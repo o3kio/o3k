@@ -293,6 +293,29 @@ assert value["artifact_type"] == "resource-leak-result"
 assert value["status"] == "passed"
 PY
 
+# The overall guard must not turn a failed P15.7 journey into a green workflow.
+bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/p15-7-gate-result.json" <<'PY'
+import json, sys
+json.dump({"artifact_type": "o3k-p15-7-gate-result", "status": "failed",
+           "reason": "evidence_validation_failed", "redacted": True},
+          open(sys.argv[1], "w", encoding="utf-8"))
+PY
+export O3K_REAL_HOST_P15_7_STEP_STATUS=failure
+if bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"; then
+    echo "failed P15.7 gate was accepted as workflow pass" >&2
+    exit 1
+fi
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "failed" and value["reason"] == "p15_7_gate_failed", value
+assert value["p15_7_step_status"] == "failure"
+assert value["p15_7_status"] == "failed"
+PY
+unset O3K_REAL_HOST_P15_7_STEP_STATUS
+rm -f "${O3K_REAL_HOST_ARTIFACT_DIR}/p15-7-gate-result.json"
+
 # schema_version 3 snapshots (extended inventory) are accepted by both guards
 V3_ROOT="${WORK_DIR}/v3-state"
 mkdir -p "${V3_ROOT}/data/dhcp"
@@ -449,6 +472,14 @@ for needle in ("workflow_dispatch:",
                "Run compute-agent process-boundary evidence",
                "tests/real-compute-agent-process-mtls.sh",
                "compute-agent-process-mtls-result.json",
+               "Run P15.7 scale/composition convergence gate",
+               "tests/p15_7_scale_composition.sh",
+               "O3K_P15_7_REAL_HOST: \"1\"",
+               "O3K_P15_7_PROFILE: small-edge-cloud",
+               "O3K_P15_7_JOURNEY_COMMAND:",
+               "p15-7-scale-composition-evidence.json",
+               "p15-7-gate-result.json",
+               "O3K_REAL_HOST_P15_7_STEP_STATUS:",
                "Install pinned P13.4 provider tools and build runtime",
                "scripts/ci/apt-provision.sh install unzip",
                "scripts/p13_2_provider_tools.sh",
@@ -493,6 +524,9 @@ assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-in
 post_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-post-run-guard.sh").read_text(encoding="utf-8")
 assert "compute-agent-process-mtls-result.json" in post_guard
 assert "compute_agent_process_probe_failed" in post_guard
+assert "p15-7-gate-result.json" in post_guard
+assert "p15_7_gate_failed" in post_guard
+assert "p15_7_gate_blocked" in post_guard
 o3kd = pathlib.Path(sys.argv[1]).parents[2].joinpath("bins/o3kd/src/composition/compute.rs").read_text(encoding="utf-8")
 probe = o3kd.split("async fn run_agent_inspect_probe(", 1)[1]
 assert ".inspect_server(" in probe

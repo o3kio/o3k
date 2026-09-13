@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p15-7-guards.XXXXXX")"
+trap 'rm -rf -- "${WORK_DIR}"' EXIT
+EVIDENCE="${WORK_DIR}/evidence.json"
+python3 - "${EVIDENCE}" <<'PY'
+import json, sys
+sha = "0123456789abcdef0123456789abcdef01234567"
+doc = {
+  "artifact_type":"o3k-p15-7-scale-composition-evidence", "schema_version":1,
+  "phase":"P15.7", "status":"passed", "evidence_tier":"protected-real-host",
+  "profile":"small-edge-cloud",
+  "tested_source_sha":sha,
+  "execution":{"provider":"agent","hypervisor":"libvirt","database_backend":"postgres",
+    "real_o3kd":True,"real_auth":True,"real_execution_boundary":True,
+    "multiple_real_hosts":True,"block_count":2,"sqlite_parity":True},
+  "journey":{"fresh_deployment":True,"init":True,"topology":True,"capacity":True,
+    "constrained_placement":True,"add_block_capacity_growth":True,
+    "multiple_authenticated_joins":{"status":"passed","count":2,"each_authenticated":True},
+    "drain":{"status":"passed","no_new_placement":True,"blockers_observed":True,"evacuation_claimed":False},
+    "remove_rejoin_replace":True,"restart_recovery":True,
+    "projections_convergent":{"native":True,"openstack":True,"araf":True}},
+  "restart_recovery":{"status":"passed","canonical_state_survived":True,"postgres":True,"sqlite_parity":True},
+  "security_negatives":{"unauthenticated_join_rejected":True,"replay_join_rejected":True,
+    "cross_tenant_concealment":True,"foreign_state_preserved":True},
+  "bootstrap_timing":{"measured":True,"sample_count":3,"boundary":"init request through ready state",
+    "excludes_preprovisioned_external_work":True,"claim_scope":"profile-specific-measurement-only"},
+  "leak_check":{"status":"passed","owned_leaks":0,"owned_inconsistencies":0,"foreign_state_changes":0},
+  "defect_ledger":{"status":"passed","blockers":0,"high":0,"medium":0},
+  "claim_validation":{"status":"passed","sources":["README.md","docs/ROADMAP.md",
+    "docs/status/current-state.yaml","compatibility/product-profiles.yaml",
+    "docs/compatibility/matrix.yaml","docs/architecture/p15-e2d-gap-register.md"],
+    "unsupported_claims_preserved":True,"claims":["bounded small-edge profile convergence"]}
+}
+json.dump(doc, open(sys.argv[1], "w", encoding="utf-8"), indent=2)
+PY
+
+python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
+  --expected-source-sha 0123456789abcdef0123456789abcdef01234567 \
+  --expected-profile small-edge-cloud
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib
+p = pathlib.Path(__import__('sys').argv[1]); d=json.loads(p.read_text())
+d["execution"]["provider"] = "fake"; p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "fake provider accepted by P15.7 validator" >&2; exit 1
+fi
+
+GATE_ARTIFACT_DIR="${WORK_DIR}/gate-artifacts"
+if O3K_P15_7_REAL_HOST=1 O3K_PROVIDER=fake \
+   O3K_P15_7_SOURCE_SHA=0123456789abcdef0123456789abcdef01234567 \
+   O3K_REAL_HOST_ARTIFACT_DIR="${GATE_ARTIFACT_DIR}" \
+   bash "${ROOT_DIR}/tests/p15_7_scale_composition.sh"; then
+  echo "fake provider accepted by P15.7 gate" >&2; exit 1
+fi
+python3 - "${GATE_ARTIFACT_DIR}/p15-7-gate-result.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc["status"] == "blocked" and doc["reason"] == "provider_mode_not_agent"
+assert doc["redacted"] is True
+PY
+echo "P15.7 validator guards passed"
