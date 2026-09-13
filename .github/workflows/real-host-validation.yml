@@ -401,9 +401,11 @@ jobs:
             postgres:16.4 >/dev/null
           for _ in $(seq 1 60); do
             if sudo -n docker exec "${container}" pg_isready -U o3k -d o3k_test >/dev/null 2>&1; then
-              printf 'O3K_DATABASE_BACKEND=postgres\n' >>"${GITHUB_ENV}"
-              printf 'O3K_DATABASE_URL=postgres://o3k:p15-7-disposable-postgres@127.0.0.1:%s/o3k_test\n' "${port}" >>"${GITHUB_ENV}"
-              printf 'O3K_P15_7_PG_CONTAINER=%s\n' "${container}" >>"${GITHUB_ENV}"
+              {
+                printf 'O3K_DATABASE_BACKEND=postgres\n'
+                printf 'O3K_DATABASE_URL=postgres://o3k:p15-7-disposable-postgres@127.0.0.1:%s/o3k_test\n' "${port}"
+                printf 'O3K_P15_7_PG_CONTAINER=%s\n' "${container}"
+              } >>"${GITHUB_ENV}"
               exit 0
             fi
             sleep 1
