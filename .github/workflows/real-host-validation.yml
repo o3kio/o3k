@@ -61,6 +61,22 @@ jobs:
           mkdir -p target
           printf 'tested_source_sha=%s\n' "${TARGET_SHA}" > target/tested-source-sha.txt
 
+      - name: Allocate run-scoped TestLab ports
+        run: |
+          set -euo pipefail
+          # Keep all disposable endpoints isolated from stale or ambient host
+          # services while retaining the bootstrap script's fail-closed port
+          # ownership checks.
+          offset=$((GITHUB_RUN_ID % 1000))
+          {
+            # Keep the protected run range separate from the historical
+            # 18080/18551/19100 defaults, which may remain occupied by an
+            # interrupted pre-scoping run on the shared runner.
+            printf 'O3K_TESTLAB_PORT=%s\n' "$((28080 + offset))"
+            printf 'O3K_TESTLAB_CONTROL_PORT=%s\n' "$((28551 + offset))"
+            printf 'O3K_TESTLAB_COMPUTE_HEALTH_PORT=%s\n' "$((29100 + offset))"
+          } >> "$GITHUB_ENV"
+
       - name: Bootstrap disposable TestLab
         id: bootstrap
         continue-on-error: true

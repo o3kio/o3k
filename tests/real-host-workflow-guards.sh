@@ -429,6 +429,7 @@ assert "          OS_PASSWORD:" not in workflow_step
 for needle in ("workflow_dispatch:",
                "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",
+               "Allocate run-scoped TestLab ports", "O3K_TESTLAB_COMPUTE_HEALTH_PORT",
                "Bootstrap disposable TestLab",
                "scripts/bootstrap-disposable-testlab.sh",
                "O3K_PROVIDER: agent",
