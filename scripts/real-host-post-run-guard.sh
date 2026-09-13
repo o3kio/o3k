@@ -7,7 +7,9 @@ RESULT_PATH="${ARTIFACT_DIR}/real-host-workflow-result.json"
 LEAK_RESULT_PATH="${ARTIFACT_DIR}/resource-leak-result.json"
 LIFECYCLE_RESULT="${ARTIFACT_DIR}/libvirt-result.json"
 AGENT_PROCESS_RESULT="${ARTIFACT_DIR}/compute-agent-process-mtls-result.json"
+P15_7_RESULT="${ARTIFACT_DIR}/p15-7-gate-result.json"
 STEP_STATUS="${O3K_REAL_HOST_WORKFLOW_STEP_STATUS:-skipped}"
+P15_7_STEP_STATUS="${O3K_REAL_HOST_P15_7_STEP_STATUS:-skipped}"
 CURRENT_INVENTORY="${ARTIFACT_DIR}/real-host-owned-inventory-after.json"
 mkdir -p "${ARTIFACT_DIR}"
 
@@ -27,9 +29,9 @@ then
     fi
 fi
 
-python3 - "${RESULT_PATH}" "${LIFECYCLE_RESULT}" "${AGENT_PROCESS_RESULT}" "${STEP_STATUS}" "${CURRENT_INVENTORY}" "${inventory_status}" "${LEAK_RESULT_PATH}" <<'PY'
+python3 - "${RESULT_PATH}" "${LIFECYCLE_RESULT}" "${AGENT_PROCESS_RESULT}" "${P15_7_RESULT}" "${STEP_STATUS}" "${P15_7_STEP_STATUS}" "${CURRENT_INVENTORY}" "${inventory_status}" "${LEAK_RESULT_PATH}" <<'PY'
 import json, os, sys, tempfile, time
-result_path, lifecycle_path, agent_process_path, step_status, current_inventory_path, inventory_status, leak_result_path = sys.argv[1:]
+result_path, lifecycle_path, agent_process_path, p15_7_path, step_status, p15_7_step_status, current_inventory_path, inventory_status, leak_result_path = sys.argv[1:]
 
 def write_atomic(path, document):
     directory = os.path.dirname(path) or "."
@@ -63,6 +65,12 @@ try:
         agent_process_status = json.load(stream).get("status")
 except (OSError, json.JSONDecodeError):
     agent_process_status = None
+try:
+    with open(p15_7_path, encoding="utf-8") as stream:
+        p15_7_status = json.load(stream).get("status")
+except (OSError, json.JSONDecodeError):
+    p15_7_status = None
+p15_7_observed = p15_7_step_status != "skipped" or p15_7_status is not None
 
 baseline = preflight.get("inventory_baseline", {})
 after = None
@@ -116,6 +124,18 @@ elif lifecycle_status != "passed":
 elif agent_process_status != "passed":
     final_status = "failed"
     reason = "compute_agent_process_probe_failed"
+elif p15_7_observed and p15_7_status == "blocked":
+    final_status = "blocked"
+    reason = "p15_7_gate_blocked"
+elif p15_7_observed and p15_7_step_status == "failure":
+    final_status = "failed"
+    reason = "p15_7_gate_failed"
+elif p15_7_observed and p15_7_step_status == "success" and p15_7_status != "passed":
+    final_status = "failed"
+    reason = "p15_7_evidence_unavailable" if p15_7_status is None else "p15_7_gate_failed"
+elif p15_7_observed and p15_7_step_status != "success":
+    final_status = "skipped"
+    reason = "p15_7_gate_skipped"
 else:
     final_status = "passed"
     reason = "workflow_and_prerequisites_passed"
@@ -124,6 +144,9 @@ result = {"artifact_type": "real-host-workflow-result", "status": final_status,
           "reason": reason, "redacted": True, "finished_at": int(time.time()),
           "preflight_status": status, "lifecycle_status": lifecycle_status}
 result["agent_process_status"] = agent_process_status
+if p15_7_observed:
+    result["p15_7_step_status"] = p15_7_step_status
+    result["p15_7_status"] = p15_7_status
 if result_leaks is not None:
     result["leaks"] = result_leaks
 if foreign_state_changed is not None:

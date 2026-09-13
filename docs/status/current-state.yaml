@@ -52,6 +52,38 @@ release_context: >-
   tracker contract stays blocked until the required evidence and human
   decisions exist.
 
+# Mechanical #433 cross-check.  This record is deliberately not a claim of a
+# passing P15.7 real-host run; it binds the public claim projections to the
+# E2D gap register until that protected evidence exists.
+claim_reconciliation:
+  status: not-executed
+  sources:
+    - README.md
+    - docs/ROADMAP.md
+    - docs/status/current-state.yaml
+    - compatibility/product-profiles.yaml
+    - docs/compatibility/matrix.yaml
+    - docs/architecture/p15-e2d-gap-register.md
+  e2d_status:
+    E2D-01: PARTIAL
+    E2D-02: PARTIAL
+    E2D-03: PARTIAL
+    E2D-04: OPEN
+    E2D-05: OPEN
+    E2D-06: PARTIAL
+    E2D-07: OPEN
+    E2D-08: PARTIAL
+    E2D-09: PARTIAL
+    E2D-10: OPEN
+    E2D-11: PARTIAL
+    E2D-12: OPEN
+    E2D-13: EVIDENCE-ONLY-GAP
+    E2D-14: PARTIAL
+    E2D-15: PARTIAL
+    E2D-16: PARTIAL
+    E2D-17: OPEN
+    E2D-18: PARTIAL
+
 # v0.2.0-alpha.1 vertical lifecycle status. This additive record preserves
 # the schema-v2 product-profile contract above while binding the release
 # journey to exact protected workflow evidence.
@@ -261,6 +293,12 @@ profiles:
           stale-artifact and foreign-mutation negatives detected as
           expected, cleanup passed
           (target/real-host-workflow-artifacts/resource-leak-result.json).
+      - name: p15-7-scale-composition-real-host-gate
+        state: not-executed
+        note: >-
+          The fail-closed gate and artifact validator exist, but the protected
+          runner has not yet produced the required multi-BuildingBlock journey
+          at an exact source commit.
     full_profile_evidence:
       - name: native-alpha-vertical-slice
         state: not-proven
@@ -377,6 +415,11 @@ profiles:
       - name: multi-host-component-gate
         state: not-executed
         note: no edge host execution exists.
+      - name: p15-7-multi-building-block-convergence
+        state: not-executed
+        note: >-
+          P15.7 requires a separate protected real-host composition journey;
+          no edge-scale claim is promoted by the gate implementation alone.
     full_profile_evidence:
       - name: edge-full-profile
         state: not-proven

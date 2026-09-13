@@ -223,6 +223,7 @@ fi
 
 REUSE=false
 PASSWORD=
+BOOTSTRAP_SECRET=
 if [[ -e "$STATE_ROOT" ]]; then
   [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || fail "run state is not a directory"
   [[ -f "$STATE_ROOT/.o3k-run-owned" && ! -L "$STATE_ROOT/.o3k-run-owned" ]] \
@@ -242,6 +243,11 @@ if [[ -e "$STATE_ROOT" ]]; then
   [[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] \
     || fail "existing run state contains an invalid protected password"
   echo "::add-mask::${PASSWORD}"
+  BOOTSTRAP_SECRET="$(sudo -n cat "$STATE_ROOT/.bootstrap-secret" 2>/dev/null)" \
+    || fail "existing run state has no readable bootstrap secret"
+  [[ "$BOOTSTRAP_SECRET" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "existing run state contains an invalid bootstrap secret"
+  echo "::add-mask::${BOOTSTRAP_SECRET}"
   [[ -f "$PID_ROOT/o3kd.pid" && -f "$PID_ROOT/o3k-compute.pid" ]] \
     || fail "existing run state has no complete process identity"
   IFS='|' read -r O3KD_PID O3KD_START O3KD_UID O3KD_BINARY <"$PID_ROOT/o3kd.pid"
@@ -410,11 +416,18 @@ AUTHORIZED_FINGERPRINT="$(sudo -n cat "$STATE_ROOT/tls/agent-fingerprint")" \
 PASSWORD="$(openssl rand -hex 32)"
 [[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] || fail "generated password format is unsafe"
 echo "::add-mask::${PASSWORD}"
+BOOTSTRAP_SECRET="$(openssl rand -hex 32)"
+[[ "$BOOTSTRAP_SECRET" =~ ^[0-9a-f]{64}$ ]] || fail "generated bootstrap secret format is unsafe"
+echo "::add-mask::${BOOTSTRAP_SECRET}"
 SIGNING_KEY="$(openssl rand -hex 48)"
 password_tmp="$(mktemp "${RUNNER_TEMP%/}/o3k-password.XXXXXX")"
 printf '%s\n' "$PASSWORD" >"$password_tmp"
 chmod 0600 "$password_tmp"
 sudo -n mv -f -- "$password_tmp" "$STATE_ROOT/.password"
+bootstrap_secret_tmp="$(mktemp "${RUNNER_TEMP%/}/o3k-bootstrap-secret.XXXXXX")"
+printf '%s\n' "$BOOTSTRAP_SECRET" >"$bootstrap_secret_tmp"
+chmod 0600 "$bootstrap_secret_tmp"
+sudo -n mv -f -- "$bootstrap_secret_tmp" "$STATE_ROOT/.bootstrap-secret"
 o3kd_env_tmp="$(mktemp "${RUNNER_TEMP%/}/o3kd.env.XXXXXX")"
 compute_env_tmp="$(mktemp "${RUNNER_TEMP%/}/o3k-compute.env.XXXXXX")"
 cat >"$o3kd_env_tmp" <<EOF
@@ -424,6 +437,7 @@ O3K_PROVIDER=$(printf '%q' "$O3K_PROVIDER")
 O3K_LOG_FORMAT=json
 O3K_LOG_FILTER=$(printf '%q' "${O3K_LOG_FILTER:-warn}")
 O3K_BOOTSTRAP_PASSWORD=$(printf '%q' "$PASSWORD")
+O3K_BOOTSTRAP_SECRET=$(printf '%q' "$BOOTSTRAP_SECRET")
 O3K_TOKEN_SIGNING_KEY=$(printf '%q' "$SIGNING_KEY")
 O3K_COMPUTE_CONTROL_ADDR=$(printf '%q' "127.0.0.1:${CONTROL_PORT}")
 O3K_COMPUTE_SERVER_CERTIFICATE=$(printf '%q' "$STATE_ROOT/tls/server.pem")
@@ -494,9 +508,9 @@ fi
 chmod 0600 "$o3kd_env_tmp" "$compute_env_tmp"
 sudo -n mv -f -- "$o3kd_env_tmp" "$STATE_ROOT/o3kd.env"
 sudo -n mv -f -- "$compute_env_tmp" "$STATE_ROOT/o3k-compute.env"
-sudo -n chown "$SERVICE_ACCOUNT:$SERVICE_ACCOUNT" "$STATE_ROOT/o3kd.env" "$STATE_ROOT/.password"
+sudo -n chown "$SERVICE_ACCOUNT:$SERVICE_ACCOUNT" "$STATE_ROOT/o3kd.env" "$STATE_ROOT/.password" "$STATE_ROOT/.bootstrap-secret"
 sudo -n chown "$COMPUTE_ACCOUNT:$COMPUTE_ACCOUNT" "$STATE_ROOT/o3k-compute.env"
-sudo -n chmod 0600 "$STATE_ROOT/o3kd.env" "$STATE_ROOT/.password" "$STATE_ROOT/o3k-compute.env"
+sudo -n chmod 0600 "$STATE_ROOT/o3kd.env" "$STATE_ROOT/.password" "$STATE_ROOT/.bootstrap-secret" "$STATE_ROOT/o3k-compute.env"
 sudo -n chgrp root "$STATE_ROOT/tls"
 sudo -n chmod 0755 "$STATE_ROOT/tls"
 for file in ca.pem server.pem agent.pem agent-id agent-fingerprint; do
@@ -717,6 +731,7 @@ printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\nO3K_REAL_HOST_INVENTORY_ROOT=%s\nO3K_O
   "$INVENTORY_ROOT" "$INVENTORY_ROOT" "$OPENSTACK_VENV" >>"${GITHUB_ENV:-/dev/null}"
 printf 'OS_AUTH_URL=%s\nOS_USERNAME=admin\nOS_PROJECT_NAME=admin\nOS_REGION_NAME=RegionOne\nOS_PASSWORD=%s\nOS_USER_DOMAIN_NAME=Default\nOS_PROJECT_DOMAIN_NAME=Default\nOS_INTERFACE=public\nOS_IDENTITY_API_VERSION=3\n' \
   "$OS_AUTH_URL" "$PASSWORD" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_BOOTSTRAP_SECRET=%s\n' "$BOOTSTRAP_SECRET" >>"${GITHUB_ENV:-/dev/null}"
 printf 'OS_CLOUD=%s\nOS_CLIENT_CONFIG_FILE=%s\n' "$OS_CLOUD" "$OPENSTACK_CLOUD_CONFIG" >>"${GITHUB_ENV:-/dev/null}"
 write_result passed authenticated
 trap - EXIT

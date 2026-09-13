@@ -15,6 +15,9 @@ workflow = Path(sys.argv[3]).read_text(encoding="utf-8")
 assert 'PASSWORD="$(openssl rand -hex 32)"' in bootstrap
 assert 'echo "::add-mask::${PASSWORD}"' in bootstrap
 assert bootstrap.index('echo "::add-mask::${PASSWORD}"') < bootstrap.index('O3K_BOOTSTRAP_PASSWORD=')
+assert 'BOOTSTRAP_SECRET="$(openssl rand -hex 32)"' in bootstrap
+assert 'O3K_BOOTSTRAP_SECRET=' in bootstrap
+assert '.bootstrap-secret' in bootstrap
 assert 'OS_PASSWORD=%s\\n' in bootstrap
 assert 'OS_PROJECT_NAME=admin' in bootstrap
 assert '--no-create-home' in bootstrap
@@ -78,8 +81,8 @@ assert bootstrap.index('wait_for_o3kd_health') < agent_start
 assert fake_block.index('wait_for_o3kd_ready') < fake_block.index('start_compute')
 assert 'userdel o3k' in cleanup
 assert 'OS_PASSWORD:' not in workflow
-assert workflow.count('scripts/bootstrap-disposable-testlab.sh') == 1
-assert workflow.count('scripts/cleanup-disposable-testlab.sh') == 1
+assert workflow.count('scripts/bootstrap-disposable-testlab.sh') >= 2
+assert workflow.count('scripts/cleanup-disposable-testlab.sh') >= 2
 PY
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/o3k-disposable-bootstrap-test.XXXXXX")"

@@ -70,6 +70,14 @@ EVIDENCE_LISTS = (
     "protected_component_evidence",
     "full_profile_evidence",
 )
+CLAIM_RECONCILIATION_SOURCES = (
+    "README.md",
+    "docs/ROADMAP.md",
+    "docs/status/current-state.yaml",
+    "compatibility/product-profiles.yaml",
+    "docs/compatibility/matrix.yaml",
+    "docs/architecture/p15-e2d-gap-register.md",
+)
 NATIVE_PROFILE = "native-rust-testlab"
 NATIVE_FORBIDDEN_EVIDENCE = re.compile(r"(?i)cinder|tempest")
 RELEASE_READY_CLAIM = re.compile(r"(?i)\brelease[-_ ]?ready\b")
@@ -127,6 +135,58 @@ def commit_resolves(root, sha):
     return result.returncode == 0 and result.stdout.strip() == sha
 
 
+def validate_claim_reconciliation(root, status, errors):
+    """Cross-check the single claim-state record against its public projections.
+
+    This is intentionally a conservative consistency check: it verifies that
+    the machine-readable E2D state is present in the gap register and that all
+    public profile/matrix inputs exist.  It never promotes an evidence state.
+    """
+    record = status.get("claim_reconciliation")
+    if not isinstance(record, dict):
+        fail(errors, "claim_reconciliation must be a mapping")
+        return
+    if record.get("status") not in EVIDENCE_STATES:
+        fail(errors, "claim_reconciliation.status has invalid evidence state")
+    sources = record.get("sources")
+    if not isinstance(sources, list) or set(sources) != set(CLAIM_RECONCILIATION_SOURCES):
+        fail(errors, "claim_reconciliation.sources must name the six public claim inputs")
+    for relative in CLAIM_RECONCILIATION_SOURCES:
+        if not (root / relative).is_file():
+            fail(errors, f"claim reconciliation source is missing: {relative}")
+
+    expected = record.get("e2d_status")
+    if not isinstance(expected, dict) or not expected:
+        fail(errors, "claim_reconciliation.e2d_status must be a non-empty mapping")
+        return
+    gap_path = root / "docs/architecture/p15-e2d-gap-register.md"
+    gap_text = gap_path.read_text(encoding="utf-8") if gap_path.is_file() else ""
+    for identifier, expected_status in expected.items():
+        if not re.fullmatch(r"E2D-\d{2}", str(identifier)):
+            fail(errors, f"invalid claim reconciliation identifier: {identifier!r}")
+            continue
+        match = re.search(
+            rf"^\|\s*{re.escape(identifier)}\s*\|[^|]*\|\s*([^|]+?)\s*\|",
+            gap_text,
+            re.MULTILINE,
+        )
+        if not match:
+            fail(errors, f"{identifier} is absent from the E2D gap register")
+        elif match.group(1).strip() != expected_status:
+            fail(errors, f"{identifier} status drift: current-state={expected_status!r}, gap-register={match.group(1).strip()!r}")
+    readme_path = root / "README.md"
+    readme = readme_path.read_text(encoding="utf-8") if readme_path.is_file() else ""
+    if "E2D-18" not in readme or "claim" not in readme.lower():
+        fail(errors, "README.md does not expose the governed E2D claim state")
+    roadmap_path = root / "docs/ROADMAP.md"
+    roadmap = roadmap_path.read_text(encoding="utf-8") if roadmap_path.is_file() else ""
+    if "P15.7" not in roadmap or "SPEC-0047" not in roadmap:
+        fail(errors, "docs/ROADMAP.md does not expose the governed P15 scope")
+    matrix = load_yaml(root / "docs/compatibility/matrix.yaml", errors)
+    if matrix is not None and matrix.get("profile") != "testlab-alpha":
+        fail(errors, "compatibility matrix profile drifted from testlab-alpha")
+
+
 def validate(root, status_file, profiles_file, errors):
     status = load_yaml(status_file, errors)
     registry = load_yaml(profiles_file, errors)
@@ -137,6 +197,8 @@ def validate(root, status_file, profiles_file, errors):
         fail(errors, "status schema_version must be 2")
     if status.get("status_kind") != "authoritative-current-state":
         fail(errors, "status_kind must be authoritative-current-state")
+
+    validate_claim_reconciliation(root, status, errors)
 
     top_commit = status.get("source_commit")
     if not top_commit:

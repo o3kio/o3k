@@ -493,15 +493,20 @@ Rules:
   passed|failed|not-executed|not-proven);
   `scripts/validate-profile-state.py` (profile-set match, field contract,
   evidence vocabulary, native-alpha isolation, source-commit resolvability,
-  consistency with `docs/release-tracker.md`);
+  consistency with `docs/release-tracker.md`, and a conservative
+  `claim_reconciliation` cross-check for the README, roadmap, compatibility
+  matrix, and E2D register public inputs);
   `tests/profile-state.sh` mutation-rejection CI harness (six mutations must be
-  rejected). Missing: nothing cross-validates the README/ROADMAP/E2D register
-  against `current-state.yaml` — the `README.md:131-148` table is manually
-  duplicated from ADR-0182. Issue #433 owns release-claim validation; P15
-  extends `validate-profile-state.py` rather than creating new machinery.
+  rejected). The cross-check now fails closed on missing public inputs, E2D
+  status drift, or compatibility-profile drift; it does not claim that the
+  manually written README status table is fully generated from the source.
+  Issue #433 owns release-claim validation; P15 extends
+  `validate-profile-state.py` rather than creating new machinery.
 - **Evidence:** `tests/profile-state.sh` harness.
-- **Remaining delta:** extend the existing validator to cover README/ROADMAP/E2D
-  register consistency with `current-state.yaml`.
+- **Remaining delta:** keep the cross-check synchronized as public claim
+  projections evolve, and close the remaining gap only when all status tables
+  are demonstrably derived or equivalently validated; P15.7 does not promote
+  E2D-18 beyond `PARTIAL`.
 - **Dependency:** none; extends #433.
 - **Claim impact:** HIGH-governance.
 - **Recommended owner:** P15.0 plan + #433.

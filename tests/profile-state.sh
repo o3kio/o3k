@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "Running product-profile status governance validator..."
 python3 "${repo_root}/scripts/validate-profile-state.py" --root "${repo_root}"
+bash "${repo_root}/tests/p15_7_scale_composition_guards.sh"
 
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/o3k-profile-state.XXXXXX")"
 trap 'rm -rf "${temp_dir}"' EXIT
@@ -40,6 +41,12 @@ mutations = {
     "bad-source-commit": lambda d: d["profiles"]["native-rust-testlab"].__setitem__(
         "source_commit", "0" * 40
     ),
+    "claim-e2d-drift": lambda d: d["claim_reconciliation"]["e2d_status"].__setitem__(
+        "E2D-18", "OPEN"
+    ),
+    "claim-source-drift": lambda d: d["claim_reconciliation"]["sources"].remove(
+        "docs/ROADMAP.md"
+    ),
 }
 mutations[mutation_name](doc)
 with open(target, "w", encoding="utf-8") as handle:
@@ -48,7 +55,8 @@ PY
 }
 
 for mutation in rename-profile missing-field cinder-evidence-in-native \
-    native-full-profile-passed bad-evidence-state bad-source-commit; do
+    native-full-profile-passed bad-evidence-state bad-source-commit \
+    claim-e2d-drift claim-source-drift; do
   mutated="${temp_dir}/status-${mutation}.yaml"
   mutate "${mutated}" "${mutation}"
   if python3 "${repo_root}/scripts/validate-profile-state.py" \
