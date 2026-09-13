@@ -76,6 +76,12 @@ vertical_lifecycle:
       lifecycle claim is made.
     evidence: https://github.com/o3kio/o3k/actions/runs/34765911560
   completed:
+    evidence_basis:
+      run: 33205054825
+      commit: 27b64a74b8b62fa5bc8a3f3103b0390150804706
+      note: >-
+        These completed flags are historical protected evidence and are not
+        re-attributed to current main until run 34765911560 executes.
     api_baseline: true
     nova_pre_dispatch: true
     agent_command_path: true
@@ -83,6 +89,10 @@ vertical_lifecycle:
     fixed_ip_projection: true
     cleanup_guard: true
   pending:
+    note: >-
+      Pending flags identify boundaries that still require explicit current
+      main protected confirmation, even where a historical run exercised a
+      related operation.
     image_overlay_real_host: true
     config_drive_guest_consumption: true
     guest_network_connectivity: true
