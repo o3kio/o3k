@@ -63,6 +63,36 @@ enum Commands {
         #[command(subcommand)]
         action: ResourceAction,
     },
+    /// Initialize the canonical Cloud Kernel and selected CloudProfile.
+    Init {
+        #[arg(long)]
+        profile_id: Option<String>,
+        #[arg(long)]
+        agent_id: Option<String>,
+    },
+    /// Enroll a prepared execution host with a single-use bootstrap grant.
+    Join {
+        #[arg(long)]
+        token: String,
+        #[arg(long)]
+        agent_id: String,
+        #[arg(long)]
+        agent_epoch: String,
+        #[arg(long)]
+        certificate: std::path::PathBuf,
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long)]
+        availability_domain: Option<String>,
+        #[arg(long)]
+        failure_domain_id: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        vcpus: u64,
+        #[arg(long, default_value_t = 0)]
+        memory_mb: u64,
+        #[arg(long, default_value_t = 0)]
+        disk_gb: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -162,6 +192,33 @@ fn main() -> ExitCode {
                 idempotency_key.as_deref(),
             )),
         },
+        Commands::Init {
+            profile_id,
+            agent_id,
+        } => handle_result(native_cli::init(profile_id.as_deref(), agent_id.as_deref())),
+        Commands::Join {
+            token,
+            agent_id,
+            agent_epoch,
+            certificate,
+            region,
+            availability_domain,
+            failure_domain_id,
+            vcpus,
+            memory_mb,
+            disk_gb,
+        } => handle_result(native_cli::join(
+            &token,
+            &agent_id,
+            &agent_epoch,
+            &certificate,
+            region.as_deref(),
+            availability_domain.as_deref(),
+            failure_domain_id.as_deref(),
+            vcpus,
+            memory_mb,
+            disk_gb,
+        )),
     }
 }
 

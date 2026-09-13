@@ -16,6 +16,7 @@ pub mod action;
 pub mod audit;
 pub mod auth_context;
 pub mod authorization;
+pub mod bootstrap;
 pub mod building_block;
 pub mod composition;
 pub mod controller;
@@ -42,6 +43,7 @@ pub use authorization::{
     ActionPolicy, AuthorizationDecision, AuthorizationRequest, Authorizer, DecisionReason,
     StaticAuthorizer,
 };
+pub use bootstrap::{BootstrapError, BootstrapPhase, BootstrapState, EnrollmentGrant};
 pub use building_block::{
     BuildingBlock, BuildingBlockError, BuildingBlockState, DrainBlocker, DrainBlockerKind,
     MAX_BUILDING_BLOCK_REFS,

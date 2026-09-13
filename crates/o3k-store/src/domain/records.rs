@@ -31,6 +31,30 @@ pub struct BuildingBlockRecord {
     pub updated_at: String,
 }
 
+/// Durable Cloud Kernel bootstrap state. The enrolled-agent map is a
+/// certificate-fingerprint projection; Placement and the agent registry remain
+/// authoritative for capacity and live execution state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapStateRecord {
+    pub state_id: String,
+    pub generation: u64,
+    pub phase: String,
+    pub cloud_identity_id: String,
+    pub cloud_profile_id: String,
+    pub enrolled_agents: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentGrantRecord {
+    pub grant_id: String,
+    pub agent_id: String,
+    pub token_digest: String,
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub used_at_unix_ms: Option<u64>,
+}
+
 impl BuildingBlockRecord {
     pub fn from_block(
         block: &o3k_kernel::BuildingBlock,

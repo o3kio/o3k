@@ -37,6 +37,75 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
         .map_err(|e| format!("failed to build tokio runtime: {e}"))
 }
 
+/// Initializes canonical Cloud Kernel bootstrap state. The bootstrap secret is
+/// sent only as a request header and is never printed.
+pub fn init(profile_id: Option<&str>, agent_id: Option<&str>) -> Result<(), String> {
+    let secret = std::env::var("O3K_BOOTSTRAP_SECRET")
+        .map_err(|_| "O3K_BOOTSTRAP_SECRET is required for init".to_owned())?;
+    if secret.contains(['\r', '\n']) {
+        return Err("bootstrap secret contains a newline".to_owned());
+    }
+    let body = serde_json::json!({ "profile_id": profile_id, "agent_id": agent_id });
+    let client = SystemHttpClient;
+    let rt = runtime()?;
+    let response = rt.block_on(client.post_json_with_header(
+        &format!("{}/bootstrap/init", api_base()),
+        &body.to_string(),
+        Some(("X-O3K-Bootstrap-Secret", secret.as_str())),
+    ))?;
+    if response.status != 200 {
+        return Err(format!("API returned status {}", response.status));
+    }
+    println!("{}", response.body);
+    Ok(())
+}
+
+/// Enrolls a prepared host. Certificate material is read locally and only the
+/// bounded certificate text is sent; private keys are never accepted or
+/// emitted by this command.
+#[allow(clippy::too_many_arguments)]
+pub fn join(
+    token: &str,
+    agent_id: &str,
+    agent_epoch: &str,
+    certificate: &Path,
+    region: Option<&str>,
+    availability_domain: Option<&str>,
+    failure_domain_id: Option<&str>,
+    vcpus: u64,
+    memory_mb: u64,
+    disk_gb: u64,
+) -> Result<(), String> {
+    if token.trim().is_empty() || agent_id.trim().is_empty() || agent_epoch.trim().is_empty() {
+        return Err("token, agent id, and agent epoch are required".to_owned());
+    }
+    let cert = std::fs::read_to_string(certificate)
+        .map_err(|e| format!("cannot read certificate: {e}"))?;
+    if cert.len() > 1024 * 1024 || cert.contains("PRIVATE KEY") {
+        return Err("certificate input is invalid".to_owned());
+    }
+    let mut inventories = serde_json::Map::new();
+    if vcpus > 0 {
+        inventories.insert("VCPU".into(), serde_json::json!(vcpus));
+    }
+    if memory_mb > 0 {
+        inventories.insert("MEMORY_MB".into(), serde_json::json!(memory_mb));
+    }
+    if disk_gb > 0 {
+        inventories.insert("DISK_GB".into(), serde_json::json!(disk_gb));
+    }
+    let body = serde_json::json!({ "enrollment_token": token, "agent_id": agent_id, "agent_epoch": agent_epoch, "certificate": cert, "region": region, "availability_domain": availability_domain, "failure_domain_id": failure_domain_id, "capabilities": { "architecture": "unknown", "provider_name": "o3k-cli", "provider_version": env!("CARGO_PKG_VERSION") }, "inventories": inventories });
+    let client = SystemHttpClient;
+    let rt = runtime()?;
+    let response = rt
+        .block_on(client.post_json(&format!("{}/bootstrap/join", api_base()), &body.to_string()))?;
+    if response.status != 200 {
+        return Err(format!("API returned status {}", response.status));
+    }
+    println!("{}", response.body);
+    Ok(())
+}
+
 /// Performs a GET request against the native API and returns parsed JSON.
 fn api_get(path: &str) -> Result<Value, String> {
     let base = api_base();

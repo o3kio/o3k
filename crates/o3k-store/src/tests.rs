@@ -8,6 +8,43 @@ mod tests {
     use uuid::Uuid;
 
     #[tokio::test]
+    async fn sqlite_bootstrap_state_and_grants_are_durable_and_single_use()
+    -> Result<(), Box<dyn Error>> {
+        let store = O3kStore::connect_sqlite_memory().await?;
+        let state = BootstrapStateRecord {
+            state_id: "default".into(),
+            generation: 1,
+            phase: "initialized".into(),
+            cloud_identity_id: "cloud-default".into(),
+            cloud_profile_id: "default".into(),
+            enrolled_agents: "{}".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        store.upsert_bootstrap_state(&state).await?;
+        assert_eq!(store.get_bootstrap_state("default").await?, Some(state));
+        let grant = EnrollmentGrantRecord {
+            grant_id: "grant-1".into(),
+            agent_id: "node-1".into(),
+            token_digest: "digest".into(),
+            issued_at_unix_ms: 10,
+            expires_at_unix_ms: 100,
+            used_at_unix_ms: None,
+        };
+        store.insert_enrollment_grant(&grant).await?;
+        let consumed = store
+            .consume_enrollment_grant("grant-1", "digest", 20)
+            .await?;
+        assert_eq!(consumed.used_at_unix_ms, Some(20));
+        assert!(
+            store
+                .consume_enrollment_grant("grant-1", "digest", 21)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sqlite_scoped_operation_migration_preserves_populated_database()
     -> Result<(), Box<dyn Error>> {
         use sqlx::migrate::Migrator;

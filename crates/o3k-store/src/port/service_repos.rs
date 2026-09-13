@@ -4,17 +4,18 @@ use uuid::Uuid;
 
 use crate::domain::error::StoreError;
 use crate::domain::records::{
-    AuditEventRecord, BuildingBlockRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
-    CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord,
-    CanonicalNetworkPolicyRecord, CanonicalNetworkRecord, CanonicalRealmBindingRecord,
-    CloudProfileRecord, FederatedBindingRecord, ImageMetadataRecord, KeypairRecord,
-    KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
-    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, OperatorAssignmentRecord,
-    PlacementAllocationRecord, PlacementCapacitySummary, PlacementIntentRecord,
-    PlacementInventoryRecord, PlacementProviderRecord, PlacementProviderStateRecord,
-    PlacementReconcileRecord, PortRecord, ResourceRecord, SecurityGroupBindingRecord,
-    SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord, VolumeAttachmentRecord,
+    AuditEventRecord, BootstrapStateRecord, BuildingBlockRecord, CanonicalAddressPoolRecord,
+    CanonicalAddressRealmRecord, CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord,
+    CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord, CanonicalNetworkRecord,
+    CanonicalRealmBindingRecord, CloudProfileRecord, EnrollmentGrantRecord, FederatedBindingRecord,
+    ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord, KeystoneEndpointRecord,
+    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
+    KeystoneServiceRecord, KeystoneUserRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
+    NetworkRecord, OperatorAssignmentRecord, PlacementAllocationRecord, PlacementCapacitySummary,
+    PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
+    PlacementProviderStateRecord, PlacementReconcileRecord, PortRecord, ResourceRecord,
+    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
+    VolumeAttachmentRecord,
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
@@ -45,6 +46,34 @@ pub trait CompositionRepository: Send + Sync {
         profile_id: &str,
         expected_generation: u64,
     ) -> Result<(), StoreError>;
+}
+
+/// Durable bootstrap and single-use enrollment authority. Secrets are never
+/// persisted: only a token digest and certificate fingerprint are retained.
+#[async_trait]
+pub trait BootstrapRepository: Send + Sync {
+    async fn get_bootstrap_state(
+        &self,
+        state_id: &str,
+    ) -> Result<Option<BootstrapStateRecord>, StoreError>;
+    async fn upsert_bootstrap_state(
+        &self,
+        state: &BootstrapStateRecord,
+    ) -> Result<BootstrapStateRecord, StoreError>;
+    async fn get_enrollment_grant(
+        &self,
+        grant_id: &str,
+    ) -> Result<Option<EnrollmentGrantRecord>, StoreError>;
+    async fn insert_enrollment_grant(
+        &self,
+        grant: &EnrollmentGrantRecord,
+    ) -> Result<(), StoreError>;
+    async fn consume_enrollment_grant(
+        &self,
+        grant_id: &str,
+        token_digest: &str,
+        now_unix_ms: u64,
+    ) -> Result<EnrollmentGrantRecord, StoreError>;
 }
 
 /// Durable BuildingBlock lifecycle/link authority.  Implementations persist

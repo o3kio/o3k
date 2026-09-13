@@ -96,6 +96,15 @@ pub trait HttpClient: Send + Sync {
     async fn get(&self, url: &str) -> Result<HttpResponse, String>;
     /// Performs an HTTP/1.1 POST with `Content-Type: application/json`.
     async fn post_json(&self, url: &str, body: &str) -> Result<HttpResponse, String>;
+    async fn post_json_with_header(
+        &self,
+        url: &str,
+        body: &str,
+        header: Option<(&str, &str)>,
+    ) -> Result<HttpResponse, String> {
+        let _ = header;
+        self.post_json(url, body).await
+    }
     async fn delete(&self, url: &str) -> Result<HttpResponse, String>;
     async fn post_json_with_idempotency(
         &self,

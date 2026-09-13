@@ -494,6 +494,7 @@ fn request_with_key(
     method: &str,
     body: Option<&str>,
     key: Option<&str>,
+    header: Option<(&str, &str)>,
 ) -> Result<HttpResponse, String> {
     let (host, port, path) = parse_http_url(url)?;
     let address = format!("{host}:{port}");
@@ -520,6 +521,9 @@ fn request_with_key(
     }
     if let Some(key) = key {
         head.push_str(&format!("Idempotency-Key: {key}\r\n"));
+    }
+    if let Some((name, value)) = header {
+        head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
     let mut payload = head.into_bytes();
@@ -580,7 +584,7 @@ fn request_with_key(
     })
 }
 fn request(url: &str, method: &str, body: Option<&str>) -> Result<HttpResponse, String> {
-    request_with_key(url, method, body, None)
+    request_with_key(url, method, body, None, None)
 }
 
 #[async_trait]
@@ -592,6 +596,14 @@ impl HttpClient for SystemHttpClient {
     async fn post_json(&self, url: &str, body: &str) -> Result<HttpResponse, String> {
         request(url, "POST", Some(body))
     }
+    async fn post_json_with_header(
+        &self,
+        url: &str,
+        body: &str,
+        header: Option<(&str, &str)>,
+    ) -> Result<HttpResponse, String> {
+        request_with_key(url, "POST", Some(body), None, header)
+    }
     async fn delete(&self, url: &str) -> Result<HttpResponse, String> {
         request(url, "DELETE", None)
     }
@@ -601,14 +613,14 @@ impl HttpClient for SystemHttpClient {
         body: &str,
         key: Option<&str>,
     ) -> Result<HttpResponse, String> {
-        request_with_key(url, "POST", Some(body), key)
+        request_with_key(url, "POST", Some(body), key, None)
     }
     async fn delete_with_idempotency(
         &self,
         url: &str,
         key: Option<&str>,
     ) -> Result<HttpResponse, String> {
-        request_with_key(url, "DELETE", None, key)
+        request_with_key(url, "DELETE", None, key, None)
     }
 }
 

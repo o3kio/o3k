@@ -183,6 +183,31 @@ impl Default for NodeRegistry {
 }
 
 impl NodeRegistry {
+    /// Registers a prepared host from the authenticated bootstrap workflow.
+    /// The certificate is authorized before the registry epoch is created;
+    /// callers cannot manufacture an execution identity without proving the
+    /// certificate binding.
+    pub async fn register_prepared(
+        &self,
+        agent_id: &str,
+        agent_epoch: &str,
+        certificate: &[u8],
+        capabilities: proto::Capabilities,
+    ) -> Result<proto::RegisterResponse, AgentError> {
+        self.authorize_agent(AuthorizedAgent::new(agent_id, certificate))
+            .await?;
+        self.register(&proto::RegisterRequest {
+            agent_id: agent_id.to_owned(),
+            agent_epoch: agent_epoch.to_owned(),
+            software_version: "o3k-bootstrap".to_owned(),
+            host_label: agent_id.to_owned(),
+            supported_versions: vec![PROTOCOL_VERSION],
+            capabilities: Some(capabilities),
+        })
+        .await
+        .map_err(|status| AgentError::Protocol(status.to_string()))
+    }
+
     async fn epoch_gate(&self, agent_id: &str) -> Arc<RwLock<()>> {
         if let Some(gate) = self.epoch_gates.read().await.get(agent_id).cloned() {
             return gate;

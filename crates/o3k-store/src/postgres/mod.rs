@@ -13,6 +13,7 @@ pub struct PostgresStore {
 }
 
 mod audit_store;
+mod bootstrap;
 mod building_block;
 mod composition;
 mod compute;
