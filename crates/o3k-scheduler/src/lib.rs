@@ -5,7 +5,8 @@ pub mod types;
 use std::collections::{BTreeMap, BTreeSet};
 
 use o3k_placement::{
-    Allocation, DISK_GB, MEMORY_MB, PlacementError, PlacementLedger, ProviderState, VCPU,
+    Allocation, CandidateRequest, DISK_GB, MEMORY_MB, PlacementError, PlacementLedger,
+    ProviderState, VCPU,
 };
 
 pub use types::{Flavor, ScheduleDecision, SchedulerError};
@@ -59,6 +60,67 @@ impl Scheduler {
     ) -> Result<ScheduleDecision, SchedulerError> {
         self.schedule_internal(server_id, flavor, Some(agent_ids))
             .await
+    }
+
+    /// Schedules using generic Placement constraints. The request is read
+    /// first to produce a deterministic candidate list; each candidate is
+    /// then claimed through the existing durable intent + generation-fenced
+    /// commit path.
+    pub async fn schedule_with_constraints(
+        &self,
+        server_id: &str,
+        flavor: Flavor,
+        mut constraints: CandidateRequest,
+    ) -> Result<ScheduleDecision, SchedulerError> {
+        if server_id.is_empty() || flavor.vcpus == 0 || flavor.memory_mb == 0 {
+            return Err(SchedulerError::InvalidFlavor);
+        }
+        constraints.resources = BTreeMap::from([
+            (VCPU.to_owned(), flavor.vcpus),
+            (MEMORY_MB.to_owned(), flavor.memory_mb),
+        ]);
+        if flavor.disk_gb > 0 {
+            constraints
+                .resources
+                .insert(DISK_GB.to_owned(), flavor.disk_gb);
+        }
+        if constraints.limit == 0 {
+            constraints.limit = o3k_placement::MAX_CANDIDATE_LIMIT;
+        }
+        let resources = constraints.resources.clone();
+        for candidate in self.placement.candidates(&constraints).await? {
+            let intent = self
+                .placement
+                .begin_allocation_intent(
+                    &candidate.provider_id,
+                    &format!("allocation-{server_id}"),
+                    server_id,
+                    resources.clone(),
+                )
+                .await?;
+            match self
+                .placement
+                .commit_allocation_intent(&intent, candidate.generation)
+                .await
+            {
+                Ok(allocation) => {
+                    return Ok(ScheduleDecision {
+                        provider_id: candidate.provider_id,
+                        allocation_id: intent.allocation_id,
+                        allocation,
+                    });
+                }
+                Err(
+                    PlacementError::StaleGeneration
+                    | PlacementError::OverCapacity
+                    | PlacementError::NotSchedulable,
+                ) => {
+                    self.placement.abandon_allocation_intent(&intent).await?;
+                }
+                Err(error) => return Err(SchedulerError::Placement(error)),
+            }
+        }
+        Err(SchedulerError::NoValidHost)
     }
 
     async fn schedule_internal(
@@ -280,6 +342,68 @@ mod tests {
         );
         std::fs::remove_dir_all(root)
             .map_err(|error| SchedulerError::Placement(PlacementError::Storage(error)))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn constrained_schedule_uses_generic_traits_and_fenced_commit()
+    -> Result<(), SchedulerError> {
+        let (scheduler, root) = test_scheduler().await;
+        let a = scheduler
+            .placement
+            .register_provider("provider-a", inv(4))
+            .await?;
+        scheduler
+            .placement
+            .update_provider_hierarchy(
+                &a.id,
+                a.generation,
+                None,
+                BTreeSet::from(["COMPUTE".to_owned()]),
+                BTreeSet::from(["rack-a".to_owned()]),
+                Some("az-1"),
+            )
+            .await?;
+        let b = scheduler
+            .placement
+            .register_provider("provider-b", inv(4))
+            .await?;
+        scheduler
+            .placement
+            .update_provider_hierarchy(
+                &b.id,
+                b.generation,
+                None,
+                BTreeSet::from(["COMPUTE".to_owned(), "SPECIAL_X".to_owned()]),
+                BTreeSet::from(["rack-b".to_owned()]),
+                Some("az-1"),
+            )
+            .await?;
+        let request = o3k_placement::CandidateRequest {
+            required_traits: BTreeSet::from(["SPECIAL_X".to_owned()]),
+            limit: 4,
+            ..Default::default()
+        };
+        let decision = scheduler
+            .schedule_with_constraints(
+                "server-special",
+                Flavor {
+                    vcpus: 1,
+                    memory_mb: 512,
+                    disk_gb: 1,
+                },
+                request,
+            )
+            .await?;
+        assert_eq!(decision.provider_id, "provider-b");
+        assert!(
+            scheduler
+                .placement
+                .allocation_intent(&decision.allocation_id)
+                .await?
+                .is_none()
+        );
+        std::fs::remove_dir_all(root).ok();
         Ok(())
     }
 

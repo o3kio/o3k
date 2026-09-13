@@ -445,6 +445,10 @@ pub(super) fn placement_provider_from_row(
         generation: placement_u64(row.get("generation"))?,
         inventories: Vec::new(),
         allocations: Vec::new(),
+        parent_provider_id: row.get("parent_provider_id"),
+        traits: Vec::new(),
+        failure_domains: Vec::new(),
+        location: row.get("location"),
     })
 }
 

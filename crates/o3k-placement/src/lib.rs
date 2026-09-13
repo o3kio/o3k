@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -78,7 +78,62 @@ pub struct ResourceProvider {
     pub generation: u64,
     pub inventories: BTreeMap<String, Inventory>,
     pub allocations: BTreeMap<String, Allocation>,
+    #[serde(default)]
+    pub parent_provider_id: Option<String>,
+    #[serde(default)]
+    pub traits: BTreeSet<String>,
+    #[serde(default)]
+    pub failure_domains: BTreeSet<String>,
+    #[serde(default)]
+    pub location: Option<String>,
 }
+
+/// Bounded, provider-neutral scheduling constraints. Empty sets preserve the
+/// legacy flat placement behavior. IDs refer to canonical LocationRegistry
+/// region/AZ/failure-domain identities; Placement never owns their topology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateRequest {
+    pub resources: BTreeMap<String, u64>,
+    pub required_traits: BTreeSet<String>,
+    pub forbidden_traits: BTreeSet<String>,
+    pub locations: BTreeSet<String>,
+    pub forbidden_locations: BTreeSet<String>,
+    /// Optional locality preferences. These never exclude a candidate; a
+    /// matching canonical location is ranked ahead of non-local candidates.
+    pub preferred_locations: BTreeSet<String>,
+    pub failure_domains: BTreeSet<String>,
+    pub forbidden_failure_domains: BTreeSet<String>,
+    /// Existing failure domains to spread away from. A provider sharing any
+    /// of these IDs is ranked after providers that do not share them.
+    pub spread_away_from: BTreeSet<String>,
+    pub limit: usize,
+}
+
+impl Default for CandidateRequest {
+    fn default() -> Self {
+        Self {
+            resources: BTreeMap::new(),
+            required_traits: BTreeSet::new(),
+            forbidden_traits: BTreeSet::new(),
+            locations: BTreeSet::new(),
+            forbidden_locations: BTreeSet::new(),
+            preferred_locations: BTreeSet::new(),
+            failure_domains: BTreeSet::new(),
+            forbidden_failure_domains: BTreeSet::new(),
+            spread_away_from: BTreeSet::new(),
+            limit: MAX_CANDIDATE_LIMIT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementCandidate {
+    pub provider_id: String,
+    pub generation: u64,
+}
+
+pub const MAX_CANDIDATE_LIMIT: usize = 256;
+pub const MAX_CONSTRAINT_SET: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum PlacementError {
@@ -100,6 +155,12 @@ pub enum PlacementError {
     Lock,
     #[error("placement store failed")]
     Store(#[source] o3k_store::StoreError),
+    #[error("provider hierarchy is invalid")]
+    InvalidHierarchy,
+    #[error("topology reference is invalid")]
+    InvalidTopologyReference,
+    #[error("candidate request exceeds bounded limits")]
+    ConstraintLimit,
 }
 
 fn map_store_error(error: o3k_store::StoreError) -> PlacementError {
@@ -291,6 +352,178 @@ impl PlacementLedger {
             .await
             .map_err(map_store_error)?;
         provider_from_record(&record)
+    }
+
+    /// Registers a provider with optional provider hierarchy and canonical
+    /// topology references. The old `register_provider` remains the flat
+    /// compatibility path.
+    pub async fn register_provider_hierarchical(
+        &self,
+        node_id: &str,
+        inventories: BTreeMap<String, Inventory>,
+        parent_provider_id: Option<&str>,
+        traits: BTreeSet<String>,
+        failure_domains: BTreeSet<String>,
+        location: Option<&str>,
+    ) -> Result<ResourceProvider, PlacementError> {
+        validate_metadata(parent_provider_id, &traits, &failure_domains, location)?;
+        let existing = self.providers().await?;
+        if parent_provider_id
+            .is_some_and(|parent| parent == node_id || !existing.iter().any(|p| p.id == parent))
+        {
+            return Err(PlacementError::InvalidHierarchy);
+        }
+        let record = self
+            .repository
+            .register_provider_metadata(
+                node_id,
+                &inventory_records(&inventories),
+                parent_provider_id,
+                &traits.iter().cloned().collect::<Vec<_>>(),
+                &failure_domains.iter().cloned().collect::<Vec<_>>(),
+                location,
+            )
+            .await
+            .map_err(map_store_error)?;
+        provider_from_record(&record)
+    }
+
+    pub async fn update_provider_hierarchy(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        parent_provider_id: Option<&str>,
+        traits: BTreeSet<String>,
+        failure_domains: BTreeSet<String>,
+        location: Option<&str>,
+    ) -> Result<ResourceProvider, PlacementError> {
+        validate_metadata(parent_provider_id, &traits, &failure_domains, location)?;
+        let providers = self.providers().await?;
+        if parent_provider_id.is_some_and(|parent| {
+            parent == provider_id || !providers.iter().any(|p| p.id == parent)
+        }) {
+            return Err(PlacementError::InvalidHierarchy);
+        }
+        // Follow parents from the proposed node to reject cycles before the
+        // durable write. The store FK independently rejects orphans.
+        let mut cursor = parent_provider_id;
+        let mut terminated = false;
+        for _ in 0..64 {
+            let Some(id) = cursor else { break };
+            if id == provider_id {
+                return Err(PlacementError::InvalidHierarchy);
+            }
+            cursor = providers
+                .iter()
+                .find(|p| p.id == id)
+                .and_then(|p| p.parent_provider_id.as_deref());
+            if cursor.is_none() {
+                terminated = true;
+                break;
+            }
+        }
+        if cursor.is_some() && !terminated {
+            return Err(PlacementError::InvalidHierarchy);
+        }
+        let record = self
+            .repository
+            .update_provider_metadata(
+                provider_id,
+                expected_generation,
+                parent_provider_id,
+                &traits.iter().cloned().collect::<Vec<_>>(),
+                &failure_domains.iter().cloned().collect::<Vec<_>>(),
+                location,
+            )
+            .await
+            .map_err(map_store_error)?;
+        provider_from_record(&record)
+    }
+
+    /// Generates a bounded deterministic candidate list without mutating
+    /// capacity. Allocation still goes through `AllocationIntent` and fenced
+    /// commit, so concurrent callers cannot double-book a provider.
+    pub async fn candidates(
+        &self,
+        request: &CandidateRequest,
+    ) -> Result<Vec<PlacementCandidate>, PlacementError> {
+        if request.resources.is_empty()
+            || request.resources.values().any(|v| *v == 0)
+            || request.limit > MAX_CANDIDATE_LIMIT
+            || request.limit == 0
+            || request.required_traits.len() > MAX_CONSTRAINT_SET
+            || request.forbidden_traits.len() > MAX_CONSTRAINT_SET
+            || request.locations.len() > MAX_CONSTRAINT_SET
+            || request.forbidden_locations.len() > MAX_CONSTRAINT_SET
+            || request.preferred_locations.len() > MAX_CONSTRAINT_SET
+            || request.failure_domains.len() > MAX_CONSTRAINT_SET
+            || request.forbidden_failure_domains.len() > MAX_CONSTRAINT_SET
+            || request.spread_away_from.len() > MAX_CONSTRAINT_SET
+        {
+            return Err(PlacementError::ConstraintLimit);
+        }
+        let providers = self.providers().await?;
+        let by_id: BTreeMap<_, _> = providers.iter().map(|p| (p.id.as_str(), p)).collect();
+        let mut candidates = providers
+            .iter()
+            .filter(|p| {
+                p.state == ProviderState::Enabled
+                    && request.resources.iter().all(|(class, amount)| {
+                        p.inventories
+                            .get(class)
+                            .is_some_and(|i| i.available() >= *amount)
+                    })
+                    && request.required_traits.is_subset(&p.traits)
+                    && request.forbidden_traits.is_disjoint(&p.traits)
+                    && (request.locations.is_empty()
+                        || p.location
+                            .as_ref()
+                            .is_some_and(|l| request.locations.contains(l)))
+                    && request
+                        .forbidden_locations
+                        .iter()
+                        .all(|l| p.location.as_ref() != Some(l))
+                    && request.failure_domains.is_subset(&p.failure_domains)
+                    && request
+                        .forbidden_failure_domains
+                        .is_disjoint(&p.failure_domains)
+                    && ancestors_enabled(p, &by_id)
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|a, b| {
+            let a_local = request
+                .preferred_locations
+                .contains(a.location.as_deref().unwrap_or_default());
+            let b_local = request
+                .preferred_locations
+                .contains(b.location.as_deref().unwrap_or_default());
+            let a_spread = a.failure_domains.is_disjoint(&request.spread_away_from);
+            let b_spread = b.failure_domains.is_disjoint(&request.spread_away_from);
+            b_local
+                .cmp(&a_local)
+                .then_with(|| b_spread.cmp(&a_spread))
+                .then_with(|| {
+                    let af = a
+                        .inventories
+                        .values()
+                        .map(Inventory::available)
+                        .sum::<u64>();
+                    let bf = b
+                        .inventories
+                        .values()
+                        .map(Inventory::available)
+                        .sum::<u64>();
+                    bf.cmp(&af).then_with(|| a.id.cmp(&b.id))
+                })
+        });
+        Ok(candidates
+            .into_iter()
+            .take(request.limit)
+            .map(|p| PlacementCandidate {
+                provider_id: p.id.clone(),
+                generation: p.generation,
+            })
+            .collect())
     }
 
     pub async fn refresh_inventory(
@@ -489,6 +722,55 @@ fn provider_state_as_str(state: ProviderState) -> &'static str {
     }
 }
 
+fn validate_metadata(
+    parent: Option<&str>,
+    traits: &BTreeSet<String>,
+    failure_domains: &BTreeSet<String>,
+    location: Option<&str>,
+) -> Result<(), PlacementError> {
+    let valid_location = |v: &str| {
+        let mut chars = v.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+            && v.len() <= 128
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    };
+    if parent.is_some_and(|v| v.trim().is_empty())
+        || location.is_some_and(|v| v.trim().is_empty() || !valid_location(v))
+        || traits
+            .iter()
+            .chain(failure_domains)
+            .any(|v| v.trim().is_empty() || v.len() > 128)
+        || failure_domains.iter().any(|v| !valid_location(v))
+        || traits.len() > MAX_CONSTRAINT_SET
+        || failure_domains.len() > MAX_CONSTRAINT_SET
+    {
+        return Err(PlacementError::InvalidTopologyReference);
+    }
+    Ok(())
+}
+
+fn ancestors_enabled(
+    provider: &ResourceProvider,
+    by_id: &BTreeMap<&str, &ResourceProvider>,
+) -> bool {
+    let mut cursor = provider.parent_provider_id.as_deref();
+    let mut seen = BTreeSet::new();
+    for _ in 0..64 {
+        let Some(id) = cursor else { return true };
+        if !seen.insert(id) {
+            return false;
+        }
+        let Some(parent) = by_id.get(id) else {
+            return false;
+        };
+        if parent.state != ProviderState::Enabled {
+            return false;
+        }
+        cursor = parent.parent_provider_id.as_deref();
+    }
+    false
+}
+
 fn provider_state_from_str(value: &str) -> Option<ProviderState> {
     match value {
         "Enabled" => Some(ProviderState::Enabled),
@@ -568,6 +850,10 @@ fn provider_from_record(
             .iter()
             .map(|allocation| (allocation.id.clone(), allocation_from_record(allocation)))
             .collect(),
+        parent_provider_id: record.parent_provider_id.clone(),
+        traits: record.traits.iter().cloned().collect(),
+        failure_domains: record.failure_domains.iter().cloned().collect(),
+        location: record.location.clone(),
     })
 }
 
@@ -605,6 +891,10 @@ fn provider_to_record(provider: &ResourceProvider) -> o3k_store::PlacementProvid
                 resources: resource_records(&allocation.resources),
             })
             .collect(),
+        parent_provider_id: provider.parent_provider_id.clone(),
+        traits: provider.traits.iter().cloned().collect(),
+        failure_domains: provider.failure_domains.iter().cloned().collect(),
+        location: provider.location.clone(),
     }
 }
 
@@ -640,11 +930,37 @@ async fn import_legacy_files(
     } else {
         BTreeMap::new()
     };
-    for provider in providers.values() {
-        repository
-            .import_provider(&provider_to_record(provider))
-            .await
-            .map_err(map_store_error)?;
+    // Parent rows must exist before child rows because the durable schema
+    // enforces the hierarchy foreign key.  The loop is bounded by the number
+    // of imported providers and rejects cycles/orphans rather than weakening
+    // that invariant during recovery.
+    let mut pending = providers;
+    let mut imported = BTreeSet::new();
+    while !pending.is_empty() {
+        let keys = pending.keys().cloned().collect::<Vec<_>>();
+        let mut progress = false;
+        for key in keys {
+            let Some(provider) = pending.get(&key) else {
+                continue;
+            };
+            if provider
+                .parent_provider_id
+                .as_deref()
+                .is_some_and(|parent| !imported.contains(parent))
+            {
+                continue;
+            }
+            repository
+                .import_provider(&provider_to_record(provider))
+                .await
+                .map_err(map_store_error)?;
+            imported.insert(key.clone());
+            pending.remove(&key);
+            progress = true;
+        }
+        if !progress {
+            return Err(PlacementError::InvalidHierarchy);
+        }
     }
     for intent in intents.values() {
         match repository.upsert_intent(&intent_to_record(intent)).await {
@@ -1145,6 +1461,46 @@ mod tests {
         ) -> Result<o3k_store::PlacementProviderRecord, o3k_store::StoreError> {
             self.inner.register_provider(node_id, inventories).await
         }
+        async fn register_provider_metadata(
+            &self,
+            node_id: &str,
+            inventories: &[o3k_store::PlacementInventoryRecord],
+            parent_provider_id: Option<&str>,
+            traits: &[String],
+            failure_domains: &[String],
+            location: Option<&str>,
+        ) -> Result<o3k_store::PlacementProviderRecord, o3k_store::StoreError> {
+            self.inner
+                .register_provider_metadata(
+                    node_id,
+                    inventories,
+                    parent_provider_id,
+                    traits,
+                    failure_domains,
+                    location,
+                )
+                .await
+        }
+        async fn update_provider_metadata(
+            &self,
+            provider_id: &str,
+            expected_generation: u64,
+            parent_provider_id: Option<&str>,
+            traits: &[String],
+            failure_domains: &[String],
+            location: Option<&str>,
+        ) -> Result<o3k_store::PlacementProviderRecord, o3k_store::StoreError> {
+            self.inner
+                .update_provider_metadata(
+                    provider_id,
+                    expected_generation,
+                    parent_provider_id,
+                    traits,
+                    failure_domains,
+                    location,
+                )
+                .await
+        }
         async fn sync_provider(
             &self,
             node_id: &str,
@@ -1312,6 +1668,10 @@ mod tests {
             generation: 5,
             inventories,
             allocations,
+            parent_provider_id: None,
+            traits: BTreeSet::new(),
+            failure_domains: BTreeSet::new(),
+            location: None,
         };
         let providers = BTreeMap::from([("node-a".to_owned(), provider)]);
         let intent = AllocationIntent {
@@ -1412,6 +1772,136 @@ mod tests {
         drop(ledger);
         drop(store);
         fs::remove_dir_all(&root).map_err(PlacementError::Storage)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hierarchical_capability_and_failure_domain_candidates_are_deterministic()
+    -> Result<(), PlacementError> {
+        let root = test_root("hierarchy");
+        let store = o3k_store::testkit::open_file(&root.join("placement.db"))
+            .await
+            .map_err(map_store_error)?;
+        let ledger = test_ledger(&root, &store).await;
+        let a = ledger.register_provider("provider-a", inventory()).await?;
+        let _a = ledger
+            .update_provider_hierarchy(
+                &a.id,
+                a.generation,
+                None,
+                BTreeSet::from(["COMPUTE".to_owned()]),
+                BTreeSet::from(["rack-a".to_owned()]),
+                Some("az-1"),
+            )
+            .await?;
+        let b = ledger.register_provider("provider-b", inventory()).await?;
+        ledger
+            .update_provider_hierarchy(
+                &b.id,
+                b.generation,
+                None,
+                BTreeSet::from(["COMPUTE".to_owned(), "SPECIAL_X".to_owned()]),
+                BTreeSet::from(["rack-b".to_owned()]),
+                Some("az-1"),
+            )
+            .await?;
+        let required = CandidateRequest {
+            resources: BTreeMap::from([(VCPU.to_owned(), 1)]),
+            required_traits: BTreeSet::from(["SPECIAL_X".to_owned()]),
+            locations: BTreeSet::from(["az-1".to_owned()]),
+            limit: 8,
+            ..CandidateRequest::default()
+        };
+        assert_eq!(
+            ledger
+                .candidates(&required)
+                .await?
+                .iter()
+                .map(|c| c.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-b"]
+        );
+        let forbidden = CandidateRequest {
+            resources: BTreeMap::from([(VCPU.to_owned(), 1)]),
+            forbidden_traits: BTreeSet::from(["SPECIAL_X".to_owned()]),
+            limit: 8,
+            ..CandidateRequest::default()
+        };
+        assert_eq!(
+            ledger
+                .candidates(&forbidden)
+                .await?
+                .iter()
+                .map(|c| c.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-a"]
+        );
+        let impossible = CandidateRequest {
+            resources: BTreeMap::from([(VCPU.to_owned(), 1)]),
+            failure_domains: BTreeSet::from(["unknown".to_owned()]),
+            limit: 8,
+            ..CandidateRequest::default()
+        };
+        assert!(ledger.candidates(&impossible).await?.is_empty());
+        let spread = CandidateRequest {
+            resources: BTreeMap::from([(VCPU.to_owned(), 1)]),
+            required_traits: BTreeSet::from(["COMPUTE".to_owned()]),
+            spread_away_from: BTreeSet::from(["rack-a".to_owned()]),
+            limit: 8,
+            ..CandidateRequest::default()
+        };
+        assert_eq!(
+            ledger.candidates(&spread).await?[0].provider_id,
+            "provider-b"
+        );
+        assert!(matches!(
+            ledger
+                .register_provider_hierarchical(
+                    "orphan",
+                    inventory(),
+                    Some("missing-parent"),
+                    BTreeSet::new(),
+                    BTreeSet::new(),
+                    None,
+                )
+                .await,
+            Err(PlacementError::InvalidHierarchy)
+        ));
+        let c = ledger.register_provider("provider-c", inventory()).await?;
+        let c = ledger
+            .update_provider_hierarchy(
+                &c.id,
+                c.generation,
+                Some("provider-b"),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                None,
+            )
+            .await?;
+        assert!(matches!(
+            ledger
+                .update_provider_hierarchy(
+                    "provider-b",
+                    ledger.provider("provider-b").await?.generation,
+                    Some(&c.id),
+                    BTreeSet::new(),
+                    BTreeSet::new(),
+                    None,
+                )
+                .await,
+            Err(PlacementError::InvalidHierarchy)
+        ));
+        drop(ledger);
+        drop(store);
+        let reopened_store = o3k_store::testkit::open_file(&root.join("placement.db"))
+            .await
+            .map_err(map_store_error)?;
+        let reopened = test_ledger(&root, &reopened_store).await;
+        let restored = reopened.provider("provider-b").await?;
+        assert!(restored.traits.contains("SPECIAL_X"));
+        assert!(restored.failure_domains.contains("rack-b"));
+        assert_eq!(restored.location.as_deref(), Some("az-1"));
+        std::fs::remove_dir_all(root).ok();
         Ok(())
     }
 }

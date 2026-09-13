@@ -18,12 +18,149 @@ use crate::{
 };
 
 impl SqliteStore {
+    pub async fn register_provider_metadata(
+        &self,
+        node_id: &str,
+        inventories: &[PlacementInventoryRecord],
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        if parent_provider_id == Some(node_id) || traits.iter().any(|value| value.trim().is_empty())
+        {
+            return Err(StoreError::Corrupt(
+                "invalid placement provider metadata".to_owned(),
+            ));
+        }
+        if let Some(parent) = parent_provider_id
+            && self.get_provider(parent).await?.is_none()
+        {
+            return Err(StoreError::PlacementProviderNotFound);
+        }
+        let provider = self.register_provider(node_id, inventories).await?;
+        self.update_provider_metadata(
+            &provider.id,
+            provider.generation,
+            parent_provider_id,
+            traits,
+            failure_domains,
+            location,
+        )
+        .await
+    }
+
+    pub async fn update_provider_metadata(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        if parent_provider_id == Some(provider_id) || traits.iter().any(|v| v.trim().is_empty()) {
+            return Err(StoreError::Corrupt(
+                "invalid placement provider metadata".to_owned(),
+            ));
+        }
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT generation FROM placement_providers WHERE id = ?")
+                .bind(provider_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+        let Some(current) = current else {
+            return Err(StoreError::PlacementProviderNotFound);
+        };
+        if u64::try_from(current).ok() != Some(expected_generation) {
+            return Err(StoreError::PlacementStaleGeneration);
+        }
+        if let Some(parent) = parent_provider_id {
+            let exists: Option<String> =
+                sqlx::query_scalar("SELECT id FROM placement_providers WHERE id = ?")
+                    .bind(parent)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?;
+            if exists.is_none() {
+                return Err(StoreError::PlacementProviderNotFound);
+            }
+        }
+        // Validate the complete proposed ancestor chain while the write
+        // transaction holds SQLite's writer lock.  This closes the race where
+        // two concurrent updates could otherwise create A -> B and B -> A.
+        let hierarchy_rows =
+            sqlx::query("SELECT id, parent_provider_id FROM placement_providers ORDER BY id")
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut cursor = parent_provider_id.map(str::to_owned);
+        for _ in 0..64 {
+            let Some(id) = cursor else { break };
+            if !seen.insert(id.clone()) || id == provider_id {
+                return Err(StoreError::Corrupt(
+                    "placement provider hierarchy cycle".to_owned(),
+                ));
+            }
+            cursor = hierarchy_rows
+                .iter()
+                .find(|row| row.get::<String, _>("id") == id)
+                .and_then(|row| row.get::<Option<String>, _>("parent_provider_id"));
+        }
+        if cursor.is_some() {
+            return Err(StoreError::Corrupt(
+                "placement provider hierarchy exceeds depth limit".to_owned(),
+            ));
+        }
+        let updated = sqlx::query("UPDATE placement_providers SET parent_provider_id = ?, location = ?, generation = generation + 1 WHERE id = ? AND generation = ?")
+            .bind(parent_provider_id).bind(location).bind(provider_id).bind(i64::try_from(expected_generation).map_err(|_| StoreError::Corrupt("generation out of range".to_owned()))?)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::PlacementStaleGeneration);
+        }
+        sqlx::query("DELETE FROM placement_provider_traits WHERE provider_id = ?")
+            .bind(provider_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        for value in traits
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            sqlx::query("INSERT INTO placement_provider_traits(provider_id, trait) VALUES (?, ?)")
+                .bind(provider_id)
+                .bind(value)
+                .execute(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+        }
+        sqlx::query("DELETE FROM placement_provider_failure_domains WHERE provider_id = ?")
+            .bind(provider_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        for value in failure_domains
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            sqlx::query("INSERT INTO placement_provider_failure_domains(provider_id, failure_domain_id) VALUES (?, ?)").bind(provider_id).bind(value).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        self.get_provider(provider_id)
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)
+    }
     pub async fn get_provider(
         &self,
         provider_id: &str,
     ) -> Result<Option<PlacementProviderRecord>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, node_id, state, generation FROM placement_providers WHERE id = ?",
+            "SELECT id, node_id, state, generation, parent_provider_id, location FROM placement_providers WHERE id = ?",
         )
         .bind(provider_id)
         .fetch_optional(&self.pool)
@@ -35,12 +172,14 @@ impl SqliteStore {
         let mut provider = placement_provider_from_row(&row)?;
         provider.inventories = self.load_placement_inventories(provider_id).await?;
         provider.allocations = self.load_placement_allocations(provider_id).await?;
+        provider.traits = self.load_provider_traits(provider_id).await?;
+        provider.failure_domains = self.load_provider_failure_domains(provider_id).await?;
         Ok(Some(provider))
     }
 
     pub async fn list_providers(&self) -> Result<Vec<PlacementProviderRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, node_id, state, generation FROM placement_providers ORDER BY id",
+            "SELECT id, node_id, state, generation, parent_provider_id, location FROM placement_providers ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await
@@ -51,6 +190,8 @@ impl SqliteStore {
             let mut provider = placement_provider_from_row(&row)?;
             provider.inventories = self.load_placement_inventories(&provider_id).await?;
             provider.allocations = self.load_placement_allocations(&provider_id).await?;
+            provider.traits = self.load_provider_traits(&provider_id).await?;
+            provider.failure_domains = self.load_provider_failure_domains(&provider_id).await?;
             providers.push(provider);
         }
         Ok(providers)
@@ -64,7 +205,7 @@ impl SqliteStore {
         let limit = i64::try_from(limit)
             .map_err(|_| StoreError::Corrupt("placement page limit out of range".to_owned()))?;
         let rows = sqlx::query(
-            "SELECT id, node_id, state, generation FROM placement_providers \
+            "SELECT id, node_id, state, generation, parent_provider_id, location FROM placement_providers \
              WHERE (?1 IS NULL OR id > ?1) \
              ORDER BY id \
              LIMIT ?2",
@@ -81,6 +222,8 @@ impl SqliteStore {
             // Inventories only: allocations are intentionally omitted (see
             // the port contract). `used` already reflects durable allocation.
             provider.inventories = self.load_placement_inventories(&provider_id).await?;
+            provider.traits = self.load_provider_traits(&provider_id).await?;
+            provider.failure_domains = self.load_provider_failure_domains(&provider_id).await?;
             providers.push(provider);
         }
         Ok(providers)
@@ -197,6 +340,29 @@ impl SqliteStore {
         .await
         .map_err(StoreError::Database)?;
         rows.iter().map(placement_inventory_from_row).collect()
+    }
+
+    async fn load_provider_traits(&self, provider_id: &str) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT trait FROM placement_provider_traits WHERE provider_id = ? ORDER BY trait",
+        )
+        .bind(provider_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        Ok(rows.iter().map(|row| row.get("trait")).collect())
+    }
+
+    async fn load_provider_failure_domains(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query("SELECT failure_domain_id FROM placement_provider_failure_domains WHERE provider_id = ? ORDER BY failure_domain_id")
+            .bind(provider_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        Ok(rows
+            .iter()
+            .map(|row| row.get("failure_domain_id"))
+            .collect())
     }
 
     async fn load_placement_allocations(
@@ -1044,6 +1210,17 @@ impl SqliteStore {
             .execute(&mut *connection)
             .await
             .map_err(StoreError::Database)?;
+            sqlx::query("UPDATE placement_providers SET parent_provider_id = ?, location = ? WHERE id = ?")
+                .bind(&provider.parent_provider_id).bind(&provider.location).bind(&provider.id)
+                .execute(&mut *connection).await.map_err(StoreError::Database)?;
+            sqlx::query("DELETE FROM placement_provider_traits WHERE provider_id = ?").bind(&provider.id).execute(&mut *connection).await.map_err(StoreError::Database)?;
+            for trait_name in &provider.traits {
+                sqlx::query("INSERT INTO placement_provider_traits(provider_id, trait) VALUES (?, ?)").bind(&provider.id).bind(trait_name).execute(&mut *connection).await.map_err(StoreError::Database)?;
+            }
+            sqlx::query("DELETE FROM placement_provider_failure_domains WHERE provider_id = ?").bind(&provider.id).execute(&mut *connection).await.map_err(StoreError::Database)?;
+            for domain in &provider.failure_domains {
+                sqlx::query("INSERT INTO placement_provider_failure_domains(provider_id, failure_domain_id) VALUES (?, ?)").bind(&provider.id).bind(domain).execute(&mut *connection).await.map_err(StoreError::Database)?;
+            }
             sqlx::query("DELETE FROM placement_inventories WHERE provider_id = ?")
                 .bind(&provider.id)
                 .execute(&mut *connection)
@@ -1241,6 +1418,46 @@ impl PlacementRepository for SqliteStore {
         inventories: &[PlacementInventoryRecord],
     ) -> Result<PlacementProviderRecord, StoreError> {
         self.register_provider(node_id, inventories).await
+    }
+
+    async fn register_provider_metadata(
+        &self,
+        node_id: &str,
+        inventories: &[PlacementInventoryRecord],
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        self.register_provider_metadata(
+            node_id,
+            inventories,
+            parent_provider_id,
+            traits,
+            failure_domains,
+            location,
+        )
+        .await
+    }
+
+    async fn update_provider_metadata(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        self.update_provider_metadata(
+            provider_id,
+            expected_generation,
+            parent_provider_id,
+            traits,
+            failure_domains,
+            location,
+        )
+        .await
     }
 
     async fn sync_provider(

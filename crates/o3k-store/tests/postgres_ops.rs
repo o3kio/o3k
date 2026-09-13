@@ -10,8 +10,9 @@ use uuid::Uuid;
 use o3k_kernel::{LimitKey, LimitValue, OwnershipScope, ResourceAmount, ScopeId, ScopeKind};
 use o3k_store::{
     DurableStore, ImageMetadataRecord, ImageRepository, NetworkRecord, NetworkRepository,
-    OperationRecord, OperationState, PlacementInventoryRecord, PlacementRepository, PortRecord,
-    PostgresStore, QuotaRepository, ResourceRecord, StoreError, SubnetRecord,
+    OperationRecord, OperationState, PlacementAllocationRecord, PlacementInventoryRecord,
+    PlacementRepository, PlacementResourceRecord, PortRecord, PostgresStore, QuotaRepository,
+    ResourceRecord, StoreError, SubnetRecord,
 };
 
 async fn prepare_test_database(database_url: &str) -> Option<PgConnection> {
@@ -347,4 +348,75 @@ async fn test_postgres_error_mapping_and_no_leakage() {
         Err(StoreError::ResourceAlreadyExists) => {}
         other => panic!("expected StoreError::ResourceAlreadyExists, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_postgres_placement_hierarchy_conformance() {
+    let Some((_db_url, store, _database_guard)) = get_test_store().await else {
+        eprintln!(
+            "Skipping test_postgres_placement_hierarchy_conformance: no Postgres instance available"
+        );
+        return;
+    };
+    let inventory = [PlacementInventoryRecord {
+        resource_class: "VCPU".to_owned(),
+        total: 8,
+        reserved: 0,
+        allocation_ratio: 1.0,
+        used: 0,
+    }];
+    let parent = store
+        .register_provider("pg-hierarchy-parent", &inventory)
+        .await
+        .expect("register parent");
+    let child = store
+        .register_provider_metadata(
+            "pg-hierarchy-child",
+            &inventory,
+            Some(&parent.id),
+            &["COMPUTE".to_owned(), "SPECIAL_X".to_owned()],
+            &["rack-a".to_owned()],
+            Some("az-1"),
+        )
+        .await
+        .expect("register child metadata");
+    assert_eq!(
+        child.parent_provider_id.as_deref(),
+        Some(parent.id.as_str())
+    );
+    assert_eq!(child.traits, vec!["COMPUTE", "SPECIAL_X"]);
+    assert_eq!(child.failure_domains, vec!["rack-a"]);
+    assert_eq!(child.location.as_deref(), Some("az-1"));
+    assert!(matches!(
+        store
+            .update_provider_metadata(
+                &child.id,
+                child.generation - 1,
+                Some(&parent.id),
+                &child.traits,
+                &child.failure_domains,
+                child.location.as_deref(),
+            )
+            .await,
+        Err(StoreError::PlacementStaleGeneration)
+    ));
+    let allocation = PlacementAllocationRecord {
+        id: "pg-hierarchy-allocation".to_owned(),
+        provider_id: child.id.clone(),
+        consumer_id: "pg-consumer".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 2,
+        }],
+    };
+    store
+        .commit_allocation(&child.id, child.generation, &allocation)
+        .await
+        .expect("commit fenced allocation");
+    let restored = store
+        .get_provider(&child.id)
+        .await
+        .expect("read child")
+        .expect("child exists");
+    assert_eq!(restored.allocations, vec![allocation]);
 }

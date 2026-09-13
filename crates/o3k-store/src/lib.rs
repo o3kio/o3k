@@ -1880,6 +1880,50 @@ pub async fn run_placement_repository_conformance<S: PlacementRepository>(
         Some(retained_intent)
     );
 
+    // Hierarchy/capability metadata is durable and generation-fenced without
+    // changing the legacy provider path.
+    let hierarchy_parent = repository
+        .register_provider("hierarchy-parent", &inventories)
+        .await?;
+    let hierarchy_child = repository
+        .register_provider_metadata(
+            "hierarchy-child",
+            &inventories,
+            Some(&hierarchy_parent.id),
+            &["COMPUTE".to_owned(), "SPECIAL_X".to_owned()],
+            &["rack-a".to_owned()],
+            Some("az-1"),
+        )
+        .await?;
+    assert_eq!(
+        hierarchy_child.parent_provider_id.as_deref(),
+        Some(hierarchy_parent.id.as_str())
+    );
+    assert_eq!(
+        &hierarchy_child.traits,
+        &vec!["COMPUTE".to_owned(), "SPECIAL_X".to_owned()]
+    );
+    assert_eq!(&hierarchy_child.failure_domains, &vec!["rack-a".to_owned()]);
+    assert_eq!(hierarchy_child.location.as_deref(), Some("az-1"));
+    assert!(matches!(
+        repository
+            .update_provider_metadata(
+                &hierarchy_child.id,
+                hierarchy_child.generation - 1,
+                Some(&hierarchy_parent.id),
+                &hierarchy_child.traits,
+                &hierarchy_child.failure_domains,
+                hierarchy_child.location.as_deref(),
+            )
+            .await,
+        Err(StoreError::PlacementStaleGeneration)
+    ));
+    let hierarchy_restored = repository
+        .get_provider(&hierarchy_child.id)
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(hierarchy_restored, hierarchy_child);
+
     // import_provider: row-granular, idempotent, exact generation preserved.
     let imported = PlacementProviderRecord {
         id: "compute-3".to_owned(),
@@ -1913,6 +1957,10 @@ pub async fn run_placement_repository_conformance<S: PlacementRepository>(
                 }],
             },
         ],
+        parent_provider_id: None,
+        traits: vec![],
+        failure_domains: vec![],
+        location: None,
     };
     repository.import_provider(&imported).await?;
     let restored_import = repository
@@ -1958,6 +2006,10 @@ pub async fn run_placement_repository_conformance<S: PlacementRepository>(
                 amount: 1,
             }],
         }],
+        parent_provider_id: None,
+        traits: vec![],
+        failure_domains: vec![],
+        location: None,
     };
     repository.import_provider(&partial).await?;
     let partial_store = repository

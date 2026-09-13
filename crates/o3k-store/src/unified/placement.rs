@@ -67,6 +67,76 @@ impl PlacementRepository for O3kStore {
         }
     }
 
+    async fn register_provider_metadata(
+        &self,
+        node_id: &str,
+        inventories: &[PlacementInventoryRecord],
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.register_provider_metadata(
+                    node_id,
+                    inventories,
+                    parent_provider_id,
+                    traits,
+                    failure_domains,
+                    location,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.register_provider_metadata(
+                    node_id,
+                    inventories,
+                    parent_provider_id,
+                    traits,
+                    failure_domains,
+                    location,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn update_provider_metadata(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_provider_metadata(
+                    provider_id,
+                    expected_generation,
+                    parent_provider_id,
+                    traits,
+                    failure_domains,
+                    location,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.update_provider_metadata(
+                    provider_id,
+                    expected_generation,
+                    parent_provider_id,
+                    traits,
+                    failure_domains,
+                    location,
+                )
+                .await
+            }
+        }
+    }
+
     async fn sync_provider(
         &self,
         node_id: &str,

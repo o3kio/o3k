@@ -663,6 +663,24 @@ pub trait PlacementRepository: Send + Sync {
         node_id: &str,
         inventories: &[PlacementInventoryRecord],
     ) -> Result<PlacementProviderRecord, StoreError>;
+    async fn register_provider_metadata(
+        &self,
+        node_id: &str,
+        inventories: &[PlacementInventoryRecord],
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError>;
+    async fn update_provider_metadata(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError>;
     async fn sync_provider(
         &self,
         node_id: &str,

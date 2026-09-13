@@ -487,6 +487,14 @@ pub struct PlacementProviderRecord {
     pub generation: u64,
     pub inventories: Vec<PlacementInventoryRecord>,
     pub allocations: Vec<PlacementAllocationRecord>,
+    /// Optional generic parent provider; `None` preserves the flat model.
+    pub parent_provider_id: Option<String>,
+    /// Provider-neutral capability names, deterministically sorted.
+    pub traits: Vec<String>,
+    /// Canonical LocationRegistry failure-domain IDs bound to this provider.
+    pub failure_domains: Vec<String>,
+    /// Optional canonical region or availability-domain ID.
+    pub location: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

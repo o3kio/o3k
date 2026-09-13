@@ -4491,6 +4491,46 @@ mod tests {
         ) -> Result<o3k_store::PlacementProviderRecord, o3k_store::StoreError> {
             self.inner.register_provider(node_id, inventories).await
         }
+        async fn register_provider_metadata(
+            &self,
+            node_id: &str,
+            inventories: &[o3k_store::PlacementInventoryRecord],
+            parent_provider_id: Option<&str>,
+            traits: &[String],
+            failure_domains: &[String],
+            location: Option<&str>,
+        ) -> Result<o3k_store::PlacementProviderRecord, o3k_store::StoreError> {
+            self.inner
+                .register_provider_metadata(
+                    node_id,
+                    inventories,
+                    parent_provider_id,
+                    traits,
+                    failure_domains,
+                    location,
+                )
+                .await
+        }
+        async fn update_provider_metadata(
+            &self,
+            provider_id: &str,
+            expected_generation: u64,
+            parent_provider_id: Option<&str>,
+            traits: &[String],
+            failure_domains: &[String],
+            location: Option<&str>,
+        ) -> Result<o3k_store::PlacementProviderRecord, o3k_store::StoreError> {
+            self.inner
+                .update_provider_metadata(
+                    provider_id,
+                    expected_generation,
+                    parent_provider_id,
+                    traits,
+                    failure_domains,
+                    location,
+                )
+                .await
+        }
         async fn sync_provider(
             &self,
             node_id: &str,
