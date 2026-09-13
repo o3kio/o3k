@@ -83,6 +83,12 @@ jobs:
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_PROVIDER: agent
+          # The storage-phase bootstrap is intentionally SQLite.  Do not let
+          # a runner-level URL from an earlier job point this fresh state at a
+          # stale or unavailable PostgreSQL instance; the generic/P15.7 phase
+          # provisions and exports its own PostgreSQL URL below.
+          O3K_DATABASE_BACKEND: sqlite
+          O3K_DATABASE_URL: ""
           # Scoped info filters keep protected evidence readable without
           # logging payloads; secrets remain excluded by the redacted fields.
           O3K_LOG_FILTER: debug
