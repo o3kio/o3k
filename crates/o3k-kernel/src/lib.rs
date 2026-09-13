@@ -16,6 +16,7 @@ pub mod action;
 pub mod audit;
 pub mod auth_context;
 pub mod authorization;
+pub mod composition;
 pub mod controller;
 pub mod durable_audit;
 pub mod envelope;
@@ -39,6 +40,10 @@ pub use auth_context::AuthContext;
 pub use authorization::{
     ActionPolicy, AuthorizationDecision, AuthorizationRequest, Authorizer, DecisionReason,
     StaticAuthorizer,
+};
+pub use composition::{
+    CloudProfile, CloudProfileError, CompositionDrift, CompositionObservation, DriftKind,
+    ServiceOwnershipMode, ServiceSelection,
 };
 pub use controller::{
     Controller, ControllerCapabilities, ControllerFailure, ControllerHealth,

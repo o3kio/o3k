@@ -55,10 +55,10 @@ pub use domain::records::{
     CanonicalNetworkPolicyRecord, CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord,
     CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, CanonicalPolicyAttachmentRecord,
     CanonicalPolicyRealizationRecord, CanonicalRealmBindingRecord,
-    CanonicalReusableNetworkPolicyRecord, DatabaseHealth, FederatedBindingRecord,
-    IdempotencyReservationRequest, ImageMetadataRecord, ImageOverlayIdentity,
-    ImageOverlayOwnershipRecord, ImageOverlayUpdate, KeypairRecord, KeystoneDomainRecord,
-    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    CanonicalReusableNetworkPolicyRecord, CloudProfileRecord, DatabaseHealth,
+    FederatedBindingRecord, IdempotencyReservationRequest, ImageMetadataRecord,
+    ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate, KeypairRecord,
+    KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
     NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, ObservationUpdate,
     OperationRecord, OperatorAssignmentRecord, PlacementAllocationRecord,
@@ -81,8 +81,8 @@ pub(crate) use port::durable::{
     RELATIONSHIP_UNKNOWN, relationship_from_row,
 };
 pub use port::service_repos::{
-    AuditRepository, ComputeRepository, IdentityRepository, ImageRepository, KeypairRepository,
-    NetworkRepository, PlacementRepository, VolumeAttachmentRepository,
+    AuditRepository, CompositionRepository, ComputeRepository, IdentityRepository, ImageRepository,
+    KeypairRepository, NetworkRepository, PlacementRepository, VolumeAttachmentRepository,
 };
 /// Maximum attempts for an observation update contended by a concurrent
 /// SQLite writer. BEGIN IMMEDIATE makes the configured busy_timeout apply, so

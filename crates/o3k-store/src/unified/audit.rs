@@ -9,6 +9,18 @@ use super::O3kStore;
 use crate::AuditEventRecord;
 use crate::port::service_repos::AuditRepository;
 
+impl O3kStore {
+    pub async fn insert_audit_event(
+        &self,
+        event: &crate::AuditEventRecord,
+    ) -> Result<(), crate::StoreError> {
+        match self {
+            Self::Sqlite(store) => store.insert_audit_event(event).await,
+            Self::Postgres(store) => store.insert_audit_event(event).await,
+        }
+    }
+}
+
 fn err<E: std::fmt::Display>(e: E) -> o3k_kernel::KernelError {
     o3k_kernel::KernelError::AuditUnavailable(e.to_string())
 }

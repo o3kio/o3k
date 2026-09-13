@@ -1,5 +1,6 @@
 mod audit;
 mod composition;
+mod composition_profile;
 mod compute;
 pub mod diagnostics;
 mod governance;
@@ -17,6 +18,7 @@ mod tests;
 
 pub use audit::AuditReaderAdapter;
 pub use composition::CompositionResourceHandler;
+pub use composition_profile::CloudProfileAdapter;
 pub use compute::ServerReaderAdapter;
 pub use diagnostics::DiagnosticsReaderAdapter;
 pub use governance::GovernanceReaderAdapter;

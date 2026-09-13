@@ -17,6 +17,7 @@ use std::sync::{Arc, RwLock};
 
 pub mod audit;
 pub mod auth;
+pub mod composition;
 pub mod compute;
 pub mod diagnostics;
 pub mod error;
@@ -70,6 +71,7 @@ pub struct NativeApiState {
     /// mutation (P15.1 issue #931 MEDIUM-1), so there is no audit sink field —
     /// a missing sink is no longer possible.
     pub topology_store: Option<Arc<dyn o3k_kernel::TopologyStore>>,
+    pub composition_reader: Option<Arc<dyn composition::CompositionReader>>,
 }
 
 impl NativeApiState {
@@ -153,7 +155,17 @@ impl NativeApiState {
             authorizer: None,
             locations: None,
             topology_store: None,
+            composition_reader: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_composition_reader(
+        mut self,
+        reader: Arc<dyn composition::CompositionReader>,
+    ) -> Self {
+        self.composition_reader = Some(reader);
+        self
     }
 
     /// Sets the canonical location topology served and mutated by the native
@@ -291,6 +303,14 @@ pub fn router(state: NativeApiState) -> Router {
         )
         .route("/identity/me", get(identity::current_context))
         .route("/operator/profile", get(identity::operator_profile))
+        .route(
+            "/operator/cloud-profiles/{id}",
+            get(composition::show).put(composition::put),
+        )
+        .route(
+            "/operator/cloud-profiles/{id}/actions/reconcile",
+            post(composition::reconcile),
+        )
         .route("/compute/servers/{id}", get(compute::show_server))
         .route("/volume/volumes/{id}", get(volume::show_volume))
         .route(

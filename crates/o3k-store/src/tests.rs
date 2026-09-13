@@ -453,6 +453,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cloud_profile_round_trip_and_generation_fencing() -> Result<(), StoreError> {
+        let store = O3kStore::connect_sqlite_memory().await?;
+        let profile = o3k_kernel::CloudProfile {
+            profile_id: "edge".into(),
+            generation: 1,
+            selected_services: vec![o3k_kernel::ServiceSelection {
+                service_id: "compute".into(),
+                ownership: o3k_kernel::ServiceOwnershipMode::O3kImplemented,
+                version_requirement: "*".into(),
+                dependencies: vec![],
+                required_capabilities: vec![],
+                locality: None,
+                placement_requirement: None,
+                config_refs: vec![],
+            }],
+            upgrade_order: vec![],
+        };
+        let record = CloudProfileRecord::from_profile(&profile, "2026-01-01T00:00:00Z")?;
+        store.upsert_cloud_profile(&record, None).await?;
+        assert_eq!(
+            store
+                .get_cloud_profile("edge")
+                .await?
+                .ok_or(StoreError::ResourceNotFound)?
+                .profile()?,
+            profile
+        );
+        let stale = CloudProfileRecord {
+            generation: 2,
+            ..record
+        };
+        assert!(matches!(
+            store.upsert_cloud_profile(&stale, Some(99)).await,
+            Err(StoreError::StaleGeneration)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sqlite_store_passes_conformance() -> Result<(), StoreError> {
         let store = SqliteStore::connect("sqlite::memory:").await?;
         run_conformance(&store).await

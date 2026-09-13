@@ -7,8 +7,8 @@ use crate::domain::records::{
     AuditEventRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
     CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord,
     CanonicalNetworkPolicyRecord, CanonicalNetworkRecord, CanonicalRealmBindingRecord,
-    FederatedBindingRecord, ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord,
-    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    CloudProfileRecord, FederatedBindingRecord, ImageMetadataRecord, KeypairRecord,
+    KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
     NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, OperatorAssignmentRecord,
     PlacementAllocationRecord, PlacementCapacitySummary, PlacementIntentRecord,
@@ -18,6 +18,34 @@ use crate::domain::records::{
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
+
+/// Durable CloudProfile desired-state authority. Implementations must enforce
+/// optimistic generation fencing; the payload is canonical kernel JSON and is
+/// never interpreted as observed service state by this repository.
+#[async_trait]
+pub trait CompositionRepository: Send + Sync {
+    async fn get_cloud_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Option<CloudProfileRecord>, StoreError>;
+    async fn list_cloud_profiles(&self) -> Result<Vec<CloudProfileRecord>, StoreError>;
+    async fn upsert_cloud_profile(
+        &self,
+        profile: &CloudProfileRecord,
+        expected_generation: Option<u64>,
+    ) -> Result<CloudProfileRecord, StoreError>;
+    async fn upsert_cloud_profile_with_audit(
+        &self,
+        profile: &CloudProfileRecord,
+        expected_generation: Option<u64>,
+        audit: &AuditEventRecord,
+    ) -> Result<CloudProfileRecord, StoreError>;
+    async fn delete_cloud_profile(
+        &self,
+        profile_id: &str,
+        expected_generation: u64,
+    ) -> Result<(), StoreError>;
+}
 
 /// Durable, scope-aware audit persistence. Implementations must enforce the
 /// page bound in SQL and never materialize the complete history.

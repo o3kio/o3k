@@ -4,6 +4,49 @@ use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Durable desired CloudProfile projection. The payload is validated by the
+/// Cloud Kernel before persistence; keeping it opaque here prevents the store
+/// from becoming a second composition authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudProfileRecord {
+    pub profile_id: String,
+    pub generation: u64,
+    pub payload: String,
+    pub updated_at: String,
+}
+
+impl CloudProfileRecord {
+    pub fn from_profile(
+        profile: &o3k_kernel::CloudProfile,
+        updated_at: impl Into<String>,
+    ) -> Result<Self, StoreError> {
+        profile
+            .validate()
+            .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        let payload = serde_json::to_string(profile)
+            .map_err(|e| StoreError::Corrupt(format!("cloud profile serialization: {e}")))?;
+        Ok(Self {
+            profile_id: profile.profile_id.clone(),
+            generation: profile.generation,
+            payload,
+            updated_at: updated_at.into(),
+        })
+    }
+    pub fn profile(&self) -> Result<o3k_kernel::CloudProfile, StoreError> {
+        let profile: o3k_kernel::CloudProfile = serde_json::from_str(&self.payload)
+            .map_err(|e| StoreError::Corrupt(format!("cloud profile payload: {e}")))?;
+        profile
+            .validate()
+            .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        if profile.profile_id != self.profile_id || profile.generation != self.generation {
+            return Err(StoreError::Corrupt(
+                "cloud profile identity mismatch".into(),
+            ));
+        }
+        Ok(profile)
+    }
+}
+
 /// Secret-safe durable audit projection.  This deliberately contains only
 /// canonical identifiers and bounded reason categories; request/provider
 /// payloads are not representable by this type.
