@@ -42,7 +42,7 @@ Rules:
 | --- | --- | --- | --- |
 | E2D-01 | Canonical topology / failure-domain model | PARTIAL | P15.1 #931 |
 | E2D-02 | Hierarchical, capability-aware placement | PARTIAL | P15.3 #933 |
-| E2D-03 | Building Block as runtime/operator concept | OPEN | P15.5 #935 |
+| E2D-03 | Building Block as runtime/operator concept | PARTIAL | P15.5 #935 |
 | E2D-04 | Service-registry authority convergence | OPEN | P15.2 #932 |
 | E2D-05 | Declarative CloudProfile artifact | OPEN | P15.4 #934 |
 | E2D-06 | Generic hosted-service machinery | PARTIAL | P19 (hosted machinery; Octavia/Designate/Barbican proofs) |
@@ -151,12 +151,17 @@ Rules:
   Ready/Unavailable/Draining state, drain blockers, replacement/removal,
   failure-domain identity, capacity aggregation, Araf/operator visibility
   (ADR-0182).
-- **Current implementation:** `BuildingBlock` matches only in docs; zero code,
-  tables, or routes. Nearest existing pieces: `NodeRegistry` in
-  `o3k-compute-agent`, placement providers, and the diagnostics
-  Draining-to-Degraded projection (`bins/o3kd/src/native_adapters/diagnostics.rs:82-121`).
-- **Evidence:** none dedicated; the adjacent pieces above are evidenced.
-- **Remaining delta:** the entire runtime/operator concept.
+- **Current implementation (P15.5):** the Cloud Kernel owns a bounded,
+  generation-fenced `BuildingBlock` lifecycle and durable SQLite/PostgreSQL
+  records. Native operator routes support enrollment, lifecycle actions and
+  bounded projections whose capacity/capabilities are derived from Placement
+  and authenticated agent state; canonical failure-domain IDs are validated
+  through `LocationRegistry`.
+- **Evidence:** kernel lifecycle and store round-trip/fencing tests, plus the
+  real `o3kd` restart persistence test
+  (`bins/o3kd/tests/p15_5_building_block_process.rs`).
+- **Remaining delta:** a live authenticated agent/libvirt execution gate and
+  full operator/Araf convergence evidence remain before a COMPLETE claim.
 - **Dependency:** E2D-01 (failure-domain identity), E2D-02 (placement link).
 - **Claim impact:** BLOCKER-to-claim.
 - **Recommended owner:** P15.5 #935.

@@ -16,6 +16,7 @@ pub mod action;
 pub mod audit;
 pub mod auth_context;
 pub mod authorization;
+pub mod building_block;
 pub mod composition;
 pub mod controller;
 pub mod durable_audit;
@@ -40,6 +41,10 @@ pub use auth_context::AuthContext;
 pub use authorization::{
     ActionPolicy, AuthorizationDecision, AuthorizationRequest, Authorizer, DecisionReason,
     StaticAuthorizer,
+};
+pub use building_block::{
+    BuildingBlock, BuildingBlockError, BuildingBlockState, DrainBlocker, DrainBlockerKind,
+    MAX_BUILDING_BLOCK_REFS,
 };
 pub use composition::{
     CloudProfile, CloudProfileError, CompositionDrift, CompositionObservation, DriftKind,

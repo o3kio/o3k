@@ -13,6 +13,7 @@ pub struct PostgresStore {
 }
 
 mod audit_store;
+mod building_block;
 mod composition;
 mod compute;
 mod core;
@@ -103,6 +104,7 @@ impl PostgresStore {
                 network_security_group_bindings, network_security_group_rules, network_security_groups,
                 placement_providers, placement_inventories, placement_allocations,
                 placement_allocation_resources, placement_allocation_intents, placement_allocation_intent_resources,
+                building_blocks,
                 quota_limits, quota_reservations, quota_reservation_amounts,
                 metering_authority, metering_intervals, metering_aggregates,
                 topology_regions, topology_availability_domains, failure_domains, topology_bindings,

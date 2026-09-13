@@ -9,6 +9,7 @@ use crate::{
 };
 
 mod audit;
+mod building_block;
 mod composition;
 mod compute;
 mod coordination;

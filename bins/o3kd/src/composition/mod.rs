@@ -1093,6 +1093,14 @@ pub async fn build_composition(
             registry: canonical_manifest_registry.clone(),
         },
     ))
+    .with_building_block_reader(std::sync::Arc::new(
+        crate::native_adapters::BuildingBlockAdapter {
+            store: store.clone(),
+            placement: placement.clone(),
+            agents: std::sync::Arc::new(registry.clone()),
+            locations: native_locations.clone(),
+        },
+    ))
     .with_locations(std::sync::Arc::new(
         o3k_native_api::topology::TopologyGuard::new(native_locations.clone()),
     ))

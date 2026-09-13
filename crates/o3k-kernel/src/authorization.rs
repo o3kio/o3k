@@ -186,6 +186,30 @@ impl StaticAuthorizer {
             "cloud_profile",
             false,
         );
+
+        // BuildingBlock lifecycle is system/operator administration, while
+        // enrollment is authenticated service-to-kernel registration.
+        reg(
+            "building_block",
+            "ReadBuildingBlock",
+            "building_block",
+            "building_block",
+            false,
+        );
+        reg(
+            "building_block",
+            "ManageBuildingBlock",
+            "building_block",
+            "building_block",
+            false,
+        );
+        reg(
+            "building_block",
+            "EnrollBuildingBlock",
+            "building_block",
+            "building_block",
+            false,
+        );
         reg(
             "composition",
             "ManageCloudProfile",
@@ -564,6 +588,22 @@ impl StaticAuthorizer {
                 },
             );
         }
+
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("building_block", "EnrollBuildingBlock"),
+            ResourceType::new("building_block", "building_block"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::Service],
+                    require_ownership: false,
+                    required_roles: vec![],
+                },
+            );
+        }
     }
 }
 
@@ -667,6 +707,16 @@ impl Authorizer for StaticAuthorizer {
             && (request.auth_context.effective_scope().kind() != ScopeKind::System
                 || (request.action == ActionId::new_unchecked("composition", "ManageCloudProfile")
                     && !request.auth_context.has_role("operator")))
+        {
+            return AuthorizationDecision::Deny {
+                reason: DecisionReason::ScopeMismatch,
+            };
+        }
+
+        if request.action.namespace() == "building_block"
+            && request.action != ActionId::new_unchecked("building_block", "EnrollBuildingBlock")
+            && (request.auth_context.effective_scope().kind() != ScopeKind::System
+                || !request.auth_context.has_role("operator"))
         {
             return AuthorizationDecision::Deny {
                 reason: DecisionReason::ScopeMismatch,
