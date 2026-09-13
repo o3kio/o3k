@@ -562,7 +562,11 @@ start_service() {
   fi
   supervisor=$!
   child=
-  for _ in $(seq 1 50); do
+  # A protected runner may be compiling the release binaries or handling a
+  # concurrent libvirt operation immediately before launch.  Give the
+  # packaged daemon a bounded observation window rather than treating a
+  # transient scheduler delay as a service-account failure.
+  for _ in $(seq 1 120); do
     while read -r candidate; do
       if process_matches "$candidate" "$(basename "$binary")"; then
         child="$candidate"
@@ -570,8 +574,7 @@ start_service() {
       fi
     done < <(sudo -n pgrep -u "$account" -x "$(basename "$binary")" 2>/dev/null || true)
     [[ -n "$child" ]] && break
-    sudo -n kill -0 "$supervisor" 2>/dev/null || break
-    sleep 0.1
+    sleep 0.25
   done
   if [[ -z "$child" ]]; then
     sudo -n kill "$supervisor" 2>/dev/null || true
@@ -592,6 +595,16 @@ wait_for_o3kd_health() {
   done
   curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/healthz" >/dev/null 2>&1 \
     || fail "o3kd health endpoint did not become ready"
+}
+
+wait_for_o3kd_control() {
+  for _ in $(seq 1 60); do
+    if (echo >/dev/tcp/127.0.0.1/"${CONTROL_PORT}") >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  fail "o3kd authenticated control endpoint did not become reachable"
 }
 
 wait_for_o3kd_ready() {
@@ -624,6 +637,7 @@ wait_for_compute_ready() {
 start_service o3kd "$O3KD_ACCOUNT" "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
 wait_for_o3kd_health
 if [[ "$O3K_PROVIDER" == agent ]]; then
+  wait_for_o3kd_control
   start_compute
   wait_for_o3kd_ready
   wait_for_compute_ready
