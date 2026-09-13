@@ -17,6 +17,7 @@ use std::sync::{Arc, RwLock};
 
 pub mod audit;
 pub mod auth;
+pub mod building_block;
 pub mod composition;
 pub mod compute;
 pub mod diagnostics;
@@ -72,6 +73,7 @@ pub struct NativeApiState {
     /// a missing sink is no longer possible.
     pub topology_store: Option<Arc<dyn o3k_kernel::TopologyStore>>,
     pub composition_reader: Option<Arc<dyn composition::CompositionReader>>,
+    pub building_block_reader: Option<Arc<dyn building_block::BuildingBlockReader>>,
 }
 
 impl NativeApiState {
@@ -156,6 +158,7 @@ impl NativeApiState {
             locations: None,
             topology_store: None,
             composition_reader: None,
+            building_block_reader: None,
         })
     }
 
@@ -165,6 +168,15 @@ impl NativeApiState {
         reader: Arc<dyn composition::CompositionReader>,
     ) -> Self {
         self.composition_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_building_block_reader(
+        mut self,
+        reader: Arc<dyn building_block::BuildingBlockReader>,
+    ) -> Self {
+        self.building_block_reader = Some(reader);
         self
     }
 
@@ -310,6 +322,15 @@ pub fn router(state: NativeApiState) -> Router {
         .route(
             "/operator/cloud-profiles/{id}/actions/reconcile",
             post(composition::reconcile),
+        )
+        .route(
+            "/operator/building-blocks",
+            get(building_block::list).post(building_block::enroll),
+        )
+        .route("/operator/building-blocks/{id}", get(building_block::show))
+        .route(
+            "/operator/building-blocks/{id}/actions/{action_name}",
+            post(building_block::action),
         )
         .route("/compute/servers/{id}", get(compute::show_server))
         .route("/volume/volumes/{id}", get(volume::show_volume))
@@ -490,6 +511,9 @@ pub async fn api_root() -> Json<ApiRootResponse> {
             "/o3k/v1/identity/scopes",
             "/o3k/v1/identity/me",
             "/o3k/v1/operator/profile",
+            "/o3k/v1/operator/building-blocks",
+            "/o3k/v1/operator/building-blocks/{id}",
+            "/o3k/v1/operator/building-blocks/{id}/actions/{action_name}",
             "/o3k/v1/compute/servers",
             "/o3k/v1/volume/volumes",
             "/o3k/v1/network/address-realms",

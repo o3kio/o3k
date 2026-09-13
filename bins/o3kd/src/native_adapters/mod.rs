@@ -1,4 +1,5 @@
 mod audit;
+mod building_block;
 mod composition;
 mod composition_profile;
 mod compute;
@@ -17,6 +18,7 @@ mod volume;
 mod tests;
 
 pub use audit::AuditReaderAdapter;
+pub use building_block::BuildingBlockAdapter;
 pub use composition::CompositionResourceHandler;
 pub use composition_profile::CloudProfileAdapter;
 pub use compute::ServerReaderAdapter;

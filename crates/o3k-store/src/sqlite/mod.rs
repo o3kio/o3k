@@ -7,6 +7,7 @@ use sqlx::SqlitePool;
 use std::sync::Arc;
 
 mod audit_store;
+mod building_block;
 mod composition;
 mod core;
 mod helpers;

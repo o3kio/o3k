@@ -220,6 +220,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn building_block_round_trip_and_generation_fence() -> Result<(), Box<dyn Error>> {
+        let store = O3kStore::connect_sqlite_memory().await?;
+        let block = o3k_kernel::BuildingBlock::enrolling(
+            "bb-a",
+            "agent-a",
+            vec!["provider-a".into()],
+            Some("fd-a".into()),
+            None,
+        )?;
+        let record = BuildingBlockRecord::from_block(&block, "2026-01-01T00:00:00Z")?;
+        store.upsert_building_block(&record, None).await?;
+        let loaded = store
+            .get_building_block("bb-a")
+            .await?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "block"))?
+            .block()?;
+        assert_eq!(loaded, block);
+        let ready = block.transition(o3k_kernel::BuildingBlockState::Ready, vec![])?;
+        let ready_record = BuildingBlockRecord::from_block(&ready, "2026-01-01T00:00:01Z")?;
+        assert!(matches!(
+            store.upsert_building_block(&ready_record, Some(99)).await,
+            Err(StoreError::StaleGeneration)
+        ));
+        store.upsert_building_block(&ready_record, Some(1)).await?;
+        assert_eq!(store.list_building_blocks().await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sqlite_scoped_operation_migration_normalizes_only_approved_legacy_checksum()
     -> Result<(), Box<dyn Error>> {
         async fn create_database() -> Result<PathBuf, Box<dyn Error>> {

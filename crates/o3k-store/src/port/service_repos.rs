@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::domain::error::StoreError;
 use crate::domain::records::{
-    AuditEventRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
+    AuditEventRecord, BuildingBlockRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
     CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord,
     CanonicalNetworkPolicyRecord, CanonicalNetworkRecord, CanonicalRealmBindingRecord,
     CloudProfileRecord, FederatedBindingRecord, ImageMetadataRecord, KeypairRecord,
@@ -45,6 +45,29 @@ pub trait CompositionRepository: Send + Sync {
         profile_id: &str,
         expected_generation: u64,
     ) -> Result<(), StoreError>;
+}
+
+/// Durable BuildingBlock lifecycle/link authority.  Implementations persist
+/// lifecycle state and references only; capacity and capabilities are derived
+/// from Placement and authenticated execution registries by the application.
+#[async_trait]
+pub trait BuildingBlockRepository: Send + Sync {
+    async fn get_building_block(
+        &self,
+        block_id: &str,
+    ) -> Result<Option<BuildingBlockRecord>, StoreError>;
+    async fn list_building_blocks(&self) -> Result<Vec<BuildingBlockRecord>, StoreError>;
+    async fn upsert_building_block(
+        &self,
+        block: &BuildingBlockRecord,
+        expected_generation: Option<u64>,
+    ) -> Result<BuildingBlockRecord, StoreError>;
+    async fn upsert_building_block_with_audit(
+        &self,
+        block: &BuildingBlockRecord,
+        expected_generation: Option<u64>,
+        audit: &AuditEventRecord,
+    ) -> Result<BuildingBlockRecord, StoreError>;
 }
 
 /// Durable, scope-aware audit persistence. Implementations must enforce the

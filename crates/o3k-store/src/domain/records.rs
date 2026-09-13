@@ -15,6 +15,76 @@ pub struct CloudProfileRecord {
     pub updated_at: String,
 }
 
+/// Durable BuildingBlock lifecycle/link record.  Provider, topology, agent,
+/// and profile values are references only; their authorities remain in their
+/// respective canonical stores/registries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildingBlockRecord {
+    pub id: String,
+    pub generation: u64,
+    pub state: String,
+    pub execution_identity: String,
+    pub resource_provider_ids: String,
+    pub failure_domain_id: Option<String>,
+    pub cloud_profile_id: Option<String>,
+    pub drain_blockers: String,
+    pub updated_at: String,
+}
+
+impl BuildingBlockRecord {
+    pub fn from_block(
+        block: &o3k_kernel::BuildingBlock,
+        updated_at: impl Into<String>,
+    ) -> Result<Self, StoreError> {
+        block
+            .validate()
+            .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        Ok(Self {
+            id: block.id.clone(),
+            generation: block.generation,
+            state: block.state.as_str().to_owned(),
+            execution_identity: block.execution_identity.clone(),
+            resource_provider_ids: serde_json::to_string(&block.resource_provider_ids)
+                .map_err(|e| StoreError::Corrupt(format!("building block providers: {e}")))?,
+            failure_domain_id: block.failure_domain_id.clone(),
+            cloud_profile_id: block.cloud_profile_id.clone(),
+            drain_blockers: serde_json::to_string(&block.drain_blockers)
+                .map_err(|e| StoreError::Corrupt(format!("building block blockers: {e}")))?,
+            updated_at: updated_at.into(),
+        })
+    }
+
+    pub fn block(&self) -> Result<o3k_kernel::BuildingBlock, StoreError> {
+        let providers: Vec<String> = serde_json::from_str(&self.resource_provider_ids)
+            .map_err(|e| StoreError::Corrupt(format!("building block providers: {e}")))?;
+        let blockers: Vec<o3k_kernel::DrainBlocker> = serde_json::from_str(&self.drain_blockers)
+            .map_err(|e| StoreError::Corrupt(format!("building block blockers: {e}")))?;
+        let state = match self.state.as_str() {
+            "enrolling" => o3k_kernel::BuildingBlockState::Enrolling,
+            "ready" => o3k_kernel::BuildingBlockState::Ready,
+            "unavailable" => o3k_kernel::BuildingBlockState::Unavailable,
+            "draining" => o3k_kernel::BuildingBlockState::Draining,
+            "removed" => o3k_kernel::BuildingBlockState::Removed,
+            "failed" => o3k_kernel::BuildingBlockState::Failed,
+            _ => return Err(StoreError::Corrupt("unknown building block state".into())),
+        };
+        let block = o3k_kernel::BuildingBlock {
+            id: self.id.clone(),
+            generation: self.generation,
+            state,
+            execution_identity: self.execution_identity.clone(),
+            resource_provider_ids: providers,
+            failure_domain_id: self.failure_domain_id.clone(),
+            cloud_profile_id: self.cloud_profile_id.clone(),
+            drain_blockers: blockers,
+        };
+        block
+            .validate()
+            .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        Ok(block)
+    }
+}
+
 impl CloudProfileRecord {
     pub fn from_profile(
         profile: &o3k_kernel::CloudProfile,
