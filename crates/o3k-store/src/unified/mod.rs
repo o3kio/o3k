@@ -9,6 +9,7 @@ use crate::{
 };
 
 mod audit;
+mod composition;
 mod compute;
 mod coordination;
 mod core;

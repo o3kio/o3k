@@ -177,6 +177,23 @@ impl StaticAuthorizer {
             false,
         );
 
+        // Declarative CloudProfile composition is a system-scoped operator
+        // concern; observed manifests and Catalog remain separate authorities.
+        reg(
+            "composition",
+            "ReadCloudProfile",
+            "composition",
+            "cloud_profile",
+            false,
+        );
+        reg(
+            "composition",
+            "ManageCloudProfile",
+            "composition",
+            "cloud_profile",
+            false,
+        );
+
         // Image
         reg("image", "ListImages", "image", "image", true);
         reg("image", "CreateImage", "image", "image", true);
@@ -640,6 +657,16 @@ impl Authorizer for StaticAuthorizer {
         if request.action.namespace() == "topology"
             && request.action != ActionId::new_unchecked("topology", "ReadTopology")
             && request.auth_context.effective_scope().kind() != ScopeKind::System
+        {
+            return AuthorizationDecision::Deny {
+                reason: DecisionReason::ScopeMismatch,
+            };
+        }
+
+        if request.action.namespace() == "composition"
+            && (request.auth_context.effective_scope().kind() != ScopeKind::System
+                || (request.action == ActionId::new_unchecked("composition", "ManageCloudProfile")
+                    && !request.auth_context.has_role("operator")))
         {
             return AuthorizationDecision::Deny {
                 reason: DecisionReason::ScopeMismatch,
