@@ -382,6 +382,35 @@ jobs:
         if: always() && steps.guard.outputs.ready == 'true'
         run: bash scripts/cleanup-disposable-testlab.sh
 
+      - name: Start disposable generic-phase PostgreSQL
+        id: generic_postgres_bootstrap
+        if: steps.guard.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          container="o3k-p15-7-postgres-${GITHUB_RUN_ID}"
+          port=15433
+          if sudo -n docker inspect "${container}" >/dev/null 2>&1; then
+            echo "refusing to reuse pre-existing PostgreSQL container ${container}" >&2
+            exit 1
+          fi
+          sudo -n docker run --detach --rm --name "${container}" \
+            --publish "127.0.0.1:${port}:5432" \
+            --env POSTGRES_USER=o3k \
+            --env POSTGRES_PASSWORD=p15-7-disposable-postgres \
+            --env POSTGRES_DB=o3k_test \
+            postgres:16.4 >/dev/null
+          for _ in $(seq 1 60); do
+            if sudo -n docker exec "${container}" pg_isready -U o3k -d o3k_test >/dev/null 2>&1; then
+              printf 'O3K_DATABASE_BACKEND=postgres\n' >>"${GITHUB_ENV}"
+              printf 'O3K_DATABASE_URL=postgres://o3k:p15-7-disposable-postgres@127.0.0.1:%s/o3k_test\n' "${port}" >>"${GITHUB_ENV}"
+              printf 'O3K_P15_7_PG_CONTAINER=%s\n' "${container}" >>"${GITHUB_ENV}"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "generic-phase PostgreSQL did not become ready" >&2
+          exit 1
+
       - name: Prepare fresh generic TestLab image
         id: generic_image
         if: steps.guard.outputs.ready == 'true'
@@ -570,6 +599,15 @@ jobs:
       - name: Stop and remove disposable TestLab
         if: always()
         run: bash scripts/cleanup-disposable-testlab.sh
+
+      - name: Stop generic-phase PostgreSQL
+        if: always()
+        run: |
+          set -euo pipefail
+          container="o3k-p15-7-postgres-${GITHUB_RUN_ID}"
+          if sudo -n docker inspect "${container}" >/dev/null 2>&1; then
+            sudo -n docker rm --force "${container}" >/dev/null
+          fi
 
       - name: Upload redacted real-host artifacts
         if: always()
