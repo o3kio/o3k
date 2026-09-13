@@ -23,6 +23,11 @@ fn now() -> String {
 
 impl BuildingBlockAdapter {
     async fn view(&self, block: BuildingBlock) -> Result<BuildingBlockView, String> {
+        // References are part of the durable BuildingBlock identity.  Validate
+        // them on every projection as well as on enrollment so a provider,
+        // topology, profile, or execution identity change cannot turn an
+        // invalid record into an apparently schedulable view.
+        self.validate_references(&block).await?;
         let providers = self
             .placement
             .providers()
