@@ -1,7 +1,7 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: bb1e1661e46fe80298d80a435818da3cad82f124
-updated_at: 2026-09-13T17:07:00Z
+source_commit: 6952e272a7e0402ba1f975fbbf36b5725b1dd8d1
+updated_at: 2026-09-13T19:08:19Z
 milestones:
   p14:
     status: real-two-cloud-acceptance-passed
@@ -58,31 +58,31 @@ release_context: >-
 vertical_lifecycle:
   schema_version: 1
   release: v0.2.0-alpha.1
-  source_commit: bb1e1661e46fe80298d80a435818da3cad82f124
+  source_commit: 6952e272a7e0402ba1f975fbbf36b5725b1dd8d1
   last_protected_run:
-    id: 34770592423
-    commit: bb1e1661e46fe80298d80a435818da3cad82f124
-    result: unavailable
+    id: 34775935138
+    commit: 6952e272a7e0402ba1f975fbbf36b5725b1dd8d1
+    result: passed
     evidence: >-
-      A stale queued workflow (34765911560) was cancelled and replaced by
-      this exact-current-main dispatch; it remains queued because the
-      protected runner inventory currently exposes no available runner. The
-      most recent completed run is 33205054825 at
-      27b64a74b8b62fa5bc8a3f3103b0390150804706.
+      Exact-current-main protected validation passed all storage, PostgreSQL,
+      real LVM/libvirt guest, public CirrOS lifecycle, compute-agent mTLS,
+      process-boundary, restart/reconciliation, and cleanup gates. Redacted
+      artifacts are published by the protected workflow run.
+      https://github.com/o3kio/o3k/actions/runs/34775935138
   current_blocker:
-    layer: protected-runner
+    layer: none
     summary: >-
-      Current-main real-host validation is queued because no self-hosted
-      KVM/libvirt/o3k-testlab runner is available; no new current-main
-      lifecycle claim is made.
-    evidence: https://github.com/o3kio/o3k/actions/runs/34770592423
+      The exact-current-main protected real-host validation completed
+      successfully; no protected-runner blocker remains for this integration
+      boundary.
+    evidence: https://github.com/o3kio/o3k/actions/runs/34775935138
   completed:
     evidence_basis:
-      run: 33205054825
-      commit: 27b64a74b8b62fa5bc8a3f3103b0390150804706
+      run: 34775935138
+      commit: 6952e272a7e0402ba1f975fbbf36b5725b1dd8d1
       note: >-
-        These completed flags are historical protected evidence and are not
-        re-attributed to current main until run 34770592423 executes.
+        These flags were verified by exact-current-main protected run
+        34775935138 at commit 6952e272a7e0402ba1f975fbbf36b5725b1dd8d1.
     api_baseline: true
     nova_pre_dispatch: true
     agent_command_path: true
@@ -94,11 +94,11 @@ vertical_lifecycle:
       Pending flags identify boundaries that still require explicit current
       main protected confirmation, even where a historical run exercised a
       related operation.
-    image_overlay_real_host: true
-    config_drive_guest_consumption: true
-    guest_network_connectivity: true
+    image_overlay_real_host: false
+    config_drive_guest_consumption: false
+    guest_network_connectivity: false
     console_boot_output: false
-    restart_reconciliation: true
+    restart_reconciliation: false
   open_prs: []
   primary_integration_issue:
     number: 937
@@ -108,12 +108,9 @@ vertical_lifecycle:
     action: integrate
   next_actions:
     - >-
-      Restore an available protected KVM/libvirt runner and complete run
-      34770592423 against current main.
-    - >-
-      If current-main evidence regresses, open one scoped integration issue
-      for the first failing guest-realization boundary; do not split field
-      plumbing into unrelated PRs.
+      Preserve the exact-current-main protected evidence and complete the
+      remaining clean-install, benchmark, human-review, and release-gate
+      phases tracked by issues #89-#94.
 
 # How to read this file
 # ---------------------
