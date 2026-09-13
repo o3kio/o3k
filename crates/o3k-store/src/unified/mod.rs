@@ -9,6 +9,7 @@ use crate::{
 };
 
 mod audit;
+mod bootstrap;
 mod building_block;
 mod composition;
 mod compute;

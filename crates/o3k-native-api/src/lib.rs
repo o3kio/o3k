@@ -17,6 +17,7 @@ use std::sync::{Arc, RwLock};
 
 pub mod audit;
 pub mod auth;
+pub mod bootstrap;
 pub mod building_block;
 pub mod composition;
 pub mod compute;
@@ -74,6 +75,7 @@ pub struct NativeApiState {
     pub topology_store: Option<Arc<dyn o3k_kernel::TopologyStore>>,
     pub composition_reader: Option<Arc<dyn composition::CompositionReader>>,
     pub building_block_reader: Option<Arc<dyn building_block::BuildingBlockReader>>,
+    pub bootstrap_workflow: Option<Arc<dyn bootstrap::BootstrapWorkflow>>,
 }
 
 impl NativeApiState {
@@ -159,6 +161,7 @@ impl NativeApiState {
             topology_store: None,
             composition_reader: None,
             building_block_reader: None,
+            bootstrap_workflow: None,
         })
     }
 
@@ -177,6 +180,15 @@ impl NativeApiState {
         reader: Arc<dyn building_block::BuildingBlockReader>,
     ) -> Self {
         self.building_block_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_bootstrap_workflow(
+        mut self,
+        workflow: Arc<dyn bootstrap::BootstrapWorkflow>,
+    ) -> Self {
+        self.bootstrap_workflow = Some(workflow);
         self
     }
 
@@ -309,6 +321,8 @@ pub fn router(state: NativeApiState) -> Router {
             axum::routing::put(topology::bind).delete(topology::unbind),
         )
         .route("/identity/tokens", post(identity::issue_token))
+        .route("/bootstrap/init", post(bootstrap::init))
+        .route("/bootstrap/join", post(bootstrap::join))
         .route(
             "/identity/scopes",
             post(identity::discover_federated_scopes),

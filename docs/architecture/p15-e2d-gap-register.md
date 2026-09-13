@@ -52,7 +52,7 @@ Rules:
 | E2D-10 | Control-plane scale partitioning | OPEN | P18 (measurement starts in P15.7 #937) |
 | E2D-11 | Operational observability contract | PARTIAL | P17 (remainder) |
 | E2D-12 | Control-plane backup/restore | OPEN | P17 |
-| E2D-13 | Production init + authenticated join | PARTIAL | P15.6 #936 |
+| E2D-13 | Production init + authenticated join | EVIDENCE-ONLY-GAP | P15.6 #936 |
 | E2D-14 | PKI lifecycle completion | PARTIAL | P17 (tracking issue not yet filed) |
 | E2D-15 | Fleet image/artifact distribution | PARTIAL | P17 |
 | E2D-16 | Storage topology in the placement model | PARTIAL | P16 |
@@ -374,15 +374,26 @@ Rules:
   CloudProfile, and benchmark the exact boundary; physical switch/storage
   provisioning stays outside the timing claim unless O3K actually performs it
   (ADR-0182).
-- **Current implementation:** a one-line TestLab installer
-  (`packaging/get-o3k.sh`, pinned `v0.2.0-alpha.2`, `docs/INSTALLER.md`),
-  bounded to the libvirt TestLab only. The `o3k` CLI has no `init`/`join`
-  commands (`bins/o3k/src/main.rs:17-70`). No bootstrap benchmark exists
-  (`tests/measure-testlab.sh` measures API timings). Per `README.md:237-238`
-  the installer must not be presented as the production flow.
-- **Evidence:** installer evidence covers the TestLab profile only.
-- **Remaining delta:** production init/join, authenticated enrollment, selected
-  CloudProfile reconciliation, and a boundary benchmark.
+- **Current implementation:** `o3k init` and `o3k join` are wired to the
+  production composition router. Init selects and durably reconciles the
+  canonical CloudProfile, creates a short-lived digest-only enrollment grant,
+  and emits secret-free client/discovery configuration. Join validates the
+  grant and prepared-host certificate binding, consumes capability/inventory
+  discovery, assigns canonical topology/failure-domain references, registers
+  the execution agent and Placement provider, enrolls the P15.5 BuildingBlock,
+  persists the bootstrap phase, and records bounded audit events. SQLite and
+  PostgreSQL migrations/ports are present; retries serialize through the
+  bootstrap lock and converge through the durable enrolled-agent projection.
+  The TestLab installer remains a separate profile and is not presented as
+  this flow.
+- **Evidence:** kernel/store/native API tests cover phase/grant invariants,
+  restart-safe durable state, single-use rejection, and unauthenticated or
+  malformed init requests. Focused daemon tests and package clippy/checks
+  pass. Real-process init → join → execution-boundary evidence and a measured
+  bootstrap boundary benchmark remain outstanding.
+- **Remaining delta:** complete the real-process evidence gate and benchmark;
+  certificate renewal/rotation/revocation remains E2D-14 and is not claimed by
+  this bounded enrollment flow.
 - **Dependency:** E2D-05 (CloudProfile), E2D-03 (blocks), E2D-14 (enrollment).
 - **Claim impact:** BLOCKER-to-fast-adoption.
 - **Recommended owner:** P15.6 #936.

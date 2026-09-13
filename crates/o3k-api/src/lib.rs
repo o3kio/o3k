@@ -554,6 +554,14 @@ pub fn router_with_state(state: AppState) -> Router {
                 post(o3k_native_api::identity::issue_token),
             )
             .route(
+                "/o3k/v1/bootstrap/init",
+                post(o3k_native_api::bootstrap::init),
+            )
+            .route(
+                "/o3k/v1/bootstrap/join",
+                post(o3k_native_api::bootstrap::join),
+            )
+            .route(
                 "/o3k/v1/identity/scopes",
                 post(o3k_native_api::identity::discover_federated_scopes),
             )

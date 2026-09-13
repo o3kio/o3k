@@ -1,0 +1,508 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use o3k_kernel::{
+    AuthContext, BootstrapPhase, BootstrapState, BuildingBlock, OwnershipScope, Principal,
+    PrincipalId, ScopeId, ServicePrincipal,
+};
+use o3k_native_api::bootstrap::{
+    BootstrapFailure, BootstrapWorkflow, ClientConfig, InitRequest, InitResponse, JoinRequest,
+    JoinResponse,
+};
+use o3k_native_api::building_block::BuildingBlockReader;
+use o3k_placement::{Inventory, PlacementLedger};
+use o3k_store::{BootstrapRepository, BootstrapStateRecord, EnrollmentGrantRecord, O3kStore};
+
+use crate::native_adapters::BuildingBlockAdapter;
+
+const STATE_ID: &str = "default";
+const GRANT_TTL_MS: u64 = 5 * 60 * 1000;
+
+pub struct BootstrapAdapter {
+    pub store: Arc<O3kStore>,
+    pub placement: PlacementLedger,
+    pub agents: Arc<o3k_compute_agent::NodeRegistry>,
+    pub locations: o3k_kernel::LocationRegistry,
+    pub bootstrap_secret: Option<String>,
+    pub lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+fn now_ms() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
+}
+fn digest(value: &str) -> String {
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+fn cert_digest(value: &str) -> String {
+    digest(value)
+}
+fn client_config(profile: &str) -> ClientConfig {
+    ClientConfig {
+        api_url: std::env::var("O3K_API_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:18080/o3k/v1".into()),
+        discovery_path: "/services".into(),
+        profile_id: profile.into(),
+    }
+}
+
+async fn record_bootstrap_audit(
+    store: &O3kStore,
+    event_id: String,
+    action: &str,
+    resource_id: Option<String>,
+    reason: &str,
+) -> Result<(), BootstrapFailure> {
+    let result = store
+        .insert_audit_event(&o3k_store::AuditEventRecord {
+            event_id,
+            timestamp: Utc::now().to_rfc3339(),
+            request_id: Uuid::now_v7().to_string(),
+            audit_id: Uuid::now_v7().to_string(),
+            principal_id: "o3k-bootstrap".into(),
+            principal_kind: "service".into(),
+            effective_scope: "admin".into(),
+            service: "cloud-kernel".into(),
+            action: action.into(),
+            resource_type: Some("cloud:bootstrap".into()),
+            resource_id,
+            owner_scope: Some("admin".into()),
+            operation_id: None,
+            outcome: "succeeded".into(),
+            reason_category: Some(reason.into()),
+        })
+        .await;
+    match result {
+        Ok(()) | Err(o3k_store::StoreError::AuditEventConflict) => Ok(()),
+        Err(_) => Err(BootstrapFailure::Internal),
+    }
+}
+
+fn principal_context() -> AuthContext {
+    AuthContext::new(
+        Principal::Service(ServicePrincipal::new(
+            PrincipalId::new_unchecked("o3k-bootstrap"),
+            "o3k-bootstrap",
+            "cloud-kernel",
+        )),
+        OwnershipScope::project(
+            ScopeId::new_unchecked("admin"),
+            Some("admin".into()),
+            Some("default".into()),
+        ),
+        vec!["admin".into(), "operator".into()],
+        0,
+        u64::MAX,
+        "bootstrap",
+        Uuid::now_v7().to_string(),
+        None,
+    )
+}
+
+fn state_from_record(record: BootstrapStateRecord) -> Result<BootstrapState, BootstrapFailure> {
+    let phase = match record.phase.as_str() {
+        "uninitialized" => BootstrapPhase::Uninitialized,
+        "initialized" => BootstrapPhase::Initialized,
+        "enrolling" => BootstrapPhase::Enrolling,
+        "ready" => BootstrapPhase::Ready,
+        "failed" => BootstrapPhase::Failed,
+        _ => return Err(BootstrapFailure::Internal),
+    };
+    let enrolled_agents =
+        serde_json::from_str(&record.enrolled_agents).map_err(|_| BootstrapFailure::Internal)?;
+    Ok(BootstrapState {
+        generation: record.generation,
+        phase,
+        cloud_identity_id: record.cloud_identity_id,
+        cloud_profile_id: record.cloud_profile_id,
+        enrolled_agents,
+    })
+}
+fn state_record(state: &BootstrapState) -> Result<BootstrapStateRecord, BootstrapFailure> {
+    Ok(BootstrapStateRecord {
+        state_id: STATE_ID.into(),
+        generation: state.generation,
+        phase: serde_json::to_string(&state.phase)
+            .map_err(|_| BootstrapFailure::Internal)?
+            .trim_matches('"')
+            .into(),
+        cloud_identity_id: state.cloud_identity_id.clone(),
+        cloud_profile_id: state.cloud_profile_id.clone(),
+        enrolled_agents: serde_json::to_string(&state.enrolled_agents)
+            .map_err(|_| BootstrapFailure::Internal)?,
+        updated_at: Utc::now().to_rfc3339(),
+    })
+}
+
+fn parse_inventory(values: &BTreeMap<String, u64>) -> BTreeMap<String, Inventory> {
+    values
+        .iter()
+        .map(|(name, total)| {
+            (
+                name.clone(),
+                Inventory {
+                    total: *total,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                },
+            )
+        })
+        .collect()
+}
+
+fn parse_capabilities(
+    value: &serde_json::Value,
+) -> Result<o3k_compute_agent::proto::Capabilities, BootstrapFailure> {
+    let object = value.as_object();
+    let string = |name: &str, default: &str| {
+        object
+            .and_then(|o| o.get(name))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(default)
+            .to_owned()
+    };
+    let u32_value = |name: &str| {
+        object
+            .and_then(|o| o.get(name))
+            .and_then(serde_json::Value::as_u64)
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| BootstrapFailure::Invalid)
+            .map(|v| v.unwrap_or_default())
+    };
+    let u64_value = |name: &str| {
+        Ok(object
+            .and_then(|o| o.get(name))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default())
+    };
+    let strings = |name: &str| {
+        object
+            .and_then(|o| o.get(name))
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        item.as_str()
+                            .map(str::to_owned)
+                            .ok_or(BootstrapFailure::Invalid)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .map(|v| v.unwrap_or_default())
+    };
+    let flags = object
+        .and_then(|o| o.get("flags"))
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    let item = item.as_object().ok_or(BootstrapFailure::Invalid)?;
+                    Ok(o3k_compute_agent::proto::CapabilityFlag {
+                        name: item
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or(BootstrapFailure::Invalid)?
+                            .to_owned(),
+                        supported: item
+                            .get("supported")
+                            .and_then(serde_json::Value::as_bool)
+                            .ok_or(BootstrapFailure::Invalid)?,
+                        bounded_value: item
+                            .get("bounded_value")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    })
+                })
+                .collect::<Result<Vec<_>, BootstrapFailure>>()
+        })
+        .transpose()
+        .map(|v| v.unwrap_or_default())?;
+    Ok(o3k_compute_agent::proto::Capabilities {
+        architecture: string("architecture", "unknown"),
+        agent_provider_name: string("provider_name", "o3k-bootstrap"),
+        agent_provider_version: string("provider_version", "1"),
+        max_vcpus: u32_value("max_vcpus")?,
+        max_memory_mib: u64_value("max_memory_mib")?,
+        disk_formats: strings("disk_formats")?,
+        lifecycle_actions: strings("lifecycle_actions")?,
+        console_log: object
+            .and_then(|o| o.get("console_log"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        max_console_log_bytes: u64_value("max_console_log_bytes")?,
+        flags,
+        max_disk_gb: u64_value("max_disk_gb")?,
+    })
+}
+
+#[async_trait]
+impl BootstrapWorkflow for BootstrapAdapter {
+    async fn init(
+        &self,
+        request: InitRequest,
+        bootstrap_secret: Option<&str>,
+    ) -> Result<InitResponse, BootstrapFailure> {
+        let configured = self
+            .bootstrap_secret
+            .as_deref()
+            .ok_or(BootstrapFailure::Unauthorized)?;
+        if bootstrap_secret != Some(configured) {
+            return Err(BootstrapFailure::Unauthorized);
+        }
+        let _guard = self.lock.lock().await;
+        let init_request_id = request.request_id.clone();
+        let profile_id = request.profile_id.unwrap_or_else(|| "default".into());
+        if request
+            .agent_id
+            .as_deref()
+            .is_some_and(|agent| agent.trim().is_empty())
+        {
+            return Err(BootstrapFailure::Invalid);
+        }
+        let mut profile = self
+            .store
+            .get_cloud_profile(&profile_id)
+            .await
+            .map_err(|_| BootstrapFailure::Internal)?
+            .map(|record| record.profile().map_err(|_| BootstrapFailure::Internal))
+            .transpose()?
+            .unwrap_or_else(o3k_kernel::CloudProfile::implicit_default);
+        if profile.profile_id != profile_id {
+            profile.profile_id = profile_id.clone();
+        }
+        self.store
+            .upsert_cloud_profile(
+                &o3k_store::CloudProfileRecord::from_profile(&profile, Utc::now().to_rfc3339())
+                    .map_err(|_| BootstrapFailure::Internal)?,
+                None,
+            )
+            .await
+            .map_err(|_| BootstrapFailure::Conflict)?;
+        let cloud_identity_id = "cloud-default";
+        let mut state = self
+            .store
+            .get_bootstrap_state(STATE_ID)
+            .await
+            .map_err(|_| BootstrapFailure::Internal)?
+            .map(state_from_record)
+            .transpose()?
+            .unwrap_or_else(BootstrapState::uninitialized);
+        state
+            .initialize(cloud_identity_id, &profile.profile_id)
+            .map_err(|_| BootstrapFailure::Conflict)?;
+        self.store
+            .upsert_bootstrap_state(&state_record(&state)?)
+            .await
+            .map_err(|_| BootstrapFailure::Internal)?;
+        record_bootstrap_audit(
+            &self.store,
+            format!(
+                "bootstrap-init-{}-{}",
+                profile.profile_id,
+                init_request_id.unwrap_or_else(|| Uuid::now_v7().to_string())
+            ),
+            "cloud-kernel:Init",
+            Some(profile.profile_id.clone()),
+            "bootstrap_initialized",
+        )
+        .await?;
+        let issued_at = now_ms();
+        let expires_at = issued_at.saturating_add(GRANT_TTL_MS);
+        let raw = format!("{}.{}", Uuid::new_v4(), Uuid::new_v4());
+        let grant_id = raw.split('.').next().unwrap_or_default().to_owned();
+        self.store
+            .insert_enrollment_grant(&EnrollmentGrantRecord {
+                grant_id,
+                agent_id: request.agent_id.unwrap_or_else(|| "*".into()),
+                token_digest: digest(&raw),
+                issued_at_unix_ms: issued_at,
+                expires_at_unix_ms: expires_at,
+                used_at_unix_ms: None,
+            })
+            .await
+            .map_err(|_| BootstrapFailure::Internal)?;
+        Ok(InitResponse {
+            phase: "initialized".into(),
+            cloud_identity_id: cloud_identity_id.into(),
+            cloud_profile_id: profile.profile_id.clone(),
+            enrollment_token: Some(raw),
+            enrollment_expires_at_unix_ms: Some(expires_at),
+            ready: state.is_ready(),
+            config: client_config(&profile.profile_id),
+        })
+    }
+
+    async fn join(&self, request: JoinRequest) -> Result<JoinResponse, BootstrapFailure> {
+        if request.agent_id.trim().is_empty()
+            || request.agent_epoch.trim().is_empty()
+            || request.enrollment_token.trim().is_empty()
+            || request.certificate.trim().is_empty()
+        {
+            return Err(BootstrapFailure::Invalid);
+        }
+        if request.inventories.is_empty() {
+            return Err(BootstrapFailure::Invalid);
+        }
+        let _guard = self.lock.lock().await;
+        let fingerprint = cert_digest(&request.certificate);
+        let mut state = self
+            .store
+            .get_bootstrap_state(STATE_ID)
+            .await
+            .map_err(|_| BootstrapFailure::Internal)?
+            .map(state_from_record)
+            .transpose()?
+            .ok_or(BootstrapFailure::Unavailable)?;
+        if let Some(region) = request.region.as_deref() {
+            if !self.locations.contains_region(region) {
+                return Err(BootstrapFailure::Invalid);
+            }
+            if let Some(az) = request.availability_domain.as_deref()
+                && !self
+                    .locations
+                    .availability_domains_of(region)
+                    .iter()
+                    .any(|candidate| candidate.id == az)
+            {
+                return Err(BootstrapFailure::Invalid);
+            }
+        } else if request.availability_domain.is_some() {
+            return Err(BootstrapFailure::Invalid);
+        }
+        if let Some(old) = state.enrolled_agents.get(&request.agent_id) {
+            if old != &fingerprint {
+                return Err(BootstrapFailure::Conflict);
+            }
+            let block_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("o3k:building-block:{}", request.agent_id).as_bytes(),
+            )
+            .to_string();
+            return Ok(JoinResponse {
+                phase: "ready".into(),
+                agent_id: request.agent_id.clone(),
+                execution_identity: request.agent_id.clone(),
+                certificate_fingerprint: fingerprint,
+                resource_provider_id: request.agent_id.clone(),
+                building_block_id: block_id,
+                ready: true,
+                config: client_config(&state.cloud_profile_id),
+            });
+        }
+        let (grant_id, _) = request
+            .enrollment_token
+            .split_once('.')
+            .ok_or(BootstrapFailure::Unauthorized)?;
+        let grant = self
+            .store
+            .get_enrollment_grant(grant_id)
+            .await
+            .map_err(|_| BootstrapFailure::Internal)?
+            .ok_or(BootstrapFailure::Unauthorized)?;
+        if grant.agent_id != "*" && grant.agent_id != request.agent_id {
+            return Err(BootstrapFailure::Unauthorized);
+        }
+        if grant.token_digest != digest(&request.enrollment_token)
+            || grant.used_at_unix_ms.is_some()
+            || now_ms() >= grant.expires_at_unix_ms
+        {
+            return Err(BootstrapFailure::Unauthorized);
+        }
+        let capabilities = parse_capabilities(&request.capabilities)?;
+        self.agents
+            .register_prepared(
+                &request.agent_id,
+                &request.agent_epoch,
+                request.certificate.as_bytes(),
+                capabilities,
+            )
+            .await
+            .map_err(|_| BootstrapFailure::Unauthorized)?;
+        let provider = self
+            .placement
+            .register_provider_hierarchical(
+                &request.agent_id,
+                parse_inventory(&request.inventories),
+                None,
+                BTreeSet::new(),
+                request.failure_domain_id.iter().cloned().collect(),
+                request.region.as_deref(),
+            )
+            .await
+            .map_err(|_| BootstrapFailure::Conflict)?;
+        let block_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:building-block:{}", request.agent_id).as_bytes(),
+        )
+        .to_string();
+        let block = BuildingBlock::enrolling(
+            block_id.clone(),
+            request.agent_id.clone(),
+            vec![provider.id.clone()],
+            request.failure_domain_id.clone(),
+            Some(state.cloud_profile_id.clone()),
+        )
+        .map_err(|_| BootstrapFailure::Invalid)?;
+        let adapter = BuildingBlockAdapter {
+            store: self.store.clone(),
+            placement: self.placement.clone(),
+            agents: self.agents.clone(),
+            locations: self.locations.clone(),
+        };
+        adapter
+            .enroll(block, &principal_context())
+            .await
+            .map_err(|_| BootstrapFailure::Conflict)?;
+        state
+            .begin_enrollment()
+            .map_err(|_| BootstrapFailure::Conflict)?;
+        state
+            .record_agent(&request.agent_id, &fingerprint)
+            .map_err(|_| BootstrapFailure::Conflict)?;
+        self.store
+            .upsert_bootstrap_state(&state_record(&state)?)
+            .await
+            .map_err(|_| BootstrapFailure::Internal)?;
+        // Mark the grant consumed only after all bounded provider/lifecycle
+        // side effects and the durable enrolled projection have succeeded.
+        // A crash before this point can safely replay through the durable
+        // agent projection; a replay after it is rejected as single-use.
+        self.store
+            .consume_enrollment_grant(grant_id, &digest(&request.enrollment_token), now_ms())
+            .await
+            .map_err(|_| BootstrapFailure::Unauthorized)?;
+        record_bootstrap_audit(
+            &self.store,
+            format!("bootstrap-join-{}", request.agent_id),
+            "cloud-kernel:Join",
+            Some(request.agent_id.clone()),
+            "agent_enrolled",
+        )
+        .await?;
+        Ok(JoinResponse {
+            phase: "ready".into(),
+            agent_id: request.agent_id.clone(),
+            execution_identity: request.agent_id,
+            certificate_fingerprint: fingerprint,
+            resource_provider_id: provider.id,
+            building_block_id: block_id,
+            ready: true,
+            config: client_config(&state.cloud_profile_id),
+        })
+    }
+}

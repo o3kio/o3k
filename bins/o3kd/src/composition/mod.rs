@@ -7,7 +7,7 @@ pub mod storage;
 use o3k_kernel::{Clock, Controller};
 use o3k_provider::ComputeProvider;
 use o3k_storage::StorageProvider;
-use o3k_store::ComputeRepository;
+use o3k_store::{BootstrapRepository, ComputeRepository};
 use std::{sync::Arc, time::Duration};
 use tracing::info;
 use uuid::Uuid;
@@ -1087,6 +1087,18 @@ pub async fn build_composition(
         volume_reader,
         network_reader,
     )?
+    .with_bootstrap_workflow(std::sync::Arc::new(
+        crate::native_adapters::BootstrapAdapter {
+            store: store.clone(),
+            placement: placement.clone(),
+            agents: std::sync::Arc::new(registry.clone()),
+            locations: native_locations.clone(),
+            bootstrap_secret: config
+                .bootstrap_secret()
+                .map(|secret| secret.expose().to_owned()),
+            lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        },
+    ))
     .with_composition_reader(std::sync::Arc::new(
         crate::native_adapters::CloudProfileAdapter {
             store: store.clone(),
@@ -1197,7 +1209,20 @@ pub async fn build_composition(
     // after the execution boundary is available.  This is intentionally
     // startup work, not a replay of an HTTP request.
     o3k_api::recover_l3_gateway_operations(&state).await;
-    state.set_ready(compute_ready);
+    // A production bootstrap profile is not ready until canonical init/join
+    // state is durable. TestLab/legacy profiles without a bootstrap secret
+    // retain their existing compute readiness semantics.
+    let bootstrap_ready = if config.bootstrap_secret().is_some() {
+        store
+            .get_bootstrap_state("default")
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|record| record.phase == "ready")
+    } else {
+        true
+    };
+    state.set_ready(compute_ready && bootstrap_ready);
     let control_task = match (
         config.compute_server_certificate.clone(),
         config.compute_server_private_key.clone(),
