@@ -234,7 +234,7 @@ mod tests {
         let loaded = store
             .get_building_block("bb-a")
             .await?
-            .expect("block")
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "block"))?
             .block()?;
         assert_eq!(loaded, block);
         let ready = block.transition(o3k_kernel::BuildingBlockState::Ready, vec![])?;
