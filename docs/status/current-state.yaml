@@ -1,7 +1,7 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: 46e050a36d15edde5b769b545d315d2875fbf923
-updated_at: 2026-09-08T00:00:00Z
+source_commit: bb1e1661e46fe80298d80a435818da3cad82f124
+updated_at: 2026-09-13T15:36:00Z
 milestones:
   p14:
     status: real-two-cloud-acceptance-passed
@@ -51,6 +51,58 @@ release_context: >-
   execution and publication, issue #94 owns the closure chain, and the
   tracker contract stays blocked until the required evidence and human
   decisions exist.
+
+# v0.2.0-alpha.1 vertical lifecycle status. This additive record preserves
+# the schema-v2 product-profile contract above while binding the release
+# journey to exact protected workflow evidence.
+vertical_lifecycle:
+  schema_version: 1
+  release: v0.2.0-alpha.1
+  source_commit: bb1e1661e46fe80298d80a435818da3cad82f124
+  last_protected_run:
+    id: 34765911560
+    commit: bb1e1661e46fe80298d80a435818da3cad82f124
+    result: unavailable
+    evidence: >-
+      The workflow was dispatched against current main but remains queued;
+      the protected runner inventory currently exposes no available runner.
+      The most recent completed run is 33205054825 at
+      27b64a74b8b62fa5bc8a3f3103b0390150804706.
+  current_blocker:
+    layer: protected-runner
+    summary: >-
+      Current-main real-host validation is queued because no self-hosted
+      KVM/libvirt/o3k-testlab runner is available; no new current-main
+      lifecycle claim is made.
+    evidence: https://github.com/o3kio/o3k/actions/runs/34765911560
+  completed:
+    api_baseline: true
+    nova_pre_dispatch: true
+    agent_command_path: true
+    server_active: true
+    fixed_ip_projection: true
+    cleanup_guard: true
+  pending:
+    image_overlay_real_host: true
+    config_drive_guest_consumption: true
+    guest_network_connectivity: true
+    console_boot_output: false
+    restart_reconciliation: true
+  open_prs: []
+  primary_integration_issue:
+    number: 937
+    purpose: >-
+      Production-composition real-host convergence: authenticated compute-agent
+      guest realization, restart/reconciliation, and exact owned cleanup.
+    action: integrate
+  next_actions:
+    - >-
+      Restore an available protected KVM/libvirt runner and complete run
+      34765911560 against current main.
+    - >-
+      If current-main evidence regresses, open one scoped integration issue
+      for the first failing guest-realization boundary; do not split field
+      plumbing into unrelated PRs.
 
 # How to read this file
 # ---------------------
