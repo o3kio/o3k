@@ -62,4 +62,16 @@ doc = json.load(open(sys.argv[1], encoding="utf-8"))
 assert doc["status"] == "blocked" and doc["reason"] == "provider_mode_not_agent"
 assert doc["redacted"] is True
 PY
+python3 - "${ROOT_DIR}/scripts/p15-7-real-host-journey.sh" <<'PY'
+from pathlib import Path
+import sys
+journey = Path(sys.argv[1]).read_text(encoding="utf-8")
+for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block-c", "block-d", "o3k init",
+                 "bootstrap/join", "actions/drain", "actions/remove", "docker restart",
+                 "capacity_total", "CAPACITY_AFTER_ADD", "drain_blockers", "cargo test --locked -p o3kd",
+                 "o3k-p15-7-journey-owned=", "o3k-p15-7-journey-owned-v1",
+                 "rm -rf -- \"$WORK_ROOT\"", "second_real_host_required", "assert_owned_domains_absent"):
+    assert required in journey, required
+assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
+PY
 echo "P15.7 validator guards passed"

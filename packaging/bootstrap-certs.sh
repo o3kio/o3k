@@ -4,12 +4,14 @@ set -Eeuo pipefail
 OUTPUT_DIR=/etc/o3k/tls
 SERVER_NAME=o3k-control-plane
 AGENT_ID=compute-agent
+EXTRA_AGENT_IDS=()
 FORCE=0
 while (($#)); do
   case "$1" in
     --output-dir) OUTPUT_DIR="${2:?missing output directory}"; shift 2;;
     --server-name) SERVER_NAME="${2:?missing server name}"; shift 2;;
     --agent-id) AGENT_ID="${2:?missing agent id}"; shift 2;;
+    --extra-agent-id) EXTRA_AGENT_IDS+=("${2:?missing extra agent id}"); shift 2;;
     --force) FORCE=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
@@ -17,6 +19,10 @@ done
 [[ "$OUTPUT_DIR" == /* && "$OUTPUT_DIR" != / ]] || { echo "output directory must be an absolute non-root path" >&2; exit 2; }
 [[ "$SERVER_NAME" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "server name contains unsupported characters" >&2; exit 2; }
 [[ "$AGENT_ID" =~ ^[A-Za-z0-9._-]+$ && ${#AGENT_ID} -le 128 ]] || { echo "agent id contains unsupported characters" >&2; exit 2; }
+for extra_id in "${EXTRA_AGENT_IDS[@]}"; do
+  [[ "$extra_id" =~ ^[A-Za-z0-9._-]+$ && ${#extra_id} -le 128 ]] || { echo "extra agent id contains unsupported characters" >&2; exit 2; }
+  [[ "$extra_id" != "$AGENT_ID" ]] || { echo "duplicate agent id: $extra_id" >&2; exit 2; }
+done
 command -v openssl >/dev/null 2>&1 || { echo "openssl is required" >&2; exit 1; }
 validate_no_symlink_path() {
   local path="$1" current=/ component
@@ -70,10 +76,32 @@ extendedKeyUsage=clientAuth
 subjectAltName=URI:urn:o3k:compute:agent:$AGENT_ID
 EOF
 openssl x509 -req -in "$TMP_DIR/agent.csr" -CA "$TMP_DIR/ca.pem" -CAkey "$TMP_DIR/ca-key.pem" -CAcreateserial -out "$TMP_DIR/agent.pem" -days 365 -extfile "$TMP_DIR/agent.ext" >/dev/null 2>&1
+for extra_id in "${EXTRA_AGENT_IDS[@]}"; do
+  extra_dir="$TMP_DIR/agents/$extra_id"
+  install -d -m 0750 "$extra_dir"
+  openssl genpkey -algorithm ED25519 -out "$extra_dir/agent-key.pem" >/dev/null 2>&1
+  openssl req -new -key "$extra_dir/agent-key.pem" -out "$extra_dir/agent.csr" -subj "/CN=$extra_id" >/dev/null 2>&1
+  cat >"$extra_dir/agent.ext" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=clientAuth
+subjectAltName=URI:urn:o3k:compute:agent:$extra_id
+EOF
+  openssl x509 -req -in "$extra_dir/agent.csr" -CA "$TMP_DIR/ca.pem" -CAkey "$TMP_DIR/ca-key.pem" -CAcreateserial -out "$extra_dir/agent.pem" -days 365 -extfile "$extra_dir/agent.ext" >/dev/null 2>&1
+done
 for file in ca.pem server.pem server-key.pem agent.pem agent-key.pem; do install -m 0640 "$TMP_DIR/$file" "$OUTPUT_DIR/$file"; done
 printf '%s\n' "$AGENT_ID" >"$OUTPUT_DIR/agent-id"
 openssl x509 -in "$OUTPUT_DIR/agent.pem" -outform DER | sha256sum | awk '{print $1}' >"$OUTPUT_DIR/agent-fingerprint"
 chmod 0640 "$OUTPUT_DIR/agent-id" "$OUTPUT_DIR/agent-fingerprint"
+for extra_id in "${EXTRA_AGENT_IDS[@]}"; do
+  extra_dir="$OUTPUT_DIR/agents/$extra_id"
+  install -d -m 0750 "$extra_dir"
+  install -m 0640 "$TMP_DIR/agents/$extra_id/agent.pem" "$extra_dir/agent.pem"
+  install -m 0640 "$TMP_DIR/agents/$extra_id/agent-key.pem" "$extra_dir/agent-key.pem"
+  printf '%s\n' "$extra_id" >"$extra_dir/agent-id"
+  openssl x509 -in "$extra_dir/agent.pem" -outform DER | sha256sum | awk '{print $1}' >"$extra_dir/agent-fingerprint"
+  chmod 0640 "$extra_dir/agent-id" "$extra_dir/agent-fingerprint"
+done
 if getent group o3k >/dev/null 2>&1; then chgrp o3k "$OUTPUT_DIR" "$OUTPUT_DIR"/*; fi
 rm -f -- "$OUTPUT_DIR/ca-key.pem" "$OUTPUT_DIR/agent.csr" "$OUTPUT_DIR/ca.srl"
 echo "generated O3K TestLab CA, server, and agent certificates under $OUTPUT_DIR for $SERVER_NAME agent=$AGENT_ID"

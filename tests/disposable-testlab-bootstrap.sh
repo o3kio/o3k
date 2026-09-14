@@ -35,6 +35,9 @@ assert '--ambient-caps=+net_admin' in bootstrap
 assert '--init-groups' in bootstrap
 assert 'nohup bash -c' in bootstrap
 assert 'O3K_COMPUTE_BRIDGE_NAME' in bootstrap
+assert 'O3K_TESTLAB_ADDITIONAL_AGENT_IDS' in bootstrap
+assert '--extra-agent-id' in bootstrap
+assert 'O3K_TESTLAB_CONTROL_BIND_ADDR' in bootstrap
 assert 'o3k-b${RUN_ID: -8}' in bootstrap
 assert 'O3K_COMPUTE_BRIDGE_NAME=%s\\n' in bootstrap
 assert 'SERVICE_STATE_BASE=/var/lib/o3k-testlab' in bootstrap
