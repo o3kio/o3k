@@ -407,12 +407,28 @@ RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
 sudo -n install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
 sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k" "$STATE_ROOT/bin/o3k"
 sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
+extra_agent_args=()
+extra_agent_ids=()
+if [[ -n "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS:-}" ]]; then
+  IFS=',' read -r -a extra_agent_ids <<<"${O3K_TESTLAB_ADDITIONAL_AGENT_IDS}"
+  for extra_agent_id in "${extra_agent_ids[@]}"; do
+    [[ "$extra_agent_id" =~ ^[A-Za-z0-9._-]+$ && ${#extra_agent_id} -le 128 ]] \
+      || fail "additional compute agent id is invalid"
+    extra_agent_args+=(--extra-agent-id "$extra_agent_id")
+  done
+fi
 sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
-  --server-name o3k-control-plane --agent-id compute-agent
+  --server-name o3k-control-plane --agent-id compute-agent "${extra_agent_args[@]}"
 sudo -n chmod 0755 "$STATE_ROOT"
 sudo -n install -m 0640 "$STATE_ROOT/tls/agent-id" "$STATE_ROOT/compute-data/agent-id"
 AUTHORIZED_FINGERPRINT="$(sudo -n cat "$STATE_ROOT/tls/agent-fingerprint")" \
   || fail "cannot read generated agent fingerprint"
+AUTHORIZED_AGENTS="compute-agent=$(printf '%q' "$AUTHORIZED_FINGERPRINT")"
+for extra_agent_id in "${extra_agent_ids[@]}"; do
+  extra_fingerprint="$(sudo -n cat "$STATE_ROOT/tls/agents/$extra_agent_id/agent-fingerprint")" \
+    || fail "cannot read generated fingerprint for $extra_agent_id"
+  AUTHORIZED_AGENTS+=",$extra_agent_id=$(printf '%q' "$extra_fingerprint")"
+done
 
 PASSWORD="$(openssl rand -hex 32)"
 [[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] || fail "generated password format is unsafe"
@@ -440,11 +456,11 @@ O3K_LOG_FILTER=$(printf '%q' "${O3K_LOG_FILTER:-warn}")
 O3K_BOOTSTRAP_PASSWORD=$(printf '%q' "$PASSWORD")
 O3K_BOOTSTRAP_SECRET=$(printf '%q' "$BOOTSTRAP_SECRET")
 O3K_TOKEN_SIGNING_KEY=$(printf '%q' "$SIGNING_KEY")
-O3K_COMPUTE_CONTROL_ADDR=$(printf '%q' "127.0.0.1:${CONTROL_PORT}")
+O3K_COMPUTE_CONTROL_ADDR=$(printf '%q' "${O3K_TESTLAB_CONTROL_BIND_ADDR:-127.0.0.1}:${CONTROL_PORT}")
 O3K_COMPUTE_SERVER_CERTIFICATE=$(printf '%q' "$STATE_ROOT/tls/server.pem")
 O3K_COMPUTE_SERVER_PRIVATE_KEY=$(printf '%q' "$STATE_ROOT/tls/server-key.pem")
 O3K_COMPUTE_CLIENT_CA=$(printf '%q' "$STATE_ROOT/tls/ca.pem")
-O3K_COMPUTE_AUTHORIZED_AGENTS=compute-agent=$(printf '%q' "$AUTHORIZED_FINGERPRINT")
+O3K_COMPUTE_AUTHORIZED_AGENTS=$AUTHORIZED_AGENTS
 EOF
 if [[ -n "${O3K_DATABASE_BACKEND:-}" ]]; then
   printf 'O3K_DATABASE_BACKEND=%s\n' "$(printf '%q' "$O3K_DATABASE_BACKEND")" >>"$o3kd_env_tmp"

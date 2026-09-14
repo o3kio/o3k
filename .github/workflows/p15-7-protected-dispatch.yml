@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - scripts/bootstrap-disposable-testlab.sh
+      - scripts/p15-7-real-host-journey.sh
+      - packaging/bootstrap-certs.sh
       - tests/disposable-testlab-bootstrap.sh
       - .github/workflows/p15-7-protected-dispatch.yml
 
