@@ -275,9 +275,19 @@ runcmd:
   - [ sh, -c, 'systemctl enable --now ssh || true' ]
   - [ sh, -c, 'systemctl enable --now libvirtd || systemctl enable --now libvirt-daemon || true' ]
 EOF
+  cat >"$WORK_ROOT/network-config-$1" <<'EOF'
+version: 2
+ethernets:
+  all-interfaces:
+    match:
+      name: "en*"
+    dhcp4: true
+    dhcp6: false
+EOF
   printf 'instance-id: o3k-p15-7-%s-%s\nlocal-hostname: %s-host\n' "$RUN_ID" "$id" "$id" >"$WORK_ROOT/meta-data-$1"
   genisoimage -quiet -output "$seed_tmp" -volid cidata -joliet -rock \
     -graft-points "user-data=$WORK_ROOT/user-data-$1" "meta-data=$WORK_ROOT/meta-data-$1" \
+      "network-config=$WORK_ROOT/network-config-$1" \
     || die "cloud-init seed failed: $id"
   sudo -n install -o root -g "$LIBVIRT_QEMU_GROUP" -m 0640 "$seed_tmp" "$seed" \
     || die "cannot stage cloud-init seed for libvirt: $id"
