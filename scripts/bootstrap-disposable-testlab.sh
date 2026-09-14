@@ -12,6 +12,8 @@ RUNNER_TEMP="$(realpath -e -- "$RUNNER_TEMP")"
 RUN_ID="${GITHUB_RUN_ID:-local-$$}"
 SOURCE_COMMIT="${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflow-artifacts}"
+[[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] \
+  || { echo "disposable TestLab bootstrap failed: invalid workflow run id" >&2; exit 1; }
 STATE_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
 PID_ROOT="${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}"
 INVENTORY_ROOT="${RUNNER_TEMP%/}/o3k-testlab-inventory/${RUN_ID}"
@@ -187,7 +189,6 @@ failure_cleanup() {
 }
 trap failure_cleanup EXIT
 
-[[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || fail "invalid workflow run id"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
 [[ "$BRIDGE_NAME" =~ ^[A-Za-z0-9_-]{1,15}$ ]] || fail "invalid compute bridge name"

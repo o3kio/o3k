@@ -23,6 +23,9 @@ API="http://127.0.0.1:$AUTH_PORT/o3k/v1"
 ARAF_URL="${O3K_P15_7_ARAF_URL:-}"
 VM_USER="${O3K_P15_7_VM_USER:-o3k}"
 die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
+[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
+[[ "$VM_USER" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]] || die "VM user is unsafe"
+[[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ ]] || die "TestLab ports are invalid"
 for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
@@ -63,6 +66,11 @@ done
 
 declare -a DOMAINS=() UUIDS=() OVERLAYS=() SEEDS=() IPS=()
 declare -A BLOCK_IDS=()
+REPLAY_JOIN_FILE=""
+FOREIGN_PROJECT_ID=""
+FOREIGN_TOKEN=""
+FOREIGN_TOKEN_PROJECT_ID=""
+CROSS_TENANT_CONCEALMENT=false
 FOREIGN_BEFORE="$(virsh -c qemu:///system list --all --uuid 2>/dev/null | sed '/^$/d' | sort)"
 cleanup() {
   set +e
@@ -146,25 +154,54 @@ EOF
 }
 join_block() {
   local id="$1" ip="$2" init="$WORK_ROOT/$1-init.json" token vcpus memory epoch
+  local certificate="$WORK_ROOT/$id.pem"
   O3K_API_URL="$API" O3K_BOOTSTRAP_SECRET="$(sudo -n cat "$STATE_ROOT/.bootstrap-secret")" "$STATE_ROOT/bin/o3k" init --profile-id default --agent-id "$id" >"$init" || die "o3k init failed: $id"
   token="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("enrollment_token", ""))' "$init")"; [[ "$token" ]] || die "init grant missing: $id"
   vcpus="$(ssh_vm "$ip" nproc)"; memory="$(ssh_vm "$ip" awk '/MemTotal:/ {print int($2/1024); exit}' /proc/meminfo)"; [[ "$vcpus" =~ ^[1-9][0-9]*$ && "$memory" =~ ^[1-9][0-9]*$ ]] || die "real inventory unavailable: $id"
   epoch="$(openssl rand -hex 16)"
-  O3K_API_URL="$API" "$STATE_ROOT/bin/o3k" join --token "$token" --agent-id "$id" --agent-epoch "$epoch" --certificate "$WORK_ROOT/$id.pem" --region RegionOne --vcpus "$vcpus" --memory-mb "$memory" --disk-gb 10 >"$WORK_ROOT/$1-join.json" || die "authenticated join failed: $id"
+  python3 - "$token" "$id" "$epoch" "$certificate" "$vcpus" "$memory" >"$WORK_ROOT/$id-join-request.json" <<'PY'
+import json, pathlib, sys
+token, agent_id, epoch, certificate, vcpus, memory = sys.argv[1:]
+json.dump({
+    "enrollment_token": token,
+    "agent_id": agent_id,
+    "agent_epoch": epoch,
+    "certificate": pathlib.Path(certificate).read_text(encoding="utf-8"),
+    "region": "RegionOne",
+    "capabilities": {"architecture": "unknown", "provider_name": "o3k-cli"},
+    "inventories": {"VCPU": int(vcpus), "MEMORY_MB": int(memory), "DISK_GB": 10},
+}, sys.stdout)
+PY
+  O3K_API_URL="$API" "$STATE_ROOT/bin/o3k" join --token "$token" --agent-id "$id" --agent-epoch "$epoch" --certificate "$certificate" --region RegionOne --vcpus "$vcpus" --memory-mb "$memory" --disk-gb 10 >"$WORK_ROOT/$1-join.json" || die "authenticated join failed: $id"
+  [[ "$id" == block-a ]] && REPLAY_JOIN_FILE="$WORK_ROOT/$id-join-request.json"
   BLOCK_IDS[$id]="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("building_block_id", ""))' "$WORK_ROOT/$1-join.json")"; [[ "${BLOCK_IDS[$id]}" =~ ^[0-9a-fA-F-]{36}$ ]] || die "canonical BuildingBlock missing: $id"
 }
 install_agent() {
   local id="$1" ip="$2" c="$TLS_ROOT/agents/$1" bin="${O3K_REAL_HOST_COMPUTE_BINARY:-$STATE_ROOT/bin/o3k-compute}"
+  local remote_stage="/tmp/o3k-p15-7-agent-$RUN_ID-$id"
   [[ -x "$bin" ]] || die "real compute-agent binary unavailable"
   [[ -f "$c/agent-id" && ! -L "$c/agent-id" ]] || die "canonical agent identity file unavailable: $id"
+  [[ "$(sudo -n cat "$c/agent-id")" == "$id" ]] || die "canonical agent identity does not match agent id: $id"
   sudo -n install -m 0644 "$TLS_ROOT/ca.pem" "$WORK_ROOT/ca.pem" || die "cannot read canonical CA"
   sudo -n install -m 0644 "$c/agent-id" "$WORK_ROOT/$id-agent-id" || die "cannot read canonical agent identity: $id"
-  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$bin" "$VM_USER@$ip:/tmp/o3k-compute" || die "agent binary transfer failed: $id"
-  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/ca.pem" "$VM_USER@$ip:/tmp/ca.pem" || die "CA transfer failed: $id"
-  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id-agent-id" "$VM_USER@$ip:/tmp/agent-id" || die "agent identity transfer failed: $id"
-  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id.pem" "$VM_USER@$ip:/tmp/agent.pem" || die "certificate transfer failed: $id"
-  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id-key.pem" "$VM_USER@$ip:/tmp/agent-key.pem" || die "private key transfer failed: $id"
-  ssh_vm "$ip" "sudo install -d -m 0750 /etc/o3k/tls /var/lib/o3k-compute; sudo install -m 0755 /tmp/o3k-compute /usr/local/bin/o3k-compute; sudo install -m 0644 /tmp/ca.pem /etc/o3k/tls/ca.pem; sudo install -m 0644 /tmp/agent.pem /etc/o3k/tls/agent.pem; sudo install -m 0600 /tmp/agent-key.pem /etc/o3k/tls/agent-key.pem; sudo install -m 0644 /tmp/agent-id /var/lib/o3k-compute/agent-id; sudo sh -c 'O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=${id}-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup /usr/local/bin/o3k-compute >/var/log/o3k-compute.log 2>&1 &'" || die "agent start failed: $id"
+  remote_agent_cleanup() {
+    ssh_vm "$ip" "sudo rm -rf -- '$remote_stage'" >/dev/null 2>&1 || true
+  }
+  ssh_vm "$ip" "sudo mkdir -- '$remote_stage'; sudo chmod 0700 '$remote_stage'; sudo chown '$VM_USER' '$remote_stage'" \
+    || { remote_agent_cleanup; die "agent staging directory failed: $id"; }
+  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$bin" "$VM_USER@$ip:$remote_stage/o3k-compute" \
+    || { remote_agent_cleanup; die "agent binary transfer failed: $id"; }
+  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/ca.pem" "$VM_USER@$ip:$remote_stage/ca.pem" \
+    || { remote_agent_cleanup; die "CA transfer failed: $id"; }
+  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id-agent-id" "$VM_USER@$ip:$remote_stage/agent-id" \
+    || { remote_agent_cleanup; die "agent identity transfer failed: $id"; }
+  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id.pem" "$VM_USER@$ip:$remote_stage/agent.pem" \
+    || { remote_agent_cleanup; die "certificate transfer failed: $id"; }
+  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id-key.pem" "$VM_USER@$ip:$remote_stage/agent-key.pem" \
+    || { remote_agent_cleanup; die "private key transfer failed: $id"; }
+  ssh_vm "$ip" "sudo install -d -m 0750 /etc/o3k/tls /var/lib/o3k-compute; sudo install -m 0755 '$remote_stage/o3k-compute' /usr/local/bin/o3k-compute; sudo install -m 0644 '$remote_stage/ca.pem' /etc/o3k/tls/ca.pem; sudo install -m 0644 '$remote_stage/agent.pem' /etc/o3k/tls/agent.pem; sudo install -m 0600 '$remote_stage/agent-key.pem' /etc/o3k/tls/agent-key.pem; sudo install -m 0644 '$remote_stage/agent-id' /var/lib/o3k-compute/agent-id; sudo sh -c 'O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=${id}-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup /usr/local/bin/o3k-compute >/var/log/o3k-compute.log 2>&1 &'" \
+    || { remote_agent_cleanup; die "agent start failed: $id"; }
+  remote_agent_cleanup
   for _ in $(seq 1 90); do ssh_vm "$ip" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 && return; sleep 2; done
   die "real mTLS agent did not become ready: $id"
 }
@@ -236,6 +273,32 @@ WORKLOAD_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).ge
 curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$API/compute/servers/$WORKLOAD_A" >"$WORK_ROOT/workload-a-show.json" || die "workload A did not converge"
 GEN_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metadata"]["generation"])' "$WORK_ROOT/workload-a-show.json")"
 
+# Prove tenant concealment with a genuinely different project-scoped token.
+# An unauthenticated request is not cross-tenant evidence. Do not fabricate
+# this field when the protected Keystone context has no second project.
+ADMIN_PROJECT_ID="$(openstack token issue -f value -c project_id 2>/dev/null | tr -d '[:space:]' || true)"
+[[ "$ADMIN_PROJECT_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "cross_tenant_test_prerequisite_missing: admin project id unavailable"
+FOREIGN_PROJECT_ID="${O3K_P15_7_FOREIGN_PROJECT_ID:-}"
+if [[ -z "$FOREIGN_PROJECT_ID" ]]; then
+  while IFS= read -r candidate; do
+    [[ "$candidate" =~ ^[0-9a-fA-F-]{36}$ && "$candidate" != "$ADMIN_PROJECT_ID" ]] || continue
+    FOREIGN_PROJECT_ID="$candidate"
+    break
+  done < <(openstack project list -f value -c ID 2>/dev/null || true)
+fi
+[[ "$FOREIGN_PROJECT_ID" =~ ^[0-9a-fA-F-]{36}$ && "$FOREIGN_PROJECT_ID" != "$ADMIN_PROJECT_ID" ]] \
+  || die "cross_tenant_test_prerequisite_missing: no distinct foreign project"
+FOREIGN_TOKEN_PROJECT_ID="$(openstack --os-project-id "$FOREIGN_PROJECT_ID" token issue -f value -c project_id 2>/dev/null | tr -d '[:space:]' || true)"
+[[ "$FOREIGN_TOKEN_PROJECT_ID" == "$FOREIGN_PROJECT_ID" ]] || die "cross_tenant_test_prerequisite_missing: foreign token scope mismatch"
+FOREIGN_TOKEN="$(openstack --os-project-id "$FOREIGN_PROJECT_ID" token issue -f value -c id 2>/dev/null | tr -d '[:space:]' || true)"
+[[ "$FOREIGN_TOKEN" ]] || die "cross_tenant_test_prerequisite_missing: foreign project token unavailable"
+FOREIGN_SHOW="$WORK_ROOT/foreign-workload-show.json"
+foreign_code="$(curl --silent --output "$FOREIGN_SHOW" --write-out '%{http_code}' \
+  -H "Authorization: Bearer $FOREIGN_TOKEN" "$API/compute/servers/$WORKLOAD_A" || true)"
+[[ "$foreign_code" == 403 || "$foreign_code" == 404 ]] || die "foreign project can read workload A"
+! grep -Fq "$WORKLOAD_A" "$FOREIGN_SHOW" || die "foreign response disclosed workload A"
+CROSS_TENANT_CONCEALMENT=true
+
 DRAIN_ID="${BLOCK_IDS[block-a]}"
 DRAIN_GEN="$(python3 - "$WORK_ROOT/blocks.json" "$DRAIN_ID" <<'PY'
 import json,sys
@@ -302,7 +365,8 @@ PY
 # Real negative probes: these requests must be rejected by the production API.
 code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST "$API/bootstrap/join" -H 'Content-Type: application/json' -d '{}')"
 [[ "$code" == 400 || "$code" == 401 || "$code" == 403 ]] || die "unauthenticated join accepted"
-code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST "$API/bootstrap/join" -H 'Content-Type: application/json' -d "$(cat "$WORK_ROOT/block-a-join.json")")"
+[[ -n "$REPLAY_JOIN_FILE" && -f "$REPLAY_JOIN_FILE" ]] || die "replay join request was not retained"
+code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST "$API/bootstrap/join" -H 'Content-Type: application/json' -d @"$REPLAY_JOIN_FILE")"
 [[ "$code" != 200 ]] || die "replayed join accepted"
 code="$(curl --silent -o /dev/null -w '%{http_code}' "$API/operator/building-blocks/${BLOCK_IDS[block-a]}")"
 [[ "$code" == 401 || "$code" == 403 ]] || die "unauthenticated state read was not concealed"
@@ -359,16 +423,16 @@ assert_owned_domains_absent
 [[ ! -e "$SSH_KEY" && ! -e "$KNOWN_HOSTS" ]] || die "owned journey files remain after cleanup"
 JOURNEY_END_MS="$(date +%s%3N)"
 
-python3 - "$EVIDENCE_FILE" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" <<'PY'
+python3 - "$EVIDENCE_FILE" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" <<'PY'
 import json,pathlib,sys
-path=pathlib.Path(sys.argv[1]); sha=sys.argv[2].lower(); profile=sys.argv[3]; blocks=int(sys.argv[4]); start=int(sys.argv[5]); end=int(sys.argv[6])
+path=pathlib.Path(sys.argv[1]); sha=sys.argv[2].lower(); profile=sys.argv[3]; blocks=int(sys.argv[4]); start=int(sys.argv[5]); end=int(sys.argv[6]); cross_tenant=sys.argv[7] == "true"
 def passed():
     return {"status":"passed"}
 doc={
  "artifact_type":"o3k-p15-7-scale-composition-evidence","schema_version":1,"phase":"P15.7","status":"passed","evidence_tier":"protected-real-host","profile":profile,"tested_source_sha":sha,
  "execution":{"real_o3kd":passed(),"real_auth":passed(),"real_execution_boundary":passed(),"multiple_real_hosts":passed(),"sqlite_parity":passed(),"provider":"agent","hypervisor":"libvirt","database_backend":"postgres","block_count":blocks},
  "journey":{"fresh_deployment":passed(),"init":passed(),"multiple_authenticated_joins":{"status":"passed","count":blocks,"each_authenticated":True},"topology":passed(),"capacity":passed(),"constrained_placement":passed(),"add_block_capacity_growth":passed(),"drain":{"status":"passed","no_new_placement":True,"blockers_observed":True,"evacuation_claimed":False},"remove_rejoin_replace":passed(),"restart_recovery":passed(),"projections_convergent":{"native":True,"openstack":True,"araf":True}},
- "security_negatives":{"unauthenticated_join_rejected":True,"replay_join_rejected":True,"cross_tenant_concealment":True,"foreign_state_preserved":True},
+ "security_negatives":{"unauthenticated_join_rejected":True,"replay_join_rejected":True,"cross_tenant_concealment":cross_tenant,"foreign_state_preserved":True},
  "restart_recovery":{"status":"passed","canonical_state_survived":True,"postgres":True,"sqlite_parity":True},
  "bootstrap_timing":{"measured":end>start,"duration_ms":end-start,"excludes_preprovisioned_external_work":True,"sample_count":1,"boundary":"fresh o3kd through two authenticated joins","claim_scope":"profile-specific-measurement-only"},
  "leak_check":{"status":"passed","owned_leaks":0,"owned_inconsistencies":0,"foreign_state_changes":0},

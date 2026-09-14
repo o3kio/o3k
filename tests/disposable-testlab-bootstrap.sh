@@ -67,6 +67,7 @@ assert 'GITHUB_PATH' in bootstrap
 assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in bootstrap
 assert 'ps -o user:32=' in bootstrap
 assert 'ps -o user:32=' in cleanup
+assert bootstrap.index('invalid workflow run id') < bootstrap.index('STATE_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"')
 assert '"$uid" == o3k || "$uid" == o3k-compute' in cleanup
 assert 'assert_no_owned_host_state()' in cleanup
 assert 'refusing to discard state while O3K-owned libvirt domain exists' in cleanup

@@ -73,8 +73,13 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "rm -rf -- \"$WORK_ROOT\"", "second_real_host_required", "assert_owned_domains_absent",
                  "agent-id", "agent identity transfer failed", "/var/lib/o3k-compute/agent-id",
                  "actual_uuid", "DOMAINS+=(\"$d\")", "OVERLAYS+=(\"$overlay\")",
-                 "UUIDS[index]=\"$uuid\""):
+                 "UUIDS[index]=\"$uuid\"", "REPLAY_JOIN_FILE",
+                 "join-request.json", "remote_agent_cleanup", "sudo mkdir -- '$remote_stage'", "sudo rm -rf -- '$remote_stage'",
+                 "canonical agent identity does not match agent id", "cross_tenant_test_prerequisite_missing",
+                 "FOREIGN_PROJECT_ID", "FOREIGN_TOKEN_PROJECT_ID", "foreign token scope mismatch",
+                 "foreign project can read workload A", "CROSS_TENANT_CONCEALMENT=true"):
     assert required in journey, required
+assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
 PY
 echo "P15.7 validator guards passed"
