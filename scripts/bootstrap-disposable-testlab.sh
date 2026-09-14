@@ -429,9 +429,13 @@ if ((${#extra_agent_ids[@]} > 0)); then
   printf 'canonical extra agent identities requested: %s\n' "${extra_agent_ids[*]}" >&2
 fi
 if ((${#extra_agent_ids[@]} > 0)); then
+  extra_agent_cert_args=()
+  for extra_agent_id in "${extra_agent_ids[@]}"; do
+    extra_agent_cert_args+=(--extra-agent-id "$extra_agent_id")
+  done
   sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
     --server-name o3k-control-plane --agent-id compute-agent \
-    --extra-agent-ids "$extra_agent_ids_csv"
+    "${extra_agent_cert_args[@]}"
 else
   sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
     --server-name o3k-control-plane --agent-id compute-agent

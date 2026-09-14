@@ -37,7 +37,8 @@ assert 'nohup bash -c' in bootstrap
 assert 'O3K_COMPUTE_BRIDGE_NAME' in bootstrap
 assert 'O3K_TESTLAB_ADDITIONAL_AGENT_IDS' in bootstrap
 assert 'extra_agent_ids_csv=' in bootstrap
-assert '--extra-agent-ids "$extra_agent_ids_csv"' in bootstrap
+assert 'extra_agent_cert_args+=(--extra-agent-id "$extra_agent_id")' in bootstrap
+assert '"${extra_agent_cert_args[@]}"' in bootstrap
 assert 'additional compute agent ids contain an empty entry' in bootstrap
 assert 'additional compute agent id is duplicated' in bootstrap
 assert 'canonical extra agent identity was not generated' in bootstrap
