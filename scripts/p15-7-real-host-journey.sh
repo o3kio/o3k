@@ -19,6 +19,7 @@ HOST_IMAGE_SHA256="${O3K_P15_7_HOST_IMAGE_SHA256:-}"
 # workload image.  A caller may provide a separately prepared image, but an
 # ambient image-list lookup is never permitted.
 O3K_TESTLAB_IMAGE_PATH="${O3K_TESTLAB_IMAGE_PATH:-$HOST_IMAGE}"
+WORKLOAD_IMAGE_MARKER="${O3K_TESTLAB_IMAGE_PATH}.o3k-owned"
 NETWORK="${O3K_P15_7_LIBVIRT_NETWORK:-default}"
 AUTH_PORT="${O3K_TESTLAB_PORT:-28080}"
 CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-28551}"
@@ -61,6 +62,12 @@ JOURNEY_START_MS="$(date +%s%3N)"
 [[ "$HOST_IMAGE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || die "pinned VM image digest required"
 printf '%s  %s\n' "$HOST_IMAGE_SHA256" "$HOST_IMAGE" | sha256sum --check --strict --status || die "VM image digest mismatch"
 [[ -f "$O3K_TESTLAB_IMAGE_PATH" && ! -L "$O3K_TESTLAB_IMAGE_PATH" ]] || die "owned workload image unavailable"
+[[ -f "$WORKLOAD_IMAGE_MARKER" && ! -L "$WORKLOAD_IMAGE_MARKER" ]] \
+  || die "owned workload image marker unavailable"
+grep -Fqx 'o3k-p15-7-host-image-v1' "$WORKLOAD_IMAGE_MARKER" \
+  || die "owned workload image marker is invalid"
+grep -Fqx "run=$RUN_ID" "$WORKLOAD_IMAGE_MARKER" \
+  || die "owned workload image marker run mismatch"
 [[ -n "$ARAF_URL" ]] || die "araf_projection_prerequisite_missing: external Araf endpoint is not configured"
 [[ -f "$STATE_ROOT/.o3k-run-owned" && -f "$TLS_ROOT/ca.pem" ]] || die "owned TestLab state/TLS unavailable"
 for required_agent in block-a block-b block-c block-d; do

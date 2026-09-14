@@ -94,5 +94,7 @@ assert 'DRAIN_AGENT="$HOST_A"' in journey
 assert '"$HOST_B" != "$HOST_A"' in journey
 assert 'resource_class") != "VCPU"' in journey
 assert 'OS_WORKLOAD_A="$WORKLOAD_A"' in journey and 'OS_WORKLOAD_B="$WORKLOAD_B"' in journey
+assert 'WORKLOAD_IMAGE_MARKER="${O3K_TESTLAB_IMAGE_PATH}.o3k-owned"' in journey
+assert "o3k-p15-7-host-image-v1" in journey
 PY
 echo "P15.7 validator guards passed"
