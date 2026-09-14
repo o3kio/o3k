@@ -623,7 +623,7 @@ wait_for_o3kd_control() {
 }
 
 bootstrap_testlab() {
-  local agent_id agent_epoch vcpus memory_mb disk_gb init_output enrollment_token
+  local agent_id agent_epoch vcpus memory_mb disk_gb init_output enrollment_token join_attempt
   agent_id="$(sudo -n cat "$STATE_ROOT/tls/agent-id")"
   [[ "$agent_id" =~ ^[A-Za-z0-9._-]+$ ]] || fail "generated agent identity is invalid"
   agent_epoch="$(openssl rand -hex 16)"
@@ -658,12 +658,25 @@ PY
   rm -f -- "$init_output"
   trap - RETURN
 
-  sudo -n -u "$SERVICE_ACCOUNT" -- env O3K_API_URL="$O3K_API_URL" \
-    "$STATE_ROOT/bin/o3k" join --token "$enrollment_token" \
-    --agent-id "$agent_id" --agent-epoch "$agent_epoch" \
-    --certificate "$STATE_ROOT/tls/agent.pem" \
-    --vcpus "$vcpus" --memory-mb "$memory_mb" --disk-gb "$disk_gb" \
-    >/dev/null || fail "canonical authenticated o3k join failed"
+  # Startup reconciliation and the canonical placement write share the same
+  # durable store.  A bounded retry lets that already-issued, single-use
+  # grant converge across a transient store/provider conflict; the join
+  # remains the production authenticated CLI path and never fabricates state.
+  for join_attempt in $(seq 1 5); do
+    if sudo -n -u "$SERVICE_ACCOUNT" -- env O3K_API_URL="$O3K_API_URL" \
+      "$STATE_ROOT/bin/o3k" join --token "$enrollment_token" \
+      --agent-id "$agent_id" --agent-epoch "$agent_epoch" \
+      --certificate "$STATE_ROOT/tls/agent.pem" \
+      --vcpus "$vcpus" --memory-mb "$memory_mb" --disk-gb "$disk_gb" \
+      >/dev/null; then
+      return 0
+    fi
+    if ((join_attempt < 5)); then
+      echo "canonical authenticated o3k join attempt ${join_attempt}/5 did not converge; retrying" >&2
+      sleep 2
+    fi
+  done
+  fail "canonical authenticated o3k join failed after bounded retries"
 }
 
 wait_for_o3kd_ready() {
