@@ -51,6 +51,7 @@ case "${O3K_PROVIDER}" in
 esac
 O3KD_PID=
 COMPUTE_PID=
+EXTRA_AGENT_IDS_SOURCE=
 OPENSTACK_VENV="${O3K_OPENSTACK_VENV:-}"
 O3KD_READY=false
 COMPUTE_READY=false
@@ -162,6 +163,9 @@ PY
 
 failure_cleanup() {
   local status="$?"
+  if [[ -n "$EXTRA_AGENT_IDS_SOURCE" ]]; then
+    rm -f -- "$EXTRA_AGENT_IDS_SOURCE" 2>/dev/null || true
+  fi
   if ((status != 0)); then
     write_result failed "$FAIL_REASON" 2>/dev/null || true
     cleanup_failed=false
@@ -424,10 +428,15 @@ if [[ -n "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS:-}" ]]; then
       || fail "additional compute agent id is duplicated: $extra_agent_id"
     seen_extra_agent_ids[$extra_agent_id]=1
   done
-  printf '%s\n' "${extra_agent_ids[@]}" \
-    | sudo -n tee "$extra_agent_ids_file" >/dev/null \
+  EXTRA_AGENT_IDS_SOURCE="$(mktemp "${RUNNER_TEMP%/}/o3k-extra-agent-ids.XXXXXX")"
+  printf '%s\n' "${extra_agent_ids[@]}" >"$EXTRA_AGENT_IDS_SOURCE"
+  chmod 0600 "$EXTRA_AGENT_IDS_SOURCE"
+  sudo -n install -m 0600 "$EXTRA_AGENT_IDS_SOURCE" "$extra_agent_ids_file" \
     || fail "cannot stage additional compute agent ids"
-  sudo -n chmod 0600 "$extra_agent_ids_file"
+  sudo -n cmp -- "$EXTRA_AGENT_IDS_SOURCE" "$extra_agent_ids_file" \
+    || fail "staged additional compute ids do not match requested identities"
+  rm -f -- "$EXTRA_AGENT_IDS_SOURCE"
+  EXTRA_AGENT_IDS_SOURCE=
 else
   sudo -n rm -f -- "$extra_agent_ids_file"
 fi
