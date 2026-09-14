@@ -309,9 +309,10 @@ grep -q 'URI:urn:o3k:compute:agent:compute-agent' <(openssl x509 -in "$TLS_DIR/a
 [[ "$(wc -c <"$TLS_DIR/agent-fingerprint")" -ge 64 ]]
 
 EXTRA_TLS_DIR="$WORK_DIR/certs-extra/tls"
+printf 'block-a\nblock-b\n' >"$WORK_DIR/extra-agent-ids"
 bash "$ROOT_DIR/packaging/bootstrap-certs.sh" \
   --output-dir "$EXTRA_TLS_DIR" --server-name o3k-control-plane --agent-id compute-agent \
-  --extra-agent-ids block-a,block-b
+  --extra-agent-ids-file "$WORK_DIR/extra-agent-ids"
 for extra_id in block-a block-b; do
   for file in agent.pem agent-key.pem agent-id agent-fingerprint; do
     [[ -s "$EXTRA_TLS_DIR/agents/$extra_id/$file" ]] \
