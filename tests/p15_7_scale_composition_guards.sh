@@ -106,7 +106,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "canonical agent identity does not match agent id", "cross_tenant_test_prerequisite_missing",
                  "FOREIGN_PROJECT_ID", "FOREIGN_TOKEN_PROJECT_ID", "foreign token scope mismatch",
                  "foreign project can read workload A", "CROSS_TENANT_CONCEALMENT=true",
-                 "record_optional_araf", "external_consumer_not_provisioned", "araf-projection.json"):
+                 "record_optional_araf", "external_consumer_not_provisioned", "araf-projection.json",
+                 "xml.etree.ElementTree", "net-dumpxml", "libvirt gateway unavailable"):
     assert required in journey, required
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
@@ -127,5 +128,21 @@ assert 'O3K_TESTLAB_IMAGE_PATH="$HOST_IMAGE"' in journey
 assert 'WORKLOAD_IMAGE_MARKER="${O3K_TESTLAB_IMAGE_PATH}.o3k-owned"' in journey
 assert "o3k-p15-7-host-image-v1" in journey
 assert "araf_projection_prerequisite_missing" not in journey
+PY
+# libvirt emits both quote styles across supported versions. Keep gateway
+# discovery independent of that XML serialization detail.
+python3 - <<'PY'
+import xml.etree.ElementTree as ET
+
+for xml in (
+    "<network><ip address='192.0.2.1' netmask='255.255.255.0'/></network>",
+    '<network><ip address="192.0.2.2" netmask="255.255.255.0"/></network>',
+):
+    root = ET.fromstring(xml)
+    gateway = next(
+        e.get("address") for e in root.iter()
+        if e.tag.rsplit("}", 1)[-1] == "ip" and e.get("address")
+    )
+    assert gateway.startswith("192.0.2."), gateway
 PY
 echo "P15.7 validator guards passed"

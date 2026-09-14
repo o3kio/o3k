@@ -192,9 +192,18 @@ assert_owned_domains_absent() {
     [[ ! -e "$p" ]] || die "owned VM artifact remains after cleanup: $p"
   done
 }
-GATEWAY="$(virsh -c qemu:///system net-dumpxml "$NETWORK" | sed -n 's/.*<ip address="\([0-9.]*\)".*/\1/p' | head -n1)"
-[[ "$GATEWAY" =~ ^[0-9.]+$ ]] || die "libvirt gateway unavailable"
 virsh -c qemu:///system net-info "$NETWORK" >/dev/null 2>&1 || die "libvirt network unavailable"
+# libvirt's XML serializer may use either single- or double-quoted attribute
+# values. Parse the network document structurally so the gateway check does
+# not depend on a presentation detail of `virsh net-dumpxml`.
+GATEWAY="$(virsh -c qemu:///system net-dumpxml "$NETWORK" |
+  python3 -c 'import sys, xml.etree.ElementTree as ET
+root = ET.parse(sys.stdin).getroot()
+for element in root.iter():
+    if element.tag.rsplit("}", 1)[-1] == "ip" and element.get("address"):
+        print(element.get("address"))
+        break' || true)"
+[[ "$GATEWAY" =~ ^[0-9.]+$ ]] || die "libvirt gateway unavailable"
 ssh-keygen -q -t ed25519 -N '' -f "$SSH_KEY" -C "o3k-p15-7-$RUN_ID" || die "VM SSH key generation failed"
 touch "$KNOWN_HOSTS"
 ssh_vm() { ssh -F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$VM_USER@$1" "${@:2}"; }
