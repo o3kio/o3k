@@ -68,10 +68,12 @@ cleanup() {
   set +e
   for i in "${!DOMAINS[@]}"; do
     d="${DOMAINS[$i]}"; u="${UUIDS[$i]}"
-    [[ "$(virsh -c qemu:///system domuuid "$d" 2>/dev/null || true)" == "$u" ]] || continue
-    virsh -c qemu:///system dumpxml "$u" 2>/dev/null | grep -Fq "o3k-p15-7-journey-owned=$RUN_ID" || continue
-    virsh -c qemu:///system destroy "$u" >/dev/null 2>&1 || true
-    virsh -c qemu:///system undefine "$u" --nvram >/dev/null 2>&1 || virsh -c qemu:///system undefine "$u" >/dev/null 2>&1 || true
+    actual_uuid="$(virsh -c qemu:///system domuuid "$d" 2>/dev/null || true)"
+    [[ "$actual_uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || continue
+    [[ -z "$u" || "$actual_uuid" == "$u" ]] || continue
+    virsh -c qemu:///system dumpxml "$actual_uuid" 2>/dev/null | grep -Fq "o3k-p15-7-journey-owned=$RUN_ID" || continue
+    virsh -c qemu:///system destroy "$actual_uuid" >/dev/null 2>&1 || true
+    virsh -c qemu:///system undefine "$actual_uuid" --nvram >/dev/null 2>&1 || virsh -c qemu:///system undefine "$actual_uuid" >/dev/null 2>&1 || true
   done
   for p in "${SEEDS[@]}" "${OVERLAYS[@]}"; do [[ -f "$p" ]] && rm -f -- "$p"; done
   rm -f -- "$SSH_KEY" "$SSH_KEY.pub" "$KNOWN_HOSTS" \
@@ -112,6 +114,9 @@ find_ip() {
 }
 provision_vm() {
   local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$WORK_ROOT/$1.qcow2" seed="$WORK_ROOT/$1-seed.iso" ip uuid
+  local index
+  DOMAINS+=("$d"); UUIDS+=(""); OVERLAYS+=("$overlay"); SEEDS+=("$seed")
+  index=$((${#DOMAINS[@]} - 1))
   qemu-img create -q -f qcow2 -F qcow2 -b "$HOST_IMAGE" "$overlay" || die "overlay creation failed: $id"
   cat >"$WORK_ROOT/$1-user-data" <<EOF
 #cloud-config
@@ -133,10 +138,11 @@ EOF
   genisoimage -quiet -output "$seed" -volid cidata -joliet -rock "$WORK_ROOT/$1-user-data" "$WORK_ROOT/$1-meta-data" || die "cloud-init seed failed: $id"
   virt-install --connect qemu:///system --name "$d" --memory 2048 --vcpus 2 --import --disk "path=$overlay,format=qcow2" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio" --os-variant ubuntu24.04 --metadata "description=o3k-p15-7-journey-owned=$RUN_ID" --noautoconsole --wait 0 >/dev/null || die "VM boot failed: $id"
   uuid="$(virsh -c qemu:///system domuuid "$d")"; [[ "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || die "VM UUID unavailable: $id"
+  UUIDS[index]="$uuid"
   ip="$(find_ip "$d")"
   for _ in $(seq 1 120); do ssh_vm "$ip" true >/dev/null 2>&1 && break; sleep 2; done
   ssh_vm "$ip" true >/dev/null 2>&1 || die "SSH unavailable on real VM: $id"
-  DOMAINS+=("$d"); UUIDS+=("$uuid"); OVERLAYS+=("$overlay"); SEEDS+=("$seed"); IPS+=("$ip")
+  IPS+=("$ip")
 }
 join_block() {
   local id="$1" ip="$2" init="$WORK_ROOT/$1-init.json" token vcpus memory epoch
