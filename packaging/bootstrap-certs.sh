@@ -112,6 +112,12 @@ for extra_id in "${EXTRA_AGENT_IDS[@]}"; do
   openssl x509 -in "$extra_dir/agent.pem" -outform DER | sha256sum | awk '{print $1}' >"$extra_dir/agent-fingerprint"
   chmod 0640 "$extra_dir/agent-id" "$extra_dir/agent-fingerprint"
 done
+for extra_id in "${EXTRA_AGENT_IDS[@]}"; do
+  for extra_file in agent.pem agent-key.pem agent-id agent-fingerprint; do
+    [[ -f "$OUTPUT_DIR/agents/$extra_id/$extra_file" && ! -L "$OUTPUT_DIR/agents/$extra_id/$extra_file" ]] \
+      || { echo "extra agent certificate generation incomplete: $extra_id/$extra_file" >&2; exit 1; }
+  done
+done
 if getent group o3k >/dev/null 2>&1; then chgrp o3k "$OUTPUT_DIR" "$OUTPUT_DIR"/*; fi
 rm -f -- "$OUTPUT_DIR/ca-key.pem" "$OUTPUT_DIR/agent.csr" "$OUTPUT_DIR/ca.srl"
 echo "generated O3K TestLab CA, server, and agent certificates under $OUTPUT_DIR for $SERVER_NAME agent=$AGENT_ID"
