@@ -39,7 +39,8 @@ assert 'O3K_TESTLAB_ADDITIONAL_AGENT_IDS' in bootstrap
 assert 'extra_agent_ids_file="$STATE_ROOT/.extra-agent-ids"' in bootstrap
 assert '--extra-agent-ids-file' in bootstrap
 assert "printf '%s\\n' \"${extra_agent_ids[@]}\"" in bootstrap
-assert 'sudo -n tee "$extra_agent_ids_file" >/dev/null' in bootstrap
+assert 'sudo -n install -m 0600 "$EXTRA_AGENT_IDS_SOURCE" "$extra_agent_ids_file"' in bootstrap
+assert 'sudo -n cmp -- "$EXTRA_AGENT_IDS_SOURCE" "$extra_agent_ids_file"' in bootstrap
 assert 'additional compute agent ids contain an empty entry' in bootstrap
 assert 'additional compute agent id is duplicated' in bootstrap
 assert 'canonical extra agent identity was not generated' in bootstrap
