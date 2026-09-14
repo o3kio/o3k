@@ -6,12 +6,23 @@ SERVER_NAME=o3k-control-plane
 AGENT_ID=compute-agent
 EXTRA_AGENT_IDS=()
 FORCE=0
+append_extra_agent_id() {
+  local extra_id="$1"
+  [[ "$extra_id" =~ ^[A-Za-z0-9._-]+$ && ${#extra_id} -le 128 ]] \
+    || { echo "extra agent id contains unsupported characters" >&2; exit 2; }
+  EXTRA_AGENT_IDS+=("$extra_id")
+}
 while (($#)); do
   case "$1" in
     --output-dir) OUTPUT_DIR="${2:?missing output directory}"; shift 2;;
     --server-name) SERVER_NAME="${2:?missing server name}"; shift 2;;
     --agent-id) AGENT_ID="${2:?missing agent id}"; shift 2;;
-    --extra-agent-id) EXTRA_AGENT_IDS+=("${2:?missing extra agent id}"); shift 2;;
+    --extra-agent-id) append_extra_agent_id "${2:?missing extra agent id}"; shift 2;;
+    --extra-agent-ids)
+      IFS=',' read -r -a extra_ids <<<"${2:?missing extra agent ids}"
+      for extra_id in "${extra_ids[@]}"; do append_extra_agent_id "$extra_id"; done
+      shift 2
+      ;;
     --force) FORCE=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
@@ -20,7 +31,6 @@ done
 [[ "$SERVER_NAME" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "server name contains unsupported characters" >&2; exit 2; }
 [[ "$AGENT_ID" =~ ^[A-Za-z0-9._-]+$ && ${#AGENT_ID} -le 128 ]] || { echo "agent id contains unsupported characters" >&2; exit 2; }
 for extra_id in "${EXTRA_AGENT_IDS[@]}"; do
-  [[ "$extra_id" =~ ^[A-Za-z0-9._-]+$ && ${#extra_id} -le 128 ]] || { echo "extra agent id contains unsupported characters" >&2; exit 2; }
   [[ "$extra_id" != "$AGENT_ID" ]] || { echo "duplicate agent id: $extra_id" >&2; exit 2; }
 done
 command -v openssl >/dev/null 2>&1 || { echo "openssl is required" >&2; exit 1; }
