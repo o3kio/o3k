@@ -415,7 +415,7 @@ if [[ -n "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS:-}" ]]; then
     [[ "$extra_agent_id" =~ ^[A-Za-z0-9._-]+$ && ${#extra_agent_id} -le 128 ]] \
       || fail "additional compute agent id is invalid"
   done
-  sudo -n bash -c 'printf "%s\\n" "$@" >"$1"; chmod 0600 "$1"' \
+  sudo -n bash -c 'file="$1"; shift; printf "%s\\n" "$@" >"$file"; chmod 0600 "$file"' \
     _ "$extra_agent_ids_file" "${extra_agent_ids[@]}"
 else
   sudo -n rm -f -- "$extra_agent_ids_file"
