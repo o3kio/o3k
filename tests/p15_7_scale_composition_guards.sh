@@ -70,7 +70,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "bootstrap/join", "actions/drain", "actions/remove", "docker restart",
                  "capacity_total", "CAPACITY_AFTER_ADD", "drain_blockers", "cargo test --locked -p o3kd",
                  "o3k-p15-7-journey-owned=", "o3k-p15-7-journey-owned-v1",
-                 "rm -rf -- \"$WORK_ROOT\"", "second_real_host_required", "assert_owned_domains_absent"):
+                 "rm -rf -- \"$WORK_ROOT\"", "second_real_host_required", "assert_owned_domains_absent",
+                 "agent-id", "agent identity transfer failed", "/var/lib/o3k-compute/agent-id"):
     assert required in journey, required
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
 PY

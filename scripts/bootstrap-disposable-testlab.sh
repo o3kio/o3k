@@ -410,10 +410,18 @@ sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/
 extra_agent_ids=()
 extra_agent_ids_file="$STATE_ROOT/.extra-agent-ids"
 if [[ -n "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS:-}" ]]; then
-  IFS=',' read -r -a extra_agent_ids <<<"${O3K_TESTLAB_ADDITIONAL_AGENT_IDS}"
+  extra_agent_ids_csv="${O3K_TESTLAB_ADDITIONAL_AGENT_IDS}"
+  [[ "$extra_agent_ids_csv" != ,* && "$extra_agent_ids_csv" != *, \
+    && "$extra_agent_ids_csv" != *,,* ]] \
+    || fail "additional compute agent ids contain an empty entry"
+  IFS=',' read -r -a extra_agent_ids <<<"$extra_agent_ids_csv"
+  declare -A seen_extra_agent_ids=()
   for extra_agent_id in "${extra_agent_ids[@]}"; do
     [[ "$extra_agent_id" =~ ^[A-Za-z0-9._-]+$ && ${#extra_agent_id} -le 128 ]] \
       || fail "additional compute agent id is invalid"
+    [[ -z "${seen_extra_agent_ids[$extra_agent_id]:-}" ]] \
+      || fail "additional compute agent id is duplicated: $extra_agent_id"
+    seen_extra_agent_ids[$extra_agent_id]=1
   done
   sudo -n bash -c 'file="$1"; shift; printf "%s\\n" "$@" >"$file"; chmod 0600 "$file"' \
     _ "$extra_agent_ids_file" "${extra_agent_ids[@]}"

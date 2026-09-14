@@ -74,7 +74,8 @@ cleanup() {
     virsh -c qemu:///system undefine "$u" --nvram >/dev/null 2>&1 || virsh -c qemu:///system undefine "$u" >/dev/null 2>&1 || true
   done
   for p in "${SEEDS[@]}" "${OVERLAYS[@]}"; do [[ -f "$p" ]] && rm -f -- "$p"; done
-  rm -f -- "$SSH_KEY" "$SSH_KEY.pub" "$KNOWN_HOSTS"
+  rm -f -- "$SSH_KEY" "$SSH_KEY.pub" "$KNOWN_HOSTS" \
+    "$WORK_ROOT"/block-*-agent-id
   if [[ -f "$WORK_ROOT/.o3k-owned" ]] \
     && grep -Fqx 'o3k-p15-7-journey-owned-v1' "$WORK_ROOT/.o3k-owned" \
     && grep -Fqx "run=$RUN_ID" "$WORK_ROOT/.o3k-owned"; then
@@ -149,12 +150,15 @@ join_block() {
 install_agent() {
   local id="$1" ip="$2" c="$TLS_ROOT/agents/$1" bin="${O3K_REAL_HOST_COMPUTE_BINARY:-$STATE_ROOT/bin/o3k-compute}"
   [[ -x "$bin" ]] || die "real compute-agent binary unavailable"
+  [[ -f "$c/agent-id" && ! -L "$c/agent-id" ]] || die "canonical agent identity file unavailable: $id"
   sudo -n install -m 0644 "$TLS_ROOT/ca.pem" "$WORK_ROOT/ca.pem" || die "cannot read canonical CA"
+  sudo -n install -m 0644 "$c/agent-id" "$WORK_ROOT/$id-agent-id" || die "cannot read canonical agent identity: $id"
   scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$bin" "$VM_USER@$ip:/tmp/o3k-compute" || die "agent binary transfer failed: $id"
   scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/ca.pem" "$VM_USER@$ip:/tmp/ca.pem" || die "CA transfer failed: $id"
+  scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id-agent-id" "$VM_USER@$ip:/tmp/agent-id" || die "agent identity transfer failed: $id"
   scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id.pem" "$VM_USER@$ip:/tmp/agent.pem" || die "certificate transfer failed: $id"
   scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id-key.pem" "$VM_USER@$ip:/tmp/agent-key.pem" || die "private key transfer failed: $id"
-  ssh_vm "$ip" "sudo install -d -m 0750 /etc/o3k/tls /var/lib/o3k-compute; sudo install -m 0755 /tmp/o3k-compute /usr/local/bin/o3k-compute; sudo install -m 0644 /tmp/ca.pem /etc/o3k/tls/ca.pem; sudo install -m 0644 /tmp/agent.pem /etc/o3k/tls/agent.pem; sudo install -m 0600 /tmp/agent-key.pem /etc/o3k/tls/agent-key.pem; sudo sh -c 'O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=${id}-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup /usr/local/bin/o3k-compute >/var/log/o3k-compute.log 2>&1 &'" || die "agent start failed: $id"
+  ssh_vm "$ip" "sudo install -d -m 0750 /etc/o3k/tls /var/lib/o3k-compute; sudo install -m 0755 /tmp/o3k-compute /usr/local/bin/o3k-compute; sudo install -m 0644 /tmp/ca.pem /etc/o3k/tls/ca.pem; sudo install -m 0644 /tmp/agent.pem /etc/o3k/tls/agent.pem; sudo install -m 0600 /tmp/agent-key.pem /etc/o3k/tls/agent-key.pem; sudo install -m 0644 /tmp/agent-id /var/lib/o3k-compute/agent-id; sudo sh -c 'O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=${id}-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup /usr/local/bin/o3k-compute >/var/log/o3k-compute.log 2>&1 &'" || die "agent start failed: $id"
   for _ in $(seq 1 90); do ssh_vm "$ip" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 && return; sleep 2; done
   die "real mTLS agent did not become ready: $id"
 }

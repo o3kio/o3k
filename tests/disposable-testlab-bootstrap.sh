@@ -39,6 +39,8 @@ assert 'O3K_TESTLAB_ADDITIONAL_AGENT_IDS' in bootstrap
 assert 'extra_agent_ids_file="$STATE_ROOT/.extra-agent-ids"' in bootstrap
 assert '--extra-agent-ids-file' in bootstrap
 assert 'file="$1"; shift; printf "%s\\\\n" "$@" >"$file"' in bootstrap
+assert 'additional compute agent ids contain an empty entry' in bootstrap
+assert 'additional compute agent id is duplicated' in bootstrap
 assert 'canonical extra agent identity was not generated' in bootstrap
 assert 'O3K_TESTLAB_CONTROL_BIND_ADDR' in bootstrap
 assert 'o3k-b${RUN_ID: -8}' in bootstrap
