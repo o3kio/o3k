@@ -23,6 +23,10 @@ assert 'OS_PROJECT_NAME=admin' in bootstrap
 assert '--no-create-home' in bootstrap
 assert 'o3k-disposable-account-v1' in bootstrap
 assert 'protobuf-compiler' in bootstrap
+assert 'cargo build --locked --release --bin o3kd --bin o3k' in bootstrap
+assert 'bootstrap_testlab() {' in bootstrap
+assert '"$STATE_ROOT/bin/o3k" init' in bootstrap
+assert '"$STATE_ROOT/bin/o3k" join' in bootstrap
 assert 'O3K_REAL_HOST_COMPUTE_BINARY' in bootstrap
 assert 'O3K_REAL_HOST_NETWORK_CAPABILITY=ambient-net-admin' in bootstrap
 assert 'usermod --append --groups "$group" o3k-compute' in bootstrap
@@ -70,15 +74,12 @@ ready_block = bootstrap[ready_start:ready_end]
 assert 'for _ in $(seq 1 60);' in ready_block
 assert 'sleep 1' in ready_block
 assert ready_block.count('/readyz"') == 2
-agent_start = bootstrap.index('if [[ "$O3K_PROVIDER" == agent ]]; then')
-provider_else = bootstrap.index('\nelse\n', agent_start)
-provider_end = bootstrap.index('\nfi\nelse\n', provider_else)
-agent_block = bootstrap[agent_start:provider_else]
-fake_block = bootstrap[provider_else:provider_end]
-assert agent_block.index('start_compute') < agent_block.index('wait_for_o3kd_ready')
-assert agent_block.index('wait_for_o3kd_ready') < agent_block.index('wait_for_compute_ready')
-assert bootstrap.index('wait_for_o3kd_health') < agent_start
-assert fake_block.index('wait_for_o3kd_ready') < fake_block.index('start_compute')
+launch_start = bootstrap.index('start_service o3kd ')
+assert bootstrap.index('wait_for_o3kd_health', launch_start) < bootstrap.index('wait_for_o3kd_control', launch_start)
+assert bootstrap.index('wait_for_o3kd_control', launch_start) < bootstrap.index('bootstrap_testlab', launch_start)
+assert bootstrap.index('bootstrap_testlab', launch_start) < bootstrap.index('start_compute', launch_start)
+assert bootstrap.index('start_compute', launch_start) < bootstrap.index('wait_for_compute_ready', launch_start)
+assert bootstrap.index('wait_for_compute_ready', launch_start) < bootstrap.index('wait_for_o3kd_ready', launch_start)
 assert 'userdel o3k' in cleanup
 assert 'OS_PASSWORD:' not in workflow
 assert workflow.count('scripts/bootstrap-disposable-testlab.sh') >= 2

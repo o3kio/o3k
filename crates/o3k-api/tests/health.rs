@@ -49,6 +49,46 @@ async fn health_endpoint_is_machine_readable() -> Result<(), Box<dyn std::error:
 }
 
 #[tokio::test]
+async fn readiness_projects_independent_runtime_and_bootstrap_gates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = o3k_api::AppState::new();
+    state.set_runtime_ready(true);
+    state.set_bootstrap_ready(false);
+    let response = o3k_api::router_with_state(state.clone())
+        .oneshot(Request::get("/readyz").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // A durable bootstrap transition must not mask an unrelated runtime
+    // failure, and it must become visible without replacing the other gate.
+    state.set_bootstrap_ready(true);
+    state.set_runtime_ready(false);
+    let response = o3k_api::router_with_state(state.clone())
+        .oneshot(Request::get("/readyz").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    state.set_runtime_ready(true);
+    let response = o3k_api::router_with_state(state)
+        .oneshot(Request::get("/readyz").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_state_preserves_no_secret_readiness_behavior()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = o3k_api::AppState::new();
+    state.set_runtime_ready(true);
+    let response = o3k_api::router_with_state(state)
+        .oneshot(Request::get("/readyz").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
 async fn network_policy_api_persists_updates_and_deletes_canonical_intent()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::PathBuf::from(format!(

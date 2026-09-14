@@ -105,10 +105,16 @@ pub fn router() -> Router {
 
 /// Composition-root state for the O3K API router: the optional service
 /// instances (identity, image, network, compute, console, agent registry)
-/// that the protocol adapters dispatch to, plus the readiness flag.
+/// that the protocol adapters dispatch to, plus independent runtime and
+/// bootstrap readiness gates.
 #[derive(Clone)]
 pub struct AppState {
-    ready: Arc<AtomicBool>,
+    /// Readiness is the conjunction of independent runtime and bootstrap
+    /// gates.  Keeping the inputs separate prevents a bootstrap transition
+    /// from accidentally resurrecting readiness after a control/runtime
+    /// failure.
+    runtime_ready: Arc<AtomicBool>,
+    bootstrap_ready: Arc<AtomicBool>,
     identity: Option<Arc<TokenService>>,
     image: Option<Arc<ImageService>>,
     network: Option<Arc<NetworkService>>,
@@ -143,7 +149,8 @@ impl Default for AppState {
     /// the bounded TestLab flat profile turns it off explicitly.
     fn default() -> Self {
         Self {
-            ready: Arc::default(),
+            runtime_ready: Arc::default(),
+            bootstrap_ready: Arc::new(AtomicBool::new(true)),
             identity: None,
             image: None,
             network: None,
@@ -191,8 +198,23 @@ impl AppState {
     }
 
     /// Marks the router ready (or not) for `/readyz` reporting.
+    ///
+    /// This compatibility helper updates both gates.  Composition roots
+    /// should use [`Self::set_runtime_ready`] and [`Self::set_bootstrap_ready`]
+    /// independently so unrelated components cannot overwrite one another.
     pub fn set_ready(&self, ready: bool) {
-        self.ready.store(ready, Ordering::Release);
+        self.set_runtime_ready(ready);
+        self.set_bootstrap_ready(ready);
+    }
+
+    /// Publishes the runtime/control/provider readiness input.
+    pub fn set_runtime_ready(&self, ready: bool) {
+        self.runtime_ready.store(ready, Ordering::Release);
+    }
+
+    /// Publishes the canonical bootstrap readiness input.
+    pub fn set_bootstrap_ready(&self, ready: bool) {
+        self.bootstrap_ready.store(ready, Ordering::Release);
     }
 
     /// Configures the Keystone-compatible token service.
@@ -350,7 +372,7 @@ impl AppState {
     /// Reports whether the router is ready (`/readyz` returns 200 when true).
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.runtime_ready.load(Ordering::Acquire) && self.bootstrap_ready.load(Ordering::Acquire)
     }
 }
 

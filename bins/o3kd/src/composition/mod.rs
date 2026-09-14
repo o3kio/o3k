@@ -1097,6 +1097,7 @@ pub async fn build_composition(
                 .bootstrap_secret()
                 .map(|secret| secret.expose().to_owned()),
             lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            readiness: state.clone(),
         },
     ))
     .with_composition_reader(std::sync::Arc::new(
@@ -1222,7 +1223,12 @@ pub async fn build_composition(
     } else {
         true
     };
-    state.set_ready(compute_ready && bootstrap_ready);
+    // Keep runtime/provider and canonical bootstrap readiness independent.
+    // The bootstrap adapter updates only its gate after init/join durably
+    // reaches `ready`; a control-plane failure therefore cannot be masked by
+    // a concurrent bootstrap transition.
+    state.set_runtime_ready(compute_ready);
+    state.set_bootstrap_ready(bootstrap_ready);
     let control_task = match (
         config.compute_server_certificate.clone(),
         config.compute_server_private_key.clone(),
@@ -1245,7 +1251,7 @@ pub async fn build_composition(
             Some(tokio::spawn(async move {
                 let result = server.serve(control_shutdown_signal()).await;
                 if let Err(error) = &result {
-                    readiness.set_ready(false);
+                    readiness.set_runtime_ready(false);
                     if let Ok(mut registry) = lifecycle_readiness.write() {
                         let _ = registry.update_controller_health(
                             "compute",
@@ -1382,7 +1388,7 @@ pub async fn shutdown_signal(state: o3k_api::AppState) {
             Err(error) => tracing::error!(%error, "SIGTERM handler failed; shutting down"),
         },
     }
-    state.set_ready(false);
+    state.set_runtime_ready(false);
 }
 
 #[cfg(test)]
