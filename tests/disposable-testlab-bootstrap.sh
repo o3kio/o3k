@@ -36,8 +36,7 @@ assert '--init-groups' in bootstrap
 assert 'nohup bash -c' in bootstrap
 assert 'O3K_COMPUTE_BRIDGE_NAME' in bootstrap
 assert 'O3K_TESTLAB_ADDITIONAL_AGENT_IDS' in bootstrap
-assert '--extra-agent-ids' in bootstrap
-assert 'canonical certificate bundle: --extra-agent-ids' in bootstrap
+assert 'extra_agent_args+=(--extra-agent-id "$extra_agent_id")' in bootstrap
 assert 'canonical extra agent identity was not generated' in bootstrap
 assert 'O3K_TESTLAB_CONTROL_BIND_ADDR' in bootstrap
 assert 'o3k-b${RUN_ID: -8}' in bootstrap
