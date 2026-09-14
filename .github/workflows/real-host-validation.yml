@@ -109,8 +109,6 @@ jobs:
           printf 'o3k-disposable-image-v1\nrun=%s\n' "${GITHUB_RUN_ID}" > "${image_path}.o3k-owned"
           chmod 0600 "${image_path}.o3k-owned"
           printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >> "${GITHUB_ENV}"
-          printf 'O3K_REAL_HOST_PROTECTED_PATHS<<O3K_PATHS_EOF\n%s\n%s\nO3K_PATHS_EOF\n' \
-            "${O3K_REAL_HOST_PROTECTED_PATHS}" "${image_path}" >> "${GITHUB_ENV}"
           curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 \
             --proto '=https' --tlsv1.2 \
             --output "${image_path}" "${CIRROS_IMAGE_URL}"
@@ -438,8 +436,6 @@ jobs:
             | sha256sum --check --strict --status
           chmod 0644 "${image_path}"
           printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >> "${GITHUB_ENV}"
-          printf 'O3K_REAL_HOST_PROTECTED_PATHS<<O3K_PATHS_EOF\n%s\n%s\nO3K_PATHS_EOF\n' \
-            "${O3K_REAL_HOST_PROTECTED_PATHS}" "${image_path}" >> "${GITHUB_ENV}"
 
       - name: Bootstrap fresh generic TestLab
         id: generic_bootstrap
@@ -545,8 +541,6 @@ jobs:
           {
             printf 'O3K_P15_7_HOST_IMAGE_PATH=%s\n' "${image_path}"
             printf 'O3K_P15_7_HOST_IMAGE_SHA256=%s\n' "${P15_7_HOST_IMAGE_SHA256}"
-            printf 'O3K_REAL_HOST_PROTECTED_PATHS<<O3K_PATHS_EOF\n%s\n%s\nO3K_PATHS_EOF\n' \
-              "${O3K_REAL_HOST_PROTECTED_PATHS}" "${image_path}"
           } >>"${GITHUB_ENV}"
 
       - name: Run P15.7 scale/composition convergence gate

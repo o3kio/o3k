@@ -15,6 +15,10 @@ TLS_ROOT="$STATE_ROOT/tls"
 WORK_ROOT="${RUNNER_TEMP:-/tmp}/o3k-p15-7-journey-$RUN_ID"
 HOST_IMAGE="${O3K_P15_7_HOST_IMAGE_PATH:-}"
 HOST_IMAGE_SHA256="${O3K_P15_7_HOST_IMAGE_SHA256:-}"
+# The cloud image used to boot the genuine compute hosts is also a valid
+# workload image.  A caller may provide a separately prepared image, but an
+# ambient image-list lookup is never permitted.
+O3K_TESTLAB_IMAGE_PATH="${O3K_TESTLAB_IMAGE_PATH:-$HOST_IMAGE}"
 NETWORK="${O3K_P15_7_LIBVIRT_NETWORK:-default}"
 AUTH_PORT="${O3K_TESTLAB_PORT:-28080}"
 CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-28551}"
@@ -56,8 +60,15 @@ JOURNEY_START_MS="$(date +%s%3N)"
 [[ "$HOST_IMAGE" && -f "$HOST_IMAGE" && ! -L "$HOST_IMAGE" ]] || die "second_real_host_required: pinned VM image unavailable"
 [[ "$HOST_IMAGE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || die "pinned VM image digest required"
 printf '%s  %s\n' "$HOST_IMAGE_SHA256" "$HOST_IMAGE" | sha256sum --check --strict --status || die "VM image digest mismatch"
+[[ -f "$O3K_TESTLAB_IMAGE_PATH" && ! -L "$O3K_TESTLAB_IMAGE_PATH" ]] || die "owned workload image unavailable"
+[[ -n "$ARAF_URL" ]] || die "araf_projection_prerequisite_missing: external Araf endpoint is not configured"
 [[ -f "$STATE_ROOT/.o3k-run-owned" && -f "$TLS_ROOT/ca.pem" ]] || die "owned TestLab state/TLS unavailable"
-[[ -f "$TLS_ROOT/agents/block-a/agent.pem" && -f "$TLS_ROOT/agents/block-b/agent.pem" && -f "$TLS_ROOT/agents/block-c/agent.pem" && -f "$TLS_ROOT/agents/block-d/agent.pem" ]] || die "canonical capacity/replacement identities unavailable"
+for required_agent in block-a block-b block-c block-d; do
+  sudo -n test -f "$TLS_ROOT/agents/$required_agent/agent.pem" \
+    || die "canonical capacity/replacement identities unavailable"
+  sudo -n test ! -L "$TLS_ROOT/agents/$required_agent/agent.pem" \
+    || die "canonical agent certificate is a symlink: $required_agent"
+done
 [[ "$(sudo -n docker inspect -f '{{.State.Running}}' "$PG_CONTAINER" 2>/dev/null || true)" == true ]] || die "run-scoped PostgreSQL unavailable"
 for agent_id in block-a block-b block-c block-d; do
   sudo -n install -m 0644 "$TLS_ROOT/agents/$agent_id/agent.pem" "$WORK_ROOT/$agent_id.pem" || die "cannot read canonical certificate: $agent_id"
@@ -66,14 +77,66 @@ done
 
 declare -a DOMAINS=() UUIDS=() OVERLAYS=() SEEDS=() IPS=()
 declare -A BLOCK_IDS=()
+OS_IMAGE_ID="" OS_KEYPAIR_NAME="" OS_NETWORK_ID="" OS_SUBNET_ID="" OS_PORT_ID="" OS_FLAVOR_ID=""
+OS_WORKLOAD_A="" OS_WORKLOAD_B=""
+CLEANUP_DONE=false
 REPLAY_JOIN_FILE=""
 FOREIGN_PROJECT_ID=""
 FOREIGN_TOKEN=""
 FOREIGN_TOKEN_PROJECT_ID=""
 CROSS_TENANT_CONCEALMENT=false
 FOREIGN_BEFORE="$(virsh -c qemu:///system list --all --uuid 2>/dev/null | sed '/^$/d' | sort)"
+openstack_absent_code() {
+  local kind="$1" id="$2" output status
+  output="$(openstack "$kind" show "$id" 2>&1)"; status=$?
+  if ((status == 0)); then
+    return 1
+  fi
+  # A missing object is an idempotent terminal state. Authentication,
+  # transport, and policy failures are deliberately not treated as absence.
+  if grep -Eiq '(^|[[:space:]])(404|not[[:space:]-]*found)([[:space:]]|$)|no .* (with a name or id|found)' <<<"$output"; then
+    return 0
+  fi
+  return 2
+}
+delete_owned_openstack() {
+  local kind="$1" id="$2"; shift 2
+  if openstack "$kind" show "$id" >/dev/null 2>&1; then
+    openstack "$kind" delete "$@" "$id" >/dev/null 2>&1 || return 1
+    openstack_absent_code "$kind" "$id"
+    return $?
+  fi
+  openstack_absent_code "$kind" "$id"
+}
 cleanup() {
   set +e
+  [[ "$CLEANUP_DONE" == true ]] && { set -e; return; }
+  local cleanup_failed=false
+  # OpenStack objects are deleted by their recorded IDs in dependency order.
+  # No name or prefix scan is used, so a failed journey cannot touch foreign
+  # tenant resources. Keep IDs and the work directory when verification fails.
+  for workload_id in "$OS_WORKLOAD_B" "$OS_WORKLOAD_A"; do
+    [[ "$workload_id" =~ ^[0-9a-fA-F-]{36}$ ]] || continue
+    delete_owned_openstack server "$workload_id" --wait || cleanup_failed=true
+  done
+  if [[ "$OS_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    delete_owned_openstack port "$OS_PORT_ID" || cleanup_failed=true
+  fi
+  if [[ "$OS_KEYPAIR_NAME" =~ ^o3k-p15-7-[A-Za-z0-9._-]+$ ]]; then
+    delete_owned_openstack keypair "$OS_KEYPAIR_NAME" || cleanup_failed=true
+  fi
+  if [[ "$OS_FLAVOR_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    delete_owned_openstack flavor "$OS_FLAVOR_ID" || cleanup_failed=true
+  fi
+  if [[ "$OS_SUBNET_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    delete_owned_openstack subnet "$OS_SUBNET_ID" || cleanup_failed=true
+  fi
+  if [[ "$OS_NETWORK_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    delete_owned_openstack network "$OS_NETWORK_ID" || cleanup_failed=true
+  fi
+  if [[ "$OS_IMAGE_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    delete_owned_openstack image "$OS_IMAGE_ID" || cleanup_failed=true
+  fi
   for i in "${!DOMAINS[@]}"; do
     d="${DOMAINS[$i]}"; u="${UUIDS[$i]}"
     actual_uuid="$(virsh -c qemu:///system domuuid "$d" 2>/dev/null || true)"
@@ -82,14 +145,28 @@ cleanup() {
     virsh -c qemu:///system dumpxml "$actual_uuid" 2>/dev/null | grep -Fq "o3k-p15-7-journey-owned=$RUN_ID" || continue
     virsh -c qemu:///system destroy "$actual_uuid" >/dev/null 2>&1 || true
     virsh -c qemu:///system undefine "$actual_uuid" --nvram >/dev/null 2>&1 || virsh -c qemu:///system undefine "$actual_uuid" >/dev/null 2>&1 || true
+    if virsh -c qemu:///system domuuid "$d" >/dev/null 2>&1; then
+      echo "P15.7 cleanup: owned domain remains after destroy/undefine: $d ($u)" >&2
+      cleanup_failed=true
+    fi
   done
-  for p in "${SEEDS[@]}" "${OVERLAYS[@]}"; do [[ -f "$p" ]] && rm -f -- "$p"; done
-  rm -f -- "$SSH_KEY" "$SSH_KEY.pub" "$KNOWN_HOSTS" \
-    "$WORK_ROOT"/block-*-agent-id
-  if [[ -f "$WORK_ROOT/.o3k-owned" ]] \
+  # Backing disks and the ownership marker are retained when a domain cannot
+  # be proven absent. This preserves recovery evidence and prevents deleting
+  # files still referenced by a live or undefined VM.
+  if [[ "$cleanup_failed" == false ]]; then
+    for p in "${SEEDS[@]}" "${OVERLAYS[@]}"; do [[ -f "$p" ]] && rm -f -- "$p"; done
+    rm -f -- "$SSH_KEY" "$SSH_KEY.pub" "$KNOWN_HOSTS" \
+      "$WORK_ROOT"/block-*-agent-id
+  fi
+  if [[ "$cleanup_failed" == false && -f "$WORK_ROOT/.o3k-owned" ]] \
     && grep -Fqx 'o3k-p15-7-journey-owned-v1' "$WORK_ROOT/.o3k-owned" \
     && grep -Fqx "run=$RUN_ID" "$WORK_ROOT/.o3k-owned"; then
     rm -rf -- "$WORK_ROOT"
+  fi
+  if [[ "$cleanup_failed" == true ]]; then
+    echo "P15.7 cleanup blocked; owned VM records and backing files were retained" >&2
+  else
+    CLEANUP_DONE=true
   fi
   set -e
 }
@@ -126,7 +203,7 @@ provision_vm() {
   DOMAINS+=("$d"); UUIDS+=(""); OVERLAYS+=("$overlay"); SEEDS+=("$seed")
   index=$((${#DOMAINS[@]} - 1))
   qemu-img create -q -f qcow2 -F qcow2 -b "$HOST_IMAGE" "$overlay" || die "overlay creation failed: $id"
-  cat >"$WORK_ROOT/$1-user-data" <<EOF
+  cat >"$WORK_ROOT/user-data-$1" <<EOF
 #cloud-config
 users:
   - name: $VM_USER
@@ -142,14 +219,18 @@ runcmd:
   - [ sh, -c, 'systemctl enable --now ssh || true' ]
   - [ sh, -c, 'systemctl enable --now libvirtd || systemctl enable --now libvirt-daemon || true' ]
 EOF
-  printf 'instance-id: o3k-p15-7-%s-%s\nlocal-hostname: %s-host\n' "$RUN_ID" "$id" "$id" >"$WORK_ROOT/$1-meta-data"
-  genisoimage -quiet -output "$seed" -volid cidata -joliet -rock "$WORK_ROOT/$1-user-data" "$WORK_ROOT/$1-meta-data" || die "cloud-init seed failed: $id"
+  printf 'instance-id: o3k-p15-7-%s-%s\nlocal-hostname: %s-host\n' "$RUN_ID" "$id" "$id" >"$WORK_ROOT/meta-data-$1"
+  genisoimage -quiet -output "$seed" -volid cidata -joliet -rock \
+    -graft-points "user-data=$WORK_ROOT/user-data-$1" "meta-data=$WORK_ROOT/meta-data-$1" \
+    || die "cloud-init seed failed: $id"
   virt-install --connect qemu:///system --name "$d" --memory 2048 --vcpus 2 --import --disk "path=$overlay,format=qcow2" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio" --os-variant ubuntu24.04 --metadata "description=o3k-p15-7-journey-owned=$RUN_ID" --noautoconsole --wait 0 >/dev/null || die "VM boot failed: $id"
   uuid="$(virsh -c qemu:///system domuuid "$d")"; [[ "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || die "VM UUID unavailable: $id"
   UUIDS[index]="$uuid"
   ip="$(find_ip "$d")"
   for _ in $(seq 1 120); do ssh_vm "$ip" true >/dev/null 2>&1 && break; sleep 2; done
   ssh_vm "$ip" true >/dev/null 2>&1 || die "SSH unavailable on real VM: $id"
+  ssh_vm "$ip" "sudo cloud-init status --wait" >/dev/null 2>&1 || die "cloud-init did not complete on real VM: $id"
+  ssh_vm "$ip" "sudo virsh -c qemu:///system uri" >/dev/null 2>&1 || die "libvirt is not available on real VM: $id"
   IPS+=("$ip")
 }
 join_block() {
@@ -157,7 +238,10 @@ join_block() {
   local certificate="$WORK_ROOT/$id.pem"
   O3K_API_URL="$API" O3K_BOOTSTRAP_SECRET="$(sudo -n cat "$STATE_ROOT/.bootstrap-secret")" "$STATE_ROOT/bin/o3k" init --profile-id default --agent-id "$id" >"$init" || die "o3k init failed: $id"
   token="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("enrollment_token", ""))' "$init")"; [[ "$token" ]] || die "init grant missing: $id"
-  vcpus="$(ssh_vm "$ip" nproc)"; memory="$(ssh_vm "$ip" awk '/MemTotal:/ {print int($2/1024); exit}' /proc/meminfo)"; [[ "$vcpus" =~ ^[1-9][0-9]*$ && "$memory" =~ ^[1-9][0-9]*$ ]] || die "real inventory unavailable: $id"
+  vcpus="$(ssh_vm "$ip" nproc)"
+  # shellcheck disable=SC2016 # awk is intentionally evaluated on the VM.
+  memory="$(ssh_vm "$ip" awk '/MemTotal:/ {print int($2/1024); exit}' /proc/meminfo)"
+  [[ "$vcpus" =~ ^[1-9][0-9]*$ && "$memory" =~ ^[1-9][0-9]*$ ]] || die "real inventory unavailable: $id"
   epoch="$(openssl rand -hex 16)"
   python3 - "$token" "$id" "$epoch" "$certificate" "$vcpus" "$memory" >"$WORK_ROOT/$id-join-request.json" <<'PY'
 import json, pathlib, sys
@@ -180,7 +264,8 @@ install_agent() {
   local id="$1" ip="$2" c="$TLS_ROOT/agents/$1" bin="${O3K_REAL_HOST_COMPUTE_BINARY:-$STATE_ROOT/bin/o3k-compute}"
   local remote_stage="/tmp/o3k-p15-7-agent-$RUN_ID-$id"
   [[ -x "$bin" ]] || die "real compute-agent binary unavailable"
-  [[ -f "$c/agent-id" && ! -L "$c/agent-id" ]] || die "canonical agent identity file unavailable: $id"
+  sudo -n test -f "$c/agent-id" || die "canonical agent identity file unavailable: $id"
+  sudo -n test ! -L "$c/agent-id" || die "canonical agent identity file is a symlink: $id"
   [[ "$(sudo -n cat "$c/agent-id")" == "$id" ]] || die "canonical agent identity does not match agent id: $id"
   sudo -n install -m 0644 "$TLS_ROOT/ca.pem" "$WORK_ROOT/ca.pem" || die "cannot read canonical CA"
   sudo -n install -m 0644 "$c/agent-id" "$WORK_ROOT/$id-agent-id" || die "cannot read canonical agent identity: $id"
@@ -218,7 +303,6 @@ api_get /operator/diagnostics/providers >"$WORK_ROOT/providers.json"
 api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity.json"
 api_get /services >"$WORK_ROOT/services.json"
 api_get /resource-types >"$WORK_ROOT/resource-types.json"
-[[ -n "$ARAF_URL" ]] || die "Araf projection boundary is not configured"
 curl --fail --silent --show-error "$ARAF_URL/healthz" >"$WORK_ROOT/araf-health.json" || die "Araf projection is not healthy"
 curl --fail --silent --show-error "$ARAF_URL/api/v1/resources/compute.server" >"$WORK_ROOT/araf-compute.json" || die "Araf compute projection is unavailable"
 python3 - "$WORK_ROOT/blocks.json" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" <<'PY'
@@ -235,15 +319,37 @@ dims=doc.get("dimensions")
 if not isinstance(dims,list) or not dims:
     raise SystemExit("capacity dimensions are absent")
 total=0
+found=False
 for dim in dims:
+    if dim.get("resource_class") != "VCPU":
+        continue
+    found=True
     value=dim.get("allocatable")
     if not isinstance(value,int) or value < 1:
-        raise SystemExit("capacity allocatable is not positive")
+        raise SystemExit("VCPU capacity allocatable is not positive")
     total += value
+if not found or total < 1:
+    raise SystemExit("VCPU capacity dimension is absent")
 print(total)
 PY
 }
 CAPACITY_BEFORE="$(capacity_total "$WORK_ROOT/capacity.json")" || die "initial Placement capacity was not honest"
+
+# Create workload prerequisites through the public compatibility API. The
+# preceding lifecycle deletes its own objects; relying on an ambient flavor,
+# image, or network would make a fresh journey depend on stale state.
+OS_IMAGE_ID="$(openstack image create "o3k-p15-7-$RUN_ID-image" --file "$O3K_TESTLAB_IMAGE_PATH" --disk-format qcow2 --container-format bare -f value -c id | tr -d '[:space:]')"
+[[ "$OS_IMAGE_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "owned workload image creation returned an invalid id"
+OS_KEYPAIR_NAME="o3k-p15-7-$RUN_ID-key"
+openstack keypair create --public-key "$SSH_KEY.pub" "$OS_KEYPAIR_NAME" >/dev/null || die "owned workload keypair creation failed"
+OS_NETWORK_ID="$(openstack network create "o3k-p15-7-$RUN_ID-network" -f value -c id | tr -d '[:space:]')"
+[[ "$OS_NETWORK_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "owned workload network creation returned an invalid id"
+OS_SUBNET_ID="$(openstack subnet create --network "$OS_NETWORK_ID" --subnet-range "198.18.0.0/29" "o3k-p15-7-$RUN_ID-subnet" -f value -c id | tr -d '[:space:]')"
+[[ "$OS_SUBNET_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "owned workload subnet creation returned an invalid id"
+OS_PORT_ID="$(openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN_ID-port" -f value -c id | tr -d '[:space:]')"
+[[ "$OS_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "owned workload port creation returned an invalid id"
+OS_FLAVOR_ID="$(openstack flavor create "o3k-p15-7-$RUN_ID-flavor" --ram 512 --disk 10 --vcpus 1 -f value -c id | tr -d '[:space:]')"
+[[ "$OS_FLAVOR_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "owned workload flavor creation returned an invalid id"
 
 # Add a third genuine VM/block before any drain. Capacity must grow in the
 # canonical diagnostics projection; a second logical object on one host is not
@@ -263,15 +369,22 @@ done
 # Exercise a constrained real workload through the canonical native resource
 # API. Keep it present while draining so the durable blocker projection is
 # observed honestly, then clear it before removing the block.
-FLAVOR_ID="$(openstack flavor list -f value -c ID | head -n1 | tr -d '[:space:]')"
-IMAGE_ID="$(openstack image list -f value -c ID | head -n1 | tr -d '[:space:]')"
-NETWORK_ID="$(openstack network list -f value -c ID | head -n1 | tr -d '[:space:]')"
-[[ "$FLAVOR_ID" && "$IMAGE_ID" && "$NETWORK_ID" ]] || die "real workload inputs unavailable"
 curl --fail --silent --show-error -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-a" "$API/compute/servers" \
-  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-a\",\"image_id\":\"$IMAGE_ID\",\"flavor_id\":\"$FLAVOR_ID\",\"network_ids\":[\"$NETWORK_ID\"]}}" >"$WORK_ROOT/workload-a.json" || die "constrained real workload placement failed"
+  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-a\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"network_ids\":[\"$OS_NETWORK_ID\"]}}" >"$WORK_ROOT/workload-a.json" || die "constrained real workload placement failed"
 WORKLOAD_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("resource_id", ""))' "$WORK_ROOT/workload-a.json")"; [[ "$WORKLOAD_A" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload A has no canonical id"
+OS_WORKLOAD_A="$WORKLOAD_A"
 curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$API/compute/servers/$WORKLOAD_A" >"$WORK_ROOT/workload-a-show.json" || die "workload A did not converge"
 GEN_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metadata"]["generation"])' "$WORK_ROOT/workload-a-show.json")"
+HOST_A=""
+for _ in $(seq 1 60); do
+  HOST_A="$(openstack server show "$WORKLOAD_A" -f value -c OS-EXT-SRV-ATTR:HOST 2>/dev/null || true)"
+  [[ -n "$HOST_A" && "$HOST_A" != "None" ]] && break
+  sleep 1
+done
+[[ "$HOST_A" =~ ^(block-a|block-b|block-c)$ ]] || die "workload A placement host did not converge to a joined real host"
+DRAIN_AGENT="$HOST_A"
+DRAIN_ID="${BLOCK_IDS[$DRAIN_AGENT]:-}"
+[[ "$DRAIN_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload A placement has no canonical block mapping"
 
 # Prove tenant concealment with a genuinely different project-scoped token.
 # An unauthenticated request is not cross-tenant evidence. Do not fabricate
@@ -299,7 +412,6 @@ foreign_code="$(curl --silent --output "$FOREIGN_SHOW" --write-out '%{http_code}
 ! grep -Fq "$WORKLOAD_A" "$FOREIGN_SHOW" || die "foreign response disclosed workload A"
 CROSS_TENANT_CONCEALMENT=true
 
-DRAIN_ID="${BLOCK_IDS[block-a]}"
 DRAIN_GEN="$(python3 - "$WORK_ROOT/blocks.json" "$DRAIN_ID" <<'PY'
 import json,sys
 for x in json.load(open(sys.argv[1])):
@@ -320,8 +432,9 @@ PY
 # must not be selected.  The OpenStack host projection is the public placement
 # observation for this real workload.
 curl --fail --silent --show-error -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-b" "$API/compute/servers" \
-  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-b\",\"image_id\":\"$IMAGE_ID\",\"flavor_id\":\"$FLAVOR_ID\",\"network_ids\":[\"$NETWORK_ID\"]}}" >"$WORK_ROOT/workload-b.json" || die "placement did not avoid drained block"
+  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-b\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"network_ids\":[\"$OS_NETWORK_ID\"]}}" >"$WORK_ROOT/workload-b.json" || die "placement did not avoid drained block"
 WORKLOAD_B="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("resource_id", ""))' "$WORK_ROOT/workload-b.json")"; [[ "$WORKLOAD_B" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload B has no canonical id"
+OS_WORKLOAD_B="$WORKLOAD_B"
 HOST_B=""
 for _ in $(seq 1 60); do
   HOST_B="$(openstack server show "$WORKLOAD_B" -f value -c OS-EXT-SRV-ATTR:HOST 2>/dev/null || true)"
@@ -329,7 +442,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [[ -n "$HOST_B" && "$HOST_B" != "None" ]] || die "workload B placement host did not converge"
-[[ "$HOST_B" != block-a* ]] || die "new placement selected drained block-a"
+[[ "$HOST_B" != "$HOST_A" ]] || die "new placement selected drained provider host: $HOST_A"
 GEN_B="$(curl --fail --silent -H "Authorization: Bearer $TOKEN" "$API/compute/servers/$WORKLOAD_B" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["generation"])')"
 curl --fail --silent --show-error -X DELETE -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: p15-7-$RUN_ID-delete-b" -H "If-Match: generation-$GEN_B" "$API/compute/servers/$WORKLOAD_B" >/dev/null || die "workload B cleanup failed"
 for _ in $(seq 1 60); do
@@ -409,6 +522,11 @@ api_get /operator/building-blocks >"$WORK_ROOT/blocks-after-restart.json"
 python3 - "$WORK_ROOT/blocks-after-restart.json" "${BLOCK_IDS[block-b]}" <<'PY'
 import json,sys
 assert any(x.get('block',{}).get('id')==sys.argv[2] for x in json.load(open(sys.argv[1])))
+PY
+python3 - "$WORK_ROOT/blocks-after-restart.json" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "$DRAIN_ID" <<'PY'
+import json,sys
+ids={x.get('block',{}).get('id') for x in json.load(open(sys.argv[1]))}
+assert sys.argv[2] in ids and sys.argv[3] in ids and sys.argv[4] not in ids
 PY
 
 FOREIGN_AFTER="$(virsh -c qemu:///system list --all --uuid 2>/dev/null | sed '/^$/d' | sort)"

@@ -518,6 +518,12 @@ assert "persist-credentials: false" in text
 assert "Verify immutable source checkout" in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
+p15_image_step = text.split("      - name: Prepare pinned P15.7 VM host image\n", 1)[1]
+p15_image_step = p15_image_step.split("      - name: Run P15.7 scale/composition convergence gate\n", 1)[0]
+# Large owned images are tracked by their marker and exact cleanup path. They
+# must not enter the protected-path inventory, whose bounded file-size policy
+# is intentionally fail-closed.
+assert "O3K_REAL_HOST_PROTECTED_PATHS" not in p15_image_step
 assert "if: steps.guard.outputs.ready == 'true'" in text
 assert "test \"${outcome}\" = success" in text
 assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-inventory.sh").exists()
