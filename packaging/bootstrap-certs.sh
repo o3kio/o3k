@@ -5,6 +5,7 @@ OUTPUT_DIR=/etc/o3k/tls
 SERVER_NAME=o3k-control-plane
 AGENT_ID=compute-agent
 EXTRA_AGENT_IDS=()
+EXTRA_AGENT_IDS_FILE=
 FORCE=0
 append_extra_agent_id() {
   local extra_id="$1"
@@ -23,10 +24,21 @@ while (($#)); do
       for extra_id in "${extra_ids[@]}"; do append_extra_agent_id "$extra_id"; done
       shift 2
       ;;
+    --extra-agent-ids-file) EXTRA_AGENT_IDS_FILE="${2:?missing extra agent ids file}"; shift 2;;
     --force) FORCE=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
+if [[ -n "$EXTRA_AGENT_IDS_FILE" ]]; then
+  [[ "$EXTRA_AGENT_IDS_FILE" == /* && "$EXTRA_AGENT_IDS_FILE" != / ]] \
+    || { echo "extra agent ids file must be an absolute non-root path" >&2; exit 2; }
+  [[ -f "$EXTRA_AGENT_IDS_FILE" && ! -L "$EXTRA_AGENT_IDS_FILE" ]] \
+    || { echo "extra agent ids file is missing or unsafe" >&2; exit 2; }
+  while IFS= read -r extra_id || [[ -n "$extra_id" ]]; do
+    [[ -n "$extra_id" ]] || { echo "extra agent ids file contains an empty id" >&2; exit 2; }
+    append_extra_agent_id "$extra_id"
+  done <"$EXTRA_AGENT_IDS_FILE"
+fi
 [[ "$OUTPUT_DIR" == /* && "$OUTPUT_DIR" != / ]] || { echo "output directory must be an absolute non-root path" >&2; exit 2; }
 [[ "$SERVER_NAME" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "server name contains unsupported characters" >&2; exit 2; }
 [[ "$AGENT_ID" =~ ^[A-Za-z0-9._-]+$ && ${#AGENT_ID} -le 128 ]] || { echo "agent id contains unsupported characters" >&2; exit 2; }
