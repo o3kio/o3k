@@ -398,8 +398,9 @@ evidence; claim limitations; acceptance criteria.
   workload -> topology/capability placement enforced -> add block -> drain
   block with honest blockers -> remove/rejoin/replace -> restart control
   plane and PostgreSQL -> IDs/topology/profile survive -> native API
-  authoritative -> OpenStack projection convergent -> Araf consumes the same
-  truth.
+  authoritative -> OpenStack projection convergent. Araf is an optional
+  external consumer and is outside the mandatory TestLab/P15.7 dependency
+  chain; if configured, it may be observed as additional evidence.
 - **Out of scope:** proving the final scale ceiling; hiding or working around
   drain blockers; simulated-agent substitution for real blocks.
 - **Authority model:** the same canonical authorities as P15.1–P15.6; this
@@ -412,8 +413,9 @@ evidence; claim limitations; acceptance criteria.
   restart matrix.
 - **OpenStack compatibility implications:** OpenStack projection convergence
   is verified against the accepted compatibility profile vocabulary only.
-- **Araf implications:** Araf consumes the same topology/capacity/service
-  truth at journey end, with no dashboard-specific state.
+- **Araf implications:** Araf may consume the same topology/capacity/service
+  truth at journey end, with no dashboard-specific state. Araf availability is
+  optional and must not gate TestLab readiness or P15.7 completion.
 - **Failure/restart behavior:** mid-journey control-plane and PostgreSQL
   restart; block failure injection; recovery without lost IDs, topology, or
   profile state.

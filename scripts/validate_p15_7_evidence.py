@@ -4,7 +4,8 @@
 This validator intentionally accepts only a completed real-host artifact.  A
 missing, skipped, fake-provider, or fixture result is not evidence of P15.7.
 The runner-specific journey is supplied by the protected host; this file only
-validates its redacted, machine-readable result.
+validates its redacted, machine-readable result. Araf is an optional external
+consumer and is recorded separately without becoming a mandatory gate.
 """
 
 from __future__ import annotations
@@ -130,8 +131,20 @@ def validate(
                 fail(errors, "journey.drain.evacuation_claimed must be false")
         projections = mapping(journey.get("projections_convergent"), "journey.projections_convergent", errors)
         if projections is not None:
-            for name in ("native", "openstack", "araf"):
+            # Native and OpenStack projections are mandatory P15.7 evidence.
+            # Araf is an external, optional consumer and is deliberately not a
+            # TestLab or P15 dependency.  Its state is recorded honestly, but
+            # it must never be allowed to manufacture mandatory convergence.
+            for name in ("native", "openstack"):
                 passed(projections.get(name), f"journey.projections_convergent.{name}", errors)
+            araf = mapping(projections.get("araf"), "journey.projections_convergent.araf", errors)
+            if araf is not None:
+                if araf.get("required") is not False:
+                    fail(errors, "journey.projections_convergent.araf.required must be false")
+                if araf.get("status") not in {"passed", "reachable", "not_configured", "not_applicable", "unavailable"}:
+                    fail(errors, "journey.projections_convergent.araf.status is invalid")
+                if not isinstance(araf.get("reason"), str) or not araf["reason"].strip():
+                    fail(errors, "journey.projections_convergent.araf.reason must be explicit")
 
     security = mapping(root.get("security_negatives"), "security_negatives", errors)
     if security is not None:

@@ -21,7 +21,9 @@ doc = {
     "multiple_authenticated_joins":{"status":"passed","count":2,"each_authenticated":True},
     "drain":{"status":"passed","no_new_placement":True,"blockers_observed":True,"evacuation_claimed":False},
     "remove_rejoin_replace":True,"restart_recovery":True,
-    "projections_convergent":{"native":True,"openstack":True,"araf":True}},
+    "projections_convergent":{"native":True,"openstack":True,
+      "araf":{"required":False,"status":"not_configured",
+        "reason":"external_consumer_not_provisioned"}}},
   "restart_recovery":{"status":"passed","canonical_state_survived":True,"postgres":True,"sqlite_parity":True},
   "security_negatives":{"unauthenticated_join_rejected":True,"replay_join_rejected":True,
     "cross_tenant_concealment":True,"foreign_state_preserved":True},
@@ -47,6 +49,32 @@ d["execution"]["provider"] = "fake"; p.write_text(json.dumps(d))
 PY
 if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
   echo "fake provider accepted by P15.7 validator" >&2; exit 1
+fi
+
+# Araf is an optional external consumer. An artifact produced with no
+# O3K_P15_7_ARAF_URL must remain valid, while a required Araf projection must
+# fail closed.
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+d["execution"]["provider"] = "agent"
+d["journey"]["projections_convergent"]["araf"] = {
+    "required": False, "status": "not_applicable",
+    "reason": "external_consumer_not_provisioned"
+}
+p.write_text(json.dumps(d))
+PY
+python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
+  --expected-source-sha 0123456789abcdef0123456789abcdef01234567 \
+  --expected-profile small-edge-cloud
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+d["journey"]["projections_convergent"]["araf"]["required"] = True
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "required Araf projection accepted by P15.7 validator" >&2; exit 1
 fi
 
 GATE_ARTIFACT_DIR="${WORK_DIR}/gate-artifacts"
@@ -77,7 +105,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "join-request.json", "remote_agent_cleanup", "sudo mkdir -- '$remote_stage'", "sudo rm -rf -- '$remote_stage'",
                  "canonical agent identity does not match agent id", "cross_tenant_test_prerequisite_missing",
                  "FOREIGN_PROJECT_ID", "FOREIGN_TOKEN_PROJECT_ID", "foreign token scope mismatch",
-                 "foreign project can read workload A", "CROSS_TENANT_CONCEALMENT=true"):
+                 "foreign project can read workload A", "CROSS_TENANT_CONCEALMENT=true",
+                 "record_optional_araf", "external_consumer_not_provisioned", "araf-projection.json"):
     assert required in journey, required
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
@@ -97,5 +126,6 @@ assert 'OS_WORKLOAD_A="$WORKLOAD_A"' in journey and 'OS_WORKLOAD_B="$WORKLOAD_B"
 assert 'O3K_TESTLAB_IMAGE_PATH="$HOST_IMAGE"' in journey
 assert 'WORKLOAD_IMAGE_MARKER="${O3K_TESTLAB_IMAGE_PATH}.o3k-owned"' in journey
 assert "o3k-p15-7-host-image-v1" in journey
+assert "araf_projection_prerequisite_missing" not in journey
 PY
 echo "P15.7 validator guards passed"

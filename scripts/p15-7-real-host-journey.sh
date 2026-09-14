@@ -27,6 +27,8 @@ CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-28551}"
 PG_CONTAINER="${O3K_P15_7_PG_CONTAINER:-o3k-p15-7-postgres-$RUN_ID}"
 API="http://127.0.0.1:$AUTH_PORT/o3k/v1"
 ARAF_URL="${O3K_P15_7_ARAF_URL:-}"
+ARAF_STATUS="not_configured"
+ARAF_REASON="external_consumer_not_provisioned"
 VM_USER="${O3K_P15_7_VM_USER:-o3k}"
 die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
@@ -69,7 +71,6 @@ grep -Fqx 'o3k-p15-7-host-image-v1' "$WORKLOAD_IMAGE_MARKER" \
   || die "owned workload image marker is invalid"
 grep -Fqx "run=$RUN_ID" "$WORKLOAD_IMAGE_MARKER" \
   || die "owned workload image marker run mismatch"
-[[ -n "$ARAF_URL" ]] || die "araf_projection_prerequisite_missing: external Araf endpoint is not configured"
 [[ -f "$STATE_ROOT/.o3k-run-owned" && -f "$TLS_ROOT/ca.pem" ]] || die "owned TestLab state/TLS unavailable"
 for required_agent in block-a block-b block-c block-d; do
   sudo -n test -f "$TLS_ROOT/agents/$required_agent/agent.pem" \
@@ -311,13 +312,43 @@ api_get /operator/diagnostics/providers >"$WORK_ROOT/providers.json"
 api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity.json"
 api_get /services >"$WORK_ROOT/services.json"
 api_get /resource-types >"$WORK_ROOT/resource-types.json"
-curl --fail --silent --show-error "$ARAF_URL/healthz" >"$WORK_ROOT/araf-health.json" || die "Araf projection is not healthy"
-curl --fail --silent --show-error "$ARAF_URL/api/v1/resources/compute.server" >"$WORK_ROOT/araf-compute.json" || die "Araf compute projection is unavailable"
 python3 - "$WORK_ROOT/blocks.json" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" <<'PY'
 import json,sys
 ids={x.get('block',{}).get('id') for x in json.load(open(sys.argv[1]))}
 assert sys.argv[2] in ids and sys.argv[3] in ids and len(ids)>=2
 PY
+
+# Araf is an optional external consumer, never an O3K/TestLab dependency.  If
+# explicitly configured, record reachability as additional evidence without
+# allowing an unavailable endpoint to block the canonical O3K journey.
+record_optional_araf() {
+  if [[ -z "$ARAF_URL" ]]; then
+    ARAF_STATUS="not_configured"
+    ARAF_REASON="external_consumer_not_provisioned"
+  elif curl --proto '=http,https' --connect-timeout 5 --max-time 15 --fail --silent --show-error \
+      "$ARAF_URL/healthz" >"$WORK_ROOT/araf-health.json" \
+    && curl --proto '=http,https' --connect-timeout 5 --max-time 15 --fail --silent --show-error \
+      "$ARAF_URL/api/v1/resources/compute.server" >"$WORK_ROOT/araf-compute.json"; then
+    ARAF_STATUS="reachable"
+    ARAF_REASON="optional_external_projection_reachable"
+  else
+    ARAF_STATUS="unavailable"
+    ARAF_REASON="optional_external_projection_unreachable"
+  fi
+  python3 - "$ARTIFACT_DIR/p15-7-araf-projection.json" "$ARAF_STATUS" "$ARAF_REASON" <<'PY'
+import json
+import pathlib
+import sys
+
+path, status, reason = sys.argv[1:]
+pathlib.Path(path).write_text(json.dumps({
+    "projection": "araf",
+    "required": False,
+    "status": status,
+    "reason": reason,
+}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
 
 capacity_total() {
   python3 - "$1" <<'PY'
@@ -544,20 +575,21 @@ while IFS= read -r uuid; do [[ -z "$uuid" || "$FOREIGN_AFTER" == *"$uuid"* ]] ||
 
 # SQLite parity remains an actual process boundary, not a boolean fixture.
 cargo test --locked -p o3kd --all-features --test p15_1_topology_process --test p15_5_building_block_process -- --test-threads=1 >/dev/null || die "SQLite parity process boundary failed"
+record_optional_araf
 cleanup
 assert_owned_domains_absent
 [[ ! -e "$SSH_KEY" && ! -e "$KNOWN_HOSTS" ]] || die "owned journey files remain after cleanup"
 JOURNEY_END_MS="$(date +%s%3N)"
 
-python3 - "$EVIDENCE_FILE" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" <<'PY'
+python3 - "$EVIDENCE_FILE" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" <<'PY'
 import json,pathlib,sys
-path=pathlib.Path(sys.argv[1]); sha=sys.argv[2].lower(); profile=sys.argv[3]; blocks=int(sys.argv[4]); start=int(sys.argv[5]); end=int(sys.argv[6]); cross_tenant=sys.argv[7] == "true"
+path=pathlib.Path(sys.argv[1]); sha=sys.argv[2].lower(); profile=sys.argv[3]; blocks=int(sys.argv[4]); start=int(sys.argv[5]); end=int(sys.argv[6]); cross_tenant=sys.argv[7] == "true"; araf_status=sys.argv[8]; araf_reason=sys.argv[9]
 def passed():
     return {"status":"passed"}
 doc={
  "artifact_type":"o3k-p15-7-scale-composition-evidence","schema_version":1,"phase":"P15.7","status":"passed","evidence_tier":"protected-real-host","profile":profile,"tested_source_sha":sha,
  "execution":{"real_o3kd":passed(),"real_auth":passed(),"real_execution_boundary":passed(),"multiple_real_hosts":passed(),"sqlite_parity":passed(),"provider":"agent","hypervisor":"libvirt","database_backend":"postgres","block_count":blocks},
- "journey":{"fresh_deployment":passed(),"init":passed(),"multiple_authenticated_joins":{"status":"passed","count":blocks,"each_authenticated":True},"topology":passed(),"capacity":passed(),"constrained_placement":passed(),"add_block_capacity_growth":passed(),"drain":{"status":"passed","no_new_placement":True,"blockers_observed":True,"evacuation_claimed":False},"remove_rejoin_replace":passed(),"restart_recovery":passed(),"projections_convergent":{"native":True,"openstack":True,"araf":True}},
+ "journey":{"fresh_deployment":passed(),"init":passed(),"multiple_authenticated_joins":{"status":"passed","count":blocks,"each_authenticated":True},"topology":passed(),"capacity":passed(),"constrained_placement":passed(),"add_block_capacity_growth":passed(),"drain":{"status":"passed","no_new_placement":True,"blockers_observed":True,"evacuation_claimed":False},"remove_rejoin_replace":passed(),"restart_recovery":passed(),"projections_convergent":{"native":passed(),"openstack":passed(),"araf":{"required":False,"status":araf_status,"reason":araf_reason}}},
  "security_negatives":{"unauthenticated_join_rejected":True,"replay_join_rejected":True,"cross_tenant_concealment":cross_tenant,"foreign_state_preserved":True},
  "restart_recovery":{"status":"passed","canonical_state_survived":True,"postgres":True,"sqlite_parity":True},
  "bootstrap_timing":{"measured":end>start,"duration_ms":end-start,"excludes_preprovisioned_external_work":True,"sample_count":1,"boundary":"fresh o3kd through two authenticated joins","claim_scope":"profile-specific-measurement-only"},
