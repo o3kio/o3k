@@ -51,7 +51,6 @@ case "${O3K_PROVIDER}" in
 esac
 O3KD_PID=
 COMPUTE_PID=
-EXTRA_AGENT_IDS_SOURCE=
 OPENSTACK_VENV="${O3K_OPENSTACK_VENV:-}"
 O3KD_READY=false
 COMPUTE_READY=false
@@ -163,9 +162,6 @@ PY
 
 failure_cleanup() {
   local status="$?"
-  if [[ -n "$EXTRA_AGENT_IDS_SOURCE" ]]; then
-    rm -f -- "$EXTRA_AGENT_IDS_SOURCE" 2>/dev/null || true
-  fi
   if ((status != 0)); then
     write_result failed "$FAIL_REASON" 2>/dev/null || true
     cleanup_failed=false
@@ -413,7 +409,7 @@ sudo -n install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
 sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k" "$STATE_ROOT/bin/o3k"
 sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
 extra_agent_ids=()
-extra_agent_ids_file="$STATE_ROOT/.extra-agent-ids"
+extra_agent_ids_csv=
 if [[ -n "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS:-}" ]]; then
   extra_agent_ids_csv="${O3K_TESTLAB_ADDITIONAL_AGENT_IDS}"
   [[ "$extra_agent_ids_csv" != ,* && "$extra_agent_ids_csv" != *, \
@@ -427,18 +423,7 @@ if [[ -n "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS:-}" ]]; then
     [[ -z "${seen_extra_agent_ids[$extra_agent_id]:-}" ]] \
       || fail "additional compute agent id is duplicated: $extra_agent_id"
     seen_extra_agent_ids[$extra_agent_id]=1
-  done
-  EXTRA_AGENT_IDS_SOURCE="$(mktemp "${RUNNER_TEMP%/}/o3k-extra-agent-ids.XXXXXX")"
-  printf '%s\n' "${extra_agent_ids[@]}" >"$EXTRA_AGENT_IDS_SOURCE"
-  chmod 0600 "$EXTRA_AGENT_IDS_SOURCE"
-  sudo -n install -m 0600 "$EXTRA_AGENT_IDS_SOURCE" "$extra_agent_ids_file" \
-    || fail "cannot stage additional compute agent ids"
-  sudo -n cmp -- "$EXTRA_AGENT_IDS_SOURCE" "$extra_agent_ids_file" \
-    || fail "staged additional compute ids do not match requested identities"
-  rm -f -- "$EXTRA_AGENT_IDS_SOURCE"
-  EXTRA_AGENT_IDS_SOURCE=
-else
-  sudo -n rm -f -- "$extra_agent_ids_file"
+    done
 fi
 if ((${#extra_agent_ids[@]} > 0)); then
   printf 'canonical extra agent identities requested: %s\n' "${extra_agent_ids[*]}" >&2
@@ -446,7 +431,7 @@ fi
 if ((${#extra_agent_ids[@]} > 0)); then
   sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
     --server-name o3k-control-plane --agent-id compute-agent \
-    --extra-agent-ids-file "$extra_agent_ids_file"
+    --extra-agent-ids "$extra_agent_ids_csv"
 else
   sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
     --server-name o3k-control-plane --agent-id compute-agent
