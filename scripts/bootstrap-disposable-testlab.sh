@@ -424,8 +424,10 @@ if [[ -n "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS:-}" ]]; then
       || fail "additional compute agent id is duplicated: $extra_agent_id"
     seen_extra_agent_ids[$extra_agent_id]=1
   done
-  sudo -n bash -c 'file="$1"; shift; printf "%s\\n" "$@" >"$file"; chmod 0600 "$file"' \
-    _ "$extra_agent_ids_file" "${extra_agent_ids[@]}"
+  printf '%s\n' "${extra_agent_ids[@]}" \
+    | sudo -n tee "$extra_agent_ids_file" >/dev/null \
+    || fail "cannot stage additional compute agent ids"
+  sudo -n chmod 0600 "$extra_agent_ids_file"
 else
   sudo -n rm -f -- "$extra_agent_ids_file"
 fi
