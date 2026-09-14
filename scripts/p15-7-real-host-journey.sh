@@ -15,10 +15,11 @@ TLS_ROOT="$STATE_ROOT/tls"
 WORK_ROOT="${RUNNER_TEMP:-/tmp}/o3k-p15-7-journey-$RUN_ID"
 HOST_IMAGE="${O3K_P15_7_HOST_IMAGE_PATH:-}"
 HOST_IMAGE_SHA256="${O3K_P15_7_HOST_IMAGE_SHA256:-}"
-# The cloud image used to boot the genuine compute hosts is also a valid
-# workload image.  A caller may provide a separately prepared image, but an
-# ambient image-list lookup is never permitted.
-O3K_TESTLAB_IMAGE_PATH="${O3K_TESTLAB_IMAGE_PATH:-$HOST_IMAGE}"
+# The pinned cloud image used to boot the genuine compute hosts is also the
+# workload image.  Do not inherit the generic-phase O3K_TESTLAB_IMAGE_PATH:
+# that variable is intentionally left exported by the dispatcher and points
+# at a different disposable image.
+O3K_TESTLAB_IMAGE_PATH="$HOST_IMAGE"
 WORKLOAD_IMAGE_MARKER="${O3K_TESTLAB_IMAGE_PATH}.o3k-owned"
 NETWORK="${O3K_P15_7_LIBVIRT_NETWORK:-default}"
 AUTH_PORT="${O3K_TESTLAB_PORT:-28080}"
