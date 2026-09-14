@@ -191,7 +191,7 @@ trap failure_cleanup EXIT
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
 [[ "$BRIDGE_NAME" =~ ^[A-Za-z0-9_-]{1,15}$ ]] || fail "invalid compute bridge name"
-for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps usermod gpasswd setpriv nohup setsid; do
+for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps nproc usermod gpasswd setpriv nohup setsid; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"
 done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required"
@@ -399,12 +399,13 @@ python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable afte
 command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable after dependency setup"
 pkg-config --exists libvirt 2>/dev/null || fail "libvirt development files are unavailable after dependency setup"
 command -v protoc >/dev/null 2>&1 || fail "protobuf compiler is unavailable after dependency setup"
-cargo build --locked --release --bin o3kd
+cargo build --locked --release --bin o3kd --bin o3k
 # virt-sys deliberately tolerates a missing pkg-config probe for docs builds;
 # make the runtime link explicit after the host preflight proves libvirt exists.
 RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
   cargo build --locked --release --features libvirt --bin o3k-compute-bin
 sudo -n install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
+sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k" "$STATE_ROOT/bin/o3k"
 sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
 sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
   --server-name o3k-control-plane --agent-id compute-agent
@@ -621,6 +622,50 @@ wait_for_o3kd_control() {
   fail "o3kd authenticated control endpoint did not become reachable"
 }
 
+bootstrap_testlab() {
+  local agent_id agent_epoch vcpus memory_mb disk_gb init_output enrollment_token
+  agent_id="$(sudo -n cat "$STATE_ROOT/tls/agent-id")"
+  [[ "$agent_id" =~ ^[A-Za-z0-9._-]+$ ]] || fail "generated agent identity is invalid"
+  agent_epoch="$(openssl rand -hex 16)"
+  vcpus="$(nproc --all 2>/dev/null || true)"
+  memory_mb="$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)"
+  disk_gb="${O3K_COMPUTE_MAX_DISK_GB:-10}"
+  [[ "$vcpus" =~ ^[1-9][0-9]*$ && "$memory_mb" =~ ^[1-9][0-9]*$ \
+    && "$disk_gb" =~ ^[1-9][0-9]*$ ]] || fail "host inventory is unavailable for canonical join"
+
+  export O3K_API_URL="http://127.0.0.1:${AUTH_PORT}/o3k/v1"
+  export O3K_BOOTSTRAP_SECRET="$BOOTSTRAP_SECRET"
+  init_output="$(mktemp "${RUNNER_TEMP%/}/o3k-init.XXXXXX")"
+  trap 'rm -f -- "${init_output:-}"' RETURN
+  # The output file is a runner-owned 0600 temporary; shell redirection is
+  # intentionally performed before sudo so the service account never needs
+  # write access to the runner temp directory.
+  # shellcheck disable=SC2024
+  sudo -n -u "$SERVICE_ACCOUNT" -- env O3K_API_URL="$O3K_API_URL" \
+    O3K_BOOTSTRAP_SECRET="$BOOTSTRAP_SECRET" "$STATE_ROOT/bin/o3k" init \
+    --agent-id "$agent_id" >"$init_output" \
+    || fail "canonical o3k init failed"
+  enrollment_token="$(python3 - "$init_output" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    response = json.load(stream)
+token = response.get("enrollment_token")
+if not isinstance(token, str) or not token:
+    raise SystemExit("canonical init did not return an enrollment token")
+print(token)
+PY
+  )" || fail "canonical init response was invalid"
+  rm -f -- "$init_output"
+  trap - RETURN
+
+  sudo -n -u "$SERVICE_ACCOUNT" -- env O3K_API_URL="$O3K_API_URL" \
+    "$STATE_ROOT/bin/o3k" join --token "$enrollment_token" \
+    --agent-id "$agent_id" --agent-epoch "$agent_epoch" \
+    --certificate "$STATE_ROOT/tls/agent.pem" \
+    --vcpus "$vcpus" --memory-mb "$memory_mb" --disk-gb "$disk_gb" \
+    >/dev/null || fail "canonical authenticated o3k join failed"
+}
+
 wait_for_o3kd_ready() {
   for _ in $(seq 1 60); do
     curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/readyz" >/dev/null 2>&1 && break
@@ -650,16 +695,11 @@ wait_for_compute_ready() {
 
 start_service o3kd "$O3KD_ACCOUNT" "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
 wait_for_o3kd_health
-if [[ "$O3K_PROVIDER" == agent ]]; then
-  wait_for_o3kd_control
-  start_compute
-  wait_for_o3kd_ready
-  wait_for_compute_ready
-else
-  wait_for_o3kd_ready
-  start_compute
-  wait_for_compute_ready
-fi
+wait_for_o3kd_control
+bootstrap_testlab
+start_compute
+wait_for_compute_ready
+wait_for_o3kd_ready
 else
   echo "reusing authenticated disposable TestLab for run ${RUN_ID}"
   curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/readyz" >/dev/null 2>&1 \

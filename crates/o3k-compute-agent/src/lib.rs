@@ -2236,6 +2236,17 @@ fn pem_certificates(input: &[u8]) -> Result<Vec<CertificateDer<'static>>, AgentE
         .map(|blocks| blocks.into_iter().map(CertificateDer::from).collect())
 }
 
+/// Decode the single leaf certificate carried by the bootstrap API. The
+/// authorized-agent ledger hashes DER bytes (the same representation exposed
+/// by the TLS peer), so hashing the PEM envelope would reject valid joins.
+pub fn certificate_der(input: &[u8]) -> Result<Vec<u8>, AgentError> {
+    let mut certificates = pem_certificates(input)?;
+    if certificates.len() != 1 {
+        return Err(AgentError::TlsMaterial);
+    }
+    Ok(certificates.remove(0).to_vec())
+}
+
 fn pem_private_key(input: &[u8]) -> Result<PrivateKeyDer<'static>, AgentError> {
     for (label, constructor) in [
         ("PRIVATE KEY", 0_u8),
@@ -6179,6 +6190,15 @@ mod tests {
     fn malformed_tls_material_is_rejected_before_transport_start() {
         assert!(pem_certificates(b"not a certificate").is_err());
         assert!(pem_private_key(b"not a private key").is_err());
+    }
+
+    #[test]
+    fn bootstrap_certificate_is_normalized_to_one_der_leaf() -> Result<(), AgentError> {
+        let pem = include_bytes!("../tests/fixtures/agent.pem");
+        let der = certificate_der(pem)?;
+        assert!(!der.is_empty());
+        assert!(certificate_der(include_bytes!("../tests/fixtures/agent-chain.pem")).is_err());
+        Ok(())
     }
 
     #[test]

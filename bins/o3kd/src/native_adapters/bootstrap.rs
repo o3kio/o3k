@@ -32,6 +32,10 @@ pub struct BootstrapAdapter {
     pub locations: o3k_kernel::LocationRegistry,
     pub bootstrap_secret: Option<String>,
     pub lock: Arc<tokio::sync::Mutex<()>>,
+    /// Runtime readiness projection.  The durable bootstrap row remains the
+    /// authority; this handle only publishes its latest phase to the
+    /// independent readiness gate after a successful durable write.
+    pub readiness: o3k_api::AppState,
 }
 
 fn now_ms() -> u64 {
@@ -309,6 +313,7 @@ impl BootstrapWorkflow for BootstrapAdapter {
             .upsert_bootstrap_state(&state_record(&state)?)
             .await
             .map_err(|_| BootstrapFailure::Internal)?;
+        self.readiness.set_bootstrap_ready(state.is_ready());
         record_bootstrap_audit(
             &self.store,
             format!(
@@ -388,6 +393,10 @@ impl BootstrapWorkflow for BootstrapAdapter {
             if old != &fingerprint {
                 return Err(BootstrapFailure::Conflict);
             }
+            // Replayed joins still project the durable canonical phase into
+            // the live readiness gate (for example after a transient runtime
+            // failure), without changing any other readiness input.
+            self.readiness.set_bootstrap_ready(state.is_ready());
             let block_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
                 format!("o3k:building-block:{}", request.agent_id).as_bytes(),
@@ -424,11 +433,13 @@ impl BootstrapWorkflow for BootstrapAdapter {
             return Err(BootstrapFailure::Unauthorized);
         }
         let capabilities = parse_capabilities(&request.capabilities)?;
+        let certificate_der = o3k_compute_agent::certificate_der(request.certificate.as_bytes())
+            .map_err(|_| BootstrapFailure::Invalid)?;
         self.agents
             .register_prepared(
                 &request.agent_id,
                 &request.agent_epoch,
-                request.certificate.as_bytes(),
+                &certificate_der,
                 capabilities,
             )
             .await
@@ -478,6 +489,7 @@ impl BootstrapWorkflow for BootstrapAdapter {
             .upsert_bootstrap_state(&state_record(&state)?)
             .await
             .map_err(|_| BootstrapFailure::Internal)?;
+        self.readiness.set_bootstrap_ready(state.is_ready());
         // Mark the grant consumed only after all bounded provider/lifecycle
         // side effects and the durable enrolled projection have succeeded.
         // A crash before this point can safely replay through the durable
@@ -504,5 +516,78 @@ impl BootstrapWorkflow for BootstrapAdapter {
             ready: true,
             config: client_config(&state.cloud_profile_id),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use o3k_store::BootstrapRepository;
+
+    #[tokio::test]
+    async fn init_join_projects_live_and_restart_readiness()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        let placement = o3k_placement::PlacementLedger::open(
+            std::env::temp_dir().join(format!("o3k-bootstrap-{}", Uuid::now_v7())),
+            store.clone(),
+        )
+        .await?;
+        let readiness = o3k_api::AppState::new();
+        readiness.set_runtime_ready(true);
+        readiness.set_bootstrap_ready(false);
+        let adapter = BootstrapAdapter {
+            store: store.clone(),
+            placement,
+            agents: Arc::new(o3k_compute_agent::NodeRegistry::default()),
+            locations: o3k_kernel::LocationRegistry::default(),
+            bootstrap_secret: Some("secret".to_owned()),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            readiness: readiness.clone(),
+        };
+
+        let init = adapter
+            .init(
+                InitRequest {
+                    profile_id: None,
+                    request_id: Some("test-init".to_owned()),
+                    agent_id: Some("node-test".to_owned()),
+                },
+                Some("secret"),
+            )
+            .await
+            .map_err(|error| format!("init failed: {error:?}"))?;
+        assert_eq!(init.phase, "initialized");
+        assert!(!readiness.is_ready());
+
+        adapter
+            .join(JoinRequest {
+                enrollment_token: init.enrollment_token.ok_or("missing grant")?,
+                agent_id: "node-test".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                certificate: String::from_utf8(include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem").to_vec())?,
+                region: None,
+                availability_domain: None,
+                failure_domain_id: None,
+                capabilities: serde_json::json!({"architecture":"x86_64","provider_name":"o3k-compute","provider_version":"test"}),
+                inventories: BTreeMap::from([(String::from("VCPU"), 2), (String::from("MEMORY_MB"), 1024)]),
+            })
+            .await
+            .map_err(|error| format!("join failed: {error:?}"))?;
+        assert!(readiness.is_ready());
+        let durable = store
+            .get_bootstrap_state("default")
+            .await?
+            .ok_or("bootstrap state missing")?;
+        assert_eq!(durable.phase, "ready");
+
+        // A newly created runtime reconstructs the bootstrap gate from the
+        // durable phase; no restart is needed for the preceding transition,
+        // and a restart does not lose it.
+        let restarted = o3k_api::AppState::new();
+        restarted.set_runtime_ready(true);
+        restarted.set_bootstrap_ready(durable.phase == "ready");
+        assert!(restarted.is_ready());
+        Ok(())
     }
 }
