@@ -11,6 +11,10 @@ append_extra_agent_id() {
   local extra_id="$1"
   [[ "$extra_id" =~ ^[A-Za-z0-9._-]+$ && ${#extra_id} -le 128 ]] \
     || { echo "extra agent id contains unsupported characters" >&2; exit 2; }
+  for existing_id in "${EXTRA_AGENT_IDS[@]}"; do
+    [[ "$existing_id" != "$extra_id" ]] \
+      || { echo "duplicate extra agent id: $extra_id" >&2; exit 2; }
+  done
   EXTRA_AGENT_IDS+=("$extra_id")
 }
 while (($#)); do

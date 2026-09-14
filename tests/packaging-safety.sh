@@ -321,6 +321,14 @@ for extra_id in block-a block-b; do
   grep -q "URI:urn:o3k:compute:agent:$extra_id" \
     <(openssl x509 -in "$EXTRA_TLS_DIR/agents/$extra_id/agent.pem" -noout -text)
 done
+echo block-a >"$WORK_DIR/duplicate-extra-agent-ids"
+echo block-a >>"$WORK_DIR/duplicate-extra-agent-ids"
+if bash "$ROOT_DIR/packaging/bootstrap-certs.sh" \
+    --output-dir "$WORK_DIR/certs-duplicate/tls" --server-name o3k-control-plane --agent-id compute-agent \
+    --extra-agent-ids-file "$WORK_DIR/duplicate-extra-agent-ids"; then
+  echo "certificate bootstrap accepted duplicate extra agent ids" >&2
+  exit 1
+fi
 
 # The packaged real-libvirt profile runs the local agent provider
 # (O3K_PROVIDER=agent, driven by o3k-compute.service): ADR-0086
