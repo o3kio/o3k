@@ -81,5 +81,20 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
     assert required in journey, required
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
+# Prevent recurrence of the bootstrap/identity and cleanup regressions that
+# previously made a protected run appear healthier than it was.
+assert 'sudo -n test -f "$TLS_ROOT/agents/$required_agent/agent.pem"' in journey
+assert '-graft-points "user-data=$WORK_ROOT/user-data-$1" "meta-data=$WORK_ROOT/meta-data-$1"' in journey
+assert 'ssh_vm "$ip" "sudo cloud-init status --wait"' in journey
+assert 'ssh_vm "$ip" "sudo virsh -c qemu:///system uri"' in journey
+assert 'if [[ "$cleanup_failed" == false ]]; then' in journey
+assert 'delete_owned_openstack()' in journey
+assert 'policy failures are deliberately not treated as absence' in journey
+assert 'DRAIN_AGENT="$HOST_A"' in journey
+assert '"$HOST_B" != "$HOST_A"' in journey
+assert 'resource_class") != "VCPU"' in journey
+assert 'OS_WORKLOAD_A="$WORKLOAD_A"' in journey and 'OS_WORKLOAD_B="$WORKLOAD_B"' in journey
+assert 'WORKLOAD_IMAGE_MARKER="${O3K_TESTLAB_IMAGE_PATH}.o3k-owned"' in journey
+assert "o3k-p15-7-host-image-v1" in journey
 PY
 echo "P15.7 validator guards passed"
