@@ -54,7 +54,10 @@ create workload → enforce topology/capability placement → add Building Block
 capacity expands without replatforming → drain a block → new allocations avoid
 it (blockers honest) → remove/rejoin/replace → restart control plane → restart
 PostgreSQL where appropriate → canonical IDs/topology/profile survive → native
-API authoritative → OpenStack projection convergent → Araf consumes same truth.
+API authoritative → OpenStack projection convergent. Araf is an optional
+external consumer: when configured, the journey may record separate
+reachability/projection observations, but Araf is never a TestLab, readiness,
+or mandatory P15.7 dependency.
 
 ## Authoritative dependencies
 
@@ -100,7 +103,9 @@ Guardrails are normative:
 
 End-to-end `o3k-implemented` authority with a REAL execution boundary.
 Canonical IDs, topology, profile, and allocations remain O3K-authoritative
-throughout; OpenStack projections and Araf consume the same truth.
+throughout; the OpenStack projection consumes the same truth. Araf is an
+optional external consumer and is not part of O3K authority or this gate's
+mandatory completion criteria.
 
 ## Security requirements
 
@@ -122,8 +127,10 @@ advertised surface.
 
 ## Araf implications
 
-Araf consumes the same canonical truth (topology, services, building blocks)
-at the end of the journey; record the Araf evidence artifacts.
+Araf may consume the same canonical truth (topology, services, building blocks)
+when an endpoint is explicitly provided. Record optional Araf evidence when it
+is available; an absent or unavailable endpoint is `not_configured` or
+`unavailable`, never a P15.7 blocker.
 
 ## Failure and restart behavior
 
@@ -184,7 +191,7 @@ PostgreSQL + SQLite parity demonstrated: PASS
 Restart/failure matrix executed: PASS
 Canonical IDs/topology/profile survive restarts: PASS
 Native API authoritative + OpenStack projection convergent: PASS
-Araf consumes same truth: PASS
+Araf optional observation: NOT APPLICABLE unless explicitly configured
 owned_leaks + defect ledger published: YES
 No scale-ceiling claims made: CONFIRMED
 P15.7 implementation authorized: YES under Accepted ADR-0184, contingent on listed dependencies merged (verify per Execution prerequisites)
