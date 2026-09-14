@@ -408,20 +408,24 @@ sudo -n install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
 sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k" "$STATE_ROOT/bin/o3k"
 sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
 extra_agent_ids=()
-extra_agent_bundle_args=()
 if [[ -n "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS:-}" ]]; then
   IFS=',' read -r -a extra_agent_ids <<<"${O3K_TESTLAB_ADDITIONAL_AGENT_IDS}"
   for extra_agent_id in "${extra_agent_ids[@]}"; do
     [[ "$extra_agent_id" =~ ^[A-Za-z0-9._-]+$ && ${#extra_agent_id} -le 128 ]] \
       || fail "additional compute agent id is invalid"
   done
-  extra_agent_bundle_args=(--extra-agent-ids "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS}")
 fi
 if ((${#extra_agent_ids[@]} > 0)); then
   printf 'canonical extra agent identities requested: %s\n' "${extra_agent_ids[*]}" >&2
+  printf 'canonical certificate bundle: --extra-agent-ids %s\n' \
+    "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS}" >&2
+  sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
+    --server-name o3k-control-plane --agent-id compute-agent \
+    --extra-agent-ids "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS}"
+else
+  sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
+    --server-name o3k-control-plane --agent-id compute-agent
 fi
-sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
-  --server-name o3k-control-plane --agent-id compute-agent "${extra_agent_bundle_args[@]}"
 for extra_agent_id in "${extra_agent_ids[@]}"; do
   for extra_agent_file in agent.pem agent-key.pem agent-id agent-fingerprint; do
     [[ -f "$STATE_ROOT/tls/agents/$extra_agent_id/$extra_agent_file" && ! -L "$STATE_ROOT/tls/agents/$extra_agent_id/$extra_agent_file" ]] \
