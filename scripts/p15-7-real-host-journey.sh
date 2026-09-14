@@ -22,6 +22,8 @@ HOST_IMAGE_SHA256="${O3K_P15_7_HOST_IMAGE_SHA256:-}"
 O3K_TESTLAB_IMAGE_PATH="$HOST_IMAGE"
 WORKLOAD_IMAGE_MARKER="${O3K_TESTLAB_IMAGE_PATH}.o3k-owned"
 NETWORK="${O3K_P15_7_LIBVIRT_NETWORK:-default}"
+LIBVIRT_IMAGE_ROOT="/var/lib/libvirt/images"
+LIBVIRT_STORAGE_ROOT="$LIBVIRT_IMAGE_ROOT/o3k-p15-7-$RUN_ID"
 AUTH_PORT="${O3K_TESTLAB_PORT:-28080}"
 CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-28551}"
 PG_CONTAINER="${O3K_P15_7_PG_CONTAINER:-o3k-p15-7-postgres-$RUN_ID}"
@@ -34,9 +36,11 @@ die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
 [[ "$VM_USER" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]] || die "VM user is unsafe"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ ]] || die "TestLab ports are invalid"
-for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo; do
+for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
+LIBVIRT_QEMU_GROUP="$(id -gn libvirt-qemu 2>/dev/null || true)"
+[[ "$LIBVIRT_QEMU_GROUP" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] || die "libvirt-qemu account unavailable"
 SSH_KEY="$WORK_ROOT/vm.key"
 KNOWN_HOSTS="$WORK_ROOT/known_hosts"
 RUNNER_TEMP_ROOT="${RUNNER_TEMP:-/tmp}"
@@ -57,6 +61,13 @@ early_cleanup() {
     && grep -Fqx "run=$RUN_ID" "$WORK_ROOT/.o3k-owned"; then
     rm -rf -- "$WORK_ROOT"
   fi
+  if [[ -n "${LIBVIRT_STORAGE_ROOT:-}" ]] \
+    && sudo -n test -f "$LIBVIRT_STORAGE_ROOT/.o3k-owned" \
+    && sudo -n grep -Fqx 'o3k-p15-7-libvirt-storage-owned-v1' "$LIBVIRT_STORAGE_ROOT/.o3k-owned" \
+    && sudo -n grep -Fqx "run=$RUN_ID" "$LIBVIRT_STORAGE_ROOT/.o3k-owned"; then
+    sudo -n rm -f -- "$LIBVIRT_STORAGE_ROOT/.o3k-owned" "$LIBVIRT_STORAGE_ROOT/base.img" || true
+    sudo -n rmdir -- "$LIBVIRT_STORAGE_ROOT" >/dev/null 2>&1 || true
+  fi
 }
 trap early_cleanup EXIT
 JOURNEY_START_MS="$(date +%s%3N)"
@@ -72,6 +83,20 @@ grep -Fqx 'o3k-p15-7-host-image-v1' "$WORKLOAD_IMAGE_MARKER" \
 grep -Fqx "run=$RUN_ID" "$WORKLOAD_IMAGE_MARKER" \
   || die "owned workload image marker run mismatch"
 [[ -f "$STATE_ROOT/.o3k-run-owned" && -f "$TLS_ROOT/ca.pem" ]] || die "owned TestLab state/TLS unavailable"
+sudo -n test -d "$LIBVIRT_IMAGE_ROOT" && sudo -n test ! -L "$LIBVIRT_IMAGE_ROOT" \
+  || die "libvirt image root unavailable"
+sudo -n test ! -e "$LIBVIRT_STORAGE_ROOT" || die "run-owned libvirt storage workspace already exists"
+sudo -n install -d -o root -g "$LIBVIRT_QEMU_GROUP" -m 0711 "$LIBVIRT_STORAGE_ROOT" \
+  || die "cannot create run-owned libvirt storage workspace"
+printf 'o3k-p15-7-libvirt-storage-owned-v1\nrun=%s\n' "$RUN_ID" >"$WORK_ROOT/.libvirt-storage-owned"
+sudo -n install -o root -g "$LIBVIRT_QEMU_GROUP" -m 0640 "$WORK_ROOT/.libvirt-storage-owned" \
+  "$LIBVIRT_STORAGE_ROOT/.o3k-owned" || die "cannot write libvirt storage ownership marker"
+rm -f -- "$WORK_ROOT/.libvirt-storage-owned"
+BASE_IMAGE="$LIBVIRT_STORAGE_ROOT/base.img"
+sudo -n install -o root -g "$LIBVIRT_QEMU_GROUP" -m 0640 "$HOST_IMAGE" "$BASE_IMAGE" \
+  || die "cannot stage pinned VM image for libvirt"
+printf '%s  %s\n' "$HOST_IMAGE_SHA256" "$BASE_IMAGE" |
+  sudo -n sha256sum --check --strict --status || die "staged VM image digest mismatch"
 for required_agent in block-a block-b block-c block-d; do
   sudo -n test -f "$TLS_ROOT/agents/$required_agent/agent.pem" \
     || die "canonical capacity/replacement identities unavailable"
@@ -166,6 +191,19 @@ cleanup() {
     for p in "${SEEDS[@]}" "${OVERLAYS[@]}"; do [[ -f "$p" ]] && rm -f -- "$p"; done
     rm -f -- "$SSH_KEY" "$SSH_KEY.pub" "$KNOWN_HOSTS" \
       "$WORK_ROOT"/block-*-agent-id
+    if [[ -f "$LIBVIRT_STORAGE_ROOT/.o3k-owned" ]] \
+      && sudo -n grep -Fqx 'o3k-p15-7-libvirt-storage-owned-v1' "$LIBVIRT_STORAGE_ROOT/.o3k-owned" \
+      && sudo -n grep -Fqx "run=$RUN_ID" "$LIBVIRT_STORAGE_ROOT/.o3k-owned"; then
+      for p in "$BASE_IMAGE" "${SEEDS[@]}" "${OVERLAYS[@]}"; do
+        [[ -n "$p" ]] || continue
+        sudo -n rm -f -- "$p" || cleanup_failed=true
+      done
+      sudo -n rm -f -- "$LIBVIRT_STORAGE_ROOT/.o3k-owned" || cleanup_failed=true
+      sudo -n rmdir -- "$LIBVIRT_STORAGE_ROOT" || cleanup_failed=true
+    else
+      echo "P15.7 cleanup blocked; libvirt storage ownership marker is missing or invalid" >&2
+      cleanup_failed=true
+    fi
   fi
   if [[ "$cleanup_failed" == false && -f "$WORK_ROOT/.o3k-owned" ]] \
     && grep -Fqx 'o3k-p15-7-journey-owned-v1' "$WORK_ROOT/.o3k-owned" \
@@ -216,11 +254,11 @@ find_ip() {
   die "VM did not receive a DHCP lease: $d"
 }
 provision_vm() {
-  local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$WORK_ROOT/$1.qcow2" seed="$WORK_ROOT/$1-seed.iso" ip uuid
+  local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" seed_tmp="$WORK_ROOT/$1-seed.iso" ip uuid
   local index
   DOMAINS+=("$d"); UUIDS+=(""); OVERLAYS+=("$overlay"); SEEDS+=("$seed")
   index=$((${#DOMAINS[@]} - 1))
-  qemu-img create -q -f qcow2 -F qcow2 -b "$HOST_IMAGE" "$overlay" || die "overlay creation failed: $id"
+  sudo -n qemu-img create -q -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$overlay" || die "overlay creation failed: $id"
   cat >"$WORK_ROOT/user-data-$1" <<EOF
 #cloud-config
 users:
@@ -238,9 +276,12 @@ runcmd:
   - [ sh, -c, 'systemctl enable --now libvirtd || systemctl enable --now libvirt-daemon || true' ]
 EOF
   printf 'instance-id: o3k-p15-7-%s-%s\nlocal-hostname: %s-host\n' "$RUN_ID" "$id" "$id" >"$WORK_ROOT/meta-data-$1"
-  genisoimage -quiet -output "$seed" -volid cidata -joliet -rock \
+  genisoimage -quiet -output "$seed_tmp" -volid cidata -joliet -rock \
     -graft-points "user-data=$WORK_ROOT/user-data-$1" "meta-data=$WORK_ROOT/meta-data-$1" \
     || die "cloud-init seed failed: $id"
+  sudo -n install -o root -g "$LIBVIRT_QEMU_GROUP" -m 0640 "$seed_tmp" "$seed" \
+    || die "cannot stage cloud-init seed for libvirt: $id"
+  rm -f -- "$seed_tmp"
   virt-install --connect qemu:///system --name "$d" --memory 2048 --vcpus 2 --import --disk "path=$overlay,format=qcow2" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio" --os-variant ubuntu24.04 --metadata "description=o3k-p15-7-journey-owned=$RUN_ID" --noautoconsole --wait 0 >/dev/null || die "VM boot failed: $id"
   uuid="$(virsh -c qemu:///system domuuid "$d")"; [[ "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || die "VM UUID unavailable: $id"
   UUIDS[index]="$uuid"

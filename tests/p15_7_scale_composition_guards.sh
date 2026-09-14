@@ -107,7 +107,11 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "FOREIGN_PROJECT_ID", "FOREIGN_TOKEN_PROJECT_ID", "foreign token scope mismatch",
                  "foreign project can read workload A", "CROSS_TENANT_CONCEALMENT=true",
                  "record_optional_araf", "external_consumer_not_provisioned", "araf-projection.json",
-                 "xml.etree.ElementTree", "net-dumpxml", "libvirt gateway unavailable"):
+                 "xml.etree.ElementTree", "net-dumpxml", "libvirt gateway unavailable",
+                 "LIBVIRT_STORAGE_ROOT", "libvirt-storage-owned-v1", "LIBVIRT_QEMU_GROUP",
+                 "sudo -n qemu-img create", "cannot stage pinned VM image for libvirt",
+                 "cannot create run-owned libvirt storage workspace", "staged VM image digest mismatch",
+                 "cannot stage cloud-init seed for libvirt"):
     assert required in journey, required
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
