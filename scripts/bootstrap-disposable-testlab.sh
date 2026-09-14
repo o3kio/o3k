@@ -442,8 +442,11 @@ else
 fi
 for extra_agent_id in "${extra_agent_ids[@]}"; do
   for extra_agent_file in agent.pem agent-key.pem agent-id agent-fingerprint; do
-    [[ -f "$STATE_ROOT/tls/agents/$extra_agent_id/$extra_agent_file" && ! -L "$STATE_ROOT/tls/agents/$extra_agent_id/$extra_agent_file" ]] \
+    extra_agent_path="$STATE_ROOT/tls/agents/$extra_agent_id/$extra_agent_file"
+    sudo -n test -f "$extra_agent_path" \
       || fail "canonical extra agent identity was not generated: ${extra_agent_id}/${extra_agent_file}"
+    sudo -n test ! -L "$extra_agent_path" \
+      || fail "canonical extra agent identity is a symlink: ${extra_agent_id}/${extra_agent_file}"
   done
 done
 sudo -n chmod 0755 "$STATE_ROOT"
