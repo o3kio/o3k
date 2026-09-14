@@ -308,6 +308,19 @@ grep -q 'DNS:o3k-control-plane' <(openssl x509 -in "$TLS_DIR/server.pem" -noout 
 grep -q 'URI:urn:o3k:compute:agent:compute-agent' <(openssl x509 -in "$TLS_DIR/agent.pem" -noout -text)
 [[ "$(wc -c <"$TLS_DIR/agent-fingerprint")" -ge 64 ]]
 
+EXTRA_TLS_DIR="$WORK_DIR/certs-extra/tls"
+bash "$ROOT_DIR/packaging/bootstrap-certs.sh" \
+  --output-dir "$EXTRA_TLS_DIR" --server-name o3k-control-plane --agent-id compute-agent \
+  --extra-agent-ids block-a,block-b
+for extra_id in block-a block-b; do
+  for file in agent.pem agent-key.pem agent-id agent-fingerprint; do
+    [[ -s "$EXTRA_TLS_DIR/agents/$extra_id/$file" ]] \
+      || { echo "missing generated extra TLS file: $extra_id/$file" >&2; exit 1; }
+  done
+  grep -q "URI:urn:o3k:compute:agent:$extra_id" \
+    <(openssl x509 -in "$EXTRA_TLS_DIR/agents/$extra_id/agent.pem" -noout -text)
+done
+
 # The packaged real-libvirt profile runs the local agent provider
 # (O3K_PROVIDER=agent, driven by o3k-compute.service): ADR-0086
 # (docs/adr/ADR-0086-libvirt-profile-fail-closed.md) blocks the direct libvirt
