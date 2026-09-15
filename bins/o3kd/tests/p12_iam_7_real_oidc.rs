@@ -283,6 +283,32 @@ async fn p12_iam_7_real_federation_evidence() -> Result<(), Box<dyn std::error::
         .await
         .is_ok()
     );
+    // A durable binding alone is not operator authority: removing the
+    // canonical operator-console assignment must deny a system exchange.
+    store
+        .set_operator_assignment_enabled("p12-7-operator-assignment", false)
+        .await?;
+    let assignment_removed = o3k_identity::TokenService::load(
+        store.clone(),
+        o3k_identity::Secret::new("p12-7-real-evidence-signing-key-at-least-32-bytes".to_owned()),
+        Duration::from_secs(900),
+    )
+    .await?;
+    let assignment_removed_adapter = o3kd::native_adapters::TokenIssuerAdapter {
+        service: Arc::new(assignment_removed),
+        oidc_validator: Some(validator()?),
+    };
+    assert!(
+        o3k_native_api::auth::TokenIssuer::issue_native(
+            &assignment_removed_adapter,
+            &federated_request(&operator_token, None, true),
+        )
+        .await
+        .is_err()
+    );
+    store
+        .set_operator_assignment_enabled("p12-7-operator-assignment", true)
+        .await?;
     store
         .set_federated_binding_enabled("p12-7-alice", false)
         .await?;

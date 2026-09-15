@@ -10,6 +10,8 @@ EVIDENCE_FILE="${O3K_P15_7_EVIDENCE_FILE:-$ARTIFACT_DIR/p15-7-scale-composition-
 RUN_ID="${GITHUB_RUN_ID:-local-$$}"
 SOURCE_SHA="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-}}"
 PROFILE="${O3K_P15_7_PROFILE:-small-edge-cloud}"
+AUTHORITY_MODE="${O3K_P15_7_AUTHORITY_MODE:-testlab-keycloak}"
+KEYCLOAK_AUTHORITY_SCRIPT="${O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT:-$ROOT_DIR/scripts/p15-7-keycloak-authority.sh}"
 STATE_ROOT="${O3K_TESTLAB_STATE_ROOT:-/var/lib/o3k-testlab/$RUN_ID}"
 TLS_ROOT="$STATE_ROOT/tls"
 WORK_ROOT="${RUNNER_TEMP:-/tmp}/o3k-p15-7-journey-$RUN_ID"
@@ -65,6 +67,11 @@ printf 'o3k-p15-7-journey-owned-v1\nrun=%s\n' "$RUN_ID" >"$WORK_ROOT/.o3k-owned"
 chmod 0600 "$WORK_ROOT/.o3k-owned"
 early_cleanup() {
   set +e
+  if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
+    O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
+      GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
+      bash "$KEYCLOAK_AUTHORITY_SCRIPT" cleanup >/dev/null 2>&1 || true
+  fi
   if [[ -f "$WORK_ROOT/.o3k-owned" ]] \
     && grep -Fqx 'o3k-p15-7-journey-owned-v1' "$WORK_ROOT/.o3k-owned" \
     && grep -Fqx "run=$RUN_ID" "$WORK_ROOT/.o3k-owned"; then
@@ -155,6 +162,11 @@ delete_owned_openstack() {
 cleanup() {
   set +e
   [[ "$CLEANUP_DONE" == true ]] && { set -e; return; }
+  if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
+    O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
+      GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
+      bash "$KEYCLOAK_AUTHORITY_SCRIPT" cleanup >/dev/null 2>&1 || true
+  fi
   local cleanup_failed=false
   # Credentials and enrollment material are never retained for recovery.
   # Remove only this run's exact files; VM diagnostics and ownership records
@@ -456,10 +468,25 @@ install_agent block-a "${IPS[0]}"; install_agent block-b "${IPS[1]}"
 # password token is project-scoped by contract and must never be treated as an
 # operator token (doing so produces a policy 403 and would tempt a security
 # boundary weakening).  The protected environment supplies this token from its
-# approved OIDC/operator provisioning; the journey only consumes it.
+# selected authority mode; the journey performs the native exchange and only
+# consumes its run-scoped 0600 result.
 OPERATOR_TOKEN_FILE="${O3K_P15_7_OPERATOR_TOKEN_FILE:-}"
+if [[ "$AUTHORITY_MODE" == testlab-keycloak ]]; then
+  # Exchange immediately before the first privileged operation.  The cheap
+  # preflight only proves that Keycloak can launch; it never mints a native
+  # operator token that could expire during the expensive VM stages.
+  [[ -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]] || die "keycloak_authority_driver_missing"
+  OPERATOR_TOKEN_FILE="$WORK_ROOT/operator.token"
+  O3K_P15_7_AUTHORITY_MODE=testlab-keycloak \
+    O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
+    O3K_P15_7_NATIVE_API_URL="$API" O3K_P15_7_AUTHORITY_OUTPUT_FILE="$OPERATOR_TOKEN_FILE" \
+    GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
+    bash "$KEYCLOAK_AUTHORITY_SCRIPT" exchange || die "system_operator_federated_exchange_failed"
+  printf 'o3k-p15-7-operator-token-v1\nrun=%s\n' "$RUN_ID" >"$OPERATOR_TOKEN_FILE.o3k-owned"
+  chmod 0600 "$OPERATOR_TOKEN_FILE" "$OPERATOR_TOKEN_FILE.o3k-owned"
+fi
 [[ -n "$OPERATOR_TOKEN_FILE" && -f "$OPERATOR_TOKEN_FILE" && ! -L "$OPERATOR_TOKEN_FILE" ]] \
-  || die "system_operator_token_required: protected preflight did not provide a run-owned authority file"
+  || die "system_operator_token_required: no canonical federation exchange output"
 [[ "$(stat -c '%a' "$OPERATOR_TOKEN_FILE" 2>/dev/null || true)" == 600 ]] \
   || die "system_operator_token_file_permissions_invalid"
 [[ -f "$OPERATOR_TOKEN_FILE.o3k-owned" ]] \
@@ -470,9 +497,41 @@ OPERATOR_TOKEN="$(<"$OPERATOR_TOKEN_FILE")"
 [[ -n "$OPERATOR_TOKEN" && "$OPERATOR_TOKEN" != *$'\n'* ]] || die "system_operator_token_empty"
 PROJECT_TOKEN="$(openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]')"; [[ "$PROJECT_TOKEN" ]] || die "authenticated project token unavailable"
 OPERATOR_CURL_CONFIG="$WORK_ROOT/operator-curl.conf"
-printf 'header = "Authorization: Bearer %s"\n' "$OPERATOR_TOKEN" >"$OPERATOR_CURL_CONFIG"
-chmod 0600 "$OPERATOR_CURL_CONFIG"
-api_get() { curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG" "$API$1"; }
+write_operator_curl_config() {
+  printf 'header = "Authorization: Bearer %s"\n' "$OPERATOR_TOKEN" >"$OPERATOR_CURL_CONFIG"
+  chmod 0600 "$OPERATOR_CURL_CONFIG"
+}
+write_operator_curl_config
+refresh_operator_authority() {
+  [[ "$AUTHORITY_MODE" == testlab-keycloak ]] || return 0
+  local remaining
+  remaining="$(python3 - "$OPERATOR_TOKEN_FILE" <<'PY' 2>/dev/null || true
+import base64, json, pathlib, sys, time
+parts = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8').strip().split('.')
+if len(parts) != 3:
+    raise SystemExit(0)
+claims = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (-len(parts[1]) % 4)))
+print(int(claims.get('exp', 0)) - int(time.time()))
+PY
+)"
+  if ! [[ "$remaining" =~ ^[0-9]+$ ]] || (( remaining <= 300 )); then
+    O3K_P15_7_AUTHORITY_MODE=testlab-keycloak \
+      O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
+      O3K_P15_7_NATIVE_API_URL="$API" O3K_P15_7_AUTHORITY_OUTPUT_FILE="$OPERATOR_TOKEN_FILE" \
+      GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
+      bash "$KEYCLOAK_AUTHORITY_SCRIPT" exchange || die "system_operator_federated_renewal_failed"
+    OPERATOR_TOKEN="$(<"$OPERATOR_TOKEN_FILE")"
+    [[ -n "$OPERATOR_TOKEN" && "$OPERATOR_TOKEN" != *$'\n'* ]] || die "renewed_system_operator_token_empty"
+    write_operator_curl_config
+  fi
+}
+operator_curl() {
+  local url="$1"
+  shift
+  refresh_operator_authority
+  curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG" "$@" "$url"
+}
+api_get() { operator_curl "$API$1"; }
 api_get /operator/building-blocks >"$WORK_ROOT/blocks.json"
 api_get /regions >"$WORK_ROOT/regions.json"
 api_get /topology/failure-domains >"$WORK_ROOT/failure-domains.json"
@@ -628,7 +687,7 @@ for x in json.load(open(sys.argv[1])):
 else: raise SystemExit(1)
 PY
 )"
-curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG" -X POST -H 'Content-Type: application/json' "$API/operator/building-blocks/$DRAIN_ID/actions/drain" -d "{\"expected_generation\":$DRAIN_GEN}" >"$WORK_ROOT/drain.json" || die "canonical drain failed"
+operator_curl "$API/operator/building-blocks/$DRAIN_ID/actions/drain" -X POST -H 'Content-Type: application/json' -d "{\"expected_generation\":$DRAIN_GEN}" >"$WORK_ROOT/drain.json" || die "canonical drain failed"
 grep -Eq '"state"[[:space:]]*:[[:space:]]*"draining"' "$WORK_ROOT/drain.json" || die "durable drain state missing"
 python3 - "$WORK_ROOT/drain.json" <<'PY'
 import json,sys
@@ -672,7 +731,7 @@ done
 
 # Remove block A, then provision a fresh fourth VM and enroll its new identity.
 REMOVE_GEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["block"]["generation"])' "$WORK_ROOT/drain.json")"
-curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG" -X POST -H 'Content-Type: application/json' "$API/operator/building-blocks/$DRAIN_ID/actions/remove" -d "{\"expected_generation\":$REMOVE_GEN}" >"$WORK_ROOT/remove.json" || die "block removal failed"
+operator_curl "$API/operator/building-blocks/$DRAIN_ID/actions/remove" -X POST -H 'Content-Type: application/json' -d "{\"expected_generation\":$REMOVE_GEN}" >"$WORK_ROOT/remove.json" || die "block removal failed"
 register_vm block-d; provision_vm block-d
 IPS+=("$(<"$WORK_ROOT/block-d-ip")")
 UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/block-d-uuid")"

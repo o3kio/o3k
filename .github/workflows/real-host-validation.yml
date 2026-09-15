@@ -69,14 +69,14 @@ jobs:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
           O3K_P15_7_JOURNEY_SCRIPT: ${{ github.workspace }}/scripts/p15-7-real-host-journey.sh
-          O3K_P15_7_OPERATOR_EXCHANGE_COMMAND: ${{ secrets.O3K_P15_7_OPERATOR_EXCHANGE_COMMAND }}
-          O3K_P15_7_OIDC_ISSUER: ${{ vars.O3K_P15_7_OIDC_ISSUER }}
-          O3K_P15_7_OIDC_AUDIENCE: ${{ vars.O3K_P15_7_OIDC_AUDIENCE }}
-          O3K_P15_7_OIDC_DISCOVERY_URL: ${{ vars.O3K_P15_7_OIDC_DISCOVERY_URL }}
-          O3K_P15_7_MIN_TOKEN_TTL_SECONDS: ${{ vars.O3K_P15_7_MIN_TOKEN_TTL_SECONDS || '1800' }}
-          # Maintainers must configure the protected environment exchange to
-          # validate GitHub's OIDC token against the O3K issuer and write only
-          # the documented redacted envelope; no static operator token is used.
+          O3K_P15_7_AUTHORITY_MODE: testlab-keycloak
+          O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT: ${{ github.workspace }}/scripts/p15-7-keycloak-authority.sh
+          # Optional external-oidc certification interface (unused by the
+          # default self-contained TestLab authority).
+          # O3K_P15_7_OPERATOR_EXCHANGE_COMMAND:
+          # O3K_P15_7_OIDC_ISSUER:
+          # O3K_P15_7_OIDC_AUDIENCE:
+          # O3K_P15_7_OIDC_DISCOVERY_URL:
         run: bash scripts/p15-7-protected-preflight.sh
 
       - name: Enforce protected preflight boundary
@@ -598,13 +598,14 @@ jobs:
           O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
           O3K_P15_7_PROFILE: small-edge-cloud
           O3K_PROVIDER: agent
-          # The early preflight obtains a short-lived canonical authority via
-          # the protected federation exchange and exports only its 0600 file.
-          # That O3K_P15_7_OPERATOR_TOKEN_FILE is never placed in workflow YAML,
-          # argv, logs, or evidence.
-          # The protected host provisions this command when the multi-block
-          # journey is enabled.  The gate fails closed when it is absent.
-          O3K_P15_7_JOURNEY_COMMAND: ${{ vars.O3K_P15_7_JOURNEY_COMMAND }}
+          # The early preflight launches the self-contained authority.  The
+          # journey performs the short-lived canonical federation exchange
+          # immediately before privileged work; no bearer token is placed in
+          # workflow YAML, argv, logs, or evidence.
+          # The repository-owned journey is the default.  A separately
+          # configured command may still be supplied for external certification
+          # profiles, but no GitHub variable is required for testlab-keycloak.
+          O3K_P15_7_JOURNEY_COMMAND: ${{ vars.O3K_P15_7_JOURNEY_COMMAND || 'bash scripts/p15-7-real-host-journey.sh' }}
         run: bash tests/p15_7_scale_composition.sh
 
       - name: Post-run result guard
@@ -703,6 +704,15 @@ jobs:
             test "$(stat -c '%a' "${token_file}")" = 600
             rm -f -- "${token_file}" "${marker}"
           fi
+
+      - name: Remove owned P15.7 Keycloak authority
+        if: always()
+        env:
+          O3K_P15_7_AUTHORITY_MODE: testlab-keycloak
+          O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT: ${{ github.workspace }}/scripts/p15-7-keycloak-authority.sh
+          O3K_P15_7_KEYCLOAK_STATE_ROOT: ${{ runner.temp }}/o3k-p15-7-keycloak-${{ github.run_id }}
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+        run: bash scripts/p15-7-keycloak-authority.sh cleanup
 
       - name: Remove owned P15.7 VM host image
         if: always()

@@ -7,7 +7,10 @@ pub mod storage;
 use o3k_kernel::{Clock, Controller};
 use o3k_provider::ComputeProvider;
 use o3k_storage::StorageProvider;
-use o3k_store::{BootstrapRepository, ComputeRepository};
+use o3k_store::{
+    BootstrapRepository, ComputeRepository, FederatedBindingRecord, IdentityRepository,
+    OperatorAssignmentRecord,
+};
 use std::{sync::Arc, time::Duration};
 use tracing::info;
 use uuid::Uuid;
@@ -59,6 +62,89 @@ fn federated_oidc_validator_from_env()
         }
         _ => Err("partial O3K_OIDC_* configuration: set trust ID, issuer, audience, and discovery URL, or none".into()),
     }
+}
+
+/// Provision the disposable TestLab's real federated human operator before the
+/// identity snapshot is loaded.  This is deliberately a narrow composition
+/// hook: it writes only the canonical durable `(issuer, subject)` binding and
+/// `operator-console` assignment.  It never creates topology, capacity or
+/// workload state, and it is inactive unless the explicit TestLab variables
+/// are complete.
+async fn provision_testlab_federated_operator(
+    store: &dyn IdentityRepository,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let values = [
+        std::env::var("O3K_TESTLAB_FEDERATED_SUBJECT").ok(),
+        std::env::var("O3K_TESTLAB_FEDERATED_PRINCIPAL_ID").ok(),
+        std::env::var("O3K_TESTLAB_FEDERATED_BINDING_ID").ok(),
+        std::env::var("O3K_TESTLAB_OPERATOR_ASSIGNMENT_ID").ok(),
+        std::env::var("O3K_OIDC_TRUST_ID").ok(),
+        std::env::var("O3K_OIDC_ISSUER").ok(),
+    ];
+    if values.iter().all(Option::is_none) {
+        return Ok(());
+    }
+    let [
+        Some(subject),
+        Some(principal),
+        Some(binding_id),
+        Some(assignment_id),
+        Some(trust_id),
+        Some(issuer),
+    ] = values
+    else {
+        return Err("partial TestLab federated operator provisioning configuration".into());
+    };
+    if subject.is_empty() || principal != "bootstrap-user" || issuer.is_empty() {
+        return Err("invalid TestLab federated operator provisioning identity".into());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let binding = FederatedBindingRecord {
+        id: binding_id.clone(),
+        trusted_issuer_id: trust_id.clone(),
+        issuer: issuer.clone(),
+        subject: subject.clone(),
+        principal_id: principal.clone(),
+        principal_type: "user".to_owned(),
+        enabled: true,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    if let Some(existing) = store
+        .list_federated_bindings()
+        .await?
+        .into_iter()
+        .find(|candidate| candidate.id == binding.id)
+    {
+        if existing.trusted_issuer_id != binding.trusted_issuer_id
+            || existing.issuer != binding.issuer
+            || existing.subject != binding.subject
+            || existing.principal_id != binding.principal_id
+            || existing.principal_type != binding.principal_type
+        {
+            return Err(
+                "existing TestLab federated binding does not match the canonical identity".into(),
+            );
+        }
+        if !existing.enabled {
+            store
+                .set_federated_binding_enabled(&binding.id, true)
+                .await?;
+        }
+    } else {
+        store.insert_federated_binding(&binding).await?;
+    }
+    store
+        .insert_operator_assignment(&OperatorAssignmentRecord {
+            id: assignment_id,
+            user_id: principal,
+            profile: "operator-console".to_owned(),
+            enabled: true,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+        .await?;
+    Ok(())
 }
 
 /// Reads the canonical O3K location topology from deployment configuration.
@@ -613,6 +699,7 @@ pub async fn build_composition(
                 &catalog_region,
             )
             .await?;
+            provision_testlab_federated_operator(identity_store.as_ref()).await?;
             Some(
                 o3k_identity::TokenService::load(
                     identity_store.clone(),
