@@ -438,6 +438,10 @@ async fn test_postgres_provider_metadata_is_atomic_with_inventory_publication() 
     }];
     for _ in 0..32 {
         let node_id = format!("atomic-provider-{}", Uuid::now_v7());
+        store
+            .register_provider(&node_id, &inventory)
+            .await
+            .expect("seed provider before concurrent projections");
         let register_store = store.clone();
         let publish_store = store.clone();
         let register_node_id = node_id.clone();
