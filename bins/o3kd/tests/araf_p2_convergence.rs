@@ -133,6 +133,18 @@ fn spawn_o3kd(port: u16, data_dir: &std::path::Path, backend: &Backend) -> Child
     for (key, value) in envs {
         command.env(&key, &value);
     }
+    // Araf reuses the P12 provider process, but it is not the TestLab
+    // authority-provisioning journey.  Do not let ambient runner variables
+    // partially configure the P15.7 bootstrap hook and make this independent
+    // evidence gate fail during composition startup.
+    for key in [
+        "O3K_TESTLAB_FEDERATED_SUBJECT",
+        "O3K_TESTLAB_FEDERATED_PRINCIPAL_ID",
+        "O3K_TESTLAB_FEDERATED_BINDING_ID",
+        "O3K_TESTLAB_OPERATOR_ASSIGNMENT_ID",
+    ] {
+        command.env_remove(key);
+    }
     command.spawn().expect("spawn o3kd")
 }
 
