@@ -33,6 +33,11 @@ ARAF_STATUS="not_configured"
 ARAF_REASON="external_consumer_not_provisioned"
 VM_USER="${O3K_P15_7_VM_USER:-o3k}"
 VM_DISK_SIZE_GB="${O3K_P15_7_VM_DISK_SIZE_GB:-10}"
+# A region is an optional topology declaration, not an OpenStack display
+# default.  The disposable daemon has no declared region unless the runner
+# explicitly supplies one; sending the historical `RegionOne` string would
+# therefore make the canonical join fail closed with a 400.
+JOIN_REGION="${O3K_P15_7_REGION:-}"
 die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
 [[ "$VM_USER" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]] || die "VM user is unsafe"
@@ -190,7 +195,11 @@ cleanup() {
   # be proven absent. This preserves recovery evidence and prevents deleting
   # files still referenced by a live or undefined VM.
   if [[ "$cleanup_failed" == false ]]; then
-    for p in "${SEEDS[@]}" "${OVERLAYS[@]}"; do [[ -f "$p" ]] && rm -f -- "$p"; done
+    # The libvirt image directory is root-owned.  Remove only the exact paths
+    # recorded for this run, using the same ownership boundary as staging.
+    for p in "${SEEDS[@]}" "${OVERLAYS[@]}"; do
+      [[ -f "$p" ]] && sudo -n rm -f -- "$p" || cleanup_failed=true
+    done
     rm -f -- "$SSH_KEY" "$SSH_KEY.pub" "$KNOWN_HOSTS" \
       "$WORK_ROOT"/block-*-agent-id
     if [[ -f "$LIBVIRT_STORAGE_ROOT/.o3k-owned" ]] \
@@ -364,7 +373,12 @@ json.dump({
     "inventories": {"VCPU": int(vcpus), "MEMORY_MB": int(memory), "DISK_GB": 10},
 }, sys.stdout)
 PY
-  O3K_API_URL="$API" "$STATE_ROOT/bin/o3k" join --token "$token" --agent-id "$id" --agent-epoch "$epoch" --certificate "$certificate" --region RegionOne --vcpus "$vcpus" --memory-mb "$memory" --disk-gb 10 >"$WORK_ROOT/$1-join.json" || die "authenticated join failed: $id"
+  local join_args=(join --token "$token" --agent-id "$id" --agent-epoch "$epoch" --certificate "$certificate" --vcpus "$vcpus" --memory-mb "$memory" --disk-gb 10)
+  if [[ -n "$JOIN_REGION" ]]; then
+    [[ "$JOIN_REGION" =~ ^[A-Za-z0-9._-]+$ ]] || die "configured P15.7 region is unsafe"
+    join_args+=(--region "$JOIN_REGION")
+  fi
+  O3K_API_URL="$API" "$STATE_ROOT/bin/o3k" "${join_args[@]}" >"$WORK_ROOT/$1-join.json" || die "authenticated join failed: $id"
   [[ "$id" == block-a ]] && REPLAY_JOIN_FILE="$WORK_ROOT/$id-join-request.json"
   BLOCK_IDS[$id]="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("building_block_id", ""))' "$WORK_ROOT/$1-join.json")"; [[ "${BLOCK_IDS[$id]}" =~ ^[0-9a-fA-F-]{36}$ ]] || die "canonical BuildingBlock missing: $id"
 }
