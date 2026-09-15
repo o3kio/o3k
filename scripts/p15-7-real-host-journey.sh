@@ -198,7 +198,9 @@ cleanup() {
     # The libvirt image directory is root-owned.  Remove only the exact paths
     # recorded for this run, using the same ownership boundary as staging.
     for p in "${SEEDS[@]}" "${OVERLAYS[@]}"; do
-      [[ -f "$p" ]] && sudo -n rm -f -- "$p" || cleanup_failed=true
+      if [[ -f "$p" ]]; then
+        sudo -n rm -f -- "$p" || cleanup_failed=true
+      fi
     done
     rm -f -- "$SSH_KEY" "$SSH_KEY.pub" "$KNOWN_HOSTS" \
       "$WORK_ROOT"/block-*-agent-id
