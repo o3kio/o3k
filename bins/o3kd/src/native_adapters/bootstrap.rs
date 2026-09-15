@@ -467,7 +467,20 @@ impl BootstrapWorkflow for BootstrapAdapter {
                 request.region.as_deref(),
             )
             .await
-            .map_err(|_| BootstrapFailure::Conflict)?;
+            .map_err(|error| {
+                // Keep the public problem deliberately generic, but leave a
+                // non-secret operator diagnostic identifying which canonical
+                // authority rejected enrollment. Protected TestLab evidence
+                // can then distinguish provider conflicts from block-store
+                // conflicts without exposing tokens or certificates.
+                tracing::warn!(
+                    target: "o3kd::bootstrap",
+                    agent_id = %request.agent_id,
+                    error = %error,
+                    "bootstrap provider registration rejected"
+                );
+                BootstrapFailure::Conflict
+            })?;
         let block_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!("o3k:building-block:{}", request.agent_id).as_bytes(),
@@ -490,7 +503,15 @@ impl BootstrapWorkflow for BootstrapAdapter {
         adapter
             .enroll(block, &principal_context())
             .await
-            .map_err(|_| BootstrapFailure::Conflict)?;
+            .map_err(|error| {
+                tracing::warn!(
+                    target: "o3kd::bootstrap",
+                    agent_id = %request.agent_id,
+                    error = %error,
+                    "bootstrap building-block enrollment rejected"
+                );
+                BootstrapFailure::Conflict
+            })?;
         state
             .begin_enrollment()
             .map_err(|_| BootstrapFailure::Conflict)?;
@@ -609,7 +630,22 @@ mod tests {
             .await
             .map_err(|error| format!("repeat init failed: {error:?}"))?;
         assert_eq!(repeat.phase, "initialized");
-        assert!(repeat.enrollment_token.is_some());
+        let second_token = repeat.enrollment_token.ok_or("missing second grant")?;
+
+        adapter
+            .join(JoinRequest {
+                enrollment_token: second_token,
+                agent_id: "node-second".to_owned(),
+                agent_epoch: "epoch-2".to_owned(),
+                certificate: String::from_utf8(include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem").to_vec())?,
+                region: None,
+                availability_domain: None,
+                failure_domain_id: None,
+                capabilities: serde_json::json!({"architecture":"x86_64","provider_name":"o3k-compute","provider_version":"test"}),
+                inventories: BTreeMap::from([(String::from("VCPU"), 2), (String::from("MEMORY_MB"), 1024)]),
+            })
+            .await
+            .map_err(|error| format!("second join failed: {error:?}"))?;
 
         // A newly created runtime reconstructs the bootstrap gate from the
         // durable phase; no restart is needed for the preceding transition,
