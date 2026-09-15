@@ -27,6 +27,8 @@ for variable in O3K_OIDC_TRUST_ID O3K_OIDC_ISSUER O3K_OIDC_AUDIENCE \
   grep -Fq "$variable" "$ROOT_DIR/scripts/bootstrap-disposable-testlab.sh"
 done
 ! grep -Eiq 'mint.*operator|fabricat(e|ing).*AuthContext' "$AUTHORITY"
+! grep -Fq 'python3 - "$reset_body" "$operator_password"' "$AUTHORITY"
+grep -Fq 'OPERATOR_PASSWORD_FILE' "$AUTHORITY"
 
 # Default preflight: a provider launcher is sufficient; no GitHub OIDC
 # issuer/audience/exchange variables are supplied.

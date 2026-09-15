@@ -140,7 +140,7 @@ PY
   local issuer discovery
   issuer="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["issuer"])' "$STATE_ROOT/discovery.json")"
   discovery="http://127.0.0.1:$port/realms/o3k-p15-7/.well-known/openid-configuration"
-  configure_operator_password "$admin_password" "$operator_password"
+  configure_operator_password "$admin_password"
   acquire_operator_token
   cat >"$ENV_FILE" <<EOF
 O3K_P15_7_AUTHORITY_MODE=testlab-keycloak
@@ -174,7 +174,7 @@ PY
 }
 
 configure_operator_password() {
-  local admin_password="$1" operator_password="$2"
+  local admin_password="$1"
   local admin_cfg admin_response admin_token users_response user_id reset_cfg reset_body
   admin_cfg="$(mktemp "$STATE_ROOT/admin-curl.XXXXXX")"
   admin_response="$(mktemp "$STATE_ROOT/admin-response.XXXXXX")"
@@ -204,9 +204,10 @@ if not users or not isinstance(users[0].get('id'), str): raise SystemExit('opera
 print(users[0]['id'])
 PY
 )"
-  python3 - "$reset_body" "$operator_password" <<'PY'
-import json, sys
-json.dump({'type': 'password', 'value': sys.argv[2], 'temporary': False}, open(sys.argv[1], 'w', encoding='utf-8'))
+  python3 - "$reset_body" "$OPERATOR_PASSWORD_FILE" <<'PY'
+import json, pathlib, sys
+password = pathlib.Path(sys.argv[2]).read_text(encoding='utf-8').strip()
+json.dump({'type': 'password', 'value': password, 'temporary': False}, open(sys.argv[1], 'w', encoding='utf-8'))
 PY
   printf 'url = "http://127.0.0.1:%s/admin/realms/o3k-p15-7/users/%s/reset-password"\nrequest = "PUT"\nheader = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\ndata = @%s\n' \
     "$(<"$PORT_FILE")" "$user_id" "$admin_token" "$reset_body" >"$reset_cfg"
