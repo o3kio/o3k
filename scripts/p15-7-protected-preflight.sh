@@ -24,10 +24,6 @@ cleanup_preflight() {
   fi
 }
 
-[[ "$ARTIFACT_DIR" == /* && "$ARTIFACT_DIR" != *..* && ! -L "$ARTIFACT_DIR" ]] || blocked artifact_dir_unsafe
-mkdir -p -- "$ARTIFACT_DIR"
-chmod 0755 -- "$ARTIFACT_DIR"
-
 write_artifact() {
   local status="$1" reason="$2" authority="$3" ttl="$4" capacity="$5"
   python3 - "$ARTIFACT" "$status" "$reason" "$authority" "$ttl" "$capacity" "$SOURCE_SHA" <<'PY'
@@ -61,6 +57,10 @@ blocked() {
   echo "P15_7_PROTECTED_PREFLIGHT: BLOCKED ($reason)" >&2
   exit 2
 }
+
+[[ "$ARTIFACT_DIR" == /* && "$ARTIFACT_DIR" != *..* && ! -L "$ARTIFACT_DIR" ]] || blocked artifact_dir_unsafe
+mkdir -p -- "$ARTIFACT_DIR"
+chmod 0755 -- "$ARTIFACT_DIR"
 
 [[ "$SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || blocked exact_source_sha_required
 [[ "$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)" == "$SOURCE_SHA" ]] || blocked source_checkout_mismatch
