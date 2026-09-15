@@ -449,7 +449,8 @@ text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 preflight_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
 for needle in ("P15.7 protected preflight", "id-token: write",
                "scripts/p15-7-protected-preflight.sh", "target_sha:",
-               "if-no-files-found: error"):
+               "if-no-files-found: error",
+               '"${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts"'):
     assert needle in preflight_text, needle
 workflow_step = text.split("      - name: Run public real-host lifecycle\n", 1)[1]
 workflow_step = workflow_step.split("        run: bash tests/testlab-libvirt.sh\n", 1)[0]
