@@ -345,8 +345,10 @@ join_block() {
   O3K_API_URL="$API" O3K_BOOTSTRAP_SECRET="$(sudo -n cat "$STATE_ROOT/.bootstrap-secret")" "$STATE_ROOT/bin/o3k" init --profile-id default --agent-id "$id" >"$init" || die "o3k init failed: $id"
   token="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("enrollment_token", ""))' "$init")"; [[ "$token" ]] || die "init grant missing: $id"
   vcpus="$(ssh_vm "$ip" nproc)"
-  # shellcheck disable=SC2016 # awk is intentionally evaluated on the VM.
-  memory="$(ssh_vm "$ip" awk '/MemTotal:/ {print int($2/1024); exit}' /proc/meminfo)"
+  # Keep the awk program inside one remote command string.  Passing the
+  # program as separate ssh arguments causes ssh to reconstruct it without
+  # its shell quoting, so the VM shell interprets `int($2/1024)` itself.
+  memory="$(ssh_vm "$ip" "awk '/MemTotal:/ {print int(\$2/1024); exit}' /proc/meminfo")"
   [[ "$vcpus" =~ ^[1-9][0-9]*$ && "$memory" =~ ^[1-9][0-9]*$ ]] || die "real inventory unavailable: $id"
   epoch="$(openssl rand -hex 16)"
   python3 - "$token" "$id" "$epoch" "$certificate" "$vcpus" "$memory" >"$WORK_ROOT/$id-join-request.json" <<'PY'

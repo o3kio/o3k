@@ -115,7 +115,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "cannot stage cloud-init seed for libvirt", "network-config=$WORK_ROOT/network-config-$1",
                  "dhcp4: true", "dhcp6: false", "renderer: networkd", "set-name: eth0",
                  "macaddress: \"$mac\"", "mac=$mac", "net-dhcp-leases", "serial console tail",
-                 "--serial \"file,path=$serial\"", "for (i = 1; i <= NF; i++)"):
+                 "--serial \"file,path=$serial\"", "for (i = 1; i <= NF; i++)",
+                 "awk '/MemTotal:/ {print int(\\$2/1024); exit}' /proc/meminfo"):
     assert required in journey, required
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
