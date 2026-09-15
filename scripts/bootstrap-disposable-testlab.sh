@@ -160,10 +160,52 @@ with open(path, "w", encoding="utf-8") as stream:
 PY
 }
 
+write_startup_diagnostics() {
+  local output="${ARTIFACT_DIR}/disposable-testlab-startup-diagnostics.log"
+  mkdir -p "$ARTIFACT_DIR"
+  python3 - "$output" "$STATE_ROOT/log/o3kd.log" "$STATE_ROOT/log/o3k-compute.log" "$O3KD_PID" "$COMPUTE_PID" <<'PY'
+import pathlib, re, sys
+
+output, o3kd_log, compute_log, o3kd_pid, compute_pid = sys.argv[1:]
+secret_assignment = re.compile(
+    r"(?i)(password|token|secret|authorization|bearer|private[-_]?key|database[_-]?url|dsn)"
+    r"([\"']?\s*[:=]\s*[\"']?)([^\s,}\"']+)"
+)
+long_value = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9_./+=:-]{40,}(?![A-Za-z0-9])")
+hex_value = re.compile(r"(?<![0-9a-f])[0-9a-f]{32,}(?![0-9a-f])", re.I)
+
+def scrub(line):
+    # Keep only bounded startup evidence.  Values attached to secret-shaped
+    # fields are removed before the file becomes a workflow artifact; the
+    # remaining long/hex strings cover accidental bearer/password material.
+    line = secret_assignment.sub(lambda match: match.group(1) + match.group(2) + "<redacted>", line)
+    line = long_value.sub("<redacted>", line)
+    return hex_value.sub("<redacted>", line)
+
+with open(output, "w", encoding="utf-8") as stream:
+    stream.write("artifact_type=disposable-testlab-startup-diagnostics\n")
+    stream.write("redacted=true\n")
+    stream.write(f"o3kd_pid={'present' if o3kd_pid else 'absent'}\n")
+    stream.write(f"compute_pid={'present' if compute_pid else 'absent'}\n")
+    for label, path in (("o3kd", o3kd_log), ("o3k-compute", compute_log)):
+        stream.write(f"== {label} startup tail ==\n")
+        try:
+            lines = pathlib.Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            stream.write("unavailable\n")
+            continue
+        for line in lines[-240:]:
+            if re.search(r"(ERROR|WARN|panic|failed|fatal|bind|listen|database|OIDC|identity)", line, re.I):
+                stream.write(scrub(line)[:2000] + "\n")
+PY
+  chmod 0644 "$output"
+}
+
 failure_cleanup() {
   local status="$?"
   if ((status != 0)); then
     write_result failed "$FAIL_REASON" 2>/dev/null || true
+    write_startup_diagnostics 2>/dev/null || true
     cleanup_failed=false
     [[ -z "$COMPUTE_PID" ]] || stop_owned_process "$COMPUTE_PID" o3k-compute || cleanup_failed=true
     [[ -z "$O3KD_PID" ]] || stop_owned_process "$O3KD_PID" o3kd || cleanup_failed=true
