@@ -73,6 +73,7 @@ PATH="$FAKE_BIN:$PATH" \
   O3K_REAL_HOST_ARTIFACT_DIR="$WORK/artifacts" \
   O3K_P15_7_SOURCE_SHA="$sha" \
   GITHUB_RUN_ID=authority-default \
+  GITHUB_ENV="$WORK/github-env" \
   O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT="$FAKE_AUTHORITY" \
   bash "$PREFLIGHT" >/dev/null
 test -s "$WORK/artifacts/p15-7-protected-preflight.json"
