@@ -31,6 +31,7 @@ jobs:
           set -euo pipefail
           for artifact_dir in \
             "${GITHUB_WORKSPACE}/target/real-host-workflow-artifacts" \
+            "${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts" \
             "${GITHUB_WORKSPACE}/target/debug"; do
             if test -e "${artifact_dir}"; then
               sudo -n chown -R "$(id -u):$(id -g)" "${artifact_dir}"
