@@ -420,3 +420,56 @@ async fn test_postgres_placement_hierarchy_conformance() {
         .expect("child exists");
     assert_eq!(restored.allocations, vec![allocation]);
 }
+
+#[tokio::test]
+async fn test_postgres_provider_metadata_is_atomic_with_inventory_publication() {
+    let Some((_db_url, store, _database_guard)) = get_test_store().await else {
+        eprintln!(
+            "Skipping test_postgres_provider_metadata_is_atomic_with_inventory_publication: no Postgres instance available"
+        );
+        return;
+    };
+    let inventory = [PlacementInventoryRecord {
+        resource_class: "VCPU".to_owned(),
+        total: 8,
+        reserved: 0,
+        allocation_ratio: 1.0,
+        used: 0,
+    }];
+    for _ in 0..32 {
+        let node_id = format!("atomic-provider-{}", Uuid::now_v7());
+        store
+            .register_provider(&node_id, &inventory)
+            .await
+            .expect("seed provider before concurrent projections");
+        let register_store = store.clone();
+        let publish_store = store.clone();
+        let register_node_id = node_id.clone();
+        let register_inventory = inventory.clone();
+        let publish_inventory = inventory.clone();
+        let register = tokio::spawn(async move {
+            register_store
+                .register_provider_metadata(
+                    &register_node_id,
+                    &register_inventory,
+                    None,
+                    &[],
+                    &[],
+                    Some("testlab"),
+                )
+                .await
+        });
+        let publish = tokio::spawn(async move {
+            publish_store
+                .sync_provider(&node_id, "Enabled", &publish_inventory)
+                .await
+        });
+        let (registered, published) = tokio::join!(register, publish);
+        registered
+            .expect("provider metadata task panicked")
+            .expect("atomic provider metadata registration must not lose a generation race");
+        published
+            .expect("inventory publication task panicked")
+            .expect("inventory publication should remain valid");
+    }
+}

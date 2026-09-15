@@ -33,21 +33,141 @@ impl SqliteStore {
                 "invalid placement provider metadata".to_owned(),
             ));
         }
-        if let Some(parent) = parent_provider_id
-            && self.get_provider(parent).await?.is_none()
-        {
-            return Err(StoreError::PlacementProviderNotFound);
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<u64, StoreError> = async {
+            sqlx::query(
+                "INSERT OR IGNORE INTO placement_providers (id, node_id, state, generation)
+                 VALUES (?, ?, 'Enabled', 0)",
+            )
+            .bind(node_id)
+            .bind(node_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            let used = SqliteStore::recompute_placement_used(&mut connection, node_id, inventories)
+                .await?;
+            SqliteStore::replace_placement_inventories(
+                &mut connection,
+                node_id,
+                inventories,
+                &used,
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE placement_providers SET generation = generation + 1 WHERE id = ?",
+            )
+            .bind(node_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            let provider_generation: i64 = sqlx::query_scalar(
+                "SELECT generation FROM placement_providers WHERE id = ?",
+            )
+            .bind(node_id)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            let provider_generation = u64::try_from(provider_generation)
+                .map_err(|_| StoreError::Corrupt("generation out of range".to_owned()))?;
+            if let Some(parent) = parent_provider_id {
+                let exists: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM placement_providers WHERE id = ?",
+                )
+                .bind(parent)
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+                if exists.is_none() {
+                    return Err(StoreError::PlacementProviderNotFound);
+                }
+            }
+            let hierarchy_rows = sqlx::query(
+                "SELECT id, parent_provider_id FROM placement_providers ORDER BY id",
+            )
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            let mut seen = std::collections::BTreeSet::new();
+            let mut cursor = parent_provider_id.map(str::to_owned);
+            for _ in 0..64 {
+                let Some(id) = cursor else { break };
+                if !seen.insert(id.clone()) || id == node_id {
+                    return Err(StoreError::Corrupt(
+                        "placement provider hierarchy cycle".to_owned(),
+                    ));
+                }
+                cursor = hierarchy_rows
+                    .iter()
+                    .find(|row| row.get::<String, _>("id") == id)
+                    .and_then(|row| row.get::<Option<String>, _>("parent_provider_id"));
+            }
+            if cursor.is_some() {
+                return Err(StoreError::Corrupt(
+                    "placement provider hierarchy exceeds depth limit".to_owned(),
+                ));
+            }
+            let updated = sqlx::query(
+                "UPDATE placement_providers
+                 SET parent_provider_id = ?, location = ?, generation = generation + 1
+                 WHERE id = ? AND generation = ?",
+            )
+            .bind(parent_provider_id)
+            .bind(location)
+            .bind(node_id)
+            .bind(i64::try_from(provider_generation).map_err(|_| {
+                StoreError::Corrupt("generation out of range".to_owned())
+            })?)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            if updated.rows_affected() != 1 {
+                return Err(StoreError::PlacementStaleGeneration);
+            }
+            sqlx::query("DELETE FROM placement_provider_traits WHERE provider_id = ?")
+                .bind(node_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            for value in traits.iter().map(String::as_str).collect::<std::collections::BTreeSet<_>>() {
+                sqlx::query(
+                    "INSERT INTO placement_provider_traits(provider_id, trait) VALUES (?, ?)",
+                )
+                .bind(node_id)
+                .bind(value)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            }
+            sqlx::query("DELETE FROM placement_provider_failure_domains WHERE provider_id = ?")
+                .bind(node_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            for value in failure_domains.iter().map(String::as_str).collect::<std::collections::BTreeSet<_>>() {
+                sqlx::query(
+                    "INSERT INTO placement_provider_failure_domains(provider_id, failure_domain_id) VALUES (?, ?)",
+                )
+                .bind(node_id)
+                .bind(value)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            }
+            Ok(provider_generation + 1)
         }
-        let provider = self.register_provider(node_id, inventories).await?;
-        self.update_provider_metadata(
-            &provider.id,
-            provider.generation,
-            parent_provider_id,
-            traits,
-            failure_domains,
-            location,
-        )
-        .await
+        .await;
+        let generation = SqliteStore::commit_or_rollback(&mut connection, outcome).await?;
+        drop(connection);
+        let provider = self
+            .get_provider(node_id)
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)?;
+        debug_assert_eq!(provider.generation, generation);
+        Ok(provider)
     }
 
     pub async fn update_provider_metadata(
