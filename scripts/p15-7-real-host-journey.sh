@@ -124,6 +124,7 @@ OS_IMAGE_ID="" OS_KEYPAIR_NAME="" OS_NETWORK_ID="" OS_SUBNET_ID="" OS_PORT_ID=""
 OS_WORKLOAD_A="" OS_WORKLOAD_B=""
 CLEANUP_DONE=false
 REPLAY_JOIN_FILE=""
+OPERATOR_CURL_CONFIG=""
 FOREIGN_PROJECT_ID=""
 FOREIGN_TOKEN=""
 FOREIGN_TOKEN_PROJECT_ID=""
@@ -155,6 +156,14 @@ cleanup() {
   set +e
   [[ "$CLEANUP_DONE" == true ]] && { set -e; return; }
   local cleanup_failed=false
+  # Credentials and enrollment material are never retained for recovery.
+  # Remove only this run's exact files; VM diagnostics and ownership records
+  # remain available when cleanup itself is blocked.
+  [[ -z "$OPERATOR_CURL_CONFIG" ]] || rm -f -- "$OPERATOR_CURL_CONFIG"
+  rm -f -- "$WORK_ROOT"/block-*-init.json \
+    "$WORK_ROOT"/block-*-join-request.json \
+    "$WORK_ROOT"/block-*-key.pem \
+    "$WORK_ROOT"/block-*.pem
   # OpenStack objects are deleted by their recorded IDs in dependency order.
   # No name or prefix scan is used, so a failed journey cannot touch foreign
   # tenant resources. Keep IDs and the work directory when verification fails.
@@ -277,7 +286,7 @@ find_ip() {
   virsh -c qemu:///system domifaddr "$d" --source arp >&2 || true
   virsh -c qemu:///system net-dhcp-leases "$NETWORK" >&2 || true
   virsh -c qemu:///system net-dumpxml "$NETWORK" >&2 || true
-  serial="${SERIALS[${#SERIALS[@]}-1]:-}"
+  serial="$LIBVIRT_STORAGE_ROOT/${d#o3k-p15-7-$RUN_ID-}-serial.log"
   if [[ -n "$serial" ]]; then
     echo "P15.7 serial console tail for owned VM $d" >&2
     sudo -n tail -n 120 -- "$serial" >&2 || true
@@ -286,9 +295,6 @@ find_ip() {
 }
 provision_vm() {
   local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" seed_tmp="$WORK_ROOT/$1-seed.iso" serial="$LIBVIRT_STORAGE_ROOT/$1-serial.log" ip uuid mac
-  local index
-  DOMAINS+=("$d"); UUIDS+=(""); OVERLAYS+=("$overlay"); SEEDS+=("$seed"); SERIALS+=("$serial")
-  index=$((${#DOMAINS[@]} - 1))
   # Match the guest network by the exact MAC we give libvirt.  This avoids
   # relying on distribution-specific predictable interface names while still
   # exercising the real libvirt DHCP path.
@@ -344,13 +350,13 @@ EOF
     || die "cannot stage serial console for libvirt: $id"
   virt-install --connect qemu:///system --name "$d" --memory 2048 --vcpus 2 --import --disk "path=$overlay,format=qcow2" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --serial "file,path=$serial" --metadata "description=o3k-p15-7-journey-owned=$RUN_ID" --noautoconsole --wait 0 >/dev/null || die "VM boot failed: $id"
   uuid="$(virsh -c qemu:///system domuuid "$d")"; [[ "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || die "VM UUID unavailable: $id"
-  UUIDS[index]="$uuid"
+  printf '%s\n' "$uuid" >"$WORK_ROOT/$id-uuid"
   ip="$(find_ip "$d")"
   for _ in $(seq 1 120); do ssh_vm "$ip" true >/dev/null 2>&1 && break; sleep 2; done
   ssh_vm "$ip" true >/dev/null 2>&1 || die "SSH unavailable on real VM: $id"
   ssh_vm "$ip" "sudo cloud-init status --wait" >/dev/null 2>&1 || die "cloud-init did not complete on real VM: $id"
   ssh_vm "$ip" "sudo virsh -c qemu:///system uri" >/dev/null 2>&1 || die "libvirt is not available on real VM: $id"
-  IPS+=("$ip")
+  printf '%s\n' "$ip" >"$WORK_ROOT/$id-ip"
 }
 join_block() {
   local id="$1" ip="$2" init="$WORK_ROOT/$1-init.json" token vcpus memory epoch
@@ -364,18 +370,20 @@ join_block() {
   memory="$(ssh_vm "$ip" "awk '/MemTotal:/ {print int(\$2/1024); exit}' /proc/meminfo")"
   [[ "$vcpus" =~ ^[1-9][0-9]*$ && "$memory" =~ ^[1-9][0-9]*$ ]] || die "real inventory unavailable: $id"
   epoch="$(openssl rand -hex 16)"
-  python3 - "$token" "$id" "$epoch" "$certificate" "$vcpus" "$memory" >"$WORK_ROOT/$id-join-request.json" <<'PY'
+  python3 - "$token" "$id" "$epoch" "$certificate" "$vcpus" "$memory" "$JOIN_REGION" >"$WORK_ROOT/$id-join-request.json" <<'PY'
 import json, pathlib, sys
-token, agent_id, epoch, certificate, vcpus, memory = sys.argv[1:]
-json.dump({
+token, agent_id, epoch, certificate, vcpus, memory, region = sys.argv[1:]
+request = {
     "enrollment_token": token,
     "agent_id": agent_id,
     "agent_epoch": epoch,
     "certificate": pathlib.Path(certificate).read_text(encoding="utf-8"),
-    "region": "RegionOne",
     "capabilities": {"architecture": "unknown", "provider_name": "o3k-cli"},
     "inventories": {"VCPU": int(vcpus), "MEMORY_MB": int(memory), "DISK_GB": 10},
-}, sys.stdout)
+}
+if region:
+    request["region"] = region
+json.dump(request, sys.stdout)
 PY
   local join_args=(join --token "$token" --agent-id "$id" --agent-epoch "$epoch" --certificate "$certificate" --vcpus "$vcpus" --memory-mb "$memory" --disk-gb 10)
   if [[ -n "$JOIN_REGION" ]]; then
@@ -417,7 +425,30 @@ install_agent() {
   die "real mTLS agent did not become ready: $id"
 }
 
-provision_vm block-a; provision_vm block-b
+register_vm() {
+  local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" serial="$LIBVIRT_STORAGE_ROOT/$1-serial.log"
+  DOMAINS+=("$d"); UUIDS+=(""); OVERLAYS+=("$overlay"); SEEDS+=("$seed"); SERIALS+=("$serial")
+}
+provision_vms_bounded() {
+  local id pid rc=0
+  local -a pids=()
+  for id in "$@"; do
+    register_vm "$id"
+    # Each job writes its address/UUID to a run-owned file; the parent then
+    # reconstructs ordered arrays used by ownership-safe cleanup.
+    provision_vm "$id" >"$WORK_ROOT/$id-provision.log" 2>&1 &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+  ((rc == 0)) || die "bounded VM provisioning failed; inspect per-VM redacted logs"
+  IPS=()
+  for id in "$@"; do
+    [[ -s "$WORK_ROOT/$id-ip" && -s "$WORK_ROOT/$id-uuid" ]] || die "VM provisioning result missing: $id"
+    IPS+=("$(<"$WORK_ROOT/$id-ip")")
+    UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/$id-uuid")"
+  done
+}
+provision_vms_bounded block-a block-b
 join_block block-a "${IPS[0]}"; join_block block-b "${IPS[1]}"
 install_agent block-a "${IPS[0]}"; install_agent block-b "${IPS[1]}"
 # BuildingBlock lifecycle and operator diagnostics are deliberately
@@ -426,10 +457,22 @@ install_agent block-a "${IPS[0]}"; install_agent block-b "${IPS[1]}"
 # operator token (doing so produces a policy 403 and would tempt a security
 # boundary weakening).  The protected environment supplies this token from its
 # approved OIDC/operator provisioning; the journey only consumes it.
-OPERATOR_TOKEN="${O3K_P15_7_OPERATOR_TOKEN:-}"
-[[ -n "$OPERATOR_TOKEN" ]] || die "system_operator_token_required: configure O3K_P15_7_OPERATOR_TOKEN from the approved federated operator authority"
+OPERATOR_TOKEN_FILE="${O3K_P15_7_OPERATOR_TOKEN_FILE:-}"
+[[ -n "$OPERATOR_TOKEN_FILE" && -f "$OPERATOR_TOKEN_FILE" && ! -L "$OPERATOR_TOKEN_FILE" ]] \
+  || die "system_operator_token_required: protected preflight did not provide a run-owned authority file"
+[[ "$(stat -c '%a' "$OPERATOR_TOKEN_FILE" 2>/dev/null || true)" == 600 ]] \
+  || die "system_operator_token_file_permissions_invalid"
+[[ -f "$OPERATOR_TOKEN_FILE.o3k-owned" ]] \
+  && grep -Fqx 'o3k-p15-7-operator-token-v1' "$OPERATOR_TOKEN_FILE.o3k-owned" \
+  && grep -Fqx "run=$RUN_ID" "$OPERATOR_TOKEN_FILE.o3k-owned" \
+  || die "system_operator_token_ownership_unproven"
+OPERATOR_TOKEN="$(<"$OPERATOR_TOKEN_FILE")"
+[[ -n "$OPERATOR_TOKEN" && "$OPERATOR_TOKEN" != *$'\n'* ]] || die "system_operator_token_empty"
 PROJECT_TOKEN="$(openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]')"; [[ "$PROJECT_TOKEN" ]] || die "authenticated project token unavailable"
-api_get() { curl --fail --silent --show-error -H "Authorization: Bearer $OPERATOR_TOKEN" "$API$1"; }
+OPERATOR_CURL_CONFIG="$WORK_ROOT/operator-curl.conf"
+printf 'header = "Authorization: Bearer %s"\n' "$OPERATOR_TOKEN" >"$OPERATOR_CURL_CONFIG"
+chmod 0600 "$OPERATOR_CURL_CONFIG"
+api_get() { curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG" "$API$1"; }
 api_get /operator/building-blocks >"$WORK_ROOT/blocks.json"
 api_get /regions >"$WORK_ROOT/regions.json"
 api_get /topology/failure-domains >"$WORK_ROOT/failure-domains.json"
@@ -518,7 +561,9 @@ OS_FLAVOR_ID="$(openstack flavor create "o3k-p15-7-$RUN_ID-flavor" --ram 512 --d
 # Add a third genuine VM/block before any drain. Capacity must grow in the
 # canonical diagnostics projection; a second logical object on one host is not
 # sufficient evidence.
-provision_vm block-c
+register_vm block-c; provision_vm block-c
+IPS+=("$(<"$WORK_ROOT/block-c-ip")")
+UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/block-c-uuid")"
 join_block block-c "${IPS[2]}"; install_agent block-c "${IPS[2]}"
 CAPACITY_AFTER_ADD=""
 for _ in $(seq 1 60); do
@@ -583,7 +628,7 @@ for x in json.load(open(sys.argv[1])):
 else: raise SystemExit(1)
 PY
 )"
-curl --fail --silent --show-error -X POST -H "Authorization: Bearer $OPERATOR_TOKEN" -H 'Content-Type: application/json' "$API/operator/building-blocks/$DRAIN_ID/actions/drain" -d "{\"expected_generation\":$DRAIN_GEN}" >"$WORK_ROOT/drain.json" || die "canonical drain failed"
+curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG" -X POST -H 'Content-Type: application/json' "$API/operator/building-blocks/$DRAIN_ID/actions/drain" -d "{\"expected_generation\":$DRAIN_GEN}" >"$WORK_ROOT/drain.json" || die "canonical drain failed"
 grep -Eq '"state"[[:space:]]*:[[:space:]]*"draining"' "$WORK_ROOT/drain.json" || die "durable drain state missing"
 python3 - "$WORK_ROOT/drain.json" <<'PY'
 import json,sys
@@ -627,8 +672,10 @@ done
 
 # Remove block A, then provision a fresh fourth VM and enroll its new identity.
 REMOVE_GEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["block"]["generation"])' "$WORK_ROOT/drain.json")"
-curl --fail --silent --show-error -X POST -H "Authorization: Bearer $OPERATOR_TOKEN" -H 'Content-Type: application/json' "$API/operator/building-blocks/$DRAIN_ID/actions/remove" -d "{\"expected_generation\":$REMOVE_GEN}" >"$WORK_ROOT/remove.json" || die "block removal failed"
-provision_vm block-d
+curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG" -X POST -H 'Content-Type: application/json' "$API/operator/building-blocks/$DRAIN_ID/actions/remove" -d "{\"expected_generation\":$REMOVE_GEN}" >"$WORK_ROOT/remove.json" || die "block removal failed"
+register_vm block-d; provision_vm block-d
+IPS+=("$(<"$WORK_ROOT/block-d-ip")")
+UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/block-d-uuid")"
 join_block block-d "${IPS[3]}"; install_agent block-d "${IPS[3]}"
 api_get /operator/building-blocks >"$WORK_ROOT/blocks-after-replace.json"
 python3 - "$WORK_ROOT/blocks-after-replace.json" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${DRAIN_ID}" <<'PY'

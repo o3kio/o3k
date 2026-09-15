@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: o3k-real-host-validation
@@ -61,6 +62,27 @@ jobs:
           mkdir -p target
           printf 'tested_source_sha=%s\n' "${TARGET_SHA}" > target/tested-source-sha.txt
 
+      - name: Protected P15.7 authority and capacity preflight
+        id: protected_preflight
+        continue-on-error: true
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_P15_7_JOURNEY_SCRIPT: ${{ github.workspace }}/scripts/p15-7-real-host-journey.sh
+          O3K_P15_7_OPERATOR_EXCHANGE_COMMAND: ${{ secrets.O3K_P15_7_OPERATOR_EXCHANGE_COMMAND }}
+          O3K_P15_7_OIDC_ISSUER: ${{ vars.O3K_P15_7_OIDC_ISSUER }}
+          O3K_P15_7_OIDC_AUDIENCE: ${{ vars.O3K_P15_7_OIDC_AUDIENCE }}
+          O3K_P15_7_OIDC_DISCOVERY_URL: ${{ vars.O3K_P15_7_OIDC_DISCOVERY_URL }}
+          O3K_P15_7_MIN_TOKEN_TTL_SECONDS: ${{ vars.O3K_P15_7_MIN_TOKEN_TTL_SECONDS || '1800' }}
+          # Maintainers must configure the protected environment exchange to
+          # validate GitHub's OIDC token against the O3K issuer and write only
+          # the documented redacted envelope; no static operator token is used.
+        run: bash scripts/p15-7-protected-preflight.sh
+
+      - name: Enforce protected preflight boundary
+        if: always()
+        run: test "${{ steps.protected_preflight.outcome }}" = success
+
       - name: Allocate run-scoped TestLab ports
         run: |
           set -euo pipefail
@@ -79,6 +101,7 @@ jobs:
 
       - name: Bootstrap disposable TestLab
         id: bootstrap
+        if: steps.protected_preflight.outcome == 'success'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
@@ -156,7 +179,7 @@ jobs:
 
       - name: Pre-run host and trust guard
         id: guard
-        if: always()
+        if: always() && steps.protected_preflight.outcome == 'success'
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
@@ -173,7 +196,7 @@ jobs:
 
       - name: Provision disposable tagged P13.4 LVM profile
         id: storage_lvm
-        if: steps.guard.outputs.ready == 'true'
+        if: steps.protected_preflight.outcome == 'success' && steps.guard.outputs.ready == 'true'
         env:
           O3K_LVM_RUN_ID: ${{ github.run_id }}
           O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
@@ -235,6 +258,10 @@ jobs:
             exit 1
           fi
           sudo -n docker run --detach --rm --name "${container}" \
+            --label o3k.owner=o3k \
+            --label "o3k.run_id=${GITHUB_RUN_ID}" \
+            --label o3k.phase=p13-4 \
+            --label "o3k.source_sha=${TARGET_SHA}" \
             --publish "127.0.0.1:${port}:5432" \
             --env POSTGRES_USER=o3k \
             --env POSTGRES_PASSWORD=p13-4-disposable-postgres \
@@ -242,6 +269,15 @@ jobs:
             postgres:16.4 >/dev/null
           for _ in $(seq 1 60); do
             if sudo -n docker exec "${container}" pg_isready -U o3k -d o3k_test >/dev/null 2>&1; then
+              python3 - "${container}" "${GITHUB_RUN_ID}" "${TARGET_SHA}" > target/real-host-workflow-artifacts/p13-4-postgres-ownership.json <<'PY'
+              import json, subprocess, sys
+              name, run_id, sha = sys.argv[1:]
+              cid = subprocess.check_output(["sudo", "-n", "docker", "inspect", "-f", "{{.Id}}", name], text=True).strip()
+              json.dump({"artifact_type":"o3k-postgres-ownership","schema_version":1,
+                         "phase":"p13-4","container_id":cid,"run_id":run_id,
+                         "source_sha":sha,"owner":"o3k","redacted":True}, sys.stdout)
+          PY
+              chmod 0644 target/real-host-workflow-artifacts/p13-4-postgres-ownership.json
               printf 'O3K_DATABASE_URL=postgres://o3k:p13-4-disposable-postgres@127.0.0.1:%s/o3k_test\n' "${port}" >>"${GITHUB_ENV}"
               printf 'O3K_P13_4_PG_CONTAINER=%s\n' "${container}" >>"${GITHUB_ENV}"
               exit 0
@@ -353,10 +389,7 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          container="o3k-p13-4-postgres-${GITHUB_RUN_ID}"
-          if sudo -n docker inspect "${container}" >/dev/null 2>&1; then
-            sudo -n docker rm --force "${container}" >/dev/null
-          fi
+          TARGET_SHA="${TARGET_SHA}" bash scripts/cleanup-owned-postgres.sh p13-4 "${GITHUB_RUN_ID}" target/real-host-workflow-artifacts/p13-4-postgres-ownership.json
 
       - name: Clean up P13.4 real guest resources
         if: always()
@@ -388,7 +421,7 @@ jobs:
 
       - name: Start disposable generic-phase PostgreSQL
         id: generic_postgres_bootstrap
-        if: steps.guard.outputs.ready == 'true'
+        if: steps.protected_preflight.outcome == 'success' && steps.guard.outputs.ready == 'true'
         run: |
           set -euo pipefail
           container="o3k-p15-7-postgres-${GITHUB_RUN_ID}"
@@ -398,6 +431,10 @@ jobs:
             exit 1
           fi
           sudo -n docker run --detach --rm --name "${container}" \
+            --label o3k.owner=o3k \
+            --label "o3k.run_id=${GITHUB_RUN_ID}" \
+            --label o3k.phase=p15-7 \
+            --label "o3k.source_sha=${TARGET_SHA}" \
             --publish "127.0.0.1:${port}:5432" \
             --env POSTGRES_USER=o3k \
             --env POSTGRES_PASSWORD=p15-7-disposable-postgres \
@@ -405,6 +442,15 @@ jobs:
             postgres:16.4 >/dev/null
           for _ in $(seq 1 60); do
             if sudo -n docker exec "${container}" pg_isready -U o3k -d o3k_test >/dev/null 2>&1; then
+              python3 - "${container}" "${GITHUB_RUN_ID}" "${TARGET_SHA}" > target/real-host-workflow-artifacts/p15-7-postgres-ownership.json <<'PY'
+              import json, subprocess, sys
+              name, run_id, sha = sys.argv[1:]
+              cid = subprocess.check_output(["sudo", "-n", "docker", "inspect", "-f", "{{.Id}}", name], text=True).strip()
+              json.dump({"artifact_type":"o3k-postgres-ownership","schema_version":1,
+                         "phase":"p15-7","container_id":cid,"run_id":run_id,
+                         "source_sha":sha,"owner":"o3k","redacted":True}, sys.stdout)
+          PY
+              chmod 0644 target/real-host-workflow-artifacts/p15-7-postgres-ownership.json
               {
                 printf 'O3K_DATABASE_BACKEND=postgres\n'
                 printf 'O3K_DATABASE_URL=postgres://o3k:p15-7-disposable-postgres@127.0.0.1:%s/o3k_test\n' "${port}"
@@ -419,7 +465,7 @@ jobs:
 
       - name: Prepare fresh generic TestLab image
         id: generic_image
-        if: steps.guard.outputs.ready == 'true'
+        if: steps.protected_preflight.outcome == 'success' && steps.guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
@@ -439,7 +485,7 @@ jobs:
 
       - name: Bootstrap fresh generic TestLab
         id: generic_bootstrap
-        if: steps.guard.outputs.ready == 'true' && steps.generic_image.outcome == 'success'
+        if: steps.protected_preflight.outcome == 'success' && steps.guard.outputs.ready == 'true' && steps.generic_image.outcome == 'success'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
@@ -470,7 +516,7 @@ jobs:
 
       - name: Fresh generic TestLab pre-run guard
         id: generic_guard
-        if: always()
+        if: always() && steps.protected_preflight.outcome == 'success'
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
@@ -487,7 +533,7 @@ jobs:
 
       - name: Run public real-host lifecycle
         id: lifecycle
-        if: steps.generic_guard.outputs.ready == 'true'
+        if: steps.protected_preflight.outcome == 'success' && steps.generic_guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
@@ -505,7 +551,7 @@ jobs:
 
       - name: Run compute-agent mTLS command evidence
         id: agent_mtls
-        if: steps.generic_guard.outputs.ready == 'true'
+        if: steps.protected_preflight.outcome == 'success' && steps.generic_guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
@@ -513,7 +559,7 @@ jobs:
 
       - name: Run compute-agent process-boundary evidence
         id: agent_process
-        if: steps.generic_guard.outputs.ready == 'true'
+        if: steps.protected_preflight.outcome == 'success' && steps.generic_guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
@@ -521,7 +567,7 @@ jobs:
 
       - name: Prepare pinned P15.7 VM host image
         id: p15_7_host_image
-        if: steps.generic_guard.outputs.ready == 'true'
+        if: steps.protected_preflight.outcome == 'success' && steps.generic_guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           P15_7_HOST_IMAGE_URL: https://cloud-images.ubuntu.com/releases/releases/noble/release-20260911/ubuntu-24.04-server-cloudimg-amd64.img
@@ -545,25 +591,24 @@ jobs:
 
       - name: Run P15.7 scale/composition convergence gate
         id: p15_7
-        if: steps.generic_guard.outputs.ready == 'true' && steps.p15_7_host_image.outcome == 'success'
+        if: steps.protected_preflight.outcome == 'success' && steps.generic_guard.outputs.ready == 'true' && steps.p15_7_host_image.outcome == 'success'
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_P15_7_REAL_HOST: "1"
           O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
           O3K_P15_7_PROFILE: small-edge-cloud
           O3K_PROVIDER: agent
-          # Operator diagnostics and BuildingBlock lifecycle are system
-          # scoped.  Consume the approved federated operator token as a
-          # protected secret; the repository journey never mints or fabricates
-          # this authority and a project password token cannot substitute.
-          O3K_P15_7_OPERATOR_TOKEN: ${{ secrets.O3K_P15_7_OPERATOR_TOKEN }}
+          # The early preflight obtains a short-lived canonical authority via
+          # the protected federation exchange and exports only its 0600 file.
+          # That O3K_P15_7_OPERATOR_TOKEN_FILE is never placed in workflow YAML,
+          # argv, logs, or evidence.
           # The protected host provisions this command when the multi-block
           # journey is enabled.  The gate fails closed when it is absent.
           O3K_P15_7_JOURNEY_COMMAND: ${{ vars.O3K_P15_7_JOURNEY_COMMAND }}
         run: bash tests/p15_7_scale_composition.sh
 
       - name: Post-run result guard
-        if: always()
+        if: always() && steps.protected_preflight.outcome == 'success'
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
@@ -572,7 +617,7 @@ jobs:
         run: bash scripts/real-host-post-run-guard.sh
 
       - name: Extract redacted create diagnostics
-        if: always()
+        if: always() && steps.protected_preflight.outcome == 'success'
         run: |
           output=target/real-host-workflow-artifacts/create-diagnostics.log
           state_root="/var/lib/o3k-testlab/${GITHUB_RUN_ID}"
@@ -590,7 +635,7 @@ jobs:
           chmod 0644 "${output}"
 
       - name: Capture redacted console boundary diagnostics
-        if: always()
+        if: always() && steps.protected_preflight.outcome == 'success'
         run: |
           output=target/real-host-workflow-artifacts/console-boundary-diagnostics.log
           state_root="/var/lib/o3k-testlab/${GITHUB_RUN_ID}"
@@ -642,9 +687,21 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          container="o3k-p15-7-postgres-${GITHUB_RUN_ID}"
-          if sudo -n docker inspect "${container}" >/dev/null 2>&1; then
-            sudo -n docker rm --force "${container}" >/dev/null
+          TARGET_SHA="${TARGET_SHA}" bash scripts/cleanup-owned-postgres.sh p15-7 "${GITHUB_RUN_ID}" target/real-host-workflow-artifacts/p15-7-postgres-ownership.json
+
+      - name: Remove protected operator authority file
+        if: always()
+        run: |
+          set -euo pipefail
+          token_file="${RUNNER_TEMP}/o3k-p15-7-operator-${GITHUB_RUN_ID}.token"
+          marker="${token_file}.o3k-owned"
+          if [[ -e "${token_file}" || -e "${marker}" ]]; then
+            test -f "${marker}" && ! test -L "${marker}"
+            grep -Fqx 'o3k-p15-7-operator-token-v1' "${marker}"
+            grep -Fqx "run=${GITHUB_RUN_ID}" "${marker}"
+            test -f "${token_file}" && ! test -L "${token_file}"
+            test "$(stat -c '%a' "${token_file}")" = 600
+            rm -f -- "${token_file}" "${marker}"
           fi
 
       - name: Remove owned P15.7 VM host image
@@ -684,6 +741,9 @@ jobs:
             target/real-host-workflow-artifacts/compute-agent-process-mtls-result.json
             target/real-host-workflow-artifacts/p15-7-scale-composition-evidence.json
             target/real-host-workflow-artifacts/p15-7-gate-result.json
+            target/real-host-workflow-artifacts/p15-7-protected-preflight.json
+            target/real-host-workflow-artifacts/p15-7-postgres-ownership.json
+            target/real-host-workflow-artifacts/p13-4-postgres-ownership.json
             target/real-host-workflow-artifacts/p13-4-volume-trace.jsonl
             target/real-host-workflow-artifacts/p13-4-storage-evidence.json
             target/lvm-real-guest-artifacts/lvm-real-guest-result.json

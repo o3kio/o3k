@@ -446,6 +446,11 @@ PY
 python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+preflight_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
+for needle in ("P15.7 protected preflight", "id-token: write",
+               "scripts/p15-7-protected-preflight.sh", "target_sha:",
+               "if-no-files-found: error"):
+    assert needle in preflight_text, needle
 workflow_step = text.split("      - name: Run public real-host lifecycle\n", 1)[1]
 workflow_step = workflow_step.split("        run: bash tests/testlab-libvirt.sh\n", 1)[0]
 assert "          OS_PASSWORD:" not in workflow_step
@@ -474,9 +479,15 @@ for needle in ("workflow_dispatch:",
                "compute-agent-process-mtls-result.json",
                "Run P15.7 scale/composition convergence gate",
                "tests/p15_7_scale_composition.sh",
+               "Protected P15.7 authority and capacity preflight",
+               "scripts/p15-7-protected-preflight.sh",
+               "O3K_P15_7_OPERATOR_EXCHANGE_COMMAND:",
+               "O3K_P15_7_OIDC_ISSUER:",
+               "O3K_P15_7_OIDC_AUDIENCE:",
+               "O3K_P15_7_OIDC_DISCOVERY_URL:",
                "O3K_P15_7_REAL_HOST: \"1\"",
                "O3K_P15_7_PROFILE: small-edge-cloud",
-               "O3K_P15_7_OPERATOR_TOKEN: ${{ secrets.O3K_P15_7_OPERATOR_TOKEN }}",
+               "O3K_P15_7_OPERATOR_TOKEN_FILE",
                "O3K_P15_7_JOURNEY_COMMAND:",
                "p15-7-scale-composition-evidence.json",
                "p15-7-gate-result.json",
@@ -517,6 +528,15 @@ assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in text
 assert "ref: ${{ inputs.target_sha || github.sha }}" in text
 assert "persist-credentials: false" in text
 assert "Verify immutable source checkout" in text
+assert text.index("Verify immutable source checkout") < text.index("Protected P15.7 authority and capacity preflight")
+assert text.index("Protected P15.7 authority and capacity preflight") < text.index("Bootstrap disposable TestLab")
+assert "if: always() && steps.protected_preflight.outcome == 'success'" in text
+assert text.count("if: always() && steps.protected_preflight.outcome == 'success'") >= 5
+assert "id-token: write" in text
+assert "O3K_P15_7_OPERATOR_TOKEN:" not in text
+assert "p15-7-postgres-ownership.json" in text
+assert "--label o3k.owner=o3k" in text
+assert "container_id" in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
 p15_image_step = text.split("      - name: Prepare pinned P15.7 VM host image\n", 1)[1]
@@ -525,7 +545,7 @@ p15_image_step = p15_image_step.split("      - name: Run P15.7 scale/composition
 # must not enter the protected-path inventory, whose bounded file-size policy
 # is intentionally fail-closed.
 assert "O3K_REAL_HOST_PROTECTED_PATHS" not in p15_image_step
-assert "if: steps.guard.outputs.ready == 'true'" in text
+assert "if: steps.protected_preflight.outcome == 'success' && steps.guard.outputs.ready == 'true'" in text
 assert "test \"${outcome}\" = success" in text
 assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-inventory.sh").exists()
 post_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-post-run-guard.sh").read_text(encoding="utf-8")
