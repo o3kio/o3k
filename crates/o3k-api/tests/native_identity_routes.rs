@@ -136,3 +136,20 @@ async fn production_router_mounts_operator_profile_with_canonical_auth()
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     Ok(())
 }
+
+#[tokio::test]
+async fn production_router_mounts_building_block_collection_route()
+-> Result<(), Box<dyn std::error::Error>> {
+    // A missing route would return 404 before authentication.  Reaching the
+    // native handler proves the production composition includes the canonical
+    // BuildingBlock collection endpoint used by the real-host journey.
+    let response = native_router_with_iam()?
+        .oneshot(
+            Request::builder()
+                .uri("/o3k/v1/operator/building-blocks")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
