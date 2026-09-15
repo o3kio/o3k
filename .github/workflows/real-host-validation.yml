@@ -737,6 +737,7 @@ jobs:
           path: |
             target/real-host-workflow-artifacts/runner-capabilities.json
             target/real-host-workflow-artifacts/disposable-testlab-bootstrap.json
+            target/real-host-workflow-artifacts/disposable-testlab-startup-diagnostics.log
             target/real-host-workflow-artifacts/real-host-owned-inventory-baseline.json
             target/real-host-workflow-artifacts/real-host-owned-inventory-after.json
             target/real-host-workflow-artifacts/real-host-workflow-result.json
