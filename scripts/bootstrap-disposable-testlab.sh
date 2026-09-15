@@ -503,6 +503,20 @@ for lvm_variable in O3K_LVM_VOLUME_GROUP O3K_LVM_THIN_POOL O3K_LVM_PROVIDER_NAME
     printf '%s=%s\n' "$lvm_variable" "$(printf '%q' "${!lvm_variable}")" >>"$o3kd_env_tmp"
   fi
 done
+# The protected P15.7 authority is provisioned by the runner, but the daemon
+# must receive the same non-secret trust and durable identity configuration in
+# its run-scoped environment.  Never copy provider credentials or bearer
+# tokens into this file; only the canonical issuer/binding metadata crosses
+# the process boundary.
+for identity_variable in \
+  O3K_OIDC_TRUST_ID O3K_OIDC_ISSUER O3K_OIDC_AUDIENCE \
+  O3K_OIDC_DISCOVERY_URL O3K_OIDC_ALLOW_INSECURE_LOCAL \
+  O3K_TESTLAB_FEDERATED_SUBJECT O3K_TESTLAB_FEDERATED_PRINCIPAL_ID \
+  O3K_TESTLAB_FEDERATED_BINDING_ID O3K_TESTLAB_OPERATOR_ASSIGNMENT_ID; do
+  if [[ -n "${!identity_variable:-}" ]]; then
+    printf '%s=%s\n' "$identity_variable" "$(printf '%q' "${!identity_variable}")" >>"$o3kd_env_tmp"
+  fi
+done
 cat >"$compute_env_tmp" <<EOF
 O3K_COMPUTE_DATA_DIR=$(printf '%q' "$STATE_ROOT/compute-data")
 O3K_COMPUTE_CONTROL_ENDPOINT=$(printf '%q' "https://127.0.0.1:${CONTROL_PORT}")

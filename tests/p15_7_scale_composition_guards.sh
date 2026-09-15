@@ -125,7 +125,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
     assert required in journey, required
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
-assert 'api_get() { curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG"' in journey
+assert 'operator_curl() {' in journey
+assert 'refresh_operator_authority' in journey
 assert 'Authorization: Bearer $PROJECT_TOKEN' in journey
 assert 'openstack token issue -f value -c id' in journey
 # Prevent recurrence of the bootstrap/identity and cleanup regressions that

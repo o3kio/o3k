@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
   id-token: write
 
 concurrency:
@@ -58,11 +59,15 @@ jobs:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha }}
           O3K_P15_7_JOURNEY_SCRIPT: ${{ github.workspace }}/scripts/p15-7-real-host-journey.sh
-          O3K_P15_7_OPERATOR_EXCHANGE_COMMAND: ${{ secrets.O3K_P15_7_OPERATOR_EXCHANGE_COMMAND }}
-          O3K_P15_7_OIDC_ISSUER: ${{ vars.O3K_P15_7_OIDC_ISSUER }}
-          O3K_P15_7_OIDC_AUDIENCE: ${{ vars.O3K_P15_7_OIDC_AUDIENCE }}
-          O3K_P15_7_OIDC_DISCOVERY_URL: ${{ vars.O3K_P15_7_OIDC_DISCOVERY_URL }}
-          O3K_P15_7_MIN_TOKEN_TTL_SECONDS: ${{ vars.O3K_P15_7_MIN_TOKEN_TTL_SECONDS || '1800' }}
+          O3K_P15_7_AUTHORITY_MODE: testlab-keycloak
+          O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT: ${{ github.workspace }}/scripts/p15-7-keycloak-authority.sh
+          # external-oidc is an explicit certification mode only.  These
+          # names document its optional interface; they are intentionally not
+          # read by the default testlab-keycloak path.
+          # O3K_P15_7_OPERATOR_EXCHANGE_COMMAND:
+          # O3K_P15_7_OIDC_ISSUER:
+          # O3K_P15_7_OIDC_AUDIENCE:
+          # O3K_P15_7_OIDC_DISCOVERY_URL:
         run: bash scripts/p15-7-protected-preflight.sh
 
       - name: Publish preflight result
@@ -88,3 +93,24 @@ jobs:
             test "$(stat -c '%a' "${token_file}")" = 600
             rm -f -- "${token_file}" "${marker}"
           fi
+
+      - name: Remove owned TestLab Keycloak authority
+        if: always()
+        env:
+          O3K_P15_7_AUTHORITY_MODE: testlab-keycloak
+          O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT: ${{ github.workspace }}/scripts/p15-7-keycloak-authority.sh
+          O3K_P15_7_KEYCLOAK_STATE_ROOT: ${{ runner.temp }}/o3k-p15-7-keycloak-${{ github.run_id }}
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha }}
+        run: bash scripts/p15-7-keycloak-authority.sh cleanup
+
+      - name: Dispatch full protected P15.7 journey
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            "repos/o3kio/o3k/actions/workflows/real-host-validation.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[target_sha]=${TARGET_SHA}"

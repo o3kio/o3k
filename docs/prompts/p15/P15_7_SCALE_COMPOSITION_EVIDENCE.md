@@ -45,6 +45,25 @@ the PR must record the authorization line with its actual state.
 
 ## Objective
 
+### Authority modes
+
+The protected TestLab defaults to `testlab-keycloak`.  Its preflight launches
+the digest-pinned Keycloak fixture from the accepted P12-IAM.7 machinery,
+generates run-scoped credentials, and exports only non-secret provider
+configuration.  `o3kd` provisions the durable federated binding and
+`operator-console` assignment during identity startup; the journey performs a
+fresh native federated exchange immediately before privileged P15.7 work.
+There is no manual GitHub OIDC issuer/audience/exchange secret in this mode.
+
+`external-oidc` remains an explicit, separately configured certification mode
+for a real external provider.  It is not a prerequisite for the normal
+protected TestLab journey.
+
+The journey renews the native credential through the same federation exchange
+when its short lifetime approaches expiry; it never extends the token lifetime
+or fabricates an operator context.  Keycloak cleanup requires the run/source
+ledger plus the complete O3K ownership labels.
+
 Run the real convergence gate on the protected runner — real `o3kd` +
 production composition router + real auth + PostgreSQL + SQLite parity + REAL
 execution boundary — proving the full journey: fresh deployment → initialize

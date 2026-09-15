@@ -82,6 +82,8 @@ jobs:
         run: bash tests/real-host-workflow-guards.sh
       - name: Test protected P15.7 authority preflight
         run: bash tests/p15_7_protected_preflight.sh
+      - name: Test protected P15.7 Keycloak authority guards
+        run: bash tests/p15_7_keycloak_authority_guards.sh
       - name: Test protected P15.7 dispatch guard
         run: bash tests/p15_7_dispatch_guard.sh
       - name: Test protected P15.7 PostgreSQL cleanup ownership

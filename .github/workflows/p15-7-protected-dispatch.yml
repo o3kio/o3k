@@ -10,6 +10,7 @@ on:
       - scripts/p15-7-protected-preflight.sh
       - scripts/p15-7-protected-dispatch-guard.sh
       - .github/workflows/p15-7-protected-preflight.yml
+      - scripts/p15-7-keycloak-authority.sh
       - scripts/cleanup-owned-postgres.sh
       - packaging/bootstrap-certs.sh
       - tests/disposable-testlab-bootstrap.sh

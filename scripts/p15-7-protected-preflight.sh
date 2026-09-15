@@ -19,6 +19,8 @@ SOURCE_SHA="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-}}"
 JOURNEY="${O3K_P15_7_JOURNEY_SCRIPT:-$ROOT_DIR/scripts/p15-7-real-host-journey.sh}"
 MIN_TTL="${O3K_P15_7_MIN_TOKEN_TTL_SECONDS:-1800}"
 EXCHANGE="${O3K_P15_7_OPERATOR_EXCHANGE_COMMAND:-}"
+AUTHORITY_MODE="${O3K_P15_7_AUTHORITY_MODE:-testlab-keycloak}"
+KEYCLOAK_AUTHORITY_SCRIPT="${O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT:-$ROOT_DIR/scripts/p15-7-keycloak-authority.sh}"
 TEMP_ROOT="${RUNNER_TEMP:-/tmp}"
 LIBVIRT_IMAGE_ROOT="${O3K_P15_7_LIBVIRT_IMAGE_ROOT:-/var/lib/libvirt/images}"
 PREFLIGHT_SUCCESS=false
@@ -27,6 +29,11 @@ cleanup_preflight() {
   rm -f -- "${EXCHANGE_OUTPUT:-}" "${EXCHANGE_OUTPUT:-}.stdout" "${EXCHANGE_OUTPUT:-}.stderr"
   if [[ "$PREFLIGHT_SUCCESS" != true ]]; then
     rm -f -- "${TOKEN_FILE:-}" "${TOKEN_MARKER:-}"
+    if [[ "${AUTHORITY_MODE:-}" == testlab-keycloak && -x "${KEYCLOAK_AUTHORITY_SCRIPT:-}" ]]; then
+      O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${TEMP_ROOT%/}/o3k-p15-7-keycloak-${RUN_ID}}" \
+        GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
+        bash "$KEYCLOAK_AUTHORITY_SCRIPT" cleanup >/dev/null 2>&1 || true
+    fi
   fi
 }
 
@@ -92,6 +99,57 @@ trap cleanup_preflight EXIT
 virsh -c qemu:///system uri >/dev/null 2>&1 || blocked libvirt_unavailable
 docker info >/dev/null 2>&1 || blocked docker_unavailable
 
+case "$AUTHORITY_MODE" in
+  testlab-keycloak)
+    [[ -x "$KEYCLOAK_AUTHORITY_SCRIPT" && ! -L "$KEYCLOAK_AUTHORITY_SCRIPT" ]] \
+      || blocked keycloak_authority_driver_missing
+    # The default protected TestLab owns its complete OIDC authority.  This is
+    # intentionally before image/database/VM work and needs no GitHub OIDC
+    # variables, environment secrets, or manually provisioned issuer.
+    if [[ -z "${O3K_P15_7_TEST_ENVELOPE:-}" \
+      && -z "${O3K_P15_7_OIDC_ISSUER:-}" \
+      && -z "${O3K_P15_7_OIDC_AUDIENCE:-}" \
+      && -z "${O3K_P15_7_OIDC_DISCOVERY_URL:-}" ]]; then
+      O3K_P15_7_AUTHORITY_MODE=testlab-keycloak \
+        O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${TEMP_ROOT%/}/o3k-p15-7-keycloak-${RUN_ID}}" \
+        GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
+        bash "$KEYCLOAK_AUTHORITY_SCRIPT" start || blocked keycloak_provider_unavailable
+      provider_env="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${TEMP_ROOT%/}/o3k-p15-7-keycloak-${RUN_ID}}/provider.env"
+      [[ -f "$provider_env" && ! -L "$provider_env" ]] || blocked keycloak_provider_state_missing
+      # shellcheck disable=SC1090
+      set -a; . "$provider_env"; set +a
+      [[ -f "${O3K_P15_7_KEYCLOAK_STATE_ROOT}/oidc-operator.token" ]] \
+        || blocked keycloak_signed_token_missing
+      python3 - "${O3K_P15_7_KEYCLOAK_STATE_ROOT}/oidc-operator.token" "$O3K_OIDC_ISSUER" <<'PY' || blocked keycloak_signed_token_invalid
+import base64, json, pathlib, sys
+token = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8').strip()
+if token.count('.') != 2: raise SystemExit('jwt_shape_invalid')
+payload = json.loads(base64.urlsafe_b64decode(token.split('.')[1] + '=' * (-len(token.split('.')[1]) % 4)))
+if payload.get('iss') != sys.argv[2] or not payload.get('sub') or int(payload.get('exp', 0)) <= 0:
+    raise SystemExit('jwt_claims_invalid')
+PY
+      if [[ -n "${GITHUB_ENV:-}" ]]; then
+        # Only non-secret provider configuration crosses the workflow-step
+        # boundary.  The signed token and generated passwords stay 0600 below
+        # the run state root.
+        grep -E '^(O3K_P15_7_AUTHORITY_MODE|O3K_P15_7_KEYCLOAK_STATE_ROOT|O3K_P15_7_KEYCLOAK_CONTAINER|O3K_P15_7_KEYCLOAK_PORT|O3K_OIDC_TRUST_ID|O3K_OIDC_ISSUER|O3K_OIDC_AUDIENCE|O3K_OIDC_DISCOVERY_URL|O3K_OIDC_ALLOW_INSECURE_LOCAL|O3K_TESTLAB_FEDERATED_)' "$provider_env" >>"$GITHUB_ENV"
+      fi
+      issuer="${O3K_OIDC_ISSUER}"; audience="${O3K_OIDC_AUDIENCE}"; discovery="${O3K_OIDC_DISCOVERY_URL}"
+      write_artifact passed provider_ready testlab-keycloak ready ready
+      if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        printf 'P15_7_PROTECTED_PREFLIGHT=PASS\nAUTHORITY_MODE=testlab-keycloak\nKEYCLOAK_PROVIDER=PASS\nMULTI_VM_CAPACITY=PENDING\n' >>"$GITHUB_OUTPUT"
+      fi
+      PREFLIGHT_SUCCESS=true
+      echo "P15_7_PROTECTED_PREFLIGHT: PASS"
+      echo "AUTHORITY_MODE: testlab-keycloak"
+      echo "KEYCLOAK_PROVIDER: PASS"
+      exit 0
+    fi
+    ;;
+  external-oidc) ;;
+  *) blocked invalid_authority_mode ;;
+esac
+
 # Reserve capacity for two independent 2-vCPU/2-GiB guests and their control
 # plane. These are minimums, not a substitute for the journey's real checks.
 cpus="$(nproc)"
@@ -108,7 +166,7 @@ libvirt_mem_kib="$(awk -F: '/Memory size:/ {gsub(/[[:space:]]KiB/, "", $2); gsub
 [[ "$libvirt_cpus" =~ ^[0-9]+$ && "$libvirt_cpus" -ge 4 ]] || blocked multi_vm_libvirt_cpu_capacity_unavailable
 [[ "$libvirt_mem_kib" =~ ^[0-9]+$ && "$libvirt_mem_kib" -ge 6144000 ]] || blocked multi_vm_libvirt_memory_capacity_unavailable
 
-# O3K federation is configured by the protected deployment, not invented by
+# External OIDC federation is configured by the protected deployment, not invented by
 # this repository. The exchange command must use that trust and return the
 # canonical O3K authority; no password/project token is accepted here.
 issuer="${O3K_P15_7_OIDC_ISSUER:-}"
