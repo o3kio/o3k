@@ -552,6 +552,11 @@ jobs:
           O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
           O3K_P15_7_PROFILE: small-edge-cloud
           O3K_PROVIDER: agent
+          # Operator diagnostics and BuildingBlock lifecycle are system
+          # scoped.  Consume the approved federated operator token as a
+          # protected secret; the repository journey never mints or fabricates
+          # this authority and a project password token cannot substitute.
+          O3K_P15_7_OPERATOR_TOKEN: ${{ secrets.O3K_P15_7_OPERATOR_TOKEN }}
           # The protected host provisions this command when the multi-block
           # journey is enabled.  The gate fails closed when it is absent.
           O3K_P15_7_JOURNEY_COMMAND: ${{ vars.O3K_P15_7_JOURNEY_COMMAND }}
