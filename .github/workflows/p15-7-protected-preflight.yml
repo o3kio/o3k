@@ -1,0 +1,89 @@
+name: P15.7 protected preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: "Full 40-character commit SHA to preflight"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: o3k-real-host-validation
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Protected P15.7 prerequisite preflight
+    if: github.repository == 'o3kio/o3k'
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    timeout-minutes: 15
+    environment: o3k-real-host-validation
+    env:
+      TARGET_SHA: ${{ inputs.target_sha }}
+    steps:
+      - name: Repair prior protected artifact ownership
+        run: |
+          set -euo pipefail
+          for artifact_dir in \
+            "${GITHUB_WORKSPACE}/target/real-host-workflow-artifacts" \
+            "${GITHUB_WORKSPACE}/target/debug"; do
+            if test -e "${artifact_dir}"; then
+              sudo -n chown -R "$(id -u):$(id -g)" "${artifact_dir}"
+            fi
+          done
+
+      - name: Check out the canonical repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable source checkout
+        run: |
+          set -euo pipefail
+          [[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]
+          git cat-file -e "${TARGET_SHA}^{commit}"
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+
+      - name: Run cheap protected P15.7 preflight
+        id: protected_preflight
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha }}
+          O3K_P15_7_JOURNEY_SCRIPT: ${{ github.workspace }}/scripts/p15-7-real-host-journey.sh
+          O3K_P15_7_OPERATOR_EXCHANGE_COMMAND: ${{ secrets.O3K_P15_7_OPERATOR_EXCHANGE_COMMAND }}
+          O3K_P15_7_OIDC_ISSUER: ${{ vars.O3K_P15_7_OIDC_ISSUER }}
+          O3K_P15_7_OIDC_AUDIENCE: ${{ vars.O3K_P15_7_OIDC_AUDIENCE }}
+          O3K_P15_7_OIDC_DISCOVERY_URL: ${{ vars.O3K_P15_7_OIDC_DISCOVERY_URL }}
+          O3K_P15_7_MIN_TOKEN_TTL_SECONDS: ${{ vars.O3K_P15_7_MIN_TOKEN_TTL_SECONDS || '1800' }}
+        run: bash scripts/p15-7-protected-preflight.sh
+
+      - name: Publish preflight result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: p15-7-protected-preflight-${{ inputs.target_sha }}
+          path: target/real-host-workflow-artifacts/p15-7-protected-preflight.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove protected operator authority file
+        if: always()
+        run: |
+          set -euo pipefail
+          token_file="${RUNNER_TEMP}/o3k-p15-7-operator-${GITHUB_RUN_ID}.token"
+          marker="${token_file}.o3k-owned"
+          if [[ -e "${token_file}" || -e "${marker}" ]]; then
+            test -f "${marker}" && ! test -L "${marker}"
+            grep -Fqx 'o3k-p15-7-operator-token-v1' "${marker}"
+            grep -Fqx "run=${GITHUB_RUN_ID}" "${marker}"
+            test -f "${token_file}" && ! test -L "${token_file}"
+            test "$(stat -c '%a' "${token_file}")" = 600
+            rm -f -- "${token_file}" "${marker}"
+          fi

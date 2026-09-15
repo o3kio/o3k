@@ -105,13 +105,13 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "rm -rf -- \"$WORK_ROOT\"", "second_real_host_required", "assert_owned_domains_absent",
                  "agent-id", "agent identity transfer failed", "/var/lib/o3k-compute/agent-id",
                  "actual_uuid", "DOMAINS+=(\"$d\")", "OVERLAYS+=(\"$overlay\")",
-                 "UUIDS[index]=\"$uuid\"", "REPLAY_JOIN_FILE",
+                 "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-c-uuid\")\"", "provision_vms_bounded", "REPLAY_JOIN_FILE",
                  "join-request.json", "remote_agent_cleanup", "sudo mkdir -- '$remote_stage'", "sudo rm -rf -- '$remote_stage'",
                  "canonical agent identity does not match agent id", "cross_tenant_test_prerequisite_missing",
                  "FOREIGN_PROJECT_ID", "FOREIGN_TOKEN_PROJECT_ID", "foreign token scope mismatch",
                  "foreign project can read workload A", "CROSS_TENANT_CONCEALMENT=true",
                  "record_optional_araf", "external_consumer_not_provisioned", "araf-projection.json",
-                 "system_operator_token_required", "O3K_P15_7_OPERATOR_TOKEN", "PROJECT_TOKEN",
+                 "system_operator_token_required", "O3K_P15_7_OPERATOR_TOKEN_FILE", "O3K_P15_7_OPERATOR_TOKEN", "PROJECT_TOKEN",
                  "xml.etree.ElementTree", "net-dumpxml", "libvirt gateway unavailable",
                  "LIBVIRT_STORAGE_ROOT", "libvirt-storage-owned-v1", "LIBVIRT_QEMU_GROUP",
                  "sudo -n qemu-img create", "cannot stage pinned VM image for libvirt",
@@ -125,7 +125,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
     assert required in journey, required
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
-assert 'api_get() { curl --fail --silent --show-error -H "Authorization: Bearer $OPERATOR_TOKEN"' in journey
+assert 'api_get() { curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG"' in journey
 assert 'Authorization: Bearer $PROJECT_TOKEN' in journey
 assert 'openstack token issue -f value -c id' in journey
 # Prevent recurrence of the bootstrap/identity and cleanup regressions that

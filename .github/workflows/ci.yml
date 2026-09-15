@@ -80,6 +80,12 @@ jobs:
         run: bash tests/workflow-validation.sh actionlint
       - name: Test protected real-host workflow guards
         run: bash tests/real-host-workflow-guards.sh
+      - name: Test protected P15.7 authority preflight
+        run: bash tests/p15_7_protected_preflight.sh
+      - name: Test protected P15.7 dispatch guard
+        run: bash tests/p15_7_dispatch_guard.sh
+      - name: Test protected P15.7 PostgreSQL cleanup ownership
+        run: bash tests/p15_7_postgres_cleanup.sh
       - name: Test protected LVM provider workflow guards
         run: bash tests/lvm-provider-workflow-guards.sh
       - name: Test protected LVM real guest workflow guards
