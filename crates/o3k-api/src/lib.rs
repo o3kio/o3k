@@ -596,6 +596,19 @@ pub fn router_with_state(state: AppState) -> Router {
                 get(o3k_native_api::identity::operator_profile),
             )
             .route(
+                "/o3k/v1/operator/building-blocks",
+                get(o3k_native_api::building_block::list)
+                    .post(o3k_native_api::building_block::enroll),
+            )
+            .route(
+                "/o3k/v1/operator/building-blocks/{id}",
+                get(o3k_native_api::building_block::show),
+            )
+            .route(
+                "/o3k/v1/operator/building-blocks/{id}/actions/{action_name}",
+                post(o3k_native_api::building_block::action),
+            )
+            .route(
                 "/o3k/v1/compute/servers",
                 get(o3k_native_api::resource::list_compute)
                     .post(o3k_native_api::resource::create_compute),
