@@ -254,10 +254,19 @@ find_ip() {
   die "VM did not receive a DHCP lease: $d"
 }
 provision_vm() {
-  local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" seed_tmp="$WORK_ROOT/$1-seed.iso" ip uuid
+  local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" seed_tmp="$WORK_ROOT/$1-seed.iso" ip uuid mac
   local index
   DOMAINS+=("$d"); UUIDS+=(""); OVERLAYS+=("$overlay"); SEEDS+=("$seed")
   index=$((${#DOMAINS[@]} - 1))
+  # Match the guest network by the exact MAC we give libvirt.  This avoids
+  # relying on distribution-specific predictable interface names while still
+  # exercising the real libvirt DHCP path.
+  mac="$(python3 - "$RUN_ID-$id" <<'PY'
+import hashlib, sys
+suffix = hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest()[:6]
+print("52:54:00:%s:%s:%s" % (suffix[0:2], suffix[2:4], suffix[4:6]))
+PY
+)"
   sudo -n qemu-img create -q -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$overlay" || die "overlay creation failed: $id"
   cat >"$WORK_ROOT/user-data-$1" <<EOF
 #cloud-config
@@ -275,12 +284,12 @@ runcmd:
   - [ sh, -c, 'systemctl enable --now ssh || true' ]
   - [ sh, -c, 'systemctl enable --now libvirtd || systemctl enable --now libvirt-daemon || true' ]
 EOF
-  cat >"$WORK_ROOT/network-config-$1" <<'EOF'
+  cat >"$WORK_ROOT/network-config-$1" <<EOF
 version: 2
 ethernets:
-  all-interfaces:
+  primary:
     match:
-      name: "en*"
+      macaddress: "$mac"
     dhcp4: true
     dhcp6: false
 EOF
@@ -292,7 +301,7 @@ EOF
   sudo -n install -o root -g "$LIBVIRT_QEMU_GROUP" -m 0640 "$seed_tmp" "$seed" \
     || die "cannot stage cloud-init seed for libvirt: $id"
   rm -f -- "$seed_tmp"
-  virt-install --connect qemu:///system --name "$d" --memory 2048 --vcpus 2 --import --disk "path=$overlay,format=qcow2" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio" --os-variant ubuntu24.04 --metadata "description=o3k-p15-7-journey-owned=$RUN_ID" --noautoconsole --wait 0 >/dev/null || die "VM boot failed: $id"
+  virt-install --connect qemu:///system --name "$d" --memory 2048 --vcpus 2 --import --disk "path=$overlay,format=qcow2" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --metadata "description=o3k-p15-7-journey-owned=$RUN_ID" --noautoconsole --wait 0 >/dev/null || die "VM boot failed: $id"
   uuid="$(virsh -c qemu:///system domuuid "$d")"; [[ "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || die "VM UUID unavailable: $id"
   UUIDS[index]="$uuid"
   ip="$(find_ip "$d")"
