@@ -73,15 +73,17 @@ fn federated_oidc_validator_from_env()
 async fn provision_testlab_federated_operator(
     store: &dyn IdentityRepository,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let values = [
+    let provisioning = [
         std::env::var("O3K_TESTLAB_FEDERATED_SUBJECT").ok(),
         std::env::var("O3K_TESTLAB_FEDERATED_PRINCIPAL_ID").ok(),
         std::env::var("O3K_TESTLAB_FEDERATED_BINDING_ID").ok(),
         std::env::var("O3K_TESTLAB_OPERATOR_ASSIGNMENT_ID").ok(),
-        std::env::var("O3K_OIDC_TRUST_ID").ok(),
-        std::env::var("O3K_OIDC_ISSUER").ok(),
     ];
-    if values.iter().all(Option::is_none) {
+    // Ordinary OIDC configuration is also used by the P12/Araf evidence
+    // gates.  Only the explicit TestLab provisioning variables activate this
+    // identity bootstrap hook; otherwise those independent gates must remain
+    // unaffected by the authority-mode feature.
+    if provisioning.iter().all(Option::is_none) {
         return Ok(());
     }
     let [
@@ -89,12 +91,14 @@ async fn provision_testlab_federated_operator(
         Some(principal),
         Some(binding_id),
         Some(assignment_id),
-        Some(trust_id),
-        Some(issuer),
-    ] = values
+    ] = provisioning
     else {
         return Err("partial TestLab federated operator provisioning configuration".into());
     };
+    let trust_id = std::env::var("O3K_OIDC_TRUST_ID")
+        .map_err(|_| "TestLab operator provisioning requires O3K_OIDC_TRUST_ID")?;
+    let issuer = std::env::var("O3K_OIDC_ISSUER")
+        .map_err(|_| "TestLab operator provisioning requires O3K_OIDC_ISSUER")?;
     if subject.is_empty() || principal != "bootstrap-user" || issuer.is_empty() {
         return Err("invalid TestLab federated operator provisioning identity".into());
     }
