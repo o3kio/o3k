@@ -136,7 +136,7 @@ fn spawn_o3kd(port: u16, data_dir: &std::path::Path, backend: &Backend) -> Child
     command.spawn().expect("spawn o3kd")
 }
 
-async fn wait_healthy(base: &str) {
+async fn wait_healthy(base: &str, log_path: &std::path::Path) {
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -146,6 +146,32 @@ async fn wait_healthy(base: &str) {
             return;
         }
         if Instant::now() >= deadline {
+            // Keep health-timeout failures actionable without exposing the
+            // process log (which is also an evidence surface for secrets).
+            // Only startup/error lines are emitted, and common connection
+            // material is redacted before it reaches CI output.
+            if let Ok(log) = std::fs::read_to_string(log_path) {
+                let diagnostics: String = log
+                    .lines()
+                    .filter(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        lower.contains("error")
+                            || lower.contains("panic")
+                            || lower.contains("failed")
+                            || lower.contains("database")
+                            || lower.contains("listen")
+                    })
+                    .take(80)
+                    .map(|line| {
+                        line.replace("postgres://", "<redacted-dsn>")
+                            .replace("postgresql://", "<redacted-dsn>")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !diagnostics.is_empty() {
+                    eprintln!("o3kd startup diagnostics (redacted):\n{diagnostics}");
+                }
+            }
             panic!("o3kd did not become healthy at {base}");
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -672,7 +698,7 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
     let port = ephemeral_port();
     let base = format!("http://{LISTEN}:{port}");
     let child = O3kdGuard::spawn(port, &data_dir, &backend);
-    wait_healthy(&base).await;
+    wait_healthy(&base, &data_dir.join("o3kd.log")).await;
     let mut api = Api::new(base.clone());
 
     // 1. Federated login.
@@ -2096,7 +2122,7 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
     let port2 = ephemeral_port();
     let base2 = format!("http://{LISTEN}:{port2}");
     let child2 = O3kdGuard::spawn(port2, &data_dir, &backend);
-    wait_healthy(&base2).await;
+    wait_healthy(&base2, &data_dir.join("o3kd.log")).await;
     let mut api2 = Api::new(base2.clone());
 
     // Re-issue tokens on the restarted process.
