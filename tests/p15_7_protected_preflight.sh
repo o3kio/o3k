@@ -106,7 +106,7 @@ if env PATH="$fake:$PATH" O3K_REAL_HOST_KVM_PATH="$work/kvm" O3K_P15_7_LIBVIRT_I
   bash "$root_dir/scripts/p15-7-protected-preflight.sh"; then
   echo "missing authority was accepted" >&2; exit 1
 fi
-python3 - "$work/missing/preflight.json" <<'PY'
+python3 - "$work/missing/p15-7-protected-preflight.json" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["status"] == "blocked"
