@@ -113,4 +113,21 @@ assert value["status"] == "blocked"
 assert value["reason"] == "oidc_workflow_identity_unavailable"
 assert value["redacted"] is True
 PY
+relative_dir="target/p15-7-preflight-relative-$$"
+rm -rf -- "$root_dir/$relative_dir"
+if (cd "$root_dir" && env PATH="$fake:$PATH" O3K_REAL_HOST_KVM_PATH="$work/kvm" O3K_P15_7_LIBVIRT_IMAGE_ROOT="$work/libvirt-images" O3K_REAL_HOST_ARTIFACT_DIR="$relative_dir" \
+  O3K_P15_7_SOURCE_SHA="$sha" GITHUB_SHA="$sha" GITHUB_RUN_ID=relative \
+  O3K_P15_7_OIDC_ISSUER=https://issuer.example.test O3K_P15_7_OIDC_AUDIENCE=o3k \
+  O3K_P15_7_OIDC_DISCOVERY_URL=https://issuer.example.test/.well-known/openid-configuration \
+  bash scripts/p15-7-protected-preflight.sh); then
+  echo "relative artifact directory was accepted without authority" >&2
+  exit 1
+fi
+python3 - "$root_dir/$relative_dir/p15-7-protected-preflight.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "blocked"
+assert value["reason"] == "oidc_workflow_identity_unavailable"
+PY
+rm -rf -- "$root_dir/$relative_dir"
 echo "P15.7 protected preflight tests passed"

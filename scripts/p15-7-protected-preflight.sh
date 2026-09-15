@@ -7,7 +7,13 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-$ROOT_DIR/target/real-host-workflow-artifacts}"
+if [[ "$ARTIFACT_DIR" != /* ]]; then
+  ARTIFACT_DIR="$ROOT_DIR/$ARTIFACT_DIR"
+fi
 ARTIFACT="${O3K_P15_7_PREFLIGHT_ARTIFACT:-$ARTIFACT_DIR/p15-7-protected-preflight.json}"
+if [[ "$ARTIFACT" != /* ]]; then
+  ARTIFACT="$ROOT_DIR/$ARTIFACT"
+fi
 RUN_ID="${GITHUB_RUN_ID:-local-$$}"
 SOURCE_SHA="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-}}"
 JOURNEY="${O3K_P15_7_JOURNEY_SCRIPT:-$ROOT_DIR/scripts/p15-7-real-host-journey.sh}"
