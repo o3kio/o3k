@@ -67,9 +67,12 @@ cat >"${workdir}/run-gate.sh" <<HOOK
 #!/usr/bin/env bash
 set -euo pipefail
 cd '${repo_root}'
+set +e
 gate_output="\$(cargo test --locked -p o3kd --test araf_p2_convergence --all-features -- \
   araf_p2_northbound_convergence --ignored --nocapture 2>&1)"
-if ! grep -q "test result: ok. 1 passed" <<<"\${gate_output}"; then
+gate_status=\$?
+set -e
+if (( gate_status != 0 )) || ! grep -q "test result: ok. 1 passed" <<<"\${gate_output}"; then
   echo "Araf P2 gate did not report exactly one passed test:" >&2
   echo "\${gate_output}" >&2
   exit 1
