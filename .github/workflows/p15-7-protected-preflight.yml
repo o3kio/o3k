@@ -110,7 +110,22 @@ jobs:
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           set -euo pipefail
-          gh api --method POST \
-            "repos/o3kio/o3k/actions/workflows/real-host-validation.yml/dispatches" \
-            -f ref=main \
-            -f "inputs[target_sha]=${TARGET_SHA}"
+          dispatch_config="$(mktemp "${RUNNER_TEMP:-/tmp}/p15-7-dispatch.XXXXXX")"
+          trap 'rm -f -- "$dispatch_config"' EXIT
+          chmod 0600 "$dispatch_config"
+          python3 - "$dispatch_config" "$TARGET_SHA" <<'PY'
+          import json, os, pathlib, sys
+          path, target = sys.argv[1:]
+          token = os.environ["GH_TOKEN"]
+          pathlib.Path(path).write_text(
+              'url = "https://api.github.com/repos/o3kio/o3k/actions/workflows/real-host-validation.yml/dispatches"\n'
+              'request = "POST"\n'
+              'header = "Accept: application/vnd.github+json"\n'
+              'header = "Authorization: Bearer ' + token + '"\n'
+              'header = "X-GitHub-Api-Version: 2022-11-28"\n'
+              'header = "Content-Type: application/json"\n'
+              'data = ' + json.dumps(json.dumps({"ref": "main", "inputs": {"target_sha": target}})) + '\n',
+              encoding="utf-8",
+          )
+          PY
+          curl --fail --silent --show-error --config "$dispatch_config" -o /dev/null
