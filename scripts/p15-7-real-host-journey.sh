@@ -46,6 +46,8 @@ die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
 for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
+RUNNER_UID="$(id -u)"
+RUNNER_GID="$(id -g)"
 LIBVIRT_QEMU_GROUP="$(id -gn libvirt-qemu 2>/dev/null || true)"
 [[ "$LIBVIRT_QEMU_GROUP" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] || die "libvirt-qemu account unavailable"
 SSH_KEY="$WORK_ROOT/vm.key"
@@ -113,7 +115,7 @@ done
 [[ "$(sudo -n docker inspect -f '{{.State.Running}}' "$PG_CONTAINER" 2>/dev/null || true)" == true ]] || die "run-scoped PostgreSQL unavailable"
 for agent_id in block-a block-b block-c block-d; do
   sudo -n install -m 0644 "$TLS_ROOT/agents/$agent_id/agent.pem" "$WORK_ROOT/$agent_id.pem" || die "cannot read canonical certificate: $agent_id"
-  sudo -n install -m 0600 "$TLS_ROOT/agents/$agent_id/agent-key.pem" "$WORK_ROOT/$agent_id-key.pem" || die "cannot read canonical private key: $agent_id"
+  sudo -n install -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0600 "$TLS_ROOT/agents/$agent_id/agent-key.pem" "$WORK_ROOT/$agent_id-key.pem" || die "cannot read canonical private key: $agent_id"
 done
 
 declare -a DOMAINS=() UUIDS=() OVERLAYS=() SEEDS=() SERIALS=() IPS=()
