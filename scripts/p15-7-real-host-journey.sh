@@ -109,7 +109,7 @@ for agent_id in block-a block-b block-c block-d; do
   sudo -n install -m 0600 "$TLS_ROOT/agents/$agent_id/agent-key.pem" "$WORK_ROOT/$agent_id-key.pem" || die "cannot read canonical private key: $agent_id"
 done
 
-declare -a DOMAINS=() UUIDS=() OVERLAYS=() SEEDS=() IPS=()
+declare -a DOMAINS=() UUIDS=() OVERLAYS=() SEEDS=() SERIALS=() IPS=()
 declare -A BLOCK_IDS=()
 OS_IMAGE_ID="" OS_KEYPAIR_NAME="" OS_NETWORK_ID="" OS_SUBNET_ID="" OS_PORT_ID="" OS_FLAVOR_ID=""
 OS_WORKLOAD_A="" OS_WORKLOAD_B=""
@@ -194,7 +194,7 @@ cleanup() {
     if [[ -f "$LIBVIRT_STORAGE_ROOT/.o3k-owned" ]] \
       && sudo -n grep -Fqx 'o3k-p15-7-libvirt-storage-owned-v1' "$LIBVIRT_STORAGE_ROOT/.o3k-owned" \
       && sudo -n grep -Fqx "run=$RUN_ID" "$LIBVIRT_STORAGE_ROOT/.o3k-owned"; then
-      for p in "$BASE_IMAGE" "${SEEDS[@]}" "${OVERLAYS[@]}"; do
+      for p in "$BASE_IMAGE" "${SEEDS[@]}" "${OVERLAYS[@]}" "${SERIALS[@]}"; do
         [[ -n "$p" ]] || continue
         sudo -n rm -f -- "$p" || cleanup_failed=true
       done
@@ -246,7 +246,7 @@ ssh-keygen -q -t ed25519 -N '' -f "$SSH_KEY" -C "o3k-p15-7-$RUN_ID" || die "VM S
 touch "$KNOWN_HOSTS"
 ssh_vm() { ssh -F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$VM_USER@$1" "${@:2}"; }
 find_ip() {
-  local d="$1" ip
+  local d="$1" ip serial
   for _ in $(seq 1 120); do
     ip="$(virsh -c qemu:///system domifaddr "$d" --source lease 2>/dev/null | awk '$3 ~ /^[0-9]+\./ {sub(/\/.*/,"",$3); print $3; exit}' || true)"
     [[ "$ip" =~ ^[0-9.]+$ && "$ip" != "$GATEWAY" ]] && { echo "$ip"; return; }; sleep 2
@@ -261,12 +261,17 @@ find_ip() {
   virsh -c qemu:///system domifaddr "$d" --source arp >&2 || true
   virsh -c qemu:///system net-dhcp-leases "$NETWORK" >&2 || true
   virsh -c qemu:///system net-dumpxml "$NETWORK" >&2 || true
+  serial="${SERIALS[${#SERIALS[@]}-1]:-}"
+  if [[ -n "$serial" ]]; then
+    echo "P15.7 serial console tail for owned VM $d" >&2
+    sudo -n tail -n 120 -- "$serial" >&2 || true
+  fi
   die "VM did not receive a DHCP lease: $d"
 }
 provision_vm() {
-  local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" seed_tmp="$WORK_ROOT/$1-seed.iso" ip uuid mac
+  local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" seed_tmp="$WORK_ROOT/$1-seed.iso" serial="$LIBVIRT_STORAGE_ROOT/$1-serial.log" ip uuid mac
   local index
-  DOMAINS+=("$d"); UUIDS+=(""); OVERLAYS+=("$overlay"); SEEDS+=("$seed")
+  DOMAINS+=("$d"); UUIDS+=(""); OVERLAYS+=("$overlay"); SEEDS+=("$seed"); SERIALS+=("$serial")
   index=$((${#DOMAINS[@]} - 1))
   # Match the guest network by the exact MAC we give libvirt.  This avoids
   # relying on distribution-specific predictable interface names while still
@@ -313,7 +318,9 @@ EOF
   sudo -n install -o root -g "$LIBVIRT_QEMU_GROUP" -m 0640 "$seed_tmp" "$seed" \
     || die "cannot stage cloud-init seed for libvirt: $id"
   rm -f -- "$seed_tmp"
-  virt-install --connect qemu:///system --name "$d" --memory 2048 --vcpus 2 --import --disk "path=$overlay,format=qcow2" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --metadata "description=o3k-p15-7-journey-owned=$RUN_ID" --noautoconsole --wait 0 >/dev/null || die "VM boot failed: $id"
+  sudo -n install -o root -g "$LIBVIRT_QEMU_GROUP" -m 0660 /dev/null "$serial" \
+    || die "cannot stage serial console for libvirt: $id"
+  virt-install --connect qemu:///system --name "$d" --memory 2048 --vcpus 2 --import --disk "path=$overlay,format=qcow2" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --serial "file,path=$serial" --metadata "description=o3k-p15-7-journey-owned=$RUN_ID" --noautoconsole --wait 0 >/dev/null || die "VM boot failed: $id"
   uuid="$(virsh -c qemu:///system domuuid "$d")"; [[ "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || die "VM UUID unavailable: $id"
   UUIDS[index]="$uuid"
   ip="$(find_ip "$d")"
