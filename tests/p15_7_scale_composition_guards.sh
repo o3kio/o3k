@@ -112,7 +112,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "sudo -n qemu-img create", "cannot stage pinned VM image for libvirt",
                  "cannot create run-owned libvirt storage workspace", "staged VM image digest mismatch",
                  "cannot stage cloud-init seed for libvirt", "network-config=$WORK_ROOT/network-config-$1",
-                 "dhcp4: true", "dhcp6: false", "macaddress: \"$mac\"", "mac=$mac"):
+                 "dhcp4: true", "dhcp6: false", "renderer: networkd", "set-name: eth0",
+                 "macaddress: \"$mac\"", "mac=$mac"):
     assert required in journey, required
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey

@@ -286,10 +286,12 @@ runcmd:
 EOF
   cat >"$WORK_ROOT/network-config-$1" <<EOF
 version: 2
+renderer: networkd
 ethernets:
   primary:
     match:
       macaddress: "$mac"
+    set-name: eth0
     dhcp4: true
     dhcp6: false
 EOF
