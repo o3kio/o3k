@@ -92,14 +92,12 @@ start() {
   printf 'KEYCLOAK_ADMIN=p15-7-admin\nKEYCLOAK_ADMIN_PASSWORD=%s\n' "$admin_password" >"$env_tmp"
   printf '%s\n' "$operator_password" >"$OPERATOR_PASSWORD_FILE"
   chmod 0600 "$OPERATOR_PASSWORD_FILE"
-  python3 - "$realm_tmp" "$OPERATOR_PASSWORD_FILE" <<'PY'
+  python3 - "$realm_tmp" <<'PY'
 import json, sys
-path, password_path = sys.argv[1:]
-with open(password_path, encoding="utf-8") as stream:
-    password = stream.read().strip()
+path = sys.argv[1]
 realm = {
   "realm": "o3k-p15-7", "enabled": True,
-  "clients": [{"clientId": "o3k-test", "enabled": True,
+  "clients": [{"clientId": "o3k-test", "name": "O3K P15.7 test client", "enabled": True,
                 "publicClient": True, "directAccessGrantsEnabled": True,
                 "standardFlowEnabled": False, "protocol": "openid-connect",
                 "protocolMappers": [{"name": "o3k-audience", "protocol": "openid-connect",
@@ -107,8 +105,7 @@ realm = {
                                       "config": {"included.client.audience": "o3k",
                                                  "id.token.claim": "false", "access.token.claim": "true"}}]}],
   "users": [{"username": "operator", "firstName": "O3K", "lastName": "Operator",
-              "enabled": True, "emailVerified": True, "requiredActions": [],
-              "credentials": [{"type": "password", "value": password, "temporary": False}]}]
+              "email": "operator@example.test", "enabled": True, "emailVerified": True, "requiredActions": []}]
 }
 with open(path, "w", encoding="utf-8") as stream:
     json.dump(realm, stream)
@@ -116,6 +113,10 @@ PY
   printf '%s\n' "$port" >"$PORT_FILE"
   chmod 0600 "$PORT_FILE"
   mv -f -- "$realm_tmp" "$REALM_FILE"
+  # The imported realm contains no credentials.  Keycloak runs as a non-root
+  # user and must be able to read this non-secret fixture from the bind mount;
+  # all generated credentials remain in separate 0600 files below.
+  chmod 0644 "$REALM_FILE"
   if ! docker run --detach --name "$CONTAINER" --network host \
     --label o3k.owner=o3k --label o3k.component=p15-7-keycloak \
     --label o3k.phase=p15-7 --label "o3k.run_id=$RUN_ID" \
@@ -139,6 +140,7 @@ PY
   local issuer discovery
   issuer="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["issuer"])' "$STATE_ROOT/discovery.json")"
   discovery="http://127.0.0.1:$port/realms/o3k-p15-7/.well-known/openid-configuration"
+  configure_operator_password "$admin_password" "$operator_password"
   acquire_operator_token
   cat >"$ENV_FILE" <<EOF
 O3K_P15_7_AUTHORITY_MODE=testlab-keycloak
@@ -169,6 +171,48 @@ PY
   chmod 0600 "$ENV_FILE"
   printf '%s\n' "$issuer" >"$STATE_ROOT/issuer"
   chmod 0600 "$STATE_ROOT/issuer"
+}
+
+configure_operator_password() {
+  local admin_password="$1" operator_password="$2"
+  local admin_cfg admin_response admin_token users_response user_id reset_cfg reset_body
+  admin_cfg="$(mktemp "$STATE_ROOT/admin-curl.XXXXXX")"
+  admin_response="$(mktemp "$STATE_ROOT/admin-response.XXXXXX")"
+  users_response="$(mktemp "$STATE_ROOT/users-response.XXXXXX")"
+  reset_cfg="$(mktemp "$STATE_ROOT/reset-curl.XXXXXX")"
+  reset_body="$(mktemp "$STATE_ROOT/reset-body.XXXXXX")"
+  chmod 0600 "$admin_cfg" "$admin_response" "$users_response" "$reset_cfg" "$reset_body"
+  printf 'url = "http://127.0.0.1:%s/realms/master/protocol/openid-connect/token"\nrequest = "POST"\nheader = "Content-Type: application/x-www-form-urlencoded"\ndata = "grant_type=password&client_id=admin-cli&username=p15-7-admin&password=%s"\n' \
+    "$(<"$PORT_FILE")" "$admin_password" >"$admin_cfg"
+  curl --fail --silent --show-error --config "$admin_cfg" -o "$admin_response" \
+    || die "Keycloak admin credential bootstrap failed"
+  admin_token="$(python3 - "$admin_response" <<'PY'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')).get('access_token')
+if not isinstance(value, str) or not value: raise SystemExit('admin token missing')
+print(value)
+PY
+)"
+  printf 'url = "http://127.0.0.1:%s/admin/realms/o3k-p15-7/users?username=operator&exact=true"\nheader = "Authorization: Bearer %s"\n' \
+    "$(<"$PORT_FILE")" "$admin_token" >"$reset_cfg"
+  curl --fail --silent --show-error --config "$reset_cfg" -o "$users_response" \
+    || die "Keycloak operator lookup failed"
+  user_id="$(python3 - "$users_response" <<'PY'
+import json, pathlib, sys
+users = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+if not users or not isinstance(users[0].get('id'), str): raise SystemExit('operator user missing')
+print(users[0]['id'])
+PY
+)"
+  python3 - "$reset_body" "$operator_password" <<'PY'
+import json, sys
+json.dump({'type': 'password', 'value': sys.argv[2], 'temporary': False}, open(sys.argv[1], 'w', encoding='utf-8'))
+PY
+  printf 'url = "http://127.0.0.1:%s/admin/realms/o3k-p15-7/users/%s/reset-password"\nrequest = "PUT"\nheader = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\ndata = @%s\n' \
+    "$(<"$PORT_FILE")" "$user_id" "$admin_token" "$reset_body" >"$reset_cfg"
+  curl --fail --silent --show-error --config "$reset_cfg" -o /dev/null \
+    || die "Keycloak operator password bootstrap failed"
+  secure_remove "$admin_cfg" "$admin_response" "$users_response" "$reset_cfg" "$reset_body"
 }
 
 acquire_operator_token() {
