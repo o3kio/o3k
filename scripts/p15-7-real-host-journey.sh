@@ -32,10 +32,12 @@ ARAF_URL="${O3K_P15_7_ARAF_URL:-}"
 ARAF_STATUS="not_configured"
 ARAF_REASON="external_consumer_not_provisioned"
 VM_USER="${O3K_P15_7_VM_USER:-o3k}"
+VM_DISK_SIZE_GB="${O3K_P15_7_VM_DISK_SIZE_GB:-10}"
 die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
 [[ "$VM_USER" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]] || die "VM user is unsafe"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ ]] || die "TestLab ports are invalid"
+[[ "$VM_DISK_SIZE_GB" =~ ^[1-9][0-9]*$ ]] || die "VM disk size is invalid"
 for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
@@ -283,6 +285,12 @@ print("52:54:00:%s:%s:%s" % (suffix[0:2], suffix[2:4], suffix[4:6]))
 PY
 )"
   sudo -n qemu-img create -q -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$overlay" || die "overlay creation failed: $id"
+  # The pinned Ubuntu cloud image is intentionally small. The guest installs
+  # the real libvirt/compute boundary packages during cloud-init; enlarge each
+  # run-owned overlay before boot so package installation cannot exhaust the
+  # root filesystem and leave cloud-init half-configured.
+  sudo -n qemu-img resize "$overlay" "${VM_DISK_SIZE_GB}G" >/dev/null \
+    || die "overlay resize failed: $id"
   cat >"$WORK_ROOT/user-data-$1" <<EOF
 #cloud-config
 users:

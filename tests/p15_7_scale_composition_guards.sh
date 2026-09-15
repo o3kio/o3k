@@ -110,6 +110,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "xml.etree.ElementTree", "net-dumpxml", "libvirt gateway unavailable",
                  "LIBVIRT_STORAGE_ROOT", "libvirt-storage-owned-v1", "LIBVIRT_QEMU_GROUP",
                  "sudo -n qemu-img create", "cannot stage pinned VM image for libvirt",
+                 "qemu-img resize", "VM_DISK_SIZE_GB",
                  "cannot create run-owned libvirt storage workspace", "staged VM image digest mismatch",
                  "cannot stage cloud-init seed for libvirt", "network-config=$WORK_ROOT/network-config-$1",
                  "dhcp4: true", "dhcp6: false", "renderer: networkd", "set-name: eth0",
