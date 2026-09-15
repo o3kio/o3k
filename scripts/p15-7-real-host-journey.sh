@@ -420,8 +420,16 @@ install_agent() {
 provision_vm block-a; provision_vm block-b
 join_block block-a "${IPS[0]}"; join_block block-b "${IPS[1]}"
 install_agent block-a "${IPS[0]}"; install_agent block-b "${IPS[1]}"
-TOKEN="$(openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]')"; [[ "$TOKEN" ]] || die "authenticated operator token unavailable"
-api_get() { curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$API$1"; }
+# BuildingBlock lifecycle and operator diagnostics are deliberately
+# system-scoped and require the canonical operator authority.  A Keystone
+# password token is project-scoped by contract and must never be treated as an
+# operator token (doing so produces a policy 403 and would tempt a security
+# boundary weakening).  The protected environment supplies this token from its
+# approved OIDC/operator provisioning; the journey only consumes it.
+OPERATOR_TOKEN="${O3K_P15_7_OPERATOR_TOKEN:-}"
+[[ -n "$OPERATOR_TOKEN" ]] || die "system_operator_token_required: configure O3K_P15_7_OPERATOR_TOKEN from the approved federated operator authority"
+PROJECT_TOKEN="$(openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]')"; [[ "$PROJECT_TOKEN" ]] || die "authenticated project token unavailable"
+api_get() { curl --fail --silent --show-error -H "Authorization: Bearer $OPERATOR_TOKEN" "$API$1"; }
 api_get /operator/building-blocks >"$WORK_ROOT/blocks.json"
 api_get /regions >"$WORK_ROOT/regions.json"
 api_get /topology/failure-domains >"$WORK_ROOT/failure-domains.json"
@@ -525,11 +533,11 @@ done
 # Exercise a constrained real workload through the canonical native resource
 # API. Keep it present while draining so the durable blocker projection is
 # observed honestly, then clear it before removing the block.
-curl --fail --silent --show-error -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-a" "$API/compute/servers" \
+curl --fail --silent --show-error -X POST -H "Authorization: Bearer $PROJECT_TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-a" "$API/compute/servers" \
   -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-a\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"network_ids\":[\"$OS_NETWORK_ID\"]}}" >"$WORK_ROOT/workload-a.json" || die "constrained real workload placement failed"
 WORKLOAD_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("resource_id", ""))' "$WORK_ROOT/workload-a.json")"; [[ "$WORKLOAD_A" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload A has no canonical id"
 OS_WORKLOAD_A="$WORKLOAD_A"
-curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$API/compute/servers/$WORKLOAD_A" >"$WORK_ROOT/workload-a-show.json" || die "workload A did not converge"
+curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_A" >"$WORK_ROOT/workload-a-show.json" || die "workload A did not converge"
 GEN_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metadata"]["generation"])' "$WORK_ROOT/workload-a-show.json")"
 HOST_A=""
 for _ in $(seq 1 60); do
@@ -575,7 +583,7 @@ for x in json.load(open(sys.argv[1])):
 else: raise SystemExit(1)
 PY
 )"
-curl --fail --silent --show-error -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$API/operator/building-blocks/$DRAIN_ID/actions/drain" -d "{\"expected_generation\":$DRAIN_GEN}" >"$WORK_ROOT/drain.json" || die "canonical drain failed"
+curl --fail --silent --show-error -X POST -H "Authorization: Bearer $OPERATOR_TOKEN" -H 'Content-Type: application/json' "$API/operator/building-blocks/$DRAIN_ID/actions/drain" -d "{\"expected_generation\":$DRAIN_GEN}" >"$WORK_ROOT/drain.json" || die "canonical drain failed"
 grep -Eq '"state"[[:space:]]*:[[:space:]]*"draining"' "$WORK_ROOT/drain.json" || die "durable drain state missing"
 python3 - "$WORK_ROOT/drain.json" <<'PY'
 import json,sys
@@ -587,7 +595,7 @@ PY
 # A second constrained workload must still converge, and the drained provider
 # must not be selected.  The OpenStack host projection is the public placement
 # observation for this real workload.
-curl --fail --silent --show-error -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-b" "$API/compute/servers" \
+curl --fail --silent --show-error -X POST -H "Authorization: Bearer $PROJECT_TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-b" "$API/compute/servers" \
   -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-b\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"network_ids\":[\"$OS_NETWORK_ID\"]}}" >"$WORK_ROOT/workload-b.json" || die "placement did not avoid drained block"
 WORKLOAD_B="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("resource_id", ""))' "$WORK_ROOT/workload-b.json")"; [[ "$WORKLOAD_B" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload B has no canonical id"
 OS_WORKLOAD_B="$WORKLOAD_B"
@@ -599,19 +607,19 @@ for _ in $(seq 1 60); do
 done
 [[ -n "$HOST_B" && "$HOST_B" != "None" ]] || die "workload B placement host did not converge"
 [[ "$HOST_B" != "$HOST_A" ]] || die "new placement selected drained provider host: $HOST_A"
-GEN_B="$(curl --fail --silent -H "Authorization: Bearer $TOKEN" "$API/compute/servers/$WORKLOAD_B" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["generation"])')"
-curl --fail --silent --show-error -X DELETE -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: p15-7-$RUN_ID-delete-b" -H "If-Match: generation-$GEN_B" "$API/compute/servers/$WORKLOAD_B" >/dev/null || die "workload B cleanup failed"
+GEN_B="$(curl --fail --silent -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_B" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["generation"])')"
+curl --fail --silent --show-error -X DELETE -H "Authorization: Bearer $PROJECT_TOKEN" -H "Idempotency-Key: p15-7-$RUN_ID-delete-b" -H "If-Match: generation-$GEN_B" "$API/compute/servers/$WORKLOAD_B" >/dev/null || die "workload B cleanup failed"
 for _ in $(seq 1 60); do
-  code="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $TOKEN" "$API/compute/servers/$WORKLOAD_B" || true)"
+  code="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_B" || true)"
   [[ "$code" == 404 ]] && break
   sleep 1
 done
 [[ "$code" == 404 ]] || die "workload B deletion did not converge before block removal"
 
 # The observed workload blocker is now explicitly cleared before removal.
-curl --fail --silent --show-error -X DELETE -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: p15-7-$RUN_ID-delete-a" -H "If-Match: generation-$GEN_A" "$API/compute/servers/$WORKLOAD_A" >/dev/null || die "workload A cleanup failed"
+curl --fail --silent --show-error -X DELETE -H "Authorization: Bearer $PROJECT_TOKEN" -H "Idempotency-Key: p15-7-$RUN_ID-delete-a" -H "If-Match: generation-$GEN_A" "$API/compute/servers/$WORKLOAD_A" >/dev/null || die "workload A cleanup failed"
 for _ in $(seq 1 60); do
-  code="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $TOKEN" "$API/compute/servers/$WORKLOAD_A" || true)"
+  code="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_A" || true)"
   [[ "$code" == 404 ]] && break
   sleep 1
 done
@@ -619,7 +627,7 @@ done
 
 # Remove block A, then provision a fresh fourth VM and enroll its new identity.
 REMOVE_GEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["block"]["generation"])' "$WORK_ROOT/drain.json")"
-curl --fail --silent --show-error -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$API/operator/building-blocks/$DRAIN_ID/actions/remove" -d "{\"expected_generation\":$REMOVE_GEN}" >"$WORK_ROOT/remove.json" || die "block removal failed"
+curl --fail --silent --show-error -X POST -H "Authorization: Bearer $OPERATOR_TOKEN" -H 'Content-Type: application/json' "$API/operator/building-blocks/$DRAIN_ID/actions/remove" -d "{\"expected_generation\":$REMOVE_GEN}" >"$WORK_ROOT/remove.json" || die "block removal failed"
 provision_vm block-d
 join_block block-d "${IPS[3]}"; install_agent block-d "${IPS[3]}"
 api_get /operator/building-blocks >"$WORK_ROOT/blocks-after-replace.json"

@@ -5,6 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p15-7-guards.XXXXXX")"
 trap 'rm -rf -- "${WORK_DIR}"' EXIT
 EVIDENCE="${WORK_DIR}/evidence.json"
+# The mandatory P15.7 path must remain valid when no Araf endpoint is
+# configured at all.  Keep this explicit so a future environment-level
+# prerequisite cannot accidentally turn the optional consumer into a gate.
+unset O3K_P15_7_ARAF_URL
 python3 - "${EVIDENCE}" <<'PY'
 import json, sys
 sha = "0123456789abcdef0123456789abcdef01234567"
@@ -39,7 +43,7 @@ doc = {
 json.dump(doc, open(sys.argv[1], "w", encoding="utf-8"), indent=2)
 PY
 
-python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
+env -u O3K_P15_7_ARAF_URL python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
   --expected-source-sha 0123456789abcdef0123456789abcdef01234567 \
   --expected-profile small-edge-cloud
 python3 - "${EVIDENCE}" <<'PY'
@@ -64,7 +68,7 @@ d["journey"]["projections_convergent"]["araf"] = {
 }
 p.write_text(json.dumps(d))
 PY
-python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
+env -u O3K_P15_7_ARAF_URL python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
   --expected-source-sha 0123456789abcdef0123456789abcdef01234567 \
   --expected-profile small-edge-cloud
 python3 - "${EVIDENCE}" <<'PY'
@@ -107,6 +111,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "FOREIGN_PROJECT_ID", "FOREIGN_TOKEN_PROJECT_ID", "foreign token scope mismatch",
                  "foreign project can read workload A", "CROSS_TENANT_CONCEALMENT=true",
                  "record_optional_araf", "external_consumer_not_provisioned", "araf-projection.json",
+                 "system_operator_token_required", "O3K_P15_7_OPERATOR_TOKEN", "PROJECT_TOKEN",
                  "xml.etree.ElementTree", "net-dumpxml", "libvirt gateway unavailable",
                  "LIBVIRT_STORAGE_ROOT", "libvirt-storage-owned-v1", "LIBVIRT_QEMU_GROUP",
                  "sudo -n qemu-img create", "cannot stage pinned VM image for libvirt",
@@ -120,6 +125,9 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
     assert required in journey, required
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
+assert 'api_get() { curl --fail --silent --show-error -H "Authorization: Bearer $OPERATOR_TOKEN"' in journey
+assert 'Authorization: Bearer $PROJECT_TOKEN' in journey
+assert 'openstack token issue -f value -c id' in journey
 # Prevent recurrence of the bootstrap/identity and cleanup regressions that
 # previously made a protected run appear healthier than it was.
 assert 'sudo -n test -f "$TLS_ROOT/agents/$required_agent/agent.pem"' in journey
