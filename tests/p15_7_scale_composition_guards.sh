@@ -131,6 +131,8 @@ assert 'delete_owned_openstack()' in journey
 assert 'policy failures are deliberately not treated as absence' in journey
 assert 'DRAIN_AGENT="$HOST_A"' in journey
 assert '"$HOST_B" != "$HOST_A"' in journey
+assert 'JOIN_REGION="${O3K_P15_7_REGION:-}"' in journey
+assert '--region RegionOne' not in journey
 assert 'resource_class") != "VCPU"' in journey
 assert 'OS_WORKLOAD_A="$WORKLOAD_A"' in journey and 'OS_WORKLOAD_B="$WORKLOAD_B"' in journey
 assert 'O3K_TESTLAB_IMAGE_PATH="$HOST_IMAGE"' in journey
