@@ -251,6 +251,16 @@ find_ip() {
     ip="$(virsh -c qemu:///system domifaddr "$d" --source lease 2>/dev/null | awk '$3 ~ /^[0-9]+\./ {sub(/\/.*/,"",$3); print $3; exit}' || true)"
     [[ "$ip" =~ ^[0-9.]+$ && "$ip" != "$GATEWAY" ]] && { echo "$ip"; return; }; sleep 2
   done
+  # Keep the failure actionable without guessing an address or weakening the
+  # real DHCP/SSH boundary.  These queries are read-only and scoped to the
+  # run-owned domain/network; they intentionally contain no credentials.
+  echo "P15.7 network diagnostics for owned VM $d" >&2
+  virsh -c qemu:///system domstate "$d" >&2 || true
+  virsh -c qemu:///system domiflist "$d" >&2 || true
+  virsh -c qemu:///system domifaddr "$d" --source lease >&2 || true
+  virsh -c qemu:///system domifaddr "$d" --source arp >&2 || true
+  virsh -c qemu:///system net-dhcp-leases "$NETWORK" >&2 || true
+  virsh -c qemu:///system net-dumpxml "$NETWORK" >&2 || true
   die "VM did not receive a DHCP lease: $d"
 }
 provision_vm() {
