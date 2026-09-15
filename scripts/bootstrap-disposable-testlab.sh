@@ -164,7 +164,7 @@ write_startup_diagnostics() {
   local output="${ARTIFACT_DIR}/disposable-testlab-startup-diagnostics.log"
   mkdir -p "$ARTIFACT_DIR"
   python3 - "$output" "$STATE_ROOT/log/o3kd.log" "$STATE_ROOT/log/o3k-compute.log" "$O3KD_PID" "$COMPUTE_PID" <<'PY'
-import pathlib, re, sys
+import re, subprocess, sys
 
 output, o3kd_log, compute_log, o3kd_pid, compute_pid = sys.argv[1:]
 secret_assignment = re.compile(
@@ -190,11 +190,18 @@ with open(output, "w", encoding="utf-8") as stream:
     for label, path in (("o3kd", o3kd_log), ("o3k-compute", compute_log)):
         stream.write(f"== {label} startup tail ==\n")
         try:
-            lines = pathlib.Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
+            result = subprocess.run(
+                ["sudo", "-n", "tail", "-n", "240", "--", path],
+                check=True,
+                capture_output=True,
+                text=True,
+                errors="replace",
+            )
+            lines = result.stdout.splitlines()
+        except (OSError, subprocess.CalledProcessError):
             stream.write("unavailable\n")
             continue
-        for line in lines[-240:]:
+        for line in lines:
             if re.search(r"(ERROR|WARN|panic|failed|fatal|bind|listen|database|OIDC|identity)", line, re.I):
                 stream.write(scrub(line)[:2000] + "\n")
 PY
