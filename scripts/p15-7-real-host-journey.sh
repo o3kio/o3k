@@ -250,7 +250,8 @@ ssh_vm() { ssh -F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 -
 find_ip() {
   local d="$1" ip serial
   for _ in $(seq 1 120); do
-    ip="$(virsh -c qemu:///system domifaddr "$d" --source lease 2>/dev/null | awk '$3 ~ /^[0-9]+\./ {sub(/\/.*/,"",$3); print $3; exit}' || true)"
+    ip="$(virsh -c qemu:///system domifaddr "$d" --source lease 2>/dev/null |
+      awk '{for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\./) {sub(/\/.*/, "", $i); print $i; exit}}' || true)"
     [[ "$ip" =~ ^[0-9.]+$ && "$ip" != "$GATEWAY" ]] && { echo "$ip"; return; }; sleep 2
   done
   # Keep the failure actionable without guessing an address or weakening the
