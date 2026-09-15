@@ -447,3 +447,59 @@ cargo clippy -p <affected-package> --all-targets --all-features -- -D warnings
 For a cross-crate change, validate the smallest affected dependency/consumer set first. Run process, compatibility, provider, Tempest, or real-host evidence only when the issue's evidence tier requires those boundaries.
 
 Before completion, still run every command in **Commands required before completion** plus the issue-specific evidence commands. Context/token efficiency changes the order and repetition of validation; it never relaxes the definition of done, authority order, mandatory reading, clean-implementation rules, or evidence requirements.
+
+## Repository Development Memory (OKF)
+
+O3K keeps repository-local development continuity under `.okf/`. This is an
+evidence-routing layer, not a new authority source. It never overrides accepted
+ADRs, normative specs, contracts, compatibility profiles, tests, issues, PRs, or
+Git history. Read `docs/OKF_MEMORY.md` for the protocol and trust boundaries.
+
+### Consumption
+
+For questions about recent progress, prior development runs, validation commands
+already executed, or where a workstream was last observed:
+
+1. read `.okf/index.md`;
+2. identify the stable workstream, normally `issue-<number>`;
+3. read `.okf/current/workstreams/<workstream>.md` when it exists;
+4. follow only the newest relevant immutable run record(s);
+5. follow linked issue/PR/ADR/spec/test sources before making semantic claims.
+
+Do not recursively ingest `.okf/`. Do not use an OKF run or projection to claim
+that a feature is complete, an architecture is accepted, a blocker is resolved,
+or a release/profile gate passed unless the authoritative source and required
+executable evidence establish that claim.
+
+### Production
+
+For a substantive issue-driven development session, start deterministic memory
+capture before implementation:
+
+```bash
+python3 scripts/okf-memory.py start --workstream issue-<number>
+```
+
+When practical, run validation commands through the helper so their exit status
+is captured without storing noisy stdout/stderr:
+
+```bash
+python3 scripts/okf-memory.py exec -- cargo test -p <affected-package> --all-features
+```
+
+For long work use `checkpoint` at a meaningful boundary. Before a handoff,
+harness/model switch, or session end, run:
+
+```bash
+python3 scripts/okf-memory.py end
+python3 scripts/okf-memory.py check
+```
+
+Generated `Development Run` files under `.okf/workstreams/*/runs/` are
+append-only evidence records and must not be hand-edited after commit. Files
+under `.okf/current/workstreams/` are deterministic projections and may only be
+regenerated with `scripts/okf-memory.py refresh` or by `checkpoint`/`end`.
+
+The helper may observe and transform repository facts; it must not generate
+LLM-authored interpretations, next-step plans, completion percentages, root
+causes, or architectural summaries as persistent memory.
