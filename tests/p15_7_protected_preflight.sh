@@ -106,4 +106,11 @@ if env PATH="$fake:$PATH" O3K_REAL_HOST_KVM_PATH="$work/kvm" O3K_P15_7_LIBVIRT_I
   bash "$root_dir/scripts/p15-7-protected-preflight.sh"; then
   echo "missing authority was accepted" >&2; exit 1
 fi
+python3 - "$work/missing/p15-7-protected-preflight.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "blocked"
+assert value["reason"] == "oidc_workflow_identity_unavailable"
+assert value["redacted"] is True
+PY
 echo "P15.7 protected preflight tests passed"
