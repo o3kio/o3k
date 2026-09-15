@@ -278,25 +278,37 @@ impl BootstrapWorkflow for BootstrapAdapter {
         {
             return Err(BootstrapFailure::Invalid);
         }
-        let mut profile = self
+        // `init` is intentionally repeatable for an already bootstrapped
+        // cloud.  The disposable TestLab bootstrap performs one canonical
+        // init before the P15.7 journey enrolls additional real hosts.  Do
+        // not rewrite an existing profile with an unconditional
+        // `expected_generation = None`: the store must reject that stale
+        // write, and turning that rejection into a 409 makes a valid
+        // idempotent init unusable.  Reuse the durable profile after
+        // validating it instead; only a genuinely fresh profile is inserted.
+        let profile = if let Some(record) = self
             .store
             .get_cloud_profile(&profile_id)
             .await
             .map_err(|_| BootstrapFailure::Internal)?
-            .map(|record| record.profile().map_err(|_| BootstrapFailure::Internal))
-            .transpose()?
-            .unwrap_or_else(o3k_kernel::CloudProfile::implicit_default);
-        if profile.profile_id != profile_id {
+        {
+            let profile = record.profile().map_err(|_| BootstrapFailure::Internal)?;
+            if profile.profile_id != profile_id {
+                return Err(BootstrapFailure::Conflict);
+            }
+            profile
+        } else {
+            let mut profile = o3k_kernel::CloudProfile::implicit_default();
             profile.profile_id = profile_id.clone();
-        }
-        self.store
-            .upsert_cloud_profile(
-                &o3k_store::CloudProfileRecord::from_profile(&profile, Utc::now().to_rfc3339())
-                    .map_err(|_| BootstrapFailure::Internal)?,
-                None,
-            )
-            .await
-            .map_err(|_| BootstrapFailure::Conflict)?;
+            let record =
+                o3k_store::CloudProfileRecord::from_profile(&profile, Utc::now().to_rfc3339())
+                    .map_err(|_| BootstrapFailure::Internal)?;
+            self.store
+                .upsert_cloud_profile(&record, None)
+                .await
+                .map_err(|_| BootstrapFailure::Conflict)?;
+            profile
+        };
         let cloud_identity_id = "cloud-default";
         let mut state = self
             .store
@@ -580,6 +592,24 @@ mod tests {
             .await?
             .ok_or("bootstrap state missing")?;
         assert_eq!(durable.phase, "ready");
+
+        // A disposable bootstrap may have already initialized this same
+        // profile before a later journey enrolls another host.  Repeating
+        // init must issue a new, host-bound grant without conflicting on the
+        // profile's optimistic-concurrency generation.
+        let repeat = adapter
+            .init(
+                InitRequest {
+                    profile_id: None,
+                    request_id: Some("test-init-repeat".to_owned()),
+                    agent_id: Some("node-second".to_owned()),
+                },
+                Some("secret"),
+            )
+            .await
+            .map_err(|error| format!("repeat init failed: {error:?}"))?;
+        assert_eq!(repeat.phase, "initialized");
+        assert!(repeat.enrollment_token.is_some());
 
         // A newly created runtime reconstructs the bootstrap gate from the
         // durable phase; no restart is needed for the preceding transition,
