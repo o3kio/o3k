@@ -119,10 +119,9 @@ async fn provision_testlab_federated_operator(
         candidate.trusted_issuer_id == binding.trusted_issuer_id
             && candidate.issuer == binding.issuer
             && candidate.subject == binding.subject
-    }) {
-        if existing_tuple.id != binding.id {
-            return Err("existing TestLab federated identity uses a different binding ID".into());
-        }
+    }) && existing_tuple.id != binding.id
+    {
+        return Err("existing TestLab federated identity uses a different binding ID".into());
     }
     if let Some(existing) = existing_bindings
         .into_iter()
@@ -157,20 +156,16 @@ async fn provision_testlab_federated_operator(
     let existing_assignments = store.list_operator_assignments().await?;
     if let Some(existing_scope) = existing_assignments.iter().find(|candidate| {
         candidate.user_id == assignment.user_id && candidate.profile == assignment.profile
-    }) {
-        if existing_scope.id != assignment.id {
-            return Err(
-                "existing TestLab operator assignment uses a different assignment ID".into(),
-            );
-        }
+    }) && existing_scope.id != assignment.id
+    {
+        return Err("existing TestLab operator assignment uses a different assignment ID".into());
     }
     if let Some(existing_id) = existing_assignments
         .iter()
         .find(|candidate| candidate.id == assignment.id)
+        && (existing_id.user_id != assignment.user_id || existing_id.profile != assignment.profile)
     {
-        if existing_id.user_id != assignment.user_id || existing_id.profile != assignment.profile {
-            return Err("existing TestLab assignment ID has a different operator scope".into());
-        }
+        return Err("existing TestLab assignment ID has a different operator scope".into());
     }
     store.insert_operator_assignment(&assignment).await?;
     Ok(())
