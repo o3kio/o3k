@@ -3279,44 +3279,65 @@ mod tests {
         // Every immutable identity/fencing field and complete progress is
         // required for adoption; retry_count remains intentionally mutable.
         let mut incompatible = canonical.clone();
+        let assert_incompatible = |record: &ArtifactTransferRecord| {
+            assert!(!equivalent_committed_transfer(
+                record,
+                &offer,
+                operation_id,
+                resource_id,
+                "image_base",
+                &agent_epoch,
+            ));
+        };
+        incompatible.transfer_id = "transfer-other".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.command_id = "command-other".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.operation_id = Uuid::now_v7();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.resource_id = Uuid::now_v7();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.agent_id = "node-other".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
         incompatible.agent_epoch = "epoch-other".to_owned();
-        assert!(!equivalent_committed_transfer(
-            &incompatible,
-            &offer,
-            operation_id,
-            resource_id,
-            "image_base",
-            &agent_epoch,
-        ));
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.artifact_id = "artifact-other".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.artifact_kind = "config_drive_iso".to_owned();
+        assert_incompatible(&incompatible);
         incompatible = canonical.clone();
         incompatible.sha256 = "b".repeat(64);
-        assert!(!equivalent_committed_transfer(
-            &incompatible,
-            &offer,
-            operation_id,
-            resource_id,
-            "image_base",
-            &agent_epoch,
-        ));
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.size_bytes = 4;
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.format = "raw".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.chunk_size_bytes = 8;
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.chunk_count = 1;
+        assert_incompatible(&incompatible);
         incompatible = canonical.clone();
         incompatible.contiguous_bytes = 4;
-        assert!(!equivalent_committed_transfer(
-            &incompatible,
-            &offer,
-            operation_id,
-            resource_id,
-            "image_base",
-            &agent_epoch,
-        ));
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.next_chunk_index = 1;
+        assert_incompatible(&incompatible);
         receiving.state = ArtifactTransferState::Receiving;
-        assert!(!equivalent_committed_transfer(
-            &receiving,
-            &offer,
-            operation_id,
-            resource_id,
-            "image_base",
-            &agent_epoch,
-        ));
+        assert_incompatible(&receiving);
+        incompatible = canonical.clone();
+        incompatible.state = ArtifactTransferState::Rejected;
+        assert_incompatible(&incompatible);
         Ok(())
     }
 
