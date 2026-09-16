@@ -1556,7 +1556,7 @@ impl ComputeProvider for AgentComputeProvider {
                 "agent create artifact transfer committed"
             );
             if let Some(store) = &self.store {
-                store
+                let commit = store
                     .update_artifact_transfer(
                         &offer.transfer_id,
                         &agent.agent_epoch,
@@ -1567,16 +1567,35 @@ impl ComputeProvider for AgentComputeProvider {
                             retry_count: 0,
                         },
                     )
-                    .await
-                    .map_err(|error| {
+                    .await;
+                if let Err(error) = commit {
+                    // The authenticated agent acknowledgement can be
+                    // projected by the event consumer immediately before
+                    // this foreground writer. Treat an already-complete
+                    // terminal row as the same successful commit; retain
+                    // conflicts for incomplete or differently identified
+                    // state (P15.7 artifact-transfer race).
+                    let already_committed =
+                        matches!(error, StoreError::ArtifactTransferConflict(_))
+                            && store
+                                .get_artifact_transfer(&offer.transfer_id)
+                                .await
+                                .is_ok_and(|current| {
+                                    current.agent_epoch == agent.agent_epoch
+                                        && current.state == ArtifactTransferState::Committed
+                                        && current.contiguous_bytes == offer.size_bytes
+                                        && current.next_chunk_index == offer.chunk_count as u64
+                                });
+                    if !already_committed {
                         tracing::warn!(
                             resource_id = %request.o3k_server_id,
                             artifact_kind = artifact_kind_name(artifact.kind),
                             error = %error,
                             "artifact transfer commit update failed"
                         );
-                        ProviderError::Conflict
-                    })?;
+                        return Err(ProviderError::Conflict);
+                    }
+                }
             }
         }
         if seen != [true, true] {
