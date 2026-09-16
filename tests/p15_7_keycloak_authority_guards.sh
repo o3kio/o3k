@@ -102,6 +102,22 @@ elif [[ "\$1" == rm ]]; then
 fi
 SH
 chmod +x "$FAKE_BIN/docker"
+
+# Startup must not adopt, chmod, or later clean a pre-existing run-path
+# directory that lacks the O3K ownership ledger.
+STATE="$WORK/o3k-p15-7-keycloak-existing"
+mkdir -m 0755 "$STATE"
+printf 'foreign-runner-data\n' >"$STATE/keep.me"
+if PATH="$FAKE_BIN:$PATH" RUNNER_TEMP="$WORK" GITHUB_RUN_ID=existing \
+  O3K_P15_7_SOURCE_SHA="$sha" O3K_P15_7_KEYCLOAK_STATE_ROOT="$STATE" \
+  bash "$AUTHORITY" start; then
+  echo "pre-existing Keycloak state directory was adopted" >&2
+  exit 1
+fi
+test -f "$STATE/keep.me"
+test "$(stat -c '%a' "$STATE")" = 755
+
+STATE="$WORK/o3k-p15-7-keycloak-owned"
 PATH="$FAKE_BIN:$PATH" RUNNER_TEMP="$WORK" GITHUB_RUN_ID=owned \
   O3K_P15_7_SOURCE_SHA="$sha" O3K_P15_7_KEYCLOAK_STATE_ROOT="$STATE" \
   bash "$AUTHORITY" cleanup

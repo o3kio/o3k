@@ -93,9 +93,9 @@ PY
 }
 
 start() {
-  mkdir -p -- "$STATE_ROOT"
-  chmod 0700 -- "$STATE_ROOT"
-  [[ ! -e "$OWNER_FILE" && ! -e "$RUN_MARKER" ]] || die "run-owned Keycloak state already exists"
+  [[ ! -e "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] \
+    || die "run-owned Keycloak state already exists"
+  mkdir -m 0700 -- "$STATE_ROOT" || die "cannot create run-owned Keycloak state root"
   local port admin_password operator_password
   write_owner_marker
   port="$(pick_port)"
