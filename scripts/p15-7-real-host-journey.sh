@@ -654,6 +654,7 @@ OS_IMAGE_ID="$(openstack image create "o3k-p15-7-$RUN_ID-image" --file "$O3K_TES
 [[ "$OS_IMAGE_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "owned workload image creation returned an invalid id"
 OS_KEYPAIR_NAME="o3k-p15-7-$RUN_ID-key"
 openstack keypair create --public-key "$SSH_KEY.pub" "$OS_KEYPAIR_NAME" >/dev/null || die "owned workload keypair creation failed"
+SSH_PUBLIC_KEY="$(<"$SSH_KEY.pub")"
 OS_NETWORK_ID="$(openstack network create "o3k-p15-7-$RUN_ID-network" -f value -c id | tr -d '[:space:]')"
 [[ "$OS_NETWORK_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "owned workload network creation returned an invalid id"
 OS_SUBNET_ID="$(openstack subnet create --network "$OS_NETWORK_ID" --subnet-range "198.18.0.0/29" "o3k-p15-7-$RUN_ID-subnet" -f value -c id | tr -d '[:space:]')"
@@ -687,7 +688,7 @@ done
 # API. Keep it present while draining so the durable blocker projection is
 # observed honestly, then clear it before removing the block.
 curl --fail --silent --show-error -X POST -H "Authorization: Bearer $PROJECT_TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-a" "$API/compute/servers" \
-  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-a\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"network_ids\":[\"$OS_PORT_A_ID\"]}}" >"$WORK_ROOT/workload-a.json" || die "constrained real workload placement failed"
+  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-a\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"key_name\":\"$OS_KEYPAIR_NAME\",\"ssh_public_key\":\"$SSH_PUBLIC_KEY\",\"network_ids\":[\"$OS_PORT_A_ID\"]}}" >"$WORK_ROOT/workload-a.json" || die "constrained real workload placement failed"
 WORKLOAD_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("resource_id", ""))' "$WORK_ROOT/workload-a.json")"; [[ "$WORKLOAD_A" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload A has no canonical id"
 OS_WORKLOAD_A="$WORKLOAD_A"
 curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_A" >"$WORK_ROOT/workload-a-show.json" || die "workload A did not converge"
@@ -749,7 +750,7 @@ PY
 # must not be selected.  The OpenStack host projection is the public placement
 # observation for this real workload.
 curl --fail --silent --show-error -X POST -H "Authorization: Bearer $PROJECT_TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-b" "$API/compute/servers" \
-  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-b\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"network_ids\":[\"$OS_PORT_B_ID\"]}}" >"$WORK_ROOT/workload-b.json" || die "placement did not avoid drained block"
+  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-b\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"key_name\":\"$OS_KEYPAIR_NAME\",\"ssh_public_key\":\"$SSH_PUBLIC_KEY\",\"network_ids\":[\"$OS_PORT_B_ID\"]}}" >"$WORK_ROOT/workload-b.json" || die "placement did not avoid drained block"
 WORKLOAD_B="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("resource_id", ""))' "$WORK_ROOT/workload-b.json")"; [[ "$WORKLOAD_B" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload B has no canonical id"
 OS_WORKLOAD_B="$WORKLOAD_B"
 HOST_B=""
