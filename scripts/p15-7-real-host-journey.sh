@@ -103,7 +103,7 @@ capture_workload_b_failure_diagnostics() {
       ssh_vm "$ip" "sudo grep -F '$operation_id' /var/log/o3k-compute.log 2>/dev/null | tail -n 40" \
         >"$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
       chmod 0600 "$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
-      ssh_vm "$ip" "sudo grep -E '\"message\":\"(command accepted|command acceptance rejected|command execution completed|command execution failed|create failed definitively; reporting terminal failure)\"' /var/log/o3k-compute.log 2>/dev/null | tail -n 64" \
+      ssh_vm "$ip" "sudo grep -E '\"message\":\"(agent command received|command accepted|command acceptance rejected|command execution completed|command execution failed|create failed definitively; reporting terminal failure)\"' /var/log/o3k-compute.log 2>/dev/null | tail -n 64" \
         >"$WORK_ROOT/agent-$agent-message-probe.raw.jsonl" 2>/dev/null || true
       chmod 0600 "$WORK_ROOT/agent-$agent-message-probe.raw.jsonl" 2>/dev/null || true
       if probe="$(ssh_vm "$ip" "log_state=missing; if sudo test -f /var/log/o3k-compute.log; then log_state=\$(sudo stat -c 'present %s' /var/log/o3k-compute.log); fi; alive=0; sudo pgrep -x o3k-compute >/dev/null 2>&1 && alive=1; ready=0; curl --silent --show-error --max-time 2 http://127.0.0.1:19101/readyz >/dev/null 2>&1 && ready=1; printf '%s alive %s ready %s' \"\$log_state\" \"\$alive\" \"\$ready\"" 2>/dev/null)"; then
