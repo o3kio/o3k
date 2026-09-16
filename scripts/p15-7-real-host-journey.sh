@@ -43,6 +43,7 @@ VM_DISK_SIZE_GB="${O3K_P15_7_VM_DISK_SIZE_GB:-10}"
 # therefore make the canonical join fail closed with a 400.
 JOIN_REGION="${O3K_P15_7_REGION:-}"
 P15_PROVISION_DIAGNOSTICS_CAPTURED=false
+P15_WORKLOAD_DIAGNOSTICS_CAPTURED=false
 die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
 [[ "$DIAGNOSTIC_ONLY" == true || "$DIAGNOSTIC_ONLY" == false ]] || die "diagnostic mode is invalid"
@@ -79,6 +80,38 @@ capture_failure_diagnostics() {
   python3 "$ROOT_DIR/scripts/capture-p15-7-provision-diagnostics.py" \
     "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" "$WORK_ROOT" "$SOURCE_SHA" "$RUN_ID" journey_failed \
     || echo "P15.7 journey diagnostics could not be safely captured" >&2
+}
+capture_workload_b_failure_diagnostics() {
+  [[ "$P15_WORKLOAD_DIAGNOSTICS_CAPTURED" == false ]] || return 0
+  [[ "$WORKLOAD_B" =~ ^[0-9a-fA-F-]{36}$ && -n "${PROJECT_TOKEN:-}" ]] || return 0
+  [[ "${DRAIN_ID:-}" =~ ^[0-9a-fA-F-]{36}$ ]] || return 0
+  local operation_id server_http operation_http agent index ip
+  operation_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("operation_id", ""))' \
+    "$WORK_ROOT/workload-b.json" 2>/dev/null || true)"
+  [[ "$operation_id" =~ ^[0-9a-fA-F-]{36}$ ]] || return 0
+  server_http="$(curl --silent --show-error --max-time 10 --output "$WORK_ROOT/workload-b-state.raw.json" \
+    --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" \
+    "$API/compute/servers/$WORKLOAD_B" 2>/dev/null || true)"
+  operation_http="$(curl --silent --show-error --max-time 10 --output "$WORK_ROOT/workload-b-operation.raw.json" \
+    --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" \
+    "$API/operations/$operation_id" 2>/dev/null || true)"
+  chmod 0600 "$WORK_ROOT/workload-b-state.raw.json" "$WORK_ROOT/workload-b-operation.raw.json" 2>/dev/null || true
+  index=0
+  for agent in block-a block-b block-c; do
+    ip="${IPS[$index]:-}"
+    if [[ "$ip" =~ ^[0-9.]+$ ]]; then
+      ssh_vm "$ip" "sudo grep -F '\"operation_id\":\"$operation_id\"' /var/log/o3k-compute.log 2>/dev/null | tail -n 20" \
+        >"$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
+      chmod 0600 "$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
+    fi
+    index=$((index + 1))
+  done
+  python3 "$ROOT_DIR/scripts/capture-p15-7-workload-diagnostics.py" \
+    "$ARTIFACT_DIR/p15-7-workload-failure-diagnostics.json" "$WORK_ROOT" \
+    "$SOURCE_SHA" "$RUN_ID" "$WORKLOAD_B" "$operation_id" \
+    "${HOST_A:-unknown}" "${HOST_B:-unknown}" "$DRAIN_ID" \
+    "$server_http" "$operation_http" || echo "P15.7 workload diagnostics could not be safely captured" >&2
+  P15_WORKLOAD_DIAGNOSTICS_CAPTURED=true
 }
 early_cleanup() {
   local exit_status=$?
@@ -834,7 +867,10 @@ for _ in $(seq 1 120); do
   [[ "$B_STATE" != "ERROR" ]] || die "workload B provisioning entered ERROR before cleanup"
   sleep 1
 done
-[[ "$B_STATE" == "ACTIVE" ]] || die "workload B did not become ACTIVE before cleanup"
+if [[ "$B_STATE" != "ACTIVE" ]]; then
+  capture_workload_b_failure_diagnostics
+  die "workload B did not become ACTIVE before cleanup"
+fi
 GEN_B="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["metadata"]["generation"])' "$WORKLOAD_B_SHOW")"
 curl --fail --silent --show-error -X DELETE -H "Authorization: Bearer $PROJECT_TOKEN" -H "Idempotency-Key: p15-7-$RUN_ID-delete-b" -H "If-Match: generation-$GEN_B" "$API/compute/servers/$WORKLOAD_B" >/dev/null || die "workload B cleanup failed"
 for _ in $(seq 1 60); do
