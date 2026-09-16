@@ -132,7 +132,7 @@ PY
         # Only non-secret provider configuration crosses the workflow-step
         # boundary.  The signed token and generated passwords stay 0600 below
         # the run state root.
-        grep -E '^(O3K_P15_7_AUTHORITY_MODE|O3K_P15_7_KEYCLOAK_STATE_ROOT|O3K_P15_7_KEYCLOAK_CONTAINER|O3K_P15_7_KEYCLOAK_PORT|O3K_OIDC_TRUST_ID|O3K_OIDC_ISSUER|O3K_OIDC_AUDIENCE|O3K_OIDC_DISCOVERY_URL|O3K_OIDC_ALLOW_INSECURE_LOCAL|O3K_TESTLAB_FEDERATED_)' "$provider_env" >>"$GITHUB_ENV"
+        grep -E '^(O3K_P15_7_AUTHORITY_MODE|O3K_P15_7_KEYCLOAK_STATE_ROOT|O3K_P15_7_KEYCLOAK_CONTAINER|O3K_P15_7_KEYCLOAK_PORT|O3K_OIDC_TRUST_ID|O3K_OIDC_ISSUER|O3K_OIDC_AUDIENCE|O3K_OIDC_DISCOVERY_URL|O3K_OIDC_ALLOW_INSECURE_LOCAL|O3K_TESTLAB_FEDERATED_|O3K_TESTLAB_OPERATOR_ASSIGNMENT_ID=)' "$provider_env" >>"$GITHUB_ENV"
       fi
       issuer="${O3K_OIDC_ISSUER}"; audience="${O3K_OIDC_AUDIENCE}"; discovery="${O3K_OIDC_DISCOVERY_URL}"
       write_artifact passed provider_ready testlab-keycloak ready ready
