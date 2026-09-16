@@ -138,6 +138,28 @@ def agent_events(root: pathlib.Path, operation_id: str) -> list[dict[str, object
     return events[-MAX_EVENT_LINES:]
 
 
+def agent_log_probes(root: pathlib.Path) -> list[dict[str, object]]:
+    probes: list[dict[str, object]] = []
+    for agent in ("block-a", "block-b", "block-c"):
+        path = safe_child(root, f"agent-{agent}-log-probe.raw")
+        if not path.exists():
+            continue
+        value = path.read_text(encoding="ascii", errors="replace").strip()
+        probe: dict[str, object] = {"agent": agent}
+        if value == "missing":
+            probe["status"] = "missing"
+        elif value == "unreachable":
+            probe["status"] = "unreachable"
+        else:
+            match = re.fullmatch(r"present ([0-9]+)", value)
+            if not match:
+                continue
+            probe["status"] = "present"
+            probe["bytes"] = int(match.group(1))
+        probes.append(probe)
+    return probes
+
+
 def write_atomic(destination: pathlib.Path, document: dict[str, object]) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".p15-7-workload.", dir=destination.parent)
@@ -208,6 +230,7 @@ def main() -> int:
         server = read_json(work_root, "workload-b-state.raw.json")
         operation = read_json(work_root, "workload-b-operation.raw.json")
         events = agent_events(work_root, operation_id)
+        probes = agent_log_probes(work_root)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"P15.7 workload diagnostics: safe capture failed ({type(error).__name__})", file=sys.stderr)
         return 2
@@ -236,6 +259,7 @@ def main() -> int:
                 "operation_state": operation_state(operation),
                 "operation_error_category": operation_error_category(operation),
                 "agent_events": events,
+                "agent_log_probes": probes,
             },
         },
     )

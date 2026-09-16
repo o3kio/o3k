@@ -103,6 +103,12 @@ capture_workload_b_failure_diagnostics() {
       ssh_vm "$ip" "sudo grep -F '$operation_id' /var/log/o3k-compute.log 2>/dev/null | tail -n 40" \
         >"$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
       chmod 0600 "$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
+      if probe="$(ssh_vm "$ip" "if sudo test -f /var/log/o3k-compute.log; then sudo stat -c 'present %s' /var/log/o3k-compute.log; else printf 'missing'; fi" 2>/dev/null)"; then
+        printf '%s\n' "$probe" >"$WORK_ROOT/agent-$agent-log-probe.raw"
+      else
+        printf 'unreachable\n' >"$WORK_ROOT/agent-$agent-log-probe.raw"
+      fi
+      chmod 0600 "$WORK_ROOT/agent-$agent-log-probe.raw" 2>/dev/null || true
     fi
     index=$((index + 1))
   done
