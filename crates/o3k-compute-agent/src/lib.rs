@@ -3758,6 +3758,36 @@ fn command_action_name(command: &proto::Command) -> &'static str {
     }
 }
 
+/// Returns a finite, payload-free category for a failed command execution.
+fn command_execution_error_kind(error: &AgentError) -> &'static str {
+    match error {
+        AgentError::InvalidConfiguration(_) => "configuration",
+        AgentError::IdentityStore(_) => "identity_store",
+        AgentError::Transport(_) => "transport",
+        AgentError::TlsMaterial => "tls",
+        AgentError::Protocol(message) => {
+            let message = message.to_ascii_lowercase();
+            if message.contains("tap") || message.contains("network") || message.contains("dhcp") {
+                "network"
+            } else if message.contains("artifact")
+                || message.contains("image")
+                || message.contains("config-drive")
+            {
+                "artifact"
+            } else if message.contains("libvirt")
+                || message.contains("domain")
+                || message.contains("console")
+            {
+                "libvirt"
+            } else if message.contains("journal") {
+                "journal"
+            } else {
+                "protocol"
+            }
+        }
+    }
+}
+
 fn observation_from_result(
     agent_id: &str,
     agent_epoch: &str,
@@ -4412,6 +4442,7 @@ impl AgentClient {
                                         Err(error) => {
                                             tracing::warn!(
                                                 %error,
+                                                error_kind = command_execution_error_kind(&error),
                                                 operation_id = %command.operation_id,
                                                 action = command_action_name(&command),
                                                 "command execution failed"
