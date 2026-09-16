@@ -150,8 +150,9 @@ assert 'p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"'
 assert 'p15-7-libvirt-storage-pool.sh" cleanup "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert journey.index('p15-7-libvirt-storage-pool.sh" define') < journey.index('provision_vms_bounded block-a block-b')
 for required in ("pool-list --all --name", "pool-dumpxml", "pool-define", "pool-start",
-                 "pool-destroy", "pool-undefine", "o3k-p15-7-journey-owned=",
-                 "legacy-or-owned", "cleanup-stale-diagnostic-images"):
+                 "pool-destroy", "pool-undefine", "target/path",
+                 "pool identity does not match its exact run-owned name and path",
+                 "cleanup-stale-diagnostic-images"):
     assert required in pool, required
 assert 'cleanup-stale-diagnostic-images "${RUNNER_TEMP}"' in diagnostic
 assert 'cirros-0.6.3-x86_64-disk.img.p15-7-diagnostic-${GITHUB_RUN_ID}.XXXXXX' in diagnostic
