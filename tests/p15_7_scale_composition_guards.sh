@@ -174,6 +174,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "actual_uuid", "DOMAINS+=(\"$d\")", "OVERLAYS+=(\"$overlay\")",
                  "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-c-uuid\")\"", "provision_vms_bounded",
                  "capture-p15-7-provision-diagnostics.py", "p15-7-provisioning-diagnostics.json", "REPLAY_JOIN_FILE",
+                 "capture-p15-7-workload-diagnostics.py", "p15-7-workload-failure-diagnostics.json",
+                 "capture_workload_b_failure_diagnostics", "workload-b-operation.raw.json", "/operations/$operation_id",
                  "capture_failure_diagnostics",
                  "join-request.json", "remote_agent_cleanup", "sudo mkdir -- '$remote_stage'", "sudo rm -rf -- '$remote_stage'",
                  "canonical agent identity does not match agent id", "cross_tenant_test_prerequisite_missing",
@@ -207,7 +209,8 @@ diagnostic_fixture_step = diagnostic.split("- name: Prepare P15.7 foreign-projec
 assert "working-directory: ${{ env.DIAGNOSTIC_REPO }}" in diagnostic_fixture_step
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
-assert journey.index('[[ "$B_STATE" == "ACTIVE" ]] || die "workload B did not become ACTIVE before cleanup"') < journey.index('Idempotency-Key: p15-7-$RUN_ID-delete-b')
+assert journey.index('capture_workload_b_failure_diagnostics') < journey.index('die "workload B did not become ACTIVE before cleanup"')
+assert journey.index('die "workload B did not become ACTIVE before cleanup"') < journey.index('Idempotency-Key: p15-7-$RUN_ID-delete-b')
 assert 'p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert 'p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert 'p15-7-libvirt-storage-pool.sh" cleanup "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
@@ -295,6 +298,7 @@ bootstrap_step = workflow.split("      - name: Bootstrap minimal PostgreSQL Test
 assert 'GITHUB_SHA: ${{ inputs.target_sha || github.sha }}' in bootstrap_step
 assert 'O3K_P15_7_DIAGNOSTIC_ONLY: "true"' in workflow
 assert 'p15-7-diagnostic-fast-lane-journey.json' in workflow
+assert 'p15-7-workload-failure-diagnostics.json' in workflow
 assert 'diagnostic-only' in workflow
 assert 'P13.4' not in workflow and 'p13-4' not in workflow and 'p13_4' not in workflow
 assert 'p15-7-scale-composition-evidence.json' not in workflow
@@ -351,6 +355,46 @@ for secret in (
     "eyJhbGciOiJSUzI1NiJ9eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzZW50aW5lbCJ9eyJzdWIiOiJzZW50aW5lbCJ9.c2lnbmF0dXJlLXNlbnRpbmVsLXNpZ25hdHVyZQ",
 ):
     assert secret not in serialized, secret
+assert path.stat().st_mode & 0o777 == 0o600
+PY
+WORKLOAD_DIAGNOSTIC_ROOT="${WORK_DIR}/workload-diagnostic-input"
+mkdir -m 0700 "${WORKLOAD_DIAGNOSTIC_ROOT}"
+printf 'o3k-p15-7-journey-owned-v1\nrun=test-run\n' >"${WORKLOAD_DIAGNOSTIC_ROOT}/.o3k-owned"
+chmod 0600 "${WORKLOAD_DIAGNOSTIC_ROOT}/.o3k-owned"
+cat >"${WORKLOAD_DIAGNOSTIC_ROOT}/workload-b-state.raw.json" <<'JSON'
+{"status":{"state":"BUILDING"},"authorization":"sentinel-native-token","provider_payload":"must-not-escape"}
+JSON
+cat >"${WORKLOAD_DIAGNOSTIC_ROOT}/workload-b-operation.raw.json" <<'JSON'
+{"state":"running","error":"sentinel-operation-error","provider_resource_id":"must-not-escape"}
+JSON
+cat >"${WORKLOAD_DIAGNOSTIC_ROOT}/agent-block-a-events.raw.jsonl" <<'JSONL'
+{"timestamp":"2026-09-16T00:00:00Z","level":"INFO","fields":{"message":"command accepted","operation_id":"22222222-2222-4222-8222-222222222222","action":"create","authorization":"sentinel-agent-token"}}
+{"timestamp":"2026-09-16T00:00:01Z","level":"INFO","fields":{"message":"command execution completed","operation_id":"22222222-2222-4222-8222-222222222222","action":"create","state":3,"console_bytes":0,"secret":"sentinel-agent-secret"}}
+{"timestamp":"2026-09-16T00:00:02Z","level":"INFO","fields":{"message":"unapproved event","operation_id":"22222222-2222-4222-8222-222222222222","secret":"sentinel-unapproved-secret"}}
+{"timestamp":"2026-09-16T00:00:03Z","level":"INFO","fields":{"message":"command execution failed","operation_id":"33333333-3333-4333-8333-333333333333","action":"create","error":"unrelated"}}
+JSONL
+WORKLOAD_DIAGNOSTIC_ARTIFACT="${WORK_DIR}/workload-failure-diagnostics.json"
+python3 "${ROOT_DIR}/scripts/capture-p15-7-workload-diagnostics.py" \
+  "${WORKLOAD_DIAGNOSTIC_ARTIFACT}" "${WORKLOAD_DIAGNOSTIC_ROOT}" \
+  0123456789abcdef0123456789abcdef01234567 test-run \
+  11111111-1111-4111-8111-111111111111 22222222-2222-4222-8222-222222222222 \
+  compute-agent block-a 44444444-4444-4444-8444-444444444444 200 200
+python3 - "${WORKLOAD_DIAGNOSTIC_ARTIFACT}" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+doc = json.loads(path.read_text(encoding="utf-8"))
+assert doc["artifact_type"] == "o3k-p15-7-workload-failure-diagnostics"
+assert doc["reason"] == "workload_b_activation_timeout" and doc["redacted"] is True
+assert doc["observations"]["native_server_state"] == "BUILDING"
+assert doc["observations"]["operation_state"] == "running"
+events = doc["observations"]["agent_events"]
+assert [event["message"] for event in events] == ["command accepted", "command execution completed"]
+assert events[1]["state"] == 3 and events[1]["console_bytes"] == 0
+serialized = path.read_text(encoding="utf-8")
+for secret in ("sentinel-native-token", "sentinel-operation-error", "sentinel-agent-token",
+               "sentinel-agent-secret", "sentinel-unapproved-secret", "must-not-escape"):
+    assert secret not in serialized, secret
+assert "provider_resource_id" not in serialized and "authorization" not in serialized
 assert path.stat().st_mode & 0o777 == 0o600
 PY
 JOURNEY_ARTIFACT="${WORK_DIR}/journey-diagnostics.json"
