@@ -684,6 +684,13 @@ done
 [[ "$CAPACITY_AFTER_ADD" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_ADD" -gt "$CAPACITY_BEFORE" ]] \
   || die "Placement capacity did not grow after adding a genuine block"
 
+# Include the run-scoped TestLab bootstrap block and every newly enrolled
+# execution identity when resolving the selected workload host.  The local
+# compute-agent is a real authenticated TestLab provider too; assuming every
+# placement must be one of the separately provisioned block-* VMs rejects a
+# valid canonical candidate.
+api_get /operator/building-blocks >"$WORK_ROOT/blocks.json"
+
 # Exercise a constrained real workload through the canonical native resource
 # API. Keep it present while draining so the durable blocker projection is
 # observed honestly, then clear it before removing the block.
@@ -699,10 +706,10 @@ for _ in $(seq 1 60); do
   [[ -n "$HOST_A" && "$HOST_A" != "None" ]] && break
   sleep 1
 done
-[[ "$HOST_A" =~ ^(block-a|block-b|block-c)$ ]] || die "workload A placement host did not converge to a joined real host"
 DRAIN_AGENT="$HOST_A"
-DRAIN_ID="${BLOCK_IDS[$DRAIN_AGENT]:-}"
-[[ "$DRAIN_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload A placement has no canonical block mapping"
+DRAIN_ID="$(python3 "$ROOT_DIR/scripts/resolve-p15-7-placement-block.py" \
+  "$WORK_ROOT/blocks.json" "$DRAIN_AGENT")" \
+  || die "workload A placement host has no unique ready canonical block/provider mapping"
 
 # Prove tenant concealment with a genuinely different project-scoped token.
 # An unauthenticated request is not cross-tenant evidence. Do not fabricate
