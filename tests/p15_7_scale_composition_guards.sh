@@ -372,6 +372,7 @@ cat >"${WORKLOAD_DIAGNOSTIC_ROOT}/agent-block-a-events.raw.jsonl" <<'JSONL'
 {"timestamp":"2026-09-16T00:00:01Z","level":"INFO","fields":{"message":"command execution completed","operation_id":"22222222-2222-4222-8222-222222222222","action":"create","state":3,"console_bytes":0,"secret":"sentinel-agent-secret"}}
 {"timestamp":"2026-09-16T00:00:02Z","level":"INFO","fields":{"message":"unapproved event","operation_id":"22222222-2222-4222-8222-222222222222","secret":"sentinel-unapproved-secret"}}
 {"timestamp":"2026-09-16T00:00:03Z","level":"INFO","fields":{"message":"command execution failed","operation_id":"33333333-3333-4333-8333-333333333333","action":"create","error":"unrelated"}}
+{"timestamp":"2026-09-16T00:00:04Z","level":"WARN","fields":{"message":"create failed definitively; reporting terminal failure","operation_id":"22222222-2222-4222-8222-222222222222","error":"sentinel-definitive-error"}}
 JSONL
 WORKLOAD_DIAGNOSTIC_ARTIFACT="${WORK_DIR}/workload-failure-diagnostics.json"
 python3 "${ROOT_DIR}/scripts/capture-p15-7-workload-diagnostics.py" \
@@ -389,7 +390,7 @@ assert doc["observations"]["native_server_state"] == "BUILDING"
 assert doc["observations"]["operation_state"] == "running"
 assert doc["observations"]["operation_error_category"] == "unknown"
 events = doc["observations"]["agent_events"]
-assert [event["message"] for event in events] == ["command accepted", "command execution completed"]
+assert [event["message"] for event in events] == ["command accepted", "command execution completed", "create failed definitively; reporting terminal failure"]
 assert events[1]["state"] == 3 and events[1]["console_bytes"] == 0
 serialized = path.read_text(encoding="utf-8")
 for secret in ("sentinel-native-token", "sentinel-operation-error", "sentinel-agent-token",
