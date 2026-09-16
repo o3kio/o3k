@@ -788,6 +788,7 @@ jobs:
             target/real-host-workflow-artifacts/compute-agent-process-mtls-result.json
             target/real-host-workflow-artifacts/p15-7-scale-composition-evidence.json
             target/real-host-workflow-artifacts/p15-7-gate-result.json
+            target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json
             target/real-host-workflow-artifacts/p15-7-protected-preflight.json
             target/real-host-workflow-artifacts/p15-7-postgres-ownership.json
             target/real-host-workflow-artifacts/p13-4-postgres-ownership.json
