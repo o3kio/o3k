@@ -444,7 +444,7 @@ assert value.get("reason") == "no_resource_leak_detected", f"Expected no leak re
 PY
 
 python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
-import pathlib, sys
+import pathlib, re, sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 preflight_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
 for needle in ("P15.7 protected preflight", "id-token: write",
@@ -536,6 +536,11 @@ assert text.count("if: always() && steps.protected_preflight.outcome == 'success
 assert "id-token: write" in text
 assert "O3K_P15_7_OPERATOR_TOKEN:" not in text
 assert "p15-7-postgres-ownership.json" in text
+# The embedded ownership JSON must start at column zero after YAML block
+# scalar dedentation; retaining the shell indentation makes Python fail before
+# the generic TestLab and falsely blocks the protected journey.
+assert re.search(r"p15-7-postgres-ownership\.json <<'PY'\n          import json, subprocess, sys", text)
+assert not re.search(r"p15-7-postgres-ownership\.json <<'PY'\n\s{12}import json, subprocess, sys", text)
 assert "--label o3k.owner=o3k" in text
 assert "container_id" in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
