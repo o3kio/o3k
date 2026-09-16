@@ -443,6 +443,22 @@ mod tests {
         assert_eq!(identity.trusted_issuer_id, "local");
         assert_eq!(identity.subject, "external-subject");
 
+        let expired_access_token = encode(
+            &header,
+            &json!({
+                "iss": "http://127.0.0.1:9000/",
+                "sub": "external-subject",
+                "aud": "o3k",
+                "exp": now.saturating_sub(60),
+            }),
+            &EncodingKey::from_secret(secret),
+        )
+        .map_err(|_| OidcError::AuthenticationFailed)?;
+        assert_eq!(
+            validator.validate_with_jwks(&expired_access_token, &keys),
+            Err(OidcError::AuthenticationFailed)
+        );
+
         let mut id_token_header = Header::new(Algorithm::HS256);
         id_token_header.kid = Some("key-1".to_owned());
         let id_token = encode(
