@@ -144,9 +144,10 @@ assert 'JOIN_REGION="${O3K_P15_7_REGION:-}"' in journey
 assert '--region RegionOne' not in journey
 assert 'resource_class") != "VCPU"' in journey
 assert 'OS_WORKLOAD_A="$WORKLOAD_A"' in journey and 'OS_WORKLOAD_B="$WORKLOAD_B"' in journey
-assert 'O3K_TESTLAB_IMAGE_PATH="$HOST_IMAGE"' in journey
-assert 'WORKLOAD_IMAGE_MARKER="${O3K_TESTLAB_IMAGE_PATH}.o3k-owned"' in journey
-assert "o3k-p15-7-host-image-v1" in journey
+assert 'WORKLOAD_IMAGE="${O3K_TESTLAB_IMAGE_PATH:-}"' in journey
+assert 'WORKLOAD_IMAGE_MARKER="${WORKLOAD_IMAGE}.o3k-owned"' in journey
+assert "o3k-disposable-image-v1" in journey
+assert "phase=generic" in journey
 assert "araf_projection_prerequisite_missing" not in journey
 PY
 # libvirt emits both quote styles across supported versions. Keep gateway

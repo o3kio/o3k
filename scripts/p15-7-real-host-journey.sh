@@ -17,12 +17,13 @@ TLS_ROOT="$STATE_ROOT/tls"
 WORK_ROOT="${RUNNER_TEMP:-/tmp}/o3k-p15-7-journey-$RUN_ID"
 HOST_IMAGE="${O3K_P15_7_HOST_IMAGE_PATH:-}"
 HOST_IMAGE_SHA256="${O3K_P15_7_HOST_IMAGE_SHA256:-}"
-# The pinned cloud image used to boot the genuine compute hosts is also the
-# workload image.  Do not inherit the generic-phase O3K_TESTLAB_IMAGE_PATH:
-# that variable is intentionally left exported by the dispatcher and points
-# at a different disposable image.
-O3K_TESTLAB_IMAGE_PATH="$HOST_IMAGE"
-WORKLOAD_IMAGE_MARKER="${O3K_TESTLAB_IMAGE_PATH}.o3k-owned"
+# The pinned Ubuntu image boots the genuine compute hosts. Workloads use the
+# separately verified, run-scoped generic TestLab image. Keeping these image
+# roles distinct avoids uploading the much larger host image through the
+# compatibility image API while preserving the host-image digest gate.
+WORKLOAD_IMAGE="${O3K_TESTLAB_IMAGE_PATH:-}"
+O3K_TESTLAB_IMAGE_PATH="$WORKLOAD_IMAGE"
+WORKLOAD_IMAGE_MARKER="${WORKLOAD_IMAGE}.o3k-owned"
 NETWORK="${O3K_P15_7_LIBVIRT_NETWORK:-default}"
 LIBVIRT_IMAGE_ROOT="/var/lib/libvirt/images"
 LIBVIRT_STORAGE_ROOT="$LIBVIRT_IMAGE_ROOT/o3k-p15-7-$RUN_ID"
@@ -91,11 +92,13 @@ JOURNEY_START_MS="$(date +%s%3N)"
 [[ "$HOST_IMAGE" && -f "$HOST_IMAGE" && ! -L "$HOST_IMAGE" ]] || die "second_real_host_required: pinned VM image unavailable"
 [[ "$HOST_IMAGE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || die "pinned VM image digest required"
 printf '%s  %s\n' "$HOST_IMAGE_SHA256" "$HOST_IMAGE" | sha256sum --check --strict --status || die "VM image digest mismatch"
-[[ -f "$O3K_TESTLAB_IMAGE_PATH" && ! -L "$O3K_TESTLAB_IMAGE_PATH" ]] || die "owned workload image unavailable"
+[[ -n "$WORKLOAD_IMAGE" && -f "$WORKLOAD_IMAGE" && ! -L "$WORKLOAD_IMAGE" ]] || die "owned workload image unavailable"
 [[ -f "$WORKLOAD_IMAGE_MARKER" && ! -L "$WORKLOAD_IMAGE_MARKER" ]] \
   || die "owned workload image marker unavailable"
-grep -Fqx 'o3k-p15-7-host-image-v1' "$WORKLOAD_IMAGE_MARKER" \
+grep -Fqx 'o3k-disposable-image-v1' "$WORKLOAD_IMAGE_MARKER" \
   || die "owned workload image marker is invalid"
+grep -Fqx 'phase=generic' "$WORKLOAD_IMAGE_MARKER" \
+  || die "owned workload image phase marker is invalid"
 grep -Fqx "run=$RUN_ID" "$WORKLOAD_IMAGE_MARKER" \
   || die "owned workload image marker run mismatch"
 [[ -f "$STATE_ROOT/.o3k-run-owned" && -f "$TLS_ROOT/ca.pem" ]] || die "owned TestLab state/TLS unavailable"
