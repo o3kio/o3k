@@ -36,6 +36,7 @@ EVENT_MESSAGES = {
     "command acceptance rejected",
     "command execution completed",
     "command execution failed",
+    "create failed definitively; reporting terminal failure",
 }
 
 
