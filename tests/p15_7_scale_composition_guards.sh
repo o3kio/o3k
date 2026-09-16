@@ -94,10 +94,13 @@ doc = json.load(open(sys.argv[1], encoding="utf-8"))
 assert doc["status"] == "blocked" and doc["reason"] == "provider_mode_not_agent"
 assert doc["redacted"] is True
 PY
-python3 - "${ROOT_DIR}/scripts/p15-7-real-host-journey.sh" <<'PY'
+python3 - "${ROOT_DIR}/scripts/p15-7-real-host-journey.sh" "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
 from pathlib import Path
 import sys
 journey = Path(sys.argv[1]).read_text(encoding="utf-8")
+workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
+upload = workflow.split("- name: Upload redacted real-host artifacts", 1)[1].split("if-no-files-found:", 1)[0]
+assert "target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json" in upload
 for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block-c", "block-d", "o3k init",
                  "bootstrap/join", "actions/drain", "actions/remove", "docker restart",
                  "capacity_total", "CAPACITY_AFTER_ADD", "drain_blockers", "cargo test --locked -p o3kd",
