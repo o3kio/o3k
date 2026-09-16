@@ -9,6 +9,22 @@ EVIDENCE="${WORK_DIR}/evidence.json"
 # configured at all.  Keep this explicit so a future environment-level
 # prerequisite cannot accidentally turn the optional consumer into a gate.
 unset O3K_P15_7_ARAF_URL
+FIXTURE_ENV="${WORK_DIR}/foreign-project.env"
+FIXTURE_MASK="${WORK_DIR}/foreign-project-mask.txt"
+: >"${FIXTURE_ENV}"
+GITHUB_ENV="${FIXTURE_ENV}" bash "${ROOT_DIR}/scripts/prepare-p15-7-foreign-project-fixture.sh" >"${FIXTURE_MASK}"
+python3 - "${FIXTURE_ENV}" "${FIXTURE_MASK}" <<'PY'
+from pathlib import Path
+import re, sys
+values = dict(line.split("=", 1) for line in Path(sys.argv[1]).read_text().splitlines())
+password = values["O3K_EXTRA_TENANT_PASSWORD"]
+assert re.fullmatch(r"[0-9a-f]{64}", password)
+assert values["O3K_P15_7_FOREIGN_PASSWORD"] == password
+assert values["O3K_EXTRA_TENANT_PROJECT_ID"] == values["O3K_P15_7_FOREIGN_PROJECT_ID"]
+assert values["O3K_EXTRA_TENANT_PROJECT_NAME"] == "tenant-b"
+assert values["O3K_EXTRA_TENANT_USER_NAME"] == values["O3K_P15_7_FOREIGN_USER_NAME"] == "tenant-b-user"
+assert Path(sys.argv[2]).read_text() == f"::add-mask::{password}\n"
+PY
 PLACEMENT_BLOCKS="${WORK_DIR}/placement-blocks.json"
 cat >"${PLACEMENT_BLOCKS}" <<'JSON'
 [
@@ -138,13 +154,15 @@ PY
 python3 - "${ROOT_DIR}/scripts/p15-7-real-host-journey.sh" \
   "${ROOT_DIR}/.github/workflows/real-host-validation.yml" \
   "${ROOT_DIR}/scripts/p15-7-libvirt-storage-pool.sh" \
-  "${ROOT_DIR}/.github/workflows/p15-7-diagnostic-fast-lane.yml" <<'PY'
+  "${ROOT_DIR}/.github/workflows/p15-7-diagnostic-fast-lane.yml" \
+  "${ROOT_DIR}/scripts/bootstrap-disposable-testlab.sh" <<'PY'
 from pathlib import Path
 import sys
 journey = Path(sys.argv[1]).read_text(encoding="utf-8")
 workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
 pool = Path(sys.argv[3]).read_text(encoding="utf-8")
 diagnostic = Path(sys.argv[4]).read_text(encoding="utf-8")
+bootstrap = Path(sys.argv[5]).read_text(encoding="utf-8")
 upload = workflow.split("- name: Upload redacted real-host artifacts", 1)[1].split("if-no-files-found:", 1)[0]
 assert "target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json" in upload
 for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block-c", "block-d", "o3k init",
@@ -160,6 +178,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "join-request.json", "remote_agent_cleanup", "sudo mkdir -- '$remote_stage'", "sudo rm -rf -- '$remote_stage'",
                  "canonical agent identity does not match agent id", "cross_tenant_test_prerequisite_missing",
                  "FOREIGN_PROJECT_ID", "FOREIGN_TOKEN_PROJECT_ID", "foreign token scope mismatch",
+                 "O3K_P15_7_FOREIGN_USER_NAME", "O3K_P15_7_FOREIGN_PASSWORD",
+                 'OS_USERNAME="$FOREIGN_USER_NAME" OS_PASSWORD="$FOREIGN_PASSWORD"',
                  "foreign project can read workload A", "CROSS_TENANT_CONCEALMENT=true",
                  "record_optional_araf", "external_consumer_not_provisioned", "araf-projection.json",
                  "system_operator_token_required", "O3K_P15_7_OPERATOR_TOKEN_FILE", "O3K_P15_7_OPERATOR_TOKEN", "PROJECT_TOKEN",
@@ -174,6 +194,15 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "--serial \"file,path=$serial\"", "for (i = 1; i <= NF; i++)",
                  "awk '/MemTotal:/ {print int(\\$2/1024); exit}' /proc/meminfo"):
     assert required in journey, required
+assert "--os-password" not in journey
+for tenant_variable in ("O3K_EXTRA_TENANT_PROJECT_ID", "O3K_EXTRA_TENANT_PROJECT_NAME",
+                        "O3K_EXTRA_TENANT_USER_ID", "O3K_EXTRA_TENANT_USER_NAME",
+                        "O3K_EXTRA_TENANT_PASSWORD"):
+    assert tenant_variable in bootstrap
+assert workflow.index("Prepare P15.7 foreign-project fixture credentials") < workflow.index("Bootstrap fresh generic TestLab")
+assert diagnostic.index("Prepare P15.7 foreign-project fixture credentials") < diagnostic.index("Bootstrap minimal PostgreSQL TestLab")
+diagnostic_fixture_step = diagnostic.split("- name: Prepare P15.7 foreign-project fixture credentials", 1)[1].split("- name: Bootstrap minimal PostgreSQL TestLab", 1)[0]
+assert "working-directory: ${{ env.DIAGNOSTIC_REPO }}" in diagnostic_fixture_step
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
 assert 'p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey

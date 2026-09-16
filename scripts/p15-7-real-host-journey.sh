@@ -741,10 +741,26 @@ if [[ -z "$FOREIGN_PROJECT_ID" ]]; then
 fi
 [[ "$FOREIGN_PROJECT_ID" =~ ^[0-9a-fA-F-]{36}$ && "$FOREIGN_PROJECT_ID" != "$ADMIN_PROJECT_ID" ]] \
   || die "cross_tenant_test_prerequisite_missing: no distinct foreign project"
-FOREIGN_TOKEN_PROJECT_ID="$(openstack --os-project-id "$FOREIGN_PROJECT_ID" token issue -f value -c project_id 2>/dev/null | tr -d '[:space:]' || true)"
+FOREIGN_USER_NAME="${O3K_P15_7_FOREIGN_USER_NAME:-${O3K_EXTRA_TENANT_USER_NAME:-}}"
+FOREIGN_PASSWORD="${O3K_P15_7_FOREIGN_PASSWORD:-${O3K_EXTRA_TENANT_PASSWORD:-}}"
+FOREIGN_PROJECT_NAME="${O3K_EXTRA_TENANT_PROJECT_NAME:-}"
+[[ -n "$FOREIGN_USER_NAME" && -n "$FOREIGN_PASSWORD" && -n "$FOREIGN_PROJECT_NAME" ]] \
+  || die "cross_tenant_test_prerequisite_missing: foreign project credentials unavailable"
+FOREIGN_TOKEN_PROJECT_ID="$(
+  OS_USERNAME="$FOREIGN_USER_NAME" OS_PASSWORD="$FOREIGN_PASSWORD" \
+  OS_PROJECT_ID="$FOREIGN_PROJECT_ID" OS_PROJECT_NAME="$FOREIGN_PROJECT_NAME" \
+  OS_USER_DOMAIN_NAME=Default OS_PROJECT_DOMAIN_NAME=Default \
+    openstack token issue -f value -c project_id 2>/dev/null | tr -d '[:space:]' || true
+)"
 [[ "$FOREIGN_TOKEN_PROJECT_ID" == "$FOREIGN_PROJECT_ID" ]] || die "cross_tenant_test_prerequisite_missing: foreign token scope mismatch"
-FOREIGN_TOKEN="$(openstack --os-project-id "$FOREIGN_PROJECT_ID" token issue -f value -c id 2>/dev/null | tr -d '[:space:]' || true)"
+FOREIGN_TOKEN="$(
+  OS_USERNAME="$FOREIGN_USER_NAME" OS_PASSWORD="$FOREIGN_PASSWORD" \
+  OS_PROJECT_ID="$FOREIGN_PROJECT_ID" OS_PROJECT_NAME="$FOREIGN_PROJECT_NAME" \
+  OS_USER_DOMAIN_NAME=Default OS_PROJECT_DOMAIN_NAME=Default \
+    openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]' || true
+)"
 [[ "$FOREIGN_TOKEN" ]] || die "cross_tenant_test_prerequisite_missing: foreign project token unavailable"
+unset FOREIGN_PASSWORD
 FOREIGN_SHOW="$WORK_ROOT/foreign-workload-show.json"
 foreign_code="$(curl --silent --output "$FOREIGN_SHOW" --write-out '%{http_code}' \
   -H "Authorization: Bearer $FOREIGN_TOKEN" "$API/compute/servers/$WORKLOAD_A" || true)"

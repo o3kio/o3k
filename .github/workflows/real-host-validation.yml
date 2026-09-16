@@ -513,6 +513,10 @@ jobs:
           chmod 0644 "${image_path}"
           printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >> "${GITHUB_ENV}"
 
+      - name: Prepare P15.7 foreign-project fixture credentials
+        if: steps.protected_preflight.outcome == 'success' && steps.generic_postgres_bootstrap.outcome == 'success' && steps.generic_image.outcome == 'success'
+        run: bash scripts/prepare-p15-7-foreign-project-fixture.sh
+
       - name: Bootstrap fresh generic TestLab
         id: generic_bootstrap
         if: steps.protected_preflight.outcome == 'success' && steps.guard.outputs.ready == 'true' && steps.generic_image.outcome == 'success'
