@@ -127,6 +127,10 @@ assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mk
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
 assert 'operator_curl() {' in journey
 assert 'refresh_operator_authority' in journey
+assert 'secure_remove_credentials() {' in journey
+assert 'secure_remove_credentials "$OPERATOR_CURL_CONFIG" "$SSH_KEY"' in journey
+assert 'secure_remove_credentials "$OPERATOR_TOKEN_FILE" "$WORK_ROOT/operator.token"' in journey
+assert 'shred --remove --zero --force -- "$secret_file"' in journey
 assert 'Authorization: Bearer $PROJECT_TOKEN' in journey
 assert 'openstack token issue -f value -c id' in journey
 # Prevent recurrence of the bootstrap/identity and cleanup regressions that

@@ -165,6 +165,18 @@ delete_owned_openstack() {
   fi
   openstack_absent_code "$kind" "$id"
 }
+secure_remove_credentials() {
+  local secret_file
+  for secret_file in "$@"; do
+    [[ -n "$secret_file" && -f "$secret_file" && ! -L "$secret_file" ]] || continue
+    if command -v shred >/dev/null 2>&1; then
+      shred --remove --zero --force -- "$secret_file" >/dev/null 2>&1 \
+        || rm -f -- "$secret_file"
+    else
+      rm -f -- "$secret_file"
+    fi
+  done
+}
 cleanup() {
   set +e
   [[ "$CLEANUP_DONE" == true ]] && { set -e; return; }
@@ -177,24 +189,17 @@ cleanup() {
   # Credentials and enrollment material are never retained for recovery.
   # Remove only this run's exact files; VM diagnostics and ownership records
   # remain available when cleanup itself is blocked.
-  [[ -z "$OPERATOR_CURL_CONFIG" ]] || rm -f -- "$OPERATOR_CURL_CONFIG"
+  secure_remove_credentials "$OPERATOR_CURL_CONFIG" "$SSH_KEY" \
+    "$WORK_ROOT"/block-*-key.pem
   if [[ "$AUTHORITY_MODE" == testlab-keycloak ]]; then
     # The native operator bearer is short-lived but still privileged.  It is
     # owned by this journey and must not survive a failed resource cleanup.
     # Keep only non-secret diagnostics when later cleanup steps are blocked.
-    for secret_file in "$OPERATOR_TOKEN_FILE" "$WORK_ROOT/operator.token"; do
-      [[ -n "$secret_file" && -e "$secret_file" && ! -L "$secret_file" ]] || continue
-      if command -v shred >/dev/null 2>&1; then
-        shred --remove --zero --force "$secret_file" >/dev/null 2>&1 || rm -f -- "$secret_file"
-      else
-        rm -f -- "$secret_file"
-      fi
-    done
+    secure_remove_credentials "$OPERATOR_TOKEN_FILE" "$WORK_ROOT/operator.token"
     rm -f -- "$WORK_ROOT/operator.token.o3k-owned"
   fi
   rm -f -- "$WORK_ROOT"/block-*-init.json \
     "$WORK_ROOT"/block-*-join-request.json \
-    "$WORK_ROOT"/block-*-key.pem \
     "$WORK_ROOT"/block-*.pem
   # OpenStack objects are deleted by their recorded IDs in dependency order.
   # No name or prefix scan is used, so a failed journey cannot touch foreign
