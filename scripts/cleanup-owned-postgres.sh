@@ -21,8 +21,8 @@ PY
 actual_id="$(sudo -n docker inspect -f '{{.Id}}' "$container")"
 [[ "$actual_id" == "$expected_id" && "$expected_phase" == "$phase" && "$expected_run" == "$run_id" && "$expected_sha" == "$source_sha" && "$expected_owner" == o3k ]] \
   || { echo "PostgreSQL ownership ledger mismatch; refusing removal" >&2; exit 2; }
-[[ "$(sudo -n docker inspect -f '{{index .Config.Labels \"o3k.owner\"}}' "$container")" == o3k ]] || { echo "PostgreSQL owner label missing" >&2; exit 2; }
-[[ "$(sudo -n docker inspect -f '{{index .Config.Labels \"o3k.run_id\"}}' "$container")" == "$run_id" ]] || { echo "PostgreSQL run label mismatch" >&2; exit 2; }
-[[ "$(sudo -n docker inspect -f '{{index .Config.Labels \"o3k.phase\"}}' "$container")" == "$phase" ]] || { echo "PostgreSQL phase label mismatch" >&2; exit 2; }
-[[ "$(sudo -n docker inspect -f '{{index .Config.Labels \"o3k.source_sha\"}}' "$container")" == "$source_sha" ]] || { echo "PostgreSQL source label mismatch" >&2; exit 2; }
+[[ "$(sudo -n docker inspect -f '{{index .Config.Labels "o3k.owner"}}' "$container")" == o3k ]] || { echo "PostgreSQL owner label missing" >&2; exit 2; }
+[[ "$(sudo -n docker inspect -f '{{index .Config.Labels "o3k.run_id"}}' "$container")" == "$run_id" ]] || { echo "PostgreSQL run label mismatch" >&2; exit 2; }
+[[ "$(sudo -n docker inspect -f '{{index .Config.Labels "o3k.phase"}}' "$container")" == "$phase" ]] || { echo "PostgreSQL phase label mismatch" >&2; exit 2; }
+[[ "$(sudo -n docker inspect -f '{{index .Config.Labels "o3k.source_sha"}}' "$container")" == "$source_sha" ]] || { echo "PostgreSQL source label mismatch" >&2; exit 2; }
 sudo -n docker rm --force "$container" >/dev/null
