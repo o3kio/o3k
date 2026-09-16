@@ -566,6 +566,14 @@ for identity_variable in \
     printf '%s=%s\n' "$identity_variable" "$(printf '%q' "${!identity_variable}")" >>"$o3kd_env_tmp"
   fi
 done
+for tenant_variable in \
+  O3K_EXTRA_TENANT_PROJECT_ID O3K_EXTRA_TENANT_PROJECT_NAME \
+  O3K_EXTRA_TENANT_USER_ID O3K_EXTRA_TENANT_USER_NAME \
+  O3K_EXTRA_TENANT_PASSWORD; do
+  if [[ -n "${!tenant_variable:-}" ]]; then
+    printf '%s=%s\n' "$tenant_variable" "$(printf '%q' "${!tenant_variable}")" >>"$o3kd_env_tmp"
+  fi
+done
 cat >"$compute_env_tmp" <<EOF
 O3K_COMPUTE_DATA_DIR=$(printf '%q' "$STATE_ROOT/compute-data")
 O3K_COMPUTE_CONTROL_ENDPOINT=$(printf '%q' "https://127.0.0.1:${CONTROL_PORT}")

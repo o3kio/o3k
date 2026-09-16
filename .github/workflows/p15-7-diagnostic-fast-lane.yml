@@ -221,6 +221,11 @@ jobs:
             printf 'O3K_TESTLAB_COMPUTE_HEALTH_PORT=%s\n' "$((29100 + offset))"
           } >>"${GITHUB_ENV}"
 
+      - name: Prepare P15.7 foreign-project fixture credentials
+        if: steps.preflight.outcome == 'success' && steps.postgres.outcome == 'success' && steps.workload_image.outcome == 'success'
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        run: bash scripts/prepare-p15-7-foreign-project-fixture.sh
+
       - name: Bootstrap minimal PostgreSQL TestLab
         id: bootstrap
         if: steps.preflight.outcome == 'success' && steps.postgres.outcome == 'success' && steps.workload_image.outcome == 'success'
