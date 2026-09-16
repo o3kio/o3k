@@ -172,6 +172,20 @@ cleanup() {
   # Remove only this run's exact files; VM diagnostics and ownership records
   # remain available when cleanup itself is blocked.
   [[ -z "$OPERATOR_CURL_CONFIG" ]] || rm -f -- "$OPERATOR_CURL_CONFIG"
+  if [[ "$AUTHORITY_MODE" == testlab-keycloak ]]; then
+    # The native operator bearer is short-lived but still privileged.  It is
+    # owned by this journey and must not survive a failed resource cleanup.
+    # Keep only non-secret diagnostics when later cleanup steps are blocked.
+    for secret_file in "$OPERATOR_TOKEN_FILE" "$WORK_ROOT/operator.token"; do
+      [[ -n "$secret_file" && -e "$secret_file" && ! -L "$secret_file" ]] || continue
+      if command -v shred >/dev/null 2>&1; then
+        shred --remove --zero --force "$secret_file" >/dev/null 2>&1 || rm -f -- "$secret_file"
+      else
+        rm -f -- "$secret_file"
+      fi
+    done
+    rm -f -- "$WORK_ROOT/operator.token.o3k-owned"
+  fi
   rm -f -- "$WORK_ROOT"/block-*-init.json \
     "$WORK_ROOT"/block-*-join-request.json \
     "$WORK_ROOT"/block-*-key.pem \
