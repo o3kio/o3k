@@ -443,6 +443,19 @@ jobs:
           set -euo pipefail
           container="o3k-p15-7-postgres-${GITHUB_RUN_ID}"
           port=15433
+          available=0
+          for _ in $(seq 1 128); do
+            if python3 -c 'import socket,sys; probe=socket.socket(socket.AF_INET,socket.SOCK_STREAM); probe.bind(("127.0.0.1",int(sys.argv[1]))); probe.close()' "${port}" 2>/dev/null
+            then
+              available=1
+              break
+            fi
+            port=$((port + 1))
+          done
+          if ((available != 1)); then
+            echo "no available loopback port for generic-phase PostgreSQL" >&2
+            exit 1
+          fi
           if sudo -n docker inspect "${container}" >/dev/null 2>&1; then
             echo "refusing to reuse pre-existing PostgreSQL container ${container}" >&2
             exit 1
