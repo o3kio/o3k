@@ -46,6 +46,17 @@ PY
 env -u O3K_P15_7_ARAF_URL python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
   --expected-source-sha 0123456789abcdef0123456789abcdef01234567 \
   --expected-profile small-edge-cloud
+DIAGNOSTIC_EVIDENCE="${WORK_DIR}/diagnostic-only.json"
+python3 - "${DIAGNOSTIC_EVIDENCE}" <<'PY'
+import json, sys
+json.dump({"artifact_type":"o3k-p15-7-diagnostic-fast-lane-journey",
+           "schema_version":1,"phase":"P15.7","status":"passed",
+           "evidence_tier":"diagnostic-only","diagnostic_lane":True,
+           "final_completion_evidence":False}, open(sys.argv[1],"w",encoding="utf-8"))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${DIAGNOSTIC_EVIDENCE}"; then
+  echo "diagnostic-only artifact accepted as final P15.7 evidence" >&2; exit 1
+fi
 python3 - "${EVIDENCE}" <<'PY'
 import json, pathlib
 p = pathlib.Path(__import__('sys').argv[1]); d=json.loads(p.read_text())
@@ -153,11 +164,63 @@ assert 'JOIN_REGION="${O3K_P15_7_REGION:-}"' in journey
 assert '--region RegionOne' not in journey
 assert 'resource_class") != "VCPU"' in journey
 assert 'OS_WORKLOAD_A="$WORKLOAD_A"' in journey and 'OS_WORKLOAD_B="$WORKLOAD_B"' in journey
+assert 'OS_PORT_A_ID="" OS_PORT_B_ID=""' in journey
+native_create_requests = [line for line in journey.splitlines() if 'network_ids' in line]
+assert len(native_create_requests) == 2, native_create_requests
+assert '$OS_PORT_A_ID' in native_create_requests[0]
+assert '$OS_PORT_B_ID' in native_create_requests[1]
+assert all('$OS_NETWORK_ID' not in line for line in native_create_requests)
+assert '"o3k-p15-7-$RUN_ID-port-a"' in journey
+assert '"o3k-p15-7-$RUN_ID-port-b"' in journey
+assert '"$OS_PORT_B_ID" != "$OS_PORT_A_ID"' in journey
+assert 'delete_owned_openstack port "$OS_PORT_B_ID"' in journey
+assert 'delete_owned_openstack port "$OS_PORT_A_ID"' in journey
 assert 'WORKLOAD_IMAGE="${O3K_TESTLAB_IMAGE_PATH:-}"' in journey
 assert 'WORKLOAD_IMAGE_MARKER="${WORKLOAD_IMAGE}.o3k-owned"' in journey
 assert "o3k-disposable-image-v1" in journey
 assert "phase=generic" in journey
 assert "araf_projection_prerequisite_missing" not in journey
+assert 'DIAGNOSTIC_ONLY="${O3K_P15_7_DIAGNOSTIC_ONLY:-false}"' in journey
+assert 'diagnostic mode requires a separate non-completion artifact path' in journey
+assert 'o3k-p15-7-diagnostic-fast-lane-journey' in journey
+assert 'final_completion_evidence' in journey
+PY
+
+python3 - "${ROOT_DIR}/.github/workflows/p15-7-diagnostic-fast-lane.yml" <<'PY'
+from pathlib import Path
+import sys
+workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
+preflight = Path(sys.argv[1]).parents[2] / "scripts/p15-7-diagnostic-preflight.sh"
+preflight = preflight.read_text(encoding="utf-8")
+postgres_step = workflow.split("      - name: Start run-scoped PostgreSQL\n", 1)[1].split("      - name:", 1)[0]
+ordered_steps = (
+    "Check out the canonical repository at the exact SHA",
+    "Ownership-safe sanitation of prior TestLab state",
+    "Protected P15.7 authority and capacity preflight",
+    "Start run-scoped PostgreSQL",
+    "Allocate run-scoped TestLab ports",
+    "Bootstrap minimal PostgreSQL TestLab",
+    "Run P15.7 journey (diagnostic only)",
+    "Capture redacted P15.7 diagnostics",
+    "Stop and remove diagnostic TestLab",
+)
+positions = [workflow.index(step) for step in ordered_steps]
+assert positions == sorted(positions), positions
+assert 'O3K_P15_7_DIAGNOSTIC_ONLY: "true"' in workflow
+assert 'p15-7-diagnostic-fast-lane-journey.json' in workflow
+assert 'diagnostic-only' in workflow
+assert 'P13.4' not in workflow and 'p13-4' not in workflow and 'p13_4' not in workflow
+assert 'p15-7-scale-composition-evidence.json' not in workflow
+assert 'p15-7-gate-result.json' not in workflow
+assert 'final_completion_evidence' in workflow
+assert postgres_step.index('p15-7-postgres-ownership.json') < postgres_step.index('pg_isready')
+assert 'scripts/p15-7-protected-preflight.sh' in preflight
+assert 'o3k-p15-7-diagnostic-fast-lane-preflight' in preflight
+assert '"final_completion_evidence": False' in preflight
+assert 'authority_preflight_failed' in preflight
+assert 'minimum_cpu_count": 4' in preflight
+assert 'minimum_available_memory_kib": 6144000' in preflight
+assert 'minimum_free_disk_kib": 20971520' in preflight
 PY
 
 # Failed bounded provisioning must retain a useful, run-scoped artifact without
