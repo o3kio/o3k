@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use o3k_kernel::{
-    AuthContext, BootstrapPhase, BootstrapState, BuildingBlock, OwnershipScope, Principal,
-    PrincipalId, ScopeId, ServicePrincipal,
+    AuthContext, BootstrapPhase, BootstrapState, BuildingBlock, BuildingBlockState, OwnershipScope,
+    Principal, PrincipalId, ScopeId, ServicePrincipal,
 };
 use o3k_native_api::bootstrap::{
     BootstrapFailure, BootstrapWorkflow, ClientConfig, InitRequest, InitResponse, JoinRequest,
@@ -88,6 +88,72 @@ async fn record_bootstrap_audit(
     match result {
         Ok(()) | Err(o3k_store::StoreError::AuditEventConflict) => Ok(()),
         Err(_) => Err(BootstrapFailure::Internal),
+    }
+}
+
+async fn enroll_joined_building_block(
+    adapter: &BuildingBlockAdapter,
+    expected: BuildingBlock,
+) -> Result<(), String> {
+    let current = match adapter.get(&expected.id).await? {
+        Some(view) => {
+            let block = &view.block;
+            if block.execution_identity != expected.execution_identity
+                || block.resource_provider_ids != expected.resource_provider_ids
+                || block.failure_domain_id != expected.failure_domain_id
+                || block.cloud_profile_id != expected.cloud_profile_id
+                || !matches!(
+                    block.state,
+                    BuildingBlockState::Enrolling | BuildingBlockState::Ready
+                )
+            {
+                return Err("building block conflicts with authenticated join".into());
+            }
+            view
+        }
+        None => adapter.enroll(expected, &principal_context()).await?,
+    };
+    match current.block.state {
+        BuildingBlockState::Ready => Ok(()),
+        BuildingBlockState::Enrolling => {
+            adapter
+                .transition(
+                    &current.block.id,
+                    BuildingBlockState::Ready,
+                    current.block.generation,
+                    Vec::new(),
+                    &principal_context(),
+                )
+                .await?;
+            Ok(())
+        }
+        _ => Err("building block is not eligible to become ready".into()),
+    }
+}
+
+async fn ensure_joined_building_block_ready(
+    adapter: &BuildingBlockAdapter,
+    id: &str,
+) -> Result<(), String> {
+    let current = adapter
+        .get(id)
+        .await?
+        .ok_or_else(|| "joined building block is missing".to_owned())?;
+    match current.block.state {
+        BuildingBlockState::Ready => Ok(()),
+        BuildingBlockState::Enrolling => {
+            adapter
+                .transition(
+                    id,
+                    BuildingBlockState::Ready,
+                    current.block.generation,
+                    Vec::new(),
+                    &principal_context(),
+                )
+                .await?;
+            Ok(())
+        }
+        _ => Err("joined building block is not ready".into()),
     }
 }
 
@@ -401,6 +467,12 @@ impl BootstrapWorkflow for BootstrapAdapter {
         } else if request.availability_domain.is_some() {
             return Err(BootstrapFailure::Invalid);
         }
+        let adapter = BuildingBlockAdapter {
+            store: self.store.clone(),
+            placement: self.placement.clone(),
+            agents: self.agents.clone(),
+            locations: self.locations.clone(),
+        };
         if let Some(old) = state.enrolled_agents.get(&request.agent_id) {
             if old != &fingerprint {
                 return Err(BootstrapFailure::Conflict);
@@ -414,6 +486,17 @@ impl BootstrapWorkflow for BootstrapAdapter {
                 format!("o3k:building-block:{}", request.agent_id).as_bytes(),
             )
             .to_string();
+            ensure_joined_building_block_ready(&adapter, &block_id)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        target: "o3kd::bootstrap",
+                        agent_id = %request.agent_id,
+                        error = %error,
+                        "replayed bootstrap join has no ready building block"
+                    );
+                    BootstrapFailure::Conflict
+                })?;
             return Ok(JoinResponse {
                 phase: "ready".into(),
                 agent_id: request.agent_id.clone(),
@@ -494,21 +577,14 @@ impl BootstrapWorkflow for BootstrapAdapter {
             Some(state.cloud_profile_id.clone()),
         )
         .map_err(|_| BootstrapFailure::Invalid)?;
-        let adapter = BuildingBlockAdapter {
-            store: self.store.clone(),
-            placement: self.placement.clone(),
-            agents: self.agents.clone(),
-            locations: self.locations.clone(),
-        };
-        adapter
-            .enroll(block, &principal_context())
+        enroll_joined_building_block(&adapter, block)
             .await
             .map_err(|error| {
                 tracing::warn!(
                     target: "o3kd::bootstrap",
                     agent_id = %request.agent_id,
                     error = %error,
-                    "bootstrap building-block enrollment rejected"
+                    "bootstrap building-block readiness rejected"
                 );
                 BootstrapFailure::Conflict
             })?;
@@ -593,7 +669,7 @@ mod tests {
         assert_eq!(init.phase, "initialized");
         assert!(!readiness.is_ready());
 
-        adapter
+        let join = adapter
             .join(JoinRequest {
                 enrollment_token: init.enrollment_token.ok_or("missing grant")?,
                 agent_id: "node-test".to_owned(),
@@ -607,12 +683,42 @@ mod tests {
             })
             .await
             .map_err(|error| format!("join failed: {error:?}"))?;
+        let first_block = store
+            .get_building_block(&join.building_block_id)
+            .await?
+            .ok_or("building block missing after successful join")?
+            .block()?;
+        assert_eq!(first_block.state, o3k_kernel::BuildingBlockState::Ready);
+        let first_generation = first_block.generation;
         assert!(readiness.is_ready());
         let durable = store
             .get_bootstrap_state("default")
             .await?
             .ok_or("bootstrap state missing")?;
         assert_eq!(durable.phase, "ready");
+
+        let replay = adapter
+            .join(JoinRequest {
+                enrollment_token: "already-consumed-grant".into(),
+                agent_id: "node-test".into(),
+                agent_epoch: "epoch-1".into(),
+                certificate: String::from_utf8(include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem").to_vec())?,
+                region: None,
+                availability_domain: None,
+                failure_domain_id: None,
+                capabilities: serde_json::json!({"architecture":"x86_64","provider_name":"o3k-compute","provider_version":"test"}),
+                inventories: BTreeMap::from([(String::from("VCPU"), 2), (String::from("MEMORY_MB"), 1024)]),
+            })
+            .await
+            .map_err(|error| format!("replayed join failed: {error:?}"))?;
+        assert_eq!(replay.building_block_id, join.building_block_id);
+        let replayed_block = store
+            .get_building_block(&replay.building_block_id)
+            .await?
+            .ok_or("building block missing after replayed join")?
+            .block()?;
+        assert_eq!(replayed_block.state, o3k_kernel::BuildingBlockState::Ready);
+        assert_eq!(replayed_block.generation, first_generation);
 
         // A disposable bootstrap may have already initialized this same
         // profile before a later journey enrolls another host.  Repeating
