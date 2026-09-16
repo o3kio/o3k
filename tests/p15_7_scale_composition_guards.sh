@@ -186,6 +186,9 @@ assert len(native_create_requests) == 2, native_create_requests
 assert '$OS_PORT_A_ID' in native_create_requests[0]
 assert '$OS_PORT_B_ID' in native_create_requests[1]
 assert all('$OS_NETWORK_ID' not in line for line in native_create_requests)
+assert 'SSH_PUBLIC_KEY="$(<"$SSH_KEY.pub")"' in journey
+assert all(r'\"key_name\":\"$OS_KEYPAIR_NAME\"' in line for line in native_create_requests)
+assert all(r'\"ssh_public_key\":\"$SSH_PUBLIC_KEY\"' in line for line in native_create_requests)
 assert '"o3k-p15-7-$RUN_ID-port-a"' in journey
 assert '"o3k-p15-7-$RUN_ID-port-b"' in journey
 assert '"$OS_PORT_B_ID" != "$OS_PORT_A_ID"' in journey
