@@ -151,11 +151,16 @@ def agent_log_probes(root: pathlib.Path) -> list[dict[str, object]]:
         elif value == "unreachable":
             probe["status"] = "unreachable"
         else:
-            match = re.fullmatch(r"present ([0-9]+)", value)
+            match = re.fullmatch(r"present ([0-9]+) alive ([01]) ready ([01])", value)
             if not match:
-                continue
+                match = re.fullmatch(r"present ([0-9]+)", value)
+                if not match:
+                    continue
             probe["status"] = "present"
             probe["bytes"] = int(match.group(1))
+            if len(match.groups()) == 3:
+                probe["process_alive"] = match.group(2) == "1"
+                probe["ready"] = match.group(3) == "1"
         probes.append(probe)
     return probes
 
