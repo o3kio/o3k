@@ -231,6 +231,7 @@ jobs:
         if: steps.preflight.outcome == 'success' && steps.postgres.outcome == 'success' && steps.workload_image.outcome == 'success'
         working-directory: ${{ env.DIAGNOSTIC_REPO }}
         env:
+          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
           O3K_REAL_HOST_ARTIFACT_DIR: target/p15-7-diagnostic-artifacts
           O3K_PROVIDER: agent
           O3K_LOG_FILTER: debug
