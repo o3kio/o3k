@@ -174,6 +174,9 @@ sentinel-private-key-material
 LOG
 printf '1\n' >"${PROVISION_ROOT}/block-a-exit"
 printf '0\n' >"${PROVISION_ROOT}/block-b-exit"
+for number in $(seq 1 200); do
+  printf 'provision diagnostic line %s\n' "$number" >>"${PROVISION_ROOT}/block-b-provision.log"
+done
 python3 "${ROOT_DIR}/scripts/capture-p15-7-provision-diagnostics.py" \
   "${PROVISION_ARTIFACT}" "${PROVISION_ROOT}" \
   0123456789abcdef0123456789abcdef01234567 test-run
@@ -186,6 +189,8 @@ assert doc["native_system_operator_token_acquired_before_provisioning"] is False
 assert doc["signed_provider_token_refreshed_before_exchange"] is True
 assert doc["vms"][0]["exit_status"] == "1"
 assert any("DHCP lease" in line for line in doc["vms"][0]["tail"])
+assert any("provision diagnostic line 200" in line for line in doc["vms"][1]["tail"])
+assert "provision diagnostic line 1" not in doc["vms"][1]["tail"]
 serialized = path.read_text(encoding="utf-8")
 for secret in (
     "sentinel-native-token", "sentinel-password", "redacted-by-this-pattern", "sentinel",

@@ -53,10 +53,12 @@ def read_log(work_root: pathlib.Path, name: str) -> tuple[list[str], int, bool]:
         return ["<diagnostic log unavailable: unsafe file type>"], 0, True
     try:
         with path.open("rb") as stream:
+            offset = max(0, metadata.st_size - MAX_LOG_BYTES)
+            stream.seek(offset)
             data = stream.read(MAX_LOG_BYTES + 1)
     except OSError:
         return ["<diagnostic log unavailable: read failed>"], 0, True
-    truncated = len(data) > MAX_LOG_BYTES
+    truncated = offset > 0 or len(data) > MAX_LOG_BYTES
     text = data[:MAX_LOG_BYTES].decode("utf-8", errors="replace")
     source_lines = text.splitlines()[-MAX_LINES:]
     output: list[str] = []
