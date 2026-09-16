@@ -165,6 +165,39 @@ def agent_log_probes(root: pathlib.Path) -> list[dict[str, object]]:
     return probes
 
 
+def agent_message_probes(root: pathlib.Path, operation_id: str) -> list[dict[str, object]]:
+    probes: list[dict[str, object]] = []
+    for agent in ("block-a", "block-b", "block-c"):
+        path = safe_child(root, f"agent-{agent}-message-probe.raw.jsonl")
+        if not path.exists():
+            continue
+        counts = {message: 0 for message in EVENT_MESSAGES}
+        matching = {message: 0 for message in EVENT_MESSAGES}
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-MAX_EVENT_LINES:]
+        for line in lines:
+            try:
+                document = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(document, dict):
+                continue
+            fields = document.get("fields")
+            if not isinstance(fields, dict):
+                continue
+            message = fields.get("message")
+            if message not in EVENT_MESSAGES:
+                continue
+            counts[message] += 1
+            if fields.get("operation_id") == operation_id:
+                matching[message] += 1
+        probes.append({
+            "agent": agent,
+            "message_counts": {key: value for key, value in counts.items() if value},
+            "matching_operation_counts": {key: value for key, value in matching.items() if value},
+        })
+    return probes
+
+
 def write_atomic(destination: pathlib.Path, document: dict[str, object]) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".p15-7-workload.", dir=destination.parent)
@@ -236,6 +269,7 @@ def main() -> int:
         operation = read_json(work_root, "workload-b-operation.raw.json")
         events = agent_events(work_root, operation_id)
         probes = agent_log_probes(work_root)
+        message_probes = agent_message_probes(work_root, operation_id)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"P15.7 workload diagnostics: safe capture failed ({type(error).__name__})", file=sys.stderr)
         return 2
@@ -265,6 +299,7 @@ def main() -> int:
                 "operation_error_category": operation_error_category(operation),
                 "agent_events": events,
                 "agent_log_probes": probes,
+                "agent_message_probes": message_probes,
             },
         },
     )
