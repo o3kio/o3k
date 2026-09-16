@@ -486,6 +486,10 @@ python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
 import pathlib, re, sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 preflight_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
+dispatch_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-dispatch.yml").read_text(encoding="utf-8")
+dispatch_trigger = dispatch_text.split("permissions:", 1)[0]
+assert re.search(r"(?m)^on:\s*\n  workflow_dispatch:\s*$", dispatch_trigger)
+assert not re.search(r"(?m)^  push:", dispatch_trigger), "protected full validation must not launch on a main push"
 for needle in ("P15.7 protected preflight", "id-token: write",
                "scripts/p15-7-protected-preflight.sh", "target_sha:",
                "if-no-files-found: error",
