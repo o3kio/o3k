@@ -34,43 +34,40 @@ pool_present() {
 }
 
 pool_xml_matches() {
-  local name="$1" path="$2" run_id="$3" description_policy="$4" xml
+  local name="$1" path="$2" xml
   xml="$("${VIRSH[@]}" pool-dumpxml "$name")" || return 1
+  # Use the documented pool identity fields; descriptions are not part of the
+  # storage-pool XML contract and are not a durable ownership marker.
   python3 -c '
 import sys
 import xml.etree.ElementTree as ET
 
-name, path, run_id, description_policy = sys.argv[1:]
+name, path = sys.argv[1:]
 try:
     pool = ET.fromstring(sys.stdin.read())
 except ET.ParseError:
     raise SystemExit(1)
-description = pool.findtext("description", "")
-expected_description = f"o3k-p15-7-journey-owned={run_id}"
 valid = (
     pool.tag == "pool"
     and pool.get("type") == "dir"
     and pool.findtext("name") == name
     and pool.findtext("target/path") == path
 )
-if description_policy == "required":
-    valid = valid and description == expected_description
-elif description_policy == "legacy-or-owned":
-    valid = valid and description in ("", expected_description)
-else:
-    valid = False
 raise SystemExit(0 if valid else 1)
-' "$name" "$path" "$run_id" "$description_policy" <<<"$xml"
+' "$name" "$path" <<<"$xml"
 }
 
 remove_pool() {
-  local name="$1" path="$2" run_id="$3" description_policy="$4" listing state
+  local name="$1" path="$2" run_id="$3" listing state
+  expected_pool_path "$run_id" "$path"
+  [[ "$name" == "o3k-p15-7-$run_id" ]] \
+    || die "pool name is not the exact run-owned name"
   listing="$(pool_listing)" || die "cannot inspect libvirt storage pools"
   if ! pool_present "$listing" "$name"; then
     return 0
   fi
-  pool_xml_matches "$name" "$path" "$run_id" "$description_policy" \
-    || die "pool identity does not match its run-owned path and marker"
+  pool_xml_matches "$name" "$path" \
+    || die "pool identity does not match its exact run-owned name and path"
   state="$("${VIRSH[@]}" pool-info "$name" | sed -n 's/^State:[[:space:]]*//p')" \
     || die "cannot inspect run-owned pool state"
   case "$state" in
@@ -91,22 +88,21 @@ define_pool() {
   ! pool_present "$listing" "$name" || die "run-owned libvirt pool already exists"
   POOL_XML_TMP="$(mktemp "${TMPDIR:-/tmp}/o3k-p15-7-pool.XXXXXX")" \
     || die "cannot create temporary pool definition"
-  python3 - "$name" "$path" "$run_id" >"$POOL_XML_TMP" <<'PY'
+  python3 - "$name" "$path" >"$POOL_XML_TMP" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 
-name, path, run_id = sys.argv[1:]
+name, path = sys.argv[1:]
 pool = ET.Element("pool", {"type": "dir"})
 ET.SubElement(pool, "name").text = name
-ET.SubElement(pool, "description").text = f"o3k-p15-7-journey-owned={run_id}"
 target = ET.SubElement(pool, "target")
 ET.SubElement(target, "path").text = path
 ET.indent(pool, space="  ")
 ET.ElementTree(pool).write(sys.stdout.buffer, encoding="utf-8", xml_declaration=True)
 PY
   "${VIRSH[@]}" pool-define "$POOL_XML_TMP" || die "cannot define run-owned libvirt pool"
-  pool_xml_matches "$name" "$path" "$run_id" required \
-    || die "defined libvirt pool failed its ownership check"
+  pool_xml_matches "$name" "$path" \
+    || die "defined libvirt pool failed its exact name and path check"
   "${VIRSH[@]}" pool-start "$name" || die "cannot start run-owned libvirt pool"
   rm -f -- "$POOL_XML_TMP"
   POOL_XML_TMP=""
@@ -123,7 +119,7 @@ assert_pool_absent() {
 cleanup_owned_pool() {
   local run_id="$1" path="$2"
   expected_pool_path "$run_id" "$path"
-  remove_pool "o3k-p15-7-$run_id" "$path" "$run_id" required
+  remove_pool "o3k-p15-7-$run_id" "$path" "$run_id"
 }
 
 cleanup_stale_diagnostic_images() {
@@ -161,7 +157,7 @@ PY
       *) die "diagnostic image filename does not match its ownership run" ;;
     esac
     pool_path="$ROOT/o3k-p15-7-$run_id"
-    remove_pool "o3k-p15-7-$run_id" "$pool_path" "$run_id" legacy-or-owned
+    remove_pool "o3k-p15-7-$run_id" "$pool_path" "$run_id"
     rm -f -- "$image" "$marker"
     echo "P15.7 stale diagnostic image cleaned: run=$run_id"
   done

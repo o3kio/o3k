@@ -66,7 +66,16 @@ export O3K_P15_7_LIBVIRT_IMAGE_ROOT="$IMAGE_ROOT"
 pool_path="$IMAGE_ROOT/o3k-p15-7-12345"
 bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" assert-absent 12345 "$pool_path"
 bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" define 12345 "$pool_path"
-grep -Fqx 'o3k-p15-7-journey-owned=12345' <(python3 -c 'import sys,xml.etree.ElementTree as e; print(e.parse(sys.argv[1]).getroot().findtext("description"))' "$P15_7_FAKE_POOL_XML")
+python3 - "$P15_7_FAKE_POOL_XML" "$pool_path" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+pool = ET.parse(sys.argv[1]).getroot()
+assert pool.findtext("name") == "o3k-p15-7-12345"
+assert pool.get("type") == "dir"
+assert pool.findtext("target/path") == sys.argv[2]
+assert pool.find("description") is None
+PY
 bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" cleanup 12345 "$pool_path"
 [[ ! -e "$P15_7_FAKE_POOL_PRESENT" ]]
 grep -Fqx destroy "$P15_7_FAKE_POOL_ACTIONS"
