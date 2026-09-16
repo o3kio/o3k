@@ -165,6 +165,18 @@ delete_owned_openstack() {
   fi
   openstack_absent_code "$kind" "$id"
 }
+secure_remove_credentials() {
+  local secret_file
+  for secret_file in "$@"; do
+    [[ -n "$secret_file" && -f "$secret_file" && ! -L "$secret_file" ]] || continue
+    if command -v shred >/dev/null 2>&1; then
+      shred --remove --zero --force -- "$secret_file" >/dev/null 2>&1 \
+        || rm -f -- "$secret_file"
+    else
+      rm -f -- "$secret_file"
+    fi
+  done
+}
 cleanup() {
   set +e
   [[ "$CLEANUP_DONE" == true ]] && { set -e; return; }
@@ -177,24 +189,17 @@ cleanup() {
   # Credentials and enrollment material are never retained for recovery.
   # Remove only this run's exact files; VM diagnostics and ownership records
   # remain available when cleanup itself is blocked.
-  [[ -z "$OPERATOR_CURL_CONFIG" ]] || rm -f -- "$OPERATOR_CURL_CONFIG"
+  secure_remove_credentials "$OPERATOR_CURL_CONFIG" "$SSH_KEY" \
+    "$WORK_ROOT"/block-*-key.pem
   if [[ "$AUTHORITY_MODE" == testlab-keycloak ]]; then
     # The native operator bearer is short-lived but still privileged.  It is
     # owned by this journey and must not survive a failed resource cleanup.
     # Keep only non-secret diagnostics when later cleanup steps are blocked.
-    for secret_file in "$OPERATOR_TOKEN_FILE" "$WORK_ROOT/operator.token"; do
-      [[ -n "$secret_file" && -e "$secret_file" && ! -L "$secret_file" ]] || continue
-      if command -v shred >/dev/null 2>&1; then
-        shred --remove --zero --force "$secret_file" >/dev/null 2>&1 || rm -f -- "$secret_file"
-      else
-        rm -f -- "$secret_file"
-      fi
-    done
+    secure_remove_credentials "$OPERATOR_TOKEN_FILE" "$WORK_ROOT/operator.token"
     rm -f -- "$WORK_ROOT/operator.token.o3k-owned"
   fi
   rm -f -- "$WORK_ROOT"/block-*-init.json \
     "$WORK_ROOT"/block-*-join-request.json \
-    "$WORK_ROOT"/block-*-key.pem \
     "$WORK_ROOT"/block-*.pem
   # OpenStack objects are deleted by their recorded IDs in dependency order.
   # No name or prefix scan is used, so a failed journey cannot touch foreign
@@ -524,26 +529,16 @@ write_operator_curl_config() {
 write_operator_curl_config
 refresh_operator_authority() {
   [[ "$AUTHORITY_MODE" == testlab-keycloak ]] || return 0
-  local remaining
-  remaining="$(python3 - "$OPERATOR_TOKEN_FILE" <<'PY' 2>/dev/null || true
-import base64, json, pathlib, sys, time
-parts = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8').strip().split('.')
-if len(parts) != 3:
-    raise SystemExit(0)
-claims = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (-len(parts[1]) % 4)))
-print(int(claims.get('exp', 0)) - int(time.time()))
-PY
-)"
-  if ! [[ "$remaining" =~ ^[0-9]+$ ]] || (( remaining <= 300 )); then
-    O3K_P15_7_AUTHORITY_MODE=testlab-keycloak \
-      O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
-      O3K_P15_7_NATIVE_API_URL="$API" O3K_P15_7_AUTHORITY_OUTPUT_FILE="$OPERATOR_TOKEN_FILE" \
-      GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
-      bash "$KEYCLOAK_AUTHORITY_SCRIPT" exchange || die "system_operator_federated_renewal_failed"
-    OPERATOR_TOKEN="$(<"$OPERATOR_TOKEN_FILE")"
-    [[ -n "$OPERATOR_TOKEN" && "$OPERATOR_TOKEN" != *$'\n'* ]] || die "renewed_system_operator_token_empty"
-    write_operator_curl_config
-  fi
+  O3K_P15_7_AUTHORITY_MODE=testlab-keycloak \
+    O3K_P15_7_OPERATOR_TOKEN_FILE="$OPERATOR_TOKEN_FILE" \
+    O3K_P15_7_OPERATOR_CURL_CONFIG="$OPERATOR_CURL_CONFIG" \
+    O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT="$KEYCLOAK_AUTHORITY_SCRIPT" \
+    O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
+    O3K_P15_7_NATIVE_API_URL="$API" GITHUB_RUN_ID="$RUN_ID" \
+    O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
+    bash "$ROOT_DIR/scripts/p15-7-refresh-operator-authority.sh" \
+    || die "system_operator_federated_renewal_failed"
+  OPERATOR_TOKEN="$(<"$OPERATOR_TOKEN_FILE")"
 }
 operator_curl() {
   local url="$1"

@@ -16,6 +16,28 @@ if [[ "$*" == "-c qemu:///system uri" ]]; then echo qemu:///system; fi
 if [[ "$*" == "-c qemu:///system list --all --name" && "${O3K_FAKE_VIRSH_DIRTY:-false}" == true ]]; then
     echo o3k-preexisting-domain
 fi
+if [[ "$*" == "-c qemu:///system list --all --name" && "${O3K_FAKE_VIRSH_STALE_P157:-false}" == true ]]; then
+    [[ -f "${O3K_FAKE_VIRSH_STALE_STATE:?}" ]] || echo o3k-p15-7-12345-block-b
+fi
+if [[ "$*" == "-c qemu:///system list --all --name" && "${O3K_FAKE_VIRSH_STALE_P157_UNOWNED:-false}" == true ]]; then
+    echo o3k-p15-7-12345-block-b
+fi
+if [[ "$*" == "-c qemu:///system dumpxml o3k-p15-7-12345-block-b" && "${O3K_FAKE_VIRSH_STALE_P157:-false}" == true ]]; then
+    echo '<domain><description>o3k-p15-7-journey-owned=12345</description></domain>'
+fi
+if [[ "$*" == "-c qemu:///system dumpxml o3k-p15-7-12345-block-b" && "${O3K_FAKE_VIRSH_STALE_P157_UNOWNED:-false}" == true ]]; then
+    echo '<domain><description>o3k-p15-7-journey-owned=12345-foreign</description></domain>'
+fi
+if [[ "$*" == "-c qemu:///system destroy o3k-p15-7-12345-block-b" || "$*" == "-c qemu:///system undefine o3k-p15-7-12345-block-b --nvram" || "$*" == "-c qemu:///system undefine o3k-p15-7-12345-block-b" ]]; then
+    : >"${O3K_FAKE_VIRSH_STALE_STATE:?}"
+fi
+if [[ "$*" == "-c qemu:///system domuuid o3k-p15-7-12345-block-b" && ! -f "${O3K_FAKE_VIRSH_STALE_STATE:-}" ]]; then
+    echo 00000000-0000-0000-0000-000000000123
+    exit 0
+fi
+if [[ "$*" == "-c qemu:///system domuuid o3k-p15-7-12345-block-b" ]]; then
+    exit 1
+fi
 SH
 chmod +x "${FAKE_BIN}/virsh"
 cat >"${FAKE_BIN}/ip" <<'SH'
@@ -255,6 +277,23 @@ assert "do-not-upload-this-value" not in json.dumps(value)
 PY
 unset O3K_FAKE_VIRSH_DIRTY
 bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+
+export O3K_FAKE_VIRSH_STALE_P157=true O3K_FAKE_VIRSH_STALE_STATE="${WORK_DIR}/stale-p157-state"
+rm -f -- "${O3K_FAKE_VIRSH_STALE_STATE}"
+bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+test -f "${O3K_FAKE_VIRSH_STALE_STATE}"
+unset O3K_FAKE_VIRSH_STALE_P157 O3K_FAKE_VIRSH_STALE_STATE
+
+export O3K_FAKE_VIRSH_STALE_P157_UNOWNED=true O3K_FAKE_VIRSH_STALE_STATE="${WORK_DIR}/stale-p157-unowned-state"
+rm -f -- "${O3K_FAKE_VIRSH_STALE_STATE}"
+if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
+    echo "unowned P15.7-shaped domain unexpectedly passed the baseline guard" >&2
+    exit 1
+fi
+test ! -e "${O3K_FAKE_VIRSH_STALE_STATE}"
+unset O3K_FAKE_VIRSH_STALE_P157_UNOWNED O3K_FAKE_VIRSH_STALE_STATE
+bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/libvirt-result.json" <<'PY'
 import json, sys
 json.dump({"status": "passed", "redacted": True}, open(sys.argv[1], "w", encoding="utf-8"))

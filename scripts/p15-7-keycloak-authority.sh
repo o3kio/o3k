@@ -10,20 +10,20 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${GITHUB_RUN_ID:-local-$$}"
 SOURCE_SHA="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-}}"
 MODE="${O3K_P15_7_AUTHORITY_MODE:-testlab-keycloak}"
-STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}"
+STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-}"
 IMAGE="quay.io/keycloak/keycloak:25.0.6@sha256:82c5b7a110456dbd42b86ea572e728878549954cc8bd03cd65410d75328095d2"
 # Keep the P12-IAM.7 evidence sources visible and pinned as the single real
 # provider contract; this P15 fixture does not introduce a second IAM path.
 P12_REAL_IDP_HARNESS="$ROOT_DIR/tests/p12-iam-7-real-idp.sh"
 P12_REAL_OIDC_TEST="$ROOT_DIR/bins/o3kd/tests/p12_iam_7_real_oidc.rs"
 CONTAINER="o3k-p15-7-keycloak-${RUN_ID}"
-PORT_FILE="$STATE_ROOT/port"
-ENV_FILE="$STATE_ROOT/provider.env"
-TOKEN_FILE="$STATE_ROOT/oidc-operator.token"
-OPERATOR_PASSWORD_FILE="$STATE_ROOT/operator-password"
-REALM_FILE="$STATE_ROOT/realm.json"
-OWNER_FILE="$STATE_ROOT/.o3k-owned"
-RUN_MARKER="$STATE_ROOT/.o3k-keycloak-owned"
+PORT_FILE=""
+ENV_FILE=""
+TOKEN_FILE=""
+OPERATOR_PASSWORD_FILE=""
+REALM_FILE=""
+OWNER_FILE=""
+RUN_MARKER=""
 UMASK_OLD=""
 
 die() { echo "P15.7 Keycloak authority: $*" >&2; exit 1; }
@@ -39,9 +39,26 @@ if [[ "$MODE" == external-oidc ]]; then
 fi
 
 for command in docker curl python3; do command -v "$command" >/dev/null 2>&1 || die "missing command: $command"; done
-[[ "$STATE_ROOT" == /* && "$STATE_ROOT" != *..* && ! -L "$STATE_ROOT" ]] || die "unsafe state root"
-mkdir -p -- "$STATE_ROOT"
-chmod 0700 -- "$STATE_ROOT"
+command -v realpath >/dev/null 2>&1 || die "missing command: realpath"
+RUNNER_TEMP_ROOT="${RUNNER_TEMP:-/tmp}"
+[[ "$RUNNER_TEMP_ROOT" == /* && "$RUNNER_TEMP_ROOT" != *..* \
+  && -d "$RUNNER_TEMP_ROOT" && ! -L "$RUNNER_TEMP_ROOT" ]] || die "unsafe runner temp root"
+RUNNER_TEMP_ROOT="$(realpath -e -- "$RUNNER_TEMP_ROOT")"
+EXPECTED_STATE_ROOT="${RUNNER_TEMP_ROOT%/}/o3k-p15-7-keycloak-${RUN_ID}"
+[[ -n "$STATE_ROOT" ]] || STATE_ROOT="$EXPECTED_STATE_ROOT"
+# All persisted credentials and recursive cleanup are confined to one direct,
+# run-scoped child of the canonical runner temp directory.  An override may
+# not broaden chmod, shredding, or removal to a shared or foreign path.
+[[ "$STATE_ROOT" == "$EXPECTED_STATE_ROOT" && ! -L "$STATE_ROOT" ]] \
+  || die "Keycloak state root must be the run-scoped runner-temp child"
+[[ ! -e "$STATE_ROOT" || -d "$STATE_ROOT" ]] || die "Keycloak state root is not a directory"
+PORT_FILE="$STATE_ROOT/port"
+ENV_FILE="$STATE_ROOT/provider.env"
+TOKEN_FILE="$STATE_ROOT/oidc-operator.token"
+OPERATOR_PASSWORD_FILE="$STATE_ROOT/operator-password"
+REALM_FILE="$STATE_ROOT/realm.json"
+OWNER_FILE="$STATE_ROOT/.o3k-owned"
+RUN_MARKER="$STATE_ROOT/.o3k-keycloak-owned"
 
 write_marker() {
   printf 'o3k-p15-7-keycloak-container-v1\nrun=%s\nsource_sha=%s\n' "$RUN_ID" "$SOURCE_SHA" >"$RUN_MARKER"
@@ -76,7 +93,9 @@ PY
 }
 
 start() {
-  [[ ! -e "$OWNER_FILE" && ! -e "$RUN_MARKER" ]] || die "run-owned Keycloak state already exists"
+  [[ ! -e "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] \
+    || die "run-owned Keycloak state already exists"
+  mkdir -m 0700 -- "$STATE_ROOT" || die "cannot create run-owned Keycloak state root"
   local port admin_password operator_password
   write_owner_marker
   port="$(pick_port)"
@@ -117,6 +136,11 @@ PY
   # user and must be able to read this non-secret fixture from the bind mount;
   # all generated credentials remain in separate 0600 files below.
   chmod 0644 "$REALM_FILE"
+  # Persist the expected container identity before creation. If the runner is
+  # interrupted after Docker creates the container but before this script can
+  # continue, cleanup still requires matching Docker labels as independent
+  # ownership proof before removing it.
+  write_marker
   if ! docker run --detach --name "$CONTAINER" --network host \
     --label o3k.owner=o3k --label o3k.component=p15-7-keycloak \
     --label o3k.phase=p15-7 --label "o3k.run_id=$RUN_ID" \
@@ -129,7 +153,6 @@ PY
     die "Keycloak container failed to start"
   fi
   secure_remove "$env_tmp"
-  write_marker
   for _ in $(seq 1 90); do
     if curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
       "http://127.0.0.1:$port/realms/o3k-p15-7/.well-known/openid-configuration" \
@@ -276,6 +299,15 @@ cleanup() {
   grep -Fqx 'o3k-p15-7-keycloak-owned-v1' "$OWNER_FILE" || die "invalid Keycloak ownership ledger"
   grep -Fqx "run=$RUN_ID" "$OWNER_FILE" || die "Keycloak ownership run mismatch"
   grep -Fqx "source_sha=$SOURCE_SHA" "$OWNER_FILE" || die "Keycloak ownership source mismatch"
+  # Remove run-owned credential material even if the container proof below is
+  # ambiguous.  Refusing to stop a foreign container must not preserve the
+  # generated passwords or signed/native bearer tokens on disk.
+  secure_remove "$TOKEN_FILE" "$OPERATOR_PASSWORD_FILE" \
+    "$STATE_ROOT"/env.* "$STATE_ROOT"/admin-curl.* \
+    "$STATE_ROOT"/admin-response.* "$STATE_ROOT"/users-response.* \
+    "$STATE_ROOT"/reset-curl.* "$STATE_ROOT"/reset-body.* \
+    "$STATE_ROOT"/curl.* "$STATE_ROOT"/oauth-response.* \
+    "$STATE_ROOT"/exchange.* "$STATE_ROOT"/native.*
   if [[ -f "$RUN_MARKER" && ! -L "$RUN_MARKER" ]]; then
     grep -Fqx 'o3k-p15-7-keycloak-container-v1' "$RUN_MARKER" || die "invalid Keycloak container ledger"
     grep -Fqx "run=$RUN_ID" "$RUN_MARKER" || die "Keycloak container run mismatch"

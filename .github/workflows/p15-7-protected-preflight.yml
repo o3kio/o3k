@@ -91,7 +91,12 @@ jobs:
             grep -Fqx "run=${GITHUB_RUN_ID}" "${marker}"
             test -f "${token_file}" && ! test -L "${token_file}"
             test "$(stat -c '%a' "${token_file}")" = 600
-            rm -f -- "${token_file}" "${marker}"
+            if command -v shred >/dev/null 2>&1; then
+              shred --remove --zero --force -- "${token_file}" || rm -f -- "${token_file}"
+            else
+              rm -f -- "${token_file}"
+            fi
+            rm -f -- "${marker}"
           fi
 
       - name: Remove owned TestLab Keycloak authority

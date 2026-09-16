@@ -283,6 +283,15 @@ async fn p12_iam_7_real_federation_evidence() -> Result<(), Box<dyn std::error::
         .await
         .is_ok()
     );
+    assert!(
+        o3k_native_api::auth::TokenIssuer::issue_native(
+            &reloaded_adapter,
+            &federated_request(&operator_token, None, true),
+        )
+        .await
+        .is_ok(),
+        "durable operator-console assignment must survive service restart"
+    );
     // A durable binding alone is not operator authority: removing the
     // canonical operator-console assignment must deny a system exchange.
     store
