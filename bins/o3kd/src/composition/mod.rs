@@ -114,9 +114,16 @@ async fn provision_testlab_federated_operator(
         created_at: now.clone(),
         updated_at: now.clone(),
     };
-    if let Some(existing) = store
-        .list_federated_bindings()
-        .await?
+    let existing_bindings = store.list_federated_bindings().await?;
+    if let Some(existing_tuple) = existing_bindings.iter().find(|candidate| {
+        candidate.trusted_issuer_id == binding.trusted_issuer_id
+            && candidate.issuer == binding.issuer
+            && candidate.subject == binding.subject
+    }) && existing_tuple.id != binding.id
+    {
+        return Err("existing TestLab federated identity uses a different binding ID".into());
+    }
+    if let Some(existing) = existing_bindings
         .into_iter()
         .find(|candidate| candidate.id == binding.id)
     {
@@ -138,16 +145,29 @@ async fn provision_testlab_federated_operator(
     } else {
         store.insert_federated_binding(&binding).await?;
     }
-    store
-        .insert_operator_assignment(&OperatorAssignmentRecord {
-            id: assignment_id,
-            user_id: principal,
-            profile: "operator-console".to_owned(),
-            enabled: true,
-            created_at: now.clone(),
-            updated_at: now,
-        })
-        .await?;
+    let assignment = OperatorAssignmentRecord {
+        id: assignment_id,
+        user_id: principal,
+        profile: "operator-console".to_owned(),
+        enabled: true,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    let existing_assignments = store.list_operator_assignments().await?;
+    if let Some(existing_scope) = existing_assignments.iter().find(|candidate| {
+        candidate.user_id == assignment.user_id && candidate.profile == assignment.profile
+    }) && existing_scope.id != assignment.id
+    {
+        return Err("existing TestLab operator assignment uses a different assignment ID".into());
+    }
+    if let Some(existing_id) = existing_assignments
+        .iter()
+        .find(|candidate| candidate.id == assignment.id)
+        && (existing_id.user_id != assignment.user_id || existing_id.profile != assignment.profile)
+    {
+        return Err("existing TestLab assignment ID has a different operator scope".into());
+    }
+    store.insert_operator_assignment(&assignment).await?;
     Ok(())
 }
 
