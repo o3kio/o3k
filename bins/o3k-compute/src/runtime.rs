@@ -1249,8 +1249,17 @@ pub(crate) fn verify_owned_domain(
     }
 }
 
-pub(crate) fn agent_error(_error: o3k_libvirt::LibvirtError) -> AgentError {
-    AgentError::Protocol("libvirt command failed".to_owned())
+pub(crate) fn agent_error(error: o3k_libvirt::LibvirtError) -> AgentError {
+    // Preserve only the finite adapter category for bounded diagnostics; the
+    // provider message remains intentionally redacted at the agent boundary.
+    let category = match error.category {
+        ErrorCategory::Unavailable => "unavailable",
+        ErrorCategory::ConnectionLost => "connection_lost",
+        ErrorCategory::NotFound => "not_found",
+        ErrorCategory::InvalidRequest => "invalid_request",
+        ErrorCategory::OperationFailed => "operation_failed",
+    };
+    AgentError::Protocol(format!("libvirt command failed: {category}"))
 }
 
 impl LibvirtCommandExecutor {
