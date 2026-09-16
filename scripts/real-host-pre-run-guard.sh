@@ -210,7 +210,8 @@ while IFS= read -r stale_domain; do
     [[ "$stale_domain" =~ ^o3k-p15-7-([0-9]+)-block-(a|b|c|d)$ ]] || continue
     stale_run="${BASH_REMATCH[1]}"
     stale_xml="$(virsh -c qemu:///system dumpxml "$stale_domain" 2>/dev/null || true)"
-    grep -Fq "o3k-p15-7-journey-owned=${stale_run}" <<<"$stale_xml" || continue
+    grep -Fq "<description>o3k-p15-7-journey-owned=${stale_run}</description>" \
+      <<<"$stale_xml" || continue
     virsh -c qemu:///system destroy "$stale_domain" >/dev/null 2>&1 || true
     virsh -c qemu:///system undefine "$stale_domain" --nvram >/dev/null 2>&1 \
       || virsh -c qemu:///system undefine "$stale_domain" >/dev/null 2>&1 || true

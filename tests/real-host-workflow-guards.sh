@@ -26,7 +26,7 @@ if [[ "$*" == "-c qemu:///system dumpxml o3k-p15-7-12345-block-b" && "${O3K_FAKE
     echo '<domain><description>o3k-p15-7-journey-owned=12345</description></domain>'
 fi
 if [[ "$*" == "-c qemu:///system dumpxml o3k-p15-7-12345-block-b" && "${O3K_FAKE_VIRSH_STALE_P157_UNOWNED:-false}" == true ]]; then
-    echo '<domain><description>unrelated domain</description></domain>'
+    echo '<domain><description>o3k-p15-7-journey-owned=12345-foreign</description></domain>'
 fi
 if [[ "$*" == "-c qemu:///system destroy o3k-p15-7-12345-block-b" || "$*" == "-c qemu:///system undefine o3k-p15-7-12345-block-b --nvram" || "$*" == "-c qemu:///system undefine o3k-p15-7-12345-block-b" ]]; then
     : >"${O3K_FAKE_VIRSH_STALE_STATE:?}"
