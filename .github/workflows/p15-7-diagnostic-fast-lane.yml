@@ -71,17 +71,9 @@ jobs:
           # ledger and exact process identity checks in the stale cleanup.
           bash scripts/cleanup-disposable-testlab.sh
           bash scripts/cleanup-stale-testlab-processes.sh
+          O3K_P15_7_LIBVIRT_IMAGE_ROOT=/var/lib/libvirt/images \
+            bash scripts/p15-7-libvirt-storage-pool.sh cleanup-stale-diagnostic-images "${RUNNER_TEMP}"
           bash scripts/p15-7-keycloak-authority.sh cleanup
-          for marker in "${RUNNER_TEMP}"/cirros-0.6.3-p15-7-diagnostic-"${GITHUB_RUN_ID}".*.o3k-owned; do
-            [[ -e "${marker}" ]] || continue
-            image_path="${marker%.o3k-owned}"
-            test -f "${marker}" && ! test -L "${marker}"
-            test -f "${image_path}" && ! test -L "${image_path}"
-            grep -Fqx 'o3k-disposable-image-v1' "${marker}"
-            grep -Fqx "run=${GITHUB_RUN_ID}" "${marker}"
-            grep -Fqx 'phase=generic' "${marker}"
-            rm -f -- "${image_path}" "${marker}"
-          done
           for marker in "${RUNNER_TEMP}"/o3k-p15-7-diagnostic-host-"${GITHUB_RUN_ID}"-*.img.o3k-owned; do
             [[ -e "${marker}" ]] || continue
             image_path="${marker%.o3k-owned}"
@@ -209,7 +201,7 @@ jobs:
           CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
         run: |
           set -euo pipefail
-          image_path="$(mktemp "${RUNNER_TEMP}/cirros-0.6.3-p15-7-diagnostic-${GITHUB_RUN_ID}.XXXXXX")"
+          image_path="$(mktemp "${RUNNER_TEMP}/cirros-0.6.3-x86_64-disk.img.p15-7-diagnostic-${GITHUB_RUN_ID}.XXXXXX")"
           printf 'o3k-disposable-image-v1\nrun=%s\nphase=generic\n' "${GITHUB_RUN_ID}" >"${image_path}.o3k-owned"
           chmod 0600 "${image_path}.o3k-owned"
           printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >>"${GITHUB_ENV}"

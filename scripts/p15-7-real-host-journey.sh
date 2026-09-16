@@ -110,6 +110,9 @@ grep -Fqx "run=$RUN_ID" "$WORKLOAD_IMAGE_MARKER" \
 [[ -f "$STATE_ROOT/.o3k-run-owned" && -f "$TLS_ROOT/ca.pem" ]] || die "owned TestLab state/TLS unavailable"
 sudo -n test -d "$LIBVIRT_IMAGE_ROOT" && sudo -n test ! -L "$LIBVIRT_IMAGE_ROOT" \
   || die "libvirt image root unavailable"
+O3K_P15_7_LIBVIRT_IMAGE_ROOT="$LIBVIRT_IMAGE_ROOT" \
+  bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$LIBVIRT_STORAGE_ROOT" \
+  || die "run-owned libvirt storage pool already exists"
 sudo -n test ! -e "$LIBVIRT_STORAGE_ROOT" || die "run-owned libvirt storage workspace already exists"
 sudo -n install -d -o root -g "$LIBVIRT_QEMU_GROUP" -m 0711 "$LIBVIRT_STORAGE_ROOT" \
   || die "cannot create run-owned libvirt storage workspace"
@@ -248,6 +251,11 @@ cleanup() {
       cleanup_failed=true
     fi
   done
+  if [[ "$cleanup_failed" == false ]]; then
+    O3K_P15_7_LIBVIRT_IMAGE_ROOT="$LIBVIRT_IMAGE_ROOT" \
+      bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" cleanup "$RUN_ID" "$LIBVIRT_STORAGE_ROOT" \
+      || cleanup_failed=true
+  fi
   # Backing disks and the ownership marker are retained when a domain cannot
   # be proven absent. This preserves recovery evidence and prevents deleting
   # files still referenced by a live or undefined VM.
@@ -505,6 +513,9 @@ provision_vms_bounded() {
     UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/$id-uuid")"
   done
 }
+O3K_P15_7_LIBVIRT_IMAGE_ROOT="$LIBVIRT_IMAGE_ROOT" \
+  bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT" \
+  || die "cannot define run-owned libvirt storage pool"
 provision_vms_bounded block-a block-b
 join_block block-a "${IPS[0]}"; join_block block-b "${IPS[1]}"
 install_agent block-a "${IPS[0]}"; install_agent block-b "${IPS[1]}"
