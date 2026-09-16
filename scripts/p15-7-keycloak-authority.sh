@@ -136,6 +136,11 @@ PY
   # user and must be able to read this non-secret fixture from the bind mount;
   # all generated credentials remain in separate 0600 files below.
   chmod 0644 "$REALM_FILE"
+  # Persist the expected container identity before creation. If the runner is
+  # interrupted after Docker creates the container but before this script can
+  # continue, cleanup still requires matching Docker labels as independent
+  # ownership proof before removing it.
+  write_marker
   if ! docker run --detach --name "$CONTAINER" --network host \
     --label o3k.owner=o3k --label o3k.component=p15-7-keycloak \
     --label o3k.phase=p15-7 --label "o3k.run_id=$RUN_ID" \
@@ -148,7 +153,6 @@ PY
     die "Keycloak container failed to start"
   fi
   secure_remove "$env_tmp"
-  write_marker
   for _ in $(seq 1 90); do
     if curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
       "http://127.0.0.1:$port/realms/o3k-p15-7/.well-known/openid-configuration" \
