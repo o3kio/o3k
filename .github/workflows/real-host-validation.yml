@@ -473,12 +473,12 @@ jobs:
           for _ in $(seq 1 60); do
             if sudo -n docker exec "${container}" pg_isready -U o3k -d o3k_test >/dev/null 2>&1; then
               python3 - "${container}" "${GITHUB_RUN_ID}" "${TARGET_SHA}" > target/real-host-workflow-artifacts/p15-7-postgres-ownership.json <<'PY'
-              import json, subprocess, sys
-              name, run_id, sha = sys.argv[1:]
-              cid = subprocess.check_output(["sudo", "-n", "docker", "inspect", "-f", "{{.Id}}", name], text=True).strip()
-              json.dump({"artifact_type":"o3k-postgres-ownership","schema_version":1,
-                         "phase":"p15-7","container_id":cid,"run_id":run_id,
-                         "source_sha":sha,"owner":"o3k","redacted":True}, sys.stdout)
+          import json, subprocess, sys
+          name, run_id, sha = sys.argv[1:]
+          cid = subprocess.check_output(["sudo", "-n", "docker", "inspect", "-f", "{{.Id}}", name], text=True).strip()
+          json.dump({"artifact_type":"o3k-postgres-ownership","schema_version":1,
+                     "phase":"p15-7","container_id":cid,"run_id":run_id,
+                     "source_sha":sha,"owner":"o3k","redacted":True}, sys.stdout)
           PY
               chmod 0644 target/real-host-workflow-artifacts/p15-7-postgres-ownership.json
               {
