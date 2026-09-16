@@ -21,6 +21,11 @@ grep -Fq 'operator-console' "$ROOT_DIR/bins/o3kd/src/composition/mod.rs"
 grep -Fq 'acquire_operator_token' "$AUTHORITY"
 grep -Fq 'refresh_operator_authority' "$ROOT_DIR/scripts/p15-7-real-host-journey.sh"
 grep -Fq 'signature' "$ROOT_DIR/bins/o3kd/tests/p12_iam_7_real_oidc.rs"
+for workflow in \
+  "$ROOT_DIR/.github/workflows/p15-7-protected-preflight.yml" \
+  "$ROOT_DIR/.github/workflows/real-host-validation.yml"; do
+  grep -Fq 'shred --remove --zero --force -- "${token_file}"' "$workflow"
+done
 for variable in O3K_OIDC_TRUST_ID O3K_OIDC_ISSUER O3K_OIDC_AUDIENCE \
   O3K_OIDC_DISCOVERY_URL O3K_TESTLAB_FEDERATED_SUBJECT \
   O3K_TESTLAB_FEDERATED_BINDING_ID O3K_TESTLAB_OPERATOR_ASSIGNMENT_ID; do
