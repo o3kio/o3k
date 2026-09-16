@@ -1599,6 +1599,11 @@ impl ComputeProvider for AgentComputeProvider {
                 );
                 error
             })?;
+        tracing::warn!(
+            resource_id = %request.o3k_server_id,
+            operation_id = %request.operation_id,
+            "agent create command dispatch accepted"
+        );
         self.state.write().await.bindings.insert(
             request.o3k_server_id.to_string(),
             AgentBinding {
