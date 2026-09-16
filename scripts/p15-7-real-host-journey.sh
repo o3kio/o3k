@@ -10,6 +10,7 @@ EVIDENCE_FILE="${O3K_P15_7_EVIDENCE_FILE:-$ARTIFACT_DIR/p15-7-scale-composition-
 RUN_ID="${GITHUB_RUN_ID:-local-$$}"
 SOURCE_SHA="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-}}"
 PROFILE="${O3K_P15_7_PROFILE:-small-edge-cloud}"
+DIAGNOSTIC_ONLY="${O3K_P15_7_DIAGNOSTIC_ONLY:-false}"
 AUTHORITY_MODE="${O3K_P15_7_AUTHORITY_MODE:-testlab-keycloak}"
 KEYCLOAK_AUTHORITY_SCRIPT="${O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT:-$ROOT_DIR/scripts/p15-7-keycloak-authority.sh}"
 STATE_ROOT="${O3K_TESTLAB_STATE_ROOT:-/var/lib/o3k-testlab/$RUN_ID}"
@@ -43,6 +44,11 @@ VM_DISK_SIZE_GB="${O3K_P15_7_VM_DISK_SIZE_GB:-10}"
 JOIN_REGION="${O3K_P15_7_REGION:-}"
 die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
+[[ "$DIAGNOSTIC_ONLY" == true || "$DIAGNOSTIC_ONLY" == false ]] || die "diagnostic mode is invalid"
+if [[ "$DIAGNOSTIC_ONLY" == true ]]; then
+  [[ "$EVIDENCE_FILE" != "$ARTIFACT_DIR/p15-7-scale-composition-evidence.json" ]] \
+    || die "diagnostic mode requires a separate non-completion artifact path"
+fi
 [[ "$VM_USER" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]] || die "VM user is unsafe"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ ]] || die "TestLab ports are invalid"
 [[ "$VM_DISK_SIZE_GB" =~ ^[1-9][0-9]*$ ]] || die "VM disk size is invalid"
@@ -130,7 +136,7 @@ done
 
 declare -a DOMAINS=() UUIDS=() OVERLAYS=() SEEDS=() SERIALS=() IPS=()
 declare -A BLOCK_IDS=()
-OS_IMAGE_ID="" OS_KEYPAIR_NAME="" OS_NETWORK_ID="" OS_SUBNET_ID="" OS_PORT_ID="" OS_FLAVOR_ID=""
+OS_IMAGE_ID="" OS_KEYPAIR_NAME="" OS_NETWORK_ID="" OS_SUBNET_ID="" OS_PORT_A_ID="" OS_PORT_B_ID="" OS_FLAVOR_ID=""
 OS_WORKLOAD_A="" OS_WORKLOAD_B=""
 CLEANUP_DONE=false
 # Initialized before the EXIT trap because provisioning can fail before the
@@ -208,8 +214,11 @@ cleanup() {
     [[ "$workload_id" =~ ^[0-9a-fA-F-]{36}$ ]] || continue
     delete_owned_openstack server "$workload_id" --wait || cleanup_failed=true
   done
-  if [[ "$OS_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
-    delete_owned_openstack port "$OS_PORT_ID" || cleanup_failed=true
+  if [[ "$OS_PORT_B_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    delete_owned_openstack port "$OS_PORT_B_ID" || cleanup_failed=true
+  fi
+  if [[ "$OS_PORT_A_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    delete_owned_openstack port "$OS_PORT_A_ID" || cleanup_failed=true
   fi
   if [[ "$OS_KEYPAIR_NAME" =~ ^o3k-p15-7-[A-Za-z0-9._-]+$ ]]; then
     delete_owned_openstack keypair "$OS_KEYPAIR_NAME" || cleanup_failed=true
@@ -638,8 +647,11 @@ OS_NETWORK_ID="$(openstack network create "o3k-p15-7-$RUN_ID-network" -f value -
 [[ "$OS_NETWORK_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "owned workload network creation returned an invalid id"
 OS_SUBNET_ID="$(openstack subnet create --network "$OS_NETWORK_ID" --subnet-range "198.18.0.0/29" "o3k-p15-7-$RUN_ID-subnet" -f value -c id | tr -d '[:space:]')"
 [[ "$OS_SUBNET_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "owned workload subnet creation returned an invalid id"
-OS_PORT_ID="$(openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN_ID-port" -f value -c id | tr -d '[:space:]')"
-[[ "$OS_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "owned workload port creation returned an invalid id"
+OS_PORT_A_ID="$(openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN_ID-port-a" -f value -c id | tr -d '[:space:]')"
+[[ "$OS_PORT_A_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "owned workload A port creation returned an invalid id"
+OS_PORT_B_ID="$(openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN_ID-port-b" -f value -c id | tr -d '[:space:]')"
+[[ "$OS_PORT_B_ID" =~ ^[0-9a-fA-F-]{36}$ && "$OS_PORT_B_ID" != "$OS_PORT_A_ID" ]] \
+  || die "owned workload B port creation returned an invalid or reused id"
 OS_FLAVOR_ID="$(openstack flavor create "o3k-p15-7-$RUN_ID-flavor" --ram 512 --disk 10 --vcpus 1 -f value -c id | tr -d '[:space:]')"
 [[ "$OS_FLAVOR_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "owned workload flavor creation returned an invalid id"
 
@@ -664,7 +676,7 @@ done
 # API. Keep it present while draining so the durable blocker projection is
 # observed honestly, then clear it before removing the block.
 curl --fail --silent --show-error -X POST -H "Authorization: Bearer $PROJECT_TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-a" "$API/compute/servers" \
-  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-a\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"network_ids\":[\"$OS_NETWORK_ID\"]}}" >"$WORK_ROOT/workload-a.json" || die "constrained real workload placement failed"
+  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-a\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"network_ids\":[\"$OS_PORT_A_ID\"]}}" >"$WORK_ROOT/workload-a.json" || die "constrained real workload placement failed"
 WORKLOAD_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("resource_id", ""))' "$WORK_ROOT/workload-a.json")"; [[ "$WORKLOAD_A" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload A has no canonical id"
 OS_WORKLOAD_A="$WORKLOAD_A"
 curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_A" >"$WORK_ROOT/workload-a-show.json" || die "workload A did not converge"
@@ -726,7 +738,7 @@ PY
 # must not be selected.  The OpenStack host projection is the public placement
 # observation for this real workload.
 curl --fail --silent --show-error -X POST -H "Authorization: Bearer $PROJECT_TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-b" "$API/compute/servers" \
-  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-b\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"network_ids\":[\"$OS_NETWORK_ID\"]}}" >"$WORK_ROOT/workload-b.json" || die "placement did not avoid drained block"
+  -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-b\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"network_ids\":[\"$OS_PORT_B_ID\"]}}" >"$WORK_ROOT/workload-b.json" || die "placement did not avoid drained block"
 WORKLOAD_B="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("resource_id", ""))' "$WORK_ROOT/workload-b.json")"; [[ "$WORKLOAD_B" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload B has no canonical id"
 OS_WORKLOAD_B="$WORKLOAD_B"
 HOST_B=""
@@ -838,9 +850,9 @@ assert_owned_domains_absent
 [[ ! -e "$SSH_KEY" && ! -e "$KNOWN_HOSTS" ]] || die "owned journey files remain after cleanup"
 JOURNEY_END_MS="$(date +%s%3N)"
 
-python3 - "$EVIDENCE_FILE" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" <<'PY'
+python3 - "$EVIDENCE_FILE" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" <<'PY'
 import json,pathlib,sys
-path=pathlib.Path(sys.argv[1]); sha=sys.argv[2].lower(); profile=sys.argv[3]; blocks=int(sys.argv[4]); start=int(sys.argv[5]); end=int(sys.argv[6]); cross_tenant=sys.argv[7] == "true"; araf_status=sys.argv[8]; araf_reason=sys.argv[9]
+path=pathlib.Path(sys.argv[1]); sha=sys.argv[2].lower(); profile=sys.argv[3]; blocks=int(sys.argv[4]); start=int(sys.argv[5]); end=int(sys.argv[6]); cross_tenant=sys.argv[7] == "true"; araf_status=sys.argv[8]; araf_reason=sys.argv[9]; diagnostic_only=sys.argv[10] == "true"
 def passed():
     return {"status":"passed"}
 doc={
@@ -853,6 +865,17 @@ doc={
  "leak_check":{"status":"passed","owned_leaks":0,"owned_inconsistencies":0,"foreign_state_changes":0},
  "defect_ledger":{"status":"passed","blockers":0,"high":0,"medium":0},
  "claim_validation":{"status":"passed","sources":["README.md","docs/ROADMAP.md","docs/status/current-state.yaml","compatibility/product-profiles.yaml","docs/compatibility/matrix.yaml","docs/architecture/p15-e2d-gap-register.md"],"unsupported_claims_preserved":True,"claims":["profile-specific protected P15.7 scale/composition convergence"]}}
+if diagnostic_only:
+ doc["artifact_type"]="o3k-p15-7-diagnostic-fast-lane-journey"
+ doc["evidence_tier"]="diagnostic-only"
+ doc["diagnostic_lane"]=True
+ doc["final_completion_evidence"]=False
+ doc.pop("defect_ledger")
+ doc.pop("claim_validation")
 path.write_text(json.dumps(doc,indent=2,sort_keys=True)+"\n",encoding="utf-8")
 PY
-echo "P15.7 genuine journey completed: $EVIDENCE_FILE"
+if [[ "$DIAGNOSTIC_ONLY" == true ]]; then
+  echo "P15.7 diagnostic journey completed; artifact is not completion evidence: $EVIDENCE_FILE"
+else
+  echo "P15.7 genuine journey completed: $EVIDENCE_FILE"
+fi

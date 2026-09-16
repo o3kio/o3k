@@ -1,0 +1,453 @@
+name: P15.7 diagnostic fast lane (not completion evidence)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: "Full 40-character commit SHA to diagnose (defaults to main)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: o3k-real-host-validation
+  cancel-in-progress: false
+
+jobs:
+  p15-7-diagnostic:
+    name: P15.7 diagnostic only — not completion evidence
+    if: >-
+      github.repository == 'o3kio/o3k' &&
+      github.event_name == 'workflow_dispatch' &&
+      (github.ref == 'refs/heads/main' || inputs.target_sha != '')
+    env:
+      TARGET_SHA: ${{ inputs.target_sha || github.sha }}
+      DIAGNOSTIC_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      DIAGNOSTIC_REPO: ${{ github.workspace }}/p15-7-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+      DIAGNOSTIC_ARTIFACT_DIR: p15-7-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}/target/p15-7-diagnostic-artifacts
+    timeout-minutes: 120
+    environment: o3k-real-host-validation
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    steps:
+      - name: Check out the canonical repository at the exact SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.target_sha || github.sha }}
+          path: p15-7-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned; reads rust-toolchain.toml
+
+      - name: Verify immutable source checkout
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]
+          git cat-file -e "${TARGET_SHA}^{commit}"
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+          mkdir -p target/p15-7-diagnostic-artifacts
+          printf 'tested_source_sha=%s\n' "${TARGET_SHA}" > target/tested-source-sha.txt
+
+      - name: Ownership-safe sanitation of prior TestLab state
+        id: sanitation
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          O3K_REAL_HOST_ARTIFACT_DIR: target/p15-7-diagnostic-artifacts
+          O3K_P15_7_AUTHORITY_MODE: testlab-keycloak
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT: ${{ env.DIAGNOSTIC_REPO }}/scripts/p15-7-keycloak-authority.sh
+          O3K_P15_7_KEYCLOAK_STATE_ROOT: ${{ runner.temp }}/o3k-p15-7-keycloak-${{ github.run_id }}
+          P15_7_HOST_IMAGE_SHA256: 612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354
+        run: |
+          set -euo pipefail
+          # Same-run retry state is cleaned only through its marker-validated
+          # cleanup path. Prior run state is removed only by the O3K ownership
+          # ledger and exact process identity checks in the stale cleanup.
+          bash scripts/cleanup-disposable-testlab.sh
+          bash scripts/cleanup-stale-testlab-processes.sh
+          bash scripts/p15-7-keycloak-authority.sh cleanup
+          for marker in "${RUNNER_TEMP}"/cirros-0.6.3-p15-7-diagnostic-${GITHUB_RUN_ID}.*.o3k-owned; do
+            [[ -e "${marker}" ]] || continue
+            image_path="${marker%.o3k-owned}"
+            test -f "${marker}" && ! test -L "${marker}"
+            test -f "${image_path}" && ! test -L "${image_path}"
+            grep -Fqx 'o3k-disposable-image-v1' "${marker}"
+            grep -Fqx "run=${GITHUB_RUN_ID}" "${marker}"
+            grep -Fqx 'phase=generic' "${marker}"
+            rm -f -- "${image_path}" "${marker}"
+          done
+          for marker in "${RUNNER_TEMP}"/o3k-p15-7-diagnostic-host-${GITHUB_RUN_ID}-*.img.o3k-owned; do
+            [[ -e "${marker}" ]] || continue
+            image_path="${marker%.o3k-owned}"
+            test -f "${marker}" && ! test -L "${marker}"
+            test -f "${image_path}" && ! test -L "${image_path}"
+            grep -Fqx 'o3k-p15-7-diagnostic-host-image-v1' "${marker}"
+            grep -Fqx "sha256=${P15_7_HOST_IMAGE_SHA256}" "${marker}"
+            run_identity="$(sed -n 's/^run=//p' "${marker}")"
+            [[ "${run_identity}" =~ ^${GITHUB_RUN_ID}-[1-9][0-9]*$ ]]
+            rm -f -- "${image_path}" "${marker}"
+          done
+          for ((attempt=1; attempt<GITHUB_RUN_ATTEMPT; attempt++)); do
+            prior_identity="${GITHUB_RUN_ID}-${attempt}"
+            prior_ledger="${GITHUB_WORKSPACE}/p15-7-diagnostic-${prior_identity}/target/p15-7-diagnostic-artifacts/p15-7-postgres-ownership.json"
+            prior_container="o3k-p15-7-diagnostic-postgres-${prior_identity}"
+            if sudo -n docker inspect "${prior_container}" >/dev/null 2>&1; then
+              test -f "${prior_ledger}" && ! test -L "${prior_ledger}"
+              TARGET_SHA="${TARGET_SHA}" bash scripts/cleanup-owned-postgres.sh \
+                p15-7-diagnostic "${prior_identity}" "${prior_ledger}"
+            fi
+          done
+          token_file="${RUNNER_TEMP}/o3k-p15-7-operator-${GITHUB_RUN_ID}.token"
+          marker="${token_file}.o3k-owned"
+          if [[ -e "${token_file}" || -e "${marker}" ]]; then
+            test -f "${marker}" && ! test -L "${marker}"
+            grep -Fqx 'o3k-p15-7-operator-token-v1' "${marker}"
+            grep -Fqx "run=${GITHUB_RUN_ID}" "${marker}"
+            test -f "${token_file}" && ! test -L "${token_file}"
+            test "$(stat -c '%a' "${token_file}")" = 600
+            if command -v shred >/dev/null 2>&1; then
+              shred --remove --zero --force -- "${token_file}" || rm -f -- "${token_file}"
+            else
+              rm -f -- "${token_file}"
+            fi
+            rm -f -- "${marker}"
+          fi
+          python3 - "target/p15-7-diagnostic-artifacts/p15-7-diagnostic-sanitation.json" "${TARGET_SHA}" <<'PY'
+          import json, sys
+          json.dump({"artifact_type":"o3k-p15-7-diagnostic-fast-lane-sanitation",
+                     "schema_version":1,"diagnostic_only":True,
+                     "final_completion_evidence":False,"redacted":True,
+                     "tested_source_sha":sys.argv[2],"status":"passed",
+                     "sanitation":"ownership_checked_testlab_and_authority_state"},
+                    open(sys.argv[1],"w",encoding="utf-8"),indent=2,sort_keys=True)
+          PY
+
+      - name: Protected P15.7 authority and capacity preflight
+        id: preflight
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          O3K_REAL_HOST_ARTIFACT_DIR: target/p15-7-diagnostic-artifacts
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_P15_7_AUTHORITY_MODE: testlab-keycloak
+          O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT: ${{ env.DIAGNOSTIC_REPO }}/scripts/p15-7-keycloak-authority.sh
+          O3K_P15_7_KEYCLOAK_STATE_ROOT: ${{ runner.temp }}/o3k-p15-7-keycloak-${{ github.run_id }}
+        run: bash scripts/p15-7-diagnostic-preflight.sh
+
+      - name: Start run-scoped PostgreSQL
+        id: postgres
+        if: steps.preflight.outcome == 'success'
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          TARGET_SHA: ${{ inputs.target_sha || github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          container="o3k-p15-7-diagnostic-postgres-${DIAGNOSTIC_RUN_ID}"
+          port=15434
+          for _ in $(seq 1 128); do
+            if python3 -c 'import socket,sys; probe=socket.socket(socket.AF_INET,socket.SOCK_STREAM); probe.bind(("127.0.0.1",int(sys.argv[1]))); probe.close()' "${port}" 2>/dev/null; then
+              break
+            fi
+            port=$((port + 1))
+          done
+          if ((port >= 15562)); then
+            echo "no available loopback port for P15.7 diagnostic PostgreSQL" >&2
+            exit 1
+          fi
+          if sudo -n docker inspect "${container}" >/dev/null 2>&1; then
+            echo "refusing to reuse pre-existing PostgreSQL container ${container}" >&2
+            exit 1
+          fi
+          sudo -n docker run --detach --rm --name "${container}" \
+            --label o3k.owner=o3k \
+            --label "o3k.run_id=${DIAGNOSTIC_RUN_ID}" \
+            --label o3k.phase=p15-7-diagnostic \
+            --label "o3k.source_sha=${TARGET_SHA}" \
+            --publish "127.0.0.1:${port}:5432" \
+            --env POSTGRES_USER=o3k \
+            --env POSTGRES_PASSWORD=p15-7-diagnostic-postgres \
+            --env POSTGRES_DB=o3k_test \
+            postgres:16.4 >/dev/null
+          python3 - "${container}" "${DIAGNOSTIC_RUN_ID}" "${TARGET_SHA}" >target/p15-7-diagnostic-artifacts/p15-7-postgres-ownership.json <<'PY'
+          import json, subprocess, sys
+          name, run_id, sha = sys.argv[1:]
+          cid = subprocess.check_output(["sudo", "-n", "docker", "inspect", "-f", "{{.Id}}", name], text=True).strip()
+          json.dump({"artifact_type":"o3k-postgres-ownership","schema_version":1,
+                     "phase":"p15-7-diagnostic","container_id":cid,"run_id":run_id,
+                     "source_sha":sha,"owner":"o3k","redacted":True}, sys.stdout)
+          PY
+          chmod 0644 target/p15-7-diagnostic-artifacts/p15-7-postgres-ownership.json
+          for _ in $(seq 1 60); do
+            if sudo -n docker exec "${container}" pg_isready -U o3k -d o3k_test >/dev/null 2>&1; then
+              {
+                printf 'O3K_DATABASE_BACKEND=postgres\n'
+                printf 'O3K_DATABASE_URL=postgres://o3k:p15-7-diagnostic-postgres@127.0.0.1:%s/o3k_test\n' "${port}"
+                printf 'O3K_P15_7_PG_CONTAINER=%s\n' "${container}"
+              } >>"${GITHUB_ENV}"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "P15.7 diagnostic PostgreSQL did not become ready" >&2
+          exit 1
+
+      - name: Download and verify the workload image
+        id: workload_image
+        if: steps.postgres.outcome == 'success'
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
+          CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
+        run: |
+          set -euo pipefail
+          image_path="$(mktemp "${RUNNER_TEMP}/cirros-0.6.3-p15-7-diagnostic-${GITHUB_RUN_ID}.XXXXXX")"
+          printf 'o3k-disposable-image-v1\nrun=%s\nphase=generic\n' "${GITHUB_RUN_ID}" >"${image_path}.o3k-owned"
+          chmod 0600 "${image_path}.o3k-owned"
+          printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >>"${GITHUB_ENV}"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 \
+            --proto '=https' --tlsv1.2 --output "${image_path}" "${CIRROS_IMAGE_URL}"
+          printf '%s  %s\n' "${CIRROS_IMAGE_SHA256}" "${image_path}" | sha256sum --check --strict --status
+          chmod 0644 "${image_path}"
+
+      - name: Allocate run-scoped TestLab ports
+        if: steps.workload_image.outcome == 'success'
+        run: |
+          set -euo pipefail
+          offset=$((GITHUB_RUN_ID % 1000))
+          {
+            printf 'O3K_TESTLAB_PORT=%s\n' "$((28080 + offset))"
+            printf 'O3K_TESTLAB_CONTROL_PORT=%s\n' "$((28551 + offset))"
+            printf 'O3K_TESTLAB_COMPUTE_HEALTH_PORT=%s\n' "$((29100 + offset))"
+          } >>"${GITHUB_ENV}"
+
+      - name: Bootstrap minimal PostgreSQL TestLab
+        id: bootstrap
+        if: steps.preflight.outcome == 'success' && steps.postgres.outcome == 'success' && steps.workload_image.outcome == 'success'
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/p15-7-diagnostic-artifacts
+          O3K_PROVIDER: agent
+          O3K_LOG_FILTER: debug
+          O3K_COMPUTE_LOG_FILTER: debug
+          O3K_TESTLAB_ADDITIONAL_AGENT_IDS: block-a,block-b,block-c,block-d
+          O3K_TESTLAB_CONTROL_BIND_ADDR: 0.0.0.0
+          O3K_AGENT_INSPECT_PROBE_ENABLED: true
+          O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ env.DIAGNOSTIC_REPO }}/target/p15-7-diagnostic-artifacts/agent-inspect-resource-id
+        run: bash scripts/bootstrap-disposable-testlab.sh
+
+      - name: Probe runner capabilities
+        id: capabilities
+        if: steps.bootstrap.outcome == 'success'
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/p15-7-diagnostic-artifacts
+          O3K_REAL_HOST_RUNNER_LABELS: self-hosted,linux,x64,kvm,libvirt,o3k-testlab
+          O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          O3K_REAL_HOST_RUNNER_NAME: ${{ runner.name }}
+          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
+        run: bash scripts/real-host-capability-probe.sh
+
+      - name: Verify clean host baseline
+        id: host_guard
+        if: always() && steps.preflight.outcome == 'success'
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/p15-7-diagnostic-artifacts
+          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
+          O3K_REAL_HOST_CAPABILITY_OUTPUT: target/p15-7-diagnostic-artifacts/runner-capabilities.json
+          O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_REAL_HOST_TARGET_SHA: ${{ inputs.target_sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/real-host-pre-run-guard.sh
+
+      - name: Prepare pinned P15.7 VM host image
+        id: host_image
+        if: steps.host_guard.outputs.ready == 'true'
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          P15_7_HOST_IMAGE_URL: https://cloud-images.ubuntu.com/releases/releases/noble/release-20260911/ubuntu-24.04-server-cloudimg-amd64.img
+          P15_7_HOST_IMAGE_SHA256: 612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354
+        run: |
+          set -euo pipefail
+          image_path="${RUNNER_TEMP}/o3k-p15-7-diagnostic-host-${DIAGNOSTIC_RUN_ID}.img"
+          test ! -e "${image_path}" && test ! -e "${image_path}.o3k-owned"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 900 \
+            --proto '=https' --tlsv1.2 --output "${image_path}" "${P15_7_HOST_IMAGE_URL}"
+          printf '%s  %s\n' "${P15_7_HOST_IMAGE_SHA256}" "${image_path}" | sha256sum --check --strict --status
+          printf 'o3k-p15-7-diagnostic-host-image-v1\nrun=%s\nsha256=%s\n' \
+            "${DIAGNOSTIC_RUN_ID}" "${P15_7_HOST_IMAGE_SHA256}" >"${image_path}.o3k-owned"
+          chmod 0644 "${image_path}"
+          chmod 0600 "${image_path}.o3k-owned"
+          {
+            printf 'O3K_P15_7_HOST_IMAGE_PATH=%s\n' "${image_path}"
+            printf 'O3K_P15_7_HOST_IMAGE_SHA256=%s\n' "${P15_7_HOST_IMAGE_SHA256}"
+          } >>"${GITHUB_ENV}"
+
+      - name: Run P15.7 journey (diagnostic only)
+        id: journey
+        if: steps.host_guard.outputs.ready == 'true' && steps.host_image.outcome == 'success'
+        continue-on-error: true
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_REAL_HOST_ARTIFACT_DIR: target/p15-7-diagnostic-artifacts
+          O3K_P15_7_REAL_HOST: "1"
+          O3K_P15_7_DIAGNOSTIC_ONLY: "true"
+          O3K_P15_7_EVIDENCE_FILE: target/p15-7-diagnostic-artifacts/p15-7-diagnostic-fast-lane-journey.json
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_P15_7_PROFILE: small-edge-cloud
+          O3K_P15_7_OPERATOR_TOKEN_FILE: ${{ runner.temp }}/o3k-p15-7-operator-${{ github.run_id }}.token
+          O3K_P15_7_AUTHORITY_MODE: testlab-keycloak
+          O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT: ${{ env.DIAGNOSTIC_REPO }}/scripts/p15-7-keycloak-authority.sh
+          O3K_P15_7_KEYCLOAK_STATE_ROOT: ${{ runner.temp }}/o3k-p15-7-keycloak-${{ github.run_id }}
+          O3K_P15_7_PG_CONTAINER: o3k-p15-7-diagnostic-postgres-${{ github.run_id }}-${{ github.run_attempt }}
+          O3K_PROVIDER: agent
+        run: bash scripts/p15-7-real-host-journey.sh
+
+      - name: Capture redacted P15.7 diagnostics
+        if: always()
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/p15-7-diagnostic-artifacts
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          JOURNEY_OUTCOME: ${{ steps.journey.outcome || 'skipped' }}
+          PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome || 'skipped' }}
+          BOOTSTRAP_OUTCOME: ${{ steps.bootstrap.outcome || 'skipped' }}
+          SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/p15-7-diagnostic-artifacts
+          output=target/p15-7-diagnostic-artifacts/p15-7-diagnostic-create-diagnostics.log
+          state_root="/var/lib/o3k-testlab/${GITHUB_RUN_ID}"
+          {
+            printf 'artifact_type=o3k-p15-7-diagnostic-fast-lane-log\n'
+            printf 'tested_source_sha=%s\n' "${SOURCE_SHA}"
+            printf 'journey_outcome=%s\n' "${JOURNEY_OUTCOME}"
+            printf '== bounded server-create and reconciliation log lines ==\n'
+            if sudo -n test -d "${state_root}/log"; then
+              sudo -n sh -c 'grep -hE "server create reconciliation|artifact transfer|create reconciliation|agent create|create (request|command|artifact)" "$1"/log/*.log 2>/dev/null | tail -n 250 || true' _ "${state_root}"
+            else
+              printf 'state_logs=unavailable\n'
+            fi
+          } >"${output}"
+          chmod 0644 "${output}"
+          bash scripts/real-host-owned-inventory.sh target/p15-7-diagnostic-artifacts/p15-7-diagnostic-owned-inventory.json || true
+          python3 - "target/p15-7-diagnostic-artifacts/p15-7-diagnostic-fast-lane-result.json" "${SOURCE_SHA}" "${PREFLIGHT_OUTCOME}" "${BOOTSTRAP_OUTCOME}" "${JOURNEY_OUTCOME}" <<'PY'
+          import json, sys
+          output, sha, preflight, bootstrap, journey = sys.argv[1:]
+          status = "passed" if preflight == bootstrap == journey == "success" else "failed"
+          json.dump({"artifact_type":"o3k-p15-7-diagnostic-fast-lane-result",
+                     "schema_version":1,"diagnostic_only":True,
+                     "final_completion_evidence":False,"redacted":True,
+                     "tested_source_sha":sha,"status":status,
+                     "journey_outcome":journey},
+                    open(output,"w",encoding="utf-8"),indent=2,sort_keys=True)
+          PY
+
+      - name: Stop and remove diagnostic TestLab
+        id: cleanup_testlab
+        if: always()
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: bash scripts/cleanup-disposable-testlab.sh
+
+      - name: Stop diagnostic PostgreSQL
+        id: cleanup_postgres
+        if: always()
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          TARGET_SHA: ${{ inputs.target_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          bash scripts/cleanup-owned-postgres.sh p15-7-diagnostic "${DIAGNOSTIC_RUN_ID}" \
+            target/p15-7-diagnostic-artifacts/p15-7-postgres-ownership.json
+
+      - name: Remove diagnostic P15.7 authority
+        id: cleanup_authority
+        if: always()
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          O3K_P15_7_AUTHORITY_MODE: testlab-keycloak
+          O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT: ${{ env.DIAGNOSTIC_REPO }}/scripts/p15-7-keycloak-authority.sh
+          O3K_P15_7_KEYCLOAK_STATE_ROOT: ${{ runner.temp }}/o3k-p15-7-keycloak-${{ github.run_id }}
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+        run: bash scripts/p15-7-keycloak-authority.sh cleanup
+
+      - name: Remove owned diagnostic P15.7 VM host image
+        id: cleanup_host_image
+        if: always()
+        working-directory: ${{ env.DIAGNOSTIC_REPO }}
+        env:
+          DIAGNOSTIC_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          P15_7_HOST_IMAGE_SHA256: 612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354
+        run: |
+          set -euo pipefail
+          image_path="${RUNNER_TEMP}/o3k-p15-7-diagnostic-host-${DIAGNOSTIC_RUN_ID}.img"
+          marker="${image_path}.o3k-owned"
+          if [[ -e "${image_path}" || -e "${marker}" ]]; then
+            test -f "${marker}" && ! test -L "${marker}"
+            grep -Fqx 'o3k-p15-7-diagnostic-host-image-v1' "${marker}"
+            grep -Fqx "run=${DIAGNOSTIC_RUN_ID}" "${marker}"
+            grep -Fqx "sha256=${P15_7_HOST_IMAGE_SHA256}" "${marker}"
+            rm -f -- "${image_path}" "${marker}"
+          fi
+
+      - name: Upload diagnostic-only artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: p15-7-diagnostic-fast-lane
+          path: |
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-diagnostic-fast-lane-result.json
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-diagnostic-fast-lane-journey.json
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-diagnostic-fast-lane-preflight.json
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-diagnostic-sanitation.json
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-diagnostic-owned-inventory.json
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-diagnostic-create-diagnostics.log
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-protected-preflight.json
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/runner-capabilities.json
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/disposable-testlab-bootstrap.json
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-postgres-ownership.json
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-provisioning-diagnostics.json
+            ${{ env.DIAGNOSTIC_REPO }}/target/tested-source-sha.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Verify diagnostic lane outcome
+        if: always()
+        env:
+          PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome || 'skipped' }}
+          POSTGRES_OUTCOME: ${{ steps.postgres.outcome || 'skipped' }}
+          BOOTSTRAP_OUTCOME: ${{ steps.bootstrap.outcome || 'skipped' }}
+          HOST_GUARD_OUTCOME: ${{ steps.host_guard.outcome || 'skipped' }}
+          HOST_IMAGE_OUTCOME: ${{ steps.host_image.outcome || 'skipped' }}
+          JOURNEY_OUTCOME: ${{ steps.journey.outcome || 'skipped' }}
+          TESTLAB_CLEANUP_OUTCOME: ${{ steps.cleanup_testlab.outcome || 'skipped' }}
+          POSTGRES_CLEANUP_OUTCOME: ${{ steps.cleanup_postgres.outcome || 'skipped' }}
+          AUTHORITY_CLEANUP_OUTCOME: ${{ steps.cleanup_authority.outcome || 'skipped' }}
+          HOST_IMAGE_CLEANUP_OUTCOME: ${{ steps.cleanup_host_image.outcome || 'skipped' }}
+        run: |
+          set -euo pipefail
+          for outcome in "${PREFLIGHT_OUTCOME}" "${POSTGRES_OUTCOME}" "${BOOTSTRAP_OUTCOME}" \
+            "${HOST_GUARD_OUTCOME}" "${HOST_IMAGE_OUTCOME}" "${JOURNEY_OUTCOME}" \
+            "${TESTLAB_CLEANUP_OUTCOME}" "${POSTGRES_CLEANUP_OUTCOME}" "${AUTHORITY_CLEANUP_OUTCOME}" \
+            "${HOST_IMAGE_CLEANUP_OUTCOME}"; do
+            test "${outcome}" = success
+          done
