@@ -100,7 +100,7 @@ capture_workload_b_failure_diagnostics() {
   for agent in block-a block-b block-c; do
     ip="${IPS[$index]:-}"
     if [[ "$ip" =~ ^[0-9.]+$ ]]; then
-      ssh_vm "$ip" "sudo grep -F '\"operation_id\":\"$operation_id\"' /var/log/o3k-compute.log 2>/dev/null | tail -n 20" \
+      ssh_vm "$ip" "sudo grep -F '$operation_id' /var/log/o3k-compute.log 2>/dev/null | tail -n 40" \
         >"$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
       chmod 0600 "$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
     fi
