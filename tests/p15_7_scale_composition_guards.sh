@@ -105,11 +105,16 @@ doc = json.load(open(sys.argv[1], encoding="utf-8"))
 assert doc["status"] == "blocked" and doc["reason"] == "provider_mode_not_agent"
 assert doc["redacted"] is True
 PY
-python3 - "${ROOT_DIR}/scripts/p15-7-real-host-journey.sh" "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
+python3 - "${ROOT_DIR}/scripts/p15-7-real-host-journey.sh" \
+  "${ROOT_DIR}/.github/workflows/real-host-validation.yml" \
+  "${ROOT_DIR}/scripts/p15-7-libvirt-storage-pool.sh" \
+  "${ROOT_DIR}/.github/workflows/p15-7-diagnostic-fast-lane.yml" <<'PY'
 from pathlib import Path
 import sys
 journey = Path(sys.argv[1]).read_text(encoding="utf-8")
 workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
+pool = Path(sys.argv[3]).read_text(encoding="utf-8")
+diagnostic = Path(sys.argv[4]).read_text(encoding="utf-8")
 upload = workflow.split("- name: Upload redacted real-host artifacts", 1)[1].split("if-no-files-found:", 1)[0]
 assert "target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json" in upload
 for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block-c", "block-d", "o3k init",
@@ -140,6 +145,16 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
     assert required in journey, required
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
+assert 'p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
+assert 'p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
+assert 'p15-7-libvirt-storage-pool.sh" cleanup "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
+assert journey.index('p15-7-libvirt-storage-pool.sh" define') < journey.index('provision_vms_bounded block-a block-b')
+for required in ("pool-list --all --name", "pool-dumpxml", "pool-define", "pool-start",
+                 "pool-destroy", "pool-undefine", "o3k-p15-7-journey-owned=",
+                 "legacy-or-owned", "cleanup-stale-diagnostic-images"):
+    assert required in pool, required
+assert 'cleanup-stale-diagnostic-images "${RUNNER_TEMP}"' in diagnostic
+assert 'cirros-0.6.3-x86_64-disk.img.p15-7-diagnostic-${GITHUB_RUN_ID}.XXXXXX' in diagnostic
 assert 'operator_curl() {' in journey
 assert 'refresh_operator_authority' in journey
 assert 'scripts/p15-7-refresh-operator-authority.sh' in journey
