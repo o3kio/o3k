@@ -84,6 +84,8 @@ jobs:
         run: bash tests/p15_7_protected_preflight.sh
       - name: Test protected P15.7 Keycloak authority guards
         run: bash tests/p15_7_keycloak_authority_guards.sh
+      - name: Test protected P15.7 journey and diagnostic guards
+        run: bash tests/p15_7_scale_composition_guards.sh
       - name: Test protected P15.7 dispatch guard
         run: bash tests/p15_7_dispatch_guard.sh
       - name: Test protected P15.7 PostgreSQL cleanup ownership

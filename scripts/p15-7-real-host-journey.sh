@@ -467,17 +467,28 @@ register_vm() {
   DOMAINS+=("$d"); UUIDS+=(""); OVERLAYS+=("$overlay"); SEEDS+=("$seed"); SERIALS+=("$serial")
 }
 provision_vms_bounded() {
-  local id pid rc=0
+  local id pid rc=0 status index=0
   local -a pids=()
+  local -a ids=()
   for id in "$@"; do
     register_vm "$id"
     # Each job writes its address/UUID to a run-owned file; the parent then
     # reconstructs ordered arrays used by ownership-safe cleanup.
     provision_vm "$id" >"$WORK_ROOT/$id-provision.log" 2>&1 &
     pids+=("$!")
+    ids+=("$id")
   done
-  for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
-  ((rc == 0)) || die "bounded VM provisioning failed; inspect per-VM redacted logs"
+  for pid in "${pids[@]}"; do
+    if wait "$pid"; then status=0; else status=$?; rc=1; fi
+    printf '%s\n' "$status" >"$WORK_ROOT/${ids[$index]}-exit"
+    ((index += 1))
+  done
+  if ((rc != 0)); then
+    python3 "$ROOT_DIR/scripts/capture-p15-7-provision-diagnostics.py" \
+      "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" "$WORK_ROOT" "$SOURCE_SHA" "$RUN_ID" \
+      || echo "P15.7 provisioning diagnostics could not be safely captured" >&2
+    die "bounded VM provisioning failed; inspect p15-7-provisioning-diagnostics.json"
+  fi
   IPS=()
   for id in "$@"; do
     [[ -s "$WORK_ROOT/$id-ip" && -s "$WORK_ROOT/$id-uuid" ]] || die "VM provisioning result missing: $id"
