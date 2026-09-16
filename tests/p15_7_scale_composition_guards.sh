@@ -290,6 +290,8 @@ ordered_steps = (
 )
 positions = [workflow.index(step) for step in ordered_steps]
 assert positions == sorted(positions), positions
+bootstrap_step = workflow.split("      - name: Bootstrap minimal PostgreSQL TestLab\n", 1)[1].split("      - name:", 1)[0]
+assert 'GITHUB_SHA: ${{ inputs.target_sha || github.sha }}' in bootstrap_step
 assert 'O3K_P15_7_DIAGNOSTIC_ONLY: "true"' in workflow
 assert 'p15-7-diagnostic-fast-lane-journey.json' in workflow
 assert 'diagnostic-only' in workflow
