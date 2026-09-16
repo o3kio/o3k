@@ -529,26 +529,16 @@ write_operator_curl_config() {
 write_operator_curl_config
 refresh_operator_authority() {
   [[ "$AUTHORITY_MODE" == testlab-keycloak ]] || return 0
-  local remaining
-  remaining="$(python3 - "$OPERATOR_TOKEN_FILE" <<'PY' 2>/dev/null || true
-import base64, json, pathlib, sys, time
-parts = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8').strip().split('.')
-if len(parts) != 3:
-    raise SystemExit(0)
-claims = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (-len(parts[1]) % 4)))
-print(int(claims.get('exp', 0)) - int(time.time()))
-PY
-)"
-  if ! [[ "$remaining" =~ ^[0-9]+$ ]] || (( remaining <= 300 )); then
-    O3K_P15_7_AUTHORITY_MODE=testlab-keycloak \
-      O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
-      O3K_P15_7_NATIVE_API_URL="$API" O3K_P15_7_AUTHORITY_OUTPUT_FILE="$OPERATOR_TOKEN_FILE" \
-      GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
-      bash "$KEYCLOAK_AUTHORITY_SCRIPT" exchange || die "system_operator_federated_renewal_failed"
-    OPERATOR_TOKEN="$(<"$OPERATOR_TOKEN_FILE")"
-    [[ -n "$OPERATOR_TOKEN" && "$OPERATOR_TOKEN" != *$'\n'* ]] || die "renewed_system_operator_token_empty"
-    write_operator_curl_config
-  fi
+  O3K_P15_7_AUTHORITY_MODE=testlab-keycloak \
+    O3K_P15_7_OPERATOR_TOKEN_FILE="$OPERATOR_TOKEN_FILE" \
+    O3K_P15_7_OPERATOR_CURL_CONFIG="$OPERATOR_CURL_CONFIG" \
+    O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT="$KEYCLOAK_AUTHORITY_SCRIPT" \
+    O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
+    O3K_P15_7_NATIVE_API_URL="$API" GITHUB_RUN_ID="$RUN_ID" \
+    O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
+    bash "$ROOT_DIR/scripts/p15-7-refresh-operator-authority.sh" \
+    || die "system_operator_federated_renewal_failed"
+  OPERATOR_TOKEN="$(<"$OPERATOR_TOKEN_FILE")"
 }
 operator_curl() {
   local url="$1"

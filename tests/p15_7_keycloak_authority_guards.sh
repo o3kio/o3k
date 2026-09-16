@@ -20,6 +20,9 @@ grep -Fq 'O3K_TESTLAB_OPERATOR_ASSIGNMENT_ID' "$AUTHORITY"
 grep -Fq 'operator-console' "$ROOT_DIR/bins/o3kd/src/composition/mod.rs"
 grep -Fq 'acquire_operator_token' "$AUTHORITY"
 grep -Fq 'refresh_operator_authority' "$ROOT_DIR/scripts/p15-7-real-host-journey.sh"
+grep -Fq 'bash "$ROOT_DIR/scripts/p15-7-refresh-operator-authority.sh"' \
+  "$ROOT_DIR/scripts/p15-7-real-host-journey.sh"
+grep -Fq 'remaining > 300' "$ROOT_DIR/scripts/p15-7-refresh-operator-authority.sh"
 grep -Fq 'signature' "$ROOT_DIR/bins/o3kd/tests/p12_iam_7_real_oidc.rs"
 for workflow in \
   "$ROOT_DIR/.github/workflows/p15-7-protected-preflight.yml" \
@@ -85,6 +88,60 @@ PATH="$FAKE_BIN:$PATH" \
   bash "$PREFLIGHT" >/dev/null
 test -s "$WORK/artifacts/p15-7-protected-preflight.json"
 grep -Fq '"status": "passed"' "$WORK/artifacts/p15-7-protected-preflight.json"
+
+# A near-expiry native token must take the helper's canonical exchange path,
+# replace its curl credential config, and remain untouched while still fresh.
+RENEWAL_AUTHORITY="$WORK/renewal-authority.sh"
+cat >"$RENEWAL_AUTHORITY" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "${1:-}" == exchange ]]
+printf 'exchange\n' >>"$O3K_P15_7_RENEWAL_COUNT"
+printf 'renewed.native.token\n' >"$O3K_P15_7_AUTHORITY_OUTPUT_FILE"
+chmod 0600 "$O3K_P15_7_AUTHORITY_OUTPUT_FILE"
+SH
+chmod +x "$RENEWAL_AUTHORITY"
+renewal_token="$WORK/renewal.token"
+renewal_config="$WORK/renewal-curl.conf"
+python3 - "$renewal_token" <<'PY'
+import base64, json, pathlib, sys, time
+claims = {'exp': int(time.time()) + 30}
+payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=')
+pathlib.Path(sys.argv[1]).write_text('header.' + payload + '.signature\n', encoding='utf-8')
+PY
+chmod 0600 "$renewal_token"
+PATH="$FAKE_BIN:$PATH" \
+  O3K_P15_7_AUTHORITY_MODE=testlab-keycloak \
+  O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT="$RENEWAL_AUTHORITY" \
+  O3K_P15_7_KEYCLOAK_STATE_ROOT="$WORK/o3k-p15-7-keycloak-renewal" \
+  O3K_P15_7_NATIVE_API_URL=http://127.0.0.1:1234/o3k/v1 \
+  O3K_P15_7_OPERATOR_TOKEN_FILE="$renewal_token" \
+  O3K_P15_7_OPERATOR_CURL_CONFIG="$renewal_config" \
+  O3K_P15_7_RENEWAL_COUNT="$WORK/renewal-count" \
+  GITHUB_RUN_ID=renewal O3K_P15_7_SOURCE_SHA="$sha" RUNNER_TEMP="$WORK" \
+  bash "$ROOT_DIR/scripts/p15-7-refresh-operator-authority.sh"
+grep -Fqx exchange "$WORK/renewal-count"
+grep -Fqx 'header = "Authorization: Bearer renewed.native.token"' "$renewal_config"
+test "$(stat -c '%a' "$renewal_config")" = 600
+python3 - "$renewal_token" <<'PY'
+import base64, json, pathlib, sys, time
+claims = {'exp': int(time.time()) + 600}
+payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=')
+pathlib.Path(sys.argv[1]).write_text('header.' + payload + '.signature\n', encoding='utf-8')
+PY
+printf 'still-fresh-config\n' >"$renewal_config"
+PATH="$FAKE_BIN:$PATH" \
+  O3K_P15_7_AUTHORITY_MODE=testlab-keycloak \
+  O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT="$RENEWAL_AUTHORITY" \
+  O3K_P15_7_KEYCLOAK_STATE_ROOT="$WORK/o3k-p15-7-keycloak-renewal" \
+  O3K_P15_7_NATIVE_API_URL=http://127.0.0.1:1234/o3k/v1 \
+  O3K_P15_7_OPERATOR_TOKEN_FILE="$renewal_token" \
+  O3K_P15_7_OPERATOR_CURL_CONFIG="$renewal_config" \
+  O3K_P15_7_RENEWAL_COUNT="$WORK/renewal-count" \
+  GITHUB_RUN_ID=renewal O3K_P15_7_SOURCE_SHA="$sha" RUNNER_TEMP="$WORK" \
+  bash "$ROOT_DIR/scripts/p15-7-refresh-operator-authority.sh"
+test "$(wc -l <"$WORK/renewal-count")" -eq 1
+grep -Fqx 'still-fresh-config' "$renewal_config"
 
 # Cleanup must remove only a container with the complete O3K ownership ledger.
 STATE="$WORK/o3k-p15-7-keycloak-owned"
