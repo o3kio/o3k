@@ -19,6 +19,18 @@ SERVER_STATES = {"BUILDING", "ACTIVE", "ERROR", "DELETED", "UNKNOWN"}
 OPERATION_STATES = {
     "pending", "running", "succeeded", "retryable", "unknown_outcome", "failed"
 }
+OPERATION_ERROR_CATEGORIES = {
+    "invalid_request",
+    "unauthenticated",
+    "unauthorized",
+    "conflict",
+    "capacity",
+    "not_found",
+    "retryable",
+    "unknown_outcome",
+    "terminal",
+    "retry_exhausted",
+}
 EVENT_MESSAGES = {
     "command accepted",
     "command acceptance rejected",
@@ -68,6 +80,19 @@ def operation_state(document: object) -> str:
         return "unavailable"
     state = document.get("state")
     return state if isinstance(state, str) and state in OPERATION_STATES else "unknown"
+
+
+def operation_error_category(document: object) -> str:
+    if not isinstance(document, dict):
+        return "unavailable"
+    error = document.get("error")
+    if not isinstance(error, str):
+        return "unknown"
+    # The native operation contract exposes a bounded category in `error`.
+    # Keep only that finite vocabulary; provider messages and payloads never
+    # cross this diagnostic boundary.
+    value = error.strip().lower()
+    return value if value in OPERATION_ERROR_CATEGORIES else "unknown"
 
 
 def agent_events(root: pathlib.Path, operation_id: str) -> list[dict[str, object]]:
@@ -208,6 +233,7 @@ def main() -> int:
                 "native_server_state": resource_state(server),
                 "operation_http_status": clean_http(operation_http),
                 "operation_state": operation_state(operation),
+                "operation_error_category": operation_error_category(operation),
                 "agent_events": events,
             },
         },

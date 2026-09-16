@@ -387,6 +387,7 @@ assert doc["artifact_type"] == "o3k-p15-7-workload-failure-diagnostics"
 assert doc["reason"] == "workload_b_activation_timeout" and doc["redacted"] is True
 assert doc["observations"]["native_server_state"] == "BUILDING"
 assert doc["observations"]["operation_state"] == "running"
+assert doc["observations"]["operation_error_category"] == "unknown"
 events = doc["observations"]["agent_events"]
 assert [event["message"] for event in events] == ["command accepted", "command execution completed"]
 assert events[1]["state"] == 3 and events[1]["console_bytes"] == 0
