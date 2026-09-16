@@ -9,6 +9,36 @@ EVIDENCE="${WORK_DIR}/evidence.json"
 # configured at all.  Keep this explicit so a future environment-level
 # prerequisite cannot accidentally turn the optional consumer into a gate.
 unset O3K_P15_7_ARAF_URL
+PLACEMENT_BLOCKS="${WORK_DIR}/placement-blocks.json"
+cat >"${PLACEMENT_BLOCKS}" <<'JSON'
+[
+  {"block":{"id":"block-bootstrap","state":"ready","execution_identity":"compute-agent","resource_provider_ids":["compute-agent"]}},
+  {"block":{"id":"block-a-id","state":"ready","execution_identity":"block-a","resource_provider_ids":["block-a"]}},
+  {"block":{"id":"block-unavailable","state":"draining","execution_identity":"unavailable-agent","resource_provider_ids":["unavailable-agent"]}},
+  {"block":{"id":"block-unlinked","state":"ready","execution_identity":"unlinked-agent","resource_provider_ids":[]}}
+]
+JSON
+[[ "$(python3 "${ROOT_DIR}/scripts/resolve-p15-7-placement-block.py" "${PLACEMENT_BLOCKS}" compute-agent)" == block-bootstrap ]]
+[[ "$(python3 "${ROOT_DIR}/scripts/resolve-p15-7-placement-block.py" "${PLACEMENT_BLOCKS}" block-a)" == block-a-id ]]
+for invalid_identity in unavailable-agent unlinked-agent absent-agent; do
+  if python3 "${ROOT_DIR}/scripts/resolve-p15-7-placement-block.py" "${PLACEMENT_BLOCKS}" \
+    "${invalid_identity}" >/dev/null 2>&1; then
+    echo "non-ready or unlinked placement host accepted: ${invalid_identity}" >&2
+    exit 1
+  fi
+done
+python3 - "${PLACEMENT_BLOCKS}" "${WORK_DIR}/placement-blocks-ambiguous.json" <<'PY'
+import json, pathlib, sys
+items = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+items.append({"block": {"id": "duplicate-bootstrap", "state": "ready",
+               "execution_identity": "compute-agent",
+               "resource_provider_ids": ["compute-agent"]}})
+pathlib.Path(sys.argv[2]).write_text(json.dumps(items), encoding="utf-8")
+PY
+if python3 "${ROOT_DIR}/scripts/resolve-p15-7-placement-block.py" \
+  "${WORK_DIR}/placement-blocks-ambiguous.json" compute-agent >/dev/null 2>&1; then
+  echo "ambiguous placement host mapping accepted" >&2; exit 1
+fi
 python3 - "${EVIDENCE}" <<'PY'
 import json, sys
 sha = "0123456789abcdef0123456789abcdef01234567"
@@ -175,6 +205,9 @@ assert 'if [[ "$cleanup_failed" == false ]]; then' in journey
 assert 'delete_owned_openstack()' in journey
 assert 'policy failures are deliberately not treated as absence' in journey
 assert 'DRAIN_AGENT="$HOST_A"' in journey
+assert 'scripts/resolve-p15-7-placement-block.py' in journey
+assert 'workload A placement host has no unique ready canonical block/provider mapping' in journey
+assert '^(block-a|block-b|block-c)$' not in journey
 assert '"$HOST_B" != "$HOST_A"' in journey
 assert 'JOIN_REGION="${O3K_P15_7_REGION:-}"' in journey
 assert '--region RegionOne' not in journey
