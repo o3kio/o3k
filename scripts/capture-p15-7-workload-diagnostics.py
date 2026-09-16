@@ -39,6 +39,17 @@ EVENT_MESSAGES = {
     "command execution failed",
     "create failed definitively; reporting terminal failure",
 }
+EVENT_ERROR_KINDS = {
+    "configuration",
+    "identity_store",
+    "transport",
+    "tls",
+    "network",
+    "artifact",
+    "libvirt",
+    "journal",
+    "protocol",
+}
 
 
 def safe_child(root: pathlib.Path, name: str) -> pathlib.Path:
@@ -135,6 +146,9 @@ def agent_events(root: pathlib.Path, operation_id: str) -> list[dict[str, object
             console_bytes = fields.get("console_bytes")
             if isinstance(console_bytes, int) and not isinstance(console_bytes, bool) and 0 <= console_bytes <= 10_000_000:
                 event["console_bytes"] = console_bytes
+            error_kind = fields.get("error_kind")
+            if isinstance(error_kind, str) and error_kind in EVENT_ERROR_KINDS:
+                event["error_kind"] = error_kind
             events.append(event)
     return events[-MAX_EVENT_LINES:]
 
