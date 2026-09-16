@@ -105,7 +105,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "rm -rf -- \"$WORK_ROOT\"", "second_real_host_required", "assert_owned_domains_absent",
                  "agent-id", "agent identity transfer failed", "/var/lib/o3k-compute/agent-id",
                  "actual_uuid", "DOMAINS+=(\"$d\")", "OVERLAYS+=(\"$overlay\")",
-                 "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-c-uuid\")\"", "provision_vms_bounded", "REPLAY_JOIN_FILE",
+                 "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-c-uuid\")\"", "provision_vms_bounded",
+                 "capture-p15-7-provision-diagnostics.py", "p15-7-provisioning-diagnostics.json", "REPLAY_JOIN_FILE",
                  "join-request.json", "remote_agent_cleanup", "sudo mkdir -- '$remote_stage'", "sudo rm -rf -- '$remote_stage'",
                  "canonical agent identity does not match agent id", "cross_tenant_test_prerequisite_missing",
                  "FOREIGN_PROJECT_ID", "FOREIGN_TOKEN_PROJECT_ID", "foreign token scope mismatch",
@@ -155,6 +156,51 @@ assert "o3k-disposable-image-v1" in journey
 assert "phase=generic" in journey
 assert "araf_projection_prerequisite_missing" not in journey
 PY
+
+# Failed bounded provisioning must retain a useful, run-scoped artifact without
+# retaining credentials or depending on the workspace surviving cleanup.
+PROVISION_ROOT="${WORK_DIR}/provision"
+PROVISION_ARTIFACT="${WORK_DIR}/provision-diagnostics.json"
+mkdir -m 0700 "${PROVISION_ROOT}"
+printf 'o3k-p15-7-journey-owned-v1\nrun=test-run\n' >"${PROVISION_ROOT}/.o3k-owned"
+cat >"${PROVISION_ROOT}/block-a-provision.log" <<'LOG'
+VM did not receive a DHCP lease: o3k-p15-7-example-block-a
+Authorization: Bearer sentinel-native-token
+operator_password=redacted-by-this-pattern
+eyJhbGciOiJSUzI1NiJ9eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzZW50aW5lbCJ9eyJzdWIiOiJzZW50aW5lbCJ9.c2lnbmF0dXJlLXNlbnRpbmVsLXNpZ25hdHVyZQ
+-----BEGIN PRIVATE KEY-----
+sentinel-private-key-material
+-----END PRIVATE KEY-----
+LOG
+printf '1\n' >"${PROVISION_ROOT}/block-a-exit"
+printf '0\n' >"${PROVISION_ROOT}/block-b-exit"
+for number in $(seq 1 200); do
+  printf 'provision diagnostic line %s\n' "$number" >>"${PROVISION_ROOT}/block-b-provision.log"
+done
+python3 "${ROOT_DIR}/scripts/capture-p15-7-provision-diagnostics.py" \
+  "${PROVISION_ARTIFACT}" "${PROVISION_ROOT}" \
+  0123456789abcdef0123456789abcdef01234567 test-run
+python3 - "${PROVISION_ARTIFACT}" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+doc = json.loads(path.read_text(encoding="utf-8"))
+assert doc["status"] == "failed" and doc["redacted"] is True
+assert doc["native_system_operator_token_acquired_before_provisioning"] is False
+assert doc["signed_provider_token_refreshed_before_exchange"] is True
+assert doc["vms"][0]["exit_status"] == "1"
+assert any("DHCP lease" in line for line in doc["vms"][0]["tail"])
+assert any("provision diagnostic line 200" in line for line in doc["vms"][1]["tail"])
+assert "provision diagnostic line 1" not in doc["vms"][1]["tail"]
+serialized = path.read_text(encoding="utf-8")
+for secret in (
+    "sentinel-native-token", "sentinel-password", "redacted-by-this-pattern", "sentinel",
+    "sentinel-private-key-material",
+    "eyJhbGciOiJSUzI1NiJ9eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzZW50aW5lbCJ9eyJzdWIiOiJzZW50aW5lbCJ9.c2lnbmF0dXJlLXNlbnRpbmVsLXNpZ25hdHVyZQ",
+):
+    assert secret not in serialized, secret
+assert path.stat().st_mode & 0o777 == 0o600
+PY
+
 # libvirt emits both quote styles across supported versions. Keep gateway
 # discovery independent of that XML serialization detail.
 python3 - <<'PY'
