@@ -4337,6 +4337,12 @@ impl AgentClient {
                             }
                         }
                         Some(proto::control_response::Body::Command(command)) => {
+                            tracing::warn!(
+                                operation_id = %command.operation_id,
+                                resource_id = %command.resource_id,
+                                action = command_action_name(&command),
+                                "agent command received"
+                            );
                             if command.agent_id != agent_id || command.agent_epoch != epoch {
                                 return Err(AgentError::Protocol(
                                     "command identity does not match registration".to_owned(),

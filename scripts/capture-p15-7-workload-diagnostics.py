@@ -32,6 +32,7 @@ OPERATION_ERROR_CATEGORIES = {
     "retry_exhausted",
 }
 EVENT_MESSAGES = {
+    "agent command received",
     "command accepted",
     "command acceptance rejected",
     "command execution completed",
