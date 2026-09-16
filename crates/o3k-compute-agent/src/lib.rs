@@ -3767,7 +3767,20 @@ fn command_execution_error_kind(error: &AgentError) -> &'static str {
         AgentError::TlsMaterial => "tls",
         AgentError::Protocol(message) => {
             let message = message.to_ascii_lowercase();
-            if message.contains("tap") || message.contains("network") || message.contains("dhcp") {
+            if message.contains("libvirt command failed: unavailable") {
+                "libvirt_unavailable"
+            } else if message.contains("libvirt command failed: connection_lost") {
+                "libvirt_connection_lost"
+            } else if message.contains("libvirt command failed: not_found") {
+                "libvirt_not_found"
+            } else if message.contains("libvirt command failed: invalid_request") {
+                "libvirt_invalid_request"
+            } else if message.contains("libvirt command failed: operation_failed") {
+                "libvirt_operation_failed"
+            } else if message.contains("tap")
+                || message.contains("network")
+                || message.contains("dhcp")
+            {
                 "network"
             } else if message.contains("artifact")
                 || message.contains("image")

@@ -47,6 +47,11 @@ EVENT_ERROR_KINDS = {
     "network",
     "artifact",
     "libvirt",
+    "libvirt_unavailable",
+    "libvirt_connection_lost",
+    "libvirt_not_found",
+    "libvirt_invalid_request",
+    "libvirt_operation_failed",
     "journal",
     "protocol",
 }
