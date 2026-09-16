@@ -339,7 +339,7 @@ jobs:
             printf 'journey_outcome=%s\n' "${JOURNEY_OUTCOME}"
             printf '== bounded server-create and reconciliation log lines ==\n'
             if sudo -n test -d "${state_root}/log"; then
-              sudo -n sh -c 'grep -hE "server create reconciliation|artifact transfer|create reconciliation|agent create|create (request|command|artifact)" "$1"/log/*.log 2>/dev/null | tail -n 250 || true' _ "${state_root}"
+              sudo -n sh -c 'grep -hE "server create reconciliation|artifact transfer|create reconciliation|agent create|create (request|command|artifact)|bootstrap provider registration rejected|bootstrap building-block readiness rejected" "$1"/log/*.log 2>/dev/null | tail -n 250 || true' _ "${state_root}"
             else
               printf 'state_logs=unavailable\n'
             fi
