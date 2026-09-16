@@ -72,7 +72,7 @@ jobs:
           bash scripts/cleanup-disposable-testlab.sh
           bash scripts/cleanup-stale-testlab-processes.sh
           bash scripts/p15-7-keycloak-authority.sh cleanup
-          for marker in "${RUNNER_TEMP}"/cirros-0.6.3-p15-7-diagnostic-${GITHUB_RUN_ID}.*.o3k-owned; do
+          for marker in "${RUNNER_TEMP}"/cirros-0.6.3-p15-7-diagnostic-"${GITHUB_RUN_ID}".*.o3k-owned; do
             [[ -e "${marker}" ]] || continue
             image_path="${marker%.o3k-owned}"
             test -f "${marker}" && ! test -L "${marker}"
@@ -82,7 +82,7 @@ jobs:
             grep -Fqx 'phase=generic' "${marker}"
             rm -f -- "${image_path}" "${marker}"
           done
-          for marker in "${RUNNER_TEMP}"/o3k-p15-7-diagnostic-host-${GITHUB_RUN_ID}-*.img.o3k-owned; do
+          for marker in "${RUNNER_TEMP}"/o3k-p15-7-diagnostic-host-"${GITHUB_RUN_ID}"-*.img.o3k-owned; do
             [[ -e "${marker}" ]] || continue
             image_path="${marker%.o3k-owned}"
             test -f "${marker}" && ! test -L "${marker}"
