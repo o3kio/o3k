@@ -295,6 +295,15 @@ cleanup() {
   grep -Fqx 'o3k-p15-7-keycloak-owned-v1' "$OWNER_FILE" || die "invalid Keycloak ownership ledger"
   grep -Fqx "run=$RUN_ID" "$OWNER_FILE" || die "Keycloak ownership run mismatch"
   grep -Fqx "source_sha=$SOURCE_SHA" "$OWNER_FILE" || die "Keycloak ownership source mismatch"
+  # Remove run-owned credential material even if the container proof below is
+  # ambiguous.  Refusing to stop a foreign container must not preserve the
+  # generated passwords or signed/native bearer tokens on disk.
+  secure_remove "$TOKEN_FILE" "$OPERATOR_PASSWORD_FILE" \
+    "$STATE_ROOT"/env.* "$STATE_ROOT"/admin-curl.* \
+    "$STATE_ROOT"/admin-response.* "$STATE_ROOT"/users-response.* \
+    "$STATE_ROOT"/reset-curl.* "$STATE_ROOT"/reset-body.* \
+    "$STATE_ROOT"/curl.* "$STATE_ROOT"/oauth-response.* \
+    "$STATE_ROOT"/exchange.* "$STATE_ROOT"/native.*
   if [[ -f "$RUN_MARKER" && ! -L "$RUN_MARKER" ]]; then
     grep -Fqx 'o3k-p15-7-keycloak-container-v1' "$RUN_MARKER" || die "invalid Keycloak container ledger"
     grep -Fqx "run=$RUN_ID" "$RUN_MARKER" || die "Keycloak container run mismatch"

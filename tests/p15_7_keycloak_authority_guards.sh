@@ -126,6 +126,8 @@ STATE="$WORK/o3k-p15-7-keycloak-foreign"
 mkdir -p "$STATE"
 printf 'o3k-p15-7-keycloak-owned-v1\nrun=foreign\nsource_sha=%s\n' "$sha" >"$STATE/.o3k-owned"
 printf 'o3k-p15-7-keycloak-container-v1\nrun=foreign\nsource_sha=%s\n' "$sha" >"$STATE/.o3k-keycloak-owned"
+printf 'run-scoped-oauth-token\n' >"$STATE/oidc-operator.token"
+printf 'run-scoped-operator-password\n' >"$STATE/operator-password"
 rm -f "$WORK/removed"
 if PATH="$FAKE_BIN:$PATH" RUNNER_TEMP="$WORK" GITHUB_RUN_ID=foreign \
   O3K_P15_7_SOURCE_SHA="$sha" O3K_P15_7_KEYCLOAK_STATE_ROOT="$STATE" \
@@ -134,5 +136,8 @@ if PATH="$FAKE_BIN:$PATH" RUNNER_TEMP="$WORK" GITHUB_RUN_ID=foreign \
   exit 1
 fi
 test ! -e "$WORK/removed"
+test ! -e "$STATE/oidc-operator.token"
+test ! -e "$STATE/operator-password"
+test -f "$STATE/.o3k-owned"
 
 echo "P15.7 Keycloak authority guards passed"
