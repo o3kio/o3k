@@ -764,8 +764,29 @@ unset FOREIGN_PASSWORD
 FOREIGN_SHOW="$WORK_ROOT/foreign-workload-show.json"
 foreign_code="$(curl --silent --output "$FOREIGN_SHOW" --write-out '%{http_code}' \
   -H "Authorization: Bearer $FOREIGN_TOKEN" "$API/compute/servers/$WORKLOAD_A" || true)"
-[[ "$foreign_code" == 403 || "$foreign_code" == 404 ]] || die "foreign project can read workload A"
-! grep -Fq "$WORKLOAD_A" "$FOREIGN_SHOW" || die "foreign response disclosed workload A"
+FOREIGN_MISSING_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+FOREIGN_MISSING_SHOW="$WORK_ROOT/foreign-missing-workload-show.json"
+foreign_missing_code="$(curl --silent --output "$FOREIGN_MISSING_SHOW" --write-out '%{http_code}' \
+  -H "Authorization: Bearer $FOREIGN_TOKEN" "$API/compute/servers/$FOREIGN_MISSING_ID" || true)"
+[[ "$foreign_missing_code" == 404 && "$foreign_code" == "$foreign_missing_code" ]] \
+  || die "foreign-resource response differs from missing-resource response"
+python3 - "$FOREIGN_SHOW" "$FOREIGN_MISSING_SHOW" "$WORKLOAD_A" "$FOREIGN_MISSING_ID" <<'PY' \
+  || die "foreign-resource response differs from missing-resource response"
+import json,sys
+
+foreign=json.load(open(sys.argv[1], encoding="utf-8"))
+missing=json.load(open(sys.argv[2], encoding="utf-8"))
+foreign_id,missing_id=sys.argv[3:]
+if foreign.get("resource_id") not in (None, foreign_id):
+    raise SystemExit("foreign error resource_id does not match the requested id")
+if missing.get("resource_id") not in (None, missing_id):
+    raise SystemExit("missing error resource_id does not match the requested id")
+for problem in (foreign, missing):
+    problem.pop("request_id", None)
+    problem.pop("resource_id", None)
+if foreign != missing:
+    raise SystemExit("foreign-resource error differs from missing-resource error")
+PY
 CROSS_TENANT_CONCEALMENT=true
 
 DRAIN_GEN="$(python3 - "$WORK_ROOT/blocks.json" "$DRAIN_ID" <<'PY'

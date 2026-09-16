@@ -180,7 +180,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "FOREIGN_PROJECT_ID", "FOREIGN_TOKEN_PROJECT_ID", "foreign token scope mismatch",
                  "O3K_P15_7_FOREIGN_USER_NAME", "O3K_P15_7_FOREIGN_PASSWORD",
                  'OS_USERNAME="$FOREIGN_USER_NAME" OS_PASSWORD="$FOREIGN_PASSWORD"',
-                 "foreign project can read workload A", "CROSS_TENANT_CONCEALMENT=true",
+                 "FOREIGN_MISSING_ID", "foreign-resource response differs from missing-resource response",
+                 'problem.pop("resource_id", None)', "CROSS_TENANT_CONCEALMENT=true",
                  "record_optional_araf", "external_consumer_not_provisioned", "araf-projection.json",
                  "system_operator_token_required", "O3K_P15_7_OPERATOR_TOKEN_FILE", "O3K_P15_7_OPERATOR_TOKEN", "PROJECT_TOKEN",
                  "xml.etree.ElementTree", "net-dumpxml", "libvirt gateway unavailable",
@@ -195,6 +196,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "awk '/MemTotal:/ {print int(\\$2/1024); exit}' /proc/meminfo"):
     assert required in journey, required
 assert "--os-password" not in journey
+assert '! grep -Fq "$WORKLOAD_A" "$FOREIGN_SHOW"' not in journey
 for tenant_variable in ("O3K_EXTRA_TENANT_PROJECT_ID", "O3K_EXTRA_TENANT_PROJECT_NAME",
                         "O3K_EXTRA_TENANT_USER_ID", "O3K_EXTRA_TENANT_USER_NAME",
                         "O3K_EXTRA_TENANT_PASSWORD"):
