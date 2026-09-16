@@ -82,7 +82,7 @@ test -s "$WORK/artifacts/p15-7-protected-preflight.json"
 grep -Fq '"status": "passed"' "$WORK/artifacts/p15-7-protected-preflight.json"
 
 # Cleanup must remove only a container with the complete O3K ownership ledger.
-STATE="$WORK/owned-state"
+STATE="$WORK/o3k-p15-7-keycloak-owned"
 mkdir -p "$STATE"
 printf 'o3k-p15-7-keycloak-owned-v1\nrun=owned\nsource_sha=%s\n' "$sha" >"$STATE/.o3k-owned"
 printf 'o3k-p15-7-keycloak-container-v1\nrun=owned\nsource_sha=%s\n' "$sha" >"$STATE/.o3k-keycloak-owned"
@@ -107,7 +107,22 @@ PATH="$FAKE_BIN:$PATH" RUNNER_TEMP="$WORK" GITHUB_RUN_ID=owned \
   bash "$AUTHORITY" cleanup
 test -f "$WORK/removed"
 
-STATE="$WORK/foreign-state"
+# A crafted ownership ledger must not authorize recursive cleanup of the
+# shared runner temp directory or another path outside this run's child.
+mkdir -p "$STATE"
+printf 'o3k-p15-7-keycloak-owned-v1\nrun=owned\nsource_sha=%s\n' "$sha" >"$STATE/.o3k-owned"
+printf 'o3k-p15-7-keycloak-container-v1\nrun=owned\nsource_sha=%s\n' "$sha" >"$STATE/.o3k-keycloak-owned"
+rm -f "$WORK/removed"
+if PATH="$FAKE_BIN:$PATH" RUNNER_TEMP="$WORK" GITHUB_RUN_ID=owned \
+  O3K_P15_7_SOURCE_SHA="$sha" O3K_P15_7_KEYCLOAK_STATE_ROOT="$WORK" \
+  bash "$AUTHORITY" cleanup; then
+  echo "broad Keycloak state root was accepted" >&2
+  exit 1
+fi
+test ! -e "$WORK/removed"
+test -f "$STATE/.o3k-owned"
+
+STATE="$WORK/o3k-p15-7-keycloak-foreign"
 mkdir -p "$STATE"
 printf 'o3k-p15-7-keycloak-owned-v1\nrun=foreign\nsource_sha=%s\n' "$sha" >"$STATE/.o3k-owned"
 printf 'o3k-p15-7-keycloak-container-v1\nrun=foreign\nsource_sha=%s\n' "$sha" >"$STATE/.o3k-keycloak-owned"

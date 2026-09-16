@@ -202,6 +202,25 @@ fi
 GITHUB_RUN_ID="${EXPECTED_RUN_ID:-${GITHUB_RUN_ID:-local-$$}}" RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}" \
   bash "${ROOT_DIR}/scripts/cleanup-stale-testlab-processes.sh" || true
 
+# A prior P15.7 journey can be interrupted before its EXIT trap reaches
+# libvirt cleanup.  Reap only domains that prove both ownership dimensions:
+# the canonical run-scoped name and the exact journey metadata marker.  Never
+# delete an ambiguous/foreign domain, even if its name happens to be similar.
+while IFS= read -r stale_domain; do
+    [[ "$stale_domain" =~ ^o3k-p15-7-([0-9]+)-block-(a|b|c|d)$ ]] || continue
+    stale_run="${BASH_REMATCH[1]}"
+    stale_xml="$(virsh -c qemu:///system dumpxml "$stale_domain" 2>/dev/null || true)"
+    grep -Fq "o3k-p15-7-journey-owned=${stale_run}" <<<"$stale_xml" || continue
+    virsh -c qemu:///system destroy "$stale_domain" >/dev/null 2>&1 || true
+    virsh -c qemu:///system undefine "$stale_domain" --nvram >/dev/null 2>&1 \
+      || virsh -c qemu:///system undefine "$stale_domain" >/dev/null 2>&1 || true
+    if virsh -c qemu:///system domuuid "$stale_domain" >/dev/null 2>&1; then
+        echo "real-host stale owned P15.7 domain remains: ${stale_domain}" >&2
+        ready=false
+        reason=stale_owned_domain_cleanup_failed
+    fi
+done < <(virsh -c qemu:///system list --all --name 2>/dev/null || true)
+
 if ! bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${INVENTORY_PATH}"; then
     ready=false
     reason=owned_inventory_unavailable
