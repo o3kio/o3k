@@ -133,6 +133,9 @@ declare -A BLOCK_IDS=()
 OS_IMAGE_ID="" OS_KEYPAIR_NAME="" OS_NETWORK_ID="" OS_SUBNET_ID="" OS_PORT_ID="" OS_FLAVOR_ID=""
 OS_WORKLOAD_A="" OS_WORKLOAD_B=""
 CLEANUP_DONE=false
+# Initialized before the EXIT trap because provisioning can fail before the
+# canonical operator exchange assigns the run-scoped token path.
+OPERATOR_TOKEN_FILE="${O3K_P15_7_OPERATOR_TOKEN_FILE:-}"
 REPLAY_JOIN_FILE=""
 OPERATOR_CURL_CONFIG=""
 FOREIGN_PROJECT_ID=""
