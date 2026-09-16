@@ -207,6 +207,7 @@ diagnostic_fixture_step = diagnostic.split("- name: Prepare P15.7 foreign-projec
 assert "working-directory: ${{ env.DIAGNOSTIC_REPO }}" in diagnostic_fixture_step
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
+assert journey.index('[[ "$B_STATE" == "ACTIVE" ]] || die "workload B did not become ACTIVE before cleanup"') < journey.index('Idempotency-Key: p15-7-$RUN_ID-delete-b')
 assert 'p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert 'p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert 'p15-7-libvirt-storage-pool.sh" cleanup "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey

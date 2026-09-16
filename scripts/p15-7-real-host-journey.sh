@@ -820,7 +820,22 @@ for _ in $(seq 1 60); do
 done
 [[ -n "$HOST_B" && "$HOST_B" != "None" ]] || die "workload B placement host did not converge"
 [[ "$HOST_B" != "$HOST_A" ]] || die "new placement selected drained provider host: $HOST_A"
-GEN_B="$(curl --fail --silent -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_B" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["generation"])')"
+# The OpenStack host projection is derived from the durable placement intent;
+# it can be visible while the provider create is still in flight. Wait for the
+# native lifecycle state before deleting so cleanup does not race provider
+# identity attachment.
+WORKLOAD_B_SHOW="$WORK_ROOT/workload-b-show.json"
+B_STATE=""
+for _ in $(seq 1 120); do
+  curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
+    "$API/compute/servers/$WORKLOAD_B" >"$WORKLOAD_B_SHOW" || die "workload B native status read failed"
+  B_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", {}).get("state", ""))' "$WORKLOAD_B_SHOW")"
+  [[ "$B_STATE" == "ACTIVE" ]] && break
+  [[ "$B_STATE" != "ERROR" ]] || die "workload B provisioning entered ERROR before cleanup"
+  sleep 1
+done
+[[ "$B_STATE" == "ACTIVE" ]] || die "workload B did not become ACTIVE before cleanup"
+GEN_B="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["metadata"]["generation"])' "$WORKLOAD_B_SHOW")"
 curl --fail --silent --show-error -X DELETE -H "Authorization: Bearer $PROJECT_TOKEN" -H "Idempotency-Key: p15-7-$RUN_ID-delete-b" -H "If-Match: generation-$GEN_B" "$API/compute/servers/$WORKLOAD_B" >/dev/null || die "workload B cleanup failed"
 for _ in $(seq 1 60); do
   code="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_B" || true)"
