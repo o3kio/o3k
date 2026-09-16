@@ -42,6 +42,7 @@ VM_DISK_SIZE_GB="${O3K_P15_7_VM_DISK_SIZE_GB:-10}"
 # explicitly supplies one; sending the historical `RegionOne` string would
 # therefore make the canonical join fail closed with a 400.
 JOIN_REGION="${O3K_P15_7_REGION:-}"
+P15_PROVISION_DIAGNOSTICS_CAPTURED=false
 die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
 [[ "$DIAGNOSTIC_ONLY" == true || "$DIAGNOSTIC_ONLY" == false ]] || die "diagnostic mode is invalid"
@@ -72,8 +73,17 @@ KNOWN_HOSTS="$WORK_ROOT/known_hosts"
 mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"; chmod 0700 "$WORK_ROOT"
 printf 'o3k-p15-7-journey-owned-v1\nrun=%s\n' "$RUN_ID" >"$WORK_ROOT/.o3k-owned"
 chmod 0600 "$WORK_ROOT/.o3k-owned"
+capture_failure_diagnostics() {
+  local exit_status="$1"
+  [[ "$exit_status" -ne 0 && "$P15_PROVISION_DIAGNOSTICS_CAPTURED" == false ]] || return 0
+  python3 "$ROOT_DIR/scripts/capture-p15-7-provision-diagnostics.py" \
+    "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" "$WORK_ROOT" "$SOURCE_SHA" "$RUN_ID" journey_failed \
+    || echo "P15.7 journey diagnostics could not be safely captured" >&2
+}
 early_cleanup() {
+  local exit_status=$?
   set +e
+  capture_failure_diagnostics "$exit_status"
   if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
     O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
       GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
@@ -187,7 +197,9 @@ secure_remove_credentials() {
   done
 }
 cleanup() {
+  local exit_status=$?
   set +e
+  capture_failure_diagnostics "$exit_status"
   [[ "$CLEANUP_DONE" == true ]] && { set -e; return; }
   if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
     O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
@@ -504,6 +516,9 @@ provision_vms_bounded() {
     python3 "$ROOT_DIR/scripts/capture-p15-7-provision-diagnostics.py" \
       "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" "$WORK_ROOT" "$SOURCE_SHA" "$RUN_ID" \
       || echo "P15.7 provisioning diagnostics could not be safely captured" >&2
+    [[ -f "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" \
+      && ! -L "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" ]] \
+      && P15_PROVISION_DIAGNOSTICS_CAPTURED=true
     die "bounded VM provisioning failed; inspect p15-7-provisioning-diagnostics.json"
   fi
   IPS=()

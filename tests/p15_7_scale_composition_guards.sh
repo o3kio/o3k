@@ -156,6 +156,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "actual_uuid", "DOMAINS+=(\"$d\")", "OVERLAYS+=(\"$overlay\")",
                  "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-c-uuid\")\"", "provision_vms_bounded",
                  "capture-p15-7-provision-diagnostics.py", "p15-7-provisioning-diagnostics.json", "REPLAY_JOIN_FILE",
+                 "capture_failure_diagnostics",
                  "join-request.json", "remote_agent_cleanup", "sudo mkdir -- '$remote_stage'", "sudo rm -rf -- '$remote_stage'",
                  "canonical agent identity does not match agent id", "cross_tenant_test_prerequisite_missing",
                  "FOREIGN_PROJECT_ID", "FOREIGN_TOKEN_PROJECT_ID", "foreign token scope mismatch",
@@ -316,6 +317,21 @@ for secret in (
     "eyJhbGciOiJSUzI1NiJ9eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzZW50aW5lbCJ9eyJzdWIiOiJzZW50aW5lbCJ9.c2lnbmF0dXJlLXNlbnRpbmVsLXNpZ25hdHVyZQ",
 ):
     assert secret not in serialized, secret
+assert path.stat().st_mode & 0o777 == 0o600
+PY
+JOURNEY_ARTIFACT="${WORK_DIR}/journey-diagnostics.json"
+python3 "${ROOT_DIR}/scripts/capture-p15-7-provision-diagnostics.py" \
+  "${JOURNEY_ARTIFACT}" "${PROVISION_ROOT}" \
+  0123456789abcdef0123456789abcdef01234567 test-run journey_failed
+python3 - "${JOURNEY_ARTIFACT}" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+doc = json.loads(path.read_text(encoding="utf-8"))
+assert doc["status"] == "failed" and doc["redacted"] is True
+assert doc["reason"] == "journey_failed"
+serialized = path.read_text(encoding="utf-8")
+assert "sentinel-native-token" not in serialized
+assert "sentinel-private-key-material" not in serialized
 assert path.stat().st_mode & 0o777 == 0o600
 PY
 

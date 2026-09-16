@@ -281,8 +281,8 @@ impl BuildingBlockReader for BuildingBlockAdapter {
         } else {
             Vec::new()
         };
-        let next = old.clone();
-        next.transition(target, blockers)
+        let next = old
+            .transition(target, blockers)
             .map_err(|e| e.to_string())?;
         let record = BuildingBlockRecord::from_block(&next, now()).map_err(|e| e.to_string())?;
         self.store

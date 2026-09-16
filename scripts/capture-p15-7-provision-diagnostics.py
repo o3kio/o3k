@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write bounded, redacted diagnostics for failed P15.7 VM provisioning."""
+"""Write bounded, redacted diagnostics for a failed P15.7 journey."""
 
 from __future__ import annotations
 
@@ -93,12 +93,16 @@ def write_atomic(destination: pathlib.Path, document: dict[str, object]) -> None
 
 
 def main() -> int:
-    if len(sys.argv) != 5:
-        print("usage: capture-p15-7-provision-diagnostics.py OUTPUT WORK_ROOT SOURCE_SHA RUN_ID", file=sys.stderr)
+    if len(sys.argv) not in (5, 6):
+        print("usage: capture-p15-7-provision-diagnostics.py OUTPUT WORK_ROOT SOURCE_SHA RUN_ID [REASON]", file=sys.stderr)
         return 2
     output = pathlib.Path(sys.argv[1])
     work_root = pathlib.Path(sys.argv[2])
-    source_sha, run_id = sys.argv[3:]
+    source_sha, run_id = sys.argv[3:5]
+    reason = sys.argv[5] if len(sys.argv) == 6 else "bounded_vm_provisioning_failed"
+    if reason not in ("bounded_vm_provisioning_failed", "journey_failed"):
+        print("P15.7 diagnostics: invalid failure reason", file=sys.stderr)
+        return 2
     if not re.fullmatch(r"[0-9a-fA-F]{40}", source_sha):
         print("P15.7 diagnostics: invalid source SHA", file=sys.stderr)
         return 2
@@ -144,7 +148,7 @@ def main() -> int:
         "artifact_type": "o3k-p15-7-provisioning-diagnostics",
         "schema_version": 1,
         "status": "failed",
-        "reason": "bounded_vm_provisioning_failed",
+        "reason": reason,
         "tested_source_sha": source_sha.lower(),
         "run_id": run_id,
         "redacted": True,
