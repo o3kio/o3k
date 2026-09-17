@@ -31,6 +31,20 @@ jobs:
     environment: o3k-real-host-validation
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
     steps:
+      - name: Inspect runner process ownership before workspace repair
+        working-directory: /tmp
+        run: |
+          set -euo pipefail
+          ps -eo pid,ppid,user,stat,lstart,args | sed -n '/Runner.Listener/p' || true
+          mapfile -t listener_pids < <(pgrep -u ubuntu -f '/home/ubuntu/actions-runner/bin/Runner[.]Listener run' || true)
+          printf 'listener_pids=%s\n' "${listener_pids[*]-}"
+          for pid in "${listener_pids[@]}"; do
+            printf 'listener_pid=%s cwd=' "${pid}"
+            readlink "/proc/${pid}/cwd" || true
+            printf 'listener_pid=%s parent=' "${pid}"
+            ps -o ppid= -p "${pid}" || true
+          done
+
       - name: Recreate runner workspace after bounded host cleanup
         working-directory: /tmp
         run: |
