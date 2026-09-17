@@ -425,6 +425,7 @@ jobs:
             ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/disposable-testlab-bootstrap.json
             ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-postgres-ownership.json
             ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-provisioning-diagnostics.json
+            ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-drain-failure-context.json
             ${{ env.DIAGNOSTIC_ARTIFACT_DIR }}/p15-7-workload-failure-diagnostics.json
             ${{ env.DIAGNOSTIC_REPO }}/target/tested-source-sha.txt
           if-no-files-found: warn
