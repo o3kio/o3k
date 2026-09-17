@@ -109,7 +109,7 @@ jobs:
           PY
 
       - name: Upload inspection artifact
-        uses: actions/upload-artifact@65c4c4c1fdee0b146144b286b20eb4ce2b865e79 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: p15-7-runner-inspection-${{ github.run_id }}
           path: ${{ runner.temp }}/p15-7-runner-inspection
