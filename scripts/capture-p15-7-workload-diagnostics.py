@@ -15,6 +15,8 @@ import uuid
 
 MAX_RAW_BYTES = 256 * 1024
 MAX_EVENT_LINES = 64
+MAX_DETAIL_CHARS = 2048
+MAX_HOST_STATE_CHARS = 96 * 1024
 SERVER_STATES = {"BUILDING", "ACTIVE", "ERROR", "DELETED", "UNKNOWN"}
 OPERATION_STATES = {
     "pending", "running", "succeeded", "retryable", "unknown_outcome", "failed"
@@ -83,6 +85,16 @@ def clean_http(value: str) -> str:
 
 def clean_label(value: str) -> str:
     return value if re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", value) else "unknown"
+
+
+def clean_detail(value: object, limit: int = MAX_DETAIL_CHARS) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.replace("\x00", "?")
+    text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._-]+", "Bearer <redacted>", text)
+    text = re.sub(r"(?i)(password|token|private[_ -]?key)=\S+", r"\1=<redacted>", text)
+    text = re.sub(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", "<redacted-key>", text, flags=re.S)
+    return text[:limit]
 
 
 def resource_state(document: object) -> str:
@@ -154,6 +166,21 @@ def agent_events(root: pathlib.Path, operation_id: str) -> list[dict[str, object
             error_kind = fields.get("error_kind")
             if isinstance(error_kind, str) and error_kind in EVENT_ERROR_KINDS:
                 event["error_kind"] = error_kind
+            for field in (
+                "command_id",
+                "resource_id",
+                "domain",
+                "libvirt_stage",
+                "libvirt_operation",
+                "libvirt_error_code",
+                "libvirt_error_domain",
+                "libvirt_error_message",
+                "libvirt_detail",
+                "error",
+            ):
+                value = clean_detail(fields.get(field))
+                if value is not None:
+                    event[field] = value
             events.append(event)
     return events[-MAX_EVENT_LINES:]
 
@@ -216,6 +243,17 @@ def agent_message_probes(root: pathlib.Path, operation_id: str) -> list[dict[str
             "matching_operation_counts": {key: value for key, value in matching.items() if value},
         })
     return probes
+
+
+def host_state(root: pathlib.Path) -> dict[str, str]:
+    states: dict[str, str] = {}
+    for label in ("block-a", "compute-agent"):
+        path = safe_child(root, f"{label}-host-state.raw")
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        states[label] = clean_detail(text, MAX_HOST_STATE_CHARS) or ""
+    return states
 
 
 def write_atomic(destination: pathlib.Path, document: dict[str, object]) -> None:
@@ -290,6 +328,7 @@ def main() -> int:
         events = agent_events(work_root, operation_id)
         probes = agent_log_probes(work_root)
         message_probes = agent_message_probes(work_root, operation_id)
+        host_states = host_state(work_root)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"P15.7 workload diagnostics: safe capture failed ({type(error).__name__})", file=sys.stderr)
         return 2
@@ -320,6 +359,7 @@ def main() -> int:
                 "agent_events": events,
                 "agent_log_probes": probes,
                 "agent_message_probes": message_probes,
+                "host_state_at_failure_boundary": host_states,
             },
         },
     )

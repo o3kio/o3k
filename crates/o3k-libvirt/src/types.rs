@@ -21,6 +21,15 @@ impl LibvirtError {
             message: message.into(),
         }
     }
+
+    /// Returns the bounded provider detail retained for host-local diagnostics.
+    ///
+    /// The compute-agent protocol still projects only the finite error category;
+    /// this accessor exists so the execution boundary can record the exact
+    /// libvirt operation and provider message without putting it on the wire.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 #[derive(Debug, Clone)]

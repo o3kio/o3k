@@ -712,6 +712,19 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         )),
                     ));
                 }
+                tracing::warn!(
+                    command_id = %command.command_id,
+                    operation_id = %command.operation_id,
+                    resource_id = %command.resource_id,
+                    domain = %definition_name,
+                    vcpus = spec.vcpus,
+                    memory_mib = spec.memory_mib,
+                    network_attachment_count = spec.network_interfaces.len(),
+                    image_artifact_id = %committed.image.artifact_id,
+                    config_drive_artifact_id = %committed.config_drive.artifact_id,
+                    xml_bytes = definition.xml.len(),
+                    "libvirt create request"
+                );
                 if let Err(error) = self
                     .adapter
                     .define(o3k_libvirt::DomainDefinition {
@@ -720,6 +733,14 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     })
                     .await
                 {
+                    tracing::warn!(
+                        operation_id = %command.operation_id,
+                        resource_id = %command.resource_id,
+                        domain = %definition_name,
+                        libvirt_stage = "define",
+                        libvirt_detail = %error.message(),
+                        "libvirt create failed"
+                    );
                     return Err(return_after_create_rollback(
                         &self.network,
                         &self.dhcp,
@@ -736,6 +757,14 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .start_owned(definition_name.clone(), command.resource_id.clone())
                     .await
                 {
+                    tracing::warn!(
+                        operation_id = %command.operation_id,
+                        resource_id = %command.resource_id,
+                        domain = %definition_name,
+                        libvirt_stage = "start",
+                        libvirt_detail = %error.message(),
+                        "libvirt create failed"
+                    );
                     let undefine_result = self
                         .adapter
                         .undefine_owned(definition_name.clone(), command.resource_id.clone())
@@ -762,6 +791,14 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 let inspection = match self.adapter.inspect(definition_name.clone()).await {
                     Ok(value) => value,
                     Err(error) => {
+                        tracing::warn!(
+                            operation_id = %command.operation_id,
+                            resource_id = %command.resource_id,
+                            domain = %definition_name,
+                            libvirt_stage = "inspect",
+                            libvirt_detail = %error.message(),
+                            "libvirt create failed"
+                        );
                         let error = match self
                             .adapter
                             .undefine_owned(name.clone(), command.resource_id.clone())
@@ -1250,8 +1287,9 @@ pub(crate) fn verify_owned_domain(
 }
 
 pub(crate) fn agent_error(error: o3k_libvirt::LibvirtError) -> AgentError {
-    // Preserve only the finite adapter category for bounded diagnostics; the
-    // provider message remains intentionally redacted at the agent boundary.
+    // Preserve only the finite adapter category on the wire. The exact
+    // provider operation/code/message is retained in the host-local warning so
+    // a real-host failure can be classified without widening the protocol.
     let category = match error.category {
         ErrorCategory::Unavailable => "unavailable",
         ErrorCategory::ConnectionLost => "connection_lost",
@@ -1259,6 +1297,11 @@ pub(crate) fn agent_error(error: o3k_libvirt::LibvirtError) -> AgentError {
         ErrorCategory::InvalidRequest => "invalid_request",
         ErrorCategory::OperationFailed => "operation_failed",
     };
+    tracing::warn!(
+        libvirt_category = category,
+        libvirt_detail = %error.message(),
+        "libvirt command failed"
+    );
     AgentError::Protocol(format!("libvirt command failed: {category}"))
 }
 

@@ -823,12 +823,31 @@ fn unavailable<T>() -> Result<T, LibvirtError> {
 
 #[cfg(feature = "libvirt")]
 fn open(uri: &str) -> Result<Connect, LibvirtError> {
-    Connect::open(Some(uri)).map_err(|_| {
-        LibvirtError::new(
-            ErrorCategory::ConnectionLost,
-            "qemu:///system connection failed",
-        )
-    })
+    Connect::open(Some(uri))
+        .map_err(|error| libvirt_provider_error(ErrorCategory::ConnectionLost, "connect", error))
+}
+
+/// Retain exact libvirt failure evidence in host-local structured logs while
+/// keeping the authenticated execution protocol's finite error taxonomy. The
+/// `virt` display includes the symbolic and numeric libvirt code and domain;
+/// the returned error carries the same bounded detail for the agent's local
+/// warning line. No provider detail is returned to the control plane.
+#[cfg(feature = "libvirt")]
+fn libvirt_provider_error(
+    category: ErrorCategory,
+    operation: &'static str,
+    error: virt::error::Error,
+) -> LibvirtError {
+    let detail = format!("{operation}: {error}");
+    tracing::error!(
+        libvirt_operation = operation,
+        libvirt_error_code = %error.code(),
+        libvirt_error_domain = %error.domain(),
+        libvirt_error_message = %error.message(),
+        error = %error,
+        "libvirt provider operation failed"
+    );
+    LibvirtError::new(category, detail)
 }
 
 #[cfg(feature = "libvirt")]
@@ -889,12 +908,10 @@ fn version(value: u32) -> String {
 fn backend_define(uri: &str, definition: &DomainDefinition) -> Result<(), LibvirtError> {
     let connection = open(uri)?;
     Domain::define_xml(&connection, &definition.xml).map_err(|error| {
-        tracing::error!(
-            domain = %definition.name,
-            error = %error,
-            "libvirt domain definition failed"
-        );
-        LibvirtError::new(ErrorCategory::OperationFailed, "domain definition failed")
+        let detail =
+            libvirt_provider_error(ErrorCategory::OperationFailed, "domain_define_xml", error);
+        tracing::error!(domain = %definition.name, "libvirt domain definition failed");
+        detail
     })?;
     Ok(())
 }
@@ -905,20 +922,17 @@ fn backend_inspect(uri: &str, name: &str) -> Result<DomainInspection, LibvirtErr
     let connection = open(uri).inspect_err(|error| {
         tracing::warn!(%error, domain = %name, "libvirt inspect connect failed");
     })?;
-    let domain = Domain::lookup_by_name(&connection, name).map_err(|_| {
+    let domain = Domain::lookup_by_name(&connection, name).map_err(|error| {
+        let detail =
+            libvirt_provider_error(ErrorCategory::NotFound, "domain_lookup_by_name", error);
         tracing::warn!(domain = %name, "libvirt inspect domain lookup failed");
-        LibvirtError::new(ErrorCategory::NotFound, "domain was not found")
+        detail
     })?;
-    let info = domain.get_info().map_err(|_| {
-        tracing::warn!(domain = %name, "libvirt inspect domain info failed");
-        LibvirtError::new(ErrorCategory::OperationFailed, "domain inspection failed")
+    let info = domain.get_info().map_err(|error| {
+        libvirt_provider_error(ErrorCategory::OperationFailed, "domain_get_info", error)
     })?;
-    let xml = domain.get_xml_desc(0).map_err(|_| {
-        tracing::warn!(domain = %name, "libvirt inspect domain XML failed");
-        LibvirtError::new(
-            ErrorCategory::OperationFailed,
-            "domain XML inspection failed",
-        )
+    let xml = domain.get_xml_desc(0).map_err(|error| {
+        libvirt_provider_error(ErrorCategory::OperationFailed, "domain_get_xml_desc", error)
     })?;
     let inspection = DomainInspection {
         name: name.to_owned(),
@@ -942,8 +956,9 @@ fn backend_inspect(uri: &str, name: &str) -> Result<DomainInspection, LibvirtErr
 #[cfg(feature = "libvirt")]
 fn backend_action(uri: &str, name: &str, action: DomainAction) -> Result<(), LibvirtError> {
     let connection = open(uri)?;
-    let domain = Domain::lookup_by_name(&connection, name)
-        .map_err(|_| LibvirtError::new(ErrorCategory::NotFound, "domain was not found"))?;
+    let domain = Domain::lookup_by_name(&connection, name).map_err(|error| {
+        libvirt_provider_error(ErrorCategory::NotFound, "domain_lookup_by_name", error)
+    })?;
     let result = match action {
         DomainAction::Start => domain.create().map(|_| ()),
         DomainAction::Shutdown => domain.shutdown().map(|_| ()),
@@ -952,11 +967,16 @@ fn backend_action(uri: &str, name: &str, action: DomainAction) -> Result<(), Lib
         DomainAction::Undefine => domain.undefine(),
     };
     result.map_err(|error| {
-        tracing::error!(domain = %name, ?action, error = %error, "libvirt domain lifecycle operation failed");
-        LibvirtError::new(
-            ErrorCategory::OperationFailed,
-            "domain lifecycle operation failed",
-        )
+        let operation = match action {
+            DomainAction::Start => "domain_start",
+            DomainAction::Shutdown => "domain_shutdown",
+            DomainAction::ForceStop => "domain_destroy",
+            DomainAction::Reboot => "domain_reboot",
+            DomainAction::Undefine => "domain_undefine",
+        };
+        let detail = libvirt_provider_error(ErrorCategory::OperationFailed, operation, error);
+        tracing::error!(domain = %name, ?action, "libvirt domain lifecycle operation failed");
+        detail
     })
 }
 
@@ -968,13 +988,11 @@ fn backend_owned_action(
     action: DomainAction,
 ) -> Result<(), LibvirtError> {
     let connection = open(uri)?;
-    let domain = Domain::lookup_by_name(&connection, name)
-        .map_err(|_| LibvirtError::new(ErrorCategory::NotFound, "domain was not found"))?;
-    let xml = domain.get_xml_desc(0).map_err(|_| {
-        LibvirtError::new(
-            ErrorCategory::OperationFailed,
-            "domain ownership metadata unavailable",
-        )
+    let domain = Domain::lookup_by_name(&connection, name).map_err(|error| {
+        libvirt_provider_error(ErrorCategory::NotFound, "domain_lookup_by_name", error)
+    })?;
+    let xml = domain.get_xml_desc(0).map_err(|error| {
+        libvirt_provider_error(ErrorCategory::OperationFailed, "domain_get_xml_desc", error)
     })?;
     if !rollback_domain_is_owned_xml(name, &xml, expected_server_id) {
         return Err(LibvirtError::new(
@@ -990,11 +1008,16 @@ fn backend_owned_action(
         DomainAction::Undefine => domain.undefine(),
     };
     result.map_err(|error| {
-        tracing::error!(domain = %name, ?action, error = %error, "libvirt owned domain lifecycle operation failed");
-        LibvirtError::new(
-            ErrorCategory::OperationFailed,
-            "owned domain lifecycle operation failed",
-        )
+        let operation = match action {
+            DomainAction::Start => "owned_domain_start",
+            DomainAction::Shutdown => "owned_domain_shutdown",
+            DomainAction::ForceStop => "owned_domain_destroy",
+            DomainAction::Reboot => "owned_domain_reboot",
+            DomainAction::Undefine => "owned_domain_undefine",
+        };
+        let detail = libvirt_provider_error(ErrorCategory::OperationFailed, operation, error);
+        tracing::error!(domain = %name, ?action, "libvirt owned domain lifecycle operation failed");
+        detail
     })
 }
 
