@@ -64,6 +64,14 @@ jobs:
           touch .p15-7-workspace-probe
           test -f .p15-7-workspace-probe
 
+      - name: Verify workspace after process probe
+        working-directory: /tmp
+        run: |
+          set -euo pipefail
+          test -d /home/ubuntu/actions-runner/_work/o3k/o3k
+          test -f /home/ubuntu/actions-runner/_work/o3k/o3k/.p15-7-workspace-probe
+          stat -c 'workspace_after_probe=%U:%G' /home/ubuntu/actions-runner/_work/o3k/o3k
+
       - name: Check out the canonical repository at the exact SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
