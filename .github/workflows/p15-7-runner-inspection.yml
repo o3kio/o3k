@@ -1,0 +1,116 @@
+name: P15.7 runner inspection (read-only)
+
+# Strictly read-only inventory of the protected TestLab runner selected by the
+# P15.7 runner labels. Never deletes, kills, undefines, destroys, or modifies
+# anything on the host. Output is a JSON + text artifact for manual
+# classification as PROVEN_O3K_OWNED / AMBIGUOUS / FOREIGN.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this inspection is being run"
+        required: false
+        type: string
+        default: "p15-7 stale residue check"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Read-only runner inventory (not completion evidence)
+    if: >-
+      github.repository == 'o3kio/o3k' &&
+      github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    timeout-minutes: 15
+    steps:
+      - name: Read-only host inventory
+        env:
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -u
+          OUT="$RUNNER_TEMP/p15-7-runner-inspection"
+          mkdir -p "$OUT"
+          {
+            echo "reason: $REASON"
+            echo "github.run_id: ${{ github.run_id }}"
+            echo "github.sha: ${{ github.sha }}"
+            echo "date: $(date -Is)"
+            echo "hostname: $(hostname)"
+            echo "runner.name: ${RUNNER_NAME:-unknown}"
+            echo "--- uname ---"; uname -a
+            echo "--- mem ---"; free -m
+            echo "--- disk (/) ---"; df -h /
+            echo "--- /dev/kvm ---"; ls -l /dev/kvm 2>&1; test -w /dev/kvm && echo "kvm writable" || echo "kvm not writable"
+            echo "--- libvirt ---"; systemctl is-active libvirtd virtlogd 2>&1; virsh -c qemu:///system uri 2>&1
+          } > "$OUT/host.txt" 2>&1
+
+          virsh -c qemu:///system list --all > "$OUT/domains.txt" 2>&1
+          virsh -c qemu:///system pool-list --all > "$OUT/pools.txt" 2>&1
+          : > "$OUT/pool-details.txt"
+          while read -r pool _state _auto; do
+            case "$pool" in Name|---|"") continue;; esac
+            {
+              echo "=== pool: $pool ==="
+              virsh -c qemu:///system pool-dumpxml "$pool" 2>&1
+              echo "--- vols ---"
+              virsh -c qemu:///system vol-list "$pool" 2>&1 || true
+            } >> "$OUT/pool-details.txt"
+          done < "$OUT/pools.txt"
+
+          ps -eo pid,ppid,etimes,uid,user,args > "$OUT/processes.txt" 2>&1
+
+          {
+            echo "--- /var/lib/o3k-testlab ---"
+            ls -la /var/lib/o3k-testlab 2>&1
+            echo "--- run dirs ---"
+            for d in /var/lib/o3k-testlab/*; do
+              [ -d "$d" ] || continue
+              echo "=== $d ==="
+              ls -la "$d" 2>&1
+              for m in "$d"/.o3k-run-owned "$d"/.o3k-owned "$d"/.o3k-inventory-owned; do
+                if [ -f "$m" ]; then
+                  echo "--- marker $m (mode $(stat -c %a "$m")) ---"
+                  cat "$m"
+                fi
+              done
+            done
+            echo "--- PID record dirs ---"
+            find "${RUNNER_TEMP:-/tmp}" /run /var/run -maxdepth 4 -type f -name '*.pid' -path '*o3k*' 2>/dev/null | while read -r p; do
+              echo "=== pidfile $p ==="; cat "$p" 2>&1
+            done
+            echo "--- RUNNER_TEMP o3k dirs ---"
+            ls -la "$RUNNER_TEMP" 2>&1 | head -100
+            find "$RUNNER_TEMP" -maxdepth 2 -name '.o3k*' 2>/dev/null
+            echo "--- image markers ---"
+            find /var/lib/libvirt/images -maxdepth 2 -name '*.o3k-owned' 2>/dev/null | while read -r m; do
+              echo "=== $m ==="; cat "$m" 2>&1
+            done
+            echo "--- network links ---"
+            ip -o link show 2>&1 | grep -E 'o3k|virbr|tap' || echo "no o3k/virbr/tap links"
+          } > "$OUT/testlab-state.txt" 2>&1
+
+          python3 - "$OUT" > "$OUT/inventory.json" <<'PY'
+          import json, os, sys
+          out = sys.argv[1]
+          def rd(n):
+              p = os.path.join(out, n)
+              return open(p).read() if os.path.exists(p) else ""
+          json.dump({
+              "host": rd("host.txt"),
+              "domains": rd("domains.txt"),
+              "pools": rd("pools.txt"),
+              "pool_details": rd("pool-details.txt"),
+              "processes": rd("processes.txt"),
+              "testlab_state": rd("testlab-state.txt"),
+          }, sys.stdout, indent=2)
+          PY
+
+      - name: Upload inspection artifact
+        uses: actions/upload-artifact@65c4c4c1fdee0b146144b286b20eb4ce2b865e79 # v4
+        with:
+          name: p15-7-runner-inspection-${{ github.run_id }}
+          path: ${{ runner.temp }}/p15-7-runner-inspection
+          if-no-files-found: error
