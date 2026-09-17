@@ -41,8 +41,10 @@ jobs:
           for pid in "${listener_pids[@]}"; do
             printf 'listener_pid=%s cwd=' "${pid}"
             readlink "/proc/${pid}/cwd" || true
-            printf 'listener_pid=%s parent=' "${pid}"
-            ps -o ppid= -p "${pid}" || true
+            parent=$(ps -o ppid= -p "${pid}" | tr -d ' ')
+            printf 'listener_pid=%s parent=%s\n' "${pid}" "${parent}"
+            ps -o pid,ppid,user,stat,lstart,args -p "${parent}" || true
+            ps -o pid,ppid,user,stat,lstart,args --forest -g "${pid}" || true
           done
 
       - name: Stop after runner process inspection
