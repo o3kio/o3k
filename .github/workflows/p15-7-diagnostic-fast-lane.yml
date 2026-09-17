@@ -43,7 +43,7 @@ jobs:
           sleep 5
 
       - name: Restart the runner service after workspace recreation
-        working-directory: /tmp
+        working-directory: /home/ubuntu/actions-runner
         run: |
           set -euo pipefail
           echo 'runner service unit files:'
@@ -59,8 +59,8 @@ jobs:
           if [[ "${#units[@]}" -eq 1 ]]; then
             sudo -n systemctl restart "${units[0]}"
           elif [[ -x /home/ubuntu/actions-runner/svc.sh ]]; then
-            sudo -n /home/ubuntu/actions-runner/svc.sh stop || true
-            sudo -n /home/ubuntu/actions-runner/svc.sh start
+            sudo -n ./svc.sh stop || true
+            sudo -n ./svc.sh start
           else
             echo 'runner service restart mechanism unavailable' >&2
             exit 1
