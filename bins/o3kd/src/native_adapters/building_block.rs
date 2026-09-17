@@ -22,6 +22,31 @@ fn now() -> String {
 }
 
 impl BuildingBlockAdapter {
+    fn resource_matches_provider_ids(
+        kind: &str,
+        resource: &o3k_store::ResourceRecord,
+        ids: &BTreeSet<&str>,
+    ) -> Result<bool, String> {
+        if kind == "compute_instance" {
+            // Placement lives in the durable create intent and names the
+            // BuildingBlock's resource provider. The execution provider
+            // identity may still be unset while terminal lifecycle
+            // projection is converging.
+            let intent = serde_json::from_str::<o3k_provider::CreateInstanceRequest>(
+                &resource.desired_state,
+            )
+            .map_err(|error| format!("invalid compute instance desired state: {error}"))?;
+            return Ok(intent
+                .placement_provider_id
+                .is_some_and(|provider_id| ids.contains(provider_id.as_str())));
+        }
+
+        Ok(resource
+            .provider_id
+            .as_deref()
+            .is_some_and(|provider_id| ids.contains(provider_id)))
+    }
+
     async fn view(&self, block: BuildingBlock) -> Result<BuildingBlockView, String> {
         // References are part of the durable BuildingBlock identity.  Validate
         // them on every projection as well as on enrollment so a provider,
@@ -161,11 +186,7 @@ impl BuildingBlockAdapter {
                 .await
                 .map_err(|e| e.to_string())?
             {
-                if resource
-                    .provider_id
-                    .as_deref()
-                    .is_some_and(|id| ids.contains(id))
-                {
+                if Self::resource_matches_provider_ids(kind, &resource, &ids)? {
                     let index = if kind == "compute_instance" {
                         0
                     } else if kind.contains("attachment") {
@@ -294,5 +315,67 @@ impl BuildingBlockReader for BuildingBlockAdapter {
             .await
             .map_err(|e| e.to_string())?;
         self.view(next).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BuildingBlockAdapter;
+    use o3k_store::ResourceRecord;
+    use std::collections::BTreeSet;
+    use uuid::Uuid;
+
+    #[test]
+    fn compute_blocker_matches_before_provider_identity_projection() {
+        let resource = ResourceRecord {
+            id: Uuid::new_v4(),
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: serde_json::json!({
+                "operation_id": Uuid::new_v4(),
+                "o3k_server_id": Uuid::new_v4(),
+                "name": "workload-a",
+                "vcpus": 1,
+                "memory_mib": 512,
+                "idempotency_key": "create-workload-a",
+                "placement_provider_id": "agent-a",
+            })
+            .to_string(),
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: None,
+        };
+
+        let block_provider_ids = BTreeSet::from(["agent-a"]);
+        assert!(matches!(
+            BuildingBlockAdapter::resource_matches_provider_ids(
+                "compute_instance",
+                &resource,
+                &block_provider_ids,
+            ),
+            Ok(true)
+        ));
+    }
+
+    #[test]
+    fn malformed_compute_intent_fails_closed_for_drain_blockers() {
+        let resource = ResourceRecord {
+            id: Uuid::new_v4(),
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "not-json".to_owned(),
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: None,
+        };
+
+        let result = BuildingBlockAdapter::resource_matches_provider_ids(
+            "compute_instance",
+            &resource,
+            &BTreeSet::from(["agent-a"]),
+        );
+        assert!(result.is_err());
     }
 }
