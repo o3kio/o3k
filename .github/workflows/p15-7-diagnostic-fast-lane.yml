@@ -46,7 +46,12 @@ jobs:
         working-directory: /tmp
         run: |
           set -euo pipefail
-          mapfile -t units < <(sudo -n systemctl list-units --type=service --all --no-legend | awk '$1 ~ /^actions\.runner/ {print $1}')
+          echo 'runner service unit files:'
+          sudo -n systemctl list-unit-files --type=service 'actions.runner*' --no-legend || true
+          echo 'loaded runner service units:'
+          sudo -n systemctl list-units --type=service --all --no-legend | sed -n '/actions[.]runner/p' || true
+          mapfile -t units < <(sudo -n systemctl list-unit-files --type=service 'actions.runner*' --no-legend | awk '$1 ~ /^actions[.]runner.*[.]service$/ {print $1}')
+          printf 'discovered runner units: %s\n' "${#units[@]}"
           test "${#units[@]}" -eq 1
           sudo -n systemctl restart "${units[0]}"
 
