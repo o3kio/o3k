@@ -881,6 +881,19 @@ mod tests {
         assert_eq!(refreshed.allocations.len(), 1);
         assert_eq!(refreshed.inventories[o3k_placement::VCPU].used, 1);
 
+        // A block transition may durably gate Placement before the agent has
+        // acknowledged the desired state. A subsequent capability refresh
+        // must preserve that drain rather than reopening scheduling.
+        registry.upsert(agent_node("agent-a", 4, 4096, 20)).await;
+        placement
+            .set_state("agent-a", o3k_placement::ProviderState::Draining)
+            .await?;
+        sync_agent_inventory(&registry, &placement).await?;
+        assert_eq!(
+            placement.provider("agent-a").await?.state,
+            o3k_placement::ProviderState::Draining
+        );
+
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

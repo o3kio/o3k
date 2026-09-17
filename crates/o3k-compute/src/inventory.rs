@@ -71,11 +71,24 @@ pub async fn sync_agent_inventory(
     placement: &o3k_placement::PlacementLedger,
 ) -> Result<(), SchedulerError> {
     for snapshot in registry.all().await {
+        // A BuildingBlock drain is a durable operator gate in Placement. An
+        // agent heartbeat can still report its own desired state as Enabled
+        // until the control stream receives that projection; never let the
+        // periodic capability publisher reopen a durably draining provider.
+        let published_state = match placement.provider(&snapshot.agent_id).await {
+            Ok(provider)
+                if provider.state == o3k_placement::ProviderState::Draining
+                    && agent_provider_state(&snapshot) == o3k_placement::ProviderState::Enabled =>
+            {
+                o3k_placement::ProviderState::Draining
+            }
+            _ => agent_provider_state(&snapshot),
+        };
         placement
             .sync_provider(
                 &snapshot.agent_id,
                 agent_inventory(&snapshot.capabilities),
-                agent_provider_state(&snapshot),
+                published_state,
             )
             .await?;
     }
