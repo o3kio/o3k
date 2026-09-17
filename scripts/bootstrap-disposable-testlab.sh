@@ -250,7 +250,9 @@ for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat rea
 done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required"
 sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" || fail "account lock directory is unavailable"
-[[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || fail "checkout is not immutable"
+actual_source_commit="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf 'unavailable')"
+[[ "$actual_source_commit" == "$SOURCE_COMMIT" ]] \
+  || fail "checkout is not immutable (expected=${SOURCE_COMMIT} actual=${actual_source_commit} root=${ROOT_DIR})"
 
 GITHUB_RUN_ID="$RUN_ID" RUNNER_TEMP="$RUNNER_TEMP" O3K_TESTLAB_STATE_BASE="$SERVICE_STATE_BASE" \
   bash "$ROOT_DIR/scripts/cleanup-stale-testlab-processes.sh" || true
