@@ -2406,7 +2406,7 @@ impl ResourceApplication for GenericResourceApplication {
                     name: server.name,
                     flavor_id: server.flavor_id.to_string(),
                     image_id: server.image_id,
-                    state: format!("{:?}", server.state),
+                    state: o3k_store::server_state_to_storage(server.state).to_owned(),
                     generation: resource.generation,
                     created_at: None,
                     migration_id: resource

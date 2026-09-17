@@ -3,6 +3,10 @@ use std::sync::Arc;
 use o3k_native_api::{compute::ServerItem, error::NativeReadError};
 use uuid::Uuid;
 
+fn native_server_state(state: o3k_domain::ServerState) -> String {
+    o3k_store::server_state_to_storage(state).to_owned()
+}
+
 /// Store-backed adapter for native Compute server reads.
 pub struct ServerReaderAdapter {
     pub service: Arc<o3k_compute::ComputeService>,
@@ -44,9 +48,13 @@ impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
                     project_id: s.project_id,
                     flavor_id: s.flavor_id.to_string(),
                     image_id: s.image_id,
-                    state: serde_json::to_value(s.state)
-                        .map(|v| v.as_str().unwrap_or("unknown").to_owned())
-                        .unwrap_or_else(|_| "unknown".to_owned()),
+                    // Native compute status uses the same Nova-compatible
+                    // uppercase lifecycle projection as the durable store.
+                    // Serializing `ServerState` directly would expose its
+                    // Rust/serde snake_case spelling ("active"), which is
+                    // not the public compute contract and causes real
+                    // clients to wait forever for ACTIVE.
+                    state: native_server_state(s.state),
                     created_at: None,
                     generation,
                     migration_id,
@@ -62,5 +70,18 @@ impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_server_state;
+    use o3k_domain::ServerState;
+
+    #[test]
+    fn native_compute_state_uses_public_uppercase_projection() {
+        assert_eq!(native_server_state(ServerState::Active), "ACTIVE");
+        assert_eq!(native_server_state(ServerState::Stopped), "SHUTOFF");
+        assert_eq!(native_server_state(ServerState::Building), "BUILD");
     }
 }
