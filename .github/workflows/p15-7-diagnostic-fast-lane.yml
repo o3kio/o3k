@@ -31,26 +31,25 @@ jobs:
     environment: o3k-real-host-validation
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
     steps:
-      - name: Inspect runner process ownership before workspace repair
+      - name: Restart the stale runner listener by exact process identity
         working-directory: /tmp
         run: |
           set -euo pipefail
-          ps -eo pid,ppid,user,stat,lstart,args | sed -n '/Runner.Listener/p' || true
           mapfile -t listener_pids < <(pgrep -u ubuntu -f '/home/ubuntu/actions-runner/bin/Runner[.]Listener run' || true)
-          printf 'listener_pids=%s\n' "${listener_pids[*]-}"
-          for pid in "${listener_pids[@]}"; do
-            printf 'listener_pid=%s cwd=' "${pid}"
-            readlink "/proc/${pid}/cwd" || true
-            parent=$(ps -o ppid= -p "${pid}" | tr -d ' ')
-            printf 'listener_pid=%s parent=%s\n' "${pid}" "${parent}"
-            ps -o pid,ppid,user,stat,lstart,args -p "${parent}" || true
-            ps -o pid,ppid,user,stat,lstart,args --forest -g "${pid}" || true
+          test "${#listener_pids[@]}" -eq 1
+          pid="${listener_pids[0]}"
+          test "$(ps -o user= -p "${pid}" | tr -d ' ')" = ubuntu
+          test "$(readlink "/proc/${pid}/cwd")" = /home/ubuntu/actions-runner
+          kill -TERM "${pid}"
+          for attempt in $(seq 1 30); do
+            mapfile -t replacement_pids < <(pgrep -u ubuntu -f '/home/ubuntu/actions-runner/bin/Runner[.]Listener run' || true)
+            if [[ "${#replacement_pids[@]}" -eq 1 && "${replacement_pids[0]}" != "${pid}" ]]; then
+              printf 'runner_listener_restarted old=%s new=%s\n' "${pid}" "${replacement_pids[0]}"
+              exit 0
+            fi
+            sleep 1
           done
-
-      - name: Stop after runner process inspection
-        working-directory: /tmp
-        run: |
-          echo 'runner process inspection complete'
+          echo 'runner listener did not restart under run-helper' >&2
           exit 1
 
       - name: Recreate runner workspace after bounded host cleanup
