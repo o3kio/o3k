@@ -30,7 +30,7 @@ jobs:
         env:
           REASON: ${{ inputs.reason }}
         run: |
-          set -u
+          set +e +u
           OUT="$RUNNER_TEMP/p15-7-runner-inspection"
           mkdir -p "$OUT"
           {
