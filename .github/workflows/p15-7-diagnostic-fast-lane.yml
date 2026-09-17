@@ -248,6 +248,7 @@ jobs:
         if: steps.bootstrap.outcome == 'success'
         working-directory: ${{ env.DIAGNOSTIC_REPO }}
         env:
+          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
           O3K_REAL_HOST_ARTIFACT_DIR: target/p15-7-diagnostic-artifacts
           O3K_REAL_HOST_RUNNER_LABELS: self-hosted,linux,x64,kvm,libvirt,o3k-testlab
           O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
