@@ -461,37 +461,6 @@ impl ComputeService {
                     state,
                 )
                 .await;
-                if let Ok(resource) = self.store.get_resource(resource.id).await
-                    && resource.observed_state != "ACTIVE"
-                {
-                    // Project after the durable write so the observation always
-                    // matches the state that was actually written. Best-effort
-                    // like the failure arm.
-                    match self
-                        .store
-                        .update_resource(
-                            resource.id,
-                            resource.generation,
-                            &resource.desired_state,
-                            "ACTIVE",
-                            resource.generation,
-                            resource.provider_id.as_deref(),
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            self.project_metering_best_effort(&resource, "ACTIVE").await;
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                operation_id = %request.operation_id,
-                                resource_id = %resource.id,
-                                error = %error,
-                                "server create success projection to ACTIVE failed"
-                            );
-                        }
-                    }
-                }
             }
             _ => {}
         }
