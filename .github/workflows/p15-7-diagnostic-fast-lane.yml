@@ -44,7 +44,7 @@ jobs:
       - name: Verify immutable source checkout
         working-directory: ${{ env.DIAGNOSTIC_REPO }}
         env:
-          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
         run: |
           set -euo pipefail
           [[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]
@@ -254,7 +254,6 @@ jobs:
           O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
           O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
           O3K_REAL_HOST_RUNNER_NAME: ${{ runner.name }}
-          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
         run: bash scripts/real-host-capability-probe.sh
 
       - name: Verify clean host baseline
