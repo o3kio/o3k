@@ -6,7 +6,7 @@ use o3k_kernel::{
     LocationRegistry, PrincipalKind,
 };
 use o3k_native_api::building_block::{BuildingBlockReader, BuildingBlockView, CapacityDimension};
-use o3k_placement::PlacementLedger;
+use o3k_placement::{PlacementLedger, ProviderState};
 use o3k_provider::AgentNodeRegistry;
 use o3k_store::{AuditEventRecord, BuildingBlockRecord, ComputeRepository, O3kStore};
 
@@ -22,6 +22,23 @@ fn now() -> String {
 }
 
 impl BuildingBlockAdapter {
+    /// Project lifecycle gates into Placement, which remains the scheduling
+    /// authority. The projection must be durable before a drain races with a
+    /// new create.
+    async fn project_provider_state(
+        &self,
+        block: &BuildingBlock,
+        state: ProviderState,
+    ) -> Result<(), String> {
+        for provider_id in &block.resource_provider_ids {
+            self.placement
+                .set_state(provider_id, state)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     fn resource_matches_provider_ids(
         kind: &str,
         resource: &o3k_store::ResourceRecord,
@@ -308,6 +325,21 @@ impl BuildingBlockReader for BuildingBlockAdapter {
             .transition(target, blockers)
             .map_err(|e| e.to_string())?;
         let record = BuildingBlockRecord::from_block(&next, now()).map_err(|e| e.to_string())?;
+        // Close capacity before recording a drain/unavailable/removal
+        // transition. If the block write fails, remaining closed is
+        // fail-safe and prevents new work from entering the requested drain.
+        let projected_state = match target {
+            BuildingBlockState::Enrolling => Some(ProviderState::Unavailable),
+            BuildingBlockState::Ready => None,
+            BuildingBlockState::Unavailable | BuildingBlockState::Failed => {
+                Some(ProviderState::Unavailable)
+            }
+            BuildingBlockState::Draining => Some(ProviderState::Draining),
+            BuildingBlockState::Removed => Some(ProviderState::Deleted),
+        };
+        if let Some(state) = projected_state {
+            self.project_provider_state(&old, state).await?;
+        }
         self.store
             .upsert_building_block_with_audit(
                 &record,
@@ -316,6 +348,11 @@ impl BuildingBlockReader for BuildingBlockAdapter {
             )
             .await
             .map_err(|e| e.to_string())?;
+        // Capacity is reopened only after the durable block reaches Ready.
+        if target == BuildingBlockState::Ready {
+            self.project_provider_state(&next, ProviderState::Enabled)
+                .await?;
+        }
         self.view(next).await
     }
 }
