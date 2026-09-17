@@ -40,6 +40,10 @@ EVENT_MESSAGES = {
     "command execution completed",
     "command execution failed",
     "create failed definitively; reporting terminal failure",
+    "libvirt create request",
+    "libvirt create failed",
+    "libvirt provider operation failed",
+    "libvirt command failed",
 }
 EVENT_ERROR_KINDS = {
     "configuration",
