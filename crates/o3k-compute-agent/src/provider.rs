@@ -805,6 +805,7 @@ fn equivalent_committed_transfer(
         && current.artifact_kind == artifact_kind
         && current.sha256 == offer.sha256
         && current.size_bytes == offer.size_bytes
+        && current.expires_at_unix_ms == offer.expires_at_unix_ms
         && current.format == offer.format
         && current.chunk_size_bytes == offer.chunk_size_bytes as u64
         && current.chunk_count == offer.chunk_count as u64
@@ -3317,6 +3318,9 @@ mod tests {
         assert_incompatible(&incompatible);
         incompatible = canonical.clone();
         incompatible.size_bytes = 4;
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.expires_at_unix_ms = offer.expires_at_unix_ms.saturating_add(1);
         assert_incompatible(&incompatible);
         incompatible = canonical.clone();
         incompatible.format = "raw".to_owned();
