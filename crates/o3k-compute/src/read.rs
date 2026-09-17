@@ -366,50 +366,6 @@ impl ComputeService {
         let Ok(operation) = self.store.get_operation(request.operation_id).await else {
             return;
         };
-        // An agent reports the terminal operation and provider observation as
-        // separate, ordered messages.  If the operation update wins the
-        // control-plane race (or the observation was lost), the durable
-        // operation can be Succeeded while the resource projection is still
-        // REQUESTED/BUILD.  Terminal success is authoritative for a create,
-        // so repair the public ACTIVE projection before deciding whether a
-        // re-drive is needed.  Without this branch the `Succeeded` arm below
-        // is unreachable because terminal operations return at the re-drive
-        // guard, leaving a running provider domain stuck at BUILD forever.
-        if operation.state == o3k_store::OperationState::Succeeded {
-            if let Ok(resource) = self.store.get_resource(resource.id).await
-                // Do not overwrite a later lifecycle projection (for
-                // example, a successful Stop that made the server SHUTOFF).
-                // Only the pre-terminal create states can represent a lost
-                // create observation.
-                && matches!(resource.observed_state.as_str(), "REQUESTED" | "BUILD")
-            {
-                match self
-                    .store
-                    .update_resource(
-                        resource.id,
-                        resource.generation,
-                        &resource.desired_state,
-                        "ACTIVE",
-                        resource.generation,
-                        resource.provider_id.as_deref(),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        self.project_metering_best_effort(&resource, "ACTIVE").await;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            operation_id = %request.operation_id,
-                            resource_id = %resource.id,
-                            error = %error,
-                            "server create success projection to ACTIVE failed"
-                        );
-                    }
-                }
-            }
-            return;
-        }
         // Issue #88 S5 rerun: a create whose transfer dispatch was rejected
         // mid-flight (agent killed during the handshake) is marked Retryable
         // by retry_or_fail; the scheduled retry must actually fire, or the
@@ -439,61 +395,105 @@ impl ComputeService {
                 return;
             }
         };
-        if state == o3k_store::OperationState::Failed {
-            self.project_terminal_binding_outcome(request.operation_id.to_string().as_str(), state)
+        match state {
+            o3k_store::OperationState::Failed => {
+                self.project_terminal_binding_outcome(
+                    request.operation_id.to_string().as_str(),
+                    state,
+                )
                 .await;
-            if let Err(error) = self.compensate_failed_create(request.operation_id).await {
-                tracing::warn!(
-                    operation_id = %request.operation_id,
-                    resource_id = %resource.id,
-                    error = %error,
-                    "server create failure compensation failed"
-                );
-            }
-            // A terminal create failure must render ERROR on the poll
-            // surface, or `--wait` keeps showing BUILD forever. The
-            // reconciler projects ERROR internally only for presence
-            // absence; every other failure path (dispatch rejection,
-            // retry budget exhaustion, provider-reported failure) needs
-            // the drive to project it. The update is idempotent: the
-            // resource is only touched when it is not already ERROR.
-            let Ok(resource) = self.store.get_resource(resource.id).await else {
-                return;
-            };
-            if resource.observed_state != server_state_to_storage(ServerState::Error) {
-                // Project after the durable write so the observation always
-                // matches the state that was actually written. Best-effort:
-                // a failure is logged, never returned, and the repair
-                // projection above heals it on the next read.
-                match self
-                    .store
-                    .update_resource(
-                        resource.id,
-                        resource.generation,
-                        &resource.desired_state,
-                        server_state_to_storage(ServerState::Error),
-                        resource.generation,
-                        resource.provider_id.as_deref(),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        self.project_metering_best_effort(
-                            &resource,
+                if let Err(error) = self.compensate_failed_create(request.operation_id).await {
+                    tracing::warn!(
+                        operation_id = %request.operation_id,
+                        resource_id = %resource.id,
+                        error = %error,
+                        "server create failure compensation failed"
+                    );
+                }
+                // A terminal create failure must render ERROR on the poll
+                // surface, or `--wait` keeps showing BUILD forever. The
+                // reconciler projects ERROR internally only for presence
+                // absence; every other failure path (dispatch rejection,
+                // retry budget exhaustion, provider-reported failure) needs
+                // the drive to project it. The update is idempotent: the
+                // resource is only touched when it is not already ERROR.
+                let Ok(resource) = self.store.get_resource(resource.id).await else {
+                    return;
+                };
+                if resource.observed_state != server_state_to_storage(ServerState::Error) {
+                    // Project after the durable write so the observation always
+                    // matches the state that was actually written. Best-effort:
+                    // a failure is logged, never returned, and the repair
+                    // projection above heals it on the next read.
+                    match self
+                        .store
+                        .update_resource(
+                            resource.id,
+                            resource.generation,
+                            &resource.desired_state,
                             server_state_to_storage(ServerState::Error),
+                            resource.generation,
+                            resource.provider_id.as_deref(),
                         )
-                        .await;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            operation_id = %request.operation_id,
-                            resource_id = %resource.id,
-                            error = %error,
-                            "server create failure projection to ERROR failed"
-                        );
+                        .await
+                    {
+                        Ok(_) => {
+                            self.project_metering_best_effort(
+                                &resource,
+                                server_state_to_storage(ServerState::Error),
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                operation_id = %request.operation_id,
+                                resource_id = %resource.id,
+                                error = %error,
+                                "server create failure projection to ERROR failed"
+                            );
+                        }
                     }
                 }
             }
+            o3k_store::OperationState::Succeeded => {
+                self.project_terminal_binding_outcome(
+                    request.operation_id.to_string().as_str(),
+                    state,
+                )
+                .await;
+                if let Ok(resource) = self.store.get_resource(resource.id).await
+                    && resource.observed_state != "ACTIVE"
+                {
+                    // Project after the durable write so the observation always
+                    // matches the state that was actually written. Best-effort
+                    // like the failure arm.
+                    match self
+                        .store
+                        .update_resource(
+                            resource.id,
+                            resource.generation,
+                            &resource.desired_state,
+                            "ACTIVE",
+                            resource.generation,
+                            resource.provider_id.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            self.project_metering_best_effort(&resource, "ACTIVE").await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                operation_id = %request.operation_id,
+                                resource_id = %resource.id,
+                                error = %error,
+                                "server create success projection to ACTIVE failed"
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
