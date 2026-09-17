@@ -40,6 +40,7 @@ jobs:
           sudo -n chmod 0755 /home/ubuntu/actions-runner /home/ubuntu/actions-runner/_work /home/ubuntu/actions-runner/_work/o3k /home/ubuntu/actions-runner/_work/o3k/o3k
           test -d /home/ubuntu/actions-runner/_work/o3k/o3k
           test "$(stat -c '%U:%G' /home/ubuntu/actions-runner/_work/o3k/o3k)" = ubuntu:ubuntu
+          sleep 5
 
       - name: Check out the canonical repository at the exact SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
