@@ -176,6 +176,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "capture-p15-7-provision-diagnostics.py", "p15-7-provisioning-diagnostics.json", "REPLAY_JOIN_FILE",
                  "capture-p15-7-workload-diagnostics.py", "p15-7-workload-failure-diagnostics.json",
                  "capture_workload_b_failure_diagnostics", "workload-b-operation.raw.json", "/operations/$operation_id",
+                 "install -d -o root -g libvirt-qemu -m 02750 /var/lib/o3k-compute",
                  "capture_failure_diagnostics",
                  "join-request.json", "remote_agent_cleanup", "sudo mkdir -- '$remote_stage'", "sudo rm -rf -- '$remote_stage'",
                  "canonical agent identity does not match agent id", "cross_tenant_test_prerequisite_missing",
