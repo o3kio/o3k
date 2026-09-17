@@ -56,6 +56,14 @@ jobs:
             sleep 1
           done
 
+      - name: Probe runner workspace process launch
+        working-directory: /home/ubuntu/actions-runner/_work/o3k/o3k
+        run: |
+          set -euo pipefail
+          pwd
+          touch .p15-7-workspace-probe
+          test -f .p15-7-workspace-probe
+
       - name: Check out the canonical repository at the exact SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
