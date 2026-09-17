@@ -73,12 +73,18 @@ jobs:
           stat -c 'workspace_after_probe=%U:%G' /home/ubuntu/actions-runner/_work/o3k/o3k
 
       - name: Check out the canonical repository at the exact SHA
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.target_sha || github.sha }}
-          path: p15-7-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
-          fetch-depth: 0
-          persist-credentials: false
+        working-directory: /tmp
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -d /home/ubuntu/actions-runner/_work/o3k/o3k
+          repo="${DIAGNOSTIC_REPO}"
+          git init --quiet "${repo}"
+          git -C "${repo}" remote add origin https://github.com/o3kio/o3k.git
+          git -C "${repo}" -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" fetch --quiet --no-tags --depth=1 origin "${TARGET_SHA}"
+          git -C "${repo}" checkout --quiet --detach "${TARGET_SHA}"
+          test "$(git -C "${repo}" rev-parse HEAD)" = "${TARGET_SHA}"
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned; reads rust-toolchain.toml
 
