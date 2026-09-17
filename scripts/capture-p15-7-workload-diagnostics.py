@@ -281,7 +281,7 @@ def write_atomic(destination: pathlib.Path, document: dict[str, object]) -> None
 def main() -> int:
     if len(sys.argv) not in (12, 13):
         print(
-            "usage: capture-p15-7-workload-diagnostics.py OUTPUT WORK_ROOT SOURCE_SHA RUN_ID RESOURCE_ID OPERATION_ID HOST_A HOST_B DRAIN_ID SERVER_HTTP OPERATION_HTTP",
+            "usage: capture-p15-7-workload-diagnostics.py OUTPUT WORK_ROOT SOURCE_SHA RUN_ID RESOURCE_ID OPERATION_ID HOST_A HOST_B DRAIN_ID SERVER_HTTP OPERATION_HTTP [workload-a|workload-b]",
             file=sys.stderr,
         )
         return 2
@@ -313,7 +313,7 @@ def main() -> int:
     try:
         resource_id = str(uuid.UUID(resource_id))
         operation_id = str(uuid.UUID(operation_id))
-        drain_id = str(uuid.UUID(drain_id))
+        drain_id = None if workload_label == "workload-a" and drain_id == "none" else str(uuid.UUID(drain_id))
     except ValueError:
         print("P15.7 workload diagnostics: invalid resource identity", file=sys.stderr)
         return 2

@@ -175,7 +175,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-c-uuid\")\"", "provision_vms_bounded",
                  "capture-p15-7-provision-diagnostics.py", "p15-7-provisioning-diagnostics.json", "REPLAY_JOIN_FILE",
                  "capture-p15-7-workload-diagnostics.py", "p15-7-workload-failure-diagnostics.json",
-                 "capture_workload_b_failure_diagnostics", "workload-b-operation.raw.json", "/operations/$operation_id",
+                 "capture_workload_failure_diagnostics", "${workload_label}-operation.raw.json", "/operations/$operation_id",
                  "install -d -o root -g libvirt-qemu -m 02750 /var/lib/o3k-compute",
                  "capture_failure_diagnostics",
                  "join-request.json", "remote_agent_cleanup", "sudo mkdir -- '$remote_stage'", "sudo rm -rf -- '$remote_stage'",
@@ -210,7 +210,7 @@ diagnostic_fixture_step = diagnostic.split("- name: Prepare P15.7 foreign-projec
 assert "working-directory: ${{ env.DIAGNOSTIC_REPO }}" in diagnostic_fixture_step
 assert journey.index('[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]') < journey.index('mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"')
 assert "O3K_P15_7_JOURNEY_COMMAND" not in journey
-assert journey.index('capture_workload_b_failure_diagnostics') < journey.index('die "workload B did not become ACTIVE before cleanup"')
+assert journey.index('capture_workload_failure_diagnostics workload-b') < journey.index('die "workload B did not become ACTIVE before cleanup"')
 assert journey.index('die "workload B did not become ACTIVE before cleanup"') < journey.index('Idempotency-Key: p15-7-$RUN_ID-delete-b')
 assert 'p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert 'p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
@@ -386,7 +386,7 @@ import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 doc = json.loads(path.read_text(encoding="utf-8"))
 assert doc["artifact_type"] == "o3k-p15-7-workload-failure-diagnostics"
-assert doc["reason"] == "workload_b_activation_timeout" and doc["redacted"] is True
+assert doc["reason"] == "workload-b_activation_failure" and doc["redacted"] is True
 assert doc["observations"]["native_server_state"] == "BUILDING"
 assert doc["observations"]["operation_state"] == "running"
 assert doc["observations"]["operation_error_category"] == "unknown"
@@ -399,6 +399,35 @@ for secret in ("sentinel-native-token", "sentinel-operation-error", "sentinel-ag
     assert secret not in serialized, secret
 assert "provider_resource_id" not in serialized and "authorization" not in serialized
 assert path.stat().st_mode & 0o777 == 0o600
+PY
+# The bootstrap agent can fail before a drain block has been selected. Keep
+# its failure evidence and distinguish an absent drain from a fabricated ID.
+python3 - "${ROOT_DIR}" "${WORKLOAD_DIAGNOSTIC_ROOT}" "${WORKLOAD_DIAGNOSTIC_ARTIFACT}" <<'PY'
+import json, pathlib, subprocess, sys
+root, work, output = map(pathlib.Path, sys.argv[1:])
+operation_id = "22222222-2222-4222-8222-222222222222"
+(work / "workload-a-state.raw.json").write_text(json.dumps({"status": {"state": "ERROR"}, "token": "sentinel-a-secret"}))
+(work / "workload-a-operation.raw.json").write_text(json.dumps({"state": "failed", "error": "terminal"}))
+(work / "agent-compute-agent-events.raw.jsonl").write_text(json.dumps({
+    "fields": {"message": "command execution failed", "operation_id": operation_id,
+               "error_kind": "libvirt_operation_failed", "token": "sentinel-a-secret"}
+}) + "\n")
+command = [sys.executable, str(root / "scripts/capture-p15-7-workload-diagnostics.py"),
+           str(output), str(work), "0123456789abcdef0123456789abcdef01234567", "test-run",
+           "11111111-1111-4111-8111-111111111111", operation_id,
+           "unknown", "unknown", "none", "200", "200", "workload-a"]
+subprocess.run(command, check=True)
+doc = json.loads(output.read_text())
+assert doc["reason"] == "workload-a_activation_failure"
+assert doc["placement_observation"]["drained_block_id"] is None
+assert doc["observations"]["native_server_state"] == "ERROR"
+assert doc["observations"]["operation_state"] == "failed"
+assert doc["observations"]["operation_error_category"] == "terminal"
+assert any(e["agent"] == "compute-agent" and e["error_kind"] == "libvirt_operation_failed"
+           for e in doc["observations"]["agent_events"])
+assert "sentinel-a-secret" not in output.read_text()
+command[-1] = "workload-b"
+assert subprocess.run(command, capture_output=True).returncode != 0
 PY
 JOURNEY_ARTIFACT="${WORK_DIR}/journey-diagnostics.json"
 python3 "${ROOT_DIR}/scripts/capture-p15-7-provision-diagnostics.py" \
