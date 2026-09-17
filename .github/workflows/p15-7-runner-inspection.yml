@@ -92,21 +92,7 @@ jobs:
             ip -o link show 2>&1 | grep -E 'o3k|virbr|tap' || echo "no o3k/virbr/tap links"
           } > "$OUT/testlab-state.txt" 2>&1
 
-          python3 - "$OUT" > "$OUT/inventory.json" <<'PY'
-          import json, os, sys
-          out = sys.argv[1]
-          def rd(n):
-              p = os.path.join(out, n)
-              return open(p).read() if os.path.exists(p) else ""
-          json.dump({
-              "host": rd("host.txt"),
-              "domains": rd("domains.txt"),
-              "pools": rd("pools.txt"),
-              "pool_details": rd("pool-details.txt"),
-              "processes": rd("processes.txt"),
-              "testlab_state": rd("testlab-state.txt"),
-          }, sys.stdout, indent=2)
-          PY
+          ls -la "$OUT"
 
       - name: Upload inspection artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
