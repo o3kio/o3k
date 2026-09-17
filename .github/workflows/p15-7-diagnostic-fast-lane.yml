@@ -45,6 +45,12 @@ jobs:
             ps -o ppid= -p "${pid}" || true
           done
 
+      - name: Stop after runner process inspection
+        working-directory: /tmp
+        run: |
+          echo 'runner process inspection complete'
+          exit 1
+
       - name: Recreate runner workspace after bounded host cleanup
         working-directory: /tmp
         run: |
