@@ -131,7 +131,7 @@ def operation_error_category(document: object) -> str:
 
 def agent_events(root: pathlib.Path, operation_id: str) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
-    for agent in ("block-a", "block-b", "block-c"):
+    for agent in ("block-a", "block-b", "block-c", "compute-agent"):
         path = safe_child(root, f"agent-{agent}-events.raw.jsonl")
         if not path.exists():
             continue
@@ -191,7 +191,7 @@ def agent_events(root: pathlib.Path, operation_id: str) -> list[dict[str, object
 
 def agent_log_probes(root: pathlib.Path) -> list[dict[str, object]]:
     probes: list[dict[str, object]] = []
-    for agent in ("block-a", "block-b", "block-c"):
+    for agent in ("block-a", "block-b", "block-c", "compute-agent"):
         path = safe_child(root, f"agent-{agent}-log-probe.raw")
         if not path.exists():
             continue
@@ -218,7 +218,7 @@ def agent_log_probes(root: pathlib.Path) -> list[dict[str, object]]:
 
 def agent_message_probes(root: pathlib.Path, operation_id: str) -> list[dict[str, object]]:
     probes: list[dict[str, object]] = []
-    for agent in ("block-a", "block-b", "block-c"):
+    for agent in ("block-a", "block-b", "block-c", "compute-agent"):
         path = safe_child(root, f"agent-{agent}-message-probe.raw.jsonl")
         if not path.exists():
             continue
@@ -279,7 +279,7 @@ def write_atomic(destination: pathlib.Path, document: dict[str, object]) -> None
 
 
 def main() -> int:
-    if len(sys.argv) != 12:
+    if len(sys.argv) not in (12, 13):
         print(
             "usage: capture-p15-7-workload-diagnostics.py OUTPUT WORK_ROOT SOURCE_SHA RUN_ID RESOURCE_ID OPERATION_ID HOST_A HOST_B DRAIN_ID SERVER_HTTP OPERATION_HTTP",
             file=sys.stderr,
@@ -297,7 +297,11 @@ def main() -> int:
         drain_id,
         server_http,
         operation_http,
-    ) = sys.argv[1:]
+    ) = sys.argv[1:12]
+    workload_label = sys.argv[12] if len(sys.argv) == 13 else "workload-b"
+    if not re.fullmatch(r"workload-[ab]", workload_label):
+        print("P15.7 workload diagnostics: invalid workload label", file=sys.stderr)
+        return 2
     output = pathlib.Path(output_arg)
     work_root = pathlib.Path(work_root_arg)
     if not re.fullmatch(r"[0-9a-fA-F]{40}", source_sha):
@@ -327,8 +331,8 @@ def main() -> int:
         return 2
 
     try:
-        server = read_json(work_root, "workload-b-state.raw.json")
-        operation = read_json(work_root, "workload-b-operation.raw.json")
+        server = read_json(work_root, f"{workload_label}-state.raw.json")
+        operation = read_json(work_root, f"{workload_label}-operation.raw.json")
         events = agent_events(work_root, operation_id)
         probes = agent_log_probes(work_root)
         message_probes = agent_message_probes(work_root, operation_id)
@@ -343,7 +347,7 @@ def main() -> int:
             "artifact_type": "o3k-p15-7-workload-failure-diagnostics",
             "schema_version": 1,
             "status": "failed",
-            "reason": "workload_b_activation_timeout",
+            "reason": f"{workload_label}_activation_failure",
             "tested_source_sha": source_sha.lower(),
             "run_id": run_id,
             "redacted": True,
