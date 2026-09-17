@@ -31,81 +31,13 @@ jobs:
     environment: o3k-real-host-validation
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
     steps:
-      - name: Restart the stale runner listener by exact process identity
-        working-directory: /tmp
-        run: |
-          set -euo pipefail
-          mapfile -t listener_pids < <(pgrep -u ubuntu -f '/home/ubuntu/actions-runner/bin/Runner[.]Listener run' || true)
-          test "${#listener_pids[@]}" -eq 1
-          pid="${listener_pids[0]}"
-          test "$(ps -o user= -p "${pid}" | tr -d ' ')" = ubuntu
-          test "$(readlink "/proc/${pid}/cwd")" = /home/ubuntu/actions-runner
-          kill -TERM "${pid}"
-          for attempt in $(seq 1 30); do
-            mapfile -t replacement_pids < <(pgrep -u ubuntu -f '/home/ubuntu/actions-runner/bin/Runner[.]Listener run' || true)
-            if [[ "${#replacement_pids[@]}" -eq 1 && "${replacement_pids[0]}" != "${pid}" ]]; then
-              printf 'runner_listener_restarted old=%s new=%s\n' "${pid}" "${replacement_pids[0]}"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo 'runner listener did not restart under run-helper' >&2
-          exit 1
-
-      - name: Recreate runner workspace after bounded host cleanup
-        working-directory: /tmp
-        run: |
-          set -euo pipefail
-          sudo -n mkdir -p /home/ubuntu/actions-runner/_work/o3k/o3k
-          sudo -n chown ubuntu:ubuntu /home/ubuntu/actions-runner /home/ubuntu/actions-runner/_work /home/ubuntu/actions-runner/_work/o3k /home/ubuntu/actions-runner/_work/o3k/o3k
-          sudo -n chmod 0755 /home/ubuntu/actions-runner /home/ubuntu/actions-runner/_work /home/ubuntu/actions-runner/_work/o3k /home/ubuntu/actions-runner/_work/o3k/o3k
-          test -d /home/ubuntu/actions-runner/_work/o3k/o3k
-          test "$(stat -c '%U:%G' /home/ubuntu/actions-runner/_work/o3k/o3k)" = ubuntu:ubuntu
-          sleep 5
-
-      - name: Verify runner workspace persists after recreation
-        working-directory: /tmp
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 20); do
-            if test -d /home/ubuntu/actions-runner/_work/o3k/o3k; then
-              printf 'workspace_present attempt=%s\n' "${attempt}"
-            else
-              printf 'workspace_missing attempt=%s\n' "${attempt}" >&2
-              exit 1
-            fi
-            sleep 1
-          done
-
-      - name: Probe runner workspace process launch
-        working-directory: /home/ubuntu/actions-runner/_work/o3k/o3k
-        run: |
-          set -euo pipefail
-          pwd
-          touch .p15-7-workspace-probe
-          test -f .p15-7-workspace-probe
-
-      - name: Verify workspace after process probe
-        working-directory: /tmp
-        run: |
-          set -euo pipefail
-          test -d /home/ubuntu/actions-runner/_work/o3k/o3k
-          test -f /home/ubuntu/actions-runner/_work/o3k/o3k/.p15-7-workspace-probe
-          stat -c 'workspace_after_probe=%U:%G' /home/ubuntu/actions-runner/_work/o3k/o3k
-
       - name: Check out the canonical repository at the exact SHA
-        working-directory: /tmp
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          test -d /home/ubuntu/actions-runner/_work/o3k/o3k
-          repo="${DIAGNOSTIC_REPO}"
-          git init --quiet "${repo}"
-          git -C "${repo}" remote add origin https://github.com/o3kio/o3k.git
-          git -C "${repo}" -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" fetch --quiet --no-tags --depth=1 origin "${TARGET_SHA}"
-          git -C "${repo}" checkout --quiet --detach "${TARGET_SHA}"
-          test "$(git -C "${repo}" rev-parse HEAD)" = "${TARGET_SHA}"
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.target_sha || github.sha }}
+          path: p15-7-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned; reads rust-toolchain.toml
 
