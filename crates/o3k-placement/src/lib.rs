@@ -1283,6 +1283,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_does_not_reopen_a_draining_provider() -> Result<(), PlacementError> {
+        let root = test_root("sync-draining");
+        let db_path = root.join("placement.db");
+        let store = o3k_store::testkit::open_file(&db_path)
+            .await
+            .map_err(map_store_error)?;
+        let ledger = test_ledger(&root, &store).await;
+
+        ledger
+            .sync_provider("node-1", inventory(), ProviderState::Enabled)
+            .await?;
+        ledger.set_state("node-1", ProviderState::Draining).await?;
+
+        let refreshed = ledger
+            .sync_provider("node-1", inventory(), ProviderState::Enabled)
+            .await?;
+        assert_eq!(refreshed.state, ProviderState::Draining);
+
+        drop(ledger);
+        drop(store);
+        fs::remove_dir_all(&root).map_err(PlacementError::Storage)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn allocation_intent_is_restart_safe_and_commit_is_idempotent()
     -> Result<(), PlacementError> {
         let root = test_root("intent");

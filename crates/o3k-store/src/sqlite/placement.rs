@@ -827,7 +827,15 @@ impl SqliteStore {
             .execute(&mut *connection)
             .await
             .map_err(StoreError::Database)?;
-            sqlx::query("UPDATE placement_providers SET state = ? WHERE id = ?")
+            sqlx::query(
+                "UPDATE placement_providers
+                 SET state = CASE
+                     WHEN state = 'Draining' AND ? = 'Enabled' THEN state
+                     ELSE ?
+                 END
+                 WHERE id = ?",
+            )
+                .bind(state)
                 .bind(state)
                 .bind(node_id)
                 .execute(&mut *connection)

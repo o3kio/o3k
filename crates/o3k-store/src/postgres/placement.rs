@@ -436,7 +436,13 @@ impl PlacementRepository for PostgresStore {
             "INSERT INTO placement_providers (id, node_id, state, generation)
              VALUES ($1, $1, $2, 1)
              ON CONFLICT (node_id) DO UPDATE
-             SET state = EXCLUDED.state, generation = placement_providers.generation + 1
+             SET state = CASE
+                     WHEN placement_providers.state = 'Draining'
+                          AND EXCLUDED.state = 'Enabled'
+                     THEN placement_providers.state
+                     ELSE EXCLUDED.state
+                 END,
+                 generation = placement_providers.generation + 1
              RETURNING id, node_id, state, generation",
         )
         .bind(node_id)
