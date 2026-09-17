@@ -787,6 +787,33 @@ fn artifact_kind_name(kind: o3k_provider::ArtifactKind) -> &'static str {
     }
 }
 
+fn equivalent_committed_transfer(
+    current: &ArtifactTransferRecord,
+    offer: &agent_proto::ArtifactOffer,
+    operation_id: Uuid,
+    resource_id: Uuid,
+    artifact_kind: &str,
+    agent_epoch: &str,
+) -> bool {
+    current.transfer_id == offer.transfer_id
+        && current.command_id == offer.command_id
+        && current.operation_id == operation_id
+        && current.resource_id == resource_id
+        && current.agent_id == offer.agent_id
+        && current.agent_epoch == agent_epoch
+        && current.artifact_id == offer.artifact_id
+        && current.artifact_kind == artifact_kind
+        && current.sha256 == offer.sha256
+        && current.size_bytes == offer.size_bytes
+        && current.expires_at_unix_ms == offer.expires_at_unix_ms
+        && current.format == offer.format
+        && current.chunk_size_bytes == offer.chunk_size_bytes as u64
+        && current.chunk_count == offer.chunk_count as u64
+        && current.state == ArtifactTransferState::Committed
+        && current.contiguous_bytes == offer.size_bytes
+        && current.next_chunk_index == offer.chunk_count as u64
+}
+
 fn unix_ms_after(duration: Duration) -> i64 {
     unix_ms().saturating_add(duration.as_millis().min(i64::MAX as u128) as i64)
 }
@@ -1556,7 +1583,7 @@ impl ComputeProvider for AgentComputeProvider {
                 "agent create artifact transfer committed"
             );
             if let Some(store) = &self.store {
-                store
+                let commit = store
                     .update_artifact_transfer(
                         &offer.transfer_id,
                         &agent.agent_epoch,
@@ -1567,16 +1594,39 @@ impl ComputeProvider for AgentComputeProvider {
                             retry_count: 0,
                         },
                     )
-                    .await
-                    .map_err(|error| {
+                    .await;
+                if let Err(error) = commit {
+                    // The authenticated agent acknowledgement can be
+                    // projected by the event consumer immediately before
+                    // this foreground writer. Treat an already-complete
+                    // terminal row as the same successful commit; retain
+                    // conflicts for incomplete or differently identified
+                    // state (P15.7 artifact-transfer race).
+                    let already_committed =
+                        matches!(error, StoreError::ArtifactTransferConflict(_))
+                            && store
+                                .get_artifact_transfer(&offer.transfer_id)
+                                .await
+                                .is_ok_and(|current| {
+                                    equivalent_committed_transfer(
+                                        &current,
+                                        &offer,
+                                        request.operation_id,
+                                        request.o3k_server_id,
+                                        artifact_kind_name(artifact.kind),
+                                        &agent.agent_epoch,
+                                    )
+                                });
+                    if !already_committed {
                         tracing::warn!(
                             resource_id = %request.o3k_server_id,
                             artifact_kind = artifact_kind_name(artifact.kind),
                             error = %error,
                             "artifact transfer commit update failed"
                         );
-                        ProviderError::Conflict
-                    })?;
+                        return Err(ProviderError::Conflict);
+                    }
+                }
             }
         }
         if seen != [true, true] {
@@ -2034,6 +2084,7 @@ mod tests {
         ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
         UnconfiguredResolvedCreateResolver,
     };
+    use o3k_store::DurableStore;
     use sha2::Digest;
     use tokio::sync::mpsc;
 
@@ -3116,6 +3167,183 @@ mod tests {
     /// validation rehashes the dispatched bytes).
     const IMAGE_PAYLOAD: &[u8] = b"o3k-race-test-image-payload";
     const CONFIG_DRIVE_PAYLOAD: &[u8] = b"o3k-race-test-config-drive-payload";
+
+    fn artifact_transfer_fixture() -> (
+        ArtifactTransferRecord,
+        agent_proto::ArtifactOffer,
+        Uuid,
+        Uuid,
+        String,
+    ) {
+        let operation_id = Uuid::now_v7();
+        let resource_id = Uuid::now_v7();
+        let sha256 = "a".repeat(64);
+        let transfer_id = "transfer-race".to_owned();
+        let command_id = "command-race".to_owned();
+        let agent_id = "node-a".to_owned();
+        let agent_epoch = "epoch-1".to_owned();
+        let artifact_id = "artifact.test".to_owned();
+        let record = ArtifactTransferRecord {
+            transfer_id: transfer_id.clone(),
+            command_id: command_id.clone(),
+            operation_id,
+            resource_id,
+            agent_id: agent_id.clone(),
+            agent_epoch: agent_epoch.clone(),
+            artifact_id: artifact_id.clone(),
+            artifact_kind: "image_base".to_owned(),
+            sha256: sha256.clone(),
+            size_bytes: 8,
+            expires_at_unix_ms: 2_000_000_000_000,
+            format: "qcow2".to_owned(),
+            chunk_size_bytes: 4,
+            chunk_count: 2,
+            state: ArtifactTransferState::Receiving,
+            contiguous_bytes: 4,
+            next_chunk_index: 1,
+            retry_count: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let offer = agent_proto::ArtifactOffer {
+            transfer_id,
+            command_id,
+            operation_id: operation_id.to_string(),
+            resource_id: resource_id.to_string(),
+            agent_id,
+            artifact_id,
+            kind: agent_proto::ArtifactKind::ImageBase as i32,
+            sha256,
+            size_bytes: 8,
+            format: "qcow2".to_owned(),
+            chunk_size_bytes: 4,
+            chunk_count: 2,
+            expires_at_unix_ms: 2_000_000_000_000,
+        };
+        (record, offer, operation_id, resource_id, agent_epoch)
+    }
+
+    /// Regression for the foreground artifact waiter racing the asynchronous
+    /// status projection: the competing commit wins durably, the foreground
+    /// conflict adopts that exact canonical result, and incompatible rows are
+    /// never accepted.
+    #[tokio::test]
+    async fn foreground_artifact_commit_adopts_only_equivalent_terminal_row()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = o3k_store::testkit::open_memory().await?;
+        let (mut receiving, offer, operation_id, resource_id, agent_epoch) =
+            artifact_transfer_fixture();
+        seed_create_durable_rows(&store, operation_id, resource_id).await?;
+        store.insert_artifact_transfer(&receiving).await?;
+
+        // The asynchronous recovery/status projection commits first.
+        store
+            .update_artifact_transfer(
+                &offer.transfer_id,
+                &agent_epoch,
+                ArtifactTransferUpdate {
+                    state: ArtifactTransferState::Committed,
+                    contiguous_bytes: offer.size_bytes,
+                    next_chunk_index: offer.chunk_count as u64,
+                    retry_count: 3,
+                },
+            )
+            .await?;
+        let foreground = store
+            .update_artifact_transfer(
+                &offer.transfer_id,
+                &agent_epoch,
+                ArtifactTransferUpdate {
+                    state: ArtifactTransferState::Committed,
+                    contiguous_bytes: offer.size_bytes,
+                    next_chunk_index: offer.chunk_count as u64,
+                    retry_count: 0,
+                },
+            )
+            .await;
+        assert!(matches!(
+            foreground,
+            Err(StoreError::ArtifactTransferConflict(_))
+        ));
+        let canonical = store.get_artifact_transfer(&offer.transfer_id).await?;
+        assert!(equivalent_committed_transfer(
+            &canonical,
+            &offer,
+            operation_id,
+            resource_id,
+            "image_base",
+            &agent_epoch,
+        ));
+        assert_eq!(canonical.retry_count, 3);
+        assert_eq!(store.list_recoverable_artifact_transfers().await?.len(), 0);
+
+        // Every immutable identity/fencing field and complete progress is
+        // required for adoption; retry_count remains intentionally mutable.
+        let mut incompatible = canonical.clone();
+        let assert_incompatible = |record: &ArtifactTransferRecord| {
+            assert!(!equivalent_committed_transfer(
+                record,
+                &offer,
+                operation_id,
+                resource_id,
+                "image_base",
+                &agent_epoch,
+            ));
+        };
+        incompatible.transfer_id = "transfer-other".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.command_id = "command-other".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.operation_id = Uuid::now_v7();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.resource_id = Uuid::now_v7();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.agent_id = "node-other".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.agent_epoch = "epoch-other".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.artifact_id = "artifact-other".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.artifact_kind = "config_drive_iso".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.sha256 = "b".repeat(64);
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.size_bytes = 4;
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.expires_at_unix_ms = offer.expires_at_unix_ms.saturating_add(1);
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.format = "raw".to_owned();
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.chunk_size_bytes = 8;
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.chunk_count = 1;
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.contiguous_bytes = 4;
+        assert_incompatible(&incompatible);
+        incompatible = canonical.clone();
+        incompatible.next_chunk_index = 1;
+        assert_incompatible(&incompatible);
+        receiving.state = ArtifactTransferState::Receiving;
+        assert_incompatible(&receiving);
+        incompatible = canonical.clone();
+        incompatible.state = ArtifactTransferState::Rejected;
+        assert_incompatible(&incompatible);
+        Ok(())
+    }
 
     fn sha256_hex(bytes: &[u8]) -> String {
         format!("{:x}", sha2::Sha256::digest(bytes))
