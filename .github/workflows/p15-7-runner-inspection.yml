@@ -90,6 +90,8 @@ jobs:
             done
             echo "--- network links ---"
             ip -o link show 2>&1 | grep -E 'o3k|virbr|tap' || echo "no o3k/virbr/tap links"
+            echo "--- full link list (foreign delta forensics) ---"
+            ip -o link show 2>&1
           } > "$OUT/testlab-state.txt" 2>&1
 
           ls -la "$OUT"
