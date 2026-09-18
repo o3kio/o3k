@@ -225,7 +225,7 @@ CLEANUP_DONE=false
 # Initialized before the EXIT trap because provisioning can fail before the
 # canonical operator exchange assigns the run-scoped token path.
 OPERATOR_TOKEN_FILE="${O3K_P15_7_OPERATOR_TOKEN_FILE:-}"
-REPLAY_JOIN_FILE=""
+declare -A REPLAY_JOIN_BY_AGENT=()
 OPERATOR_CURL_CONFIG=""
 FOREIGN_PROJECT_ID=""
 FOREIGN_TOKEN=""
@@ -569,7 +569,10 @@ PY
     join_args+=(--region "$JOIN_REGION")
   fi
   O3K_API_URL="$API" "$STATE_ROOT/bin/o3k" "${join_args[@]}" >"$WORK_ROOT/$1-join.json" || die "authenticated join failed: $id"
-  [[ "$id" == block-a ]] && REPLAY_JOIN_FILE="$WORK_ROOT/$id-join-request.json"
+  # Retain every journey-joined agent's original join request: the replay
+  # negative probe must target whichever agent actually hosted workload A
+  # (see the probe below), not a fixed block name.
+  REPLAY_JOIN_BY_AGENT["$id"]="$WORK_ROOT/$id-join-request.json"
   BLOCK_IDS[$id]="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("building_block_id", ""))' "$WORK_ROOT/$1-join.json")"; [[ "${BLOCK_IDS[$id]}" =~ ^[0-9a-fA-F-]{36}$ ]] || die "canonical BuildingBlock missing: $id"
 }
 install_agent() {
@@ -1036,9 +1039,44 @@ PY
 # accepted and is a hard failure.
 code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST "$API/bootstrap/join" -H 'Content-Type: application/json' -d '{}')"
 [[ "$code" == 400 || "$code" == 401 || "$code" == 403 || "$code" == 422 ]] || die "unauthenticated join accepted"
-[[ -n "$REPLAY_JOIN_FILE" && -f "$REPLAY_JOIN_FILE" ]] || die "replay join request was not retained"
+# Replay the ORIGINAL join request of the agent whose block was just drained
+# and removed above — never a fixed block name: Placement may legitimately
+# host workload A on any ready canonical provider (a journey block or the
+# TestLab bootstrap compute-agent), and only the removed agent's replay is
+# required to be refused. A replay of a still-ready agent's request is
+# legitimately accepted by the canonical replay-join path and is not evidence.
+REPLAY_JOIN_FILE="${REPLAY_JOIN_BY_AGENT[$DRAIN_AGENT]:-}"
+if [[ -z "$REPLAY_JOIN_FILE" && "$DRAIN_AGENT" == "compute-agent" ]]; then
+  # The drained host is the TestLab bootstrap agent: the journey did not
+  # perform its join, so reconstruct the replay from the durable identity the
+  # canonical bootstrap recorded (same certificate fingerprint and agent id,
+  # which is what the replay path validates). The enrollment token is ignored
+  # on the enrolled-replay path; any non-empty placeholder exercises it.
+  [[ -s "$STATE_ROOT/tls/agent.pem" && -s "$STATE_ROOT/tls/agent-id" ]] \
+    || die "bootstrap agent identity unavailable for drained-agent replay probe"
+  [[ "$(sudo -n cat "$STATE_ROOT/tls/agent-id" 2>/dev/null)" == "compute-agent" ]] \
+    || die "bootstrap agent identity does not match the drained host"
+  REPLAY_JOIN_FILE="$WORK_ROOT/compute-agent-replay-join.json"
+  sudo -n install -m 0600 "$STATE_ROOT/tls/agent.pem" "$WORK_ROOT/replay-agent.pem" \
+    || die "cannot stage bootstrap agent certificate for replay probe"
+  python3 - "$REPLAY_JOIN_FILE" "$WORK_ROOT/replay-agent.pem" <<'PY' \
+    || die "cannot compose drained-agent replay join request"
+import json, pathlib, sys
+request = {
+    "enrollment_token": "replayed-consumed-grant.invalid",
+    "agent_id": "compute-agent",
+    "agent_epoch": "replay-probe",
+    "certificate": pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"),
+    "capabilities": {},
+    "inventories": {"VCPU": 1},
+}
+pathlib.Path(sys.argv[1]).write_text(json.dumps(request), encoding="utf-8")
+PY
+  shred --remove --zero --force -- "$WORK_ROOT/replay-agent.pem" 2>/dev/null || rm -f -- "$WORK_ROOT/replay-agent.pem"
+fi
+[[ -n "$REPLAY_JOIN_FILE" && -f "$REPLAY_JOIN_FILE" ]] || die "replay join request was not retained for drained agent: $DRAIN_AGENT"
 code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST "$API/bootstrap/join" -H 'Content-Type: application/json' -d @"$REPLAY_JOIN_FILE")"
-[[ "$code" != 200 ]] || die "replayed join accepted"
+[[ "$code" != 200 ]] || die "replayed join accepted for removed drained agent: $DRAIN_AGENT"
 code="$(curl --silent -o /dev/null -w '%{http_code}' "$API/operator/building-blocks/${BLOCK_IDS[block-a]}")"
 [[ "$code" == 401 || "$code" == 403 ]] || die "unauthenticated state read was not concealed"
 
