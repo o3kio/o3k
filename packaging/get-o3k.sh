@@ -19,7 +19,7 @@
 #   The version to install is BAKED into this file (O3K_INSTALLER_VERSION);
 #   the installer never consults a channel service or any other network
 #   endpoint to decide which version to install. Every file that is executed
-#   (packaging/*.sh, bin/o3kd, bin/o3k-compute) comes from the release
+#   (packaging/*.sh, bin/o3kd, bin/o3k-compute, bin/o3k-network) comes from the release
 #   tarball AFTER its published SHA-256 is verified; the tarball is never
 #   extracted before that verification, and extraction rejects any entry that
 #   is absolute, contains a ".." component, does not start with "./", or is
@@ -88,7 +88,7 @@ fi
 # published install.sh GitHub Release asset is byte-identical to this file,
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
-O3K_INSTALLER_VERSION="v0.4.0-alpha.1"
+O3K_INSTALLER_VERSION="v0.4.0-rc.1"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
@@ -498,8 +498,11 @@ else
 fi
 
 # ---- install from the verified bundle -----------------------------------------
+# install.sh discovers bin/o3k-network inside the extracted bundle itself and
+# installs it (with its unit, not enabled) when present — no extra flag needed.
 bash "$BUNDLE_DIR/packaging/install.sh" --profile libvirt --noninteractive \
   --binary "$BUNDLE_DIR/bin/o3kd" --compute-binary "$BUNDLE_DIR/bin/o3k-compute" \
+  --o3k-binary "$BUNDLE_DIR/bin/o3k" \
   || die 'installation failed; the host holds recoverable O3K-owned state and re-running the installer converges'
 step 'o3kd installed'
 step 'o3k-compute installed'

@@ -93,13 +93,14 @@ mkdir -p "$ROOTFS/build"
 (cd "$ROOT_DIR" && tar -cf - Cargo.toml Cargo.lock rust-toolchain.toml bins crates proto) \
   | tar -xf - -C "$ROOTFS/build"
 
-echo "==> cargo build --release (o3kd, o3k, o3k-compute-bin --features libvirt)"
+echo "==> cargo build --release (o3kd, o3k, o3k-compute-bin --features libvirt, o3k-network)"
 chroot "$ROOTFS" /bin/bash -c '
   set -Eeuo pipefail
   cd /build
   export RUSTUP_HOME=/root/.rustup CARGO_HOME=/root/.cargo PATH="/root/.cargo/bin:$PATH" HOME=/root
   cargo build --release --locked --bin o3kd --bin o3k
   cargo build --release --locked --features libvirt --bin o3k-compute-bin
+  cargo build --release --locked --bin o3k-network
   rustc --version > rustc-version.txt
 '
 
@@ -107,7 +108,8 @@ mkdir -p "$OUTPUT_DIR"
 install -m 0755 "$ROOTFS/build/target/release/o3kd" "$OUTPUT_DIR/o3kd"
 install -m 0755 "$ROOTFS/build/target/release/o3k" "$OUTPUT_DIR/o3k"
 install -m 0755 "$ROOTFS/build/target/release/o3k-compute-bin" "$OUTPUT_DIR/o3k-compute"
-(cd "$OUTPUT_DIR" && sha256sum o3kd o3k o3k-compute > SHA256SUMS)
+install -m 0755 "$ROOTFS/build/target/release/o3k-network" "$OUTPUT_DIR/o3k-network"
+(cd "$OUTPUT_DIR" && sha256sum o3kd o3k o3k-compute o3k-network > SHA256SUMS)
 
 echo "==> recording the glibc floor proof (checked with the host readelf)"
 {

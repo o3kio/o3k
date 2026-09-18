@@ -21,9 +21,10 @@ distribution:
   traceability: >-
     Every installed binary must be traceable to release version, source
     commit SHA, manifest.json, SHA256SUMS checksum, and the SBOM. Artifact
-    authenticity signatures/provenance attestation are REQUIRED before
-    publication; their absence is a known PP.1 gap (integrity via SHA-256
-    exists today, authenticity does not).
+    authenticity is bound by the release ed25519 signature
+    (release-digests.sig + provenance.json + release-verify.pub), generated
+    by packaging/make-provenance.sh; integrity via SHA-256 is verified by
+    the installer before extraction.
 
 required_assets:
   - name: install.sh
@@ -45,8 +46,14 @@ required_assets:
     role: bundle-wide checksum manifest covering exactly the regular files
   - name: sbom.spdx.json
     role: SPDX 2.3 dependency SBOM from cargo metadata
-  - name: provenance
-    role: signature/attestation material binding assets to source (PP.1 requirement)
+  - name: release-digests.txt
+    role: sha256 of every published release asset (bundle manifest, bundle SHA256SUMS, SBOM, install.sh, tarball, .sha256)
+  - name: release-digests.sig
+    role: detached ed25519 signature over release-digests.txt (O3K release key; authenticity)
+  - name: provenance.json
+    role: machine-readable binding of release version, source commit, and every asset digest
+  - name: release-verify.pub
+    role: committed O3K release ed25519 public key (offline signature verification)
 
 bundle_contents:
   binaries:
@@ -71,13 +78,20 @@ bundle_contents:
       install_path: /usr/local/bin/o3k-network
       mode: "0755"
       owner: root
-      profile_scope: [o3k-small-edge-v1]
-      note: required for the small-edge network execution boundary; not part of the bounded demo bundle
+      profile_scope: [o3k-demo-v1, o3k-small-edge-v1]
+      note: >-
+        shipped in every libvirt-profile bundle from v0.4.0-rc.1 (PP.1);
+        installed with its unit but never enabled — required for the
+        small-edge network execution boundary, optional for the demo
   systemd_units:
     - unit: o3kd.service
       process_user: o3k
     - unit: o3k-compute.service
       process_user: o3k-compute
+    - unit: o3k-network.service
+      process_user: o3k-network
+      enabled_by_default: false
+      note: installed but never enabled by the installer; small-edge orchestration enrolls the agent through canonical init/join
   config_paths:
     - /etc/o3k
     - /etc/o3k/tls
@@ -96,21 +110,10 @@ build_baseline:
 known_gaps:
   - >-
     No automated GitHub Actions pipeline builds/publishes the bundle to a
-    GitHub Release today (PP.1 IMPLEMENTATION REQUIRED).
+    GitHub Release; PP.1 publishes the RC with operator-run pipeline scripts
+    and a protected release workflow remains follow-up work.
   - >-
-    No cryptographic signature/provenance attestation today; only SHA-256
-    integrity (PP.1 IMPLEMENTATION REQUIRED).
-  - >-
-    packaging/install.sh still compiles o3kd/o3k/o3k-compute with cargo on the
-    target when prebuilt binaries are absent; the frozen contract requires the
-    release-bundle path with prebuilt binaries and no target compilation
-    (STALE-PRE-P15, PP.1 IMPLEMENTATION REQUIRED).
-  - >-
-    No o3k-network.service systemd unit exists for the o3k-network execution
-    agent required by o3k-small-edge-v1; only o3kd.service and
-    o3k-compute.service are packaged (PP.1 IMPLEMENTATION REQUIRED for the
-    small-edge bundle).
-  - >-
-    packaging/bootstrap-testlab.sh provisions its TestLab topology via raw
-    openstack CLI calls instead of canonical o3k init/o3k join
-    (STALE-PRE-P15, reconcile in PP.1/PP.2).
+    packaging/bootstrap-testlab.sh still provisions its TestLab topology via
+    raw openstack CLI calls instead of canonical o3k init/o3k join
+    (STALE-PRE-P15; canonical bootstrap is the installer path frozen by
+    contracts/installer-v1.yaml and is exercised in PP.2).

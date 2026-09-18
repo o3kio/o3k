@@ -12,7 +12,7 @@ BUNDLE_DIR="$WORK_DIR/bundle"
 mkdir -p "$BUNDLE_DIR/bin" "$BUNDLE_DIR/packaging" "$BUNDLE_DIR/scripts"
 for file in \
   install.sh o3kd.service reset.sh uninstall.sh diagnose.sh preflight.sh \
-  bootstrap-certs.sh bootstrap-testlab.sh release-gate.sh validate-human-review.sh scan-release-evidence.sh generate-candidate-evidence-manifest.py o3k-compute.service 50-o3k-libvirt.rules; do
+  bootstrap-certs.sh bootstrap-testlab.sh release-gate.sh validate-human-review.sh scan-release-evidence.sh generate-candidate-evidence-manifest.py o3k-compute.service o3k-network.service 50-o3k-libvirt.rules; do
   cp "$ROOT_DIR/packaging/$file" "$BUNDLE_DIR/packaging/$file"
 done
 cp "$ROOT_DIR/scripts/generate-passwords.sh" "$BUNDLE_DIR/scripts/generate-passwords.sh"
@@ -23,6 +23,8 @@ printf '#!/usr/bin/env bash\nprintf bundled-o3k\n' >"$BUNDLE_DIR/bin/o3k"
 chmod 0755 "$BUNDLE_DIR/bin/o3k"
 printf '#!/usr/bin/env bash\nprintf bundled-o3k-compute\n' >"$BUNDLE_DIR/bin/o3k-compute"
 chmod 0755 "$BUNDLE_DIR/bin/o3k-compute"
+printf '#!/usr/bin/env bash\nprintf bundled-o3k-network\n' >"$BUNDLE_DIR/bin/o3k-network"
+chmod 0755 "$BUNDLE_DIR/bin/o3k-network"
 # Bundle-root provenance fixtures (issue #617): install.sh installs them as
 # share/o3k/release-manifest.json and share/o3k/SHA256SUMS exactly like the
 # real bundle produced by make-release.sh.
@@ -136,8 +138,33 @@ else
   cmp -s "$BUNDLE_DIR/bin/o3kd" "$LIBVIRT_PREFIX/bin/o3kd"
   cmp -s "$BUNDLE_DIR/bin/o3k" "$LIBVIRT_PREFIX/bin/o3k"
   cmp -s "$BUNDLE_DIR/bin/o3k-compute" "$LIBVIRT_PREFIX/bin/o3k-compute"
+  cmp -s "$BUNDLE_DIR/bin/o3k-network" "$LIBVIRT_PREFIX/bin/o3k-network"
   [[ -f "$LIBVIRT_PREFIX/share/o3k/o3k-compute.service" ]]
+  [[ -f "$LIBVIRT_PREFIX/share/o3k/o3k-network.service" ]]
 fi
+
+# ---- release bundles fail closed instead of compiling on the target --------
+# A bundle (manifest.json + SHA256SUMS at the root) missing a REQUIRED prebuilt
+# binary must abort; it must never fall back to cargo on the installation
+# target (contracts/installer-v1.yaml no_target_compilation).
+INCOMPLETE_BUNDLE="$WORK_DIR/incomplete-bundle"
+cp -a "$BUNDLE_DIR" "$INCOMPLETE_BUNDLE"
+rm -f -- "$INCOMPLETE_BUNDLE/bin/o3k"
+if CARGO_MARKER="$WORK_DIR/incomplete-cargo" PATH="$CARGO_DIR:$PATH" \
+    bash "$INCOMPLETE_BUNDLE/packaging/install.sh" \
+    --profile fake --noninteractive \
+    --prefix "$WORK_DIR/incomplete-prefix" \
+    --data-dir "$WORK_DIR/incomplete-data" \
+    --config-dir "$WORK_DIR/incomplete-config" \
+    --log-dir "$WORK_DIR/incomplete-log" 2>"$WORK_DIR/incomplete.err"; then
+  echo "release bundle installer accepted a missing required binary" >&2
+  exit 1
+fi
+[[ ! -e "$WORK_DIR/incomplete-cargo" ]] \
+  || { echo "release bundle installer compiled on the target" >&2; exit 1; }
+grep -Fq 'refusing to compile O3K on the installation target' "$WORK_DIR/incomplete.err" \
+  || { echo "missing fail-closed message for the missing-binary bundle" >&2; exit 1; }
+echo "release bundle fail-closed (no target compilation) passed"
 
 # ---- install.sh first-class release asset (successful fake-profile build) ----
 # make-release.sh refuses a dirty source tree (its own contract, exercised

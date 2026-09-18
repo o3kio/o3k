@@ -88,18 +88,24 @@ check(release["distribution"].get("convenience_redirect") == "get.o3k.io",
       "get.o3k.io must be a convenience redirect only")
 check(release["bundle_contents"].get("no_source_compilation_on_target") is True,
       "target hosts must not compile from source")
-for asset in ("install.sh", "manifest.json", "SHA256SUMS", "sbom.spdx.json", "provenance"):
+for asset in ("install.sh", "manifest.json", "SHA256SUMS", "sbom.spdx.json",
+              "release-digests.txt", "release-digests.sig", "provenance.json",
+              "release-verify.pub"):
     check(any(a.get("name") == asset for a in release.get("required_assets", [])),
           f"release contract missing required asset {asset}")
 install_asset = next((a for a in release.get("required_assets", [])
                       if a.get("name") == "install.sh"), {})
 check("get-o3k.sh" in install_asset.get("source", ""),
       "install.sh release asset must be the byte-identical get-o3k.sh export")
+units = {u.get("unit") for u in release.get("bundle_contents", {}).get("systemd_units", [])}
+check("o3k-network.service" in units,
+      "release contract must ship the o3k-network.service unit")
+bundle_binaries = {b["binary"] for b in release.get("bundle_contents", {}).get("binaries", [])}
+check("o3k-network" in bundle_binaries,
+      "release contract must ship the o3k-network binary")
 gaps = " ".join(str(g).lower() for g in release.get("known_gaps", []))
-check("o3k-network.service" in gaps,
-      "missing o3k-network.service must be recorded as a known gap")
-check("compiles" in gaps or "compilation" in gaps,
-      "target compilation gap in packaging/install.sh must be recorded")
+check("compiles" not in gaps and "compilation" not in gaps,
+      "target-compilation gap must be resolved, not just recorded")
 for profile_id in ("o3k-demo-v1", "o3k-small-edge-v1"):
     targets = profiles[profile_id].get("supported_targets", {})
     check(targets.get("hosts", {}).get("proven_support_claim") is False,

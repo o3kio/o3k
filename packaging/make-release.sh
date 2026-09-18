@@ -92,6 +92,10 @@ if [[ -n "$BINARIES_DIR" ]]; then
   if [[ "$PROFILE" == libvirt ]]; then
     [[ -f "$BINARIES_DIR/o3k-compute" ]] || { echo "baseline binary is missing: $BINARIES_DIR/o3k-compute" >&2; exit 2; }
     bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$BINARIES_DIR/o3k-compute"
+    # The network execution agent ships in every libvirt-profile bundle for
+    # the o3k-small-edge-v1 boundary (PP.1 resolution of the PP.0 gap).
+    [[ -f "$BINARIES_DIR/o3k-network" ]] || { echo "baseline binary is missing: $BINARIES_DIR/o3k-network" >&2; exit 2; }
+    bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$BINARIES_DIR/o3k-network"
   fi
 else
   cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd
@@ -101,6 +105,8 @@ else
   if [[ "$PROFILE" == libvirt ]]; then
     cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute-bin
     bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-compute-bin"
+    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k-network
+    bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-network"
   fi
 fi
 rm -rf -- "$OUT_DIR"
@@ -108,21 +114,27 @@ mkdir -p "$OUT_DIR/bin" "$OUT_DIR/packaging" "$OUT_DIR/scripts" "$OUT_DIR/contra
 if [[ -n "$BINARIES_DIR" ]]; then
   install -m 0755 "$BINARIES_DIR/o3kd" "$OUT_DIR/bin/o3kd"
   install -m 0755 "$BINARIES_DIR/o3k" "$OUT_DIR/bin/o3k"
-  if [[ "$PROFILE" == libvirt ]]; then install -m 0755 "$BINARIES_DIR/o3k-compute" "$OUT_DIR/bin/o3k-compute"; fi
+  if [[ "$PROFILE" == libvirt ]]; then
+    install -m 0755 "$BINARIES_DIR/o3k-compute" "$OUT_DIR/bin/o3k-compute"
+    install -m 0755 "$BINARIES_DIR/o3k-network" "$OUT_DIR/bin/o3k-network"
+  fi
 else
   install -m 0755 "$ROOT_DIR/target/release/o3kd" "$OUT_DIR/bin/o3kd"
   install -m 0755 "$ROOT_DIR/target/release/o3k" "$OUT_DIR/bin/o3k"
-  if [[ "$PROFILE" == libvirt ]]; then install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$OUT_DIR/bin/o3k-compute"; fi
+  if [[ "$PROFILE" == libvirt ]]; then
+    install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$OUT_DIR/bin/o3k-compute"
+    install -m 0755 "$ROOT_DIR/target/release/o3k-network" "$OUT_DIR/bin/o3k-network"
+  fi
 fi
 # get-o3k.sh and channels.yaml ship in the bundle so a pinned/self-hosted
 # release is self-describing (the wrapper and its advisory channel table
 # travel with the artifacts they download; the wrapper itself never consults
 # the channel table).
-cp "$ROOT_DIR/packaging/o3kd.service" "$ROOT_DIR/packaging/install.sh" "$ROOT_DIR/packaging/reset.sh" "$ROOT_DIR/packaging/uninstall.sh" "$ROOT_DIR/packaging/diagnose.sh" "$ROOT_DIR/packaging/preflight.sh" "$ROOT_DIR/packaging/bootstrap-certs.sh" "$ROOT_DIR/packaging/bootstrap-testlab.sh" "$ROOT_DIR/packaging/get-o3k.sh" "$ROOT_DIR/packaging/channels.yaml" "$ROOT_DIR/packaging/release-gate.sh" "$ROOT_DIR/packaging/validate-human-review.sh" "$ROOT_DIR/packaging/scan-release-evidence.sh" "$ROOT_DIR/packaging/generate-candidate-evidence-manifest.py" "$ROOT_DIR/packaging/verify-release-bundle.sh" "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/packaging/o3k-compute.service" "$ROOT_DIR/packaging/50-o3k-libvirt.rules" "$OUT_DIR/packaging/"
+cp "$ROOT_DIR/packaging/o3kd.service" "$ROOT_DIR/packaging/install.sh" "$ROOT_DIR/packaging/reset.sh" "$ROOT_DIR/packaging/uninstall.sh" "$ROOT_DIR/packaging/diagnose.sh" "$ROOT_DIR/packaging/preflight.sh" "$ROOT_DIR/packaging/bootstrap-certs.sh" "$ROOT_DIR/packaging/bootstrap-testlab.sh" "$ROOT_DIR/packaging/get-o3k.sh" "$ROOT_DIR/packaging/channels.yaml" "$ROOT_DIR/packaging/release-gate.sh" "$ROOT_DIR/packaging/validate-human-review.sh" "$ROOT_DIR/packaging/scan-release-evidence.sh" "$ROOT_DIR/packaging/generate-candidate-evidence-manifest.py" "$ROOT_DIR/packaging/verify-release-bundle.sh" "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/packaging/o3k-compute.service" "$ROOT_DIR/packaging/o3k-network.service" "$ROOT_DIR/packaging/50-o3k-libvirt.rules" "$OUT_DIR/packaging/"
 cp "$ROOT_DIR/scripts/generate-passwords.sh" "$OUT_DIR/scripts/"
 cp "$ROOT_DIR/scripts/validate-release-e2e-evidence.py" "$OUT_DIR/scripts/"
 cp "$ROOT_DIR/contracts/release-e2e-evidence.schema.json" "$OUT_DIR/contracts/"
-cp "$ROOT_DIR/docs/compatibility.md" "$ROOT_DIR/docs/cirros-walkthrough.md" "$ROOT_DIR/docs/release-evidence-schema.md" "$ROOT_DIR/docs/human-review-schema.md" "$ROOT_DIR/docs/security-review-checklist.md" "$ROOT_DIR/docs/releases/v0.4.0-alpha.1.md" "$OUT_DIR/docs/"
+cp "$ROOT_DIR/docs/compatibility.md" "$ROOT_DIR/docs/cirros-walkthrough.md" "$ROOT_DIR/docs/release-evidence-schema.md" "$ROOT_DIR/docs/human-review-schema.md" "$ROOT_DIR/docs/security-review-checklist.md" "$ROOT_DIR/docs/releases/v0.4.0-rc.1.md" "$OUT_DIR/docs/"
 cp "$ROOT_DIR/examples/clouds.yaml" "$ROOT_DIR/examples/o3kd.env.example" "$OUT_DIR/examples/"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" show -s --format=%ct HEAD)}" \
   "$ROOT_DIR/packaging/make-sbom.sh" "$OUT_DIR/sbom.spdx.json"

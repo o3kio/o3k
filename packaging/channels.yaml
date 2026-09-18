@@ -16,4 +16,4 @@
 #   - alpha is a prerelease, so it must not point at GitHub /releases/latest;
 #   - `stable` will be added later without redesigning this table.
 channels:
-  alpha: v0.4.0-alpha.1
+  alpha: v0.4.0-rc.1
