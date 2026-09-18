@@ -712,21 +712,15 @@ jobs:
           set -euo pipefail
           TARGET_SHA="${TARGET_SHA}" bash scripts/cleanup-owned-postgres.sh p15-7 "${GITHUB_RUN_ID}" target/real-host-workflow-artifacts/p15-7-postgres-ownership.json
 
-      # The post-run guard needs the disposable TestLab still running (the
-      # owned OpenStack inventory queries its API), but the disposable
-      # PostgreSQL container must already be stopped: its bridge-networked
-      # docker veth pair is random per container and would otherwise enter
-      # the after-inventory foreign-link digest and falsely fail the
-      # foreign-state comparison against the pre-run baseline.
-      - name: Post-run result guard
-        if: always() && steps.protected_preflight.outcome == 'success'
-        env:
-          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
-          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
-          O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
-          O3K_REAL_HOST_P15_7_STEP_STATUS: ${{ steps.p15_7.outcome || 'skipped' }}
-        run: bash scripts/real-host-post-run-guard.sh
-
+      # The post-run guard snapshots the host at the stable post-cleanup
+      # point, matching the pre-run baseline's lifecycle position. The owned
+      # OpenStack inventory stays not_checked: the disposable TestLab API and
+      # its PostgreSQL database are removed by the cleanup steps above, so an
+      # OpenStack resource leak is vacuously impossible (and the collector
+      # would fail closed trying to reach a removed API). Requesting it would
+      # also force the database's bridge-networked docker veth pair into the
+      # foreign-link digest; its random per-container identity falsely failed
+      # the foreign-state comparison in certification attempts 4 and 5.
       - name: Stop and remove disposable TestLab
         if: always()
         run: bash scripts/cleanup-disposable-testlab.sh
@@ -773,6 +767,14 @@ jobs:
             grep -Fqx "sha256=612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354" "${marker}"
             rm -f -- "${image_path}" "${marker}"
           fi
+
+      - name: Post-run result guard
+        if: always() && steps.protected_preflight.outcome == 'success'
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
+          O3K_REAL_HOST_P15_7_STEP_STATUS: ${{ steps.p15_7.outcome || 'skipped' }}
+        run: bash scripts/real-host-post-run-guard.sh
 
       - name: Upload redacted real-host artifacts
         if: always()
