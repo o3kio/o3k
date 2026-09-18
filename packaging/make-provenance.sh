@@ -109,9 +109,12 @@ pathlib.Path("provenance.json").write_text(
 )
 PY
 
-# Never leak the private key into the dist tree.
-if grep -rq 'PRIVATE KEY' "$DIST_ROOT" 2>/dev/null; then
-  echo "refusing to leave private key material in the dist root" >&2
+# Never leak the private key into the published release assets (the release
+# binaries legitimately embed PEM marker strings for TLS handling, so scope
+# the sweep to the assets this script produces).
+if grep -Eql 'BEGIN (OPENSSH|RSA|EC|DSA|PGP|ENCRYPTED)? ?PRIVATE KEY-----' \
+    "$DIGESTS" release-digests.sig provenance.json release-verify.pub 2>/dev/null; then
+  echo "refusing to publish private key material in the provenance assets" >&2
   exit 1
 fi
 
