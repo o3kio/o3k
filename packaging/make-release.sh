@@ -63,7 +63,7 @@ done
 UPGRADE_FROM_MIN_VERSION="${O3K_UPGRADE_FROM_MIN_VERSION:-}"
 if [[ -z "$UPGRADE_FROM_MIN_VERSION" ]]; then
   echo "O3K_UPGRADE_FROM_MIN_VERSION is unset: set it to the previous published release version" >&2
-  echo "  e.g. O3K_UPGRADE_FROM_MIN_VERSION=v0.4.0-rc.2 packaging/make-release.sh 0.4.0-rc.2 libvirt" >&2
+  echo "  e.g. O3K_UPGRADE_FROM_MIN_VERSION=v0.3.0-alpha.1 packaging/make-release.sh 0.4.0-rc.3 libvirt" >&2
   exit 1
 fi
 UPGRADE_FROM_VERSION_NO_V="${UPGRADE_FROM_MIN_VERSION#v}"

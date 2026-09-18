@@ -37,11 +37,40 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
         .map_err(|e| format!("failed to build tokio runtime: {e}"))
 }
 
+/// Reads a secret from the environment, or — when the variable is unset or
+/// empty — from the file whose path is named by `<ENV>_FILE`. File contents
+/// are trimmed of surrounding whitespace. File-based intake exists so shared
+/// hosts never carry secrets through `/proc/<pid>/cmdline` argv.
+fn secret_from_env_or_file(env_var: &str) -> Result<String, String> {
+    secret_from(
+        std::env::var(env_var).ok(),
+        std::env::var(format!("{env_var}_FILE")).ok(),
+    )
+    .map_err(|detail| format!("{env_var} (or {env_var}_FILE) is required: {detail}"))
+}
+
+/// Testable core of [`secret_from_env_or_file`]: resolve from an explicit env
+/// value first, then an explicit file path.
+fn secret_from(env_value: Option<String>, file_path: Option<String>) -> Result<String, String> {
+    if let Some(value) = env_value
+        && !value.trim().is_empty()
+    {
+        return Ok(value);
+    }
+    let path = file_path.ok_or("no file path provided")?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read secret file at {path}: {e}"))?;
+    let value = content.trim().to_owned();
+    if value.is_empty() {
+        return Err(format!("secret file at {path} is empty"));
+    }
+    Ok(value)
+}
+
 /// Initializes canonical Cloud Kernel bootstrap state. The bootstrap secret is
 /// sent only as a request header and is never printed.
 pub fn init(profile_id: Option<&str>, agent_id: Option<&str>) -> Result<(), String> {
-    let secret = std::env::var("O3K_BOOTSTRAP_SECRET")
-        .map_err(|_| "O3K_BOOTSTRAP_SECRET is required for init".to_owned())?;
+    let secret = secret_from_env_or_file("O3K_BOOTSTRAP_SECRET")?;
     if secret.contains(['\r', '\n']) {
         return Err("bootstrap secret contains a newline".to_owned());
     }
@@ -62,10 +91,12 @@ pub fn init(profile_id: Option<&str>, agent_id: Option<&str>) -> Result<(), Stri
 
 /// Enrolls a prepared host. Certificate material is read locally and only the
 /// bounded certificate text is sent; private keys are never accepted or
-/// emitted by this command.
+/// emitted by this command. The enrollment token is taken from `--token`,
+/// `O3K_ENROLLMENT_TOKEN`, or `O3K_ENROLLMENT_TOKEN_FILE` (preferred on shared
+/// hosts: argv is visible in `/proc/<pid>/cmdline`).
 #[allow(clippy::too_many_arguments)]
 pub fn join(
-    token: &str,
+    token: Option<&str>,
     agent_id: &str,
     agent_epoch: &str,
     certificate: &Path,
@@ -76,8 +107,12 @@ pub fn join(
     memory_mb: u64,
     disk_gb: u64,
 ) -> Result<(), String> {
-    if token.trim().is_empty() || agent_id.trim().is_empty() || agent_epoch.trim().is_empty() {
-        return Err("token, agent id, and agent epoch are required".to_owned());
+    let token = match token.map(str::trim) {
+        Some(value) if !value.is_empty() => value.to_owned(),
+        _ => secret_from_env_or_file("O3K_ENROLLMENT_TOKEN")?,
+    };
+    if agent_id.trim().is_empty() || agent_epoch.trim().is_empty() {
+        return Err("agent id and agent epoch are required".to_owned());
     }
     let cert = std::fs::read_to_string(certificate)
         .map_err(|e| format!("cannot read certificate: {e}"))?;
@@ -295,4 +330,62 @@ pub fn print_help() {
     println!();
     println!("Environment:");
     println!("  O3K_API_URL   native API base URL (default: {DEFAULT_API_BASE})");
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::secret_from;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    fn fixture_file(name: &str, contents: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "o3k-native-cli-test-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let mut file = std::fs::File::create(&path).expect("fixture create");
+        file.write_all(contents.as_bytes()).expect("fixture write");
+        path
+    }
+
+    #[test]
+    fn env_value_wins_over_file() {
+        let path = fixture_file("envwins", "file-value");
+        let value = secret_from(
+            Some("  env-value  ".to_owned()),
+            Some(path.to_string_lossy().into_owned()),
+        )
+        .expect("env secret");
+        assert_eq!(value, "  env-value  ");
+        std::fs::remove_file(&path).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn secret_file_is_trimmed() {
+        let path = fixture_file(
+            "trim",
+            "  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        );
+        let value =
+            secret_from(None, Some(path.to_string_lossy().into_owned())).expect("file secret");
+        assert_eq!(value.len(), 64);
+        std::fs::remove_file(&path).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn missing_everything_errors() {
+        let error = secret_from(None, None).expect_err("must fail");
+        assert!(error.contains("no file path"), "{error}");
+    }
+
+    #[test]
+    fn empty_secret_file_errors() {
+        let path = fixture_file("empty", "\n");
+        let error =
+            secret_from(None, Some(path.to_string_lossy().into_owned())).expect_err("must fail");
+        assert!(error.contains("is empty"), "{error}");
+        std::fs::remove_file(&path).expect("fixture cleanup");
+    }
 }

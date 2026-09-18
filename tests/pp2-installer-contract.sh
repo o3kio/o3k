@@ -62,14 +62,28 @@ check_grep "get-o3k.sh invokes \`o3k init --agent-id\`" \
   'init --agent-id "$AGENT_ID"' "$WRAPPER"
 check_grep "get-o3k.sh invokes \`o3k join\`" \
   '"$O3K_BIN" join' "$WRAPPER"
-check_grep "get-o3k.sh join is authenticated with --token" \
-  '--token "$ENROLLMENT_TOKEN"' "$WRAPPER"
 check_grep "get-o3k.sh defers the compute start to install.sh" \
   '--defer-compute-start' "$WRAPPER"
 check_grep "get-o3k.sh parses the daemon env file" \
   'ENV_FILE=/etc/o3k/o3kd.env' "$WRAPPER"
 check_grep "get-o3k.sh reads scalars from o3kd.env (read_env_scalar)" \
   'read_env_scalar()' "$WRAPPER"
+
+# Secret channel hygiene (adversarial review finding, PR #1025): secrets must
+# never travel through argv — /proc/<pid>/cmdline is world-readable. The
+# canonical CLI reads O3K_BOOTSTRAP_SECRET / O3K_ENROLLMENT_TOKEN from
+# <NAME>_FILE fragments the installer writes o3k-owned 0600, and the wrapper
+# must use exactly that channel.
+check_grep "get-o3k.sh passes the bootstrap secret via a secret file" \
+  'O3K_BOOTSTRAP_SECRET_FILE="$BOOTSTRAP_SECRET_FILE"' "$WRAPPER"
+check_grep "get-o3k.sh passes the enrollment token via a token file" \
+  'O3K_ENROLLMENT_TOKEN_FILE="$ENROLLMENT_TOKEN_FILE"' "$WRAPPER"
+check_grep "get-o3k.sh secret fragments are o3k-owned 0600 (write_secret_file)" \
+  'install -o o3k -g o3k -m 0600 /dev/null' "$WRAPPER"
+check_no_grep "get-o3k.sh never passes the bootstrap secret through argv/env" \
+  'O3K_BOOTSTRAP_SECRET="\$' "$WRAPPER" -F
+check_no_grep "get-o3k.sh never passes the enrollment token through argv" \
+  '--token "\$' "$WRAPPER" -F
 
 # Authority boundary: orchestration only, never a direct durable-store write.
 check_no_grep "get-o3k.sh contains no sqlite access" \
@@ -143,6 +157,15 @@ check_grep "bootstrap-testlab.sh temp clouds.yaml pins network_endpoint_override
   'network_endpoint_override' "$BOOTSTRAP"
 check_grep "bootstrap-testlab.sh temp clouds.yaml pins image_api_version 2" \
   '"image_api_version": "2"' "$BOOTSTRAP"
+# The script's only store access must stay read-only (adversarial review
+# finding, PR #1025): it legitimately opens o3k.sqlite for the canonical
+# precondition check and must never gain a write path.
+check_grep "bootstrap-testlab.sh canonical check opens the store read-only" \
+  'mode=ro' "$BOOTSTRAP"
+check_no_grep "bootstrap-testlab.sh contains no store write statements" \
+  'INSERT[[:space:]]+INTO|UPDATE[[:space:]]+|DELETE[[:space:]]+FROM|mode=rw' "$BOOTSTRAP" -E
+check_no_grep "bootstrap-testlab.sh passes the password via argv" \
+  '"\$OS_PASSWORD"' "$BOOTSTRAP" -F
 
 # Ordering: definition < invocation (create path) < first image creation, and
 # the invocation sits AFTER the teardown branch (teardown stays unaffected).

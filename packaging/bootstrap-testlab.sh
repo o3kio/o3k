@@ -89,16 +89,23 @@ done
 # any supported versions" (recorded as the v0.4.0-rc.1 fresh-host defect on
 # BOTH supported distros). Pinning the versioned service roots here matches
 # the canonical protected bootstrap (scripts/bootstrap-disposable-testlab.sh)
-# and keeps every openstack invocation on one client configuration.
+# and keeps every openstack invocation on one client configuration. The
+# password reaches the generator through the process environment (never argv:
+# /proc/<pid>/cmdline is world-readable) and the file is created under umask
+# 077 so it is never group/world readable, not even transiently.
 CLOUDS_FILE="$WORK_DIR/o3k-testlab-clouds.yaml"
-python3 - "$CLOUDS_FILE" "$OS_AUTH_URL" "$OS_USERNAME" "$OS_PASSWORD" \
+export OS_PASSWORD
+umask 077
+python3 - "$CLOUDS_FILE" "$OS_AUTH_URL" "$OS_USERNAME" \
   "$OS_PROJECT_NAME" "$OS_REGION_NAME" "${OS_INTERFACE:-public}" \
   "${OS_USER_DOMAIN_NAME:-Default}" "${OS_PROJECT_DOMAIN_NAME:-Default}" <<'PY'
 import json
+import os
 import sys
 
-(path, auth_url, username, password, project, region, interface,
- user_domain, project_domain) = sys.argv[1:10]
+(path, auth_url, username, project, region, interface,
+ user_domain, project_domain) = sys.argv[1:9]
+password = os.environ["OS_PASSWORD"]
 base = auth_url[:-3] if auth_url.endswith("/v3") else auth_url.rstrip("/")
 config = {
     "clouds": {

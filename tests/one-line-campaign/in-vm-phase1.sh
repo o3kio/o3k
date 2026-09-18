@@ -49,7 +49,9 @@ log "pre-checks passed (no o3k accounts, /etc/o3k absent, canaries planted)"
 # (O3K_CAMPAIGN_REAL_RELEASE=1, the canonical PP.2 evidence path) runs the
 # exact published release command with no local endpoint involved.
 if [ "${O3K_CAMPAIGN_REAL_RELEASE:-0}" = 1 ]; then
-  ONELINER='curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.2/install.sh | sudo sh -'
+  # Single source of truth for the version under test: host-run.sh injects
+  # O3K_CAMPAIGN_VERSION (= the get-o3k.sh release pin being campaigned).
+  ONELINER="curl -sfL https://github.com/o3kio/o3k/releases/download/${O3K_CAMPAIGN_VERSION:?O3K_CAMPAIGN_VERSION is required in real-release mode}/install.sh | sudo sh -"
 else
   ONELINER='curl -sfL http://10.0.2.2:18000/ | sudo env O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh -'
 fi

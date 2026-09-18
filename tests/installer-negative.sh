@@ -90,7 +90,12 @@ cleanup() {
   [[ "$USR_LOCAL_O3K_CREATED" -eq 1 ]] && rm -f -- /usr/local/bin/o3k || true
   [[ "$USR_LOCAL_O3K_CREATED" -eq 1 ]] && rm -f -- /usr/local/share/o3k/release-manifest.json || true
   [[ "$USR_LOCAL_O3K_CREATED" -eq 1 ]] && rmdir /usr/local/share/o3k 2>/dev/null || true
-  rm -rf -- "$WORK_DIR"
+  # O3K_NEGATIVE_KEEP_WORKDIR=1 preserves the matrix for local debugging.
+  if [[ "${O3K_NEGATIVE_KEEP_WORKDIR:-0}" != 1 ]]; then
+    rm -rf -- "$WORK_DIR"
+  else
+    printf 'matrix preserved at %s\n' "$WORK_DIR" >&2
+  fi
 }
 trap cleanup EXIT
 
@@ -182,7 +187,31 @@ if [ "${1:-}" = "--" ]; then
 fi
 exec "$@"
 EOF
-  chmod +x "$SHIM_BIN/apt-get" "$SHIM_BIN/systemctl" "$SHIM_BIN/runuser"
+  cat >"$SHIM_BIN/install" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — delegates to /usr/bin/install. Sandboxed (user-namespace)
+# runs cannot chown to the unmapped o3k uid; retry without ownership args in
+# that case. On real hosts the o3k user exists and the first attempt wins.
+if /usr/bin/install "$@"; then
+  exit 0
+fi
+args=()
+skip_next=0
+for arg in "$@"; do
+  case "$arg" in
+    -o|-g|--owner|--group) skip_next=1 ;;
+    *)
+      if [ "$skip_next" -eq 1 ]; then
+        skip_next=0
+      else
+        args+=("$arg")
+      fi
+      ;;
+  esac
+done
+exec /usr/bin/install "${args[@]}"
+EOF
+  chmod +x "$SHIM_BIN/apt-get" "$SHIM_BIN/systemctl" "$SHIM_BIN/runuser" "$SHIM_BIN/install"
 
   # ---- TEST FIXTURE: shim release bundle (record only, delete with WORK_DIR) ----
   cat >"$SRC_BUNDLE/packaging/verify-release-bundle.sh" <<'EOF'
@@ -233,6 +262,23 @@ case "${O3K_TEST_INSTALL_MODE:-ok}" in
 esac
 bundle_dir="$(cd "$(dirname "$0")/.." && pwd)"
 umask 077
+# The wrapper's canonical bootstrap writes o3k-owned 0600 secret fragments
+# under the o3k-owned data directory (O3K_*_FILE intake); emulate the real
+# install.sh prerequisites for that layout.
+getent group o3k >/dev/null 2>&1 || groupadd --system o3k 2>/dev/null || true
+if ! getent passwd o3k >/dev/null 2>&1; then
+  useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k 2>/dev/null || true
+fi
+if [ $EUID -eq 0 ] && getent passwd o3k >/dev/null 2>&1; then
+  if [ ! -d /var/lib/o3k ]; then
+    install -d -o o3k -g o3k -m 0700 /var/lib/o3k
+  else
+    chown o3k:o3k /var/lib/o3k 2>/dev/null || true
+    chmod 0700 /var/lib/o3k 2>/dev/null || true
+  fi
+else
+  mkdir -p /var/lib/o3k
+fi
 mkdir -p /etc/o3k/tls
 if [ ! -e /etc/o3k/o3kd.env ] && [ ! -L /etc/o3k/o3kd.env ]; then
   secret="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
@@ -347,7 +393,12 @@ EOF
   export O3K_TEST_O3K_LOG="$MATRIX/o3k-cli.log"
 
   run_wrapper() { # run_wrapper OUT ERR — runs the real wrapper with the matrix env
+    local status
     PATH="$SHIM_BIN:$PATH" bash "$WRAPPER" >"$1" 2>"$2"
+    status=$?
+    # Debug aid: keep the most recent wrapper stderr for local failure triage.
+    cp "$2" "$MATRIX/wrapper-last.err" 2>/dev/null || true
+    return "$status"
   }
 
   expect_abort() { # expect_abort DESC MESSAGE [OUT ERR] — non-zero exit + message
@@ -359,7 +410,7 @@ EOF
     if grep -Fq -- "$message" "$err"; then
       record_pass "$desc"
     else
-      record_fail "$desc (missing message: $message; stderr was: $(head -c 300 "$err"))"
+      record_fail "$desc (missing message: $message; stderr was: $(grep -aE "O3K installer|TestLab bootstrap|error" "$err" | tail -n2 | tr "\n" " "))"
     fi
   }
 
@@ -706,7 +757,7 @@ PY
       && record_pass "install completed before bootstrap failure" \
       || record_fail "install did not run before bootstrap failure"
     if grep -Fq 'o3k init --agent-id compute-agent' "$O3K_TEST_O3K_LOG" \
-      && grep -Fq 'o3k join --token fixture-enrollment-token-0123456789abcdef' "$O3K_TEST_O3K_LOG" \
+      && grep -Fq 'o3k join --agent-id compute-agent' "$O3K_TEST_O3K_LOG" \
       && grep -Fq 'o3k doctor' "$O3K_TEST_O3K_LOG"; then
       record_pass "canonical init/join/doctor ran before the bootstrap step"
     else
@@ -732,7 +783,7 @@ PY
     if run_wrapper "$out" "$err"; then
       record_pass "fresh first run exits 0 through the shim pipeline"
     else
-      record_fail "fresh first run failed (stderr: $(head -c 300 "$err"))"
+      record_fail "fresh first run failed (stderr: $(grep -aE "O3K installer|TestLab bootstrap|error" "$err" | tail -n2 | tr "\n" " "))"
     fi
     # Default-version proof: with no O3K_VERSION and no pin line, the wrapper
     # resolved the BAKED O3K_INSTALLER_VERSION — visible both in the banner
@@ -784,11 +835,12 @@ PY
     grep -Fq 'start o3k-compute.service' "$O3K_TEST_SYSTEMCTL_LOG" \
       && record_pass "wrapper started o3k-compute.service after canonical join" \
       || record_fail "wrapper did not start o3k-compute.service"
-    if grep -Fq 'runuser -u o3k -- env O3K_API_URL=http://127.0.0.1:18080/o3k/v1 O3K_BOOTSTRAP_SECRET=<redacted> /usr/local/bin/o3k init --agent-id compute-agent' "$O3K_TEST_RUNUSER_LOG" \
+    if grep -Fq 'runuser -u o3k -- env O3K_API_URL=http://127.0.0.1:18080/o3k/v1 O3K_BOOTSTRAP_SECRET_FILE=/var/lib/o3k/.installer-bootstrap-secret /usr/local/bin/o3k init --agent-id compute-agent' "$O3K_TEST_RUNUSER_LOG" \
+      && grep -Fq 'O3K_ENROLLMENT_TOKEN_FILE=/var/lib/o3k/.installer-enrollment-token' "$O3K_TEST_RUNUSER_LOG" \
       && grep -Fq 'o3k init --agent-id compute-agent' "$O3K_TEST_O3K_LOG" \
-      && grep -Fq 'o3k join --token fixture-enrollment-token-0123456789abcdef' "$O3K_TEST_O3K_LOG" \
+      && grep -Fq 'o3k join --agent-id compute-agent' "$O3K_TEST_O3K_LOG" \
       && grep -Fq 'o3k doctor' "$O3K_TEST_O3K_LOG"; then
-      record_pass "canonical init/join/doctor executed through the fixtures"
+      record_pass "canonical init/join/doctor executed through the fixtures (secrets via *_FILE, not argv)"
     else
       record_fail "canonical init/join/doctor did not execute through the fixtures"
     fi
@@ -856,7 +908,7 @@ PY
         run_wrapper "$out" "$err"; then
       record_pass "converged second run exits 0"
     else
-      record_fail "converged second run failed (stderr: $(head -c 300 "$err"))"
+      record_fail "converged second run failed (stderr: $(grep -aE "O3K installer|TestLab bootstrap|error" "$err" | tail -n2 | tr "\n" " "))"
     fi
     grep -Fq 'TLS identities preserved' "$out" \
       && record_pass "complete TLS set preserved" || record_fail "missing TLS-preserved line"
@@ -922,7 +974,7 @@ PY
     if run_wrapper "$out" "$err"; then
       record_pass "upgrade fence delegates an older install (exit 0)"
     else
-      record_fail "upgrade fence delegation failed (stderr: $(head -c 300 "$err"))"
+      record_fail "upgrade fence delegation failed (stderr: $(grep -aE "O3K installer|TestLab bootstrap|error" "$err" | tail -n2 | tr "\n" " "))"
     fi
     grep -Fq "Run: sudo $MATRIX/upgrade-download/o3k-0.4.0-rc.2/bin/o3k upgrade" "$out" \
       && record_pass "delegation prints the exact sudo o3k upgrade command" \

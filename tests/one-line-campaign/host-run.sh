@@ -170,7 +170,7 @@ scp "${SCP_OPTS[@]}" "$SCRIPT_DIR/in-vm-phase1.sh" "$SCRIPT_DIR/in-vm-phase2.sh"
 # ---- phase 1: install through the one-liner, assert, reboot --------------------
 log "phase 1: one-liner install"
 set +e
-ssh_vm "sudo env O3K_CAMPAIGN_REAL_RELEASE=$REAL_RELEASE bash $VM_SCRIPTS/in-vm-phase1.sh $DISTRO $VM_EVID $SOURCE_SHA" \
+ssh_vm "sudo env O3K_CAMPAIGN_REAL_RELEASE=$REAL_RELEASE O3K_CAMPAIGN_VERSION=$VERSION bash $VM_SCRIPTS/in-vm-phase1.sh $DISTRO $VM_EVID $SOURCE_SHA" \
   | tee "$EVID/vm-${DISTRO}-phase1.log"
 PHASE1_SSH=$?
 set -e
@@ -315,10 +315,10 @@ ssh_vm "sudo rm -f $VM_EVID/phase2-done"
 # skips only those idempotency blocks while uninstall/purge/zero-residue
 # and foreign-state checks still run.
 if [ -n "${O3K_UPGRADE_TARGET_VERSION:-}" ]; then
-  ssh_vm "sudo nohup env O3K_PHASE2_SKIP_IDEMPOTENCY=1 O3K_CAMPAIGN_REAL_RELEASE=$REAL_RELEASE bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
+  ssh_vm "sudo nohup env O3K_PHASE2_SKIP_IDEMPOTENCY=1 O3K_CAMPAIGN_REAL_RELEASE=$REAL_RELEASE O3K_CAMPAIGN_VERSION=$VERSION bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
     >$VM_EVID/phase2-console.log 2>&1 </dev/null &"
 else
-  ssh_vm "sudo nohup env O3K_CAMPAIGN_REAL_RELEASE=$REAL_RELEASE bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
+  ssh_vm "sudo nohup env O3K_CAMPAIGN_REAL_RELEASE=$REAL_RELEASE O3K_CAMPAIGN_VERSION=$VERSION bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
     >$VM_EVID/phase2-console.log 2>&1 </dev/null &"
 fi
 PHASE2_MARKER=""
