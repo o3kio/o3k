@@ -643,15 +643,6 @@ jobs:
           O3K_P15_7_JOURNEY_COMMAND: ${{ vars.O3K_P15_7_JOURNEY_COMMAND || 'bash scripts/p15-7-real-host-journey.sh' }}
         run: bash tests/p15_7_scale_composition.sh
 
-      - name: Post-run result guard
-        if: always() && steps.protected_preflight.outcome == 'success'
-        env:
-          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
-          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
-          O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
-          O3K_REAL_HOST_P15_7_STEP_STATUS: ${{ steps.p15_7.outcome || 'skipped' }}
-        run: bash scripts/real-host-post-run-guard.sh
-
       - name: Extract redacted create diagnostics
         if: always() && steps.protected_preflight.outcome == 'success'
         run: |
@@ -767,6 +758,20 @@ jobs:
             grep -Fqx "sha256=612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354" "${marker}"
             rm -f -- "${image_path}" "${marker}"
           fi
+
+      # The post-run guard snapshots the host AFTER every cleanup step so the
+      # after-inventory describes the same stable lifecycle point as the
+      # pre-run baseline. Running it earlier recorded the run's own in-flight
+      # disposable PostgreSQL container's random docker veth pair as foreign
+      # state and falsely failed the foreign-state comparison.
+      - name: Post-run result guard
+        if: always() && steps.protected_preflight.outcome == 'success'
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
+          O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
+          O3K_REAL_HOST_P15_7_STEP_STATUS: ${{ steps.p15_7.outcome || 'skipped' }}
+        run: bash scripts/real-host-post-run-guard.sh
 
       - name: Upload redacted real-host artifacts
         if: always()
