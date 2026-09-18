@@ -554,9 +554,15 @@ product baseline:
   semantics, and the Araf compatibility boundary
   ([SPEC-0048](specs/SPEC-0048-pp0-demo-and-small-edge-baseline-freeze.md),
   [baseline summary](pp0/PP0_PRODUCT_BASELINE.md)).
-- **PP.1** — build and publish the exact release artifact.
-- **PP.2** — fresh supported machine installs and runs via canonical P15
-  init/join.
+- **PP.1 (#970)** — build and publish the exact release artifact: shipped
+  as v0.4.0-rc.1 (signed digests/provenance; `o3k-network` binary + unit
+  shipped installed-but-never-enabled in the libvirt bundle).
+- **PP.2 (#971)** — fresh supported machine installs and runs via canonical
+  P15 init/join: implementation in progress on branch
+  `pp2-one-line-canonical-bootstrap` (the installer now performs canonical
+  `o3k init` + authenticated `o3k join` with canonical-readiness and
+  `o3k doctor` gates before the bounded demo workload); fresh-host campaign
+  pending against the successor candidate.
 - **PP.3/PP.4** — Araf deployment integration; **PP.5** — 1–20 hypervisor
   scale evidence.
 

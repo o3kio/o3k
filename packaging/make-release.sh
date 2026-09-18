@@ -63,7 +63,7 @@ done
 UPGRADE_FROM_MIN_VERSION="${O3K_UPGRADE_FROM_MIN_VERSION:-}"
 if [[ -z "$UPGRADE_FROM_MIN_VERSION" ]]; then
   echo "O3K_UPGRADE_FROM_MIN_VERSION is unset: set it to the previous published release version" >&2
-  echo "  e.g. O3K_UPGRADE_FROM_MIN_VERSION=v0.4.0-rc.1 packaging/make-release.sh 0.4.0-rc.1 libvirt" >&2
+  echo "  e.g. O3K_UPGRADE_FROM_MIN_VERSION=v0.4.0-rc.2 packaging/make-release.sh 0.4.0-rc.2 libvirt" >&2
   exit 1
 fi
 UPGRADE_FROM_VERSION_NO_V="${UPGRADE_FROM_MIN_VERSION#v}"
@@ -134,7 +134,7 @@ cp "$ROOT_DIR/packaging/o3kd.service" "$ROOT_DIR/packaging/install.sh" "$ROOT_DI
 cp "$ROOT_DIR/scripts/generate-passwords.sh" "$OUT_DIR/scripts/"
 cp "$ROOT_DIR/scripts/validate-release-e2e-evidence.py" "$OUT_DIR/scripts/"
 cp "$ROOT_DIR/contracts/release-e2e-evidence.schema.json" "$OUT_DIR/contracts/"
-cp "$ROOT_DIR/docs/compatibility.md" "$ROOT_DIR/docs/cirros-walkthrough.md" "$ROOT_DIR/docs/release-evidence-schema.md" "$ROOT_DIR/docs/human-review-schema.md" "$ROOT_DIR/docs/security-review-checklist.md" "$ROOT_DIR/docs/releases/v0.4.0-rc.1.md" "$OUT_DIR/docs/"
+cp "$ROOT_DIR/docs/compatibility.md" "$ROOT_DIR/docs/cirros-walkthrough.md" "$ROOT_DIR/docs/release-evidence-schema.md" "$ROOT_DIR/docs/human-review-schema.md" "$ROOT_DIR/docs/security-review-checklist.md" "$ROOT_DIR/docs/releases/v0.4.0-rc.2.md" "$OUT_DIR/docs/"
 cp "$ROOT_DIR/examples/clouds.yaml" "$ROOT_DIR/examples/o3kd.env.example" "$OUT_DIR/examples/"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" show -s --format=%ct HEAD)}" \
   "$ROOT_DIR/packaging/make-sbom.sh" "$OUT_DIR/sbom.spdx.json"

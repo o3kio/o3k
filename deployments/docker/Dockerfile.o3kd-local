@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-ARG VERSION="0.4.0-rc.1"
+ARG VERSION="0.4.0-rc.2"
 ARG VCS_REF="HEAD"
 
 LABEL org.opencontainers.image.title="o3kd" \

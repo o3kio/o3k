@@ -605,7 +605,9 @@ profiles:
       ephemeral-root storage, SQLite default. P15.7 convergence evidence
       (run 35365369016 at 096e4679) covers the canonical init/join
       authorities this profile mandates. This is a definition, not a new
-      support claim.
+      support claim. The PP.1 v0.4.0-rc.1 bundle (#970) ships o3k-network as
+      an installed-but-never-enabled optional component; this profile still
+      does not require or enable it.
     source_commit: 096e46792aad3af1e425fb844f449c4dcbfa5da2
     portable_evidence:
       - name: pp0-contract-validation
@@ -627,20 +629,32 @@ profiles:
       - name: demo-v1-fresh-install-profile-gate
         state: not-executed
         note: >-
-          PP.2 owns fresh-supported-machine installation evidence through
-          the canonical P15 bootstrap path; PP.0 freezes the contract only.
+          PP.2 (#971) owns fresh-supported-machine installation evidence
+          through the canonical P15 bootstrap path; PP.0 freezes the
+          contract only. PP.2 implementation is in progress on branch
+          pp2-one-line-canonical-bootstrap (the installer now performs
+          canonical init/join with canonical-readiness and o3k doctor
+          gates); the fresh-host campaign is pending against the successor
+          candidate. No fresh-install evidence is claimed yet.
     release_relevance: >-
       Contract-frozen vehicle for the next release. Not itself a release
       claim: publication still requires the release gate
       (docs/release-tracker.md, issues #93/#94) and PP.1-PP.2 evidence.
     blockers:
-      - PP.1 release artifact build/publish pipeline (contract frozen, not implemented)
-      - PP.2 fresh-machine install evidence via canonical init/join
+      - >-
+        PP.1 release artifact build/publish pipeline (shipped in
+        v0.4.0-rc.1, #970; a protected GitHub Actions release workflow
+        remains follow-up)
+      - >-
+        PP.2 (#971) fresh-machine install evidence via canonical init/join —
+        implementation in progress on branch pp2-one-line-canonical-bootstrap;
+        fresh-host campaign pending against the successor candidate
       - release-gate execution and publication (issue #93)
     next_evidence_action: >-
-      Execute PP.1 (build/publish the exact release bundle per
-      contracts/release-bundle-v1.yaml) and PP.2 (fresh-machine install
-      through canonical init/join).
+      Execute the PP.2 (#971) fresh-host campaign against the successor
+      release candidate from branch pp2-one-line-canonical-bootstrap
+      (canonical init/join installer path), then PP.5 scale evidence. PP.1
+      shipped the v0.4.0-rc.1 bundle (#970).
     explicitly_unproven_claims:
       - production readiness
       - HA / multi-node behavior

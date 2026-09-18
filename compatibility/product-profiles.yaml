@@ -193,7 +193,10 @@ profiles:
         required: false
         binary: o3k-network
         authority: execution-boundary-only
-        readiness: not packaged for this profile
+        readiness: >-
+          not required or enabled for this profile; shipped inactive in the
+          libvirt release bundle since v0.4.0-rc.1 (PP.1, #970) — binary +
+          unit installed, never enabled; no readiness requirement
       - component: libvirt-kvm
         required: true
         binary: host-package
