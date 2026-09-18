@@ -41,14 +41,14 @@
 # credential/TLS files are captured, never their contents.
 #
 # Usage: sudo bash in-vm-upgrade.sh <ubuntu|debian> <evidence-dir> <source-sha>
-# Env:   O3K_UPGRADE_TARGET_VERSION (default v0.4.0-rc.1),
+# Env:   O3K_UPGRADE_TARGET_VERSION (default v0.4.0-alpha.1),
 #        O3K_UPGRADE_RELEASE_BASE (default
 #        https://github.com/o3kio/o3k/releases/download)
 set -Eeuo pipefail
 DISTRO="${1:-ubuntu}"
 EVID="${2:-/tmp/o3k-campaign-evidence}"
 SOURCE_SHA="${3:-unknown}"
-TARGET_VERSION="${O3K_UPGRADE_TARGET_VERSION:-v0.4.0-rc.1}"
+TARGET_VERSION="${O3K_UPGRADE_TARGET_VERSION:-v0.4.0-alpha.1}"
 RELEASE_BASE="${O3K_UPGRADE_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download}"
 TARGET="${TARGET_VERSION#v}"
 [[ "$TARGET" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] \

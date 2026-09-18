@@ -73,7 +73,7 @@ artifact signing.
 
   ```bash
   O3K_UPGRADE_FROM_MIN_VERSION=v0.3.0-alpha.1 \
-    packaging/make-release.sh 0.4.0-alpha.1 libvirt
+    packaging/make-release.sh 0.4.0-rc.1 libvirt
   ```
 
 The fields are backward-compatible additions: `verify-release-bundle.sh`
@@ -97,10 +97,13 @@ gates make a second edited copy impossible to miss:
 
 `install.sh` sits next to the bundle directory in `dist/` — it is a release
 asset, not a bundle file, so it is deliberately absent from the bundle
-`SHA256SUMS`. The release asset contract for a GitHub Release is:
-`install.sh`, `o3k-<version>-linux-x86_64.tar.gz`, its `.sha256`, `o3kd`,
-`o3k`, `o3k-compute`, `o3k-network` (libvirt profile), `SHA256SUMS`,
-`sbom.spdx.json`, `manifest.json`, plus the provenance material below.
+`SHA256SUMS`. The published GitHub Release assets are exactly:
+`install.sh`, `o3k-<version>-linux-x86_64.tar.gz`, its `.sha256`, and the
+provenance material below (`release-digests.txt`, `release-digests.sig`,
+`provenance.json`, `release-verify.pub`). The bundle itself — `o3kd`, `o3k`,
+`o3k-compute`, `o3k-network` (libvirt profile), `SHA256SUMS`,
+`sbom.spdx.json`, `manifest.json`, packaging, docs, and examples — travels
+inside the tarball and is integrity-verified after extraction.
 
 The project does not claim SLSA compliance and does not automatically publish
 production releases. Since PP.1 (v0.4.0-rc.1), every release additionally

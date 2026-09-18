@@ -141,6 +141,17 @@ else
   cmp -s "$BUNDLE_DIR/bin/o3k-network" "$LIBVIRT_PREFIX/bin/o3k-network"
   [[ -f "$LIBVIRT_PREFIX/share/o3k/o3k-compute.service" ]]
   [[ -f "$LIBVIRT_PREFIX/share/o3k/o3k-network.service" ]]
+  # Uninstall must process the network entries recorded in the ownership
+  # manifest and remove them (regression: allowlist used to reject them).
+  bash "$BUNDLE_DIR/packaging/uninstall.sh" --yes \
+    --prefix "$LIBVIRT_PREFIX" --data-dir "$WORK_DIR/libvirt-data" \
+    --config-dir "$WORK_DIR/libvirt-config" --log-dir "$WORK_DIR/libvirt-log" \
+    >"$WORK_DIR/libvirt-uninstall.log" 2>&1
+  [[ ! -e "$LIBVIRT_PREFIX/bin/o3k-network" ]] \
+    || { echo "uninstall left bin/o3k-network behind" >&2; exit 1; }
+  [[ ! -e "$LIBVIRT_PREFIX/share/o3k/o3k-network.service" ]] \
+    || { echo "uninstall left the network unit behind" >&2; exit 1; }
+  echo "uninstall processed the network manifest entries"
 fi
 
 # ---- release bundles fail closed instead of compiling on the target --------

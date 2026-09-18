@@ -26,6 +26,10 @@ while (($#)); do
   esac
 done
 [[ "$PROFILE" == fake || "$PROFILE" == libvirt ]] || { echo "profile must be fake or libvirt" >&2; exit 2; }
+if [[ -n "$NETWORK_BINARY" && "$PROFILE" != libvirt ]]; then
+  echo "the network agent is only installed with the libvirt profile" >&2
+  exit 2
+fi
 [[ -n "$PREFIX" && -n "$DATA_DIR" && -n "$CONFIG_DIR" && -n "$LOG_DIR" ]] || { echo "installation paths must not be empty" >&2; exit 2; }
 validate_install_path() {
   local name="$1" path="$2"
@@ -636,6 +640,13 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   chown -R o3k:o3k "$LOG_DIR"
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d ! -path "$COMPUTE_DATA_DIR" -exec chmod 0700 {} +
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type f -exec chmod 0600 {} +
+  # The network agent state dir has its own identity: restore it after the
+  # recursive control-plane chown so the (never-enabled-here) o3k-network
+  # unit can write its state once small-edge orchestration enrolls it.
+  if [[ "$PROFILE" == libvirt && -n "$NETWORK_BINARY" && -d "$DATA_DIR/network" ]]; then
+    chown o3k-network:o3k-network "$DATA_DIR/network"
+    chmod 0700 "$DATA_DIR/network"
+  fi
   # Keep the QEMU access model through reinstall: the compute subtree stays
   # group-kvm (the setgid bit is restored below), so pre-existing runtime
   # files (base images, overlays, console sinks) remain QEMU-readable after a

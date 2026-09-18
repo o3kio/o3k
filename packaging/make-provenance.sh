@@ -52,6 +52,26 @@ PUBLIC_KEY="$ROOT_DIR/packaging/release-verify.pub"
 [[ -f "$PUBLIC_KEY" ]] || { echo "release verification public key is missing: $PUBLIC_KEY" >&2; exit 2; }
 
 COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+# The binding must be to ONE exact source commit: the commit already
+# recorded in the digest-covered bundle manifest. Provenance run at a
+# different checkout/commits than the bundle build must fail closed.
+MANIFEST_COMMIT="$(python3 - "$BUNDLE_DIR/manifest.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+commit = manifest.get("source_commit")
+if not isinstance(commit, str) or len(commit) != 40:
+    raise SystemExit("bundle manifest has no resolvable source_commit")
+print(commit)
+PY
+)"
+[[ "$COMMIT" == "$MANIFEST_COMMIT" ]] || {
+  echo "provenance source drift: HEAD is $COMMIT but the bundle manifest records $MANIFEST_COMMIT" >&2
+  echo "rebuild the bundle at one exact source commit before signing" >&2
+  exit 1
+}
 WORKFLOW="${GITHUB_WORKFLOW:-local}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" show -s --format=%ct HEAD)}"
 SIGNED_AT="$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"

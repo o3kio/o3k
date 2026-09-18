@@ -56,7 +56,7 @@ while IFS= read -r line; do
   [[ -n "$line" ]] || { echo "refusing malformed installation ownership manifest: $INSTALL_MANIFEST" >&2; exit 2; }
   [[ "$line" == "$MANIFEST_HEADER" ]] && continue
   case "$line" in
-    bin/o3kd|bin/o3k|bin/o3k-compute|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/50-o3k-libvirt.rules|share/o3k/release-manifest.json|share/o3k/SHA256SUMS|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/bootstrap-testlab.sh|share/o3k/generate-passwords.sh)
+    bin/o3kd|bin/o3k|bin/o3k-compute|bin/o3k-network|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/o3k-network.service|share/o3k/50-o3k-libvirt.rules|share/o3k/release-manifest.json|share/o3k/SHA256SUMS|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/bootstrap-testlab.sh|share/o3k/generate-passwords.sh)
       MANIFEST_FILES+=("$line")
       ;;
     *)
@@ -294,6 +294,7 @@ fi
 if [[ $SYSTEM_INSTALL -eq 1 ]]; then
   remove_owned_system_file "$PREFIX/share/o3k/o3kd.service" /etc/systemd/system/o3kd.service
   remove_owned_system_file "$PREFIX/share/o3k/o3k-compute.service" /etc/systemd/system/o3k-compute.service
+  remove_owned_system_file "$PREFIX/share/o3k/o3k-network.service" /etc/systemd/system/o3k-network.service
 fi
 for relative in "${MANIFEST_FILES[@]}"; do
   destination="$PREFIX/$relative"
