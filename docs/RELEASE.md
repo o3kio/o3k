@@ -131,8 +131,9 @@ cosign verify-blob --bundle o3kd.sigstore.json bin/o3kd \
 ```
 
 That workflow remains a proposal until a protected workflow, identity
-pattern, and maintainer approval are in place. A release must not be
-described as signed merely because it contains checksums.
+pattern, and maintainer approval are in place. Checksums are integrity, not
+authenticity: a release must not be described as signed merely because it
+contains checksums.
 
 The libvirt alpha also requires `packaging/release-gate.sh` to report
 `status: ready` from real E2E, recovery, clean Ubuntu/Debian installation,
