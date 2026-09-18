@@ -28,8 +28,17 @@ jobs:
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
     timeout-minutes: 15
     steps:
-      - name: Check out the canonical repository at the exact SHA
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # No repository checkout: the protected run may leave root-owned
+      # artifacts in the workspace that checkout cannot remove. The bounded
+      # script is fetched verbatim at the exact merged SHA instead.
+      - name: Fetch pinned sanitation script
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 30 \
+            "https://raw.githubusercontent.com/o3kio/o3k/${GITHUB_SHA}/scripts/p15-7-stale-postgres-sanitation.sh" \
+            -o "$RUNNER_TEMP/p15-7-stale-postgres-sanitation.sh"
+          chmod 0755 "$RUNNER_TEMP/p15-7-stale-postgres-sanitation.sh"
+          grep -q "stale owned postgres sanitation completed" "$RUNNER_TEMP/p15-7-stale-postgres-sanitation.sh"
 
       - name: Verify runner identity before any mutation
         run: |
@@ -61,7 +70,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          bash scripts/p15-7-stale-postgres-sanitation.sh "$RUNNER_TEMP/stale-postgres.allowlist" \
+          bash "$RUNNER_TEMP/p15-7-stale-postgres-sanitation.sh" "$RUNNER_TEMP/stale-postgres.allowlist" \
             | tee "$RUNNER_TEMP/sanitation.log"
 
       - name: Post-sanitation verification (read-only)
