@@ -173,6 +173,15 @@ impl DhcpRuntime {
                     .stop()
                     .map_err(|_| AgentError::Protocol("DHCP stop failed".to_owned()))?;
             }
+            // The flat bridge is single-subnet per occupied lifetime. With no
+            // bindings left, return it to unbound state so a later attachment
+            // with a different subnet (for example the P15.7 journey network
+            // after an earlier lifecycle server was deleted) can bind. While
+            // any binding exists, validate() still rejects conflicting
+            // subnets — the guard is unchanged for occupied bridges.
+            self.service.clear_configuration().map_err(|_| {
+                AgentError::Protocol("DHCP configuration cleanup failed".to_owned())
+            })?;
         } else if let Some(supervisor) = self.supervisor.as_mut() {
             self.service
                 .reload(supervisor)

@@ -361,6 +361,16 @@ impl DhcpService {
         self.state.config.as_ref()
     }
 
+    /// Clears the persisted network configuration after the last binding was
+    /// removed. The flat DHCP bridge is single-subnet per occupied lifetime;
+    /// once no bindings remain, the bridge returns to unbound state so a
+    /// future attachment with a different subnet can bind. The conflict guard
+    /// is unchanged while any binding exists.
+    pub fn clear_configuration(&mut self) -> Result<(), DhcpError> {
+        self.state.config = None;
+        self.persist()
+    }
+
     pub fn render_config(&self) -> Result<String, DhcpError> {
         let config = self.state.config.as_ref().ok_or(DhcpError::InvalidConfig)?;
         validate_config(config)?;
@@ -549,6 +559,33 @@ mod tests {
         assert!(rendered.contains("dhcp-range=192.0.2.1,static,3600"));
         assert!(rendered.contains("dhcp-leasefile="));
         assert!(service.managed_lease_path().ends_with("dnsmasq.leases"));
+        Ok(())
+    }
+
+    #[test]
+    fn clearing_configuration_after_last_binding_allows_new_subnet() -> Result<(), DhcpError> {
+        let mut service = service()?;
+        service.configure(config()?)?;
+        service.upsert_binding(Binding {
+            port_id: "p1".into(),
+            mac: "02:00:00:00:00:01".into(),
+            address: "192.0.2.10".parse().map_err(|_| DhcpError::InvalidConfig)?,
+        })?;
+        // While a binding exists, a conflicting subnet stays rejected.
+        let mut conflicting = config()?;
+        conflicting.subnet = "198.18.0.0/29".into();
+        conflicting.gateway = "198.18.0.1".parse().map_err(|_| DhcpError::InvalidConfig)?;
+        conflicting.dns = vec![conflicting.gateway];
+        assert!(matches!(
+            service.configure(conflicting.clone()),
+            Err(DhcpError::InvalidConfig)
+        ));
+        // Once the last binding is removed and the configuration cleared, the
+        // bridge is unbound again and a different subnet may bind.
+        service.remove_binding("p1")?;
+        service.clear_configuration()?;
+        assert!(service.configuration().is_none());
+        service.configure(conflicting)?;
         Ok(())
     }
 

@@ -334,6 +334,26 @@ mod tests {
             0,
             "removing an absent binding must be a no-op"
         );
+        // Once the last binding is gone the flat bridge returns to unbound
+        // state, so a later attachment with a different subnet (for example
+        // the P15.7 journey network after an earlier lifecycle server was
+        // deleted) can bind instead of failing on a stale configuration.
+        assert!(
+            runtime.service.configuration().is_none(),
+            "the bridge must be unbound after the last binding is removed"
+        );
+        assert!(
+            runtime
+                .validate(&[proto::NetworkAttachment {
+                    port_id: "port-next".to_owned(),
+                    mac: "02:00:00:00:00:09".to_owned(),
+                    fixed_ipv4: "198.18.0.2".to_owned(),
+                    subnet_cidr: "198.18.0.0/29".to_owned(),
+                    gateway_ipv4: "198.18.0.1".to_owned(),
+                }])
+                .is_ok(),
+            "a different subnet must be bindable once the bridge is unbound"
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
