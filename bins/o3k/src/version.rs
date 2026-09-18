@@ -39,11 +39,12 @@ impl ReleaseVersion {
         !self.prerelease.is_empty()
     }
 
-    /// Release channel family. O3K only ships `alpha` and `beta` prereleases;
-    /// a stable release (no prerelease) is `stable`. Any other prerelease
-    /// identifier (for example `rc`) is treated as `stable`-family: unknown
-    /// families must not accidentally pattern-match the alpha fence, and no
-    /// such releases exist today.
+    /// Release channel family. O3K ships `alpha` and `beta` prereleases and
+    /// `rc` release candidates; a stable release (no prerelease) is `stable`.
+    /// An `rc` prerelease is treated as `stable`-family (it is a candidate
+    /// FOR the stable line): upgrading from an alpha/beta install to an rc
+    /// target is a cross-channel path and remains fenced. Unknown prerelease
+    /// identifiers must not accidentally pattern-match the alpha fence.
     #[must_use]
     pub fn channel(&self) -> &'static str {
         match self.prerelease.first().map(String::as_str) {

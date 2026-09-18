@@ -35,10 +35,11 @@ set -Eeuo pipefail
 #     component; verified again here and re-verified by the wrapper before
 #     extraction
 #
-# This script does NOT sign the artifacts and must not be described as
-# producing signed releases: the SHA-256 file is an integrity checksum for the
-# wrapper's download verification, not an authenticity signature (see
-# docs/RELEASE.md for the signing position).
+# Signing: this script delegates to packaging/make-provenance.sh, which binds
+# every published asset to the exact source commit and signs that binding
+# with the O3K release ed25519 key (release-digests.txt/.sig, provenance.json,
+# release-verify.pub). The .sha256 file remains an integrity checksum, not an
+# authenticity signature (see docs/RELEASE.md for the signing position).
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:?usage: make-release-archive.sh VERSION [BUNDLE_DIR]}"
 VERSION_RE='^[0-9]+(\.[0-9]+){1,2}(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
@@ -101,6 +102,12 @@ printf '%s  %s\n' "$DIGEST" "o3k-$VERSION-linux-x86_64.tar.gz" >"$SHA_FILE"
 # Prove the published file round-trips with the exact tool the wrapper uses.
 (cd "$DIST_DIR" && sha256sum -c --strict -- "o3k-$VERSION-linux-x86_64.tar.gz.sha256" >/dev/null) \
   || { echo "published SHA-256 file does not verify" >&2; exit 1; }
+
+# Provenance/signature material (contracts/release-bundle-v1.yaml): binds
+# every published asset to the exact source commit and signs the binding with
+# the O3K release ed25519 key. Fail closed when the signing key is absent —
+# an unsigned release archive must not be produced silently.
+bash "$ROOT_DIR/packaging/make-provenance.sh" "v$VERSION" "$DIST_DIR"
 
 echo "release archive: $TARBALL ($ENTRY_COUNT entries, all ./ prefixed)"
 echo "published SHA-256: $SHA_FILE"

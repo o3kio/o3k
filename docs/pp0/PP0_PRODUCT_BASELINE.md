@@ -61,16 +61,16 @@ single-use enrollment grant; `o3k join` presents the agent certificate
 |---|---|
 | `get-o3k.sh` download → sha256 verify → `install.sh` → health gates | VALID |
 | `install.sh` ownership markers, foreign-file refusal, install manifest | VALID |
-| `install.sh` cargo-compiles `o3kd`/`o3k`/`o3k-compute` on target when prebuilt binaries are absent | **STALE-PRE-P15** — violates the frozen no-target-compilation contract; PP.1 IMPLEMENTATION REQUIRED |
+| `install.sh` cargo-compiles `o3kd`/`o3k`/`o3k-compute` on target when prebuilt binaries are absent | **RESOLVED in PP.1 (v0.4.0-rc.1)** — release bundles now fail closed on a missing required binary; cargo fallback remains only for repo-tree dev installs |
 | Upgrade fence (semver compare, delegate-download, no auto-upgrade) | VALID |
 | `o3k upgrade` engine (schema/version fence, doctor gate, backup) | VALID |
 | reset/uninstall/purge ownership fencing (P15.7 fail-closed model) | VALID |
 | systemd units `o3kd.service` / `o3k-compute.service` | VALID |
-| `o3k-network.service` unit for the small-edge network agent | **MISSING** — PP.1 IMPLEMENTATION REQUIRED |
+| `o3k-network.service` unit for the small-edge network agent | **RESOLVED in PP.1 (v0.4.0-rc.1)** — unit shipped, installed but never enabled (canonical init/join enrollment) |
 | `packaging/bootstrap-testlab.sh` (raw `openstack` CLI topology, no init/join) | **STALE-PRE-P15** — reconcile in PP.1/PP.2 |
-| Automated release pipeline publishing to GitHub Releases | **MISSING** — PP.1 IMPLEMENTATION REQUIRED |
-| Artifact signature/provenance attestation (only SHA-256 today) | **MISSING** — PP.1 IMPLEMENTATION REQUIRED |
-| `o3k-network` packaging/unit | **MISSING** — PP.1 for small-edge bundle |
+| Automated release pipeline publishing to GitHub Releases | **PARTIAL in PP.1** — first RC published via the operator-run pipeline scripts; a protected GitHub Actions release workflow remains follow-up |
+| Artifact signature/provenance attestation | **RESOLVED in PP.1 (v0.4.0-rc.1)** — ed25519 release key (`release-verify.pub` committed), `release-digests.txt/.sig` + `provenance.json` published per release |
+| `o3k-network` packaging/unit | **RESOLVED in PP.1 (v0.4.0-rc.1)** — binary built (Debian-12 baseline), bundled, installed |
 | Full upgrade/rollback/crash-resume | **LATER-PHASE** — issue #640 / PP.6–P17 |
 | Araf deployment integration | **LATER-PHASE** — PP.3/PP.4 |
 

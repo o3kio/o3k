@@ -7,6 +7,7 @@ LOG_DIR=/var/log/o3k
 BINARY=
 COMPUTE_BINARY=
 O3K_BINARY=
+NETWORK_BINARY=
 PROFILE=fake
 NONINTERACTIVE=0
 while (($#)); do
@@ -18,12 +19,17 @@ while (($#)); do
     --binary) BINARY="$2"; shift 2;;
     --compute-binary) COMPUTE_BINARY="$2"; shift 2;;
     --o3k-binary) O3K_BINARY="$2"; shift 2;;
+    --network-binary) NETWORK_BINARY="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --noninteractive) NONINTERACTIVE=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
 [[ "$PROFILE" == fake || "$PROFILE" == libvirt ]] || { echo "profile must be fake or libvirt" >&2; exit 2; }
+if [[ -n "$NETWORK_BINARY" && "$PROFILE" != libvirt ]]; then
+  echo "the network agent is only installed with the libvirt profile" >&2
+  exit 2
+fi
 [[ -n "$PREFIX" && -n "$DATA_DIR" && -n "$CONFIG_DIR" && -n "$LOG_DIR" ]] || { echo "installation paths must not be empty" >&2; exit 2; }
 validate_install_path() {
   local name="$1" path="$2"
@@ -59,11 +65,28 @@ SYSTEM_INSTALL=0
 if [[ "$PREFIX" == /usr/local && "$DATA_DIR" == /var/lib/o3k && "$CONFIG_DIR" == /etc/o3k && "$LOG_DIR" == /var/log/o3k ]]; then SYSTEM_INSTALL=1; fi
 if [[ $EUID -ne 0 && ( "$PREFIX" == /usr/* || "$DATA_DIR" == /var/* || "$CONFIG_DIR" == /etc/* ) ]]; then echo "system paths require root; use sudo or explicit user paths" >&2; exit 2; fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Release-bundle detection: a release bundle carries manifest.json and
+# SHA256SUMS at its root (packaging/make-release.sh). Inside a release bundle
+# the installer must NEVER compile on the target host: a missing required
+# prebuilt binary fails closed (contracts/installer-v1.yaml
+# no_target_compilation). Repo-tree/dev installs keep the cargo fallback.
+RELEASE_BUNDLE=0
+if [[ -f "$ROOT_DIR/manifest.json" && -f "$ROOT_DIR/SHA256SUMS" ]]; then
+  RELEASE_BUNDLE=1
+fi
+bundle_missing_binary() {
+  echo "release bundle is missing required prebuilt binary: $1" >&2
+  echo "refusing to compile O3K on the installation target (contracts/installer-v1.yaml no_target_compilation)" >&2
+  exit 1
+}
 if [[ "$PROFILE" == libvirt ]]; then "$ROOT_DIR/packaging/preflight.sh" --profile libvirt --data-dir "$DATA_DIR"; fi
 if [[ -z "$BINARY" ]]; then
   if [[ -x "$ROOT_DIR/bin/o3kd" ]]; then
     BINARY="$ROOT_DIR/bin/o3kd"
   else
+    if [[ "$RELEASE_BUNDLE" == 1 ]]; then
+      bundle_missing_binary "$ROOT_DIR/bin/o3kd (o3kd)"
+    fi
     cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd
     BINARY="$ROOT_DIR/target/release/o3kd"
   fi
@@ -76,6 +99,9 @@ if [[ "$PROFILE" == libvirt && -z "$COMPUTE_BINARY" ]]; then
     # The cargo bin target is `o3k-compute-bin` (bins/o3k-compute package);
     # its `libvirt` feature gates the libvirt backend
     # (bins/o3k-compute/Cargo.toml).
+    if [[ "$RELEASE_BUNDLE" == 1 ]]; then
+      bundle_missing_binary "$ROOT_DIR/bin/o3k-compute (o3k-compute)"
+    fi
     cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute-bin
     COMPUTE_BINARY="$ROOT_DIR/target/release/o3k-compute-bin"
   fi
@@ -83,17 +109,32 @@ fi
 if [[ "$PROFILE" == libvirt ]]; then [[ -x "$COMPUTE_BINARY" ]] || { echo "compute binary is not executable: $COMPUTE_BINARY" >&2; exit 1; }; fi
 # o3k doctor is profile-independent: installed in every profile (issue #617).
 # The release bundle carries bin/o3k next to bin/o3kd; repo-tree/dev installs
-# build it from the workspace like the o3kd fallback above unless the caller
-# supplies --o3k-binary (used by tests to avoid in-script release builds).
+# build it from the workspace unless the caller supplies --o3k-binary (used by
+# tests to avoid in-script release builds). In a release bundle a missing
+# bin/o3k fails closed instead of compiling.
 if [[ -z "$O3K_BINARY" ]]; then
   if [[ -x "$ROOT_DIR/bin/o3k" ]]; then
     O3K_BINARY="$ROOT_DIR/bin/o3k"
   else
+    if [[ "$RELEASE_BUNDLE" == 1 ]]; then
+      bundle_missing_binary "$ROOT_DIR/bin/o3k (o3k)"
+    fi
     cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k
     O3K_BINARY="$ROOT_DIR/target/release/o3k"
   fi
 fi
 [[ -x "$O3K_BINARY" ]] || { echo "o3k binary is not executable: $O3K_BINARY" >&2; exit 1; }
+# Optional o3k-network execution agent (o3k-small-edge-v1 network boundary):
+# shipped in libvirt-profile release bundles from PP.1 onward. It is installed
+# together with its systemd unit but never enabled here — small-edge
+# orchestration enrolls it through the canonical init/join path. Optional
+# everywhere and never compiled on the target host.
+if [[ "$PROFILE" == libvirt && -z "$NETWORK_BINARY" && -x "$ROOT_DIR/bin/o3k-network" ]]; then
+  NETWORK_BINARY="$ROOT_DIR/bin/o3k-network"
+fi
+if [[ -n "$NETWORK_BINARY" ]]; then
+  [[ -x "$NETWORK_BINARY" ]] || { echo "network binary is not executable: $NETWORK_BINARY" >&2; exit 1; }
+fi
 TLS_DIR="$CONFIG_DIR/tls"
 if [[ "$PROFILE" == libvirt ]]; then
   [[ -d "$TLS_DIR" && ! -L "$TLS_DIR" ]] || { echo "libvirt TLS directory is missing or unsafe: $TLS_DIR" >&2; exit 2; }
@@ -148,6 +189,27 @@ if [[ $EUID -eq 0 ]]; then
       done < <(id -nG o3k-compute | tr ' ' '\n')
     else
       useradd --system --gid o3k-compute --home-dir /var/lib/o3k/compute --shell /usr/sbin/nologin o3k-compute
+    fi
+  fi
+  if [[ -n "$NETWORK_BINARY" ]]; then
+    getent group o3k-network >/dev/null || groupadd --system o3k-network
+    if id o3k-network >/dev/null 2>&1; then
+      network_record="$(getent passwd o3k-network || true)"
+      [[ "$network_record" == *":/var/lib/o3k/network:/usr/sbin/nologin" ]] || {
+        echo "refusing to reuse an unrelated o3k-network account" >&2
+        exit 2
+      }
+      while read -r group; do
+        case "$group" in
+          ""|o3k-network) ;;
+          *)
+            echo "refusing to reuse o3k-network account with unexpected group: $group" >&2
+            exit 2
+            ;;
+        esac
+      done < <(id -nG o3k-network | tr ' ' '\n')
+    else
+      useradd --system --gid o3k-network --home-dir /var/lib/o3k/network --shell /usr/sbin/nologin o3k-network
     fi
   fi
   RUN_USER=o3k
@@ -265,6 +327,14 @@ if [[ "$PROFILE" == libvirt ]]; then
   install_owned_file "$ROOT_DIR/packaging/o3k-compute.service" "$PREFIX/share/o3k/o3k-compute.service" share/o3k/o3k-compute.service 0644
   install_owned_file "$ROOT_DIR/packaging/50-o3k-libvirt.rules" "$PREFIX/share/o3k/50-o3k-libvirt.rules" share/o3k/50-o3k-libvirt.rules 0644
   INSTALLED_FILES+=(bin/o3k-compute share/o3k/o3k-compute.service share/o3k/50-o3k-libvirt.rules)
+fi
+if [[ "$PROFILE" == libvirt && -n "$NETWORK_BINARY" ]]; then
+  install_owned_file "$NETWORK_BINARY" "$PREFIX/bin/o3k-network" bin/o3k-network 0755
+  install_owned_file "$ROOT_DIR/packaging/o3k-network.service" "$PREFIX/share/o3k/o3k-network.service" share/o3k/o3k-network.service 0644
+  INSTALLED_FILES+=(bin/o3k-network share/o3k/o3k-network.service)
+  if [[ $EUID -eq 0 ]]; then
+    install -d -o o3k-network -g o3k-network -m 0700 "$DATA_DIR/network"
+  fi
 fi
 MANIFEST_TEMP="$INSTALL_MANIFEST.tmp-$$"
 {
@@ -570,6 +640,13 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   chown -R o3k:o3k "$LOG_DIR"
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d ! -path "$COMPUTE_DATA_DIR" -exec chmod 0700 {} +
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type f -exec chmod 0600 {} +
+  # The network agent state dir has its own identity: restore it after the
+  # recursive control-plane chown so the (never-enabled-here) o3k-network
+  # unit can write its state once small-edge orchestration enrolls it.
+  if [[ "$PROFILE" == libvirt && -n "$NETWORK_BINARY" && -d "$DATA_DIR/network" ]]; then
+    chown o3k-network:o3k-network "$DATA_DIR/network"
+    chmod 0700 "$DATA_DIR/network"
+  fi
   # Keep the QEMU access model through reinstall: the compute subtree stays
   # group-kvm (the setgid bit is restored below), so pre-existing runtime
   # files (base images, overlays, console sinks) remain QEMU-readable after a
@@ -585,6 +662,13 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   if [[ "$PROFILE" == libvirt ]]; then
     install_owned_system_file "$ROOT_DIR/packaging/o3k-compute.service" \
       /etc/systemd/system/o3k-compute.service 0644
+  fi
+  if [[ "$PROFILE" == libvirt && -n "$NETWORK_BINARY" ]]; then
+    # Installed but deliberately NOT enabled: the network agent is enrolled
+    # by small-edge orchestration through the canonical init/join path
+    # (contracts/installer-v1.yaml authority boundary).
+    install_owned_system_file "$ROOT_DIR/packaging/o3k-network.service" \
+      /etc/systemd/system/o3k-network.service 0644
   fi
   systemctl daemon-reload
   systemctl enable --now o3kd.service

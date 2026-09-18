@@ -1,0 +1,26 @@
+[Unit]
+Description=O3K network execution agent
+After=network-online.target o3kd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=o3k-network
+Group=o3k-network
+EnvironmentFile=-/etc/o3k/o3k-network.env
+ExecStart=/usr/local/bin/o3k-network
+Restart=on-failure
+NoNewPrivileges=true
+UMask=0027
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/o3k/network /var/log/o3k
+# TAP/bridge/gateway realization and dnsmasq DHCP serving need network
+# administration and privileged-port binding; ambient so helper processes
+# (ip, dnsmasq) retain them across exec.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

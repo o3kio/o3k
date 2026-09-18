@@ -94,7 +94,7 @@ export default {
       const bare = version.startsWith('v') ? version.slice(1) : version;
       if (!VERSION_RE.test(bare)) {
         return text(
-          `invalid version path: /v${version} — expected a published release version like /v0.4.0-alpha.1\n`,
+          `invalid version path: /v${version} — expected a published release version like /v0.4.0-rc.1\n`,
           { status: 400, cache: false },
         );
       }
