@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # o3k upgrade campaign — in-VM UPGRADE/ROLLBACK phase (issue #626).
 #
-# Runs INSIDE the VM AFTER the doctor phase (v0.4.0-rc.2 installed with a
+# Runs INSIDE the VM AFTER the doctor phase (v0.4.0-rc.3 installed with a
 # working TestLab: o3kd + o3k-compute running, canonical bootstrap ready,
 # test-vm ACTIVE with fixed IP
 # 192.0.2.2, doctor HEALTHY) and BEFORE phase 2's teardown. Proves the
@@ -348,8 +348,8 @@ phase_identity_before() {
   log "phase 1/8: identity capture (before)"
   SOURCE_VERSION="$(manifest_version)"
   [ "$SOURCE_VERSION" != "$TARGET" ] || fail 11 "installed version ($SOURCE_VERSION) already equals the target $TARGET"
-  if [ "$SOURCE_VERSION" != 0.4.0-rc.2 ]; then
-    log "WARNING: expected the v0.4.0-rc.2 source install, found $SOURCE_VERSION"
+  if [ "$SOURCE_VERSION" != 0.4.0-rc.3 ]; then
+    log "WARNING: expected the v0.4.0-rc.3 source install, found $SOURCE_VERSION"
   fi
   token_ok || fail 11 "token issue failed before the upgrade"
   SRV_ID="$(server_id)"
