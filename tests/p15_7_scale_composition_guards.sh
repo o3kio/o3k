@@ -175,6 +175,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-c-uuid\")\"", "provision_vms_bounded",
                  "capture-p15-7-provision-diagnostics.py", "p15-7-provisioning-diagnostics.json", "REPLAY_JOIN_FILE",
                  "REPLAY_JOIN_BY_AGENT[$DRAIN_AGENT]", "compute-agent-replay-join.json",
+                 "install -m 0644 \"$STATE_ROOT/tls/agent.pem\"",
                  "capture-p15-7-workload-diagnostics.py", "p15-7-workload-failure-diagnostics.json",
                  "capture_workload_failure_diagnostics", "${workload_label}-operation.raw.json", "/operations/$operation_id",
                  "install -d -o root -g libvirt-qemu -m 02750 /var/lib/o3k-compute",

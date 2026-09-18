@@ -1057,7 +1057,10 @@ if [[ -z "$REPLAY_JOIN_FILE" && "$DRAIN_AGENT" == "compute-agent" ]]; then
   [[ "$(sudo -n cat "$STATE_ROOT/tls/agent-id" 2>/dev/null)" == "compute-agent" ]] \
     || die "bootstrap agent identity does not match the drained host"
   REPLAY_JOIN_FILE="$WORK_ROOT/compute-agent-replay-join.json"
-  sudo -n install -m 0600 "$STATE_ROOT/tls/agent.pem" "$WORK_ROOT/replay-agent.pem" \
+  # The certificate is public material (the journey stages block agent certs
+  # 0644 above the same way); 0600 root-owned would be unreadable by the
+  # unprivileged runner user that runs python3 below.
+  sudo -n install -m 0644 "$STATE_ROOT/tls/agent.pem" "$WORK_ROOT/replay-agent.pem" \
     || die "cannot stage bootstrap agent certificate for replay probe"
   python3 - "$REPLAY_JOIN_FILE" "$WORK_ROOT/replay-agent.pem" <<'PY' \
     || die "cannot compose drained-agent replay join request"
@@ -1076,7 +1079,7 @@ PY
 fi
 [[ -n "$REPLAY_JOIN_FILE" && -f "$REPLAY_JOIN_FILE" ]] || die "replay join request was not retained for drained agent: $DRAIN_AGENT"
 code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST "$API/bootstrap/join" -H 'Content-Type: application/json' -d @"$REPLAY_JOIN_FILE")"
-[[ "$code" != 200 ]] || die "replayed join accepted for removed drained agent: $DRAIN_AGENT"
+[[ "$code" != 200 ]] || die "replayed join accepted for removed drained agent: $DRAIN_AGENT (code=$code)"
 code="$(curl --silent -o /dev/null -w '%{http_code}' "$API/operator/building-blocks/${BLOCK_IDS[block-a]}")"
 [[ "$code" == 401 || "$code" == 403 ]] || die "unauthenticated state read was not concealed"
 
