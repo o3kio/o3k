@@ -881,6 +881,30 @@ mod tests {
         assert_eq!(refreshed.allocations.len(), 1);
         assert_eq!(refreshed.inventories[o3k_placement::VCPU].used, 1);
 
+        // A block transition may durably gate Placement before the agent has
+        // acknowledged the desired state. A subsequent capability refresh
+        // must preserve that drain rather than reopening scheduling.
+        registry.upsert(agent_node("agent-a", 4, 4096, 20)).await;
+        placement
+            .set_state("agent-a", o3k_placement::ProviderState::Draining)
+            .await?;
+        sync_agent_inventory(&registry, &placement).await?;
+        assert_eq!(
+            placement.provider("agent-a").await?.state,
+            o3k_placement::ProviderState::Draining
+        );
+
+        // The same fence holds for a removed block's deleted provider: a
+        // still-heartbeating agent must not reopen scheduling on it.
+        placement
+            .set_state("agent-a", o3k_placement::ProviderState::Deleted)
+            .await?;
+        sync_agent_inventory(&registry, &placement).await?;
+        assert_eq!(
+            placement.provider("agent-a").await?.state,
+            o3k_placement::ProviderState::Deleted
+        );
+
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1960,6 +1984,38 @@ mod tests {
         Ok(())
     }
 
+    /// Command success alone is not a running-instance observation. In
+    /// particular, a delayed or missing observation must not fabricate ACTIVE.
+    #[tokio::test]
+    async fn succeeded_create_without_instance_does_not_project_active_on_show()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        let (service, store, request) =
+            crash_before_dispatch_fixture("succeeded-no-instance", fake.clone()).await?;
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Succeeded,
+                Some(&request.operation_id.to_string()),
+                None,
+                None,
+            )
+            .await?;
+        let server = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(server.state, ServerState::Requested);
+        assert_eq!(fake.instance_count(), 0);
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "REQUESTED"
+        );
+        Ok(())
+    }
+
     /// The periodic create-convergence sweep must recover the issue-87 S1
     /// residue after a control-plane restart WITHOUT any API call: the lazy
     /// show path alone would leave the server stuck in REQUESTED until a
@@ -2629,7 +2685,8 @@ mod tests {
             "an undelivered create must not become terminal while the registry is empty"
         );
         // The agent re-registers (reconnect backoff completed); a later sweep
-        // tick re-dispatches the create and converges to ACTIVE.
+        // tick re-dispatches the create and the provider reports the running
+        // instance observation.
         provider.register();
         loop {
             let operation = store.get_operation(request.operation_id).await?;

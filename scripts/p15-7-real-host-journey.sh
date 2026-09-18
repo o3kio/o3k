@@ -37,11 +37,14 @@ ARAF_STATUS="not_configured"
 ARAF_REASON="external_consumer_not_provisioned"
 VM_USER="${O3K_P15_7_VM_USER:-o3k}"
 VM_DISK_SIZE_GB="${O3K_P15_7_VM_DISK_SIZE_GB:-10}"
+COMPUTE_LOG_FILTER="${O3K_COMPUTE_LOG_FILTER:-warn}"
 # A region is an optional topology declaration, not an OpenStack display
 # default.  The disposable daemon has no declared region unless the runner
 # explicitly supplies one; sending the historical `RegionOne` string would
 # therefore make the canonical join fail closed with a 400.
 JOIN_REGION="${O3K_P15_7_REGION:-}"
+P15_PROVISION_DIAGNOSTICS_CAPTURED=false
+P15_WORKLOAD_DIAGNOSTICS_CAPTURED=false
 die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
 [[ "$DIAGNOSTIC_ONLY" == true || "$DIAGNOSTIC_ONLY" == false ]] || die "diagnostic mode is invalid"
@@ -52,6 +55,7 @@ fi
 [[ "$VM_USER" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]] || die "VM user is unsafe"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ ]] || die "TestLab ports are invalid"
 [[ "$VM_DISK_SIZE_GB" =~ ^[1-9][0-9]*$ ]] || die "VM disk size is invalid"
+[[ "$COMPUTE_LOG_FILTER" =~ ^[A-Za-z0-9_=,:.-]+$ ]] || die "compute log filter is invalid"
 for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
@@ -72,8 +76,84 @@ KNOWN_HOSTS="$WORK_ROOT/known_hosts"
 mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"; chmod 0700 "$WORK_ROOT"
 printf 'o3k-p15-7-journey-owned-v1\nrun=%s\n' "$RUN_ID" >"$WORK_ROOT/.o3k-owned"
 chmod 0600 "$WORK_ROOT/.o3k-owned"
+capture_failure_diagnostics() {
+  local exit_status="$1"
+  [[ "$exit_status" -ne 0 && "$P15_PROVISION_DIAGNOSTICS_CAPTURED" == false ]] || return 0
+  python3 "$ROOT_DIR/scripts/capture-p15-7-provision-diagnostics.py" \
+    "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" "$WORK_ROOT" "$SOURCE_SHA" "$RUN_ID" journey_failed \
+    || echo "P15.7 journey diagnostics could not be safely captured" >&2
+}
+capture_workload_failure_diagnostics() {
+  local workload_label="${1:-workload-b}" workload_file workload_id
+  [[ "$P15_WORKLOAD_DIAGNOSTICS_CAPTURED" == false ]] || return 0
+  [[ "$workload_label" =~ ^workload-[ab]$ && -n "${PROJECT_TOKEN:-}" ]] || return 0
+  workload_file="$WORK_ROOT/${workload_label}.json"
+  [[ -f "$workload_file" ]] || return 0
+  workload_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("resource_id", ""))' "$workload_file" 2>/dev/null || true)"
+  [[ "$workload_id" =~ ^[0-9a-fA-F-]{36}$ ]] || return 0
+  local operation_id server_http operation_http agent index ip drain_id workload_domain runner_domain
+  drain_id="${DRAIN_ID:-none}"
+  operation_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("operation_id", ""))' \
+    "$workload_file" 2>/dev/null || true)"
+  [[ "$operation_id" =~ ^[0-9a-fA-F-]{36}$ ]] || return 0
+  server_http="$(curl --silent --show-error --max-time 10 --output "$WORK_ROOT/${workload_label}-state.raw.json" \
+    --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" \
+    "$API/compute/servers/$workload_id" 2>/dev/null || true)"
+  operation_http="$(curl --silent --show-error --max-time 10 --output "$WORK_ROOT/${workload_label}-operation.raw.json" \
+    --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" \
+    "$API/operations/$operation_id" 2>/dev/null || true)"
+  chmod 0600 "$WORK_ROOT/${workload_label}-state.raw.json" "$WORK_ROOT/${workload_label}-operation.raw.json" 2>/dev/null || true
+  index=0
+  for agent in block-a block-b block-c; do
+    ip="${IPS[$index]:-}"
+    if [[ "$ip" =~ ^[0-9.]+$ ]]; then
+      ssh_vm "$ip" "sudo grep -F '$operation_id' /var/log/o3k-compute.log 2>/dev/null | tail -n 80" \
+        >"$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
+      chmod 0600 "$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
+      ssh_vm "$ip" "sudo grep -E '\"message\":\"(agent command received|command accepted|command acceptance rejected|command execution completed|command execution failed|create failed definitively; reporting terminal failure|libvirt create request|libvirt create failed|libvirt command failed|libvirt provider operation failed)\"' /var/log/o3k-compute.log 2>/dev/null | tail -n 96" \
+        >"$WORK_ROOT/agent-$agent-message-probe.raw.jsonl" 2>/dev/null || true
+      chmod 0600 "$WORK_ROOT/agent-$agent-message-probe.raw.jsonl" 2>/dev/null || true
+      if probe="$(ssh_vm "$ip" "log_state=missing; if sudo test -f /var/log/o3k-compute.log; then log_state=\$(sudo stat -c 'present %s' /var/log/o3k-compute.log); fi; alive=0; sudo pgrep -x o3k-compute >/dev/null 2>&1 && alive=1; ready=0; curl --silent --show-error --max-time 2 http://127.0.0.1:19101/readyz >/dev/null 2>&1 && ready=1; printf '%s alive %s ready %s' \"\$log_state\" \"\$alive\" \"\$ready\"" 2>/dev/null)"; then
+        printf '%s\n' "$probe" >"$WORK_ROOT/agent-$agent-log-probe.raw"
+      else
+        printf 'unreachable\n' >"$WORK_ROOT/agent-$agent-log-probe.raw"
+      fi
+      chmod 0600 "$WORK_ROOT/agent-$agent-log-probe.raw" 2>/dev/null || true
+    fi
+    index=$((index + 1))
+  done
+  # The bootstrap compute-agent runs on the runner, so capture its exact
+  # operation events alongside the VM-backed agents.
+  sudo -n grep -F "$operation_id" "$STATE_ROOT/log/o3k-compute.log" 2>/dev/null | tail -n 80 \
+    >"$WORK_ROOT/agent-compute-agent-events.raw.jsonl" || true
+  sudo -n grep -E '"message":"(agent command received|command accepted|command acceptance rejected|command execution completed|command execution failed|create failed definitively; reporting terminal failure|libvirt create request|libvirt create failed|libvirt command failed|libvirt provider operation failed)"' "$STATE_ROOT/log/o3k-compute.log" 2>/dev/null | tail -n 96 \
+    >"$WORK_ROOT/agent-compute-agent-message-probe.raw.jsonl" || true
+  if sudo -n test -f "$STATE_ROOT/log/o3k-compute.log"; then
+    printf 'present %s alive %s ready %s\n' "$(sudo -n stat -c '%s' "$STATE_ROOT/log/o3k-compute.log" 2>/dev/null || echo 0)" \
+      "$(sudo -n kill -0 "$(awk -F'|' '$4=="o3k-compute" {print $1; exit}' "${O3K_TESTLAB_PID_ROOT:-/tmp/none}/o3k-compute.pid" 2>/dev/null)" 2>/dev/null && echo 1 || echo 0)" \
+      "$(curl --silent --show-error --max-time 2 "http://127.0.0.1:${O3K_TESTLAB_COMPUTE_HEALTH_PORT:-19101}/readyz" >/dev/null 2>&1 && echo 1 || echo 0)" \
+      >"$WORK_ROOT/agent-compute-agent-log-probe.raw"
+  else
+    printf 'missing\n' >"$WORK_ROOT/agent-compute-agent-log-probe.raw"
+  fi
+  chmod 0600 "$WORK_ROOT/agent-compute-agent-events.raw.jsonl" "$WORK_ROOT/agent-compute-agent-message-probe.raw.jsonl" "$WORK_ROOT/agent-compute-agent-log-probe.raw" 2>/dev/null || true
+  workload_domain="$(domain_name_for_resource "$workload_id")"
+  capture_host_state block-a "${IPS[0]:-}" "$workload_domain"
+  if [[ "$workload_id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    runner_domain="$workload_domain"
+    capture_host_state compute-agent "" "$runner_domain"
+  fi
+  python3 "$ROOT_DIR/scripts/capture-p15-7-workload-diagnostics.py" \
+    "$ARTIFACT_DIR/p15-7-workload-failure-diagnostics.json" "$WORK_ROOT" \
+    "$SOURCE_SHA" "$RUN_ID" "$workload_id" "$operation_id" \
+    "${HOST_A:-unknown}" "${HOST_B:-unknown}" "$drain_id" \
+    "$server_http" "$operation_http" "$workload_label" || echo "P15.7 workload diagnostics could not be safely captured" >&2
+  P15_WORKLOAD_DIAGNOSTICS_CAPTURED=true
+}
 early_cleanup() {
+  local exit_status=$?
   set +e
+  capture_failure_diagnostics "$exit_status"
   if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
     O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
       GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
@@ -187,7 +267,9 @@ secure_remove_credentials() {
   done
 }
 cleanup() {
+  local exit_status=$?
   set +e
+  capture_failure_diagnostics "$exit_status"
   [[ "$CLEANUP_DONE" == true ]] && { set -e; return; }
   if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
     O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
@@ -323,6 +405,48 @@ for element in root.iter():
 ssh-keygen -q -t ed25519 -N '' -f "$SSH_KEY" -C "o3k-p15-7-$RUN_ID" || die "VM SSH key generation failed"
 touch "$KNOWN_HOSTS"
 ssh_vm() { ssh -F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$VM_USER@$1" "${@:2}"; }
+domain_name_for_resource() {
+  python3 - "$1" <<'PY'
+import hashlib, sys
+print("o3k-" + hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest()[:20])
+PY
+}
+capture_host_state() {
+  local label="$1" ip="$2" domain="$3" output
+  output="$WORK_ROOT/${label}-host-state.raw"
+  if [[ "$label" == block-a ]]; then
+    {
+      ssh_vm "$ip" 'hostname; pgrep -af "[o]3k-compute" || true'
+      ssh_vm "$ip" 'sudo virsh -c qemu:///system uri; sudo virsh -c qemu:///system version; systemctl is-active libvirtd libvirtd.socket virtqemud virtqemud.socket virtlogd virtlogd.socket'
+      ssh_vm "$ip" 'sudo test -r /dev/kvm; printf "kvm_readable=%s\\n" "$?"; sudo virsh -c qemu:///system nodeinfo; sudo virsh -c qemu:///system nodememstats; free -h; df -h / /var/lib/o3k-compute'
+      ssh_vm "$ip" "sudo virsh -c qemu:///system dominfo '$domain'; sudo virsh -c qemu:///system domstate '$domain' --reason; sudo virsh -c qemu:///system dumpxml '$domain'"
+      ssh_vm "$ip" "sudo virsh -c qemu:///system list --all; ps -eo pid,ppid,user,stat,args --sort=pid | grep '[q]emu' || true"
+      ssh_vm "$ip" 'sudo find /var/lib/o3k-compute -maxdepth 4 -printf "%M %u %g %s %p\\n" | sort'
+      ssh_vm "$ip" "ip -details link; bridge link; sudo virsh -c qemu:///system domiflist '$domain'; sudo virsh -c qemu:///system net-info default; sudo virsh -c qemu:///system net-dhcp-leases default"
+      ssh_vm "$ip" 'command -v aa-status >/dev/null && sudo aa-status || true; command -v getenforce >/dev/null && getenforce || true; sudo journalctl --since "-10 min" -u libvirtd -u virtqemud -u virtlogd --no-pager -n 200 || true; sudo journalctl --since "-10 min" -k --no-pager -n 120 || true'
+    } >"$output" 2>/dev/null || true
+  else
+    {
+      printf '%s\n' '== runner successful execution path =='
+      hostname
+      virsh -c qemu:///system uri 2>&1 || true
+      virsh -c qemu:///system version 2>&1 || true
+      virsh -c qemu:///system dominfo "$domain" 2>&1 || true
+      virsh -c qemu:///system domstate "$domain" --reason 2>&1 || true
+      virsh -c qemu:///system dumpxml "$domain" 2>&1 || true
+      virsh -c qemu:///system domiflist "$domain" 2>&1 || true
+      virsh -c qemu:///system nodeinfo 2>&1 || true
+      test -r /dev/kvm; printf 'kvm_readable=%s\n' "$?"
+      free -h 2>&1 || true
+      df -h / /var/lib/libvirt/images 2>&1 || true
+      systemctl is-active libvirtd libvirtd.socket virtqemud virtqemud.socket virtlogd virtlogd.socket 2>&1 || true
+      ps -eo pid,ppid,user,stat,args --sort=pid | grep '[q]emu' 2>&1 || true
+      ip -details link show 2>&1 || true
+      bridge link show 2>&1 || true
+    } >"$output" 2>/dev/null || true
+  fi
+  chmod 0600 "$output" 2>/dev/null || true
+}
 find_ip() {
   local d="$1" ip serial
   for _ in $(seq 1 120); do
@@ -472,7 +596,7 @@ install_agent() {
     || { remote_agent_cleanup; die "certificate transfer failed: $id"; }
   scp -q -F /dev/null -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$WORK_ROOT/$id-key.pem" "$VM_USER@$ip:$remote_stage/agent-key.pem" \
     || { remote_agent_cleanup; die "private key transfer failed: $id"; }
-  ssh_vm "$ip" "sudo install -d -m 0750 /etc/o3k/tls /var/lib/o3k-compute; sudo install -m 0755 '$remote_stage/o3k-compute' /usr/local/bin/o3k-compute; sudo install -m 0644 '$remote_stage/ca.pem' /etc/o3k/tls/ca.pem; sudo install -m 0644 '$remote_stage/agent.pem' /etc/o3k/tls/agent.pem; sudo install -m 0600 '$remote_stage/agent-key.pem' /etc/o3k/tls/agent-key.pem; sudo install -m 0644 '$remote_stage/agent-id' /var/lib/o3k-compute/agent-id; sudo sh -c 'O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=${id}-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup /usr/local/bin/o3k-compute >/var/log/o3k-compute.log 2>&1 &'" \
+  ssh_vm "$ip" "sudo install -d -m 0750 /etc/o3k/tls; sudo install -d -o root -g libvirt-qemu -m 02750 /var/lib/o3k-compute; sudo chown root:libvirt-qemu /var/lib/o3k-compute; sudo chmod 02750 /var/lib/o3k-compute; sudo install -m 0755 '$remote_stage/o3k-compute' /usr/local/bin/o3k-compute; sudo install -m 0644 '$remote_stage/ca.pem' /etc/o3k/tls/ca.pem; sudo install -m 0644 '$remote_stage/agent.pem' /etc/o3k/tls/agent.pem; sudo install -m 0600 '$remote_stage/agent-key.pem' /etc/o3k/tls/agent-key.pem; sudo install -m 0644 '$remote_stage/agent-id' /var/lib/o3k-compute/agent-id; sudo sh -c 'RUST_LOG=$COMPUTE_LOG_FILTER O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=${id}-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup /usr/local/bin/o3k-compute >/var/log/o3k-compute.log 2>&1 &'" \
     || { remote_agent_cleanup; die "agent start failed: $id"; }
   remote_agent_cleanup
   for _ in $(seq 1 90); do ssh_vm "$ip" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 && return; sleep 2; done
@@ -504,6 +628,9 @@ provision_vms_bounded() {
     python3 "$ROOT_DIR/scripts/capture-p15-7-provision-diagnostics.py" \
       "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" "$WORK_ROOT" "$SOURCE_SHA" "$RUN_ID" \
       || echo "P15.7 provisioning diagnostics could not be safely captured" >&2
+    [[ -f "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" \
+      && ! -L "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" ]] \
+      && P15_PROVISION_DIAGNOSTICS_CAPTURED=true
     die "bounded VM provisioning failed; inspect p15-7-provisioning-diagnostics.json"
   fi
   IPS=()
@@ -698,8 +825,23 @@ curl --fail --silent --show-error -X POST -H "Authorization: Bearer $PROJECT_TOK
   -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-a\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"key_name\":\"$OS_KEYPAIR_NAME\",\"ssh_public_key\":\"$SSH_PUBLIC_KEY\",\"network_ids\":[\"$OS_PORT_A_ID\"]}}" >"$WORK_ROOT/workload-a.json" || die "constrained real workload placement failed"
 WORKLOAD_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("resource_id", ""))' "$WORK_ROOT/workload-a.json")"; [[ "$WORKLOAD_A" =~ ^[0-9a-fA-F-]{36}$ ]] || die "workload A has no canonical id"
 OS_WORKLOAD_A="$WORKLOAD_A"
-curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_A" >"$WORK_ROOT/workload-a-show.json" || die "workload A did not converge"
-GEN_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metadata"]["generation"])' "$WORK_ROOT/workload-a-show.json")"
+WORKLOAD_A_SHOW="$WORK_ROOT/workload-a-show.json"
+A_STATE=""
+for _ in $(seq 1 120); do
+  curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
+    "$API/compute/servers/$WORKLOAD_A" >"$WORKLOAD_A_SHOW" || die "workload A native status read failed"
+  A_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", {}).get("state", ""))' "$WORKLOAD_A_SHOW")"
+  [[ "$A_STATE" == "ACTIVE" ]] && break
+  if [[ "$A_STATE" == ERROR ]]; then
+    capture_workload_failure_diagnostics workload-a
+    die "workload A provisioning entered ERROR"
+  fi
+  sleep 1
+done
+if [[ "$A_STATE" != ACTIVE ]]; then
+  capture_workload_failure_diagnostics workload-a
+  die "workload A did not become ACTIVE"
+fi
 HOST_A=""
 for _ in $(seq 1 60); do
   HOST_A="$(openstack server show "$WORKLOAD_A" -f value -c OS-EXT-SRV-ATTR:HOST 2>/dev/null || true)"
@@ -726,15 +868,52 @@ if [[ -z "$FOREIGN_PROJECT_ID" ]]; then
 fi
 [[ "$FOREIGN_PROJECT_ID" =~ ^[0-9a-fA-F-]{36}$ && "$FOREIGN_PROJECT_ID" != "$ADMIN_PROJECT_ID" ]] \
   || die "cross_tenant_test_prerequisite_missing: no distinct foreign project"
-FOREIGN_TOKEN_PROJECT_ID="$(openstack --os-project-id "$FOREIGN_PROJECT_ID" token issue -f value -c project_id 2>/dev/null | tr -d '[:space:]' || true)"
+FOREIGN_USER_NAME="${O3K_P15_7_FOREIGN_USER_NAME:-${O3K_EXTRA_TENANT_USER_NAME:-}}"
+FOREIGN_PASSWORD="${O3K_P15_7_FOREIGN_PASSWORD:-${O3K_EXTRA_TENANT_PASSWORD:-}}"
+FOREIGN_PROJECT_NAME="${O3K_EXTRA_TENANT_PROJECT_NAME:-}"
+[[ -n "$FOREIGN_USER_NAME" && -n "$FOREIGN_PASSWORD" && -n "$FOREIGN_PROJECT_NAME" ]] \
+  || die "cross_tenant_test_prerequisite_missing: foreign project credentials unavailable"
+FOREIGN_TOKEN_PROJECT_ID="$(
+  OS_USERNAME="$FOREIGN_USER_NAME" OS_PASSWORD="$FOREIGN_PASSWORD" \
+  OS_PROJECT_ID="$FOREIGN_PROJECT_ID" OS_PROJECT_NAME="$FOREIGN_PROJECT_NAME" \
+  OS_USER_DOMAIN_NAME=Default OS_PROJECT_DOMAIN_NAME=Default \
+    openstack token issue -f value -c project_id 2>/dev/null | tr -d '[:space:]' || true
+)"
 [[ "$FOREIGN_TOKEN_PROJECT_ID" == "$FOREIGN_PROJECT_ID" ]] || die "cross_tenant_test_prerequisite_missing: foreign token scope mismatch"
-FOREIGN_TOKEN="$(openstack --os-project-id "$FOREIGN_PROJECT_ID" token issue -f value -c id 2>/dev/null | tr -d '[:space:]' || true)"
+FOREIGN_TOKEN="$(
+  OS_USERNAME="$FOREIGN_USER_NAME" OS_PASSWORD="$FOREIGN_PASSWORD" \
+  OS_PROJECT_ID="$FOREIGN_PROJECT_ID" OS_PROJECT_NAME="$FOREIGN_PROJECT_NAME" \
+  OS_USER_DOMAIN_NAME=Default OS_PROJECT_DOMAIN_NAME=Default \
+    openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]' || true
+)"
 [[ "$FOREIGN_TOKEN" ]] || die "cross_tenant_test_prerequisite_missing: foreign project token unavailable"
+unset FOREIGN_PASSWORD
 FOREIGN_SHOW="$WORK_ROOT/foreign-workload-show.json"
 foreign_code="$(curl --silent --output "$FOREIGN_SHOW" --write-out '%{http_code}' \
   -H "Authorization: Bearer $FOREIGN_TOKEN" "$API/compute/servers/$WORKLOAD_A" || true)"
-[[ "$foreign_code" == 403 || "$foreign_code" == 404 ]] || die "foreign project can read workload A"
-! grep -Fq "$WORKLOAD_A" "$FOREIGN_SHOW" || die "foreign response disclosed workload A"
+FOREIGN_MISSING_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+FOREIGN_MISSING_SHOW="$WORK_ROOT/foreign-missing-workload-show.json"
+foreign_missing_code="$(curl --silent --output "$FOREIGN_MISSING_SHOW" --write-out '%{http_code}' \
+  -H "Authorization: Bearer $FOREIGN_TOKEN" "$API/compute/servers/$FOREIGN_MISSING_ID" || true)"
+[[ "$foreign_missing_code" == 404 && "$foreign_code" == "$foreign_missing_code" ]] \
+  || die "foreign-resource response differs from missing-resource response"
+python3 - "$FOREIGN_SHOW" "$FOREIGN_MISSING_SHOW" "$WORKLOAD_A" "$FOREIGN_MISSING_ID" <<'PY' \
+  || die "foreign-resource response differs from missing-resource response"
+import json,sys
+
+foreign=json.load(open(sys.argv[1], encoding="utf-8"))
+missing=json.load(open(sys.argv[2], encoding="utf-8"))
+foreign_id,missing_id=sys.argv[3:]
+if foreign.get("resource_id") not in (None, foreign_id):
+    raise SystemExit("foreign error resource_id does not match the requested id")
+if missing.get("resource_id") not in (None, missing_id):
+    raise SystemExit("missing error resource_id does not match the requested id")
+for problem in (foreign, missing):
+    problem.pop("request_id", None)
+    problem.pop("resource_id", None)
+if foreign != missing:
+    raise SystemExit("foreign-resource error differs from missing-resource error")
+PY
 CROSS_TENANT_CONCEALMENT=true
 
 DRAIN_GEN="$(python3 - "$WORK_ROOT/blocks.json" "$DRAIN_ID" <<'PY'
@@ -746,11 +925,23 @@ PY
 )"
 operator_curl "$API/operator/building-blocks/$DRAIN_ID/actions/drain" -X POST -H 'Content-Type: application/json' -d "{\"expected_generation\":$DRAIN_GEN}" >"$WORK_ROOT/drain.json" || die "canonical drain failed"
 grep -Eq '"state"[[:space:]]*:[[:space:]]*"draining"' "$WORK_ROOT/drain.json" || die "durable drain state missing"
-python3 - "$WORK_ROOT/drain.json" <<'PY'
-import json,sys
-block=json.load(open(sys.argv[1], encoding="utf-8")).get("block", {})
+python3 - "$WORK_ROOT/drain.json" "$WORK_ROOT/workload-a.json" "$WORK_ROOT/blocks.json" "$ARTIFACT_DIR/p15-7-drain-failure-context.json" <<'PY'
+import json,pathlib,sys
+drain_path, workload_path, blocks_path, context_path = sys.argv[1:]
+block=json.load(open(drain_path, encoding="utf-8")).get("block", {})
 blockers=block.get("drain_blockers", [])
-assert any(item.get("kind") == "workload" and item.get("count", 0) >= 1 for item in blockers)
+if not any(item.get("kind") == "workload" and item.get("count", 0) >= 1 for item in blockers):
+    # Keep the exact response available to the diagnostic artifact collector;
+    # the journey workspace is deliberately removed by cleanup on failure.
+    context = {
+        "block": block,
+        "workload_a": json.load(open(workload_path, encoding="utf-8")),
+        "blocks": json.load(open(blocks_path, encoding="utf-8")),
+    }
+    pathlib.Path(context_path).write_text(
+        json.dumps(context, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    raise SystemExit("drain response did not report a workload blocker")
 PY
 
 # A second constrained workload must still converge, and the drained provider
@@ -768,7 +959,28 @@ for _ in $(seq 1 60); do
 done
 [[ -n "$HOST_B" && "$HOST_B" != "None" ]] || die "workload B placement host did not converge"
 [[ "$HOST_B" != "$HOST_A" ]] || die "new placement selected drained provider host: $HOST_A"
-GEN_B="$(curl --fail --silent -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_B" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["generation"])')"
+# The OpenStack host projection is derived from the durable placement intent;
+# it can be visible while the provider create is still in flight. Wait for the
+# native lifecycle state before deleting so cleanup does not race provider
+# identity attachment.
+WORKLOAD_B_SHOW="$WORK_ROOT/workload-b-show.json"
+B_STATE=""
+for _ in $(seq 1 120); do
+  curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
+    "$API/compute/servers/$WORKLOAD_B" >"$WORKLOAD_B_SHOW" || die "workload B native status read failed"
+  B_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", {}).get("state", ""))' "$WORKLOAD_B_SHOW")"
+  [[ "$B_STATE" == "ACTIVE" ]] && break
+  if [[ "$B_STATE" == ERROR ]]; then
+    capture_workload_failure_diagnostics workload-b
+    die "workload B provisioning entered ERROR before cleanup"
+  fi
+  sleep 1
+done
+if [[ "$B_STATE" != "ACTIVE" ]]; then
+  capture_workload_failure_diagnostics workload-b
+  die "workload B did not become ACTIVE before cleanup"
+fi
+GEN_B="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["metadata"]["generation"])' "$WORKLOAD_B_SHOW")"
 curl --fail --silent --show-error -X DELETE -H "Authorization: Bearer $PROJECT_TOKEN" -H "Idempotency-Key: p15-7-$RUN_ID-delete-b" -H "If-Match: generation-$GEN_B" "$API/compute/servers/$WORKLOAD_B" >/dev/null || die "workload B cleanup failed"
 for _ in $(seq 1 60); do
   code="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_B" || true)"
@@ -778,7 +990,22 @@ done
 [[ "$code" == 404 ]] || die "workload B deletion did not converge before block removal"
 
 # The observed workload blocker is now explicitly cleared before removal.
-curl --fail --silent --show-error -X DELETE -H "Authorization: Bearer $PROJECT_TOKEN" -H "Idempotency-Key: p15-7-$RUN_ID-delete-a" -H "If-Match: generation-$GEN_A" "$API/compute/servers/$WORKLOAD_A" >/dev/null || die "workload A cleanup failed"
+# Refresh the optimistic-concurrency token immediately before deletion. The
+# drain/placement assertions above can legitimately advance the observed
+# generation while the workload remains ACTIVE; deleting with the earlier
+# token would be a runner sequencing error, not a lifecycle failure.
+WORKLOAD_A_DELETE_SHOW="$WORK_ROOT/workload-a-delete-show.json"
+curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
+  "$API/compute/servers/$WORKLOAD_A" >"$WORKLOAD_A_DELETE_SHOW" || die "workload A final status read failed"
+python3 - "$WORKLOAD_A_DELETE_SHOW" <<'PY' \
+  || die "workload A is not ACTIVE at cleanup boundary"
+import json,sys
+state=json.load(open(sys.argv[1], encoding="utf-8")).get("status", {}).get("state")
+if state != "ACTIVE":
+    raise SystemExit(f"workload A state is {state!r}, expected 'ACTIVE'")
+PY
+GEN_A_DELETE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metadata"]["generation"])' "$WORKLOAD_A_DELETE_SHOW")"
+curl --fail --silent --show-error -X DELETE -H "Authorization: Bearer $PROJECT_TOKEN" -H "Idempotency-Key: p15-7-$RUN_ID-delete-a" -H "If-Match: generation-$GEN_A_DELETE" "$API/compute/servers/$WORKLOAD_A" >/dev/null || die "workload A cleanup failed"
 for _ in $(seq 1 60); do
   code="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_A" || true)"
   [[ "$code" == 404 ]] && break
@@ -803,8 +1030,12 @@ assert sys.argv[5] not in ids
 PY
 
 # Real negative probes: these requests must be rejected by the production API.
+# The axum JSON extractor rejects the credential-less body (missing required
+# join fields) with 422 before any handler runs; 400/401/403 are handler-level
+# rejections. Anything outside this set — above all 2xx — means the join was
+# accepted and is a hard failure.
 code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST "$API/bootstrap/join" -H 'Content-Type: application/json' -d '{}')"
-[[ "$code" == 400 || "$code" == 401 || "$code" == 403 ]] || die "unauthenticated join accepted"
+[[ "$code" == 400 || "$code" == 401 || "$code" == 403 || "$code" == 422 ]] || die "unauthenticated join accepted"
 [[ -n "$REPLAY_JOIN_FILE" && -f "$REPLAY_JOIN_FILE" ]] || die "replay join request was not retained"
 code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST "$API/bootstrap/join" -H 'Content-Type: application/json' -d @"$REPLAY_JOIN_FILE")"
 [[ "$code" != 200 ]] || die "replayed join accepted"
