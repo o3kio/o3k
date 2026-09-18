@@ -640,18 +640,39 @@ wait_http_ok http://127.0.0.1:18080/readyz 120 \
   || die 'o3kd did not reach canonical readiness (http://127.0.0.1:18080/readyz)'
 step 'control plane ready (canonical readiness)'
 
-# Canonical diagnostics gate: `o3k doctor` must accept the installation.
-doctor_ok=0
+# Canonical diagnostics gate: `o3k doctor` must report no failing checks.
+# A fresh installation legitimately carries advisory WARNs (for example
+# "no O3K-created backup exists yet"), which yields overall "warning" and
+# exit 1 — that is still a successful diagnostic run. Only "unhealthy"
+# (any FAIL) or a doctor invocation error (exit 2) fails the install.
+DOCTOR_VERDICT=""
 doctor_attempt=1
 while [ "$doctor_attempt" -le 30 ]; do
-  if "$O3K_BIN" doctor >/dev/null 2>&1; then
-    doctor_ok=1
-    break
+  doctor_rc=0
+  DOCTOR_OUT="$("$O3K_BIN" doctor --json 2>/dev/null)" || doctor_rc=$?
+  if [ "$doctor_rc" -eq 2 ]; then
+    die 'o3k doctor could not produce a report (usage or serialization error)'
   fi
+  if [ "$doctor_rc" -le 1 ] && [ -n "$DOCTOR_OUT" ]; then
+    DOCTOR_VERDICT="$(printf '%s' "$DOCTOR_OUT" | python3 -c '
+import json
+import sys
+
+try:
+    print(json.load(sys.stdin)["overall_status"])
+except Exception:
+    print("unknown")
+')"
+    if [ "$DOCTOR_VERDICT" = healthy ] || [ "$DOCTOR_VERDICT" = warning ]; then
+      break
+    fi
+  fi
+  DOCTOR_VERDICT=""
   sleep 5
   doctor_attempt=$((doctor_attempt + 1))
 done
-[ "$doctor_ok" -eq 1 ] || die 'o3k doctor did not report a healthy installation'
+unset DOCTOR_OUT
+[ -n "$DOCTOR_VERDICT" ] || die 'o3k doctor reported failing checks; the installation is not healthy'
 step 'o3k doctor healthy'
 
 # ---- bounded demo cloud (public APIs only) ------------------------------------

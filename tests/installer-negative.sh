@@ -305,6 +305,9 @@ case "$cmd" in
     printf '{"building_block_id": "11111111-2222-3333-4444-555555555555"}\n'
     ;;
   doctor)
+    # The installer's diagnostics gate parses `o3k doctor --json` and accepts
+    # overall healthy|warning with zero FAIL checks.
+    printf '{"overall_status": "healthy", "checks": []}\n'
     exit 0
     ;;
   *)
