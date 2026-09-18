@@ -328,4 +328,79 @@ grep -Fq "AMBIGUOUS $p8" <<<"$SWEEP_OUT"
 pool_present "$p8"
 ! grep -Fq "destroy $p8" "$P15_7_FAKE_POOL_ACTIONS"
 
+# partial canonical marker (truncated: missing path/source_sha) -> invalid
+reset_state
+p9="o3k-p15-7-909"; p9path="$IMAGE_ROOT/$p9"; make_pool "$p9" "$p9path" running
+mkdir -p "$p9path"
+printf 'o3k-p15-7-pool-owned-v1\nrun=909\npool=%s\n' "$p9" >"$p9path/.o3k-p15-7-pool-owned"
+sweep
+[[ "$SWEEP_RC" == 0 ]]
+grep -Fq "AMBIGUOUS $p9" <<<"$SWEEP_OUT"
+pool_present "$p9"
+! grep -Fq "destroy $p9" "$P15_7_FAKE_POOL_ACTIONS"
+
+# marker with malformed source_sha (not 40-hex, not "unknown") -> invalid
+reset_state
+p10="o3k-p15-7-910"; p10path="$IMAGE_ROOT/$p10"; make_pool "$p10" "$p10path" running
+mkdir -p "$p10path"
+printf 'o3k-p15-7-pool-owned-v1\nrun=910\npool=%s\npath=%s\nsource_sha=not-a-sha\n' \
+  "$p10" "$p10path" >"$p10path/.o3k-p15-7-pool-owned"
+sweep
+[[ "$SWEEP_RC" == 0 ]]
+grep -Fq "AMBIGUOUS $p10" <<<"$SWEEP_OUT"
+pool_present "$p10"
+
+# symlink marker -> invalid, never followed
+reset_state
+p11="o3k-p15-7-911"; p11path="$IMAGE_ROOT/$p11"; make_pool "$p11" "$p11path" running
+mkdir -p "$p11path"
+target="$WORK_DIR/marker-target"
+printf 'o3k-p15-7-pool-owned-v1\nrun=911\npool=%s\npath=%s\nsource_sha=unknown\n' \
+  "$p11" "$p11path" >"$target"
+ln -s "$target" "$p11path/.o3k-p15-7-pool-owned"
+sweep
+[[ "$SWEEP_RC" == 0 ]]
+grep -Fq "AMBIGUOUS $p11" <<<"$SWEEP_OUT"
+pool_present "$p11"
+! grep -Fq "destroy $p11" "$P15_7_FAKE_POOL_ACTIONS"
+
+# marker whose pool= does not match the live pool name -> invalid
+reset_state
+p12="o3k-p15-7-912"; p12path="$IMAGE_ROOT/$p12"; make_pool "$p12" "$p12path" running
+mkdir -p "$p12path"
+printf 'o3k-p15-7-pool-owned-v1\nrun=912\npool=o3k-p15-7-999\npath=%s\nsource_sha=unknown\n' \
+  "$p12path" >"$p12path/.o3k-p15-7-pool-owned"
+sweep
+[[ "$SWEEP_RC" == 0 ]]
+grep -Fq "AMBIGUOUS $p12" <<<"$SWEEP_OUT"
+pool_present "$p12"
+
+# temporary .tmp.* marker only -> NOT ownership proof; pool preserved and the
+# temporary never authorizes destructive cleanup. A leftover temporary is
+# removed only when the surrounding pool passes the complete proof (covered by
+# the define/cleanup lifecycle case and remove_pool).
+reset_state
+p13="o3k-p15-7-913"; p13path="$IMAGE_ROOT/$p13"; make_pool "$p13" "$p13path" running
+mkdir -p "$p13path"
+printf 'o3k-p15-7-pool-owned-v1\nrun=913\npool=%s\npath=%s\nsource_sha=unknown\n' \
+  "$p13" "$p13path" >"$p13path/.o3k-p15-7-pool-owned.tmp.abcde"
+sweep
+[[ "$SWEEP_RC" == 0 ]]
+grep -Fq "AMBIGUOUS $p13" <<<"$SWEEP_OUT"
+pool_present "$p13"
+[[ -e "$p13path/.o3k-p15-7-pool-owned.tmp.abcde" ]]
+! grep -Fq "destroy $p13" "$P15_7_FAKE_POOL_ACTIONS"
+
+# no leftover publication temporaries after a define/cleanup lifecycle
+reset_state
+pool_path="$IMAGE_ROOT/o3k-p15-7-12345"
+mkdir -p "$pool_path"
+bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" define 12345 "$pool_path"
+[[ -f "$pool_path/.o3k-p15-7-pool-owned" ]]
+compgen -G "$pool_path/.o3k-p15-7-pool-owned.tmp.*" >/dev/null \
+  && { echo "publication temporary leaked after define" >&2; exit 1; }
+bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" cleanup 12345 "$pool_path"
+! compgen -G "$pool_path/.o3k-p15-7-pool-owned*" >/dev/null \
+  || { echo "marker artifacts leaked after cleanup" >&2; exit 1; }
+
 echo "P15.7 libvirt pool ownership cleanup tests passed"

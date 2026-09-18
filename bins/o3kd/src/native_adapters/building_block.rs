@@ -6,7 +6,7 @@ use o3k_kernel::{
     LocationRegistry, PrincipalKind,
 };
 use o3k_native_api::building_block::{BuildingBlockReader, BuildingBlockView, CapacityDimension};
-use o3k_placement::PlacementLedger;
+use o3k_placement::{PlacementLedger, ProviderState};
 use o3k_provider::AgentNodeRegistry;
 use o3k_store::{AuditEventRecord, BuildingBlockRecord, ComputeRepository, O3kStore};
 
@@ -22,6 +22,23 @@ fn now() -> String {
 }
 
 impl BuildingBlockAdapter {
+    /// Project lifecycle gates into Placement, which remains the scheduling
+    /// authority. The projection must be durable before a drain races with a
+    /// new create.
+    async fn project_provider_state(
+        &self,
+        block: &BuildingBlock,
+        state: ProviderState,
+    ) -> Result<(), String> {
+        for provider_id in &block.resource_provider_ids {
+            self.placement
+                .set_state(provider_id, state)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     fn resource_matches_provider_ids(
         kind: &str,
         resource: &o3k_store::ResourceRecord,
@@ -238,10 +255,15 @@ impl BuildingBlockReader for BuildingBlockAdapter {
             .map_err(|e| e.to_string())?;
         let mut out = Vec::with_capacity(records.len());
         for record in records {
-            out.push(
-                self.view(record.block().map_err(|e| e.to_string())?)
-                    .await?,
-            );
+            let block = record.block().map_err(|e| e.to_string())?;
+            // Removed is a terminal tombstone, not a live management object:
+            // the operator list must not present it as schedulable topology
+            // (the P15.7 remove/rejoin/replace journey asserts absence after
+            // a canonical remove). The durable record stays for audit.
+            if block.state == BuildingBlockState::Removed {
+                continue;
+            }
+            out.push(self.view(block).await?);
         }
         Ok(out)
     }
@@ -302,10 +324,25 @@ impl BuildingBlockReader for BuildingBlockAdapter {
         } else {
             Vec::new()
         };
-        let next = old.clone();
-        next.transition(target, blockers)
+        let next = old
+            .transition(target, blockers)
             .map_err(|e| e.to_string())?;
         let record = BuildingBlockRecord::from_block(&next, now()).map_err(|e| e.to_string())?;
+        // Close capacity before recording a drain/unavailable/removal
+        // transition. If the block write fails, remaining closed is
+        // fail-safe and prevents new work from entering the requested drain.
+        let projected_state = match target {
+            BuildingBlockState::Enrolling => Some(ProviderState::Unavailable),
+            BuildingBlockState::Ready => None,
+            BuildingBlockState::Unavailable | BuildingBlockState::Failed => {
+                Some(ProviderState::Unavailable)
+            }
+            BuildingBlockState::Draining => Some(ProviderState::Draining),
+            BuildingBlockState::Removed => Some(ProviderState::Deleted),
+        };
+        if let Some(state) = projected_state {
+            self.project_provider_state(&old, state).await?;
+        }
         self.store
             .upsert_building_block_with_audit(
                 &record,
@@ -314,6 +351,11 @@ impl BuildingBlockReader for BuildingBlockAdapter {
             )
             .await
             .map_err(|e| e.to_string())?;
+        // Capacity is reopened only after the durable block reaches Ready.
+        if target == BuildingBlockState::Ready {
+            self.project_provider_state(&next, ProviderState::Enabled)
+                .await?;
+        }
         self.view(next).await
     }
 }
@@ -321,9 +363,186 @@ impl BuildingBlockReader for BuildingBlockAdapter {
 #[cfg(test)]
 mod tests {
     use super::BuildingBlockAdapter;
+    use o3k_kernel::{AuthContext, OwnershipScope, Principal, PrincipalId, ServicePrincipal};
+    use o3k_native_api::building_block::BuildingBlockReader;
+    use o3k_provider::{
+        AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentEpochLease,
+        AgentEvent, AgentNodeRegistry, AgentNodeSnapshot,
+    };
     use o3k_store::ResourceRecord;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::sync::Arc;
     use uuid::Uuid;
+
+    struct FakeAgents {
+        snapshots: HashMap<String, AgentNodeSnapshot>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentNodeRegistry for FakeAgents {
+        async fn all(&self) -> Vec<AgentNodeSnapshot> {
+            self.snapshots.values().cloned().collect()
+        }
+        async fn snapshot(&self, agent_id: &str) -> Option<AgentNodeSnapshot> {
+            self.snapshots.get(agent_id).cloned()
+        }
+        async fn lease_current_epoch(
+            &self,
+            _agent_id: &str,
+            _agent_epoch: &str,
+        ) -> Option<Box<dyn AgentEpochLease>> {
+            None
+        }
+        fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<AgentEvent> {
+            tokio::sync::broadcast::channel(1).1
+        }
+    }
+
+    fn snapshot(agent_id: &str) -> AgentNodeSnapshot {
+        AgentNodeSnapshot {
+            agent_id: agent_id.to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            availability: AgentAvailability::Available,
+            administrative_state: AgentAdministrativeState::Enabled,
+            capabilities: AgentCapabilities {
+                agent_provider_name: "test".to_owned(),
+                agent_provider_version: "1".to_owned(),
+                max_vcpus: 8,
+                max_memory_mib: 8192,
+                max_disk_gb: 100,
+                lifecycle_actions: vec![],
+                console_log: false,
+                flags: vec![],
+            },
+        }
+    }
+
+    fn operator_context() -> AuthContext {
+        AuthContext::new(
+            Principal::Service(ServicePrincipal::new(
+                PrincipalId::new_unchecked("o3k-test"),
+                "o3k-test",
+                "cloud-kernel",
+            )),
+            OwnershipScope::project(
+                o3k_kernel::ScopeId::new_unchecked("admin"),
+                Some("admin".into()),
+                Some("default".into()),
+            ),
+            vec!["admin".into(), "operator".into()],
+            0,
+            u64::MAX,
+            "building-block-test",
+            Uuid::now_v7().to_string(),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn removed_block_leaves_operator_list_but_stays_durable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        let placement = o3k_placement::PlacementLedger::open(
+            std::env::temp_dir().join(format!("o3k-bb-list-{}", Uuid::now_v7())),
+            store.clone(),
+        )
+        .await?;
+        for agent in ["agent-a", "agent-b"] {
+            placement
+                .register_provider(
+                    agent,
+                    BTreeMap::from([(
+                        "VCPU".to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    )]),
+                )
+                .await?;
+        }
+        let agents = FakeAgents {
+            snapshots: HashMap::from([
+                ("agent-a".to_owned(), snapshot("agent-a")),
+                ("agent-b".to_owned(), snapshot("agent-b")),
+            ]),
+        };
+        let adapter = BuildingBlockAdapter {
+            store: store.clone(),
+            placement,
+            agents: Arc::new(agents),
+            locations: o3k_kernel::LocationRegistry::default(),
+        };
+        let auth = operator_context();
+
+        let block_a = o3k_kernel::BuildingBlock::enrolling(
+            "block-a",
+            "agent-a",
+            vec!["agent-a".to_owned()],
+            None,
+            None,
+        )?;
+        let block_b = o3k_kernel::BuildingBlock::enrolling(
+            "block-b",
+            "agent-b",
+            vec!["agent-b".to_owned()],
+            None,
+            None,
+        )?;
+        adapter.enroll(block_a, &auth).await?;
+        adapter.enroll(block_b, &auth).await?;
+        let ready = adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Ready,
+                1,
+                vec![],
+                &auth,
+            )
+            .await?;
+        adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Draining,
+                ready.block.generation,
+                vec![],
+                &auth,
+            )
+            .await?;
+        let draining = store
+            .get_building_block("block-a")
+            .await?
+            .ok_or("block-a missing")?
+            .block()?;
+        adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Removed,
+                draining.generation,
+                vec![],
+                &auth,
+            )
+            .await?;
+
+        // The durable tombstone stays for audit...
+        let tombstone = store
+            .get_building_block("block-a")
+            .await?
+            .ok_or("removed block-a tombstone missing")?
+            .block()?;
+        assert_eq!(tombstone.state, o3k_kernel::BuildingBlockState::Removed);
+        // ...but the operator list must present only live management objects.
+        let listed: BTreeSet<String> = adapter
+            .list()
+            .await?
+            .into_iter()
+            .map(|view| view.block.id)
+            .collect();
+        assert_eq!(listed, BTreeSet::from(["block-b".to_owned()]));
+        Ok(())
+    }
 
     #[test]
     fn compute_blocker_matches_before_provider_identity_projection() {

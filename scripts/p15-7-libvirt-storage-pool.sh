@@ -74,11 +74,17 @@ pool_source_sha() {
 
 # Atomically publish the durable pool ownership marker into the pool's exact
 # target directory. The marker is the only durable record that authorizes the
-# stale-pool sweep, so it must never be written outside an exact run-owned
-# path. A temp file in the same directory plus an atomic rename prevents a
-# partially-written marker from ever being read as valid ownership.
+# stale-pool sweep, so:
+#   - the temporary file is created INSIDE the pool directory (same
+#     filesystem) and the canonical marker appears only via an atomic
+#     same-directory rename of fully-written, content-validated bytes;
+#   - a `.tmp.*` temporary marker is never ownership evidence and must never
+#     authorize destructive cleanup;
+#   - libvirt creates the run-owned pool directory root-owned (0711), so a
+#     passwordless-sudo path performs the identical in-directory write +
+#     rename as the unprivileged fast path. Fail closed if neither works.
 write_pool_marker() {
-  local path="$1" run_id="$2" name="$3" sha tmp marker
+  local path="$1" run_id="$2" name="$3" sha tmp marker content
   expected_pool_path "$run_id" "$path"
   [[ "$name" == "o3k-p15-7-$run_id" ]] \
     || die "pool name is not the exact run-owned name"
@@ -86,21 +92,33 @@ write_pool_marker() {
     || die "pool target path is not an owned directory"
   sha="$(pool_source_sha)"
   marker="$path/.o3k-p15-7-pool-owned"
-  # libvirt creates the run-owned pool directory root-owned (0711), so the
-  # unprivileged runner user usually cannot write it directly. Prefer a direct
-  # atomic write; fall back to passwordless sudo install (the same privilege
-  # idiom the journey already uses for this directory). Fail closed if neither
-  # works — an unrecorded marker would make the pool un-reapable.
-  tmp="$(mktemp "${TMPDIR:-/tmp}/o3k-p15-7-pool-owned.XXXXXX")" \
-    || die "cannot create pool ownership marker temporary"
-  printf 'o3k-p15-7-pool-owned-v1\nrun=%s\npool=%s\npath=%s\nsource_sha=%s\n' \
-    "$run_id" "$name" "$path" "$sha" >"$tmp"
-  chmod 0644 "$tmp"
-  if ! mv -f -- "$tmp" "$marker" 2>/dev/null; then
-    sudo -n install -m 0644 -o root -g root -- "$tmp" "$marker" 2>/dev/null \
-      || { rm -f -- "$tmp"; die "cannot record pool ownership marker"; }
-    rm -f -- "$tmp"
+  content="$(printf 'o3k-p15-7-pool-owned-v1\nrun=%s\npool=%s\npath=%s\nsource_sha=%s\n' \
+    "$run_id" "$name" "$path" "$sha")" \
+    || die "cannot compose pool ownership marker content"
+
+  # Unprivileged fast path: temp inside the pool dir, validate, atomic rename.
+  if tmp="$(mktemp "$path/.o3k-p15-7-pool-owned.tmp.XXXXXX" 2>/dev/null)"; then
+    if printf '%s' "$content" >"$tmp" \
+      && chmod 0644 "$tmp" \
+      && [[ "$(cat -- "$tmp")" == "$content" ]] \
+      && mv -f -- "$tmp" "$marker"; then
+      return 0
+    fi
+    rm -f -- "$tmp" 2>/dev/null || true
   fi
+
+  # Privileged path (root-owned 0711 pool dir): the temp file is still created
+  # inside the pool directory and published by the same atomic rename, as the
+  # runner user via passwordless sudo. The canonical marker is never written
+  # directly.
+  printf '%s' "$content" | sudo -n sh -c '
+    umask 022
+    t="$(mktemp "$1/.o3k-p15-7-pool-owned.tmp.XXXXXX")" || exit 1
+    cat >"$t" || { rm -f -- "$t"; exit 1; }
+    chmod 0644 "$t" || { rm -f -- "$t"; exit 1; }
+    [ "$(cat -- "$t")" = "$2" ] || { rm -f -- "$t"; exit 1; }
+    mv -f -- "$t" "$3" || { rm -f -- "$t"; exit 1; }
+  ' -- "$path" "$content" "$marker" || die "cannot record pool ownership marker"
 }
 
 # Sweep-only non-fatal path conformance (the sweep reports AMBIGUOUS instead
@@ -216,10 +234,12 @@ remove_pool() {
   "${VIRSH[@]}" pool-undefine "$name" || die "cannot undefine run-owned pool"
   listing="$(pool_listing)" || die "cannot verify libvirt storage pool cleanup"
   ! pool_present "$listing" "$name" || die "run-owned pool remains after undefine"
-  # The pool is gone; drop its ownership marker too (best-effort — a leftover
-  # marker is harmless; the root-owned pool dir may need the sudo idiom).
-  rm -f -- "$path/.o3k-p15-7-pool-owned" 2>/dev/null \
-    || sudo -n rm -f -- "$path/.o3k-p15-7-pool-owned" 2>/dev/null \
+  # The pool is gone; drop its ownership marker and any orphaned publication
+  # temporaries too (best-effort; the root-owned pool dir may need the sudo
+  # idiom). Temporaries are removed only here, after the complete ownership
+  # proof for this exact pool has passed — never as standalone cleanup.
+  rm -f -- "$path/.o3k-p15-7-pool-owned" "$path"/.o3k-p15-7-pool-owned.tmp.* 2>/dev/null \
+    || sudo -n rm -f -- "$path/.o3k-p15-7-pool-owned" "$path"/.o3k-p15-7-pool-owned.tmp.* 2>/dev/null \
     || true
 }
 
