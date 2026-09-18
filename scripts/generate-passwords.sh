@@ -89,9 +89,16 @@ if [[ -z "$bootstrap" ]]; then bootstrap="$(read_kolla_admin_password)"; fi
 if [[ -z "$bootstrap" ]]; then bootstrap="$(openssl rand -hex 32)"; fi
 signing_key="$(read_env_value O3K_TOKEN_SIGNING_KEY)"
 if [[ -z "$signing_key" ]]; then signing_key="$(openssl rand -hex 48)"; fi
+# Canonical P15.6 bootstrap secret (contracts/installer-v1.yaml): o3kd rejects
+# /bootstrap/init without it, so the installed control plane can never reach
+# canonical readiness when it is missing. Generated once, preserved verbatim
+# on every regeneration, never printed.
+bootstrap_secret="$(read_env_value O3K_BOOTSTRAP_SECRET)"
+if [[ -z "$bootstrap_secret" ]]; then bootstrap_secret="$(openssl rand -hex 32)"; fi
 
 [[ "$bootstrap" != *$'\n'* && "$bootstrap" != *$'\r'* ]] || die "bootstrap password contains a newline"
 [[ "$signing_key" =~ ^[[:xdigit:]]{64,}$ ]] || die "token signing key must be at least 32 bytes of hex"
+[[ "$bootstrap_secret" =~ ^[[:xdigit:]]{64}$ ]] || die "bootstrap secret must be 32 bytes of hex"
 
 tmp="${OUTPUT_FILE}.tmp.$$"
 trap 'rm -f -- "$tmp"' EXIT
@@ -104,6 +111,7 @@ trap 'rm -f -- "$tmp"' EXIT
   # fail closed.
   bootstrap_written=0
   signing_written=0
+  bootstrap_secret_written=0
   if [[ -f "$OUTPUT_FILE" ]]; then
     while IFS= read -r line; do
       case "$line" in
@@ -115,6 +123,10 @@ trap 'rm -f -- "$tmp"' EXIT
           printf 'O3K_TOKEN_SIGNING_KEY=%q\n' "$signing_key"
           signing_written=1
           ;;
+        O3K_BOOTSTRAP_SECRET=*)
+          printf 'O3K_BOOTSTRAP_SECRET=%q\n' "$bootstrap_secret"
+          bootstrap_secret_written=1
+          ;;
         *)
           printf '%s\n' "$line"
           ;;
@@ -123,6 +135,7 @@ trap 'rm -f -- "$tmp"' EXIT
   fi
   [[ $bootstrap_written -eq 1 ]] || printf 'O3K_BOOTSTRAP_PASSWORD=%q\n' "$bootstrap"
   [[ $signing_written -eq 1 ]] || printf 'O3K_TOKEN_SIGNING_KEY=%q\n' "$signing_key"
+  [[ $bootstrap_secret_written -eq 1 ]] || printf 'O3K_BOOTSTRAP_SECRET=%q\n' "$bootstrap_secret"
 } >"$tmp"
 chmod 0600 "$tmp"
 mv -f -- "$tmp" "$OUTPUT_FILE"

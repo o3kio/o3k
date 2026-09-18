@@ -11,6 +11,12 @@ note: >-
   install O3K without compiling from source. Building and publishing the
   bundle is PP.1; verifying installation on a fresh machine is PP.2. Nothing
   here is a release or publication claim.
+  Status update: PP.1 shipped the v0.4.0-rc.1 bundle (#970); in PP.2 (#971,
+  branch pp2-one-line-canonical-bootstrap) the installer's
+  invoke_canonical_init_join phase is implemented and the
+  bootstrap-testlab.sh STALE-PRE-P15 gap recorded under known_gaps is
+  reconciled (it now requires canonical bootstrap readiness instead of
+  replacing it). Frozen semantics are unchanged.
 
 distribution:
   canonical_public_source: github-release-asset
@@ -116,4 +122,7 @@ known_gaps:
     packaging/bootstrap-testlab.sh still provisions its TestLab topology via
     raw openstack CLI calls instead of canonical o3k init/o3k join
     (STALE-PRE-P15; canonical bootstrap is the installer path frozen by
-    contracts/installer-v1.yaml and is exercised in PP.2).
+    contracts/installer-v1.yaml and is exercised in PP.2). Reconciled in
+    PP.2 (#971): bootstrap-testlab.sh now requires canonical P15.6 bootstrap
+    state (read-only check) before creating demo workload state; retained
+    here as the historical gap record.
