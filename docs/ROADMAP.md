@@ -541,3 +541,24 @@ discovery, and the #907/#928 Araf P2 northbound convergence gate) is recorded
 in `docs/architecture/p15-0-post-araf-current-state-audit.md`; the post-#928
 gap truth lives in `docs/architecture/p15-e2d-gap-register.md`; implementation
 prompts live under `docs/prompts/p15/`.
+
+## PP — Production Phase (umbrella #968)
+
+P15 is complete: the protected certification run 35365369016 passed the P15.7
+scale/composition convergence gate at the exact completion SHA 096e4679.
+The Production Phase turns that foundation into a shippable, installable
+product baseline:
+
+- **PP.0 (#969)** — frozen contracts for `o3k-demo-v1` and
+  `o3k-small-edge-v1`, the release bundle, installer/lifecycle/upgrade
+  semantics, and the Araf compatibility boundary
+  ([SPEC-0048](specs/SPEC-0048-pp0-demo-and-small-edge-baseline-freeze.md),
+  [baseline summary](pp0/PP0_PRODUCT_BASELINE.md)).
+- **PP.1** — build and publish the exact release artifact.
+- **PP.2** — fresh supported machine installs and runs via canonical P15
+  init/join.
+- **PP.3/PP.4** — Araf deployment integration; **PP.5** — 1–20 hypervisor
+  scale evidence.
+
+PP.0 freezes definitions only: no production-readiness, GA, HA, live
+migration, automatic evacuation, or proven 1–20-host-scale claims.

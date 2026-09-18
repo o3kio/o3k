@@ -231,6 +231,18 @@ def validate(root, status_file, profiles_file, errors):
         program_status == "blocked" or closure_decision == "pending"
     )
 
+    parents = {}
+    for profile in registry.get("profiles", []):
+        if isinstance(profile, dict) and profile.get("id"):
+            parents[profile["id"]] = profile.get("parent_profile")
+
+    # Evidence is profile-scoped (SPEC-0024). A passed entry may only be
+    # reused across profiles through an explicit, consistent shared_run
+    # marker (the same protected run recorded for the scope it exercised),
+    # or through an inherited_from reference that resolves to a passed entry
+    # in the registry-declared parent profile.
+    shared_runs = {}
+
     for profile_id in sorted(registry_ids):
         record = status_profiles[profile_id]
         if not isinstance(record, dict):
@@ -270,6 +282,46 @@ def validate(root, status_file, profiles_file, errors):
                         f"native-rust-testlab must not claim Cinder/Tempest evidence "
                         f"(profile-scoped; see openstack-service-testbed): {name!r}",
                     )
+                if state == "passed":
+                    shared_runs.setdefault(name, []).append(
+                        (profile_id, entry.get("shared_run"))
+                    )
+                if name.startswith("inherited-"):
+                    inherited_from = entry.get("inherited_from")
+                    parent = parents.get(profile_id)
+                    parent_record = status_profiles.get(parent, {})
+                    parent_entries = {
+                        e.get("name"): e
+                        for e in (
+                            parent_record.get(list_name, [])
+                            if isinstance(parent_record, dict) else []
+                        )
+                        if isinstance(e, dict)
+                    }
+                    if not inherited_from:
+                        fail(
+                            errors,
+                            f"profile {profile_id} inherited entry {name!r} must "
+                            f"declare inherited_from",
+                        )
+                    elif not parent:
+                        fail(
+                            errors,
+                            f"profile {profile_id} inherited entry {name!r} but "
+                            f"profile declares no parent_profile in the registry",
+                        )
+                    elif inherited_from not in parent_entries:
+                        fail(
+                            errors,
+                            f"profile {profile_id} inherited entry {name!r} resolves "
+                            f"to nothing in parent profile {parent!r}: {inherited_from!r}",
+                        )
+                    elif parent_entries[inherited_from].get("state") != "passed":
+                        fail(
+                            errors,
+                            f"profile {profile_id} inherited entry {name!r} inherits "
+                            f"non-passed evidence {inherited_from!r} from {parent!r}",
+                        )
 
         if profile_id == NATIVE_PROFILE and tracker_blocked:
             for entry in record.get("full_profile_evidence", []):
@@ -285,6 +337,23 @@ def validate(root, status_file, profiles_file, errors):
                     errors,
                     "native-rust-testlab release_relevance cannot claim release "
                     "readiness while the release tracker is blocked/pending",
+                )
+
+    for name, occurrences in sorted(shared_runs.items()):
+        profiles_claiming = {profile_id for profile_id, _ in occurrences}
+        if len(profiles_claiming) > 1:
+            run_ids = {run_id for _, run_id in occurrences}
+            if any(run_id is None for _, run_id in occurrences):
+                fail(
+                    errors,
+                    f"evidence entry {name!r} is claimed passed by multiple profiles "
+                    f"({sorted(profiles_claiming)}) but is not marked shared_run; "
+                    f"evidence is profile-scoped (SPEC-0024)",
+                )
+            elif len(run_ids) != 1:
+                fail(
+                    errors,
+                    f"evidence entry {name!r} shared_run drift: {sorted(run_ids)}",
                 )
 
 
@@ -321,7 +390,7 @@ def main():
             print(f"  - {error}", file=sys.stderr)
         return 1
     print(
-        "Product-profile status validated: four profiles, field contract, "
+        "Product-profile status validated: profile set, field contract, "
         "evidence vocabulary, native alpha isolation, source commits, and "
         "release-tracker consistency all pass."
     )

@@ -1,0 +1,36 @@
+schema_version: 1
+status: frozen-contract
+pp_phase: PP.0
+tracking_issue: 969
+normative_spec: docs/specs/SPEC-0048-pp0-demo-and-small-edge-baseline-freeze.md
+implementation_status: contract-only
+note: >-
+  Frozen Araf compatibility boundary for PP.0. Definition only; actual Araf
+  deployment integration is owned by PP.3/PP.4.
+
+model:
+  composition: O3K release + compatible Araf release
+  versioning: Araf remains separately versioned
+  pinning: >-
+    PP must eventually pin an exact compatible Araf version/digest before any
+    demo profile ships Araf integration.
+
+araf_is:
+  - external-human-interface-identity
+  - client-of-real-o3k-native-apis
+  - browser-redirect-oidc-pkce-owner
+araf_is_not:
+  - owner-of-o3k-state
+  - required-for-o3kd-readiness
+  - part-of-the-o3k-release-bundle
+fake_mode_forbidden: >-
+  No fixture/demo fake mode may satisfy the final real demo profile; Araf
+  integration must consume real O3K native APIs.
+evidence:
+  existing: >-
+    P15.7 convergence evidence (run 35365369016) explicitly records Araf as
+    not_configured / not required for readiness, and the P15.7 validator
+    fail-closes on a required-but-unproven Araf projection.
+  boundary_docs:
+    - docs/architecture/p15-0-post-araf-current-state-audit.md
+    - docs/evidence/ISSUE_907_ARAF_P2_NORTHBOUND_CONVERGENCE.md

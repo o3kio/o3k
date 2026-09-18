@@ -1,0 +1,73 @@
+schema_version: 1
+status: frozen-contract
+pp_phase: PP.0
+tracking_issue: 969
+normative_spec: docs/specs/SPEC-0048-pp0-demo-and-small-edge-baseline-freeze.md
+implementation_status: contract-only
+note: >-
+  Frozen installer semantics for PP.0. The installer (packaging/get-o3k.sh +
+  packaging/install.sh) may orchestrate canonical P15 authorities but must
+  never recreate them.
+
+authority_boundary:
+  installer_must_not_fabricate:
+    - topology
+    - placement-providers
+    - building-blocks
+    - cloud-profile-state
+    - service-readiness
+    - agent-identity
+  canonical_workflows:
+    init: o3k init (CloudProfile select, bootstrap secret)
+    join: o3k join (authenticated enrollment token + agent certificate)
+  stale_pre_p15_behavior:
+    - >-
+      packaging/bootstrap-testlab.sh provisions a TestLab topology via raw
+      openstack CLI calls instead of canonical init/join; classified
+      STALE-PRE-P15 and must be reconciled with the canonical bootstrap
+      path in PP.1/PP.2.
+    - >-
+      packaging/install.sh compiles o3kd/o3k/o3k-compute with cargo on the
+      target when prebuilt binaries are absent; the frozen contract requires
+      prebuilt release binaries and no target compilation (PP.1).
+
+installer_semantics:
+  phases:
+    - preflight (supported OS/hardware, disk, /dev/kvm, libvirt)
+    - verify_release_artifact_integrity (sha256, bundle preflight)
+    - install_runtime_files (prebuilt binaries only; never cargo build on target)
+    - configure_canonical_prerequisites (users, TLS, systemd)
+    - invoke_canonical_init_join
+    - wait_for_canonical_readiness (o3kd /readyz, compute /readyz, o3k doctor)
+    - expose_credentials_safely (no secrets in logs)
+  convergence: >-
+    re-run is idempotent and convergent; when the installed version equals the
+    release version every phase is a no-op or an observe-before-act reconcile;
+    canonical init/join identities are durable, so re-run can never duplicate
+    BuildingBlocks, providers, agents, users, or files
+  fail_before_mutation: unsupported environments must fail before any destructive mutation
+  no_target_compilation: true
+
+lifecycle_safety:
+  # Reuses the P15.7 fail-closed ownership model; does not duplicate it.
+  ownership_proof_required_before_delete:
+    - foreign VMs (libvirt domains)
+    - foreign libvirt pools
+    - foreign bridges / network links
+    - foreign PostgreSQL data
+    - foreign containers
+    - foreign certificates / files
+  operations:
+    reset: remove only O3K-owned state under data/log roots; refuse foreign or non-empty unowned state
+    uninstall: manifest-driven removal; refuse purge while owned libvirt domains/links/processes exist
+    purge: reset + digest-fenced config/TLS removal; requires explicit confirmation
+  ambiguous_state: reported and preserved, never silently deleted
+
+upgrade_boundary:
+  # Contract only; general rollback/crash-resume remains issue #640 / PP.6-P17.
+  same_version_re_run: convergent, no mutation of installed version
+  supported_upgrade_path: newer version only, via delegate-download + explicit operator-invoked o3k upgrade
+  unsupported_downgrade: implicit downgrade refused by the installer fence
+  schema_compatibility: release manifest schema_version and upgrade_from.min_version checked before upgrade
+  backup: o3k upgrade engine creates a backup before mutation
+  arbitrary_rollback: not promised

@@ -1,0 +1,116 @@
+schema_version: 1
+status: frozen-contract
+pp_phase: PP.0
+tracking_issue: 969
+normative_spec: docs/specs/SPEC-0048-pp0-demo-and-small-edge-baseline-freeze.md
+supersedes: nothing
+implementation_status: contract-only
+note: >-
+  This file freezes the release asset contract for PP.0. It defines what a
+  canonical O3K release must contain so that a supported target host can
+  install O3K without compiling from source. Building and publishing the
+  bundle is PP.1; verifying installation on a fresh machine is PP.2. Nothing
+  here is a release or publication claim.
+
+distribution:
+  canonical_public_source: github-release-asset
+  convenience_redirect: get.o3k.io
+  redirect_authority: >-
+    get.o3k.io is only a convenience 302 redirect / reviewed installer
+    entrypoint. It must never become an independent artifact authority.
+  traceability: >-
+    Every installed binary must be traceable to release version, source
+    commit SHA, manifest.json, SHA256SUMS checksum, and the SBOM. Artifact
+    authenticity signatures/provenance attestation are REQUIRED before
+    publication; their absence is a known PP.1 gap (integrity via SHA-256
+    exists today, authenticity does not).
+
+required_assets:
+  - name: install.sh
+    role: installer entrypoint
+    source: packaging/get-o3k.sh
+    note: >-
+      make-release.sh exports packaging/get-o3k.sh byte-identically as the
+      install.sh release asset; the wrapper downloads/verifies/extracts the
+      bundle and then invokes packaging/install.sh from the extracted tree
+      (which performs the binary/systemd/user installation).
+  - name: "o3k-<version>-linux-x86_64.tar.gz"
+    role: release bundle archive
+    naming: ADR-0130 version format
+  - name: "o3k-<version>-linux-x86_64.tar.gz.sha256"
+    role: single-line tarball checksum, verified before extraction
+  - name: manifest.json
+    role: release identity (source_commit, schema_version, upgrade_from.min_version, installer_sha256)
+  - name: SHA256SUMS
+    role: bundle-wide checksum manifest covering exactly the regular files
+  - name: sbom.spdx.json
+    role: SPDX 2.3 dependency SBOM from cargo metadata
+  - name: provenance
+    role: signature/attestation material binding assets to source (PP.1 requirement)
+
+bundle_contents:
+  binaries:
+    # The exact set required by o3k-demo-v1. o3k-small-edge-v1 additionally
+    # requires o3k-network; o3k-storage is a library, not a daemon.
+    - binary: o3kd
+      install_path: /usr/local/bin/o3kd
+      mode: "0755"
+      owner: root
+      profile_scope: [o3k-demo-v1, o3k-small-edge-v1]
+    - binary: o3k
+      install_path: /usr/local/bin/o3k
+      mode: "0755"
+      owner: root
+      profile_scope: [o3k-demo-v1, o3k-small-edge-v1]
+    - binary: o3k-compute
+      install_path: /usr/local/bin/o3k-compute
+      mode: "0755"
+      owner: root
+      profile_scope: [o3k-demo-v1, o3k-small-edge-v1]
+    - binary: o3k-network
+      install_path: /usr/local/bin/o3k-network
+      mode: "0755"
+      owner: root
+      profile_scope: [o3k-small-edge-v1]
+      note: required for the small-edge network execution boundary; not part of the bounded demo bundle
+  systemd_units:
+    - unit: o3kd.service
+      process_user: o3k
+    - unit: o3k-compute.service
+      process_user: o3k-compute
+  config_paths:
+    - /etc/o3k
+    - /etc/o3k/tls
+  state_paths:
+    - /var/lib/o3k
+  log_paths:
+    - /var/log/o3k
+  no_source_compilation_on_target: true
+
+build_baseline:
+  os: debian-12
+  glibc_floor: "2.36"
+  arch: x86_64
+  builder: scripts/build-release-binaries-debian12.sh
+
+known_gaps:
+  - >-
+    No automated GitHub Actions pipeline builds/publishes the bundle to a
+    GitHub Release today (PP.1 IMPLEMENTATION REQUIRED).
+  - >-
+    No cryptographic signature/provenance attestation today; only SHA-256
+    integrity (PP.1 IMPLEMENTATION REQUIRED).
+  - >-
+    packaging/install.sh still compiles o3kd/o3k/o3k-compute with cargo on the
+    target when prebuilt binaries are absent; the frozen contract requires the
+    release-bundle path with prebuilt binaries and no target compilation
+    (STALE-PRE-P15, PP.1 IMPLEMENTATION REQUIRED).
+  - >-
+    No o3k-network.service systemd unit exists for the o3k-network execution
+    agent required by o3k-small-edge-v1; only o3kd.service and
+    o3k-compute.service are packaged (PP.1 IMPLEMENTATION REQUIRED for the
+    small-edge bundle).
+  - >-
+    packaging/bootstrap-testlab.sh provisions its TestLab topology via raw
+    openstack CLI calls instead of canonical o3k init/o3k join
+    (STALE-PRE-P15, reconcile in PP.1/PP.2).

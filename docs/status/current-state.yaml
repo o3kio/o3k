@@ -1,8 +1,25 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: 6952e272a7e0402ba1f975fbbf36b5725b1dd8d1
-updated_at: 2026-09-13T19:08:19Z
+source_commit: 096e46792aad3af1e425fb844f449c4dcbfa5da2
+updated_at: 2026-09-18T00:00:00Z
 milestones:
+  p15:
+    status: completed
+    source_commit: 096e46792aad3af1e425fb844f449c4dcbfa5da2
+    evidence: >-
+      P15.0-P15.7 complete on protected main 096e4679 (ADR-0184/SPEC-0047).
+      The protected real-host certification run 35365369016 passed the P15.7
+      scale/composition convergence gate at the exact completion SHA:
+      real o3kd, real auth, agent provider, libvirt, PostgreSQL with SQLite
+      parity, multiple real hosts, 4 BuildingBlocks, authenticated
+      init/join/drain/remove/rejoin, restart recovery, zero leaks, zero
+      foreign-state changes, Araf not required for readiness.
+      https://github.com/o3kio/o3k/actions/runs/35365369016
+    claim_scope: >-
+      Bounded P15 scale/composition foundation evidence only. The 1-20
+      hypervisor small-edge envelope remains a PP hardening target, not a
+      proven support claim; no cells/sharding, live migration, automatic
+      evacuation, or multi-region claim is promoted.
   p14:
     status: real-two-cloud-acceptance-passed
     source_commit: 46e050a36d15edde5b769b545d315d2875fbf923
@@ -52,9 +69,10 @@ release_context: >-
   tracker contract stays blocked until the required evidence and human
   decisions exist.
 
-# Mechanical #433 cross-check.  This record is deliberately not a claim of a
-# passing P15.7 real-host run; it binds the public claim projections to the
-# E2D gap register until that protected evidence exists.
+# Mechanical #433 cross-check.  The protected P15.7 real-host evidence now
+# exists (run 35365369016 at 096e4679, see milestones.p15); this record binds
+# the public claim projections to the E2D gap register and is updated only by
+# an executed reconciliation pass, not by this evidence re-baseline.
 claim_reconciliation:
   status: not-executed
   sources:
@@ -294,11 +312,19 @@ profiles:
           expected, cleanup passed
           (target/real-host-workflow-artifacts/resource-leak-result.json).
       - name: p15-7-scale-composition-real-host-gate
-        state: not-executed
+        state: passed
+        shared_run: "35365369016"
         note: >-
-          The fail-closed gate and artifact validator exist, but the protected
-          runner has not yet produced the required multi-BuildingBlock journey
-          at an exact source commit.
+          Protected certification run 35365369016 passed the P15.7
+          scale/composition convergence gate at the exact completion SHA
+          096e4679: real o3kd, real auth, agent provider, libvirt,
+          PostgreSQL with SQLite parity, multiple real hosts, 4
+          BuildingBlocks, authenticated init/join/drain/remove/rejoin,
+          restart recovery, zero leaks, zero foreign-state changes. The
+          same protected run is canonically recorded under small-edge-cloud
+          (the evidence artifact profile) and shared here for the native
+          stack scope it exercised.
+          https://github.com/o3kio/o3k/actions/runs/35365369016
     full_profile_evidence:
       - name: native-alpha-vertical-slice
         state: not-proven
@@ -403,9 +429,12 @@ profiles:
       - broad OpenStack compatibility
   small-edge-cloud:
     implementation_state: >-
-      Planned (SPEC-0024 Profile C). The architecture boundaries it will
-      use are accepted (ADR-0160), but no multi-host implementation,
-      inventory, scheduling, fencing, database, or evidence work exists.
+      Planned (SPEC-0024 Profile C), now with P15 scale/composition
+      foundations complete: the protected P15.7 convergence gate passed at
+      096e4679 (run 35365369016) with multiple real hosts and 4
+      BuildingBlocks. Full-profile edge operation (1-20 hypervisors,
+      production hardening) is owned by the PP program via the frozen
+      o3k-small-edge-v1 contract; it remains unproven as a support claim.
     source_commit: 519517e5bd217b08ba1b5e6957f996040fd8fbac
     portable_evidence:
       - name: multi-host-portable-suite
@@ -413,13 +442,22 @@ profiles:
         note: no profile-specific multi-host portable suite exists.
     protected_component_evidence:
       - name: multi-host-component-gate
-        state: not-executed
-        note: no edge host execution exists.
-      - name: p15-7-multi-building-block-convergence
-        state: not-executed
+        state: passed
         note: >-
-          P15.7 requires a separate protected real-host composition journey;
-          no edge-scale claim is promoted by the gate implementation alone.
+          Protected P15.7 convergence (run 35365369016 at 096e4679) executed
+          the multi-host journey with multiple real hosts and 4
+          BuildingBlocks; see p15-7-multi-building-block-convergence.
+      - name: p15-7-multi-building-block-convergence
+        state: passed
+        shared_run: "35365369016"
+        note: >-
+          Protected certification run 35365369016 passed the P15.7
+          scale/composition convergence gate at the exact completion SHA
+          096e4679: authenticated joins, capacity growth on block add,
+          drain with blockers observed (no evacuation claimed),
+          remove/rejoin/replace, restart recovery, native and OpenStack
+          projections convergent, Araf not required.
+          https://github.com/o3kio/o3k/actions/runs/35365369016
     full_profile_evidence:
       - name: edge-full-profile
         state: not-proven
@@ -434,8 +472,9 @@ profiles:
       - database profile appropriate to the claimed availability and concurrency
       - policy, resource, and latency budgets
     next_evidence_action: >-
-      None scheduled. Requires an accepted edge-specific issue and profile
-      gate before any evidence work starts.
+      PP program hardening (issue #968 umbrella): PP.2 fresh-machine
+      installation evidence through the canonical P15 init/join path, then
+      PP.5 scale evidence before any 1-20 support claim.
     explicitly_unproven_claims:
       - production readiness
       - HA / multi-controller behavior
@@ -555,3 +594,109 @@ profiles:
       - external-Cinder or other external-hosted profile under this profile
       - multi-region IaC
       - native terraform-provider-o3k
+  o3k-demo-v1:
+    implementation_state: >-
+      Contract-frozen (PP.0, issue #969; SPEC-0048) as the shippable
+      definition of the single-host demo/development/evaluation profile.
+      It derives from native-rust-testlab: canonical o3k init, authenticated
+      local o3k join, one local BuildingBlock, real Placement/topology/
+      CloudProfile, o3kd + o3k CLI + o3k-compute (libvirt/KVM agent),
+      bounded flat networking, bounded image handling, native
+      ephemeral-root storage, SQLite default. P15.7 convergence evidence
+      (run 35365369016 at 096e4679) covers the canonical init/join
+      authorities this profile mandates. This is a definition, not a new
+      support claim.
+    source_commit: 096e46792aad3af1e425fb844f449c4dcbfa5da2
+    portable_evidence:
+      - name: pp0-contract-validation
+        state: passed
+        note: tests/pp0-contracts.sh validates the frozen profile and release/installer contracts in normal CI.
+      - name: profile-registry-governance
+        state: passed
+        note: validate-profile-state.py passes with the frozen profile records.
+    protected_component_evidence:
+      - name: inherited-native-rust-testlab-real-host-evidence
+        state: passed
+        inherited_from: p15-7-scale-composition-real-host-gate
+        note: >-
+          Inherits profile-scoped native-rust-testlab evidence, including
+          the P15.7 protected convergence gate (run 35365369016 at
+          096e4679) whose canonical init/join path this profile mandates.
+          No new protected evidence is claimed by the freeze itself.
+    full_profile_evidence:
+      - name: demo-v1-fresh-install-profile-gate
+        state: not-executed
+        note: >-
+          PP.2 owns fresh-supported-machine installation evidence through
+          the canonical P15 bootstrap path; PP.0 freezes the contract only.
+    release_relevance: >-
+      Contract-frozen vehicle for the next release. Not itself a release
+      claim: publication still requires the release gate
+      (docs/release-tracker.md, issues #93/#94) and PP.1-PP.2 evidence.
+    blockers:
+      - PP.1 release artifact build/publish pipeline (contract frozen, not implemented)
+      - PP.2 fresh-machine install evidence via canonical init/join
+      - release-gate execution and publication (issue #93)
+    next_evidence_action: >-
+      Execute PP.1 (build/publish the exact release bundle per
+      contracts/release-bundle-v1.yaml) and PP.2 (fresh-machine install
+      through canonical init/join).
+    explicitly_unproven_claims:
+      - production readiness
+      - HA / multi-node behavior
+      - live migration
+      - automatic evacuation
+      - native persistent volumes / boot from volume
+      - 50 MB footprint guarantee (target only)
+      - Araf deployment (client-only integration belongs to PP.3/PP.4)
+  o3k-small-edge-v1:
+    implementation_state: >-
+      Contract-frozen (PP.0, issue #969; SPEC-0048) as the bounded
+      near-term production-hardening definition for one site. It derives
+      from small-edge-cloud: authenticated BuildingBlock lifecycle,
+      durable topology, capability-aware Placement, CloudProfile, real
+      compute execution, bounded network/storage profiles, PostgreSQL
+      production target, native O3K API, and selected OpenStack/
+      Terraform compatibility. The 1-20 hypervisor envelope is a PP
+      hardening target, not a proven support claim.
+    source_commit: 096e46792aad3af1e425fb844f449c4dcbfa5da2
+    portable_evidence:
+      - name: pp0-contract-validation-small-edge
+        state: passed
+        note: tests/pp0-contracts.sh validates the frozen profile and release/installer contracts in normal CI.
+      - name: profile-registry-governance-small-edge
+        state: passed
+        note: validate-profile-state.py passes with the frozen profile records.
+    protected_component_evidence:
+      - name: inherited-small-edge-p15-7-convergence
+        state: passed
+        inherited_from: p15-7-multi-building-block-convergence
+        note: >-
+          P15.7 protected convergence (run 35365369016 at 096e4679) proved
+          multi-host BuildingBlock composition with 4 blocks; this is the
+          foundation the frozen profile builds on, not 1-20 scale proof.
+    full_profile_evidence:
+      - name: small-edge-v1-full-profile-gate
+        state: not-proven
+        note: >-
+          No evidence exists at the 1-20 hypervisor envelope; PP.5 owns
+          scale evidence before any support claim.
+    release_relevance: >-
+      No release claim in PP.0. Production-hardening target for the PP
+      program; any edge release requires its own profile gate.
+    blockers:
+      - 1-20 hypervisor scale evidence (PP.5)
+      - PostgreSQL production conformance evidence where required
+      - upgrade/backup/restore and failure matrix across the envelope
+    next_evidence_action: >-
+      PP hardening phases (issue #968 umbrella): installer evidence (PP.2),
+      Araf integration (PP.3/PP.4), then scale evidence (PP.5).
+    explicitly_unproven_claims:
+      - production readiness / GA
+      - 1-20 host proven scale (hardening target only)
+      - HA / multi-region
+      - cells / sharding
+      - automatic evacuation
+      - live migration
+      - arbitrary OpenStack parity
+      - unsupported external services

@@ -151,6 +151,162 @@ profiles:
     footprint_claim: unmeasured
     evidence_state: implemented
 
+  # PP.0 (issue #969) frozen product baselines. These two profiles are the
+  # contract-frozen answers to "what exactly do we ship"; they derive from
+  # native-rust-testlab and small-edge-cloud and add no new authority.
+  - id: o3k-demo-v1
+    maturity: frozen-contract
+    pp_phase: PP.0
+    parent_profile: native-rust-testlab
+    user_outcome: >
+      Single supported Linux x86_64 host running the real native O3K Cloud
+      Kernel end to end: canonical o3k init, authenticated local o3k join, one
+      local BuildingBlock, real Placement, real topology, real libvirt/KVM
+      compute, bounded flat networking, bounded image handling, and native
+      ephemeral-root storage, for demo, development, and evaluation.
+    supported_targets:
+      os: [ubuntu-24.04, debian-12]
+      arch: x86_64
+      hosts: {target_envelope: single, proven_support_claim: false}
+      note: >-
+        Build/install target envelope frozen by PP.0, not an OS support claim;
+        support claims require PP.2 fresh-install evidence.
+    runtime_components:
+      - component: o3kd
+        required: true
+        binary: o3kd
+        process_user: o3k
+        authority: cloud-kernel-controller
+        readiness: /readyz runtime+bootstrap gates
+      - component: o3k-cli
+        required: true
+        binary: o3k
+        authority: operator-entrypoint
+        readiness: o3k doctor exit 0
+      - component: o3k-compute
+        required: true
+        binary: o3k-compute
+        process_user: o3k-compute
+        authority: execution-boundary-only
+        readiness: /readyz on compute health addr
+      - component: o3k-network-agent
+        required: false
+        binary: o3k-network
+        authority: execution-boundary-only
+        readiness: not packaged for this profile
+      - component: libvirt-kvm
+        required: true
+        binary: host-package
+        authority: none-o3k
+        readiness: qemu:///system capabilities
+    database:
+      default: sqlite
+      production_target: postgres
+      postgres_support: optional-not-required-for-demo
+    compute_provider: libvirt-kvm-via-o3k-compute-agent
+    network_profile: bounded-flat-bridge
+    storage_profile: native-ephemeral-root-only
+    cloud_profile: required-canonical-p15-4
+    building_block: one-local-block-via-canonical-init-join
+    interfaces:
+      - native-api
+      - openstack-compatible-api-baseline
+      - o3k-cli
+      - araf-client-optional
+    araf_integration: client-only-not-required-for-readiness
+    evidence_dependencies:
+      - native-rust-testlab
+      - p15-7-scale-composition-real-host-gate
+    known_limitations:
+      - not-production
+      - not-ha
+      - not-multi-node
+      - no-live-migration
+      - no-automatic-evacuation
+      - no-native-persistent-volumes
+    release_blocking_for_first_alpha: true
+    footprint_claim: unmeasured-target-approximately-50mb
+    evidence_state: contract-frozen
+    normative_spec: docs/specs/SPEC-0048-pp0-demo-and-small-edge-baseline-freeze.md
+    contract: contracts/release-bundle-v1.yaml
+
+  - id: o3k-small-edge-v1
+    maturity: frozen-contract
+    pp_phase: PP.0
+    parent_profile: small-edge-cloud
+    user_outcome: >
+      One-site near-term production-hardening profile: 1-20 hypervisor target
+      envelope, authenticated BuildingBlock lifecycle, durable topology,
+      capability-aware Placement, CloudProfile, real compute execution,
+      bounded network/storage profiles, PostgreSQL production target, native
+      O3K API, and selected OpenStack/Terraform compatibility.
+    supported_targets:
+      os: [ubuntu-24.04, debian-12]
+      arch: x86_64
+      hosts: {target_envelope: 1-20, proven_support_claim: false}
+      note: >-
+        Build/install target envelope frozen by PP.0, not an OS support claim;
+        support claims require PP.2 (install) and PP.5 (scale) evidence.
+    runtime_components:
+      - component: o3kd
+        required: true
+        binary: o3kd
+        process_user: o3k
+        authority: cloud-kernel-controller
+        readiness: /readyz runtime+bootstrap gates
+      - component: o3k-cli
+        required: true
+        binary: o3k
+        authority: operator-entrypoint
+        readiness: o3k doctor exit 0
+      - component: o3k-compute
+        required: true
+        binary: o3k-compute
+        process_user: o3k-compute
+        authority: execution-boundary-only
+        readiness: /readyz on compute health addr
+      - component: o3k-network-agent
+        required: true
+        binary: o3k-network
+        authority: execution-boundary-only
+        readiness: startup reconcile
+      - component: libvirt-kvm
+        required: true
+        binary: host-package
+        authority: none-o3k
+        readiness: qemu:///system capabilities
+    database:
+      default: sqlite-with-documented-limits
+      production_target: postgres
+      postgres_support: supported-production-backend
+    compute_provider: libvirt-kvm-via-o3k-compute-agent
+    network_profile: bounded-declared-network-profile
+    storage_profile: bounded-declared-storage-profile
+    cloud_profile: required-canonical-p15-4
+    building_block: authenticated-buildingblock-lifecycle-via-canonical-init-join
+    interfaces:
+      - native-api
+      - selected-openstack-compatibility
+      - selected-terraform-opentofu-compatibility
+      - araf-client-optional
+    araf_integration: client-only-not-required-for-readiness
+    evidence_dependencies:
+      - small-edge-cloud
+      - p15-7-multi-building-block-convergence
+    known_limitations:
+      - no-multi-region
+      - no-cells-or-sharding
+      - no-arbitrary-datacenter-scale
+      - no-automatic-evacuation
+      - no-live-migration
+      - no-arbitrary-openstack-parity
+      - target-1-20-hardening-goal-not-proven-support
+    release_blocking_for_first_alpha: false
+    footprint_claim: unmeasured
+    evidence_state: contract-frozen
+    normative_spec: docs/specs/SPEC-0048-pp0-demo-and-small-edge-baseline-freeze.md
+    contract: contracts/release-bundle-v1.yaml
+
 claim_rules:
   cloud_operating_system:
     type: architecture-and-product-direction
