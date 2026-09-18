@@ -7,6 +7,9 @@ echo "Running product-profile status governance validator..."
 python3 "${repo_root}/scripts/validate-profile-state.py" --root "${repo_root}"
 bash "${repo_root}/tests/p15_7_scale_composition_guards.sh"
 
+echo "Running PP.0 frozen profile and release/installer contract validation..."
+bash "${repo_root}/tests/pp0-contracts.sh"
+
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/o3k-profile-state.XXXXXX")"
 trap 'rm -rf "${temp_dir}"' EXIT
 
@@ -47,6 +50,14 @@ mutations = {
     "claim-source-drift": lambda d: d["claim_reconciliation"]["sources"].remove(
         "docs/ROADMAP.md"
     ),
+    "cross-profile-evidence-without-shared-run": lambda d: d["profiles"][
+        "small-edge-cloud"
+    ]["portable_evidence"].append(
+        {"name": "p15-7-scale-composition-real-host-gate", "state": "passed"}
+    ),
+    "inherited-evidence-without-source": lambda d: d["profiles"]["o3k-demo-v1"][
+        "protected_component_evidence"
+    ][0].pop("inherited_from"),
 }
 mutations[mutation_name](doc)
 with open(target, "w", encoding="utf-8") as handle:
@@ -56,7 +67,8 @@ PY
 
 for mutation in rename-profile missing-field cinder-evidence-in-native \
     native-full-profile-passed bad-evidence-state bad-source-commit \
-    claim-e2d-drift claim-source-drift; do
+    claim-e2d-drift claim-source-drift cross-profile-evidence-without-shared-run \
+    inherited-evidence-without-source; do
   mutated="${temp_dir}/status-${mutation}.yaml"
   mutate "${mutated}" "${mutation}"
   if python3 "${repo_root}/scripts/validate-profile-state.py" \

@@ -43,7 +43,10 @@ jobs:
             echo "--- uname ---"; uname -a
             echo "--- mem ---"; free -m
             echo "--- disk (/) ---"; df -h /
-            echo "--- /dev/kvm ---"; ls -l /dev/kvm 2>&1; test -w /dev/kvm && echo "kvm writable" || echo "kvm not writable"
+            echo "--- /dev/kvm ---"
+            # shellcheck disable=SC2012
+            ls -l /dev/kvm 2>&1
+            test -w /dev/kvm && echo "kvm writable" || echo "kvm not writable"
             echo "--- libvirt ---"; systemctl is-active libvirtd virtlogd 2>&1; virsh -c qemu:///system uri 2>&1
           } > "$OUT/host.txt" 2>&1
 
@@ -64,11 +67,13 @@ jobs:
 
           {
             echo "--- /var/lib/o3k-testlab ---"
+            # shellcheck disable=SC2012
             ls -la /var/lib/o3k-testlab 2>&1
             echo "--- run dirs ---"
             for d in /var/lib/o3k-testlab/*; do
               [ -d "$d" ] || continue
               echo "=== $d ==="
+              # shellcheck disable=SC2012
               ls -la "$d" 2>&1
               for m in "$d"/.o3k-run-owned "$d"/.o3k-owned "$d"/.o3k-inventory-owned; do
                 if [ -f "$m" ]; then
@@ -82,6 +87,7 @@ jobs:
               echo "=== pidfile $p ==="; cat "$p" 2>&1
             done
             echo "--- RUNNER_TEMP o3k dirs ---"
+            # shellcheck disable=SC2012
             ls -la "$RUNNER_TEMP" 2>&1 | head -100
             find "$RUNNER_TEMP" -maxdepth 2 -name '.o3k*' 2>/dev/null
             echo "--- image markers ---"
@@ -96,6 +102,7 @@ jobs:
             sudo -n docker ps --format '{{.Names}} {{.Status}}' 2>&1 || docker ps --format '{{.Names}} {{.Status}}' 2>&1
           } > "$OUT/testlab-state.txt" 2>&1
 
+          # shellcheck disable=SC2012
           ls -la "$OUT"
 
       - name: Upload inspection artifact

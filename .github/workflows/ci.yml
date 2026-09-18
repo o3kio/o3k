@@ -150,6 +150,8 @@ jobs:
         run: bash tests/program-tracker.sh
       - name: Test product-profile status governance
         run: bash tests/profile-state.sh
+      - name: Test PP.0 frozen profile and release/installer contracts
+        run: bash tests/pp0-contracts.sh
       - name: Test capability inventory generation
         run: bash tests/capability-inventory.sh
       - name: Test normative TestLab API baseline
