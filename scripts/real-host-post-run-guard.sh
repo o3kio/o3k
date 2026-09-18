@@ -99,7 +99,18 @@ if status == "ready" and inventory_status == "available":
         result_leaks["openstack"] = {
             name: values for name, values in result_leaks["openstack"].items() if values
         }
-        foreign_state_changed = baseline.get("foreign_state") != after.get("foreign_state")
+        # Protected paths are run-scoped OWNED state (the TestLab's
+        # inventory/protected dirs), not foreign host state: the pre-run
+        # baseline snapshots them while the TestLab exists and the post-cleanup
+        # snapshot runs after their legitimate removal. Comparing their digests
+        # across those lifecycle points is meaningless, so they are recorded
+        # per snapshot as tamper evidence but excluded from the foreign-state
+        # comparison.
+        baseline_foreign = {key: value for key, value in baseline.get("foreign_state", {}).items()
+                            if key != "protected_paths_sha256"}
+        after_foreign = {key: value for key, value in after.get("foreign_state", {}).items()
+                         if key != "protected_paths_sha256"}
+        foreign_state_changed = baseline_foreign != after_foreign
 
 if status == "blocked":
     final_status = "blocked"

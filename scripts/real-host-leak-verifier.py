@@ -542,8 +542,15 @@ def compare_snapshots(
                 })
 
     # Foreign state: digest comparison plus per-canary identity comparison.
-    baseline_foreign = baseline.get("foreign_state", {})
-    after_foreign = after.get("foreign_state", {})
+    # Protected paths are run-scoped OWNED state (the TestLab's
+    # inventory/protected dirs), not foreign host state: the pre-run baseline
+    # snapshots them while the TestLab exists and the post-cleanup snapshot
+    # runs after their legitimate removal, so their digests are recorded per
+    # snapshot but excluded from the foreign-change comparison.
+    baseline_foreign = {key: value for key, value in baseline.get("foreign_state", {}).items()
+                        if key != "protected_paths_sha256"}
+    after_foreign = {key: value for key, value in after.get("foreign_state", {}).items()
+                     if key != "protected_paths_sha256"}
     for key in sorted(set(baseline_foreign) | set(after_foreign)):
         if baseline_foreign.get(key) != after_foreign.get(key):
             foreign_changes.append({

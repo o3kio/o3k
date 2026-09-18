@@ -772,6 +772,12 @@ jobs:
         if: always() && steps.protected_preflight.outcome == 'success'
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          # Empty allowlist: the run-scoped protected roots recorded in the
+          # bootstrap environment are legitimately removed by the cleanup
+          # steps above; the collector must not fail closed on their absence
+          # (their digests are owned-state tamper evidence, excluded from the
+          # foreign-state comparison by the guard).
+          O3K_REAL_HOST_PROTECTED_PATHS: ""
           O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
           O3K_REAL_HOST_P15_7_STEP_STATUS: ${{ steps.p15_7.outcome || 'skipped' }}
         run: bash scripts/real-host-post-run-guard.sh
