@@ -97,9 +97,9 @@ jobs:
             echo "--- domains ---"
             virsh -c qemu:///system list --all
             echo "--- o3kd/o3k-compute processes (must be unchanged) ---"
-            ps -eo pid,uid,args | grep -E '/var/lib/o3k-testlab/.*/bin/(o3kd|o3k-compute)' | grep -v grep || echo "none"
+            pgrep -af -f '/var/lib/o3k-testlab/.*/bin/(o3kd|o3k-compute)' || echo "none"
             echo "--- TCG capability process (must be unchanged) ---"
-            ps -eo pid,args | grep 'machine none,accel=tcg' | grep -v grep || echo "none"
+            pgrep -af -f 'machine none,accel=tcg' || echo "none"
             echo "--- mem ---"; free -m
             echo "--- disk ---"; df -h /
             echo "--- kvm ---"; ls -l /dev/kvm
