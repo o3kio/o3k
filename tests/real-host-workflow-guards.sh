@@ -38,6 +38,43 @@ fi
 if [[ "$*" == "-c qemu:///system domuuid o3k-p15-7-12345-block-b" ]]; then
     exit 1
 fi
+POOL_DIR="${O3K_FAKE_VIRSH_POOL_DIR:-}"
+if [[ -n "${POOL_DIR}" && "$*" == "-c qemu:///system pool-list --all --name" ]]; then
+    for f in "${POOL_DIR}"/*.pool; do
+        [[ -e "$f" ]] || continue
+        name="${f##*/}"; name="${name%.pool}"
+        echo "$name"
+    done
+fi
+if [[ -n "${POOL_DIR}" && "$*" == "-c qemu:///system pool-list --all --details" ]]; then
+    printf ' Name                 State      Autostart  Persistent  Capacity     Allocation   Available\n'
+    for f in "${POOL_DIR}"/*.pool; do
+        [[ -e "$f" ]] || continue
+        IFS='|' read -r n p st auto <"$f"
+        printf ' %-20s %-10s %-10s %-10s %-12s %-12s %s\n' \
+            "$n" "$st" "${auto:-no}" yes - - -
+    done
+fi
+if [[ -n "${POOL_DIR}" && "$*" == "-c qemu:///system pool-dumpxml "* ]]; then
+    cat "${POOL_DIR}/${!#}.xml"
+fi
+if [[ -n "${POOL_DIR}" && "$*" == "-c qemu:///system pool-info "* ]]; then
+    IFS='|' read -r n p st auto <"${POOL_DIR}/${!#}.pool"
+    printf 'Name: %s\nState: %s\nAutostart: %s\n' "$n" "$st" "${auto:-no}"
+fi
+if [[ -n "${POOL_DIR}" && "$*" == "-c qemu:///system pool-destroy "* ]]; then
+    name="${!#}"
+    IFS='|' read -r n p st auto <"${POOL_DIR}/${name}.pool"
+    printf '%s|%s|inactive|%s\n' "$n" "$p" "${auto:-no}" >"${POOL_DIR}/${name}.pool"
+fi
+if [[ -n "${POOL_DIR}" && "$*" == "-c qemu:///system pool-undefine "* ]]; then
+    if [[ "${O3K_FAKE_VIRSH_POOL_UNDEFINE_FAIL:-false}" == true ]]; then
+        echo "pool undefine failed (fake)" >&2
+        exit 1
+    fi
+    name="${!#}"
+    rm -f -- "${POOL_DIR}/${name}.pool" "${POOL_DIR}/${name}.xml"
+fi
 SH
 chmod +x "${FAKE_BIN}/virsh"
 cat >"${FAKE_BIN}/ip" <<'SH'
@@ -98,7 +135,8 @@ export O3K_REAL_HOST_OPENSTACK_INVENTORY=true OS_PASSWORD=fake-password
 export O3K_REAL_HOST_PROTECTED_PATHS="${WORK_DIR}/protected-state.txt"
 export O3K_REAL_HOST_WORKFLOW_RUN_ID=guard-run-1 O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT=1
 export GITHUB_SHA=0123456789abcdef0123456789abcdef01234567
-mkdir -p "${O3K_REAL_HOST_ARTIFACT_DIR}"
+export O3K_FAKE_VIRSH_POOL_DIR="${WORK_DIR}/fake-pools"
+mkdir -p "${O3K_REAL_HOST_ARTIFACT_DIR}" "${O3K_FAKE_VIRSH_POOL_DIR}"
 printf 'original protected state\n' >"${O3K_REAL_HOST_PROTECTED_PATHS}"
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
 import json, sys
@@ -443,6 +481,84 @@ import json, sys
 json.dump({"status": "skipped", "redacted": True}, open(sys.argv[1], "w", encoding="utf-8"))
 PY
 bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+# --- P15.7 libvirt storage-pool baseline fixtures --------------------------
+# The pre-run guard first runs the stale-pool sweep (reaping only fully
+# proven pools), then blocks on any inventory pool whose ownership evidence is
+# broken (`ambiguous`) while accepting fully-proven (`active_owned`) pools.
+# These scenarios run against an isolated artifact dir so they do not disturb
+# the shared baseline/result used by the rest of this harness.
+POOL_ARTIFACT_DIR="${WORK_DIR}/pool-artifacts"
+POOL_IMG_ROOT="${WORK_DIR}/pool-img-root"
+mkdir -p "${POOL_ARTIFACT_DIR}" "${POOL_IMG_ROOT}"
+cat >"${POOL_ARTIFACT_DIR}/runner-capabilities.json" <<'JSON'
+{"artifact_type": "runner-capabilities", "schema_version": 1, "status": "passed",
+ "redacted": true, "workflow_run_id": "guard-run-1", "workflow_run_attempt": "1",
+ "source_commit": "0123456789abcdef0123456789abcdef01234567", "finished_at": 1}
+JSON
+cat >"${POOL_ARTIFACT_DIR}/disposable-testlab-bootstrap.json" <<'JSON'
+{"artifact_type": "disposable-testlab-bootstrap", "status": "passed",
+ "provider": "agent", "redacted": true}
+JSON
+printf 'pool protected baseline\n' >"${POOL_ARTIFACT_DIR}/protected.txt"
+add_fake_pool() {
+    local name="$1" path="$2" state="$3"
+    printf '%s|%s|%s|no\n' "$name" "$path" "$state" >"${O3K_FAKE_VIRSH_POOL_DIR}/${name}.pool"
+    cat >"${O3K_FAKE_VIRSH_POOL_DIR}/${name}.xml" <<XML
+<pool type="dir">
+  <name>${name}</name>
+  <target><path>${path}</path></target>
+</pool>
+XML
+}
+add_fake_pool_marker() {
+    local path="$1" run="$2" name="$3"
+    mkdir -p "$path"
+    printf 'o3k-p15-7-pool-owned-v1\nrun=%s\npool=%s\npath=%s\nsource_sha=unknown\n' \
+        "$run" "$name" "$path" >"$path/.o3k-p15-7-pool-owned"
+}
+clear_fake_pools() {
+    rm -f -- "${O3K_FAKE_VIRSH_POOL_DIR}"/*.pool "${O3K_FAKE_VIRSH_POOL_DIR}"/*.xml
+    rm -rf -- "${POOL_IMG_ROOT:?}"/*
+}
+run_pool_guard() {
+    env O3K_REAL_HOST_ARTIFACT_DIR="${POOL_ARTIFACT_DIR}" \
+        O3K_REAL_HOST_PROTECTED_PATHS="${POOL_ARTIFACT_DIR}/protected.txt" \
+        O3K_P15_7_LIBVIRT_IMAGE_ROOT="${POOL_IMG_ROOT}" \
+        bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+}
+unset O3K_FAKE_VIRSH_POOL_UNDEFINE_FAIL
+# A conforming pool with a broken ownership record (no durable marker) is
+# ambiguous and must block the guard (fail closed).
+clear_fake_pools
+AMB_NAME="o3k-p15-7-12345"; AMB_PATH="${POOL_IMG_ROOT}/${AMB_NAME}"
+mkdir -p "${AMB_PATH}"
+add_fake_pool "${AMB_NAME}" "${AMB_PATH}" running
+if run_pool_guard; then
+    echo "an ambiguous pool passed the baseline guard" >&2
+    exit 1
+fi
+python3 - "${POOL_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "blocked" and value["reason"] == "baseline_not_clean", value
+assert any(p["classification"] == "ambiguous" for p in value["inventory_baseline"]["pools"])
+PY
+# A fully-proven (active_owned) pool does NOT block the guard.  Keep libvirt
+# from actually reaping it so the inventory still sees it at the check.
+clear_fake_pools
+OWN_NAME="o3k-p15-7-12345"; OWN_PATH="${POOL_IMG_ROOT}/${OWN_NAME}"
+add_fake_pool "${OWN_NAME}" "${OWN_PATH}" running
+add_fake_pool_marker "${OWN_PATH}" 12345 "${OWN_NAME}"
+O3K_FAKE_VIRSH_POOL_UNDEFINE_FAIL=true run_pool_guard \
+    || { echo "an active_owned pool blocked the baseline guard" >&2; exit 1; }
+python3 - "${POOL_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "ready" and value["reason"] == "ready", value
+assert any(p["classification"] == "active_owned" for p in value["inventory_baseline"]["pools"])
+PY
+unset O3K_FAKE_VIRSH_POOL_UNDEFINE_FAIL
+clear_fake_pools
 if bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"; then
     echo "skipped lifecycle was accepted as a pass" >&2
     exit 1

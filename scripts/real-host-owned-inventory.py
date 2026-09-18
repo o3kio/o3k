@@ -9,9 +9,15 @@ Schema versions
 ---------------
 
 - schema_version 2: the bounded libvirt/OpenStack inventory. Its fields
-  (`domains`, `network_links`, `openstack`, `foreign_state`) are stable and
-  consumed verbatim by `scripts/real-host-pre-run-guard.sh` and
-  `scripts/real-host-post-run-guard.sh`.
+  (`domains`, `pools`, `network_links`, `openstack`, `foreign_state`) are
+  stable and consumed verbatim by `scripts/real-host-pre-run-guard.sh` and
+  `scripts/real-host-post-run-guard.sh`. `pools` records each `o3k-p15-7-`
+  owned-name libvirt dir pool with its libvirt state/autostart/target path,
+  ownership-marker presence and digest, and an `active_owned` / `ambiguous`
+  classification (the stale-pool sweep reaps proven stale pools before the
+  guard runs, so pools have no `stale_owned` class; anything with broken or
+  missing ownership evidence is `ambiguous`); foreign pool names are counted
+  only in `foreign_state.pools_count`.
 - schema_version 3: adds the independent verifier sections. The v2 fields are
   preserved byte-identically; the new sections are gated by environment
   variables so a configuration that never sets them produces an unchanged v2
@@ -297,6 +303,10 @@ TEMP_NAME_PATTERNS = (
     re.compile(r"^[A-Za-z0-9._:-]+\.state\.tmp$"),
 )
 LAST_FAILURE_REASON = "inventory_collection_failed"
+
+POOL_PREFIX = "o3k-p15-7-"
+POOL_MARKER_MAGIC = "o3k-p15-7-pool-owned-v1"
+POOL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 def failure_class(stderr: str) -> str:
@@ -928,6 +938,192 @@ def classify_links(
     return classified
 
 
+def parse_pool_marker(path: Path) -> dict[str, str] | None:
+    """Parse the durable pool ownership marker emitted by
+    `scripts/p15-7-libvirt-storage-pool.sh` (define writes
+    `.o3k-p15-7-pool-owned` into the exact run-owned target directory). A
+    marker dict of `key=value` facts is returned only when the file is a
+    regular (non-symlink) file whose magic `o3k-p15-7-pool-owned-v1` appears
+    exactly once. None for absent, symbolic, or malformed markers."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    if lines.count(POOL_MARKER_MAGIC) != 1:
+        return None
+    fields: dict[str, str] = {}
+    for line in lines:
+        if "=" in line:
+            key, _, value = line.partition("=")
+            fields[key] = value
+    return fields
+
+
+def _pool_autostart_map(details_output: str) -> dict[str, str]:
+    """Parse the read-only `virsh pool-list --all --details` Autostart column.
+    Pool names and the leading columns never contain spaces, so a whitespace
+    split of the header and each data row is safe for the fields we read."""
+    autostart: dict[str, str] = {}
+    header = None
+    for line in details_output.splitlines():
+        if "Autostart" in line:
+            header = line
+            break
+    if header is None:
+        return autostart
+    columns = header.split()
+    for line in details_output.splitlines()[1:]:
+        stripped = line.strip()
+        if not stripped or set(stripped) == {"-"}:  # separator row
+            continue
+        fields = line.split()
+        if len(fields) >= len(columns):
+            row = dict(zip(columns, fields))
+            if row.get("Name"):
+                autostart[row["Name"]] = row.get("Autostart")
+    return autostart
+
+
+def classify_pool(
+    name: str,
+    image_root: Path,
+    autostart_map: dict[str, str],
+    domain_xmls: list[str],
+) -> dict[str, object] | None:
+    """Classify one ``o3k-p15-7-`` owned-name libvirt dir storage pool.
+
+    Returns None only on virsh infrastructure failure (fail closed). Every
+    other outcome is recorded with a ``classification`` of ``active_owned``
+    (name/path/XML conform AND a valid matching durable marker AND no live
+    domain references the path) or ``ambiguous`` (anything with broken,
+    missing, or self-contradictory ownership evidence — never silently
+    foreign, never automatically reaped). The libvirt ``State`` is recorded
+    separately as ``libvirt_state`` so an active libvirt state is never
+    conflated with active ownership.
+    """
+    info = command(("virsh", "-c", "qemu:///system", "pool-info", name))
+    if info is None:
+        return None
+    state = None
+    for line in info.splitlines():
+        if line.startswith("State:"):
+            state = line.split(":", 1)[1].strip()
+    dump = command(("virsh", "-c", "qemu:///system", "pool-dumpxml", name))
+    if dump is None:
+        return None
+    xml_type = None
+    xml_name = None
+    target_path = None
+    try:
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(dump)
+        xml_name = root.findtext("name")
+        xml_type = root.get("type")
+        target_path = root.findtext("target/path")
+    except (ET.ParseError, AttributeError, UnicodeError):
+        pass
+
+    record: dict[str, object] = {
+        "name": name,
+        "libvirt_state": state,
+        "autostart": autostart_map.get(name),
+        "target_path": target_path,
+        "marker_present": False,
+        "marker_sha256": None,
+        "classification": "ambiguous",
+    }
+
+    run = name[len(POOL_PREFIX):]
+    expected_path = os.path.join(str(image_root), POOL_PREFIX + run)
+    conforms = (
+        xml_type == "dir"
+        and xml_name == name
+        and isinstance(target_path, str)
+        and target_path == expected_path
+        and ".." not in target_path
+    )
+    if not conforms:
+        record["reason"] = "pool_xml_not_run_owned_target"
+        return record
+
+    marker_path = Path(target_path) / ".o3k-p15-7-pool-owned"
+    marker_present = not marker_path.is_symlink() and marker_path.is_file()
+    record["marker_present"] = marker_present
+    if marker_present:
+        try:
+            record["marker_sha256"] = sha256_bytes(marker_path.read_bytes())
+        except (OSError, UnicodeError):
+            record["marker_sha256"] = None
+    marker = parse_pool_marker(marker_path)
+    if marker is None:
+        record["reason"] = "pool_marker_missing"
+        return record
+    source_sha = marker.get("source_sha")
+    valid = (
+        marker.get("run") == run
+        and marker.get("pool") == name
+        and marker.get("path") == target_path
+        and (source_sha == "unknown" or (source_sha is not None and POOL_SHA_RE.fullmatch(source_sha) is not None))
+    )
+    if not valid:
+        record["reason"] = "pool_marker_mismatch"
+        return record
+
+    # Domain-attachment check: no live domain may reference the pool path.
+    for xml in domain_xmls:
+        if target_path in xml:
+            record["reason"] = "referenced_by_domain"
+            return record
+
+    record["classification"] = "active_owned"
+    record["contract"] = (
+        "scripts/p15-7-libvirt-storage-pool.sh define writes the durable "
+        "o3k-p15-7-pool-owned marker; proven-owned and unused"
+    )
+    return record
+
+
+def collect_pools(image_root: Path) -> dict[str, object] | None:
+    """Inventory owned-name libvirt dir storage pools for the base snapshot.
+
+    Only pools whose name starts with ``o3k-p15-7-`` are recorded
+    individually; foreign pools are counted only (``foreign_count``). Any
+    virsh command failure (listing pools, listing domains, dumping a domain
+    or an owned pool) fails closed (None) — consistent with how the domains
+    section is collected.
+    """
+    listing = command(("virsh", "-c", "qemu:///system", "pool-list", "--all", "--name"))
+    if listing is None:
+        return None
+    domain_output = command(("virsh", "-c", "qemu:///system", "list", "--all", "--name"))
+    if domain_output is None:
+        return None
+    domain_xmls: list[str] = []
+    for dom in (line.strip() for line in domain_output.splitlines() if line.strip()):
+        xml = command(("virsh", "-c", "qemu:///system", "dumpxml", dom))
+        if xml is None:
+            return None
+        domain_xmls.append(xml)
+
+    details = command(("virsh", "-c", "qemu:///system", "pool-list", "--all", "--details"))
+    autostart_map = _pool_autostart_map(details) if details is not None else {}
+
+    foreign_count = 0
+    pools: list[dict[str, object]] = []
+    for name in (line.strip() for line in listing.splitlines() if line.strip()):
+        if not name.startswith(POOL_PREFIX):
+            foreign_count += 1
+            continue
+        record = classify_pool(name, image_root, autostart_map, domain_xmls)
+        if record is None:
+            return None
+        pools.append(record)
+    return {"pools": pools, "foreign_count": foreign_count}
+
+
 def classification_summary(document: dict[str, object]) -> dict[str, int]:
     """Tally every classified O3K-owned object in the snapshot."""
     counts = {"active_owned": 0, "expected_retained": 0, "stale_owned": 0, "inconsistent": 0}
@@ -950,6 +1146,7 @@ def classification_summary(document: dict[str, object]) -> dict[str, int]:
         "dhcp",
         "processes",
         "durable",
+        "pools",
     ):
         if key in document:
             count(document[key])
@@ -1872,17 +2069,25 @@ def snapshot() -> dict[str, object] | None:
     if protected_paths is None:
         return None
 
+    pool_result = collect_pools(
+        Path(os.environ.get("O3K_P15_7_LIBVIRT_IMAGE_ROOT", "/var/lib/libvirt/images"))
+    )
+    if pool_result is None:
+        return None
+
     document: dict[str, object] = {
         "schema_version": 2,
         "status": "available",
         "redacted": True,
         "domains": sorted(set(domains)),
+        "pools": pool_result["pools"],
         "network_links": network_links,
         "openstack": {"status": openstack_status, "resources": resources},
         "foreign_state": {
             "domains_sha256": digest(foreign_domains),
             "network_links_sha256": digest(foreign_links),
             "protected_paths_sha256": protected_paths,
+            "pools_count": pool_result["foreign_count"],
         },
     }
 

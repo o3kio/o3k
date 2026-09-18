@@ -1,0 +1,118 @@
+name: P15.7 legacy pool sanitation (one-time, runner-2404)
+
+# Bounded ONE-TIME sanitation of the 28 marker-less legacy P15.7 libvirt dir
+# pools observed on runner-2404 (inspection run 35283121198, 2026-09-17).
+# Runs scripts/p15-7-legacy-pool-sanitation.sh with an explicit allowlist.
+# Re-verifies every entry live (host, exact name/run-id/path, dir-pool XML,
+# no domain attachment, no durable marker) before destroy+undefine.
+# Preserves and reports anything that fails verification. Does NOT touch
+# domains, processes, foreign pools, or non-allowlisted pools.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type SANITIZE-LEGACY-POOLS to confirm this one-time destructive-but-bounded run"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sanitize:
+    name: One-time legacy P15.7 pool sanitation
+    if: >-
+      github.repository == 'o3kio/o3k' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.confirm == 'SANITIZE-LEGACY-POOLS'
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    timeout-minutes: 30
+    steps:
+      - name: Check out the canonical repository at the exact SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify runner identity before any mutation
+        run: |
+          set -euo pipefail
+          host="$(hostname)"
+          runner="${RUNNER_NAME:-unknown}"
+          echo "hostname=$host runner.name=$runner"
+          [[ "$host" == "runner-2404" && "$runner" == "runner-2404" ]] \
+            || { echo "refusing to sanitize on unexpected host" >&2; exit 1; }
+
+      - name: Write bounded allowlist
+        run: |
+          set -euo pipefail
+          cat >"$RUNNER_TEMP/legacy-pools.allowlist" <<'EOF'
+          o3k-p15-7-journey-34903480999 34903480999 /home/ubuntu/actions-runner/_work/_temp/o3k-p15-7-journey-34903480999
+          o3k-p15-7-34906667277 34906667277 /var/lib/libvirt/images/o3k-p15-7-34906667277
+          o3k-p15-7-34910009695 34910009695 /var/lib/libvirt/images/o3k-p15-7-34910009695
+          o3k-p15-7-34912802938 34912802938 /var/lib/libvirt/images/o3k-p15-7-34912802938
+          o3k-p15-7-34915664668 34915664668 /var/lib/libvirt/images/o3k-p15-7-34915664668
+          o3k-p15-7-34918767471 34918767471 /var/lib/libvirt/images/o3k-p15-7-34918767471
+          o3k-p15-7-34921055944 34921055944 /var/lib/libvirt/images/o3k-p15-7-34921055944
+          o3k-p15-7-34923581775 34923581775 /var/lib/libvirt/images/o3k-p15-7-34923581775
+          o3k-p15-7-34926223149 34926223149 /var/lib/libvirt/images/o3k-p15-7-34926223149
+          o3k-p15-7-34928652917 34928652917 /var/lib/libvirt/images/o3k-p15-7-34928652917
+          o3k-p15-7-34928655625 34928655625 /var/lib/libvirt/images/o3k-p15-7-34928655625
+          o3k-p15-7-34931318121 34931318121 /var/lib/libvirt/images/o3k-p15-7-34931318121
+          o3k-p15-7-34931324222 34931324222 /var/lib/libvirt/images/o3k-p15-7-34931324222
+          o3k-p15-7-34934179381 34934179381 /var/lib/libvirt/images/o3k-p15-7-34934179381
+          o3k-p15-7-34939192352 34939192352 /var/lib/libvirt/images/o3k-p15-7-34939192352
+          o3k-p15-7-34942632716 34942632716 /var/lib/libvirt/images/o3k-p15-7-34942632716
+          o3k-p15-7-34942637781 34942637781 /var/lib/libvirt/images/o3k-p15-7-34942637781
+          o3k-p15-7-34946578778 34946578778 /var/lib/libvirt/images/o3k-p15-7-34946578778
+          o3k-p15-7-35053669354 35053669354 /var/lib/libvirt/images/o3k-p15-7-35053669354
+          o3k-p15-7-35056281559 35056281559 /var/lib/libvirt/images/o3k-p15-7-35056281559
+          o3k-p15-7-35065813009 35065813009 /var/lib/libvirt/images/o3k-p15-7-35065813009
+          o3k-p15-7-35070196520 35070196520 /var/lib/libvirt/images/o3k-p15-7-35070196520
+          o3k-p15-7-35073301818 35073301818 /var/lib/libvirt/images/o3k-p15-7-35073301818
+          o3k-p15-7-35083047252 35083047252 /var/lib/libvirt/images/o3k-p15-7-35083047252
+          o3k-p15-7-35087827396 35087827396 /var/lib/libvirt/images/o3k-p15-7-35087827396
+          o3k-p15-7-35090537275 35090537275 /var/lib/libvirt/images/o3k-p15-7-35090537275
+          o3k-p15-7-35143739792 35143739792 /var/lib/libvirt/images/o3k-p15-7-35143739792
+          o3k-p15-7-35278626272 35278626272 /var/lib/libvirt/images/o3k-p15-7-35278626272
+          EOF
+          # Strip leading spaces from the heredoc without touching content.
+          sed -i 's/^          //' "$RUNNER_TEMP/legacy-pools.allowlist"
+          wc -l "$RUNNER_TEMP/legacy-pools.allowlist"
+
+      - name: Run bounded legacy pool sanitation
+        run: |
+          set -euo pipefail
+          bash scripts/p15-7-legacy-pool-sanitation.sh "$RUNNER_TEMP/legacy-pools.allowlist" \
+            | tee "$RUNNER_TEMP/sanitation.log"
+
+      - name: Post-sanitation verification (read-only)
+        run: |
+          set -euo pipefail
+          {
+            echo "date: $(date -Is)"
+            echo "hostname: $(hostname)"
+            echo "--- remaining owned-named pools (must be none) ---"
+            virsh -c qemu:///system pool-list --all --name | grep '^o3k-p15-7-' || echo "none"
+            echo "--- full pool list ---"
+            virsh -c qemu:///system pool-list --all
+            echo "--- domains ---"
+            virsh -c qemu:///system list --all
+            echo "--- o3kd/o3k-compute processes (must be unchanged) ---"
+            ps -eo pid,uid,args | grep -E '/var/lib/o3k-testlab/.*/bin/(o3kd|o3k-compute)' | grep -v grep || echo "none"
+            echo "--- TCG capability process (must be unchanged) ---"
+            ps -eo pid,args | grep 'machine none,accel=tcg' | grep -v grep || echo "none"
+            echo "--- mem ---"; free -m
+            echo "--- disk ---"; df -h /
+            echo "--- kvm ---"; ls -l /dev/kvm
+          } > "$RUNNER_TEMP/post-sanitation.txt" 2>&1
+          # Fail closed if any owned-named pool survives sanitation.
+          ! grep -q '^o3k-p15-7-' <(virsh -c qemu:///system pool-list --all --name)
+
+      - name: Upload sanitation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: p15-7-legacy-sanitation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/sanitation.log
+            ${{ runner.temp }}/post-sanitation.txt
+          if-no-files-found: error

@@ -222,6 +222,15 @@ while IFS= read -r stale_domain; do
     fi
 done < <(virsh -c qemu:///system list --all --name 2>/dev/null || true)
 
+# A prior P15.7 journey can also leak a libvirt dir storage pool (its own
+# cleanup is in the journey EXIT trap, which an interruption can skip).  The
+# automatic sweep reaps only pools whose exact name, exact target path,
+# structural XML, and durable ownership marker are all proven; ambiguous pools
+# are reported and preserved, never deleted here.  Best-effort, like
+# cleanup-stale-testlab-processes: an unreapable pool is then caught by the
+# baseline inventory check below.
+bash "${ROOT_DIR}/scripts/p15-7-libvirt-storage-pool.sh" cleanup-stale-pools || true
+
 if ! bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${INVENTORY_PATH}"; then
     ready=false
     reason=owned_inventory_unavailable
@@ -230,6 +239,13 @@ import json, sys
 inventory = json.load(open(sys.argv[1], encoding="utf-8"))
 if (inventory.get("status") != "available" or inventory.get("domains")
         or inventory.get("network_links")):
+    raise SystemExit(1)
+# The stale-pool sweep above reaps provably-owned stale pools, so the only
+# pools a clean baseline may legitimately report are fully proven
+# (`active_owned`).  Any pool whose ownership evidence is broken, missing, or
+# contradictory is `ambiguous` and blocks the run (fail closed).
+if any(pool.get("classification") in ("stale_owned", "ambiguous")
+       for pool in inventory.get("pools", [])):
     raise SystemExit(1)
 if any(inventory.get("openstack", {}).get("resources", {}).values()):
     raise SystemExit(1)
