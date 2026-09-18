@@ -100,7 +100,7 @@ chroot "$ROOTFS" /bin/bash -c '
   export RUSTUP_HOME=/root/.rustup CARGO_HOME=/root/.cargo PATH="/root/.cargo/bin:$PATH" HOME=/root
   cargo build --release --locked --bin o3kd --bin o3k
   cargo build --release --locked --features libvirt --bin o3k-compute-bin
-  cargo build --release --locked --bin o3k-network
+  cargo build --release --locked --bin o3k-network-bin
   rustc --version > rustc-version.txt
 '
 
@@ -108,7 +108,7 @@ mkdir -p "$OUTPUT_DIR"
 install -m 0755 "$ROOTFS/build/target/release/o3kd" "$OUTPUT_DIR/o3kd"
 install -m 0755 "$ROOTFS/build/target/release/o3k" "$OUTPUT_DIR/o3k"
 install -m 0755 "$ROOTFS/build/target/release/o3k-compute-bin" "$OUTPUT_DIR/o3k-compute"
-install -m 0755 "$ROOTFS/build/target/release/o3k-network" "$OUTPUT_DIR/o3k-network"
+install -m 0755 "$ROOTFS/build/target/release/o3k-network-bin" "$OUTPUT_DIR/o3k-network"
 (cd "$OUTPUT_DIR" && sha256sum o3kd o3k o3k-compute o3k-network > SHA256SUMS)
 
 echo "==> recording the glibc floor proof (checked with the host readelf)"

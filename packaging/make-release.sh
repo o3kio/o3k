@@ -105,8 +105,8 @@ else
   if [[ "$PROFILE" == libvirt ]]; then
     cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute-bin
     bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-compute-bin"
-    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k-network
-    bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-network"
+    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k-network-bin
+    bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-network-bin"
   fi
 fi
 rm -rf -- "$OUT_DIR"
@@ -123,7 +123,7 @@ else
   install -m 0755 "$ROOT_DIR/target/release/o3k" "$OUT_DIR/bin/o3k"
   if [[ "$PROFILE" == libvirt ]]; then
     install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$OUT_DIR/bin/o3k-compute"
-    install -m 0755 "$ROOT_DIR/target/release/o3k-network" "$OUT_DIR/bin/o3k-network"
+    install -m 0755 "$ROOT_DIR/target/release/o3k-network-bin" "$OUT_DIR/bin/o3k-network"
   fi
 fi
 # get-o3k.sh and channels.yaml ship in the bundle so a pinned/self-hosted
