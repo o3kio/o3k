@@ -40,11 +40,12 @@ VM_NAME="asr022-${DISTRO}"
 VM_EVID="/home/tester/o3k-campaign-evidence"
 VM_SCRIPTS="/home/tester/o3k-campaign"
 ENDPOINT_PID=""
+SSH_PORT="${O3K_CAMPAIGN_SSH_PORT:-2322}"
 mkdir -p "$WORK" "$EVID"
 [ -f "$SSH_KEY" ] || ssh-keygen -t ed25519 -f "$SSH_KEY" -N '' -C "asr022" >/dev/null
 SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  -o ConnectTimeout=5 -o ServerAliveInterval=15 -p 2322)
-SCP_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P 2322)
+  -o ConnectTimeout=5 -o ServerAliveInterval=15 -p "$SSH_PORT")
+SCP_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$SSH_PORT")
 
 log() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
 
@@ -118,7 +119,7 @@ qemu-system-x86_64 \
   -m 3584 \
   -drive file="$DISK",if=virtio,format=qcow2 \
   -drive file="$SEED_ISO",if=virtio,media=cdrom \
-  -netdev user,id=net0,hostfwd=tcp::2322-:22 \
+  -netdev user,id=net0,hostfwd=tcp::${SSH_PORT}-:22 \
   -device virtio-net-pci,netdev=net0 \
   -display none -daemonize -pidfile "$WORK/${VM_NAME}.pid"
 log "VM ${VM_NAME} launched (slirp gateway 10.0.2.2 -> host)"
