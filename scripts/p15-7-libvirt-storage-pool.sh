@@ -86,12 +86,21 @@ write_pool_marker() {
     || die "pool target path is not an owned directory"
   sha="$(pool_source_sha)"
   marker="$path/.o3k-p15-7-pool-owned"
-  tmp="$(mktemp "$path/.o3k-p15-7-pool-owned.XXXXXX")" \
+  # libvirt creates the run-owned pool directory root-owned (0711), so the
+  # unprivileged runner user usually cannot write it directly. Prefer a direct
+  # atomic write; fall back to passwordless sudo install (the same privilege
+  # idiom the journey already uses for this directory). Fail closed if neither
+  # works — an unrecorded marker would make the pool un-reapable.
+  tmp="$(mktemp "${TMPDIR:-/tmp}/o3k-p15-7-pool-owned.XXXXXX")" \
     || die "cannot create pool ownership marker temporary"
   printf 'o3k-p15-7-pool-owned-v1\nrun=%s\npool=%s\npath=%s\nsource_sha=%s\n' \
     "$run_id" "$name" "$path" "$sha" >"$tmp"
   chmod 0644 "$tmp"
-  mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; die "cannot commit pool ownership marker"; }
+  if ! mv -f -- "$tmp" "$marker" 2>/dev/null; then
+    sudo -n install -m 0644 -o root -g root -- "$tmp" "$marker" 2>/dev/null \
+      || { rm -f -- "$tmp"; die "cannot record pool ownership marker"; }
+    rm -f -- "$tmp"
+  fi
 }
 
 # Sweep-only non-fatal path conformance (the sweep reports AMBIGUOUS instead
@@ -208,8 +217,10 @@ remove_pool() {
   listing="$(pool_listing)" || die "cannot verify libvirt storage pool cleanup"
   ! pool_present "$listing" "$name" || die "run-owned pool remains after undefine"
   # The pool is gone; drop its ownership marker too (best-effort — a leftover
-  # marker is harmless and never a reason to fail the cleanup that succeeded).
-  rm -f -- "$path/.o3k-p15-7-pool-owned"
+  # marker is harmless; the root-owned pool dir may need the sudo idiom).
+  rm -f -- "$path/.o3k-p15-7-pool-owned" 2>/dev/null \
+    || sudo -n rm -f -- "$path/.o3k-p15-7-pool-owned" 2>/dev/null \
+    || true
 }
 
 define_pool() {
