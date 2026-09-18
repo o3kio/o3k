@@ -333,6 +333,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Test one-line installer negative matrix
         run: sudo bash tests/installer-negative.sh
+      - name: Test PP.2 canonical-bootstrap installer contract
+        run: bash tests/pp2-installer-contract.sh
   supply-chain:
     runs-on: ubuntu-latest
     steps:
