@@ -67,7 +67,7 @@ jobs:
 
       - name: Run bounded stale postgres sanitation
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           bash "$RUNNER_TEMP/p15-7-stale-postgres-sanitation.sh" "$RUNNER_TEMP/stale-postgres.allowlist" \
