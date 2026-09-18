@@ -93,6 +93,10 @@ if [[ "${O3K_FAKE_IP_UNSTABLE:-false}" == true ]]; then
     printf '%s\n' "${count}" >"${counter_file}"
     echo "${count}: unstable0: <BROADCAST> mtu 1500 state UP"
 fi
+if [[ "${O3K_FAKE_IP_DOCKER:-false}" == true ]]; then
+    echo '9: docker0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP'
+    echo "10: ${O3K_FAKE_IP_DOCKER_VETH:-vethaaaaaaa}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 master docker0 state UP"
+fi
 SH
 chmod +x "${FAKE_BIN}/ip"
 cat >"${FAKE_BIN}/openstack" <<'SH'
@@ -369,6 +373,24 @@ value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["artifact_type"] == "resource-leak-result"
 assert value["status"] == "passed"
 PY
+
+# Docker bridge ports (kernel-named veth* enslaved to docker0) are anonymous
+# positional artifacts whose names are random per container lifecycle: a
+# differently-named veth at the after snapshot must NOT count as a
+# foreign-state change, while docker0 itself remains part of the digest.
+export O3K_FAKE_IP_DOCKER=true O3K_FAKE_IP_DOCKER_VETH=vethbase000
+bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+export O3K_FAKE_IP_DOCKER_VETH=vethafter999
+export O3K_REAL_HOST_WORKFLOW_STEP_STATUS=success
+bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "passed", f"docker veth was treated as foreign state: {value}"
+assert value.get("foreign_state_changed") is not True
+PY
+unset O3K_FAKE_IP_DOCKER O3K_FAKE_IP_DOCKER_VETH
+bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
 
 # The overall guard must not turn a failed P15.7 journey into a green workflow.
 bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"

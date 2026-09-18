@@ -578,6 +578,15 @@ def classify_link_lines(output: str) -> tuple[list[str], list[str]]:
         # foreign state and could stay invisible to the owned-link delta.
         fields = value.split(":", 2)
         name = fields[1].strip().split("@", 1)[0] if len(fields) > 1 else ""
+        # Docker bridge ports (kernel-named veth* enslaved to docker0) are
+        # anonymous, positional artifacts: their names are random per container
+        # lifecycle and carry no identity. Run-scoped O3K containers (the
+        # disposable PostgreSQL database) start before the pre-run baseline and
+        # are removed by cleanup, so their veth pairs make the foreign digest
+        # unstable by construction. docker0 itself remains digested; container
+        # identity is tracked by ownership ledgers, not by veth names.
+        if " master docker0 " in f" {value} ":
+            continue
         if name.startswith(("o3k-", "o3ktap-", "o3ktmp-", "o3kbm-")):
             if SAFE_ID.fullmatch(name) is None:
                 return [], []
