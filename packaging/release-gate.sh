@@ -511,7 +511,7 @@ if isinstance(benchmark_summary, dict) and isinstance(benchmark_raw, dict):
         elif evaluated != expected or not all(expected.values()):
             errors.append("benchmark: targets_evaluated does not match raw measurements")
 
-report = {"release": "v0.4.0-rc.4", "profile": "libvirt", "source_commit": source_commit, "status": "ready" if not errors else "blocked", "evidence": evidence, "errors": errors, "tag_created": False}
+report = {"release": "v0.4.0-rc.5", "profile": "libvirt", "source_commit": source_commit, "status": "ready" if not errors else "blocked", "evidence": evidence, "errors": errors, "tag_created": False}
 with open(os.environ["OUTPUT"], "w", encoding="utf-8") as stream:
     json.dump(report, stream, indent=2, sort_keys=True); stream.write("\n")
 if errors:

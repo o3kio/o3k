@@ -62,7 +62,7 @@ The container image packages `o3kd` (Cloud Kernel daemon) and `o3k` (diagnostic 
 
 - **Source Dockerfile**: [`deployments/docker/Dockerfile.o3kd`](../deployments/docker/Dockerfile.o3kd)
 - **Local build Dockerfile**: [`deployments/docker/Dockerfile.o3kd-local`](../deployments/docker/Dockerfile.o3kd-local)
-- **Image Name**: `ghcr.io/o3kio/o3kd:0.4.0-rc.4` (matching Cargo workspace version)
+- **Image Name**: `ghcr.io/o3kio/o3kd:0.4.0-rc.5` (matching Cargo workspace version)
 - **Security Posture**:
   - Base: Ubuntu 24.04 (matching host glibc)
   - Non-root user: `o3k:o3k` (UID/GID `10001`)
@@ -74,7 +74,7 @@ The container image packages `o3kd` (Cloud Kernel daemon) and `o3k` (diagnostic 
 ## Versioning and Artifact Consistency Policy
 
 To prevent configuration drift and guarantee source-bound artifact integrity:
-1. **Application Version Authority**: The Cargo workspace version in `Cargo.toml` (`[workspace.package].version`) is the canonical source of truth for the O3K application version (`0.4.0-rc.4`).
+1. **Application Version Authority**: The Cargo workspace version in `Cargo.toml` (`[workspace.package].version`) is the canonical source of truth for the O3K application version (`0.4.0-rc.5`).
 2. **Helm `appVersion`**: The Helm chart `appVersion` in [`deployments/helm/o3k/Chart.yaml`](../deployments/helm/o3k/Chart.yaml) strictly mirrors the Cargo workspace version.
 3. **Helm `version`**: The Helm chart `version` (e.g. `0.1.0`) tracks chart packaging revisions independently from `appVersion` to allow packaging-only improvements without bumping application semver.
 4. **OCI Image Tags**: The default image tag in `values.yaml` defaults to `.Chart.AppVersion`.

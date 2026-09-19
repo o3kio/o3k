@@ -13,7 +13,7 @@
 # (scripts/serve-installer-endpoint.py) and the in-VM one-liner installs from
 # it. O3K_CAMPAIGN_REAL_RELEASE=1 (the canonical PP.2 evidence path) installs
 # through the exact published release command instead:
-#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.4/install.sh | sudo sh -
+#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.5/install.sh | sudo sh -
 # The only things copied into the VM are in-vm-phase1.sh, in-vm-phase2.sh,
 # and in-vm-doctor.sh.
 #
@@ -22,7 +22,7 @@
 # O3K_CAMPAIGN_PORT (default 18000), O3K_CAMPAIGN_SOURCE_SHA (default HEAD),
 # O3K_CAMPAIGN_REAL_RELEASE=1 (canonical evidence path: no local endpoint
 # shim; the in-VM one-liner is exactly
-#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.4/install.sh | sudo sh -
+#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.5/install.sh | sudo sh -
 # so the campaign exercises the byte-identical published release asset).
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,8 +31,8 @@ DISTRO="${1:-ubuntu}"
 EVID="${2:-$REPO/target/real-host-workflow-artifacts/asr-022-$(git -C "$REPO" rev-parse --short HEAD)/one-line-$DISTRO}"
 WORK="$REPO/target/asr-022-vms"
 PORT="${O3K_CAMPAIGN_PORT:-18000}"
-BUNDLE_DIST="${O3K_CAMPAIGN_BUNDLE_DIST:-/tmp/campaign-tree/dist/o3k-0.4.0-rc.4}"
-VERSION="${O3K_CAMPAIGN_VERSION:-v0.4.0-rc.4}"
+BUNDLE_DIST="${O3K_CAMPAIGN_BUNDLE_DIST:-/tmp/campaign-tree/dist/o3k-0.4.0-rc.5}"
+VERSION="${O3K_CAMPAIGN_VERSION:-v0.4.0-rc.5}"
 REAL_RELEASE="${O3K_CAMPAIGN_REAL_RELEASE:-0}"
 SOURCE_SHA="${O3K_CAMPAIGN_SOURCE_SHA:-$(git -C "$REPO" rev-parse HEAD)}"
 SSH_KEY="$WORK/id_ed25519"

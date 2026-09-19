@@ -73,7 +73,7 @@ artifact signing.
 
   ```bash
   O3K_UPGRADE_FROM_MIN_VERSION=v0.3.0-alpha.1 \
-    packaging/make-release.sh 0.4.0-rc.4 libvirt
+    packaging/make-release.sh 0.4.0-rc.5 libvirt
   ```
 
 The fields are backward-compatible additions: `verify-release-bundle.sh`

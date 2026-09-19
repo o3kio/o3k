@@ -46,16 +46,16 @@ test('GET /version returns the alpha channel target', async () => {
   assert.equal(await body(response), ALPHA_TARGET);
   // The version constants are intentional: a channel bump to a new release
   // must update this test (and packaging/channels.yaml) deliberately.
-  assert.equal(ALPHA_TARGET, 'v0.4.0-rc.4');
+  assert.equal(ALPHA_TARGET, 'v0.4.0-rc.5');
 });
 
-test('GET /channel/alpha returns v0.4.0-rc.4 as plain text', async () => {
+test('GET /channel/alpha returns v0.4.0-rc.5 as plain text', async () => {
   const response = await handler.fetch(request('GET', '/channel/alpha'));
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('content-type'), 'text/plain; charset=utf-8');
-  assert.equal(await body(response), 'v0.4.0-rc.4');
+  assert.equal(await body(response), 'v0.4.0-rc.5');
   // Intentional pin: see the version-constant comment on GET /version.
-  assert.equal(CHANNELS.alpha, 'v0.4.0-rc.4');
+  assert.equal(CHANNELS.alpha, 'v0.4.0-rc.5');
 });
 
 test('GET /channel/<unknown> is a 404, never a redirect and never main', async () => {
@@ -66,22 +66,22 @@ test('GET /channel/<unknown> is a 404, never a redirect and never main', async (
   assert.doesNotMatch(text, /main/);
 });
 
-test('GET /v0.4.0-rc.4 prepends the exact pin line and then equals the script', async () => {
-  const response = await handler.fetch(request('GET', '/v0.4.0-rc.4'));
+test('GET /v0.4.0-rc.5 prepends the exact pin line and then equals the script', async () => {
+  const response = await handler.fetch(request('GET', '/v0.4.0-rc.5'));
   assert.equal(response.status, 200);
   const text = await body(response);
-  const expected = 'O3K_PINNED_VERSION="0.4.0-rc.4"\n' + REPO_SCRIPT;
+  const expected = 'O3K_PINNED_VERSION="0.4.0-rc.5"\n' + REPO_SCRIPT;
   assert.equal(text, expected);
-  assert.ok(text.startsWith('O3K_PINNED_VERSION="0.4.0-rc.4"\n'));
-  assert.equal(text.slice('O3K_PINNED_VERSION="0.4.0-rc.4"\n'.length), REPO_SCRIPT);
+  assert.ok(text.startsWith('O3K_PINNED_VERSION="0.4.0-rc.5"\n'));
+  assert.equal(text.slice('O3K_PINNED_VERSION="0.4.0-rc.5"\n'.length), REPO_SCRIPT);
 });
 
-test('GET /v0.4.0-rc.4 pin line is a plain sh assignment the wrapper parses', async () => {
+test('GET /v0.4.0-rc.5 pin line is a plain sh assignment the wrapper parses', async () => {
   // packaging/get-o3k.sh resolves O3K_VERSION env > O3K_PINNED_VERSION >
   // the baked O3K_INSTALLER_VERSION pin, and VERSION_NO_V strips a leading
   // "v" — mirror that resolution on the served bytes to prove the line is
   // exactly what the wrapper expects.
-  const response = await handler.fetch(request('GET', '/v0.4.0-rc.4'));
+  const response = await handler.fetch(request('GET', '/v0.4.0-rc.5'));
   const text = await body(response);
   const firstLine = text.split('\n', 1)[0];
   assert.match(firstLine, /^O3K_PINNED_VERSION="[^"]*"$/);
@@ -96,13 +96,13 @@ test('GET /v/bogus is a 400', async () => {
   assert.match(await body(response), /invalid version path/);
 });
 
-test('GET /v0.4.0-rc.4/evil (traversal-shaped) is a 400, not a file read', async () => {
-  const response = await handler.fetch(request('GET', '/v0.4.0-rc.4/evil'));
+test('GET /v0.4.0-rc.5/evil (traversal-shaped) is a 400, not a file read', async () => {
+  const response = await handler.fetch(request('GET', '/v0.4.0-rc.5/evil'));
   assert.equal(response.status, 400);
 });
 
 test('unknown paths are 404 with a tiny helpful body', async () => {
-  const response = await handler.fetch(request('GET', '/release/v0.4.0-rc.4'));
+  const response = await handler.fetch(request('GET', '/release/v0.4.0-rc.5'));
   assert.equal(response.status, 404);
   assert.match(await body(response), /not found/);
 });

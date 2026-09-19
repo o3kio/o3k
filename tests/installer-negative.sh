@@ -18,7 +18,7 @@
 #     interrupted bootstrap, TLS partial-set fail-closed, TLS complete-set
 #     skip-and-preserve, converged second run, and a first-run success
 #     control that proves the BAKED default version (no O3K_VERSION, no pin
-#     line) resolves to the pinned v0.4.0-rc.4 release asset path;
+#     line) resolves to the pinned v0.4.0-rc.5 release asset path;
 #   - upgrade fence (issue #626): installed version newer than the resolved
 #     target -> implicit-downgrade refusal (exit 1, nothing mutated,
 #     nothing downloaded); installed version older -> verified delegation
@@ -134,11 +134,11 @@ run_full_matrix() {
   local HEALTH_UP=1
   MATRIX="$WORK_DIR/matrix"
   SHIM_BIN="$MATRIX/bin"
-  SRC_BUNDLE="$MATRIX/src-bundle/o3k-0.4.0-rc.4"
+  SRC_BUNDLE="$MATRIX/src-bundle/o3k-0.4.0-rc.5"
   TMP_ROOT="$MATRIX/tmp"
   WWW="$MATRIX/www"
   mkdir -p "$SHIM_BIN" "$SRC_BUNDLE/packaging" "$SRC_BUNDLE/bin" "$TMP_ROOT" \
-    "$WWW/releases/v0.4.0-rc.4"
+    "$WWW/releases/v0.4.0-rc.5"
   printf 'ok\n' >"$WWW/ready"
 
   if [[ $EUID -ne 0 ]]; then
@@ -365,18 +365,18 @@ EOF
   chmod +x "$SRC_BUNDLE/bin/o3kd" "$SRC_BUNDLE/bin/o3k-compute" "$SRC_BUNDLE/bin/o3k"
 
   build_good_tarball() { # build_good_tarball TARBALL
-    tar -C "$MATRIX/src-bundle" -czf "$1" ./o3k-0.4.0-rc.4
+    tar -C "$MATRIX/src-bundle" -czf "$1" ./o3k-0.4.0-rc.5
   }
   publish_tarball() { # publish_tarball TARBALL — copies into WWW + writes .sha256
     local digest
-    cp "$1" "$WWW/releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz"
+    cp "$1" "$WWW/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz"
     digest="$(sha256sum "$1" | awk '{print $1}')"
-    printf '%s  %s\n' "$digest" "o3k-0.4.0-rc.4-linux-x86_64.tar.gz" \
-      >"$WWW/releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz.sha256"
+    printf '%s  %s\n' "$digest" "o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
+      >"$WWW/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256"
   }
   publish_sha_digest() { # publish_sha_digest HEX64 — publishes a specific digest
-    printf '%s  %s\n' "$1" "o3k-0.4.0-rc.4-linux-x86_64.tar.gz" \
-      >"$WWW/releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz.sha256"
+    printf '%s  %s\n' "$1" "o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
+      >"$WWW/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256"
   }
 
   RELEASE_PORT="$(free_port)"
@@ -529,12 +529,12 @@ PY
   fresh_logs default-version-release-down
   O3K_RELEASE_BASE="http://127.0.0.1:$DEAD_PORT/releases" \
     expect_abort "baked default version resolves to the pinned release asset" \
-    "download failed: http://127.0.0.1:$DEAD_PORT/releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz" \
+    "download failed: http://127.0.0.1:$DEAD_PORT/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
     "$out" "$err"
   assert_no_script_run "no bundled script ran after default-version download failure"
 
   # 2. O3K_VERSION override wins over the baked default: the abort names the
-  #    OVERRIDE version's asset, not the baked v0.4.0-rc.4 one.
+  #    OVERRIDE version's asset, not the baked v0.4.0-rc.5 one.
   fresh_logs override-version
   O3K_VERSION="0.2.0-overridetest" O3K_RELEASE_BASE="http://127.0.0.1:$DEAD_PORT/releases" \
     expect_abort "O3K_VERSION override wins over the baked default" \
@@ -544,10 +544,10 @@ PY
 
   # 3. missing release asset (404) -> abort.
   fresh_logs missing-asset
-  rm -f -- "$WWW/releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz" \
-    "$WWW/releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz.sha256"
+  rm -f -- "$WWW/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
+    "$WWW/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256"
   expect_abort "missing release asset (404) aborts" \
-    "download failed: http://127.0.0.1:$RELEASE_PORT/releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz" \
+    "download failed: http://127.0.0.1:$RELEASE_PORT/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
     "$out" "$err"
   assert_no_script_run "no bundled script ran after a 404 asset"
 
@@ -788,14 +788,14 @@ PY
     # Default-version proof: with no O3K_VERSION and no pin line, the wrapper
     # resolved the BAKED O3K_INSTALLER_VERSION — visible both in the banner
     # and in the exact asset paths the release endpoint served.
-    grep -Fq '✓ O3K v0.4.0-rc.4 verified' "$out" \
-      && record_pass "baked default resolved to v0.4.0-rc.4 (verified banner)" \
-      || record_fail "missing v0.4.0-rc.4 verified banner"
-    if grep -Fq 'GET /releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz ' "$MATRIX/endpoint-http.log" \
-      && grep -Fq 'GET /releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz.sha256 ' "$MATRIX/endpoint-http.log"; then
-      record_pass "default resolution downloaded the pinned v0.4.0-rc.4 asset paths"
+    grep -Fq '✓ O3K v0.4.0-rc.5 verified' "$out" \
+      && record_pass "baked default resolved to v0.4.0-rc.5 (verified banner)" \
+      || record_fail "missing v0.4.0-rc.5 verified banner"
+    if grep -Fq 'GET /releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz ' "$MATRIX/endpoint-http.log" \
+      && grep -Fq 'GET /releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256 ' "$MATRIX/endpoint-http.log"; then
+      record_pass "default resolution downloaded the pinned v0.4.0-rc.5 asset paths"
     else
-      record_fail "release endpoint log does not show the pinned v0.4.0-rc.4 asset requests"
+      record_fail "release endpoint log does not show the pinned v0.4.0-rc.5 asset requests"
     fi
     grep -Fq 'release archive SHA-256 verified' "$out" \
       && record_pass "release archive verified" || record_fail "missing verification line"
@@ -948,9 +948,9 @@ PY
     #     downgrade refused, exit 1, nothing mutated, nothing downloaded.
     fresh_logs fence-newer
     printf '{"version":"0.5.0-alpha.1","profile":"libvirt"}\n' >/usr/local/share/o3k/release-manifest.json
-    release_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.4/')"
+    release_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.5/')"
     expect_abort "upgrade fence refuses an implicit downgrade" \
-      "installed v0.5.0-alpha.1 is newer than requested v0.4.0-rc.4; refusing implicit downgrade" \
+      "installed v0.5.0-alpha.1 is newer than requested v0.4.0-rc.5; refusing implicit downgrade" \
       "$out" "$err"
     assert_no_script_run "no bundled script ran on an implicit downgrade"
     [[ ! -s "$O3K_TEST_APT_LOG" && ! -s "$O3K_TEST_SYSTEMCTL_LOG" ]] \
@@ -959,7 +959,7 @@ PY
     [[ ! -e "$MATRIX/upgrade-download" ]] \
       && record_pass "implicit downgrade created no upgrade-download directory" \
       || record_fail "implicit downgrade created an upgrade-download directory"
-    [[ "$(endpoint_gets '/releases/v0.4.0-rc.4/')" -eq "$release_gets_before" ]] \
+    [[ "$(endpoint_gets '/releases/v0.4.0-rc.5/')" -eq "$release_gets_before" ]] \
       && record_pass "implicit downgrade downloaded nothing from the release endpoint" \
       || record_fail "implicit downgrade fetched release assets"
 
@@ -970,36 +970,36 @@ PY
     printf '{"version":"0.2.0-alpha.2","profile":"libvirt"}\n' >/usr/local/share/o3k/release-manifest.json
     publish_tarball "$MATRIX/good.tar.gz"
     printf '#!/usr/bin/env sh\n# TEST FIXTURE install.sh release asset\n' \
-      >"$WWW/releases/v0.4.0-rc.4/install.sh"
+      >"$WWW/releases/v0.4.0-rc.5/install.sh"
     if run_wrapper "$out" "$err"; then
       record_pass "upgrade fence delegates an older install (exit 0)"
     else
       record_fail "upgrade fence delegation failed (stderr: $(grep -aE "O3K installer|TestLab bootstrap|error" "$err" | tail -n2 | tr "\n" " "))"
     fi
-    grep -Fq "Run: sudo $MATRIX/upgrade-download/o3k-0.4.0-rc.4/bin/o3k upgrade" "$out" \
+    grep -Fq "Run: sudo $MATRIX/upgrade-download/o3k-0.4.0-rc.5/bin/o3k upgrade" "$out" \
       && record_pass "delegation prints the exact sudo o3k upgrade command" \
       || record_fail "missing delegation command (stdout: $(head -c 300 "$out"))"
     grep -Fq 'the installer never upgrades an existing installation automatically' "$out" \
       && record_pass "delegation notice states curl|sh never auto-upgrades" \
       || record_fail "missing no-auto-upgrade notice"
-    [[ -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.4-linux-x86_64.tar.gz" \
-      && -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.4-linux-x86_64.tar.gz.sha256" \
+    [[ -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
+      && -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256" \
       && -f "$MATRIX/upgrade-download/install.sh" ]] \
       && record_pass "delegation download holds tarball + .sha256 + install.sh" \
       || record_fail "delegation download files incomplete"
     # The staged entry point must exist so the printed command is runnable:
     # extraction targets the download dir itself (the tarball root is
     # already o3k-<version>/; the first implementation double-nested it).
-    [[ -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.4/bin/o3k" ]] \
+    [[ -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.5/bin/o3k" ]] \
       && record_pass "delegation staged the o3k entry point (no double nesting)" \
-      || record_fail "staged entry point missing: $MATRIX/upgrade-download/o3k-0.4.0-rc.4/bin/o3k"
+      || record_fail "staged entry point missing: $MATRIX/upgrade-download/o3k-0.4.0-rc.5/bin/o3k"
     [[ "$(stat -c %a "$MATRIX/upgrade-download")" = "700" ]] \
       && record_pass "delegation directory is private (0700)" \
       || record_fail "delegation directory mode is not 0700"
-    (cd "$MATRIX/upgrade-download" && sha256sum -c --strict -- o3k-0.4.0-rc.4-linux-x86_64.tar.gz.sha256 >/dev/null) \
+    (cd "$MATRIX/upgrade-download" && sha256sum -c --strict -- o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256 >/dev/null) \
       && record_pass "delegated tarball matches the published SHA-256" \
       || record_fail "delegated tarball failed published SHA-256"
-    cmp -s "$WWW/releases/v0.4.0-rc.4/install.sh" "$MATRIX/upgrade-download/install.sh" \
+    cmp -s "$WWW/releases/v0.4.0-rc.5/install.sh" "$MATRIX/upgrade-download/install.sh" \
       && record_pass "install.sh copy is byte-identical to the published asset" \
       || record_fail "install.sh copy drifted from the published asset"
     assert_no_script_run "no bundled script ran during delegation"
@@ -1009,24 +1009,24 @@ PY
     [[ -z "$(find /usr/local/share/o3k -mindepth 1 -maxdepth 1 ! -name release-manifest.json -print -quit)" ]] \
       && record_pass "delegation wrote nothing else under /usr/local/share/o3k" \
       || record_fail "delegation mutated /usr/local/share/o3k"
-    [[ "$(endpoint_gets '/releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz ')" -ge 1 ]] \
+    [[ "$(endpoint_gets '/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz ')" -ge 1 ]] \
       && record_pass "delegation fetched the tarball + .sha256 + install.sh from the release endpoint" \
       || record_fail "release endpoint did not serve the delegation assets"
 
     # 20. delegation re-run: the existing verified tarball is REUSED (no
     #     re-download); only the install.sh asset copy is refreshed.
     fresh_logs fence-reuse
-    tarball_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz ')"
-    install_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.4/install.sh ')"
+    tarball_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz ')"
+    install_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.5/install.sh ')"
     if run_wrapper "$out" "$err"; then
       record_pass "delegation re-run exits 0"
     else
       record_fail "delegation re-run failed (stderr: $(head -c 300 "$err"))"
     fi
-    [[ "$(endpoint_gets '/releases/v0.4.0-rc.4/o3k-0.4.0-rc.4-linux-x86_64.tar.gz ')" -eq "$tarball_gets_before" ]] \
+    [[ "$(endpoint_gets '/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz ')" -eq "$tarball_gets_before" ]] \
       && record_pass "delegation re-run reuses the verified tarball (no re-download)" \
       || record_fail "delegation re-run re-downloaded the tarball"
-    [[ "$(endpoint_gets '/releases/v0.4.0-rc.4/install.sh ')" -gt "$install_gets_before" ]] \
+    [[ "$(endpoint_gets '/releases/v0.4.0-rc.5/install.sh ')" -gt "$install_gets_before" ]] \
       && record_pass "delegation re-run refreshes the install.sh asset copy" \
       || record_fail "delegation re-run did not refresh the install.sh copy"
     assert_no_script_run "no bundled script ran on the delegation re-run"
@@ -1037,7 +1037,7 @@ PY
     # 21. tampered delegated tarball: the re-verification fails closed and
     #     nothing runs (the interrupted-delegation reuse rule).
     fresh_logs fence-tamper
-    printf 'tampered\n' >>"$MATRIX/upgrade-download/o3k-0.4.0-rc.4-linux-x86_64.tar.gz"
+    printf 'tampered\n' >>"$MATRIX/upgrade-download/o3k-0.4.0-rc.5-linux-x86_64.tar.gz"
     expect_abort "tampered delegated tarball fails closed on re-run" \
       "published SHA-256 verification failed" "$out" "$err"
     assert_no_script_run "no bundled script ran on a tampered delegated tarball"
@@ -1110,7 +1110,7 @@ expect_version_fail "version fence rejects 'latest'" latest
 expect_version_fail "version fence rejects three-dot versions" v1.2.3.4
 expect_version_fail "version fence rejects control characters" 'v1.2.3;rm -rf /'
 expect_version_fail "version fence rejects slashes" v0.2.0/alpha
-if bash -c 'source "$1"; check_version_format v0.4.0-rc.4; check_version_format 0.4.0-alpha.1; check_version_format v0.2.0-alpha.1; check_version_format 1.2' \
+if bash -c 'source "$1"; check_version_format v0.4.0-rc.5; check_version_format 0.4.0-alpha.1; check_version_format v0.2.0-alpha.1; check_version_format 1.2' \
   bash "$FUNCS" >/dev/null 2>&1; then
   record_pass "version fence accepts published release shapes"
 else
@@ -1143,7 +1143,7 @@ expect_compare() { # expect_compare DESC LEFT RIGHT EXPECTED_EXIT
 }
 
 expect_compare "compare: older release sorts below newer (exit 0)" 0.2.0-alpha.2 0.4.0-alpha.1 0
-expect_compare "compare: equal versions (exit 1)" v0.4.0-rc.4 0.4.0-rc.4 1
+expect_compare "compare: equal versions (exit 1)" v0.4.0-rc.5 0.4.0-rc.5 1
 expect_compare "compare: newer release sorts above older (exit 2)" 0.4.0-alpha.1 0.2.0-alpha.2 2
 expect_compare "compare: prerelease increments" 0.3.0-alpha.1 0.3.0-alpha.2 0
 expect_compare "compare: prerelease is older than its release" 0.3.0-alpha.1 0.3.0 0
