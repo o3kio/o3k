@@ -54,6 +54,8 @@ services:
           - operator.o3k.demo
           - idp.o3k.demo
           - api.o3k.demo
+    read_only: true
+    tmpfs: [/tmp, /var/cache/nginx, /var/run]
     labels:
       o3k.io/pp-owner: o3k-araf-demo
       o3k.io/pp-component: tls-proxy
@@ -69,6 +71,8 @@ services:
     volumes:
       - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/api-relay.conf:/etc/nginx/conf.d/api-relay.conf:ro
       - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/nginx-default-blank.conf:/etc/nginx/conf.d/default.conf:ro
+    read_only: true
+    tmpfs: [/tmp, /var/cache/nginx, /var/run]
     labels:
       o3k.io/pp-owner: o3k-araf-demo
       o3k.io/pp-component: api-relay
