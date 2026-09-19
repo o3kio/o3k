@@ -583,6 +583,15 @@ umask 077
   printf 'export OS_REGION_NAME=RegionOne\n'
   printf 'export OS_INTERFACE=public\n'
   printf 'export OS_IDENTITY_API_VERSION=3\n'
+  # Route the CLI through the generated clouds.yaml (auth + pinned
+  # image/network endpoint overrides for the shared-port catalog): with only
+  # OS_* env vars, commands that touch the image service fail version
+  # discovery at the bare catalog root (recorded as the v0.4.0-rc.3 campaign
+  # defect: `openstack server show` could not resolve its image/flavor
+  # follow-up). This mirrors the canonical protected bootstrap, which exports
+  # OS_CLOUD/OS_CLIENT_CONFIG_FILE alongside OS_*.
+  printf 'export OS_CLOUD=o3k-testlab\n'
+  printf 'export OS_CLIENT_CONFIG_FILE=%s\n' "$(sh_quote "$CONFIG_DIR/clouds.yaml")"
 } >"$CONFIG_DIR/admin-openrc"
 chmod 0600 "$CONFIG_DIR/admin-openrc"
 {
