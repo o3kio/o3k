@@ -89,7 +89,7 @@ n_never = len(re.findall(r'^\s*pull_policy: never', text, re.M))
 n_tag = len(re.findall(r'image: \\\${ARAF_[A-Z_]+(?::\?set [^}]*)?}:\\\${LOCAL_IMAGE_TAG(?::\?set [^}]*)?}', text))
 sys.exit(0 if n_never == 4 and n_tag == 4 else 1)"
 check_grep "${COMPOSE}" "o3k.io/pp-owner: o3k-araf-demo"
-check_grep "${COMPOSE}" "127.0.0.1:443:8080"
+check_grep "${COMPOSE}" "127.0.0.1:443:443"
 check "no console/BFF port published on all interfaces" \
   sh -c "! grep -E 'ports: \[[\"'\"'\"']?(8080|8081|5173|5174):' '${COMPOSE}'"
 check_grep "${COMPOSE}" "combined-ca.crt:/etc/ssl/certs/ca-certificates.crt:ro"
