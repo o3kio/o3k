@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
-# o3k-araf-demo.sh — PP.3 (#972) demo-profile Araf deployment orchestration.
+# o3k-araf-demo.sh — PP.4 (#973) one-line-installer Araf demo deployment.
 #
 # Deploys the digest-pinned Araf compatibility tuple from
-# contracts/araf-compatibility-v1.yaml (pp3_tuple) onto a single-node
-# o3k-demo-v1 host. Orchestration only: this script never fabricates O3K
-# topology, Placement, BuildingBlock, CloudProfile, agent, or readiness
-# state, and it never authorizes anything. O3K readiness stays independent
-# of Araf availability.
+# contracts/araf-compatibility-v1.yaml (pp3_tuple/pp4_tuple) onto a single-node
+# o3k-demo-v1 host as the final stage of the public one-line installer
+# (packaging/get-o3k.sh), and supports convergent post-reboot reruns from the
+# installed copy under /usr/local/share/o3k/araf-demo/. Browser-ready demo:
+# the operator imports the locally minted demo CA and uses the tenant/operator
+# consoles. Targets: Ubuntu 24.04 and Debian 12, x86_64 — Debian 12 installs
+# the pinned upstream static Docker because bookworm's docker.io (20.10) is
+# below the Docker>=24.0 contract minimum. Orchestration only: this script
+# never fabricates O3K topology, Placement, BuildingBlock, CloudProfile, agent,
+# or readiness state, and it never authorizes anything. O3K readiness stays
+# independent of Araf availability.
 #
 # Subcommands:
 #   install     preflight -> docker -> demo CA -> compose stack -> o3kd OIDC
-#               federation enable -> health gates (idempotent / convergent)
+#               federation enable -> health gates -> credentials file
+#               (idempotent / convergent); appends the T3 timing stamp to
+#               $PP4_TIMESTAMPS_FILE (installer timing ledger) when set
 #   verify      real OIDC login (tenant + operator) through the production
 #               Araf profile against the real O3K native API
+#   tuple       print the pinned demo tuple: Araf constants plus the O3K
+#               version/source commit read fail-closed from the installed
+#               release manifest /usr/local/share/o3k/release-manifest.json
 #   status      per-layer health: o3kd (independent), idp, BFFs, consoles
 #   start|stop  compose start/stop (O3K runtime untouched)
 #   uninstall   remove runtime wiring (containers, network, o3kd federation
@@ -24,18 +35,22 @@
 # volumes, networks, files, and processes are never touched.
 #
 # Secrets: generated once into $STATE_DIR (0700, files 0600), never printed,
-# never passed on argv of logged commands beyond the local host.
+# never passed on argv of logged commands beyond the local host. The operator
+# credentials file (credentials.txt, 0600) is written during install; only its
+# path — never its contents — is printed.
 set -Eeuo pipefail
 umask 077
 
 # ---------------------------------------------------------------------------
-# Pinned compatibility tuple (must match contracts/araf-compatibility-v1.yaml
-# pp3_tuple; tests/pp3-araf-demo-contract.sh enforces drift).
+# Pinned compatibility tuple (Araf constants must match
+# contracts/araf-compatibility-v1.yaml pp3_tuple/pp4_tuple;
+# tests/pp4-araf-demo-contract.sh enforces drift). The O3K side of the tuple
+# is NOT self-referential: version is pinned here, and the source commit is
+# read fail-closed from the installed release manifest at install/tuple time.
 # ---------------------------------------------------------------------------
 ARAF_VERSION="v1.0.0-rc.12"
 ARAF_SOURCE_SHA="de64cc9193085116fa30ad51c04ccab24a013dd0"
-O3K_TUPLE_VERSION="v0.4.0-rc.5"
-O3K_TUPLE_SOURCE_SHA="145b0149fd82f44a4b76f30f7b4fd272ca6ef60d"
+O3K_TUPLE_VERSION="v0.4.0-rc.6"
 
 ARAF_BFF_IMAGE="ghcr.io/o3kio/araf-bff"
 ARAF_BFF_DIGEST="sha256:bc717ecdbbbf3ea673efe168c90419936677d644aa0ae25af4eb84906cd744ba"
@@ -61,6 +76,20 @@ NGINX_DIGEST="sha256:dcc9bf9c084901dddbbce305130a7295c5637b6a8fce3e29cf678d86336
 
 COMPOSE_MIN="2.24"
 DOCKER_MIN="24.0"
+# Debian 12 (bookworm) apt ships docker.io 20.10 — below the Docker>=24.0
+# contract minimum — so the Debian demo path installs the pinned upstream
+# static binaries under /usr/local instead. download.docker.com does not
+# publish a sidecar digest for the static tarball, so the pinned sha256 below
+# was recorded from the tarball fetched from the pinned URL on 2026-09-19 and
+# is verified before every install/use. The compose plugin publishes a
+# .sha256 asset; the pinned digest matches the published file and the
+# downloaded binary (verified 2026-09-19).
+DOCKER_STATIC_VERSION="28.5.2"
+DOCKER_STATIC_SHA256="ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d"
+DOCKER_STATIC_BASE="https://download.docker.com/linux/static/stable/x86_64"
+COMPOSE_PLUGIN_VERSION="v2.39.4"
+COMPOSE_PLUGIN_SHA256="7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4"
+COMPOSE_PLUGIN_BASE="https://github.com/docker/compose/releases/download"
 
 # ---------------------------------------------------------------------------
 DEMO_HOSTS="tenant.o3k.demo operator.o3k.demo idp.o3k.demo api.o3k.demo"
@@ -78,6 +107,7 @@ COMPOSE_PROJECT="o3k-araf-demo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/araf-demo/compose.yaml"
 O3KD_ENV="/etc/o3k/o3kd.env"
+O3K_RELEASE_MANIFEST="/usr/local/share/o3k/release-manifest.json"
 HOSTS_MARKER="# o3k-araf-demo"
 ENV_BEGIN="# BEGIN o3k-araf-demo (PP.3)"
 ENV_END="# END o3k-araf-demo"
@@ -101,13 +131,16 @@ preflight() {
   [ "$(id -u)" -eq 0 ] || die "must run as root"
   need_cmd curl; need_cmd openssl; need_cmd python3; need_cmd ss
 
-  # Frozen PP.3 target: Ubuntu 24.04 x86_64. Fail closed elsewhere.
+  # PP.4 targets: Ubuntu 24.04 or Debian 12, x86_64. Fail closed elsewhere.
   [ -r /etc/os-release ] || die "cannot identify OS"
   # shellcheck disable=SC1091
   . /etc/os-release
-  if [ "${ID}" != "ubuntu" ] || [ "${VERSION_ID}" != "24.04" ]; then
-    die "unsupported target ${ID:-?} ${VERSION_ID:-?}; PP.3 demo tuple is frozen for ubuntu-24.04 x86_64 only"
-  fi
+  case "${ID}:${VERSION_ID}" in
+    ubuntu:24.04|debian:12) ;;
+    *)
+      die "unsupported target ${ID:-?} ${VERSION_ID:-?}; PP.4 demo tuple is frozen for ubuntu-24.04 x86_64 and debian-12 x86_64 only"
+      ;;
+  esac
   [ "$(uname -m)" = "x86_64" ] || die "unsupported architecture $(uname -m)"
 
   # The O3K demo release must already be installed canonically (PP.2 path).
@@ -121,17 +154,33 @@ preflight() {
   fi
 }
 
+# Docker provisioning is target-specific:
+#   Ubuntu 24.04 — apt docker.io + docker-compose-v2 (both >= the contract
+#     minimums on noble).
+#   Debian 12    — bookworm's docker.io is 20.10 (< Docker>=24.0 contract
+#     minimum), so install the pinned upstream static tarball under
+#     /usr/local/lib/o3k/docker-static/<VER>/bin with /usr/local/bin
+#     symlinks, a minimal systemd unit, and the pinned compose plugin.
+# Both paths converge on the same version-minimum gate below.
 ensure_docker() {
-  if ! command -v docker >/dev/null 2>&1; then
-    log "installing docker.io via apt (contract-accepted prerequisite)"
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io >/dev/null
-  fi
-  if ! docker compose version >/dev/null 2>&1; then
-    log "installing docker-compose-v2 via apt (contract-accepted prerequisite)"
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker-compose-v2 >/dev/null
-  fi
+  case "${ID}:${VERSION_ID}" in
+    ubuntu:24.04)
+      if ! command -v docker >/dev/null 2>&1; then
+        log "installing docker.io via apt (contract-accepted prerequisite)"
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io >/dev/null
+      fi
+      if ! docker compose version >/dev/null 2>&1; then
+        log "installing docker-compose-v2 via apt (contract-accepted prerequisite)"
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker-compose-v2 >/dev/null
+      fi
+      ;;
+    debian:12)
+      ensure_docker_static
+      ensure_compose_plugin
+      ;;
+  esac
   systemctl enable --now docker >/dev/null 2>&1 || die "cannot start docker service"
   local dv cv
   dv="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 0)"
@@ -143,6 +192,102 @@ def parse(v):
 dv, cv, dmin, cmin = sys.argv[1:5]
 sys.exit(0 if parse(dv) >= parse(dmin) and parse(cv) >= parse(cmin) else 1)
 PY
+}
+
+# Idempotency: skip the download entirely when the versioned dir already
+# holds every binary and its recorded sha256 verifies.
+static_docker_present() {
+  local bindir="$1" b
+  [ -f "${bindir}/SHA256SUMS" ] || return 1
+  for b in docker dockerd containerd containerd-shim-runc-v2 runc ctr docker-init docker-proxy; do
+    [ -x "${bindir}/${b}" ] || return 1
+  done
+  ( cd "${bindir}" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1 )
+}
+
+ensure_docker_static() {
+  local root="/usr/local/lib/o3k/docker-static"
+  local bindir="${root}/${DOCKER_STATIC_VERSION}/bin"
+  if static_docker_present "${bindir}"; then
+    log "pinned Docker static ${DOCKER_STATIC_VERSION} already installed and verified"
+  else
+    log "installing pinned Docker static ${DOCKER_STATIC_VERSION} (Debian 12 apt docker.io is below the ${DOCKER_MIN} contract minimum)"
+    # dockerd's bridge/NAT rules are delegated to the host iptables binary.
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iptables ca-certificates >/dev/null
+    local tmp
+    tmp="$(mktemp -d)"
+    curl -fsSL -o "${tmp}/docker.tgz" "${DOCKER_STATIC_BASE}/docker-${DOCKER_STATIC_VERSION}.tgz" \
+      || die "docker static tarball download failed (${DOCKER_STATIC_BASE}/docker-${DOCKER_STATIC_VERSION}.tgz)"
+    echo "${DOCKER_STATIC_SHA256}  ${tmp}/docker.tgz" | sha256sum -c - >/dev/null \
+      || die "docker static tarball sha256 mismatch (pin ${DOCKER_STATIC_SHA256}; upstream replaced the tarball?)"
+    tar -xzf "${tmp}/docker.tgz" -C "${tmp}" || die "docker static tarball extraction failed"
+    mkdir -p "${bindir}"
+    local b
+    for b in docker dockerd containerd containerd-shim-runc-v2 runc ctr docker-init docker-proxy; do
+      [ -f "${tmp}/docker/${b}" ] || die "docker static tarball is missing ${b}"
+      install -m 0755 "${tmp}/docker/${b}" "${bindir}/${b}"
+    done
+    rm -rf "${tmp}"
+    ( cd "${bindir}" && sha256sum docker dockerd containerd containerd-shim-runc-v2 runc ctr docker-init docker-proxy > SHA256SUMS )
+  fi
+  local b
+  for b in docker dockerd containerd containerd-shim-runc-v2 runc ctr docker-init docker-proxy; do
+    ln -sfn "${bindir}/${b}" "/usr/local/bin/${b}"
+  done
+  if [ ! -f /etc/systemd/system/docker.service ]; then
+    cat > /etc/systemd/system/docker.service <<'EOF'
+[Unit]
+Description=Docker Application Container Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/dockerd
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=always
+StartLimitBurst=3
+StartLimitIntervalSec=10s
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  fi
+  systemctl daemon-reload
+}
+
+ensure_compose_plugin() {
+  local plugin_dir="/usr/local/libexec/docker/cli-plugins"
+  local plugin="${plugin_dir}/docker-compose"
+  if [ -f "${plugin}" ] && echo "${COMPOSE_PLUGIN_SHA256}  ${plugin}" | sha256sum -c - >/dev/null 2>&1; then
+    log "pinned docker-compose plugin ${COMPOSE_PLUGIN_VERSION} already installed"
+    return 0
+  fi
+  log "installing pinned docker-compose plugin ${COMPOSE_PLUGIN_VERSION}"
+  local tmp
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "${tmp}/docker-compose" \
+    "${COMPOSE_PLUGIN_BASE}/${COMPOSE_PLUGIN_VERSION}/docker-compose-linux-x86_64" \
+    || die "compose plugin download failed"
+  curl -fsSL -o "${tmp}/docker-compose.sha256" \
+    "${COMPOSE_PLUGIN_BASE}/${COMPOSE_PLUGIN_VERSION}/docker-compose-linux-x86_64.sha256" \
+    || die "compose plugin published sha256 download failed"
+  local published
+  published="$(awk 'NR==1{print $1}' "${tmp}/docker-compose.sha256")"
+  printf '%s' "${published}" | grep -Eq '^[0-9a-f]{64}$' \
+    || die "compose plugin published sha256 is malformed"
+  [ "${published}" = "${COMPOSE_PLUGIN_SHA256}" ] \
+    || die "compose plugin published sha256 does not match the pinned constant (upstream replaced the asset?)"
+  echo "${COMPOSE_PLUGIN_SHA256}  ${tmp}/docker-compose" | sha256sum -c - >/dev/null \
+    || die "compose plugin sha256 mismatch after download"
+  mkdir -p "${plugin_dir}"
+  install -m 0755 "${tmp}/docker-compose" "${plugin}"
+  rm -rf "${tmp}"
 }
 
 # ---------------------------------------------------------------------------
@@ -494,10 +639,102 @@ ensure_alice() {
 }
 
 # ---------------------------------------------------------------------------
+# O3K tuple side, read fail-closed from the installed release manifest (the
+# published bundle manifest.json is the runtime authority; this script never
+# carries its own source SHA). Prints O3K_VERSION=<v> / O3K_SOURCE_SHA=<sha>;
+# exits 1 with a clear stderr message on missing/unreadable/mismatched input.
+# ---------------------------------------------------------------------------
+read_o3k_tuple() {
+  python3 - "${O3K_RELEASE_MANIFEST}" "${O3K_TUPLE_VERSION}" <<'PY'
+import json
+import sys
+
+path, expected = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as handle:
+        document = json.load(handle)
+except (OSError, ValueError):
+    print("O3K tuple unavailable: installed release manifest is missing or "
+          "unreadable: %s" % path, file=sys.stderr)
+    sys.exit(1)
+version = document.get("version") if isinstance(document, dict) else None
+sha = document.get("source_commit") if isinstance(document, dict) else None
+if not isinstance(version, str) or not version.strip():
+    print("O3K tuple unavailable: installed release manifest declares no "
+          "version: %s" % path, file=sys.stderr)
+    sys.exit(1)
+if not isinstance(sha, str) or not sha.strip():
+    print("O3K tuple unavailable: installed release manifest declares no "
+          "source_commit: %s" % path, file=sys.stderr)
+    sys.exit(1)
+strip_v = lambda text: text[1:] if text.startswith("v") else text
+if strip_v(version.strip()) != strip_v(expected):
+    print("O3K tuple unavailable: installed release %s does not match the "
+          "pinned demo tuple %s" % (version.strip(), expected), file=sys.stderr)
+    sys.exit(1)
+print("O3K_VERSION=%s" % version.strip())
+print("O3K_SOURCE_SHA=%s" % sha.strip())
+PY
+}
+
+cmd_tuple() {
+  local lines
+  lines="$(read_o3k_tuple)" \
+    || die "cannot build the demo tuple from the installed release manifest (${O3K_RELEASE_MANIFEST}); run the one-line installer first"
+  printf 'ARAF_VERSION=%s\n' "${ARAF_VERSION}"
+  printf 'ARAF_SOURCE_SHA=%s\n' "${ARAF_SOURCE_SHA}"
+  printf 'ARAF_BFF_DIGEST=%s\n' "${ARAF_BFF_DIGEST}"
+  printf '%s\n' "${lines}"
+}
+
+# ---------------------------------------------------------------------------
+# PP.4 timing stamp + operator credentials file
+# ---------------------------------------------------------------------------
+pp4_record_t3() {
+  local epoch iso target
+  epoch="$(date +%s)"
+  iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  target="${PP4_TIMESTAMPS_FILE:-}"
+  if [ -n "${target}" ] && [ ! -e "${target}" ]; then
+    ( umask 077 && : >> "${target}" ) 2>/dev/null || target=""
+  fi
+  if [ -n "${target}" ] && [ -w "${target}" ]; then
+    printf 'T3=%s\nT3_ISO=%s\n' "${epoch}" "${iso}" >> "${target}" || true
+  else
+    printf 'T3=%s\nT3_ISO=%s\n' "${epoch}" "${iso}" >> "${STATE_DIR}/timestamps.env"
+    chmod 600 "${STATE_DIR}/timestamps.env"
+  fi
+}
+
+# Operator-facing credentials file: written root 0600, contents NEVER printed
+# (only the path appears in the install summary).
+write_credentials_file() {
+  local f="${STATE_DIR}/credentials.txt"
+  {
+    printf 'O3K Araf demo credentials\n'
+    printf 'username: alice\n'
+    printf 'password: %s\n' "${ALICE_PASSWORD}"
+    printf 'demo CA: %s\n' "${TLS_DIR}/ca.crt"
+    printf 'tenant console:   https://tenant.o3k.demo/\n'
+    printf 'operator console: https://operator.o3k.demo/\n'
+    printf 'O3K API:          https://api.o3k.demo/\n'
+    printf 'note: this file is root-only (mode 0600); the installer and the\n'
+    printf 'demo script print its path but never its contents.\n'
+  } > "${f}"
+  chmod 600 "${f}"
+}
+
+# ---------------------------------------------------------------------------
 # install / status / start / stop / uninstall / purge
 # ---------------------------------------------------------------------------
 cmd_install() {
   preflight
+  # Fail closed on the O3K side of the tuple BEFORE any mutation: the
+  # installed release manifest must exist, be readable, and declare the pinned
+  # tuple version. The source commit comes from the manifest (this script is
+  # copied into the release bundle, so it must never carry its own SHA).
+  read_o3k_tuple >/dev/null \
+    || die "installed O3K release manifest is missing/unreadable or does not match pinned tuple ${O3K_TUPLE_VERSION} (${O3K_RELEASE_MANIFEST})"
   ensure_docker
   mkdir -p "${STATE_DIR}" "${TLS_DIR}"
   chmod 700 "${STATE_DIR}"
@@ -548,13 +785,24 @@ cmd_install() {
   wait_url "https://tenant.o3k.demo/" "tenant console via TLS proxy"
   wait_url "https://operator.o3k.demo/" "operator console via TLS proxy"
   wait_url "${O3KD_READY_URL}" "o3kd readiness (independent of Araf)"
+  pp4_record_t3
+  write_credentials_file
+  local tuple_lines o3k_manifest_version o3k_manifest_sha
+  tuple_lines="$(read_o3k_tuple)" \
+    || die "installed O3K release manifest is missing/unreadable or does not match pinned tuple ${O3K_TUPLE_VERSION} (${O3K_RELEASE_MANIFEST})"
+  o3k_manifest_version="$(printf '%s\n' "${tuple_lines}" | sed -n 's/^O3K_VERSION=//p')"
+  o3k_manifest_sha="$(printf '%s\n' "${tuple_lines}" | sed -n 's/^O3K_SOURCE_SHA=//p')"
+  [ -n "${o3k_manifest_version}" ] && [ -n "${o3k_manifest_sha}" ] \
+    || die "installed O3K release manifest tuple fields are empty (${O3K_RELEASE_MANIFEST})"
   cat <<EOF
 [o3k-araf-demo] install OK
-  tuple: O3K ${O3K_TUPLE_VERSION} + Araf ${ARAF_VERSION} (${ARAF_SOURCE_SHA})
-  tenant console:  https://tenant.o3k.demo/   (trust ${TLS_DIR}/ca.crt)
+  tuple: O3K ${o3k_manifest_version} (${o3k_manifest_sha}) + Araf ${ARAF_VERSION} (${ARAF_SOURCE_SHA})
+  tenant console:   https://tenant.o3k.demo/   (trust ${TLS_DIR}/ca.crt)
   operator console: https://operator.o3k.demo/
-  state dir: ${STATE_DIR}
-  next: $0 verify | $0 status
+  O3K API:          https://api.o3k.demo/
+  CLI config:       /etc/o3k/clouds.yaml, /etc/o3k/admin-openrc
+  demo login:       alice  (credentials file: ${STATE_DIR}/credentials.txt, root 0600)
+  next: o3k-araf-demo verify | o3k-araf-demo status
 EOF
 }
 
@@ -714,12 +962,12 @@ cmd_verify() {
     https://operator.o3k.demo/api/v1/auth/logout >/dev/null
   log "verify: operator surface reached real O3K native API"
   rm -rf "${WORK}"
-  echo "PP.3 verify: PASS"
+  echo "PP.4 verify: PASS"
 }
 
 usage() {
   cat <<EOF
-usage: $0 {install|verify|status|start|stop|uninstall [--yes]|purge [--yes]}
+usage: $0 {install|verify|tuple|status|start|stop|uninstall [--yes]|purge [--yes]}
 EOF
   exit 2
 }
@@ -727,6 +975,7 @@ EOF
 case "${1:-}" in
   install) cmd_install ;;
   verify) cmd_verify ;;
+  tuple) cmd_tuple ;;
   status) cmd_status ;;
   start) cmd_start ;;
   stop) cmd_stop ;;

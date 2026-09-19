@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# PP.3 (#972) Araf demo deployment contract tests.
+# PP.4 (#973) Araf demo one-line-installer contract tests.
 #
 # Static + functional checks that the pinned compatibility tuple and the
 # demo deployment mechanism cannot drift into unsupported shapes:
-#   - tuple schema completeness and digest pinning
+#   - pp3_tuple/pp4_tuple schema completeness and digest pinning (the frozen
+#     pp3_tuple drift gates are all retained)
 #   - script constants == tuple digests (single source of truth)
 #   - no floating tags, no fixture mode, no target compilation
 #   - preflight-before-mutation, lifecycle fencing, secret-safe output
 #   - release-only artifacts (no source build on target)
+#   - PP.4 integration: installer version pin, Debian 12 static docker pins,
+#     T3 timing stamp, tuple subcommand, credentials file (written, never
+#     printed), installer success block, one-line installer integration
 set -Eeuo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${root}"
 
 pass=0 fail=0
 ok()   { pass=$((pass + 1)); }
-bad()  { printf 'PP3 CONTRACT FAIL: %s\n' "$*" >&2; fail=$((fail + 1)); }
+bad()  { printf 'PP4 CONTRACT FAIL: %s\n' "$*" >&2; fail=$((fail + 1)); }
 check() { # check DESCRIPTION CONDITION...
   local desc="$1"; shift
   if "$@" >/dev/null 2>&1; then ok; else bad "${desc}"; fi
@@ -23,6 +27,7 @@ check_grep()     { check "expected present: $2"        grep -qF "$2" "$1"; }
 check_no_grep()  { check "must be absent: $1 <= $2"    sh -c "! grep -qF '$2' '$1'"; }
 
 SCRIPT="packaging/o3k-araf-demo.sh"
+WRAPPER="packaging/get-o3k.sh"
 COMPOSE="packaging/araf-demo/compose.yaml"
 REALM="packaging/araf-demo/realm.json"
 NGINX="packaging/araf-demo/nginx.conf"
@@ -75,6 +80,91 @@ for pair in \
     sh -c "[ -n '${script_val}' ] && grep -qF '${script_val}' '${TUPLE}'"
 done
 
+# --- pp4_tuple section (PP.4 #973 one-line installer integration) -------------
+check_grep "${TUPLE}" "pp4_tuple:"
+check_grep "${TUPLE}" "tracking_issue: 973"
+# flipped to "passed" by the PP.4 evidence commit once campaigns pass
+check_grep "${TUPLE}" "one_line_installer_integration: pending-evidence"
+check_grep "${TUPLE}" "supported_targets: [ubuntu-24.04-x86_64, debian-12-x86_64]"
+check_grep "${TUPLE}" "browser_trust: operator-imported demo CA"
+check_grep "${TUPLE}" "non-prerelease (recorded fact)"
+# pp4_tuple.araf digests == script constants (same drift gate as pp3)
+for pair in \
+  "ARAF_BFF_DIGEST" "ARAF_TENANT_CONSOLE_DIGEST" "ARAF_OPERATOR_CONSOLE_DIGEST" \
+  "KEYCLOAK_DIGEST" "NGINX_DIGEST"; do
+  script_val="$(sed -n "s/^${pair}=\"\(sha256:[a-f0-9]*\)\"/\1/p" "${SCRIPT}")"
+  check "pp4_tuple ${pair} matches script constant" \
+    sh -c "[ -n '${script_val}' ] && sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF '${script_val}'"
+done
+check "pp4_tuple pins O3K v0.4.0-rc.6" \
+  sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'version: v0.4.0-rc.6'"
+check "pp4_tuple o3k source_sha placeholder is a 64-hex stub" \
+  sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -Eq 'source_sha: \"?0{64}\"?'"
+
+# --- PP.4 one-line installer integration (get-o3k.sh) -------------------------
+check_grep "${WRAPPER}" 'O3K_INSTALLER_VERSION="v0.4.0-rc.6"'
+check_grep "${WRAPPER}" 'pp4_stamp()'
+check_grep "${WRAPPER}" 'pp4_stamp T0'
+check_grep "${WRAPPER}" 'pp4_stamp T1'
+check_grep "${WRAPPER}" 'pp4_stamp T2'
+check_grep "${WRAPPER}" 'pp4_stamp T5'
+check_grep "${WRAPPER}" 'PP4-TIMESTAMP'
+check_grep "${WRAPPER}" 'install-timestamps.env'
+check_grep "${WRAPPER}" 'PP4_TIMESTAMPS_FILE='
+check_grep "${WRAPPER}" '/usr/local/share/o3k/araf-demo'
+check_grep "${WRAPPER}" 'cmp -s'
+check "wrapper invokes the demo stage from the verified bundle" \
+  sh -c "grep -qF 'bash \"\$BUNDLE_DIR/packaging/o3k-araf-demo.sh\" install' '${WRAPPER}'"
+check "wrapper reads the demo tuple via the tuple subcommand" \
+  sh -c "grep -qF 'o3k-araf-demo.sh\" tuple' '${WRAPPER}'"
+check "wrapper fails closed on demo-stage failure with a retry hint" \
+  sh -c "grep -qF 'Araf demo deployment failed; O3K itself is healthy' '${WRAPPER}'"
+# PP.4 success block (what the operator sees)
+for token in \
+  'O3K demo ready' 'Tenant Console:' 'Operator Console:' 'O3K API:' \
+  'CLI configuration:' 'OpenStack compatibility:' 'Uninstall:' \
+  'credentials.txt'; do
+  check_grep "${WRAPPER}" "${token}"
+done
+check "wrapper is dash-clean (piped to sudo sh -)" dash -n "${WRAPPER}"
+check_no_grep "${WRAPPER}" "cargo "
+check_no_grep "${WRAPPER}" "docker build"
+
+# --- PP.4 demo script additions ------------------------------------------------
+check_grep "${SCRIPT}" 'O3K_TUPLE_VERSION="v0.4.0-rc.6"'
+check_no_grep "${SCRIPT}" 'O3K_TUPLE_SOURCE_SHA'
+check_grep "${SCRIPT}" 'ubuntu:24.04|debian:12' # OS preflight accepts both targets
+check_grep "${SCRIPT}" 'unsupported target'
+check_grep "${SCRIPT}" 'DOCKER_STATIC_VERSION='
+check_grep "${SCRIPT}" 'DOCKER_STATIC_SHA256='
+check_grep "${SCRIPT}" 'COMPOSE_PLUGIN_VERSION='
+check_grep "${SCRIPT}" 'COMPOSE_PLUGIN_SHA256='
+check "DOCKER_STATIC_SHA256 is a 64-hex pin" \
+  sh -c "grep -Eq '^DOCKER_STATIC_SHA256=\"[0-9a-f]{64}\"' '${SCRIPT}'"
+check "COMPOSE_PLUGIN_SHA256 is a 64-hex pin" \
+  sh -c "grep -Eq '^COMPOSE_PLUGIN_SHA256=\"[0-9a-f]{64}\"' '${SCRIPT}'"
+check_grep "${SCRIPT}" 'download.docker.com/linux/static/stable/x86_64'
+check_grep "${SCRIPT}" 'sha256sum -c -'
+check_grep "${SCRIPT}" 'docker.service'
+check_grep "${SCRIPT}" 'Restart=always'
+check_grep "${SCRIPT}" 'libexec/docker/cli-plugins'
+check_grep "${SCRIPT}" 'systemctl daemon-reload'
+check_grep "${SCRIPT}" 'PP4_TIMESTAMPS_FILE'
+check_grep "${SCRIPT}" 'T3_ISO='
+check_grep "${SCRIPT}" 'timestamps.env'
+check_grep "${SCRIPT}" 'cmd_tuple'
+check_grep "${SCRIPT}" 'tuple)'
+check_grep "${SCRIPT}" 'ARAF_BFF_DIGEST'
+check_grep "${SCRIPT}" 'release-manifest.json'
+check "tuple reads O3K side from the installed manifest" \
+  sh -c "grep -qF 'O3K_VERSION=' '${SCRIPT}' && grep -qF 'O3K_SOURCE_SHA=' '${SCRIPT}'"
+check_grep "${SCRIPT}" 'write_credentials_file'
+check_grep "${SCRIPT}" 'credentials.txt'
+check "credentials file is written 0600" \
+  sh -c "grep -qF 'chmod 600 \"\${f}\"' '${SCRIPT}'"
+check "credentials file contents are never printed" \
+  sh -c "! grep -Eq '(cat|tail|head|less) .*credentials\\.txt' '${SCRIPT}'"
+
 # --- deployment mechanism --------------------------------------------------
 check_grep "${COMPOSE}" "ARAF_RUNTIME_PROFILE: production"
 check_grep "${COMPOSE}" 'ARAF_UPSTREAM_ADAPTER: ${ARAF_UPSTREAM_ADAPTER'
@@ -120,7 +210,7 @@ for forbidden in "o3k init" "o3k join" "INSERT INTO" "sqlite3 "; do
 done
 
 # --- lifecycle + fencing ---------------------------------------------------
-for sub in install verify status start stop uninstall purge; do
+for sub in install verify tuple status start stop uninstall purge; do
   check_grep "${SCRIPT}" "${sub})"
 done
 check_grep "${SCRIPT}" "preflight()" # checks before any mutation
@@ -158,12 +248,25 @@ check_grep "${TUPLE}" "araf_is_not:"
 check_grep "${PROFILE}" "araf-client-optional"
 check_grep "${PROFILE}" "araf_integration:"
 check_grep "${PROFILE}" "araf_demo_tuple:"
+check_grep "${PROFILE}" "state: pending-evidence"
+check "profile notes the v0.4.0-rc.6 one-line installer integration" \
+  sh -c "grep -qF 'shipped in v0.4.0-rc.6' '${PROFILE}'"
 
 # --- functional: realm template is valid JSON --------------------------------
 check "realm template valid JSON" python3 -c "import json;json.load(open('${REALM}'))"
 
+# --- functional: tuple YAML parses and both tuples coexist --------------------
+check "tuple contract is valid YAML with pp3+pp4 tuples" \
+  python3 -c "
+import yaml
+d = yaml.safe_load(open('${TUPLE}'))
+assert 'pp3_tuple' in d and 'pp4_tuple' in d
+assert d['pp3_tuple']['o3k']['version'] == 'v0.4.0-rc.5'
+assert d['pp4_tuple']['o3k']['version'] == 'v0.4.0-rc.6'
+assert d['pp4_tuple']['araf']['version'] == d['pp3_tuple']['araf']['version']"
+
 # --- functional: script parses and constants resolve ------------------------
 check "script has valid bash syntax" bash -n "${SCRIPT}"
 
-echo "PP.3 contract tests: ${pass} passed, ${fail} failed"
+echo "PP.4 contract tests: ${pass} passed, ${fail} failed"
 [ "${fail}" -eq 0 ]

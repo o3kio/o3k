@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# uninstall.sh — remove an O3K installation.
+#
+# Removes only O3K-owned state: the install.sh ownership-manifest files
+# (binaries, units, helper scripts), and, with --purge, the data/config/log
+# roots after ownership and live-state fencing. PP.4 (#973): also removes the
+# Araf demo deployment material the one-line installer copied into
+# /usr/local/share/o3k/araf-demo/ (path-fenced like every other removal). The
+# Araf demo RUNTIME (state dir, containers, /etc/hosts entries, o3kd OIDC
+# federation block) is owned by o3k-araf-demo.sh uninstall/purge — run that
+# first; this script only drops the static demo material from the share dir.
 set -Eeuo pipefail
 PREFIX=/usr/local
 DATA_DIR=/var/lib/o3k
@@ -309,6 +319,20 @@ for relative in "${MANIFEST_FILES[@]}"; do
   [[ -e "$destination" ]] && rm -f -- "$destination"
 done
 rm -f -- "$INSTALL_MANIFEST"
+# PP.4 (#973): the one-line installer copies the Araf demo deployment material
+# (orchestrator + compose material) into this O3K-owned share path; it is not
+# part of the install.sh ownership ledger, so it is removed here under the
+# same fencing (validate_path refuses symlink components; the tree itself is
+# O3K-owned demo material).
+DEMO_SHARE_DIR="$PREFIX/share/o3k/araf-demo"
+if [[ -e "$DEMO_SHARE_DIR" || -L "$DEMO_SHARE_DIR" ]]; then
+  validate_path demo-share-dir "$DEMO_SHARE_DIR"
+  if [[ -L "$DEMO_SHARE_DIR" ]]; then
+    echo "refusing to remove symlink demo material path: $DEMO_SHARE_DIR" >&2
+    exit 2
+  fi
+  rm -rf -- "$DEMO_SHARE_DIR"
+fi
 if [[ $PURGE -eq 1 ]]; then
   echo "o3k binaries, helper files, and owned state removed"
 else
