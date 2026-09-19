@@ -185,7 +185,10 @@ assert_status initial "$EVID/doctor-initial.json" services.o3kd_unit PASS
 assert_status initial "$EVID/doctor-initial.json" services.compute_unit PASS
 assert_status initial "$EVID/doctor-initial.json" control.healthz PASS
 assert_status initial "$EVID/doctor-initial.json" control.readyz PASS
-sudo /usr/local/bin/o3k doctor >"$EVID/doctor-initial.txt" 2>&1
+# Informational human-readable run; the authoritative verdict was asserted
+# from --json above. doctor exits 1 for the advisory warning verdict (no
+# upgrade backup yet), which is not a failure here.
+sudo /usr/local/bin/o3k doctor >"$EVID/doctor-initial.txt" 2>&1 || [ "$?" -le 1 ]
 INITIAL=passed
 
 # ------------------------------------------- (b) compute stop / restart ------
