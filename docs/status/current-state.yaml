@@ -627,15 +627,27 @@ profiles:
           No new protected evidence is claimed by the freeze itself.
     full_profile_evidence:
       - name: demo-v1-fresh-install-profile-gate
-        state: not-executed
+        state: passed
+        evidence: >-
+          PP.2 (#971) fresh-host campaigns PASSED on genuinely fresh Ubuntu
+          24.04 and Debian 12 nested-KVM hosts against the exact immutable
+          published v0.4.0-rc.5 GitHub Release assets (source commit
+          145b0149fd82f44a4b76f30f7b4fd272ca6ef60d, PR #1025): canonical
+          one-line install (exit 0), canonical init + authenticated join
+          (BuildingBlock 142281f7-1e14-5bed-8b43-fe7922802ff0 ready),
+          o3kd/o3k-compute readiness, o3k doctor, real libvirt test-vm
+          ACTIVE with console boot marker, host-reboot recovery, rerun
+          convergence with zero duplicate identities, doctor phase 12/12,
+          uninstall/reinstall and purge with zero residue and foreign-state
+          preservation. Evidence: target/real-host-workflow-artifacts/
+          asr-022-145b0149/one-line-{ubuntu,debian}/. Predecessor candidates
+          rc.1-rc.4 are recorded as failed/immutable in
+          target/pp2-rc1-attempt-evidence/. Scope: the o3k-demo-v1
+          single-host profile ONLY; no production/HA/edge/persistent-volume
+          claim is added.
         note: >-
-          PP.2 (#971) owns fresh-supported-machine installation evidence
-          through the canonical P15 bootstrap path; PP.0 freezes the
-          contract only. PP.2 implementation is in progress on branch
-          pp2-one-line-canonical-bootstrap (the installer now performs
-          canonical init/join with canonical-readiness and o3k doctor
-          gates); the fresh-host campaign is pending against the successor
-          candidate. No fresh-install evidence is claimed yet.
+          PP.2 (#971) owns this evidence through the canonical P15
+          bootstrap path. Recorded only to the level actually proven.
     release_relevance: >-
       Contract-frozen vehicle for the next release. Not itself a release
       claim: publication still requires the release gate
@@ -647,14 +659,13 @@ profiles:
         remains follow-up)
       - >-
         PP.2 (#971) fresh-machine install evidence via canonical init/join —
-        implementation in progress on branch pp2-one-line-canonical-bootstrap;
-        fresh-host campaign pending against the successor candidate
+        PASSED on both supported distros against the published v0.4.0-rc.5
+        (PR #1025)
       - release-gate execution and publication (issue #93)
     next_evidence_action: >-
-      Execute the PP.2 (#971) fresh-host campaign against the successor
-      release candidate from branch pp2-one-line-canonical-bootstrap
-      (canonical init/join installer path), then PP.5 scale evidence. PP.1
-      shipped the v0.4.0-rc.1 bundle (#970).
+      PP.2 (#971) is complete pending merge of PR #1025. Next: PP.3/PP.4
+      Araf client deployment evidence and PP.5 scale evidence (1-20 host
+      envelope remains a hardening target, not a support claim).
     explicitly_unproven_claims:
       - production readiness
       - HA / multi-node behavior
