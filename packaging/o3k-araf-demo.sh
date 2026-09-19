@@ -346,7 +346,13 @@ ensure_o3kd_federation() {
   desired="$(o3kd_block_content)"
   current="$(sed -n "/^${ENV_BEGIN}/,/^${ENV_END}/p" "${O3KD_ENV}" 2>/dev/null || true)"
   if [ "${current}" = "${desired}" ]; then
-    log "o3kd OIDC federation block already present; no restart needed"
+    if systemctl is-active --quiet o3kd; then
+      log "o3kd OIDC federation block already present; no restart needed"
+      return 0
+    fi
+    log "o3kd OIDC federation block present; o3kd is down, restarting"
+    systemctl restart o3kd
+    wait_url "${O3KD_READY_URL}" "o3kd readiness after restart"
     return 0
   fi
   log "enabling o3kd OIDC federation (managed env block + service restart)"
@@ -445,6 +451,13 @@ cmd_install() {
   ensure_docker
   mkdir -p "${STATE_DIR}" "${TLS_DIR}"
   chmod 700 "${STATE_DIR}"
+  # o3kd runs as the o3k user and must read the TLS trust bundle for OIDC
+  # discovery; grant traverse-only group access, files keep their own modes
+  # (secrets stay 0600 root).
+  if id o3k >/dev/null 2>&1; then
+    chgrp o3k "${STATE_DIR}" "${TLS_DIR}" 2>/dev/null || true
+    chmod 710 "${STATE_DIR}" "${TLS_DIR}"
+  fi
   ensure_secrets
   ensure_ca
   cp "${SCRIPT_DIR}/araf-demo/nginx.conf" "${STATE_DIR}/nginx.conf"
