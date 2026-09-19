@@ -648,6 +648,37 @@ profiles:
         note: >-
           PP.2 (#971) owns this evidence through the canonical P15
           bootstrap path. Recorded only to the level actually proven.
+      - name: demo-v1-araf-demo-tuple-gate
+        state: passed
+        evidence: >-
+          PP.3 (#972) PASSED on a genuinely fresh Ubuntu 24.04 x86_64
+          nested-KVM host (kernel 6.8.0-139, /dev/kvm present) running the
+          one-line-installed v0.4.0-rc.5 demo cloud. The O3K-pinned
+          compatibility tuple (contracts/araf-compatibility-v1.yaml
+          pp3_tuple) binds Araf v1.0.0-rc.12 (source
+          de64cc9193085116fa30ad51c04ccab24a013dd0, GitHub Release with
+          digest-pinned OCI tarballs, SPDX SBOMs and SLSA provenance) and
+          packaging/o3k-araf-demo.sh deploys it via Docker Engine + Compose
+          v2 only. Verified: install and layered status; real OIDC
+          authorization-code+PKCE logins on BOTH surfaces against the
+          demo-scoped local IdP; federated native tokens against the real
+          O3K native API (tenant scopes + operator platform routes);
+          production Araf runtime profile with fixture mode impossible;
+          same-version re-run converged (o3kd untouched, zero duplicate
+          containers); Araf service restart; complete host reboot with
+          boot-id-confirmed recovery; uninstall -> reinstall -> verify and
+          purge -> reinstall -> verify (state dir removed, no demo volumes,
+          no hosts entries); foreign container/volume/file canaries
+          preserved and functional; zero secret leakage; artifact-integrity
+          fence fail-closed on unavailable/corrupt OCI tarball with O3K
+          readiness unaffected (200). Evidence:
+          target/pp3-.../evidence-final (campaign logs 00-31). Scope: the
+          o3k-demo-v1 single-host profile ONLY.
+        note: >-
+          O3K v0.4.0-rc.5 was NOT modified; the tuple and deployment
+          material are repository-side integration metadata. One-line
+          installer integration and the full browser demo remain PP.4
+          (#973). No Araf production/HA claim (o3kio/araf#106).
     release_relevance: >-
       Contract-frozen vehicle for the next release. Not itself a release
       claim: publication still requires the release gate

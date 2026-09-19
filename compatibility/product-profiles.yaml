@@ -218,17 +218,22 @@ profiles:
       - araf-client-optional
     araf_integration: client-only-not-required-for-readiness
     araf_demo_tuple:
-      state: pinned-evidence-backed
+      state: passed
       tracking_issue: 972
       contract: contracts/araf-compatibility-v1.yaml
+      evidence: >-
+        PP.3 fresh-host campaign PASSED on Ubuntu 24.04 x86_64 against the
+        published O3K v0.4.0-rc.5 + Araf v1.0.0-rc.12 tuple: real OIDC
+        tenant/operator logins, federated native tokens to the real O3K
+        native API, production Araf runtime profile (no fixture), restart,
+        host reboot, convergent re-run, uninstall/reinstall,
+        purge/reinstall, foreign-state preservation, zero secret leakage.
       note: >-
-        PP.3 (#972) pins one exact O3K + Araf compatibility tuple
-        (pp3_tuple: O3K v0.4.0-rc.5 + Araf v1.0.0-rc.12, digest-pinned OCI
-        artifacts). Araf remains a separately versioned client, is not part
-        of the O3K release bundle, and is not required for O3K readiness.
-        Deployment mechanism for the demo profile: Docker Engine + Compose
-        v2 via packaging/o3k-araf-demo.sh. One-line installer integration is
-        PP.4 (#973) scope.
+        Araf remains a separately versioned client, is not part of the O3K
+        release bundle, and is not required for O3K readiness. Deployment
+        mechanism for the demo profile: Docker Engine + Compose v2 via
+        packaging/o3k-araf-demo.sh. One-line installer integration is PP.4
+        (#973) scope. No Araf production/HA claim (o3kio/araf#106).
     evidence_dependencies:
       - native-rust-testlab
       - p15-7-scale-composition-real-host-gate
