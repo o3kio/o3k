@@ -89,6 +89,12 @@ n_never = len(re.findall(r'^\s*pull_policy: never', text, re.M))
 n_tag = len(re.findall(r'image: \\\${ARAF_[A-Z_]+(?::\?set [^}]*)?}:\\\${LOCAL_IMAGE_TAG(?::\?set [^}]*)?}', text))
 sys.exit(0 if n_never == 4 and n_tag == 4 else 1)"
 check_grep "${COMPOSE}" "o3k.io/pp-owner: o3k-araf-demo"
+check "every service restarts after host reboot" \
+  python3 -c "
+import yaml, sys
+d = yaml.safe_load(open('${COMPOSE}'))
+missing = [n for n, s in d['services'].items() if s.get('restart') != 'unless-stopped']
+sys.exit(1 if missing else 0)"
 check_grep "${COMPOSE}" "127.0.0.1:443:443"
 check "no console/BFF port published on all interfaces" \
   sh -c "! grep -E 'ports: \[[\"'\"'\"']?(8080|8081|5173|5174):' '${COMPOSE}'"

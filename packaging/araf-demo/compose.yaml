@@ -28,6 +28,7 @@ x-bff-security: &bff-security
   read_only: true
   tmpfs: [/tmp]
   stop_grace_period: 30s
+  restart: unless-stopped
 
 services:
   tls-proxy:
@@ -183,6 +184,7 @@ services:
     pull_policy: never
     environment:
       BFF_UPSTREAM: http://tenant-bff:8080
+    restart: unless-stopped
     # No host publication: browser reachability is loopback HTTPS via the
     # tls-proxy vhost tenant.o3k.demo only.
     read_only: true
@@ -205,6 +207,7 @@ services:
     pull_policy: never
     environment:
       BFF_UPSTREAM: http://operator-bff:8081
+    restart: unless-stopped
     read_only: true
     tmpfs:
       - /tmp
