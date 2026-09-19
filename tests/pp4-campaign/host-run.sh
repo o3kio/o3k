@@ -208,10 +208,18 @@ set +e
   CDP_URL="http://127.0.0.1:$CDP_PORT" \
   PP4_ALICE_USER=alice PP4_ALICE_PASSWORD="$ALICE_PW" \
   PP4_EVIDENCE_DIR="$EVID_FINAL/browser" \
-  npx playwright test specs/tenant.spec.ts specs/operator.spec.ts) \
+  npx playwright test --no-deps specs/tenant.spec.ts) \
   2>&1 | tee "$EVID_FINAL/05-browser-e2e.log"
 BROWSER_RC=$?
+(cd "$REPO/tests/pp4-browser-e2e" && \
+  CDP_URL="http://127.0.0.1:$CDP_PORT" \
+  PP4_ALICE_USER=alice PP4_ALICE_PASSWORD="$ALICE_PW" \
+  PP4_EVIDENCE_DIR="$EVID_FINAL/browser" \
+  npx playwright test --no-deps specs/operator.spec.ts) \
+  2>&1 | tee -a "$EVID_FINAL/05-browser-e2e.log"
+OPERATOR_RC=$?
 set -e
+[ "$OPERATOR_RC" -eq 0 ] || BROWSER_RC=$OPERATOR_RC
 T4="$(grep -oE 'PP4-TIMESTAMPS T4=[0-9]+' "$EVID_FINAL/05-browser-e2e.log" | head -1 | cut -d= -f2 || true)"
 [ -n "$T4" ] && printf 'T4=%s\n' "$T4" >> "$EVID_FINAL/03-timestamps.env"
 grep -oE 'PP4-NATIVE id=[a-f0-9-]+' "$EVID_FINAL/05-browser-e2e.log" | head -1 | sed 's/PP4-NATIVE id=//' \
@@ -283,7 +291,7 @@ set +e
   CDP_URL="http://127.0.0.1:$CDP_PORT" \
   PP4_ALICE_USER=alice PP4_ALICE_PASSWORD="$ALICE_PW" \
   PP4_EVIDENCE_DIR="$EVID_FINAL/browser-relogin" \
-  npx playwright test specs/relogin.spec.ts) 2>&1 | tee "$EVID_FINAL/23-browser-relogin.log"
+  npx playwright test --no-deps specs/relogin.spec.ts) 2>&1 | tee "$EVID_FINAL/23-browser-relogin.log"
 RELOGIN_RC=$?
 set -e
 [ "$RELOGIN_RC" -eq 0 ] && grep -q 'PP4-RELOGIN-OK' "$EVID_FINAL/23-browser-relogin.log" \
