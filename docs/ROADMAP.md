@@ -554,9 +554,17 @@ product baseline:
   semantics, and the Araf compatibility boundary
   ([SPEC-0048](specs/SPEC-0048-pp0-demo-and-small-edge-baseline-freeze.md),
   [baseline summary](pp0/PP0_PRODUCT_BASELINE.md)).
-- **PP.1** — build and publish the exact release artifact.
-- **PP.2** — fresh supported machine installs and runs via canonical P15
-  init/join.
+- **PP.1 (#970)** — build and publish the exact release artifact: shipped
+  as v0.4.0-rc.1 (signed digests/provenance; `o3k-network` binary + unit
+  shipped installed-but-never-enabled in the libvirt bundle).
+- **PP.2 (#971)** — fresh supported machine installs and runs via canonical
+  P15 init/join: PASSED. Fresh-host campaigns on genuinely fresh Ubuntu
+  24.04 and Debian 12 hosts succeeded against the exact immutable published
+  v0.4.0-rc.5 assets (PR #1025): canonical one-line install, authenticated
+  join, one ready BuildingBlock, real libvirt VM with guest boot proof,
+  reboot/rerun/reset/uninstall/reinstall/purge lifecycle, zero duplicate
+  identities, zero foreign-state mutation, zero secret leakage. Predecessor
+  candidates rc.1-rc.4 are recorded as failed and immutable.
 - **PP.3/PP.4** — Araf deployment integration; **PP.5** — 1–20 hypervisor
   scale evidence.
 

@@ -6,7 +6,9 @@
 #       reconnected, test-vm identity preserved (same ID, ACTIVE, same fixed
 #       IP, console marker);
 #   (b) exact one-liner re-run: exit 0, converged markers, NO duplicate
-#       resources/identities (IDs + counts + TLS dir + admin password hashes);
+#       resources/identities (IDs + counts + TLS dir + admin password hashes)
+#       and NO second canonical BuildingBlock (durable init/join state,
+#       agent-id bytes, /etc/o3k/tls hashes all unchanged);
 #   (c) teardown through the INSTALLED /usr/local/share/o3k/bootstrap-testlab.sh
 #       --teardown (ships with the install thanks to the install.sh copy list);
 #   (d) uninstall --yes (accounts intentionally retained);
@@ -26,6 +28,14 @@ ONELINER_OUT="$EVID/install-output.txt"
 mkdir -p "$EVID"
 cd /
 log() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
+# The exact one-liner, mode-dependent like phase 1: local endpoint shim by
+# default; the published release asset when O3K_CAMPAIGN_REAL_RELEASE=1 (the
+# canonical PP.2 evidence path).
+if [ "${O3K_CAMPAIGN_REAL_RELEASE:-0}" = 1 ]; then
+  ONELINER="curl -sfL https://github.com/o3kio/o3k/releases/download/${O3K_CAMPAIGN_VERSION:?O3K_CAMPAIGN_VERSION is required in real-release mode}/install.sh | sudo sh -"
+else
+  ONELINER='curl -sfL http://10.0.2.2:18000/ | sudo env O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh -'
+fi
 
 # The ssh session driving this script can drop (flaky slirp session); the
 # script must keep running detached and report through a marker file that
@@ -82,6 +92,34 @@ addresses = []
 collect(value.get("addresses", {}), addresses)
 print(addresses[0] if addresses else "")
 '
+}
+
+canonical_state() { # canonical_state DB — prints one KEY=VALUE line per durable fact
+  python3 - "$1" <<'PY'
+import sqlite3
+import sys
+
+try:
+    connection = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+    blocks = connection.execute(
+        "SELECT block_id, state FROM building_blocks").fetchall()
+    phases = [row[0] for row in connection.execute(
+        "SELECT phase FROM bootstrap_state")]
+    profiles = connection.execute(
+        "SELECT COUNT(*) FROM cloud_profiles").fetchone()[0]
+except sqlite3.Error as error:
+    sys.exit(f"canonical durable state unreadable: {error}")
+print(f"BB_ID={blocks[0][0] if blocks else ''}")
+print(f"BB_COUNT={len(blocks)}")
+print(f"BB_STATES={','.join(sorted(b[1] for b in blocks))}")
+print(f"BOOTSTRAP_PHASE={phases[0] if phases else ''}")
+print(f"BOOTSTRAP_ROWS={len(phases)}")
+print(f"PROFILE_COUNT={profiles}")
+PY
+}
+
+canonical_field() { # canonical_field TEXT KEY
+  printf '%s\n' "$1" | awk -F= -v key="$2" '$1 == key {print $2; exit}'
 }
 
 console_marker_ok() { # console_marker_ok ATTEMPTS
@@ -182,9 +220,7 @@ if [ "${O3K_PHASE2_SKIP_IDEMPOTENCY:-0}" = 1 ]; then
 else
 ENV_HASH_BEFORE="$(sha256sum /etc/o3k/o3kd.env | awk '{print $1}')"
 TLS_HASH_BEFORE="$(sha256sum /etc/o3k/tls/* | sha256sum | awk '{print $1}')"
-if curl -sfL http://10.0.2.2:18000/ \
-    | sudo env O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh - 2>&1 \
-    | tee "$EVID/rerun-output.txt"; then
+if eval "$ONELINER" 2>&1 | tee "$EVID/rerun-output.txt"; then
   log "one-liner re-run exited 0"
 else
   RERUN_STATUS=failed
@@ -271,6 +307,36 @@ ENV_HASH_AFTER="$(sha256sum /etc/o3k/o3kd.env | awk '{print $1}')"
 TLS_HASH_AFTER="$(sha256sum /etc/o3k/tls/* | sha256sum | awk '{print $1}')"
 [ "$ENV_HASH_BEFORE" = "$ENV_HASH_AFTER" ] && [ "$TLS_HASH_BEFORE" = "$TLS_HASH_AFTER" ] \
   || { NO_DUPLICATES=no; RERUN_STATUS=failed; echo "ERROR: admin password or TLS identities changed on re-run" >&2; }
+# Canonical no-duplicate contract (PP.2): the re-run's init/join convergence
+# must NOT create a second BuildingBlock, change the bootstrap phase, add
+# CloudProfiles, or rotate the agent identity / TLS material. The teardown
+# path is unaffected: bootstrap-testlab.sh --teardown never required
+# canonical state and still does not (create-path-only precondition).
+AGENT_ID_AFTER="$(sha256sum /etc/o3k/tls/agent-id | awk '{print $1}')"
+[ "$AGENT_ID_AFTER" = "$AGENT_ID_BEFORE" ] \
+  || { NO_DUPLICATES=no; RERUN_STATUS=failed; echo "ERROR: agent-id file changed on re-run" >&2; }
+CANONICAL_AFTER=""
+if canonical_after_output="$(canonical_state /var/lib/o3k/o3k.sqlite 2>&1)"; then
+  CANONICAL_AFTER="$canonical_after_output"
+else
+  RERUN_STATUS=failed; NO_DUPLICATES=no
+  echo "ERROR: canonical durable state unreadable after re-run: $canonical_after_output" >&2
+fi
+if [ -n "$CANONICAL_AFTER" ]; then
+  R2_BB_ID="$(canonical_field "$CANONICAL_AFTER" BB_ID)"
+  R2_BB_COUNT="$(canonical_field "$CANONICAL_AFTER" BB_COUNT)"
+  R2_BOOTSTRAP_ROWS="$(canonical_field "$CANONICAL_AFTER" BOOTSTRAP_ROWS)"
+  R2_BOOTSTRAP_PHASE="$(canonical_field "$CANONICAL_AFTER" BOOTSTRAP_PHASE)"
+  R2_PROFILE_COUNT="$(canonical_field "$CANONICAL_AFTER" PROFILE_COUNT)"
+  if [ "$R2_BB_ID" = "$BB_ID" ] && [ "$R2_BB_COUNT" = "$BB_COUNT" ] \
+    && [ "$R2_BOOTSTRAP_ROWS" = 1 ] && [ "$R2_BOOTSTRAP_PHASE" = "$BOOTSTRAP_PHASE" ] \
+    && [ "$R2_PROFILE_COUNT" = "$PROFILE_COUNT" ]; then
+    log "canonical no-duplicate verified (same BuildingBlock $R2_BB_ID, phase $R2_BOOTSTRAP_PHASE, $R2_PROFILE_COUNT CloudProfile(s))"
+  else
+    NO_DUPLICATES=no; RERUN_STATUS=failed
+    echo "ERROR: canonical durable state changed on re-run (bb=$R2_BB_ID/$R2_BB_COUNT phase_rows=$R2_BOOTSTRAP_ROWS/$R2_BOOTSTRAP_PHASE profiles=$R2_PROFILE_COUNT; expected bb=$BB_ID/$BB_COUNT phase=$BOOTSTRAP_PHASE profiles=$PROFILE_COUNT)" >&2
+  fi
+fi
 log "re-run idempotency: $RERUN_STATUS (no_duplicates=$NO_DUPLICATES)"
 fi
 
@@ -326,9 +392,7 @@ R3_SRV_ID=unavailable
 if [ "${O3K_PHASE2_SKIP_IDEMPOTENCY:-0}" = 1 ]; then
   log "reinstall skipped: the upgrade campaign leaves the NEW release installed and its installer fence refuses the OLD one-liner (covered by installer-negative)"
 else
-if curl -sfL http://10.0.2.2:18000/ \
-    | sudo env O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh - 2>&1 \
-    | tee "$EVID/reinstall-output.txt"; then
+if eval "$ONELINER" 2>&1 | tee "$EVID/reinstall-output.txt"; then
   log "one-liner reinstall exited 0"
 else
   REINSTALL_STATUS=failed; echo "ERROR: one-liner reinstall failed" >&2
@@ -431,17 +495,21 @@ python3 - "$EVID/one-line-${DISTRO}-install.json" "$DISTRO" "$SOURCE_SHA" "$OVER
   "$RECOVERY_STATUS" "$O3KD_ACTIVE" "$COMPUTE_ACTIVE" "$DOMAIN_OBS" "$DOMAIN_RUNNING" \
   "$RERUN_STATUS" "$NO_DUPLICATES" "$TEARDOWN1_STATUS" "$UNINSTALL_STATUS" \
   "$REINSTALL_STATUS" "$TEARDOWN2_STATUS" "$PURGE_STATUS" "$ZERO_RESIDUE" \
-  "$FOREIGN_OK" "$R3_SRV_ID" "$ONELINER_OUT" <<'PY'
+  "$FOREIGN_OK" "$R3_SRV_ID" "$ONELINER_OUT" \
+  "$BB_ID" "$BB_COUNT" "$BOOTSTRAP_PHASE" "$PROFILE_COUNT" "$ONELINER" <<'PY'
 import json
 import sys
 import time
 
 path, distro, sha, overall, recovery, o3kd, compute, domain_obs, domain_running = sys.argv[1:10]
 rerun, no_dup, teardown1, uninstall, reinstall, teardown2, purge = sys.argv[10:17]
-zero_residue, foreign, reinstall_server, output_path = sys.argv[17:22]
+zero_residue, foreign, reinstall_server, output_path = sys.argv[17:21]
+bb_id, bb_count, bootstrap_phase, profile_count, oneliner = sys.argv[21:26]
 
 with open(output_path, encoding="utf-8") as stream:
     user_output = stream.read()
+
+is_real_release = oneliner.startswith("curl -sfL https://github.com/")
 
 doc = {
     "artifact_type": "one-line-installer",
@@ -451,16 +519,28 @@ doc = {
     "redacted": True,
     "finished_at": int(time.time()),
     "source_commit": sha,
-    "install_method": "one-line-local-endpoint",
-    "endpoint_base": "http://10.0.2.2:18000",
-    "installer_command": "curl -sfL http://10.0.2.2:18000/ | sudo env "
-        "O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh -",
+    "install_method": "one-line-public-release-asset" if is_real_release
+        else "one-line-local-endpoint",
+    "installer_command": oneliner,
     "public_api_only": True,
     "install": {
         "status": "passed",
         "from_one_liner_only": True,
-        "credentials": {"admin_openrc": "0600", "clouds_yaml": "0600"},
+        "credentials": {"admin_openrc": "0600", "clouds_yaml": "0600",
+                        "o3kd_env": "0600"},
         "password_not_in_output": True,
+        "bootstrap_secret_not_in_output": True,
+        "enrollment_token_not_in_output": True,
+    },
+    "canonical_bootstrap": {
+        "status": "passed",
+        "building_block_id": bb_id,
+        "building_blocks_count": int(bb_count),
+        "bootstrap_phase": bootstrap_phase,
+        "cloud_profiles_count": int(profile_count),
+        "durable_store": "/var/lib/o3k/o3k.sqlite (read-only python3 sqlite3)",
+        "no_second_building_block_on_rerun": no_dup == "yes",
+        "teardown_unaffected_by_canonical_precondition": teardown1 == "passed",
     },
     "acceptance": {
         "status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True,
@@ -479,7 +559,9 @@ doc = {
     "teardown": {"first": teardown1, "second": teardown2,
                  "via_installed_bootstrap_testlab_sh": True},
     "uninstall": {"status": uninstall, "service_accounts_after_uninstall": "retained-intentional"},
-    "reinstall": {"status": reinstall, "method": "one-line-local-endpoint",
+    "reinstall": {"status": reinstall,
+                  "method": "one-line-public-release-asset" if is_real_release
+                      else "one-line-local-endpoint",
                   "new_server_id": reinstall_server},
     "purge": {"status": purge, "state_reconciliation":
               "operator-explicit: services stopped, ownership markers verified, "

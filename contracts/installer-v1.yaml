@@ -8,6 +8,13 @@ note: >-
   Frozen installer semantics for PP.0. The installer (packaging/get-o3k.sh +
   packaging/install.sh) may orchestrate canonical P15 authorities but must
   never recreate them.
+  Status update (PP.2, #971, branch pp2-one-line-canonical-bootstrap): the
+  invoke_canonical_init_join phase is now implemented by the installer
+  (canonical `o3k init` + authenticated `o3k join`, followed by
+  canonical-readiness and `o3k doctor` gates), and the bootstrap-testlab.sh
+  STALE-PRE-P15 gap recorded below is reconciled — it now requires canonical
+  bootstrap state (read-only) before creating demo workload state instead of
+  replacing the canonical path. Frozen semantics are unchanged.
 
 authority_boundary:
   installer_must_not_fabricate:
@@ -25,7 +32,9 @@ authority_boundary:
       packaging/bootstrap-testlab.sh provisions a TestLab topology via raw
       openstack CLI calls instead of canonical init/join; classified
       STALE-PRE-P15 and must be reconciled with the canonical bootstrap
-      path in PP.1/PP.2.
+      path in PP.1/PP.2. (Reconciled in PP.2, #971: bootstrap-testlab.sh now
+      requires canonical P15.6 bootstrap state via a read-only check before
+      creating demo resources; retained here as the historical record.)
     - >-
       packaging/install.sh compiles o3kd/o3k/o3k-compute with cargo on the
       target when prebuilt binaries are absent; the frozen contract requires

@@ -45,7 +45,7 @@ evacuation, arbitrary OpenStack parity, proven 1–20-host scale.
 | `o3kd` control plane | required | required | `o3kd` | `o3k` | Cloud Kernel controller | `/readyz` runtime+bootstrap gates |
 | `o3k` CLI | required | required | `o3k` | operator | operator entrypoint | `o3k doctor` exit 0 |
 | `o3k-compute` | required | required | `o3k-compute` | `o3k-compute` (+`libvirt`,`kvm`) | execution boundary only | `/readyz` :9100 |
-| `o3k-network` agent | not packaged | required | `o3k-network` | — | execution boundary only | startup reconcile |
+| `o3k-network` agent | shipped inactive (not required) | required | `o3k-network` | — | execution boundary only | startup reconcile |
 | libvirt/KVM + dnsmasq | required | required | host packages | — | none (host) | `qemu:///system` capabilities |
 | native storage | in-process library | in-process library | — | — | `o3kd` work-lease | volume manifest ready |
 | external Cinder | not in this profile | not in this profile | external | — | external-owned (SPEC-0023) | o3kd probe |
@@ -67,7 +67,7 @@ single-use enrollment grant; `o3k join` presents the agent certificate
 | reset/uninstall/purge ownership fencing (P15.7 fail-closed model) | VALID |
 | systemd units `o3kd.service` / `o3k-compute.service` | VALID |
 | `o3k-network.service` unit for the small-edge network agent | **RESOLVED in PP.1 (v0.4.0-rc.1)** — unit shipped, installed but never enabled (canonical init/join enrollment) |
-| `packaging/bootstrap-testlab.sh` (raw `openstack` CLI topology, no init/join) | **STALE-PRE-P15** — reconcile in PP.1/PP.2 |
+| `packaging/bootstrap-testlab.sh` (public-API demo workload layered on the canonical bootstrap) | **RESOLVED in PP.2 (#971)** — requires canonical P15.6 bootstrap state (read-only check: bootstrap phase ready + BuildingBlock ready) before creating demo resources; fabricates no topology itself |
 | Automated release pipeline publishing to GitHub Releases | **PARTIAL in PP.1** — first RC published via the operator-run pipeline scripts; a protected GitHub Actions release workflow remains follow-up |
 | Artifact signature/provenance attestation | **RESOLVED in PP.1 (v0.4.0-rc.1)** — ed25519 release key (`release-verify.pub` committed), `release-digests.txt/.sig` + `provenance.json` published per release |
 | `o3k-network` packaging/unit | **RESOLVED in PP.1 (v0.4.0-rc.1)** — binary built (Debian-12 baseline), bundled, installed |
@@ -89,9 +89,11 @@ single-use enrollment grant; `o3k join` presents the agent certificate
 ## 5. What PP hardens next
 
 - **PP.1**: build/publish the exact release bundle (incl. signing/provenance,
-  `o3k-network` packaging, TestLab bootstrap reconciliation).
+  `o3k-network` packaging) — shipped in v0.4.0-rc.1 (#970).
 - **PP.2**: fresh supported machine installs and runs via canonical
-  init/join.
+  init/join — installer implementation in progress on branch
+  `pp2-one-line-canonical-bootstrap` (#971); `bootstrap-testlab.sh` now
+  requires the canonical bootstrap state instead of replacing it.
 - **PP.3/PP.4**: Araf deployment integration (real APIs, pinned version).
 - **PP.5**: 1–20 hypervisor scale evidence before any support claim.
 

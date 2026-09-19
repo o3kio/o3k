@@ -605,7 +605,9 @@ profiles:
       ephemeral-root storage, SQLite default. P15.7 convergence evidence
       (run 35365369016 at 096e4679) covers the canonical init/join
       authorities this profile mandates. This is a definition, not a new
-      support claim.
+      support claim. The PP.1 v0.4.0-rc.1 bundle (#970) ships o3k-network as
+      an installed-but-never-enabled optional component; this profile still
+      does not require or enable it.
     source_commit: 096e46792aad3af1e425fb844f449c4dcbfa5da2
     portable_evidence:
       - name: pp0-contract-validation
@@ -625,22 +627,45 @@ profiles:
           No new protected evidence is claimed by the freeze itself.
     full_profile_evidence:
       - name: demo-v1-fresh-install-profile-gate
-        state: not-executed
+        state: passed
+        evidence: >-
+          PP.2 (#971) fresh-host campaigns PASSED on genuinely fresh Ubuntu
+          24.04 and Debian 12 nested-KVM hosts against the exact immutable
+          published v0.4.0-rc.5 GitHub Release assets (source commit
+          145b0149fd82f44a4b76f30f7b4fd272ca6ef60d, PR #1025): canonical
+          one-line install (exit 0), canonical init + authenticated join
+          (BuildingBlock 142281f7-1e14-5bed-8b43-fe7922802ff0 ready),
+          o3kd/o3k-compute readiness, o3k doctor, real libvirt test-vm
+          ACTIVE with console boot marker, host-reboot recovery, rerun
+          convergence with zero duplicate identities, doctor phase 12/12,
+          uninstall/reinstall and purge with zero residue and foreign-state
+          preservation. Evidence: target/real-host-workflow-artifacts/
+          asr-022-145b0149/one-line-{ubuntu,debian}/. Predecessor candidates
+          rc.1-rc.4 are recorded as failed/immutable in
+          target/pp2-rc1-attempt-evidence/. Scope: the o3k-demo-v1
+          single-host profile ONLY; no production/HA/edge/persistent-volume
+          claim is added.
         note: >-
-          PP.2 owns fresh-supported-machine installation evidence through
-          the canonical P15 bootstrap path; PP.0 freezes the contract only.
+          PP.2 (#971) owns this evidence through the canonical P15
+          bootstrap path. Recorded only to the level actually proven.
     release_relevance: >-
       Contract-frozen vehicle for the next release. Not itself a release
       claim: publication still requires the release gate
       (docs/release-tracker.md, issues #93/#94) and PP.1-PP.2 evidence.
     blockers:
-      - PP.1 release artifact build/publish pipeline (contract frozen, not implemented)
-      - PP.2 fresh-machine install evidence via canonical init/join
+      - >-
+        PP.1 release artifact build/publish pipeline (shipped in
+        v0.4.0-rc.1, #970; a protected GitHub Actions release workflow
+        remains follow-up)
+      - >-
+        PP.2 (#971) fresh-machine install evidence via canonical init/join —
+        PASSED on both supported distros against the published v0.4.0-rc.5
+        (PR #1025)
       - release-gate execution and publication (issue #93)
     next_evidence_action: >-
-      Execute PP.1 (build/publish the exact release bundle per
-      contracts/release-bundle-v1.yaml) and PP.2 (fresh-machine install
-      through canonical init/join).
+      PP.2 (#971) is complete pending merge of PR #1025. Next: PP.3/PP.4
+      Araf client deployment evidence and PP.5 scale evidence (1-20 host
+      envelope remains a hardening target, not a support claim).
     explicitly_unproven_claims:
       - production readiness
       - HA / multi-node behavior

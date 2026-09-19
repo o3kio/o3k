@@ -3,12 +3,18 @@
 #
 # Runs INSIDE a fresh VM with no repo checkout and no bundle copy:
 #   (a) foreign canaries + clean-state pre-checks;
-#   (b) the exact one-liner, full output captured verbatim into the evidence
-#       directory (the §15 UX evidence);
-#   (c) assertions: exit 0, checklist markers, 0600 credential files, admin
-#       password never in the captured output;
-#   (d) public-API verification: token issue, test-vm ACTIVE, fixed IP
-#       192.0.2.2, config-drive, console boot marker; resource IDs + counts;
+#   (b) the exact one-liner (local endpoint shim, or the published release
+#       asset with O3K_CAMPAIGN_REAL_RELEASE=1), full output captured verbatim
+#       into the evidence directory (the §15 UX evidence);
+#   (c) assertions: exit 0, checklist markers (canonical P15.6 bootstrap
+#       sequence), 0600 credential files, admin password / canonical
+#       bootstrap secret / enrollment token / private keys never in the
+#       captured output;
+#   (d) canonical durable state (PP.2): read-only python3 sqlite3 on
+#       /var/lib/o3k/o3k.sqlite — exactly one ready building_blocks row, one
+#       ready bootstrap_state row, >=1 cloud_profiles row; then public-API
+#       verification: token issue, test-vm ACTIVE, fixed IP 192.0.2.2,
+#       config-drive, console boot marker; resource IDs + counts;
 #   (e) `sudo reboot` as the LAST statement (host-run.sh polls SSH afterwards).
 #
 # Usage: sudo bash in-vm-phase1.sh <ubuntu|debian> <evidence-dir> <source-sha>
@@ -39,10 +45,18 @@ fi
 log "pre-checks passed (no o3k accounts, /etc/o3k absent, canaries planted)"
 
 # ---- (b) the exact one-liner, verbatim capture ---------------------------------
-log "running the one-liner (exact command, output captured to $ONELINER_OUT)"
-if curl -sfL http://10.0.2.2:18000/ \
-    | sudo env O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh - 2>&1 \
-    | tee "$ONELINER_OUT"; then
+# Local-shim mode installs from the campaign endpoint shim; real-release mode
+# (O3K_CAMPAIGN_REAL_RELEASE=1, the canonical PP.2 evidence path) runs the
+# exact published release command with no local endpoint involved.
+if [ "${O3K_CAMPAIGN_REAL_RELEASE:-0}" = 1 ]; then
+  # Single source of truth for the version under test: host-run.sh injects
+  # O3K_CAMPAIGN_VERSION (= the get-o3k.sh release pin being campaigned).
+  ONELINER="curl -sfL https://github.com/o3kio/o3k/releases/download/${O3K_CAMPAIGN_VERSION:?O3K_CAMPAIGN_VERSION is required in real-release mode}/install.sh | sudo sh -"
+else
+  ONELINER='curl -sfL http://10.0.2.2:18000/ | sudo env O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh -'
+fi
+log "running the one-liner (exact command: $ONELINER; output captured to $ONELINER_OUT)"
+if eval "$ONELINER" 2>&1 | tee "$ONELINER_OUT"; then
   log "one-liner exited 0"
 else
   echo "ERROR: one-liner failed" >&2; exit 1
@@ -64,28 +78,97 @@ for marker in \
   '✓ o3kd installed' \
   '✓ o3k-compute installed' \
   '✓ control plane ready' \
-  '✓ compute agent connected' \
+  '✓ canonical bootstrap initialized (CloudProfile + enrollment grant)' \
+  '✓ compute agent ready' \
+  '✓ control plane ready (canonical readiness)' \
+  '✓ o3k doctor healthy' \
   'server test-vm ACTIVE with fixed IP 192.0.2.2 and config-drive' \
   'console boot marker verified (cirros|login:)' \
   'O3K is ready.'; do
   grep -Fq -- "$marker" "$ONELINER_OUT" || { echo "ERROR: missing output marker: $marker" >&2; exit 1; }
 done
-for cred in /etc/o3k/admin-openrc /etc/o3k/clouds.yaml; do
+# The join marker carries the durable BuildingBlock id; assert the prefix and
+# capture the id for the canonical durable-state and evidence checks below.
+grep -Fq '✓ canonical authenticated join complete (BuildingBlock ' "$ONELINER_OUT" \
+  || { echo "ERROR: missing output marker: canonical authenticated join complete" >&2; exit 1; }
+BB_ID="$(sed -n 's/^✓ canonical authenticated join complete (BuildingBlock \(.*\))$/\1/p' "$ONELINER_OUT" | head -1)"
+[ -n "$BB_ID" ] || { echo "ERROR: could not capture the BuildingBlock id" >&2; exit 1; }
+grep -Fq "BuildingBlock: $BB_ID" "$ONELINER_OUT" \
+  || { echo "ERROR: summary does not carry the BuildingBlock id" >&2; exit 1; }
+for cred in /etc/o3k/admin-openrc /etc/o3k/clouds.yaml /etc/o3k/o3kd.env; do
   [ -f "$cred" ] || { echo "ERROR: missing credential file $cred" >&2; exit 1; }
   [ "$(stat -c %a "$cred")" = 600 ] || { echo "ERROR: bad mode on $cred" >&2; exit 1; }
 done
 PW="$(grep '^O3K_BOOTSTRAP_PASSWORD=' /etc/o3k/o3kd.env | head -1 | cut -d= -f2-)"
 [ -n "$PW" ] || { echo "ERROR: no bootstrap password in o3kd.env" >&2; exit 1; }
-if grep -Fq -- "$PW" "$ONELINER_OUT"; then
+# Canonical bootstrap secret (PP.2): present, 64-hex, and NEVER printed —
+# neither by value nor in assignment form.
+SECRET="$(grep '^O3K_BOOTSTRAP_SECRET=' /etc/o3k/o3kd.env | head -1 | cut -d= -f2-)"
+[ -n "$SECRET" ] || { echo "ERROR: no O3K_BOOTSTRAP_SECRET in o3kd.env" >&2; exit 1; }
+[[ "$SECRET" =~ ^[0-9a-f]{64}$ ]] || { echo "ERROR: O3K_BOOTSTRAP_SECRET is not 64 lowercase hex" >&2; exit 1; }
+if grep -Fq -- "$PW" "$ONELINER_OUT" || grep -Fq 'O3K_BOOTSTRAP_PASSWORD=' "$ONELINER_OUT"; then
   echo "ERROR: admin password leaked into the captured output" >&2; exit 1
 fi
-log "markers, credential modes (0600), and password-redaction verified"
+if grep -Fq -- "$SECRET" "$ONELINER_OUT" || grep -Fq 'O3K_BOOTSTRAP_SECRET=' "$ONELINER_OUT"; then
+  echo "ERROR: canonical bootstrap secret leaked into the captured output" >&2; exit 1
+fi
+if grep -Eq 'BEGIN .*PRIVATE KEY' "$ONELINER_OUT"; then
+  echo "ERROR: private key material leaked into the captured output" >&2; exit 1
+fi
+# The enrollment token is one-time and destroyed by the installer; assert no
+# enrollment_token JSON/assignment with a live-looking value was printed.
+if grep -Eq 'enrollment_token["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9_.-]{8,}' "$ONELINER_OUT"; then
+  echo "ERROR: enrollment token leaked into the captured output" >&2; exit 1
+fi
+log "markers, credential modes (0600), secret/token redaction verified"
 
 # ---- (d) public-API verification + resource identity capture -------------------
 # shellcheck disable=SC1091
 source /etc/o3k/admin-openrc
 openstack token issue >/dev/null 2>&1 || { echo "ERROR: token issue failed" >&2; exit 1; }
 log "token issue ok"
+
+# Canonical P15.6 durable state (PP.2): exactly one ready BuildingBlock, a
+# single ready bootstrap_state row, and at least one CloudProfile — read-only
+# through python3 sqlite3 (the sqlite3 CLI is NOT installed on fresh hosts).
+# The checker prints BB_ID / BB_COUNT / BOOTSTRAP_PHASE / PROFILE_COUNT for
+# the phase-2 no-duplicate comparison and the evidence JSON; its exit code is
+# the assertion (any deviation from the canonical contract fails the phase).
+CANONICAL_ENV="$(python3 - /var/lib/o3k/o3k.sqlite "$BB_ID" <<'PY'
+import sqlite3
+import sys
+
+db_path, expected_block = sys.argv[1], sys.argv[2]
+try:
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    blocks = connection.execute(
+        "SELECT block_id, state FROM building_blocks").fetchall()
+    phases = [row[0] for row in connection.execute(
+        "SELECT phase FROM bootstrap_state")]
+    profiles = connection.execute(
+        "SELECT COUNT(*) FROM cloud_profiles").fetchone()[0]
+except sqlite3.Error as error:
+    sys.exit(f"canonical durable state unreadable: {error}")
+if len(blocks) != 1 or blocks[0][1] != "ready":
+    sys.exit(f"expected exactly one ready building_blocks row, got {blocks!r}")
+if blocks[0][0] != expected_block:
+    sys.exit("durable BuildingBlock id does not match the installer-reported id")
+if len(phases) != 1 or phases[0] != "ready":
+    sys.exit(f"expected exactly one ready bootstrap_state row, got {phases!r}")
+if profiles < 1:
+    sys.exit("expected at least one cloud_profiles row")
+print(f"BB_ID={blocks[0][0]}")
+print(f"BB_COUNT={len(blocks)}")
+print(f"BOOTSTRAP_PHASE={phases[0]}")
+print(f"PROFILE_COUNT={profiles}")
+PY
+)" || { echo "ERROR: canonical durable state check failed: $CANONICAL_ENV" >&2; exit 1; }
+BB_ID_DB="$(printf '%s\n' "$CANONICAL_ENV" | awk -F= '$1 == "BB_ID" {print $2; exit}')"
+BB_COUNT="$(printf '%s\n' "$CANONICAL_ENV" | awk -F= '$1 == "BB_COUNT" {print $2; exit}')"
+BOOTSTRAP_PHASE="$(printf '%s\n' "$CANONICAL_ENV" | awk -F= '$1 == "BOOTSTRAP_PHASE" {print $2; exit}')"
+PROFILE_COUNT="$(printf '%s\n' "$CANONICAL_ENV" | awk -F= '$1 == "PROFILE_COUNT" {print $2; exit}')"
+[ "$BB_ID_DB" = "$BB_ID" ] || { echo "ERROR: BuildingBlock id mismatch (installer=$BB_ID db=$BB_ID_DB)" >&2; exit 1; }
+log "canonical durable state verified (BuildingBlock $BB_ID ready, bootstrap phase $BOOTSTRAP_PHASE, $PROFILE_COUNT CloudProfile(s))"
 
 SRV_ID=""
 for i in $(seq 1 15); do
@@ -200,6 +283,11 @@ KP_FP="$(openstack keypair show testlab-keypair -f value -c fingerprint || true)
   printf 'SUB_ID=%s\n' "$SUB_ID"
   printf 'PORT_ID=%s\n' "$PORT_ID"
   printf 'KP_FP=%s\n' "$KP_FP"
+  printf 'BB_ID=%s\n' "$BB_ID"
+  printf 'BB_COUNT=%s\n' "$BB_COUNT"
+  printf 'BOOTSTRAP_PHASE=%s\n' "$BOOTSTRAP_PHASE"
+  printf 'PROFILE_COUNT=%s\n' "$PROFILE_COUNT"
+  printf 'AGENT_ID_BEFORE=%s\n' "$(sha256sum /etc/o3k/tls/agent-id | awk '{print $1}')"
   printf 'COUNT_SRV=%s\n' "$(capture_count server ID)"
   printf 'COUNT_IMG=%s\n' "$(capture_count image ID)"
   printf 'COUNT_NET=%s\n' "$(capture_count network ID)"

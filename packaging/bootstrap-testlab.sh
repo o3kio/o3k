@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Idempotent O3K libvirt TestLab resource bootstrap (issue #613).
+# Idempotent O3K libvirt TestLab resource bootstrap (issue #613, PP.2 #971).
 #
 # Speaks ONLY public OpenStack APIs through the `openstack` CLI: no direct
 # SQLite writes, no internal service calls, no libvirt shortcuts, no hidden
@@ -9,6 +9,13 @@ set -Eeuo pipefail
 # `--teardown` removes only the resources this script owns (server, port,
 # subnet, network, and the TestLab-spec flavor) — idempotently too, so absent
 # resources are fine. Secrets are never printed.
+#
+# Canonical precondition (PP.2, contracts/installer-v1.yaml): this script
+# creates demo workload only AFTER the canonical P15.6 bootstrap
+# (`o3k init` + authenticated `o3k join`) has durably reached phase `ready`.
+# It verifies the durable canonical state read-only and fails closed when the
+# bootstrap is missing — it never fabricates topology, providers,
+# BuildingBlocks, CloudProfile state, agent identity, or readiness itself.
 #
 # Ownership records: the disposable keypair private key (/etc/o3k/testlab-key.pem)
 # and the flavor ID of every flavor this script creates
@@ -75,6 +82,85 @@ export OS_PROJECT_DOMAIN_NAME="${OS_PROJECT_DOMAIN_NAME:-Default}"
 for var in OS_AUTH_URL OS_USERNAME OS_PASSWORD OS_PROJECT_NAME OS_REGION_NAME; do
   [[ -n "${!var:-}" ]] || die "$var is not configured (source $OPENRC_FILE or export OS_* variables)"
 done
+
+# Endpoint overrides for the shared-port demo catalog: the native catalog
+# advertises image/network at the bare control-plane root, which serves the
+# identity version document, so python-openstackclient reports "does not have
+# any supported versions" (recorded as the v0.4.0-rc.1 fresh-host defect on
+# BOTH supported distros). Pinning the versioned service roots here matches
+# the canonical protected bootstrap (scripts/bootstrap-disposable-testlab.sh)
+# and keeps every openstack invocation on one client configuration. The
+# password reaches the generator through the process environment (never argv:
+# /proc/<pid>/cmdline is world-readable) and the file is created under umask
+# 077 so it is never group/world readable, not even transiently.
+CLOUDS_FILE="$WORK_DIR/o3k-testlab-clouds.yaml"
+export OS_PASSWORD
+umask 077
+python3 - "$CLOUDS_FILE" "$OS_AUTH_URL" "$OS_USERNAME" \
+  "$OS_PROJECT_NAME" "$OS_REGION_NAME" "${OS_INTERFACE:-public}" \
+  "${OS_USER_DOMAIN_NAME:-Default}" "${OS_PROJECT_DOMAIN_NAME:-Default}" <<'PY'
+import json
+import os
+import sys
+
+(path, auth_url, username, project, region, interface,
+ user_domain, project_domain) = sys.argv[1:9]
+password = os.environ["OS_PASSWORD"]
+base = auth_url[:-3] if auth_url.endswith("/v3") else auth_url.rstrip("/")
+config = {
+    "clouds": {
+        "o3k-testlab": {
+            "auth": {
+                "auth_url": auth_url,
+                "username": username,
+                "password": password,
+                "project_name": project,
+                "user_domain_name": user_domain,
+                "project_domain_name": project_domain,
+            },
+            "region_name": region,
+            "interface": interface,
+            "identity_api_version": 3,
+            "image_api_version": "2",
+            "image_endpoint_override": f"{base}/v2",
+            "network_endpoint_override": f"{base}/v2.0",
+        }
+    }
+}
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(config, stream, indent=2)
+    stream.write("\n")
+PY
+chmod 0600 "$CLOUDS_FILE"
+export OS_CLOUD=o3k-testlab OS_CLIENT_CONFIG_FILE="$CLOUDS_FILE"
+
+require_canonical_bootstrap() {
+  # Fail closed unless the canonical P15.6 bootstrap is durably ready: one
+  # bootstrap_state row at phase ready and at least one enrolled BuildingBlock
+  # in the durable store. Read-only access; never mutates runtime state.
+  local data_dir="${O3K_DATA_DIR:-/var/lib/o3k}"
+  local db="file:$data_dir/o3k.sqlite?mode=ro"
+  python3 - "$db" <<'PY'
+import sqlite3
+import sys
+
+try:
+    connection = sqlite3.connect(sys.argv[1], uri=True)
+    phases = [row[0] for row in connection.execute(
+        "SELECT phase FROM bootstrap_state")]
+    blocks = [row[0] for row in connection.execute(
+        "SELECT state FROM building_blocks")]
+except sqlite3.Error as error:
+    raise SystemExit(f"canonical bootstrap state is unreadable: {error}")
+if not phases or any(phase != "ready" for phase in phases):
+    raise SystemExit(
+        "canonical P15.6 bootstrap is not ready "
+        f"(bootstrap_state phases: {phases or 'none'})")
+if not blocks or any(state != "ready" for state in blocks):
+    raise SystemExit(
+        f"canonical BuildingBlock is not ready (states: {blocks or 'none'})")
+PY
+}
 
 wait_for_api() {
   # Bounded readiness wait: authentication is the control-plane liveness gate
@@ -361,6 +447,10 @@ if [[ $TEARDOWN -eq 1 ]]; then
   echo "TestLab resources removed"
   exit 0
 fi
+
+require_canonical_bootstrap \
+  || die "canonical P15.6 bootstrap (o3k init + authenticated o3k join) is not durably ready — refusing to create demo workload state"
+step "canonical bootstrap state verified (phase ready, BuildingBlock ready)"
 
 # Image: upload only when absent; the cache download/verification is then the
 # only network-bound step.

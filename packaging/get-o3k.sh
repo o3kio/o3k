@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# get-o3k.sh — thin one-line installer wrapper (issue #613).
+# get-o3k.sh — thin one-line installer wrapper (issue #613, PP.2 #971).
 #
 # Published as the GitHub Release asset install.sh of every O3K release: the
 # release generator exports this file byte-for-byte as dist/install.sh
 # (packaging/make-release.sh, 0755, drift-gated by cmp), so the canonical
 # alpha invocation is
-#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.3.0-alpha.1/install.sh | sudo sh -
+#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.5/install.sh | sudo sh -
 # get.o3k.io is only a convenience 302 redirect to that exact asset:
 #   curl -sfL https://get.o3k.io | sudo sh -
+#
+# Canonical bootstrap (PP.2, contracts/installer-v1.yaml): this script is
+# orchestration only. After the verified prebuilt runtime is installed it
+# invokes the canonical `o3k init` and authenticated `o3k join` (one local
+# BuildingBlock, real Placement/topology state), waits for canonical runtime
+# readiness (o3kd /readyz, o3k-compute /readyz, `o3k doctor`), and only then
+# creates the bounded o3k-demo-v1 workload through the supported public CLI.
+# It never fabricates topology, providers, BuildingBlocks, CloudProfile state,
+# agent identity, or readiness, and it never compiles on the target host.
 #
 # This file is POSIX-sh compatible on purpose: on Ubuntu 24.04 and Debian 12
 # `sudo sh -` is dash, so the piped invocation must not depend on bashisms.
@@ -88,7 +97,7 @@ fi
 # published install.sh GitHub Release asset is byte-identical to this file,
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
-O3K_INSTALLER_VERSION="v0.4.0-rc.1"
+O3K_INSTALLER_VERSION="v0.4.0-rc.5"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
@@ -500,25 +509,230 @@ fi
 # ---- install from the verified bundle -----------------------------------------
 # install.sh discovers bin/o3k-network inside the extracted bundle itself and
 # installs it (with its unit, not enabled) when present — no extra flag needed.
+# --defer-compute-start keeps the compute agent stopped so the canonical join
+# below wins the NodeRegistry epoch race (see the canonical bootstrap section).
 bash "$BUNDLE_DIR/packaging/install.sh" --profile libvirt --noninteractive \
+  --defer-compute-start \
   --binary "$BUNDLE_DIR/bin/o3kd" --compute-binary "$BUNDLE_DIR/bin/o3k-compute" \
   --o3k-binary "$BUNDLE_DIR/bin/o3k" \
   || die 'installation failed; the host holds recoverable O3K-owned state and re-running the installer converges'
 step 'o3kd installed'
 step 'o3k-compute installed'
 
-# ---- service health (same gates as the proven clean-install harness) ----------
+# ---- canonical P15.6 bootstrap (contracts/installer-v1.yaml) -------------------
+# The installer is orchestration ONLY: it never fabricates topology, Placement
+# providers, BuildingBlocks, CloudProfile state, agent identity, or readiness.
+# Canonical init creates the CloudProfile + one-time enrollment grant; the
+# authenticated join enrolls this host's agent identity (the mTLS certificate
+# minted above) and creates exactly one local BuildingBlock with Placement
+# inventory. Idempotent by construction: a repeated init converges on the
+# durable profile and issues a fresh grant; a replayed join short-circuits on
+# the durable enrolled-agent projection without consuming a second grant.
+ENV_FILE=/etc/o3k/o3kd.env
+O3K_BIN=/usr/local/bin/o3k
+API_URL=http://127.0.0.1:18080/o3k/v1
+
+# Read one shell-quoted scalar from the daemon env file. The generated
+# secrets are hex-only, so %q quoting is always plain; anything else fails
+# closed instead of misparsing a credential.
+read_env_scalar() {
+  key="$1"
+  value=$(awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")
+  case "$value" in
+    ""|*[!0-9a-fA-F]*) die "$key is missing or not a plain hex value in $ENV_FILE" ;;
+  esac
+  printf '%s' "$value"
+}
+
 wait_http_ok http://127.0.0.1:18080/healthz 30 \
   || die 'o3kd did not become healthy (http://127.0.0.1:18080/healthz)'
 step 'control plane ready'
-wait_http_ok http://127.0.0.1:9100/readyz 30 \
-  || die 'o3k-compute did not become ready (http://127.0.0.1:9100/readyz)'
-step 'compute agent connected'
 
-# ---- TestLab bootstrap (public APIs only, idempotent) -------------------------
+BOOTSTRAP_SECRET=$(read_env_scalar O3K_BOOTSTRAP_SECRET)
+AGENT_ID=$(cat "$TLS_DIR/agent-id" 2>/dev/null || true)
+case "$AGENT_ID" in *[!A-Za-z0-9._-]*|'') die "agent identity is invalid: $TLS_DIR/agent-id" ;; esac
+VCPUS=$(nproc 2>/dev/null || true)
+MEMORY_MB=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)
+DISK_GB=$(awk -F= '$1 == "O3K_COMPUTE_MAX_DISK_GB" {sub(/^[^=]*=/, ""); print; exit}' /etc/o3k/o3k-compute.env)
+[ -n "$DISK_GB" ] || DISK_GB=10
+case "$VCPUS" in ''|*[!0-9]*) die 'host inventory is unavailable (vcpus)' ;; esac
+case "$MEMORY_MB" in ''|*[!0-9]*) die 'host inventory is unavailable (memory)' ;; esac
+case "$DISK_GB" in ''|*[!0-9]*) die 'host inventory is unavailable (disk)' ;; esac
+
+RUNUSER_BIN=$(command -v runuser || true)
+[ -n "$RUNUSER_BIN" ] || RUNUSER_BIN=/usr/sbin/runuser
+[ -x "$RUNUSER_BIN" ] || die 'runuser is unavailable; cannot invoke canonical bootstrap as the o3k service account'
+
+# Secret-carrying fragments for the canonical CLI. They live in the o3k-owned
+# 0700 data directory as o3k-owned 0600 files and are removed immediately
+# after each command: secrets travel via file descriptors and file contents,
+# never through argv (world-readable /proc/<pid>/cmdline) or logs. A SIGKILL
+# leftover is root/compute-unreadable, o3k-readable only, and the enrollment
+# grant it may contain expires after 5 minutes.
+SECRET_DIR=/var/lib/o3k
+BOOTSTRAP_SECRET_FILE="$SECRET_DIR/.installer-bootstrap-secret"
+ENROLLMENT_TOKEN_FILE="$SECRET_DIR/.installer-enrollment-token"
+write_secret_file() { # write_secret_file PATH CONTENT — root writes, o3k owns, 0600.
+  install -o o3k -g o3k -m 0600 /dev/null "$1" \
+    || die "cannot create secret file: $1"
+  printf '%s' "$2" >"$1" || die "cannot write secret file: $1"
+}
+
+wait_http_ok http://127.0.0.1:18080/healthz 30 \
+  || die 'o3kd did not become healthy (http://127.0.0.1:18080/healthz)'
+step 'control plane ready'
+
+BOOTSTRAP_SECRET=$(read_env_scalar O3K_BOOTSTRAP_SECRET)
+AGENT_ID=$(cat "$TLS_DIR/agent-id" 2>/dev/null || true)
+case "$AGENT_ID" in *[!A-Za-z0-9._-]*|'') die "agent identity is invalid: $TLS_DIR/agent-id" ;; esac
+VCPUS=$(nproc 2>/dev/null || true)
+MEMORY_MB=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)
+DISK_GB=$(awk -F= '$1 == "O3K_COMPUTE_MAX_DISK_GB" {sub(/^[^=]*=/, ""); print; exit}' /etc/o3k/o3k-compute.env)
+[ -n "$DISK_GB" ] || DISK_GB=10
+case "$VCPUS" in ''|*[!0-9]*) die 'host inventory is unavailable (vcpus)' ;; esac
+case "$MEMORY_MB" in ''|*[!0-9]*) die 'host inventory is unavailable (memory)' ;; esac
+case "$DISK_GB" in ''|*[!0-9]*) die 'host inventory is unavailable (disk)' ;; esac
+
+# Canonical init, executed as the o3k service account. The response (which
+# carries the one-time enrollment token) goes to a root-owned 0600 temporary
+# file opened by this shell before privilege drop; it is parsed and destroyed
+# immediately and is never printed.
+INIT_OUT="$TMP_DIR/o3k-init.json"
+( umask 077 && : >"$INIT_OUT" )
+write_secret_file "$BOOTSTRAP_SECRET_FILE" "$BOOTSTRAP_SECRET"
+"$RUNUSER_BIN" -u o3k -- env O3K_API_URL="$API_URL" \
+  O3K_BOOTSTRAP_SECRET_FILE="$BOOTSTRAP_SECRET_FILE" \
+  "$O3K_BIN" init --agent-id "$AGENT_ID" \
+  >"$INIT_OUT" || { rm -f -- "$BOOTSTRAP_SECRET_FILE"; die 'canonical o3k init failed (see o3kd logs: journalctl -u o3kd)'; }
+rm -f -- "$BOOTSTRAP_SECRET_FILE"
+ENROLLMENT_TOKEN=$(python3 - "$INIT_OUT" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    response = json.load(stream)
+token = response.get("enrollment_token")
+if not isinstance(token, str) or not token:
+    raise SystemExit("canonical init did not return an enrollment token")
+print(token)
+PY
+) || die 'canonical init response was invalid'
+rm -f -- "$INIT_OUT"
+step 'canonical bootstrap initialized (CloudProfile + enrollment grant)'
+
+# Authenticated canonical join. A bounded retry converges across a transient
+# store/provider conflict; the grant stays single-use either way. The token
+# reaches the CLI through an o3k-owned 0600 file, never argv.
+JOIN_OUT="$TMP_DIR/o3k-join.json"
+( umask 077 && : >"$JOIN_OUT" "$TMP_DIR/o3k-join.err" )
+AGENT_EPOCH=$(openssl rand -hex 16)
+write_secret_file "$ENROLLMENT_TOKEN_FILE" "$ENROLLMENT_TOKEN"
+join_ok=0
+join_attempt=1
+while [ "$join_attempt" -le 5 ]; do
+  if "$RUNUSER_BIN" -u o3k -- env O3K_API_URL="$API_URL" \
+      O3K_ENROLLMENT_TOKEN_FILE="$ENROLLMENT_TOKEN_FILE" "$O3K_BIN" join \
+      --agent-id "$AGENT_ID" --agent-epoch "$AGENT_EPOCH" \
+      --certificate "$TLS_DIR/agent.pem" \
+      --vcpus "$VCPUS" --memory-mb "$MEMORY_MB" --disk-gb "$DISK_GB" \
+      >"$JOIN_OUT" 2>"$TMP_DIR/o3k-join.err"; then
+    join_ok=1
+    break
+  fi
+  if [ "$join_attempt" -lt 5 ]; then
+    printf 'canonical authenticated o3k join attempt %s/5 did not converge; retrying\n' "$join_attempt" >&2
+    sleep 2
+  fi
+  join_attempt=$((join_attempt + 1))
+done
+rm -f -- "$ENROLLMENT_TOKEN_FILE"
+if [ "$join_ok" -ne 1 ]; then
+  printf 'O3K installer: canonical authenticated o3k join failed: %s\n' \
+    "$(tail -1 "$TMP_DIR/o3k-join.err" 2>/dev/null || echo 'no response')" >&2
+  exit 1
+fi
+BUILDING_BLOCK_ID=$(python3 - "$JOIN_OUT" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    response = json.load(stream)
+block = response.get("building_block_id")
+if not isinstance(block, str) or not block:
+    raise SystemExit("canonical join did not return a building block id")
+print(block)
+PY
+) || BUILDING_BLOCK_ID='(unavailable)'
+rm -f -- "$JOIN_OUT" "$TMP_DIR/o3k-join.err"
+step "canonical authenticated join complete (BuildingBlock $BUILDING_BLOCK_ID)"
+
+# Only after canonical join does the compute agent start: its first
+# registration adopts the join-established identity instead of fencing it.
+systemctl start o3k-compute.service \
+  || die 'o3k-compute.service failed to start'
+wait_http_ok http://127.0.0.1:9100/readyz 90 \
+  || die 'o3k-compute did not become ready (http://127.0.0.1:9100/readyz)'
+step 'compute agent ready'
+wait_http_ok http://127.0.0.1:18080/readyz 120 \
+  || die 'o3kd did not reach canonical readiness (http://127.0.0.1:18080/readyz)'
+step 'control plane ready (canonical readiness)'
+
+# Canonical diagnostics gate: `o3k doctor` must report no failing checks.
+# A fresh installation legitimately carries advisory WARNs (for example
+# "no O3K-created backup exists yet"), which yields overall "warning" and
+# exit 1 — that is still a successful diagnostic run. Only "unhealthy"
+# (any FAIL) or a doctor invocation error (exit 2) fails the install.
+DOCTOR_VERDICT=""
+doctor_attempt=1
+while [ "$doctor_attempt" -le 30 ]; do
+  doctor_rc=0
+  DOCTOR_OUT="$("$O3K_BIN" doctor --json 2>/dev/null)" || doctor_rc=$?
+  if [ "$doctor_rc" -eq 2 ]; then
+    die 'o3k doctor could not produce a report (usage or serialization error)'
+  fi
+  if [ "$doctor_rc" -le 1 ] && [ -n "$DOCTOR_OUT" ]; then
+    DOCTOR_VERDICT="$(printf '%s' "$DOCTOR_OUT" | python3 -c '
+import json
+import sys
+
+try:
+    print(json.load(sys.stdin)["overall_status"])
+except Exception:
+    print("unknown")
+')"
+    if [ "$DOCTOR_VERDICT" = healthy ] || [ "$DOCTOR_VERDICT" = warning ]; then
+      break
+    fi
+  fi
+  DOCTOR_VERDICT=""
+  sleep 5
+  doctor_attempt=$((doctor_attempt + 1))
+done
+if [ -z "$DOCTOR_VERDICT" ]; then
+  # Preserve the failing report for the operator before aborting.
+  DOCTOR_DIAG=/var/log/o3k/installer-doctor-last.json
+  if [ -n "${DOCTOR_OUT:-}" ]; then
+    ( umask 077 && printf '%s\n' "$DOCTOR_OUT" >"$DOCTOR_DIAG" ) \
+      && printf 'O3K installer: the failing doctor report is preserved at %s (root 0600)\n' "$DOCTOR_DIAG" >&2
+  fi
+  die 'o3k doctor reported failing checks; the installation is not healthy'
+fi
+unset DOCTOR_OUT
+step 'o3k doctor healthy'
+
+# ---- bounded demo cloud (public APIs only) ------------------------------------
+# Creates the frozen o3k-demo-v1 workload (CirrOS image, TestLab flavor,
+# bounded flat network, keypair, test-vm) through the supported public CLI
+# after canonical bootstrap. The script fails closed unless the canonical
+# bootstrap state is durably ready; it fabricates nothing itself.
 bash "$BUNDLE_DIR/packaging/bootstrap-testlab.sh" || die 'TestLab bootstrap failed'
 
 printf '\nO3K is ready.\n\n'
+printf 'Cloud: single-node demo (o3k-demo-v1)\n'
+printf 'BuildingBlock: %s\n' "$BUILDING_BLOCK_ID"
+printf 'Endpoints:\n'
+printf '  identity/image/network/compute/placement: http://127.0.0.1:18080\n'
+printf '  native API: %s\n' "$API_URL"
 printf 'Credentials:\n'
 printf '  /etc/o3k/admin-openrc\n'
 printf '  /etc/o3k/clouds.yaml\n\n'
@@ -526,3 +740,4 @@ printf 'Try:\n\n'
 printf '  source /etc/o3k/admin-openrc\n'
 printf '  openstack server list\n'
 printf '  openstack console log show test-vm\n'
+printf '  sudo o3k doctor\n'

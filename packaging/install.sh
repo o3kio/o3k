@@ -10,6 +10,13 @@ O3K_BINARY=
 NETWORK_BINARY=
 PROFILE=fake
 NONINTERACTIVE=0
+# Canonical-bootstrap orchestration (PP.2, contracts/installer-v1.yaml
+# invoke_canonical_init_join): the outer installer runs `o3k init` and the
+# authenticated `o3k join` BEFORE the compute agent's first control-plane
+# registration (the NodeRegistry epoch lease fences a live agent's
+# replacement; join must win the race). With this flag the unit is enabled
+# but not started; the outer installer starts it after canonical join.
+DEFER_COMPUTE_START=0
 while (($#)); do
   case "$1" in
     --prefix) PREFIX="$2"; shift 2;;
@@ -22,6 +29,7 @@ while (($#)); do
     --network-binary) NETWORK_BINARY="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --noninteractive) NONINTERACTIVE=1; shift;;
+    --defer-compute-start) DEFER_COMPUTE_START=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
@@ -575,6 +583,15 @@ umask 077
   printf 'export OS_REGION_NAME=RegionOne\n'
   printf 'export OS_INTERFACE=public\n'
   printf 'export OS_IDENTITY_API_VERSION=3\n'
+  # Route the CLI through the generated clouds.yaml (auth + pinned
+  # image/network endpoint overrides for the shared-port catalog): with only
+  # OS_* env vars, commands that touch the image service fail version
+  # discovery at the bare catalog root (recorded as the v0.4.0-rc.3 campaign
+  # defect: `openstack server show` could not resolve its image/flavor
+  # follow-up). This mirrors the canonical protected bootstrap, which exports
+  # OS_CLOUD/OS_CLIENT_CONFIG_FILE alongside OS_*.
+  printf 'export OS_CLOUD=o3k-testlab\n'
+  printf 'export OS_CLIENT_CONFIG_FILE=%s\n' "$(sh_quote "$CONFIG_DIR/clouds.yaml")"
 } >"$CONFIG_DIR/admin-openrc"
 chmod 0600 "$CONFIG_DIR/admin-openrc"
 {
@@ -590,6 +607,15 @@ chmod 0600 "$CONFIG_DIR/admin-openrc"
   printf '    region_name: RegionOne\n'
   printf '    interface: public\n'
   printf '    identity_api_version: 3\n'
+  # The native catalog advertises image/network at the shared-port root, which
+  # serves the identity version document; python-openstackclient then reports
+  # "does not have any supported versions" (recorded as an RC.1 fresh-host
+  # defect). The protected bootstrap carries the same overrides
+  # (scripts/bootstrap-disposable-testlab.sh); pin the versioned service roots
+  # here so the generated client config works out of the box.
+  printf '    image_api_version: "2"\n'
+  printf '    image_endpoint_override: http://%s/v2\n' "$CLIENT_LISTEN_ADDR"
+  printf '    network_endpoint_override: http://%s/v2.0\n' "$CLIENT_LISTEN_ADDR"
 } >"$CONFIG_DIR/clouds.yaml"
 chmod 0600 "$CONFIG_DIR/clouds.yaml"
 echo "wrote client credentials to $CONFIG_DIR/admin-openrc and $CONFIG_DIR/clouds.yaml"
@@ -672,7 +698,13 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   fi
   systemctl daemon-reload
   systemctl enable --now o3kd.service
-  if [[ "$PROFILE" == libvirt ]]; then systemctl enable --now o3k-compute.service; fi
+  if [[ "$PROFILE" == libvirt ]]; then
+    if [[ "$DEFER_COMPUTE_START" -eq 1 ]]; then
+      systemctl enable o3k-compute.service
+    else
+      systemctl enable --now o3k-compute.service
+    fi
+  fi
 fi
 # The runtime access model applies to every root install and mirrors the
 # disposable-testlab bootstrap: the QEMU process (primary group kvm) must

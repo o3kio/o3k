@@ -72,8 +72,10 @@ enum Commands {
     },
     /// Enroll a prepared execution host with a single-use bootstrap grant.
     Join {
+        /// Enrollment token. Prefer O3K_ENROLLMENT_TOKEN_FILE on shared hosts:
+        /// a token passed on argv is visible in /proc/<pid>/cmdline.
         #[arg(long)]
-        token: String,
+        token: Option<String>,
         #[arg(long)]
         agent_id: String,
         #[arg(long)]
@@ -208,7 +210,7 @@ fn main() -> ExitCode {
             memory_mb,
             disk_gb,
         } => handle_result(native_cli::join(
-            &token,
+            token.as_deref(),
             &agent_id,
             &agent_epoch,
             &certificate,

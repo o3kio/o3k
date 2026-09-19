@@ -2,7 +2,6 @@
 # ASR-022 one-line installer campaign — HOST runner (issue #613).
 #
 # Provisions a fresh nested-KVM VM with NO repo checkout and NO bundle copy,
-# serves the local get.o3k.io endpoint shim (scripts/serve-installer-endpoint.py)
 # and drives the two in-VM phases:
 #   phase 1: canaries -> exact one-liner install -> assertions -> sudo reboot
 #   doctor: o3k doctor acceptance (HEALTHY, compute/o3kd stop-restart
@@ -10,12 +9,21 @@
 #   phase 2: reboot recovery -> one-liner rerun idempotency -> teardown ->
 #            uninstall -> one-liner reinstall -> lifecycle again -> purge ->
 #            zero-residue + canaries -> evidence JSON
+# Local-shim mode (default) serves the get.o3k.io endpoint shim
+# (scripts/serve-installer-endpoint.py) and the in-VM one-liner installs from
+# it. O3K_CAMPAIGN_REAL_RELEASE=1 (the canonical PP.2 evidence path) installs
+# through the exact published release command instead:
+#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.5/install.sh | sudo sh -
 # The only things copied into the VM are in-vm-phase1.sh, in-vm-phase2.sh,
 # and in-vm-doctor.sh.
 #
 # Usage: bash host-run.sh <ubuntu|debian> <evidence-dir>
 # Env overrides: O3K_CAMPAIGN_BUNDLE_DIST (default /tmp/campaign-tree/dist/...),
-# O3K_CAMPAIGN_PORT (default 18000), O3K_CAMPAIGN_SOURCE_SHA (default HEAD).
+# O3K_CAMPAIGN_PORT (default 18000), O3K_CAMPAIGN_SOURCE_SHA (default HEAD),
+# O3K_CAMPAIGN_REAL_RELEASE=1 (canonical evidence path: no local endpoint
+# shim; the in-VM one-liner is exactly
+#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.5/install.sh | sudo sh -
+# so the campaign exercises the byte-identical published release asset).
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -23,19 +31,21 @@ DISTRO="${1:-ubuntu}"
 EVID="${2:-$REPO/target/real-host-workflow-artifacts/asr-022-$(git -C "$REPO" rev-parse --short HEAD)/one-line-$DISTRO}"
 WORK="$REPO/target/asr-022-vms"
 PORT="${O3K_CAMPAIGN_PORT:-18000}"
-BUNDLE_DIST="${O3K_CAMPAIGN_BUNDLE_DIST:-/tmp/campaign-tree/dist/o3k-0.3.0-alpha.1}"
-VERSION="${O3K_CAMPAIGN_VERSION:-v0.3.0-alpha.1}"
+BUNDLE_DIST="${O3K_CAMPAIGN_BUNDLE_DIST:-/tmp/campaign-tree/dist/o3k-0.4.0-rc.5}"
+VERSION="${O3K_CAMPAIGN_VERSION:-v0.4.0-rc.5}"
+REAL_RELEASE="${O3K_CAMPAIGN_REAL_RELEASE:-0}"
 SOURCE_SHA="${O3K_CAMPAIGN_SOURCE_SHA:-$(git -C "$REPO" rev-parse HEAD)}"
 SSH_KEY="$WORK/id_ed25519"
 VM_NAME="asr022-${DISTRO}"
 VM_EVID="/home/tester/o3k-campaign-evidence"
 VM_SCRIPTS="/home/tester/o3k-campaign"
 ENDPOINT_PID=""
+SSH_PORT="${O3K_CAMPAIGN_SSH_PORT:-2322}"
 mkdir -p "$WORK" "$EVID"
 [ -f "$SSH_KEY" ] || ssh-keygen -t ed25519 -f "$SSH_KEY" -N '' -C "asr022" >/dev/null
 SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  -o ConnectTimeout=5 -o ServerAliveInterval=15 -p 2322)
-SCP_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P 2322)
+  -o ConnectTimeout=5 -o ServerAliveInterval=15 -p "$SSH_PORT")
+SCP_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$SSH_PORT")
 
 log() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
 
@@ -109,7 +119,7 @@ qemu-system-x86_64 \
   -m 3584 \
   -drive file="$DISK",if=virtio,format=qcow2 \
   -drive file="$SEED_ISO",if=virtio,media=cdrom \
-  -netdev user,id=net0,hostfwd=tcp::2322-:22 \
+  -netdev user,id=net0,hostfwd=tcp::${SSH_PORT}-:22 \
   -device virtio-net-pci,netdev=net0 \
   -display none -daemonize -pidfile "$WORK/${VM_NAME}.pid"
 log "VM ${VM_NAME} launched (slirp gateway 10.0.2.2 -> host)"
@@ -130,21 +140,27 @@ log "nested KVM inside VM: $(ssh_vm 'ls /dev/kvm >/dev/null 2>&1 && echo present
 BOOT_ID_BEFORE="$(ssh_vm 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)"
 [ -n "$BOOT_ID_BEFORE" ] || { echo "could not read pre-reboot boot_id" >&2; exit 1; }
 
-# ---- start the local endpoint shim ---------------------------------------------
-if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
-  echo "port $PORT is already in use" >&2; exit 1
+# ---- start the local endpoint shim (local-shim mode only) -----------------------
+# Real-release mode installs straight from the published GitHub Release asset;
+# there is no local endpoint and no bundle dist at all.
+if [ "$REAL_RELEASE" != 1 ]; then
+  if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
+    echo "port $PORT is already in use" >&2; exit 1
+  fi
+  nohup python3 "$REPO/scripts/serve-installer-endpoint.py" \
+    --port "$PORT" --bundle-dist "$BUNDLE_DIST" --version "$VERSION" \
+    >"$EVID/endpoint.log" 2>&1 &
+  ENDPOINT_PID=$!
+  for i in $(seq 1 20); do
+    curl -sf "http://127.0.0.1:$PORT/version" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  curl -sf "http://127.0.0.1:$PORT/version" >/dev/null \
+    || { echo "endpoint shim did not come up" >&2; exit 1; }
+  log "endpoint shim serving on 0.0.0.0:$PORT (pid $ENDPOINT_PID)"
+else
+  log "REAL-RELEASE mode: no endpoint shim; the in-VM one-liner is the exact published install.sh asset"
 fi
-nohup python3 "$REPO/scripts/serve-installer-endpoint.py" \
-  --port "$PORT" --bundle-dist "$BUNDLE_DIST" --version "$VERSION" \
-  >"$EVID/endpoint.log" 2>&1 &
-ENDPOINT_PID=$!
-for i in $(seq 1 20); do
-  curl -sf "http://127.0.0.1:$PORT/version" >/dev/null 2>&1 && break
-  sleep 0.5
-done
-curl -sf "http://127.0.0.1:$PORT/version" >/dev/null \
-  || { echo "endpoint shim did not come up" >&2; exit 1; }
-log "endpoint shim serving on 0.0.0.0:$PORT (pid $ENDPOINT_PID)"
 
 # ---- copy the in-VM scripts (no repo, no bundle, no image) ---------------------
 ssh_vm "mkdir -p $VM_SCRIPTS $VM_EVID"
@@ -154,7 +170,7 @@ scp "${SCP_OPTS[@]}" "$SCRIPT_DIR/in-vm-phase1.sh" "$SCRIPT_DIR/in-vm-phase2.sh"
 # ---- phase 1: install through the one-liner, assert, reboot --------------------
 log "phase 1: one-liner install"
 set +e
-ssh_vm "sudo bash $VM_SCRIPTS/in-vm-phase1.sh $DISTRO $VM_EVID $SOURCE_SHA" \
+ssh_vm "sudo env O3K_CAMPAIGN_REAL_RELEASE=$REAL_RELEASE O3K_CAMPAIGN_VERSION=$VERSION bash $VM_SCRIPTS/in-vm-phase1.sh $DISTRO $VM_EVID $SOURCE_SHA" \
   | tee "$EVID/vm-${DISTRO}-phase1.log"
 PHASE1_SSH=$?
 set -e
@@ -299,10 +315,10 @@ ssh_vm "sudo rm -f $VM_EVID/phase2-done"
 # skips only those idempotency blocks while uninstall/purge/zero-residue
 # and foreign-state checks still run.
 if [ -n "${O3K_UPGRADE_TARGET_VERSION:-}" ]; then
-  ssh_vm "sudo nohup env O3K_PHASE2_SKIP_IDEMPOTENCY=1 bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
+  ssh_vm "sudo nohup env O3K_PHASE2_SKIP_IDEMPOTENCY=1 O3K_CAMPAIGN_REAL_RELEASE=$REAL_RELEASE O3K_CAMPAIGN_VERSION=$VERSION bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
     >$VM_EVID/phase2-console.log 2>&1 </dev/null &"
 else
-  ssh_vm "sudo nohup bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
+  ssh_vm "sudo nohup env O3K_CAMPAIGN_REAL_RELEASE=$REAL_RELEASE O3K_CAMPAIGN_VERSION=$VERSION bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
     >$VM_EVID/phase2-console.log 2>&1 </dev/null &"
 fi
 PHASE2_MARKER=""

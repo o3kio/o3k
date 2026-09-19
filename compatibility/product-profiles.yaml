@@ -193,7 +193,10 @@ profiles:
         required: false
         binary: o3k-network
         authority: execution-boundary-only
-        readiness: not packaged for this profile
+        readiness: >-
+          not required or enabled for this profile; shipped inactive in the
+          libvirt release bundle since v0.4.0-rc.1 (PP.1, #970) — binary +
+          unit installed, never enabled; no readiness requirement
       - component: libvirt-kvm
         required: true
         binary: host-package
@@ -217,6 +220,20 @@ profiles:
     evidence_dependencies:
       - native-rust-testlab
       - p15-7-scale-composition-real-host-gate
+    fresh_install_evidence:
+      state: passed
+      gate: demo-v1-fresh-install-profile-gate
+      release: v0.4.0-rc.5
+      source_commit: 145b0149fd82f44a4b76f30f7b4fd272ca6ef60d
+      campaigns: [ubuntu-24.04, debian-12]
+      note: >-
+        PP.2 (#971, PR #1025) fresh-host campaigns passed on both frozen
+        targets against the exact immutable published release artifact:
+        canonical init/join, one ready BuildingBlock, real libvirt VM with
+        guest boot proof, reboot/rerun/uninstall/reinstall/purge lifecycle,
+        zero duplicate identities, zero foreign-state mutation, zero secret
+        leakage. See docs/status/current-state.yaml and
+        target/real-host-workflow-artifacts/asr-022-145b0149/.
     known_limitations:
       - not-production
       - not-ha
