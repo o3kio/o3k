@@ -25,7 +25,6 @@ check_no_grep()  { check "must be absent: $1 <= $2"    sh -c "! grep -qF '$2' '$
 SCRIPT="packaging/o3k-araf-demo.sh"
 COMPOSE="packaging/araf-demo/compose.yaml"
 REALM="packaging/araf-demo/realm.json"
-MASTER_REALM="packaging/araf-demo/master-realm.json"
 NGINX="packaging/araf-demo/nginx.conf"
 TUPLE="contracts/araf-compatibility-v1.yaml"
 PROFILE="compatibility/product-profiles.yaml"
@@ -138,10 +137,7 @@ check "compose has no literal secret values" \
 check "realm template secrets are env-substitution placeholders only" \
   sh -c "! grep -E '\"secret\": \"' '${REALM}' | grep -vE '\\\$\\{[A-Z_]+\\}'"
 check_grep "${REALM}" '"${TENANT_CLIENT_SECRET}"'
-check_grep "${REALM}" "@ALICE_CREDENTIAL_JSON@"
-check_grep "${MASTER_REALM}" "@ADMIN_CREDENTIAL_JSON@"
-check "master realm template has no plaintext password" \
-  sh -c "! grep -iE 'password\": \"[^@]' '${MASTER_REALM}'"
+check_grep "${REALM}" "o3k-demo"
 check_grep "${NGINX}" "ssl_certificate_key"
 check "script never logs secret values" \
   sh -c "! grep -E '^\s*(log|echo) .*(SECRET|PASSWORD|STORE_KEY)' '${SCRIPT}'"
@@ -157,17 +153,8 @@ check_grep "${PROFILE}" "araf-client-optional"
 check_grep "${PROFILE}" "araf_integration:"
 check_grep "${PROFILE}" "araf_demo_tuple:"
 
-# --- functional: realm templates valid JSON after credential substitution ---
-check "realm template valid JSON (credential placeholder substituted)" \
-  python3 -c "
-import json
-t = open('${REALM}').read().replace('@ALICE_CREDENTIAL_JSON@', '{\"type\":\"password\"}')
-json.loads(t)"
-check "master realm template valid JSON (credential placeholder substituted)" \
-  python3 -c "
-import json
-t = open('${MASTER_REALM}').read().replace('@ADMIN_CREDENTIAL_JSON@', '{\"type\":\"password\"}')
-json.loads(t)"
+# --- functional: realm template is valid JSON --------------------------------
+check "realm template valid JSON" python3 -c "import json;json.load(open('${REALM}'))"
 
 # --- functional: script parses and constants resolve ------------------------
 check "script has valid bash syntax" bash -n "${SCRIPT}"

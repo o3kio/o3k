@@ -64,6 +64,11 @@ services:
       - --http-enabled=true
       - --proxy-headers=xforwarded
     environment:
+      # Legacy bootstrap vars: proven with --import-realm on Keycloak 25.0.6
+      # (see tests/p12-iam-7-real-idp.sh); KC_BOOTSTRAP_ADMIN_* is not
+      # honored by this image version.
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
       # Realm import substitutes these into client secrets; the realm file
       # on disk stays placeholder-only (no secrets at rest outside the
       # 0600 env file).
@@ -71,10 +76,6 @@ services:
       OPERATOR_CLIENT_SECRET: ${OPERATOR_CLIENT_SECRET:?set OPERATOR_CLIENT_SECRET}
     volumes:
       - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/realm.json:/opt/keycloak/data/import/realm.json:ro
-      # The bootstrap-admin env path does not run when realms are imported
-      # at first boot, so the master realm (with the admin user) is seeded
-      # by import as well.
-      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/master-realm.json:/opt/keycloak/data/import/master-realm.json:ro
     networks: [o3k-araf-demo]
     labels:
       o3k.io/pp-owner: o3k-araf-demo

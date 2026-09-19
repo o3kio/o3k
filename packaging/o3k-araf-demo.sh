@@ -243,49 +243,12 @@ EOF
 }
 
 render_realm() {
-  # Render both realm files with Keycloak-format PBKDF2-SHA256 credential
-  # JSON (never plaintext). Keycloak's bootstrap-admin env path does not
-  # create the admin user when --import-realm is used, so the master realm
-  # admin is seeded by the master-realm.json import instead.
-  python3 - "${SCRIPT_DIR}/araf-demo/realm.json" \
-    "${SCRIPT_DIR}/araf-demo/master-realm.json" \
-    "${STATE_DIR}/realm.json" "${STATE_DIR}/master-realm.json" \
-    "${ALICE_PASSWORD}" "${KEYCLOAK_ADMIN_PASSWORD}" <<'PY'
-import base64, hashlib, json, os, sys
-
-realm_src, master_src, realm_dst, master_dst, alice_pw, admin_pw = sys.argv[1:7]
-
-def kc_password_credential(password, iterations=27500):
-    salt = os.urandom(16)
-    derived = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
-    return {
-        "type": "password",
-        "secretData": json.dumps({
-            "value": base64.b64encode(derived).decode(),
-            "salt": base64.b64encode(salt).decode(),
-            "additionalParameters": {},
-        }),
-        "credentialData": json.dumps({
-            "hashIterations": iterations,
-            "algorithm": "pbkdf2-sha256",
-            "additionalParameters": {},
-        }),
-    }
-
-alice_cred = json.dumps(kc_password_credential(alice_pw))
-admin_cred = json.dumps(kc_password_credential(admin_pw))
-
-text = open(realm_src, encoding="utf-8").read()
-text = text.replace("@ALICE_CREDENTIAL_JSON@", alice_cred)
-open(realm_dst, "w", encoding="utf-8").write(text)
-
-text = open(master_src, encoding="utf-8").read()
-text = text.replace("@ADMIN_CREDENTIAL_JSON@", admin_cred)
-open(master_dst, "w", encoding="utf-8").write(text)
-PY
-  # The rendered master realm contains a password hash: keep it 0600.
+  # Realm secrets arrive via Keycloak env substitution (${VAR}); the file on
+  # disk stays placeholder-only, so it can be readable by the idp container.
+  # Demo users are provisioned through the admin API after boot (proven
+  # pattern; imported credential metadata varies across Keycloak versions).
+  cp "${SCRIPT_DIR}/araf-demo/realm.json" "${STATE_DIR}/realm.json"
   chmod 644 "${STATE_DIR}/realm.json"
-  chmod 600 "${STATE_DIR}/master-realm.json"
 }
 
 # ---------------------------------------------------------------------------
