@@ -50,7 +50,7 @@ umask 077
 # ---------------------------------------------------------------------------
 ARAF_VERSION="v1.0.0-rc.12"
 ARAF_SOURCE_SHA="de64cc9193085116fa30ad51c04ccab24a013dd0"
-O3K_TUPLE_VERSION="v0.4.0-rc.7"
+O3K_TUPLE_VERSION="v0.4.0-rc.8"
 
 ARAF_BFF_IMAGE="ghcr.io/o3kio/araf-bff"
 ARAF_BFF_DIGEST="sha256:bc717ecdbbbf3ea673efe168c90419936677d644aa0ae25af4eb84906cd744ba"
@@ -704,37 +704,85 @@ wait_url_soft() {
 # ---------------------------------------------------------------------------
 kc_token() {
   # The password travels through a 0600 temp file (curl form field `@file`),
-  # never through argv (/proc/<pid>/cmdline is world-readable).
-  local pw_file
+  # never through argv (/proc/<pid>/cmdline is world-readable). Bounded retry:
+  # the IdP may still be finishing realm import when the first call lands.
+  local pw_file attempt status body tok=""
   pw_file="$(mktemp)"
   chmod 600 "${pw_file}"
   printf '%s' "${KEYCLOAK_ADMIN_PASSWORD}" > "${pw_file}"
-  curl -sf --cacert "${TLS_DIR}/ca.crt" -X POST \
-    "https://idp.o3k.demo/realms/master/protocol/openid-connect/token" \
-    -d grant_type=password -d client_id=admin-cli \
-    -d username=admin --data-urlencode "password@${pw_file}" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
-  local rc=$?
-  rm -f "${pw_file}"
-  return "${rc}"
+  for attempt in 1 2 3 4 5; do
+    set +e
+    status="$(curl -s --cacert "${TLS_DIR}/ca.crt" -o "${pw_file}.resp" -w '%{http_code}' -X POST \
+      "https://idp.o3k.demo/realms/master/protocol/openid-connect/token" \
+      -d grant_type=password -d client_id=admin-cli \
+      -d username=admin --data-urlencode "password@${pw_file}")"
+    set -e
+    if [ "${status}" = 200 ]; then
+      tok="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))' < "${pw_file}.resp" 2>/dev/null || true)"
+      [ -n "${tok}" ] && break
+    fi
+    sleep 3
+  done
+  rm -f "${pw_file}" "${pw_file}.resp"
+  if [ -z "${tok}" ]; then
+    die "demo IdP admin token request did not succeed (last HTTP ${status}) — inspect: docker logs o3k-araf-demo-idp-1"
+  fi
+  printf '%s\n' "${tok}"
 }
 
-kc_api() { # kc_api METHOD PATH [JSON_BODY]
-  local method="$1" path="$2" body="${3:-}" tok body_file=""
+kc_api() { # kc_api METHOD PATH [JSON_BODY] — bounded retry, fail closed loudly
+  local method="$1" path="$2" body="${3:-}" attempt="1" status="" tok body_file="" resp_file
   tok="$(kc_token)"
+  resp_file="$(mktemp)"
   if [ -n "${body}" ]; then
     body_file="$(mktemp)"
     chmod 600 "${body_file}"
     printf '%s' "${body}" > "${body_file}"
-    curl -sf --cacert "${TLS_DIR}/ca.crt" -X "${method}" \
-      -H "Authorization: Bearer ${tok}" -H 'Content-Type: application/json' \
-      --data "@${body_file}" "https://idp.o3k.demo${path}" >/dev/null
-    local rc=$?
-    rm -f "${body_file}"
-    return "${rc}"
   fi
-  curl -sf --cacert "${TLS_DIR}/ca.crt" -X "${method}" \
-    -H "Authorization: Bearer ${tok}" "https://idp.o3k.demo${path}" >/dev/null
+  while [ "${attempt}" -le 5 ]; do
+    set +e
+    if [ -n "${body_file}" ]; then
+      status="$(curl -s --cacert "${TLS_DIR}/ca.crt" -o "${resp_file}" -w '%{http_code}' -X "${method}" \
+        -H "Authorization: Bearer ${tok}" -H 'Content-Type: application/json' \
+        --data "@${body_file}" "https://idp.o3k.demo${path}")"
+    else
+      status="$(curl -s --cacert "${TLS_DIR}/ca.crt" -o "${resp_file}" -w '%{http_code}' -X "${method}" \
+        -H "Authorization: Bearer ${tok}" "https://idp.o3k.demo${path}")"
+    fi
+    set -e
+    case "${status}" in
+      2*) rm -f "${body_file}" "${resp_file}"; return 0 ;;
+    esac
+    sleep 3
+    attempt=$((attempt + 1))
+  done
+  # Fail closed with the observed status (never the request body or secrets).
+  log "keycloak admin call failed: ${method} ${path} -> HTTP ${status}"
+  if [ -s "${resp_file}" ]; then
+    log "keycloak response (first 200 bytes): $(head -c 200 "${resp_file}" | tr -d '\n')"
+  fi
+  rm -f "${body_file}" "${resp_file}"
+  die "demo IdP admin API call did not succeed: ${method} ${path} (HTTP ${status})"
+}
+
+# Retrying read of the demo user id (single source: the IdP assigns it).
+kc_user_id() { # kc_user_id USERNAME -> prints the id or nothing
+  local username="$1" attempt tok id=""
+  for attempt in 1 2 3 4 5; do
+    tok="$(kc_token)"
+    id="$(curl -s --cacert "${TLS_DIR}/ca.crt" \
+      -H "Authorization: Bearer ${tok}" \
+      "https://idp.o3k.demo/admin/realms/${ISSUER_REALM}/users?username=${username}" \
+      | python3 -c 'import json,sys
+try:
+    users = json.load(sys.stdin)
+except Exception:
+    users = []
+print(users[0]["id"] if users else "")' 2>/dev/null || true)"
+    [ -n "${id}" ] && break
+    sleep 3
+  done
+  printf '%s' "${id}"
 }
 
 ensure_alice() {
@@ -744,18 +792,12 @@ ensure_alice() {
   # IdP database -> new subject -> managed block is rewritten + o3kd upserts
   # the new binding idempotently).
   local existing
-  existing="$(curl -sf --cacert "${TLS_DIR}/ca.crt" \
-    -H "Authorization: Bearer $(kc_token)" \
-    "https://idp.o3k.demo/admin/realms/${ISSUER_REALM}/users?username=alice" \
-    | python3 -c 'import json,sys; u=json.load(sys.stdin); print(u[0]["id"] if u else "")')"
+  existing="$(kc_user_id alice)"
   if [ -z "${existing}" ]; then
     log "creating demo user alice"
     kc_api POST "/admin/realms/${ISSUER_REALM}/users" \
       '{"username":"alice","enabled":true,"firstName":"Alice","lastName":"Demo","email":"alice@o3k.demo","emailVerified":true}'
-    existing="$(curl -sf --cacert "${TLS_DIR}/ca.crt" \
-      -H "Authorization: Bearer $(kc_token)" \
-      "https://idp.o3k.demo/admin/realms/${ISSUER_REALM}/users?username=alice" \
-      | python3 -c 'import json,sys; u=json.load(sys.stdin); print(u[0]["id"] if u else "")')"
+    existing="$(kc_user_id alice)"
   else
     # Converge profile fields: without them Keycloak's default VERIFY_PROFILE
     # required action intercepts the first login.
@@ -765,9 +807,17 @@ ensure_alice() {
   [ -n "${existing}" ] || die "keycloak user alice missing after provisioning"
   local block_subject
   # The federated subject recorded by the last enable lives in the demo-owned
-  # env file (legacy PP.3 installs kept it in o3kd.env; read both).
-  block_subject="$(sed -n 's/^O3K_TESTLAB_FEDERATED_SUBJECT=//p' "${O3KD_DEMO_ENV}" 2>/dev/null | head -1)"
-  [ -n "${block_subject}" ] || block_subject="$(sed -n 's/^O3K_TESTLAB_FEDERATED_SUBJECT=//p' "${O3KD_ENV}" 2>/dev/null | head -1)"
+  # env file (legacy PP.3 installs kept it in o3kd.env; read both). Both files
+  # are optional at this point — the demo env file is written later by
+  # ensure_o3kd_federation — so the lookups must never fail the script
+  # (`set -e` + `pipefail` would abort on sed's exit status otherwise).
+  block_subject=""
+  if [ -f "${O3KD_DEMO_ENV}" ]; then
+    block_subject="$(sed -n 's/^O3K_TESTLAB_FEDERATED_SUBJECT=//p' "${O3KD_DEMO_ENV}" | head -1 || true)"
+  fi
+  if [ -z "${block_subject}" ] && [ -f "${O3KD_ENV}" ]; then
+    block_subject="$(sed -n 's/^O3K_TESTLAB_FEDERATED_SUBJECT=//p' "${O3KD_ENV}" | head -1 || true)"
+  fi
   if [ -n "${block_subject}" ] && [ "${block_subject}" != "${existing}" ]; then
     # The demo IdP was recreated and assigned alice a new subject. o3kd's
     # TestLab federated hook conflict-fails when a binding id is reused with

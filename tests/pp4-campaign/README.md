@@ -106,8 +106,8 @@ Usage:
 ```sh
 # host, from repo root; needs /root/noble-server-cloudimg-amd64.img (Ubuntu);
 # the Debian cloud image is downloaded into target/pp4-campaign/vms/ if absent
-O3K_CAMPAIGN_VERSION=v0.4.0-rc.7 bash tests/pp4-campaign/host-run.sh ubuntu target/pp4-campaign/ubuntu
-O3K_CAMPAIGN_VERSION=v0.4.0-rc.7 bash tests/pp4-campaign/host-run.sh debian target/pp4-campaign/debian
+O3K_CAMPAIGN_VERSION=v0.4.0-rc.8 bash tests/pp4-campaign/host-run.sh ubuntu target/pp4-campaign/ubuntu
+O3K_CAMPAIGN_VERSION=v0.4.0-rc.8 bash tests/pp4-campaign/host-run.sh debian target/pp4-campaign/debian
 # optional Horizon witness (Ubuntu campaign, bounded, non-blocking):
 O3K_PP4_HORIZON=1 bash tests/pp4-campaign/host-run.sh ubuntu ...
 ```

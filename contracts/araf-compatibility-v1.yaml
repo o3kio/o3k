@@ -144,12 +144,12 @@ pp4_tuple:
   status: pinned-evidence-backed
   updated_by: PP.4 (#973)
   o3k:
-    version: v0.4.0-rc.7
+    version: v0.4.0-rc.8
     # stamped with the release-commit SHA in the PP.4 evidence commit; the
     # published bundle manifest.json is the runtime authority (the demo
     # orchestrator reads it fail-closed at install/tuple time).
     source_sha: "0000000000000000000000000000000000000000000000000000000000000000"
-    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.7
+    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.8
   araf:
     version: v1.0.0-rc.12
     source_sha: de64cc9193085116fa30ad51c04ccab24a013dd0

@@ -233,7 +233,7 @@ profiles:
         release bundle, and is not required for O3K readiness. Deployment
         mechanism for the demo profile: Docker Engine + Compose v2 via
         packaging/o3k-araf-demo.sh. The one-line installer integration
-        shipped in v0.4.0-rc.7 (PP.4, #973) on both frozen demo targets
+        shipped in v0.4.0-rc.8 (PP.4, #973) on both frozen demo targets
         (ubuntu-24.04-x86_64, debian-12-x86_64); the FINAL PP.4 campaign
         evidence flip happens separately — this record stays
         pending-evidence until then. No Araf production/HA claim

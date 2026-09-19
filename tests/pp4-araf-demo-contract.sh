@@ -96,8 +96,8 @@ for pair in \
   check "pp4_tuple ${pair} matches script constant" \
     sh -c "[ -n '${script_val}' ] && sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF '${script_val}'"
 done
-check "pp4_tuple pins O3K v0.4.0-rc.7" \
-  sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'version: v0.4.0-rc.7'"
+check "pp4_tuple pins O3K v0.4.0-rc.8" \
+  sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'version: v0.4.0-rc.8'"
 check "pp4_tuple o3k source_sha is a stamped 64-hex value (zeros only before the evidence commit)" \
   sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -Eq 'source_sha: \"?[0-9a-f]{64}\"?'"
 
@@ -136,9 +136,16 @@ check "demo script keeps a legacy-block migration path" \
   sh -c "grep -q 'legacy_strip_o3kd_env_block' '${SCRIPT}'"
 check "federation enable is wrapped in snapshot/rollback" \
   sh -c "grep -q 'snapshot_federation_state' '${SCRIPT}' && grep -q 'restore_federation_state' '${SCRIPT}'"
+# Regression guard (rc.7 defect): the federated-subject lookup ran sed against
+# the demo env file before ensure_o3kd_federation creates it; with set -e +
+# pipefail the missing-file status aborted the whole demo stage silently.
+check "subject lookup is guarded against a missing demo env file" \
+  sh -c "grep -q 'if \[ -f \"\${O3KD_DEMO_ENV}\" \]' '${SCRIPT}'"
+check "keycloak helpers retry with visible status (no silent set -e abort)" \
+  sh -c "grep -q 'demo IdP admin API call did not succeed' '${SCRIPT}' && grep -q 'kc_user_id()' '${SCRIPT}'"
 
 # --- PP.4 one-line installer integration (get-o3k.sh) -------------------------
-check_grep "${WRAPPER}" 'O3K_INSTALLER_VERSION="v0.4.0-rc.7"'
+check_grep "${WRAPPER}" 'O3K_INSTALLER_VERSION="v0.4.0-rc.8"'
 check_grep "${WRAPPER}" 'pp4_stamp()'
 check_grep "${WRAPPER}" 'pp4_stamp T0'
 check_grep "${WRAPPER}" 'pp4_stamp T1'
@@ -173,7 +180,7 @@ check_no_grep "${WRAPPER}" "cargo "
 check_no_grep "${WRAPPER}" "docker build"
 
 # --- PP.4 demo script additions ------------------------------------------------
-check_grep "${SCRIPT}" 'O3K_TUPLE_VERSION="v0.4.0-rc.7"'
+check_grep "${SCRIPT}" 'O3K_TUPLE_VERSION="v0.4.0-rc.8"'
 check_no_grep "${SCRIPT}" 'O3K_TUPLE_SOURCE_SHA'
 check_grep "${SCRIPT}" 'ubuntu:24.04|debian:12' # OS preflight accepts both targets
 check_grep "${SCRIPT}" 'unsupported target'
@@ -292,7 +299,7 @@ check_grep "${PROFILE}" "araf_integration:"
 check_grep "${PROFILE}" "araf_demo_tuple:"
 check_grep "${PROFILE}" "state: pending-evidence"
 check "profile notes the v0.4.0-rc.6 one-line installer integration" \
-  sh -c "grep -qF 'shipped in v0.4.0-rc.7' '${PROFILE}'"
+  sh -c "grep -qF 'shipped in v0.4.0-rc.8' '${PROFILE}'"
 
 # --- functional: realm template is valid JSON --------------------------------
 check "realm template valid JSON" python3 -c "import json;json.load(open('${REALM}'))"
@@ -304,7 +311,7 @@ import yaml
 d = yaml.safe_load(open('${TUPLE}'))
 assert 'pp3_tuple' in d and 'pp4_tuple' in d
 assert d['pp3_tuple']['o3k']['version'] == 'v0.4.0-rc.5'
-assert d['pp4_tuple']['o3k']['version'] == 'v0.4.0-rc.7'
+assert d['pp4_tuple']['o3k']['version'] == 'v0.4.0-rc.8'
 assert d['pp4_tuple']['araf']['version'] == d['pp3_tuple']['araf']['version']"
 
 # --- functional: script parses and constants resolve ------------------------

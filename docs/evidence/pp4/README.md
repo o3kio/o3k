@@ -20,7 +20,7 @@ evidence:
 
 ```sh
 python3 tests/pp4-campaign/make-manifest.py ubuntu target/pp4-campaign/ubuntu/evidence-final \
-  v0.4.0-rc.7 <source-sha> | diff - docs/evidence/pp4/manifest-ubuntu-24.04.json
+  v0.4.0-rc.8 <source-sha> | diff - docs/evidence/pp4/manifest-ubuntu-24.04.json
 ```
 
 Acceptance areas and the evidence files each campaign produces:

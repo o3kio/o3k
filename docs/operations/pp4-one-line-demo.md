@@ -4,7 +4,7 @@ This is the PP.4 public demo path (o3kio/o3k#973). From a fresh supported
 host (Ubuntu 24.04 or Debian 12, x86_64, hardware virtualization available):
 
 ```sh
-curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.7/install.sh | sudo sh -
+curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.8/install.sh | sudo sh -
 ```
 
 (`https://get.o3k.io` is a convenience redirect to the same release asset.)
@@ -30,7 +30,7 @@ That single command:
 O3K demo ready
 
 O3K:
-  version: v0.4.0-rc.7
+  version: v0.4.0-rc.8
   source: <release commit sha>
 Araf:
   version: v1.0.0-rc.12

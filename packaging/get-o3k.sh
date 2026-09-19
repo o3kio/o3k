@@ -5,7 +5,7 @@
 # release generator exports this file byte-for-byte as dist/install.sh
 # (packaging/make-release.sh, 0755, drift-gated by cmp), so the canonical
 # alpha invocation is
-#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.7/install.sh | sudo sh -
+#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.8/install.sh | sudo sh -
 # get.o3k.io is only a convenience 302 redirect to that exact asset:
 #   curl -sfL https://get.o3k.io | sudo sh -
 #
@@ -22,7 +22,7 @@
 # installs the digest-pinned Araf demo deployment material from the VERIFIED
 # bundle into /usr/local/share/o3k/araf-demo/ (convergent, content-compared)
 # and runs packaging/o3k-araf-demo.sh install (the pinned pp3/pp4 tuple from
-# contracts/araf-compatibility-v1.yaml: O3K v0.4.0-rc.7 + Araf v1.0.0-rc.12).
+# contracts/araf-compatibility-v1.yaml: O3K v0.4.0-rc.8 + Araf v1.0.0-rc.12).
 # A demo-stage failure aborts the installer with a message that O3K itself is
 # healthy and the demo stage can be retried from the installed copy — the
 # demo never gates O3K readiness. Stage timing is recorded as T0..T5 stamps
@@ -113,7 +113,7 @@ fi
 # published install.sh GitHub Release asset is byte-identical to this file,
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
-O3K_INSTALLER_VERSION="v0.4.0-rc.7"
+O3K_INSTALLER_VERSION="v0.4.0-rc.8"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
