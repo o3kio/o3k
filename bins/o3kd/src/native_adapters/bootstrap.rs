@@ -477,6 +477,35 @@ impl BootstrapWorkflow for BootstrapAdapter {
             if old != &fingerprint {
                 return Err(BootstrapFailure::Conflict);
             }
+            // Re-project the durable enrolled identity into the live agent
+            // registry when no live registration exists — e.g. after an
+            // o3kd restart or an uninstall/reinstall cycle, where the
+            // canonical join legitimately arrives before the compute agent
+            // reconnects (the installer defers the agent start until after
+            // the join). Without this the BuildingBlock readiness view
+            // rejects the joined block with "unknown execution identity"
+            // and every reinstall deadlocks at the join (issue #971). The
+            // request certificate was authenticated above against the
+            // durable enrolled fingerprint, so the projection can only
+            // restore the durable truth, never mint a new identity. When a
+            // live registration already exists (plain rerun), leave it
+            // untouched: replacing it would trip the epoch lease fence.
+            if self.agents.snapshot(&request.agent_id).await.is_none()
+                && let (Ok(capabilities), Ok(certificate_der)) = (
+                    parse_capabilities(&request.capabilities),
+                    o3k_compute_agent::certificate_der(request.certificate.as_bytes()),
+                )
+            {
+                let _ = self
+                    .agents
+                    .register_prepared(
+                        &request.agent_id,
+                        &request.agent_epoch,
+                        &certificate_der,
+                        capabilities,
+                    )
+                    .await;
+            }
             // Replayed joins still project the durable canonical phase into
             // the live readiness gate (for example after a transient runtime
             // failure), without changing any other readiness input.
@@ -760,6 +789,63 @@ mod tests {
         restarted.set_runtime_ready(true);
         restarted.set_bootstrap_ready(durable.phase == "ready");
         assert!(restarted.is_ready());
+
+        // Reinstall/restart convergence (issue #971): a NEW runtime over the
+        // SAME durable store starts with an EMPTY live agent registry (the
+        // compute agent has not reconnected yet — the installer defers its
+        // start until after the join). A replayed join must re-project the
+        // durable enrolled identity into the live registry instead of
+        // failing the joined BuildingBlock readiness with "unknown execution
+        // identity".
+        let restarted_readiness = o3k_api::AppState::new();
+        restarted_readiness.set_runtime_ready(true);
+        restarted_readiness.set_bootstrap_ready(false);
+        let restarted_adapter = BootstrapAdapter {
+            store: store.clone(),
+            placement: o3k_placement::PlacementLedger::open(
+                std::env::temp_dir().join(format!("o3k-bootstrap-restart-{}", Uuid::now_v7())),
+                store.clone(),
+            )
+            .await?,
+            agents: Arc::new(o3k_compute_agent::NodeRegistry::default()),
+            locations: o3k_kernel::LocationRegistry::default(),
+            bootstrap_secret: Some("secret".to_owned()),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            readiness: restarted_readiness.clone(),
+        };
+        assert!(
+            restarted_adapter
+                .agents
+                .snapshot("node-test")
+                .await
+                .is_none(),
+            "fresh runtime must start with an empty live registry"
+        );
+        let reinstall_replay = restarted_adapter
+            .join(JoinRequest {
+                enrollment_token: "reinstall-replay-grant".into(),
+                agent_id: "node-test".into(),
+                agent_epoch: "epoch-3".into(),
+                certificate: String::from_utf8(include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem").to_vec())?,
+                region: None,
+                availability_domain: None,
+                failure_domain_id: None,
+                capabilities: serde_json::json!({"architecture":"x86_64","provider_name":"o3k-compute","provider_version":"test"}),
+                inventories: BTreeMap::from([(String::from("VCPU"), 2), (String::from("MEMORY_MB"), 1024)]),
+            })
+            .await
+            .map_err(|error| format!("reinstall replay join failed: {error:?}"))?;
+        assert_eq!(reinstall_replay.building_block_id, join.building_block_id);
+        assert_eq!(reinstall_replay.phase, "ready");
+        assert!(restarted_readiness.is_ready());
+        assert!(
+            restarted_adapter
+                .agents
+                .snapshot("node-test")
+                .await
+                .is_some(),
+            "replayed join must re-project the durable identity into the live registry"
+        );
         Ok(())
     }
 }
