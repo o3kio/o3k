@@ -70,7 +70,6 @@ O3K_API_URL="https://api.o3k.demo"
 TRUST_ID="araf-demo-idp"
 O3K_AUDIENCE="o3k"
 ADMIN_PROJECT_ID="eba29e2d-53de-461d-ae91-ede7402713cb"
-ALICE_ID="00000000-0000-4000-8000-0000000000a1"
 
 STATE_DIR="${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}"
 TLS_DIR="${STATE_DIR}/tls"
@@ -333,7 +332,7 @@ O3K_OIDC_TRUST_ID=${TRUST_ID}
 O3K_OIDC_ISSUER=${ISSUER_URL}
 O3K_OIDC_AUDIENCE=${O3K_AUDIENCE}
 O3K_OIDC_DISCOVERY_URL=${ISSUER_URL}/.well-known/openid-configuration
-O3K_TESTLAB_FEDERATED_SUBJECT=${ALICE_ID}
+O3K_TESTLAB_FEDERATED_SUBJECT=${ALICE_SUBJECT}
 O3K_TESTLAB_FEDERATED_PRINCIPAL_ID=bootstrap-user
 O3K_TESTLAB_FEDERATED_BINDING_ID=${FEDERATED_BINDING_ID}
 O3K_TESTLAB_OPERATOR_ASSIGNMENT_ID=${OPERATOR_ASSIGNMENT_ID}
@@ -412,19 +411,29 @@ kc_api() { # kc_api METHOD PATH [JSON_BODY]
 }
 
 ensure_alice() {
+  # Keycloak assigns the user id server-side, so the federated subject is
+  # whatever id this IdP instance gave alice. Capture it and feed the o3kd
+  # federation block from it; convergent across IdP re-creation (fresh demo
+  # IdP database -> new subject -> managed block is rewritten + o3kd upserts
+  # the new binding idempotently).
   local existing
   existing="$(curl -sf --cacert "${TLS_DIR}/ca.crt" \
     -H "Authorization: Bearer $(kc_token)" \
     "https://idp.o3k.demo/admin/realms/${ISSUER_REALM}/users?username=alice" \
     | python3 -c 'import json,sys; u=json.load(sys.stdin); print(u[0]["id"] if u else "")')"
   if [ -z "${existing}" ]; then
-    log "creating demo user alice (fixed subject ${ALICE_ID})"
+    log "creating demo user alice"
     kc_api POST "/admin/realms/${ISSUER_REALM}/users" \
-      "{\"id\":\"${ALICE_ID}\",\"username\":\"alice\",\"enabled\":true}"
-  elif [ "${existing}" != "${ALICE_ID}" ]; then
-    die "keycloak user alice has unexpected subject ${existing}"
+      '{"username":"alice","enabled":true}'
+    existing="$(curl -sf --cacert "${TLS_DIR}/ca.crt" \
+      -H "Authorization: Bearer $(kc_token)" \
+      "https://idp.o3k.demo/admin/realms/${ISSUER_REALM}/users?username=alice" \
+      | python3 -c 'import json,sys; u=json.load(sys.stdin); print(u[0]["id"] if u else "")')"
   fi
-  kc_api PUT "/admin/realms/${ISSUER_REALM}/users/${ALICE_ID}/reset-password" \
+  [ -n "${existing}" ] || die "keycloak user alice missing after provisioning"
+  ALICE_SUBJECT="${existing}"
+  log "demo user alice subject: ${ALICE_SUBJECT}"
+  kc_api PUT "/admin/realms/${ISSUER_REALM}/users/${ALICE_SUBJECT}/reset-password" \
     '{"type":"password","value":"'"${ALICE_PASSWORD}"'","temporary":false}'
 }
 
