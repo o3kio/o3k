@@ -18,24 +18,57 @@ export interface Pp4Env {
   readonly aliceUser: string;
   /** Keycloak password for alice (REQUIRED, never logged). */
   readonly alicePassword: string;
-  /** Canonical VM name created by the tenant journey. */
+  /** Canonical VM name the tenant journey attempts to create. */
   readonly vmName: string;
+  /**
+   * Deterministic name of the server the tenant journey deletes through the
+   * console. The campaign harness creates it through the unmodified OpenStack
+   * CLI BEFORE the browser phase (a CLI-created server is a canonical native
+   * resource that the console lists), because the pinned Araf SPA cannot
+   * submit any create form.
+   */
+  readonly uiTargetName: string;
+  /**
+   * Canonical id of that server (REQUIRED). host-run.sh creates
+   * `pp4-ui-target` through the unmodified OpenStack CLI in the VM and exports
+   * the id `openstack server show pp4-ui-target -c id -f value` reports.
+   */
+  readonly uiTargetId: string;
   /** TestLab image name that must exist (default cirros-0.6.3). */
   readonly imageName: string;
   /** TestLab network name that must exist (default testlab-network). */
   readonly networkName: string;
+  /**
+   * Canonical id of the TestLab image (REQUIRED). VERIFIED: the demo's cirros
+   * image exists only through the compatibility (Glance) API — the native
+   * `image.image` inventory is empty — so the harness passes the id the
+   * unmodified OpenStack CLI reports (`openstack image list`).
+   */
+  readonly imageId: string;
+  /**
+   * Canonical id of the TestLab network (REQUIRED). VERIFIED: `testlab-network`
+   * was created through the compatibility (Neutron) API and is therefore not a
+   * canonical `network:network` resource; the console create form still needs
+   * the id `openstack network list` reports.
+   */
+  readonly networkId: string;
   /** TestLab flavor name (display only; the create contract needs the UUID). */
   readonly flavorName: string;
   /**
-   * Canonical UUID of the testlab-flavor. Optional only because the harness
-   * additionally attempts UI discovery on /resources/compute.flavor, which the
-   * pinned demo tuple does not advertise (the compute.flavor manifest has no
-   * collection). The campaign harness must normally provide this, read from
-   * the VM's /etc/o3k/testlab-flavor-id ledger.
+   * Canonical UUID of the testlab-flavor (REQUIRED). The pinned demo tuple
+   * advertises no flavor collection, so there is nothing to fall back on: the
+   * campaign harness reads it from the VM's /etc/o3k/testlab-flavor-id ledger
+   * (packaging/bootstrap-testlab.sh) and exports PP4_FLAVOR_ID.
    */
-  readonly flavorId: string | undefined;
-  /** Expected admin project id; when set it must be offered by scope discovery. */
-  readonly adminProjectId: string | undefined;
+  readonly flavorId: string;
+  /** Expected admin project id (REQUIRED; must be offered by scope discovery). */
+  readonly adminProjectId: string;
+  /**
+   * phase1a deployment-tuple evidence (KEY=VALUE) proving the deployed Araf is
+   * the pinned production tuple. Required: the console DOM alone is not
+   * server-side proof about the deployment.
+   */
+  readonly deploymentEnvFile: string | undefined;
   /** Directory for evidence screenshots. */
   readonly evidenceDir: string;
   /** Poll budget for canonical Operations to reach a terminal state. */
@@ -90,6 +123,7 @@ let cached: Pp4Env | undefined;
 
 export function loadEnv(): Pp4Env {
   if (cached) return cached;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const env: Pp4Env = {
     tenantUrl: normalizeBaseUrl(
       "TENANT_URL",
@@ -106,15 +140,54 @@ export function loadEnv(): Pp4Env {
       "Export the demo user's Keycloak password (see tests/pp4-browser-e2e/README.md).",
     ),
     vmName: withDefault("PP4_VM_NAME", "pp4-native"),
+    uiTargetName: withDefault("PP4_UI_TARGET_NAME", "pp4-ui-target"),
+    uiTargetId: required(
+      "PP4_UI_TARGET_ID",
+      "host-run.sh creates `pp4-ui-target` through the unmodified OpenStack CLI in the VM " +
+        "before the browser phase; export the id `openstack server show pp4-ui-target -c id -f value` reports.",
+    ),
     imageName: withDefault("PP4_IMAGE_NAME", "cirros-0.6.3"),
     networkName: withDefault("PP4_NETWORK_NAME", "testlab-network"),
+    imageId: required(
+      "PP4_IMAGE_ID",
+      "Read it in the VM: sudo sh -c '. /etc/o3k/admin-openrc; openstack image list -f json' " +
+        "(the native image.image inventory is empty on this profile).",
+    ),
+    networkId: required(
+      "PP4_NETWORK_ID",
+      "Read it in the VM: sudo sh -c '. /etc/o3k/admin-openrc; openstack network list -f json' " +
+        "(testlab-network exists only through the compatibility API).",
+    ),
     flavorName: withDefault("PP4_FLAVOR_NAME", "testlab-flavor"),
-    flavorId: read("PP4_FLAVOR_ID"),
-    adminProjectId: read("PP4_ADMIN_PROJECT_ID"),
+    flavorId: required(
+      "PP4_FLAVOR_ID",
+      "Read it in the VM: sudo cat /etc/o3k/testlab-flavor-id (the pinned demo " +
+        "tuple advertises no flavor collection to fall back on).",
+    ),
+    adminProjectId: required(
+      "PP4_ADMIN_PROJECT_ID",
+      "Export the canonical admin project id (eba29e2d-53de-461d-ae91-ede7402713cb).",
+    ),
+    deploymentEnvFile: read("PP4_DEPLOYMENT_ENV_FILE"),
     evidenceDir: resolve(read("PP4_EVIDENCE_DIR") ?? "./evidence"),
     operationTimeoutMs: asPositiveInt("PP4_OP_TIMEOUT_MS", 15 * 60 * 1000),
     resourceTimeoutMs: asPositiveInt("PP4_RESOURCE_TIMEOUT_MS", 10 * 60 * 1000),
   };
+  if (!uuid.test(env.flavorId)) {
+    throw new Error(`[pp4] PP4_FLAVOR_ID must be a canonical uuid, got "${env.flavorId}"`);
+  }
+  if (!uuid.test(env.imageId)) {
+    throw new Error(`[pp4] PP4_IMAGE_ID must be a canonical uuid, got "${env.imageId}"`);
+  }
+  if (!uuid.test(env.networkId)) {
+    throw new Error(`[pp4] PP4_NETWORK_ID must be a canonical uuid, got "${env.networkId}"`);
+  }
+  if (!uuid.test(env.uiTargetId)) {
+    throw new Error(`[pp4] PP4_UI_TARGET_ID must be a canonical uuid, got "${env.uiTargetId}"`);
+  }
+  if (!uuid.test(env.adminProjectId)) {
+    throw new Error(`[pp4] PP4_ADMIN_PROJECT_ID must be a canonical uuid, got "${env.adminProjectId}"`);
+  }
   cached = env;
   return env;
 }
@@ -123,4 +196,17 @@ export function loadEnv(): Pp4Env {
 export function ensureEvidenceDir(env: Pp4Env): string {
   mkdirSync(env.evidenceDir, { recursive: true });
   return isAbsolute(env.evidenceDir) ? env.evidenceDir : resolve(env.evidenceDir);
+}
+
+/** Parse KEY=VALUE lines (the campaign's numbered evidence format). */
+export function parseKeyValues(text: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const index = trimmed.indexOf("=");
+    if (index <= 0) continue;
+    values[trimmed.slice(0, index).trim()] = trimmed.slice(index + 1).trim();
+  }
+  return values;
 }

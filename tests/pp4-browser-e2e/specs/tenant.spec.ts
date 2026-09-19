@@ -1,49 +1,78 @@
 /**
  * PP.4 tenant journey — sequential, one shared browser context.
  *
- * Proves, against the live demo deployment (production Araf profile on the
- * real O3K native API, real Keycloak OIDC):
+ * Proves against the live demo deployment (production Araf profile on the real
+ * O3K native API, real Keycloak OIDC), and truthfully records what this product
+ * profile does NOT support as classified gaps:
  *   a. OIDC login (authorization code + PKCE through the confidential BFF)
- *   b. project scope discovery + selection (admin project)
- *   c. service catalog derived from real O3K discovery
- *   d. usage/capacity truth (quotas/meters)
- *   e. deployment topology context on the tenant home
- *   f. image collection contains cirros-0.6.3 (TestLab image)
- *   g. network collection contains testlab-network
- *   h. server collection contains test-vm with truthful status
- *   i. create VM "pp4-native" (cirros + testlab-flavor + testlab-network),
- *      canonical Operation -> SUCCEEDED, server Ready
- *   j. inspect pp4-native detail — canonical uuid displayed
- *   k. stop action — truthful state transition + Operation
- *   l. delete pp4-native — canonical delete Operation + final absence
+ *   b. web-storage/DOM security scan + cookie audit
+ *   c. project scope discovery + selection (admin project)
+ *   d. service catalog derived from real O3K discovery
+ *   e. usage/capacity truth (quotas/meters)
+ *   f. deployment topology context on the tenant home
+ *   g. image collection renders truthfully — the native `image.image`
+ *      inventory is EMPTY while the demo's cirros image exists through the
+ *      compatibility (Glance) API -> PP4-GAP images-native-inventory=compat-only
+ *   h. network collection renders truthfully — `testlab-network` was created
+ *      through the compatibility (Neutron) API and is not a canonical
+ *      `network:network` resource -> PP4-GAP network-compat-created-not-canonical
+ *   i. server collection lists the CLI-created workload by CANONICAL ID (the
+ *      native list projection carries no spec name)
+ *   j. a REAL console create of a VM fails truthfully: the native
+ *      `compute.server` create cannot be scheduled on this profile (the
+ *      network execution agent is inactive by contract), the console shows a
+ *      real error, and no server is fabricated. The pinned Araf SPA cannot
+ *      submit ANY create form (the create schemas O3K serves declare JSON
+ *      Schema 2020-12 while the pinned schema-runtime compiles with draft-07
+ *      Ajv; the upstream fix, Araf PR #118, is not in this release tuple), so
+ *      the observed console error is classified as well:
+ *      -> PP4-GAP native-vm-create=network-provider-inactive
+ *      -> PP4-GAP console-create-schema-dialect=<observed error class>
+ *   k. a REAL console delete on a supported native resource class: the server
+ *      `pp4-ui-target` (created BEFORE the browser phase through the
+ *      unmodified OpenStack CLI, so it is a canonical native resource with the
+ *      same uuid the console lists) is deleted through its advertised action
+ *      and confirmation modal, and the truthful final absence is observed.
+ *      Prints PP4-UI-DELETE id=<uuid> state=<observed>.
+ *   l. inspect the TestLab workload detail by canonical id
  *   m. logout — session destroyed, follow-up API call 401s
  *
  * stdout protocol lines grepped by the campaign harness:
- *   PP4-TIMESTAMPS T4=<unix seconds>   (after login succeeds)
- *   PP4-NATIVE id=<uuid>               (after pp4-native is ACTIVE)
- *   PP4-TENANT-OK                      (after logout asserts)
+ *   PP4-TIMESTAMPS T4=<unix seconds>         (after login succeeds)
+ *   PP4-UI-CSRF-BRIDGE <METHOD> <path>       (diagnostic: CSRF header added)
+ *   PP4-UI-FALLBACK <step>                   (INVALIDATING: a step fell back to
+ *                                             the BFF; host-run fails)
+ *   PP4-GAP <id> <detail>                    (classified product-profile gap)
+ *   PP4-UI-DELETE id=<uuid> state=<state>    (after the console delete)
+ *   PP4-TENANT-OK                            (after logout asserts)
  *
- * Security asserts run immediately after login (web storage + DOM scan).
+ * Security asserts run immediately after login (web storage + DOM scan) plus a
+ * deployment-side production-profile check (PP4_DEPLOYMENT_ENV_FILE).
  *
- * Known pinned-tuple limitations exercised here (see README.md):
- *   - Araf rc.12 SPA never sends x-csrf-token, so UI mutations 403; the
- *     harness attempts the UI click first and falls back to the identical BFF
- *     call with the CSRF header (what Araf's own process evidence uses).
- *   - Araf rc.12 schema-runtime cannot compile the O3K draft 2020-12 create
- *     schema, so the create form blocks client-side; the fallback create uses
- *     the exact payload the form would send (with network_ids as an array).
+ * Cross-spec handoff: none. The resource the console deletes is the harness's
+ * own target, whose canonical id the campaign exports as PP4_UI_TARGET_ID; the
+ * operator journey ties its canonical-operations assertion to the same id
+ * instead of reading a shared file.
+ *
+ * Known pinned-tuple limitations exercised here (see ../README.md):
+ *   - the pinned Araf SPA never sends x-csrf-token, so UI mutations would 403;
+ *     `installCsrfBridge` adds that one header at the network layer, keeping
+ *     the click path real. The delete mutation goes through the real UI
+ *     (advertised action button + confirmation modal) with no BFF fallback: a
+ *     step that cannot be performed through the UI fails the campaign here
+ *     rather than bypassing it.
  */
 import { expect, test } from "playwright/test";
 import type { Browser } from "playwright";
 import { loadEnv, type Pp4Env } from "../lib/env";
 import {
-  createComputeServer,
-  deleteResource,
+  bffFetch,
+  getResource,
   getSession,
+  installCsrfBridge,
   listScopes,
   logCookieNames,
   logout,
-  submitResourceAction,
 } from "../lib/bff";
 import {
   assertIdentityVisible,
@@ -53,13 +82,19 @@ import {
   type AuthenticatedSurface,
 } from "../lib/login";
 import {
+  CANONICAL_ID,
   evidence,
+  expectNoConsoleCrash,
   expectNoFixtureMarkers,
+  expectProductionDeployment,
+  findResourceIdByName,
+  getResourceOrUndefined,
+  openCollection,
   openOperationDetail,
-  resourceIdByName,
-  resourceRow,
-  waitForOperationTerminal,
-  waitForResourceStatus,
+  parseSubmittedOperation,
+  resourceRowById,
+  resolveTerminalOperation,
+  waitForResourceConcealed,
 } from "../lib/console";
 
 test.describe.configure({ mode: "serial" });
@@ -67,35 +102,73 @@ test.setTimeout(300_000);
 
 const SERVER_TYPE = "compute.server";
 const SERVER_PLURAL = "servers";
+const NETWORK_TYPE = "network.network";
+const NETWORK_PLURAL = "networks";
+const IMAGE_TYPE = "image.image";
+const IMAGE_PLURAL = "images";
 
 let env: Pp4Env;
 let browser: Browser | undefined;
 let auth: AuthenticatedSurface;
 let projectName = "";
-let imageId = "";
-let networkId = "";
-let flavorId = "";
-let vmId = "";
+let testVmId = "";
 
-async function cleanupVm(): Promise<void> {
-  if (!vmId) return;
-  try {
-    const existing = await resourceRow(auth.page, SERVER_PLURAL, env.vmName).count();
-    if (existing > 0) {
-      // eslint-disable-next-line no-console
-      console.log("[pp4] cleanup: deleting leftover VM");
-      await submitResourceAction(auth.page, auth.context, env.tenantUrl, SERVER_TYPE, vmId, "stop").catch(() => undefined);
-      await deleteResource(auth.page, auth.context, env.tenantUrl, SERVER_TYPE, vmId).catch(() => undefined);
-    }
-  } catch {
-    // best effort only
+/** Emit a classified product-profile gap: one log line, one evidence line. */
+function gap(id: string, detail: string): void {
+  // eslint-disable-next-line no-console
+  console.log(`PP4-GAP ${id} ${detail}`);
+}
+
+/** Read the create page's error banner (or undefined when none is shown). */
+async function readErrorBanner(): Promise<string | undefined> {
+  const alert = auth.page.getByRole("alert").first();
+  if ((await alert.count()) === 0) return undefined;
+  const text = (await alert.textContent().catch(() => "")) ?? "";
+  return text.trim() === "" ? undefined : text.trim();
+}
+
+/** The console create error class plus the raw signal it was decided from. */
+interface CreateErrorClassification {
+  /** `client-schema-compile` | `client-validation` | `upstream-<status>` | `other`. */
+  readonly klass: string;
+  /** Rendered field-level error elements (Cloudscape's `<controlId>-error` slot). */
+  readonly fieldErrors: number;
+}
+
+/**
+ * Classify the console create failure from what the page actually rendered.
+ *
+ * The create page renders the SAME submit-time summary ("Please correct the
+ * errors below.") for a schema-runtime compile failure and for contract-field
+ * validation, so the banner alone cannot separate the two. The DOM can: the
+ * pinned schema-runtime reports a compile failure with an EMPTY instance path
+ * (`collectErrors` then maps it to no field), while a real field validation
+ * failure renders Cloudscape's error slot `<controlId>-error` (Araf passes
+ * `controlId=field-<key>`).
+ */
+async function classifyCreateError(banner: string): Promise<CreateErrorClassification> {
+  if (/correct the errors below/i.test(banner)) {
+    const fieldErrors = await auth.page
+      .locator('form [id$="-error"]')
+      .filter({ hasText: /\S/u })
+      .count();
+    return { klass: fieldErrors === 0 ? "client-schema-compile" : "client-validation", fieldErrors };
   }
+  const upstream = /\((\d{3})\)/u.exec(banner);
+  if (upstream?.[1]) return { klass: `upstream-${upstream[1]}`, fieldErrors: 0 };
+  return { klass: "other", fieldErrors: 0 };
 }
 
 test.beforeAll(async () => {
-  env = loadEnv(); // fail fast on missing PP4_ALICE_PASSWORD etc.
+  env = loadEnv(); // fail fast on missing PP4_ALICE_PASSWORD / PP4_FLAVOR_ID etc.
+  // Server-side fixture check: the deployment itself must be the pinned
+  // production tuple (phase1a evidence), not merely render without the word.
+  expectProductionDeployment(env);
   browser = await connectBrowser(env);
   auth = await loginToSurface(browser, env, "tenant");
+  // The pinned SPA sends no CSRF header; bridge it so the UI click path can
+  // actually perform its mutations (recorded per request as PP4-UI-CSRF-BRIDGE).
+  await installCsrfBridge(auth.context, auth.baseUrl);
 
   // (a) "browser login usable" measurement for the campaign timestamps.
   // eslint-disable-next-line no-console
@@ -145,9 +218,8 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  await cleanupVm().catch(() => undefined);
   try {
-    if (auth) await logout(auth.page, auth.context, auth.baseUrl);
+    if (auth) await logout(auth.page, auth.baseUrl);
   } catch {
     // already logged out or session gone
   }
@@ -162,6 +234,10 @@ test("project scope is listed and selectable", async () => {
     (scope) => scope.kind === "project" && scope.can_request_token !== false,
   );
   expect(adminListed.length, "scope discovery must list projects").toBeGreaterThan(0);
+  expect(
+    adminListed.some((scope) => scope.id === env.adminProjectId),
+    "scope discovery must offer the canonical admin project",
+  ).toBe(true);
 
   // ...and the shell reflects the selection (ProjectSelector in the nav).
   const selector = auth.page.getByLabel("Project");
@@ -247,70 +323,130 @@ test("tenant home shows truthful deployment context", async () => {
   await expect(auth.page.getByText("No project selected")).toHaveCount(0);
 });
 
-test("image collection contains the TestLab image", async () => {
-  imageId = await resourceIdByName(
-    auth.page,
-    env.tenantUrl,
-    "image.image",
-    "images",
-    env.imageName,
-  );
-  expect(imageId, "resolved image id must be a canonical uuid").toMatch(
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-  );
-});
+test("image collection is truthful about the native inventory", async () => {
+  const observed = await openCollection(auth.page, env.tenantUrl, IMAGE_TYPE, IMAGE_PLURAL);
 
-test("network collection contains the TestLab network", async () => {
-  networkId = await resourceIdByName(
-    auth.page,
-    env.tenantUrl,
-    "network.network",
-    "networks",
-    env.networkName,
-  );
-  expect(networkId, "resolved network id must be a canonical uuid").toMatch(
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-  );
-});
+  // Whatever is rendered must be a real canonical resource: the console must
+  // never invent a row. Every row id is a canonical uuid and is either a live
+  // canonical resource of the right type or a concealed canonical tombstone.
+  let liveRows = 0;
+  let tombstoneRows = 0;
+  for (const id of observed.ids) {
+    expect(id, "a rendered image row must carry a canonical uuid").toMatch(CANONICAL_ID);
+    const resource = await getResourceOrUndefined(auth.page, env.tenantUrl, IMAGE_TYPE, id);
+    if (!resource) {
+      tombstoneRows += 1;
+      continue;
+    }
+    liveRows += 1;
+    expect(resource.id, "the row id must resolve to the same canonical resource").toBe(id);
+    expect(resource.resourceType, "a rendered image row must be an image.image resource").toBe(
+      IMAGE_TYPE,
+    );
+  }
+  await evidence(auth.page, env, "06-images-native-inventory");
 
-test("server collection contains the TestLab workload with truthful status", async () => {
-  await auth.page.goto(`${env.tenantUrl}/resources/${SERVER_TYPE}`);
-  await expect(
-    auth.page.getByRole("heading", { name: new RegExp(SERVER_PLURAL, "i") }).first(),
-  ).toBeVisible({ timeout: 30_000 });
-  const row = resourceRow(auth.page, SERVER_PLURAL, "test-vm");
-  await expect(row, "test-vm row is listed").toBeVisible({ timeout: 60_000 });
-  // The status cell renders the mapped O3K state (Ready/Busy/Error/Unknown).
-  await expect(row.getByText(/Ready|Busy|Error|Unknown/)).toBeVisible();
+  // VERIFIED profile fact: the demo image exists only through the
+  // compatibility (Glance) API, so the native inventory does not carry it.
+  const compatListed = observed.ids.includes(env.imageId);
+  if (!compatListed) {
+    gap(
+      "images-native-inventory=compat-only",
+      `native_rows=${observed.ids.length} live_rows=${liveRows} tombstone_rows=${tombstoneRows} ` +
+        `compat_image_id=${env.imageId} compat_image_name=${env.imageName} ` +
+        `empty_state=${String(observed.empty)}`,
+    );
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[pp4] the compat image ${env.imageId} IS a canonical native row ` +
+        `(${observed.ids.length} row(s) total): no inventory gap to classify`,
+    );
+  }
   await expectNoFixtureMarkers(auth.page);
 });
 
-test("create representative VM pp4-native", async () => {
+test("network collection is truthful about the native inventory", async () => {
+  const observed = await openCollection(auth.page, env.tenantUrl, NETWORK_TYPE, NETWORK_PLURAL);
+
+  let liveRows = 0;
+  let tombstoneRows = 0;
+  for (const id of observed.ids) {
+    expect(id, "a rendered network row must carry a canonical uuid").toMatch(CANONICAL_ID);
+    const resource = await getResourceOrUndefined(auth.page, env.tenantUrl, NETWORK_TYPE, id);
+    if (!resource) {
+      tombstoneRows += 1;
+      continue;
+    }
+    liveRows += 1;
+    expect(resource.id, "the row id must resolve to the same canonical resource").toBe(id);
+    expect(
+      resource.resourceType,
+      "a rendered network row must be a network.network resource",
+    ).toBe(NETWORK_TYPE);
+  }
+  await evidence(auth.page, env, "07-networks-native-inventory");
+
+  // VERIFIED profile fact: testlab-network was created through the
+  // compatibility (Neutron) API and lives only in the compat store, so a fresh
+  // demo deployment shows an empty Araf Networks page while
+  // `openstack network list` shows it.
+  const compatListed = observed.ids.includes(env.networkId);
+  if (!compatListed) {
+    gap(
+      "network-compat-created-not-canonical",
+      `native_rows=${observed.ids.length} live_rows=${liveRows} tombstone_rows=${tombstoneRows} ` +
+        `compat_network_id=${env.networkId} compat_network_name=${env.networkName} ` +
+        `empty_state=${String(observed.empty)}`,
+    );
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[pp4] the compat network ${env.networkId} IS a canonical native row ` +
+        `(${observed.ids.length} row(s) total): no inventory gap to classify`,
+    );
+  }
+  await expectNoFixtureMarkers(auth.page);
+});
+
+test("server collection lists the TestLab workload by canonical id", async () => {
+  // Row identity is the canonical id: VERIFIED, the native list projection
+  // does not carry the spec name for every resource (some rows are labelled
+  // with their id). The name is asserted on the detail page below.
+  testVmId = await findResourceIdByName(auth.page, env.tenantUrl, SERVER_TYPE, "test-vm");
+  expect(testVmId, "resolved workload id must be a canonical uuid").toMatch(CANONICAL_ID);
+
+  const observed = await openCollection(auth.page, env.tenantUrl, SERVER_TYPE, SERVER_PLURAL);
+  expect(observed.ids, `test-vm (${testVmId}) must be listed`).toContain(testVmId);
+
+  const row = resourceRowById(auth.page, SERVER_PLURAL, testVmId);
+  await expect(row, `test-vm (${testVmId}) row is listed`).toBeVisible({ timeout: 60_000 });
+  // The status cell renders the mapped O3K state (Ready/Busy/Error/Unknown).
+  await expect(row.getByText(/Ready|Busy|Error|Unknown/)).toBeVisible();
+
+  // The detail page renders the resource's real name and canonical id.
+  await auth.page.goto(`${env.tenantUrl}/resources/${SERVER_TYPE}/${encodeURIComponent(testVmId)}`);
+  await expect(
+    auth.page.getByRole("heading", { name: "test-vm" }),
+    "the detail page renders the TestLab workload name",
+  ).toBeVisible({ timeout: 30_000 });
+  await expect(auth.page.getByText(`ID: ${testVmId}`)).toBeVisible();
+  await expectNoConsoleCrash(auth.page);
+  await expectNoFixtureMarkers(auth.page);
+});
+
+test("console VM create fails truthfully (classified gap)", async () => {
   test.setTimeout(env.operationTimeoutMs + 6 * 60 * 1000);
 
-  // Resolve the testlab-flavor canonical id. The pinned demo tuple does not
-  // advertise a flavor collection (compute.flavor has no collection in the
-  // O3K manifest), so the campaign harness normally exports PP4_FLAVOR_ID
-  // read from the VM's /etc/o3k/testlab-flavor-id ledger.
-  if (env.flavorId) {
-    flavorId = env.flavorId;
-  } else {
-    try {
-      flavorId = await resourceIdByName(
-        auth.page,
-        env.tenantUrl,
-        "compute.flavor",
-        "flavors",
-        env.flavorName,
-      );
-    } catch (error) {
-      throw new Error(
-        `[pp4] cannot resolve flavor "${env.flavorName}" through the console ` +
-          `(the pinned demo tuple does not advertise a flavor collection): ${String(error)}. ` +
-          `Export PP4_FLAVOR_ID=<uuid> (VM ledger: /etc/o3k/testlab-flavor-id).`,
-      );
-    }
-  }
+  // The pinned demo tuple does not advertise a flavor collection
+  // (compute.flavor has no collection in the O3K manifest), so the canonical
+  // id must come from the campaign harness (PP4_FLAVOR_ID, read in the VM from
+  // /etc/o3k/testlab-flavor-id). loadEnv() already fails when it is missing.
+  const flavorId = env.flavorId;
+
+  // Baseline: the server rows that exist BEFORE the create attempt, so the
+  // outcome can never pass vacuously on stale state.
+  const before = await openCollection(auth.page, env.tenantUrl, SERVER_TYPE, SERVER_PLURAL);
 
   // Schema-driven create form (fields derived from the O3K create contract:
   // name, image_id, flavor_id, network_ids, ...).
@@ -329,253 +465,241 @@ test("create representative VM pp4-native", async () => {
   }
 
   await nameField.fill(env.vmName);
-  await imageField.fill(imageId);
+  await imageField.fill(env.imageId);
   await flavorField.fill(flavorId);
-  await networkField.fill(networkId); // text widget; array contract needs []
+  await networkField.fill(env.networkId); // text widget; the array contract needs []
 
-  // Attempt the truthful UI submit first.
+  // The REAL UI submit. No BFF fallback exists for this step: the expected
+  // outcome is a truthful failure, so there is nothing to fall back to.
   await auth.page.getByRole("button", { name: "Create Server" }).click();
 
   const submittedHeading = auth.page.getByRole("heading", { name: /creation submitted/i });
-  const blockedAlert = auth.page.getByRole("alert").first();
+  const alert = auth.page.getByRole("alert").first();
   const outcome = await Promise.race([
-    submittedHeading.waitFor({ state: "visible", timeout: 30_000 }).then(() => "submitted" as const),
-    blockedAlert.waitFor({ state: "visible", timeout: 30_000 }).then(() => "blocked" as const),
-  ]).catch(() => "blocked" as const);
+    submittedHeading.waitFor({ state: "visible", timeout: 45_000 }).then(() => "submitted" as const),
+    alert.waitFor({ state: "visible", timeout: 45_000 }).then(() => "error" as const),
+  ]).catch(() => "timeout" as const);
 
-  let createOperationId = "";
-  if (outcome === "submitted") {
-    // eslint-disable-next-line no-console
-    console.log("[pp4] create submitted through the UI form");
-    await expect(submittedHeading).toBeVisible();
-    const bodyText = (await auth.page.textContent("body")) ?? "";
-    const match = /Operation\s+(\S+)\s+is\s+(\S+)/.exec(bodyText);
-    expect(match, "submitted screen must name the canonical Operation").toBeTruthy();
-    createOperationId = match![1]!;
-  } else {
-    // The submit may simply have been slower than the validation alert; do
-    // not create a second VM if the form actually went through.
-    if (await submittedHeading.isVisible().catch(() => false)) {
-      // eslint-disable-next-line no-console
-      console.log("[pp4] create submitted through the UI form (slow path)");
-      const bodyText = (await auth.page.textContent("body")) ?? "";
-      const match = /Operation\s+(\S+)\s+is\s+(\S+)/.exec(bodyText);
-      expect(match, "submitted screen must name the canonical Operation").toBeTruthy();
-      createOperationId = match![1]!;
-    } else {
-      const alertText = (await blockedAlert.first().textContent().catch(() => "")) ?? "";
-      // eslint-disable-next-line no-console
-      console.log(
-        `[pp4] PP4-NOTE create form blocked client-side (pinned Araf schema-runtime ` +
-          `cannot compile the O3K draft 2020-12 create schema): ${alertText.trim().slice(0, 200)}`,
-      );
-      await evidence(auth.page, env, "02a-create-form-blocked");
-      // Fallback: the identical BFF call the form would make, with the payload
-      // the O3K create contract requires (network_ids as an array).
-      const operation = await createComputeServer(auth.page, auth.context, env.tenantUrl, {
-        name: env.vmName,
-        image_id: imageId,
-        flavor_id: flavorId,
-        network_ids: [networkId],
-      });
-      createOperationId = operation.id;
-      // eslint-disable-next-line no-console
-      console.log(`[pp4] create accepted through the BFF fallback: operation ${createOperationId}`);
-    }
+  let detail = "";
+  let consoleErrorClass: CreateErrorClassification | undefined;
+  let consoleErrorBanner = "";
+  if (outcome === "timeout") {
+    await evidence(auth.page, env, "08a-create-form-no-outcome");
+    throw new Error(
+      "[pp4] the console create attempt produced neither a submitted screen nor an error " +
+        `banner for ${env.vmName}`,
+    );
   }
-  expect(createOperationId).not.toBe("");
 
-  // Canonical Operation observed through the UI.
-  await openOperationDetail(auth.page, env.tenantUrl, createOperationId);
-  await expect(
-    auth.page.getByText(/Pending|Running/).first(),
-    "create Operation is observable as pending/running",
-  ).toBeVisible({ timeout: 30_000 });
-  await evidence(auth.page, env, "02-create-operation-pending");
+  if (outcome === "error") {
+    const banner = (await readErrorBanner()) ?? "";
+    await evidence(auth.page, env, "08b-create-form-truthful-error");
+    expect(banner, "the console must surface a real error message").not.toBe("");
+    expect(
+      await submittedHeading.count(),
+      "a truthful error must not leave the create success screen visible",
+    ).toBe(0);
+    consoleErrorClass = await classifyCreateError(banner);
+    consoleErrorBanner = banner;
+    detail =
+      `console_error_class=${consoleErrorClass.klass} ` +
+      `console_error=${JSON.stringify(banner.slice(0, 200))}`;
+  } else {
+    // The form reached the BFF: the canonical Operation must carry the
+    // upstream failure (never a fabricated success). The state is polled
+    // directly so "the operation failed" and "the operation never reached a
+    // terminal state" are never conflated.
+    const bodyText = (await auth.page.textContent("body")) ?? "";
+    const submitted = parseSubmittedOperation(bodyText);
+    await openOperationDetail(auth.page, env.tenantUrl, submitted.id);
+    await evidence(auth.page, env, "08b-create-operation");
+    const resolved = await resolveTerminalOperation(
+      auth.page,
+      env.tenantUrl,
+      submitted,
+      env.operationTimeoutMs,
+    );
+    if (resolved.state !== "failed") {
+      throw new Error(
+        `[pp4] the native compute.server create Operation ${resolved.id} reported ` +
+          `${resolved.state}: this profile is documented as unable to create VMs, so a ` +
+          "successful create invalidates the harness",
+      );
+    }
+    detail =
+      `operation=${resolved.id} state=failed ` +
+      `error=${JSON.stringify(`${resolved.errorTitle} ${resolved.errorDetail}`.trim().slice(0, 200))}`;
+  }
 
-  // Real-async wait: terminal SUCCEEDED (VM create can take minutes).
-  const terminal = await waitForOperationTerminal(
-    auth.page,
-    env.tenantUrl,
-    createOperationId,
-    env.operationTimeoutMs,
+  // No fabricated resource. Any NEW row is a recorded side effect and must
+  // never be Ready (the profile cannot schedule a VM).
+  const after = await openCollection(auth.page, env.tenantUrl, SERVER_TYPE, SERVER_PLURAL);
+  const appeared = after.ids.filter((id) => !before.ids.includes(id));
+  const appearedStatuses: string[] = [];
+  for (const id of appeared) {
+    const resource = await getResourceOrUndefined(auth.page, env.tenantUrl, SERVER_TYPE, id);
+    if (!resource) {
+      appearedStatuses.push(`${id}=concealed-tombstone`);
+      continue;
+    }
+    appearedStatuses.push(`${id}=${resource.status}`);
+    expect(
+      resource.status,
+      `a server row that appeared from a failed create (${id}) must not be Ready`,
+    ).not.toBe("ready");
+  }
+  await evidence(auth.page, env, "08c-servers-after-failed-create");
+  await expectNoConsoleCrash(auth.page);
+
+  gap(
+    "native-vm-create=network-provider-inactive",
+    `${detail} created_server_rows=${appeared.length} ` +
+      `appeared_rows=[${appearedStatuses.join(",")}] requested_network=${env.networkId}`,
   );
-  expect(terminal.resourceId, "create Operation must reference the new server").toBeTruthy();
-  vmId = terminal.resourceId!;
-
-  // The server itself reaches the truthful Ready state.
-  await waitForResourceStatus(
-    auth.page,
-    env.tenantUrl,
-    SERVER_TYPE,
-    vmId,
-    "ready",
-    env.resourceTimeoutMs,
-  );
-  await auth.page.goto(`${env.tenantUrl}/resources/${SERVER_TYPE}`);
-  const row = resourceRow(auth.page, SERVER_PLURAL, env.vmName);
-  await expect(row, "pp4-native is listed after create").toBeVisible({ timeout: 60_000 });
-  await expect(row.getByText("Ready")).toBeVisible();
-  await evidence(auth.page, env, "03-pp4-native-active");
-
-  // stdout protocol for the bash cross-checks.
-  // eslint-disable-next-line no-console
-  console.log(`PP4-NATIVE id=${vmId}`);
+  if (consoleErrorClass) {
+    // The console refused the create client-side; record WHICH error class the
+    // pinned tuple produced, with the verbatim banner it was decided from (the
+    // manifest requires this classified gap).
+    gap(
+      `console-create-schema-dialect=${consoleErrorClass.klass}`,
+      `console_error=${JSON.stringify(consoleErrorBanner.slice(0, 200))} ` +
+        `field_errors_rendered=${String(consoleErrorClass.fieldErrors)}`,
+    );
+  }
 });
 
-test("inspect pp4-native detail and canonical id", async () => {
-  expect(vmId, "VM must have been created by the previous step").not.toBe("");
-  await auth.page.goto(`${env.tenantUrl}/resources/${SERVER_TYPE}/${encodeURIComponent(vmId)}`);
+test("console delete of the CLI-created server is observed truthfully", async () => {
+  test.setTimeout(env.operationTimeoutMs + 5 * 60 * 1000);
+  const targetId = env.uiTargetId;
+
+  // Observe-before-act: the target the campaign created through the unmodified
+  // OpenStack CLI must be a LIVE canonical resource (same uuid the console
+  // lists) — never a missing or fabricated one.
+  const before = await getResource(auth.page, env.tenantUrl, SERVER_TYPE, targetId);
+  expect(before.id, "the UI delete target must exist as a canonical resource").toBe(targetId);
+  expect(before.resourceType, "the UI delete target must be a compute.server").toBe(SERVER_TYPE);
+  const listed = await openCollection(auth.page, env.tenantUrl, SERVER_TYPE, SERVER_PLURAL);
+  expect(listed.ids, `the UI delete target (${targetId}) must be listed`).toContain(targetId);
+
+  // (1) Open the target's detail page by canonical id.
+  await auth.page.goto(
+    `${env.tenantUrl}/resources/${SERVER_TYPE}/${encodeURIComponent(targetId)}`,
+  );
   await expect(
-    auth.page.getByRole("heading", { name: env.vmName }),
+    auth.page.getByRole("heading", { name: env.uiTargetName }),
+    "the target's detail page renders the server name",
+  ).toBeVisible({ timeout: 60_000 });
+  await expect(auth.page.getByText(`ID: ${targetId}`)).toBeVisible();
+  await evidence(auth.page, env, "09a-ui-delete-target-detail");
+
+  // (2) Run the advertised delete action through the REAL UI: the action
+  // button opens the destructive confirmation modal, and the modal's confirm
+  // performs the mutation. There is deliberately no BFF fallback for this
+  // step: a delete that cannot be performed through the UI fails here.
+  const deleteButton = auth.page.getByRole("button", { name: "delete", exact: true });
+  if ((await deleteButton.count()) === 0) {
+    await evidence(auth.page, env, "09b-ui-delete-action-missing");
+    throw new Error(
+      `[pp4] the pinned compute.server descriptor offers no delete action for ${targetId}`,
+    );
+  }
+  await deleteButton.first().click();
+  const dialog = auth.page.getByRole("dialog");
+  await expect(dialog, "the destructive delete confirmation modal appears").toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(
+    dialog.getByText(new RegExp(`delete ${env.uiTargetName}`, "i")),
+    "the confirmation names the server being deleted",
+  ).toBeVisible({ timeout: 20_000 });
+  await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+
+  // (3) The mutation outcome as the console rendered it. Native CRUD routes may
+  // complete synchronously and the BFF then reports the terminal state in the
+  // mutation response without persisting a pollable history record
+  // (`fetch_or_build_operation`), so a state the console already reports as
+  // terminal is authoritative and needs no polling.
+  const operationNote = auth.page
+    .getByRole("status")
+    .filter({ hasText: /Operation\s+\S+\s+is\s+\S+/u })
+    .first();
+  const errorAlert = auth.page.getByRole("alert").first();
+  const deleteOutcome = await Promise.race([
+    operationNote.waitFor({ state: "visible", timeout: 60_000 }).then(() => "ui" as const),
+    errorAlert.waitFor({ state: "visible", timeout: 60_000 }).then(() => "blocked" as const),
+  ]).catch(() => "timeout" as const);
+  if (deleteOutcome !== "ui") {
+    const banner = (await readErrorBanner()) ?? "";
+    await evidence(auth.page, env, "09b-ui-delete-blocked");
+    throw new Error(
+      `[pp4] the console delete of ${targetId} produced no operation state ` +
+        `(${deleteOutcome}): ${banner}`,
+    );
+  }
+  const submitted = parseSubmittedOperation((await operationNote.textContent()) ?? "");
+  await evidence(auth.page, env, "09c-ui-delete-operation");
+  const deleted = await resolveTerminalOperation(
+    auth.page,
+    env.tenantUrl,
+    submitted,
+    env.operationTimeoutMs,
+  );
+  expect(
+    deleted.state,
+    `the console delete of ${targetId} must reach a truthful terminal state`,
+  ).toBe("succeeded");
+
+  // Hand the canonical identity to the campaign harness: this marker is what
+  // the bash cross-check asserts the cross-interface absence from.
+  // eslint-disable-next-line no-console
+  console.log(`PP4-UI-DELETE id=${targetId} state=${deleted.state}`);
+
+  // (4) Truthful final state. The canonical live view through the BFF conceals
+  // the resource (404 — the ledger keeps a DELETED tombstone), and the detail
+  // URL renders its not-found state instead of a fabricated resource.
+  await waitForResourceConcealed(auth.page, env.tenantUrl, SERVER_TYPE, targetId);
+  await auth.page.goto(
+    `${env.tenantUrl}/resources/${SERVER_TYPE}/${encodeURIComponent(targetId)}`,
+  );
+  await expect(
+    auth.page.getByText(`ID: ${targetId}`),
+    "a deleted resource must not be rendered on its detail page",
+  ).toHaveCount(0);
+  await expect(
+    auth.page.getByText(/Could not load resource|not found/i).first(),
+    "the detail URL shows a truthful not-found state for the concealed resource",
+  ).toBeVisible({ timeout: 30_000 });
+  await evidence(auth.page, env, "09d-ui-delete-concealed");
+  // eslint-disable-next-line no-console
+  console.log(
+    `[pp4] ${env.uiTargetName} (${targetId}) after the console delete: ` +
+      "detail URL shows the truthful not-found state and the live-resource view is concealed (404)",
+  );
+});
+
+test("inspect the TestLab workload detail by canonical id", async () => {
+  expect(testVmId, "the workload id must have been resolved by the earlier step").not.toBe("");
+  await auth.page.goto(`${env.tenantUrl}/resources/${SERVER_TYPE}/${encodeURIComponent(testVmId)}`);
+  await expect(
+    auth.page.getByRole("heading", { name: "test-vm" }),
     "detail page heading is the server name",
   ).toBeVisible({ timeout: 30_000 });
   // The canonical uuid is displayed in the header description ("ID: <uuid>").
   await expect(
-    auth.page.getByText(`ID: ${vmId}`),
+    auth.page.getByText(`ID: ${testVmId}`),
     "canonical uuid must be displayed on the detail page",
   ).toBeVisible();
   await expect(auth.page.getByRole("tab", { name: "Overview" })).toBeVisible();
   await expect(auth.page.getByRole("tab", { name: "Operations" })).toBeVisible();
 });
 
-test("stop server action shows truthful transition and Operation", async () => {
-  test.setTimeout(env.operationTimeoutMs);
-  expect(vmId).not.toBe("");
-  await auth.page.goto(`${env.tenantUrl}/resources/${SERVER_TYPE}/${encodeURIComponent(vmId)}`);
-
-  // The descriptor advertises start/stop/reboot/delete/update; the action
-  // buttons carry the lowercase action verbs (ResourceActionsPanel).
-  const stopButton = auth.page.getByRole("button", { name: "stop", exact: true });
-  await expect(stopButton, "stop action is offered for an active server").toBeVisible({
-    timeout: 30_000,
-  });
-  await stopButton.click();
-
-  // UI attempt succeeds (role=status) or 403s (pinned SPA CSRF gap).
-  const statusNote = auth.page.getByRole("status").first();
-  const errorAlert = auth.page.getByRole("alert").first();
-  const stopOutcome = await Promise.race([
-    statusNote.waitFor({ state: "visible", timeout: 20_000 }).then(() => "ui" as const),
-    errorAlert.waitFor({ state: "visible", timeout: 20_000 }).then(() => "blocked" as const),
-  ]).catch(() => "blocked" as const);
-
-  let stopOperationId = "";
-  if (stopOutcome === "ui") {
-    const text = (await statusNote.textContent()) ?? "";
-    const match = /Operation\s+(\S+)\s+is\s+(\S+)/.exec(text);
-    expect(match, "UI action status must name the canonical Operation").toBeTruthy();
-    stopOperationId = match![1]!;
-  } else {
-    // eslint-disable-next-line no-console
-    console.log(
-      "[pp4] PP4-NOTE UI action blocked (pinned Araf SPA does not send " +
-        "x-csrf-token); submitting the identical BFF action with the CSRF header",
-    );
-    const operation = await submitResourceAction(
-      auth.page,
-      auth.context,
-      env.tenantUrl,
-      SERVER_TYPE,
-      vmId,
-      "stop",
-    );
-    stopOperationId = operation.id;
-  }
-
-  const terminal = await waitForOperationTerminal(
-    auth.page,
-    env.tenantUrl,
-    stopOperationId,
-    env.operationTimeoutMs,
-  );
-  expect(terminal.action, "canonical Operation action is stop").toBe("stop");
-
-  // Truthful state transition: O3K "stopped" maps to the Busy presentation
-  // label (packages/resources/src/status.ts), different from Ready.
-  await waitForResourceStatus(
-    auth.page,
-    env.tenantUrl,
-    SERVER_TYPE,
-    vmId,
-    "busy",
-    env.resourceTimeoutMs,
-  );
-  await auth.page.goto(`${env.tenantUrl}/resources/${SERVER_TYPE}/${encodeURIComponent(vmId)}`);
-  await expect(
-    auth.page.getByText("Busy").first(),
-    "server shows the truthful post-stop state",
-  ).toBeVisible({ timeout: 30_000 });
-});
-
-test("delete pp4-native and observe final absence", async () => {
-  test.setTimeout(env.operationTimeoutMs);
-  expect(vmId).not.toBe("");
-  await auth.page.goto(`${env.tenantUrl}/resources/${SERVER_TYPE}/${encodeURIComponent(vmId)}`);
-
-  const deleteButton = auth.page.getByRole("button", { name: "delete", exact: true });
-  await expect(deleteButton, "delete action is offered").toBeVisible({ timeout: 30_000 });
-  await deleteButton.click();
-
-  // Destructive actions open a confirmation modal.
-  const dialog = auth.page.getByRole("dialog");
-  await expect(dialog, "delete confirmation modal").toBeVisible({ timeout: 15_000 });
-  await expect(dialog.getByText(new RegExp(`delete ${env.vmName}`))).toBeVisible();
-  await dialog.getByRole("button", { name: "Delete", exact: true }).click();
-
-  const statusNote = auth.page.getByRole("status").first();
-  const errorAlert = auth.page.getByRole("alert").first();
-  const deleteOutcome = await Promise.race([
-    statusNote.waitFor({ state: "visible", timeout: 20_000 }).then(() => "ui" as const),
-    errorAlert.waitFor({ state: "visible", timeout: 20_000 }).then(() => "blocked" as const),
-  ]).catch(() => "blocked" as const);
-
-  let deleteOperationId = "";
-  if (deleteOutcome === "ui") {
-    const text = (await statusNote.textContent()) ?? "";
-    const match = /Operation\s+(\S+)\s+is\s+(\S+)/.exec(text);
-    expect(match, "UI delete status must name the canonical Operation").toBeTruthy();
-    deleteOperationId = match![1]!;
-  } else {
-    // eslint-disable-next-line no-console
-    console.log(
-      "[pp4] PP4-NOTE UI delete blocked (pinned Araf SPA does not send " +
-        "x-csrf-token); calling the identical BFF delete with the CSRF header",
-    );
-    const operation = await deleteResource(
-      auth.page,
-      auth.context,
-      env.tenantUrl,
-      SERVER_TYPE,
-      vmId,
-    );
-    deleteOperationId = operation.id;
-  }
-
-  const terminal = await waitForOperationTerminal(
-    auth.page,
-    env.tenantUrl,
-    deleteOperationId,
-    env.operationTimeoutMs,
-  );
-  expect(terminal.action, "canonical Operation action is delete").toBe("delete");
-
-  // Truthful final state: pp4-native is absent from the server collection.
-  await auth.page.goto(`${env.tenantUrl}/resources/${SERVER_TYPE}`);
-  await expect
-    .poll(
-      async () => resourceRow(auth.page, SERVER_PLURAL, env.vmName).count(),
-      { timeout: 60_000, intervals: [1_000, 2_000, 5_000] },
-    )
-    .toBe(0);
-  vmId = ""; // deleted; cleanup guard no longer applies
-});
-
 test("logout ends the session", async () => {
-  // Araf rc.12 ships no logout UI button (verified across packages/shell and
-  // apps); the BFF logout endpoint is exercised exactly as Araf's own
-  // process evidence does (POST /api/v1/auth/logout with the CSRF header).
-  await logout(auth.page, auth.context, env.tenantUrl);
+  // The pinned Araf console ships no logout UI button (verified across
+  // packages/shell and apps); the BFF logout endpoint is exercised exactly as
+  // Araf's own process evidence does (POST /api/v1/auth/logout with the CSRF
+  // header). This is a read-only session boundary, not a cloud mutation, so it
+  // does not invalidate the browser journey.
+  await logout(auth.page, env.tenantUrl);
 
   const session = await getSession(auth.page, env.tenantUrl);
   expect(session.authenticated, "session must be destroyed after logout").toBe(false);
@@ -588,8 +712,8 @@ test("logout ends the session", async () => {
   ).toBeVisible({ timeout: 30_000 });
 
   // Subsequent API call must be rejected.
-  const contextResponse = await auth.page.request.get(`${env.tenantUrl}/api/v1/context`);
-  expect(contextResponse.status(), "GET /api/v1/context must 401 after logout").toBe(401);
+  const contextResponse = await bffFetch(auth.page, `${env.tenantUrl}/api/v1/context`);
+  expect(contextResponse.status, "GET /api/v1/context must 401 after logout").toBe(401);
 
   // eslint-disable-next-line no-console
   console.log("PP4-TENANT-OK");

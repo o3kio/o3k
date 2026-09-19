@@ -17,6 +17,7 @@ import {
   selectAdminProject,
   type AuthenticatedSurface,
 } from "../lib/login";
+import { findResourceIdByName, openCollection, resourceRowById } from "../lib/console";
 
 test.setTimeout(300_000);
 
@@ -43,7 +44,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   try {
-    if (auth) await logout(auth.page, auth.context, auth.baseUrl);
+    if (auth) await logout(auth.page, auth.baseUrl);
   } catch {
     // already logged out or session gone
   }
@@ -65,12 +66,19 @@ test("relogin recovers OIDC and the read journey", async () => {
     .poll(async () => table.getByRole("row").count(), { timeout: 30_000 })
     .toBeGreaterThan(1);
 
-  await auth.page.goto(`${env.tenantUrl}/resources/compute.server`);
+  // The TestLab workload must still be listed. Identity is the canonical id:
+  // VERIFIED, the native list projection does not carry the spec name, so a
+  // row-name lookup would be a false negative.
+  const testVmId = await findResourceIdByName(
+    auth.page,
+    env.tenantUrl,
+    "compute.server",
+    "test-vm",
+  );
+  const servers = await openCollection(auth.page, env.tenantUrl, "compute.server", "servers");
+  expect(servers.ids, `test-vm (${testVmId}) must still be listed after reboot`).toContain(testVmId);
   await expect(
-    auth.page
-      .getByRole("table", { name: "servers table" })
-      .getByRole("row", { name: /test-vm/ })
-      .first(),
+    resourceRowById(auth.page, "servers", testVmId),
     "the TestLab workload must still be listed after reboot",
   ).toBeVisible({ timeout: 60_000 });
 

@@ -18,7 +18,7 @@
 import { expect } from "playwright/test";
 import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
-import { getSession, listScopes, selectProjectScope } from "./bff";
+import { getContext, getSession, listScopes, selectProjectScope } from "./bff";
 import type { Pp4Env } from "./env";
 
 export type Surface = "tenant" | "operator";
@@ -185,12 +185,10 @@ export async function selectAdminProject(
     projects[0];
   expect(chosen, "a project scope must be selectable").toBeTruthy();
 
-  await selectProjectScope(auth.page, auth.context, auth.baseUrl, chosen!.id);
+  await selectProjectScope(auth.page, auth.baseUrl, chosen!.id);
 
   // The session context must now carry the selected project.
-  const response = await auth.page.request.get(`${auth.baseUrl}/api/v1/context`);
-  expect(response.ok(), "GET /api/v1/context after scope selection must succeed").toBe(true);
-  const context = (await response.json()) as { projectId: string | null };
+  const context = await getContext(auth.page, auth.baseUrl);
   expect(context.projectId, "context must reflect the selected project").toBe(chosen!.id);
 
   return { projectId: chosen!.id, projectName: chosen!.name };

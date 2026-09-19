@@ -5,15 +5,20 @@
 #   phase1a (in-vm): foreign canaries -> exact public one-liner -> success
 #                    output + T0-T3/T5 stamps -> canonical state -> guest boot
 #                    proof -> curl OIDC verify
+#   ui target (host):  creates `pp4-ui-target` through the UNMODIFIED OpenStack
+#                    CLI inside the VM (a canonical native resource the console
+#                    lists) so the tenant journey has a real resource to delete
 #   browser (host):  Chromium INSIDE the VM (demo CA imported into its NSS
 #                    profile) driven by Playwright over CDP from the host:
 #                    tenant journey (login -> scope -> catalog -> capacity ->
-#                    images/networks/servers -> create pp4-native -> operation
-#                    -> action -> delete -> logout) + operator journey.
-#                    Emits PP4-TIMESTAMPS T4 + PP4-NATIVE id.
+#                    images/networks/servers by canonical id -> console VM
+#                    create fails truthfully -> console delete of the
+#                    CLI-created server -> logout) + operator journey.
+#                    Emits PP4-TIMESTAMPS T4 + PP4-GAP lines + PP4-UI-DELETE id.
 #   phase1b (in-vm): cross-interface scenarios A-D (openstack CLI <-> Araf
-#                    native BFF on identical canonical IDs), OpenTofu smoke,
-#                    secret scans, optional Horizon witness (O3K_PP4_HORIZON=1)
+#                    native BFF on identical canonical IDs), classified-gap
+#                    probes, OpenTofu smoke, secret scans, optional Horizon
+#                    witness (O3K_PP4_HORIZON=1)
 #   reboot:          host reboot recovery gate (new boot_id)
 #   browser relogin: post-reboot OIDC/session recovery
 #   phase2 (in-vm):  convergence rerun, failure/recovery matrix, interrupted
@@ -178,8 +183,63 @@ if ! grep -Fq 'PHASE1A-COMPLETE status=passed' <<<"$P1A_MARKER"; then
 fi
 log "phase1a complete"
 
+# ---- console-ui target + TestLab ids (unmodified OpenStack CLI inside the VM) -----
+# The only real UI mutation this pinned tuple supports is the advertised delete
+# action on an EXISTING canonical resource: the pinned Araf SPA cannot submit
+# any create form (the create schemas O3K serves declare JSON Schema 2020-12
+# while the pinned schema-runtime compiles with draft-07 Ajv; the upstream fix,
+# Araf PR #118, is not in this release tuple). The harness therefore creates the
+# delete target itself through the UNMODIFIED OpenStack CLI: a CLI-created
+# server is a canonical native resource (same uuid) and appears in the console.
+# Every id is resolved inside the VM and every lookup fails closed.
+vm_openstack_id_by_name() { # TYPE(image|network|flavor) NAME
+  local type="$1" name="$2"
+  ssh_vm "sudo bash -c 'set -e; . /etc/o3k/admin-openrc; openstack ${type} list -f json'" 2>/dev/null \
+    | python3 -c 'import json,sys
+items = json.load(sys.stdin)
+for item in items:
+    if item.get("Name") == sys.argv[1]:
+        print(item["ID"])
+        break' "$name" || true
+}
+PP4_ADMIN_PROJECT_ID="eba29e2d-53de-461d-ae91-ede7402713cb"
+# The pinned demo tuple advertises no flavor collection, so the console create
+# form can only work with the canonical flavor id the installer recorded in the
+# root-owned VM ledger. The demo image and network exist ONLY through the
+# compatibility APIs (the native image/network inventories are empty), so their
+# canonical ids come from the unmodified OpenStack CLI inside the VM. All are
+# mandatory: an empty value would let the journey silently degrade.
+PP4_FLAVOR_ID="$(ssh_vm 'sudo cat /etc/o3k/testlab-flavor-id' 2>/dev/null | tr -d '[:space:]')"
+[ -n "$PP4_FLAVOR_ID" ] || { echo "could not read /etc/o3k/testlab-flavor-id in the VM" >&2; exit 1; }
+PP4_IMAGE_ID="$(vm_openstack_id_by_name image cirros-0.6.3)"
+[ -n "$PP4_IMAGE_ID" ] || { echo "could not resolve the cirros image id via the VM OpenStack CLI" >&2; exit 1; }
+PP4_NETWORK_ID="$(vm_openstack_id_by_name network testlab-network)"
+[ -n "$PP4_NETWORK_ID" ] || { echo "could not resolve the testlab-network id via the VM OpenStack CLI" >&2; exit 1; }
+[ -n "$PP4_ADMIN_PROJECT_ID" ] || { echo "PP4_ADMIN_PROJECT_ID is empty" >&2; exit 1; }
+# `openstack server create --flavor` takes the flavor id the CLI reports.
+UI_TARGET_FLAVOR_ID="$(vm_openstack_id_by_name flavor testlab-flavor)"
+[ -n "$UI_TARGET_FLAVOR_ID" ] || { echo "could not resolve the testlab-flavor id via the VM OpenStack CLI" >&2; exit 1; }
+log "ui target: creating pp4-ui-target through the unmodified OpenStack CLI"
+ssh_vm "sudo bash -c 'set -e; . /etc/o3k/admin-openrc; openstack server create --wait --image ${PP4_IMAGE_ID} --flavor ${UI_TARGET_FLAVOR_ID} --nic net-id=${PP4_NETWORK_ID} --config-drive true --key-name testlab-keypair pp4-ui-target'" \
+  > "$EVID_FINAL/04b-ui-target-create.log" 2>&1 \
+  || { echo "could not create pp4-ui-target through the VM OpenStack CLI (see 04b-ui-target-create.log)" >&2; exit 1; }
+PP4_UI_TARGET_ID="$(ssh_vm 'sudo bash -c ". /etc/o3k/admin-openrc; openstack server show pp4-ui-target -c id -f value"' 2>/dev/null | tr -d '[:space:]')"
+[ -n "$PP4_UI_TARGET_ID" ] || { echo "pp4-ui-target has no canonical id (openstack server show pp4-ui-target)" >&2; exit 1; }
+log "ui target: pp4-ui-target id=$PP4_UI_TARGET_ID"
+export PP4_FLAVOR_ID PP4_ADMIN_PROJECT_ID PP4_IMAGE_ID PP4_NETWORK_ID PP4_UI_TARGET_ID
+
 # ---- browser e2e (host playwright -> in-VM chromium over CDP) ---------------------
 log "browser: starting in-VM chromium"
+# The in-VM chromium validates TLS against the VM trust store, so the demo CA
+# must be installed as a system trust anchor before the journey runs (an NSS
+# import into the browser profile is not consulted by chrome-headless-shell).
+# Without this every page load fails with ERR_CERT_AUTHORITY_INVALID.
+install_vm_demo_ca() {
+  ssh_vm 'sudo install -m 0644 /var/lib/o3k/araf-demo/tls/ca.crt \
+      /usr/local/share/ca-certificates/o3k-demo-ca.crt && sudo update-ca-certificates >/dev/null' \
+    || { echo "could not install the demo CA into the VM trust store" >&2; exit 1; }
+}
+install_vm_demo_ca
 ssh_vm "sudo rm -f $VM_EVID/browser-ready"
 ssh_vm "sudo nohup bash $VM_SCRIPTS/in-vm-browser.sh $VM_BROWSER $VM_EVID \
   >$VM_EVID/browser-console.log 2>&1 </dev/null &"
@@ -200,6 +260,11 @@ if [ ! -d "$REPO/tests/pp4-browser-e2e/node_modules" ]; then
 fi
 ALICE_PW="$(ssh_vm 'sudo awk -F": " "/^password:/{print \$2}" /var/lib/o3k/araf-demo/credentials.txt' 2>/dev/null || true)"
 [ -n "$ALICE_PW" ] || { echo "could not read demo credentials file" >&2; exit 1; }
+# Deployment-side production-tuple evidence (phase1a) that the browser suite
+# re-checks server-side, so a fixture-mode deployment cannot pass on the DOM alone.
+PP4_DEPLOYMENT_ENV_FILE="$EVID_FINAL/10-araf-production-tuple.txt"
+[ -f "$PP4_DEPLOYMENT_ENV_FILE" ] || { echo "missing $PP4_DEPLOYMENT_ENV_FILE from phase1a" >&2; exit 1; }
+export PP4_DEPLOYMENT_ENV_FILE
 mkdir -p "$EVID_FINAL/browser"
 
 log "browser: tenant + operator journeys"
@@ -207,6 +272,10 @@ set +e
 (cd "$REPO/tests/pp4-browser-e2e" && \
   CDP_URL="http://127.0.0.1:$CDP_PORT" \
   PP4_ALICE_USER=alice PP4_ALICE_PASSWORD="$ALICE_PW" \
+  PP4_FLAVOR_ID="$PP4_FLAVOR_ID" PP4_ADMIN_PROJECT_ID="$PP4_ADMIN_PROJECT_ID" \
+  PP4_IMAGE_ID="$PP4_IMAGE_ID" PP4_NETWORK_ID="$PP4_NETWORK_ID" \
+  PP4_UI_TARGET_ID="$PP4_UI_TARGET_ID" \
+  PP4_DEPLOYMENT_ENV_FILE="$PP4_DEPLOYMENT_ENV_FILE" \
   PP4_EVIDENCE_DIR="$EVID_FINAL/browser" \
   npx playwright test --no-deps specs/tenant.spec.ts) \
   2>&1 | tee "$EVID_FINAL/05-browser-e2e.log"
@@ -214,16 +283,36 @@ BROWSER_RC=$?
 (cd "$REPO/tests/pp4-browser-e2e" && \
   CDP_URL="http://127.0.0.1:$CDP_PORT" \
   PP4_ALICE_USER=alice PP4_ALICE_PASSWORD="$ALICE_PW" \
+  PP4_FLAVOR_ID="$PP4_FLAVOR_ID" PP4_ADMIN_PROJECT_ID="$PP4_ADMIN_PROJECT_ID" \
+  PP4_IMAGE_ID="$PP4_IMAGE_ID" PP4_NETWORK_ID="$PP4_NETWORK_ID" \
+  PP4_UI_TARGET_ID="$PP4_UI_TARGET_ID" \
+  PP4_DEPLOYMENT_ENV_FILE="$PP4_DEPLOYMENT_ENV_FILE" \
   PP4_EVIDENCE_DIR="$EVID_FINAL/browser" \
   npx playwright test --no-deps specs/operator.spec.ts) \
   2>&1 | tee -a "$EVID_FINAL/05-browser-e2e.log"
 OPERATOR_RC=$?
 set -e
 [ "$OPERATOR_RC" -eq 0 ] || BROWSER_RC=$OPERATOR_RC
+# A UI fallback means the mutation was NOT performed through the browser
+# journey, so the campaign's real-browser claim does not hold: fail loudly and
+# keep the fallback logs for diagnosis.
+if grep -q 'PP4-UI-FALLBACK' "$EVID_FINAL/05-browser-e2e.log"; then
+  grep -oE 'PP4-UI-FALLBACK [a-z-]+' "$EVID_FINAL/05-browser-e2e.log" | sort -u >&2
+  echo "browser journey used a UI fallback: the real-browser claim is not met (see 05-browser-e2e.log)" >&2
+  exit 1
+fi
 T4="$(grep -oE 'PP4-TIMESTAMPS T4=[0-9]+' "$EVID_FINAL/05-browser-e2e.log" | head -1 | cut -d= -f2 || true)"
-[ -n "$T4" ] && printf 'T4=%s\n' "$T4" >> "$EVID_FINAL/03-timestamps.env"
-grep -oE 'PP4-NATIVE id=[a-f0-9-]+' "$EVID_FINAL/05-browser-e2e.log" | head -1 | sed 's/PP4-NATIVE id=//' \
-  > "$EVID_FINAL/05-browser-ids.env" || true
+[ -n "$T4" ] || { echo "browser phase produced no PP4-TIMESTAMPS T4 marker" >&2; exit 1; }
+printf 'T4=%s\n' "$T4" >> "$EVID_FINAL/03-timestamps.env"
+# The tenant journey's only real UI mutation on this pinned tuple is the delete
+# of the CLI-created server through its advertised action; phase1b proves the
+# cross-interface absence from this id. No console CREATE is claimed: the pinned
+# SPA cannot compile the 2020-12 create schemas O3K serves.
+UI_DELETE_ID="$(grep -oE 'PP4-UI-DELETE id=[a-f0-9-]+' "$EVID_FINAL/05-browser-e2e.log" | head -1 | cut -d= -f2 || true)"
+[ -n "$UI_DELETE_ID" ] || { echo "browser journey produced no PP4-UI-DELETE id" >&2; exit 1; }
+[ "$UI_DELETE_ID" = "$PP4_UI_TARGET_ID" ] \
+  || { echo "the console deleted $UI_DELETE_ID, not the harness target $PP4_UI_TARGET_ID" >&2; exit 1; }
+printf 'PP4_UI_DELETE_ID=%s\n' "$UI_DELETE_ID" > "$EVID_FINAL/05-browser-ids.env"
 if [ "$BROWSER_RC" -ne 0 ]; then
   scp "${SCP_OPTS[@]}" -r tester@localhost:"$VM_EVID/." "$EVID_FINAL/" 2>/dev/null || true
   echo "browser e2e FAILED (rc $BROWSER_RC)" >&2; exit 1
@@ -232,8 +321,12 @@ grep -q 'PP4-TENANT-OK' "$EVID_FINAL/05-browser-e2e.log" || { echo "tenant journ
 grep -q 'PP4-OPERATOR-OK' "$EVID_FINAL/05-browser-e2e.log" || { echo "operator journey missing PP4-OPERATOR-OK" >&2; exit 1; }
 log "browser e2e complete (T4=$T4)"
 
-# push host-side browser ids into the VM evidence for phase1b
-scp "${SCP_OPTS[@]}" "$EVID_FINAL/05-browser-ids.env" "$EVID_FINAL/03-timestamps.env" tester@localhost:"$VM_EVID/" >/dev/null 2>&1 || true
+# push host-side browser ids + log into the VM evidence for phase1b
+# (05-browser-e2e.log is a SEC1 scan target inside the VM; 05-browser-ids.env
+# carries the browser-created resource id for the cross-interface deletion check)
+scp "${SCP_OPTS[@]}" "$EVID_FINAL/05-browser-ids.env" "$EVID_FINAL/03-timestamps.env" \
+  "$EVID_FINAL/05-browser-e2e.log" tester@localhost:"$VM_EVID/" >/dev/null 2>&1 \
+  || { echo "could not push browser evidence into the VM" >&2; exit 1; }
 
 # ---- phase 1b: cross-interface scenarios, tofu smoke, scans, horizon ------------
 log "phase1b: cross-interface + supplemental evidence"
@@ -279,6 +372,10 @@ log "VM back after reboot (boot_id changed)"
 
 # ---- browser relogin (post-reboot recovery) ----------------------------------------
 log "browser: post-reboot relogin"
+# The VM reboot killed the SSH port-forward, so the CDP tunnel must be
+# re-established (and verified) before the relogin journey runs.
+if [ -n "${CDP_FWD_PID:-}" ]; then kill "$CDP_FWD_PID" 2>/dev/null || true; CDP_FWD_PID=""; fi
+install_vm_demo_ca
 ssh_vm "sudo rm -f $VM_EVID/browser-ready"
 ssh_vm "sudo nohup bash $VM_SCRIPTS/in-vm-browser.sh $VM_BROWSER $VM_EVID \
   >$VM_EVID/browser-console.log 2>&1 </dev/null &"
@@ -286,10 +383,21 @@ for i in $(seq 1 60); do
   sleep 5
   [ "$(ssh_vm "sudo cat $VM_EVID/browser-ready 2>/dev/null" 2>/dev/null || true)" = "ready" ] && break
 done
+[ "$(ssh_vm "sudo cat $VM_EVID/browser-ready 2>/dev/null" 2>/dev/null || true)" = "ready" ] \
+  || { echo "in-VM chromium did not restart after the reboot; see browser-console.log" >&2; exit 1; }
+ssh -N -L "$CDP_PORT:127.0.0.1:9223" "${SSH_OPTS[@]}" tester@localhost &
+CDP_FWD_PID=$!
+for i in $(seq 1 30); do curl -sf "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null \
+  || { echo "CDP forward did not come back after the reboot" >&2; exit 1; }
 set +e
 (cd "$REPO/tests/pp4-browser-e2e" && \
   CDP_URL="http://127.0.0.1:$CDP_PORT" \
   PP4_ALICE_USER=alice PP4_ALICE_PASSWORD="$ALICE_PW" \
+  PP4_FLAVOR_ID="$PP4_FLAVOR_ID" PP4_ADMIN_PROJECT_ID="$PP4_ADMIN_PROJECT_ID" \
+  PP4_IMAGE_ID="$PP4_IMAGE_ID" PP4_NETWORK_ID="$PP4_NETWORK_ID" \
+  PP4_UI_TARGET_ID="$PP4_UI_TARGET_ID" \
+  PP4_DEPLOYMENT_ENV_FILE="$PP4_DEPLOYMENT_ENV_FILE" \
   PP4_EVIDENCE_DIR="$EVID_FINAL/browser-relogin" \
   npx playwright test --no-deps specs/relogin.spec.ts) 2>&1 | tee "$EVID_FINAL/23-browser-relogin.log"
 RELOGIN_RC=$?
@@ -320,6 +428,16 @@ log "phase2 complete"
 
 # ---- durable manifest ----------------------------------------------------------------
 log "assembling durable manifest"
-python3 "$SCRIPT_DIR/make-manifest.py" "$DISTRO" "$EVID_FINAL" "$VERSION" "$SOURCE_SHA" \
-  | tee "$EVID_FINAL/99-manifest.json" >/dev/null
+# A non-PASS manifest is written to disk (as evidence) and fails the campaign:
+# the manifest only reports PASS when the numbered evidence supports it.
+if ! python3 "$SCRIPT_DIR/make-manifest.py" "$DISTRO" "$EVID_FINAL" "$VERSION" "$SOURCE_SHA" \
+     > "$EVID_FINAL/99-manifest.json"; then
+  echo "durable manifest is not PASS: see $EVID_FINAL/99-manifest.json (failures on stderr)" >&2
+  exit 1
+fi
+python3 - "$EVID_FINAL/99-manifest.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+print(f"[pp4] manifest result={doc['result']} cases={len(doc['test_cases'])}")
+PY
 log "PP4 campaign COMPLETE: $EVID_FINAL"

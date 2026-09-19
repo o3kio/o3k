@@ -4,11 +4,14 @@
  * Proves the operator console (production profile, same canonical O3K
  * authority) shows real platform truth after OIDC login as alice:
  *   - /platform/overview: region/provider status, active operations
- *   - /services/installed: discovered services + resource types
+ *   - /services/installed: discovered services + resource types, including a
+ *     truthful Storage (volume) rendering — empty is fine, fabricated is not
  *   - /platform/health: provider health
  *   - /platform/capacity: real capacity (VCPU totals)
  *   - /platform/regions: RegionOne + AZ truth
- *   - /operations: the operations created during the tenant journey
+ *   - /operations: the canonical operations the tenant journey produced for the
+ *     SAME resource id the tenant console deleted (the server the harness
+ *     created as `pp4-ui-target`, canonical id exported as PP4_UI_TARGET_ID)
  *   - logout
  *
  * stdout protocol: PP4-OPERATOR-OK at the end.
@@ -16,14 +19,14 @@
 import { expect, test } from "playwright/test";
 import type { Browser } from "playwright";
 import { loadEnv, type Pp4Env } from "../lib/env";
-import { listOperatorOperations, logCookieNames, logout } from "../lib/bff";
+import { bffFetch, listOperations, logCookieNames, logout } from "../lib/bff";
 import {
   assertIdentityVisible,
   connectBrowser,
   loginToSurface,
   type AuthenticatedSurface,
 } from "../lib/login";
-import { evidence, expectNoFixtureMarkers } from "../lib/console";
+import { CANONICAL_ID, evidence, expectNoFixtureMarkers } from "../lib/console";
 
 test.describe.configure({ mode: "serial" });
 test.setTimeout(300_000);
@@ -31,9 +34,15 @@ test.setTimeout(300_000);
 let env: Pp4Env;
 let browser: Browser | undefined;
 let auth: AuthenticatedSurface;
+let tenantResourceId = "";
 
 test.beforeAll(async () => {
   env = loadEnv();
+  // The resource the tenant console deleted is the harness's own target: its
+  // canonical id is the campaign contract PP4_UI_TARGET_ID, so the operator
+  // tie-in needs no cross-spec evidence file.
+  tenantResourceId = env.uiTargetId;
+  expect(tenantResourceId, "PP4_UI_TARGET_ID must carry a canonical uuid").toMatch(CANONICAL_ID);
   browser = await connectBrowser(env);
   auth = await loginToSurface(browser, env, "operator");
 
@@ -52,7 +61,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   try {
-    if (auth) await logout(auth.page, auth.context, auth.baseUrl);
+    if (auth) await logout(auth.page, auth.baseUrl);
   } catch {
     // already logged out or session gone
   }
@@ -106,6 +115,27 @@ test("installed services show the discovered platform", async () => {
   const typesTable = auth.page.getByRole("table", { name: "Discovered resource types" });
   await expect(typesTable).toBeVisible();
   await expect(typesTable.getByText("server").first()).toBeVisible();
+
+  // Storage (the volume service) must render truthfully: the service row is
+  // discovery-derived, and its resource-type cell is either the real list or
+  // the console's "—" empty marker. An empty inventory is fine; a fabricated
+  // one is not.
+  const storageRow = servicesTable.getByRole("row", { name: /Storage/ }).first();
+  await expect(storageRow, "the Storage (volume) service row renders").toBeVisible({
+    timeout: 30_000,
+  });
+  const storageCells = await storageRow.getByRole("cell").allTextContents();
+  const storageText = storageCells.join(" | ");
+  expect(storageText, "the Storage row must not carry a fixture marker").not.toMatch(/fixture/i);
+  // eslint-disable-next-line no-console
+  console.log(`[pp4] Storage service row: ${storageText}`);
+  const storageTypes = typesTable.getByRole("row", { name: /volume/ });
+  // eslint-disable-next-line no-console
+  console.log(
+    `[pp4] discovered volume resource-type rows: ${String(await storageTypes.count())} ` +
+      "(0 is a truthful empty inventory)",
+  );
+  await evidence(auth.page, env, "06-operator-installed-services");
   await expectNoFixtureMarkers(auth.page);
 });
 
@@ -175,37 +205,82 @@ test("regions expose RegionOne with availability zones", async () => {
   await expectNoFixtureMarkers(auth.page);
 });
 
-test("operator operations include the tenant journey work", async () => {
+test("operator operations tie the tenant journey to the canonical authority", async () => {
   await auth.page.goto(`${env.operatorUrl}/operations`);
   await expect(
     auth.page.getByRole("heading", { name: "Operations" }),
   ).toBeVisible({ timeout: 30_000 });
 
-  const table = auth.page.getByRole("table", { name: "Operator operations table" });
-  await expect(table).toBeVisible();
-  await expect
-    .poll(async () => table.getByRole("row").count(), { timeout: 30_000 })
-    .toBeGreaterThan(1);
+  // The operator console's dedicated GLOBAL operations list
+  // (/api/v1/operator/operations) is not implemented by upstream O3K on this
+  // profile, so the page must be truthful about it (an explicit error or empty
+  // state — never fabricated rows). The canonical list itself is served on the
+  // same surface at /api/v1/operations (base_routes) and is what ties the
+  // tenant journey's work to the operator's view.
+  const globalList = await bffFetch(
+    auth.page,
+    `${env.operatorUrl}/api/v1/operator/operations?page=0&pageSize=5`,
+  );
+  // eslint-disable-next-line no-console
+  console.log(`[pp4] operator global operations list: HTTP ${globalList.status}`);
+  if (!globalList.ok) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `PP4-GAP operator-global-operations-not-exposed HTTP ${globalList.status} ` +
+        `${globalList.body.slice(0, 120).replace(/\s+/gu, " ")}`,
+    );
+    const failed = auth.page.getByText("Could not load operations");
+    const empty = auth.page.getByText("No operations", { exact: false });
+    const rows = auth.page.getByRole("table", { name: "Operator operations table" }).getByRole("row");
+    await expect
+      .poll(
+        async () =>
+          (await failed.count()) > 0 || (await empty.count()) > 0 || (await rows.count()) <= 1,
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+    expect(
+      await rows.count(),
+      "a non-implemented global list must not render fabricated operation rows",
+    ).toBeLessThanOrEqual(1); // header row only
+  } else {
+    const table = auth.page.getByRole("table", { name: "Operator operations table" });
+    await expect(table).toBeVisible();
+    await expect
+      .poll(async () => table.getByRole("row").count(), { timeout: 30_000 })
+      .toBeGreaterThan(1);
+  }
 
-  // Cross-check through the BFF: the same canonical authority served the
-  // tenant journey, so compute.server operations must be visible here.
-  const operations = await listOperatorOperations(auth.page, env.operatorUrl, 50);
-  const computeOps = operations.items.filter(
-    (operation) => operation.resourceType === "compute.server",
+  // Cross-check through the canonical list: the same canonical authority serves
+  // both surfaces, so the operations for the EXACT resource the tenant console
+  // deleted (the CLI-created `pp4-ui-target`) must be visible here.
+  const operations = await listOperations(auth.page, env.operatorUrl, 100);
+  const forResource = operations.items.filter(
+    (operation) => operation.resourceId === tenantResourceId,
   );
   expect(
-    computeOps.length,
-    "operator operations must include tenant compute.server operations",
+    forResource.length,
+    `operator operations must include operations for the resource the tenant console ` +
+      `deleted (${tenantResourceId}) (canonical list total=${operations.total})`,
   ).toBeGreaterThan(0);
   expect(
-    computeOps.some((operation) => operation.action === "create"),
-    "the pp4-native create Operation must be visible to the operator",
+    forResource.some((operation) => operation.action === "delete"),
+    `the console delete Operation for ${tenantResourceId} must be visible to the operator`,
   ).toBe(true);
+  expect(
+    forResource.every((operation) => operation.resourceType === "compute.server"),
+    "every operation for the tenant resource must be a compute.server operation",
+  ).toBe(true);
+  // eslint-disable-next-line no-console
+  console.log(
+    `[pp4] operator canonical operations list sees ${forResource.length} operation(s) for tenant ` +
+      `resource ${tenantResourceId}: ${forResource.map((operation) => operation.action).join(", ")}`,
+  );
   await expectNoFixtureMarkers(auth.page);
 });
 
 test("operator logout ends the session", async () => {
-  await logout(auth.page, auth.context, env.operatorUrl);
+  await logout(auth.page, env.operatorUrl);
 
   await auth.page.reload();
   await expect(
@@ -213,8 +288,8 @@ test("operator logout ends the session", async () => {
     "operator console shows the unauthenticated state after logout",
   ).toBeVisible({ timeout: 30_000 });
 
-  const contextResponse = await auth.page.request.get(`${env.operatorUrl}/api/v1/context`);
-  expect(contextResponse.status(), "GET /api/v1/context must 401 after logout").toBe(401);
+  const contextResponse = await bffFetch(auth.page, `${env.operatorUrl}/api/v1/context`);
+  expect(contextResponse.status, "GET /api/v1/context must 401 after logout").toBe(401);
 
   // eslint-disable-next-line no-console
   console.log("PP4-OPERATOR-OK");

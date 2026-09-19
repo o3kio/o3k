@@ -27,14 +27,18 @@ Acceptance areas and the evidence files each campaign produces:
 
 | Area | Evidence |
 | --- | --- |
-| one-line install -> O3K + Araf ready | `01-one-line-install.log`, `02-success-output.txt`, `03-timestamps.env`, cases I3–I13 |
-| real browser E2E (tenant + operator) | `05-browser-e2e.log`, case ledger entries, browser screenshots (local only) |
-| cross-interface canonical truth (A–D) | `13-*`–`18-*`, cases A1–A3, B1, C1–C2, D1–D2 |
-| OpenStack CLI witness (unmodified) | `08-*`, `14-*`, cases I10–I11, A2, C1–C2, D1–D2 |
-| OpenTofu supplemental smoke (provider 3.4.0) | `20-tofu-*.log`, cases T1–T2 |
-| reboot recovery + rerun convergence | `22-*`–`25-*`, boot-id files, cases R1–R2 |
-| failure/recovery matrix | `23-browser-relogin.log`, `26-*`, cases F1–F4 |
-| cleanup / foreign-state preservation | `27-*`–`31-*`, cases C1–C6 |
+| one-line install -> O3K + Araf ready | `01-one-line-install.log`, `02-success-output.txt`, `03-timestamps.env`, cases I3-I14 |
+| demo never mutates O3K-owned config (rc.7 regression) | `12b-*`, `12b2-*`, `27b-*`, cases I15-I16, C8 |
+| demo disk capacity fits a second VM | `12d-demo-disk-capacity.txt`, case I17 |
+| real browser E2E (tenant + operator) | `05-browser-e2e.log`, browser screenshots (local), `23-browser-relogin.log` |
+| console UI deletion lifecycle on a canonical server | case `PP4-UI-DELETE`, `05-browser-ids.env` |
+| classified gaps (truthful failures) | `35-classified-gaps.txt`, `21-network-provider-posture.txt`, `21e-compat-vs-native-inventories.txt` |
+| cross-interface canonical truth (native <-> CLI) | `13-*`-`18-*`, cases A-gap, B1-B3, C1-C3, D1-D3, G1 |
+| OpenStack CLI witness (unmodified) | `08-*`, `14-*`, cases I10-I11, B2 |
+| OpenTofu supplemental smoke (provider 3.4.0) | `20-tofu-*.log`, cases T1-T2 |
+| reboot recovery + rerun convergence | `22-*`-`25-*`, boot-id files, cases R1-R3 |
+| failure/recovery matrix | `23-browser-relogin.log`, `26-*`, cases F1-F4 |
+| cleanup / foreign-state preservation | `27-*`-`31-*`, cases C1-C8 |
 | secret scans (browser + CLI + journals) | `17-secret-scan.txt`, `32-secret-scan-phase2.txt`, case SEC1 |
 | Horizon (optional witness) | `30-horizon-summary.txt` (Ubuntu campaign), classified PASS/GAP |
 

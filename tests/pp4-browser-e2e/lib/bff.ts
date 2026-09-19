@@ -1,15 +1,24 @@
 /**
  * Minimal typed access to the Araf BFF API from the browser context.
  *
- * All calls go through `page.request`, so they carry the page's real cookie
- * jar (araf_<surface>_session + araf_csrf) and hit the same confidential-BFF
- * endpoints the console UI uses. Mutations additionally send the
- * `x-csrf-token` header the BFF CSRF middleware requires
- * (backend/console-bff-core/src/csrf.rs); the pinned Araf release's SPA
- * client does not attach it, which is why UI mutations fall back here (see
- * README.md "Known upstream limitations").
+ * TRANSPORT: the browser runs INSIDE the campaign VM, but this Playwright
+ * process runs on the host, where the demo hostnames (tenant.o3k.demo,
+ * operator.o3k.demo) do not resolve. `page.request`/`context.request` are
+ * Node-side HTTP clients, so every call through them fails with ENOTFOUND.
+ * All BFF calls therefore go through `page.evaluate(fetch(...))`: they execute
+ * inside the in-VM Chromium, resolve through its /etc/hosts, trust the demo CA
+ * and carry the page's real cookie jar (araf_<surface>_session + araf_csrf).
+ *
+ * Mutations additionally send the `x-csrf-token` header the BFF CSRF middleware
+ * requires (backend/console-bff-core/src/csrf.rs); the pinned Araf release's
+ * SPA client does not attach it, which is why the specs install a network-layer
+ * CSRF bridge for UI-originated requests (see installCsrfBridge).
+ *
+ * This module is READ-ONLY apart from the session boundary calls (login scope
+ * selection, logout) and `installCsrfBridge`: every cloud mutation in the
+ * browser journeys must go through the real console UI. There is deliberately
+ * no BFF helper for creating or deleting a resource.
  */
-import { randomUUID } from "node:crypto";
 import { expect } from "playwright/test";
 import type { BrowserContext, Page } from "playwright";
 
@@ -61,16 +70,69 @@ export interface PaginatedCollection<T> {
   readonly hasMore: boolean;
 }
 
+export interface BffResponse {
+  readonly status: number;
+  readonly ok: boolean;
+  readonly body: string;
+}
+
+interface FetchInit {
+  readonly method?: string;
+  readonly headers?: Record<string, string>;
+  readonly body?: string;
+}
+
+/**
+ * Issue a request from INSIDE the browser page (see the module comment).
+ * Relative paths are resolved against the page origin; absolute URLs are used
+ * as-is (they must share the page origin for cookies to be sent).
+ */
+export async function bffFetch(
+  page: Page,
+  url: string,
+  init: FetchInit = {},
+): Promise<BffResponse> {
+  return page.evaluate(
+    async ({ url, init }) => {
+      const response = await fetch(url, {
+        method: init.method ?? "GET",
+        headers: init.headers ?? {},
+        body: init.body ?? undefined,
+        credentials: "same-origin",
+      });
+      return { status: response.status, ok: response.ok, body: await response.text() };
+    },
+    { url, init },
+  );
+}
+
+/** The araf_csrf cookie value as the page itself sees it (not HttpOnly). */
+async function browserCsrfToken(page: Page): Promise<string> {
+  const value = await page.evaluate(() => {
+    const entry = document.cookie.split("; ").find((cookie) => cookie.startsWith("araf_csrf="));
+    return entry ? entry.slice("araf_csrf=".length) : "";
+  });
+  expect(value, "araf_csrf cookie missing; the BFF session was not established").not.toBe("");
+  return value;
+}
+
+async function expectOk(response: BffResponse, what: string): Promise<BffResponse> {
+  expect(response.ok, `${what} failed: HTTP ${response.status} ${response.body.slice(0, 300)}`).toBe(
+    true,
+  );
+  return response;
+}
+
 /** Cookie names are logged; values are session secrets and never are. */
 const SESSION_COOKIE_NAMES = ["araf_tenant_session", "araf_operator_session", "araf_csrf"] as const;
 
-export async function cookieNames(context: BrowserContext, baseUrl: string): Promise<string[]> {
-  const cookies = await context.cookies(baseUrl);
+export async function cookieNames(context: BrowserContext): Promise<string[]> {
+  const cookies = await context.cookies();
   return cookies.map((cookie) => cookie.name).sort();
 }
 
 export async function logCookieNames(context: BrowserContext, baseUrl: string): Promise<void> {
-  const names = await cookieNames(context, baseUrl);
+  const names = await cookieNames(context);
   const unexpected = names.filter((name) => !(SESSION_COOKIE_NAMES as readonly string[]).includes(name));
   // eslint-disable-next-line no-console
   console.log(`[pp4] cookies for ${new URL(baseUrl).host}: ${names.join(", ")}${unexpected.length > 0 ? ` (unexpected: ${unexpected.join(", ")})` : ""}`);
@@ -85,40 +147,71 @@ export async function logCookieNames(context: BrowserContext, baseUrl: string): 
  * (backend/console-bff-core/src/csrf.rs), so the test can read it exactly as
  * the SPA would.
  */
-export async function csrfToken(context: BrowserContext, baseUrl: string): Promise<string> {
-  const cookies = await context.cookies(baseUrl);
+export async function csrfToken(context: BrowserContext): Promise<string> {
+  const cookies = await context.cookies();
   const csrf = cookies.find((cookie) => cookie.name === "araf_csrf");
   if (!csrf) {
-    throw new Error(`[pp4] araf_csrf cookie missing for ${baseUrl}; login did not complete`);
+    throw new Error("[pp4] araf_csrf cookie missing; login did not complete");
   }
   return csrf.value;
 }
 
+/**
+ * Bridge the pinned console SPA's missing CSRF header at the network layer.
+ *
+ * The pinned Araf SPA ships no CSRF handling at all, so every POST/DELETE the
+ * console UI issues is answered 403 by the BFF double-submit middleware and the
+ * UI action can never succeed. This route lets the REAL UI path run (real form,
+ * real click, real SPA fetch, real BFF endpoint) by adding only the header the
+ * SPA omits. It is not a substitute for the UI: when a step cannot be performed
+ * through the UI at all, the spec records PP4-UI-FALLBACK and the campaign
+ * fails. Every bridged request is logged for the evidence log.
+ */
+export async function installCsrfBridge(context: BrowserContext, baseUrl: string): Promise<void> {
+  const origin = new URL(baseUrl).origin;
+  await context.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method())) {
+      return route.continue();
+    }
+    if (new URL(request.url()).origin !== origin) {
+      return route.continue();
+    }
+    const headers = { ...request.headers() };
+    if (!headers["x-csrf-token"]) {
+      const cookies = await context.cookies();
+      const csrf = cookies.find((cookie) => cookie.name === "araf_csrf");
+      if (csrf) {
+        headers["x-csrf-token"] = csrf.value;
+        // eslint-disable-next-line no-console
+        console.log(`PP4-UI-CSRF-BRIDGE ${request.method()} ${new URL(request.url()).pathname}`);
+      }
+    }
+    await route.continue({ headers });
+  });
+}
+
 export async function getSession(page: Page, baseUrl: string): Promise<BffSessionStatus> {
-  const response = await page.request.get(`${baseUrl}/api/v1/auth/session`);
-  expect(response.ok(), `GET /api/v1/auth/session failed: HTTP ${response.status()}`).toBe(true);
-  return (await response.json()) as BffSessionStatus;
+  const response = await bffFetch(page, `${baseUrl}/api/v1/auth/session`);
+  await expectOk(response, "GET /api/v1/auth/session");
+  return JSON.parse(response.body) as BffSessionStatus;
 }
 
 export async function listScopes(page: Page, baseUrl: string): Promise<ScopeChoice[]> {
-  const response = await page.request.get(`${baseUrl}/api/v1/auth/scopes`);
-  expect(response.ok(), `GET /api/v1/auth/scopes failed: HTTP ${response.status()}`).toBe(true);
-  return (await response.json()) as ScopeChoice[];
+  const response = await bffFetch(page, `${baseUrl}/api/v1/auth/scopes`);
+  await expectOk(response, "GET /api/v1/auth/scopes");
+  return JSON.parse(response.body) as ScopeChoice[];
 }
 
 /** POST /api/v1/auth/scope — server-side project selection (CSRF-protected). */
-export async function selectProjectScope(
-  page: Page,
-  context: BrowserContext,
-  baseUrl: string,
-  projectId: string,
-): Promise<void> {
-  const csrf = await csrfToken(context, baseUrl);
-  const response = await page.request.post(`${baseUrl}/api/v1/auth/scope`, {
-    data: { project_id: projectId },
-    headers: { "x-csrf-token": csrf },
+export async function selectProjectScope(page: Page, baseUrl: string, projectId: string): Promise<void> {
+  const csrf = await browserCsrfToken(page);
+  const response = await bffFetch(page, `${baseUrl}/api/v1/auth/scope`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-csrf-token": csrf },
+    body: JSON.stringify({ project_id: projectId }),
   });
-  expect(response.ok(), `POST /api/v1/auth/scope failed: HTTP ${response.status()}`).toBe(true);
+  await expectOk(response, "POST /api/v1/auth/scope");
 }
 
 export interface SessionContext {
@@ -132,94 +225,9 @@ export interface SessionContext {
 
 /** GET /api/v1/context — authoritative session context (identity + scope). */
 export async function getContext(page: Page, baseUrl: string): Promise<SessionContext> {
-  const response = await page.request.get(`${baseUrl}/api/v1/context`);
-  expect(response.ok(), `GET /api/v1/context failed: HTTP ${response.status()}`).toBe(true);
-  return (await response.json()) as SessionContext;
-}
-
-async function postMutation<T>(
-  page: Page,
-  context: BrowserContext,
-  baseUrl: string,
-  path: string,
-  data?: unknown,
-): Promise<T> {
-  const csrf = await csrfToken(context, baseUrl);
-  const response = await page.request.post(`${baseUrl}${path}`, {
-    ...(data === undefined ? {} : { data }),
-    headers: {
-      "x-csrf-token": csrf,
-      "Idempotency-Key": randomUUID(),
-    },
-  });
-  expect(
-    response.ok(),
-    `POST ${path} failed: HTTP ${response.status()} ${(await response.text().catch(() => "")).slice(0, 400)}`,
-  ).toBe(true);
-  return (await response.json()) as T;
-}
-
-/**
- * Create a compute server through the same BFF endpoint the create form
- * posts to. The payload matches the O3K create contract exactly
- * (crates/o3k-native-api/src/resource_contract.rs: ComputeServerCreateSpec).
- */
-export async function createComputeServer(
-  page: Page,
-  context: BrowserContext,
-  baseUrl: string,
-  payload: { name: string; image_id: string; flavor_id: string; network_ids: string[] },
-): Promise<CanonicalOperation> {
-  return postMutation<CanonicalOperation>(
-    page,
-    context,
-    baseUrl,
-    "/api/v1/resources/compute.server",
-    payload,
-  );
-}
-
-/** Submit a lifecycle action (e.g. "stop") — same payload the UI sends. */
-export async function submitResourceAction(
-  page: Page,
-  context: BrowserContext,
-  baseUrl: string,
-  resourceType: string,
-  id: string,
-  actionId: string,
-): Promise<CanonicalOperation> {
-  return postMutation<CanonicalOperation>(
-    page,
-    context,
-    baseUrl,
-    `/api/v1/resources/${encodeURIComponent(resourceType)}/${encodeURIComponent(id)}/actions`,
-    { action_id: actionId },
-  );
-}
-
-/** Delete a resource — same BFF endpoint the UI delete action uses. */
-export async function deleteResource(
-  page: Page,
-  context: BrowserContext,
-  baseUrl: string,
-  resourceType: string,
-  id: string,
-): Promise<CanonicalOperation> {
-  const csrf = await csrfToken(context, baseUrl);
-  const response = await page.request.delete(
-    `${baseUrl}/api/v1/resources/${encodeURIComponent(resourceType)}/${encodeURIComponent(id)}`,
-    {
-      headers: {
-        "x-csrf-token": csrf,
-        "Idempotency-Key": randomUUID(),
-      },
-    },
-  );
-  expect(
-    response.ok(),
-    `DELETE /api/v1/resources/${resourceType}/${id} failed: HTTP ${response.status()}`,
-  ).toBe(true);
-  return (await response.json()) as CanonicalOperation;
+  const response = await bffFetch(page, `${baseUrl}/api/v1/context`);
+  await expectOk(response, "GET /api/v1/context");
+  return JSON.parse(response.body) as SessionContext;
 }
 
 export async function getOperation(
@@ -227,13 +235,12 @@ export async function getOperation(
   baseUrl: string,
   operationId: string,
 ): Promise<CanonicalOperation> {
-  const response = await page.request.get(
+  const response = await bffFetch(
+    page,
     `${baseUrl}/api/v1/operations/${encodeURIComponent(operationId)}`,
   );
-  expect(response.ok(), `GET /api/v1/operations/${operationId} failed: HTTP ${response.status()}`).toBe(
-    true,
-  );
-  return (await response.json()) as CanonicalOperation;
+  await expectOk(response, `GET /api/v1/operations/${operationId}`);
+  return JSON.parse(response.body) as CanonicalOperation;
 }
 
 export async function listResources(
@@ -242,13 +249,12 @@ export async function listResources(
   resourceType: string,
   pageSize = 100,
 ): Promise<PaginatedCollection<CanonicalResource>> {
-  const response = await page.request.get(
+  const response = await bffFetch(
+    page,
     `${baseUrl}/api/v1/resources/${encodeURIComponent(resourceType)}?page=0&pageSize=${pageSize}`,
   );
-  expect(response.ok(), `GET /api/v1/resources/${resourceType} failed: HTTP ${response.status()}`).toBe(
-    true,
-  );
-  return (await response.json()) as PaginatedCollection<CanonicalResource>;
+  await expectOk(response, `GET /api/v1/resources/${resourceType}`);
+  return JSON.parse(response.body) as PaginatedCollection<CanonicalResource>;
 }
 
 export async function getResource(
@@ -257,35 +263,39 @@ export async function getResource(
   resourceType: string,
   id: string,
 ): Promise<CanonicalResource> {
-  const response = await page.request.get(
+  const response = await bffFetch(
+    page,
     `${baseUrl}/api/v1/resources/${encodeURIComponent(resourceType)}/${encodeURIComponent(id)}`,
   );
-  expect(response.ok(), `GET resource ${id} failed: HTTP ${response.status()}`).toBe(true);
-  return (await response.json()) as CanonicalResource;
+  await expectOk(response, `GET resource ${id}`);
+  return JSON.parse(response.body) as CanonicalResource;
 }
 
-export interface OperatorOperationList {
+export interface OperationList {
   readonly items: readonly CanonicalOperation[];
   readonly total: number;
 }
 
-export async function listOperatorOperations(
+/**
+ * GET /api/v1/operations — the canonical operations list the O3K token is
+ * scope-bound to (served on both console surfaces; `base_routes`).
+ */
+export async function listOperations(
   page: Page,
   baseUrl: string,
-  pageSize = 25,
-): Promise<OperatorOperationList> {
-  const response = await page.request.get(
-    `${baseUrl}/api/v1/operator/operations?page=0&pageSize=${pageSize}`,
-  );
-  expect(response.ok(), `GET /api/v1/operator/operations failed: HTTP ${response.status()}`).toBe(true);
-  return (await response.json()) as OperatorOperationList;
+  pageSize = 100,
+): Promise<OperationList> {
+  const response = await bffFetch(page, `${baseUrl}/api/v1/operations?page=0&pageSize=${pageSize}`);
+  await expectOk(response, "GET /api/v1/operations");
+  return JSON.parse(response.body) as OperationList;
 }
 
 /** POST /api/v1/auth/logout (CSRF-protected). Araf ships no logout UI button. */
-export async function logout(page: Page, context: BrowserContext, baseUrl: string): Promise<void> {
-  const csrf = await csrfToken(context, baseUrl);
-  const response = await page.request.post(`${baseUrl}/api/v1/auth/logout`, {
+export async function logout(page: Page, baseUrl: string): Promise<void> {
+  const csrf = await browserCsrfToken(page);
+  const response = await bffFetch(page, `${baseUrl}/api/v1/auth/logout`, {
+    method: "POST",
     headers: { "x-csrf-token": csrf },
   });
-  expect(response.ok(), `POST /api/v1/auth/logout failed: HTTP ${response.status()}`).toBe(true);
+  await expectOk(response, "POST /api/v1/auth/logout");
 }

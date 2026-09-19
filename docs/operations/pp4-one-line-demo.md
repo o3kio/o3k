@@ -76,10 +76,54 @@ openstack server delete demo-vm
 #   https://operator.o3k.demo/  - platform/operator console (Araf)
 ```
 
-Everything above — Araf, the OpenStack CLI, and the native `o3k` CLI — sees
-the **same canonical O3K resources**. Araf is the supported O3K dashboard;
+Everything above — Araf, the OpenStack CLI, and the native `o3k` CLI — reads
+the **same canonical O3K cloud state**. Araf is the supported O3K dashboard;
 the OpenStack-compatible API is a bounded projection used by external
 ecosystem clients (CLI, optionally Horizon, OpenTofu).
+
+## What the native console can and cannot do today
+
+Verified on fresh Ubuntu 24.04 and Debian 12 hosts (see
+`docs/evidence/pp4/`). This is the honest surface of `o3k-demo-v1`:
+
+Works natively in Araf (real O3K native API, no fixtures):
+
+- OIDC login, project scope selection, service catalog, capacity/usage,
+  regions and deployment context, operations list/detail with canonical
+  Operation states;
+- **server inspection**: servers created by the demo (and by the OpenStack
+  CLI) appear with their canonical UUID and truthful state;
+- **server deletion through the console UI**: the advertised native
+  `DeleteServer` action runs through the real console (confirmation modal,
+  canonical Operation, truthful final state), and the resource is then absent
+  from the OpenStack CLI too — the cross-interface proof;
+- operator views: platform overview, installed services, provider/agent
+  health, capacity, regions.
+
+Not supported by this profile (truthful failures, recorded as classified
+gaps — no fabricated data is ever shown):
+
+- **creating anything from the console** (VM or network): the pinned Araf
+  release cannot compile the JSON Schema 2020-12 create schemas O3K serves
+  (its validator defaults to draft-07). The console surfaces an error and
+  creates nothing. The upstream fix is prepared (o3kio/araf#118) and will
+  ship in the next Araf candidate;
+- **native VM creation even through the API**: the native create path needs
+  the O3K network execution agent to resolve a port, and `o3k-demo-v1` ships
+  that agent inactive by contract. Create VMs with the OpenStack CLI (above)
+  and they appear in Araf immediately;
+- **native image and flavor inventories**: the demo's CirrOS image and
+  TestLab flavor exist through the OpenStack-compatible API only
+  (`openstack image list`, `openstack flavor list`); the native image
+  collection is empty and no flavor resource type is advertised;
+- **canonical parity for compat-created networks and images**: a network
+  created through the OpenStack-compatible API (including the installer's
+  `testlab-network`) is not a canonical native resource, so it does not
+  appear in the native network list. Servers *are* canonical in both
+  directions — that is what the cross-interface tests prove;
+- **operator global operations** (`/api/v1/operator/operations`) — not
+  implemented by the production O3K adapter; the operator console states
+  that truthfully.
 
 ## Uninstall / purge
 
