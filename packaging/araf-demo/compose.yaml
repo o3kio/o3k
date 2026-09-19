@@ -35,19 +35,42 @@ services:
     # Loopback-only publication: the demo console/IdP/API vhosts are trusted
     # local hops (see contracts/araf-compatibility-v1.yaml pp3_tuple
     # known_limitations). Not a remote-deployment TLS claim.
-    ports: ["127.0.0.1:443:8080"]
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    ports: ["127.0.0.1:443:443"]
     volumes:
       - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/tls/server.crt:/etc/nginx/tls/server.crt:ro
       - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/tls/server.key:/etc/nginx/tls/server.key:ro
       - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/nginx.conf:/etc/nginx/conf.d/demo.conf:ro
       # blank out the image's default site so only the demo vhosts bind :8080
       - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/nginx-default-blank.conf:/etc/nginx/conf.d/default.conf:ro
-    networks: [o3k-araf-demo]
+    networks:
+      o3k-araf-demo:
+        aliases:
+          # The demo names resolve to this TLS endpoint both on the host
+          # (/etc/hosts -> 127.0.0.1:443) and inside the compose network
+          # (DNS aliases -> tls-proxy:8080), so BFF->IdP and BFF->O3K API
+          # keep full TLS verification without host-DNS tricks.
+          - tenant.o3k.demo
+          - operator.o3k.demo
+          - idp.o3k.demo
+          - api.o3k.demo
     labels:
       o3k.io/pp-owner: o3k-araf-demo
       o3k.io/pp-component: tls-proxy
+    restart: unless-stopped
+
+  api-relay:
+    image: ${NGINX_IMAGE:?set NGINX_IMAGE}@${NGINX_DIGEST:?set NGINX_DIGEST}
+    # Host network namespace: binds the docker0 address (172.17.0.1) and
+    # forwards to o3kd's loopback-only native API at 127.0.0.1:18080.
+    # Reachable only from container networks via the bridge address; never
+    # LAN-facing. See api-relay.conf.
+    network_mode: host
+    volumes:
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/api-relay.conf:/etc/nginx/conf.d/api-relay.conf:ro
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/nginx-default-blank.conf:/etc/nginx/conf.d/default.conf:ro
+    labels:
+      o3k.io/pp-owner: o3k-araf-demo
+      o3k.io/pp-component: api-relay
     restart: unless-stopped
 
   idp:

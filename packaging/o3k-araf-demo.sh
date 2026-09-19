@@ -430,11 +430,16 @@ ensure_alice() {
   if [ -z "${existing}" ]; then
     log "creating demo user alice"
     kc_api POST "/admin/realms/${ISSUER_REALM}/users" \
-      '{"username":"alice","enabled":true}'
+      '{"username":"alice","enabled":true,"firstName":"Alice","lastName":"Demo","email":"alice@o3k.demo","emailVerified":true}'
     existing="$(curl -sf --cacert "${TLS_DIR}/ca.crt" \
       -H "Authorization: Bearer $(kc_token)" \
       "https://idp.o3k.demo/admin/realms/${ISSUER_REALM}/users?username=alice" \
       | python3 -c 'import json,sys; u=json.load(sys.stdin); print(u[0]["id"] if u else "")')"
+  else
+    # Converge profile fields: without them Keycloak's default VERIFY_PROFILE
+    # required action intercepts the first login.
+    kc_api PUT "/admin/realms/${ISSUER_REALM}/users/${existing}" \
+      '{"username":"alice","enabled":true,"firstName":"Alice","lastName":"Demo","email":"alice@o3k.demo","emailVerified":true}'
   fi
   [ -n "${existing}" ] || die "keycloak user alice missing after provisioning"
   ALICE_SUBJECT="${existing}"
@@ -462,6 +467,8 @@ cmd_install() {
   ensure_ca
   cp "${SCRIPT_DIR}/araf-demo/nginx.conf" "${STATE_DIR}/nginx.conf"
   chmod 644 "${STATE_DIR}/nginx.conf"
+  cp "${SCRIPT_DIR}/araf-demo/api-relay.conf" "${STATE_DIR}/api-relay.conf"
+  chmod 644 "${STATE_DIR}/api-relay.conf"
   : > "${STATE_DIR}/nginx-default-blank.conf"
   chmod 644 "${STATE_DIR}/nginx-default-blank.conf"
   render_env_file
