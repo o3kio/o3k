@@ -331,7 +331,24 @@ if [[ -e "$DEMO_SHARE_DIR" || -L "$DEMO_SHARE_DIR" ]]; then
     echo "refusing to remove symlink demo material path: $DEMO_SHARE_DIR" >&2
     exit 2
   fi
-  rm -rf -- "$DEMO_SHARE_DIR"
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^o3k-araf-demo-'; then
+    echo "refusing to remove the Araf demo material while the demo stack is running;" >&2
+    echo "  run: sudo $DEMO_SHARE_DIR/o3k-araf-demo.sh uninstall" >&2
+    exit 2
+  fi
+  # Remove only the files this installer owns; anything else under the tree is
+  # operator state and is preserved (the directory is left in place).
+  demo_removed=0
+  for demo_file in o3k-araf-demo.sh araf-demo/compose.yaml araf-demo/nginx.conf \
+    araf-demo/api-relay.conf araf-demo/realm.json araf-demo/README.md; do
+    if [[ -f "$DEMO_SHARE_DIR/$demo_file" ]]; then
+      rm -f -- "$DEMO_SHARE_DIR/$demo_file"
+      demo_removed=$((demo_removed + 1))
+    fi
+  done
+  rmdir "$DEMO_SHARE_DIR/araf-demo" "$DEMO_SHARE_DIR" 2>/dev/null || {
+    echo "preserved operator files under $DEMO_SHARE_DIR (not owned by the installer)"
+  }
 fi
 if [[ $PURGE -eq 1 ]]; then
   echo "o3k binaries, helper files, and owned state removed"

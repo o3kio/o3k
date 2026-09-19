@@ -144,12 +144,12 @@ pp4_tuple:
   status: pinned-evidence-backed
   updated_by: PP.4 (#973)
   o3k:
-    version: v0.4.0-rc.6
+    version: v0.4.0-rc.7
     # stamped with the release-commit SHA in the PP.4 evidence commit; the
     # published bundle manifest.json is the runtime authority (the demo
     # orchestrator reads it fail-closed at install/tuple time).
     source_sha: "0000000000000000000000000000000000000000000000000000000000000000"
-    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.6
+    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.7
   araf:
     version: v1.0.0-rc.12
     source_sha: de64cc9193085116fa30ad51c04ccab24a013dd0
@@ -181,6 +181,17 @@ pp4_tuple:
     one_line_installer_integration: pending-evidence
     supported_targets: [ubuntu-24.04-x86_64, debian-12-x86_64]
     browser_trust: operator-imported demo CA
+    o3kd_federation_wiring: systemd drop-in (/etc/systemd/system/o3kd.service.d/araf-demo.conf)
+    o3k_config_files_mutated: none
+  container_engine:
+    # Ubuntu 24.04 uses apt docker.io + docker-compose-v2; Debian 12 ships
+    # docker.io 20.10 (below the >=24.0 contract minimum), so the demo installs
+    # these pinned upstream static artifacts instead.
+    debian_static_docker_version: "28.5.2"
+    debian_static_docker_sha256: ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d
+    debian_compose_plugin_version: "v2.39.4"
+    debian_compose_plugin_sha256: 7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4
+    local_verification_tag: o3k-demo-v1.0.0-rc.12
   notes:
     - Araf GitHub release v1.0.0-rc.12 metadata is published as a
       non-prerelease (recorded fact); future Araf RCs publish as prereleases

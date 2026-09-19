@@ -387,7 +387,7 @@ fi
 # Unavailable, every create 409s) when unset; the packaged libvirt install
 # must declare the capacity so a clean install can schedule the E2E flavor
 # (--disk 10), and must preserve an operator-pre-set value.
-if ! grep -Fq 'O3K_COMPUTE_MAX_DISK_GB=10' "$ROOT_DIR/packaging/install.sh"; then
+if ! grep -Fq 'O3K_COMPUTE_MAX_DISK_GB=30' "$ROOT_DIR/packaging/install.sh"; then
   echo "install.sh does not declare compute-agent disk capacity" >&2
   exit 1
 fi

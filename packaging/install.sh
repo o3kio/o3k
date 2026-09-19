@@ -403,12 +403,15 @@ if [[ "$PROFILE" == libvirt ]]; then
   # ADR-0146 (docs/adr/ADR-0146-agent-inventory-publication.md): the compute
   # agent publishes Placement disk capacity from the operator's bounded
   # O3K_COMPUTE_MAX_DISK_GB declaration and is intentionally unschedulable
-  # (DISK_GB total=0) while it is unset. The packaged install declares 10 GB
-  # per host — the E2E flavor needs 10 — and operators tune per host via
-  # docs/CONFIGURATION.md; an operator-pre-set value is preserved.
+  # (DISK_GB total=0) while it is unset. The packaged install declares 30 GB
+  # per host: the bounded o3k-demo-v1 cloud must host the installer's TestLab
+  # VM (10 GB flavor) plus at least two user-created VMs — a 10 GB default
+  # left the second create unschedulable (Scheduler(NoValidHost), found in the
+  # PP.4 campaign). Operators tune per host via docs/CONFIGURATION.md; an
+  # operator-pre-set value is preserved.
   if ! grep -q '^O3K_COMPUTE_MAX_DISK_GB=' "$CONFIG_DIR/o3k-compute.env"; then
     umask 077
-    printf 'O3K_COMPUTE_MAX_DISK_GB=10\n' >>"$CONFIG_DIR/o3k-compute.env"
+    printf 'O3K_COMPUTE_MAX_DISK_GB=30\n' >>"$CONFIG_DIR/o3k-compute.env"
     chmod 0600 "$CONFIG_DIR/o3k-compute.env"
   fi
   if [[ $EUID -eq 0 ]]; then

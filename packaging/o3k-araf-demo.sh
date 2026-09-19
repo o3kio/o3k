@@ -50,7 +50,7 @@ umask 077
 # ---------------------------------------------------------------------------
 ARAF_VERSION="v1.0.0-rc.12"
 ARAF_SOURCE_SHA="de64cc9193085116fa30ad51c04ccab24a013dd0"
-O3K_TUPLE_VERSION="v0.4.0-rc.6"
+O3K_TUPLE_VERSION="v0.4.0-rc.7"
 
 ARAF_BFF_IMAGE="ghcr.io/o3kio/araf-bff"
 ARAF_BFF_DIGEST="sha256:bc717ecdbbbf3ea673efe168c90419936677d644aa0ae25af4eb84906cd744ba"
@@ -108,8 +108,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/araf-demo/compose.yaml"
 O3KD_ENV="/etc/o3k/o3kd.env"
 O3K_RELEASE_MANIFEST="/usr/local/share/o3k/release-manifest.json"
+# The demo never edits /etc/o3k/o3kd.env: O3K's installer keeps an install-time
+# content ledger for that file and refuses to re-run when it was modified, so a
+# demo-managed block in it would break one-line-installer convergence. The
+# federation wiring lives in its own environment file, pulled in by a systemd
+# drop-in that O3K's unit does not own.
+O3KD_DROPIN_DIR="/etc/systemd/system/o3kd.service.d"
+O3KD_DROPIN="${O3KD_DROPIN_DIR}/araf-demo.conf"
+O3KD_DEMO_ENV="/etc/o3k/o3kd-araf-demo.env"
 HOSTS_MARKER="# o3k-araf-demo"
-ENV_BEGIN="# BEGIN o3k-araf-demo (PP.3)"
+ENV_BEGIN="# BEGIN o3k-araf-demo (PP.4)"
 ENV_END="# END o3k-araf-demo"
 O3KD_READY_URL="http://127.0.0.1:18080/readyz"
 
@@ -218,14 +226,15 @@ ensure_docker_static() {
     local tmp
     tmp="$(mktemp -d)"
     curl -fsSL -o "${tmp}/docker.tgz" "${DOCKER_STATIC_BASE}/docker-${DOCKER_STATIC_VERSION}.tgz" \
-      || die "docker static tarball download failed (${DOCKER_STATIC_BASE}/docker-${DOCKER_STATIC_VERSION}.tgz)"
+      || { rm -rf "${tmp}"; die "docker static tarball download failed (${DOCKER_STATIC_BASE}/docker-${DOCKER_STATIC_VERSION}.tgz)"; }
     echo "${DOCKER_STATIC_SHA256}  ${tmp}/docker.tgz" | sha256sum -c - >/dev/null \
-      || die "docker static tarball sha256 mismatch (pin ${DOCKER_STATIC_SHA256}; upstream replaced the tarball?)"
-    tar -xzf "${tmp}/docker.tgz" -C "${tmp}" || die "docker static tarball extraction failed"
+      || { rm -rf "${tmp}"; die "docker static tarball sha256 mismatch (pin ${DOCKER_STATIC_SHA256}; upstream replaced the tarball?)"; }
+    tar -xzf "${tmp}/docker.tgz" -C "${tmp}" \
+      || { rm -rf "${tmp}"; die "docker static tarball extraction failed"; }
     mkdir -p "${bindir}"
     local b
     for b in docker dockerd containerd containerd-shim-runc-v2 runc ctr docker-init docker-proxy; do
-      [ -f "${tmp}/docker/${b}" ] || die "docker static tarball is missing ${b}"
+      [ -f "${tmp}/docker/${b}" ] || { rm -rf "${tmp}"; die "docker static tarball is missing ${b}"; }
       install -m 0755 "${tmp}/docker/${b}" "${bindir}/${b}"
     done
     rm -rf "${tmp}"
@@ -235,10 +244,20 @@ ensure_docker_static() {
   for b in docker dockerd containerd containerd-shim-runc-v2 runc ctr docker-init docker-proxy; do
     ln -sfn "${bindir}/${b}" "/usr/local/bin/${b}"
   done
-  if [ ! -f /etc/systemd/system/docker.service ]; then
-    cat > /etc/systemd/system/docker.service <<'EOF'
+  # A distro docker.io (bookworm: 20.10, below the contract minimum) ships its
+  # own units at /lib/systemd/system. Refuse to mix the two silently: stop and
+  # disable them so the pinned static engine is the one that runs, then restart
+  # so the version gate below measures the engine the demo will actually use.
+  if [ -f /lib/systemd/system/docker.service ] || [ -f /lib/systemd/system/docker.socket ]; then
+    log "disabling distro docker units in favour of the pinned static engine"
+    systemctl disable --now docker.socket >/dev/null 2>&1 || true
+    systemctl disable --now docker >/dev/null 2>&1 || true
+  fi
+  local unit_tmp
+  unit_tmp="$(mktemp)"
+  cat > "${unit_tmp}" <<'EOF'
 [Unit]
-Description=Docker Application Container Engine
+Description=Docker Application Container Engine (O3K demo pinned static)
 After=network-online.target
 Wants=network-online.target
 
@@ -246,6 +265,8 @@ Wants=network-online.target
 Type=notify
 ExecStart=/usr/local/bin/dockerd
 ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=process
+Delegate=yes
 Restart=always
 StartLimitBurst=3
 StartLimitIntervalSec=10s
@@ -253,12 +274,27 @@ LimitNOFILE=infinity
 LimitNPROC=infinity
 LimitCORE=infinity
 TasksMax=infinity
+TimeoutStartSec=0
 
 [Install]
 WantedBy=multi-user.target
 EOF
+  if ! cmp -s "${unit_tmp}" /etc/systemd/system/docker.service; then
+    install -m 0644 "${unit_tmp}" /etc/systemd/system/docker.service
+    DOCKER_UNIT_CHANGED=1
   fi
+  rm -f "${unit_tmp}"
   systemctl daemon-reload
+  if [ "${DOCKER_UNIT_CHANGED:-0}" = "1" ] || ! systemctl is-active --quiet docker; then
+    systemctl restart docker >/dev/null 2>&1 || systemctl start docker
+  fi
+  # Prove the running daemon is the pinned engine, not a distro leftover.
+  local running
+  running="$(readlink -f "/proc/$(pgrep -x dockerd | head -1)/exe" 2>/dev/null || true)"
+  case "${running}" in
+    "${bindir}/dockerd") ;;
+    *) die "the running docker daemon is not the pinned static engine (${running:-none}); remove the distro docker.io package and re-run" ;;
+  esac
 }
 
 ensure_compose_plugin() {
@@ -273,18 +309,18 @@ ensure_compose_plugin() {
   tmp="$(mktemp -d)"
   curl -fsSL -o "${tmp}/docker-compose" \
     "${COMPOSE_PLUGIN_BASE}/${COMPOSE_PLUGIN_VERSION}/docker-compose-linux-x86_64" \
-    || die "compose plugin download failed"
+    || { rm -rf "${tmp}"; die "compose plugin download failed"; }
   curl -fsSL -o "${tmp}/docker-compose.sha256" \
     "${COMPOSE_PLUGIN_BASE}/${COMPOSE_PLUGIN_VERSION}/docker-compose-linux-x86_64.sha256" \
-    || die "compose plugin published sha256 download failed"
+    || { rm -rf "${tmp}"; die "compose plugin published sha256 download failed"; }
   local published
   published="$(awk 'NR==1{print $1}' "${tmp}/docker-compose.sha256")"
   printf '%s' "${published}" | grep -Eq '^[0-9a-f]{64}$' \
-    || die "compose plugin published sha256 is malformed"
+    || { rm -rf "${tmp}"; die "compose plugin published sha256 is malformed"; }
   [ "${published}" = "${COMPOSE_PLUGIN_SHA256}" ] \
-    || die "compose plugin published sha256 does not match the pinned constant (upstream replaced the asset?)"
+    || { rm -rf "${tmp}"; die "compose plugin published sha256 does not match the pinned constant (upstream replaced the asset?)"; }
   echo "${COMPOSE_PLUGIN_SHA256}  ${tmp}/docker-compose" | sha256sum -c - >/dev/null \
-    || die "compose plugin sha256 mismatch after download"
+    || { rm -rf "${tmp}"; die "compose plugin sha256 mismatch after download"; }
   mkdir -p "${plugin_dir}"
   install -m 0755 "${tmp}/docker-compose" "${plugin}"
   rm -rf "${tmp}"
@@ -330,7 +366,7 @@ persist_secrets() {
 }
 
 ensure_ca() {
-  if [ ! -f "${TLS_DIR}/ca.crt" ] || [ ! -f "${TLS_DIR}/server.crt" ]; then
+  if [ ! -f "${TLS_DIR}/ca.crt" ] || [ ! -f "${TLS_DIR}/server.crt" ] || [ ! -f "${TLS_DIR}/server.key" ]; then
   log "minting local demo CA and server certificate (loopback only, not publicly trusted)"
   mkdir -p "${TLS_DIR}"
   local cnf="${TLS_DIR}/server.cnf"
@@ -458,15 +494,18 @@ ensure_araf_images() {
 # /etc/hosts and o3kd federation wiring (marker-managed, convergent)
 # ---------------------------------------------------------------------------
 ensure_hosts() {
-  local missing=0 h
+  local h added=0
   for h in ${DEMO_HOSTS}; do
-    grep -qE "^127\.0\.0\.1\s+.*\b${h}\b" /etc/hosts || missing=1
-  done
-  [ "${missing}" -eq 0 ] && return 0
-  log "adding loopback demo hostnames to /etc/hosts (${HOSTS_MARKER})"
-  for h in ${DEMO_HOSTS}; do
+    if grep -qE "^127\.0\.0\.1\s+.*\b${h}\b" /etc/hosts; then
+      continue
+    fi
+    if [ "${added}" -eq 0 ]; then
+      log "adding loopback demo hostnames to /etc/hosts (${HOSTS_MARKER})"
+    fi
     printf '127.0.0.1 %s %s\n' "${h}" "${HOSTS_MARKER}" >> /etc/hosts
+    added=$((added + 1))
   done
+  return 0
 }
 
 remove_hosts() {
@@ -492,6 +531,46 @@ O3K_TESTLAB_OPERATOR_ASSIGNMENT_ID=${OPERATOR_ASSIGNMENT_ID}
 SSL_CERT_FILE=${TLS_DIR}/combined-ca.crt
 ${ENV_END}
 EOF
+}
+
+o3kd_dropin_content() {
+  cat <<EOF
+# Managed by o3k-araf-demo (PP.4 #973); do not edit.
+# The demo OIDC federation is kept out of /etc/o3k/o3kd.env because that file
+# is O3K-install-owned (content ledger) and must stay byte-identical for
+# one-line-installer convergence.
+[Service]
+EnvironmentFile=-${O3KD_DEMO_ENV}
+EOF
+}
+
+# Legacy (PP.3) migration: strip the managed block the old mechanism appended
+# to /etc/o3k/o3kd.env, restoring the file the installer's ledger expects.
+legacy_strip_o3kd_env_block() {
+  grep -q "^${ENV_BEGIN}" "${O3KD_ENV}" 2>/dev/null || return 0
+  log "migrating legacy o3kd.env federation block to the managed drop-in"
+  python3 - "${O3KD_ENV}" "${ENV_BEGIN}" "${ENV_END}" <<'PY' || die "legacy federation block removal failed"
+import sys
+
+path, begin, end = (value.strip() for value in sys.argv[1:4])
+with open(path, encoding="utf-8") as handle:
+    lines = handle.read().splitlines()
+out, skipping = [], False
+for line in lines:
+    if line.strip() == begin:
+        skipping = True
+        continue
+    if skipping and line.strip() == end:
+        skipping = False
+        continue
+    if not skipping:
+        out.append(line)
+# the legacy writer appended "\n<block>\n" at EOF; drop the blank line it added
+while out and not out[-1].strip():
+    out.pop()
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write("".join(f"{line}\n" for line in out))
+PY
 }
 
 # Reconcile the managed operator-assignment id with the durable o3kd state:
@@ -520,40 +599,77 @@ PY
 }
 
 ensure_o3kd_federation() {
-  local desired current
+  local desired current dropin_desired dropin_current
   desired="$(o3kd_block_content)"
-  current="$(sed -n "/^${ENV_BEGIN}/,/^${ENV_END}/p" "${O3KD_ENV}" 2>/dev/null || true)"
-  if [ "${current}" = "${desired}" ]; then
+  dropin_desired="$(o3kd_dropin_content)"
+  current="$(cat "${O3KD_DEMO_ENV}" 2>/dev/null || true)"
+  dropin_current="$(cat "${O3KD_DROPIN}" 2>/dev/null || true)"
+  if [ "${current}" = "${desired}" ] && [ "${dropin_current}" = "${dropin_desired}" ]; then
     if systemctl is-active --quiet o3kd; then
-      log "o3kd OIDC federation block already present; no restart needed"
+      log "o3kd OIDC federation drop-in already present; no restart needed"
       return 0
     fi
-    log "o3kd OIDC federation block present; o3kd is down, restarting"
+    log "o3kd OIDC federation drop-in present; o3kd is down, restarting"
     systemctl restart o3kd
     wait_url "${O3KD_READY_URL}" "o3kd readiness after restart"
     return 0
   fi
-  log "enabling o3kd OIDC federation (managed env block + service restart)"
-  local tmp
-  tmp="$(mktemp)"
-  sed "/^${ENV_BEGIN}/,/^${ENV_END}/d" "${O3KD_ENV}" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > "${tmp}"
-  printf '\n%s\n' "${desired}" >> "${tmp}"
-  cat "${tmp}" > "${O3KD_ENV}"
-  rm -f "${tmp}"
+  log "enabling o3kd OIDC federation (managed systemd drop-in; O3K config files untouched)"
+  mkdir -p "${O3KD_DROPIN_DIR}"
+  printf '%s\n' "${dropin_desired}" > "${O3KD_DROPIN}"
+  chmod 644 "${O3KD_DROPIN}"
+  ( umask 077 && printf '%s\n' "${desired}" > "${O3KD_DEMO_ENV}" )
+  chmod 600 "${O3KD_DEMO_ENV}"
+  systemctl daemon-reload
   systemctl restart o3kd
   wait_url "${O3KD_READY_URL}" "o3kd readiness after federation enable"
 }
 
-remove_o3kd_federation() {
-  if ! grep -q "^${ENV_BEGIN}" "${O3KD_ENV}" 2>/dev/null; then
+# Snapshot/restore around the federation enable: a failed enable must never
+# leave the control plane down or half-configured.
+FEDERATION_ROLLBACK_DIR="${STATE_DIR}/.federation-rollback"
+snapshot_federation_state() {
+  rm -rf "${FEDERATION_ROLLBACK_DIR}"
+  mkdir -p "${FEDERATION_ROLLBACK_DIR}"
+  chmod 700 "${FEDERATION_ROLLBACK_DIR}"
+  [ -f "${O3KD_DEMO_ENV}" ] && cp -a "${O3KD_DEMO_ENV}" "${FEDERATION_ROLLBACK_DIR}/env.present" || touch "${FEDERATION_ROLLBACK_DIR}/env.absent"
+  [ -f "${O3KD_DROPIN}" ] && cp -a "${O3KD_DROPIN}" "${FEDERATION_ROLLBACK_DIR}/dropin.present" || touch "${FEDERATION_ROLLBACK_DIR}/dropin.absent"
+  return 0
+}
+
+restore_federation_state() {
+  if [ -f "${FEDERATION_ROLLBACK_DIR}/env.present" ]; then
+    cp -a "${FEDERATION_ROLLBACK_DIR}/env.present" "${O3KD_DEMO_ENV}"
+  else
+    rm -f "${O3KD_DEMO_ENV}"
+  fi
+  if [ -f "${FEDERATION_ROLLBACK_DIR}/dropin.present" ]; then
+    cp -a "${FEDERATION_ROLLBACK_DIR}/dropin.present" "${O3KD_DROPIN}"
+  else
+    rm -f "${O3KD_DROPIN}"
+    rmdir "${O3KD_DROPIN_DIR}" 2>/dev/null || true
+  fi
+  systemctl daemon-reload
+  systemctl restart o3kd || true
+  if wait_url_soft "${O3KD_READY_URL}" 45; then
     return 0
   fi
-  log "removing o3kd OIDC federation block (service restart)"
-  local tmp
-  tmp="$(mktemp)"
-  sed "/^${ENV_BEGIN}/,/^${ENV_END}/d" "${O3KD_ENV}" > "${tmp}"
-  cat "${tmp}" > "${O3KD_ENV}"
-  rm -f "${tmp}"
+  # The rollback itself could not restore readiness: say so truthfully.
+  die "o3kd did not reach readiness after rolling the demo federation drop-in back; inspect: journalctl -u o3kd -n 100"
+}
+
+remove_o3kd_federation() {
+  local removed=0
+  if [ -f "${O3KD_DEMO_ENV}" ]; then rm -f "${O3KD_DEMO_ENV}"; removed=1; fi
+  if [ -f "${O3KD_DROPIN}" ]; then
+    rm -f "${O3KD_DROPIN}"
+    rmdir "${O3KD_DROPIN_DIR}" 2>/dev/null || true
+    removed=1
+  fi
+  legacy_strip_o3kd_env_block && removed=1
+  [ "${removed}" -eq 1 ] || return 0
+  log "removing o3kd OIDC federation drop-in (service restart)"
+  systemctl daemon-reload
   systemctl restart o3kd
   wait_url "${O3KD_READY_URL}" "o3kd readiness after federation removal"
 }
@@ -570,28 +686,55 @@ wait_url() {
   die "${what}: timed out (${url})"
 }
 
+# Same probe, bounded attempts, returns 1 instead of exiting: used where the
+# caller must recover (federation rollback) rather than abort.
+wait_url_soft() {
+  local url="$1" attempts="${2:-30}" i
+  for i in $(seq 1 "${attempts}"); do
+    if curl -sf --cacert "${TLS_DIR}/ca.crt" "${url}" >/dev/null 2>&1 || curl -sf "${url}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Keycloak admin API helpers (master realm admin-cli; never logged)
 # ---------------------------------------------------------------------------
 kc_token() {
+  # The password travels through a 0600 temp file (curl form field `@file`),
+  # never through argv (/proc/<pid>/cmdline is world-readable).
+  local pw_file
+  pw_file="$(mktemp)"
+  chmod 600 "${pw_file}"
+  printf '%s' "${KEYCLOAK_ADMIN_PASSWORD}" > "${pw_file}"
   curl -sf --cacert "${TLS_DIR}/ca.crt" -X POST \
     "https://idp.o3k.demo/realms/master/protocol/openid-connect/token" \
     -d grant_type=password -d client_id=admin-cli \
-    -d username=admin -d password="${KEYCLOAK_ADMIN_PASSWORD}" \
+    -d username=admin --data-urlencode "password@${pw_file}" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+  local rc=$?
+  rm -f "${pw_file}"
+  return "${rc}"
 }
 
 kc_api() { # kc_api METHOD PATH [JSON_BODY]
-  local method="$1" path="$2" body="${3:-}" tok
+  local method="$1" path="$2" body="${3:-}" tok body_file=""
   tok="$(kc_token)"
   if [ -n "${body}" ]; then
+    body_file="$(mktemp)"
+    chmod 600 "${body_file}"
+    printf '%s' "${body}" > "${body_file}"
     curl -sf --cacert "${TLS_DIR}/ca.crt" -X "${method}" \
       -H "Authorization: Bearer ${tok}" -H 'Content-Type: application/json' \
-      -d "${body}" "https://idp.o3k.demo${path}" >/dev/null
-  else
-    curl -sf --cacert "${TLS_DIR}/ca.crt" -X "${method}" \
-      -H "Authorization: Bearer ${tok}" "https://idp.o3k.demo${path}" >/dev/null
+      --data "@${body_file}" "https://idp.o3k.demo${path}" >/dev/null
+    local rc=$?
+    rm -f "${body_file}"
+    return "${rc}"
   fi
+  curl -sf --cacert "${TLS_DIR}/ca.crt" -X "${method}" \
+    -H "Authorization: Bearer ${tok}" "https://idp.o3k.demo${path}" >/dev/null
 }
 
 ensure_alice() {
@@ -621,7 +764,10 @@ ensure_alice() {
   fi
   [ -n "${existing}" ] || die "keycloak user alice missing after provisioning"
   local block_subject
-  block_subject="$(sed -n 's/^O3K_TESTLAB_FEDERATED_SUBJECT=//p' "${O3KD_ENV}" 2>/dev/null | head -1)"
+  # The federated subject recorded by the last enable lives in the demo-owned
+  # env file (legacy PP.3 installs kept it in o3kd.env; read both).
+  block_subject="$(sed -n 's/^O3K_TESTLAB_FEDERATED_SUBJECT=//p' "${O3KD_DEMO_ENV}" 2>/dev/null | head -1)"
+  [ -n "${block_subject}" ] || block_subject="$(sed -n 's/^O3K_TESTLAB_FEDERATED_SUBJECT=//p' "${O3KD_ENV}" 2>/dev/null | head -1)"
   if [ -n "${block_subject}" ] && [ "${block_subject}" != "${existing}" ]; then
     # The demo IdP was recreated and assigned alice a new subject. o3kd's
     # TestLab federated hook conflict-fails when a binding id is reused with
@@ -778,8 +924,14 @@ cmd_install() {
   ensure_alice
   reconcile_operator_assignment_id
   # Federation enabled only after the IdP is healthy: o3kd fetches OIDC
-  # discovery/JWKS from the demo IdP at startup.
-  ensure_o3kd_federation
+  # discovery/JWKS from the demo IdP at startup. The enable is wrapped in a
+  # snapshot/rollback: a failed enable must not leave the control plane down.
+  snapshot_federation_state
+  if ! ( ensure_o3kd_federation ); then
+    log "o3kd federation enable failed; restoring the previous state"
+    restore_federation_state
+    die "o3kd did not become ready with the demo federation drop-in; the previous state was restored and O3K is healthy again"
+  fi
   wait_url "http://127.0.0.1:8080/readyz" "tenant BFF readiness"
   wait_url "http://127.0.0.1:8081/readyz" "operator BFF readiness"
   wait_url "https://tenant.o3k.demo/" "tenant console via TLS proxy"
@@ -900,12 +1052,19 @@ if not m:
 print(urljoin(sys.argv[2], m.group(1).replace("&amp;", "&")))
 PY
 )"
+  local pw_file
+  pw_file="$(mktemp)"
+  chmod 600 "${pw_file}"
+  printf '%s' "${ALICE_PASSWORD}" > "${pw_file}"
   curl -sf --cacert "${TLS_DIR}/ca.crt" -D "${kc_headers}" -o /dev/null \
     -c "${jar}" -b "${jar}" -X POST "${form_action}" \
     -H 'Content-Type: application/x-www-form-urlencoded' \
     --data-urlencode username=alice \
-    --data-urlencode "password=${ALICE_PASSWORD}" \
+    --data-urlencode "password@${pw_file}" \
     --data-urlencode credentialId=
+  local curl_rc=$?
+  rm -f "${pw_file}"
+  [ "${curl_rc}" -eq 0 ] || die "${surface}: keycloak login submit failed"
   local callback
   callback="$(sed -n 's/^Location: //Ip' "${kc_headers}" | tr -d '\r' | head -1)"
   [ -n "${callback}" ] || die "${surface}: keycloak did not redirect to Araf callback"

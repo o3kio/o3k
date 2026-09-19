@@ -5,7 +5,7 @@
 # release generator exports this file byte-for-byte as dist/install.sh
 # (packaging/make-release.sh, 0755, drift-gated by cmp), so the canonical
 # alpha invocation is
-#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.6/install.sh | sudo sh -
+#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.7/install.sh | sudo sh -
 # get.o3k.io is only a convenience 302 redirect to that exact asset:
 #   curl -sfL https://get.o3k.io | sudo sh -
 #
@@ -22,7 +22,7 @@
 # installs the digest-pinned Araf demo deployment material from the VERIFIED
 # bundle into /usr/local/share/o3k/araf-demo/ (convergent, content-compared)
 # and runs packaging/o3k-araf-demo.sh install (the pinned pp3/pp4 tuple from
-# contracts/araf-compatibility-v1.yaml: O3K v0.4.0-rc.6 + Araf v1.0.0-rc.12).
+# contracts/araf-compatibility-v1.yaml: O3K v0.4.0-rc.7 + Araf v1.0.0-rc.12).
 # A demo-stage failure aborts the installer with a message that O3K itself is
 # healthy and the demo stage can be retried from the installed copy — the
 # demo never gates O3K readiness. Stage timing is recorded as T0..T5 stamps
@@ -97,7 +97,12 @@
 # package list plus openssl/openssh-client for the bundled bootstrap scripts
 # and binutils for readelf in the bundled verify-release-bundle.sh glibc floor
 # check).
-# This is the ONE place the outer installer may apt-install. It does NOT touch
+# This is the one place the OUTER wrapper may apt-install. The bundled
+# packaging/install.sh installs nothing, and the PP.4 Araf demo stage
+# (packaging/o3k-araf-demo.sh, run after the O3K install) apt-installs only the
+# container-engine prerequisites the araf-demo deployment contract allows
+# (docker.io + docker-compose-v2 on Ubuntu, iptables + the pinned static
+# engine's deps on Debian). It does NOT touch
 # netplan, systemd-networkd, sysctl forwarding, or host-wide NAT (goal §11).
 set -eu
 if (set -o pipefail) 2>/dev/null; then
@@ -108,7 +113,7 @@ fi
 # published install.sh GitHub Release asset is byte-identical to this file,
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
-O3K_INSTALLER_VERSION="v0.4.0-rc.6"
+O3K_INSTALLER_VERSION="v0.4.0-rc.7"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
@@ -430,8 +435,6 @@ check_platform "$(uname -s)" "$(uname -m)" "${ID:-}" "${VERSION_CODENAME:-}"
 
 printf 'O3K Cloud OS — TestLab\n'
 printf '✓ %s %s\n' "${PRETTY_NAME:-${ID:-unknown} ${VERSION_ID:-unknown}}" "$(uname -m)"
-pp4_stamp T0
-T0_EPOCH="$PP4_LAST_STAMP_EPOCH"
 
 # ---- version resolution -------------------------------------------------------
 # The version is baked into this file; the installer never consults a channel
@@ -452,6 +455,12 @@ INSTALLED_MANIFEST=/usr/local/share/o3k/release-manifest.json
 O3K_UPGRADE_DOWNLOAD_DIR="${O3K_UPGRADE_DOWNLOAD_DIR:-/var/lib/o3k/upgrade-download}"
 check_upgrade_fence
 print_installed_notice
+
+# T0 marks the start of the real install path: it is stamped only after the
+# upgrade fence has decided this run installs (the delegation and downgrade
+# branches above exit without touching the timing ledger).
+pp4_stamp T0
+T0_EPOCH="$PP4_LAST_STAMP_EPOCH"
 
 # ---- private temp dir + cleanup ----------------------------------------------
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-installer.XXXXXX")"
@@ -792,11 +801,15 @@ done
 step 'Araf demo material installed (O3K share dir)'
 
 # Deploy the pinned O3K + Araf demo tuple. Fail closed: a demo-stage failure
-# aborts the installer with a retry hint; O3K itself is already healthy and
-# the stage can be re-run from the installed copy. The demo script appends T3
-# to the timing ledger via PP4_TIMESTAMPS_FILE.
-PP4_TIMESTAMPS_FILE="$PP4_TS_FILE" bash "$BUNDLE_DIR/packaging/o3k-araf-demo.sh" install \
-  || die 'Araf demo deployment failed; O3K itself is healthy and installed — retry the demo stage with: sudo /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh install'
+# aborts the installer with a retry hint. The message states the O3K readiness
+# it actually observed (never a blind "O3K is healthy" claim). The demo script
+# appends T3 to the timing ledger via PP4_TIMESTAMPS_FILE.
+if ! PP4_TIMESTAMPS_FILE="$PP4_TS_FILE" bash "$BUNDLE_DIR/packaging/o3k-araf-demo.sh" install; then
+  if wait_http_ok http://127.0.0.1:18080/readyz 15; then
+    die 'Araf demo deployment failed; O3K is installed and its control plane is ready — retry the demo stage with: sudo /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh install'
+  fi
+  die "Araf demo deployment failed and o3kd is NOT ready (http://127.0.0.1:18080/readyz): inspect 'systemctl status o3kd' and 'journalctl -u o3kd', then retry the demo stage with: sudo /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh install"
+fi
 step 'Araf demo deployed (pinned tuple)'
 
 # Demo tuple for the success block: Araf values from the demo script (which
@@ -841,4 +854,4 @@ printf '  openstack console log show test-vm\n'
 printf '  sudo /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh status\n'
 printf 'Uninstall:\n'
 printf '  sudo /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh uninstall   (Araf demo)\n'
-printf '  sudo bash /usr/local/share/o3k/packaging/uninstall.sh --yes     (O3K)\n'
+printf '  sudo bash /usr/local/share/o3k/uninstall.sh --yes                (O3K)\n'

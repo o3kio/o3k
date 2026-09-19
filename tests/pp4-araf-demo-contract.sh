@@ -96,13 +96,49 @@ for pair in \
   check "pp4_tuple ${pair} matches script constant" \
     sh -c "[ -n '${script_val}' ] && sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF '${script_val}'"
 done
-check "pp4_tuple pins O3K v0.4.0-rc.6" \
-  sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'version: v0.4.0-rc.6'"
-check "pp4_tuple o3k source_sha placeholder is a 64-hex stub" \
-  sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -Eq 'source_sha: \"?0{64}\"?'"
+check "pp4_tuple pins O3K v0.4.0-rc.7" \
+  sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'version: v0.4.0-rc.7'"
+check "pp4_tuple o3k source_sha is a stamped 64-hex value (zeros only before the evidence commit)" \
+  sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -Eq 'source_sha: \"?[0-9a-f]{64}\"?'"
+
+# Araf tuple constants cited by the installer/demo scripts must equal
+# pp4_tuple.araf (the values are printed to the operator as demo provenance).
+for pair in ARAF_VERSION ARAF_SOURCE_SHA; do
+  script_val="$(sed -n "s/^${pair}=\"\([^\"]*\)\"/\1/p" "${SCRIPT}")"
+  check "script ${pair} matches pp4_tuple.araf" \
+    sh -c "[ -n '${script_val}' ] && sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF '${script_val}'"
+done
+araf_version_pin="$(sed -n 's/^ARAF_VERSION="\([^"]*\)"/\1/p' "${SCRIPT}")"
+check "script LOCAL_IMAGE_TAG derives from ARAF_VERSION" \
+  sh -c "grep -q '^LOCAL_IMAGE_TAG=\"o3k-demo-\\\${ARAF_VERSION}\"' '${SCRIPT}'"
+check "script LOCAL_IMAGE_TAG resolves to pp4_tuple.local_verification_tag" \
+  sh -c "[ -n '${araf_version_pin}' ] && sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'o3k-demo-${araf_version_pin}'"
+# Docker-engine pins (Debian static path) must be recorded in the contract,
+# not only in the script, so a silent swap is a reviewable contract change.
+docker_static_version="$(sed -n 's/^DOCKER_STATIC_VERSION="\([^"]*\)"/\1/p' "${SCRIPT}")"
+docker_static_sha="$(sed -n 's/^DOCKER_STATIC_SHA256="\([^"]*\)"/\1/p' "${SCRIPT}")"
+compose_sha="$(sed -n 's/^COMPOSE_PLUGIN_SHA256="\([^"]*\)"/\1/p' "${SCRIPT}")"
+for pin in "${docker_static_version}" "${docker_static_sha}" "${compose_sha}"; do
+  check "pp4_tuple records pinned engine value ${pin}" \
+    sh -c "[ -n '${pin}' ] && sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF '${pin}'"
+done
+
+# --- PP.4 regression guard: the demo must never mutate O3K-owned config ------
+# O3K's installer keeps an install-time content ledger for /etc/o3k/o3kd.env and
+# refuses to re-run when it changed; a demo-managed block in that file breaks
+# one-line-installer convergence (found in PP.4 adversarial review). The demo
+# wires federation through a systemd drop-in + its own env file instead.
+check "demo script never writes to o3kd.env" \
+  sh -c "! grep -Eq '(>>|>) *\\\"?\\\$\{?O3KD_ENV' '${SCRIPT}'"
+check "demo script uses the managed drop-in" \
+  sh -c "grep -q 'O3KD_DROPIN=' '${SCRIPT}' && grep -q 'EnvironmentFile=-' '${SCRIPT}'"
+check "demo script keeps a legacy-block migration path" \
+  sh -c "grep -q 'legacy_strip_o3kd_env_block' '${SCRIPT}'"
+check "federation enable is wrapped in snapshot/rollback" \
+  sh -c "grep -q 'snapshot_federation_state' '${SCRIPT}' && grep -q 'restore_federation_state' '${SCRIPT}'"
 
 # --- PP.4 one-line installer integration (get-o3k.sh) -------------------------
-check_grep "${WRAPPER}" 'O3K_INSTALLER_VERSION="v0.4.0-rc.6"'
+check_grep "${WRAPPER}" 'O3K_INSTALLER_VERSION="v0.4.0-rc.7"'
 check_grep "${WRAPPER}" 'pp4_stamp()'
 check_grep "${WRAPPER}" 'pp4_stamp T0'
 check_grep "${WRAPPER}" 'pp4_stamp T1'
@@ -118,7 +154,9 @@ check "wrapper invokes the demo stage from the verified bundle" \
 check "wrapper reads the demo tuple via the tuple subcommand" \
   sh -c "grep -qF 'o3k-araf-demo.sh\" tuple' '${WRAPPER}'"
 check "wrapper fails closed on demo-stage failure with a retry hint" \
-  sh -c "grep -qF 'Araf demo deployment failed; O3K itself is healthy' '${WRAPPER}'"
+  sh -c "grep -qF 'Araf demo deployment failed' '${WRAPPER}' && grep -qF 'retry the demo stage with' '${WRAPPER}'"
+check "wrapper states the readiness it observed, both ways" \
+  sh -c "grep -qF 'its control plane is ready' '${WRAPPER}' && grep -qF 'o3kd is NOT ready' '${WRAPPER}'"
 # PP.4 success block (what the operator sees)
 for token in \
   'O3K demo ready' 'Tenant Console:' 'Operator Console:' 'O3K API:' \
@@ -126,12 +164,16 @@ for token in \
   'credentials.txt'; do
   check_grep "${WRAPPER}" "${token}"
 done
-check "wrapper is dash-clean (piped to sudo sh -)" dash -n "${WRAPPER}"
+check "wrapper parses under dash (piped to sudo sh -)" dash -n "${WRAPPER}"
+# dash -n only catches parse errors; it accepts ${v:1}, $'...' and printf %q
+# which then fail at runtime. shellcheck at error severity catches that class.
+check "wrapper has no shellcheck error-level findings under POSIX sh" \
+  sh -c "command -v shellcheck >/dev/null 2>&1 || exit 0; shellcheck -s sh -S error '${WRAPPER}' >/dev/null 2>&1"
 check_no_grep "${WRAPPER}" "cargo "
 check_no_grep "${WRAPPER}" "docker build"
 
 # --- PP.4 demo script additions ------------------------------------------------
-check_grep "${SCRIPT}" 'O3K_TUPLE_VERSION="v0.4.0-rc.6"'
+check_grep "${SCRIPT}" 'O3K_TUPLE_VERSION="v0.4.0-rc.7"'
 check_no_grep "${SCRIPT}" 'O3K_TUPLE_SOURCE_SHA'
 check_grep "${SCRIPT}" 'ubuntu:24.04|debian:12' # OS preflight accepts both targets
 check_grep "${SCRIPT}" 'unsupported target'
@@ -250,7 +292,7 @@ check_grep "${PROFILE}" "araf_integration:"
 check_grep "${PROFILE}" "araf_demo_tuple:"
 check_grep "${PROFILE}" "state: pending-evidence"
 check "profile notes the v0.4.0-rc.6 one-line installer integration" \
-  sh -c "grep -qF 'shipped in v0.4.0-rc.6' '${PROFILE}'"
+  sh -c "grep -qF 'shipped in v0.4.0-rc.7' '${PROFILE}'"
 
 # --- functional: realm template is valid JSON --------------------------------
 check "realm template valid JSON" python3 -c "import json;json.load(open('${REALM}'))"
@@ -262,7 +304,7 @@ import yaml
 d = yaml.safe_load(open('${TUPLE}'))
 assert 'pp3_tuple' in d and 'pp4_tuple' in d
 assert d['pp3_tuple']['o3k']['version'] == 'v0.4.0-rc.5'
-assert d['pp4_tuple']['o3k']['version'] == 'v0.4.0-rc.6'
+assert d['pp4_tuple']['o3k']['version'] == 'v0.4.0-rc.7'
 assert d['pp4_tuple']['araf']['version'] == d['pp3_tuple']['araf']['version']"
 
 # --- functional: script parses and constants resolve ------------------------
