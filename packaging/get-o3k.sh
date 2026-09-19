@@ -5,7 +5,7 @@
 # release generator exports this file byte-for-byte as dist/install.sh
 # (packaging/make-release.sh, 0755, drift-gated by cmp), so the canonical
 # alpha invocation is
-#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.3/install.sh | sudo sh -
+#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.4/install.sh | sudo sh -
 # get.o3k.io is only a convenience 302 redirect to that exact asset:
 #   curl -sfL https://get.o3k.io | sudo sh -
 #
@@ -97,7 +97,7 @@ fi
 # published install.sh GitHub Release asset is byte-identical to this file,
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
-O3K_INSTALLER_VERSION="v0.4.0-rc.3"
+O3K_INSTALLER_VERSION="v0.4.0-rc.4"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 

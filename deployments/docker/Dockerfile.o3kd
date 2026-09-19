@@ -28,7 +28,7 @@ RUN cargo build --release --bin o3kd --bin o3k
 # ------------------------------------------------------------------------------
 FROM debian:bookworm-slim
 
-ARG VERSION="0.4.0-rc.3"
+ARG VERSION="0.4.0-rc.4"
 ARG VCS_REF="HEAD"
 
 LABEL org.opencontainers.image.title="o3kd" \
