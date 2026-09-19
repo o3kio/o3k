@@ -1,0 +1,239 @@
+# o3k-araf-demo — PP.3 (#972) demo-profile deployment stack.
+#
+# Araf services follow deploy/docker-compose.release.yml from the pinned
+# Araf release (v1.0.0-rc.12), with demo-profile adjustments: loopback-only
+# publication, demo-CA trust bundle mount, o3k-araf-demo ownership labels,
+# and the demo IdP / TLS proxy infrastructure services.
+#
+# Araf images are referenced by the LOCAL_IMAGE_TAG that
+# packaging/o3k-araf-demo.sh assigns only after sha256-verifying the
+# published OCI tarball and the image config digest against the pinned
+# tuple (pull_policy: never — these are never pulled from a registry).
+# Infrastructure images are digest pinned (see
+# contracts/araf-compatibility-v1.yaml pp3_tuple).
+# Never put credentials in this file; secrets arrive via --env-file (mode
+# 0600) rendered by the installer.
+name: o3k-araf-demo
+
+networks:
+  o3k-araf-demo:
+    labels:
+      o3k.io/pp-owner: o3k-araf-demo
+
+x-araf-labels: &araf-labels
+  o3k.io/pp-owner: o3k-araf-demo
+  o3k.io/pp-component: araf
+
+x-bff-security: &bff-security
+  read_only: true
+  tmpfs: [/tmp]
+  stop_grace_period: 30s
+  restart: unless-stopped
+
+services:
+  tls-proxy:
+    image: ${NGINX_IMAGE:?set NGINX_IMAGE}@${NGINX_DIGEST:?set NGINX_DIGEST}
+    # Loopback-only publication: the demo console/IdP/API vhosts are trusted
+    # local hops (see contracts/araf-compatibility-v1.yaml pp3_tuple
+    # known_limitations). Not a remote-deployment TLS claim.
+    ports: ["127.0.0.1:443:443"]
+    volumes:
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/tls/server.crt:/etc/nginx/tls/server.crt:ro
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/tls/server.key:/etc/nginx/tls/server.key:ro
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/nginx.conf:/etc/nginx/conf.d/demo.conf:ro
+      # blank out the image's default site so only the demo vhosts bind :8080
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/nginx-default-blank.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      o3k-araf-demo:
+        aliases:
+          # The demo names resolve to this TLS endpoint both on the host
+          # (/etc/hosts -> 127.0.0.1:443) and inside the compose network
+          # (DNS aliases -> tls-proxy:8080), so BFF->IdP and BFF->O3K API
+          # keep full TLS verification without host-DNS tricks.
+          - tenant.o3k.demo
+          - operator.o3k.demo
+          - idp.o3k.demo
+          - api.o3k.demo
+    read_only: true
+    tmpfs: [/tmp, /var/cache/nginx, /var/run]
+    labels:
+      o3k.io/pp-owner: o3k-araf-demo
+      o3k.io/pp-component: tls-proxy
+    restart: unless-stopped
+
+  api-relay:
+    image: ${NGINX_IMAGE:?set NGINX_IMAGE}@${NGINX_DIGEST:?set NGINX_DIGEST}
+    # Host network namespace: binds the docker0 address (172.17.0.1) and
+    # forwards to o3kd's loopback-only native API at 127.0.0.1:18080.
+    # Reachable only from container networks via the bridge address; never
+    # LAN-facing. See api-relay.conf.
+    network_mode: host
+    volumes:
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/api-relay.conf:/etc/nginx/conf.d/api-relay.conf:ro
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/nginx-default-blank.conf:/etc/nginx/conf.d/default.conf:ro
+    read_only: true
+    tmpfs: [/tmp, /var/cache/nginx, /var/run]
+    labels:
+      o3k.io/pp-owner: o3k-araf-demo
+      o3k.io/pp-component: api-relay
+    restart: unless-stopped
+
+  idp:
+    image: ${KEYCLOAK_IMAGE:?set KEYCLOAK_IMAGE}@${KEYCLOAK_DIGEST:?set KEYCLOAK_DIGEST}
+    # Demo-scoped IdP (start-dev, embedded H2). NOT a production IdP claim;
+    # see pp3_tuple.known_limitations. External URL is https://idp.o3k.demo
+    # via the loopback TLS proxy.
+    command:
+      - start-dev
+      - --import-realm
+      - --health-enabled=true
+      - --hostname=https://idp.o3k.demo
+      - --hostname-strict=true
+      - --http-enabled=true
+      - --proxy-headers=xforwarded
+    environment:
+      # Legacy bootstrap vars: proven with --import-realm on Keycloak 25.0.6
+      # (see tests/p12-iam-7-real-idp.sh); KC_BOOTSTRAP_ADMIN_* is not
+      # honored by this image version.
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+      # Realm import substitutes these into client secrets; the realm file
+      # on disk stays placeholder-only (no secrets at rest outside the
+      # 0600 env file).
+      TENANT_CLIENT_SECRET: ${TENANT_CLIENT_SECRET:?set TENANT_CLIENT_SECRET}
+      OPERATOR_CLIENT_SECRET: ${OPERATOR_CLIENT_SECRET:?set OPERATOR_CLIENT_SECRET}
+    volumes:
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/realm.json:/opt/keycloak/data/import/realm.json:ro
+      # Durable demo IdP state: keeps user subjects (and therefore the o3kd
+      # federated binding) stable across container recreation / reboot.
+      - idp-data:/opt/keycloak/data
+    networks: [o3k-araf-demo]
+    labels:
+      o3k.io/pp-owner: o3k-araf-demo
+      o3k.io/pp-component: idp
+    restart: unless-stopped
+
+  tenant-bff:
+    image: ${ARAF_BFF_IMAGE:?set ARAF_BFF_IMAGE}:${LOCAL_IMAGE_TAG:?set LOCAL_IMAGE_TAG}
+    pull_policy: never
+    command: ["tenant-bff"]
+    environment:
+      ARAF_RUNTIME_PROFILE: production
+      ARAF_UPSTREAM_ADAPTER: ${ARAF_UPSTREAM_ADAPTER:?set adapter}
+      ARAF_PUBLIC_URL: ${ARAF_TENANT_PUBLIC_URL:?set tenant URL}
+      ARAF_TRUSTED_ORIGINS: ${ARAF_TENANT_PUBLIC_URL:?set tenant URL}
+      ARAF_SESSION_STORE_PATH: /var/lib/araf/sessions.json
+      ARAF_SESSION_STORE_KEY: ${ARAF_SESSION_STORE_KEY:?set base64 session store key}
+      O3K_URL: ${O3K_URL:-}
+      O3K_TOKEN: ""
+      OPENSTACK_AUTH_URL: ""
+      OPENSTACK_TOKEN: ""
+      OPENSTACK_USERNAME: ""
+      OPENSTACK_PASSWORD: ""
+      ARAF_OPENSTACK_COMPATIBILITY_JOURNAL: /var/lib/araf/compatibility-operations.json
+      ARAF_TENANT_OIDC_CLIENT_ID: ${ARAF_TENANT_OIDC_CLIENT_ID:?set tenant OIDC client id}
+      ARAF_TENANT_OIDC_CLIENT_SECRET: ${ARAF_TENANT_OIDC_CLIENT_SECRET:?set tenant OIDC client secret}
+      ARAF_TENANT_OIDC_ISSUER_URL: ${ARAF_TENANT_OIDC_ISSUER_URL:?set tenant OIDC issuer}
+      ARAF_TENANT_OIDC_REDIRECT_URI: ${ARAF_TENANT_OIDC_REDIRECT_URI:?set tenant OIDC redirect}
+    volumes:
+      - tenant-session:/var/lib/araf
+      # demo-CA trust bundle so O3K_URL (https://api.o3k.demo) and the IdP
+      # verify without disabling TLS verification.
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/tls/combined-ca.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    <<: *bff-security
+    ports: ["127.0.0.1:8080:8080"]
+    networks: [o3k-araf-demo]
+    labels:
+      <<: *araf-labels
+      o3k.io/pp-component: tenant-bff
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8080/readyz"]
+
+  operator-bff:
+    image: ${ARAF_BFF_IMAGE:?set ARAF_BFF_IMAGE}:${LOCAL_IMAGE_TAG:?set LOCAL_IMAGE_TAG}
+    pull_policy: never
+    command: ["operator-bff"]
+    environment:
+      ARAF_RUNTIME_PROFILE: production
+      ARAF_UPSTREAM_ADAPTER: ${ARAF_UPSTREAM_ADAPTER:?set adapter}
+      ARAF_PUBLIC_URL: ${ARAF_OPERATOR_PUBLIC_URL:?set operator URL}
+      ARAF_TRUSTED_ORIGINS: ${ARAF_OPERATOR_PUBLIC_URL:?set operator URL}
+      ARAF_SESSION_STORE_PATH: /var/lib/araf/sessions.json
+      ARAF_SESSION_STORE_KEY: ${ARAF_SESSION_STORE_KEY:?set base64 session store key}
+      O3K_URL: ${O3K_URL:-}
+      O3K_TOKEN: ""
+      OPENSTACK_AUTH_URL: ""
+      OPENSTACK_TOKEN: ""
+      OPENSTACK_USERNAME: ""
+      OPENSTACK_PASSWORD: ""
+      ARAF_OPENSTACK_COMPATIBILITY_JOURNAL: /var/lib/araf/compatibility-operations.json
+      ARAF_OPERATOR_OIDC_CLIENT_ID: ${ARAF_OPERATOR_OIDC_CLIENT_ID:?set operator OIDC client id}
+      ARAF_OPERATOR_OIDC_CLIENT_SECRET: ${ARAF_OPERATOR_OIDC_CLIENT_SECRET:?set operator OIDC client secret}
+      ARAF_OPERATOR_OIDC_ISSUER_URL: ${ARAF_OPERATOR_OIDC_ISSUER_URL:?set operator OIDC issuer}
+      ARAF_OPERATOR_OIDC_REDIRECT_URI: ${ARAF_OPERATOR_OIDC_REDIRECT_URI:?set operator OIDC redirect}
+    volumes:
+      - operator-session:/var/lib/araf
+      - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/tls/combined-ca.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    <<: *bff-security
+    ports: ["127.0.0.1:8081:8081"]
+    networks: [o3k-araf-demo]
+    labels:
+      <<: *araf-labels
+      o3k.io/pp-component: operator-bff
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8081/readyz"]
+
+  tenant-console:
+    image: ${ARAF_TENANT_CONSOLE_IMAGE:?set ARAF_TENANT_CONSOLE_IMAGE}:${LOCAL_IMAGE_TAG:?set LOCAL_IMAGE_TAG}
+    pull_policy: never
+    environment:
+      BFF_UPSTREAM: http://tenant-bff:8080
+    restart: unless-stopped
+    # No host publication: browser reachability is loopback HTTPS via the
+    # tls-proxy vhost tenant.o3k.demo only.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+      - /etc/nginx/conf.d:uid=101,gid=101,mode=755
+    networks: [o3k-araf-demo]
+    labels:
+      <<: *araf-labels
+      o3k.io/pp-component: tenant-console
+    depends_on:
+      tenant-bff: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8080/"]
+
+  operator-console:
+    image: ${ARAF_OPERATOR_CONSOLE_IMAGE:?set ARAF_OPERATOR_CONSOLE_IMAGE}:${LOCAL_IMAGE_TAG:?set LOCAL_IMAGE_TAG}
+    pull_policy: never
+    environment:
+      BFF_UPSTREAM: http://operator-bff:8081
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+      - /etc/nginx/conf.d:uid=101,gid=101,mode=755
+    networks: [o3k-araf-demo]
+    labels:
+      <<: *araf-labels
+      o3k.io/pp-component: operator-console
+    depends_on:
+      operator-bff: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8080/"]
+
+volumes:
+  tenant-session:
+    labels:
+      o3k.io/pp-owner: o3k-araf-demo
+  operator-session:
+    labels:
+      o3k.io/pp-owner: o3k-araf-demo
+  idp-data:
+    labels:
+      o3k.io/pp-owner: o3k-araf-demo

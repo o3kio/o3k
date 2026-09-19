@@ -1,0 +1,73 @@
+{
+  "realm": "o3k-demo",
+  "enabled": true,
+  "displayName": "O3K Demo",
+  "registrationAllowed": false,
+  "rememberMe": false,
+  "sslRequired": "external",
+  "accessTokenLifespan": 3600,
+  "clients": [
+    {
+      "clientId": "tenant-console",
+      "name": "Araf Tenant Console",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${TENANT_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["https://tenant.o3k.demo/api/v1/auth/callback"],
+      "webOrigins": ["https://tenant.o3k.demo"],
+      "attributes": {
+        "post.logout.redirect.uris": "https://tenant.o3k.demo/"
+      },
+      "protocolMappers": [
+        {
+          "name": "o3k-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "o3k",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "operator-console",
+      "name": "Araf Operator Console",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${OPERATOR_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["https://operator.o3k.demo/api/v1/auth/callback"],
+      "webOrigins": ["https://operator.o3k.demo"],
+      "attributes": {
+        "post.logout.redirect.uris": "https://operator.o3k.demo/"
+      },
+      "protocolMappers": [
+        {
+          "name": "o3k-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "o3k",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ]
+}

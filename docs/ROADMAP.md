@@ -565,7 +565,18 @@ product baseline:
   reboot/rerun/reset/uninstall/reinstall/purge lifecycle, zero duplicate
   identities, zero foreign-state mutation, zero secret leakage. Predecessor
   candidates rc.1-rc.4 are recorded as failed and immutable.
-- **PP.3/PP.4** — Araf deployment integration; **PP.5** — 1–20 hypervisor
+- **PP.3 (#972)** — versioned Araf artifact + demo deployment integration:
+  PASSED on a genuinely fresh Ubuntu 24.04 host. The O3K-pinned
+  compatibility tuple (`contracts/araf-compatibility-v1.yaml` `pp3_tuple`)
+  binds O3K v0.4.0-rc.5 (unchanged) to Araf v1.0.0-rc.12 with digest-pinned
+  OCI artifacts, and `packaging/o3k-araf-demo.sh` deploys the demo stack
+  (Docker Engine + Compose v2 only) using real OIDC per-surface logins
+  against a demo-scoped local IdP, federated to the real O3K native API.
+  Verified: install/verify/status, same-version re-run, restart, host
+  reboot, uninstall/reinstall, purge/reinstall, foreign-state preservation,
+  zero secret leakage. The Araf side publishes the release bundle and OCI
+  tarballs (o3kio/araf#114). No Araf production/HA claim.
+- **PP.4** — one-line end-user browser demo; **PP.5** — 1–20 hypervisor
   scale evidence.
 
 PP.0 freezes definitions only: no production-readiness, GA, HA, live

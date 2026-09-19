@@ -34,3 +34,97 @@ evidence:
   boundary_docs:
     - docs/architecture/p15-0-post-araf-current-state-audit.md
     - docs/evidence/ISSUE_907_ARAF_P2_NORTHBOUND_CONVERGENCE.md
+
+# PP.3 (#972) pinned demo compatibility tuple. This block is the only
+# supported o3k-demo-v1 + Araf combination; the deployment mechanism in
+# packaging/o3k-araf-demo.sh fails closed when it is absent or violated.
+pp3_tuple:
+  pp_phase: PP.3
+  tracking_issue: 972
+  status: pinned-evidence-backed
+  updated_by: PP.3 (#972)
+  o3k:
+    version: v0.4.0-rc.5
+    source_sha: 145b0149fd82f44a4b76f30f7b4fd272ca6ef60d
+    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.5
+    # The tuple metadata and deployment material live in the O3K repository
+    # (this contract + packaging/o3k-araf-demo.sh). The v0.4.0-rc.5 release
+    # artifact itself is unchanged and does NOT contain this metadata; the
+    # one-line installer integration is PP.4 (#973) scope.
+    artifact_note: repository-side-integration-metadata
+  araf:
+    version: v1.0.0-rc.12
+    source_sha: de64cc9193085116fa30ad51c04ccab24a013dd0
+    release_asset_identity: github.com/o3kio/araf/releases/tag/v1.0.0-rc.12
+  artifacts:
+    # One BFF image carries both BFF binaries; the command selects the role.
+    # ghcr.io/o3kio packages require registry authentication to pull, so the
+    # demo deployment consumes the published OCI tarballs from the Araf
+    # GitHub Release and verifies sha256 (tarball integrity) plus the
+    # image config digest (content identity) after docker load. Index and
+    # platform digests remain the compatibility authority.
+    bff_image: ghcr.io/o3kio/araf-bff
+    bff_digest: sha256:bc717ecdbbbf3ea673efe168c90419936677d644aa0ae25af4eb84906cd744ba
+    bff_platform_digest: sha256:37ad02cfbd5c3eed7effba01525ddd0d3eb8b852c73e54c7fbc701fb082ef051
+    bff_config_digest: sha256:a22458df7ced503bbda9e69e45ec559b5881a63d8f8849ef24721bb8918c5edc
+    bff_oci_tarball_sha256: 42d46d01f823cf02c1edb03ce352d6b9b1dc7a349235c4b6f28dee3ad3f21d1e
+    tenant_console_image: ghcr.io/o3kio/araf-tenant-console
+    tenant_console_digest: sha256:25f5fe41927f68db3dafd49597c6b8cb4520bca2dd45ec131d1372474ef3e5e5
+    tenant_console_platform_digest: sha256:824932fe7cf8bbeefea9061d54ac7b0a0e338427b7d4487b844ba41f63d68d48
+    tenant_console_config_digest: sha256:34901700540686c1a5ff13c7b02ba96180170d4c83f9bf170def7917df2eb068
+    tenant_console_oci_tarball_sha256: f9fa6de50d01d96dce0db5ac9bff52d83b4212943f14a5354e7890f09ce9b066
+    operator_console_image: ghcr.io/o3kio/araf-operator-console
+    operator_console_digest: sha256:cbbad76033eced4d4290c9848e0665a23c30bd4a7c647077ba0cf03150666b18
+    operator_console_platform_digest: sha256:d2d2bef4edaf836ecd6001113d50526fc9b14bc764abb6254dfc87c5cf7bb34e
+    operator_console_config_digest: sha256:c9b4c88b56293e12bb569ced7020da3eda349d094351a3944c881888147cac9b
+    operator_console_oci_tarball_sha256: cc7bd68c58ea01ce7b7eb70213b58f495876a06945f38521378e406fd1377c1d
+    # Infrastructure images for the demo deployment mechanism (not Araf
+    # artifacts; still digest pinned for deterministic deployment).
+    keycloak_image: quay.io/keycloak/keycloak
+    keycloak_version: "25.0.6"
+    keycloak_digest: sha256:82c5b7a110456dbd42b86ea572e728878549954cc8bd03cd65410d75328095d2
+    nginx_unprivileged_image: docker.io/nginxinc/nginx-unprivileged
+    nginx_unprivileged_tag: mainline-alpine-slim
+    nginx_unprivileged_digest: sha256:dcc9bf9c084901dddbbce305130a7295c5637b6a8fce3e29cf678d86336982e4
+  artifact_distribution:
+    araf_images: oci-tarballs-on-github-release
+    reason: ghcr.io/o3kio packages require pull authentication; tarballs are
+      fetched anonymously from the Araf GitHub Release and verified by
+      pinned sha256 plus image config digest after docker load.
+    release_base: https://github.com/o3kio/araf/releases/download/v1.0.0-rc.12
+    local_verification_tag: o3k-demo-v1.0.0-rc.12
+  contracts:
+    native_api_version: o3k-native-iam-v1
+    auth_contract: araf-oidc-pkce-per-surface-confidential-client
+    tenant_bff_contract: araf-tenant-bff-v1
+    operator_bff_contract: araf-operator-bff-v1
+  deployment:
+    mechanism: docker-compose-v2
+    compose_project: o3k-araf-demo
+    runtime_minimums:
+      docker_engine: "24.0"
+      compose_v2: "2.24"
+    entrypoint: packaging/o3k-araf-demo.sh
+    supported_target: ubuntu-24.04-x86_64
+  compatibility_fence:
+    missing_record_fails_closed: true
+    unsupported_tuple_fails: true
+    digest_mismatch_fails: true
+    floating_tag_rejected: true
+    o3k_readiness_independent_of_araf: true
+    fixture_mode_rejected_in_production_profile: true
+  immutability:
+    # GHCR/quay/docker.io tags are mutable; digests above are the only
+    # compatibility authority. This is cryptographic/policy immutability,
+    # NOT platform-enforced immutability (no immutable-tag enforcement is
+    # available on these registries).
+    kind: digest-pinned-policy
+    platform_enforced: false
+  known_limitations:
+    - demo IdP (Keycloak start-dev, H2) is demo-scoped, not a production IdP claim.
+    - O3K native tokens are 1-hour HMAC tokens without renewal; an Araf demo
+      session ends at upstream token expiry (accepted Araf deviation).
+    - Browser trust for the locally minted demo CA is a PP.4 concern; PP.3
+      evidence uses --cacert on loopback only.
+    - o3k-network-agent remains shipped-inactive; the demo profile does not
+      require the small-edge networking agent.
