@@ -99,6 +99,9 @@ services:
       OPERATOR_CLIENT_SECRET: ${OPERATOR_CLIENT_SECRET:?set OPERATOR_CLIENT_SECRET}
     volumes:
       - ${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}/realm.json:/opt/keycloak/data/import/realm.json:ro
+      # Durable demo IdP state: keeps user subjects (and therefore the o3kd
+      # federated binding) stable across container recreation / reboot.
+      - idp-data:/opt/keycloak/data
     networks: [o3k-araf-demo]
     labels:
       o3k.io/pp-owner: o3k-araf-demo
@@ -222,5 +225,8 @@ volumes:
     labels:
       o3k.io/pp-owner: o3k-araf-demo
   operator-session:
+    labels:
+      o3k.io/pp-owner: o3k-araf-demo
+  idp-data:
     labels:
       o3k.io/pp-owner: o3k-araf-demo

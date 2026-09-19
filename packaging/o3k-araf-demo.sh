@@ -70,6 +70,7 @@ O3K_API_URL="https://api.o3k.demo"
 TRUST_ID="araf-demo-idp"
 O3K_AUDIENCE="o3k"
 ADMIN_PROJECT_ID="eba29e2d-53de-461d-ae91-ede7402713cb"
+ALICE_SUBJECT=""
 
 STATE_DIR="${O3K_ARAF_DEMO_STATE_DIR:-/var/lib/o3k/araf-demo}"
 TLS_DIR="${STATE_DIR}/tls"
@@ -164,6 +165,12 @@ ensure_secrets() {
   ALICE_PASSWORD="$(gen_secret)"
   FEDERATED_BINDING_ID="$(python3 -c 'import uuid;print(uuid.uuid4())')"
   OPERATOR_ASSIGNMENT_ID="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+  ALICE_SUBJECT=""
+  persist_secrets
+}
+
+persist_secrets() {
+  local f="${STATE_DIR}/secrets.env"
   {
     printf 'ARAF_SESSION_STORE_KEY=%q\n' "${ARAF_SESSION_STORE_KEY}"
     printf 'TENANT_CLIENT_SECRET=%q\n' "${TENANT_CLIENT_SECRET}"
@@ -172,6 +179,7 @@ ensure_secrets() {
     printf 'ALICE_PASSWORD=%q\n' "${ALICE_PASSWORD}"
     printf 'FEDERATED_BINDING_ID=%q\n' "${FEDERATED_BINDING_ID}"
     printf 'OPERATOR_ASSIGNMENT_ID=%q\n' "${OPERATOR_ASSIGNMENT_ID}"
+    printf 'ALICE_SUBJECT=%q\n' "${ALICE_SUBJECT:-}"
   } > "${f}"
   chmod 600 "${f}"
 }
@@ -341,6 +349,31 @@ ${ENV_END}
 EOF
 }
 
+# Reconcile the managed operator-assignment id with the durable o3kd state:
+# the assignment (principal + role) already exists after the first enable, and
+# o3kd conflict-fails if the id changes. Read-only; canonical state wins.
+reconcile_operator_assignment_id() {
+  [ -f /var/lib/o3k/o3k.sqlite ] || return 0
+  local durable
+  durable="$(python3 - <<'PY' 2>/dev/null || true
+import sqlite3
+try:
+    c = sqlite3.connect("file:/var/lib/o3k/o3k.sqlite?mode=ro", uri=True)
+    row = c.execute(
+        "select id from operator_assignments where user_id='bootstrap-user' order by id limit 1"
+    ).fetchone()
+    print(row[0] if row else "")
+except Exception:
+    print("")
+PY
+)"
+  if [ -n "${durable}" ] && [ "${durable}" != "${OPERATOR_ASSIGNMENT_ID}" ]; then
+    log "adopting durable operator assignment id ${durable}"
+    OPERATOR_ASSIGNMENT_ID="${durable}"
+    persist_secrets
+  fi
+}
+
 ensure_o3kd_federation() {
   local desired current
   desired="$(o3kd_block_content)"
@@ -442,7 +475,19 @@ ensure_alice() {
       '{"username":"alice","enabled":true,"firstName":"Alice","lastName":"Demo","email":"alice@o3k.demo","emailVerified":true}'
   fi
   [ -n "${existing}" ] || die "keycloak user alice missing after provisioning"
+  local block_subject
+  block_subject="$(sed -n 's/^O3K_TESTLAB_FEDERATED_SUBJECT=//p' "${O3KD_ENV}" 2>/dev/null | head -1)"
+  if [ -n "${block_subject}" ] && [ "${block_subject}" != "${existing}" ]; then
+    # The demo IdP was recreated and assigned alice a new subject. o3kd's
+    # TestLab federated hook conflict-fails when a binding id is reused with
+    # a different identity, so rotate the binding id; previous binding rows
+    # stay as inert history (documented LOW). The operator assignment id is
+    # identity-stable (principal + role) and is NEVER rotated.
+    log "alice subject changed (${block_subject} -> ${existing}); rotating federated binding identity"
+    FEDERATED_BINDING_ID="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+  fi
   ALICE_SUBJECT="${existing}"
+  persist_secrets
   log "demo user alice subject: ${ALICE_SUBJECT}"
   kc_api PUT "/admin/realms/${ISSUER_REALM}/users/${ALICE_SUBJECT}/reset-password" \
     '{"type":"password","value":"'"${ALICE_PASSWORD}"'","temporary":false}'
@@ -471,14 +516,30 @@ cmd_install() {
   chmod 644 "${STATE_DIR}/api-relay.conf"
   : > "${STATE_DIR}/nginx-default-blank.conf"
   chmod 644 "${STATE_DIR}/nginx-default-blank.conf"
+  # Bind-mounted config changes need an explicit restart: track a content
+  # hash so a convergent re-run restarts nothing and a real config change
+  # recreates the nginx containers.
+  local cfg_hash cfg_hash_file
+  cfg_hash="$(cat "${SCRIPT_DIR}/araf-demo/nginx.conf" "${SCRIPT_DIR}/araf-demo/api-relay.conf" | sha256sum | cut -d' ' -f1)"
+  cfg_hash_file="${STATE_DIR}/.nginx-config-hash"
+  NGINX_CONFIG_CHANGED=0
+  if [ ! -f "${cfg_hash_file}" ] || [ "$(cat "${cfg_hash_file}")" != "${cfg_hash}" ]; then
+    NGINX_CONFIG_CHANGED=1
+  fi
+  printf '%s\n' "${cfg_hash}" > "${cfg_hash_file}"
   render_env_file
   render_realm
   ensure_hosts
   ensure_araf_images
   log "starting Araf demo stack (${COMPOSE_PROJECT})"
   compose up -d
+  if [ "${NGINX_CONFIG_CHANGED:-0}" = "1" ]; then
+    log "nginx config changed; recreating tls-proxy and api-relay"
+    compose up -d --force-recreate tls-proxy api-relay
+  fi
   wait_url "https://idp.o3k.demo/demo-healthz" "idp health"
   ensure_alice
+  reconcile_operator_assignment_id
   # Federation enabled only after the IdP is healthy: o3kd fetches OIDC
   # discovery/JWKS from the demo IdP at startup.
   ensure_o3kd_federation
