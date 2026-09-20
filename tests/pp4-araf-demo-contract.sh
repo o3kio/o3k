@@ -97,10 +97,10 @@ done
 check_grep "${TUPLE}" "status: candidate-pending-fresh-host-evidence"
 check "pp4_tuple does not retain the historical O3K rc.8 pin" \
   sh -c "! sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'version: v0.4.0-rc.8'"
-check_grep "${TUPLE}" "version: v0.4.0-rc.12"
+check_grep "${TUPLE}" "version: v0.4.0-rc.13"
 check_grep "${TUPLE}" "source_sha: null"
 check_grep "${TUPLE}" "source_identity_authority: signed-release-manifest"
-check_grep "${TUPLE}" "release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.12"
+check_grep "${TUPLE}" "release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.13"
 check "pp4_tuple requires the native IAM API contract" \
   sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'o3k-native-iam-v1'"
 
@@ -156,7 +156,7 @@ check "keycloak helpers retry with visible status (no silent set -e abort)" \
   sh -c "grep -q 'demo IdP admin API call did not succeed' '${SCRIPT}' && grep -q 'kc_user_id()' '${SCRIPT}'"
 
 # --- PP.4 one-line installer integration (get-o3k.sh) -------------------------
-check_grep "${WRAPPER}" 'O3K_INSTALLER_VERSION="v0.4.0-rc.12"'
+check_grep "${WRAPPER}" 'O3K_INSTALLER_VERSION="v0.4.0-rc.13"'
 check_grep "${WRAPPER}" 'pp4_stamp()'
 check_grep "${WRAPPER}" 'pp4_stamp T0'
 check_grep "${WRAPPER}" 'pp4_stamp T1'
@@ -191,7 +191,7 @@ check_no_grep "${WRAPPER}" "cargo "
 check_no_grep "${WRAPPER}" "docker build"
 
 # --- PP.4 demo script additions ------------------------------------------------
-check_grep "${SCRIPT}" 'O3K_TUPLE_VERSION="v0.4.0-rc.12"'
+check_grep "${SCRIPT}" 'O3K_TUPLE_VERSION="v0.4.0-rc.13"'
 check_no_grep "${SCRIPT}" 'O3K_TUPLE_SOURCE_SHA'
 check_grep "${SCRIPT}" 'ubuntu:24.04|debian:12' # OS preflight accepts both targets
 check_grep "${SCRIPT}" 'unsupported target'
@@ -323,7 +323,7 @@ d = yaml.safe_load(open('${TUPLE}'))
 assert 'pp3_tuple' in d and 'pp4_tuple' in d
 assert d['pp3_tuple']['o3k']['version'] == 'v0.4.0-rc.5'
 assert d['pp3_tuple']['araf']['version'] == 'v1.0.0-rc.12'
-assert d['pp4_tuple']['o3k']['version'] == 'v0.4.0-rc.12'
+assert d['pp4_tuple']['o3k']['version'] == 'v0.4.0-rc.13'
 assert d['pp4_tuple']['o3k']['source_sha'] is None
 assert d['pp4_tuple']['o3k']['source_identity_authority'] == 'signed-release-manifest'
 assert d['pp4_tuple']['araf']['version'] == 'v1.0.0-rc.15'

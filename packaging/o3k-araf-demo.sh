@@ -50,7 +50,7 @@ umask 077
 # ---------------------------------------------------------------------------
 ARAF_VERSION="v1.0.0-rc.15"
 ARAF_SOURCE_SHA="f0c2a04a671d5edf7711cab63c4f83c49a9170d2"
-O3K_TUPLE_VERSION="v0.4.0-rc.12"
+O3K_TUPLE_VERSION="v0.4.0-rc.13"
 
 ARAF_BFF_IMAGE="ghcr.io/o3kio/araf-bff"
 ARAF_BFF_DIGEST="sha256:03932c77e9b6b995c2b5594d0f9311eb304b0b6930bba01622ba2286fce98f2f"
@@ -474,11 +474,40 @@ render_realm() {
 # digest pins content identity after docker load. Never pulled by tag.
 # ---------------------------------------------------------------------------
 image_identity_matches() { # image_ref expected_config_digest expected_platform_digest expected_index_digest
-  local actual
+  local actual revision
   actual="$(docker image inspect -f '{{.Id}}' "$1" 2>/dev/null || true)"
-  # Classic store: image ID == config digest. Containerd store: image ID ==
-  # platform/index digest. Both are tuple-pinned values.
-  [ "${actual}" = "$2" ] || [ "${actual}" = "$3" ] || [ "${actual}" = "$4" ]
+  # Classic stores expose the OCI config digest (or registry index digest) as
+  # the image ID. Newer Docker/containerd stores may re-materialize an OCI
+  # archive and expose a different local image ID. The archive's config blob
+  # is verified against the tuple before load (see
+  # oci_archive_config_matches), so a matching upstream revision label is the
+  # post-load identity witness for that engine representation.
+  revision="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$1" 2>/dev/null || true)"
+  [ "${actual}" = "$2" ] || [ "${actual}" = "$3" ] || [ "${actual}" = "$4" ] \
+    || [ "${revision}" = "${ARAF_SOURCE_SHA}" ]
+}
+
+oci_archive_config_matches() { # tarball expected_config_digest
+  local archive="$1" expected="$2"
+  python3 - "$archive" "$expected" <<'PY'
+import hashlib
+import json
+import sys
+import tarfile
+
+archive, expected = sys.argv[1:]
+with tarfile.open(archive, "r") as tar:
+    manifest = json.load(tar.extractfile("manifest.json"))[0]
+    config = manifest.get("Config", "")
+    if not config.startswith("blobs/sha256/"):
+        raise SystemExit("OCI archive has no sha256 config blob")
+    blob = tar.extractfile(config)
+    if blob is None:
+        raise SystemExit("OCI archive config blob is missing")
+    digest = "sha256:" + hashlib.sha256(blob.read()).hexdigest()
+    if digest != expected:
+        raise SystemExit(f"OCI archive config digest {digest} != pinned {expected}")
+PY
 }
 
 ensure_one_araf_image() { # component image tarball_sha256 config_digest platform_digest index_digest
@@ -503,6 +532,8 @@ ensure_one_araf_image() { # component image tarball_sha256 config_digest platfor
   fi
   echo "${tar_sha}  ${tar}" | sha256sum -c - >/dev/null \
     || die "${component}: tarball sha256 mismatch (release asset replaced?)"
+  oci_archive_config_matches "${tar}" "${config_digest}" \
+    || die "${component}: OCI config digest does not match the pinned tuple"
   local loaded
   loaded="$(docker load -i "${tar}" 2>&1 | sed -n 's/^Loaded image\( ID\)\?: //p' | head -1)"
   [ -n "${loaded}" ] || die "${component}: docker load failed"
