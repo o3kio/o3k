@@ -55,30 +55,33 @@ declare -A IMAGE=(
 )
 
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 2; }
+DIGESTS="$WORK/araf-${VERSION}-digests.txt"
+curl -fsSL --retry 3 -o "$DIGESTS" "$BASE/araf-${VERSION}-digests.txt"
+grep -Eq '^bff ghcr.io/o3kio/araf-bff:v1\.0\.0-rc\.16@sha256:' "$DIGESTS"
+grep -Eq '^bff-platform ghcr.io/o3kio/araf-bff:v1\.0\.0-rc\.16@sha256:' "$DIGESTS"
+grep -Eq '^tenant-console ghcr.io/o3kio/araf-tenant-console:v1\.0\.0-rc\.16@sha256:' "$DIGESTS"
+grep -Eq '^tenant-console-platform ghcr.io/o3kio/araf-tenant-console:v1\.0\.0-rc\.16@sha256:' "$DIGESTS"
+grep -Eq '^operator-console ghcr.io/o3kio/araf-operator-console:v1\.0\.0-rc\.16@sha256:' "$DIGESTS"
+grep -Eq '^operator-console-platform ghcr.io/o3kio/araf-operator-console:v1\.0\.0-rc\.16@sha256:' "$DIGESTS"
 
 for component in bff tenant-console operator-console; do
   ref="${IMAGE[$component]}:${VERSION}"
-  docker pull --platform linux/amd64 "$ref" >/dev/null
-  actual_index="$(docker image inspect -f '{{index .RepoDigests 0}}' "$ref")"
-  expected_ref="${IMAGE[$component]}@${INDEX_DIGEST[$component]}"
+  case "$component" in
+    bff) digest_key=bff; platform_key=bff-platform ;;
+    tenant-console) digest_key=tenant-console; platform_key=tenant-console-platform ;;
+    operator-console) digest_key=operator-console; platform_key=operator-console-platform ;;
+  esac
+  actual_index="$(awk -v key="$digest_key" '$1 == key {print $2}' "$DIGESTS")"
+  expected_ref="${IMAGE[$component]}:${VERSION}@${INDEX_DIGEST[$component]}"
   [ "$actual_index" = "$expected_ref" ] || {
     echo "$component: index digest mismatch: $actual_index (expected $expected_ref)" >&2
     exit 1
   }
-  actual_platform="$(docker manifest inspect --verbose "$ref" | python3 -c '
-import json
-import sys
-
-document = json.load(sys.stdin)
-if isinstance(document, list):
-    document = document[0]
-print(document["Descriptor"]["digest"])
-')"
+  actual_platform="$(awk -v key="$platform_key" '$1 == key {print $2}' "$DIGESTS" | sed 's/.*@//')"
   [ "$actual_platform" = "${PLATFORM_DIGEST[$component]}" ] || {
     echo "$component: platform digest mismatch: $actual_platform (expected ${PLATFORM_DIGEST[$component]})" >&2
     exit 1
   }
-  docker image rm "$ref" >/dev/null 2>&1 || true
   archive="$WORK/araf-${component}-${VERSION}.oci.tar"
   curl -fsSL --retry 3 -o "$archive" "$BASE/araf-${component}-${VERSION}.oci.tar"
   printf '%s  %s\n' "${TAR_SHA[$component]}" "$archive" | sha256sum -c - >/dev/null
