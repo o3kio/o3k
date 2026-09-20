@@ -1290,6 +1290,40 @@ async fn native_quota_operator_http_uses_real_iam_and_durable_cas()
         .as_str()
         .ok_or("quota network id")?
         .to_owned();
+    // A canonical network is not attachable until it has a bounded-flat
+    // subnet/realm.  Native compute resolves network UUIDs through the
+    // canonical Network authority and creates its endpoint there; keep this
+    // real-IAM quota test on the same supported network contract instead of
+    // relying on an opaque compatibility reference or a provider shortcut.
+    let subnet_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/subnets")
+                .header("x-auth-token", &tenant_token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "subnet": {
+                            "network_id": network_id,
+                            "name": "quota-http-subnet",
+                            "cidr": "192.0.2.0/24",
+                            "gateway_ip": "192.0.2.1"
+                        }
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    if subnet_response.status() != StatusCode::CREATED {
+        let status = subnet_response.status();
+        let body = axum::body::to_bytes(subnet_response.into_body(), 64 * 1024).await?;
+        panic!(
+            "quota subnet create failed: {status} {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
     let create_body = serde_json::json!({"kind":"compute:server","spec":{"name":"quota-http-server","image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":[network_id]}});
     let response = app
         .clone()

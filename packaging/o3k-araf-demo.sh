@@ -486,6 +486,12 @@ ensure_one_araf_image() { # component image tarball_sha256 config_digest index_d
     log "${component}: digest-verified image already present"
     return 0
   fi
+  # Refuse a collision before docker load: the OCI archive may carry its own
+  # tags, and loading it could overwrite a foreign local verification tag
+  # before the post-load ownership check below can run.
+  if docker image inspect "${tag}" >/dev/null 2>&1; then
+    die "${component}: local verification tag ${tag} already names a different image; refusing to overwrite foreign state"
+  fi
   local tar="${STATE_DIR}/araf-${component}-${ARAF_VERSION}.oci.tar"
   if [ ! -f "${tar}" ] || ! echo "${tar_sha}  ${tar}" | sha256sum -c - >/dev/null 2>&1; then
     log "${component}: fetching pinned OCI tarball from Araf release ${ARAF_VERSION}"
@@ -504,7 +510,7 @@ ensure_one_araf_image() { # component image tarball_sha256 config_digest index_d
   # pre-existing host tag.  Refusing the collision preserves unrelated images
   # and makes the operator choose an explicit cleanup/retag action.
   if docker image inspect "${tag}" >/dev/null 2>&1; then
-    die "${component}: local verification tag ${tag} already names a different image; refusing to overwrite foreign state"
+    die "${component}: local verification tag ${tag} appeared during load; refusing to overwrite foreign state"
   fi
   docker tag "${loaded}" "${tag}" >/dev/null
   log "${component}: loaded and digest verified"
