@@ -98,7 +98,7 @@ check_grep "${TUPLE}" "status: candidate-pending-fresh-host-evidence"
 check "pp4_tuple does not retain the historical O3K rc.8 pin" \
   sh -c "! sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'version: v0.4.0-rc.8'"
 check_grep "${TUPLE}" "version: v0.4.0-rc.9"
-check_grep "${TUPLE}" "source_sha: e52b7e7ecde09d66f3d37d8ee3d2309eb370aecc"
+check_grep "${TUPLE}" "source_sha: 0865e713a6741b6c43756361f408b36055bf83f0"
 check_grep "${TUPLE}" "release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.9"
 check "pp4_tuple requires the native IAM API contract" \
   sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'o3k-native-iam-v1'"
