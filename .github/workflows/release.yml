@@ -49,6 +49,8 @@ jobs:
           # therefore needs root. Keep the source checkout and all release
           # metadata owned by the runner; only the disposable rootfs/build
           # operation is elevated.
+          sudo apt-get update
+          sudo apt-get install -y debootstrap binutils curl tar
           sudo git config --global --add safe.directory "$GITHUB_WORKSPACE"
           sudo scripts/build-release-binaries-debian12.sh
 
