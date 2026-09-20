@@ -45,7 +45,12 @@ jobs:
       - name: Build Debian 12 release binaries
         run: |
           set -euo pipefail
-          scripts/build-release-binaries-debian12.sh
+          # The baseline builder intentionally uses debootstrap + chroot and
+          # therefore needs root. Keep the source checkout and all release
+          # metadata owned by the runner; only the disposable rootfs/build
+          # operation is elevated.
+          sudo git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          sudo scripts/build-release-binaries-debian12.sh
 
       - name: Build and archive release bundle
         env:
