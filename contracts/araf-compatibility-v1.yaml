@@ -133,54 +133,57 @@ pp3_tuple:
       require the small-edge networking agent.
 
 # PP.4 (#973) one-line installer integration of the pinned demo tuple: the
-# public one-line installer (packaging/get-o3k.sh, published as the install.sh
-# release asset) deploys the SAME pinned Araf release end to end on the
-# o3k-demo-v1 profile. The Araf artifact digests are duplicated explicitly
-# (identical to pp3_tuple.araf) so the drift gate stays a simple grep; the
-# pp3_tuple section above remains the frozen compatibility authority.
+# PP.4 candidate integration. Araf rc.15 is pinned while the successor O3K
+# release identity and fresh-host evidence remain pending. This is candidate
+# metadata, not certification; the historical pp3_tuple above is unchanged.
 pp4_tuple:
   pp_phase: PP.4
   tracking_issue: 973
-  status: pinned-evidence-backed
-  updated_by: PP.4 (#973)
+  status: candidate-pending-fresh-host-evidence
+  updated_by: PP.4 (#973) candidate integration
   o3k:
-    version: v0.4.0-rc.8
-    # The published bundle manifest.json is the runtime authority (the demo
-    # orchestrator reads it fail-closed at install/tuple time); this SHA is the
-    # exact source tuple exercised by the PP.4 campaigns.
-    source_sha: "a546b61ce87dea57b702002ef1506846e3edbef7"
-    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.8
+    # No successor O3K release has been selected or published yet.
+    version: null
+    source_sha: null
+    release_asset_identity: pending-successor-release
   araf:
-    version: v1.0.0-rc.12
-    source_sha: de64cc9193085116fa30ad51c04ccab24a013dd0
-    release_asset_identity: github.com/o3kio/araf/releases/tag/v1.0.0-rc.12
+    version: v1.0.0-rc.15
+    source_sha: f0c2a04a671d5edf7711cab63c4f83c49a9170d2
+    release_asset_identity: github.com/o3kio/araf/releases/tag/v1.0.0-rc.15
   artifacts:
-    # Identical to pp3_tuple.artifacts (Araf stayed at v1.0.0-rc.12).
+    # Verified against the public rc.15 release manifest
+    # (SHA256 f2bf124fd38bbf6223027ad44d725e1d191effb4e013c38c1c6f8b316e777cf2).
     bff_image: ghcr.io/o3kio/araf-bff
-    bff_digest: sha256:bc717ecdbbbf3ea673efe168c90419936677d644aa0ae25af4eb84906cd744ba
-    bff_platform_digest: sha256:37ad02cfbd5c3eed7effba01525ddd0d3eb8b852c73e54c7fbc701fb082ef051
-    bff_config_digest: sha256:a22458df7ced503bbda9e69e45ec559b5881a63d8f8849ef24721bb8918c5edc
-    bff_oci_tarball_sha256: 42d46d01f823cf02c1edb03ce352d6b9b1dc7a349235c4b6f28dee3ad3f21d1e
+    bff_digest: sha256:03932c77e9b6b995c2b5594d0f9311eb304b0b6930bba01622ba2286fce98f2f
+    bff_platform_digest: sha256:7ddfc2f711f3730b617498136732cac74418c6f6239df790fdc9a6f267e450fa1
+    bff_config_digest: sha256:f0aba789573c0bf250f99e0dab4096ec1f707a93392afb5fad04ff26179c515f
+    bff_oci_tarball_sha256: e4a682a836c60859c3d0330d082ab4b84d4ef112c8912f3f5d66849017b67459
     tenant_console_image: ghcr.io/o3kio/araf-tenant-console
-    tenant_console_digest: sha256:25f5fe41927f68db3dafd49597c6b8cb4520bca2dd45ec131d1372474ef3e5e5
-    tenant_console_platform_digest: sha256:824932fe7cf8bbeefea9061d54ac7b0a0e338427b7d4487b844ba41f63d68d48
-    tenant_console_config_digest: sha256:34901700540686c1a5ff13c7b02ba96180170d4c83f9bf170def7917df2eb068
-    tenant_console_oci_tarball_sha256: f9fa6de50d01d96dce0db5ac9bff52d83b4212943f14a5354e7890f09ce9b066
+    tenant_console_digest: sha256:7ee84629447b481378efab8f1219682f22c710cb4614f905d433122e61981c2a
+    tenant_console_platform_digest: sha256:d064d7152008a18f13db589b57370eede83c0cd6fb4c372980115ad938d50fb1
+    tenant_console_config_digest: sha256:3f6028fc9d6eac2bc5d0b93fa7ea1605e4be6c263d9b6b3f973ef49300eda527
+    tenant_console_oci_tarball_sha256: 68847dbd75635ad705ca3575e056a0191ba8d2816239ffb3707ca2cd8352d0e8
     operator_console_image: ghcr.io/o3kio/araf-operator-console
-    operator_console_digest: sha256:cbbad76033eced4d4290c9848e0665a23c30bd4a7c647077ba0cf03150666b18
-    operator_console_platform_digest: sha256:d2d2bef4edaf836ecd6001113d50526fc9b14bc764abb6254dfc87c5cf7bb34e
-    operator_console_config_digest: sha256:c9b4c88b56293e12bb569ced7020da3eda349d094351a3944c881888147cac9b
-    operator_console_oci_tarball_sha256: cc7bd68c58ea01ce7b7eb70213b58f495876a06945f38521378e406fd1377c1d
+    operator_console_digest: sha256:b00c69f2f881a788a94ad0570d6c03c485f4b3023761a03c5bb4d5e2c4e88759
+    operator_console_platform_digest: sha256:ed78147d9128400dd05837ae4a42aafee31fb432fc874a898cd63c0568347c4a
+    operator_console_config_digest: sha256:81d10a46b7a99f5a66003c3a9e7bf85843586010c4ccc1e147725657361b6715
+    operator_console_oci_tarball_sha256: 8504d57ce10096cbd743e5260ecde5d51c900117c1614d500f5e09e9b75a7139
     keycloak_image: quay.io/keycloak/keycloak
     keycloak_version: "25.0.6"
     keycloak_digest: sha256:82c5b7a110456dbd42b86ea572e728878549954cc8bd03cd65410d75328095d2
     nginx_unprivileged_image: docker.io/nginxinc/nginx-unprivileged
     nginx_unprivileged_tag: mainline-alpine-slim
     nginx_unprivileged_digest: sha256:dcc9bf9c084901dddbbce305130a7295c5637b6a8fce3e29cf678d86336982e4
+  artifact_distribution:
+    araf_images: oci-tarballs-on-github-release
+    release_base: https://github.com/o3kio/araf/releases/download/v1.0.0-rc.15
+    release_manifest_sha256: f2bf124fd38bbf6223027ad44d725e1d191effb4e013c38c1c6f8b316e777cf2
+  contracts:
+    native_api_version: o3k-native-iam-v1
+    auth_contract: araf-oidc-pkce-per-surface-confidential-client
   mechanism:
-    # Historical install/readiness evidence is retained, but PP.4 remains
-    # unproven until a successor tuple proves native browser workload create.
-    one_line_installer_integration: pending-native-workload-evidence
+    one_line_installer_integration: candidate-pending-successor-o3k-release
+    fresh_host_evidence: pending
     supported_targets: [ubuntu-24.04-x86_64, debian-12-x86_64]
     browser_trust: operator-imported demo CA
     o3kd_federation_wiring: systemd drop-in (/etc/systemd/system/o3kd.service.d/araf-demo.conf)
@@ -193,11 +196,12 @@ pp4_tuple:
     debian_static_docker_sha256: ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d
     debian_compose_plugin_version: "v2.39.4"
     debian_compose_plugin_sha256: 7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4
-    local_verification_tag: o3k-demo-v1.0.0-rc.12
+    local_verification_tag: o3k-demo-v1.0.0-rc.15
   notes:
-    - Araf GitHub release v1.0.0-rc.12 metadata is published as a
-      non-prerelease (recorded fact); future Araf RCs publish as prereleases
-      via the o3kio/araf release-publish workflow fix.
+    - Araf GitHub release v1.0.0-rc.15 is an immutable prerelease candidate;
+      its published manifest and OCI identities are pinned above.
+    - The successor O3K release identity is intentionally pending; no O3K RC
+      number or source SHA is invented before release selection.
     - The demo runtime (docker engine, compose project, demo IdP, consoles)
       never gates O3K readiness; a demo-stage failure leaves the O3K install
       healthy and retryable from /usr/local/share/o3k/araf-demo/.

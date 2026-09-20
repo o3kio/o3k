@@ -20,20 +20,10 @@ export interface Pp4Env {
   readonly alicePassword: string;
   /** Canonical VM name the tenant journey attempts to create. */
   readonly vmName: string;
-  /**
-   * Deterministic name of the server the tenant journey deletes through the
-   * console. The campaign harness creates it through the unmodified OpenStack
-   * CLI BEFORE the browser phase (a CLI-created server is a canonical native
-   * resource that the console lists), because the pinned Araf SPA cannot
-   * submit any create form.
-   */
+  /** Deterministic name of the native server created and later deleted in Araf. */
   readonly uiTargetName: string;
-  /**
-   * Canonical id of that server (REQUIRED). host-run.sh creates
-   * `pp4-ui-target` through the unmodified OpenStack CLI in the VM and exports
-   * the id `openstack server show pp4-ui-target -c id -f value` reports.
-   */
-  readonly uiTargetId: string;
+  /** Canonical id handed from the native-create journey to later specs. */
+  readonly uiTargetId?: string;
   /** TestLab image name that must exist (default cirros-0.6.3). */
   readonly imageName: string;
   /** TestLab network name that must exist (default testlab-network). */
@@ -146,12 +136,8 @@ export function loadEnv(): Pp4Env {
       "Export the demo user's Keycloak password (see tests/pp4-browser-e2e/README.md).",
     ),
     vmName: withDefault("PP4_VM_NAME", "pp4-native"),
-    uiTargetName: withDefault("PP4_UI_TARGET_NAME", "pp4-ui-target"),
-    uiTargetId: required(
-      "PP4_UI_TARGET_ID",
-      "host-run.sh creates `pp4-ui-target` through the unmodified OpenStack CLI in the VM " +
-        "before the browser phase; export the id `openstack server show pp4-ui-target -c id -f value` reports.",
-    ),
+    uiTargetName: withDefault("PP4_UI_TARGET_NAME", read("PP4_VM_NAME") ?? "pp4-native"),
+    uiTargetId: read("PP4_UI_TARGET_ID"),
     imageName: withDefault("PP4_IMAGE_NAME", "cirros-0.6.3"),
     networkName: withDefault("PP4_NETWORK_NAME", "testlab-network"),
     imageId: required(
@@ -188,7 +174,7 @@ export function loadEnv(): Pp4Env {
   if (!uuid.test(env.networkId)) {
     throw new Error(`[pp4] PP4_NETWORK_ID must be a canonical uuid, got "${env.networkId}"`);
   }
-  if (!uuid.test(env.uiTargetId)) {
+  if (env.uiTargetId && !uuid.test(env.uiTargetId)) {
     throw new Error(`[pp4] PP4_UI_TARGET_ID must be a canonical uuid, got "${env.uiTargetId}"`);
   }
   if (!uuid.test(env.adminProjectId)) {

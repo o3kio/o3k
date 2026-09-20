@@ -579,9 +579,11 @@ product baseline:
 - **PP.4 (#973)** — one-line end-user browser demo: **NOT PROVEN**. Historical
   fresh Ubuntu 24.04 and Debian 12 campaigns against the immutable O3K
   v0.4.0-rc.8 / Araf v1.0.0-rc.12 tuple are retained under
-  `docs/evidence/pp4/`, but they did not create a workload through Araf. A
-  successor tuple must prove the native browser create and cross-interface
-  lifecycle before PP.4 can close. **PP.5** must not start yet.
+  `docs/evidence/pp4/`, but they did not create a workload through Araf. The
+  current candidate pins Araf v1.0.0-rc.15; the successor O3K release and
+  fresh-host evidence remain pending. That candidate must prove the native
+  browser create and cross-interface lifecycle before PP.4 can close.
+  **PP.5** must not start yet.
 
 PP.0 freezes definitions only: no production-readiness, GA, HA, live
 migration, automatic evacuation, or proven 1–20-host-scale claims.

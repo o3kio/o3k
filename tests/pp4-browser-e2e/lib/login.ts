@@ -167,7 +167,7 @@ export async function loginToSurface(
 /**
  * Tenant-only: the shell cannot render until a project scope is selected
  * server-side (the BFF session needs the exchanged native O3K token before
- * /api/v1/context resolves). Araf rc.12 exposes no scope-selection page in
+ * /api/v1/context resolves). Araf rc.15 exposes no scope-selection page in
  * the SPA (ProjectSelector is presentation-only), so selection uses the same
  * BFF endpoint as Araf's own process evidence; the shell then renders the
  * selected project. Asserts the admin project is listed first.

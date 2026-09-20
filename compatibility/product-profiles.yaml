@@ -233,10 +233,12 @@ profiles:
         release bundle, and is not required for O3K readiness. Deployment
         mechanism for the demo profile: Docker Engine + Compose v2 via
         packaging/o3k-araf-demo.sh. The historical one-line installer
-        integration shipped in v0.4.0-rc.8; the rc.8/rc.12 campaigns are
-        retained under docs/evidence/pp4/, but do not prove the required native
-        browser workload journey; the tuple remains not-proven until a
-        successor tuple does. No Araf production/HA claim (o3kio/araf#106).
+        integration was historically exercised with v0.4.0-rc.8 and
+        Araf v1.0.0-rc.12; those campaigns are retained under
+        docs/evidence/pp4/ and do not prove the required native browser
+        workload journey. The current PP.4 candidate pins Araf v1.0.0-rc.15;
+        the successor O3K release and fresh-host evidence remain pending.
+        No Araf production/HA claim (o3kio/araf#106).
     evidence_dependencies:
       - native-rust-testlab
       - p15-7-scale-composition-real-host-gate

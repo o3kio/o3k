@@ -43,7 +43,6 @@ export PP4_ALICE_PASSWORD=...            # demo user's Keycloak password (requir
 export PP4_FLAVOR_ID=...                 # uuid of testlab-flavor (see below)
 export PP4_IMAGE_ID=...                  # uuid of the cirros image (compat API)
 export PP4_NETWORK_ID=...                # uuid of testlab-network (compat API)
-export PP4_UI_TARGET_ID=...              # uuid of the CLI-created pp4-ui-target server
 npm test                                 # all three specs, serial
 npx playwright test specs/tenant.spec.ts # one journey
 ```
@@ -65,13 +64,13 @@ npx playwright test --list
 | `PP4_ALICE_USER` | `alice` | Keycloak user |
 | `PP4_ALICE_PASSWORD` | — | **required, fail fast; never logged** |
 | `PP4_VM_NAME` | `pp4-native` | deterministic VM name the console create attempt uses |
-| `PP4_UI_TARGET_NAME` | `pp4-ui-target` | server name the console delete journey targets |
+| `PP4_UI_TARGET_NAME` | value of `PP4_VM_NAME` | server name the console delete journey targets |
 | `PP4_IMAGE_NAME` | `cirros-0.6.3` | TestLab image name (gap detail only) |
 | `PP4_NETWORK_NAME` | `testlab-network` | TestLab network name (gap detail only) |
 | `PP4_IMAGE_ID` | — | **required**: canonical id `openstack image list` reports (the native `image.image` inventory is empty) |
 | `PP4_NETWORK_ID` | — | **required**: canonical id `openstack network list` reports (`testlab-network` is compat-created, not canonical) |
 | `PP4_FLAVOR_ID` | — | **required**: canonical uuid of the flavor (see gaps) |
-| `PP4_UI_TARGET_ID` | — | **required**: canonical id of the CLI-created server the console deletes |
+| `PP4_UI_TARGET_ID` | — | supplied only for the post-verification delete run; canonical id created by the browser |
 | `PP4_ADMIN_PROJECT_ID` | — | **required**: expected admin project (asserted when set) |
 | `PP4_DEPLOYMENT_ENV_FILE` | — | **required**: phase1a production-tuple evidence (`10-araf-production-tuple.txt`) |
 | `PP4_EVIDENCE_DIR` | `./evidence` | screenshots |
@@ -82,8 +81,9 @@ npx playwright test --list
 native image/network inventories of this profile are empty and `compute.flavor`
 has no collection at all, so there is nothing to fall back on. The campaign bash
 harness bridges them from the VM (`/etc/o3k/testlab-flavor-id` and the
-unmodified OpenStack CLI), creates `pp4-ui-target` through that same CLI, and
-exports its canonical id as `PP4_UI_TARGET_ID`.
+unmodified OpenStack CLI). The workload itself is created through Araf's native
+schema-driven form; its canonical id is exported as `PP4_UI_TARGET_ID` only
+after live provider and guest-boot inspection.
 
 ## stdout protocol (grepped by the campaign harness)
 
@@ -91,16 +91,18 @@ exports its canonical id as `PP4_UI_TARGET_ID`.
 | --- | --- |
 | `PP4-TIMESTAMPS T4=<unix seconds>` | tenant OIDC login authenticated ("browser login usable") |
 | `PP4-GAP <id> <detail>` | a verified product-profile gap was observed (a gap, never a failure) |
-| `PP4-UI-DELETE id=<uuid> state=<state>` | the console delete of the CLI-created server reached a terminal state |
+| `PP4-UI-CREATE id=<uuid> operation=<uuid>` | the schema-driven form created a native server |
+| `PP4-UI-DELETE id=<uuid> state=<state>` | the console delete of that native server reached a terminal state |
 | `PP4-UI-FALLBACK <step>` | **invalidating**: the mutation did not go through the real UI |
 | `PP4-TENANT-OK` | tenant journey finished incl. logout asserts |
 | `PP4-OPERATOR-OK` | operator journey finished |
 | `PP4-RELOGIN-OK` | post-reboot relogin recovered |
 
-Cross-spec handoff: none. The resource the console deletes is the harness's own
-`pp4-ui-target`, whose canonical id the campaign exports as `PP4_UI_TARGET_ID`
-and writes into `05-browser-ids.env` as `PP4_UI_DELETE_ID`; the operator journey
-ties its canonical-operations assertion to the same id.
+The tenant native-create journey writes its canonical id to
+`05-browser-ids.env` as `PP4_UI_CREATE_ID`. Host-side provider and guest-boot
+checks run while that resource remains live; only then does the delete journey
+receive the same id as `PP4_UI_TARGET_ID`. The operator witness ties its
+canonical-operation assertion to that id.
 
 Evidence screenshots: `01-tenant-home-post-login`,
 `06-images-native-inventory`, `07-networks-native-inventory`,
@@ -123,15 +125,12 @@ in `PP4_EVIDENCE_DIR`.
      network-compat-created-not-canonical`.
   7. **servers**: `test-vm` is listed and inspected by CANONICAL ID (the
      native list projection carries no spec name).
-  8. **console VM create fails truthfully**: the schema-driven form is filled
-     with the env-provided image/flavor/network ids and submitted through the
-     real UI; the console must surface a real error, must not show the success
-     screen, must not crash, and no server may appear in a Ready state →
-     `PP4-GAP native-vm-create=network-provider-inactive` plus the classified
-     create failure class → `PP4-GAP
-     console-create-schema-dialect=<client-schema-compile|client-validation|upstream-<status>|other>`.
-  9. **console delete on a supported native class**: the harness-created
-     `pp4-ui-target` server is opened by canonical id and deleted through the
+  8. **console VM create succeeds natively**: the JSON-Schema-driven form is
+     filled with the env-provided image/flavor/network ids and submitted
+     through the real UI; the canonical Operation succeeds and the resource
+     reaches Ready. The host then proves OpenStack visibility, libvirt
+     execution, and the CirrOS boot marker.
+  9. **console delete on the same native class**: the browser-created server is opened by canonical id and deleted through the
      advertised `delete` action (button + destructive confirmation modal). The
      console must render an operation id with a terminal state (or a
      synchronously completed state — the BFF does not persist pollable
@@ -162,8 +161,7 @@ and aggregated by the campaign into `35-classified-gaps.txt`.
 | --- | --- |
 | `images-native-inventory=compat-only` | The native `image.image` inventory is empty; the demo cirros image exists only through the compatibility (Glance) API. |
 | `network-compat-created-not-canonical` | `testlab-network` was created through the compatibility (Neutron) API and lives only in the compat store, so the native `network.network` list does not contain it. |
-| `native-vm-create=network-provider-inactive` | The native `compute.server` create cannot be scheduled on this profile (the `o3k-network` execution agent is inactive by contract; disk capacity is bounded), so the console create fails — truthfully, with a real error and no fabricated resource. |
-| `console-create-schema-dialect=<class>` | The console create failure is **client-side**: the create schemas O3K serves declare `$schema: https://json-schema.org/draft/2020-12/schema` while the pinned schema-runtime compiles with draft-07 Ajv, so the form never reaches the BFF. The harness classifies the observed error from the rendered page (`client-schema-compile` / `client-validation` / `upstream-<status>` / `other`) and records the verbatim banner. Fixed only by Araf PR #118, which is not in this release tuple. |
+| `native-vm-create` | No native-create gap is accepted. A campaign that cannot complete the schema-driven create fails. |
 | `operator-global-operations-not-exposed` | The operator console's dedicated global operations list (`/api/v1/operator/operations`) is not implemented by upstream O3K, so that page renders an explicit failure/empty state instead of rows. The canonical `/api/v1/operations` list is served on the same surface and carries the operator tie-in. |
 
 ## Canonical Operations: synchronous vs. pollable
@@ -178,11 +176,10 @@ terminal console state as authoritative, and only polls
 ## UI-mutation rule
 
 Every cloud mutation in this harness goes through the **real console UI**: the
-advertised action button and its destructive confirmation modal (there is no
-create form this pinned tuple can submit — see the classified gaps). The pinned
-Araf SPA sends no `x-csrf-token`, so `installCsrfBridge` adds that one header at
-the network layer (`PP4-UI-CSRF-BRIDGE`) and the real click path stays real.
-There is deliberately **no BFF helper for creating or deleting a resource** in
+schema-driven create form or advertised action button and its destructive
+confirmation modal. Araf rc.15 supplies the production CSRF header itself;
+any `PP4-UI-CSRF-BRIDGE` marker or UI fallback fails the campaign. There is
+deliberately **no BFF helper for creating or deleting a resource** in
 `lib/bff.ts`: a step that cannot be performed through the UI records
 `PP4-UI-FALLBACK <step>` (or fails outright) and host-run fails the campaign.
 
@@ -208,45 +205,28 @@ There is deliberately **no BFF helper for creating or deleting a resource** in
 | Native list projection: `name` falls back to the canonical id when `spec.name` is absent | `araf/backend/console-bff-core/src/o3k_adapter.rs:361-372` |
 | Demo truth: cirros-0.6.3 / testlab-network / testlab-flavor / test-vm / RegionOne | `o3k-rust/packaging/bootstrap-testlab.sh:34-40`, `bins/o3kd/src/composition/mod.rs:402-406` |
 
-## Known pinned-tuple limitations (measured, worked around loudly)
+## Known bounded profile limitations
 
-1. **UI mutations 403 without the CSRF header.** The pinned Araf SPA client
-   never sends `x-csrf-token`, but the production BFF requires it for every
-   mutation (`araf/backend/console-bff-core/src/csrf.rs:39-78` vs
-   `araf/packages/api-client/src/index.ts:786-794`). → `installCsrfBridge` adds
-   that one header at the network layer; the real click path is unchanged and
-   every bridged request is logged.
-2. **No console create can be submitted.** The create schemas O3K serves carry
-   `$schema: https://json-schema.org/draft/2020-12/schema`; the pinned
-   schema-runtime compiles with **draft-07** Ajv, whose `compile` throws for
-   that dialect, so `validateFormData` returns a compile failure with an empty
-   instance path and the form shows its summary banner without any field-level
-   error. Nothing is sent, so no create (VM *or* network) can succeed until
-   upstream [Araf PR #118](https://github.com/o3kio/araf/pull/118) ships in the
-   release tuple. → the VM-create step is performed anyway, its **truthful
-   failure is classified** (`console-create-schema-dialect=<class>`, decided
-   from the rendered banner plus the presence/absence of a field error) and the
-   campaign's only real mutation is the delete of a CLI-created server.
-3. **No logout UI.** Araf ships no logout button (verified across
+1. **No logout UI.** Araf ships no logout button (verified across
    `packages/shell` and `apps/*`). → `POST /api/v1/auth/logout` with the CSRF
    header, as Araf's own evidence does; UI + API asserts follow.
-4. **No tenant scope-selection page.** The shell renders only after
+2. **No tenant scope-selection page.** The shell renders only after
    server-side scope selection; the ProjectSelector is presentation-only.
    → `POST /api/v1/auth/scope` (CSRF), then the shell is asserted in the UI.
-5. **Compatibility-only inventories.** `image.image` and `network.network` have
+3. **Compatibility-only inventories.** `image.image` and `network.network` have
    no canonical rows on a fresh demo deployment, and `compute.flavor` has no
    collection at all (`crates/o3k-kernel/src/manifest.rs:1907-1930`). → the
    compat ids come from the harness env (`PP4_IMAGE_ID`, `PP4_NETWORK_ID`,
-   `PP4_FLAVOR_ID`), the delete target is created through the unmodified
-   OpenStack CLI, and the empty inventories are recorded as gaps.
+   `PP4_FLAVOR_ID`), and the empty inventories are recorded as gaps. The
+   workload itself is created through the native schema-driven form.
 
 ## Notes
 
 - Tests are serial (`workers: 1`, `mode: "serial"`) and share one browser
   context per spec; resource names are deterministic (single-tenant campaign).
-- The delete target is created by the campaign harness (host-run.sh) through the
-  unmodified OpenStack CLI before the browser phase; the journeys themselves
-  perform no cross-run cleanup mutations.
+- The native-create target is supplied to the post-verification delete run by
+  the campaign harness (host-run.sh); it is never pre-created through the
+  compatibility CLI.
 - `npm install` was run on the host to produce `package-lock.json`;
   `node_modules/` is gitignored. Playwright browsers are NOT downloaded here
   (`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` is safe): the browser lives in the VM.

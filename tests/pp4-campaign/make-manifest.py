@@ -31,8 +31,8 @@ import uuid
 EXPECTED_CASES = {
     "phase1a": ["I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8", "I9", "I10",
                 "I11", "I12", "I13", "I14", "I15", "I16", "I17"],
-    "phase1b": ["X0", "A-gap", "B1", "B2", "B3", "C1", "C2", "C3", "D1", "D2",
-                "D3", "G1", "S1", "T1", "T2", "SEC1"],
+    "phase1b": ["X0", "UI_CREATE_5", "UI_CREATE_6", "UI_CREATE_7", "B1", "B2", "B3",
+                "C1", "C2", "C3", "D1", "D2", "D3", "G1", "S1", "T1", "T2", "SEC1", "A1"],
     "phase2": ["R1", "R2", "R3", "F1", "F2", "F3", "F4", "C1", "C2", "C3", "C4",
                "C5", "C6", "C7", "C8"],
 }
@@ -43,8 +43,6 @@ EXPECTED_CASES = {
 # A trailing "*" makes the requirement a prefix match: the console create error
 # class itself is observed at run time (`console-create-schema-dialect=<class>`).
 REQUIRED_GAPS = {
-    "native-vm-create=network-provider-inactive",
-    "console-create-schema-dialect=*",
     "compat-created-resource-not-canonical",
     "compat-action-operation-not-canonical",
 }
@@ -240,24 +238,36 @@ def main() -> int:
             failures.append(f"05-browser-e2e.log is missing {marker}")
     if "PP4-UI-FALLBACK" in browser_log:
         failures.append("05-browser-e2e.log records a PP4-UI-FALLBACK: the browser journey did not perform the mutation")
-    # The console mutation is a DELETE of the CLI-created server the harness
-    # owns: the pinned Araf SPA cannot submit any create form (JSON Schema
-    # 2020-12 create schemas vs draft-07 Ajv), so no console-created resource id
-    # is expected (and would have to be explained).
-    if not re.search(r"PP4-UI-DELETE id=[0-9a-f-]{36}", browser_log):
-        failures.append("05-browser-e2e.log is missing the PP4-UI-DELETE id line (console-deleted server)")
-    for gap_line in (
-        "PP4-GAP native-vm-create=network-provider-inactive",
-        "PP4-GAP console-create-schema-dialect=",
-    ):
-        if gap_line not in browser_log:
-            failures.append(f"05-browser-e2e.log is missing the classified gap line: {gap_line}")
+    if "PP4-UI-CSRF-BRIDGE" in browser_log:
+        failures.append("05-browser-e2e.log records a PP4-UI-CSRF-BRIDGE: request mutation is forbidden")
+    for marker in ("UI_CREATE_1 schema-form-rendered", "UI_CREATE_2 browser-submit",
+                   "UI_CREATE_3 operation-succeeded", "UI_CREATE_4 resource-ready"):
+        if marker not in browser_log:
+            failures.append(f"05-browser-e2e.log is missing {marker}")
+    # The browser mutation is a native create followed by a later delete of the
+    # same canonical resource. A CLI-created resource is never accepted as proof.
+    create_match = re.search(r"PP4-UI-CREATE id=([0-9a-f-]{36}) operation=([0-9a-f-]{36})", browser_log)
+    delete_match = re.search(r"PP4-UI-DELETE id=([0-9a-f-]{36})", browser_log)
+    if not create_match:
+        failures.append("05-browser-e2e.log is missing PP4-UI-CREATE id/operation")
+    if not delete_match:
+        failures.append("05-browser-e2e.log is missing PP4-UI-DELETE id")
+    if create_match and delete_match and create_match.group(1) != delete_match.group(1):
+        failures.append("browser delete id differs from browser-created canonical id")
     if "PP4-RELOGIN-OK" not in log_text(evidence("23-browser-relogin.log")):
         failures.append("23-browser-relogin.log is missing PP4-RELOGIN-OK")
     browser_ids = read_pairs(evidence("05-browser-ids.env"))
-    if not browser_ids.get("PP4_UI_DELETE_ID"):
-        failures.append(
-            "05-browser-ids.env carries no PP4_UI_DELETE_ID (console-deleted server)")
+    if not browser_ids.get("PP4_UI_CREATE_ID") or not browser_ids.get("PP4_UI_DELETE_ID"):
+        failures.append("05-browser-ids.env lacks browser create/delete canonical ids")
+    if browser_ids.get("PP4_UI_CREATE_ID") != browser_ids.get("PP4_UI_DELETE_ID"):
+        failures.append("05-browser-ids.env create/delete ids differ")
+    for required_evidence in (
+        "14-browser-native-identity.txt",
+        "14-browser-native-openstack-show.txt",
+        "14-browser-native-console.log",
+    ):
+        if not os.path.isfile(evidence(required_evidence)):
+            failures.append(f"{required_evidence} is missing: native browser workload proof incomplete")
 
     # ---- classified gaps (known profile facts, evidence, never failures) ---
     gaps = []
@@ -388,7 +398,7 @@ def main() -> int:
         "browser_console_deleted_resource": {
             "resource_type": "compute.server",
             "id": browser_ids.get("PP4_UI_DELETE_ID", ""),
-            "created_through_the_unmodified_openstack_cli": True,
+            "created_through_the_unmodified_openstack_cli": False,
             "deleted_through_the_console_ui": True,
         },
         "classified_gaps": gaps,
@@ -399,9 +409,7 @@ def main() -> int:
         "evidence_file_sha256": files,
         "known_limitations": [
             "single-node demo profile (o3k-demo-v1); not HA, not multi-node",
-            "the pinned Araf console SPA sends no x-csrf-token, so the campaign bridges that one header at the network layer; any UI fallback fails this campaign",
-            "NO console create can succeed on the pinned Araf tuple: the create schemas O3K serves declare JSON Schema 2020-12 while the pinned schema-runtime compiles with draft-07 Ajv, so the form fails client-side before any request is sent; the upstream fix (Araf PR #118) is not in this release tuple, and the observed error class is recorded as the classified gap console-create-schema-dialect=client-schema-compile. No campaign evidence claims a console create of a VM OR of a network",
-        "the native compute.server create is NOT supported on this historical profile (the o3k-network execution agent is inactive by contract): the console attempt is performed and its truthful failure is recorded as the classified gap native-vm-create=network-provider-inactive; any resulting row is checked as a canonical terminal ERROR resource, never an unowned/non-terminal leak",
+            "native compute.server creation is required through the schema-driven browser form; the canonical Operation, resource, provider execution, libvirt guest boot, and cross-interface identity are independently checked",
             "native image and flavor inventories are compatibility-backed only: image.image has no canonical row and compute.flavor has no collection, so the console create form can only be fed the ids the compatibility APIs report",
             "compat-created networks and images are not canonical resources: testlab-network and the demo image exist only through the compatibility (Neutron/Glance) APIs (classified gap compat-created-resource-not-canonical)",
             "the native list projection carries no spec name for compute.server, so console rows are identified by canonical id (see 13b-native-name-projection.txt)",

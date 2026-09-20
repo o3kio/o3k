@@ -5,15 +5,14 @@
 #   phase1a (in-vm): foreign canaries -> exact public one-liner -> success
 #                    output + T0-T3/T5 stamps -> canonical state -> guest boot
 #                    proof -> curl OIDC verify
-#   ui target (host):  creates `pp4-ui-target` through the UNMODIFIED OpenStack
-#                    CLI inside the VM (a canonical native resource the console
-#                    lists) so the tenant journey has a real resource to delete
+#   browser: creates and deletes the workload through the real Araf UI; there
+#                    is no OpenStack precreation substitute
 #   browser (host):  Chromium INSIDE the VM (demo CA imported into its NSS
 #                    profile) driven by Playwright over CDP from the host:
 #                    tenant journey (login -> scope -> catalog -> capacity ->
 #                    images/networks/servers by canonical id -> console VM
-#                    create fails truthfully -> console delete of the
-#                    CLI-created server -> logout) + operator journey.
+#                    schema-driven native create -> console delete of the
+#                    native-created server -> logout) + operator witness.
 #                    Emits PP4-TIMESTAMPS T4 + PP4-GAP lines + PP4-UI-DELETE id.
 #   phase1b (in-vm): cross-interface scenarios A-D (openstack CLI <-> Araf
 #                    native BFF on identical canonical IDs), classified-gap
@@ -237,15 +236,10 @@ fi
 cp "$EVID_FINAL/03-timestamps.env" "$TIMESTAMP_SNAPSHOT"
 log "phase1a complete"
 
-# ---- console-ui target + TestLab ids (unmodified OpenStack CLI inside the VM) -----
-# The only real UI mutation this pinned tuple supports is the advertised delete
-# action on an EXISTING canonical resource: the pinned Araf SPA cannot submit
-# any create form (the create schemas O3K serves declare JSON Schema 2020-12
-# while the pinned schema-runtime compiles with draft-07 Ajv; the upstream fix,
-# Araf PR #118, is not in this release tuple). The harness therefore creates the
-# delete target itself through the UNMODIFIED OpenStack CLI: a CLI-created
-# server is a canonical native resource (same uuid) and appears in the console.
-# Every id is resolved inside the VM and every lookup fails closed.
+# ---- TestLab ids (unmodified OpenStack CLI inside the VM) -----------------------
+# Image/network/flavor identifiers are compatibility-surface inputs required by
+# the native compute schema. The workload itself is created only by the Araf
+# browser; this CLI is never used to pre-create the PP.4 native target.
 vm_openstack_id_by_name() { # TYPE(image|network|flavor) NAME
   local type="$1" name="$2"
   ssh_vm "sudo bash -c 'set -e; . /etc/o3k/admin-openrc; openstack ${type} list -f json'" 2>/dev/null \
@@ -270,17 +264,7 @@ PP4_IMAGE_ID="$(vm_openstack_id_by_name image cirros-0.6.3)"
 PP4_NETWORK_ID="$(vm_openstack_id_by_name network testlab-network)"
 [ -n "$PP4_NETWORK_ID" ] || { echo "could not resolve the testlab-network id via the VM OpenStack CLI" >&2; exit 1; }
 [ -n "$PP4_ADMIN_PROJECT_ID" ] || { echo "PP4_ADMIN_PROJECT_ID is empty" >&2; exit 1; }
-# `openstack server create --flavor` takes the flavor id the CLI reports.
-UI_TARGET_FLAVOR_ID="$(vm_openstack_id_by_name flavor testlab-flavor)"
-[ -n "$UI_TARGET_FLAVOR_ID" ] || { echo "could not resolve the testlab-flavor id via the VM OpenStack CLI" >&2; exit 1; }
-log "ui target: creating pp4-ui-target through the unmodified OpenStack CLI"
-ssh_vm "sudo bash -c 'set -e; . /etc/o3k/admin-openrc; openstack server create --wait --image ${PP4_IMAGE_ID} --flavor ${UI_TARGET_FLAVOR_ID} --nic net-id=${PP4_NETWORK_ID} --config-drive true --key-name testlab-keypair pp4-ui-target'" \
-  > "$EVID_FINAL/04b-ui-target-create.log" 2>&1 \
-  || { echo "could not create pp4-ui-target through the VM OpenStack CLI (see 04b-ui-target-create.log)" >&2; exit 1; }
-PP4_UI_TARGET_ID="$(ssh_vm 'sudo bash -c ". /etc/o3k/admin-openrc; openstack server show pp4-ui-target -c id -f value"' 2>/dev/null | tr -d '[:space:]')"
-[ -n "$PP4_UI_TARGET_ID" ] || { echo "pp4-ui-target has no canonical id (openstack server show pp4-ui-target)" >&2; exit 1; }
-log "ui target: pp4-ui-target id=$PP4_UI_TARGET_ID"
-export PP4_FLAVOR_ID PP4_ADMIN_PROJECT_ID PP4_IMAGE_ID PP4_NETWORK_ID PP4_UI_TARGET_ID
+export PP4_FLAVOR_ID PP4_ADMIN_PROJECT_ID PP4_IMAGE_ID PP4_NETWORK_ID
 
 # ---- browser e2e (host playwright -> in-VM chromium over CDP) ---------------------
 log "browser: starting in-VM chromium"
@@ -321,34 +305,20 @@ PP4_DEPLOYMENT_ENV_FILE="$EVID_FINAL/10-araf-production-tuple.txt"
 export PP4_DEPLOYMENT_ENV_FILE
 mkdir -p "$EVID_FINAL/browser"
 
-log "browser: tenant + operator journeys"
+log "browser: tenant native-create journey"
 set +e
 (cd "$REPO/tests/pp4-browser-e2e" && \
   CDP_URL="http://127.0.0.1:$CDP_PORT" \
   TENANT_URL="https://tenant.o3k.demo" OPERATOR_URL="https://operator.o3k.demo" \
   PP4_ALICE_USER=alice PP4_ALICE_PASSWORD="$ALICE_PW" \
   PP4_FLAVOR_ID="$PP4_FLAVOR_ID" PP4_ADMIN_PROJECT_ID="$PP4_ADMIN_PROJECT_ID" \
-  PP4_IMAGE_ID="$PP4_IMAGE_ID" PP4_NETWORK_ID="$PP4_NETWORK_ID" \
-  PP4_UI_TARGET_ID="$PP4_UI_TARGET_ID" \
+  PP4_IMAGE_ID="$PP4_IMAGE_ID" PP4_NETWORK_ID="$PP4_NETWORK_ID" PP4_SKIP_DELETE=1 \
   PP4_DEPLOYMENT_ENV_FILE="$PP4_DEPLOYMENT_ENV_FILE" \
   PP4_EVIDENCE_DIR="$EVID_FINAL/browser" \
   npx playwright test --no-deps specs/tenant.spec.ts) \
   2>&1 | tee "$EVID_FINAL/05-browser-e2e.log"
 BROWSER_RC=$?
-(cd "$REPO/tests/pp4-browser-e2e" && \
-  CDP_URL="http://127.0.0.1:$CDP_PORT" \
-  TENANT_URL="https://tenant.o3k.demo" OPERATOR_URL="https://operator.o3k.demo" \
-  PP4_ALICE_USER=alice PP4_ALICE_PASSWORD="$ALICE_PW" \
-  PP4_FLAVOR_ID="$PP4_FLAVOR_ID" PP4_ADMIN_PROJECT_ID="$PP4_ADMIN_PROJECT_ID" \
-  PP4_IMAGE_ID="$PP4_IMAGE_ID" PP4_NETWORK_ID="$PP4_NETWORK_ID" \
-  PP4_UI_TARGET_ID="$PP4_UI_TARGET_ID" \
-  PP4_DEPLOYMENT_ENV_FILE="$PP4_DEPLOYMENT_ENV_FILE" \
-  PP4_EVIDENCE_DIR="$EVID_FINAL/browser" \
-  npx playwright test --no-deps specs/operator.spec.ts) \
-  2>&1 | tee -a "$EVID_FINAL/05-browser-e2e.log"
-OPERATOR_RC=$?
 set -e
-[ "$OPERATOR_RC" -eq 0 ] || BROWSER_RC=$OPERATOR_RC
 # A UI fallback means the mutation was NOT performed through the browser
 # journey, so the campaign's real-browser claim does not hold: fail loudly and
 # keep the fallback logs for diagnosis.
@@ -357,26 +327,30 @@ if grep -q 'PP4-UI-FALLBACK' "$EVID_FINAL/05-browser-e2e.log"; then
   echo "browser journey used a UI fallback: the real-browser claim is not met (see 05-browser-e2e.log)" >&2
   exit 1
 fi
+if grep -q 'PP4-UI-CSRF-BRIDGE' "$EVID_FINAL/05-browser-e2e.log"; then
+  echo "browser journey used a network-layer CSRF repair; rc.15 product semantics are not proven" >&2
+  exit 1
+fi
 T4="$(grep -oE 'PP4-TIMESTAMPS T4=[0-9]+' "$EVID_FINAL/05-browser-e2e.log" | head -1 | cut -d= -f2 || true)"
 [ -n "$T4" ] || { echo "browser phase produced no PP4-TIMESTAMPS T4 marker" >&2; exit 1; }
 printf 'T4=%s\n' "$T4" >> "$EVID_FINAL/03-timestamps.env"
-# The tenant journey's only real UI mutation on this pinned tuple is the delete
-# of the CLI-created server through its advertised action; phase1b proves the
-# cross-interface absence from this id. No console CREATE is claimed: the pinned
-# SPA cannot compile the 2020-12 create schemas O3K serves.
-UI_DELETE_ID="$(grep -oE 'PP4-UI-DELETE id=[a-f0-9-]+' "$EVID_FINAL/05-browser-e2e.log" | head -1 | cut -d= -f2 || true)"
-[ -n "$UI_DELETE_ID" ] || { echo "browser journey produced no PP4-UI-DELETE id" >&2; exit 1; }
-[ "$UI_DELETE_ID" = "$PP4_UI_TARGET_ID" ] \
-  || { echo "the console deleted $UI_DELETE_ID, not the harness target $PP4_UI_TARGET_ID" >&2; exit 1; }
+# The tenant journey creates the workload through Araf rc.15's schema-driven
+# form. The host carries its canonical id into phase1b while the guest is live,
+# then runs the real Araf delete and records cross-interface absence.
+UI_CREATE_ID="$(grep -oE 'PP4-UI-CREATE id=[a-f0-9-]+' "$EVID_FINAL/05-browser-e2e.log" | head -1 | cut -d= -f2 || true)"
+UI_DELETE_ID=""
+[ -n "$UI_CREATE_ID" ] || { echo "browser journey produced no PP4-UI-CREATE id" >&2; exit 1; }
+PP4_UI_TARGET_ID="$UI_CREATE_ID"
+export PP4_UI_TARGET_ID
 printf 'PP4_UI_DELETE_ID=%s\n' "$UI_DELETE_ID" > "$EVID_FINAL/05-browser-ids.env"
+printf 'PP4_UI_CREATE_ID=%s\n' "$UI_CREATE_ID" >> "$EVID_FINAL/05-browser-ids.env"
 if [ "$BROWSER_RC" -ne 0 ]; then
   scp "${SCP_OPTS[@]}" -r tester@localhost:"$VM_EVID/." "$EVID_FINAL/" \
     || { echo "could not pull browser-failure evidence" >&2; exit 1; }
   echo "browser e2e FAILED (rc $BROWSER_RC)" >&2; exit 1
 fi
 grep -q 'PP4-TENANT-OK' "$EVID_FINAL/05-browser-e2e.log" || { echo "tenant journey missing PP4-TENANT-OK" >&2; exit 1; }
-grep -q 'PP4-OPERATOR-OK' "$EVID_FINAL/05-browser-e2e.log" || { echo "operator journey missing PP4-OPERATOR-OK" >&2; exit 1; }
-log "browser e2e complete (T4=$T4)"
+log "browser tenant native-create complete (T4=$T4)"
 
 # push host-side browser ids + log into the VM evidence for phase1b.  Keep the
 # installer-owned timestamp ledger in place; replacing it with the host-side
@@ -419,6 +393,71 @@ if ! grep -Fq 'PHASE1B-COMPLETE status=passed' <<<"$P1B_MARKER"; then
   exit 1
 fi
 log "phase1b complete"
+
+# Delete only after phase1b has independently verified the browser-created
+# resource through OpenStack, libvirt, and the guest boot marker.
+log "browser: deleting the verified native-created server"
+(cd "$REPO/tests/pp4-browser-e2e" && \
+  CDP_URL="http://127.0.0.1:$CDP_PORT" TENANT_URL="https://tenant.o3k.demo" \
+  OPERATOR_URL="https://operator.o3k.demo" PP4_ALICE_USER=alice \
+  PP4_ALICE_PASSWORD="$ALICE_PW" PP4_FLAVOR_ID="$PP4_FLAVOR_ID" \
+  PP4_ADMIN_PROJECT_ID="$PP4_ADMIN_PROJECT_ID" PP4_IMAGE_ID="$PP4_IMAGE_ID" \
+  PP4_NETWORK_ID="$PP4_NETWORK_ID" PP4_UI_TARGET_ID="$PP4_UI_TARGET_ID" \
+  PP4_DEPLOYMENT_ENV_FILE="$PP4_DEPLOYMENT_ENV_FILE" PP4_EVIDENCE_DIR="$EVID_FINAL/browser-delete" \
+  npx playwright test --no-deps --grep "console delete is observed truthfully") \
+  2>&1 | tee -a "$EVID_FINAL/05-browser-e2e.log" \
+  || { echo "browser native delete failed" >&2; exit 1; }
+UI_DELETE_ID="$(grep -oE 'PP4-UI-DELETE id=[a-f0-9-]+' "$EVID_FINAL/05-browser-e2e.log" | tail -1 | cut -d= -f2 || true)"
+[ "$UI_DELETE_ID" = "$PP4_UI_TARGET_ID" ] || { echo "delete identity mismatch" >&2; exit 1; }
+printf 'PP4_UI_DELETE_ID=%s\n' "$UI_DELETE_ID" >> "$EVID_FINAL/05-browser-ids.env"
+
+# Cross-interface absence is checked after the real browser mutation. The
+# native live-view concealment is asserted by the delete spec; the unmodified
+# OpenStack CLI is checked independently here and must return a truthful
+# not-found response. This closes the deferred phase1b D3 case without ever
+# precreating the browser workload.
+ssh_vm "sudo bash -c '. /etc/o3k/admin-openrc; openstack server show ${UI_DELETE_ID}'" \
+  > "$EVID_FINAL/18b-console-deleted-server-cli.txt" 2>&1 && {
+    echo "browser-deleted server remains visible through OpenStack" >&2
+    exit 1
+  } || true
+grep -qiE 'No Server found|No server with a name or ID' "$EVID_FINAL/18b-console-deleted-server-cli.txt" \
+  || { echo "OpenStack absence was not a truthful not-found response" >&2; exit 1; }
+printf 'araf_live_view_status=404 (browser delete spec)\n' >> "$EVID_FINAL/18b-console-deleted-server-cli.txt"
+python3 - "$EVID_FINAL/cases.jsonl" <<'PY'
+import json, sys, time
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({"id":"D3","phase":"phase1b","name":"browser delete absent through OpenStack and native live view","status":"PASS","ts":int(time.time())}) + "\n")
+PY
+
+# The operator view is run after deletion so its canonical-operation assertion
+# can observe the same browser-created resource and delete Operation. It is
+# intentionally not allowed to create or mutate any workload.
+log "browser: operator witness"
+set +e
+(cd "$REPO/tests/pp4-browser-e2e" && \
+  CDP_URL="http://127.0.0.1:$CDP_PORT" \
+  TENANT_URL="https://tenant.o3k.demo" OPERATOR_URL="https://operator.o3k.demo" \
+  PP4_ALICE_USER=alice PP4_ALICE_PASSWORD="$ALICE_PW" \
+  PP4_FLAVOR_ID="$PP4_FLAVOR_ID" PP4_ADMIN_PROJECT_ID="$PP4_ADMIN_PROJECT_ID" \
+  PP4_IMAGE_ID="$PP4_IMAGE_ID" PP4_NETWORK_ID="$PP4_NETWORK_ID" \
+  PP4_UI_TARGET_ID="$PP4_UI_TARGET_ID" \
+  PP4_DEPLOYMENT_ENV_FILE="$PP4_DEPLOYMENT_ENV_FILE" \
+  PP4_EVIDENCE_DIR="$EVID_FINAL/browser-operator" \
+  npx playwright test --no-deps specs/operator.spec.ts) \
+  2>&1 | tee -a "$EVID_FINAL/05-browser-e2e.log"
+OPERATOR_RC=$?
+set -e
+[ "$OPERATOR_RC" -eq 0 ] || { echo "operator journey failed" >&2; exit 1; }
+grep -q 'PP4-OPERATOR-OK' "$EVID_FINAL/05-browser-e2e.log" || { echo "operator journey missing PP4-OPERATOR-OK" >&2; exit 1; }
+
+# Persist the post-verification delete and operator markers into the VM-side
+# evidence before reboot/phase2 copies can supersede the directory.
+scp "${SCP_OPTS[@]}" "$EVID_FINAL/05-browser-ids.env" "$EVID_FINAL/05-browser-e2e.log" \
+  tester@localhost:"$VM_SCRIPTS/" >/dev/null 2>&1 \
+  || { echo "could not push final browser evidence into the VM" >&2; exit 1; }
+ssh_vm "sudo mv -f $VM_SCRIPTS/05-browser-ids.env $VM_SCRIPTS/05-browser-e2e.log $VM_EVID/ && sudo chown root:root $VM_EVID/05-browser-ids.env $VM_EVID/05-browser-e2e.log" \
+  || { echo "could not persist final browser evidence in the VM" >&2; exit 1; }
 
 # ---- host reboot ------------------------------------------------------------------
 log "rebooting the VM (host reboot recovery gate)"
@@ -507,7 +546,6 @@ set +e
   PP4_ALICE_USER=alice PP4_ALICE_PASSWORD="$ALICE_PW" \
   PP4_FLAVOR_ID="$PP4_FLAVOR_ID" PP4_ADMIN_PROJECT_ID="$PP4_ADMIN_PROJECT_ID" \
   PP4_IMAGE_ID="$PP4_IMAGE_ID" PP4_NETWORK_ID="$PP4_NETWORK_ID" \
-  PP4_UI_TARGET_ID="$PP4_UI_TARGET_ID" \
   PP4_DEPLOYMENT_ENV_FILE="$PP4_DEPLOYMENT_ENV_FILE" \
   PP4_EVIDENCE_DIR="$EVID_FINAL/browser-relogin" \
   npx playwright test --no-deps specs/relogin.spec.ts) 2>&1 | tee "$EVID_FINAL/23-browser-relogin.log"
@@ -549,8 +587,8 @@ cp "$TIMESTAMP_SNAPSHOT" "$EVID_FINAL/03-timestamps.env"
 printf 'T4=%s\n' "$T4" >> "$EVID_FINAL/03-timestamps.env"
 
 # The phase2 evidence copy is authoritative for the final VM-side evidence and
-# can replace the phase1b identity ledger.  Re-attach the host-created browser
-# target only after that copy, so all three canonical IDs survive into the
+# can replace the phase1b identity ledger. Re-attach the browser-created target
+# only after that copy, so all canonical IDs survive into the
 # durable manifest.
 printf 'pp4-ui-target %s\n' "$PP4_UI_TARGET_ID" >> "$EVID_FINAL/14-scenarioA-identity.txt"
 

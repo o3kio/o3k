@@ -663,15 +663,15 @@ profiles:
           o3k-demo-v1 single-node profile only; Horizon was an optional Ubuntu
           witness, not the O3K dashboard.
         note: >-
-          O3K v0.4.0-rc.8 and the Araf tuple were not modified; the tuple and
-          deployment material are repository-side integration metadata. The
-          pinned Araf console schema-dialect defect remains historical
-          client-schema-compile evidence (upstream Araf PR #118 is not in
-          rc.12), and native VM create remains network-provider-inactive. Any
-          failed-create row is classified only as a canonical terminal ERROR
-          resource with no provider identity; it is not evidence of a
-          successful or reachable workload. These are acceptance blockers, not
-          accepted product limitations.
+          The rc.8/rc.12 tuple and its deployment material remain immutable
+          historical evidence. The current PP.4 candidate pins Araf
+          v1.0.0-rc.15; the successor O3K release and fresh-host evidence are
+          pending. The historical schema-dialect and network-provider findings
+          above are not claims about the current candidate. Any failed-create
+          row is classified only as a canonical terminal ERROR resource with
+          no provider identity; it is not evidence of a successful or
+          reachable workload. These remain acceptance gates, not accepted
+          product limitations.
           No Araf production/HA claim (o3kio/araf#106).
     release_relevance: >-
       Contract-frozen vehicle for the next release. Not itself a release
@@ -688,10 +688,11 @@ profiles:
         (PR #1025)
       - release-gate execution and publication (issue #93)
     next_evidence_action: >-
-      PP.4 (#973) remains incomplete. A successor immutable O3K/Araf tuple,
-      native browser workload evidence, and exact-head CI checks are required
-      before PP.5. The 1-20 host envelope remains a hardening target, not a
-      support claim.
+      PP.4 (#973) remains incomplete. The current candidate pins Araf
+      v1.0.0-rc.15; publication of the successor immutable O3K release,
+      native browser workload evidence, and exact-head CI checks remain
+      required before PP.5. The 1-20 host envelope remains a hardening target,
+      not a support claim.
     explicitly_unproven_claims:
       - production readiness
       - HA / multi-node behavior

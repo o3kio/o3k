@@ -5,7 +5,7 @@
 # release generator exports this file byte-for-byte as dist/install.sh
 # (packaging/make-release.sh, 0755, drift-gated by cmp), so the canonical
 # alpha invocation is
-#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.8/install.sh | sudo sh -
+#   curl -sfL https://github.com/o3kio/o3k/releases/download/<published-version>/install.sh | sudo sh -
 # get.o3k.io is only a convenience 302 redirect to that exact asset:
 #   curl -sfL https://get.o3k.io | sudo sh -
 #
@@ -21,8 +21,10 @@
 # PP.4 (#973) Araf demo stage: after the TestLab workload exists, the installer
 # installs the digest-pinned Araf demo deployment material from the VERIFIED
 # bundle into /usr/local/share/o3k/araf-demo/ (convergent, content-compared)
-# and runs packaging/o3k-araf-demo.sh install (the pinned pp3/pp4 tuple from
-# contracts/araf-compatibility-v1.yaml: O3K v0.4.0-rc.8 + Araf v1.0.0-rc.12).
+# and runs packaging/o3k-araf-demo.sh install (the pinned PP.3 historical
+# evidence plus the PP.4 candidate tuple from
+# contracts/araf-compatibility-v1.yaml: Araf v1.0.0-rc.15 and the selected
+# successor O3K release).
 # A demo-stage failure aborts the installer with a message that O3K itself is
 # healthy and the demo stage can be retried from the installed copy — the
 # demo never gates O3K readiness. Stage timing is recorded as T0..T5 stamps
@@ -113,7 +115,7 @@ fi
 # published install.sh GitHub Release asset is byte-identical to this file,
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
-O3K_INSTALLER_VERSION="v0.4.0-rc.8"
+O3K_INSTALLER_VERSION="pending-successor-release"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
@@ -442,6 +444,8 @@ printf '✓ %s %s\n' "${PRETTY_NAME:-${ID:-unknown} ${VERSION_ID:-unknown}}" "$(
 VERSION="${O3K_VERSION:-${O3K_PINNED_VERSION:-$O3K_INSTALLER_VERSION}}"
 VERSION="$(trim "$VERSION")"
 [ -n "$VERSION" ] || die "no installer version resolved"
+[ "$VERSION" != "pending-successor-release" ] \
+  || die "PP.4 successor O3K release is not selected; publish the candidate release before using the public installer"
 check_version_format "$VERSION"
 VERSION_NO_V="${VERSION#v}"
 

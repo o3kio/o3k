@@ -9,15 +9,13 @@
  * inside the in-VM Chromium, resolve through its /etc/hosts, trust the demo CA
  * and carry the page's real cookie jar (araf_<surface>_session + araf_csrf).
  *
- * Mutations additionally send the `x-csrf-token` header the BFF CSRF middleware
- * requires (backend/console-bff-core/src/csrf.rs); the pinned Araf release's
- * SPA client does not attach it, which is why the specs install a network-layer
- * CSRF bridge for UI-originated requests (see installCsrfBridge).
+ * The rc.15 SPA supplies the `x-csrf-token` header for product mutations. The
+ * harness never rewrites browser requests or installs a network-layer bridge.
  *
  * This module is READ-ONLY apart from the session boundary calls (login scope
- * selection, logout) and `installCsrfBridge`: every cloud mutation in the
- * browser journeys must go through the real console UI. There is deliberately
- * no BFF helper for creating or deleting a resource.
+ * selection, logout): every cloud mutation in the browser journeys must go
+ * through the real console UI. There is deliberately no BFF helper for
+ * creating or deleting a resource.
  */
 import { expect } from "playwright/test";
 import type { BrowserContext, Page } from "playwright";
@@ -195,41 +193,6 @@ export async function csrfToken(context: BrowserContext): Promise<string> {
     throw new Error("[pp4] araf_csrf cookie missing; login did not complete");
   }
   return csrf.value;
-}
-
-/**
- * Bridge the pinned console SPA's missing CSRF header at the network layer.
- *
- * The pinned Araf SPA ships no CSRF handling at all, so every POST/DELETE the
- * console UI issues is answered 403 by the BFF double-submit middleware and the
- * UI action can never succeed. This route lets the REAL UI path run (real form,
- * real click, real SPA fetch, real BFF endpoint) by adding only the header the
- * SPA omits. It is not a substitute for the UI: when a step cannot be performed
- * through the UI at all, the spec records PP4-UI-FALLBACK and the campaign
- * fails. Every bridged request is logged for the evidence log.
- */
-export async function installCsrfBridge(context: BrowserContext, baseUrl: string): Promise<void> {
-  const origin = new URL(baseUrl).origin;
-  await context.route("**/api/v1/**", async (route) => {
-    const request = route.request();
-    if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method())) {
-      return route.continue();
-    }
-    if (new URL(request.url()).origin !== origin) {
-      return route.continue();
-    }
-    const headers = { ...request.headers() };
-    if (!headers["x-csrf-token"]) {
-      const cookies = await context.cookies();
-      const csrf = cookies.find((cookie) => cookie.name === "araf_csrf");
-      if (csrf) {
-        headers["x-csrf-token"] = csrf.value;
-        // eslint-disable-next-line no-console
-        console.log(`PP4-UI-CSRF-BRIDGE ${request.method()} ${new URL(request.url()).pathname}`);
-      }
-    }
-    await route.continue({ headers });
-  });
 }
 
 export async function getSession(page: Page, baseUrl: string): Promise<BffSessionStatus> {

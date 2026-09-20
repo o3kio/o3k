@@ -291,116 +291,30 @@ record_gap "compat-created-resource-not-canonical" \
 case_ok G1 "native image/network inventories are empty while the compat-created image+network exist (classified gap, counts in 21e-compat-vs-native-inventories.txt)"
 
 # ---------------------------------------------------------------------------
-# Scenario A (CLASSIFIED GAP): the native compute.server create cannot work on
-# this profile. Recorded, never reported as a successful create.
+# Scenario A: browser-native create remains live for provider verification.
 # ---------------------------------------------------------------------------
-log "scenario A: probing the native compute.server create path (expected to FAIL)"
-{
-  echo "systemctl_is_active=$(systemctl is-active o3k-network 2>&1 || true)"
-  echo "systemctl_is_enabled=$(systemctl is-enabled o3k-network 2>&1 || true)"
-  echo "unit_file_present=$([ -f /etc/systemd/system/o3k-network.service ] && echo yes || echo no)"
-  echo "unit_environmentfile=$(sed -n 's/^EnvironmentFile=//p' /etc/systemd/system/o3k-network.service 2>/dev/null | tr '\n' ' ')"
-  echo "network_env_file_present=$([ -e /etc/o3k/o3k-network.env ] && echo yes || echo no)"
-  echo "contract_posture: the canonical installer installs the o3k-network unit but deliberately does NOT enable it — the bounded node-local network executor is enrolled only through small-edge orchestration (contracts/installer-v1.yaml authority boundary, contracts/execution-boundaries.md). This demo profile therefore has no port allocation/resolution provider."
-  echo "observed_consequence: the native compute.server create requires the network provider to resolve/allocate a port."
-} > "$EVID/21-network-provider-posture.txt"
-systemctl is-active --quiet o3k-network && die "o3k-network is active on this profile: scenario A's premise changed, re-verify the gap before accepting it"
-
-INSTANCES_BEFORE="$(sqlite_ro "select id, observed_state, ifnull(provider_id,'') from resources where kind='compute_instance' order by id")" \
-  || die "cannot read compute_instance rows (cannot measure the side effect)"
-printf '%s\n' "$INSTANCES_BEFORE" > "$EVID/21b-compute-instances-before.txt"
-
-CREATE_PAYLOAD="{\"name\":\"pp4-native\",\"image_id\":\"${IMAGE_ID}\",\"flavor_id\":\"${FLAVOR_ID}\",\"network_ids\":[\"${NET_ID}\"],\"key_name\":\"testlab-keypair\"}"
-CREATE_STATUS="$(bff_post_status /api/v1/resources/compute.server "$CREATE_PAYLOAD" \
-  "$EVID/21b-scenarioA-native-create-attempt.json")" \
-  || die "scenario A: the native create attempt could not be sent (cannot verify the outcome)"
-CREATE_STATE="not-attempted"
-case "$CREATE_STATUS" in
-  2??)
-    # A 2xx is only truthful when the canonical Operation FAILS.
-    CREATE_OP="$(python3 -c 'import json,sys
-d = json.load(open(sys.argv[1]))
-print(d.get("id") or d.get("operationId") or d.get("operation_id") or "")' \
-      "$EVID/21b-scenarioA-native-create-attempt.json")"
-    [ -n "$CREATE_OP" ] || die "the native create answered $CREATE_STATUS without a canonical Operation"
-    CREATE_STATE="$(wait_operation_terminal "$CREATE_OP")"
-    [ "$CREATE_STATE" = failed ] \
-      || die "the native compute.server create Operation $CREATE_OP reported $CREATE_STATE: this profile is documented as unable to create VMs"
-    ;;
-  *)
-    # The expected shape: a canonical upstream rejection (4xx/5xx).
-    case "$CREATE_STATUS" in
-      4??|5??) ;;
-      *) die "native create returned unexpected HTTP status $CREATE_STATUS" ;;
-    esac
-    CREATE_STATE="rejected"
-    python3 - "$EVID/21b-scenarioA-native-create-attempt.json" "$CREATE_STATUS" <<'PY' || die "the native create failure is not a canonical upstream error"
-import json, sys
-raw = open(sys.argv[1], encoding="utf-8").read()
-doc = json.loads(raw)
-assert isinstance(doc, dict), doc
-# A canonical error body carries a machine-readable code/title/detail/status; a
-# resource envelope (or an empty body) would mean the request was accepted.
-assert any(key in doc for key in ("title", "detail", "code", "status", "message")), doc
-assert int(doc.get("status", 0)) == int(sys.argv[2]), doc
-assert str(doc.get("title", "")).lower() == "conflict", doc
-PY
-    ;;
-esac
-
-{ journalctl -u o3kd --no-pager -n 4000 2>/dev/null || true; cat /var/log/o3k/*.log 2>/dev/null || true; } \
-  | grep -E 'network resolution rejected|canonical native server create failed|provider rejected the request|NoValidHost|Conflict' \
-  > "$EVID/21d-scenarioA-o3kd-log.txt" || true
-[ -s "$EVID/21d-scenarioA-o3kd-log.txt" ] \
-  || die "no o3kd log line proves the native create failure cause (searched journal + /var/log/o3k)"
-
-INSTANCES_AFTER="$(sqlite_ro "select id, observed_state, ifnull(provider_id,'') from resources where kind='compute_instance' order by id")" \
-  || die "cannot read compute_instance rows after the attempt"
-printf '%s\n' "$INSTANCES_AFTER" > "$EVID/21b-compute-instances-after.txt"
-FAILED_ROWS="$(python3 - "$EVID/21b-compute-instances-before.txt" "$EVID/21b-compute-instances-after.txt" <<'PY'
-import sys
-before = {line.split("\t")[0] for line in open(sys.argv[1], encoding="utf-8") if line.strip()}
-after = [line.rstrip("\n").split("\t") for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
-new = [row for row in after if row[0] not in before]
-with open(sys.argv[2] + ".delta", "w", encoding="utf-8") as handle:
-    for row in new:
-        handle.write("\t".join(row) + "\n")
-print(len(new))
-PY
-)" || die "cannot compute the compute_instance delta"
-{
-  echo "compute_instance_rows_before=$(wc -l < "$EVID/21b-compute-instances-before.txt")"
-  echo "compute_instance_rows_after=$(wc -l < "$EVID/21b-compute-instances-after.txt")"
-  echo "terminal_failed_rows_created=$FAILED_ROWS"
-  echo "terminal_failed_rows (id, observed_state, provider_id):"
-  cat "$EVID/21b-compute-instances-after.txt.delta"
-} > "$EVID/21c-scenarioA-terminal-failed-rows.txt"
-if [ "$FAILED_ROWS" -gt 0 ]; then
-  python3 - "$EVID/21b-compute-instances-after.txt.delta" <<'PY' || die "the create failure left a provider-backed row without a successful operation"
-import sys
-rows = [line.rstrip("\n").split("\t") for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
-for row in rows:
-    assert len(row) == 3, row
-    assert row[1] == "ERROR", f"row {row[0]} is not a terminal ERROR resource: {row[1]}"
-    assert row[2] == "", f"row {row[0]} carries provider {row[2]} despite failed create"
-PY
-fi
-
-# No ACTIVE workload may exist after a create that reported failure. The
-# unmodified CLI is the authoritative view of the compat compute API.
-openstack server list -f json > "$EVID/21b-scenarioA-cli-servers.json" \
-  || die "cannot list servers after the failed create (cannot verify absence)"
-python3 - "$EVID/21b-scenarioA-cli-servers.json" <<'PY' || die "an ACTIVE pp4-native exists after a create that reported failure"
-import json, sys
-servers = json.load(open(sys.argv[1], encoding="utf-8"))
-active = [s for s in servers if s["Name"] == "pp4-native" and s["Status"] == "ACTIVE"]
-assert not active, f"fabricated ACTIVE server: {active}"
-PY
-
-record_gap "native-vm-create=network-provider-inactive" \
-  "http_status=${CREATE_STATUS} operation_state=${CREATE_STATE} terminal_failed_compute_instance_rows=${FAILED_ROWS} o3k-network=$(systemctl is-active o3k-network 2>&1 || true)"
-CURRENT_CASE=A-gap CURRENT_NAME="native compute.server create is NOT supported on this profile (classified gap)" \
-  case_ok A-gap "native create FAILED as expected (http=$CREATE_STATUS, operation=$CREATE_STATE): no ACTIVE pp4-native, ${FAILED_ROWS} canonical terminal ERROR compute_instance row(s) with no provider, cause lines captured in 21d (NOT a create)"
+log "scenario A: verifying browser-created canonical workload identity"
+UI_CREATE_ID="$(sed -n 's/^PP4_UI_CREATE_ID=//p' "$EVID/05-browser-ids.env" | head -1)"
+[ -n "$UI_CREATE_ID" ] || die "browser native create marker missing"
+printf 'browser_native_server_id=%s\n' "$UI_CREATE_ID" > "$EVID/14-browser-native-identity.txt"
+wait_bff_live compute.server "$UI_CREATE_ID"
+wait_bff_status compute.server "$UI_CREATE_ID" ready >/dev/null
+openstack server show "$UI_CREATE_ID" > "$EVID/14-browser-native-openstack-show.txt" \
+  || die "OpenStack cannot observe the browser-created canonical server"
+libvirt_domain_running_for "$UI_CREATE_ID" \
+  || die "no running libvirt domain for browser-created server $UI_CREATE_ID"
+CURRENT_CASE=UI_CREATE_5 CURRENT_NAME="real libvirt domain for browser-created server" \
+  case_ok UI_CREATE_5 "running libvirt domain carries browser-created server identity $UI_CREATE_ID"
+openstack console log show "$UI_CREATE_ID" > "$EVID/14-browser-native-console.log" 2>&1 \
+  || die "console log unavailable for browser-created server"
+grep -Eiq 'cirros|login:' "$EVID/14-browser-native-console.log" \
+  || die "guest boot marker missing for browser-created server"
+CURRENT_CASE=UI_CREATE_6 CURRENT_NAME="guest boot marker for browser-created server" \
+  case_ok UI_CREATE_6 "CirrOS/login guest boot marker observed for browser-created server $UI_CREATE_ID"
+CURRENT_CASE=UI_CREATE_7 CURRENT_NAME="OpenStack observes browser-created server" \
+  case_ok UI_CREATE_7 "OpenStack-compatible server show observes canonical browser-created id $UI_CREATE_ID"
+CURRENT_CASE=A1 CURRENT_NAME="browser native create provider execution and cross-interface identity" \
+  case_ok A1 "UI-created canonical server $UI_CREATE_ID is ready, OpenStack-visible, libvirt-running, and guest-booted"
 
 # ---------------------------------------------------------------------------
 # Scenario B: CLI create -> Araf native view on the SAME canonical id
@@ -622,34 +536,10 @@ CURRENT_CASE=D2 CURRENT_NAME="CLI-deleted resource absent on Araf; test-vm survi
   case_ok D2 "delete via CLI -> native live view 404 (collection: $(awk -F= '/araf_collection_state/{print $2}' "$EVID/17f-scenarioD2-absence.txt")); test-vm intact (ONE canonical truth)"
 openstack server list -f json > "$EVID/18-servers-final.json"
 
-# ---------------------------------------------------------------------------
-# D3: the resource the BROWSER DELETED through the console UI is gone in the
-# unmodified OpenStack CLI and concealed in the Araf live view. The target
-# itself is created by host-run through the unmodified CLI BEFORE the browser
-# phase (`pp4-ui-target`), because the pinned Araf SPA cannot submit any create
-# form. host-run extracts the deleted id from the tenant journey's
-# PP4-UI-DELETE protocol line and pushes 05-browser-ids.env into the VM.
-# ---------------------------------------------------------------------------
-BROWSER_IDS="$EVID/05-browser-ids.env"
-[ -f "$BROWSER_IDS" ] || die "browser id handoff missing ($BROWSER_IDS): host-run must push 05-browser-ids.env before phase1b"
-UI_DELETE_ID="$(awk -F= '$1=="PP4_UI_DELETE_ID"{print $2}' "$BROWSER_IDS" | head -1)"
-[ -n "$UI_DELETE_ID" ] || die "the browser journey produced no console-deleted server id (05-browser-ids.env empty)"
-SRV_OUT="$(openstack server show "$UI_DELETE_ID" 2>&1)" && SRV_RC=0 || SRV_RC=$?
-{
-  echo "openstack server show ${UI_DELETE_ID} -> rc=${SRV_RC}"
-  echo "$SRV_OUT"
-  echo "araf_collection_state=$(record_collection_state compute.server "$UI_DELETE_ID")"
-} > "$EVID/18b-console-deleted-server-cli.txt"
-[ "$SRV_RC" -ne 0 ] || die "the console-deleted server $UI_DELETE_ID is still visible via the OpenStack CLI"
-grep -qiE 'No Server found|No server with a name or ID' <<<"$SRV_OUT" \
-  || die "openstack server show $UI_DELETE_ID failed for a non-not-found reason (cannot call it absence): $SRV_OUT"
-UI_DELETE_STATUS="$(bff_show_status compute.server "$UI_DELETE_ID" "$EVID/18c-console-deleted-server-bff.json")" \
-  || die "cannot query the Araf live view for the console-deleted server"
-echo "araf_live_view_status=${UI_DELETE_STATUS}" >> "$EVID/18b-console-deleted-server-cli.txt"
-[ "$UI_DELETE_STATUS" = 404 ] \
-  || die "the console-deleted server $UI_DELETE_ID is still served by the Araf live view (status $UI_DELETE_STATUS)"
-CURRENT_CASE=D3 CURRENT_NAME="resource deleted through the console UI is absent via the OpenStack CLI and the Araf live view" \
-  case_ok D3 "the server ($UI_DELETE_ID) deleted through the tenant console's advertised action is truthfully absent in the unmodified CLI ('No Server found') and in the Araf live view (404)"
+# The browser delete is deliberately performed by host-run after this phase's
+# live-provider checks. Its dual-surface absence proof is recorded there; this
+# phase must not require a delete marker before the browser has acted.
+printf 'browser_delete_verification=deferred_until_host_phase\n' > "$EVID/18b-console-deleted-server-cli.txt"
 
 # ---- tenant/operator separation spot-check ----------------------------------------------
 araf_login operator
@@ -778,10 +668,6 @@ if [ -f "$EVID/05-browser-e2e.log" ]; then
 else
   die "05-browser-e2e.log is missing: the browser journey's classified gaps cannot be recorded"
 fi
-grep -q '^GAP native-vm-create=network-provider-inactive' "$EVID/35-classified-gaps.txt" \
-  || die "the browser journey did not record the native-vm-create classified gap"
-grep -q '^GAP console-create-schema-dialect=' "$EVID/35-classified-gaps.txt" \
-  || die "the browser journey did not classify the console create error (console-create-schema-dialect)"
 
 # ---- secret scan across clients + evidence ------------------------------------------------
 # A missing scan target is a FAIL, never a silent skip: the campaign claims
@@ -821,13 +707,8 @@ assert lines, "no classified gaps were recorded"
 for line in lines:
     parts = line.split(" ", 2)
     assert parts[0] == "GAP" and len(parts) >= 2 and parts[1], f"malformed gap line: {line}"
-required = {
-    "native-vm-create=network-provider-inactive",
-    "compat-created-resource-not-canonical",
-}
-# `console-create-schema-dialect=<class>` carries an observed error class, so it
-# is required by prefix rather than by exact id.
-required_prefixes = ("console-create-schema-dialect=",)
+required = {"compat-created-resource-not-canonical"}
+required_prefixes = ()
 observed = {line.split(" ", 2)[1] for line in lines}
 missing = sorted(required - observed)
 missing.extend(

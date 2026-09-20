@@ -16,51 +16,33 @@
  *   h. network collection renders truthfully — `testlab-network` was created
  *      through the compatibility (Neutron) API and is not a canonical
  *      `network:network` resource -> PP4-GAP network-compat-created-not-canonical
- *   i. server collection lists the CLI-created workload by CANONICAL ID (the
+ *   i. server collection lists the existing TestLab workload by CANONICAL ID (the
  *      native list projection carries no spec name)
- *   j. a REAL console create of a VM fails truthfully: the native
- *      `compute.server` create cannot be scheduled on this profile (the
- *      network execution agent is inactive by contract), the console shows a
- *      real error, and no server is fabricated. The pinned Araf SPA cannot
- *      submit ANY create form (the create schemas O3K serves declare JSON
- *      Schema 2020-12 while the pinned schema-runtime compiles with draft-07
- *      Ajv; the upstream fix, Araf PR #118, is not in this release tuple), so
- *      the observed console error is classified as well:
- *      -> PP4-GAP native-vm-create=network-provider-inactive
- *      -> PP4-GAP console-create-schema-dialect=<observed error class>
- *   k. a REAL console delete on a supported native resource class: the server
- *      `pp4-ui-target` (created BEFORE the browser phase through the
- *      unmodified OpenStack CLI, so it is a canonical native resource with the
- *      same uuid the console lists) is deleted through its advertised action
- *      and confirmation modal, and the truthful final absence is observed.
+ *   j. a REAL console create of a VM from O3K's schema-driven form, with a
+ *      successful canonical Operation and ready canonical resource.
+ *   k. the same browser-created resource is deleted through its advertised
+ *      action and confirmation modal, and truthful absence is observed.
  *      Prints PP4-UI-DELETE id=<uuid> state=<observed>.
  *   l. inspect the TestLab workload detail by canonical id
  *   m. logout — session destroyed, follow-up API call 401s
  *
  * stdout protocol lines grepped by the campaign harness:
  *   PP4-TIMESTAMPS T4=<unix seconds>         (after login succeeds)
- *   PP4-UI-CSRF-BRIDGE <METHOD> <path>       (diagnostic: CSRF header added)
  *   PP4-UI-FALLBACK <step>                   (INVALIDATING: a step fell back to
  *                                             the BFF; host-run fails)
  *   PP4-GAP <id> <detail>                    (classified product-profile gap)
+ *   PP4-UI-CREATE id=<uuid> operation=<uuid> (after native browser create)
  *   PP4-UI-DELETE id=<uuid> state=<state>    (after the console delete)
  *   PP4-TENANT-OK                            (after logout asserts)
  *
  * Security asserts run immediately after login (web storage + DOM scan) plus a
  * deployment-side production-profile check (PP4_DEPLOYMENT_ENV_FILE).
  *
- * Cross-spec handoff: none. The resource the console deletes is the harness's
- * own target, whose canonical id the campaign exports as PP4_UI_TARGET_ID; the
- * operator journey ties its canonical-operations assertion to the same id
- * instead of reading a shared file.
+ * The browser-created canonical id is handed to the campaign through its
+ * evidence marker; no compatibility-side precreation is accepted.
  *
- * Known pinned-tuple limitations exercised here (see ../README.md):
- *   - the pinned Araf SPA never sends x-csrf-token, so UI mutations would 403;
- *     `installCsrfBridge` adds that one header at the network layer, keeping
- *     the click path real. The delete mutation goes through the real UI
- *     (advertised action button + confirmation modal) with no BFF fallback: a
- *     step that cannot be performed through the UI fails the campaign here
- *     rather than bypassing it.
+ * rc.15 must send x-csrf-token as product behavior. This harness performs no
+ * network-layer request repair or hidden fallback.
  */
 import { expect, test } from "playwright/test";
 import type { Browser } from "playwright";
@@ -69,7 +51,6 @@ import {
   bffFetch,
   getResource,
   getSession,
-  installCsrfBridge,
   listScopes,
   logCookieNames,
   logout,
@@ -112,6 +93,7 @@ let browser: Browser | undefined;
 let auth: AuthenticatedSurface;
 let projectName = "";
 let testVmId = "";
+let nativeCreatedId = "";
 
 /** Emit a classified product-profile gap: one log line, one evidence line. */
 function gap(id: string, detail: string): void {
@@ -119,56 +101,16 @@ function gap(id: string, detail: string): void {
   console.log(`PP4-GAP ${id} ${detail}`);
 }
 
-/** Read the create page's error banner (or undefined when none is shown). */
-async function readErrorBanner(): Promise<string | undefined> {
-  const alert = auth.page.getByRole("alert").first();
-  if ((await alert.count()) === 0) return undefined;
-  const text = (await alert.textContent().catch(() => "")) ?? "";
-  return text.trim() === "" ? undefined : text.trim();
-}
-
-/** The console create error class plus the raw signal it was decided from. */
-interface CreateErrorClassification {
-  /** `client-schema-compile` | `client-validation` | `upstream-<status>` | `other`. */
-  readonly klass: string;
-  /** Rendered field-level error elements (Cloudscape's `<controlId>-error` slot). */
-  readonly fieldErrors: number;
-}
-
-/**
- * Classify the console create failure from what the page actually rendered.
- *
- * The create page renders the SAME submit-time summary ("Please correct the
- * errors below.") for a schema-runtime compile failure and for contract-field
- * validation, so the banner alone cannot separate the two. The DOM can: the
- * pinned schema-runtime reports a compile failure with an EMPTY instance path
- * (`collectErrors` then maps it to no field), while a real field validation
- * failure renders Cloudscape's error slot `<controlId>-error` (Araf passes
- * `controlId=field-<key>`).
- */
-async function classifyCreateError(banner: string): Promise<CreateErrorClassification> {
-  if (/correct the errors below/i.test(banner)) {
-    const fieldErrors = await auth.page
-      .locator('form [id$="-error"]')
-      .filter({ hasText: /\S/u })
-      .count();
-    return { klass: fieldErrors === 0 ? "client-schema-compile" : "client-validation", fieldErrors };
-  }
-  const upstream = /\((\d{3})\)/u.exec(banner);
-  if (upstream?.[1]) return { klass: `upstream-${upstream[1]}`, fieldErrors: 0 };
-  return { klass: "other", fieldErrors: 0 };
-}
-
 test.beforeAll(async () => {
   env = loadEnv(); // fail fast on missing PP4_ALICE_PASSWORD / PP4_FLAVOR_ID etc.
+  nativeCreatedId = env.uiTargetId ?? "";
   // Server-side fixture check: the deployment itself must be the pinned
   // production tuple (phase1a evidence), not merely render without the word.
   expectProductionDeployment(env);
   browser = await connectBrowser(env);
   auth = await loginToSurface(browser, env, "tenant");
-  // The pinned SPA sends no CSRF header; bridge it so the UI click path can
-  // actually perform its mutations (recorded per request as PP4-UI-CSRF-BRIDGE).
-  await installCsrfBridge(auth.context, auth.baseUrl);
+  // CSRF is supplied by the rc.15 product client; the harness does not repair
+  // requests at the network layer.
 
   // (a) "browser login usable" measurement for the campaign timestamps.
   // eslint-disable-next-line no-console
@@ -481,7 +423,7 @@ test("server collection lists the TestLab workload by canonical id", async () =>
   await expectNoFixtureMarkers(auth.page);
 });
 
-test("console VM create fails truthfully (classified gap)", async () => {
+test("UI creates a native VM through the schema-driven form", async () => {
   test.setTimeout(env.operationTimeoutMs + 6 * 60 * 1000);
 
   // The pinned demo tuple does not advertise a flavor collection
@@ -490,8 +432,7 @@ test("console VM create fails truthfully (classified gap)", async () => {
   // /etc/o3k/testlab-flavor-id). loadEnv() already fails when it is missing.
   const flavorId = env.flavorId;
 
-  // Baseline: the server rows that exist BEFORE the create attempt, so the
-  // outcome can never pass vacuously on stale state.
+  // Baseline: prove the browser mutation creates a new canonical resource.
   const before = await openCollection(auth.page, env.tenantUrl, SERVER_TYPE, SERVER_PLURAL);
 
   // Schema-driven create form (fields derived from the O3K create contract:
@@ -516,112 +457,42 @@ test("console VM create fails truthfully (classified gap)", async () => {
   await flavorField.fill(flavorId);
   await networkField.fill(env.networkId); // text widget; the array contract needs []
 
-  // The REAL UI submit. No BFF fallback exists for this step: the expected
-  // outcome is a truthful failure, so there is nothing to fall back to.
+  // The REAL UI submit. No BFF fallback exists for this step.
   await auth.page.getByRole("button", { name: "Create Server" }).click();
 
   const submittedHeading = auth.page.getByRole("heading", { name: /creation submitted/i });
   const alert = auth.page.getByRole("alert").first();
-  const outcome = await Promise.race([
-    submittedHeading.waitFor({ state: "visible", timeout: 45_000 }).then(() => "submitted" as const),
-    alert.waitFor({ state: "visible", timeout: 45_000 }).then(() => "error" as const),
-  ]).catch(() => "timeout" as const);
-
-  let detail = "";
-  let consoleErrorClass: CreateErrorClassification | undefined;
-  let consoleErrorBanner = "";
-  if (outcome === "timeout") {
-    await evidence(auth.page, env, "08a-create-form-no-outcome");
-    throw new Error(
-      "[pp4] the console create attempt produced neither a submitted screen nor an error " +
-        `banner for ${env.vmName}`,
-    );
-  }
-
-  if (outcome === "error") {
-    const banner = (await readErrorBanner()) ?? "";
-    await evidence(auth.page, env, "08b-create-form-truthful-error");
-    expect(banner, "the console must surface a real error message").not.toBe("");
-    expect(
-      await submittedHeading.count(),
-      "a truthful error must not leave the create success screen visible",
-    ).toBe(0);
-    consoleErrorClass = await classifyCreateError(banner);
-    consoleErrorBanner = banner;
-    detail =
-      `console_error_class=${consoleErrorClass.klass} ` +
-      `console_error=${JSON.stringify(banner.slice(0, 200))}`;
-  } else {
-    // The form reached the BFF: the canonical Operation must carry the
-    // upstream failure (never a fabricated success). The state is polled
-    // directly so "the operation failed" and "the operation never reached a
-    // terminal state" are never conflated.
-    const bodyText = (await auth.page.textContent("body")) ?? "";
-    const submitted = parseSubmittedOperation(bodyText);
-    await openOperationDetail(auth.page, env.tenantUrl, submitted.id);
-    await evidence(auth.page, env, "08b-create-operation");
-    const resolved = await resolveTerminalOperation(
-      auth.page,
-      env.tenantUrl,
-      submitted,
-      env.operationTimeoutMs,
-    );
-    if (resolved.state !== "failed") {
-      throw new Error(
-        `[pp4] the native compute.server create Operation ${resolved.id} reported ` +
-          `${resolved.state}: this profile is documented as unable to create VMs, so a ` +
-          "successful create invalidates the harness",
-      );
-    }
-    detail =
-      `operation=${resolved.id} state=failed ` +
-      `error=${JSON.stringify(`${resolved.errorTitle} ${resolved.errorDetail}`.trim().slice(0, 200))}`;
-  }
-
-  // No fabricated resource. Any NEW row is a recorded side effect and must
-  // never be Ready (the profile cannot schedule a VM).
+  await expect(submittedHeading, "UI_CREATE_2 must submit the native create").toBeVisible({ timeout: 60_000 });
+  const submitted = parseSubmittedOperation((await auth.page.textContent("body")) ?? "");
+  await openOperationDetail(auth.page, env.tenantUrl, submitted.id);
+  await evidence(auth.page, env, "08b-create-operation");
+  const resolved = await resolveTerminalOperation(auth.page, env.tenantUrl, submitted, env.operationTimeoutMs);
+  expect(resolved.state, "UI_CREATE_3 canonical Operation must succeed").toBe("succeeded");
   const after = await openCollection(auth.page, env.tenantUrl, SERVER_TYPE, SERVER_PLURAL);
   const appeared = after.ids.filter((id) => !before.ids.includes(id));
-  const appearedStatuses: string[] = [];
-  for (const id of appeared) {
-    const resource = await getResourceOrUndefined(auth.page, env.tenantUrl, SERVER_TYPE, id);
-    if (!resource) {
-      appearedStatuses.push(`${id}=concealed-tombstone`);
-      continue;
-    }
-    appearedStatuses.push(`${id}=${resource.status}`);
-    expect(
-      resource.status,
-      `a server row that appeared from a failed create (${id}) must not be Ready`,
-    ).not.toBe("ready");
-  }
-  await evidence(auth.page, env, "08c-servers-after-failed-create");
+  expect(appeared, "native browser create must create exactly one new canonical server").toHaveLength(1);
+  nativeCreatedId = resolved.resourceId ?? appeared[0]!;
+  expect(nativeCreatedId).toMatch(CANONICAL_ID);
+  const created = await getResource(auth.page, env.tenantUrl, SERVER_TYPE, nativeCreatedId);
+  expect(created.id).toBe(nativeCreatedId);
+  expect(created.status, "UI_CREATE_4 resource must become ready").toBe("ready");
+  await evidence(auth.page, env, "08c-native-created-resource");
   await expectNoConsoleCrash(auth.page);
-
-  gap(
-    "native-vm-create=network-provider-inactive",
-    `${detail} created_server_rows=${appeared.length} ` +
-      `appeared_rows=[${appearedStatuses.join(",")}] requested_network=${env.networkId}`,
-  );
-  if (consoleErrorClass) {
-    // The console refused the create client-side; record WHICH error class the
-    // pinned tuple produced, with the verbatim banner it was decided from (the
-    // manifest requires this classified gap).
-    gap(
-      `console-create-schema-dialect=${consoleErrorClass.klass}`,
-      `console_error=${JSON.stringify(consoleErrorBanner.slice(0, 200))} ` +
-        `field_errors_rendered=${String(consoleErrorClass.fieldErrors)}`,
-    );
-  }
+  console.log(`PP4-UI-CREATE id=${nativeCreatedId} operation=${submitted.id}`);
+  console.log("UI_CREATE_1 schema-form-rendered");
+  console.log("UI_CREATE_2 browser-submit");
+  console.log("UI_CREATE_3 operation-succeeded");
+  console.log("UI_CREATE_4 resource-ready");
 });
 
-test("console delete of the CLI-created server is observed truthfully", async () => {
+test("console delete is observed truthfully after live native-create inspection", async () => {
+  test.skip(!!process.env.PP4_SKIP_DELETE, "delete runs after live provider verification");
   test.setTimeout(env.operationTimeoutMs + 5 * 60 * 1000);
-  const targetId = env.uiTargetId;
+  const targetId = env.uiTargetId ?? nativeCreatedId;
+  expect(targetId, "UI_DELETE must delete the browser-created canonical server").toMatch(CANONICAL_ID);
 
-  // Observe-before-act: the target the campaign created through the unmodified
-  // OpenStack CLI must be a LIVE canonical resource (same uuid the console
-  // lists) — never a missing or fabricated one.
+  // Observe-before-act: the target created through the native browser form
+  // must remain a LIVE canonical resource (same uuid the console lists).
   const before = await getResource(auth.page, env.tenantUrl, SERVER_TYPE, targetId);
   expect(before.id, "the UI delete target must exist as a canonical resource").toBe(targetId);
   expect(before.resourceType, "the UI delete target must be a compute.server").toBe(SERVER_TYPE);
@@ -669,7 +540,7 @@ test("console delete of the CLI-created server is observed truthfully", async ()
     await evidence(auth.page, env, "09b-ui-delete-action-missing");
     const rendered = (await auth.page.getByRole("main").textContent()) ?? "";
     throw new Error(
-      `[pp4] the pinned compute.server descriptor offers no delete action for ${targetId} ` +
+      `[pp4] the compute.server descriptor offers no delete action for ${targetId} ` +
         `after 3 minutes; page text: ${rendered.replace(/\s+/gu, " ").slice(0, 300)}`,
     );
   }
@@ -699,7 +570,7 @@ test("console delete of the CLI-created server is observed truthfully", async ()
     errorAlert.waitFor({ state: "visible", timeout: 60_000 }).then(() => "blocked" as const),
   ]).catch(() => "timeout" as const);
   if (deleteOutcome !== "ui") {
-    const banner = (await readErrorBanner()) ?? "";
+    const banner = (await auth.page.getByRole("alert").first().textContent()) ?? "";
     await evidence(auth.page, env, "09b-ui-delete-blocked");
     throw new Error(
       `[pp4] the console delete of ${targetId} produced no operation state ` +

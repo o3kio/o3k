@@ -48,22 +48,25 @@ umask 077
 # is NOT self-referential: version is pinned here, and the source commit is
 # read fail-closed from the installed release manifest at install/tuple time.
 # ---------------------------------------------------------------------------
-ARAF_VERSION="v1.0.0-rc.12"
-ARAF_SOURCE_SHA="de64cc9193085116fa30ad51c04ccab24a013dd0"
-O3K_TUPLE_VERSION="v0.4.0-rc.8"
+ARAF_VERSION="v1.0.0-rc.15"
+ARAF_SOURCE_SHA="f0c2a04a671d5edf7711cab63c4f83c49a9170d2"
+O3K_TUPLE_VERSION="pending-successor-release"
 
 ARAF_BFF_IMAGE="ghcr.io/o3kio/araf-bff"
-ARAF_BFF_DIGEST="sha256:bc717ecdbbbf3ea673efe168c90419936677d644aa0ae25af4eb84906cd744ba"
-ARAF_BFF_CONFIG_DIGEST="sha256:a22458df7ced503bbda9e69e45ec559b5881a63d8f8849ef24721bb8918c5edc"
-ARAF_BFF_TAR_SHA256="42d46d01f823cf02c1edb03ce352d6b9b1dc7a349235c4b6f28dee3ad3f21d1e"
+ARAF_BFF_DIGEST="sha256:03932c77e9b6b995c2b5594d0f9311eb304b0b6930bba01622ba2286fce98f2f"
+ARAF_BFF_PLATFORM_DIGEST="sha256:7ddfc2f711f3730b617498136732cac74418c6f6239df790fdc9a6f267e450fa"
+ARAF_BFF_CONFIG_DIGEST="sha256:f0aba789573c0bf250f99e0dab4096ec1f707a93392afb5fad04ff26179c515f"
+ARAF_BFF_TAR_SHA256="e4a682a836c60859c3d0330d082ab4b84d4ef112c8912f3f5d66849017b67459"
 ARAF_TENANT_CONSOLE_IMAGE="ghcr.io/o3kio/araf-tenant-console"
-ARAF_TENANT_CONSOLE_DIGEST="sha256:25f5fe41927f68db3dafd49597c6b8cb4520bca2dd45ec131d1372474ef3e5e5"
-ARAF_TENANT_CONSOLE_CONFIG_DIGEST="sha256:34901700540686c1a5ff13c7b02ba96180170d4c83f9bf170def7917df2eb068"
-ARAF_TENANT_CONSOLE_TAR_SHA256="f9fa6de50d01d96dce0db5ac9bff52d83b4212943f14a5354e7890f09ce9b066"
+ARAF_TENANT_CONSOLE_DIGEST="sha256:7ee84629447b481378efab8f1219682f22c710cb4614f905d433122e61981c2a"
+ARAF_TENANT_CONSOLE_PLATFORM_DIGEST="sha256:d064d7152008a18f13db589b57370eede83c0cd6fb4c372980115ad938d50fb1"
+ARAF_TENANT_CONSOLE_CONFIG_DIGEST="sha256:3f6028fc9d6eac2bc5d0b93fa7ea1605e4be6c263d9b6b3f973ef49300eda527"
+ARAF_TENANT_CONSOLE_TAR_SHA256="68847dbd75635ad705ca3575e056a0191ba8d2816239ffb3707ca2cd8352d0e8"
 ARAF_OPERATOR_CONSOLE_IMAGE="ghcr.io/o3kio/araf-operator-console"
-ARAF_OPERATOR_CONSOLE_DIGEST="sha256:cbbad76033eced4d4290c9848e0665a23c30bd4a7c647077ba0cf03150666b18"
-ARAF_OPERATOR_CONSOLE_CONFIG_DIGEST="sha256:c9b4c88b56293e12bb569ced7020da3eda349d094351a3944c881888147cac9b"
-ARAF_OPERATOR_CONSOLE_TAR_SHA256="cc7bd68c58ea01ce7b7eb70213b58f495876a06945f38521378e406fd1377c1d"
+ARAF_OPERATOR_CONSOLE_DIGEST="sha256:b00c69f2f881a788a94ad0570d6c03c485f4b3023761a03c5bb4d5e2c4e88759"
+ARAF_OPERATOR_CONSOLE_PLATFORM_DIGEST="sha256:ed78147d9128400dd05837ae4a42aafee31fb432fc874a898cd63c0568347c4a"
+ARAF_OPERATOR_CONSOLE_CONFIG_DIGEST="sha256:81d10a46b7a99f5a66003c3a9e7bf85843586010c4ccc1e147725657361b6715"
+ARAF_OPERATOR_CONSOLE_TAR_SHA256="8504d57ce10096cbd743e5260ecde5d51c900117c1614d500f5e09e9b75a7139"
 # Local tag for the digest-verified images; compose never pulls (pull_policy
 # never) so this tag names only content whose config digest was verified
 # against the pinned tuple after docker load.
@@ -470,19 +473,19 @@ render_realm() {
 # artifact_distribution). Tarball sha256 pins integrity; the image config
 # digest pins content identity after docker load. Never pulled by tag.
 # ---------------------------------------------------------------------------
-image_identity_matches() { # image_ref expected_config_digest expected_index_digest
+image_identity_matches() { # image_ref expected_config_digest expected_platform_digest expected_index_digest
   local actual
   actual="$(docker image inspect -f '{{.Id}}' "$1" 2>/dev/null || true)"
   # Classic store: image ID == config digest. Containerd store: image ID ==
   # platform/index digest. Both are tuple-pinned values.
-  [ "${actual}" = "$2" ] || [ "${actual}" = "$3" ]
+  [ "${actual}" = "$2" ] || [ "${actual}" = "$3" ] || [ "${actual}" = "$4" ]
 }
 
-ensure_one_araf_image() { # component image tarball_sha256 config_digest index_digest
-  local component="$1" image="$2" tar_sha="$3" config_digest="$4" index_digest="$5"
+ensure_one_araf_image() { # component image tarball_sha256 config_digest platform_digest index_digest
+  local component="$1" image="$2" tar_sha="$3" config_digest="$4" platform_digest="$5" index_digest="$6"
   local tag="${image}:${LOCAL_IMAGE_TAG}"
   if docker image inspect "${tag}" >/dev/null 2>&1 \
-    && image_identity_matches "${tag}" "${config_digest}" "${index_digest}"; then
+    && image_identity_matches "${tag}" "${config_digest}" "${platform_digest}" "${index_digest}"; then
     log "${component}: digest-verified image already present"
     return 0
   fi
@@ -503,14 +506,14 @@ ensure_one_araf_image() { # component image tarball_sha256 config_digest index_d
   local loaded
   loaded="$(docker load -i "${tar}" 2>&1 | sed -n 's/^Loaded image\( ID\)\?: //p' | head -1)"
   [ -n "${loaded}" ] || die "${component}: docker load failed"
-  image_identity_matches "${loaded}" "${config_digest}" "${index_digest}" \
+  image_identity_matches "${loaded}" "${config_digest}" "${platform_digest}" "${index_digest}" \
     || die "${component}: digest mismatch after load (tarball does not match pinned tuple)"
   # Never displace an image tag that is not the tuple-verified image.  A valid
   # archive may itself carry the local verification tag; accept that tag only
   # when it resolves to the verified identity.  Refusing every tag introduced
   # during load would reject a valid release archive.
   if docker image inspect "${tag}" >/dev/null 2>&1; then
-    image_identity_matches "${tag}" "${config_digest}" "${index_digest}" \
+    image_identity_matches "${tag}" "${config_digest}" "${platform_digest}" "${index_digest}" \
       || die "${component}: local verification tag ${tag} appeared during load with a foreign identity; refusing to overwrite foreign state"
   else
     docker tag "${loaded}" "${tag}" >/dev/null
@@ -519,9 +522,9 @@ ensure_one_araf_image() { # component image tarball_sha256 config_digest index_d
 }
 
 ensure_araf_images() {
-  ensure_one_araf_image "bff" "${ARAF_BFF_IMAGE}" "${ARAF_BFF_TAR_SHA256}" "${ARAF_BFF_CONFIG_DIGEST}" "${ARAF_BFF_DIGEST}"
-  ensure_one_araf_image "tenant-console" "${ARAF_TENANT_CONSOLE_IMAGE}" "${ARAF_TENANT_CONSOLE_TAR_SHA256}" "${ARAF_TENANT_CONSOLE_CONFIG_DIGEST}" "${ARAF_TENANT_CONSOLE_DIGEST}"
-  ensure_one_araf_image "operator-console" "${ARAF_OPERATOR_CONSOLE_IMAGE}" "${ARAF_OPERATOR_CONSOLE_TAR_SHA256}" "${ARAF_OPERATOR_CONSOLE_CONFIG_DIGEST}" "${ARAF_OPERATOR_CONSOLE_DIGEST}"
+  ensure_one_araf_image "bff" "${ARAF_BFF_IMAGE}" "${ARAF_BFF_TAR_SHA256}" "${ARAF_BFF_CONFIG_DIGEST}" "${ARAF_BFF_PLATFORM_DIGEST}" "${ARAF_BFF_DIGEST}"
+  ensure_one_araf_image "tenant-console" "${ARAF_TENANT_CONSOLE_IMAGE}" "${ARAF_TENANT_CONSOLE_TAR_SHA256}" "${ARAF_TENANT_CONSOLE_CONFIG_DIGEST}" "${ARAF_TENANT_CONSOLE_PLATFORM_DIGEST}" "${ARAF_TENANT_CONSOLE_DIGEST}"
+  ensure_one_araf_image "operator-console" "${ARAF_OPERATOR_CONSOLE_IMAGE}" "${ARAF_OPERATOR_CONSOLE_TAR_SHA256}" "${ARAF_OPERATOR_CONSOLE_CONFIG_DIGEST}" "${ARAF_OPERATOR_CONSOLE_PLATFORM_DIGEST}" "${ARAF_OPERATOR_CONSOLE_DIGEST}"
   log "pulling digest-pinned infrastructure images"
   docker pull -q "${KEYCLOAK_IMAGE}@${KEYCLOAK_DIGEST}" >/dev/null
   docker pull -q "${NGINX_IMAGE}@${NGINX_DIGEST}" >/dev/null
@@ -886,6 +889,11 @@ import json
 import sys
 
 path, expected = sys.argv[1], sys.argv[2]
+if expected == "pending-successor-release":
+    print("O3K tuple unavailable: successor O3K release identity is pending; "
+          "select and publish the candidate release before deployment",
+          file=sys.stderr)
+    sys.exit(1)
 try:
     with open(path, encoding="utf-8") as handle:
         document = json.load(handle)

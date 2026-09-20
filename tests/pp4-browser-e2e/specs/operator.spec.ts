@@ -9,9 +9,8 @@
  *   - /platform/health: provider health
  *   - /platform/capacity: real capacity (VCPU totals)
  *   - /platform/regions: RegionOne + AZ truth
- *   - /operations: the canonical operations the tenant journey produced for the
- *     SAME resource id the tenant console deleted (the server the harness
- *     created as `pp4-ui-target`, canonical id exported as PP4_UI_TARGET_ID)
+ *   - /operations: canonical operations for the native browser-created server
+ *     the tenant console later deleted (id exported as PP4_UI_TARGET_ID)
  *   - logout
  *
  * stdout protocol: PP4-OPERATOR-OK at the end.
@@ -38,10 +37,9 @@ let tenantResourceId = "";
 
 test.beforeAll(async () => {
   env = loadEnv();
-  // The resource the tenant console deleted is the harness's own target: its
-  // canonical id is the campaign contract PP4_UI_TARGET_ID, so the operator
-  // tie-in needs no cross-spec evidence file.
-  tenantResourceId = env.uiTargetId;
+  // The resource was created through the native browser form; its canonical id
+  // is handed in by the campaign after live provider verification.
+  tenantResourceId = env.uiTargetId!;
   expect(tenantResourceId, "PP4_UI_TARGET_ID must carry a canonical uuid").toMatch(CANONICAL_ID);
   browser = await connectBrowser(env);
   auth = await loginToSurface(browser, env, "operator");
@@ -312,7 +310,7 @@ test("operator operations tie the tenant journey to the canonical authority", as
 
   // Cross-check through the canonical list: the same canonical authority serves
   // both surfaces, so the operations for the EXACT resource the tenant console
-  // deleted (the CLI-created `pp4-ui-target`) must be visible here.
+  // deleted through Araf must be visible here.
   const operations = await listOperationsOrNull(auth.page, env.operatorUrl, 100);
   if (operations === null) {
     // Neither the operator's global list nor the canonical list is mounted on
