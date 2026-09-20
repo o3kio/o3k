@@ -353,8 +353,8 @@ jobs:
             debian:12@sha256:f37a335e82bca302e955fa39f9dfe28f1be618f016f8a2b56318e5a5111afc26 \
             bash -lc '
               set -euo pipefail
-              apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io curl python3 ca-certificates >/dev/null
+              apt-get -qq update
+              DEBIAN_FRONTEND=noninteractive apt-get -y -qq install docker.io curl python3 ca-certificates >/dev/null
               dockerd --host=unix:///tmp/docker.sock --storage-driver=vfs --iptables=false --bridge=none >/tmp/dockerd.log 2>&1 &
               daemon=$!
               trap "kill $daemon 2>/dev/null || true" EXIT
