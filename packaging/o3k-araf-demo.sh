@@ -505,14 +505,16 @@ ensure_one_araf_image() { # component image tarball_sha256 config_digest index_d
   [ -n "${loaded}" ] || die "${component}: docker load failed"
   image_identity_matches "${loaded}" "${config_digest}" "${index_digest}" \
     || die "${component}: digest mismatch after load (tarball does not match pinned tuple)"
-  # Never displace an image tag that is not already the tuple-verified image.
-  # The local verification tag is a convenience alias, not ownership of a
-  # pre-existing host tag.  Refusing the collision preserves unrelated images
-  # and makes the operator choose an explicit cleanup/retag action.
+  # Never displace an image tag that is not the tuple-verified image.  A valid
+  # archive may itself carry the local verification tag; accept that tag only
+  # when it resolves to the verified identity.  Refusing every tag introduced
+  # during load would reject a valid release archive.
   if docker image inspect "${tag}" >/dev/null 2>&1; then
-    die "${component}: local verification tag ${tag} appeared during load; refusing to overwrite foreign state"
+    image_identity_matches "${tag}" "${config_digest}" "${index_digest}" \
+      || die "${component}: local verification tag ${tag} appeared during load with a foreign identity; refusing to overwrite foreign state"
+  else
+    docker tag "${loaded}" "${tag}" >/dev/null
   fi
-  docker tag "${loaded}" "${tag}" >/dev/null
   log "${component}: loaded and digest verified"
 }
 
