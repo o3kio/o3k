@@ -194,6 +194,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0182](ADR-0182-edge-to-datacenter-building-block-cloud-os.md) (accepted)
 - [ADR-0183](ADR-0183-authoritative-metering-and-bounded-usage-aggregation.md) (accepted)
 - [ADR-0184](ADR-0184-p15-scale-and-composition-foundation.md) (accepted)
+- [ADR-0185](ADR-0185-release-signing-trust-transition.md) (accepted)
 
 ## Required audit
 
