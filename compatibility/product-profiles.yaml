@@ -236,7 +236,7 @@ profiles:
         integration was historically exercised with v0.4.0-rc.8 and
         Araf v1.0.0-rc.12; those campaigns are retained under
         docs/evidence/pp4/ and do not prove the required native browser
-        workload journey. The current PP.4 candidate pins Araf v1.0.0-rc.15;
+        workload journey. The current PP.4 candidate pins Araf v1.0.0-rc.16;
         the successor O3K release and fresh-host evidence remain pending.
         No Araf production/HA claim (o3kio/araf#106).
     evidence_dependencies:

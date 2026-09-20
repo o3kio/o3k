@@ -23,7 +23,7 @@
 # bundle into /usr/local/share/o3k/araf-demo/ (convergent, content-compared)
 # and runs packaging/o3k-araf-demo.sh install (the pinned PP.3 historical
 # evidence plus the PP.4 candidate tuple from
-# contracts/araf-compatibility-v1.yaml: Araf v1.0.0-rc.15 and the selected
+# contracts/araf-compatibility-v1.yaml: Araf v1.0.0-rc.16 and the selected
 # successor O3K release).
 # A demo-stage failure aborts the installer with a message that O3K itself is
 # healthy and the demo stage can be retried from the installed copy — the
@@ -115,7 +115,7 @@ fi
 # published install.sh GitHub Release asset is byte-identical to this file,
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
-O3K_INSTALLER_VERSION="v0.4.0-rc.15"
+O3K_INSTALLER_VERSION="v0.4.0-rc.16"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 

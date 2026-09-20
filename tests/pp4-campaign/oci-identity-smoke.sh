@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Focused PP.4 Araf OCI identity gate.  This deliberately exercises the
-# published rc.15 archives through the host Docker engine, including engines
+# published rc.16 archives through the host Docker engine, including engines
 # that rematerialize OCI configs and therefore expose a different local image
 # ID after `docker load`.
 set -Eeuo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VERSION="v1.0.0-rc.15"
-SOURCE_SHA="f0c2a04a671d5edf7711cab63c4f83c49a9170d2"
+VERSION="v1.0.0-rc.16"
+SOURCE_SHA="98ea45245c0be8d4ad1e340f1e6cbc5a8d949293"
 BASE="https://github.com/o3kio/araf/releases/download/${VERSION}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/o3k-araf-oci.XXXXXX")"
 LOADED_IDS=()
@@ -29,17 +29,43 @@ printf 'engine=%s\n' "$(docker version --format '{{.Server.Version}}')"
 printf 'os=%s\n' "$(. /etc/os-release; printf '%s:%s' "$ID" "$VERSION_ID")"
 
 declare -A TAR_SHA=(
-  [bff]=e4a682a836c60859c3d0330d082ab4b84d4ef112c8912f3f5d66849017b67459
-  [tenant-console]=68847dbd75635ad705ca3575e056a0191ba8d2816239ffb3707ca2cd8352d0e8
-  [operator-console]=8504d57ce10096cbd743e5260ecde5d51c900117c1614d500f5e09e9b75a7139
+  [bff]=85afa9361225c40281c0371e1aad9f361aa8c988f4efc50d31669a43ca877c9c
+  [tenant-console]=39f4392c97deec8db246f1383425896d3743872fc3a0c465b8ff5ac72341a0e0
+  [operator-console]=4ebad231d0a7a189c8f5f1299654db295256821461a24cbbbdef08703ae29956
 )
 declare -A CONFIG_SHA=(
-  [bff]=f0aba789573c0bf250f99e0dab4096ec1f707a93392afb5fad04ff26179c515f
-  [tenant-console]=3f6028fc9d6eac2bc5d0b93fa7ea1605e4be6c263d9b6b3f973ef49300eda527
-  [operator-console]=81d10a46b7a99f5a66003c3a9e7bf85843586010c4ccc1e147725657361b6715
+  [bff]=c54b961b26d4c22b9bc1dec31dd33fd365047d6970e42a5cbcbe36610aa1afbe
+  [tenant-console]=2117dd6b268e2feb0a50835beff2a805c925dbeead87a3466cf5156434a4501a
+  [operator-console]=2ea47baa764eac8b493447c904d2237d1250b815fee588e4d866fee51b6c92ab
+)
+declare -A INDEX_DIGEST=(
+  [bff]=sha256:d136814198eaa4df2f1028c35b421c6b5cfcdc3d6450584ad9b6e8d7e7b83f29
+  [tenant-console]=sha256:3fd0a3c93a0bdcbd733227fd063e232851cf605038077f1fddfbf1a4762309f1
+  [operator-console]=sha256:1abd14091eaf20ba1c2f3032743fd2804f7d1ebb182722bca989c56a21169a4e
+)
+declare -A PLATFORM_DIGEST=(
+  [bff]=sha256:95eae6e725aff5c11cf9a0fca7e6ad12e5644016e3e524a3c98cd1289b0804c9
+  [tenant-console]=sha256:5544725ee8e3d1f0667d0b781356a2d400a0428b915b05b1eba185d78e4a793d
+  [operator-console]=sha256:3043604f8a7c66cc1723a519777d7f98ce1160e7d5921b909260e1ca2b3c866b
+)
+declare -A IMAGE=(
+  [bff]=ghcr.io/o3kio/araf-bff
+  [tenant-console]=ghcr.io/o3kio/araf-tenant-console
+  [operator-console]=ghcr.io/o3kio/araf-operator-console
 )
 
+command -v docker >/dev/null || { echo "docker is required" >&2; exit 2; }
+docker buildx version >/dev/null 2>&1 || {
+  echo "docker buildx is required to verify public OCI index/platform identities" >&2
+  exit 2
+}
+
 for component in bff tenant-console operator-console; do
+  inspect="$(docker buildx imagetools inspect "${IMAGE[$component]}:${VERSION}")"
+  grep -Fq "Digest:    ${INDEX_DIGEST[$component]}" <<<"$inspect" \
+    || { echo "$component: OCI index digest mismatch" >&2; exit 1; }
+  grep -Fq "@${PLATFORM_DIGEST[$component]}" <<<"$inspect" \
+    || { echo "$component: linux/amd64 platform digest mismatch" >&2; exit 1; }
   archive="$WORK/araf-${component}-${VERSION}.oci.tar"
   curl -fsSL --retry 3 -o "$archive" "$BASE/araf-${component}-${VERSION}.oci.tar"
   printf '%s  %s\n' "${TAR_SHA[$component]}" "$archive" | sha256sum -c - >/dev/null
@@ -64,7 +90,8 @@ PY
   LOADED_IDS+=("$loaded")
   revision="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$loaded")"
   [ "$revision" = "$SOURCE_SHA" ] || { echo "$component: revision mismatch: $revision" >&2; exit 1; }
-  printf '%s: archive-config=%s docker-id=%s revision=%s\n' \
-    "$component" "${CONFIG_SHA[$component]}" "$loaded" "$revision"
+  printf '%s: index=%s platform=%s config=%s docker-id=%s revision=%s\n' \
+    "$component" "${INDEX_DIGEST[$component]}" "${PLATFORM_DIGEST[$component]}" \
+    "${CONFIG_SHA[$component]}" "$loaded" "$revision"
 done
 echo 'OCI identity smoke: PASS'

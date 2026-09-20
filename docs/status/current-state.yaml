@@ -665,7 +665,7 @@ profiles:
         note: >-
           The rc.8/rc.12 tuple and its deployment material remain immutable
           historical evidence. The current PP.4 candidate pins Araf
-          v1.0.0-rc.15; the successor O3K release and fresh-host evidence are
+          v1.0.0-rc.16; the successor O3K release and fresh-host evidence are
           pending. The historical schema-dialect and network-provider findings
           above are not claims about the current candidate. Any failed-create
           row is classified only as a canonical terminal ERROR resource with
@@ -689,7 +689,7 @@ profiles:
       - release-gate execution and publication (issue #93)
     next_evidence_action: >-
       PP.4 (#973) remains incomplete. The current candidate pins Araf
-      v1.0.0-rc.15; publication of the successor immutable O3K release,
+      v1.0.0-rc.16; publication of the successor immutable O3K release,
       native browser workload evidence, and exact-head CI checks remain
       required before PP.5. The 1-20 host envelope remains a hardening target,
       not a support claim.

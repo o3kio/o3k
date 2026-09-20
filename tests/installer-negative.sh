@@ -348,8 +348,8 @@ case "$cmd" in
     printf '[o3k-araf-demo] install OK (fixture)\n'
     ;;
   tuple)
-    printf 'ARAF_VERSION=v1.0.0-rc.15\n'
-    printf 'ARAF_SOURCE_SHA=f0c2a04a671d5edf7711cab63c4f83c49a9170d20\n'
+    printf 'ARAF_VERSION=v1.0.0-rc.16\n'
+    printf 'ARAF_SOURCE_SHA=98ea45245c0be8d4ad1e340f1e6cbc5a8d949293\n'
     printf 'ARAF_BFF_DIGEST=sha256:bc717ecdbbbf3ea673efe168c90419936677d644aa0ae25af4eb84906cd744ba\n'
     printf 'O3K_VERSION=v0.4.0-rc.9\n'
     printf 'O3K_SOURCE_SHA=fixture-source-sha-0000000000000000000000000000000000000000\n'
@@ -878,8 +878,8 @@ PY
       && grep -Fq 'Uninstall:' "$out" \
       && record_pass "PP.4 success block carries consoles + uninstall lines" \
       || record_fail "PP.4 success block incomplete"
-    grep -Fq 'Araf:' "$out" && grep -Fq '  version: v1.0.0-rc.15' "$out" \
-      && grep -Fq '  source: f0c2a04a671d5edf7711cab63c4f83c49a9170d20' "$out" \
+    grep -Fq 'Araf:' "$out" && grep -Fq '  version: v1.0.0-rc.16' "$out" \
+      && grep -Fq '  source: 98ea45245c0be8d4ad1e340f1e6cbc5a8d949293' "$out" \
       && record_pass "PP.4 success block carries the Araf tuple from the demo script" \
       || record_fail "PP.4 Araf tuple lines missing"
     grep -Fq 'o3k-araf-demo install' "$O3K_TEST_SCRIPT_LOG" \

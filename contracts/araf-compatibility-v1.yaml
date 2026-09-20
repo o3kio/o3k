@@ -133,7 +133,7 @@ pp3_tuple:
       require the small-edge networking agent.
 
 # PP.4 (#973) one-line installer integration of the pinned demo tuple: the
-# PP.4 candidate integration. Araf rc.15 is pinned while the successor O3K
+# PP.4 candidate integration. Araf rc.16 is pinned while the successor O3K
 # release identity and fresh-host evidence remain pending. This is candidate
 # metadata, not certification; the historical pp3_tuple above is unchanged.
 pp4_tuple:
@@ -144,36 +144,36 @@ pp4_tuple:
   o3k:
     # Successor identity selected from the repository release inventory. The
     # public release remains pending until the immutable bundle is published.
-    version: v0.4.0-rc.15
+    version: v0.4.0-rc.16
     # The candidate must not predict the commit that will contain this
     # metadata. The immutable signed release manifest and provenance bind the
     # eventual source identity after publication; the installed runtime reads
     # that verified identity from the release bundle.
     source_sha: null
     source_identity_authority: signed-release-manifest
-    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.15
+    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.16
   araf:
-    version: v1.0.0-rc.15
-    source_sha: f0c2a04a671d5edf7711cab63c4f83c49a9170d2
-    release_asset_identity: github.com/o3kio/araf/releases/tag/v1.0.0-rc.15
+    version: v1.0.0-rc.16
+    source_sha: 98ea45245c0be8d4ad1e340f1e6cbc5a8d949293
+    release_asset_identity: github.com/o3kio/araf/releases/tag/v1.0.0-rc.16
   artifacts:
-    # Verified against the public rc.15 release manifest
-    # (SHA256 f2bf124fd38bbf6223027ad44d725e1d191effb4e013c38c1c6f8b316e777cf2).
+    # Verified against the public rc.16 release manifest
+    # (SHA256 629fdaf92d4528b22fc4492c34cd13f364cf6267caa0538d880676a657dd6d09).
     bff_image: ghcr.io/o3kio/araf-bff
-    bff_digest: sha256:03932c77e9b6b995c2b5594d0f9311eb304b0b6930bba01622ba2286fce98f2f
-    bff_platform_digest: sha256:7ddfc2f711f3730b617498136732cac74418c6f6239df790fdc9a6f267e450fa1
-    bff_config_digest: sha256:f0aba789573c0bf250f99e0dab4096ec1f707a93392afb5fad04ff26179c515f
-    bff_oci_tarball_sha256: e4a682a836c60859c3d0330d082ab4b84d4ef112c8912f3f5d66849017b67459
+    bff_digest: sha256:d136814198eaa4df2f1028c35b421c6b5cfcdc3d6450584ad9b6e8d7e7b83f29
+    bff_platform_digest: sha256:95eae6e725aff5c11cf9a0fca7e6ad12e5644016e3e524a3c98cd1289b0804c9
+    bff_config_digest: sha256:c54b961b26d4c22b9bc1dec31dd33fd365047d6970e42a5cbcbe36610aa1afbe
+    bff_oci_tarball_sha256: 85afa9361225c40281c0371e1aad9f361aa8c988f4efc50d31669a43ca877c9c
     tenant_console_image: ghcr.io/o3kio/araf-tenant-console
-    tenant_console_digest: sha256:7ee84629447b481378efab8f1219682f22c710cb4614f905d433122e61981c2a
-    tenant_console_platform_digest: sha256:d064d7152008a18f13db589b57370eede83c0cd6fb4c372980115ad938d50fb1
-    tenant_console_config_digest: sha256:3f6028fc9d6eac2bc5d0b93fa7ea1605e4be6c263d9b6b3f973ef49300eda527
-    tenant_console_oci_tarball_sha256: 68847dbd75635ad705ca3575e056a0191ba8d2816239ffb3707ca2cd8352d0e8
+    tenant_console_digest: sha256:3fd0a3c93a0bdcbd733227fd063e232851cf605038077f1fddfbf1a4762309f1
+    tenant_console_platform_digest: sha256:5544725ee8e3d1f0667d0b781356a2d400a0428b915b05b1eba185d78e4a793d
+    tenant_console_config_digest: sha256:2117dd6b268e2feb0a50835beff2a805c925dbeead87a3466cf5156434a4501a
+    tenant_console_oci_tarball_sha256: 39f4392c97deec8db246f1383425896d3743872fc3a0c465b8ff5ac72341a0e0
     operator_console_image: ghcr.io/o3kio/araf-operator-console
-    operator_console_digest: sha256:b00c69f2f881a788a94ad0570d6c03c485f4b3023761a03c5bb4d5e2c4e88759
-    operator_console_platform_digest: sha256:ed78147d9128400dd05837ae4a42aafee31fb432fc874a898cd63c0568347c4a
-    operator_console_config_digest: sha256:81d10a46b7a99f5a66003c3a9e7bf85843586010c4ccc1e147725657361b6715
-    operator_console_oci_tarball_sha256: 8504d57ce10096cbd743e5260ecde5d51c900117c1614d500f5e09e9b75a7139
+    operator_console_digest: sha256:1abd14091eaf20ba1c2f3032743fd2804f7d1ebb182722bca989c56a21169a4e
+    operator_console_platform_digest: sha256:3043604f8a7c66cc1723a519777d7f98ce1160e7d5921b909260e1ca2b3c866b
+    operator_console_config_digest: sha256:2ea47baa764eac8b493447c904d2237d1250b815fee588e4d866fee51b6c92ab
+    operator_console_oci_tarball_sha256: 4ebad231d0a7a189c8f5f1299654db295256821461a24cbbbdef08703ae29956
     keycloak_image: quay.io/keycloak/keycloak
     keycloak_version: "25.0.6"
     keycloak_digest: sha256:82c5b7a110456dbd42b86ea572e728878549954cc8bd03cd65410d75328095d2
@@ -182,8 +182,10 @@ pp4_tuple:
     nginx_unprivileged_digest: sha256:dcc9bf9c084901dddbbce305130a7295c5637b6a8fce3e29cf678d86336982e4
   artifact_distribution:
     araf_images: oci-tarballs-on-github-release
-    release_base: https://github.com/o3kio/araf/releases/download/v1.0.0-rc.15
-    release_manifest_sha256: f2bf124fd38bbf6223027ad44d725e1d191effb4e013c38c1c6f8b316e777cf2
+    release_base: https://github.com/o3kio/araf/releases/download/v1.0.0-rc.16
+    release_manifest_sha256: 629fdaf92d4528b22fc4492c34cd13f364cf6267caa0538d880676a657dd6d09
+    sbom_manifest_sha256: 883ded717810698a378c1df0ddd7f9601dd1053fad9b6138bbf30fd21e5d8004
+    provenance_manifest_sha256: 66004632e1cc02d6e51a789746ad04aa97b34b964729772aecf600a5576d7762
   contracts:
     native_api_version: o3k-native-iam-v1
     auth_contract: araf-oidc-pkce-per-surface-confidential-client
@@ -202,9 +204,9 @@ pp4_tuple:
     debian_static_docker_sha256: ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d
     debian_compose_plugin_version: "v2.39.4"
     debian_compose_plugin_sha256: 7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4
-    local_verification_tag: o3k-demo-v1.0.0-rc.15
+    local_verification_tag: o3k-demo-v1.0.0-rc.16
   notes:
-    - Araf GitHub release v1.0.0-rc.15 is an immutable prerelease candidate;
+    - Araf GitHub release v1.0.0-rc.16 is an immutable prerelease candidate;
       its published manifest and OCI identities are pinned above.
     - The successor O3K release identity is intentionally pending; no O3K RC
       number or source SHA is invented before release selection.
