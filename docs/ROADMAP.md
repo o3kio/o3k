@@ -576,8 +576,12 @@ product baseline:
   reboot, uninstall/reinstall, purge/reinstall, foreign-state preservation,
   zero secret leakage. The Araf side publishes the release bundle and OCI
   tarballs (o3kio/araf#114). No Araf production/HA claim.
-- **PP.4** — one-line end-user browser demo; **PP.5** — 1–20 hypervisor
-  scale evidence.
+- **PP.4 (#973)** — one-line end-user browser demo: **NOT PROVEN**. Historical
+  fresh Ubuntu 24.04 and Debian 12 campaigns against the immutable O3K
+  v0.4.0-rc.8 / Araf v1.0.0-rc.12 tuple are retained under
+  `docs/evidence/pp4/`, but they did not create a workload through Araf. A
+  successor tuple must prove the native browser create and cross-interface
+  lifecycle before PP.4 can close. **PP.5** must not start yet.
 
 PP.0 freezes definitions only: no production-readiness, GA, HA, live
 migration, automatic evacuation, or proven 1–20-host-scale claims.

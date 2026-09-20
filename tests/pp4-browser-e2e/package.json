@@ -1,0 +1,15 @@
+{
+  "name": "pp4-browser-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PP.4 acceptance evidence: real-browser E2E for the O3K + Araf demo deployment (o3kio/o3k#973). No fixtures; every assertion hits the live deployment.",
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "playwright": "1.63.0",
+    "typescript": "^5.5.0"
+  }
+}

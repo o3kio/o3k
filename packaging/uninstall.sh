@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# uninstall.sh — remove an O3K installation.
+#
+# Removes only O3K-owned state: the install.sh ownership-manifest files
+# (binaries, units, helper scripts), and, with --purge, the data/config/log
+# roots after ownership and live-state fencing. PP.4 (#973): also removes the
+# Araf demo deployment material the one-line installer copied into
+# /usr/local/share/o3k/araf-demo/ (path-fenced like every other removal). The
+# Araf demo RUNTIME (state dir, containers, /etc/hosts entries, o3kd OIDC
+# federation block) is owned by o3k-araf-demo.sh uninstall/purge — run that
+# first; this script only drops the static demo material from the share dir.
 set -Eeuo pipefail
 PREFIX=/usr/local
 DATA_DIR=/var/lib/o3k
@@ -309,6 +319,37 @@ for relative in "${MANIFEST_FILES[@]}"; do
   [[ -e "$destination" ]] && rm -f -- "$destination"
 done
 rm -f -- "$INSTALL_MANIFEST"
+# PP.4 (#973): the one-line installer copies the Araf demo deployment material
+# (orchestrator + compose material) into this O3K-owned share path; it is not
+# part of the install.sh ownership ledger, so it is removed here under the
+# same fencing (validate_path refuses symlink components; the tree itself is
+# O3K-owned demo material).
+DEMO_SHARE_DIR="$PREFIX/share/o3k/araf-demo"
+if [[ -e "$DEMO_SHARE_DIR" || -L "$DEMO_SHARE_DIR" ]]; then
+  validate_path demo-share-dir "$DEMO_SHARE_DIR"
+  if [[ -L "$DEMO_SHARE_DIR" ]]; then
+    echo "refusing to remove symlink demo material path: $DEMO_SHARE_DIR" >&2
+    exit 2
+  fi
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^o3k-araf-demo-'; then
+    echo "refusing to remove the Araf demo material while the demo stack is running;" >&2
+    echo "  run: sudo $DEMO_SHARE_DIR/o3k-araf-demo.sh uninstall" >&2
+    exit 2
+  fi
+  # Remove only the files this installer owns; anything else under the tree is
+  # operator state and is preserved (the directory is left in place).
+  demo_removed=0
+  for demo_file in o3k-araf-demo.sh araf-demo/compose.yaml araf-demo/nginx.conf \
+    araf-demo/api-relay.conf araf-demo/realm.json araf-demo/README.md; do
+    if [[ -f "$DEMO_SHARE_DIR/$demo_file" ]]; then
+      rm -f -- "$DEMO_SHARE_DIR/$demo_file"
+      demo_removed=$((demo_removed + 1))
+    fi
+  done
+  rmdir "$DEMO_SHARE_DIR/araf-demo" "$DEMO_SHARE_DIR" 2>/dev/null || {
+    echo "preserved operator files under $DEMO_SHARE_DIR (not owned by the installer)"
+  }
+fi
 if [[ $PURGE -eq 1 ]]; then
   echo "o3k binaries, helper files, and owned state removed"
 else

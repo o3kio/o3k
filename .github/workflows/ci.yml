@@ -335,8 +335,8 @@ jobs:
         run: sudo bash tests/installer-negative.sh
       - name: Test PP.2 canonical-bootstrap installer contract
         run: bash tests/pp2-installer-contract.sh
-      - name: Test PP.3 Araf demo tuple/deployment contract
-        run: bash tests/pp3-araf-demo-contract.sh
+      - name: Test PP.4 Araf demo tuple/deployment contract
+        run: bash tests/pp4-araf-demo-contract.sh
   supply-chain:
     runs-on: ubuntu-latest
     steps:

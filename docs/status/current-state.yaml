@@ -649,36 +649,30 @@ profiles:
           PP.2 (#971) owns this evidence through the canonical P15
           bootstrap path. Recorded only to the level actually proven.
       - name: demo-v1-araf-demo-tuple-gate
-        state: passed
+        state: not-proven
         evidence: >-
-          PP.3 (#972) PASSED on a genuinely fresh Ubuntu 24.04 x86_64
-          nested-KVM host (kernel 6.8.0-139, /dev/kvm present) running the
-          one-line-installed v0.4.0-rc.5 demo cloud. The O3K-pinned
-          compatibility tuple (contracts/araf-compatibility-v1.yaml
-          pp3_tuple) binds Araf v1.0.0-rc.12 (source
-          de64cc9193085116fa30ad51c04ccab24a013dd0, GitHub Release with
-          digest-pinned OCI tarballs, SPDX SBOMs and SLSA provenance) and
-          packaging/o3k-araf-demo.sh deploys it via Docker Engine + Compose
-          v2 only. Verified: install and layered status; real OIDC
-          authorization-code+PKCE logins on BOTH surfaces against the
-          demo-scoped local IdP; federated native tokens against the real
-          O3K native API (tenant scopes + operator platform routes);
-          production Araf runtime profile with fixture mode impossible;
-          same-version re-run converged (o3kd untouched, zero duplicate
-          containers); Araf service restart; complete host reboot with
-          boot-id-confirmed recovery; uninstall -> reinstall -> verify and
-          purge -> reinstall -> verify (state dir removed, no demo volumes,
-          no hosts entries); foreign container/volume/file canaries
-          preserved and functional; zero secret leakage; artifact-integrity
-          fence fail-closed on unavailable/corrupt OCI tarball with O3K
-          readiness unaffected (200). Evidence:
-          target/pp3-.../evidence-final (campaign logs 00-31). Scope: the
-          o3k-demo-v1 single-host profile ONLY.
+          PP.4 (#973) has historical evidence on fresh Ubuntu 24.04 and
+          Debian 12 x86_64 nested-KVM hosts against the exact published O3K
+          v0.4.0-rc.8 source a546b61ce87dea57b702002ef1506846e3edbef7 and
+          Araf v1.0.0-rc.12 source de64cc9193085116fa30ad51c04ccab24a013dd0.
+          Those campaigns verified install/read/delete and the bounded server
+          cross-interface observation, but did not prove the required native
+          browser workload creation journey.
+          Durable manifests: docs/evidence/pp4/manifest-ubuntu-24.04.json
+          and docs/evidence/pp4/manifest-debian-12.json. Scope is the
+          o3k-demo-v1 single-node profile only; Horizon was an optional Ubuntu
+          witness, not the O3K dashboard.
         note: >-
-          O3K v0.4.0-rc.5 was NOT modified; the tuple and deployment
-          material are repository-side integration metadata. One-line
-          installer integration and the full browser demo remain PP.4
-          (#973). No Araf production/HA claim (o3kio/araf#106).
+          O3K v0.4.0-rc.8 and the Araf tuple were not modified; the tuple and
+          deployment material are repository-side integration metadata. The
+          pinned Araf console schema-dialect defect remains historical
+          client-schema-compile evidence (upstream Araf PR #118 is not in
+          rc.12), and native VM create remains network-provider-inactive. Any
+          failed-create row is classified only as a canonical terminal ERROR
+          resource with no provider identity; it is not evidence of a
+          successful or reachable workload. These are acceptance blockers, not
+          accepted product limitations.
+          No Araf production/HA claim (o3kio/araf#106).
     release_relevance: >-
       Contract-frozen vehicle for the next release. Not itself a release
       claim: publication still requires the release gate
@@ -694,9 +688,10 @@ profiles:
         (PR #1025)
       - release-gate execution and publication (issue #93)
     next_evidence_action: >-
-      PP.2 (#971) is complete pending merge of PR #1025. Next: PP.3/PP.4
-      Araf client deployment evidence and PP.5 scale evidence (1-20 host
-      envelope remains a hardening target, not a support claim).
+      PP.4 (#973) remains incomplete. A successor immutable O3K/Araf tuple,
+      native browser workload evidence, and exact-head CI checks are required
+      before PP.5. The 1-20 host envelope remains a hardening target, not a
+      support claim.
     explicitly_unproven_claims:
       - production readiness
       - HA / multi-node behavior

@@ -84,7 +84,7 @@ for marker in \
   '✓ o3k doctor healthy' \
   'server test-vm ACTIVE with fixed IP 192.0.2.2 and config-drive' \
   'console boot marker verified (cirros|login:)' \
-  'O3K is ready.'; do
+  'O3K demo ready'; do
   grep -Fq -- "$marker" "$ONELINER_OUT" || { echo "ERROR: missing output marker: $marker" >&2; exit 1; }
 done
 # The join marker carries the durable BuildingBlock id; assert the prefix and

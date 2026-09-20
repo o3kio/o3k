@@ -1,0 +1,636 @@
+{
+  "campaign": "pp4-debian",
+  "tracking_issue": "o3kio/o3k#973",
+  "generated_utc": "2026-09-20T01:55:34.321521+00:00",
+  "host": {
+    "distro": "debian",
+    "os_pretty": "Debian GNU/Linux 12 (bookworm)",
+    "kernel": "6.1.0-53-cloud-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.187-1 (2026-09-07) x86_64 GNU/Linux",
+    "cpu": "model name\t: AMD EPYC 7401P 24-Core Processor",
+    "kvm_device": "crw-rw---- 1 root kvm 10, 232 Sep 20 01:32 /dev/kvm",
+    "svm_vmx_flag": "svm",
+    "boot_id_before": "8308f170-64bc-40fe-be12-14139a1621d4",
+    "boot_id_after_reboot": "4d5e33fe-1687-40a4-ad44-d4cb0de8014e"
+  },
+  "base_image": {
+    "url": "https://cloud.debian.org/images/cloud/bookworm/20260909-2596/debian-12-genericcloud-amd64-20260909-2596.qcow2",
+    "digest_algorithm": "sha512",
+    "digest": "08fea112563461f251f3c95a5c5cf8cb25eb60f74cec03e85a97ff91d3efef3059d35837598bbb476008f20db6d3bdc7143c5f2f2a9a6da394a0acc601fd5986",
+    "evidence": "00-base-image.txt"
+  },
+  "o3k": {
+    "version": "0.4.0-rc.8",
+    "source_sha": "a546b61ce87dea57b702002ef1506846e3edbef7",
+    "campaign_version": "v0.4.0-rc.8",
+    "campaign_source_sha": "a546b61ce87dea57b702002ef1506846e3edbef7",
+    "release_identity_evidence": "06-release-identity.txt"
+  },
+  "araf": {
+    "version": "v1.0.0-rc.12",
+    "source_sha": "de64cc9193085116fa30ad51c04ccab24a013dd0",
+    "upstream_adapter": "o3k",
+    "runtime_profile": "production",
+    "image_digests": {
+      "bff": "sha256:a22458df7ced503bbda9e69e45ec559b5881a63d8f8849ef24721bb8918c5edc",
+      "tenant_console": "sha256:34901700540686c1a5ff13c7b02ba96180170d4c83f9bf170def7917df2eb068",
+      "operator_console": "sha256:c9b4c88b56293e12bb569ced7020da3eda349d094351a3944c881888147cac9b"
+    },
+    "image_identity": {
+      "bff": {
+        "observed": "sha256:a22458df7ced503bbda9e69e45ec559b5881a63d8f8849ef24721bb8918c5edc",
+        "digest_kind": "config",
+        "pinned_index_digest": "sha256:bc717ecdbbbf3ea673efe168c90419936677d644aa0ae25af4eb84906cd744ba",
+        "pinned_config_digest": "sha256:a22458df7ced503bbda9e69e45ec559b5881a63d8f8849ef24721bb8918c5edc"
+      },
+      "tenant_console": {
+        "observed": "sha256:34901700540686c1a5ff13c7b02ba96180170d4c83f9bf170def7917df2eb068",
+        "digest_kind": "config",
+        "pinned_index_digest": "sha256:25f5fe41927f68db3dafd49597c6b8cb4520bca2dd45ec131d1372474ef3e5e5",
+        "pinned_config_digest": "sha256:34901700540686c1a5ff13c7b02ba96180170d4c83f9bf170def7917df2eb068"
+      },
+      "operator_console": {
+        "observed": "sha256:c9b4c88b56293e12bb569ced7020da3eda349d094351a3944c881888147cac9b",
+        "digest_kind": "config",
+        "pinned_index_digest": "sha256:cbbad76033eced4d4290c9848e0665a23c30bd4a7c647077ba0cf03150666b18",
+        "pinned_config_digest": "sha256:c9b4c88b56293e12bb569ced7020da3eda349d094351a3944c881888147cac9b"
+      }
+    },
+    "compose_services": [
+      "api-relay",
+      "idp",
+      "operator-bff",
+      "operator-console",
+      "tenant-bff",
+      "tenant-console",
+      "tls-proxy"
+    ],
+    "tuple_evidence": "10-araf-production-tuple.txt"
+  },
+  "canonical_resources": {
+    "test-vm": "a22a2da5-e27a-5f66-a1aa-14e29a240051",
+    "pp4-openstack": "03ea1326-677c-55a2-b150-24e7d0fb2301",
+    "pp4-ui-target": "a0ddd83c-19e2-565c-b4cc-a5e1a27b5bf0"
+  },
+  "browser_console_deleted_resource": {
+    "resource_type": "compute.server",
+    "id": "a0ddd83c-19e2-565c-b4cc-a5e1a27b5bf0",
+    "created_through_the_unmodified_openstack_cli": true,
+    "deleted_through_the_console_ui": true
+  },
+  "classified_gaps": [
+    {
+      "id": "compat-created-resource-not-canonical",
+      "detail": "compat_image=01a0bc74-27a5-7182-90f4-7dee592310ed compat_network=01a0bc74-3c7b-7871-8a63-fe3892e5a1b7 native_image_rows=0 native_network_rows=0"
+    },
+    {
+      "id": "native-vm-create=network-provider-inactive",
+      "detail": "http_status=409 operation_state=rejected orphan_compute_instance_rows=1 o3k-network=inactive; console_error_class=client-schema-compile console_error=\"Please correct the errors below.\" created_server_rows=0 appeared_rows=[] requested_network=01a0bc74-3c7b-7871-8a63-fe3892e5a1b7"
+    },
+    {
+      "id": "native-list-name-projection",
+      "detail": "server_id=03ea1326-677c-55a2-b150-24e7d0fb2301 native_list_name=03ea1326-677c-55a2-b150-24e7d0fb2301 (spec name is not projected in the native collection)"
+    },
+    {
+      "id": "compat-action-operation-not-canonical",
+      "detail": "openstack server stop changed the canonical state (Araf status=unknown) but left no canonical Operation in /api/v1/operations"
+    },
+    {
+      "id": "native-server-start-not-advertised",
+      "detail": "advertised_actions=DeleteServer,UpdateServer,delete,update native_start_attempt_http=400 (compute.server advertises no start/stop actions on this profile)"
+    },
+    {
+      "id": "tofu-created-network-not-canonical",
+      "detail": "tofu_network=01a0bc79-5210-7b82-a900-42e0b2967a26 visible_via_cli=yes native_row=absent (the unmodified provider uses the compatibility API)"
+    },
+    {
+      "id": "metering-usage-read-error",
+      "detail": "Usage & Cost surfaced a truthful error instead of usage rows: Failed to load usage dataUnexpected error (400): The server returned an error response that could not be parsed."
+    },
+    {
+      "id": "images-native-inventory=compat-only",
+      "detail": "native_rows=0 live_rows=0 tombstone_rows=0 compat_image_id=01a0bc74-27a5-7182-90f4-7dee592310ed compat_image_name=cirros-0.6.3 empty_state=true"
+    },
+    {
+      "id": "network-compat-created-not-canonical",
+      "detail": "native_rows=0 live_rows=0 tombstone_rows=0 compat_network_id=01a0bc74-3c7b-7871-8a63-fe3892e5a1b7 compat_network_name=testlab-network empty_state=true"
+    },
+    {
+      "id": "console-create-schema-dialect=client-schema-compile",
+      "detail": "console_error=\"Please correct the errors below.\" field_errors_rendered=0"
+    },
+    {
+      "id": "operator-installed-services-descriptor-rejected",
+      "detail": "installed-services read failed truthfully: Could not load servicesbad request: dangerous descriptor value at descriptor[0].actions[0].output: arbitrary URLs are not allowed outside documentation fieldsCorrelation ID: 710fe710-1b09-49f7-b5a0-5287c280e31b"
+    },
+    {
+      "id": "operator-regions-empty",
+      "detail": "GET /api/v1/operator/regions returned [] on this deployment; the console renders the explicit empty state"
+    },
+    {
+      "id": "operator-global-operations-not-exposed",
+      "detail": "HTTP 501 {\"type\":\"https://araf.o3k.io/errors/501\",\"title\":\"Not implemented\",\"status\":501,\"detail\":\"not implemented: O3K does not"
+    },
+    {
+      "id": "operator-canonical-operations-route-unavailable",
+      "detail": "GET /api/v1/operations is not mounted on the operator surface (and /api/v1/operator/operations is HTTP 501)"
+    }
+  ],
+  "timestamps_unix": {
+    "T0_oneline_invoked": 1789867969,
+    "T1_o3k_canonical_ready": 1789868118,
+    "T2_buildingblock_ready": 1789868116,
+    "T3_araf_ready": 1789868250,
+    "T4_browser_login_usable": 1789868294,
+    "T5_first_vm_active_boot": 1789868152,
+    "T0_to_T5_seconds": 183
+  },
+  "test_cases": [
+    {
+      "id": "I1",
+      "phase": "phase1a",
+      "name": "host inventory captured (OS/kernel/KVM)",
+      "status": "PASS",
+      "ts": 1789867968
+    },
+    {
+      "id": "I2",
+      "phase": "phase1a",
+      "name": "pre-checks + foreign canaries planted",
+      "status": "PASS",
+      "ts": 1789867969
+    },
+    {
+      "id": "I3",
+      "phase": "phase1a",
+      "name": "one-line installer exit 0 (public release asset v0.4.0-rc.8)",
+      "status": "PASS",
+      "ts": 1789868250
+    },
+    {
+      "id": "I4",
+      "phase": "phase1a",
+      "name": "success output complete (consoles, API, CLI config, uninstall)",
+      "status": "PASS",
+      "ts": 1789868250
+    },
+    {
+      "id": "I5",
+      "phase": "phase1a",
+      "name": "no secret material in installer output",
+      "status": "PASS",
+      "ts": 1789868250
+    },
+    {
+      "id": "I6",
+      "phase": "phase1a",
+      "name": "timing stamps T0-T3,T5 present",
+      "status": "PASS",
+      "ts": 1789868250
+    },
+    {
+      "id": "I7",
+      "phase": "phase1a",
+      "name": "installed release identity matches campaign version + source SHA",
+      "status": "PASS",
+      "ts": 1789868251
+    },
+    {
+      "id": "I8",
+      "phase": "phase1a",
+      "name": "canonical state: exactly one ready BuildingBlock/bootstrap, >=1 profile+provider",
+      "status": "PASS",
+      "ts": 1789868251
+    },
+    {
+      "id": "I17",
+      "phase": "phase1a",
+      "name": "demo capacity evidence: O3K_COMPUTE_MAX_DISK_GB matches the Placement DISK_GB inventory and still fits a second 10 GB VM",
+      "status": "PASS",
+      "ts": 1789868251
+    },
+    {
+      "id": "I15",
+      "phase": "phase1a",
+      "name": "/etc/o3k/o3kd.env matches the O3K install-time content ledger (the demo stage did not mutate an O3K-owned config file)",
+      "status": "PASS",
+      "ts": 1789868251
+    },
+    {
+      "id": "I9",
+      "phase": "phase1a",
+      "name": "o3kd OIDC federation wired via /etc/o3k/o3kd-araf-demo.env (0600) + systemd drop-in; O3K's o3kd.env untouched",
+      "status": "PASS",
+      "ts": 1789868251
+    },
+    {
+      "id": "I10",
+      "phase": "phase1a",
+      "name": "OpenStack CLI witness: test-vm ACTIVE with config-drive",
+      "status": "PASS",
+      "ts": 1789868254
+    },
+    {
+      "id": "I11",
+      "phase": "phase1a",
+      "name": "guest boot proof: running libvirt domain (server_id XML) + CirrOS console marker",
+      "status": "PASS",
+      "ts": 1789868257
+    },
+    {
+      "id": "I12",
+      "phase": "phase1a",
+      "name": "Araf demo stack running (7 containers)",
+      "status": "PASS",
+      "ts": 1789868257
+    },
+    {
+      "id": "I13",
+      "phase": "phase1a",
+      "name": "curl OIDC verify (tenant+operator) PASS",
+      "status": "PASS",
+      "ts": 1789868259
+    },
+    {
+      "id": "I14",
+      "phase": "phase1a",
+      "name": "deployed Araf is the pinned production tuple (native o3k adapter, pinned digests, 7 services)",
+      "status": "PASS",
+      "ts": 1789868259
+    },
+    {
+      "id": "I16",
+      "phase": "phase1a",
+      "name": "/etc/o3k/o3kd.env sha256 unchanged across the demo stage (byte-identical to the O3K install ledger)",
+      "status": "PASS",
+      "ts": 1789868259
+    },
+    {
+      "id": "X0",
+      "phase": "phase1b",
+      "name": "tenant BFF session established (real OIDC)",
+      "status": "PASS",
+      "ts": 1789868343
+    },
+    {
+      "id": "G1",
+      "phase": "phase1b",
+      "name": "native image/network inventories are empty while the compat-created image+network exist (classified gap, counts in 21e-compat-vs-native-inventories.txt)",
+      "status": "PASS",
+      "ts": 1789868347
+    },
+    {
+      "id": "A-gap",
+      "phase": "phase1b",
+      "name": "native create FAILED as expected (http=409, operation=rejected): no ACTIVE pp4-native, 1 orphan compute_instance row(s) recorded, cause lines captured in 21d (NOT a create)",
+      "status": "PASS",
+      "ts": 1789868349
+    },
+    {
+      "id": "B1",
+      "phase": "phase1b",
+      "name": "Araf native live view serves pp4-openstack with the identical canonical id 03ea1326-677c-55a2-b150-24e7d0fb2301 (no import/hack)",
+      "status": "PASS",
+      "ts": 1789868358
+    },
+    {
+      "id": "B2",
+      "phase": "phase1b",
+      "name": "native collection lists the server by canonical id; its name projection is '03ea1326-677c-55a2-b150-24e7d0fb2301' (recorded gap, identity is the id)",
+      "status": "PASS",
+      "ts": 1789868358
+    },
+    {
+      "id": "B3",
+      "phase": "phase1b",
+      "name": "pp4-openstack guest boot proof (running libvirt domain via server_id XML + console marker)",
+      "status": "PASS",
+      "ts": 1789868361
+    },
+    {
+      "id": "C1",
+      "phase": "phase1b",
+      "name": "Araf reports pp4-openstack 'unknown' (non-ready) truthfully after the CLI stop",
+      "status": "PASS",
+      "ts": 1789868366
+    },
+    {
+      "id": "C1b",
+      "phase": "phase1b",
+      "name": "classified gap recorded: the compat stop exposes canonical state, not a canonical Operation",
+      "status": "PASS",
+      "ts": 1789868366
+    },
+    {
+      "id": "C3",
+      "phase": "phase1b",
+      "name": "compute.server discovery advertises only 'DeleteServer,UpdateServer,delete,update'; a native start attempt answers http=400 (recorded gap)",
+      "status": "PASS",
+      "ts": 1789868366
+    },
+    {
+      "id": "C2",
+      "phase": "phase1b",
+      "name": "openstack server start -> Araf status 'ready' and CLI ACTIVE for the same canonical id 03ea1326-677c-55a2-b150-24e7d0fb2301",
+      "status": "PASS",
+      "ts": 1789868400
+    },
+    {
+      "id": "D1",
+      "phase": "phase1b",
+      "name": "delete via Araf -> openstack server show fails with 'No Server found' and the native live view answers 404 (tombstone-row-concealed-on-show)",
+      "status": "PASS",
+      "ts": 1789868407
+    },
+    {
+      "id": "D2",
+      "phase": "phase1b",
+      "name": "delete via CLI -> native live view 404 (collection: tombstone-row-concealed-on-show); test-vm intact (ONE canonical truth)",
+      "status": "PASS",
+      "ts": 1789868449
+    },
+    {
+      "id": "D3",
+      "phase": "phase1b",
+      "name": "the server (a0ddd83c-19e2-565c-b4cc-a5e1a27b5bf0) deleted through the tenant console's advertised action is truthfully absent in the unmodified CLI ('No Server found') and in the Araf live view (404)",
+      "status": "PASS",
+      "ts": 1789868452
+    },
+    {
+      "id": "S1",
+      "phase": "phase1b",
+      "name": "tenant/operator trust surfaces separated (tenant BFF 404 on operator route, tenant session rejected 401 by operator BFF, operator session accepted 200)",
+      "status": "PASS",
+      "ts": 1789868453
+    },
+    {
+      "id": "T1",
+      "phase": "phase1b",
+      "name": "OpenTofu provider 3.4.0 created network 01a0bc79-5210-7b82-a900-42e0b2967a26 visible via the unmodified CLI; it is not a canonical native row (recorded gap, 20b)",
+      "status": "PASS",
+      "ts": 1789868463
+    },
+    {
+      "id": "T2",
+      "phase": "phase1b",
+      "name": "tofu destroy removed the compat network",
+      "status": "PASS",
+      "ts": 1789868465
+    },
+    {
+      "id": "SEC1",
+      "phase": "phase1b",
+      "name": "secret scans clean (installer output, verify, browser, tofu logs, o3kd journal)",
+      "status": "PASS",
+      "ts": 1789868468
+    },
+    {
+      "id": "R1",
+      "phase": "phase2",
+      "name": "post-reboot recovery: O3K + Araf + workload healthy",
+      "status": "PASS",
+      "ts": 1789868872
+    },
+    {
+      "id": "R3",
+      "phase": "phase2",
+      "name": "rerun exit 0 with no 'refusing to overwrite operator-modified configuration file'; /etc/o3k/o3kd.env byte-identical; demo federation drop-in re-applied",
+      "status": "PASS",
+      "ts": 1789868902
+    },
+    {
+      "id": "R2",
+      "phase": "phase2",
+      "name": "same-version rerun converges: identical BB/profile/provider id sets, pinned images, no duplicates",
+      "status": "PASS",
+      "ts": 1789868906
+    },
+    {
+      "id": "F1",
+      "phase": "phase2",
+      "name": "Araf restart: bounded recovery, O3K unaffected, sessions per architecture",
+      "status": "PASS",
+      "ts": 1789868910
+    },
+    {
+      "id": "F2",
+      "phase": "phase2",
+      "name": "o3kd restart: Araf recovers against canonical authority",
+      "status": "PASS",
+      "ts": 1789868919
+    },
+    {
+      "id": "F3",
+      "phase": "phase2",
+      "name": "IdP outage: O3K independent, console serves, pre-established session reads truth, new login fails closed, full recovery",
+      "status": "PASS",
+      "ts": 1789868945
+    },
+    {
+      "id": "F4",
+      "phase": "phase2",
+      "name": "interrupted deployment: rerun rebuilt the full 7-container stack, federation drop-in re-applied, all layers healthy, verify PASS",
+      "status": "PASS",
+      "ts": 1789869028
+    },
+    {
+      "id": "C1",
+      "phase": "phase2",
+      "name": "uninstall: demo runtime removed, demo federation env + systemd drop-in gone, O3K + workload untouched, /etc/o3k/o3kd.env byte-identical, state preserved",
+      "status": "PASS",
+      "ts": 1789869033
+    },
+    {
+      "id": "C2",
+      "phase": "phase2",
+      "name": "reinstall after uninstall converges (federation drop-in re-applied, O3K config untouched)",
+      "status": "PASS",
+      "ts": 1789869080
+    },
+    {
+      "id": "C3",
+      "phase": "phase2",
+      "name": "purge: all owned demo state removed (containers, volumes, hosts, state dir, federation env + drop-in)",
+      "status": "PASS",
+      "ts": 1789869084
+    },
+    {
+      "id": "C4",
+      "phase": "phase2",
+      "name": "purge-reinstall: demo fully recovered",
+      "status": "PASS",
+      "ts": 1789869155
+    },
+    {
+      "id": "C7",
+      "phase": "phase2",
+      "name": "final o3k doctor --json report is non-empty valid JSON with checks",
+      "status": "PASS",
+      "ts": 1789869155
+    },
+    {
+      "id": "C8",
+      "phase": "phase2",
+      "name": "/etc/o3k/o3kd.env sha256 identical to the install-ledger baseline across uninstall -> reinstall -> purge cycles (evidence 27b-o3k-o3kd-env-ledger-convergence.txt; the config-ledger regression stays fixed)",
+      "status": "PASS",
+      "ts": 1789869155
+    },
+    {
+      "id": "C5",
+      "phase": "phase2",
+      "name": "foreign state preserved (files, user) \u2014 no blanket prune",
+      "status": "PASS",
+      "ts": 1789869155
+    },
+    {
+      "id": "C6",
+      "phase": "phase2",
+      "name": "phase2 secret scans clean",
+      "status": "PASS",
+      "ts": 1789869155
+    }
+  ],
+  "result": "PASS",
+  "failures": [],
+  "evidence_file_sha256": {
+    ".bff-collection.json": "2f5f5f07d29587538c0d77dca066386a4415fd6bf796a054ab0c7d9813576a69",
+    ".bff-show.json": "1564ac70138aca0280595d39e85455867f50184ca8ff0aa4776ae4c081afc27d",
+    ".bff-status.json": "671cfe7086009245207c82e5db43790bc8abcd283dbfaf83f1a1a5f3abb1a0cf",
+    ".cli-absence-ffcef090-b094-55f1-8d3b-eec92bd8ae8b.txt": "0ae2f7a9b554846c98bfe31b443aa70f63100bed7c2f9e07a90cedcfb91cea86",
+    ".cli-create-pp4-openstack-cli.txt": "98a7feee2ddf67d502e5168831655e4b8be14fb1fd1b9134105c74479bfe56ac",
+    ".cli-create-pp4-openstack.txt": "22adb0a1e1f6b8fc748b9cb425e582f9b34c73cafccf2b4d5e6a66e97145b0b9",
+    ".cli-list-lag-ffcef090-b094-55f1-8d3b-eec92bd8ae8b.json": "b7faf5588114cd8103a18313134fcef5a51874ec52c595ca4cf3bef9d7153e3d",
+    "00-base-image.txt": "697f16396df8978fc1abea030bfe805a0a06083cb855535e3c509815f0a82b9a",
+    "00-host-inventory.txt": "23d64c8b9ad1b62ffa45766ca5ad3535b8e26dd8ead53db48fd31ae97bec6994",
+    "01-one-line-install.log": "70a1d12e2ef178408addf6f399480f88c1df9b1da80da1a7539a04ba31c1aa5a",
+    "02-success-output.txt": "dedb453b5fbe16e58fbd40d75246baa0e7b83552cde609d634aa68b7807e043e",
+    "03-timestamps.env": "8630a49dd117fb029f00ca04508dcc55be453d236862686e199b894ee9661842",
+    "04-verify.log": "e814879246e4bd215f3d430662ccbb63bafc2e87a56651d0dda4024cc0d66d89",
+    "04b-ui-target-create.log": "71f43dfb51d7edd8ada023904b90dc60b54b7c776a6b0837390722be125eceaa",
+    "05-browser-e2e.log": "81cf91d0a834b2922567c9eb1aa958978de620e084c5678a03943626f7cf536f",
+    "05-browser-ids.env": "dcd413dffb6345e8ae97eacc3bd734ae0cb9ea78cd1e31d19e92cd1bd687367c",
+    "06-release-identity.txt": "5f988953a2ebccb87111d587f426d506824d573739b51641c250d6b69bf5748f",
+    "07-canonical-state.txt": "3d731a3edcca6b4b8ffcd2ae3f0e4059f9c0ccedb8744010abcfdb9ff362a239",
+    "08-openstack-test-vm.json": "cec22de629cafbbd4b7d3f8cf5a74f5eb1e4a6d0ac6794cda08b3576fbd6a7a4",
+    "08b-libvirt-domains.txt": "b67feee45a2763c419d53cf0471d33b7d1f3f7cfad27ce792e36d87438c048d9",
+    "08b2-libvirt-domain-ownership.txt": "b13f849abdd192d5b8013df7939e1b4788794f326abf36af0548c31bf827e4e5",
+    "08c-console.log": "912d9037f0803d01167d4850c764452ca9f3173c1105d4335f69b5f1f2ae5113",
+    "08d-dhcp-leases.txt": "e1463f650b2d0e609218124bb2243705236d093e8d981694133fda69024ef331",
+    "09-foreign-canaries-before.txt": "047bb693eb11963f20eb51b99e14480748a48b32db7767e463e88d0fe89e11c1",
+    "10-araf-production-tuple.txt": "549fd8c241cc2ad8108d6bf65f9de5cec36df3e1072202e58f5c262bc8a93e3a",
+    "10a-araf-tenant-bff-env.txt": "338dc3d3173272c9b85ca5872b7bd801753b301252fb32f0bfd3e335306d814b",
+    "10b-araf-image-digests.txt": "195c9e64292be174f9b1f073e50a68d89f93c908010c0b32210d59667a875fb9",
+    "10c-araf-compose-services.txt": "46a810215d5998c92843f738ea48c205f1d50454029b14486eae9b248f6bf972",
+    "10d-araf-tuple-reported.txt": "ad4dc9af8817e8de609f9efca95037016f6f42b6c7f290073ba4543b0a680ce2",
+    "11-container-names.txt": "f8886ac4a6ac21a8f18d04266cbaf1678e010e62a25c01d268196a6a3f541ce1",
+    "12b-o3k-o3kd-env-ledger.txt": "7a7dec54d5e833cc2ab56651c7bf2d28163d44bccb7b01173d8bef7bf386663a",
+    "12b2-o3k-o3kd-env-ledger-after-demo.txt": "c494f31add6d50917ee06b9ca834908ba879c55dca9eb494b92f89384db8743f",
+    "12c-demo-federation-wiring.txt": "6419655d05ab45f0db40cef861fdde776d1bfa3816a4aec3a7f8cd1ac606f24d",
+    "12d-demo-disk-capacity.txt": "a7c4284df76bbd7d781c12d5a497816bc314b812145249bf2fe64d196712266b",
+    "13b-native-name-projection.txt": "e9f249b21adec8a303413eaba66561c40ad640b8c01a3fcbe5424ea993d7ae48",
+    "14-scenarioA-identity.txt": "c0d5f20f80b0410a41300737395745a10070d6cb553c071595915d70a4c53b8f",
+    "15-scenarioC-operations.json": "9f1d6d8dfd797cf8e76df364a6e1e600b7f9677fd4e19dcabdf0885eb2d5ae08",
+    "15-scenarioC-stop-state.txt": "7ac9e8c2527fab6203faadb0afbb977058ef01250bbcda83743a45d3f58c6c16",
+    "15c-services-descriptor.json": "581a5de6209575143df522e6bc79830f3aa7d74392cc02af15a6a97d90c9dd61",
+    "15c-services-descriptor.json.compute-actions": "59a62415461c62937e5d0f85ad96d6da9215968e36602c34085f97d37bdfe6be",
+    "15d-scenarioC-native-start-attempt.json": "d3dfb6a9e08c2d0dfec546f9104c4ba9442a289468119245f918a010384c46db",
+    "16-scenarioB-create.txt": "98a7feee2ddf67d502e5168831655e4b8be14fb1fd1b9134105c74479bfe56ac",
+    "16b-scenarioB-libvirt-domain.txt": "c6a478e771f95b30442b41dc77eddc640be919ab787b036c9c496b87eb02cc69",
+    "16c-scenarioB-console.log": "e6a4b8313e688225d614d6cdc04a3f46bc4e6481d1388fdf47cd9a0d999765e9",
+    "17-scenarioD-araf-delete.json": "0831e929f73e2667c6e4dee8b7cce4f9466a7a1396d751dce9b897182ee933a7",
+    "17-secret-scan.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "17b-o3kd-journal-tail.log": "1f570c1b4d2e877b46d293cfa680f878974b037792eeb1e63b9047c1dd018ab4",
+    "17b-scenarioD-absence.txt": "3c4e9deeee3cb9009763d2241416cdada198673162b121e299041ef229260769",
+    "17d-scenarioD2-cli-create.txt": "98a7feee2ddf67d502e5168831655e4b8be14fb1fd1b9134105c74479bfe56ac",
+    "17e-scenarioD2-cli-delete.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "17f-scenarioD2-absence.txt": "c4800be5090f013127d8fd66e43649f5ab5e4d990d92456350213e6aba58d9b8",
+    "18-servers-final.json": "b7faf5588114cd8103a18313134fcef5a51874ec52c595ca4cf3bef9d7153e3d",
+    "18b-console-deleted-server-cli.txt": "d250f0e9000ab9ee1dfb863c2a38b0766a130d9ef6f6d827bf32ee0f37e95bdf",
+    "18c-console-deleted-server-bff.json": "d1ae52d426dbd1319ddd4b45f95a0939e51c0ecf50cdb258fb5973d40fcc64a8",
+    "19-operator-profile.json": "d17ffa27a4ea1eec29cf34e53044355c602e549fec48702d8a47247a03debdc9",
+    "19-tenant-context.json": "0364f996df4012f99dbfecd207e75523632acbb44ba62ffe82b5ee62a0cd74d8",
+    "19b-separation-statuses.txt": "c3ca797cf4d3266408f14cc8a58dfc828193ef4b6c1b9bf60fb6c76903668cae",
+    "20-tofu-apply.log": "46335c14c863431e65f78e39ade3079841a0ee1fd7d096a6250a8007ea00ea73",
+    "20-tofu-araf-networks.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "20-tofu-compat-trace.jsonl": "69104498c0818ceb788959021cd07aaddfe349a54cfa1e29d4154136e29ce979",
+    "20-tofu-destroy.log": "6308c6af5f91f0a5f33fe314900f3a7dc527d1aebc5792de33e57d864adba704",
+    "20-tofu-init.log": "589ecd7f389b68ce4002d4441ebf7bdee5523b7122c516e2c3b7bdeb7acf25c8",
+    "20b-tofu-native-network-check.txt": "c8312bbd666c224faae6948b04b890e0fc066f6384f30e875f120168994b9e31",
+    "21-network-provider-posture.txt": "2c3dbf7e14db699665fc651a15c755ddb6d6bc61056d7db6273f6932daeb145f",
+    "21b-compute-instances-after.txt": "b2680fe14e73830d6b345802af1048b7d559bf20b5561c92e10192e72a507b60",
+    "21b-compute-instances-after.txt.delta": "bf7d11975469d63b8a7ea349200623c9c5ffc77cfb1b44db771d6dbc47776a0e",
+    "21b-compute-instances-before.txt": "e19c759c12a0339dba5362ccb6e484442ee32c9b84f5fe05cf4643a13dfe0962",
+    "21b-scenarioA-cli-servers.json": "b7faf5588114cd8103a18313134fcef5a51874ec52c595ca4cf3bef9d7153e3d",
+    "21b-scenarioA-native-create-attempt.json": "99eef66d3188bbc9247d0e48b5e8a504afadb68ddde0ccd2708f3de831a6e76c",
+    "21c-scenarioA-orphan-rows.txt": "6d297bdc5e0b3b5b08c32a1e43abbee42643ddcb0b855b37d14a7fab62ebbb55",
+    "21d-scenarioA-o3kd-log.txt": "48f07accdc271b4f88ed417d887a26741b61480fbc037529969566963182ba0d",
+    "21e-compat-vs-native-inventories.txt": "69636ed5b711895403d1848caab9d355c537efdbd9ec67204dabe5284bd0dd12",
+    "21e-native-list-compute-server.txt": "cd12396dce09f455febc71f22ec5b96d7836c1a984f4c8a6efe23558a3d58aa0",
+    "21e-native-list-image-image.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "21e-native-list-network-network.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "22-status-post-reboot.txt": "5d129968297c30648cf74361c1e1b479e0b07a11aee90b6dec85d3cc479e25bc",
+    "22b-containers-post-reboot.txt": "0b5c68010a490eb625dd7305e93b7ee16828b13fc349a639654c8b0e4270c049",
+    "22b-expected-containers.txt": "f8886ac4a6ac21a8f18d04266cbaf1678e010e62a25c01d268196a6a3f541ce1",
+    "22c-running-containers.txt": "f8886ac4a6ac21a8f18d04266cbaf1678e010e62a25c01d268196a6a3f541ce1",
+    "22d-containers-all.txt": "9a966596fcdb1f5a91da0999ebebb6bb7988676fe366f8ff2dcb04f394441566",
+    "22e-container-diff.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "23-browser-relogin.log": "7d2e8f9f85c3bf52d61ea8d4a888b1410a2166cf0708cfc6bd4e83373ee9ae18",
+    "23c-console-status-outage.txt": "ff5f59a9cd41c7d68d56ce5a14ec1c50e7d9654c4ce9c51fa2b83fb5524e346a",
+    "23c-idp-state-outage.txt": "d374aa273f75171a52ae59f3bf51e1712d44908fa35891cca3471d2244dae75b",
+    "23c-new-login-body.json": "50fd568eaca4e68c576a4b1de040c9dda984f4cc8e071c0dbda24f76ce7f0310",
+    "23c-new-login-status.txt": "d41c6d327a5418d9ad9a64e0f5cb9188353b8e375f10ca68adb26d4655a7171f",
+    "23c-post-reboot-recovery.txt": "c367d26fef84d9b6d19f5c5e091b8b4f2ffa33ed275f901d0257136aefd1f68f",
+    "23c-resources-during-outage.json": "44861a75285e254df0fe0cde3b5ce05f0478f5b728c1858bf2f8e6be6aed8d92",
+    "23c-session-before-outage.json": "bd48ef2bf839948de902b447709dc40f17c7aa8f3745b95d7c0bddad2a4dfc0f",
+    "24-verify-post-reboot.log": "e814879246e4bd215f3d430662ccbb63bafc2e87a56651d0dda4024cc0d66d89",
+    "25-canonical-state-after.json": "af39ad02642c57148be9909a3b6dff88f126ce48f5ef6345d4602690ed7d9d57",
+    "25-canonical-state-before.json": "af39ad02642c57148be9909a3b6dff88f126ce48f5ef6345d4602690ed7d9d57",
+    "25-image-digests-after.txt": "195c9e64292be174f9b1f073e50a68d89f93c908010c0b32210d59667a875fb9",
+    "25-image-digests-before.txt": "195c9e64292be174f9b1f073e50a68d89f93c908010c0b32210d59667a875fb9",
+    "25-rerun-install.log": "aad8a36b32b0ab682d88f7c35bcbb9bdfb25bc73dc430358b3ee8b7adda9b74d",
+    "25-servers-after-rerun.json": "b7faf5588114cd8103a18313134fcef5a51874ec52c595ca4cf3bef9d7153e3d",
+    "25-servers-before-rerun.json": "b7faf5588114cd8103a18313134fcef5a51874ec52c595ca4cf3bef9d7153e3d",
+    "25-timestamps-before-rerun.env": "4fe2b083b1df7a5c0a88b37237fe40565182821341ed17576a1d1ee0a41a57f0",
+    "26-interrupt-purge.log": "bf8c43e60de5b85eb6058c42fd0073bb06e101246132bb9104c1e4562ab42d22",
+    "26-interrupt-rerun-containers.txt": "6098ac01021c09f27d02a16c7fd1c2e19113f82e2ec9c4a8c976cc89be48e0a3",
+    "26-interrupt-rerun.log": "06da850b2695535ef5ec239b71354e148af09a27802ca4ae679ef4927d4931be",
+    "26-interrupt-status.txt": "5d129968297c30648cf74361c1e1b479e0b07a11aee90b6dec85d3cc479e25bc",
+    "26-interrupt-verify.log": "e814879246e4bd215f3d430662ccbb63bafc2e87a56651d0dda4024cc0d66d89",
+    "26-interrupted-containers.txt": "5ad77a3327fc6a0ba8d4356db1aa95e015432245617555eb7e9ad20bfc58d1a5",
+    "26-interrupted-install.log": "113574485573e44bb412622c573811b3b3fa7d81039598782d0661e5d32d0e0e",
+    "27-reinstall.log": "689a9e1d0fe93eeda3b32efdd6c8547fd1ecff7c88ece53bdc3101c1e7a24deb",
+    "27-uninstall.log": "389e62109d390e69b4be7dcaa17ff0a2274161325f12091df8b827fa85c4369f",
+    "27b-o3k-o3kd-env-ledger-convergence.txt": "3baa364237ae13e937e4066e2421bdfa4e95f13a0939b97da2a2a3c46a3d86fa",
+    "28-purge-reinstall.log": "c06110b4832235b76c675455499b95b773d8c887bd44a45dcbabf056e2074046",
+    "28-purge.log": "bf8c43e60de5b85eb6058c42fd0073bb06e101246132bb9104c1e4562ab42d22",
+    "29-doctor-final.json": "87d0bf109f1051ae6eea23649f1867b8df2d0c60840c199e3ee2c04b0fb28afa",
+    "31-foreign-canaries-after.txt": "047bb693eb11963f20eb51b99e14480748a48b32db7767e463e88d0fe89e11c1",
+    "32-secret-scan-phase2.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "35-classified-gaps.txt": "c82246254f1b74affdd8f8ca299ee15f7f9456c32cc00db2dcba36a6e2730600",
+    "99-manifest.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "boot-id-after.txt": "a0b48cf122ab2fabcceb36c729dbdc19cf8db7044df907649df936007dfa54c4",
+    "boot-id-before.txt": "78069fd22fc55a946f2a9745fe876dbd7f932d5ca3d1bccae93985a28f3b59dc",
+    "browser-chrome.log": "c94b89de6f859091f06a357daa1dc3faa146d520557fde4637e3197aeebe84d7",
+    "browser-chrome.pid": "543f3b1d4f0d76f0d464bc6c8718b58e55f04904a5971ef976da7aed58074988",
+    "browser-console.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "browser-nssdb-anchors.txt": "ffadd50b9b689615b3fd22a68cfddeecc60160952867d810f1b5f82cd06e8b0b",
+    "browser-ready": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b",
+    "cases.jsonl": "bff67210443f5bcd024a7bec8402319741e9f1d3d66fd8122b2b5a1656b95913",
+    "phase1a-console.log": "b4eea470d3146a8dde115c9b0c187f9866e87c25c963e821487856889f958253",
+    "phase1b-console.log": "dda8454f93bd74f0f00233407a2ba999d273a10965902c2791ffca05a85f0ff4",
+    "phase2-console.log": "5856d7d5272490a7ad53a524122db660ae605bfad4dfc9a81e920a72e93e12cf"
+  },
+  "known_limitations": [
+    "single-node demo profile (o3k-demo-v1); not HA, not multi-node",
+    "the pinned Araf console SPA sends no x-csrf-token, so the campaign bridges that one header at the network layer; any UI fallback fails this campaign",
+    "NO console create can succeed on the pinned Araf tuple: the create schemas O3K serves declare JSON Schema 2020-12 while the pinned schema-runtime compiles with draft-07 Ajv, so the form fails client-side before any request is sent; the upstream fix (Araf PR #118) is not in this release tuple, and the observed error class is recorded as the classified gap console-create-schema-dialect=client-schema-compile. No campaign evidence claims a console create of a VM OR of a network",
+    "the native compute.server create is NOT supported on this profile (the o3k-network execution agent is inactive by contract): the console attempt is performed and its truthful failure is recorded as the classified gap native-vm-create=network-provider-inactive",
+    "native image and flavor inventories are compatibility-backed only: image.image has no canonical row and compute.flavor has no collection, so the console create form can only be fed the ids the compatibility APIs report",
+    "compat-created networks and images are not canonical resources: testlab-network and the demo image exist only through the compatibility (Neutron/Glance) APIs (classified gap compat-created-resource-not-canonical)",
+    "the native list projection carries no spec name for compute.server, so console rows are identified by canonical id (see 13b-native-name-projection.txt)",
+    "the canonical ledger keeps a DELETED tombstone after a delete; the native show view conceals it (404) while the collection may still list it with a non-live status",
+    "the operator console's dedicated global operations route (/api/v1/operator/operations) is not implemented by upstream O3K on this profile; the canonical /api/v1/operations list the same surface serves is what ties the operator view to tenant work",
+    "demo IdP (Keycloak start-dev) is not a production identity claim",
+    "native demo tokens are 1-hour HMAC without renewal (accepted Araf deviation)",
+    "Horizon is an optional external compatibility witness, not the O3K dashboard"
+  ]
+}

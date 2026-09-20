@@ -218,8 +218,8 @@ profiles:
       - araf-client-optional
     araf_integration: client-only-not-required-for-readiness
     araf_demo_tuple:
-      state: passed
-      tracking_issue: 972
+      state: not-proven
+      tracking_issue: 973
       contract: contracts/araf-compatibility-v1.yaml
       evidence: >-
         PP.3 fresh-host campaign PASSED on Ubuntu 24.04 x86_64 against the
@@ -232,8 +232,11 @@ profiles:
         Araf remains a separately versioned client, is not part of the O3K
         release bundle, and is not required for O3K readiness. Deployment
         mechanism for the demo profile: Docker Engine + Compose v2 via
-        packaging/o3k-araf-demo.sh. One-line installer integration is PP.4
-        (#973) scope. No Araf production/HA claim (o3kio/araf#106).
+        packaging/o3k-araf-demo.sh. The historical one-line installer
+        integration shipped in v0.4.0-rc.8; the rc.8/rc.12 campaigns are
+        retained under docs/evidence/pp4/, but do not prove the required native
+        browser workload journey; the tuple remains not-proven until a
+        successor tuple does. No Araf production/HA claim (o3kio/araf#106).
     evidence_dependencies:
       - native-rust-testlab
       - p15-7-scale-composition-real-host-gate
