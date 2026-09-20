@@ -4,9 +4,18 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The DAC identity checks below execute as the packaged service accounts.  A
 # root-owned 0750 /tmp (common on hardened hosts) would make those checks fail
-# before the fixture's ownership policy is exercised.  Use the world-
-# traversable temporary root by default, with an explicit override for CI.
-PACKAGING_TEST_ROOT="${O3K_PACKAGING_TEST_ROOT:-/var/tmp}"
+# before the fixture's ownership policy is exercised.  Root can therefore use
+# the world-traversable /var/tmp default, while an unprivileged CI runner must
+# use /tmp: the installer deliberately rejects every /var/* data path for a
+# non-root caller.  O3K_PACKAGING_TEST_ROOT remains an explicit override for
+# hardened runners and local sandboxes.
+if [[ -n "${O3K_PACKAGING_TEST_ROOT:-}" ]]; then
+  PACKAGING_TEST_ROOT="$O3K_PACKAGING_TEST_ROOT"
+elif [[ "$EUID" -eq 0 ]]; then
+  PACKAGING_TEST_ROOT=/var/tmp
+else
+  PACKAGING_TEST_ROOT=/tmp
+fi
 WORK_DIR="$(mktemp -d "${PACKAGING_TEST_ROOT%/}/o3k-packaging.XXXXXX")"
 trap 'rm -rf -- "${WORK_DIR}"' EXIT
 BINARY="${O3K_PACKAGING_BINARY:-${ROOT_DIR}/target/debug/o3kd}"

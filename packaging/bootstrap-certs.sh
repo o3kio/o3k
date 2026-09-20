@@ -134,6 +134,13 @@ for extra_id in "${EXTRA_AGENT_IDS[@]}"; do
       || { echo "extra agent certificate generation incomplete: $extra_id/$extra_file" >&2; exit 1; }
   done
 done
-if getent group o3k >/dev/null 2>&1; then chgrp o3k "$OUTPUT_DIR" "$OUTPUT_DIR"/*; fi
+# A root install assigns the certificate tree to the control-plane group.  A
+# user-scoped install must remain usable when an unrelated host already has a
+# group named `o3k`: merely resolving that name does not grant the caller
+# permission to change group ownership, and failing here would turn an
+# otherwise safe user-path operation into a false error.
+if [[ "$EUID" -eq 0 ]] && getent group o3k >/dev/null 2>&1; then
+  chgrp o3k "$OUTPUT_DIR" "$OUTPUT_DIR"/*
+fi
 rm -f -- "$OUTPUT_DIR/ca-key.pem" "$OUTPUT_DIR/agent.csr" "$OUTPUT_DIR/ca.srl"
 echo "generated O3K TestLab CA, server, and agent certificates under $OUTPUT_DIR for $SERVER_NAME agent=$AGENT_ID"
