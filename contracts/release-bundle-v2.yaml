@@ -1,0 +1,73 @@
+schema_version: 2
+status: accepted-successor-contract
+pp_phase: PP.4
+tracking_issue: 973
+supersedes: contracts/release-bundle-v1.yaml
+effective_for: v0.4.0-rc.9-and-later
+
+note: >-
+  Version 1 remains the immutable contract for historical releases. Version 2
+  keeps the same payload and checksum layout but replaces the unavailable
+  operator-held release key with a keyless Sigstore bundle produced by the
+  protected GitHub Actions release workflow. Checksums remain integrity data;
+  the Sigstore bundle authenticates release-digests.txt.
+
+distribution:
+  canonical_public_source: github-release-asset
+  convenience_redirect: get.o3k.io
+  redirect_authority: >-
+    get.o3k.io is only a convenience redirect / reviewed installer entrypoint.
+    It is never an independent artifact authority.
+  source_binding: >-
+    manifest.json, provenance.json, and the signed digest manifest bind every
+    payload asset to one exact release tag and source commit.
+
+required_assets:
+  - name: install.sh
+    role: installer entrypoint
+    source: packaging/get-o3k.sh
+  - name: "o3k-<version>-linux-x86_64.tar.gz"
+    role: release bundle archive
+  - name: "o3k-<version>-linux-x86_64.tar.gz.sha256"
+    role: single-line tarball checksum
+  - name: release-digests.txt
+    role: SHA-256 manifest for every release payload asset
+  - name: provenance.json
+    role: release, source, workflow, and payload binding
+  - name: release-digests.sigstore.json
+    role: Sigstore verification bundle for release-digests.txt
+
+bundle_required_files:
+  - manifest.json
+  - SHA256SUMS
+  - sbom.spdx.json
+
+authentication:
+  scheme: sigstore-keyless
+  target: release-digests.txt
+  bundle: release-digests.sigstore.json
+  oidc_issuer: https://token.actions.githubusercontent.com
+  repository: o3kio/o3k
+  workflow: .github/workflows/release.yml
+  release_environment: release
+  transparency_log_required: true
+  private_signing_key_required: false
+
+legacy:
+  contract: contracts/release-bundle-v1.yaml
+  scheme: ed25519
+  public_key: packaging/trust/o3k-release-ed25519-legacy.pub
+  applies_to: historical-releases-with-release-digests.sig
+
+build_baseline:
+  os: debian-12
+  glibc_floor: "2.36"
+  arch: x86_64
+  builder: scripts/build-release-binaries-debian12.sh
+
+verification_order:
+  - verify_sigstore_identity_and_transparency
+  - verify_release_digests
+  - verify_provenance_and_source_commit
+  - verify_bundle_checksums
+  - verify_installer_before_extraction

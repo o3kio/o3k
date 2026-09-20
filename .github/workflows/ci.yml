@@ -49,6 +49,8 @@ jobs:
           for file in packaging/*.sh tests/*.sh scripts/*.sh scripts/ci/*.sh; do bash -n "$file"; done
           bash tests/ci-apt-provision.sh
           python3 -m compileall -q scripts
+      - name: Validate release signing trust transition
+        run: bash tests/release-signing-migration.sh
       - name: Test P13.5E deterministic fault proxy and evidence artifact
         run: |
           python3 scripts/p13_5e_fault_proxy.py --self-test

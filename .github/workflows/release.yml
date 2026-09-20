@@ -1,0 +1,116 @@
+name: O3K protected release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Release tags must be protected by repository rules and the `release`
+# environment must require an explicit maintainer approval. This workflow is
+# intentionally not callable by untrusted changes or reusable dispatch.
+permissions:
+  contents: read
+
+concurrency:
+  group: o3k-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'o3kio/o3k' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact release tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Verify tag and source identity
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
+          test "$(git status --porcelain)" = ""
+
+      - name: Build Debian 12 release binaries
+        run: |
+          set -euo pipefail
+          scripts/build-release-binaries-debian12.sh
+
+      - name: Build and archive release bundle
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          O3K_RELEASE_BINARIES_DIR: ${{ github.workspace }}/target/release-debian12
+          O3K_RELEASE_SIGNATURE_SCHEME: sigstore
+          O3K_UPGRADE_FROM_MIN_VERSION: v0.4.0-rc.5
+          GITHUB_WORKFLOW: O3K protected release workflow
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          packaging/make-release.sh "$version" libvirt
+          packaging/make-release-archive.sh "$version"
+          packaging/verify-release-bundle.sh "dist/o3k-$version"
+
+      - name: Generate v2 provenance and digest manifest
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_WORKFLOW: O3K protected release workflow
+        run: packaging/make-provenance-sigstore.sh "$RELEASE_TAG" dist
+
+      - name: Install pinned Cosign
+        uses: sigstore/cosign-installer@828df1e55de306ba29db814d6057ddae71883cda # pinned action
+        with:
+          cosign-release: v3.1.3
+
+      - name: Sign release digest manifest with GitHub OIDC
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --bundle dist/release-digests.sigstore.json \
+            dist/release-digests.txt
+
+      - name: Self-verify Sigstore bundle and release payload
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          packaging/verify-release-sigstore.sh "$RELEASE_TAG" dist
+
+      - name: Publish immutable GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release already exists: $tag" >&2
+            exit 1
+          fi
+          cat > release-notes.md <<EOF
+          ## O3K $tag
+
+          PP.4 candidate. Not final release-gate approved and not production ready.
+
+          Authenticity uses the protected O3K GitHub Actions release workflow,
+          GitHub OIDC, and a Sigstore keyless bundle. This prerelease is
+          immutable by policy; defects require a successor candidate.
+          EOF
+          gh release create "$tag" \
+            dist/install.sh \
+            "dist/o3k-$version-linux-x86_64.tar.gz" \
+            "dist/o3k-$version-linux-x86_64.tar.gz.sha256" \
+            dist/release-digests.txt \
+            dist/release-digests.sigstore.json \
+            dist/provenance.json \
+            --prerelease --title "$tag" --notes-file release-notes.md

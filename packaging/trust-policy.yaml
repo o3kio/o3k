@@ -1,0 +1,15 @@
+schema_version: 1
+legacy:
+  scheme: ed25519
+  public_key: packaging/trust/o3k-release-ed25519-legacy.pub
+  public_key_fingerprint_sha256: 0b75fba397c47600bfb7244a9bac2720ebecc5c4057b758ae9a4ce5ead23cef7
+  applies_to: historical-releases-with-release-digests.sig
+current:
+  scheme: sigstore-keyless
+  first_release: v0.4.0-rc.9
+  oidc_issuer: https://token.actions.githubusercontent.com
+  repository: o3kio/o3k
+  workflow: .github/workflows/release.yml
+  environment: release
+  certificate_identity_template: https://github.com/o3kio/o3k/.github/workflows/release.yml@refs/tags/{tag}
+  transparency_log_required: true
