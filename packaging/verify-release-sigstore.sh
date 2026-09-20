@@ -13,7 +13,7 @@ TAG="v$VERSION_NO_V"
 for asset in release-digests.txt release-digests.sigstore.json provenance.json; do
   [[ -f "$DIST_ROOT/$asset" ]] || { echo "missing Sigstore release asset: $asset" >&2; exit 2; }
 done
-COMMIT="$(python3 - "$DIST_ROOT/$VERSION_NO_V/manifest.json" <<'PY'
+COMMIT="$(python3 - "$DIST_ROOT/o3k-$VERSION_NO_V/manifest.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     print(json.load(stream)["source_commit"])
