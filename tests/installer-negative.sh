@@ -68,8 +68,14 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WRAPPER="$ROOT_DIR/packaging/get-o3k.sh"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-installer-negative.XXXXXX")"
+# Keep the historical v0.4.0-rc.9 fixture matrix independent of the current
+# release pin. The real release source is intentionally advanced per immutable
+# candidate; this test's local HTTP fixture remains rc.9 by design.
+WRAPPER="$WORK_DIR/get-o3k.sh"
+sed 's/^O3K_INSTALLER_VERSION="v[^"]*"$/O3K_INSTALLER_VERSION="v0.4.0-rc.9"/' \
+  "$ROOT_DIR/packaging/get-o3k.sh" >"$WRAPPER"
+chmod 0755 "$WRAPPER"
 HTTP_PID=""
 HEALTH_PID_18080=""
 HEALTH_PID_9100=""
