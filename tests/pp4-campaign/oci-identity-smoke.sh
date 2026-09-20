@@ -55,17 +55,30 @@ declare -A IMAGE=(
 )
 
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 2; }
-docker buildx version >/dev/null 2>&1 || {
-  echo "docker buildx is required to verify public OCI index/platform identities" >&2
-  exit 2
-}
 
 for component in bff tenant-console operator-console; do
-  inspect="$(docker buildx imagetools inspect "${IMAGE[$component]}:${VERSION}")"
-  grep -Fq "Digest:    ${INDEX_DIGEST[$component]}" <<<"$inspect" \
-    || { echo "$component: OCI index digest mismatch" >&2; exit 1; }
-  grep -Fq "@${PLATFORM_DIGEST[$component]}" <<<"$inspect" \
-    || { echo "$component: linux/amd64 platform digest mismatch" >&2; exit 1; }
+  ref="${IMAGE[$component]}:${VERSION}"
+  docker pull --platform linux/amd64 "$ref" >/dev/null
+  actual_index="$(docker image inspect -f '{{index .RepoDigests 0}}' "$ref")"
+  expected_ref="${IMAGE[$component]}@${INDEX_DIGEST[$component]}"
+  [ "$actual_index" = "$expected_ref" ] || {
+    echo "$component: index digest mismatch: $actual_index (expected $expected_ref)" >&2
+    exit 1
+  }
+  actual_platform="$(docker manifest inspect --verbose "$ref" | python3 -c '
+import json
+import sys
+
+document = json.load(sys.stdin)
+if isinstance(document, list):
+    document = document[0]
+print(document["Descriptor"]["digest"])
+')"
+  [ "$actual_platform" = "${PLATFORM_DIGEST[$component]}" ] || {
+    echo "$component: platform digest mismatch: $actual_platform (expected ${PLATFORM_DIGEST[$component]})" >&2
+    exit 1
+  }
+  docker image rm "$ref" >/dev/null 2>&1 || true
   archive="$WORK/araf-${component}-${VERSION}.oci.tar"
   curl -fsSL --retry 3 -o "$archive" "$BASE/araf-${component}-${VERSION}.oci.tar"
   printf '%s  %s\n' "${TAR_SHA[$component]}" "$archive" | sha256sum -c - >/dev/null

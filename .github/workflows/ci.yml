@@ -343,9 +343,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Ubuntu Docker engine — Araf rc.15 OCI identity
+      - name: Ubuntu Docker engine — Araf rc.16 OCI identity
         run: bash tests/pp4-campaign/oci-identity-smoke.sh
-      - name: Debian 12 Docker engine — Araf rc.15 OCI identity
+      - name: Debian 12 Docker engine — Araf rc.16 OCI identity
         run: |
           set -euo pipefail
           docker run --rm --privileged --network host \
