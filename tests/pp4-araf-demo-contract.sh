@@ -83,7 +83,7 @@ done
 # --- pp4_tuple section (PP.4 #973 one-line installer integration) -------------
 check_grep "${TUPLE}" "pp4_tuple:"
 check_grep "${TUPLE}" "tracking_issue: 973"
-check_grep "${TUPLE}" "one_line_installer_integration: candidate-pending-successor-o3k-release"
+check_grep "${TUPLE}" "one_line_installer_integration: candidate-successor-release-pending-publication"
 check_grep "${TUPLE}" "supported_targets: [ubuntu-24.04-x86_64, debian-12-x86_64]"
 check_grep "${TUPLE}" "browser_trust: operator-imported demo CA"
 # pp4_tuple.araf digests == script constants (same drift gate as pp3)
@@ -97,8 +97,9 @@ done
 check_grep "${TUPLE}" "status: candidate-pending-fresh-host-evidence"
 check "pp4_tuple does not retain the historical O3K rc.8 pin" \
   sh -c "! sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'version: v0.4.0-rc.8'"
-check "pp4_tuple successor O3K identity is explicitly pending" \
-  sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'release_asset_identity: pending-successor-release'"
+check_grep "${TUPLE}" "version: v0.4.0-rc.9"
+check_grep "${TUPLE}" "source_sha: e52b7e7ecde09d66f3d37d8ee3d2309eb370aecc"
+check_grep "${TUPLE}" "release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.9"
 check "pp4_tuple requires the native IAM API contract" \
   sh -c "sed -n '/^pp4_tuple:/,\$p' '${TUPLE}' | grep -qF 'o3k-native-iam-v1'"
 
@@ -154,8 +155,7 @@ check "keycloak helpers retry with visible status (no silent set -e abort)" \
   sh -c "grep -q 'demo IdP admin API call did not succeed' '${SCRIPT}' && grep -q 'kc_user_id()' '${SCRIPT}'"
 
 # --- PP.4 one-line installer integration (get-o3k.sh) -------------------------
-check "wrapper release identity is explicitly deferred until successor selection" \
-  sh -c "grep -Eq '^O3K_INSTALLER_VERSION=\"pending-successor-release\"' '${WRAPPER}'"
+check_grep "${WRAPPER}" 'O3K_INSTALLER_VERSION="v0.4.0-rc.9"'
 check_grep "${WRAPPER}" 'pp4_stamp()'
 check_grep "${WRAPPER}" 'pp4_stamp T0'
 check_grep "${WRAPPER}" 'pp4_stamp T1'
@@ -190,7 +190,7 @@ check_no_grep "${WRAPPER}" "cargo "
 check_no_grep "${WRAPPER}" "docker build"
 
 # --- PP.4 demo script additions ------------------------------------------------
-check_grep "${SCRIPT}" 'O3K_TUPLE_VERSION="pending-successor-release"'
+check_grep "${SCRIPT}" 'O3K_TUPLE_VERSION="v0.4.0-rc.9"'
 check_no_grep "${SCRIPT}" 'O3K_TUPLE_SOURCE_SHA'
 check_grep "${SCRIPT}" 'ubuntu:24.04|debian:12' # OS preflight accepts both targets
 check_grep "${SCRIPT}" 'unsupported target'

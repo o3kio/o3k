@@ -115,7 +115,7 @@ fi
 # published install.sh GitHub Release asset is byte-identical to this file,
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
-O3K_INSTALLER_VERSION="pending-successor-release"
+O3K_INSTALLER_VERSION="v0.4.0-rc.9"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
@@ -444,8 +444,6 @@ printf '✓ %s %s\n' "${PRETTY_NAME:-${ID:-unknown} ${VERSION_ID:-unknown}}" "$(
 VERSION="${O3K_VERSION:-${O3K_PINNED_VERSION:-$O3K_INSTALLER_VERSION}}"
 VERSION="$(trim "$VERSION")"
 [ -n "$VERSION" ] || die "no installer version resolved"
-[ "$VERSION" != "pending-successor-release" ] \
-  || die "PP.4 successor O3K release is not selected; publish the candidate release before using the public installer"
 check_version_format "$VERSION"
 VERSION_NO_V="${VERSION#v}"
 

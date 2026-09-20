@@ -142,10 +142,11 @@ pp4_tuple:
   status: candidate-pending-fresh-host-evidence
   updated_by: PP.4 (#973) candidate integration
   o3k:
-    # No successor O3K release has been selected or published yet.
-    version: null
-    source_sha: null
-    release_asset_identity: pending-successor-release
+    # Successor identity selected from the repository release inventory. The
+    # public release remains pending until the immutable bundle is published.
+    version: v0.4.0-rc.9
+    source_sha: e52b7e7ecde09d66f3d37d8ee3d2309eb370aecc
+    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.9
   araf:
     version: v1.0.0-rc.15
     source_sha: f0c2a04a671d5edf7711cab63c4f83c49a9170d2
@@ -182,7 +183,7 @@ pp4_tuple:
     native_api_version: o3k-native-iam-v1
     auth_contract: araf-oidc-pkce-per-surface-confidential-client
   mechanism:
-    one_line_installer_integration: candidate-pending-successor-o3k-release
+    one_line_installer_integration: candidate-successor-release-pending-publication
     fresh_host_evidence: pending
     supported_targets: [ubuntu-24.04-x86_64, debian-12-x86_64]
     browser_trust: operator-imported demo CA
