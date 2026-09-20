@@ -4,6 +4,7 @@ Status: Accepted
 Date: 2026-09-20
 Review date: 2027-09-20
 Responsible maintainer: O3K maintainers
+Affected-services: governance
 Tracking: PP.4 / #973
 
 ## Context
