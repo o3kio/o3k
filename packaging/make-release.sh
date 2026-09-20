@@ -69,6 +69,16 @@ fi
 UPGRADE_FROM_VERSION_NO_V="${UPGRADE_FROM_MIN_VERSION#v}"
 [[ "$UPGRADE_FROM_VERSION_NO_V" =~ $VERSION_RE ]] \
   || { echo "upgrade_from.min_version must be a published release version: $UPGRADE_FROM_MIN_VERSION" >&2; exit 2; }
+# The one-line installer is intentionally pinned to its own immutable release.
+# Fail before building anything when a version-bump commit forgot to update the
+# baked pin; otherwise a published asset can silently fetch a different
+# release (as the first keyless candidate demonstrated).
+INSTALLER_PIN="$(sed -n 's/^O3K_INSTALLER_VERSION="\(v[^\"]*\)"$/\1/p' "$ROOT_DIR/packaging/get-o3k.sh")"
+[[ "$INSTALLER_PIN" == "v$VERSION" ]] || {
+  echo "packaging/get-o3k.sh is pinned to $INSTALLER_PIN, expected v$VERSION" >&2
+  echo "update O3K_INSTALLER_VERSION in the release source before packaging" >&2
+  exit 2
+}
 DIST_ROOT="${O3K_RELEASE_DIST_DIR:-$ROOT_DIR/dist}"
 if [[ -L "$DIST_ROOT" || ( -e "$DIST_ROOT" && ! -d "$DIST_ROOT" ) ]]; then
   echo "release dist root must be a real directory, not a symlink or special file" >&2
