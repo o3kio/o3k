@@ -859,6 +859,55 @@ async fn allocation_is_deterministic_collision_safe_and_restartable()
 }
 
 #[tokio::test]
+async fn caller_supplied_port_identity_is_stable_and_conflicts_on_replay()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("stable-port-id");
+    let _ = fs::remove_dir_all(&path);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open_for_test(&path, store).await?;
+    let network = service
+        .create_network(&auth("project-a"), "stable".to_owned())
+        .await?;
+    service
+        .create_subnet(
+            &auth("project-a"),
+            network.id,
+            "stable-subnet".to_owned(),
+            "192.0.2.0/29".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"native:stable-port");
+    let first = service
+        .create_port_for_project_with_id_and_fixed_ip(
+            "project-a",
+            id,
+            network.id,
+            "native-server-endpoint".to_owned(),
+            None,
+        )
+        .await?;
+    assert_eq!(first.id, id);
+    assert!(matches!(
+        service
+            .create_port_for_project_with_id_and_fixed_ip(
+                "project-a",
+                id,
+                network.id,
+                "native-server-endpoint".to_owned(),
+                None,
+            )
+            .await,
+        Err(NetworkError::Conflict)
+    ));
+    assert_eq!(service.get_port(&auth("project-a"), id).await?, first);
+    let _ = fs::remove_dir_all(path);
+    Ok(())
+}
+
+#[tokio::test]
 async fn legacy_metadata_file_is_imported_once_and_never_read_again()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = root("legacy-import");

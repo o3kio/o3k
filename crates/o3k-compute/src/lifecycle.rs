@@ -934,6 +934,7 @@ impl ComputeService {
                     "server create reconciliation failed"
                 );
             }
+            self.project_failed_create_error(id).await?;
             if let Err(error) = self.store.detach_server_keypair(id).await {
                 release_quota_and_return!(ComputeError::Store(error));
             }

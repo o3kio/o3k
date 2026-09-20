@@ -160,17 +160,11 @@ impl NetworkService {
                 && candidate >= u32::from(pool.first_usable)
                 && candidate <= u32::from(pool.last_usable)
             {
-                // Ordinary allocation must use a fresh operation identity for
-                // each candidate. A failed IP attempt releases its quota
-                // reservation, but the reservation key remains idempotent;
-                // reusing the same ID would turn a normal pool collision into
-                // a false Conflict. Explicit migration IDs are used only with
-                // requested addresses and remain stable for source mappings.
-                let port_id = if explicit_ip.is_some() {
-                    id
-                } else {
-                    Uuid::now_v7()
-                };
+                // The endpoint identity is supplied by the caller. The
+                // ordinary random-ID wrapper passes a fresh v7 UUID, while
+                // migration and native compute resolution pass a deterministic
+                // UUID so retries cannot create a second endpoint.
+                let port_id = id;
                 let port = PortRecord {
                     id: port_id,
                     network_id,
@@ -250,9 +244,7 @@ impl NetworkService {
                             .repository
                             .release_reservation(&quota_res.id)
                             .await;
-                        if explicit_ip.is_some() {
-                            return Err(NetworkError::Conflict);
-                        }
+                        return Err(NetworkError::Conflict);
                     }
                     Err(error) => {
                         let _ = self

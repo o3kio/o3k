@@ -1,11 +1,12 @@
 use super::{
     AgentNodeRegistry, Arc, AttachmentOrchestrator, ComputeError, ComputeService,
     CreateInstanceRequest, Duration, OperationJournal, PortBindingProjector, ProviderBackend,
-    Scheduler, StaticAuthorizer, Uuid, VolumeAttachmentProvider,
+    Scheduler, ServerState, StaticAuthorizer, Uuid, VolumeAttachmentProvider,
 };
 
 use o3k_kernel::{Authorizer, MemoryAuditSink, RequiredAuditPublisher};
 use o3k_store::ComputeRepository;
+use o3k_store::server_state_to_storage;
 
 impl ComputeService {
     /// Publish mandatory control-plane evidence before acknowledging an
@@ -415,6 +416,31 @@ impl ComputeService {
             self.release_placement_allocation(resource.id, &request)
                 .await?;
         }
+        Ok(())
+    }
+
+    /// Projects a synchronously observed terminal create failure onto the
+    /// canonical resource. The direct create API can drive the journal in the
+    /// request path (rather than through the read-side convergence loop), so
+    /// it must not leave a failed operation visible as REQUESTED forever.
+    pub(super) async fn project_failed_create_error(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<(), ComputeError> {
+        let resource = self.store.get_resource(resource_id).await?;
+        if resource.observed_state == server_state_to_storage(ServerState::Error) {
+            return Ok(());
+        }
+        self.store
+            .update_resource(
+                resource.id,
+                resource.generation,
+                &resource.desired_state,
+                server_state_to_storage(ServerState::Error),
+                resource.generation,
+                resource.provider_id.as_deref(),
+            )
+            .await?;
         Ok(())
     }
 
