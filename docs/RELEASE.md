@@ -135,11 +135,7 @@ cosign verify-blob \
 
 The verifier requires the exact repository, workflow path, release tag,
 issuer, and transparency proof. It rejects another repository, workflow,
-branch, issuer, modified digest manifest, or missing bundle. A release must
-not be described as signed merely because it contains checksums: checksums are
-integrity, not authenticity, and an artifact is never signed merely because it
-contains checksums. The application/browser OIDC authority (Keycloak in the
-PP.4 TestLab) is separate from GitHub's release-workload OIDC.
+branch, issuer, modified digest manifest, or missing bundle. A release must not be described as signed merely because it contains checksums: checksums are integrity, not authenticity, and an artifact is never signed merely because it contains checksums. The application/browser OIDC authority (Keycloak in the PP.4 TestLab) is separate from GitHub's release-workload OIDC.
 
 The libvirt alpha also requires `packaging/release-gate.sh` to report
 `status: ready` from real E2E, recovery, clean Ubuntu/Debian installation,
