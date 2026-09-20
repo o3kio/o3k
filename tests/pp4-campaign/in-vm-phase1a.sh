@@ -325,13 +325,18 @@ docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' \
 docker inspect -f '{{.Image}}' o3k-araf-demo-tenant-bff-1 o3k-araf-demo-tenant-console-1 \
   o3k-araf-demo-operator-console-1 > "$EVID/10b-araf-image-digests.txt" \
   || die "cannot read deployed image digests"
+docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+  o3k-araf-demo-tenant-bff-1 o3k-araf-demo-tenant-console-1 \
+  o3k-araf-demo-operator-console-1 > "$EVID/10b-araf-image-revisions.txt" \
+  || die "cannot read deployed image source revisions"
 bash "$DEMO" tuple > "$EVID/10d-araf-tuple-reported.txt" 2>&1 || die "cannot read the pinned demo tuple"
 python3 - "$DEMO" "$EVID/10a-araf-tenant-bff-env.txt" "$EVID/10b-araf-image-digests.txt" \
-  "$EVID/10c-araf-compose-services.txt" "$EVID/10d-araf-tuple-reported.txt" \
+  "$EVID/10b-araf-image-revisions.txt" "$EVID/10c-araf-compose-services.txt" \
+  "$EVID/10d-araf-tuple-reported.txt" \
   "$EVID/10-araf-production-tuple.txt" <<'PY' || die "deployed Araf is not the pinned production tuple"
 import re, sys
 
-demo_path, env_path, digests_path, services_path, reported_path, out_path = sys.argv[1:7]
+demo_path, env_path, digests_path, revisions_path, services_path, reported_path, out_path = sys.argv[1:8]
 
 demo = open(demo_path, encoding="utf-8").read()
 pinned = dict(re.findall(r'^(ARAF_[A-Z0-9_]+)="?([^"\n]+)"?$', demo, re.M))
@@ -349,17 +354,31 @@ assert "fixture" not in env.lower(), "fixture-mode marker in the deployed tenant
 # Observed image identity must equal the pinned config OR index digest of the
 # matching component (docker stores either form depending on the image store).
 observed = [line.strip() for line in open(digests_path, encoding="utf-8") if line.strip()]
+revisions = [line.strip() for line in open(revisions_path, encoding="utf-8")]
 components = [
     ("tenant-bff", "ARAF_BFF"),
     ("tenant-console", "ARAF_TENANT_CONSOLE"),
     ("operator-console", "ARAF_OPERATOR_CONSOLE"),
 ]
 assert len(observed) == len(components), observed
-for (name, prefix), digest in zip(components, observed):
+assert len(revisions) == len(components), revisions
+identity_kinds = []
+for (name, prefix), digest, revision in zip(components, observed, revisions):
     allowed = {pinned.get(f"{prefix}_DIGEST"), pinned.get(f"{prefix}_CONFIG_DIGEST")}
     allowed.discard(None)
     assert allowed, f"no pinned digest constants for {prefix}"
-    assert digest in allowed, f"{name} image {digest} is not the pinned digest {sorted(allowed)}"
+    if digest in allowed:
+        identity_kinds.append("digest")
+    else:
+        # Docker/containerd may re-materialize an OCI archive and expose a
+        # local image ID that is neither the registry index nor config digest.
+        # The archive config was verified before load; require the immutable
+        # Araf source revision label as the second independent identity proof.
+        assert revision == pinned.get("ARAF_SOURCE_SHA"), (
+            f"{name} image {digest} is not pinned and has revision {revision!r}, "
+            f"expected {pinned.get('ARAF_SOURCE_SHA')!r}"
+        )
+        identity_kinds.append("source-revision")
 
 expected_services = {
     "idp", "tenant-bff", "operator-bff", "tenant-console",
@@ -388,6 +407,10 @@ with open(out_path, "w", encoding="utf-8") as handle:
     handle.write(f"ARAF_BFF_IMAGE_DIGEST={observed[0]}\n")
     handle.write(f"ARAF_TENANT_CONSOLE_IMAGE_DIGEST={observed[1]}\n")
     handle.write(f"ARAF_OPERATOR_CONSOLE_IMAGE_DIGEST={observed[2]}\n")
+    handle.write(f"ARAF_BFF_IMAGE_REVISION={revisions[0]}\n")
+    handle.write(f"ARAF_TENANT_CONSOLE_IMAGE_REVISION={revisions[1]}\n")
+    handle.write(f"ARAF_OPERATOR_CONSOLE_IMAGE_REVISION={revisions[2]}\n")
+    handle.write(f"ARAF_IMAGE_IDENTITY_KINDS={','.join(identity_kinds)}\n")
     handle.write(f"ARAF_COMPOSE_SERVICES={','.join(sorted(observed_services))}\n")
 PY
 case_ok I14 "deployed Araf is the pinned production tuple (native o3k adapter, pinned digests, 7 services)"

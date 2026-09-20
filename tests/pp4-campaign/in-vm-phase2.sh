@@ -117,6 +117,12 @@ araf_image_digests() {
     o3k-araf-demo-operator-console-1
 }
 
+araf_image_revisions() {
+  docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+    o3k-araf-demo-tenant-bff-1 o3k-araf-demo-tenant-console-1 \
+    o3k-araf-demo-operator-console-1
+}
+
 # ---- post-reboot recovery -------------------------------------------------------------
 curl -sf http://127.0.0.1:18080/readyz >/dev/null || die "o3kd not ready after reboot"
 curl -sf http://127.0.0.1:9100/readyz >/dev/null || die "o3k-compute not ready after reboot"
@@ -134,6 +140,7 @@ case_ok R1 "post-reboot recovery: O3K + Araf + workload healthy"
 # ---- same-version rerun convergence ----------------------------------------------------
 assert_demo_container_set "pre-rerun"
 araf_image_digests > "$EVID/25-image-digests-before.txt"
+araf_image_revisions > "$EVID/25-image-revisions-before.txt"
 canonical_snapshot "$EVID/25-canonical-state-before.json" || die "cannot snapshot canonical state before the rerun"
 cp /var/lib/o3k/install-timestamps.env "$EVID/25-timestamps-before-rerun.env"
 openstack server list -f json > "$EVID/25-servers-before-rerun.json" \
@@ -184,13 +191,18 @@ assert len(after["placement_providers"]) >= 1, after["placement_providers"]
 PY
 assert_demo_container_set "post-rerun"
 araf_image_digests > "$EVID/25-image-digests-after.txt"
+araf_image_revisions > "$EVID/25-image-revisions-after.txt"
 diff "$EVID/25-image-digests-before.txt" "$EVID/25-image-digests-after.txt" \
   || die "demo image digests changed across the rerun (silent image swap)"
-python3 - "$EVID/25-image-digests-after.txt" "$EVID/10-araf-production-tuple.txt" <<'PY' || die "demo images no longer match the pinned tuple after the rerun"
+diff "$EVID/25-image-revisions-before.txt" "$EVID/25-image-revisions-after.txt" \
+  || die "demo image source revisions changed across the rerun (silent image swap)"
+python3 - "$EVID/25-image-digests-after.txt" "$EVID/25-image-revisions-after.txt" \
+  "$EVID/10-araf-production-tuple.txt" <<'PY' || die "demo images no longer match the pinned tuple after the rerun"
 import sys
 after = [line.strip() for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+revisions = [line.strip() for line in open(sys.argv[2], encoding="utf-8")]
 pinned = {}
-for line in open(sys.argv[2], encoding="utf-8"):
+for line in open(sys.argv[3], encoding="utf-8"):
     if "=" in line:
         key, _, value = line.strip().partition("=")
         pinned[key] = value
@@ -199,7 +211,12 @@ expected = [
     pinned["ARAF_TENANT_CONSOLE_IMAGE_DIGEST"],
     pinned["ARAF_OPERATOR_CONSOLE_IMAGE_DIGEST"],
 ]
-assert after == expected, f"image digest drift after rerun: {after} != {expected}"
+assert len(after) == len(expected) == len(revisions), (after, expected, revisions)
+for observed, revision, digest in zip(after, revisions, expected):
+    assert observed == digest or revision == pinned["ARAF_SOURCE_SHA"], (
+        f"image identity drift after rerun: observed={observed} revision={revision} "
+        f"expected_digest={digest} source={pinned['ARAF_SOURCE_SHA']}"
+    )
 PY
 python3 - "$(cat /usr/local/share/o3k/release-manifest.json)" "$O3K_CAMPAIGN_VERSION" <<'PY' || die "release identity drifted across rerun"
 import json, sys

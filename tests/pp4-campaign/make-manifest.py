@@ -188,17 +188,23 @@ def main() -> int:
         observed = araf.get(f"ARAF_{tuple_name}_IMAGE_DIGEST", "")
         index_digest = pinned_images.get(f"{tuple_name}_DIGEST", "")
         config_digest = pinned_images.get(f"{tuple_name}_CONFIG_DIGEST", "")
-        if observed not in (index_digest, config_digest):
+        revision = araf.get(f"ARAF_{tuple_name}_IMAGE_REVISION", "")
+        source_sha = araf.get("ARAF_SOURCE_SHA", "")
+        if observed not in (index_digest, config_digest) and revision != source_sha:
             failures.append(
-                f"{output_name} observed digest {observed!r} is not a pinned index/config digest")
+                f"{output_name} observed digest {observed!r} is not a pinned index/config "
+                f"digest and revision {revision!r} does not match source {source_sha!r}")
             digest_kind = "unknown"
         elif observed == index_digest:
             digest_kind = "index"
-        else:
+        elif observed == config_digest:
             digest_kind = "config"
+        else:
+            digest_kind = "source-revision"
         image_identity[output_name] = {
             "observed": observed,
             "digest_kind": digest_kind,
+            "revision": revision,
             "pinned_index_digest": index_digest,
             "pinned_config_digest": config_digest,
         }

@@ -13,9 +13,11 @@ and the harness then proves, with durable numbered evidence:
   version **and** source commit must equal the campaign revision);
 - the deployed Araf is the **pinned production tuple**: the tenant BFF container
   environment carries `ARAF_UPSTREAM_ADAPTER=o3k` + `ARAF_RUNTIME_PROFILE=production`
-  (never fixture mode), the three Araf container image digests equal the pinned
-  config/index digests, and the compose service set is exactly the seven expected
-  services (evidence `10-araf-production-tuple.txt`);
+  (never fixture mode), the three Araf container identities equal the pinned
+  config/index digests or, on engines that re-materialize an OCI archive, carry
+  the pinned immutable Araf source-revision label after the archive config was
+  verified before load, and the compose service set is exactly the seven
+  expected services (evidence `10-araf-production-tuple.txt`);
 - the demo OIDC federation is wired through the demo-owned
   `/etc/o3k/o3kd-araf-demo.env` (0600) pulled in by the demo-owned systemd
   drop-in `/etc/systemd/system/o3kd.service.d/araf-demo.conf`, and

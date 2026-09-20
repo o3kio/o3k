@@ -144,14 +144,14 @@ pp4_tuple:
   o3k:
     # Successor identity selected from the repository release inventory. The
     # public release remains pending until the immutable bundle is published.
-    version: v0.4.0-rc.14
+    version: v0.4.0-rc.15
     # The candidate must not predict the commit that will contain this
     # metadata. The immutable signed release manifest and provenance bind the
     # eventual source identity after publication; the installed runtime reads
     # that verified identity from the release bundle.
     source_sha: null
     source_identity_authority: signed-release-manifest
-    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.14
+    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.15
   araf:
     version: v1.0.0-rc.15
     source_sha: f0c2a04a671d5edf7711cab63c4f83c49a9170d2

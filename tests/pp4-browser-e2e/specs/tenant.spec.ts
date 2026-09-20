@@ -455,7 +455,10 @@ test("UI creates a native VM through the schema-driven form", async () => {
   await nameField.fill(env.vmName);
   await imageField.fill(env.imageId);
   await flavorField.fill(flavorId);
-  await networkField.fill(env.networkId); // text widget; the array contract needs []
+  // The schema contract is an array of network IDs. The generated text widget
+  // accepts JSON, so submit a one-element JSON array rather than a scalar UUID
+  // (which the form correctly rejects as invalid input).
+  await networkField.fill(JSON.stringify([env.networkId]));
 
   // The REAL UI submit. No BFF fallback exists for this step.
   await auth.page.getByRole("button", { name: "Create Server" }).click();
