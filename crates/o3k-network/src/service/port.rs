@@ -116,6 +116,41 @@ impl NetworkService {
         name: String,
         requested_fixed_ip: Option<(Uuid, Option<Ipv4Addr>)>,
     ) -> Result<PortRecord, NetworkError> {
+        self.create_port_for_project_internal(
+            project_id,
+            id,
+            network_id,
+            name,
+            requested_fixed_ip,
+            requested_fixed_ip.is_some(),
+        )
+        .await
+    }
+
+    /// Creates an endpoint with a caller-owned identity even when the
+    /// address is allocated from a pool. Native compute uses this stable
+    /// entry point so replay cannot create a second endpoint; ordinary pool
+    /// allocation retains its collision-safe fresh identity behavior.
+    pub async fn create_port_for_project_with_stable_id(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        network_id: Uuid,
+        name: String,
+    ) -> Result<PortRecord, NetworkError> {
+        self.create_port_for_project_internal(project_id, id, network_id, name, None, true)
+            .await
+    }
+
+    async fn create_port_for_project_internal(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        network_id: Uuid,
+        name: String,
+        requested_fixed_ip: Option<(Uuid, Option<Ipv4Addr>)>,
+        stable_id: bool,
+    ) -> Result<PortRecord, NetworkError> {
         self.get_canonical_network_for_project(project_id, network_id)
             .await?;
         let realms = self
@@ -160,11 +195,11 @@ impl NetworkService {
                 && candidate >= u32::from(pool.first_usable)
                 && candidate <= u32::from(pool.last_usable)
             {
-                // The endpoint identity is supplied by the caller. The
-                // ordinary random-ID wrapper passes a fresh v7 UUID, while
-                // migration and native compute resolution pass a deterministic
-                // UUID so retries cannot create a second endpoint.
-                let port_id = id;
+                // Ordinary pool allocation uses a fresh identity for each
+                // candidate so an address collision can advance through the
+                // pool. Stable native/migration callers opt into the supplied
+                // identity to make replay deterministic.
+                let port_id = if stable_id { id } else { Uuid::now_v7() };
                 let port = PortRecord {
                     id: port_id,
                     network_id,
@@ -244,7 +279,9 @@ impl NetworkService {
                             .repository
                             .release_reservation(&quota_res.id)
                             .await;
-                        return Err(NetworkError::Conflict);
+                        if stable_id {
+                            return Err(NetworkError::Conflict);
+                        }
                     }
                     Err(error) => {
                         let _ = self

@@ -881,23 +881,21 @@ async fn caller_supplied_port_identity_is_stable_and_conflicts_on_replay()
         .await?;
     let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"native:stable-port");
     let first = service
-        .create_port_for_project_with_id_and_fixed_ip(
+        .create_port_for_project_with_stable_id(
             "project-a",
             id,
             network.id,
             "native-server-endpoint".to_owned(),
-            None,
         )
         .await?;
     assert_eq!(first.id, id);
     assert!(matches!(
         service
-            .create_port_for_project_with_id_and_fixed_ip(
+            .create_port_for_project_with_stable_id(
                 "project-a",
                 id,
                 network.id,
                 "native-server-endpoint".to_owned(),
-                None,
             )
             .await,
         Err(NetworkError::Conflict)

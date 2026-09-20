@@ -2394,12 +2394,11 @@ impl ResourceApplication for GenericResourceApplication {
                             );
                             let (port, created_here) = match self
                                 .network_service
-                                .create_port_for_project_with_id_and_fixed_ip(
+                                .create_port_for_project_with_stable_id(
                                     &project_id,
                                     deterministic_port_id,
                                     port_id,
                                     format!("o3k-server:{project_id}:{key}"),
-                                    None,
                                 )
                                 .await
                             {
