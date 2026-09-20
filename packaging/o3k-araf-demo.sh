@@ -50,7 +50,7 @@ umask 077
 # ---------------------------------------------------------------------------
 ARAF_VERSION="v1.0.0-rc.15"
 ARAF_SOURCE_SHA="f0c2a04a671d5edf7711cab63c4f83c49a9170d2"
-O3K_TUPLE_VERSION="v0.4.0-rc.13"
+O3K_TUPLE_VERSION="v0.4.0-rc.14"
 
 ARAF_BFF_IMAGE="ghcr.io/o3kio/araf-bff"
 ARAF_BFF_DIGEST="sha256:03932c77e9b6b995c2b5594d0f9311eb304b0b6930bba01622ba2286fce98f2f"
