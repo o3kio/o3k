@@ -164,7 +164,7 @@ if (( address_realm_rc != 0 )); then
 fi
 native /network/networks GET "$EVID/native-networks.json" --expect 200 || fail 'native network collection unavailable'
 native "/network/networks/$network_id" GET "$EVID/native-network-show.json" --expect 200 || fail 'native network authority show unavailable'
-[[ "$(jq -r '.id // .resource.metadata.id // .resource_id // empty' "$EVID/native-network-show.json")" == "$network_id" ]] || fail 'native network authority identity mismatch'
+[[ "$(jq -r '.id // .metadata.id // .resource.metadata.id // .resource_id // empty' "$EVID/native-network-show.json")" == "$network_id" ]] || fail 'native network authority identity mismatch'
 openstack network show "$network_id" -f json >"$EVID/native-network.json" || fail 'native network authority observation failed'
 openstack subnet list --network "$network_id" -f json >"$EVID/native-subnets.json" || fail 'native subnet authority observation failed'
 printf 'network_id=%s\nexisting_port=%s\nexisting_ip=%s\n' "$network_id" "$existing_port" "$existing_ip" >>"$EVID/state.env"
