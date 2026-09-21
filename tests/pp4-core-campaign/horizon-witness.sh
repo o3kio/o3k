@@ -22,6 +22,7 @@ cat >"$CONF/config.json" <<'EOF'
 {"command":"/usr/sbin/apache2ctl -DFOREGROUND","config_files":[{"source":"/var/lib/kolla/config_files/src/local_settings","dest":"/etc/openstack-dashboard/local_settings","owner":"horizon","perm":"0644"}]}
 EOF
 cat >"$CONF/local_settings" <<'EOF'
+import os
 DEBUG=False
 ALLOWED_HOSTS=['*']
 WEBROOT='/'
@@ -30,9 +31,14 @@ OPENSTACK_HOST='172.17.0.1'
 OPENSTACK_KEYSTONE_URL='http://172.17.0.1:18090/v3'
 OPENSTACK_KEYSTONE_DEFAULT_ROLE='admin'
 OPENSTACK_ENDPOINT_TYPE='publicURL'
-SECRET_KEY='pp4-core-witness-local-session-only'
+SECRET_KEY=os.environ.get('HORIZON_SECRET_KEY','pp4-core-witness-local-session-only')
 CACHES={'default':{'BACKEND':'django.core.cache.backends.locmem.LocMemCache'}}
+HORIZON_CONFIG={
+    'help_url':'http://docs.openstack.org',
+    'exceptions':{'recoverable':[],'not_found':[],'unauthorized':[]},
+}
 EOF
+chmod 755 "$CONF" "$CONF/config.json" "$CONF/local_settings"
 "${DOCKER[@]}" run -d --name "$NAME" --restart no -e KOLLA_CONFIG_STRATEGY=COPY_ALWAYS -e KEYSTONE_ADMIN_PASSWORD="$OS_PASSWORD" -p 127.0.0.1:18091:80 -v "$CONF:/var/lib/kolla/config_files/src:ro" "$IMAGE" >"$EVID/horizon-run.txt" 2>&1 || { summary 'RESULT: FAIL container-start'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; }
 ready=0; for _ in $(seq 1 90); do curl -sf http://127.0.0.1:18091/ >/dev/null 2>&1 && ready=1 && break; sleep 2; done
 if (( ready == 0 )); then "${DOCKER[@]}" logs "$NAME" >"$EVID/horizon-docker.log" 2>&1 || true; summary 'RESULT: FAIL http-readiness'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; fi
