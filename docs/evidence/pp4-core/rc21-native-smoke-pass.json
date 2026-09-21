@@ -1,0 +1,53 @@
+{
+  "candidate": {
+    "release": "v0.4.0-rc.21",
+    "source_sha": "0a3fa9f186ba99cfee91a95e3df928b861e17667",
+    "archive_sha256": "9f87865dd853abc215ecef8f0d19e1f2ee4ce315dc38477bf52fd0b5bcd984fb",
+    "provenance": "sigstore-keyless; cosign verify-blob Verified OK"
+  },
+  "round_trip": {
+    "archive_sha256_check": "PASS",
+    "sigstore_bundle_verify": "PASS",
+    "provenance_source_commit_exact": "PASS",
+    "sbom_spdx": "PASS (SPDX-2.3)",
+    "bundle_self_verification": "PASS (SHA256SUMS + glibc floor 2.34 <= 2.36)"
+  },
+  "campaign": {
+    "harness": "tests/pp4-core-campaign/host-run.sh ubuntu",
+    "host": "fresh disposable Ubuntu 24.04 nested KVM VM",
+    "araf": false,
+    "harness_result": "PASS",
+    "campaign_env": "release=v0.4.0-rc.21 source_sha=0a3fa9f186ba99cfee91a95e3df928b861e17667 distro=ubuntu campaign_status=PASS"
+  },
+  "first_create": {
+    "server_id": "9397a51a-fb3a-5671-8d8b-91f7c025e390",
+    "operation_id": "0b7be8f5-5aaf-560a-a74b-9ab731b926bd",
+    "operation_state": "succeeded",
+    "server_state": "ACTIVE",
+    "compatibility_port_ip": "192.0.2.2",
+    "native_port_ip": "192.0.2.3",
+    "libvirt_domain": "o3k-4d109efd46810914e9c3",
+    "libvirt_state": "running",
+    "managed_by": "o3k-compute",
+    "guest_boot": "PASS (console log marker cirros|login:)"
+  },
+  "replay": {
+    "same_idempotency_key": "pp4-core-native-create-rc18",
+    "request": "byte-equivalent native create request",
+    "http_status": "success (200/201/202)",
+    "same_server": "9397a51a-fb3a-5671-8d8b-91f7c025e390",
+    "same_operation": "0b7be8f5-5aaf-560a-a74b-9ab731b926bd",
+    "same_port": true,
+    "same_ip": true,
+    "second_provider_side_effect": "none",
+    "classification": "rc.18 defect fixed in rc.21"
+  },
+  "different_body_conflict": {
+    "same_idempotency_key": "pp4-core-native-create-rc18",
+    "changed": "spec.name",
+    "http_status": 409,
+    "original_resource_unchanged": true
+  },
+  "secret_scan": "PASS (no Authorization/Bearer/token/private-key patterns in evidence)",
+  "secrets": "redacted; no reusable credentials included"
+}
