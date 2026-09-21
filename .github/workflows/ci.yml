@@ -213,6 +213,10 @@ jobs:
         run: cargo test --workspace --all-features
       - name: P12.4 PostgreSQL conformance (mandatory)
         run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --ignored --nocapture
+      - name: P12.7 cross-process native replay conformance (mandatory)
+        # Independently-spawned runtimes share only the durable store, so the
+        # canonical replay authority is proven durable rather than process-local.
+        run: cargo test -p o3kd --test p12_7_cross_process_replay --all-features -- --ignored --nocapture
       - name: Emit exact-source binary build manifest (preparation for artifact pipeline)
         # Safest useful preparation for the follow-up pre-built-artifact pipeline:
         # record the exact commit and sha256 of the two protected-run binaries so

@@ -1393,16 +1393,20 @@ async fn run_native_http_same_key_replay(
     let concurrent_a_json = response_json(concurrent_a).await;
     let concurrent_b_status = concurrent_b.status();
     let concurrent_b_json = response_json(concurrent_b).await;
-    assert_eq!(
-        concurrent_a_status,
-        StatusCode::CREATED,
-        "{concurrent_a_json}"
-    );
-    assert_eq!(
-        concurrent_b_status,
-        StatusCode::CREATED,
-        "{concurrent_b_json}"
-    );
+    // An equivalent replay resolves the canonical result without re-driving the
+    // create, so a caller that observes the operation while the winning caller
+    // is still dispatching legitimately receives ``202 Accepted`` (in-flight)
+    // rather than ``201 Created``. Either way both callers converge on the same
+    // canonical identity and the winning caller completes synchronously.
+    for (status, body) in [
+        (concurrent_a_status, &concurrent_a_json),
+        (concurrent_b_status, &concurrent_b_json),
+    ] {
+        assert!(
+            status == StatusCode::CREATED || status == StatusCode::ACCEPTED,
+            "{body}"
+        );
+    }
     assert_eq!(
         concurrent_a_json["resource_id"],
         concurrent_b_json["resource_id"]

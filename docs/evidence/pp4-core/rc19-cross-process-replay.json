@@ -1,0 +1,52 @@
+{
+  "candidate_family": "PP.4 Core successor to v0.4.0-rc.18",
+  "base_source_sha": "f55f842e422801c2976531a460a7aa5829175ffb",
+  "gate": "independent cross-process native compute-create replay",
+  "purpose": "Prove the canonical native replay authority is durable rather than process-local: two independently spawned runtimes that share only the durable store (never memory) must converge on one canonical identity with zero duplicate side effects.",
+  "runtime_independence": {
+    "runtime_a": "separate OS process (re-exec of the p12_7_cross_process_replay test binary)",
+    "runtime_b": "separate OS process",
+    "shared_state": "durable store only (disposable PostgreSQL database)",
+    "process_local_shared_state": "none",
+    "pools": "each runtime constructs its own O3kStore connection pool, Placement ledger handle, ComputeService, NetworkService and provider"
+  },
+  "test_command": "cargo test -p o3kd --test p12_7_cross_process_replay --all-features -- --ignored --nocapture",
+  "cases": [
+    "cross_process_sequential_replay_postgres",
+    "cross_process_concurrent_replay_postgres",
+    "cross_process_in_flight_replay_postgres",
+    "cross_process_terminal_replay_and_conflict_postgres",
+    "cross_process_restart_replay_postgres",
+    "cross_process_sequential_replay_sqlite",
+    "cross_process_restart_replay_sqlite"
+  ],
+  "durable_invariants_asserted": {
+    "canonical_idempotency_reservation": 1,
+    "canonical_operation": 1,
+    "compute_resource": 1,
+    "deterministic_native_port": 1,
+    "placement_allocation": 1,
+    "quota_usage": 1,
+    "provider_instance_identity": 1
+  },
+  "defects_exposed_and_corrected": [
+    {
+      "id": "name-conflict-rejects-concurrent-identical-canonical-write",
+      "symptom": "an equivalent same-key create from the second runtime returned HTTP 409 because a name-conflict check saw the row the first runtime had just persisted under the same deterministic server identity",
+      "correction": "the pre-persistence name checks ignore the request's own deterministic server_id, so only a *different* live server with the same name conflicts; the canonical reservation resolves the equivalent write as a replay"
+    },
+    {
+      "id": "replay-response-re-drove-create-convergence",
+      "symptom": "an equivalent replay response triggered the read-triggered create-convergence drive, dispatching a second provider create while the first runtime was still completing",
+      "correction": "canonical replay paths return the durable projection without the convergence drive; convergence stays owned by the accepting create, the poll surface, or the periodic sweep"
+    },
+    {
+      "id": "placement-commit-conflict-surfaced-as-caller-conflict",
+      "symptom": "when a peer committed the deterministic allocation first, the losing scheduler attempt mapped PlacementError::InvalidAllocation to ComputeError::Conflict (HTTP 409) instead of converging",
+      "correction": "the scheduler re-observes the durable allocation on intent/commit/abandon placement errors and returns the existing decision, extending the rc.18 NoValidHost convergence to those paths"
+    }
+  ],
+  "provider_dedup_boundary": "The in-memory FakeComputeProvider keeps its idempotency ledger per process; the product dedups provider commands at the shared execution boundary (the compute-agent command journal, single-owner dispatch, covered by crates/o3k-compute/tests/multi_controller_acceptance.rs). The cross-process gate therefore asserts one deterministic provider identity across runtimes, and one dispatch in total.",
+  "result": "PASS",
+  "secrets": "redacted; no reusable credentials included"
+}

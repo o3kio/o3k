@@ -293,7 +293,10 @@ impl ComputeService {
                         resource_id,
                     } => {
                         let server = self
-                            .show_server(&project_id, ServerId::from_uuid(resource_id))
+                            .show_server_without_convergence(
+                                &project_id,
+                                ServerId::from_uuid(resource_id),
+                            )
                             .await?;
                         let operation = self.store.get_operation(existing_operation_id).await?;
                         return Ok(CreateMutationReceipt {
@@ -498,12 +501,19 @@ impl ComputeService {
         // canonical replay carries the same server_id, so the name check must
         // be skipped to avoid rejecting an equivalent replay.
         let canonical_has_existing = canonical.is_some() && existing_res.is_ok();
+        // CANONICAL INVARIANT: a canonical request's deterministic server_id is
+        // its own durable identity. A concurrently persisted row carrying that
+        // identity is the same resource the caller is converging on, so it must
+        // not be surfaced as a name conflict — the canonical reservation
+        // resolves it as an equivalent replay. Only a *different* live server
+        // with the same name is a real conflict. `existing_res` was read before
+        // scheduling, so a racing create can persist this identity in between.
         if !canonical_has_existing
-            && self
-                .list_servers(&project_id)
-                .await?
-                .iter()
-                .any(|server| server.name == name && server.state != ServerState::Deleted)
+            && self.list_servers(&project_id).await?.iter().any(|server| {
+                server.id.as_uuid() != server_id
+                    && server.name == name
+                    && server.state != ServerState::Deleted
+            })
         {
             return Err(ComputeError::Conflict);
         }
@@ -559,9 +569,11 @@ impl ComputeService {
             }
         };
         if !canonical_has_existing
-            && servers
-                .iter()
-                .any(|server| server.name == name && server.state != ServerState::Deleted)
+            && servers.iter().any(|server| {
+                server.id.as_uuid() != server_id
+                    && server.name == name
+                    && server.state != ServerState::Deleted
+            })
         {
             // A racing identical request may have persisted this server while
             // the schedule was in flight; its allocation idempotently backs
@@ -793,7 +805,10 @@ impl ComputeService {
                             self.release_placement_decision(decision).await?;
                         }
                         let server = self
-                            .show_server(&project_id, ServerId::from_uuid(resource_id))
+                            .show_server_without_convergence(
+                                &project_id,
+                                ServerId::from_uuid(resource_id),
+                            )
                             .await?;
                         let operation = self.store.get_operation(existing_operation_id).await?;
                         match operation.state {

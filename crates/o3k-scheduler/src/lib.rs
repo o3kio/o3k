@@ -186,7 +186,18 @@ impl Scheduler {
                 .await
             {
                 Ok(intent) => intent,
-                Err(error) => return Err(SchedulerError::Placement(error)),
+                Err(error) => {
+                    // An equivalent peer may have already committed the
+                    // deterministic allocation; converge on it rather than
+                    // failing this caller with a placement error.
+                    if let Some(decision) = self
+                        .existing_allocation(server_id, &resources, selected_providers)
+                        .await?
+                    {
+                        return Ok(decision);
+                    }
+                    return Err(SchedulerError::Placement(error));
+                }
             };
             match self
                 .placement
@@ -205,10 +216,32 @@ impl Scheduler {
                     | PlacementError::OverCapacity
                     | PlacementError::NotSchedulable,
                 ) => {
-                    self.placement.abandon_allocation_intent(&intent).await?;
+                    if let Err(error) = self.placement.abandon_allocation_intent(&intent).await {
+                        if let Some(decision) = self
+                            .existing_allocation(server_id, &resources, selected_providers)
+                            .await?
+                        {
+                            return Ok(decision);
+                        }
+                        return Err(SchedulerError::Placement(error));
+                    }
                     continue;
                 }
-                Err(error) => return Err(SchedulerError::Placement(error)),
+                Err(error) => {
+                    // A peer committed the deterministic allocation after this
+                    // candidate snapshot was read; the commit therefore fails
+                    // with a conflict/not-found. Re-observe the durable
+                    // allocation so equivalent callers converge on the same
+                    // Placement receipt instead of surfacing a caller-visible
+                    // conflict for a create that already succeeded elsewhere.
+                    if let Some(decision) = self
+                        .existing_allocation(server_id, &resources, selected_providers)
+                        .await?
+                    {
+                        return Ok(decision);
+                    }
+                    return Err(SchedulerError::Placement(error));
+                }
             }
         }
         // A concurrent retry may have committed the deterministic allocation

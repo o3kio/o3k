@@ -30,3 +30,13 @@ as a failed historical candidate.
 The campaign attempts are retained as controller-local run directories under
 `target/` and are not release evidence. They contain no credentials; temporary
 credential files are created mode 0600 and removed by the VM harness trap.
+
+## Successor: rc.19 cross-process replay proof
+
+The rc.18 replay defect is corrected, and the successor candidate adds the
+independent cross-process proof that the replay authority is durable rather
+than process-local. The gate spawns two genuinely independent runtimes that
+share only the durable store and requires them to converge on one canonical
+identity with zero duplicate side effects. See
+`rc19-cross-process-replay.json` for the gate, the durable invariants it
+asserts, and the three convergence defects this proof exposed and corrected.

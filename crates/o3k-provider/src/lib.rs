@@ -523,6 +523,18 @@ impl FakeComputeProvider {
             .unwrap_or_default()
     }
 
+    /// The provider-side instance identities currently materialized by this
+    /// fake. Test-support accessor: it lets a process-boundary test assert that
+    /// independent runtimes converge on one deterministic provider identity
+    /// (`fake-<server id>`) instead of minting competing provider resources.
+    #[must_use]
+    pub fn instance_ids(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|state| state.instances.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Returns the latest create request for boundary tests. The request is
     /// retained only by the in-memory fake and is never logged or serialized.
     #[must_use]

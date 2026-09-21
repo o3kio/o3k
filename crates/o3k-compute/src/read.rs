@@ -207,6 +207,38 @@ impl ComputeService {
         project_id: &str,
         id: ServerId,
     ) -> Result<Server, ComputeError> {
+        let resource = self.owned_resource(project_id, id).await?;
+        // The show path is the poll surface for `openstack server create
+        // --wait`: a create operation left non-terminal after the synchronous
+        // pass must be re-driven here or the server stays in BUILD forever.
+        // The drive is lazy, bounded, and idempotent; ownership was validated
+        // above, so no provider dispatch can happen for a foreign project.
+        self.drive_create_convergence(&resource).await;
+        // Re-read the durable state: the convergence drive may have projected
+        // a terminal outcome onto the resource.
+        self.project_server(project_id, id).await
+    }
+
+    /// Returns the current durable server projection without triggering the
+    /// create-convergence drive. A canonical replay must resolve the existing
+    /// result with **zero** new side effects, so convergence stays owned by the
+    /// runtime that accepted the create, the poll surface (`show_server`), or
+    /// the periodic sweep — never by an equivalent-replay response, and never
+    /// concurrently from two independent runtimes.
+    pub(crate) async fn show_server_without_convergence(
+        &self,
+        project_id: &str,
+        id: ServerId,
+    ) -> Result<Server, ComputeError> {
+        let _ = self.owned_resource(project_id, id).await?;
+        self.project_server(project_id, id).await
+    }
+
+    async fn owned_resource(
+        &self,
+        project_id: &str,
+        id: ServerId,
+    ) -> Result<o3k_store::ResourceRecord, ComputeError> {
         let resource =
             self.store
                 .get_resource(id.as_uuid())
@@ -218,14 +250,10 @@ impl ComputeService {
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
-        // The show path is the poll surface for `openstack server create
-        // --wait`: a create operation left non-terminal after the synchronous
-        // pass must be re-driven here or the server stays in BUILD forever.
-        // The drive is lazy, bounded, and idempotent; ownership was validated
-        // above, so no provider dispatch can happen for a foreign project.
-        self.drive_create_convergence(&resource).await;
-        // Re-read the durable state: the convergence drive may have projected
-        // a terminal outcome onto the resource.
+        Ok(resource)
+    }
+
+    async fn project_server(&self, project_id: &str, id: ServerId) -> Result<Server, ComputeError> {
         let resource =
             self.store
                 .get_resource(id.as_uuid())
