@@ -1,15 +1,19 @@
 {
   "base_source_sha": "da00eeaa878956f438a62648f40c783e06a076d7",
-  "comparison_head": "final PR head recorded in the certification report",
-  "runtime_changes": false,
+  "comparison_head": "0150f968b5c8cc3593df9f9147b44c43f77481f8",
+  "runtime_changes": true,
   "installer_changes": false,
   "shipped_packaging_changes": false,
   "release_logic_changes": false,
-  "api_semantics_changes": false,
-  "provider_network_compute_changes": false,
+  "api_semantics_changes": true,
+  "provider_network_compute_changes": true,
   "database_migration_changes": false,
-  "classification": "harness-and-evidence-only",
+  "classification": "runtime-correction-and-harness-evidence; rc.18 cannot be certified",
   "changed_files": [
+    "bins/o3kd/tests/p12_7_convergence.rs",
+    "crates/o3k-compute/src/lib.rs",
+    "crates/o3k-compute/src/lifecycle.rs",
+    "crates/o3k-scheduler/src/lib.rs",
     "docs/evidence/pp4-core/README.md",
     "docs/evidence/pp4-core/post-release-diff.json",
     "docs/evidence/pp4-core/rc18-native-replay-failure.json",
@@ -20,5 +24,5 @@
     "tests/pp4-core-campaign/test_native_client.py",
     "tests/pp4-core-campaign/verify_manifest.py"
   ],
-  "note": "All paths are non-shipped campaign/evidence inputs; rc.18 runtime remains immutable."
+  "note": "The four Rust paths are the replay correction and are not present in rc.18; the remaining paths are non-shipped campaign/evidence inputs. rc.18 runtime remains immutable and failed."
 }
