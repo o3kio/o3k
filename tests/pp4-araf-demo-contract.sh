@@ -164,7 +164,8 @@ check "keycloak helpers retry with visible status (no silent set -e abort)" \
   sh -c "grep -q 'demo IdP admin API call did not succeed' '${SCRIPT}' && grep -q 'kc_user_id()' '${SCRIPT}'"
 
 # --- PP.4 one-line installer integration (get-o3k.sh) -------------------------
-check_grep "${WRAPPER}" 'O3K_INSTALLER_VERSION="v0.4.0-rc.16"'
+check "wrapper carries a valid immutable self-release pin" \
+  sh -c "grep -Eq '^O3K_INSTALLER_VERSION=\"v[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?\"$' '${WRAPPER}'"
 check_grep "${WRAPPER}" 'pp4_stamp()'
 check_grep "${WRAPPER}" 'pp4_stamp T0'
 check_grep "${WRAPPER}" 'pp4_stamp T1'
