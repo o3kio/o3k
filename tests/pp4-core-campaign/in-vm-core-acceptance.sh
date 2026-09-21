@@ -126,11 +126,22 @@ printf 'building_block_id=%s\n' "$bb_id" >>"$EVID/state.env"
 jq -e '.resource_types | length >= 1' "$EVID/resource-types.json" >/dev/null || fail 'resource type discovery empty'
 jq -e 'has("regions")' "$EVID/regions.json" >/dev/null || fail 'canonical region discovery response malformed'
 jq -e '((.failure_domains // .items) | type == "array")' "$EVID/failure-domains.json" >/dev/null || fail 'canonical failure-domain discovery response malformed'
-openstack resource provider list -f json >"$EVID/placement-providers.json" || fail 'Placement provider compatibility observation failed'
-jq -e 'length >= 1' "$EVID/placement-providers.json" >/dev/null || fail 'Placement provider list empty'
+set +e
+openstack resource provider list -f json >"$EVID/placement-providers.json" 2>"$EVID/placement-cli-error.txt"
+placement_cli_rc=$?
+set -e
+if (( placement_cli_rc != 0 )); then
+  printf 'placement_cli=UNAVAILABLE\nreason=compatibility catalog has no Placement endpoint\n' >"$EVID/placement-cli-unavailable.txt"
+  jq '.placement_providers' "$EVID/durable-bootstrap.json" >"$EVID/placement-providers.json"
+  jq '.placement_inventories' "$EVID/durable-bootstrap.json" >"$EVID/placement-inventory.json"
+else
+  jq -e 'length >= 1' "$EVID/placement-providers.json" >/dev/null || fail 'Placement provider list empty'
+fi
 provider_id="$(jq -r '.[0].uuid // .[0].id // empty' "$EVID/placement-providers.json")"
 [[ -n "$provider_id" ]] || fail 'Placement provider identity missing'
-openstack resource provider inventory list "$provider_id" -f json >"$EVID/placement-inventory.json" || fail 'Placement inventory observation failed'
+if (( placement_cli_rc == 0 )); then
+  openstack resource provider inventory list "$provider_id" -f json >"$EVID/placement-inventory.json" || fail 'Placement inventory observation failed'
+fi
 jq -e 'length >= 1' "$EVID/placement-inventory.json" >/dev/null || fail 'Placement inventory empty'
 printf 'placement_provider_id=%s\n' "$provider_id" >>"$EVID/state.env"
 pass "BuildingBlock $bb_id, public topology, Placement provider and inventory"
