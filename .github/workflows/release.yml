@@ -108,6 +108,11 @@ jobs:
 
           PP.4 candidate. Not final release-gate approved and not production ready.
 
+          PP.4 successor to rc.18. Fixes canonical native compute-create
+          replay so an equivalent same-key request converges on the existing
+          resource/Operation without re-entering Placement or creating
+          duplicate side effects. This does not claim PP.4 completion.
+
           Authenticity uses the protected O3K GitHub Actions release workflow,
           GitHub OIDC, and a Sigstore keyless bundle. This prerelease is
           immutable by policy; defects require a successor candidate.
