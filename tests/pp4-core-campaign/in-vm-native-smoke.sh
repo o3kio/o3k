@@ -144,15 +144,15 @@ record "replay: same_server=$replay_server same_operation=${replay_operation:-sa
 domain=""
 while read -r candidate; do
   [[ -n "$candidate" ]] || continue
-  xml="$(virsh -c qemu:///system dumpxml "$candidate" 2>/dev/null || true)"
+  xml="$(sudo virsh -c qemu:///system dumpxml "$candidate" 2>/dev/null || true)"
   if grep -Fq "server_id=\"$server_id\"" <<<"$xml" && grep -Fq 'managed_by="o3k-compute"' <<<"$xml"; then
     domain="$candidate"; break
   fi
-done < <(virsh -c qemu:///system list --all --name)
+done < <(sudo virsh -c qemu:///system list --all --name)
 [[ -n "$domain" ]] || die 'managed_by=o3k-compute libvirt domain not found'
-[[ "$(virsh -c qemu:///system domstate "$domain")" == running ]] || die 'libvirt domain is not running'
+[[ "$(sudo virsh -c qemu:///system domstate "$domain")" == running ]] || die 'libvirt domain is not running'
 record "libvirt: domain=$domain state=running server_id=$server_id"
-if virsh -c qemu:///system console "$domain" --force 2>/dev/null | timeout 8 grep -Eiq 'cirros|login:'; then
+if sudo virsh -c qemu:///system console "$domain" --force 2>/dev/null | timeout 8 grep -Eiq 'cirros|login:'; then
   record 'guest boot: PASS (console marker)'
 else
   die 'guest console did not expose a CirrOS/login boot marker'

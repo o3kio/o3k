@@ -5,8 +5,8 @@ DISTRO=ubuntu
 if [ "$#" -ge 1 ]; then DISTRO="$1"; fi
 EVID=target/pp4-core-$(date -u +%Y%m%dT%H%M%SZ)-$DISTRO
 if [ "$#" -ge 2 ]; then EVID="$2"; fi
-VERSION="${O3K_PP4_VERSION-v0.4.0-rc.18}"
-EXPECTED_SHA="${O3K_PP4_SOURCE_SHA-da00eeaa878956f438a62648f40c783e06a076d7}"
+VERSION="${O3K_PP4_VERSION-v0.4.0-rc.21}"
+EXPECTED_SHA="${O3K_PP4_SOURCE_SHA-0a3fa9f186ba99cfee91a95e3df928b861e17667}"
 WORK="${O3K_PP4_WORK-$(mktemp -d /tmp/o3k-pp4-core.XXXXXX)}"
 SSH_PORT="${O3K_PP4_SSH_PORT-2392}"
 mkdir -p "$EVID" "$WORK"
