@@ -152,7 +152,19 @@ flavor_id="$(sudo cat /etc/o3k/testlab-flavor-id)" || fail 'flavor identity miss
 network_id="$(openstack network show testlab-network -f value -c id)" || fail 'network lookup failed'
 existing_port="$(openstack port show testlab-port -f value -c id)" || fail 'compatibility port missing'
 existing_ip="$(openstack port show "$existing_port" -f value -c fixed_ips | grep -Eo '192\.0\.2\.[0-9]+' | head -1)"
-native /network/address-realms GET "$EVID/address-realms.json" --expect 200 || fail 'native address realm collection unavailable'
+# Address-realms is intentionally not advertised in the rc.22 native profile.
+# The supported canonical Network authority is the network collection/show
+# surface; retain the 501 response as evidence rather than inventing support.
+set +e
+native /network/address-realms GET "$EVID/address-realms.json" --expect 200
+address_realm_rc=$?
+set -e
+if (( address_realm_rc != 0 )); then
+  printf 'native_address_realms=NOT_ADVERTISED\n' >"$EVID/address-realms-unavailable.txt"
+fi
+native /network/networks GET "$EVID/native-networks.json" --expect 200 || fail 'native network collection unavailable'
+native "/network/networks/$network_id" GET "$EVID/native-network-show.json" --expect 200 || fail 'native network authority show unavailable'
+[[ "$(jq -r '.id // .resource.metadata.id // .resource_id // empty' "$EVID/native-network-show.json")" == "$network_id" ]] || fail 'native network authority identity mismatch'
 openstack network show "$network_id" -f json >"$EVID/native-network.json" || fail 'native network authority observation failed'
 openstack subnet list --network "$network_id" -f json >"$EVID/native-subnets.json" || fail 'native subnet authority observation failed'
 printf 'network_id=%s\nexisting_port=%s\nexisting_ip=%s\n' "$network_id" "$existing_port" "$existing_ip" >>"$EVID/state.env"

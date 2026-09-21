@@ -27,7 +27,7 @@ def main() -> int:
         "canonical_bootstrap": PASS if exists(root, "identity-me.json", "durable-bootstrap.json", "doctor-bootstrap.json") else NOT_PROVEN,
         "topology": PASS if exists(root, "durable-bootstrap.json", "regions.json", "failure-domains.json") else NOT_PROVEN,
         "placement": PASS if exists(root, "placement-providers.json", "placement-inventory.json") else NOT_PROVEN,
-        "native_network": PASS if exists(root, "address-realms.json", "native-network.json", "native-subnets.json") else NOT_PROVEN,
+        "native_network": PASS if exists(root, "native-networks.json", "native-network-show.json", "native-network.json", "native-subnets.json") else NOT_PROVEN,
         "native_first_create": PASS if exists(root, "native-create.json", "native-operation.json", "native-server.json", "native-domain.txt", "native-console.log") else NOT_PROVEN,
         "canonical_replay": PASS if exists(root, "native-replay.json") and equal_files(root, "side-effects-before-replay.json", "side-effects-after-replay.json") else NOT_PROVEN,
         "changed_body_conflict": PASS if exists(root, "native-conflict.json") and equal_files(root, "side-effects-before-replay.json", "side-effects-after-conflict.json") else NOT_PROVEN,
