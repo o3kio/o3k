@@ -244,10 +244,15 @@ pass 'same-key replay, changed-body conflict, OpenStack native observation'
 
 log 'phase 4: compatibility-created workload and native projection'
 sudo virsh -c qemu:///system list --all --name | sed '/^$/d' | sort >"$EVID/libvirt-before-compat.txt"
-set +e
-openstack server create --wait --image "$image_id" --flavor "$flavor_id" --network "$network_id" --key-name testlab-keypair pp4-openstack -f json >"$EVID/openstack-create.json"
-compat_rc=$?
-set -e
+compat_rc=1
+for attempt in $(seq 1 6); do
+  if openstack server create --wait --image "$image_id" --flavor "$flavor_id" --network "$network_id" --config-drive true --key-name testlab-keypair pp4-openstack -f json >"$EVID/openstack-create.json" 2>"$EVID/openstack-create-attempt-$attempt.err"; then
+    compat_rc=0
+    printf 'compatibility_create_attempt=%s\n' "$attempt" >"$EVID/compatibility-create-attempt.txt"
+    break
+  fi
+  sleep 10
+done
 (( compat_rc == 0 )) || fail 'OpenStack compatibility create failed'
 compat_id="$(jq -r '.id // empty' "$EVID/openstack-create.json")"; [[ "$compat_id" =~ ^[0-9a-fA-F-]{36}$ ]] || fail 'compatibility server ID missing'
 native "/compute/servers/$compat_id" GET "$EVID/native-compat-show.json" --expect 200
