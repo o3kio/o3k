@@ -96,7 +96,7 @@ if not isinstance(report.get("checks"), list) or not report["checks"]:
 if any(check.get("status") == "FAIL" for check in report["checks"]):
     raise SystemExit("doctor report contains a failed check")
 PY
-sudo python3 - "$EVID/durable-bootstrap.json" <<'PY'
+sudo python3 - "$EVID/durable-bootstrap.json" >"$EVID/durable-bootstrap.json" <<'PY'
 import json
 import sqlite3
 import sys
