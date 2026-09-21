@@ -10,11 +10,12 @@ trap cleanup EXIT
 OPENRC="$WORKDIR/admin-openrc"; sudo cp /etc/o3k/admin-openrc "$OPENRC"; sudo chown "$(id -u):$(id -g)" "$OPENRC"; chmod 600 "$OPENRC"; source "$OPENRC"
 IMAGE="docker.io/openstackhelm/horizon:2024.1-ubuntu_jammy-20250523@sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b"
 NAME=pp4-horizon-witness; CONF=/var/lib/o3k/pp4-horizon-witness; JAR="$EVID/horizon.jar"
+DOCKER=(sudo docker)
 summary(){ printf '%s\n' "$*" | tee -a "$EVID/horizon-summary.txt"; }
 if ! command -v docker >/dev/null 2>&1; then summary 'RESULT: NOT_APPLICABLE_OPTIONAL docker-unavailable'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; fi
 sudo systemctl start docker >/dev/null 2>&1 || { summary 'RESULT: FAIL docker-unavailable'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; }
-docker rm -f "$NAME" >/dev/null 2>&1 || true
-docker pull -q "$IMAGE" >"$EVID/horizon-pull.txt" 2>&1 || { summary 'RESULT: FAIL image-pull'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; }
+"${DOCKER[@]}" rm -f "$NAME" >/dev/null 2>&1 || true
+"${DOCKER[@]}" pull -q "$IMAGE" >"$EVID/horizon-pull.txt" 2>&1 || { summary 'RESULT: FAIL image-pull'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; }
 printf 'image=%s\n' "$IMAGE" >"$EVID/horizon-image.txt"
 mkdir -p "$CONF"
 cat >"$CONF/config.json" <<'EOF'
@@ -32,9 +33,9 @@ OPENSTACK_ENDPOINT_TYPE='publicURL'
 SECRET_KEY='pp4-core-witness-local-session-only'
 CACHES={'default':{'BACKEND':'django.core.cache.backends.locmem.LocMemCache'}}
 EOF
-docker run -d --name "$NAME" --restart no -e KOLLA_CONFIG_STRATEGY=COPY_ALWAYS -e KEYSTONE_ADMIN_PASSWORD="$OS_PASSWORD" -p 127.0.0.1:18091:80 -v "$CONF:/var/lib/kolla/config_files/src:ro" "$IMAGE" >"$EVID/horizon-run.txt" 2>&1 || { summary 'RESULT: FAIL container-start'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; }
+"${DOCKER[@]}" run -d --name "$NAME" --restart no -e KOLLA_CONFIG_STRATEGY=COPY_ALWAYS -e KEYSTONE_ADMIN_PASSWORD="$OS_PASSWORD" -p 127.0.0.1:18091:80 -v "$CONF:/var/lib/kolla/config_files/src:ro" "$IMAGE" >"$EVID/horizon-run.txt" 2>&1 || { summary 'RESULT: FAIL container-start'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; }
 ready=0; for _ in $(seq 1 90); do curl -sf http://127.0.0.1:18091/ >/dev/null 2>&1 && ready=1 && break; sleep 2; done
-if (( ready == 0 )); then docker logs "$NAME" >"$EVID/horizon-docker.log" 2>&1 || true; summary 'RESULT: FAIL http-readiness'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; fi
+if (( ready == 0 )); then "${DOCKER[@]}" logs "$NAME" >"$EVID/horizon-docker.log" 2>&1 || true; summary 'RESULT: FAIL http-readiness'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; fi
 summary 'image: PASS'; summary 'boot: PASS'
 curl -s -c "$JAR" http://127.0.0.1:18091/auth/login/ -o "$EVID/horizon-login.html" || true
 csrf=$(grep -oE 'name="csrfmiddlewaretoken" value="[^"]+"' "$EVID/horizon-login.html" | head -1 | sed -E 's/.*value="([^"]+)".*/\1/')
