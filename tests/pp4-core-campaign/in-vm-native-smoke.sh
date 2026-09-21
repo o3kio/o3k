@@ -6,6 +6,7 @@ set -Eeuo pipefail
 EVID=${1:?usage: in-vm-native-smoke.sh evidence-dir helper.py}
 HELPER=${2:?usage: in-vm-native-smoke.sh evidence-dir helper.py}
 API=http://127.0.0.1:18080/o3k/v1
+echo 'PP4 native smoke: start'
 mkdir -p "$EVID"
 chmod 0700 "$EVID"
 TOKEN_FILE="$(mktemp "$EVID/native-token.XXXXXX")"
@@ -56,9 +57,12 @@ export OS_CLOUD=o3k-testlab OS_CLIENT_CONFIG_FILE="$CLIENT_CLOUDS"
 openstack_error="$EVID/openstack-error.log"
 image_id="$(openstack image show cirros-0.6.3 -f value -c id 2>"$openstack_error")" || die "image lookup failed: $(tr '\n' ' ' <"$openstack_error")"
 flavor_id="$(cat /etc/o3k/testlab-flavor-id 2>/dev/null || true)"
+if [[ -z "$flavor_id" ]]; then
+  flavor_id="$(openstack flavor show testlab-flavor -f value -c id 2>>"$openstack_error" || true)"
+fi
 network_id="$(openstack network show testlab-network -f value -c id 2>>"$openstack_error")" || die "network lookup failed: $(tr '\n' ' ' <"$openstack_error")"
 existing_port="$(openstack port show testlab-port -f value -c id 2>>"$openstack_error")" || die "port lookup failed: $(tr '\n' ' ' <"$openstack_error")"
-existing_ip="$(openstack port show "$existing_port" -f value -c fixed_ips 2>>"$openstack_error" | grep -Eo '192\\.0\\.2\\.[0-9]+' | head -1)"
+existing_ip="$(openstack port show "$existing_port" -f value -c fixed_ips 2>>"$openstack_error" | grep -Eo '192\.0\.2\.[0-9]+' | head -1)"
 key_name=testlab-keypair
 [[ "$flavor_id" =~ ^[0-9a-fA-F-]{36}$ && -n "$image_id" && -n "$network_id" && -n "$existing_port" && -n "$existing_ip" ]] \
   || die 'bounded TestLab resources unavailable'
@@ -123,7 +127,7 @@ while read -r candidate; do
   if [[ "$name" == o3k-server:* ]]; then native_port="$candidate"; break; fi
 done < <(openstack port list -f value -c ID 2>/dev/null)
 [[ -n "$native_port" ]] || die 'native-owned port not visible through OpenStack compatibility'
-native_ip="$(openstack port show "$native_port" -f value -c fixed_ips | grep -Eo '192\\.0\\.2\\.[0-9]+' | head -1)"
+native_ip="$(openstack port show "$native_port" -f value -c fixed_ips | grep -Eo '192\.0\.2\.[0-9]+' | head -1)"
 [[ -n "$native_ip" && "$native_ip" != "$existing_ip" ]] || die 'native allocator reused compatibility IP or returned no IP'
 record "collision-safe port: native_port=$native_port native_ip=$native_ip existing_port=$existing_port existing_ip=$existing_ip"
 

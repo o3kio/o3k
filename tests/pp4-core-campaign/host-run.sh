@@ -50,6 +50,10 @@ qemu-system-x86_64 -name "$VM_NAME" -machine type=q35,accel=kvm -cpu host -smp 2
   -display none -daemonize -pidfile "$PIDFILE"
 ssh_vm() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p "$SSH_PORT" tester@127.0.0.1 "$@"; }
 cleanup() {
+  if [[ "${O3K_PP4_KEEP_VM-0}" == 1 ]]; then
+    echo "PP4 debug VM retained: work=$WORK ssh_port=$SSH_PORT key=$SSH_KEY pidfile=$PIDFILE" >&2
+    return 0
+  fi
   set +e
   if [ -f "$PIDFILE" ]; then
     kill "$(cat "$PIDFILE")" 2>/dev/null || true
@@ -75,8 +79,17 @@ set +e
 ssh_vm 'bash /home/tester/in-vm-native-smoke.sh /home/tester/pp4-evidence /home/tester/native_client.py > /home/tester/native-smoke.log 2>&1'
 smoke_status=$?
 set -e
+set +e
 scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$SSH_PORT" \
-  tester@127.0.0.1:/home/tester/native-smoke.log "$EVID/native-smoke.log" >/dev/null
+  tester@127.0.0.1:/home/tester/native-smoke.log "$EVID/native-smoke.log" >/dev/null 2>&1
+log_copy_status=$?
+if (( log_copy_status != 0 )); then
+  # Preserve a diagnostic even when the guest SSH service drops during a
+  # provider action; this keeps a harness failure distinct from product
+  # evidence and lets the outer campaign report the actual transport state.
+  printf 'native log unavailable (scp status=%s, smoke status=%s)\n' "$log_copy_status" "$smoke_status" >"$EVID/native-smoke.log"
+fi
+set -e
 cat "$EVID/native-smoke.log"
 ((smoke_status == 0)) || exit "$smoke_status"
 scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$SSH_PORT" -r \

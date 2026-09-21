@@ -10,12 +10,22 @@ The immutable runtime candidate is `v0.4.0-rc.18` at source
 
 Status: **INCOMPLETE**. Public release integrity and exact-source CI are
 green, and the campaign helper self-tests pass. The disposable smoke harness
-has reached public installation, release verification, canonical init/join,
+reached public installation, release verification, canonical init/join,
 BuildingBlock/compute readiness, TestLab image/network/keypair setup, and a
-real TestLab libvirt guest boot. The native workload, reverse compatibility
-workload, Horizon witness, Ubuntu full matrix, and Debian full matrix have not
-yet produced complete auditable evidence. No PP.4 Core certification or merge
-claim is made from these attempts.
+real TestLab libvirt guest boot. It then proved one native create through
+`Operation=succeeded`, stable collision-safe port allocation (`192.0.2.3`
+beside the compatibility port at `192.0.2.2`), a managed/running
+`o3k-compute` libvirt domain, and guest console output. The required same-key
+native replay returned HTTP 500 (`INTERNAL_ERROR`) after the first resource was
+already active; this is a product/runtime idempotency defect in rc.18, not a
+harness authentication failure. The exact redacted observation is recorded in
+`rc18-native-replay-failure.json`.
+
+Because the immutable candidate fails a mandatory PP.4 Core invariant, the
+reverse compatibility workload, Horizon witness, Ubuntu full matrix, and
+Debian full matrix were not run. No PP.4 Core certification or merge claim is
+made. A runtime correction requires a successor public RC; rc.18 is retained
+as a failed historical candidate.
 
 The campaign attempts are retained as controller-local run directories under
 `target/` and are not release evidence. They contain no credentials; temporary

@@ -25,3 +25,11 @@ The host driver must copy only these non-shipped campaign files into a fresh
 Ubuntu 24.04 or Debian 12 VM, then install with the exact public command and
 `O3K_SKIP_ARAF=1`. Runtime files must come from the public release. Evidence
 must retain the release source SHA separately from the campaign harness SHA.
+
+The first rc.18 real-KVM smoke reached native `Operation=succeeded`, guest
+boot, and collision-safe port allocation, then exposed a mandatory product
+defect: replaying the byte-equivalent create with the same idempotency key
+returned HTTP 500 instead of the original canonical result. See
+`docs/evidence/pp4-core/rc18-native-replay-failure.json`. Do not classify this
+as a harness failure or continue to Horizon/full-distro certification until a
+successor runtime candidate fixes it.

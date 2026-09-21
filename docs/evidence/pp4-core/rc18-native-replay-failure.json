@@ -1,0 +1,40 @@
+{
+  "candidate": {
+    "release": "v0.4.0-rc.18",
+    "source_sha": "da00eeaa878956f438a62648f40c783e06a076d7",
+    "archive_sha256": "01d20d6676d4c56bb6630d9878a66a97d57a59cbeccf3934f4c12206ab5f8dcc"
+  },
+  "campaign": {
+    "os": "Ubuntu 24.04.5 LTS x86_64",
+    "kvm": true,
+    "araf": false,
+    "auth": "Keystone project-scoped password -> documented native token exchange",
+    "harness_result": "PASS through first native create"
+  },
+  "first_create": {
+    "server_id": "9397a51a-fb3a-5671-8d8b-91f7c025e390",
+    "operation_id": "0b7be8f5-5aaf-560a-a74b-9ab731b926bd",
+    "operation_state": "succeeded",
+    "server_state": "ACTIVE",
+    "network_id": "01a0c455-96e3-7c33-83c6-af0fc496ae81",
+    "compatibility_port_id": "01a0c455-afb2-74f2-80ba-b561fef94783",
+    "compatibility_ip": "192.0.2.2",
+    "native_port_id": "d9ecb6fc-a6dd-5be5-95b3-12a47ea12356",
+    "native_ip": "192.0.2.3",
+    "keypair": "testlab-keypair",
+    "libvirt_domain": "o3k-4d109efd46810914e9c3",
+    "libvirt_state": "running",
+    "managed_by": "o3k-compute",
+    "guest_console": "CirrOS output observed"
+  },
+  "replay": {
+    "same_idempotency_key": "pp4-core-native-create-rc18",
+    "request": "byte-equivalent native create request",
+    "http_status": 500,
+    "problem_type": "https://o3k.io/problems/internal-server-error",
+    "code": "INTERNAL_ERROR",
+    "second_provider_side_effect": "not accepted as a successful replay",
+    "classification": "rc.18 product/runtime defect; successor RC required"
+  },
+  "secrets": "redacted; no reusable credentials included"
+}
