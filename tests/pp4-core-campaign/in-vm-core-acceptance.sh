@@ -80,7 +80,22 @@ operator_scope_rc=$?
 set -e
 (( operator_scope_rc == 0 )) || fail 'operator scope boundary probe was not the expected 403'
 printf 'operator_routes=SYSTEM_SCOPE_ONLY\nproject_token_probe=403\n' >"$EVID/operator-scope-boundary.txt"
-sudo o3k doctor --json >"$EVID/doctor-bootstrap.json" 2>/dev/null || fail 'o3k doctor bootstrap report failed'
+doctor_rc=0
+sudo o3k doctor --json >"$EVID/doctor-bootstrap.json" 2>/dev/null || doctor_rc=$?
+(( doctor_rc <= 1 )) || fail "o3k doctor bootstrap report failed (rc $doctor_rc)"
+python3 - "$EVID/doctor-bootstrap.json" <<'PY' || fail 'o3k doctor bootstrap report was not valid JSON'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+if not report.get("version"):
+    raise SystemExit("doctor report has no version")
+if not isinstance(report.get("checks"), list) or not report["checks"]:
+    raise SystemExit("doctor report has no checks")
+if any(check.get("status") == "FAIL" for check in report["checks"]):
+    raise SystemExit("doctor report contains a failed check")
+PY
 sudo python3 - "$EVID/durable-bootstrap.json" <<'PY'
 import json
 import sqlite3
