@@ -104,8 +104,9 @@ import sys
 out = sys.argv[1]
 db = sqlite3.connect("file:/var/lib/o3k/o3k.sqlite?mode=ro", uri=True)
 def rows(query):
-    return [dict(zip((column[0] for column in db.description), row))
-            for row in db.execute(query)]
+    cursor = db.execute(query)
+    columns = [column[0] for column in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor]
 
 blocks = rows("SELECT block_id, state, cloud_profile_id, resource_provider_ids, failure_domain_id FROM building_blocks ORDER BY block_id")
 profiles = rows("SELECT profile_id, generation FROM cloud_profiles ORDER BY profile_id")
