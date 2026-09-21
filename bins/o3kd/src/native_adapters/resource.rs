@@ -2462,6 +2462,25 @@ impl ResourceApplication for GenericResourceApplication {
         }
         let canonical_id = spec._canonical_id;
         let compute_key = canonical_id.map_or_else(|| key.clone(), |id| format!("canonical:{id}"));
+        // Native callers may identify a keypair by its non-secret name. Resolve
+        // that reference at the Compute/IAM boundary so the provider receives
+        // only the public key needed for config-drive generation. Never make a
+        // client or compatibility adapter transport private key material.
+        let key_name = spec.key_name.clone();
+        let ssh_public_key = if let Some(public_key) = spec.ssh_public_key.clone() {
+            Some(public_key)
+        } else if let Some(key_name) = key_name.as_deref() {
+            match self.compute.show_keypair_for_auth(auth, key_name).await {
+                Ok(keypair) => Some(keypair.public_key),
+                Err(error) => {
+                    self.compensate_native_network_ports(&project_id, &owned_network_ids)
+                        .await;
+                    return Err(compute_error(error));
+                }
+            }
+        } else {
+            None
+        };
         let action = descriptor
             .lifecycle_actions
             .get(&o3k_native_api::resource::LifecycleOperation::Create)
@@ -2498,8 +2517,8 @@ impl ResourceApplication for GenericResourceApplication {
                     image_id: spec.image_id,
                     flavor_id: spec.flavor_id,
                     network_ids,
-                    key_name: spec.key_name,
-                    config_drive: spec.ssh_public_key.map(|ssh_public_key| {
+                    key_name,
+                    config_drive: ssh_public_key.map(|ssh_public_key| {
                         o3k_provider::ConfigDriveRequest {
                             user_data: Vec::new(),
                             vendor_data: None,

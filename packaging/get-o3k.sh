@@ -18,13 +18,11 @@
 # It never fabricates topology, providers, BuildingBlocks, CloudProfile state,
 # agent identity, or readiness, and it never compiles on the target host.
 #
-# PP.4 (#973) Araf demo stage: after the TestLab workload exists, the installer
-# installs the digest-pinned Araf demo deployment material from the VERIFIED
-# bundle into /usr/local/share/o3k/araf-demo/ (convergent, content-compared)
-# and runs packaging/o3k-araf-demo.sh install (the pinned PP.3 historical
-# evidence plus the PP.4 candidate tuple from
-# contracts/araf-compatibility-v1.yaml: Araf v1.0.0-rc.16 and the selected
-# successor O3K release).
+# The historical/default path then installs the digest-pinned Araf demo
+# material and runs packaging/o3k-araf-demo.sh install. PP.4 Core can set
+# O3K_SKIP_ARAF=1 to stop after the O3K/TestLab proof; this is an explicit
+# product/demo split, not a claim that Araf is no longer required. Araf's
+# browser/runtime candidate remains the separately certified PP.4A path.
 # A demo-stage failure aborts the installer with a message that O3K itself is
 # healthy and the demo stage can be retried from the installed copy — the
 # demo never gates O3K readiness. Stage timing is recorded as T0..T5 stamps
@@ -783,8 +781,37 @@ step 'o3k doctor healthy'
 # bootstrap state is durably ready; it fabricates nothing itself.
 bash "$BUNDLE_DIR/packaging/bootstrap-testlab.sh" || die 'TestLab bootstrap failed'
 pp4_stamp T5
+O3K_MANIFEST_SOURCE="$(python3 - "$BUNDLE_DIR/manifest.json" <<'PY'
+import json
+import sys
 
-# ---- PP.4 Araf demo stage (issue #973) ----------------------------------------
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+sha = document.get("source_commit") if isinstance(document, dict) else None
+if not isinstance(sha, str) or not sha.strip():
+    raise SystemExit("O3K installer: release bundle manifest declares no source_commit")
+print(sha.strip())
+PY
+)" || die 'release bundle manifest is missing source_commit'
+
+# ---- optional Araf demo stage (PP.4A; issue #1029) -----------------------------
+# PP.4 Core campaigns may set O3K_SKIP_ARAF=1 to certify the Cloud Kernel and
+# bounded OpenStack compatibility without downloading or starting a separately
+# versioned dashboard. The default remains the historical demo path so the
+# PP.3/PP.4A integration entrypoint and its contracts are preserved.
+if [ "${O3K_SKIP_ARAF:-0}" = 1 ]; then
+  printf 'Araf demo stage skipped by O3K_SKIP_ARAF=1 (PP.4 Core; PP.4A remains available separately)\n'
+  printf '\nO3K Core demo ready\n\n'
+  printf 'O3K:\n'
+  printf '  version: %s\n' "$VERSION"
+  printf '  source: %s\n' "$O3K_MANIFEST_SOURCE"
+  printf '  BuildingBlock: %s\n' "$BUILDING_BLOCK_ID"
+  printf 'OpenStack compatibility: source /etc/o3k/admin-openrc, then: openstack server list\n'
+  printf 'Araf: not deployed (PP.4A #1029)\n'
+  exit 0
+fi
+
+# ---- Araf demo material and deployment (PP.4A; issue #1029) --------------------
 # Install the demo deployment material from the VERIFIED bundle into the O3K
 # share dir so post-reboot / convergent reruns work without the bundle
 # (o3k-araf-demo.sh resolves its compose material relative to its own path).
@@ -823,19 +850,6 @@ ARAF_TUPLE_VERSION="$(printf '%s\n' "$ARAF_TUPLE" | sed -n 's/^ARAF_VERSION=//p'
 ARAF_TUPLE_SOURCE="$(printf '%s\n' "$ARAF_TUPLE" | sed -n 's/^ARAF_SOURCE_SHA=//p')"
 [ -n "$ARAF_TUPLE_VERSION" ] && [ -n "$ARAF_TUPLE_SOURCE" ] \
   || die 'demo tuple output is missing ARAF_VERSION/ARAF_SOURCE_SHA'
-O3K_MANIFEST_SOURCE="$(python3 - "$BUNDLE_DIR/manifest.json" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    document = json.load(handle)
-sha = document.get("source_commit") if isinstance(document, dict) else None
-if not isinstance(sha, str) or not sha.strip():
-    raise SystemExit("O3K installer: release bundle manifest declares no source_commit")
-print(sha.strip())
-PY
-)" || die 'release bundle manifest is missing source_commit'
-
 printf '\nO3K demo ready\n\n'
 printf 'O3K:\n'
 printf '  version: %s\n' "$VERSION"

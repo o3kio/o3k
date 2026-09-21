@@ -880,6 +880,11 @@ async fn caller_supplied_port_identity_is_stable_and_conflicts_on_replay()
         )
         .await?;
     let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"native:stable-port");
+    // A compatibility/TestLab port owns the first pool address. Stable native
+    // identity must not imply a fixed address; allocation advances safely.
+    let occupied = service
+        .create_port(&auth("project-a"), network.id, "occupied".to_owned())
+        .await?;
     let first = service
         .create_port_for_project_with_stable_id(
             "project-a",
@@ -889,6 +894,7 @@ async fn caller_supplied_port_identity_is_stable_and_conflicts_on_replay()
         )
         .await?;
     assert_eq!(first.id, id);
+    assert_ne!(first.fixed_ip, occupied.fixed_ip);
     assert!(matches!(
         service
             .create_port_for_project_with_stable_id(
@@ -902,6 +908,84 @@ async fn caller_supplied_port_identity_is_stable_and_conflicts_on_replay()
     ));
     assert_eq!(service.get_port(&auth("project-a"), id).await?, first);
     let _ = fs::remove_dir_all(path);
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_stable_native_ports_keep_identity_and_address_unique()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!("o3k-network-stable-race-{}", Uuid::now_v7()));
+    let sqlite_path = path.with_extension("sqlite");
+    fs::create_dir_all(&path)?;
+    let setup_store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+    let setup = NetworkService::open_for_test(&path, setup_store).await?;
+    let network = setup
+        .create_network(&auth("project-a"), "stable-race".to_owned())
+        .await?;
+    setup
+        .create_subnet(
+            &auth("project-a"),
+            network.id,
+            "stable-race-subnet".to_owned(),
+            "192.0.2.0/27".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    drop(setup);
+
+    let service_a = NetworkService::open_for_test(
+        &path,
+        Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?),
+    )
+    .await?;
+    let service_b = NetworkService::open_for_test(
+        &path,
+        Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?),
+    )
+    .await?;
+    let mut handles = Vec::new();
+    for index in 0..8 {
+        let service = if index % 2 == 0 {
+            service_a.clone()
+        } else {
+            service_b.clone()
+        };
+        let id = Uuid::new_v5(
+            &Uuid::NAMESPACE_OID,
+            format!("native:stable:{index}").as_bytes(),
+        );
+        handles.push(tokio::spawn(async move {
+            service
+                .create_port_for_project_with_stable_id(
+                    "project-a",
+                    id,
+                    network.id,
+                    format!("native-{index}"),
+                )
+                .await
+        }));
+    }
+    let mut ports = Vec::new();
+    for handle in handles {
+        ports.push(handle.await??);
+    }
+    let ids: HashSet<Uuid> = ports.iter().map(|port| port.id).collect();
+    let ips: HashSet<Ipv4Addr> = ports.iter().map(|port| port.fixed_ip).collect();
+    let macs: HashSet<String> = ports
+        .iter()
+        .map(|port| port.mac_address.to_ascii_lowercase())
+        .collect();
+    assert_eq!(ports.len(), ids.len());
+    assert_eq!(ports.len(), ips.len());
+    assert_eq!(ports.len(), macs.len());
+    drop(service_a);
+    drop(service_b);
+    fs::remove_dir_all(path)?;
+    let _ = fs::remove_file(&sqlite_path);
+    let _ = fs::remove_file(format!("{}-wal", sqlite_path.display()));
+    let _ = fs::remove_file(format!("{}-shm", sqlite_path.display()));
     Ok(())
 }
 

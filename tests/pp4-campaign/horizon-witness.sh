@@ -11,18 +11,26 @@
 # The script is a client witness, never an O3K readiness authority. The
 # campaign wrapper may classify a witness failure separately, but O3K Ready
 # must remain healthy. It records PASS/FAIL/GAP per bounded-journey step into
-# 30-horizon-summary.txt.
+# 30-horizon-summary.txt. Historical callers keep the default diagnostic
+# (non-blocking) mode; PP.4 Core invokes it with O3K_PP4_HORIZON_REQUIRED=1.
 #
 # Usage: bash horizon-witness.sh <evidence-dir>
 set -Eeuo pipefail
 EVID="${1:?evidence dir}"
 source /etc/o3k/admin-openrc
 SUMMARY="$EVID/30-horizon-summary.txt"
+REQUIRED="${O3K_PP4_HORIZON_REQUIRED:-0}"
 : > "$SUMMARY"
 note() { echo "$*" | tee -a "$SUMMARY"; }
 step() { # step NAME -> records PASS/FAIL/GAP
   local name="$1" result="$2" detail="${3:-}"
   printf '%s: %s %s\n' "$name" "$result" "$detail" | tee -a "$SUMMARY"
+}
+witness_exit() {
+  if [ "$REQUIRED" = 1 ]; then
+    exit 1
+  fi
+  exit 0
 }
 
 # Exact upstream image pin for the PP.4 witness. The tag is retained for
@@ -49,7 +57,7 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${NAME}$"; then
   docker rm -f "$NAME" >/dev/null 2>&1 || true
 fi
 
-docker pull -q "$HORIZON_IMAGE" >/dev/null || { step image PULL-FAIL; note "RESULT: WITNESS-SKIPPED"; exit 0; }
+docker pull -q "$HORIZON_IMAGE" >/dev/null || { step image PULL-FAIL; note "RESULT: WITNESS-SKIPPED"; witness_exit; }
 step image PRESENT "$HORIZON_IMAGE"
 
 mkdir -p "$CONF"
@@ -90,7 +98,7 @@ docker run -d --name "$NAME" --restart no \
   -e KEYSTONE_ADMIN_PASSWORD="$ADMIN_PW" \
   -p 127.0.0.1:18091:80 \
   -v "$CONF:/var/lib/kolla/config_files/src:ro" \
-  "$HORIZON_IMAGE" >"$EVID/30-horizon-run.txt" 2>&1 || { step boot FAIL "docker run rejected"; note "RESULT: WITNESS-FAIL"; exit 0; }
+  "$HORIZON_IMAGE" >"$EVID/30-horizon-run.txt" 2>&1 || { step boot FAIL "docker run rejected"; note "RESULT: WITNESS-FAIL"; witness_exit; }
 
 READY=0
 for i in $(seq 1 90); do
@@ -101,7 +109,7 @@ if [ "$READY" != 1 ]; then
   docker logs "$NAME" >"$EVID/30-horizon-docker-logs.txt" 2>&1 || true
   step boot FAIL "http never came up"
   note "RESULT: WITNESS-FAIL (see 30-horizon-docker-logs.txt)"
-  exit 0
+  witness_exit
 fi
 step boot PASS "http://127.0.0.1:18091/"
 
@@ -112,7 +120,7 @@ CSRF="$(grep -oE 'name="csrfmiddlewaretoken" value="[^"]+"' "$HTML" | head -1 | 
 if [ -z "$CSRF" ]; then
   step login GAP "no Django CSRF token on login page (see 30-horizon-login.html)"
   note "RESULT: WITNESS-GAP-AT-LOGIN"
-  exit 0
+  witness_exit
 fi
 LOGIN_RESP="$EVID/30-horizon-login-post.txt"
 LOGIN_FORM="$SECRET_TMP/login.form"
@@ -139,7 +147,7 @@ if grep -q 'Log Out' "$LOGIN_RESP" 2>/dev/null || grep -q 'Log Out' <<<"$IDENTIT
 else
   step login FAIL "session not established (Keystone auth or catalog gap)"
   note "RESULT: WITNESS-FAIL-AT-LOGIN"
-  exit 0
+  witness_exit
 fi
 
 probe_panel() { # name url must_contain_regex

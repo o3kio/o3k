@@ -1,9 +1,12 @@
-# Historical PP.4 campaign harness (o3kio/o3k#973; PP.4A input)
+# PP.4 campaign harnesses (o3kio/o3k#973)
 
-This harness records the historical one-line O3K + Araf campaign. Its Araf
-browser/runtime evidence is preserved as PP.4A (#1029) input; it is not the
-PP.4 Core completion gate. A successor PP.4 Core campaign must prove the
-native-first O3K journey and bounded OpenStack/Horizon witness independently.
+The existing `host-run.sh` and `in-vm-phase*.sh` path records the historical
+one-line O3K + Araf campaign. Its Araf browser/runtime evidence is preserved
+as PP.4A (#1029) input; it is not the PP.4 Core completion gate. A PP.4 Core
+campaign must prove the native-first O3K journey and bounded
+OpenStack/Horizon witness independently and may set `O3K_SKIP_ARAF=1` in the
+public installer. Core evidence must not require an Araf RC, CSP, schema
+runtime, browser, or dashboard deployment.
 A nested-KVM VM with no repo and no bundle runs the **exact published installer**
 
 ```sh
@@ -111,9 +114,11 @@ Usage:
 # the Debian cloud image is downloaded into target/pp4-campaign/vms/ if absent
 O3K_CAMPAIGN_VERSION=v0.4.0-rc.8 bash tests/pp4-campaign/host-run.sh ubuntu target/pp4-campaign/ubuntu
 O3K_CAMPAIGN_VERSION=v0.4.0-rc.8 bash tests/pp4-campaign/host-run.sh debian target/pp4-campaign/debian
-# historical optional Horizon witness (bounded external evidence; PP.4 Core
-# must pin its exact unmodified artifact and campaign matrix):
+# historical optional Horizon diagnostic witness (non-blocking by default):
 O3K_PP4_HORIZON=1 bash tests/pp4-campaign/host-run.sh ubuntu ...
+# PP.4 Core witness mode is fail-closed when the bounded Horizon run is
+# selected; it uses the immutable artifact in docs/evidence/pp4/horizon-artifact.yaml.
+O3K_PP4_HORIZON_REQUIRED=1 O3K_PP4_HORIZON=1 bash tests/pp4-campaign/horizon-witness.sh <evidence-dir>
 ```
 
 The campaign is always REAL-RELEASE (public GitHub assets). Evidence lands in

@@ -1,0 +1,66 @@
+schema: pp4-horizon-witness-v1
+status: selected-for-pp4-core
+role: external-openstack-compatibility-witness
+authority: none
+product_dependency: false
+forked: false
+artifact:
+  image: docker.io/openstackhelm/horizon:2024.1-ubuntu_jammy-20250523
+  digest: sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b
+  provider: Docker Hub / openstackhelm
+  source: https://hub.docker.com/r/openstackhelm/horizon
+  upstream_image: true
+  patches: []
+  selection_basis: >-
+    The image is an unmodified OpenStack Horizon 2024.1 artifact whose
+    Keystone/Nova/Neutron/Glance client surface matches the bounded
+    o3k-demo-v1 compatibility journey. The immutable manifest digest is the
+    evidence identity; the tag is provenance only.
+  registry_observation:
+    tag_last_pushed: 2025-05-23T04:59:14Z
+    digest_verified_against_registry_tag: true
+bounded_journey:
+  keystone:
+    - auth
+    - token
+    - project
+    - service-catalog
+  glance:
+    - image-list
+    - image-show
+  neutron:
+    - network-list
+    - subnet-list
+    - port-list
+    - network-selection-for-server-create
+  nova:
+    - flavor-list-or-selected-flavor
+    - keypair-where-configured
+    - server-list
+    - server-show
+    - server-create
+    - supported-lifecycle-action
+    - server-delete
+  excluded_services:
+    - octavia
+    - manila
+    - swift
+    - heat
+    - magnum
+    - designate
+    - arbitrary-admin-panels
+configuration_allowed:
+  - keystone-endpoint
+  - service-catalog
+  - region
+  - tls-ca-trust
+  - session-settings
+  - enabled-panels-for-advertised-services
+campaign_matrix:
+  ubuntu-24.04-x86_64:
+    horizon: required-full-witness
+    openstack_cli: required
+  debian-12-x86_64:
+    horizon: optional-repeat
+    openstack_cli: required
+readiness_rule: O3K readiness must remain healthy when Horizon is stopped.

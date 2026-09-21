@@ -181,6 +181,20 @@ impl NetworkService {
             .into_iter()
             .next()
             .ok_or(NetworkError::NotFound)?;
+        // Stable native identities still use the canonical pool allocator. A
+        // compatibility/TestLab port may already occupy the first address;
+        // skip it rather than coupling deterministic port identity to a fixed
+        // IP. The database uniqueness constraint remains the race-safe guard
+        // when independent runtimes allocate concurrently.
+        let occupied_addresses = self
+            .inner
+            .repository
+            .list_canonical_endpoints(project_id, &realm.id)
+            .await
+            .map_err(map_store_error)?
+            .into_iter()
+            .map(|endpoint| endpoint.fixed_ip)
+            .collect::<std::collections::HashSet<_>>();
         let explicit_ip = requested_fixed_ip.and_then(|(_, ip)| ip);
         let mut candidate = explicit_ip
             .map(u32::from)
@@ -195,6 +209,10 @@ impl NetworkService {
                 && candidate >= u32::from(pool.first_usable)
                 && candidate <= u32::from(pool.last_usable)
             {
+                if explicit_ip.is_none() && occupied_addresses.contains(&address) {
+                    candidate = candidate.saturating_add(1);
+                    continue;
+                }
                 // Ordinary pool allocation uses a fresh identity for each
                 // candidate so an address collision can advance through the
                 // pool. Stable native/migration callers opt into the supplied
@@ -218,7 +236,11 @@ impl NetworkService {
                     None,
                 );
                 let amounts = vec![ResourceAmount::new(LimitKey::network_ports(), 1)];
-                let op_id = format!("o3k:port:create:{}:{}", project_id, port.id);
+                // A failed address attempt releases its reservation. Include
+                // the candidate in the idempotency key so a concurrent
+                // stable-id retry can advance without reusing a released
+                // reservation tombstone.
+                let op_id = format!("o3k:port:create:{}:{}:{}", project_id, port.id, address);
                 let quota_res = self
                     .inner
                     .repository
@@ -279,8 +301,26 @@ impl NetworkService {
                             .repository
                             .release_reservation(&quota_res.id)
                             .await;
-                        if stable_id {
+                        if explicit_ip.is_some() {
                             return Err(NetworkError::Conflict);
+                        }
+                        if stable_id {
+                            // ResourceAlreadyExists can be either the stable
+                            // identity replay or a concurrent address winner.
+                            // Re-read the authoritative endpoint set to
+                            // distinguish them; only the former is a replay
+                            // conflict, while the latter advances to the next
+                            // free address.
+                            let identity_exists = self
+                                .inner
+                                .repository
+                                .get_canonical_endpoint(project_id, &id)
+                                .await
+                                .map_err(map_store_error)?
+                                .is_some();
+                            if identity_exists {
+                                return Err(NetworkError::Conflict);
+                            }
                         }
                     }
                     Err(error) => {
