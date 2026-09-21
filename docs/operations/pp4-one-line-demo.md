@@ -1,8 +1,10 @@
-# PP.4 — One-line O3K + Araf demo
+# PP.4 — One-line O3K Demo/Core acceptance (historical Araf campaign)
 
 This documents the historical PP.4 public demo path (o3kio/o3k#973). Its
 rc.8/rc.12 evidence is bounded and does not prove the required native browser
-workload journey; PP.4 remains unproven pending a successor tuple. From a fresh supported
+workload journey. The release-blocking PP.4 Core gate is now native-first and
+independent of Araf browser/runtime certification; PP.4A (#1029) owns that
+separately versioned Araf gate. From a fresh supported
 host (Ubuntu 24.04 or Debian 12, x86_64, hardware virtualization available):
 
 ```sh
@@ -80,9 +82,10 @@ openstack server delete demo-vm
 
 Everything above — Araf, the OpenStack CLI, and the native `o3k` CLI — reads
 the same canonical O3K server resource for the supported server lifecycle.
-Araf is the supported O3K dashboard; the OpenStack-compatible API is a
-bounded projection used by external ecosystem clients (CLI, optionally
-Horizon, OpenTofu). This is not a universal canonical-parity claim: image and
+Araf is O3K's intended native next-generation dashboard and is certified
+separately by PP.4A; the OpenStack-compatible API is a bounded projection
+used by external ecosystem clients (CLI, optionally Horizon, OpenTofu). This
+is not a universal canonical-parity claim: image and
 network compatibility resources remain bounded by the profile semantics below.
 
 ## What the native console can and cannot do today
@@ -127,6 +130,18 @@ gaps — no fabricated data is ever shown):
 - **operator global operations** (`/api/v1/operator/operations`) — not
   implemented by the production O3K adapter; the operator console states
   that truthfully.
+
+## PP.4 Core compatibility witness
+
+PP.4 Core proves native O3K creation and lifecycle first, then uses the
+unmodified `python-openstackclient` and one pinned unmodified upstream
+Horizon artifact as external compatibility evidence. Horizon is bounded to
+the capabilities advertised by `o3k-demo-v1` (login, project context,
+image/network selection, server list/detail/create, supported lifecycle, and
+delete). It is not the O3K dashboard, does not own authority, and does not
+affect O3K readiness. The exact Horizon version, provider/artifact identity,
+digest, OS campaign matrix, and canonical identity mapping belong in the
+PP.4 evidence manifest.
 
 ## Uninstall / purge
 

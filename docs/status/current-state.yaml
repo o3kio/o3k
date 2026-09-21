@@ -1,7 +1,7 @@
 schema_version: 2
 status_kind: authoritative-current-state
 source_commit: 096e46792aad3af1e425fb844f449c4dcbfa5da2
-updated_at: 2026-09-18T00:00:00Z
+updated_at: 2026-09-21T00:00:00Z
 milestones:
   p15:
     status: completed
@@ -648,10 +648,27 @@ profiles:
         note: >-
           PP.2 (#971) owns this evidence through the canonical P15
           bootstrap path. Recorded only to the level actually proven.
+      - name: demo-v1-pp4-core-gate
+        state: not-proven
+        evidence: >-
+          PP.4 Core (#973) is the release-blocking O3K Demo/Core gate. It
+          requires fresh Ubuntu 24.04 and Debian 12 x86_64 campaigns against
+          exact published O3K artifacts: public one-line install and release
+          verification, canonical init/join, one BuildingBlock, Placement and
+          topology, bounded native network, real libvirt/KVM guest boot,
+          native workload lifecycle, bounded OpenStack CLI lifecycle, a
+          pinned unmodified Horizon compatibility witness, reboot/rerun/
+          reset/reinstall/purge, foreign-state preservation, and secret scan.
+          Native creation is proven before compatibility observation; identity
+          mapping must show one canonical resource across interfaces. This
+          gate is not yet executed by this governance rebaseline.
+        note: >-
+          O3K Ready is independent of Horizon Ready. Horizon is external
+          compatibility evidence only and does not replace native API proof.
       - name: demo-v1-araf-demo-tuple-gate
         state: not-proven
         evidence: >-
-          PP.4 (#973) has historical evidence on fresh Ubuntu 24.04 and
+          PP.4A (#1029) owns the historical Araf evidence on fresh Ubuntu 24.04 and
           Debian 12 x86_64 nested-KVM hosts against the exact published O3K
           v0.4.0-rc.8 source a546b61ce87dea57b702002ef1506846e3edbef7 and
           Araf v1.0.0-rc.12 source de64cc9193085116fa30ad51c04ccab24a013dd0.
@@ -661,17 +678,18 @@ profiles:
           Durable manifests: docs/evidence/pp4/manifest-ubuntu-24.04.json
           and docs/evidence/pp4/manifest-debian-12.json. Scope is the
           o3k-demo-v1 single-node profile only; Horizon was an optional Ubuntu
-          witness, not the O3K dashboard.
+          witness, not the O3K dashboard. This historical record is retained
+          and does not block PP.4 Core.
         note: >-
-          The rc.8/rc.12 tuple and its deployment material remain immutable
-          historical evidence. The current PP.4 candidate pins Araf
-          v1.0.0-rc.16; the successor O3K release and fresh-host evidence are
-          pending. The historical schema-dialect and network-provider findings
-          above are not claims about the current candidate. Any failed-create
-          row is classified only as a canonical terminal ERROR resource with
-          no provider identity; it is not evidence of a successful or
-          reachable workload. These remain acceptance gates, not accepted
-          product limitations.
+          O3K v0.4.0-rc.8 and the Araf tuple were not modified; the tuple and
+          deployment material are repository-side integration metadata. The
+          pinned Araf console schema-dialect defect remains historical
+          client-schema-compile evidence (upstream Araf PR #118 is not in
+          rc.12), and native VM create remains network-provider-inactive. Any
+          failed-create row is classified only as a canonical terminal ERROR
+          resource with no provider identity; it is not evidence of a
+          successful or reachable workload. These are acceptance blockers, not
+          accepted product limitations.
           No Araf production/HA claim (o3kio/araf#106).
     release_relevance: >-
       Contract-frozen vehicle for the next release. Not itself a release
@@ -688,11 +706,12 @@ profiles:
         (PR #1025)
       - release-gate execution and publication (issue #93)
     next_evidence_action: >-
-      PP.4 (#973) remains incomplete. The current candidate pins Araf
-      v1.0.0-rc.16; publication of the successor immutable O3K release,
-      native browser workload evidence, and exact-head CI checks remain
-      required before PP.5. The 1-20 host envelope remains a hardening target,
-      not a support claim.
+      PP.4 Core (#973) remains incomplete until the native-first O3K,
+      OpenStack CLI, and bounded Horizon witness campaign passes on the two
+      supported OS targets. PP.4A (#1029) separately owns successor Araf
+      browser/workload evidence and is required only for an Araf-integrated
+      PP.7 verdict. PP.5 may begin after PP.4 Core; the 1-20 host envelope
+      remains a hardening target, not a support claim.
     explicitly_unproven_claims:
       - production readiness
       - HA / multi-node behavior
@@ -700,7 +719,7 @@ profiles:
       - automatic evacuation
       - native persistent volumes / boot from volume
       - 50 MB footprint guarantee (target only)
-      - Araf deployment (client-only integration belongs to PP.3/PP.4)
+      - Araf deployment/certification (client-only integration belongs to PP.3/PP.4A)
   o3k-small-edge-v1:
     implementation_state: >-
       Contract-frozen (PP.0, issue #969; SPEC-0048) as the bounded
@@ -742,7 +761,9 @@ profiles:
       - upgrade/backup/restore and failure matrix across the envelope
     next_evidence_action: >-
       PP hardening phases (issue #968 umbrella): installer evidence (PP.2),
-      Araf integration (PP.3/PP.4), then scale evidence (PP.5).
+      Araf artifact/deployment integration (PP.3), O3K Core acceptance (PP.4),
+      independent Araf console certification (PP.4A), then scale evidence
+      (PP.5). PP.4A is not a PP.5 dependency.
     explicitly_unproven_claims:
       - production readiness / GA
       - 1-20 host proven scale (hardening target only)

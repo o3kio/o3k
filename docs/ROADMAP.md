@@ -576,14 +576,43 @@ product baseline:
   reboot, uninstall/reinstall, purge/reinstall, foreign-state preservation,
   zero secret leakage. The Araf side publishes the release bundle and OCI
   tarballs (o3kio/araf#114). No Araf production/HA claim.
-- **PP.4 (#973)** — one-line end-user browser demo: **NOT PROVEN**. Historical
-  fresh Ubuntu 24.04 and Debian 12 campaigns against the immutable O3K
-  v0.4.0-rc.8 / Araf v1.0.0-rc.12 tuple are retained under
-  `docs/evidence/pp4/`, but they did not create a workload through Araf. The
-  current candidate pins Araf v1.0.0-rc.16; the successor O3K release and
-  fresh-host evidence remain pending. That candidate must prove the native
-  browser create and cross-interface lifecycle before PP.4 can close.
-  **PP.5** must not start yet.
+- **PP.4 (#973) — O3K Demo/Core Acceptance**: **NOT PROVEN**. The
+  release-blocking core gate is native-first and covers fresh Ubuntu 24.04 and
+  Debian 12 campaigns against exact published O3K artifacts: public one-line
+  install and verification, canonical init/join, one BuildingBlock,
+  Placement/topology, bounded native network, real libvirt/KVM and guest boot,
+  native workload lifecycle, bounded OpenStack CLI lifecycle, an unmodified
+  pinned Horizon compatibility witness, reboot/rerun/reset/reinstall/purge,
+  foreign-state preservation, and secret scanning. Native creation precedes
+  compatibility observation and both interfaces must prove one canonical
+  resource. Historical Araf evidence remains under `docs/evidence/pp4/` and is
+  not deleted or rewritten.
+- **PP.4A (#1029) — Araf Native Console Certification**: independently
+  certifies the separately versioned Araf native next-generation O3K dashboard
+  (strict CSP, JSON Schema runtime, CSRF, OIDC/session, tenant/operator
+  separation, native browser create/inspect/lifecycle/delete, reboot/recovery,
+  and required OS matrix). Araf is not an O3K readiness authority. PP.4A is
+  required before PP.7 can certify an Araf-integrated Edge-v1 product, but it
+  does not block PP.4 Core or PP.5.
+
+Dependency rebaseline:
+
+```text
+PP.4 Core (#973)
+   |
+   +------> PP.5 (#974)
+   |
+PP.4A Araf (#1029)
+   |
+PP.5 + PP.6 (#975) + PP.4A
+   |
+   v
+PP.7 final certification (#976)
+```
+
+Horizon is an external OpenStack compatibility witness, not the O3K
+dashboard, not an authority, and not a product dependency. See
+`docs/pp/PP4_REBASELINE.md`. PP.5 must not start during this rebaseline task.
 
 PP.0 freezes definitions only: no production-readiness, GA, HA, live
 migration, automatic evacuation, or proven 1–20-host-scale claims.

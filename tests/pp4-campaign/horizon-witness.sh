@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PP.4 OPTIONAL Horizon compatibility witness (unmodified upstream Horizon).
+# PP.4 BOUNDED Horizon compatibility witness (unmodified upstream Horizon).
 #
 # Role: external OpenStack ecosystem witness — explicitly NOT the O3K
 # dashboard (that is Araf). Horizon runs unmodified (only normal OpenStack
@@ -8,8 +8,10 @@
 # supports is exercised; whatever it lacks must fail truthfully and is
 # CLASSIFIED as an O3K compatibility gap here — never patched around.
 #
-# The script is non-blocking for the campaign: it always exits 0 and records
-# PASS/FAIL/GAP per bounded-journey step into 30-horizon-summary.txt.
+# The script is a client witness, never an O3K readiness authority. The
+# campaign wrapper may classify a witness failure separately, but O3K Ready
+# must remain healthy. It records PASS/FAIL/GAP per bounded-journey step into
+# 30-horizon-summary.txt.
 #
 # Usage: bash horizon-witness.sh <evidence-dir>
 set -Eeuo pipefail
@@ -23,7 +25,12 @@ step() { # step NAME -> records PASS/FAIL/GAP
   printf '%s: %s %s\n' "$name" "$result" "$detail" | tee -a "$SUMMARY"
 }
 
-HORIZON_IMAGE="${O3K_PP4_HORIZON_IMAGE:-quay.io/openstack.kolla/horizon:2024.1}"
+# Exact upstream image pin for the PP.4 witness. The tag is retained for
+# provenance; the digest prevents a moving client from changing evidence.
+# Source/provider: Docker Hub openstackhelm/horizon (unmodified Horizon
+# container). Override only with another exact tag@digest in an explicitly
+# recorded campaign manifest.
+HORIZON_IMAGE="${O3K_PP4_HORIZON_IMAGE:-docker.io/openstackhelm/horizon:2024.1-ubuntu_jammy-20250523@sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b}"
 KEYSTONE="http://172.17.0.1:18090/v3"
 ADMIN_PW="${OS_PASSWORD:?admin password required}"
 CONF=/var/lib/o3k/horizon-witness

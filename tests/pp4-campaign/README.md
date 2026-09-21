@@ -1,7 +1,10 @@
-# PP.4 campaign harness (o3kio/o3k#973)
+# Historical PP.4 campaign harness (o3kio/o3k#973; PP.4A input)
 
-Fresh-host acceptance for the one-line O3K + Araf demo. A nested-KVM VM with
-no repo and no bundle runs the **exact published installer**
+This harness records the historical one-line O3K + Araf campaign. Its Araf
+browser/runtime evidence is preserved as PP.4A (#1029) input; it is not the
+PP.4 Core completion gate. A successor PP.4 Core campaign must prove the
+native-first O3K journey and bounded OpenStack/Horizon witness independently.
+A nested-KVM VM with no repo and no bundle runs the **exact published installer**
 
 ```sh
 curl -sfL https://github.com/o3kio/o3k/releases/download/<version>/install.sh | sudo sh -
@@ -13,11 +16,9 @@ and the harness then proves, with durable numbered evidence:
   version **and** source commit must equal the campaign revision);
 - the deployed Araf is the **pinned production tuple**: the tenant BFF container
   environment carries `ARAF_UPSTREAM_ADAPTER=o3k` + `ARAF_RUNTIME_PROFILE=production`
-  (never fixture mode), the three Araf container identities equal the pinned
-  config/index digests or, on engines that re-materialize an OCI archive, carry
-  the pinned immutable Araf source-revision label after the archive config was
-  verified before load, and the compose service set is exactly the seven
-  expected services (evidence `10-araf-production-tuple.txt`);
+  (never fixture mode), the three Araf container image digests equal the pinned
+  config/index digests, and the compose service set is exactly the seven expected
+  services (evidence `10-araf-production-tuple.txt`);
 - the demo OIDC federation is wired through the demo-owned
   `/etc/o3k/o3kd-araf-demo.env` (0600) pulled in by the demo-owned systemd
   drop-in `/etc/systemd/system/o3kd.service.d/araf-demo.conf`, and
@@ -56,7 +57,8 @@ gaps** (`PP4-GAP <id> <detail>` lines from the browser journeys +
 
 | Classified gap | Verified behaviour |
 | --- | --- |
-| `native-vm-create` | No native-create gap is accepted. The schema-driven browser create must succeed; any failure is a campaign failure. |
+| `console-create-schema-dialect=<class>` | **No console create can succeed on the pinned Araf tuple.** The create schemas O3K serves declare `$schema: https://json-schema.org/draft/2020-12/schema` while the pinned schema-runtime compiles with draft-07 Ajv, so validation aborts before any request is sent. The VM-create step classifies the observed console error (`client-schema-compile` on the pinned tuple) and records the verbatim banner; no campaign evidence claims a console create of a VM **or** of a network. The upstream fix is Araf PR #118, which is not in this release tuple. |
+| `native-vm-create=network-provider-inactive` | The native (`ARAF_UPSTREAM_ADAPTER=o3k`) `compute.server` create **fails**: O3K requires the network execution agent to resolve/allocate a port, and `o3k-network` is installed-but-inactive by contract. The console must surface a real error (no fabricated success, no crash), the BFF attempt must be rejected or its canonical Operation must fail, and any durable row is required to be a canonical terminal `ERROR` resource with no provider identity (not an unowned/non-terminal leak). **No campaign claim says Araf created a VM.** |
 | `compat-created-resource-not-canonical` | On a fresh VM the native `image.image` and `network.network` inventories are empty while the installer's `testlab-network` and the demo image exist through the compatibility (Neutron/Glance) APIs. Every native row that does exist is confirmed against the canonical `resources` ledger. |
 | `native-list-name-projection` | The native **list** projection carries `spec: {}` for `compute.server`, so a collection row's label falls back to the canonical id: rows are identified by ID, never by name (the detail projection still carries the name). |
 | `native-server-start-not-advertised` | `compute.server` discovery advertises only delete/update; the console offers no start/stop action, and a native start attempt is rejected. |
@@ -64,14 +66,16 @@ gaps** (`PP4-GAP <id> <detail>` lines from the browser journeys +
 | `images-native-inventory=compat-only` / `network-compat-created-not-canonical` | The browser-side observations of the two inventory gaps above, with the exact row/compat counts. |
 | `operator-global-operations-not-exposed` | The operator console's dedicated global operations list (`/api/v1/operator/operations`) is not implemented by upstream O3K on this profile; the canonical `/api/v1/operations` list the same surface serves carries the tenant tie-in. |
 
-What the campaign **does** prove about the console lifecycle: the browser
-creates a native server, phase1b verifies its canonical id, provider domain,
-guest boot, and OpenStack visibility while it remains live, and the same id is
-then deleted through the advertised `delete` action. The canonical Operation
-reaches a terminal state and the resource is truthfully absent in the
-unmodified CLI (`No Server found`) and the Araf live view (404). Deletes keep a
-`DELETED` tombstone in the canonical ledger; the native `show` view conceals it
-while the collection may still list it with a non-live status.
+What the campaign **does** prove about the console lifecycle: the server
+`pp4-ui-target` — created BEFORE the browser phase through the **unmodified
+OpenStack CLI** (so it is a canonical native resource with the same uuid the
+console lists) — is deleted through the console's advertised `delete` action
+(button + destructive confirmation modal), the canonical Operation reaches a
+terminal state, and the resource is then truthfully absent in the unmodified
+CLI (`No Server found`) and in the Araf live view (404, scenario D3). Deletes
+keep a `DELETED` tombstone in the canonical ledger; the native `show` view
+conceals it while the collection may still list it with a non-live status, and
+both facts are recorded.
 
 ## Honesty rules enforced by the harness
 
@@ -83,10 +87,13 @@ The campaign only reports `PASS` when the numbered evidence supports it:
 - a query that *fails* is never read as "the resource is gone": the absence and
   presence helpers distinguish a failed CLI/HTTP call (fail closed) from an
   empty result, and cross-interface identity is always the canonical id;
-- the browser journeys must perform their mutations through the **real UI**.
-  Araf rc.15 supplies the CSRF header itself; any `PP4-UI-CSRF-BRIDGE` marker
-  or UI fallback fails the campaign. Both native create and delete go through
-  the advertised form/action and confirmation modal;
+- the browser journeys must perform their mutations through the **real UI**. The
+  pinned Araf SPA sends no `x-csrf-token`, so the harness adds that one header
+  at the network layer (`PP4-UI-CSRF-BRIDGE`) and keeps the real click path; the
+  harness has no BFF create/delete fallback at all. The one supported mutation
+  (the console delete of the CLI-created server) goes through the advertised
+  action button and its confirmation modal, and a step that cannot be performed
+  through the UI records `PP4-UI-FALLBACK <step>` or fails outright;
 - classified gaps are evidence: they are recorded with their observed counts and
   are never turned into a PASS for behaviour that did not happen;
 - `make-manifest.py` is fail-closed: the Araf tuple, the O3K release identity
@@ -102,13 +109,10 @@ Usage:
 ```sh
 # host, from repo root; needs /root/noble-server-cloudimg-amd64.img (Ubuntu);
 # the Debian cloud image is downloaded into target/pp4-campaign/vms/ if absent
-O3K_CAMPAIGN_VERSION=<published-successor-version> \
-  O3K_CAMPAIGN_SOURCE_SHA=<published-source-sha> \
-  bash tests/pp4-campaign/host-run.sh ubuntu target/pp4-campaign/ubuntu
-O3K_CAMPAIGN_VERSION=<published-successor-version> \
-  O3K_CAMPAIGN_SOURCE_SHA=<published-source-sha> \
-  bash tests/pp4-campaign/host-run.sh debian target/pp4-campaign/debian
-# optional Horizon witness (Ubuntu campaign, bounded, non-blocking):
+O3K_CAMPAIGN_VERSION=v0.4.0-rc.8 bash tests/pp4-campaign/host-run.sh ubuntu target/pp4-campaign/ubuntu
+O3K_CAMPAIGN_VERSION=v0.4.0-rc.8 bash tests/pp4-campaign/host-run.sh debian target/pp4-campaign/debian
+# historical optional Horizon witness (bounded external evidence; PP.4 Core
+# must pin its exact unmodified artifact and campaign matrix):
 O3K_PP4_HORIZON=1 bash tests/pp4-campaign/host-run.sh ubuntu ...
 ```
 

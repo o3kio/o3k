@@ -1,6 +1,9 @@
-# PP.4 evidence (o3kio/o3k#973)
+# Historical PP.4 evidence (o3kio/o3k#973; now PP.4A input)
 
-Durable, redacted evidence for the PP.4 one-line O3K + Araf demo acceptance.
+Durable, redacted evidence for the historical one-line O3K + Araf campaign.
+The Araf browser/runtime portions are preserved as PP.4A (#1029) evidence;
+they are not rewritten or promoted to the PP.4 Core completion gate. PP.4
+Core now has a separate native-first campaign and bounded Horizon witness.
 Raw campaign logs are large and stay local/gitignored under
 `target/pp4-campaign/`; this directory keeps the immutable metadata needed to
 verify what was actually tested, against which exact artifacts.
@@ -41,7 +44,7 @@ Acceptance areas and the evidence files each campaign produces:
 | failure/recovery matrix | `23-browser-relogin.log`, `26-*`, cases F1-F4 |
 | cleanup / foreign-state preservation | `27-*`-`31-*`, cases C1-C8 |
 | secret scans (browser + CLI + journals) | `17-secret-scan.txt`, `32-secret-scan-phase2.txt`, case SEC1 |
-| Horizon (optional witness) | `30-horizon-summary.txt` (Ubuntu campaign), classified PASS/GAP |
+| Horizon (historical optional witness) | `30-horizon-summary.txt` (Ubuntu campaign), classified PASS/GAP; PP.4 Core must pin its exact unmodified artifact |
 
 Known limitations are recorded inside each manifest. Campaigns that did not
 run (or failed) have no manifest here on purpose.

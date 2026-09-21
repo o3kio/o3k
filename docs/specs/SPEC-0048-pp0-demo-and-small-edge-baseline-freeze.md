@@ -142,8 +142,15 @@ SPEC-0023).
 plus a separately versioned compatible Araf release; PP must eventually pin
 an exact Araf version/digest. Araf consumes real O3K native APIs, owns no
 O3K state, and is not required for `o3kd` readiness. No fixture/demo fake
-mode may satisfy the final real demo profile. Actual Araf deployment
-integration is owned by PP.3/PP.4.
+mode may satisfy the final real demo profile. PP.3 owns artifact/deployment
+integration; PP.4A owns Araf native-console certification. PP.4 Core owns
+the O3K-native lifecycle and the bounded OpenStack/Horizon compatibility
+witness independently of Araf browser/runtime readiness.
+
+Horizon is an unmodified external OpenStack compatibility witness, never the
+O3K product dashboard or a readiness authority. Its exact version and
+artifact/provider digest are pinned by the PP.4 Core evidence manifest; it
+does not become a product dependency.
 
 ## 10. Claim discipline
 
@@ -159,5 +166,6 @@ SPEC-0024.
 - PP.2: can a fresh supported machine install and run it through the
   canonical P15 bootstrap path?
 
-Later PP phases own Araf deployment integration (PP.3/PP.4) and scale
-evidence (PP.5). PP.0 does not start any of them.
+Later PP phases own Araf deployment integration (PP.3), Araf native-console
+certification (PP.4A), O3K Demo/Core acceptance (PP.4), and scale evidence
+(PP.5). PP.0 does not start any of them.

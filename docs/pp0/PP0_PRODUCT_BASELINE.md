@@ -24,7 +24,7 @@ canonical P15 bootstrap path?".
 | Storage | native ephemeral-root only | bounded declared storage profile |
 | Database | SQLite default, PostgreSQL target | SQLite w/ documented limits, PostgreSQL production target |
 | Bootstrap | canonical `o3k init` + authenticated `o3k join`, one local BuildingBlock | authenticated BuildingBlock lifecycle |
-| Araf | optional client only | optional client only (PP.3/PP.4) |
+| Araf | optional client only | optional client only (PP.3/PP.4A) |
 
 Both are machine-readable in `compatibility/product-profiles.yaml` with
 matching state records in `docs/status/current-state.yaml`; #433 validation
@@ -72,7 +72,7 @@ single-use enrollment grant; `o3k join` presents the agent certificate
 | Artifact signature/provenance attestation | **RESOLVED in PP.1 (v0.4.0-rc.1)** — ed25519 release key (`release-verify.pub` committed), `release-digests.txt/.sig` + `provenance.json` published per release |
 | `o3k-network` packaging/unit | **RESOLVED in PP.1 (v0.4.0-rc.1)** — binary built (Debian-12 baseline), bundled, installed |
 | Full upgrade/rollback/crash-resume | **LATER-PHASE** — issue #640 / PP.6–P17 |
-| Araf deployment integration | **LATER-PHASE** — PP.3/PP.4 |
+| Araf deployment integration | **LATER-PHASE** — PP.3; native console certification PP.4A |
 
 ## 4. Frozen contracts
 
@@ -94,7 +94,9 @@ single-use enrollment grant; `o3k join` presents the agent certificate
   init/join — installer implementation in progress on branch
   `pp2-one-line-canonical-bootstrap` (#971); `bootstrap-testlab.sh` now
   requires the canonical bootstrap state instead of replacing it.
-- **PP.3/PP.4**: Araf deployment integration (real APIs, pinned version).
+- **PP.3**: Araf deployment integration (real APIs, pinned version); **PP.4A**:
+  Araf native-console certification. PP.4 Core separately owns O3K-native and
+  bounded OpenStack/Horizon acceptance.
 - **PP.5**: 1–20 hypervisor scale evidence before any support claim.
 
 ## 6. Still unsupported

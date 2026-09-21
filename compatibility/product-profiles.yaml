@@ -217,9 +217,26 @@ profiles:
       - o3k-cli
       - araf-client-optional
     araf_integration: client-only-not-required-for-readiness
+    dashboard_boundary:
+      araf:
+        role: native-next-generation-o3k-dashboard
+        interface: o3k-native-apis
+        authority: none
+        certification: PP.4A-1029
+      horizon:
+        role: external-openstack-compatibility-witness
+        interface: openstack-compatible-apis
+        authority: none
+        product_dependency: false
+        artifact:
+          provider: docker-hub
+          image: docker.io/openstackhelm/horizon
+          version: 2024.1-ubuntu_jammy-20250523
+          digest: sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b
+          unmodified: true
     araf_demo_tuple:
       state: not-proven
-      tracking_issue: 973
+      tracking_issue: 1029
       contract: contracts/araf-compatibility-v1.yaml
       evidence: >-
         PP.3 fresh-host campaign PASSED on Ubuntu 24.04 x86_64 against the
