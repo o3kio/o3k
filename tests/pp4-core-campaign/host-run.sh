@@ -91,8 +91,13 @@ if (( log_copy_status != 0 )); then
 fi
 set -e
 cat "$EVID/native-smoke.log"
-((smoke_status == 0)) || exit "$smoke_status"
+# Preserve the in-guest evidence directory on failure too, so a harness or
+# product failure is diagnosed from the recorded observations rather than a
+# two-line stdout tail.
+set +e
 scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$SSH_PORT" -r \
-  tester@127.0.0.1:/home/tester/pp4-evidence/. "$EVID/"
+  tester@127.0.0.1:/home/tester/pp4-evidence/. "$EVID/" >/dev/null 2>&1
+set -e
+((smoke_status == 0)) || exit "$smoke_status"
 printf 'release=%s\nsource_sha=%s\ndistro=%s\ncampaign_status=PASS\n' "$VERSION" "$EXPECTED_SHA" "$DISTRO" >"$EVID/campaign.env"
 echo "PP4 CORE CAMPAIGN PASS: $DISTRO"

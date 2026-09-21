@@ -141,6 +141,29 @@ replay_operation="$(jq -r '.operation_id // .operation.id // empty' "$replay_fil
 [[ -z "$replay_operation" || "$replay_operation" == "$operation_id" ]] || die 'idempotent replay returned a different Operation'
 record "replay: same_server=$replay_server same_operation=${replay_operation:-same-or-complete} same_port=$native_port same_ip=$native_ip"
 
+# Same idempotency key with a materially different body must conflict, not
+# converge: the canonical fingerprint identifies the original create intent.
+conflict_request="$EVID/native-conflict-request.json"
+python3 - "$REQUEST_FILE" "$conflict_request" <<'PY'
+import json, sys
+source, destination = sys.argv[1:]
+with open(source, encoding="utf-8") as stream:
+    body = json.load(stream)
+body["spec"]["name"] = "pp4-native-conflict"
+with open(destination, "w", encoding="utf-8") as stream:
+    json.dump(body, stream, separators=(",", ":"))
+    stream.write("\n")
+PY
+chmod 0600 "$conflict_request"
+conflict_file="$EVID/native-conflict-response.json"
+if python3 "$HELPER" request --token-file "$TOKEN_FILE" --url "$API/compute/servers" \
+  --method POST --request-file "$conflict_request" --output-file "$conflict_file" \
+  --idempotency-key "$idempotency" --expect 409 >/dev/null 2>&1; then
+  record 'conflict: same key + changed body -> 409 (canonical intent preserved)'
+else
+  die 'same key with a changed body did not conflict'
+fi
+
 domain=""
 while read -r candidate; do
   [[ -n "$candidate" ]] || continue
@@ -152,8 +175,21 @@ done < <(sudo virsh -c qemu:///system list --all --name)
 [[ -n "$domain" ]] || die 'managed_by=o3k-compute libvirt domain not found'
 [[ "$(sudo virsh -c qemu:///system domstate "$domain")" == running ]] || die 'libvirt domain is not running'
 record "libvirt: domain=$domain state=running server_id=$server_id"
-if sudo virsh -c qemu:///system console "$domain" --force 2>/dev/null | timeout 8 grep -Eiq 'cirros|login:'; then
-  record 'guest boot: PASS (console marker)'
+# Read the persisted serial log through the compatibility API (the same
+# authority the installer's TestLab check uses). `virsh console` attaches
+# live and cannot replay a prompt the guest already printed before attach.
+console_marker=0
+for _attempt in $(seq 1 60); do
+  if timeout 15 openstack console log show "$server_id" >"$EVID/native-console.log" 2>>"$openstack_error" \
+    && [[ -s "$EVID/native-console.log" ]] \
+    && grep -Eiq 'cirros|login:' "$EVID/native-console.log"; then
+    console_marker=1
+    break
+  fi
+  sleep 2
+done
+if [[ "$console_marker" == 1 ]]; then
+  record 'guest boot: PASS (console log marker)'
 else
   die 'guest console did not expose a CirrOS/login boot marker'
 fi
