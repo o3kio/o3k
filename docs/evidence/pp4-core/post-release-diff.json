@@ -1,0 +1,24 @@
+{
+  "base_source_sha": "da00eeaa878956f438a62648f40c783e06a076d7",
+  "comparison_head": "final PR head recorded in the certification report",
+  "runtime_changes": false,
+  "installer_changes": false,
+  "shipped_packaging_changes": false,
+  "release_logic_changes": false,
+  "api_semantics_changes": false,
+  "provider_network_compute_changes": false,
+  "database_migration_changes": false,
+  "classification": "harness-and-evidence-only",
+  "changed_files": [
+    "docs/evidence/pp4-core/README.md",
+    "docs/evidence/pp4-core/post-release-diff.json",
+    "docs/evidence/pp4-core/rc18-native-replay-failure.json",
+    "tests/pp4-core-campaign/README.md",
+    "tests/pp4-core-campaign/host-run.sh",
+    "tests/pp4-core-campaign/in-vm-native-smoke.sh",
+    "tests/pp4-core-campaign/native_client.py",
+    "tests/pp4-core-campaign/test_native_client.py",
+    "tests/pp4-core-campaign/verify_manifest.py"
+  ],
+  "note": "All paths are non-shipped campaign/evidence inputs; rc.18 runtime remains immutable."
+}
