@@ -137,6 +137,16 @@ The verifier requires the exact repository, workflow path, release tag,
 issuer, and transparency proof. It rejects another repository, workflow,
 branch, issuer, modified digest manifest, or missing bundle. A release must not be described as signed merely because it contains checksums: checksums are integrity, not authenticity, and an artifact is never signed merely because it contains checksums. The application/browser OIDC authority (Keycloak in the PP.4 TestLab) is separate from GitHub's release-workload OIDC.
 
+The public installer performs this verification before downloading or
+extracting the archive. Its embedded consumer verifier uses the supported
+Ubuntu/Debian OpenSSL and Python runtimes plus pinned Fulcio and Rekor trust
+material; it never downloads Cosign or executes archive content to obtain a
+verifier. Only after the signed `release-digests.txt` is accepted does it read
+the archive digest. The `.sha256` asset remains convenience integrity data,
+not the v2 authenticity root. `provenance.json` is generated before the
+digest manifest and is included in that signed manifest, avoiding a circular
+self-digest.
+
 The libvirt alpha also requires `packaging/release-gate.sh` to report
 `status: ready` from real E2E, recovery, clean Ubuntu/Debian installation,
 and benchmark artifacts. The invocation must supply `--source-commit`,

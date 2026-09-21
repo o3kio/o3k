@@ -40,3 +40,23 @@ share only the durable store and requires them to converge on one canonical
 identity with zero duplicate side effects. See
 `rc19-cross-process-replay.json` for the gate, the durable invariants it
 asserts, and the three convergence defects this proof exposed and corrected.
+
+## rc.21 historical native evidence
+
+`v0.4.0-rc.21` is an immutable published prerelease at source
+`0a3fa9f186ba99cfee91a95e3df928b861e17667`. Its replay purpose succeeded: the
+cross-process gate passed on both SQLite and PostgreSQL, covering sequential,
+concurrent, in-flight, terminal, restart, and different-body conflict cases
+with one canonical reservation, operation, resource, port, Placement
+allocation, quota reservation, and provider execution. The fresh disposable
+Ubuntu smoke also passed canonical init/join, native create, a real KVM guest,
+same-key replay, and changed-body conflict. See
+`rc21-native-smoke-pass.json` for the bounded smoke record.
+
+rc.21 is not the final PP.4 Core candidate. The publisher generated and
+manually verified a Sigstore bundle, but the public installer did not consume
+that authentication before archive extraction. The two-OS PP.4 campaign,
+bounded Horizon witness, full cross-interface lifecycle, reinstall/purge, and
+foreign-state/secret evidence therefore remain **not-proven**. The current
+source repair prepares a successor candidate (expected `v0.4.0-rc.22`); no
+successor is tagged or published by this iteration.

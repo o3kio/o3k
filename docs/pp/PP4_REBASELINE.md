@@ -50,6 +50,17 @@ The witness is limited to the capabilities advertised by
 `o3k-demo-v1`; unsupported services fail truthfully or are absent. O3K Ready
 does not depend on Horizon Ready.
 
+### Current candidate state
+
+The immutable `v0.4.0-rc.21` candidate at source
+`0a3fa9f186ba99cfee91a95e3df928b861e17667` proves the native replay and fresh
+Ubuntu native/KVM smoke portions of this gate. It does not prove the complete
+two-OS campaign, Horizon witness, or full lifecycle matrix. Its release
+publisher produced a Sigstore bundle, but the public installer did not enforce
+that authentication before extraction. Source repair is therefore preparing
+the next eligible candidate (`v0.4.0-rc.22`); no tag or publication occurs in
+this iteration.
+
 ### PP.4A — Araf Native Console Certification (#1029)
 
 PP.4A owns the separately versioned Araf candidate and its native O3K console

@@ -31,6 +31,8 @@ assert "run: bash tests/upgrade-process.sh" in text
 assert "run: bash tests/helm-lint-and-template.sh" in text
 assert "run: bash tests/kubernetes-version-consistency.sh" in text
 assert "run: sudo bash tests/installer-negative.sh" in text
+assert "run: bash tests/pp4-core-installer-contract.sh" in text
+assert "run: bash tests/release-consumer-trust.sh" in text
 # The installer-negative matrix skip is vacuous on any non-24.04 runner:
 # the dedicated job must stay pinned to ubuntu-24.04.
 assert re.search(r"^  installer-negative:\s*\n\s+runs-on: ubuntu-24\.04", text, re.MULTILINE) is not None

@@ -52,6 +52,12 @@ authentication:
   release_environment: release
   transparency_log_required: true
   private_signing_key_required: false
+  consumer_verifier:
+    implementation: packaging/verify-sigstore-bundle.py
+    bootstrap: embedded-system-openssl-python
+    pinned_fulcio_root: packaging/trust/fulcio_v1.crt.pem
+    pinned_fulcio_intermediate: packaging/trust/fulcio_intermediate_v1.crt.pem
+    pinned_rekor_key: packaging/trust/rekor.pub
 
 legacy:
   contract: contracts/release-bundle-v1.yaml
@@ -68,6 +74,13 @@ build_baseline:
 verification_order:
   - verify_sigstore_identity_and_transparency
   - verify_release_digests
+  - obtain_archive_digest_from_authenticated_manifest
+  - verify_archive_before_extraction
   - verify_provenance_and_source_commit
   - verify_bundle_checksums
   - verify_installer_before_extraction
+
+provenance_binding:
+  generated_before_digest_manifest: true
+  digest_manifest_includes: provenance.json
+  self_digest_is_not_listed_in_provenance: true

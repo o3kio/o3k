@@ -42,29 +42,34 @@ RHEL/Fedora, other releases, and other profiles are not supported.
 2. creates a private `mktemp -d` temp dir with trap cleanup — nothing is
    executed from unverified content;
 3. resolves the version from the pin baked into the installer
-   (`O3K_INSTALLER_VERSION=v0.2.0-alpha.2`); precedence is the `O3K_VERSION`
+   (`O3K_INSTALLER_VERSION=v0.4.0-rc.21` in the current source); precedence is the `O3K_VERSION`
    env override (dev/test only) > an optional endpoint-injected
    `O3K_PINNED_VERSION` first line > the baked pin. The installer never
    consults a channel service and never falls back to `main`/`latest`;
-4. apt-installs the certified dependency set (the only place the wrapper may
+4. downloads `release-digests.txt`, its Sigstore bundle, and `provenance.json`
+   before any archive or host mutation;
+5. verifies the exact protected GitHub workflow/tag identity, OIDC issuer,
+   pinned Fulcio chain, signed digest, and Rekor transparency proof using the
+   embedded system-OpenSSL/Python consumer verifier;
+6. apt-installs the certified dependency set (the only place the wrapper may
    install packages) and enables `libvirtd`;
-5. downloads `o3k-<version>-linux-x86_64.tar.gz` and its published
-   `.sha256` from GitHub Releases;
-6. verifies the published SHA-256 **before** extraction and aborts on any
-   mismatch;
-7. extracts safely (rejects absolute paths, `..` components, entries not
+7. downloads `o3k-<version>-linux-x86_64.tar.gz` and obtains its expected
+   digest from the authenticated manifest. The separately published `.sha256`
+   is checked only as convenience integrity data;
+8. extracts safely (rejects absolute paths, `..` components, entries not
    under `./`, and any non-regular entry — symlinks, devices, fifos, and
    sockets — detected from the archive listing);
-8. runs the bundled `packaging/verify-release-bundle.sh`, then
+9. cross-checks extracted `manifest.json` against authenticated provenance,
+   then runs the bundled `packaging/verify-release-bundle.sh`, then
    `packaging/preflight.sh --profile libvirt` — preflight failure aborts;
-9. bootstraps mTLS identities only when the complete TLS set is absent —
+10. bootstraps mTLS identities only when the complete TLS set is absent —
    valid existing identities are never regenerated, and a partial set fails
    closed;
-10. runs the bundled `packaging/install.sh --profile libvirt --noninteractive`
+11. runs the bundled `packaging/install.sh --profile libvirt --noninteractive`
     with the verified binaries — the same layout and fences as a manual
     certified-bundle install;
-11. waits for `o3kd` health (`127.0.0.1:18080/healthz`);
-12. runs the canonical P15.6 bootstrap as orchestration only
+12. waits for `o3kd` health (`127.0.0.1:18080/healthz`);
+13. runs the canonical P15.6 bootstrap as orchestration only
     (`contracts/installer-v1.yaml` — the installer never fabricates
     topology, Placement providers, BuildingBlocks, CloudProfile state, agent
     identity, or readiness): canonical `o3k init`, executed as the `o3k`
@@ -74,17 +79,17 @@ RHEL/Fedora, other releases, and other profiles are not supported.
     certificate and creates exactly one local BuildingBlock with Placement
     inventory. The enrollment token is written to a root-owned 0600
     temporary file, parsed, and destroyed immediately — it is never printed;
-13. starts `o3k-compute.service` and waits for the compute agent
+14. starts `o3k-compute.service` and waits for the compute agent
     (`127.0.0.1:9100/readyz`), then canonical control-plane readiness
     (`127.0.0.1:18080/readyz`), then gates on `o3k doctor` reporting a
     healthy installation before any workload is created;
-14. runs the bundled `packaging/bootstrap-testlab.sh`, which first verifies
+15. runs the bundled `packaging/bootstrap-testlab.sh`, which first verifies
     the canonical bootstrap state (read-only: bootstrap phase `ready` plus a
     ready BuildingBlock — it fails closed otherwise) and then uses **public
     OpenStack APIs only** to converge the bounded demo workload (CirrOS
     image, network, subnet, port, flavor, keypair, `test-vm`, console boot
     marker);
-15. prints the cloud identity, BuildingBlock id, endpoint URLs, credential
+16. prints the cloud identity, BuildingBlock id, endpoint URLs, credential
     paths, and next commands — never secrets.
 
 The TestLab bootstrap replaces the manual steps of
@@ -95,7 +100,10 @@ public-API resources.
 
 Every published installer is pinned to its own release version (the baked
 `O3K_INSTALLER_VERSION` constant in `packaging/get-o3k.sh`), so the plain
-`curl | sudo sh -` form installs exactly `v0.2.0-alpha.2` by default. The
+`curl | sudo sh -` form installs exactly `v0.4.0-rc.21` in the current source.
+The published rc.21 installer predates the consumer trust repair; a successor
+must be published before this source-level pin is used for fresh-host PP.4
+evidence. The
 installer never asks any endpoint which version to install.
 
 Version resolution precedence:
@@ -104,7 +112,7 @@ Version resolution precedence:
    precedence):
 
    ```sh
-   curl -sfL https://get.o3k.io | sudo env O3K_VERSION=v0.2.0-alpha.2 sh -
+   curl -sfL https://get.o3k.io | sudo env O3K_VERSION=v0.4.0-rc.21 sh -
    ```
 
 2. an optional `O3K_PINNED_VERSION="<version>"` first line, kept for the

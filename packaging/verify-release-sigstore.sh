@@ -13,7 +13,16 @@ TAG="v$VERSION_NO_V"
 for asset in release-digests.txt release-digests.sigstore.json provenance.json; do
   [[ -f "$DIST_ROOT/$asset" ]] || { echo "missing Sigstore release asset: $asset" >&2; exit 2; }
 done
-COMMIT="$(python3 - "$DIST_ROOT/o3k-$VERSION_NO_V/manifest.json" <<'PY'
+COMMIT="${RELEASE_SOURCE_COMMIT:-}"
+if [[ -z "$COMMIT" && -f "$DIST_ROOT/source-commit.txt" ]]; then
+  COMMIT="$(sed -n '1p' "$DIST_ROOT/source-commit.txt")"
+fi
+if [[ -n "$COMMIT" ]]; then
+  python3 "$ROOT_DIR/packaging/verify-sigstore-bundle.py" "$VERSION" "$DIST_ROOT" "$COMMIT"
+else
+  python3 "$ROOT_DIR/packaging/verify-sigstore-bundle.py" "$VERSION" "$DIST_ROOT"
+fi
+COMMIT="$(python3 - "$DIST_ROOT/provenance.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     print(json.load(stream)["source_commit"])
@@ -29,5 +38,4 @@ IDENTITY="https://github.com/o3kio/o3k/.github/workflows/release.yml@refs/tags/$
   --certificate-identity "$IDENTITY" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   "$DIST_ROOT/release-digests.txt"
-(cd "$DIST_ROOT" && sha256sum --check --strict release-digests.txt)
 echo "verified keyless O3K release: $TAG ($IDENTITY)"

@@ -39,9 +39,16 @@ for field, expected in required.items():
         fail(f"provenance {field!r} does not match the governed policy")
 if provenance.get("digest_manifest") != "release-digests.txt":
     fail("provenance must name release-digests.txt as its digest manifest")
+if provenance.get("self_digest_binding") != "release-digests.txt":
+    fail("provenance must declare its external digest binding")
 if not isinstance(provenance.get("assets"), list) or not provenance["assets"]:
     fail("provenance assets must be a non-empty list")
+asset_names = set()
 for asset in provenance["assets"]:
     if not isinstance(asset, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(asset.get("sha256", ""))):
         fail("provenance asset digest is invalid")
+    name = asset.get("name")
+    if not isinstance(name, str) or name in asset_names:
+        fail("provenance asset names must be unique")
+    asset_names.add(name)
 print("sigstore provenance policy: PASS")

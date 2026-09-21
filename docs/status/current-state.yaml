@@ -660,11 +660,22 @@ profiles:
           pinned unmodified Horizon compatibility witness, reboot/rerun/
           reset/reinstall/purge, foreign-state preservation, and secret scan.
           Native creation is proven before compatibility observation; identity
-          mapping must show one canonical resource across interfaces. This
-          gate is not yet executed by this governance rebaseline.
+          mapping must show one canonical resource across interfaces. The
+          immutable published v0.4.0-rc.21 candidate (source
+          0a3fa9f186ba99cfee91a95e3df928b861e17667) proves native replay on
+          SQLite and PostgreSQL, including independent-process sequential,
+          concurrent, in-flight, terminal, restart, and changed-body cases,
+          plus a fresh Ubuntu native/KVM smoke. It does not prove the complete
+          two-OS campaign. Its publisher produced a valid Sigstore bundle, but
+          the public installer did not consume that trust chain before
+          extraction; the successor repair is therefore source-level work and
+          rc.21 remains historical, not the final PP.4 candidate.
         note: >-
           O3K Ready is independent of Horizon Ready. Horizon is external
           compatibility evidence only and does not replace native API proof.
+          Full Ubuntu/Debian lifecycle, bounded Horizon, cross-interface,
+          reinstall/purge, foreign-state, and secret-scan evidence remain
+          not-proven.
       - name: demo-v1-araf-demo-tuple-gate
         state: not-proven
         evidence: >-
@@ -697,13 +708,15 @@ profiles:
       (docs/release-tracker.md, issues #93/#94) and PP.1-PP.2 evidence.
     blockers:
       - >-
-        PP.1 release artifact build/publish pipeline (shipped in
-        v0.4.0-rc.1, #970; a protected GitHub Actions release workflow
-        remains follow-up)
+        successor release candidate with the repaired public-installer
+        Sigstore consumer path (expected v0.4.0-rc.22; publication is not
+        authorized in this iteration)
       - >-
         PP.2 (#971) fresh-machine install evidence via canonical init/join —
         PASSED on both supported distros against the published v0.4.0-rc.5
         (PR #1025)
+      - complete PP.4 Core campaign on Ubuntu 24.04 and Debian 12, including
+        bounded Horizon and cross-interface lifecycle evidence
       - release-gate execution and publication (issue #93)
     next_evidence_action: >-
       PP.4 Core (#973) remains incomplete until the native-first O3K,

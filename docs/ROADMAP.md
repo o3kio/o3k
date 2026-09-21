@@ -36,6 +36,18 @@ exact tested Kubernetes topology.
 The post-foundation milestones increase **tenant-visible cloud product
 capability**, not infrastructure abstraction for its own sake.
 
+## PP.4 Core release-gate state
+
+PP.4 Core is the current productization and release-hardening gate, not a
+production-readiness declaration. Immutable `v0.4.0-rc.21` evidence proves
+native replay convergence on SQLite/PostgreSQL and a fresh Ubuntu native/KVM
+smoke. The complete Ubuntu 24.04 + Debian 12 native-first lifecycle, bounded
+Horizon witness, reinstall/purge, foreign-state, and secret checks remain
+pending. A public-installer v2 trust-consumer repair is prepared in source for
+the expected `v0.4.0-rc.22`; no candidate is tagged or published here. PP.5
+remains dependent on PP.4 Core, PP.7 remains later certification, and Araf
+successor certification is tracked separately by #1029.
+
 ## P9 — O3K Routed Fabric v1 — completed profile
 
 P9 established the native tenant networking foundation:

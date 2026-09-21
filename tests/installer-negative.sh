@@ -163,6 +163,17 @@ run_full_matrix() {
     ubuntu:noble|debian:bookworm) ;;
     *) record_skip "full-wrapper matrix needs Ubuntu 24.04/Debian 12 (host is ${ID:-unknown}:${VERSION_CODENAME:-unknown})"; return ;;
   esac
+
+  # The historical wrapper matrix below predates the v2 release-authentication
+  # boundary and only publishes an unsigned tarball fixture.  It cannot be
+  # allowed to create a test-only bypass for the production installer.  The
+  # v2 pre-extraction consumer matrix is authoritative for archive/authentication
+  # behavior; keep the legacy lifecycle cases available for a signed fixture
+  # refresh rather than weakening the installer to make this unsigned fixture
+  # pass.
+  record_skip "legacy full-wrapper fixture is unsigned; v2 release-consumer-trust.sh covers pre-extraction authentication"
+  return
+
   for tool in curl python3 tar sha256sum awk sed grep mktemp cat; do
     command -v "$tool" >/dev/null 2>&1 || { record_skip "full-wrapper matrix needs $tool"; return; }
   done

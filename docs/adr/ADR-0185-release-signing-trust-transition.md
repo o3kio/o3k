@@ -34,6 +34,17 @@ The verifier requires all of the following, exactly:
 - the release tag in the certificate identity;
 - a valid Sigstore bundle and transparency proof.
 
+The public one-line installer consumes this trust chain before it downloads or
+extracts the archive. It uses the embedded Python/OpenSSL consumer verifier,
+with pinned Fulcio root/intermediate and Rekor key material; no verifier
+binary is downloaded from the release channel. The archive digest is obtained
+only from the authenticated `release-digests.txt`. The separately published
+`.sha256` remains convenience integrity data, never the authenticity root.
+The pinned public trust material is sourced from
+`sigstore/root-signing` commit
+`17c3a0dd48de7b107f94953001358e7a78b54e76`; the consumer verifies the Rekor
+checkpoint signature and RFC 6962 inclusion path against that pinned key.
+
 The release workflow is protected by repository tag rules and environment
 approval. It is not callable by pull requests, branches, or reusable workflow
 dispatch. Every third-party action is pinned to a full commit SHA and the
@@ -57,6 +68,12 @@ No long-lived release private key is required for new releases. Public users
 can verify the Sigstore bundle without private infrastructure. A release is
 not authentic merely because its checksums match: the exact repository,
 workflow, tag identity, issuer, and transparency proof must verify.
+
+`provenance.json` is generated before `release-digests.txt`, and the signed
+digest manifest includes the provenance bytes. Provenance declares that
+external manifest binding rather than recursively claiming its own digest.
+The internal `manifest.json` is checked only after safe extraction and is
+cross-checked with the authenticated external identity.
 
 The GitHub repository must keep the `release` Environment protected and must
 protect release tags. If either protection is absent, the workflow is not

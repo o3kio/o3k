@@ -1,4 +1,7 @@
 schema_version: 1
+# Public Sigstore trust material is pinned from sigstore/root-signing commit
+# 17c3a0dd48de7b107f94953001358e7a78b54e76 (targets/trusted_root.json and
+# its Fulcio/Rekor targets). The installer never downloads these at runtime.
 legacy:
   scheme: ed25519
   public_key: packaging/trust/o3k-release-ed25519-legacy.pub
@@ -13,3 +16,7 @@ current:
   environment: release
   certificate_identity_template: https://github.com/o3kio/o3k/.github/workflows/release.yml@refs/tags/{tag}
   transparency_log_required: true
+  verifier: packaging/verify-sigstore-bundle.py
+  fulcio_root: packaging/trust/fulcio_v1.crt.pem
+  fulcio_intermediate: packaging/trust/fulcio_intermediate_v1.crt.pem
+  rekor_public_key: packaging/trust/rekor.pub

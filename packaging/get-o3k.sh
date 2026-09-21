@@ -35,13 +35,15 @@
 # 24.04's dash (0.5.12-6ubuntu5) rejects `set -o pipefail`, so it is enabled
 # conditionally (empirically verified on a clean noble VM).
 #
-# SECURITY CONTRACT — no curl|sh of unverified content:
+# SECURITY CONTRACT — no curl|sh of unauthenticated content:
 #   The version to install is BAKED into this file (O3K_INSTALLER_VERSION);
 #   the installer never consults a channel service or any other network
 #   endpoint to decide which version to install. Every file that is executed
 #   (packaging/*.sh, bin/o3kd, bin/o3k-compute, bin/o3k-network) comes from the release
-#   tarball AFTER its published SHA-256 is verified; the tarball is never
-#   extracted before that verification, and extraction rejects any entry that
+#   tarball AFTER the exact tag, GitHub OIDC identity, Sigstore signature,
+#   Rekor checkpoint/inclusion proof, and signed digest manifest are verified;
+#   the tarball is never extracted before its digest from that authenticated
+#   manifest is verified, and extraction rejects any entry that
 #   is absolute, contains a ".." component, does not start with "./", or is
 #   not a regular file (symlink, hardlink, device, fifo, socket entries are
 #   refused from the `tar -tvzf` listing before anything is written). Any
@@ -226,6 +228,145 @@ safe_extract() { # safe_extract TARBALL DESTINATION ENTRIES_FILE
   done <"$entries.types"
   tar -xzf "$tarball" -C "$destination" \
     || die "release archive extraction failed: $tarball"
+}
+
+# Verify external release metadata before any archive extraction or bundled
+# script execution. This uses the system OpenSSL/Python verifier; no verifier
+# binary is downloaded from the release channel.
+verify_release_metadata() {
+  python3 - "$1" "$2" <<'PY'
+import base64, hashlib, json, re, subprocess, sys, tempfile
+from pathlib import Path
+
+directory = Path(sys.argv[1])
+version = sys.argv[2].removeprefix("v")
+tag = "v" + version
+identity = f"https://github.com/o3kio/o3k/.github/workflows/release.yml@refs/tags/{tag}"
+def fail(message):
+    raise SystemExit("O3K installer: release authentication failed: " + message)
+def decode(value, name):
+    if not isinstance(value, str): fail(name + " is missing")
+    try: return base64.b64decode(value, validate=True)
+    except (ValueError, TypeError) as error: fail(name + " is not base64: " + str(error))
+def openssl(*args):
+    try: return subprocess.check_output(("openssl",) + args, stderr=subprocess.STDOUT, text=True)
+    except (OSError, subprocess.CalledProcessError) as error: fail("OpenSSL verification failed: " + str(error))
+manifest = directory / "release-digests.txt"
+bundle_path = directory / "release-digests.sigstore.json"
+provenance_path = directory / "provenance.json"
+if not all(path.is_file() for path in (manifest, bundle_path, provenance_path)): fail("required signed metadata is missing")
+try: bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+except (OSError, ValueError) as error: fail("malformed Sigstore bundle: " + str(error))
+if bundle.get("mediaType") != "application/vnd.dev.sigstore.bundle.v0.3+json": fail("unsupported bundle format")
+material, message = bundle.get("verificationMaterial"), bundle.get("messageSignature")
+if not isinstance(material, dict) or not isinstance(message, dict): fail("bundle has no verification material")
+manifest_digest = hashlib.sha256(manifest.read_bytes()).digest()
+message_digest = message.get("messageDigest")
+if not isinstance(message_digest, dict) or message_digest.get("algorithm") != "SHA2_256" or decode(message_digest.get("digest"), "message digest") != manifest_digest: fail("signed digest does not match release-digests.txt")
+certificate = material.get("certificate")
+logs = material.get("tlogEntries")
+if not isinstance(certificate, dict) or not isinstance(logs, list) or not logs or not isinstance(logs[0], dict): fail("certificate or transparency entry is missing")
+try: attime = str(int(logs[0]["integratedTime"]))
+except (KeyError, TypeError, ValueError): fail("transparency time is invalid")
+root_cert = '''-----BEGIN CERTIFICATE-----
+MIIB9zCCAXygAwIBAgIUALZNAPFdxHPwjeDloDwyYChAO/4wCgYIKoZIzj0EAwMw
+KjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0y
+MTEwMDcxMzU2NTlaFw0zMTEwMDUxMzU2NThaMCoxFTATBgNVBAoTDHNpZ3N0b3Jl
+LmRldjERMA8GA1UEAxMIc2lnc3RvcmUwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAT7
+XeFT4rb3PQGwS4IajtLk3/OlnpgangaBclYpsYBr5i+4ynB07ceb3LP0OIOZdxex
+X69c5iVuyJRQ+Hz05yi+UF3uBWAlHpiS5sh0+H2GHE7SXrk1EC5m1Tr19L9gg92j
+YzBhMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBRY
+wB5fkUWlZql6zJChkyLQKsXF+jAfBgNVHSMEGDAWgBRYwB5fkUWlZql6zJChkyLQ
+KsXF+jAKBggqhkjOPQQDAwNpADBmAjEAj1nHeXZp+13NWBNa+EDsDP8G1WWg1tCM
+WP/WHPqpaVo0jhsweNFZgSs0eE7wYI4qAjEA2WB9ot98sIkoF3vZYdd3/VtWB5b9
+TNMea7Ix/stJ5TfcLLeABLE4BNJOsQ4vnBHJ
+-----END CERTIFICATE-----\n'''
+intermediate = '''-----BEGIN CERTIFICATE-----
+MIICGjCCAaGgAwIBAgIUALnViVfnU0brJasmRkHrn/UnfaQwCgYIKoZIzj0EAwMw
+KjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0y
+MjA0MTMyMDA2MTVaFw0zMTEwMDUxMzU2NThaMDcxFTATBgNVBAoTDHNpZ3N0b3Jl
+LmRldjEeMBwGA1UEAxMVc2lnc3RvcmUtaW50ZXJtZWRpYXRlMHYwEAYHKoZIzj0C
+AQYFK4EEACIDYgAE8RVS/ysH+NOvuDZyPIZtilgUF9NlarYpAd9HP1vBBH1U5CV7
+7LSS7s0ZiH4nE7Hv7ptS6LvvR/STk798LVgMzLlJ4HeIfF3tHSaexLcYpSASr1kS
+0N/RgBJz/9jWCiXno3sweTAOBgNVHQ8BAf8EBAMCAQYwEwYDVR0lBAwwCgYIKwYB
+BQUHAwMwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQU39Ppz1YkEZb5qNjp
+KFWixi4YZD8wHwYDVR0jBBgwFoAUWMAeX5FFpWapesyQoZMi0CrFxfowCgYIKoZI
+zj0EAwMDZwAwZAIwPCsQK4DYiZYDPIaDi5HFKnfxXx6ASSVmERfsynYBiX2X6SJR
+nZU84/9DZdnFvvxmAjBOt6QpBlc4J/0DxvkTCqpclvziL6BCCPnjdlIB3Pu3BxsP
+mygUY7Ii2zbdCdliiow=
+-----END CERTIFICATE-----\n'''
+with tempfile.TemporaryDirectory(prefix="o3k-installer-sigstore-") as temp:
+    work = Path(temp); leaf = work / "leaf.der"; leaf.write_bytes(decode(certificate.get("rawBytes"), "certificate"))
+    root = work / "root.pem"; root.write_text(root_cert); chain = work / "intermediate.pem"; chain.write_text(intermediate)
+    openssl("verify", "-attime", attime, "-CAfile", str(root), "-untrusted", str(chain), str(leaf))
+    public = work / "public.pem"; public.write_text(openssl("x509", "-inform", "DER", "-in", str(leaf), "-pubkey", "-noout"))
+    if "URI:" + identity not in openssl("x509", "-inform", "DER", "-in", str(leaf), "-noout", "-ext", "subjectAltName"): fail("certificate identity is not the exact release tag")
+    if "https://token.actions.githubusercontent.com" not in openssl("x509", "-inform", "DER", "-in", str(leaf), "-text", "-noout"): fail("GitHub OIDC issuer is not present")
+    signature = work / "signature.der"; signature.write_bytes(decode(message.get("signature"), "signature"))
+    openssl("dgst", "-sha256", "-verify", str(public), "-signature", str(signature), str(manifest))
+entries = {}
+for line in manifest.read_text(encoding="utf-8").splitlines():
+    fields = line.split()
+    if len(fields) != 2 or not re.fullmatch(r"[0-9a-f]{64}", fields[0]) or fields[1] in entries: fail("malformed or duplicate digest entry")
+    if fields[1].startswith("/") or ".." in Path(fields[1]).parts: fail("unsafe digest path")
+    entries[fields[1]] = fields[0]
+archive = f"o3k-{version}-linux-x86_64.tar.gz"
+if archive not in entries or "provenance.json" not in entries or "install.sh" not in entries: fail("required release asset is absent from signed manifest")
+try: provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+except (OSError, ValueError) as error: fail("malformed provenance: " + str(error))
+if provenance.get("release") != tag or provenance.get("repository") != "o3kio/o3k" or provenance.get("workflow") != ".github/workflows/release.yml" or provenance.get("oidc_issuer") != "https://token.actions.githubusercontent.com": fail("provenance identity binding is wrong")
+if provenance.get("self_digest_binding") != "release-digests.txt" or entries["provenance.json"] != hashlib.sha256(provenance_path.read_bytes()).hexdigest(): fail("provenance is not bound by the signed manifest")
+entry = logs[0]
+try:
+    body_bytes = decode(entry.get("canonicalizedBody"), "transparency body")
+    body = json.loads(body_bytes)
+except (ValueError, TypeError, KeyError) as error: fail("malformed transparency body: " + str(error))
+if body.get("spec", {}).get("data", {}).get("hash", {}).get("value") != hashlib.sha256(manifest.read_bytes()).hexdigest(): fail("transparency entry is for a different manifest")
+proof = entry.get("inclusionProof")
+checkpoint = proof.get("checkpoint") if isinstance(proof, dict) else None
+if not isinstance(proof, dict) or not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("envelope"), str): fail("transparency proof is incomplete")
+envelope = checkpoint["envelope"]
+if "rekor.sigstore.dev" not in envelope: fail("transparency checkpoint is not from the governed Rekor log")
+try:
+    note, sigline = envelope.rsplit("\n\n", 1)
+    _, signer, encoded = sigline.strip().split(" ", 2)
+    checkpoint_signature = decode(encoded, "checkpoint signature")
+    origin, tree_size_text, checkpoint_root = note.splitlines()[:3]
+    tree_size = int(tree_size_text)
+    checkpoint_root = decode(checkpoint_root, "checkpoint root hash")
+except (ValueError, TypeError) as error: fail("malformed transparency checkpoint: " + str(error))
+if signer != "rekor.sigstore.dev" or not origin.startswith("rekor.sigstore.dev - "): fail("checkpoint signer/origin is wrong")
+proof_root = decode(proof.get("rootHash"), "inclusion proof root hash")
+if tree_size != int(proof.get("treeSize", -1)) or checkpoint_root != proof_root: fail("checkpoint does not bind the inclusion proof root")
+with tempfile.TemporaryDirectory(prefix="o3k-rekor-verify-") as rekor_temp:
+ rekor_work = Path(rekor_temp)
+ rekor_key = rekor_work / "rekor.pub"
+ rekor_key.write_text("""-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwr
+kBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==
+-----END PUBLIC KEY-----
+""")
+# Rekor's signed-note signature carries a four-byte public-key hash hint.
+ key_der = subprocess.check_output(("openssl", "pkey", "-pubin", "-in", str(rekor_key), "-outform", "DER"), stderr=subprocess.STDOUT)
+ if checkpoint_signature[:4] != hashlib.sha256(key_der).digest()[:4]: fail("checkpoint key hint does not match the pinned Rekor key")
+ checkpoint_file = rekor_work / "checkpoint"; checkpoint_file.write_text(note + "\n")
+ checkpoint_sig = rekor_work / "checkpoint.sig"; checkpoint_sig.write_bytes(checkpoint_signature[4:])
+ openssl("dgst", "-sha256", "-verify", str(rekor_key), "-signature", str(checkpoint_sig), str(checkpoint_file))
+try:
+    index = int(proof.get("logIndex", -1)); hashes = proof.get("hashes")
+    if index < 0 or index >= tree_size or not isinstance(hashes, list): raise ValueError("invalid inclusion coordinates")
+    node = hashlib.sha256(b"\0" + decode(entry.get("canonicalizedBody"), "transparency body")).digest()
+    inner = (index ^ (tree_size - 1)).bit_length(); border = (index >> inner).bit_count()
+    if len(hashes) != inner + border: raise ValueError("wrong inclusion proof length")
+    for level, encoded_hash in enumerate(hashes[:inner]):
+        sibling = decode(encoded_hash, "inclusion proof hash")
+        children = node + sibling if ((index >> level) & 1) == 0 else sibling + node
+        node = hashlib.sha256(b"\1" + children).digest()
+    for encoded_hash in hashes[inner:]: node = hashlib.sha256(b"\1" + decode(encoded_hash, "inclusion proof hash") + node).digest()
+    if node != proof_root: raise ValueError("inclusion proof root mismatch")
+except (ValueError, TypeError) as error: fail("invalid transparency inclusion proof: " + str(error))
+print("release authenticity verified before extraction")
+PY
 }
 
 wait_http_ok() { # wait_http_ok URL ATTEMPTS
@@ -469,6 +610,18 @@ trap 'rm -rf -- "$TMP_DIR"' EXIT
 trap 'rm -rf -- "$TMP_DIR"; exit 130' INT
 trap 'rm -rf -- "$TMP_DIR"; exit 143' TERM HUP
 
+# Release authenticity is established before apt, libvirt, TLS, or any
+# bundled application code is touched.  The digest manifest is downloaded
+# separately from the archive and authenticated by the Sigstore bundle.
+METADATA_DIR="$TMP_DIR/release-metadata"
+mkdir -p -m 700 "$METADATA_DIR"
+METADATA_BASE="$O3K_RELEASE_BASE/v$VERSION_NO_V"
+fetch "$METADATA_BASE/release-digests.txt" "$METADATA_DIR/release-digests.txt"
+fetch "$METADATA_BASE/release-digests.sigstore.json" "$METADATA_DIR/release-digests.sigstore.json"
+fetch "$METADATA_BASE/provenance.json" "$METADATA_DIR/provenance.json"
+verify_release_metadata "$METADATA_DIR" "$VERSION"
+step 'release authenticity verified (Sigstore identity/transparency)'
+
 # ---- host dependencies (the one place apt is allowed) -------------------------
 # Mirror the proven clean-VM set (asr-021-cd15263/vm-run.sh cloud-init):
 # ca-certificates curl libvirt-daemon-system libvirt-clients qemu-utils
@@ -497,27 +650,50 @@ ASSET="o3k-${VERSION_NO_V}-linux-x86_64.tar.gz"
 ASSET_URL="$O3K_RELEASE_BASE/v$VERSION_NO_V/$ASSET"
 printf 'downloading %s\n' "$ASSET"
 fetch "$ASSET_URL" "$TMP_DIR/$ASSET"
+# SHA-256 remains useful convenience/integrity data, but it is not the
+# authenticity root.  Obtain the expected archive digest only from the
+# authenticated release-digests.txt and compare the optional .sha256 file to
+# that value when present.
+ARCHIVE_DIGEST="$(python3 - "$METADATA_DIR/release-digests.txt" "$ASSET" <<'PY'
+import re, sys
+matches = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    fields = line.split()
+    if len(fields) == 2 and fields[1] == sys.argv[2]: matches.append(fields[0])
+if len(matches) != 1 or not re.fullmatch(r"[0-9a-f]{64}", matches[0]):
+    raise SystemExit("authenticated release manifest has no unique archive digest")
+print(matches[0])
+PY
+)" || die 'authenticated release manifest could not provide an archive digest'
+printf '%s  %s\n' "$ARCHIVE_DIGEST" "$ASSET" | (cd "$TMP_DIR" && sha256sum -c --strict -) \
+  || die "release archive digest mismatch — refusing to extract or execute anything from the bundle"
 fetch "$ASSET_URL.sha256" "$TMP_DIR/$ASSET.sha256"
-
-# ---- published SHA-256 verification BEFORE extraction -------------------------
-SHA_LINES="$(awk 'END{print NR}' "$TMP_DIR/$ASSET.sha256")"
-SHA_FIELDS="$(awk 'NR==1{print NF}' "$TMP_DIR/$ASSET.sha256")"
-SHA_DIGEST="$(awk 'NR==1{print $1}' "$TMP_DIR/$ASSET.sha256")"
-SHA_NAME="$(awk 'NR==1{print $2}' "$TMP_DIR/$ASSET.sha256")"
-[ "$SHA_LINES" = 1 ] && [ "$SHA_FIELDS" = 2 ] \
-  || die "published SHA-256 file is malformed: $ASSET.sha256"
-printf '%s' "$SHA_DIGEST" | grep -Eq '^[0-9a-f]{64}$' \
-  || die "published SHA-256 file is malformed: $ASSET.sha256"
-[ "$SHA_NAME" = "$ASSET" ] \
-  || die "published SHA-256 file names an unexpected asset: $SHA_NAME"
-(cd "$TMP_DIR" && sha256sum -c --strict -- "$ASSET.sha256") \
-  || die "published SHA-256 verification failed for $ASSET — refusing to extract or execute anything from the bundle"
-step 'release archive SHA-256 verified'
+CONVENIENCE_LINE="$(sed -n '1p' "$TMP_DIR/$ASSET.sha256")"
+if [ "$CONVENIENCE_LINE" != "$ARCHIVE_DIGEST  $ASSET" ] && [ "$CONVENIENCE_LINE" != "$ARCHIVE_DIGEST *$ASSET" ]; then
+  die "convenience SHA-256 file disagrees with authenticated release-digests.txt"
+fi
+step 'release archive digest verified from authenticated manifest'
 
 # ---- safe extraction ----------------------------------------------------------
 safe_extract "$TMP_DIR/$ASSET" "$TMP_DIR" "$TMP_DIR/entries.txt"
 BUNDLE_DIR="$TMP_DIR/o3k-$VERSION_NO_V"
 [ -d "$BUNDLE_DIR" ] || die "release archive does not contain the expected bundle directory: o3k-$VERSION_NO_V"
+
+# Only now, after the archive bytes are authenticated and safely extracted, use
+# internal metadata.  Cross-check it against the already trusted external
+# provenance before invoking any script from the bundle.
+python3 - "$METADATA_DIR/provenance.json" "$BUNDLE_DIR/manifest.json" "$VERSION_NO_V" <<'PY'
+import json, sys
+try:
+    external = json.load(open(sys.argv[1], encoding="utf-8"))
+    internal = json.load(open(sys.argv[2], encoding="utf-8"))
+except (OSError, ValueError) as error:
+    raise SystemExit("O3K installer: extracted release metadata is unreadable: " + str(error))
+if external.get("source_commit") != internal.get("source_commit"):
+    raise SystemExit("O3K installer: extracted source_commit disagrees with authenticated provenance")
+if internal.get("version") not in (sys.argv[3], "v" + sys.argv[3]):
+    raise SystemExit("O3K installer: extracted manifest version disagrees with the authenticated release tag")
+PY
 
 # ---- bundled integrity and preflight ------------------------------------------
 bash "$BUNDLE_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR" \

@@ -343,6 +343,10 @@ jobs:
         run: bash tests/pp2-installer-contract.sh
       - name: Test PP.4 Araf demo tuple/deployment contract
         run: bash tests/pp4-araf-demo-contract.sh
+      - name: Test PP.4 Core installer trust contract
+        run: bash tests/pp4-core-installer-contract.sh
+      - name: Test v2 release consumer trust negatives
+        run: bash tests/release-consumer-trust.sh
   oci-identity-smoke:
     runs-on: ubuntu-24.04
     steps:

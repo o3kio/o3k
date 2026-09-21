@@ -9,6 +9,15 @@ Raw campaign logs are large and stay local/gitignored under
 `target/pp4-campaign/`; this directory keeps the immutable metadata needed to
 verify what was actually tested, against which exact artifacts.
 
+The immutable published `v0.4.0-rc.21` native evidence is recorded separately
+under `docs/evidence/pp4-core/rc21-native-smoke-pass.json`: native replay and a
+fresh Ubuntu/KVM smoke passed, but the complete Ubuntu/Debian PP.4 Core
+campaign did not run. rc.21's publisher produced authenticated Sigstore
+metadata; its public installer did not consume that metadata before extraction.
+The source repair prepares the expected `v0.4.0-rc.22` successor without
+tagging or publishing it. No PP.4 completion or production-readiness claim is
+made.
+
 Per Core campaign (added by the campaign run; absent until the campaign
 completes):
 
