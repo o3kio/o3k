@@ -5332,6 +5332,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonical_native_create_replay_preserves_in_flight_and_failed_operations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_provider::FailureInjection;
+
+        let auth = test_compute_auth("project-a", "user-a", "member");
+        let input = ServerCreateInput {
+            user_id: "user-a".into(),
+            project_id: "project-a".into(),
+            name: "native-in-flight".into(),
+            image_id: "image-a".into(),
+            flavor_id: Uuid::from_u128(1),
+            network_ids: vec!["network-a".into()],
+            key_name: None,
+            config_drive: None,
+            idempotency_key: "create-in-flight".into(),
+        };
+        let context = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "CreateServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "create-in-flight".into(),
+            serde_json::json!({"spec":{"name":"native-in-flight","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
+        )?;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = Arc::new(FakeComputeProvider::default());
+        provider.set_failure(FailureInjection::PartialCompletion)?;
+        let service = ComputeService::new_for_test(store, provider.clone());
+        let first = service
+            .create_server_for_auth_canonical(&auth, input.clone(), context.clone())
+            .await?;
+        assert_eq!(first.operation_state, o3k_store::OperationState::Running);
+        let replay = service
+            .create_server_for_auth_canonical(&auth, input, context)
+            .await?;
+        assert_eq!(replay.operation_id, first.operation_id);
+        assert_eq!(replay.resource.id, first.resource.id);
+        assert_eq!(replay.operation_state, o3k_store::OperationState::Running);
+        assert_eq!(provider.instance_count(), 1);
+
+        let failed_store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let failed_provider = Arc::new(FakeComputeProvider::default());
+        failed_provider.set_failure(FailureInjection::Terminal)?;
+        let failed_service = ComputeService::new_for_test(failed_store, failed_provider.clone());
+        let failed_input = ServerCreateInput {
+            user_id: "user-a".into(),
+            project_id: "project-a".into(),
+            name: "native-failed".into(),
+            image_id: "image-a".into(),
+            flavor_id: Uuid::from_u128(1),
+            network_ids: vec!["network-a".into()],
+            key_name: None,
+            config_drive: None,
+            idempotency_key: "create-failed".into(),
+        };
+        let failed_context = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "CreateServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "create-failed".into(),
+            serde_json::json!({"spec":{"name":"native-failed","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
+        )?;
+        let first_failure = failed_service
+            .create_server_for_auth_canonical(&auth, failed_input.clone(), failed_context.clone())
+            .await;
+        assert!(matches!(first_failure, Err(ComputeError::Conflict)));
+        let failed_replay = failed_service
+            .create_server_for_auth_canonical(&auth, failed_input, failed_context)
+            .await?;
+        assert_eq!(
+            failed_replay.operation_state,
+            o3k_store::OperationState::Failed
+        );
+        assert_eq!(failed_provider.instance_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn canonical_native_create_delete_same_key_no_revive()
     -> Result<(), Box<dyn std::error::Error>> {
         use o3k_store::DurableStore;

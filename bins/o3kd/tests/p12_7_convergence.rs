@@ -6,15 +6,20 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use o3k_compute::ComputeService;
 use o3k_kernel::{
-    ControllerSession, ManifestRegistry, PrincipalId, ProtocolVersion, ServicePrincipal,
+    ControllerSession, LimitKey, ManifestRegistry, OwnershipScope, PrincipalId, ProtocolVersion,
+    ScopeId, ServicePrincipal,
 };
 use o3k_native_api::auth::TokenIssuer;
 use o3k_network::NetworkService;
 use o3k_provider::FakeComputeProvider;
 use o3k_store::DurableStore;
 use o3k_store::IdentityRepository;
+use o3k_store::KeypairRepository;
+use o3k_store::NetworkRepository;
+use o3k_store::PlacementRepository;
+use o3k_store::QuotaRepository;
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tower::ServiceExt;
 
 fn session(service: &str, namespace: &str, generation: u64) -> ControllerSession {
@@ -164,8 +169,20 @@ async fn build_http_runtime_with_identity(
     identity: o3k_identity::TokenService,
     oidc_validator: Option<Arc<o3k_identity::oidc::OidcValidator>>,
 ) -> Result<(axum::Router, Arc<FakeComputeProvider>), Box<dyn std::error::Error>> {
+    build_http_runtime_with_identity_and_scheduler(store, identity, oidc_validator, None).await
+}
+
+async fn build_http_runtime_with_identity_and_scheduler(
+    store: Arc<o3k_store::unified::O3kStore>,
+    identity: o3k_identity::TokenService,
+    oidc_validator: Option<Arc<o3k_identity::oidc::OidcValidator>>,
+    scheduler: Option<o3k_scheduler::Scheduler>,
+) -> Result<(axum::Router, Arc<FakeComputeProvider>), Box<dyn std::error::Error>> {
     let provider = Arc::new(FakeComputeProvider::new());
     let compute_service = ComputeService::new_for_test(store.clone(), provider.clone());
+    let compute_service = scheduler.map_or(compute_service.clone(), |scheduler| {
+        compute_service.clone().with_scheduler(scheduler)
+    });
     let compute = Arc::new(compute_service.clone());
     let network = Arc::new(
         NetworkService::open_for_test(
@@ -1093,6 +1110,309 @@ async fn native_http_scope_like_request_fields_cannot_select_foreign_owner()
         .await?;
     assert!(rejected.status().is_client_error());
     assert_eq!(provider.instance_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_http_same_key_replay_does_not_reschedule_or_return_internal_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_native_http_same_key_replay(Arc::new(
+        o3k_store::unified::O3kStore::connect_sqlite_memory().await?,
+    ))
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database"]
+async fn native_http_same_key_replay_does_not_reschedule_or_return_internal_error_postgres()
+-> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("O3K_DATABASE_URL")?;
+    let store = Arc::new(o3k_store::unified::O3kStore::connect_postgres(&url).await?);
+    run_native_http_same_key_replay(store).await
+}
+
+async fn run_native_http_same_key_replay(
+    store: Arc<o3k_store::unified::O3kStore>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let identity = o3k_identity::testkit::test_service_with_projects(
+        "http://127.0.0.1:8080",
+        vec![o3k_identity::ExtraProjectSeed {
+            project_id: "project-a".to_owned(),
+            project_name: "project-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            user_name: "user-a".to_owned(),
+            password: o3k_identity::Secret::new("password-a".to_owned()),
+        }],
+    )
+    .await?;
+    let placement_root = std::env::temp_dir().join(format!(
+        "o3k-p12-7-native-replay-placement-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let placement_repository: Arc<dyn o3k_store::PlacementRepository> = store.clone();
+    let placement =
+        o3k_placement::PlacementLedger::open(&placement_root, placement_repository).await?;
+    placement
+        .register_provider(
+            "node-a",
+            BTreeMap::from([
+                (
+                    o3k_placement::VCPU.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 2,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::MEMORY_MB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 1024,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::DISK_GB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 20,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+            ]),
+        )
+        .await?;
+    let (app, provider) = build_http_runtime_with_identity_and_scheduler(
+        store.clone(),
+        identity,
+        None,
+        Some(o3k_scheduler::Scheduler::new(placement)),
+    )
+    .await?;
+    let token = issue_token_for(&app, "user-a", "password-a", "project-a").await?;
+
+    let network = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/networks")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"network":{"name":"native-replay-network"}}).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(network.status(), StatusCode::CREATED);
+    let network_id = response_json(network).await["network"]["id"]
+        .as_str()
+        .ok_or("network id")?
+        .to_owned();
+    let subnet = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/subnets")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"subnet":{"network_id":network_id,"name":"native-replay-subnet","cidr":"192.0.2.0/24","gateway_ip":"192.0.2.1"}}).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(subnet.status(), StatusCode::CREATED);
+    let port = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/ports")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"port":{"network_id":network_id,"name":"native-replay-port"}})
+                        .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(port.status(), StatusCode::CREATED);
+    let port_id = response_json(port).await["port"]["id"]
+        .as_str()
+        .ok_or("port id")?
+        .to_owned();
+    let public_key =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj o3k-test";
+    let (key_type, fingerprint, public_key) = o3k_store::validate_public_key(public_key)?;
+    store
+        .insert_keypair(&o3k_store::KeypairRecord {
+            id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"o3k:native-replay-keypair"),
+            user_id: "user-a".to_owned(),
+            project_id: "project-a".to_owned(),
+            name: "native-key".to_owned(),
+            key_type,
+            public_key,
+            fingerprint,
+            created_at: "2026-09-21T00:00:00Z".to_owned(),
+        })
+        .await?;
+    let body = serde_json::json!({
+        "kind": "compute:server",
+        "spec": {
+            "name": "native-replay-server",
+            "image_id": "image-a",
+            "flavor_id": "00000000-0000-0000-0000-000000000001",
+            "network_ids": [port_id],
+            "key_name": "native-key"
+        }
+    });
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/compute/servers")
+                .header("authorization", format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "native-replay-key")
+                .body(Body::from(serde_json::to_vec(&body)?))?,
+        )
+        .await?;
+    let first_status = first.status();
+    let first_json = response_json(first).await;
+    assert_eq!(first_status, StatusCode::CREATED, "{first_json}");
+    let first_resource = first_json["resource_id"]
+        .as_str()
+        .ok_or("first resource id")?
+        .to_owned();
+    let first_operation = first_json["operation_id"]
+        .as_str()
+        .ok_or("first operation id")?
+        .to_owned();
+    assert_eq!(provider.instance_count(), 1);
+    let ports_after_first = store.list_ports("project-a").await?;
+    let placement_after_first = store.list_providers().await?;
+    let project_scope = OwnershipScope::project(ScopeId::new_unchecked("project-a"), None, None);
+    let quota_after_first = store
+        .get_usage(&project_scope, &LimitKey::compute_servers())
+        .await?;
+
+    let replay = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/compute/servers")
+                .header("authorization", format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "native-replay-key")
+                .body(Body::from(serde_json::to_vec(&body)?))?,
+        )
+        .await?;
+    let replay_status = replay.status();
+    let replay_json = response_json(replay).await;
+    assert_eq!(
+        replay_status,
+        StatusCode::CREATED,
+        "same-key equivalent native replay must return the canonical result, not 500: {replay_json}"
+    );
+    assert_eq!(replay_json["resource_id"], first_resource);
+    assert_eq!(replay_json["operation_id"], first_operation);
+    assert_eq!(provider.instance_count(), 1);
+    assert_eq!(store.list_ports("project-a").await?, ports_after_first);
+    assert_eq!(store.list_providers().await?, placement_after_first);
+    assert_eq!(
+        store
+            .get_usage(&project_scope, &LimitKey::compute_servers())
+            .await?,
+        quota_after_first
+    );
+
+    let mut changed_body = body.clone();
+    changed_body["spec"]["image_id"] = serde_json::Value::String("image-b".to_owned());
+    let changed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/compute/servers")
+                .header("authorization", format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "native-replay-key")
+                .body(Body::from(serde_json::to_vec(&changed_body)?))?,
+        )
+        .await?;
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    assert_eq!(provider.instance_count(), 1);
+
+    // Independent application contexts racing with an equivalent request must
+    // converge on the already durable canonical identity.  This is deliberately
+    // exercised through two concurrent HTTP calls rather than a process-local
+    // mutex so the durable reservation/Placement boundary remains authoritative.
+    let concurrent_body = serde_json::json!({
+        "kind": "compute:server",
+        "spec": {
+            "name": "native-concurrent-server",
+            "image_id": "image-a",
+            "flavor_id": "00000000-0000-0000-0000-000000000001",
+            "network_ids": [port_id],
+            "key_name": "native-key"
+        }
+    });
+    let concurrent_token = token.clone();
+    let concurrent_request = |app: axum::Router| {
+        let body = concurrent_body.clone();
+        let token = concurrent_token.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/o3k/v1/compute/servers")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", "native-concurrent-key")
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("concurrent body"),
+                    ))
+                    .expect("concurrent request"),
+            )
+            .await
+            .expect("concurrent response")
+        }
+    };
+    let (concurrent_a, concurrent_b) = tokio::join!(
+        concurrent_request(app.clone()),
+        concurrent_request(app.clone())
+    );
+    let concurrent_a_status = concurrent_a.status();
+    let concurrent_a_json = response_json(concurrent_a).await;
+    let concurrent_b_status = concurrent_b.status();
+    let concurrent_b_json = response_json(concurrent_b).await;
+    assert_eq!(
+        concurrent_a_status,
+        StatusCode::CREATED,
+        "{concurrent_a_json}"
+    );
+    assert_eq!(
+        concurrent_b_status,
+        StatusCode::CREATED,
+        "{concurrent_b_json}"
+    );
+    assert_eq!(
+        concurrent_a_json["resource_id"],
+        concurrent_b_json["resource_id"]
+    );
+    assert_eq!(
+        concurrent_a_json["operation_id"],
+        concurrent_b_json["operation_id"]
+    );
+    assert_eq!(provider.instance_count(), 2);
+    let _ = std::fs::remove_dir_all(placement_root);
     Ok(())
 }
 

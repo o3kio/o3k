@@ -211,7 +211,44 @@ impl Scheduler {
                 Err(error) => return Err(SchedulerError::Placement(error)),
             }
         }
+        // A concurrent retry may have committed the deterministic allocation
+        // after the candidate snapshot was read (or after a generation-fenced
+        // commit lost a race).  Re-observe the durable allocation before
+        // reporting NoValidHost so equivalent callers converge on the same
+        // Placement receipt instead of retrying capacity or returning an
+        // internal error.
+        if let Some(decision) = self
+            .existing_allocation(server_id, &resources, selected_providers)
+            .await?
+        {
+            return Ok(decision);
+        }
         Err(SchedulerError::NoValidHost)
+    }
+
+    async fn existing_allocation(
+        &self,
+        server_id: &str,
+        resources: &BTreeMap<String, u64>,
+        selected_providers: Option<&BTreeSet<String>>,
+    ) -> Result<Option<ScheduleDecision>, SchedulerError> {
+        let allocation_id = format!("allocation-{server_id}");
+        for provider in self.placement.providers().await? {
+            if selected_providers.is_some_and(|ids| !ids.contains(&provider.id)) {
+                continue;
+            }
+            let Some(allocation) = provider.allocations.get(&allocation_id) else {
+                continue;
+            };
+            if allocation.consumer_id == server_id && allocation.resources == *resources {
+                return Ok(Some(ScheduleDecision {
+                    provider_id: provider.id.clone(),
+                    allocation_id,
+                    allocation: allocation.clone(),
+                }));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn release_terminal(
