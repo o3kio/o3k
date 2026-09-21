@@ -37,18 +37,24 @@ record_env(){ printf '%s=%s\n' "$1" "$2" >>"$EVID/state.env"; }
 
 capture_side_effect_counts() {
   local label="$1"
-  sudo python3 - "$EVID/side-effects-$label.json" <<'PY'
+  local operation_id="${2:-}"
+  sudo python3 - "$EVID/side-effects-$label.json" "$operation_id" <<'PY'
 import json
 import sqlite3
 import sys
 out = sys.argv[1]
+operation_id = sys.argv[2]
 db = sqlite3.connect("file:/var/lib/o3k/o3k.sqlite?mode=ro", uri=True)
 def count(table):
     return db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+quota_for_operation = (db.execute(
+    "SELECT COUNT(*) FROM quota_reservations WHERE operation_id = ?", (operation_id,)
+).fetchone()[0] if operation_id else None)
 json.dump({"resources": count("resources"), "operations": count("operations"),
            "network_ports": count("network_ports"),
            "placement_allocations": count("placement_allocations"),
-           "quota_reservations": count("quota_reservations")},
+           "quota_reservations": count("quota_reservations"),
+           "quota_reservations_for_operation": quota_for_operation},
           open(out, "w", encoding="utf-8"), indent=2, sort_keys=True)
 PY
   sudo virsh -c qemu:///system list --all --name | sed '/^$/d' | sort >"$EVID/side-effects-$label-domains.txt"
@@ -193,17 +199,32 @@ grep -Eiq 'cirros|login:' "$EVID/native-console.log" || fail 'native guest boot 
 pass 'native server, canonical network allocation and guest boot'
 
 log 'phase 3: replay and OpenStack observation'
-capture_side_effect_counts before-replay
+sleep 3
+capture_side_effect_counts before-replay "$operation_id"
 native /compute/servers POST "$EVID/native-replay.json" --request-file "$EVID/native-request.json" --idempotency-key pp4-core-native-rc22 --expect 200 --expect 201 --expect 202
 [[ "$(jq -r '.resource_id // .resource.metadata.id // empty' "$EVID/native-replay.json")" == "$server_id" ]] || fail 'replay changed canonical resource'
-capture_side_effect_counts after-replay
-cmp -s "$EVID/side-effects-before-replay.json" "$EVID/side-effects-after-replay.json" || fail 'replay changed durable side-effect counts'
+capture_side_effect_counts after-replay "$operation_id"
+python3 - "$EVID/side-effects-before-replay.json" "$EVID/side-effects-after-replay.json" <<'PY' || fail 'replay changed durable side-effect counts'
+import json, sys
+before = json.load(open(sys.argv[1], encoding='utf-8'))
+after = json.load(open(sys.argv[2], encoding='utf-8'))
+keys = ('resources', 'operations', 'network_ports', 'placement_allocations', 'quota_reservations_for_operation')
+if any(before[key] != after[key] for key in keys):
+    raise SystemExit(1)
+PY
 cmp -s "$EVID/side-effects-before-replay-domains.txt" "$EVID/side-effects-after-replay-domains.txt" || fail 'replay created a provider domain'
 cmp -s "$EVID/side-effects-before-replay-ports.json" "$EVID/side-effects-after-replay-ports.json" || fail 'replay created a port'
 cp "$EVID/native-request.json" "$EVID/native-conflict-request.json"; sed -i 's/pp4-native/pp4-native-conflict/' "$EVID/native-conflict-request.json"
 native /compute/servers POST "$EVID/native-conflict.json" --request-file "$EVID/native-conflict-request.json" --idempotency-key pp4-core-native-rc22 --expect 409
-capture_side_effect_counts after-conflict
-cmp -s "$EVID/side-effects-before-replay.json" "$EVID/side-effects-after-conflict.json" || fail 'changed-body conflict changed durable side-effect counts'
+capture_side_effect_counts after-conflict "$operation_id"
+python3 - "$EVID/side-effects-before-replay.json" "$EVID/side-effects-after-conflict.json" <<'PY' || fail 'changed-body conflict changed durable side-effect counts'
+import json, sys
+before = json.load(open(sys.argv[1], encoding='utf-8'))
+after = json.load(open(sys.argv[2], encoding='utf-8'))
+keys = ('resources', 'operations', 'network_ports', 'placement_allocations', 'quota_reservations_for_operation')
+if any(before[key] != after[key] for key in keys):
+    raise SystemExit(1)
+PY
 openstack server show "$server_id" -f json >"$EVID/openstack-native-show.json" || fail 'OpenStack CLI cannot observe native server'
 openstack server list -f json >"$EVID/openstack-native-list.json" || fail 'OpenStack CLI server list failed'
 openstack port show "$native_port" -f json >"$EVID/openstack-native-port-show.json" || fail 'OpenStack CLI cannot observe native port'
