@@ -25,7 +25,7 @@ def main() -> int:
     required = {
         "public_release_trust": PASS if exists(root, "installed-identity.txt", "release.env") else NOT_PROVEN,
         "canonical_bootstrap": PASS if exists(root, "identity-me.json", "durable-bootstrap.json", "doctor-bootstrap.json") else NOT_PROVEN,
-        "topology": PASS if exists(root, "regions.json", "failure-domains.json") else NOT_PROVEN,
+        "topology": PASS if exists(root, "durable-bootstrap.json", "regions.json", "failure-domains.json") else NOT_PROVEN,
         "placement": PASS if exists(root, "placement-providers.json", "placement-inventory.json") else NOT_PROVEN,
         "native_network": PASS if exists(root, "address-realms.json", "native-network.json", "native-subnets.json") else NOT_PROVEN,
         "native_first_create": PASS if exists(root, "native-create.json", "native-operation.json", "native-server.json", "native-domain.txt", "native-console.log") else NOT_PROVEN,

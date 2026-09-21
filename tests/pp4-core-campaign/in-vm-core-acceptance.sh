@@ -148,7 +148,7 @@ pass "BuildingBlock $bb_id, public topology, Placement provider and inventory"
 
 log 'phase 2: canonical native network and native-first workload'
 image_id="$(openstack image show cirros-0.6.3 -f value -c id)" || fail 'image lookup failed'
-flavor_id="$(cat /etc/o3k/testlab-flavor-id)" || fail 'flavor identity missing'
+flavor_id="$(sudo cat /etc/o3k/testlab-flavor-id)" || fail 'flavor identity missing'
 network_id="$(openstack network show testlab-network -f value -c id)" || fail 'network lookup failed'
 existing_port="$(openstack port show testlab-port -f value -c id)" || fail 'compatibility port missing'
 existing_ip="$(openstack port show "$existing_port" -f value -c fixed_ips | grep -Eo '192\.0\.2\.[0-9]+' | head -1)"
