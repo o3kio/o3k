@@ -158,6 +158,17 @@ flavor_id="$(sudo cat /etc/o3k/testlab-flavor-id)" || fail 'flavor identity miss
 network_id="$(openstack network show testlab-network -f value -c id)" || fail 'network lookup failed'
 existing_port="$(openstack port show testlab-port -f value -c id)" || fail 'compatibility port missing'
 existing_ip="$(openstack port show "$existing_port" -f value -c fixed_ips | grep -Eo '192\.0\.2\.[0-9]+' | head -1)"
+# The public TestLab bootstrap leaves one demo VM running.  It is O3K-owned
+# campaign setup, not a Core acceptance workload; remove it after recording
+# its identity so the native-first and compatibility-created guests can both
+# fit within the bounded TestLab inventory.
+if openstack server show test-vm -f json >"$EVID/test-vm-before-core.json" 2>/dev/null; then
+  openstack server delete --wait test-vm
+  printf 'test-vm=deleted-before-core\n' >"$EVID/test-vm-core-capacity.txt"
+else
+  printf 'test-vm=already-absent\n' >"$EVID/test-vm-core-capacity.txt"
+fi
+if openstack server show test-vm -f json >/dev/null 2>&1; then fail 'test-vm remained after campaign capacity cleanup'; fi
 # Address-realms is intentionally not advertised in the rc.22 native profile.
 # The supported canonical Network authority is the network collection/show
 # surface; retain the 501 response as evidence rather than inventing support.
