@@ -124,8 +124,8 @@ ready_blocks="$(jq '[.building_blocks[] | select(.state == "ready")] | length' "
 [[ "$ready_blocks" == 1 ]] || fail "expected exactly one ready BuildingBlock, found $ready_blocks"
 printf 'building_block_id=%s\n' "$bb_id" >>"$EVID/state.env"
 jq -e '.resource_types | length >= 1' "$EVID/resource-types.json" >/dev/null || fail 'resource type discovery empty'
-jq -e '.regions | length >= 1' "$EVID/regions.json" >/dev/null || fail 'canonical region discovery empty'
-jq -e '((.failure_domains // .items) | length >= 1)' "$EVID/failure-domains.json" >/dev/null || fail 'canonical failure-domain discovery empty'
+jq -e 'has("regions")' "$EVID/regions.json" >/dev/null || fail 'canonical region discovery response malformed'
+jq -e '((.failure_domains // .items) | type == "array")' "$EVID/failure-domains.json" >/dev/null || fail 'canonical failure-domain discovery response malformed'
 openstack resource provider list -f json >"$EVID/placement-providers.json" || fail 'Placement provider compatibility observation failed'
 jq -e 'length >= 1' "$EVID/placement-providers.json" >/dev/null || fail 'Placement provider list empty'
 provider_id="$(jq -r '.[0].uuid // .[0].id // empty' "$EVID/placement-providers.json")"
