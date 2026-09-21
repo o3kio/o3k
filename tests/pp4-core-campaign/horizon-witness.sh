@@ -9,7 +9,7 @@ cleanup(){ rm -rf -- "$WORKDIR"; }
 trap cleanup EXIT
 OPENRC="$WORKDIR/admin-openrc"; sudo cp /etc/o3k/admin-openrc "$OPENRC"; sudo chown "$(id -u):$(id -g)" "$OPENRC"; chmod 600 "$OPENRC"; source "$OPENRC"
 IMAGE="docker.io/openstackhelm/horizon:2024.1-ubuntu_jammy-20250523@sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b"
-NAME=pp4-horizon-witness; CONF=/var/lib/o3k/pp4-horizon-witness; JAR="$EVID/horizon.jar"
+NAME=pp4-horizon-witness; CONF="$WORKDIR/config"; JAR="$EVID/horizon.jar"
 DOCKER=(sudo docker)
 summary(){ printf '%s\n' "$*" | tee -a "$EVID/horizon-summary.txt"; }
 if ! command -v docker >/dev/null 2>&1; then summary 'RESULT: NOT_APPLICABLE_OPTIONAL docker-unavailable'; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; fi
