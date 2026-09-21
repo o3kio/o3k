@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Public-release native-first PP.4 Core smoke. The caller copies this file
 # and native_client.py into a fresh VM; no product source tree is used.
+# shellcheck disable=SC1090,SC1091,SC2024,SC2034,SC2154
 set -Eeuo pipefail
 
 EVID=${1:?usage: in-vm-native-smoke.sh evidence-dir helper.py}

@@ -5,8 +5,15 @@ DISTRO=ubuntu
 if [ "$#" -ge 1 ]; then DISTRO="$1"; fi
 EVID=target/pp4-core-$(date -u +%Y%m%dT%H%M%SZ)-$DISTRO
 if [ "$#" -ge 2 ]; then EVID="$2"; fi
-VERSION="${O3K_PP4_VERSION-v0.4.0-rc.22}"
-EXPECTED_SHA="${O3K_PP4_SOURCE_SHA-45e2f5aff28ce18fc7c4cba06831f43ef5ae74db}"
+VERSION="${O3K_PP4_VERSION-}"
+EXPECTED_SHA="${O3K_PP4_SOURCE_SHA-}"
+[[ "$VERSION" =~ ^v0\.4\.0-rc\.[0-9]+$ ]] || {
+  echo 'O3K_PP4_VERSION is required and must be an immutable v0.4.0-rc.N tag' >&2; exit 2;
+}
+[[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+  echo 'O3K_PP4_SOURCE_SHA is required and must be a 40-character lowercase SHA' >&2; exit 2;
+}
+HARNESS_SHA="${O3K_PP4_HARNESS_SHA-$(git rev-parse HEAD 2>/dev/null || printf unknown)}"
 WORK="${O3K_PP4_WORK-$(mktemp -d /tmp/o3k-pp4-core.XXXXXX)}"
 SSH_PORT="${O3K_PP4_SSH_PORT-2392}"
 mkdir -p "$EVID" "$WORK"
@@ -37,9 +44,12 @@ package_upgrade: false
 packages:
   - curl
   - ca-certificates
+  - jq
+  - docker.io
 runcmd:
   - echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester
   - chmod 0440 /etc/sudoers.d/tester
+  - systemctl enable --now docker
 EOF
 printf 'instance-id: %s\nlocal-hostname: %s\n' "$VM_NAME" "$VM_NAME" >"$SEED/meta-data"
 genisoimage -output "$SEED_ISO" -volid cidata -joliet -rock "$SEED/user-data" "$SEED/meta-data" >/dev/null
@@ -70,27 +80,42 @@ ssh_vm 'test -e /dev/kvm'
 echo "PP4 VM ready: $DISTRO /dev/kvm"
 scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$SSH_PORT" \
   "$(dirname "$0")/native_client.py" "$(dirname "$0")/in-vm-native-smoke.sh" \
+  "$(dirname "$0")/in-vm-core-acceptance.sh" "$(dirname "$0")/horizon-witness.sh" \
+  "$(dirname "$0")/in-vm-core-post.sh" "$(dirname "$0")/generate_core_manifest.py" \
   "$(dirname "$0")/verify_manifest.py" tester@127.0.0.1:/home/tester/
-ssh_vm 'chmod 0755 /home/tester/in-vm-native-smoke.sh /home/tester/native_client.py'
+ssh_vm 'chmod 0755 /home/tester/in-vm-native-smoke.sh /home/tester/in-vm-core-acceptance.sh /home/tester/in-vm-core-post.sh /home/tester/native_client.py /home/tester/horizon-witness.sh /home/tester/generate_core_manifest.py'
 ssh_vm "curl -sfL https://github.com/o3kio/o3k/releases/download/$VERSION/install.sh | sudo env O3K_SKIP_ARAF=1 sh -" 2>&1 | tee "$EVID/install-output.log"
 ssh_vm "sudo python3 /home/tester/verify_manifest.py '$VERSION' '$EXPECTED_SHA'"
 ssh_vm 'mkdir -p /home/tester/pp4-evidence'
 set +e
-ssh_vm 'bash /home/tester/in-vm-native-smoke.sh /home/tester/pp4-evidence /home/tester/native_client.py > /home/tester/native-smoke.log 2>&1'
+ssh_vm "O3K_PP4_VERSION='$VERSION' O3K_PP4_SOURCE_SHA='$EXPECTED_SHA' O3K_PP4_HARNESS_SHA='$HARNESS_SHA' bash /home/tester/in-vm-core-acceptance.sh /home/tester/pp4-evidence /home/tester/native_client.py '$DISTRO' > /home/tester/core-acceptance.log 2>&1"
 smoke_status=$?
 set -e
+if (( smoke_status == 0 )); then
+  # The reboot is performed by the host driver so a dropped SSH session is
+  # expected and cannot be confused with a product failure.
+  ssh_vm 'sudo reboot' >/dev/null 2>&1 || true
+  for _attempt in $(seq 1 120); do sleep 3; ssh_vm true 2>/dev/null && break; done
+  ssh_vm true || smoke_status=1
+  if (( smoke_status == 0 )); then
+    set +e
+    ssh_vm "O3K_PP4_VERSION='$VERSION' O3K_PP4_SOURCE_SHA='$EXPECTED_SHA' O3K_PP4_HARNESS_SHA='$HARNESS_SHA' bash /home/tester/in-vm-core-post.sh /home/tester/pp4-evidence /home/tester/native_client.py '$DISTRO' >> /home/tester/core-acceptance.log 2>&1"
+    smoke_status=$?
+    set -e
+  fi
+fi
 set +e
 scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$SSH_PORT" \
-  tester@127.0.0.1:/home/tester/native-smoke.log "$EVID/native-smoke.log" >/dev/null 2>&1
+  tester@127.0.0.1:/home/tester/core-acceptance.log "$EVID/core-acceptance.log" >/dev/null 2>&1
 log_copy_status=$?
 if (( log_copy_status != 0 )); then
   # Preserve a diagnostic even when the guest SSH service drops during a
   # provider action; this keeps a harness failure distinct from product
   # evidence and lets the outer campaign report the actual transport state.
-  printf 'native log unavailable (scp status=%s, smoke status=%s)\n' "$log_copy_status" "$smoke_status" >"$EVID/native-smoke.log"
+  printf 'core acceptance log unavailable (scp status=%s, status=%s)\n' "$log_copy_status" "$smoke_status" >"$EVID/core-acceptance.log"
 fi
 set -e
-cat "$EVID/native-smoke.log"
+cat "$EVID/core-acceptance.log"
 # Preserve the in-guest evidence directory on failure too, so a harness or
 # product failure is diagnosed from the recorded observations rather than a
 # two-line stdout tail.
@@ -99,5 +124,5 @@ scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P
   tester@127.0.0.1:/home/tester/pp4-evidence/. "$EVID/" >/dev/null 2>&1
 set -e
 ((smoke_status == 0)) || exit "$smoke_status"
-printf 'release=%s\nsource_sha=%s\ndistro=%s\ncampaign_status=PASS\n' "$VERSION" "$EXPECTED_SHA" "$DISTRO" >"$EVID/campaign.env"
+printf 'release=%s\nsource_sha=%s\nharness_sha=%s\ndistro=%s\ncampaign_status=PASS\n' "$VERSION" "$EXPECTED_SHA" "$HARNESS_SHA" "$DISTRO" >"$EVID/campaign.env"
 echo "PP4 CORE CAMPAIGN PASS: $DISTRO"
