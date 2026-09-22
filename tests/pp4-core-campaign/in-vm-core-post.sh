@@ -23,7 +23,7 @@ log 'phase 7: host reboot and identity recovery'
 native /identity/me GET "$EVID/identity-me-after-reboot.json" --expect 200
 native /regions GET "$EVID/regions-after-reboot.json" --expect 200
 native /topology/failure-domains GET "$EVID/failure-domains-after-reboot.json" --expect 200
-sudo python3 - "$EVID/durable-bootstrap-after-reboot.json" <<'PY'
+sudo python3 - "$EVID/durable-bootstrap-after-reboot.json" >"$EVID/durable-bootstrap-after-reboot.json" <<'PY'
 import json
 import sqlite3
 import sys
@@ -52,7 +52,7 @@ before_tls="$(sha256sum /etc/o3k/tls/* | sha256sum | awk '{print $1}')"
 curl -sfL "https://github.com/o3kio/o3k/releases/download/$RELEASE_VERSION/install.sh" | sudo env O3K_SKIP_ARAF=1 sh - >"$EVID/rerun-install.log" 2>&1 || fail 'public installer rerun failed'
 sudo python3 /home/tester/verify_manifest.py "$RELEASE_VERSION" "$SOURCE_SHA" >"$EVID/rerun-identity.txt" || fail 'rerun source identity mismatch'
 native /identity/me GET "$EVID/identity-me-after-rerun.json" --expect 200
-sudo python3 - "$EVID/durable-bootstrap-after-rerun.json" <<'PY'
+sudo python3 - "$EVID/durable-bootstrap-after-rerun.json" >"$EVID/durable-bootstrap-after-rerun.json" <<'PY'
 import json
 import sqlite3
 import sys
