@@ -117,6 +117,10 @@ jobs:
             Horizon witness;
           - bounded Nova/Neutron collection marker/limit pagination required by
             the PP.4 witness;
+          - server-owned network dependency cleanup across the native and
+            OpenStack lifecycle, including terminal create-failure
+            compensation, so both interfaces converge on identical durable
+            state;
           - previously accepted native networking, keypair/config-drive and
             release-trust repairs.
 

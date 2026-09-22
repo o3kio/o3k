@@ -79,17 +79,22 @@ Core principles:
 > These are strong implementation milestones, not a blanket production, full
 > OpenStack parity, multi-region, live-migration, or datacenter-scale claim.
 
-> **PP.4 Core status (2026-09-22):** immutable `v0.4.0-rc.21` and
-> `v0.4.0-rc.22` are preserved as historical PP.4 candidates, not as
-> certification. rc.21 proves native replay convergence plus a fresh-Ubuntu
-> native/KVM smoke; rc.22 proves the fresh-Ubuntu native lifecycle,
-> bidirectional OpenStack compatibility and Horizon HTTP readiness, then
-> fails the required unmodified Horizon witness because O3K had no Keystone
-> unscoped password authentication for the login bootstrap. The current
-> source carries the two bounded repairs the pinned client proved necessary —
-> Horizon login/bootstrap identity compatibility and bounded Nova/Neutron
-> collection pagination. The successor is not named, tagged or published
-> here; the complete Ubuntu + Debian native-first campaign, bounded Horizon
+> **PP.4 Core status (2026-09-22):** immutable `v0.4.0-rc.21`,
+> `v0.4.0-rc.22` and `v0.4.0-rc.23` are preserved as historical PP.4
+> candidates, not as certification. rc.21 proves native replay convergence
+> plus a fresh-Ubuntu native/KVM smoke; rc.22 proves the fresh-Ubuntu native
+> lifecycle, bidirectional OpenStack compatibility and Horizon HTTP
+> readiness, then fails the required unmodified Horizon witness because O3K
+> had no Keystone unscoped password authentication for the login bootstrap.
+> rc.23 proves those two bounded identity/pagination repairs plus the whole
+> rebooting Ubuntu lifecycle through cross-interface delete convergence, then
+> fails the required TestLab teardown because a server deleted through the
+> native interface kept its auto-created port `ACTIVE` (#1034). The current
+> source carries all three bounded repairs — Horizon login/bootstrap identity
+> compatibility, bounded Nova/Neutron collection pagination, and
+> server-owned endpoint release across both interfaces — and is still not a
+> certified candidate. The successor is not named, tagged or published here;
+> the complete Ubuntu + Debian native-first campaign, bounded Horizon
 > witness and full cross-interface lifecycle remain unproven. O3K is not
 > production-ready by this evidence.
 
