@@ -1,0 +1,74 @@
+{
+  "schema": "o3k.pp4-core.public-candidate.v1",
+  "release": {
+    "version": "v0.4.0-rc.23",
+    "prerelease": true,
+    "public_url": "https://github.com/o3kio/o3k/releases/tag/v0.4.0-rc.23",
+    "annotated_tag_object": "acc03a1e6281ad57155fdbd4a9cc2c0793ad40d1",
+    "source_commit": "5cb24f0585d5899102b12e441bd6c4c9aa571f7b",
+    "published_at": "2026-09-22T14:25:23Z",
+    "protected_workflow_run": "https://github.com/o3kio/o3k/actions/runs/35739152169",
+    "environment": "release (required_reviewers; deployment approved before the job started)",
+    "predecessor": {
+      "version": "v0.4.0-rc.22",
+      "source_commit": "15162af7582f72d98475a79ee369e8902574ffee",
+      "verdict": "failed immutable PP.4 candidate: Horizon login bootstrap missing (no Keystone unscoped authentication)"
+    },
+    "release_notes": "PP.4 Core candidate. Not production-ready and not PP.7 certified. Lists the accumulated bounded PP.4 corrections; claims no full OpenStack or Horizon parity."
+  },
+  "assets": {
+    "install.sh": "40fcbbaaa989327f794d2bb93828328545a3d6e167ba3e0a21f08b7f54be3116",
+    "o3k-0.4.0-rc.23-linux-x86_64.tar.gz": "a3ec849677e35625cbbdfec931a15f0d068c87f3e378ba9d651429e3b63ea059",
+    "o3k-0.4.0-rc.23-linux-x86_64.tar.gz.sha256": "3a5fc7e782fae09de0852dd04893d1254165f929e374e5f0e502d0c1f90aea6a",
+    "provenance.json": "a70f8df89b8beae78606e663d1bc559ffd8abffba41a8b1e80f582d293b84f63",
+    "release-digests.txt": "b24e2b31e18b1b936be8f14d830712206abdf7fd300923c0c4dce4f36020e071",
+    "release-digests.sigstore.json": "3f3ff80aa6611324c84183e7e2dcfb1f0f09c6c9b68cf6b2982137ec765303a0"
+  },
+  "signed_bundle_members": {
+    "o3k-0.4.0-rc.23/manifest.json": "3e5440e486a1f1047e8be035ac1ae4002eb12c8592746de9b5a9a4e85659d00e",
+    "o3k-0.4.0-rc.23/SHA256SUMS": "a1928ff5e49c6c5ee9a4920147ad38a19d669fb06afe891759e8304d07040a43",
+    "o3k-0.4.0-rc.23/sbom.spdx.json": "1c02880036fd6bbfbb81c1af347b319bdf64d2abbd8fa9954fbc9b80f0b04159"
+  },
+  "provenance": {
+    "builder": "O3K protected release",
+    "signature_scheme": "sigstore-keyless",
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "workflow": ".github/workflows/release.yml",
+    "source_commit": "5cb24f0585d5899102b12e441bd6c4c9aa571f7b",
+    "signed_at": "2026-09-22T13:23:14Z",
+    "signed_at_derivation": "SOURCE_DATE_EPOCH = commit time of the release source (packaging/make-provenance-sigstore.sh), not wall-clock signing time"
+  },
+  "roundtrip_verification": {
+    "verified_at": "2026-09-22T14:26Z",
+    "download": "gh release download v0.4.0-rc.23 --repo o3kio/o3k (all 6 published assets)",
+    "archive_sha256_matches_published_checksum": true,
+    "installer_pin": "v0.4.0-rc.23",
+    "installer_identical_to_tagged_source": "cmp packaging/get-o3k.sh@v0.4.0-rc.23 install.sh -> identical",
+    "bundle_sha256sums_check": "sha256sum -c SHA256SUMS -> all members OK",
+    "sbom_and_manifest_hashes_match_signed_manifest": true,
+    "sigstore_verification": {
+      "tool": "cosign v3.1.3 (packaging/verify-release-sigstore.sh v0.4.0-rc.23 /tmp/pp4-roundtrip)",
+      "exit_code": 0,
+      "identity": "https://github.com/o3kio/o3k/.github/workflows/release.yml@refs/tags/v0.4.0-rc.23",
+      "result": "Verified OK; sigstore provenance policy: PASS"
+    }
+  },
+  "horizon_witness_artifact": {
+    "image": "quay.io/openstack.kolla/horizon:2026.1-ubuntu-noble",
+    "digest": "sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048",
+    "re_resolved_at": "2026-09-22T14:27:14Z",
+    "tag_resolved_to_pinned_digest": true,
+    "media_type": "application/vnd.oci.image.manifest.v1+json",
+    "config_digest": "sha256:737572c6cffdfe78e11e2c06a383f60218ebc86d274efe180c95035d6f7944b8",
+    "layer_count": 39,
+    "horizon_version": "25.7.4.dev26",
+    "forked": false,
+    "patches": [],
+    "witness_pulls_digest_not_tag": true,
+    "note": "The mutable tag is rebuilt by Kolla; the digest is the evidence identity. The rc.22 Docker Hub 2024.1 pin is historical only and is never mixed with 2026.1 evidence."
+  },
+  "runtime_source_vs_harness": {
+    "runtime_source_commit": "5cb24f0585d5899102b12e441bd6c4c9aa571f7b",
+    "note": "The campaign harness is identified separately in each campaign record. Harness fixes after publication are confined to tests/pp4-core-campaign/** and docs/evidence/** and never alter the published rc.23 artifact."
+  }
+}
