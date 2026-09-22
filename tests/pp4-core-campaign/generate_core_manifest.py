@@ -43,6 +43,14 @@ def same_side_effect_counts(root: Path, left: str, right: str) -> bool:
         return False
     return all(before.get(key) == after.get(key) for key in SIDE_EFFECT_KEYS)
 
+def reboot_proven(root: Path) -> bool:
+    # The campaign driver records the guest boot id before and after the host
+    # reboot; identical ids mean the guest never rebooted and the reboot gate
+    # would otherwise be vacuous.
+    if not exists(root, "boot-id-before-reboot.txt", "boot-id-after-reboot.txt"):
+        return False
+    return (root / "boot-id-before-reboot.txt").read_bytes() != (root / "boot-id-after-reboot.txt").read_bytes()
+
 def main() -> int:
     if len(sys.argv) != 6:
         raise SystemExit("usage: generate_core_manifest.py EVID VERSION SOURCE_SHA HARNESS_SHA DISTRO")
@@ -64,7 +72,7 @@ def main() -> int:
         "cross_interface_delete": PASS if exists(root, "native-compat-delete.json") else NOT_PROVEN,
         "horizon": horizon,
         "horizon_independent_readiness": PASS if exists(root, "ready-after-horizon-stop.txt") else NOT_PROVEN,
-        "host_reboot": PASS if exists(root, "ready-after-reboot.txt", "durable-bootstrap-after-reboot.json", "libvirt-after-reboot.txt") else NOT_PROVEN,
+        "host_reboot": PASS if exists(root, "ready-after-reboot.txt", "durable-bootstrap-after-reboot.json", "libvirt-after-reboot.txt") and reboot_proven(root) else NOT_PROVEN,
         "installer_rerun": PASS if exists(root, "rerun-identity.txt", "durable-bootstrap-after-rerun.json") else NOT_PROVEN,
         "reset_reinstall": PASS if "reset_rc=0" in read(root / "cleanup-status.env") and exists(root, "reset-reinstall-identity.txt", "ready-after-reset-reinstall.txt") else NOT_PROVEN,
         "uninstall_reinstall": PASS if "uninstall=PASS" in read(root / "cleanup-status.env") and exists(root, "reinstall-identity.txt", "ready-after-uninstall-reinstall.txt") else NOT_PROVEN,

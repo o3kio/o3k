@@ -53,11 +53,13 @@ runcmd:
 EOF
 printf 'instance-id: %s\nlocal-hostname: %s\n' "$VM_NAME" "$VM_NAME" >"$SEED/meta-data"
 genisoimage -output "$SEED_ISO" -volid cidata -joliet -rock "$SEED/user-data" "$SEED/meta-data" >/dev/null
+# A serial console log is captured so a guest that fails to come back after the
+# campaign reboot can be diagnosed instead of guessed at.
 # shellcheck disable=SC2086
 qemu-system-x86_64 -name "$VM_NAME" -machine type=q35,accel=kvm -cpu host -smp 2 -m 6144 \
   -drive file="$DISK",if=virtio,format=qcow2 -drive file="$SEED_ISO",if=virtio,media=cdrom \
   -netdev user,id=net0,hostfwd=tcp::$SSH_PORT-:22 -device virtio-net-pci,netdev=net0 \
-  -display none -daemonize -pidfile "$PIDFILE"
+  -display none -serial "file:$WORK/console.log" -daemonize -pidfile "$PIDFILE"
 ssh_vm() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p "$SSH_PORT" tester@127.0.0.1 "$@"; }
 # Protected evidence backup. An external wipe of target/ already destroyed one
 # campaign's raw evidence, so every run copies its evidence out of the mutable
@@ -89,6 +91,9 @@ backup_evidence() {
   echo 'PP4 evidence backup failed; raw evidence left in the checkout' >&2
 }
 cleanup() {
+  if [[ -f "$WORK/console.log" && -d "$EVID" ]]; then
+    cp -f -- "$WORK/console.log" "$EVID/guest-console.log" 2>/dev/null || true
+  fi
   backup_evidence
   if [[ "${O3K_PP4_KEEP_VM-0}" == 1 ]]; then
     echo "PP4 debug VM retained: work=$WORK ssh_port=$SSH_PORT key=$SSH_KEY pidfile=$PIDFILE" >&2
@@ -123,10 +128,35 @@ smoke_status=$?
 set -e
 if (( smoke_status == 0 )); then
   # The reboot is performed by the host driver so a dropped SSH session is
-  # expected and cannot be confused with a product failure.
+  # expected and cannot be confused with a product failure.  `sudo reboot`
+  # returns immediately while sshd lingers for a few seconds, so the guest must
+  # be observed going down AND coming back with a different boot id: otherwise
+  # the gate is vacuous and the delayed shutdown kills the post-reboot phases.
+  ssh_vm 'cat /proc/sys/kernel/random/boot_id' >"$EVID/boot-id-before-reboot.txt" 2>/dev/null || smoke_status=1
   ssh_vm 'sudo reboot' >/dev/null 2>&1 || true
-  for _attempt in $(seq 1 120); do sleep 3; ssh_vm true 2>/dev/null && break; done
-  ssh_vm true || smoke_status=1
+  went_down=0
+  for _attempt in $(seq 1 60); do
+    if ! ssh_vm true 2>/dev/null; then went_down=1; break; fi
+    sleep 2
+  done
+  (( went_down == 1 )) || { echo 'guest never became unreachable during the reboot' >&2; smoke_status=1; }
+  came_back=0
+  for _attempt in $(seq 1 120); do
+    if ssh_vm true 2>/dev/null; then came_back=1; break; fi
+    sleep 3
+  done
+  (( came_back == 1 )) || { echo 'SSH did not return after the host reboot' >&2; smoke_status=1; }
+  if (( smoke_status == 0 )); then
+    ssh_vm 'cat /proc/sys/kernel/random/boot_id' >"$EVID/boot-id-after-reboot.txt" 2>/dev/null || smoke_status=1
+  fi
+  if (( smoke_status == 0 )); then
+    if cmp -s "$EVID/boot-id-before-reboot.txt" "$EVID/boot-id-after-reboot.txt"; then
+      echo 'host reboot not proven: guest boot id is unchanged' >&2
+      smoke_status=1
+    else
+      echo 'host reboot verified: guest boot id changed'
+    fi
+  fi
   if (( smoke_status == 0 )); then
     set +e
     ssh_vm "O3K_PP4_VERSION='$VERSION' O3K_PP4_SOURCE_SHA='$EXPECTED_SHA' O3K_PP4_HARNESS_SHA='$HARNESS_SHA' bash /home/tester/in-vm-core-post.sh /home/tester/pp4-evidence /home/tester/native_client.py '$DISTRO' >> /home/tester/core-acceptance.log 2>&1"
