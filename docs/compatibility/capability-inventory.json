@@ -6,7 +6,7 @@
     "repository": "https://github.com/kubedoio/o3k"
   },
   "inventory_version": "0.2.0-alpha.1",
-  "operation_count": 41,
+  "operation_count": 42,
   "operations": [
     {
       "aliases": [],
@@ -477,6 +477,34 @@
     },
     {
       "aliases": [],
+      "cli_command": "openstack project list",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/keystone/handlers.go"
+      ],
+      "id": "identity.auth_projects_list",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Client project discovery only: it returns the caller's durable role-assignment projects and exposes no pagination, links, or project writes."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects"
+      ],
+      "operation": "auth_projects_list",
+      "path": "/v3/auth/projects",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:407",
+        "crates/o3k-api/src/identity.rs",
+        "crates/o3k-identity/src/lib.rs"
+      ],
+      "service": "identity"
+    },
+    {
+      "aliases": [],
       "cli_command": "openstack token issue",
       "cli_verification": "verified",
       "go_locations": [
@@ -486,13 +514,15 @@
       "id": "identity.token_password_scoped",
       "implementation_state": "implemented",
       "known_gaps": [
-        "Federation and non-password authentication are outside the alpha profile."
+        "Federation and non-password authentication are outside the alpha profile.",
+        "The route is the single canonical operation for both project-scoped and unscoped password authentication; an unscoped token carries no project, roles, or catalog and authorizes no O3K operation."
       ],
       "method": "POST",
       "official_sources": [
-        "https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-scoped-token"
+        "https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-scoped-token",
+        "https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-unscoped-token"
       ],
-      "operation": "password_authentication_scoped_token",
+      "operation": "password_authentication_token",
       "path": "/v3/auth/tokens",
       "portable_contract": "verified",
       "protected_runner": "pending",

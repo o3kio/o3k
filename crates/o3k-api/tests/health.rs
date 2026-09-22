@@ -2,7 +2,8 @@ use axum::body::{Body, HttpBody};
 use http::{HeaderValue, Method, Request, StatusCode, header};
 use o3k_compute::ComputeService;
 use o3k_domain::Ipv4Prefix;
-use o3k_identity::testkit::test_service;
+use o3k_identity::testkit::{test_service, test_service_with_projects};
+use o3k_identity::{ExtraProjectSeed, Secret};
 use o3k_image::{DEFAULT_MAX_UPLOAD_BYTES, ImageService};
 use o3k_network::{
     NetworkPlanAction, NetworkPlanCommand, NetworkPlanDispatcher, NetworkPlanStatus,
@@ -11,7 +12,10 @@ use o3k_network::{
 use o3k_provider::{FailureInjection, FakeComputeProvider};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 use tower::ServiceExt;
+
+const ADMIN_PROJECT_ID: &str = "eba29e2d-53de-461d-ae91-ede7402713cb";
 
 #[derive(Clone, Default)]
 struct RecordingNetworkDispatcher {
@@ -33,6 +37,106 @@ impl NetworkPlanDispatcher for RecordingNetworkDispatcher {
             })?
             .push(command);
         Ok(NetworkPlanStatus::Succeeded)
+    }
+}
+
+/// Native API token issuer backed by the real identity service, so the native
+/// route exercises the same unscoped-token rejection boundary as the
+/// OpenStack compatibility routes.
+#[derive(Clone)]
+struct IdentityBackedIssuer(Arc<o3k_identity::TokenService>);
+
+#[async_trait::async_trait]
+impl o3k_native_api::auth::TokenIssuer for IdentityBackedIssuer {
+    async fn issue_native(
+        &self,
+        _request: &o3k_native_api::auth::NativeTokenRequestV1,
+    ) -> Result<(String, Value), o3k_native_api::error::ProblemDetails> {
+        Err(o3k_native_api::error::ProblemDetails::unauthorized())
+    }
+
+    async fn auth_context(
+        &self,
+        token: &str,
+    ) -> Result<o3k_kernel::AuthContext, o3k_native_api::error::ProblemDetails> {
+        self.0
+            .auth_context(token, SystemTime::now())
+            .map_err(|_| o3k_native_api::error::ProblemDetails::unauthorized())
+    }
+}
+
+/// Password authentication body without a `scope` member.
+fn unscoped_password_body() -> Value {
+    unscoped_password_body_for("admin", "password")
+}
+
+fn unscoped_password_body_for(name: &str, password: &str) -> Value {
+    serde_json::json!({
+        "auth": {
+            "identity": {
+                "methods": ["password"],
+                "password": {"user": {"name": name, "password": password}}
+            }
+        }
+    })
+}
+
+/// Password authentication body scoped to the bootstrap project.
+fn project_scoped_password_body() -> Value {
+    serde_json::json!({
+        "auth": {
+            "identity": {
+                "methods": ["password"],
+                "password": {"user": {"name": "admin", "password": "password"}}
+            },
+            "scope": {"project": {"name": "admin"}}
+        }
+    })
+}
+
+async fn post_auth(
+    router: &axum::Router,
+    body: Value,
+) -> Result<axum::response::Response, Box<dyn std::error::Error>> {
+    Ok(router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?)
+}
+
+async fn issue_keystone_token(
+    router: &axum::Router,
+    body: Value,
+) -> Result<(String, Value), Box<dyn std::error::Error>> {
+    let response = post_auth(router, body).await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let token = response
+        .headers()
+        .get("x-subject-token")
+        .ok_or("missing x-subject-token header")?
+        .to_str()?
+        .to_owned();
+    let value: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    Ok((token, value))
+}
+
+fn assert_unscoped_token_body(body: &Value) {
+    assert_eq!(body["token"]["user"]["id"], "bootstrap-user");
+    assert_eq!(body["token"]["methods"][0], "password");
+    assert!(body["token"]["expires_at"].is_string());
+    assert!(body["token"]["issued_at"].is_string());
+    for absent in ["project", "roles", "catalog"] {
+        assert!(
+            body["token"].get(absent).is_none(),
+            "unscoped token body must not contain {absent}: {body}"
+        );
     }
 }
 
@@ -992,32 +1096,609 @@ async fn keystone_invalid_password_is_generic_unauthorized()
 }
 
 #[tokio::test]
-async fn keystone_rejects_missing_scope_and_wrong_project_without_leaking_credentials()
+async fn keystone_unscoped_password_auth_without_scope_issues_token()
 -> Result<(), Box<dyn std::error::Error>> {
     let service = test_service("http://127.0.0.1:8080").await?;
-    for body in [
-        serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}}}}),
-        serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"other-project"}}}}),
-    ] {
-        let response =
-            o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service.clone()))
-                .oneshot(
-                    Request::builder()
-                        .method(Method::POST)
-                        .uri("/v3/auth/tokens")
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(body.to_string()))?,
-                )
-                .await?;
-        assert!(matches!(
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let response = post_auth(&router, unscoped_password_body()).await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let token = response
+        .headers()
+        .get("x-subject-token")
+        .ok_or("missing x-subject-token header")?
+        .to_str()?
+        .to_owned();
+    assert_eq!(token.split('.').count(), 3);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_unscoped_token_body(&body);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_unscoped_scope_keyword_issues_token() -> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let mut request = unscoped_password_body();
+    request["auth"]["scope"] = Value::from("unscoped");
+    let response = post_auth(&router, request).await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(response.headers().get("x-subject-token").is_some());
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_unscoped_token_body(&body);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_unscoped_token_validation_returns_unscoped_shape()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let (token, _) = issue_keystone_token(&router, unscoped_password_body()).await?;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v3/auth/tokens")
+                .header("x-subject-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_unscoped_token_body(&body);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_unscoped_invalid_password_is_generic_unauthorized()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let body = serde_json::json!({
+        "auth": {
+            "identity": {
+                "methods": ["password"],
+                "password": {"user": {"name": "admin", "password": "wrong"}}
+            }
+        }
+    });
+    let response = post_auth(&router, body).await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let text = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 4096)
+            .await?
+            .to_vec(),
+    )?;
+    assert!(!text.contains("wrong"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_unsupported_scope_keyword_is_bounded_rejection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    for keyword in ["domain", "garbage"] {
+        let mut body = unscoped_password_body();
+        body["auth"]["scope"] = Value::from(keyword);
+        let response = post_auth(&router, body).await?;
+        assert_eq!(
             response.status(),
-            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED
-        ));
-        let bytes = axum::body::to_bytes(response.into_body(), 4096).await?;
-        let text = String::from_utf8(bytes.to_vec())?;
+            StatusCode::BAD_REQUEST,
+            "scope keyword {keyword} must be rejected, not treated as unscoped"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_unsupported_identity_method_is_bounded_rejection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    for methods in [
+        serde_json::json!(["totp"]),
+        serde_json::json!(["password", "token"]),
+    ] {
+        let mut body = unscoped_password_body();
+        body["auth"]["identity"]["methods"] = methods.clone();
+        let response = post_auth(&router, body).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "unsupported method set {methods} must be rejected"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_wrong_project_and_malformed_scope_fail_closed_without_leaking_credentials()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The absence of a scope is now a supported unscoped request; a *wrong*
+    // project and a malformed scope must still fail closed.
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    for (body, expected) in [
+        (
+            serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"other-project"}}}}),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":"not-a-project-object"}}}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":7}}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let description = body.to_string();
+        let response = post_auth(&router, body).await?;
+        assert_eq!(response.status(), expected, "{description}");
+        let text = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await?
+                .to_vec(),
+        )?;
         assert!(!text.contains("password"));
         assert!(!text.contains("other-project"));
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_auth_projects_lists_authorized_projects_for_unscoped_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let (token, _) = issue_keystone_token(&router, unscoped_password_body()).await?;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v3/auth/projects")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    let projects = body["projects"].as_array().ok_or("projects missing")?;
+    assert_eq!(projects.len(), 1, "{body}");
+    assert_eq!(projects[0]["id"], ADMIN_PROJECT_ID);
+    assert_eq!(projects[0]["name"], "admin");
+    assert_eq!(projects[0]["domain_id"], "default");
+    assert_eq!(projects[0]["enabled"], true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_auth_projects_accepts_project_scoped_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let (token, _) = issue_keystone_token(&router, project_scoped_password_body()).await?;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v3/auth/projects")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_eq!(body["projects"][0]["id"], ADMIN_PROJECT_ID);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_auth_projects_rejects_invalid_and_missing_tokens()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    for header_value in [Some("not-a-token"), None] {
+        let mut request = Request::builder().uri("/v3/auth/projects");
+        if let Some(value) = header_value {
+            request = request.header("x-auth-token", value);
+        }
+        let response = router.clone().oneshot(request.body(Body::empty())?).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "header {header_value:?}"
+        );
+        let text = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await?
+                .to_vec(),
+        )?;
+        assert!(!text.contains("not-a-token"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_auth_projects_rejects_expired_token() -> Result<(), Box<dyn std::error::Error>> {
+    // The API layer has no injectable clock, so the expiry is constructed the
+    // same way the identity expiry test does: issue against a `now` in the
+    // past so the token's lifetime has already elapsed.
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let request: o3k_identity::TokenRequest = serde_json::from_value(unscoped_password_body())?;
+    let (expired, _) = service.issue(&request, SystemTime::now() - Duration::from_secs(7_200))?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v3/auth/projects")
+                .header("x-auth-token", &expired)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_auth_projects_never_returns_unrelated_projects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant_b = "8d1f3c4a-5b6e-4f2a-9c3d-1e2f3a4b5c6d";
+    let service = test_service_with_projects(
+        "http://127.0.0.1:8080",
+        vec![ExtraProjectSeed {
+            project_id: tenant_b.to_owned(),
+            project_name: "tenant-b".to_owned(),
+            user_id: "a7c2e9d1-4f3b-4c8e-9d2a-3b4c5d6e7f8a".to_owned(),
+            user_name: "tenant-b-user".to_owned(),
+            password: Secret::new("tenant-b-password".to_owned()),
+        }],
+    )
+    .await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+
+    let (admin_token, _) = issue_keystone_token(&router, unscoped_password_body()).await?;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v3/auth/projects")
+                .header("x-auth-token", &admin_token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    let ids: Vec<&str> = body["projects"]
+        .as_array()
+        .ok_or("projects missing")?
+        .iter()
+        .filter_map(|project| project["id"].as_str())
+        .collect();
+    assert_eq!(ids, [ADMIN_PROJECT_ID], "{body}");
+    assert!(!ids.contains(&tenant_b));
+    assert!(!ids.contains(&"service-project"));
+
+    // The isolated tenant sees exactly its own project, never the bootstrap one.
+    let (tenant_token, _) = issue_keystone_token(
+        &router,
+        unscoped_password_body_for("tenant-b-user", "tenant-b-password"),
+    )
+    .await?;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v3/auth/projects")
+                .header("x-auth-token", &tenant_token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_eq!(
+        body["projects"]
+            .as_array()
+            .ok_or("projects missing")?
+            .iter()
+            .filter_map(|project| project["id"].as_str())
+            .collect::<Vec<_>>(),
+        [tenant_b]
+    );
+    Ok(())
+}
+
+async fn get_with_token(
+    router: &axum::Router,
+    uri: &str,
+    token: Option<(&str, &str)>,
+) -> Result<axum::response::Response, Box<dyn std::error::Error>> {
+    let mut request = Request::builder().uri(uri);
+    if let Some((header_name, value)) = token {
+        request = request.header(header_name, value);
+    }
+    Ok(router.clone().oneshot(request.body(Body::empty())?).await?)
+}
+
+#[tokio::test]
+async fn keystone_user_projects_lists_own_authorized_projects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let (token, _) = issue_keystone_token(&router, unscoped_password_body()).await?;
+    let response = get_with_token(
+        &router,
+        "/v3/users/bootstrap-user/projects",
+        Some(("x-auth-token", &token)),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    let projects = body["projects"].as_array().ok_or("projects missing")?;
+    assert_eq!(projects.len(), 1, "{body}");
+    assert_eq!(projects[0]["id"], ADMIN_PROJECT_ID);
+    assert_eq!(projects[0]["name"], "admin");
+    assert_eq!(projects[0]["domain_id"], "default");
+    assert_eq!(projects[0]["enabled"], true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_user_projects_accepts_project_scoped_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let (token, _) = issue_keystone_token(&router, project_scoped_password_body()).await?;
+
+    let response = get_with_token(
+        &router,
+        "/v3/users/bootstrap-user/projects",
+        Some(("x-auth-token", &token)),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_eq!(body["projects"][0]["id"], ADMIN_PROJECT_ID);
+
+    // The sibling `/v3/auth/projects` route and the per-user route project the
+    // same capability, so both must return the identical body.
+    let sibling = get_with_token(
+        &router,
+        "/v3/auth/projects",
+        Some(("x-subject-token", &token)),
+    )
+    .await?;
+    assert_eq!(sibling.status(), StatusCode::OK);
+    let sibling_body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(sibling.into_body(), 16 * 1024).await?)?;
+    assert_eq!(body, sibling_body);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_user_projects_rejects_invalid_and_missing_tokens()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    for header_value in [Some("not-a-token"), Some("a.b.c"), None] {
+        let response = get_with_token(
+            &router,
+            "/v3/users/bootstrap-user/projects",
+            header_value.map(|value| ("x-auth-token", value)),
+        )
+        .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "header {header_value:?}"
+        );
+        let text = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await?
+                .to_vec(),
+        )?;
+        if let Some(value) = header_value {
+            assert!(!text.contains(value));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_user_projects_never_leaks_another_subject()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let (admin_token, _) = issue_keystone_token(&router, unscoped_password_body()).await?;
+
+    let mut bodies = Vec::new();
+    // `cinder` is a real durable user in the bootstrap universe; the second id
+    // does not exist. Both must be indistinguishable.
+    for foreign in ["cinder", "00000000-0000-0000-0000-000000000000"] {
+        let response = get_with_token(
+            &router,
+            &format!("/v3/users/{foreign}/projects"),
+            Some(("x-auth-token", &admin_token)),
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{foreign}");
+        let text = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await?
+                .to_vec(),
+        )?;
+        assert!(!text.contains(ADMIN_PROJECT_ID), "{foreign}: {text}");
+        assert!(!text.contains("\"admin\""), "{foreign}: {text}");
+        assert!(!text.contains("service-project"), "{foreign}: {text}");
+        bodies.push(text);
+    }
+    assert_eq!(
+        bodies[0], bodies[1],
+        "an unknown user and a foreign existing user must be indistinguishable"
+    );
+
+    // The caller's own list is still reachable, so the 403 is about the id.
+    let own = get_with_token(
+        &router,
+        "/v3/users/bootstrap-user/projects",
+        Some(("x-auth-token", &admin_token)),
+    )
+    .await?;
+    assert_eq!(own.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_user_projects_returns_empty_without_assignments()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let mut snapshot = service.snapshot().clone();
+    snapshot.users.push(o3k_identity::SnapshotUser {
+        id: "roleless-user".to_owned(),
+        domain_id: "default".to_owned(),
+        name: "roleless".to_owned(),
+        password_hash: o3k_identity::PasswordHash::derive_with_iterations_for_testing(
+            "password", 1_000,
+        )?,
+        enabled: true,
+    });
+    let service = o3k_identity::TokenService::from_snapshot(
+        snapshot,
+        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+        Duration::from_secs(3600),
+    )?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let (token, _) =
+        issue_keystone_token(&router, unscoped_password_body_for("roleless", "password")).await?;
+    let response = get_with_token(
+        &router,
+        "/v3/users/roleless-user/projects",
+        Some(("x-auth-token", &token)),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_eq!(body, serde_json::json!({"projects": []}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_user_projects_rejects_expired_token() -> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let request: o3k_identity::TokenRequest = serde_json::from_value(unscoped_password_body())?;
+    let (expired, _) = service.issue(&request, SystemTime::now() - Duration::from_secs(7_200))?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let response = get_with_token(
+        &router,
+        "/v3/users/bootstrap-user/projects",
+        Some(("x-auth-token", &expired)),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_unscoped_token_cannot_authorize_compatibility_or_native_routes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/o3k-api-unscoped-gate-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let identity = test_service("http://127.0.0.1:8080").await?;
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let image = ImageService::open_for_test(&root, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+    let native = o3k_native_api::NativeApiState::new(
+        None,
+        o3k_native_api::pagination::CursorConfig::default(),
+        Some(Arc::new(IdentityBackedIssuer(Arc::new(identity.clone())))),
+        None,
+        None,
+        None,
+    )?;
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_image(image)
+        .with_native_api(native);
+    let router = o3k_api::router_with_state(state);
+
+    let (unscoped, _) = issue_keystone_token(&router, unscoped_password_body()).await?;
+    let (scoped, _) = issue_keystone_token(&router, project_scoped_password_body()).await?;
+
+    // Glance compatibility route: the project-scoped token is accepted, the
+    // unscoped token is rejected with 401.
+    let scoped_images = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v2/images")
+                .header("x-auth-token", &scoped)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(scoped_images.status(), StatusCode::OK);
+    let unscoped_images = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v2/images")
+                .header("x-auth-token", &unscoped)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(unscoped_images.status(), StatusCode::UNAUTHORIZED);
+
+    // Native /o3k/v1 route: the same authorization boundary applies.
+    let scoped_native = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/o3k/v1/identity/me")
+                .header("authorization", format!("Bearer {scoped}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(scoped_native.status(), StatusCode::OK);
+    let unscoped_native = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/o3k/v1/identity/me")
+                .header("authorization", format!("Bearer {unscoped}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(unscoped_native.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_project_scoped_password_auth_still_returns_project_roles_and_catalog()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let (_, body) = issue_keystone_token(&router, project_scoped_password_body()).await?;
+    assert_eq!(body["token"]["project"]["id"], ADMIN_PROJECT_ID);
+    assert_eq!(body["token"]["project"]["name"], "admin");
+    let roles = body["token"]["roles"].as_array().ok_or("roles missing")?;
+    assert!(roles.iter().any(|role| role["name"] == "admin"));
+    assert!(roles.iter().any(|role| role["name"] == "member"));
+    let catalog = body["token"]["catalog"]
+        .as_array()
+        .ok_or("catalog missing")?;
+    assert!(!catalog.is_empty());
+    assert!(catalog.iter().any(|service| service["type"] == "identity"));
     Ok(())
 }
 

@@ -60,7 +60,7 @@ pub struct TokenRequest {
 #[derive(Deserialize)]
 pub struct Auth {
     pub identity: Identity,
-    pub scope: Option<Scope>,
+    pub scope: Option<ScopeRequest>,
 }
 
 #[derive(Deserialize)]
@@ -94,9 +94,38 @@ pub struct DomainReference {
     pub name: Option<String>,
 }
 
+/// Keystone `auth.scope` accepts two wire shapes: the `"unscoped"` keyword and
+/// a structured object. Untagged parsing keeps an unknown string or object
+/// shape a bounded rejection instead of silently degrading to unscoped.
 #[derive(Deserialize)]
-pub struct Scope {
+#[serde(untagged)]
+pub enum ScopeRequest {
+    Keyword(ScopeKeyword),
+    Structured(StructuredScope),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScopeKeyword {
+    Unscoped,
+}
+
+#[derive(Deserialize)]
+pub struct StructuredScope {
     pub project: Option<ProjectReference>,
+}
+
+impl ScopeRequest {
+    /// The requested project reference, or `None` when the request is
+    /// unscoped (no `scope`, the `"unscoped"` keyword, or an object without a
+    /// `project`).
+    #[must_use]
+    pub fn project(&self) -> Option<&ProjectReference> {
+        match self {
+            Self::Keyword(ScopeKeyword::Unscoped) => None,
+            Self::Structured(scope) => scope.project.as_ref(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -111,15 +140,54 @@ pub struct TokenResponse {
     pub token: TokenDetails,
 }
 
+/// The authorization projection of a token. An unscoped token carries no
+/// project, roles, or catalog keys at all; modelling it as an untagged enum
+/// makes fabricated empty authorization unrepresentable.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum TokenAuthorization {
+    Unscoped {},
+    Project {
+        project: ProjectDetails,
+        roles: Vec<RoleDetails>,
+        catalog: Vec<ServiceDetails>,
+    },
+}
+
 #[derive(Debug, Serialize)]
 pub struct TokenDetails {
     pub expires_at: String,
     pub issued_at: String,
     pub methods: Vec<String>,
-    pub project: ProjectDetails,
     pub user: UserDetails,
-    pub roles: Vec<RoleDetails>,
-    pub catalog: Vec<ServiceDetails>,
+    #[serde(flatten)]
+    pub authorization: TokenAuthorization,
+}
+
+impl TokenDetails {
+    #[must_use]
+    pub fn project(&self) -> Option<&ProjectDetails> {
+        match &self.authorization {
+            TokenAuthorization::Unscoped {} => None,
+            TokenAuthorization::Project { project, .. } => Some(project),
+        }
+    }
+
+    #[must_use]
+    pub fn roles(&self) -> &[RoleDetails] {
+        match &self.authorization {
+            TokenAuthorization::Unscoped {} => &[],
+            TokenAuthorization::Project { roles, .. } => roles,
+        }
+    }
+
+    #[must_use]
+    pub fn catalog(&self) -> &[ServiceDetails] {
+        match &self.authorization {
+            TokenAuthorization::Unscoped {} => &[],
+            TokenAuthorization::Project { catalog, .. } => catalog,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -335,6 +403,27 @@ impl IdentitySnapshot {
         roles.sort();
         roles.dedup();
         roles
+    }
+
+    /// Projects this user may scope a token into: enabled projects in an
+    /// enabled domain where the durable role assignments grant at least one
+    /// role. Derived from the snapshot only, never from a compiled-in list.
+    #[must_use]
+    pub fn authorized_projects_for(&self, user_id: &str) -> Vec<SnapshotProject> {
+        let mut projects: Vec<SnapshotProject> = self
+            .projects
+            .iter()
+            .filter(|project| {
+                project.enabled
+                    && self
+                        .domain_by_id(&project.domain_id)
+                        .is_some_and(|domain| domain.enabled)
+                    && !self.role_names_for(user_id, &project.id).is_empty()
+            })
+            .cloned()
+            .collect();
+        projects.sort_by(|left, right| left.id.cmp(&right.id));
+        projects
     }
 
     fn federated_binding_for(
@@ -992,6 +1081,14 @@ impl TokenService {
         Ok(scopes)
     }
 
+    /// Projects the durable role assignments of `user_id` into the public
+    /// projects the user is authorized to scope a token into. Used by
+    /// `GET /v3/auth/projects`; never derived from a compiled-in list.
+    #[must_use]
+    pub fn authorized_projects(&self, user_id: &str) -> Vec<SnapshotProject> {
+        self.snapshot_guard().authorized_projects_for(user_id)
+    }
+
     /// Re-evaluates a requested project scope against the current snapshot.
     /// The previous token/AuthContext is never used as authorization input.
     pub fn authorize_federated_scope(
@@ -1087,24 +1184,23 @@ impl TokenService {
             _ => return Err(AuthError::InvalidRequest),
         };
 
-        let project_ref = request
-            .auth
-            .scope
-            .as_ref()
-            .and_then(|scope| scope.project.as_ref())
-            .ok_or(AuthError::InvalidRequest)?;
-        let project = self.resolve_project(project_ref)?;
-        if !project.enabled {
-            return Err(AuthError::Unauthorized);
-        }
+        match request.auth.scope.as_ref().and_then(ScopeRequest::project) {
+            None => self.issue_unscoped(&user_id, "password", None, now),
+            Some(project_ref) => {
+                let project = self.resolve_project(project_ref)?;
+                if !project.enabled {
+                    return Err(AuthError::Unauthorized);
+                }
 
-        let roles = self.snapshot_guard().role_names_for(&user_id, &project.id);
-        if roles.is_empty() {
-            // Cross-project scoping fails closed before any token is issued.
-            return Err(AuthError::Unauthorized);
-        }
+                let roles = self.snapshot_guard().role_names_for(&user_id, &project.id);
+                if roles.is_empty() {
+                    // Cross-project scoping fails closed before any token is issued.
+                    return Err(AuthError::Unauthorized);
+                }
 
-        self.issue_scoped(&user_id, &project.id, &roles, "password", None, now)
+                self.issue_scoped(&user_id, &project.id, &roles, "password", None, now)
+            }
+        }
     }
 
     /// Exchanges a validated external identity for the existing native scoped
@@ -1176,6 +1272,45 @@ impl TokenService {
         external_expires_at: Option<u64>,
         now: SystemTime,
     ) -> Result<(String, TokenResponse), AuthError> {
+        self.issue_with_scope(
+            user_id,
+            TokenScope::Project(project_id.to_owned()),
+            roles,
+            method,
+            external_expires_at,
+            now,
+        )
+    }
+
+    /// Issues an unscoped token. An unscoped token authenticates the subject
+    /// user but authorizes no O3K operation; it carries no project, roles, or
+    /// catalog, and no role assignment is required to obtain one.
+    fn issue_unscoped(
+        &self,
+        user_id: &str,
+        method: &str,
+        external_expires_at: Option<u64>,
+        now: SystemTime,
+    ) -> Result<(String, TokenResponse), AuthError> {
+        self.issue_with_scope(
+            user_id,
+            TokenScope::Unscoped,
+            &[],
+            method,
+            external_expires_at,
+            now,
+        )
+    }
+
+    fn issue_with_scope(
+        &self,
+        user_id: &str,
+        scope: TokenScope,
+        roles: &[(String, String)],
+        method: &str,
+        external_expires_at: Option<u64>,
+        now: SystemTime,
+    ) -> Result<(String, TokenResponse), AuthError> {
         let issued = now
             .duration_since(UNIX_EPOCH)
             .map_err(|_| AuthError::InvalidRequest)?
@@ -1191,10 +1326,14 @@ impl TokenService {
         }
         let token_id = Uuid::now_v7().to_string();
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let project = match &scope {
+            TokenScope::Unscoped => None,
+            TokenScope::Project(project_id) => Some(project_id.clone()),
+        };
         let payload = URL_SAFE_NO_PAD.encode(
             serde_json::to_vec(&Claims {
                 sub: user_id.to_owned(),
-                project: project_id.to_owned(),
+                project,
                 issued,
                 expires,
                 token_id,
@@ -1210,7 +1349,7 @@ impl TokenService {
         Ok((
             token,
             TokenResponse {
-                token: self.details(user_id, project_id, roles, method, issued_at, expires_at)?,
+                token: self.details(user_id, &scope, roles, method, issued_at, expires_at)?,
             },
         ))
     }
@@ -1258,25 +1397,35 @@ impl TokenService {
         }
 
         // Validation is fail-closed against the durable identity universe:
-        // the subject user and scoped project must still exist and be enabled.
+        // the subject user must still exist and be enabled, and a scoped token
+        // additionally requires its project to exist and be enabled.
         let snapshot = self.snapshot_guard();
         let user = snapshot.user_by_id(&claims.sub);
-        let project = snapshot.project_by_id(&claims.project);
-        match (user, project) {
-            (Some(user), Some(project)) if user.enabled && project.enabled => {}
-            (Some(user), None)
-                if claims.project == "system"
-                    && user.enabled
-                    && snapshot
-                        .operator_assignment_for(&user.id, "operator-console")
-                        .is_some() => {}
-            _ => return Err(AuthError::InvalidToken),
-        }
+        let scope = match claims.project.as_deref() {
+            None => match user {
+                Some(user) if user.enabled => TokenScope::Unscoped,
+                _ => return Err(AuthError::InvalidToken),
+            },
+            Some(project_id) => {
+                let project = snapshot.project_by_id(project_id);
+                match (user, project) {
+                    (Some(user), Some(project)) if user.enabled && project.enabled => {}
+                    (Some(user), None)
+                        if project_id == "system"
+                            && user.enabled
+                            && snapshot
+                                .operator_assignment_for(&user.id, "operator-console")
+                                .is_some() => {}
+                    _ => return Err(AuthError::InvalidToken),
+                }
+                TokenScope::Project(project_id.to_owned())
+            }
+        };
 
         Ok(VerifiedToken {
             token_id: claims.token_id,
             user_id: claims.sub,
-            project_id: claims.project,
+            scope,
             issued: claims.issued,
             expires: claims.expires,
             method: claims.method,
@@ -1285,18 +1434,21 @@ impl TokenService {
 
     pub fn verify_details(&self, token: &str, now: SystemTime) -> Result<TokenResponse, AuthError> {
         let verified = self.verify(token, now)?;
-        let roles = if verified.project_id == "system" {
-            vec![("operator-console".to_owned(), "operator".to_owned())]
-        } else {
-            self.snapshot_guard()
-                .role_names_for(&verified.user_id, &verified.project_id)
+        let roles = match &verified.scope {
+            TokenScope::Unscoped => Vec::new(),
+            TokenScope::Project(project_id) if project_id == "system" => {
+                vec![("operator-console".to_owned(), "operator".to_owned())]
+            }
+            TokenScope::Project(project_id) => self
+                .snapshot_guard()
+                .role_names_for(&verified.user_id, project_id),
         };
         let issued_at = format_time(verified.issued)?;
         let expires_at = format_time(verified.expires)?;
         Ok(TokenResponse {
             token: self.details(
                 &verified.user_id,
-                &verified.project_id,
+                &verified.scope,
                 &roles,
                 &verified.method,
                 issued_at,
@@ -1307,11 +1459,16 @@ impl TokenService {
 
     pub fn auth_context(&self, token: &str, now: SystemTime) -> Result<AuthContext, AuthError> {
         let verified = self.verify(token, now)?;
+        let TokenScope::Project(project_id) = &verified.scope else {
+            // An unscoped token authenticates a principal but never authorizes
+            // an operation: it has no project, role, or ownership scope.
+            return Err(AuthError::Unauthorized);
+        };
         let snapshot = self.snapshot_guard();
         let user = snapshot
             .user_by_id(&verified.user_id)
             .ok_or(AuthError::InvalidToken)?;
-        if verified.project_id == "system" {
+        if project_id == "system" {
             let principal_id = PrincipalId::new(&user.id).map_err(|_| AuthError::InvalidToken)?;
             // The durable operator-console assignment is enforced by `verify`
             // above; the `operator` role here is the canonical projection that
@@ -1335,7 +1492,7 @@ impl TokenService {
             ));
         }
         let project = snapshot
-            .project_by_id(&verified.project_id)
+            .project_by_id(project_id)
             .ok_or(AuthError::InvalidToken)?;
         let domain = snapshot
             .domain_by_id(&project.domain_id)
@@ -1463,7 +1620,7 @@ impl TokenService {
     fn details(
         &self,
         user_id: &str,
-        project_id: &str,
+        scope: &TokenScope,
         roles: &[(String, String)],
         method: &str,
         issued_at: String,
@@ -1474,6 +1631,26 @@ impl TokenService {
             .user_by_id(user_id)
             .cloned()
             .ok_or(AuthError::InvalidToken)?;
+        let TokenScope::Project(project_id) = scope else {
+            return Ok(TokenDetails {
+                expires_at,
+                issued_at,
+                methods: vec![method.to_owned()],
+                user: UserDetails {
+                    id: user.id.clone(),
+                    name: user.name.clone(),
+                    domain: DomainDetails {
+                        id: user.domain_id.clone(),
+                        name: self
+                            .snapshot_guard()
+                            .domain_by_id(&user.domain_id)
+                            .map_or_else(|| user.domain_id.clone(), |domain| domain.name.clone()),
+                    },
+                    password_expires_at: None,
+                },
+                authorization: TokenAuthorization::Unscoped {},
+            });
+        };
         if project_id == "system" {
             let role_details = roles
                 .iter()
@@ -1486,14 +1663,6 @@ impl TokenService {
                 expires_at,
                 issued_at,
                 methods: vec![method.to_owned()],
-                project: ProjectDetails {
-                    id: "system".to_owned(),
-                    name: "System".to_owned(),
-                    domain: DomainDetails {
-                        id: "system".to_owned(),
-                        name: "System".to_owned(),
-                    },
-                },
                 user: UserDetails {
                     id: user.id.clone(),
                     name: user.name.clone(),
@@ -1503,8 +1672,18 @@ impl TokenService {
                     },
                     password_expires_at: None,
                 },
-                roles: role_details,
-                catalog: Vec::new(),
+                authorization: TokenAuthorization::Project {
+                    project: ProjectDetails {
+                        id: "system".to_owned(),
+                        name: "System".to_owned(),
+                        domain: DomainDetails {
+                            id: "system".to_owned(),
+                            name: "System".to_owned(),
+                        },
+                    },
+                    roles: role_details,
+                    catalog: Vec::new(),
+                },
             });
         }
         let project = self
@@ -1536,14 +1715,6 @@ impl TokenService {
             expires_at,
             issued_at,
             methods: vec![method.to_owned()],
-            project: ProjectDetails {
-                id: project.id.clone(),
-                name: project.name.clone(),
-                domain: DomainDetails {
-                    id: project_domain.id.clone(),
-                    name: project_domain.name.clone(),
-                },
-            },
             user: UserDetails {
                 id: user.id.clone(),
                 name: user.name.clone(),
@@ -1553,8 +1724,18 @@ impl TokenService {
                 },
                 password_expires_at: None,
             },
-            roles: role_details,
-            catalog: self.catalog(project_id),
+            authorization: TokenAuthorization::Project {
+                project: ProjectDetails {
+                    id: project.id.clone(),
+                    name: project.name.clone(),
+                    domain: DomainDetails {
+                        id: project_domain.id.clone(),
+                        name: project_domain.name.clone(),
+                    },
+                },
+                roles: role_details,
+                catalog: self.catalog(project_id),
+            },
         })
     }
 
@@ -1618,11 +1799,19 @@ impl TokenService {
     }
 }
 
+/// The authorization scope carried by a verified token. Unscoped tokens are
+/// authenticatable but never authorize an O3K operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenScope {
+    Unscoped,
+    Project(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedToken {
     pub token_id: String,
     pub user_id: String,
-    pub project_id: String,
+    pub scope: TokenScope,
     pub issued: u64,
     pub expires: u64,
     pub method: String,
@@ -1631,7 +1820,8 @@ pub struct VerifiedToken {
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
-    project: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
     issued: u64,
     expires: u64,
     token_id: String,
@@ -1897,13 +2087,13 @@ pub mod testkit {
                         },
                     }),
                 },
-                scope: Some(Scope {
+                scope: Some(ScopeRequest::Structured(StructuredScope {
                     project: Some(ProjectReference {
                         id: None,
                         name: Some("admin".to_owned()),
                         domain: None,
                     }),
-                }),
+                })),
             },
         }
     }
@@ -1921,13 +2111,13 @@ pub mod testkit {
                     }),
                     password: None,
                 },
-                scope: Some(Scope {
+                scope: Some(ScopeRequest::Structured(StructuredScope {
                     project: Some(ProjectReference {
                         id: None,
                         name: Some("admin".to_owned()),
                         domain: None,
                     }),
-                }),
+                })),
             },
         }
     }
@@ -1949,13 +2139,13 @@ pub mod testkit {
                         },
                     }),
                 },
-                scope: Some(Scope {
+                scope: Some(ScopeRequest::Structured(StructuredScope {
                     project: Some(ProjectReference {
                         id: None,
                         name: Some("admin".to_owned()),
                         domain: None,
                     }),
-                }),
+                })),
             },
         }
     }
@@ -2261,7 +2451,7 @@ mod tests {
         let (token, response) = service.issue_federated(&identity, project_id, now)?;
         let verified = service.verify(&token, now)?;
         assert_eq!(verified.user_id, "bootstrap-user");
-        assert_eq!(verified.project_id, project_id);
+        assert_eq!(verified.scope, TokenScope::Project(project_id.to_owned()));
         assert_eq!(verified.expires, 1_200);
         assert_eq!(verified.method, "federated");
         assert_eq!(response.token.methods, ["federated"]);
@@ -2291,9 +2481,12 @@ mod tests {
         let (token, response) = service.issue_federated_system(&identity, now)?;
         let verified = service.verify(&token, now)?;
         assert_eq!(verified.user_id, "bootstrap-user");
-        assert_eq!(verified.project_id, "system");
+        assert_eq!(verified.scope, TokenScope::Project("system".to_owned()));
         assert_eq!(verified.expires, 1_200);
-        assert_eq!(response.token.project.id, "system");
+        assert_eq!(
+            response.token.project().map(|project| project.id.as_str()),
+            Some("system")
+        );
 
         let context = service.auth_context(&token, now)?;
         assert_eq!(context.principal().id().as_str(), "bootstrap-user");
@@ -2351,13 +2544,13 @@ mod tests {
                         },
                     }),
                 },
-                scope: Some(Scope {
+                scope: Some(ScopeRequest::Structured(StructuredScope {
                     project: Some(ProjectReference {
                         id: None,
                         name: Some(project_name.to_owned()),
                         domain: None,
                     }),
-                }),
+                })),
             },
         }
     }
@@ -2369,11 +2562,209 @@ mod tests {
         let (token, response) = service.issue(&admin_request(), now)?;
         assert!(token.split('.').count() == 3);
         assert_eq!(
-            response.token.project.id,
-            "eba29e2d-53de-461d-ae91-ede7402713cb"
+            response.token.project().map(|project| project.id.as_str()),
+            Some("eba29e2d-53de-461d-ae91-ede7402713cb")
         );
         assert_eq!(response.token.user.id, "bootstrap-user");
         assert_eq!(service.verify(&token, now)?.user_id, "bootstrap-user");
+        Ok(())
+    }
+
+    fn unscoped_password_request(user_name: &str, password: &str) -> TokenRequest {
+        TokenRequest {
+            auth: Auth {
+                identity: Identity {
+                    methods: vec!["password".to_owned()],
+                    token: None,
+                    password: Some(PasswordIdentity {
+                        user: UserReference {
+                            id: None,
+                            name: Some(user_name.to_owned()),
+                            domain: None,
+                            password: password.to_owned(),
+                        },
+                    }),
+                },
+                scope: None,
+            },
+        }
+    }
+
+    fn claims_of(token: &str) -> Result<serde_json::Value, AuthError> {
+        let payload = token.split('.').nth(1).ok_or(AuthError::InvalidToken)?;
+        let decoded = URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|_| AuthError::InvalidToken)?;
+        serde_json::from_slice(&decoded).map_err(|_| AuthError::InvalidToken)
+    }
+
+    #[test]
+    fn scope_wire_shapes_parse_bounded() -> Result<(), AuthError> {
+        let bare = r#"{"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}}}}"#;
+        let keyword = r#"{"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":"unscoped"}}"#;
+        let empty_object = r#"{"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{}}}"#;
+        let project = r#"{"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}}"#;
+        let unsupported_keyword = r#"{"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":"domain"}}"#;
+
+        for body in [bare, keyword, empty_object] {
+            let request: TokenRequest =
+                serde_json::from_str(body).map_err(|_| AuthError::InvalidRequest)?;
+            assert!(
+                request
+                    .auth
+                    .scope
+                    .as_ref()
+                    .and_then(ScopeRequest::project)
+                    .is_none(),
+                "{body} must parse as an unscoped request"
+            );
+        }
+        let request: TokenRequest =
+            serde_json::from_str(project).map_err(|_| AuthError::InvalidRequest)?;
+        assert!(
+            request
+                .auth
+                .scope
+                .as_ref()
+                .and_then(ScopeRequest::project)
+                .is_some()
+        );
+        assert!(serde_json::from_str::<TokenRequest>(unsupported_keyword).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn unscoped_password_issue_and_verify_round_trip() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, response) =
+            service.issue(&unscoped_password_request("admin", "password"), now)?;
+        let verified = service.verify(&token, now)?;
+        assert_eq!(verified.user_id, "bootstrap-user");
+        assert_eq!(verified.scope, TokenScope::Unscoped);
+        assert_eq!(response.token.user.id, "bootstrap-user");
+        assert_eq!(response.token.methods, ["password"]);
+        assert!(response.token.project().is_none());
+        assert!(response.token.roles().is_empty());
+        assert!(response.token.catalog().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn unscoped_password_auth_requires_no_role_assignment() -> Result<(), AuthError> {
+        let mut snapshot = service_with_snapshot()?.snapshot().clone();
+        snapshot.users.push(SnapshotUser {
+            id: "roleless-user".to_owned(),
+            domain_id: "default".to_owned(),
+            name: "roleless".to_owned(),
+            password_hash: PasswordHash::derive_with_iterations_for_testing("password", 1_000)?,
+            enabled: true,
+        });
+        let service = TokenService::from_snapshot(
+            snapshot,
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, _) = service.issue(&unscoped_password_request("roleless", "password"), now)?;
+        assert_eq!(service.verify(&token, now)?.user_id, "roleless-user");
+        assert!(service.authorized_projects("roleless-user").is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn unscoped_token_auth_context_is_unauthorized() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, _) = service.issue(&unscoped_password_request("admin", "password"), now)?;
+        assert_eq!(
+            service.auth_context(&token, now),
+            Err(AuthError::Unauthorized)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unscoped_claims_omit_project_key() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, _) = service.issue(&unscoped_password_request("admin", "password"), now)?;
+        let claims = claims_of(&token)?;
+        assert_eq!(claims["sub"], "bootstrap-user");
+        assert!(claims.get("project").is_none());
+        let body = serde_json::to_value(TokenResponse {
+            token: service.verify_details(&token, now)?.token,
+        })
+        .map_err(|_| AuthError::InvalidRequest)?;
+        for absent in ["project", "roles", "catalog"] {
+            assert!(
+                body["token"].get(absent).is_none(),
+                "unscoped token body must not contain {absent}: {body}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_claims_still_carry_project_key() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, _) = service.issue(&admin_request(), now)?;
+        let claims = claims_of(&token)?;
+        assert_eq!(claims["project"], "eba29e2d-53de-461d-ae91-ede7402713cb");
+        let verified = service.verify(&token, now)?;
+        assert_eq!(
+            verified.scope,
+            TokenScope::Project("eba29e2d-53de-461d-ae91-ede7402713cb".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unscoped_token_requires_an_enabled_user() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, _) = service.issue(&unscoped_password_request("admin", "password"), now)?;
+
+        let mut snapshot = service.snapshot().clone();
+        snapshot
+            .users
+            .iter_mut()
+            .find(|user| user.id == "bootstrap-user")
+            .ok_or(AuthError::InvalidRequest)?
+            .enabled = false;
+        let disabled = TokenService::from_snapshot(
+            snapshot,
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )?;
+        assert_eq!(disabled.verify(&token, now), Err(AuthError::InvalidToken));
+        Ok(())
+    }
+
+    #[test]
+    fn authorized_projects_follow_role_assignments() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let projects = service.authorized_projects("bootstrap-user");
+        assert_eq!(
+            projects
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<Vec<_>>(),
+            ["eba29e2d-53de-461d-ae91-ede7402713cb"]
+        );
+        assert_eq!(projects[0].name, "admin");
+        assert_eq!(projects[0].domain_id, "default");
+        assert!(projects[0].enabled);
+        // The Cinder service identity's projects never leak into another user.
+        assert_eq!(
+            service
+                .authorized_projects("cinder")
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<Vec<_>>(),
+            ["eba29e2d-53de-461d-ae91-ede7402713cb", "service-project"]
+        );
         Ok(())
     }
 
@@ -2386,8 +2777,8 @@ mod tests {
         assert_ne!(reissued, presented);
         assert_eq!(response.token.user.id, "bootstrap-user");
         assert_eq!(
-            response.token.project.id,
-            "eba29e2d-53de-461d-ae91-ede7402713cb"
+            response.token.project().map(|project| project.id.as_str()),
+            Some("eba29e2d-53de-461d-ae91-ede7402713cb")
         );
         // The freshly issued token is valid and carries the same identity.
         assert_eq!(service.verify(&reissued, now)?.user_id, "bootstrap-user");
@@ -2410,13 +2801,13 @@ mod tests {
                     token: None,
                     password: None,
                 },
-                scope: Some(Scope {
+                scope: Some(ScopeRequest::Structured(StructuredScope {
                     project: Some(ProjectReference {
                         id: None,
                         name: Some("admin".to_owned()),
                         domain: None,
                     }),
-                }),
+                })),
             },
         };
         assert!(matches!(
@@ -2433,7 +2824,7 @@ mod tests {
         let (_, response) = service.issue(&admin_request(), now)?;
         let urls: Vec<(String, String)> = response
             .token
-            .catalog
+            .catalog()
             .iter()
             .map(|item| (item.service_type.clone(), item.endpoints[0].url.clone()))
             .collect();
@@ -2505,14 +2896,14 @@ mod tests {
         assert!(
             response
                 .token
-                .catalog
+                .catalog()
                 .iter()
                 .any(|entry| entry.service_type == "database")
         );
         assert!(
             !response
                 .token
-                .catalog
+                .catalog()
                 .iter()
                 .any(|entry| entry.service_type == "volumev3")
         );
@@ -2531,7 +2922,7 @@ mod tests {
         let (_, response) = service.issue(&admin_request(), now)?;
         let identity = response
             .token
-            .catalog
+            .catalog()
             .iter()
             .find(|item| item.service_type == "identity")
             .ok_or(AuthError::InvalidToken)?;
@@ -2566,13 +2957,13 @@ mod tests {
                         },
                     }),
                 },
-                scope: Some(Scope {
+                scope: Some(ScopeRequest::Structured(StructuredScope {
                     project: Some(ProjectReference {
                         id: None,
                         name: Some("admin".to_owned()),
                         domain: None,
                     }),
-                }),
+                })),
             },
         };
         assert!(matches!(
@@ -2601,13 +2992,13 @@ mod tests {
                                 },
                             }),
                         },
-                        scope: Some(Scope {
+                        scope: Some(ScopeRequest::Structured(StructuredScope {
                             project: Some(ProjectReference {
                                 id: None,
                                 name: Some("admin".to_owned()),
                                 domain: None,
                             }),
-                        }),
+                        })),
                     },
                 },
                 UNIX_EPOCH,
@@ -2665,8 +3056,8 @@ mod tests {
         let (token, response) = service.issue(&testkit::cinder_service_request("password"), now)?;
         assert_eq!(response.token.user.id, "cinder");
         assert_eq!(
-            response.token.project.id,
-            "eba29e2d-53de-461d-ae91-ede7402713cb"
+            response.token.project().map(|project| project.id.as_str()),
+            Some("eba29e2d-53de-461d-ae91-ede7402713cb")
         );
         let context = service.auth_context(&token, now)?;
         assert_eq!(context.principal().kind(), PrincipalKind::Service);
@@ -2716,10 +3107,12 @@ mod tests {
         assert_eq!(auth_ctx.principal().name(), &response.token.user.name);
 
         // 2. Ownership Scope
-        assert_eq!(
-            auth_ctx.effective_scope().id().as_str(),
-            &response.token.project.id
-        );
+        let project_id = response
+            .token
+            .project()
+            .map(|project| project.id.as_str())
+            .ok_or(AuthError::InvalidToken)?;
+        assert_eq!(auth_ctx.effective_scope().id().as_str(), project_id);
         assert_eq!(auth_ctx.effective_scope().kind(), ScopeKind::Project);
 
         // 3. Roles
@@ -3039,7 +3432,10 @@ mod tests {
 
         let verified = service.verify(&token, now)?;
         assert_eq!(verified.user_id, "bootstrap-user");
-        assert_eq!(verified.project_id, "eba29e2d-53de-461d-ae91-ede7402713cb");
+        assert_eq!(
+            verified.scope,
+            TokenScope::Project("eba29e2d-53de-461d-ae91-ede7402713cb".to_owned())
+        );
         Ok(())
     }
 }

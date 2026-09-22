@@ -5,7 +5,7 @@ This file is generated from `capability-inventory-source.json`; edit the source 
 - Profile: `testlab-alpha`
 - Go O3K reference: `53fd2cb36ee79f42da49c8181d6ceed12b41b3aa`
 - Rust reference: `3e508ea72e55a4c1e0113fbcf3643f4ffdbda735`
-- Operations: `41`
+- Operations: `42`
 
 Evidence states are independent: route implementation does not imply contract, CLI, or protected-runner verification.
 
@@ -28,7 +28,8 @@ Evidence states are independent: route implementation does not imply contract, C
 | compute | server_actions_start_stop_reboot_console | POST | /v2.1/{project_id}/servers/{id}/action | implemented | verified | pending | pending | required |
 | identity | version_discovery_root | GET | / | implemented | verified | pending | pending | required |
 | identity | version_discovery_v3 | GET | /v3 | implemented | verified | pending | pending | required |
-| identity | password_authentication_scoped_token | POST | /v3/auth/tokens | implemented | verified | verified | pending | required |
+| identity | auth_projects_list | GET | /v3/auth/projects | implemented | verified | pending | pending | required |
+| identity | password_authentication_token | POST | /v3/auth/tokens | implemented | verified | verified | pending | required |
 | image | image_list | GET | /v2/images | implemented | verified | pending | pending | required |
 | image | image_create | POST | /v2/images | implemented | verified | verified | pending | required |
 | image | image_delete | DELETE | /v2/images/{id} | implemented | verified | pending | pending | required |
@@ -67,7 +68,9 @@ Evidence states are independent: route implementation does not imply contract, C
 - `compute.server_member_actions`: Console output is bounded API data; real guest serial output is tracked by #84.
 - `identity.version_root`: Protected deployment verification remains a release-gate task.
 - `identity.version_v3`: Protected deployment verification remains a release-gate task.
+- `identity.auth_projects_list`: Client project discovery only: it returns the caller's durable role-assignment projects and exposes no pagination, links, or project writes.
 - `identity.token_password_scoped`: Federation and non-password authentication are outside the alpha profile.
+- `identity.token_password_scoped`: The route is the single canonical operation for both project-scoped and unscoped password authentication; an unscoped token carries no project, roles, or catalog and authorizes no O3K operation.
 - `image.collection_list`: The broad Glance filter and pagination surface is outside the alpha profile.
 - `image.collection_create`: Local filesystem storage is the only alpha backend.
 - `image.member_download`: Protected deployment verification remains a release-gate task.

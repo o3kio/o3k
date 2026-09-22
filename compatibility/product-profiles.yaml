@@ -229,10 +229,10 @@ profiles:
         authority: none
         product_dependency: false
         artifact:
-          provider: docker-hub
-          image: docker.io/openstackhelm/horizon
-          version: 2024.1-ubuntu_jammy-20250523
-          digest: sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b
+          provider: quay
+          image: quay.io/openstack.kolla/horizon
+          version: 2026.1-ubuntu-noble
+          digest: sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048
           unmodified: true
     araf_demo_tuple:
       state: not-proven

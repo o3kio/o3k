@@ -1530,7 +1530,7 @@
         },
         {
           "id": "horizon-005",
-          "user_outcome": "Horizon's project switcher dropdown lists the projects a user can access via GET /v3/auth/projects, a route the Rust identity router does not register, so a basic session can only ever see its current project.",
+          "user_outcome": "Horizon's project switcher dropdown lists the projects a user can access via GET /v3/auth/projects; the Rust identity router now registers the route for both unscoped and project-scoped tokens and returns only the caller's durable role-assignment projects.",
           "client_command": "keystoneclient GET /v3/auth/projects (Horizon project switcher; keystoneclient projects.list for non-admin)",
           "official_sources": [
             "https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects-for-user"
@@ -1538,14 +1538,18 @@
           "go_paths_consulted": [
             "internal/keystone/handlers.go"
           ],
-          "rust_status": "missing",
-          "in_product_profile": false,
-          "failure_seen": "not-exercised",
-          "priority": "useful-later",
+          "rust_status": "implemented",
+          "in_product_profile": true,
+          "failure_seen": "rc.22-real-host",
+          "failure_evidence": "docs/evidence/pp4-core/rc22-horizon-unscoped-auth-defect.json (rc.22 real-host Horizon witness could not establish an authenticated login session: it submitted an unscoped POST /v3/auth/tokens, which O3K rc.22 rejected with HTTP 400 invalid authentication request)",
+          "priority": "blocks-declared-journey",
           "requires_before_implementation": [
             "SPEC-0022 amendment (identity baseline: auth-projects list)",
             "contract record",
-            "black-box test id"
+            "black-box test id: crates/o3k-api/tests/health.rs::keystone_auth_projects_lists_authorized_projects_for_unscoped_token"
+          ],
+          "profiles": [
+            "native-rust-testlab"
           ]
         },
         {

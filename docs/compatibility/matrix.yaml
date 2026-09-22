@@ -31,6 +31,62 @@ entries:
       - crates/o3k-identity/src/lib.rs::tests
     status: implemented
 
+  - service: identity
+    operation: token_issue_password_unscoped
+    api_version: keystone-v3
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-unscoped-token
+    supported_fields:
+      request: [auth.identity.password.user]
+      response: [token, expires_at, issued_at, methods, user]
+    known_deviations:
+      - An unscoped token carries no project, roles, or catalog and authorizes no O3K operation; project-scoped routes reject it with 401.
+      - No role assignment is required to obtain an unscoped token.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::keystone_unscoped_password_auth_without_scope_issues_token
+      - crates/o3k-api/tests/health.rs::keystone_unscoped_scope_keyword_issues_token
+      - crates/o3k-api/tests/health.rs::keystone_unscoped_token_cannot_authorize_compatibility_or_native_routes
+      - crates/o3k-identity/src/lib.rs::tests
+    status: implemented
+
+  - service: identity
+    operation: auth_projects_list
+    api_version: keystone-v3
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects
+    supported_fields:
+      request: [X-Auth-Token]
+      response: [projects.id, projects.name, projects.domain_id, projects.enabled]
+    known_deviations:
+      - Returns only the caller's durable role-assignment projects; no pagination, links, or project CRUD.
+      - Accepts both unscoped and project-scoped tokens.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::keystone_auth_projects_lists_authorized_projects_for_unscoped_token
+      - crates/o3k-api/tests/health.rs::keystone_auth_projects_never_returns_unrelated_projects
+      - crates/o3k-api/tests/health.rs::keystone_auth_projects_rejects_invalid_and_missing_tokens
+    status: implemented
+
+  - service: identity
+    operation: user_projects_list
+    api_version: keystone-v3
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects-for-user
+    supported_fields:
+      request: [X-Auth-Token, user_id]
+      response: [projects.id, projects.name, projects.domain_id, projects.enabled]
+    known_deviations:
+      - Bounded to the caller's own subject: any other user_id is a generic 403 that does not distinguish an unknown user from a foreign one.
+      - Returns only the caller's durable role-assignment projects; no pagination, links, or user/project CRUD.
+      - Accepts both unscoped and project-scoped tokens.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::keystone_user_projects_lists_own_authorized_projects
+      - crates/o3k-api/tests/health.rs::keystone_user_projects_never_leaks_another_subject
+      - crates/o3k-api/tests/health.rs::keystone_user_projects_rejects_invalid_and_missing_tokens
+    status: implemented
+
   - service: image
     operation: image_create
     api_version: glance-v2

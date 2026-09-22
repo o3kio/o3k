@@ -101,6 +101,22 @@ Required behavior:
 
 - version discovery;
 - project-scoped password authentication;
+- unscoped password authentication: the password identity method with the
+  `scope` member omitted, with the `"unscoped"` keyword, or with a scope object
+  that carries no `project`. An unscoped token proves identity only. It carries
+  no project, roles or catalog, never implies system or domain scope, and is
+  never silently mapped to the bootstrap admin project. It is rejected with 401
+  by every operation that requires a normalized project-scoped `AuthContext`.
+  This is required by the bounded Horizon login bootstrap: the unmodified
+  external client authenticates unscoped, discovers the projects it may scope
+  into, and only then re-authenticates with the selected project scope;
+- available-scope discovery for the authenticated subject:
+  `GET /v3/auth/projects` and `GET /v3/users/{user_id}/projects` return, for the
+  caller's own durable identity, the enabled projects in an enabled domain where
+  the durable role assignments grant at least one role. Both are the same
+  bounded capability addressed by identity and by user ID, and neither is
+  project or user administration: no write operations, no pagination, no
+  listing of another subject's scopes;
 - `X-Subject-Token` issuance;
 - token expiry and verification;
 - catalog for enabled profile services;
