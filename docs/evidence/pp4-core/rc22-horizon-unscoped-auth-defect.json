@@ -9,7 +9,12 @@
   },
   "release_trust": {
     "public_release_manifest": "PASS",
-    "sigstore": "PASS (release authenticity verified; Sigstore identity/transparency)",
+    "sigstore": "PASS (release authenticity verified before extraction; Sigstore identity/transparency)",
+    "archive": "o3k-0.4.0-rc.22-linux-x86_64.tar.gz",
+    "archive_sha256": "8bcca6206ba4b49ab83ec45f599ee7485e17ec72a6f90f1d633cf08633372116",
+    "install_sh_sha256": "df895230324d613ffde1f267f62486cd65e28145232deda6c5c6aa8915feab11",
+    "provenance_json_sha256": "b43160df552d5346e8bf21db2f2569e474e59ddea4af7708b0c7963e16e48d6d",
+    "manifest_json_sha256": "72d88c39d2ac217dbaded7b944755b4985ccbeae57f06fbc25b7f0a3ae1ca5d1",
     "install_command": "curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.22/install.sh | sudo env O3K_SKIP_ARAF=1 sh -"
   },
   "campaign": {
@@ -62,7 +67,12 @@
     "container_keystone_reachability": "PASS (keystoneauth1 v3.Password from inside the container obtained a token)",
     "login_submit": "HTTP 200, form re-rendered; Horizon message \"An error occurred authenticating. Please try again later.\"",
     "project_context": "HTTP 302 back to login (no authenticated session)",
-    "result": "FAIL login-session"
+    "result": "FAIL login-session",
+    "not_proven_because_phase_aborted": [
+      "Horizon panel reachability (identity/images/networks/instances)",
+      "Core resource visibility in Horizon responses",
+      "Horizon readiness independence (stop container, then O3K /readyz and both APIs still PASS, VM still running, then recovery)"
+    ]
   },
   "defect": {
     "classification": "real O3K compatibility defect (product/runtime)",
