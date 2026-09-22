@@ -28,7 +28,7 @@ case "$DISTRO" in
 esac
 [ -f "$BASE" ] || { echo "missing base image: $BASE" >&2; exit 2; }
 ssh-keygen -t ed25519 -f "$SSH_KEY" -N '' -C pp4-core >/dev/null
-qemu-img create -f qcow2 -b "$BASE" -F qcow2 "$DISK" 24G >/dev/null
+qemu-img create -f qcow2 -b "$BASE" -F qcow2 "$DISK" 48G >/dev/null
 mkdir -p "$SEED"
 cat >"$SEED/user-data" <<EOF
 #cloud-config
@@ -56,7 +56,7 @@ genisoimage -output "$SEED_ISO" -volid cidata -joliet -rock "$SEED/user-data" "$
 # A serial console log is captured so a guest that fails to come back after the
 # campaign reboot can be diagnosed instead of guessed at.
 # shellcheck disable=SC2086
-qemu-system-x86_64 -name "$VM_NAME" -machine type=q35,accel=kvm -cpu host -smp 2 -m 6144 \
+qemu-system-x86_64 -name "$VM_NAME" -machine type=q35,accel=kvm -cpu host -smp 4 -m 6144 \
   -drive file="$DISK",if=virtio,format=qcow2 -drive file="$SEED_ISO",if=virtio,media=cdrom \
   -netdev user,id=net0,hostfwd=tcp::$SSH_PORT-:22 -device virtio-net-pci,netdev=net0 \
   -display none -serial "file:$WORK/console.log" -daemonize -pidfile "$PIDFILE"
