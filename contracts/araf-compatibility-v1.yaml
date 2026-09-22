@@ -50,7 +50,8 @@ pp3_tuple:
     # The tuple metadata and deployment material live in the O3K repository
     # (this contract + packaging/o3k-araf-demo.sh). The v0.4.0-rc.5 release
     # artifact itself is unchanged and does NOT contain this metadata; the
-    # one-line installer integration is PP.4 (#973) scope.
+    # one-line installer integration shipped in PP.4 (#973) — see the
+    # pp4_tuple section below for the integration record.
     artifact_note: repository-side-integration-metadata
   araf:
     version: v1.0.0-rc.12
@@ -124,7 +125,91 @@ pp3_tuple:
     - demo IdP (Keycloak start-dev, H2) is demo-scoped, not a production IdP claim.
     - O3K native tokens are 1-hour HMAC tokens without renewal; an Araf demo
       session ends at upstream token expiry (accepted Araf deviation).
-    - Browser trust for the locally minted demo CA is a PP.4 concern; PP.3
-      evidence uses --cacert on loopback only.
+    - >-
+      Browser trust for the locally minted demo CA is handled by PP.4 (#973):
+      the operator imports the demo CA recorded here; PP.3 evidence used
+      --cacert on loopback only.
     - o3k-network-agent remains shipped-inactive; the demo profile does not
       require the small-edge networking agent.
+
+# PP.4 (#973) one-line installer integration of the pinned demo tuple: the
+# PP.4 candidate integration. Araf rc.16 is pinned while the successor O3K
+# release identity and fresh-host evidence remain pending. This is candidate
+# metadata, not certification; the historical pp3_tuple above is unchanged.
+pp4_tuple:
+  pp_phase: PP.4
+  tracking_issue: 973
+  status: candidate-pending-fresh-host-evidence
+  updated_by: PP.4 (#973) candidate integration
+  o3k:
+    # Successor identity selected from the repository release inventory. The
+    # public release remains pending until the immutable bundle is published.
+    version: v0.4.0-rc.16
+    # The candidate must not predict the commit that will contain this
+    # metadata. The immutable signed release manifest and provenance bind the
+    # eventual source identity after publication; the installed runtime reads
+    # that verified identity from the release bundle.
+    source_sha: null
+    source_identity_authority: signed-release-manifest
+    release_asset_identity: github.com/o3kio/o3k/releases/tag/v0.4.0-rc.16
+  araf:
+    version: v1.0.0-rc.16
+    source_sha: 98ea45245c0be8d4ad1e340f1e6cbc5a8d949293
+    release_asset_identity: github.com/o3kio/araf/releases/tag/v1.0.0-rc.16
+  artifacts:
+    # Verified against the public rc.16 release manifest
+    # (SHA256 629fdaf92d4528b22fc4492c34cd13f364cf6267caa0538d880676a657dd6d09).
+    bff_image: ghcr.io/o3kio/araf-bff
+    bff_digest: sha256:d136814198eaa4df2f1028c35b421c6b5cfcdc3d6450584ad9b6e8d7e7b83f29
+    bff_platform_digest: sha256:95eae6e725aff5c11cf9a0fca7e6ad12e5644016e3e524a3c98cd1289b0804c9
+    bff_config_digest: sha256:c54b961b26d4c22b9bc1dec31dd33fd365047d6970e42a5cbcbe36610aa1afbe
+    bff_oci_tarball_sha256: 85afa9361225c40281c0371e1aad9f361aa8c988f4efc50d31669a43ca877c9c
+    tenant_console_image: ghcr.io/o3kio/araf-tenant-console
+    tenant_console_digest: sha256:3fd0a3c93a0bdcbd733227fd063e232851cf605038077f1fddfbf1a4762309f1
+    tenant_console_platform_digest: sha256:5544725ee8e3d1f0667d0b781356a2d400a0428b915b05b1eba185d78e4a793d
+    tenant_console_config_digest: sha256:2117dd6b268e2feb0a50835beff2a805c925dbeead87a3466cf5156434a4501a
+    tenant_console_oci_tarball_sha256: 39f4392c97deec8db246f1383425896d3743872fc3a0c465b8ff5ac72341a0e0
+    operator_console_image: ghcr.io/o3kio/araf-operator-console
+    operator_console_digest: sha256:1abd14091eaf20ba1c2f3032743fd2804f7d1ebb182722bca989c56a21169a4e
+    operator_console_platform_digest: sha256:3043604f8a7c66cc1723a519777d7f98ce1160e7d5921b909260e1ca2b3c866b
+    operator_console_config_digest: sha256:2ea47baa764eac8b493447c904d2237d1250b815fee588e4d866fee51b6c92ab
+    operator_console_oci_tarball_sha256: 4ebad231d0a7a189c8f5f1299654db295256821461a24cbbbdef08703ae29956
+    keycloak_image: quay.io/keycloak/keycloak
+    keycloak_version: "25.0.6"
+    keycloak_digest: sha256:82c5b7a110456dbd42b86ea572e728878549954cc8bd03cd65410d75328095d2
+    nginx_unprivileged_image: docker.io/nginxinc/nginx-unprivileged
+    nginx_unprivileged_tag: mainline-alpine-slim
+    nginx_unprivileged_digest: sha256:dcc9bf9c084901dddbbce305130a7295c5637b6a8fce3e29cf678d86336982e4
+  artifact_distribution:
+    araf_images: oci-tarballs-on-github-release
+    release_base: https://github.com/o3kio/araf/releases/download/v1.0.0-rc.16
+    release_manifest_sha256: 629fdaf92d4528b22fc4492c34cd13f364cf6267caa0538d880676a657dd6d09
+    sbom_manifest_sha256: 883ded717810698a378c1df0ddd7f9601dd1053fad9b6138bbf30fd21e5d8004
+    provenance_manifest_sha256: 66004632e1cc02d6e51a789746ad04aa97b34b964729772aecf600a5576d7762
+  contracts:
+    native_api_version: o3k-native-iam-v1
+    auth_contract: araf-oidc-pkce-per-surface-confidential-client
+  mechanism:
+    one_line_installer_integration: candidate-successor-release-pending-publication
+    fresh_host_evidence: pending
+    supported_targets: [ubuntu-24.04-x86_64, debian-12-x86_64]
+    browser_trust: operator-imported demo CA
+    o3kd_federation_wiring: systemd drop-in (/etc/systemd/system/o3kd.service.d/araf-demo.conf)
+    o3k_config_files_mutated: none
+  container_engine:
+    # Ubuntu 24.04 uses apt docker.io + docker-compose-v2; Debian 12 ships
+    # docker.io 20.10 (below the >=24.0 contract minimum), so the demo installs
+    # these pinned upstream static artifacts instead.
+    debian_static_docker_version: "28.5.2"
+    debian_static_docker_sha256: ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d
+    debian_compose_plugin_version: "v2.39.4"
+    debian_compose_plugin_sha256: 7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4
+    local_verification_tag: o3k-demo-v1.0.0-rc.16
+  notes:
+    - Araf GitHub release v1.0.0-rc.16 is an immutable prerelease candidate;
+      its published manifest and OCI identities are pinned above.
+    - The successor O3K release identity is intentionally pending; no O3K RC
+      number or source SHA is invented before release selection.
+    - The demo runtime (docker engine, compose project, demo IdP, consoles)
+      never gates O3K readiness; a demo-stage failure leaves the O3K install
+      healthy and retryable from /usr/local/share/o3k/araf-demo/.

@@ -35,11 +35,10 @@ set -Eeuo pipefail
 #     component; verified again here and re-verified by the wrapper before
 #     extraction
 #
-# Signing: this script delegates to packaging/make-provenance.sh, which binds
-# every published asset to the exact source commit and signs that binding
-# with the O3K release ed25519 key (release-digests.txt/.sig, provenance.json,
-# release-verify.pub). The .sha256 file remains an integrity checksum, not an
-# authenticity signature (see docs/RELEASE.md for the signing position).
+# Signing is selected explicitly. The historical default retains the v1
+# Ed25519 contract; the protected rc.9+ workflow selects `sigstore` and runs
+# make-provenance-sigstore.sh followed by Cosign verification. Never silently
+# emit an unsigned or ambiguously authenticated release.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:?usage: make-release-archive.sh VERSION [BUNDLE_DIR]}"
 VERSION_RE='^[0-9]+(\.[0-9]+){1,2}(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
@@ -103,11 +102,21 @@ printf '%s  %s\n' "$DIGEST" "o3k-$VERSION-linux-x86_64.tar.gz" >"$SHA_FILE"
 (cd "$DIST_DIR" && sha256sum -c --strict -- "o3k-$VERSION-linux-x86_64.tar.gz.sha256" >/dev/null) \
   || { echo "published SHA-256 file does not verify" >&2; exit 1; }
 
-# Provenance/signature material (contracts/release-bundle-v1.yaml): binds
-# every published asset to the exact source commit and signs the binding with
-# the O3K release ed25519 key. Fail closed when the signing key is absent —
-# an unsigned release archive must not be produced silently.
-bash "$ROOT_DIR/packaging/make-provenance.sh" "v$VERSION" "$DIST_DIR"
+SIGNATURE_SCHEME="${O3K_RELEASE_SIGNATURE_SCHEME:-ed25519}"
+case "$SIGNATURE_SCHEME" in
+  ed25519)
+    # Historical v1 release path. New releases must use the protected
+    # keyless workflow and must not fall back to this path accidentally.
+    bash "$ROOT_DIR/packaging/make-provenance.sh" "v$VERSION" "$DIST_DIR"
+    ;;
+  sigstore)
+    echo "Sigstore v2 selected; generate provenance and sign with Cosign in the protected workflow"
+    ;;
+  *)
+    echo "unsupported release signature scheme: $SIGNATURE_SCHEME" >&2
+    exit 2
+    ;;
+esac
 
 echo "release archive: $TARBALL ($ENTRY_COUNT entries, all ./ prefixed)"
 echo "published SHA-256: $SHA_FILE"

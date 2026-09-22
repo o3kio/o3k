@@ -1,0 +1,138 @@
+{
+  "schema": "o3k.pp4-core.campaign-evidence.v1",
+  "issue": "#973",
+  "status": "PP.4 Core profile proven on both supported hosts for the bounded o3k-demo-v1 scope only",
+  "release": {
+    "version": "v0.4.0-rc.24",
+    "source_commit": "7830d62e54eea4d73276ebe8f6e6c0e58e3397fc",
+    "tag_object": "629f2011c471665ffdd97d42974a5653db33a0d0",
+    "published_at": "2026-09-22T17:26:54Z",
+    "url": "https://github.com/o3kio/o3k/releases/tag/v0.4.0-rc.24",
+    "protected_run": "35760018564",
+    "environment": "release (maintainer-approved deployment)",
+    "assets_sha256": {
+      "install.sh": "6c1d73f88397308e35a38a9e9c18dce3b0c272536584754ed79f478c135423a9",
+      "o3k-0.4.0-rc.24-linux-x86_64.tar.gz": "e9e94e92044ee032a2cc40b7bdad3ffb6ec89eeb09fb4e0aaf6e63dbc9c63515",
+      "o3k-0.4.0-rc.24-linux-x86_64.tar.gz.sha256": "8e9c4ae0509885dc8ffbb2745f9884a49c15aa81d1cb0d690fdd889b29390de8",
+      "provenance.json": "a89ba59b016b1a99a3b13204734d55e151aef519214cad0cec3787e11ec175e0"
+    },
+    "bundle_members_sha256": {
+      "o3k-0.4.0-rc.24/manifest.json": "b4abd15fa8aad30cb2548dc39f1c081b1ff5849a2773141f46cd3c3c51d06508",
+      "o3k-0.4.0-rc.24/SHA256SUMS": "71c694ea4851da96bdbe8c9874bb0136682d1823ba6f691a4ad54bc36022c5bf",
+      "o3k-0.4.0-rc.24/sbom.spdx.json": "95b13348bc0393cc7ef3579edabb86f40254379f426f9abfba302a16aae57f90"
+    },
+    "sigstore": "keyless bundle verified with certificate identity https://github.com/o3kio/o3k/.github/workflows/release.yml@refs/tags/v0.4.0-rc.24 and issuer https://token.actions.githubusercontent.com",
+    "provenance_source_commit": "7830d62e54eea4d73276ebe8f6e6c0e58e3397fc",
+    "sbom": "sbom.spdx.json, SPDX-2.3, 391 packages",
+    "round_trip": "all six public assets re-downloaded and re-verified after publication: Sigstore bundle, provenance policy, archive sha256 against the published .sha256, bundle SHA256SUMS, install.sh byte-identical to git show v0.4.0-rc.24:packaging/get-o3k.sh",
+    "runtime_changed_after_release": false
+  },
+  "final_harness": {
+    "sha": "1954db8ee5ae7791e19e98da9182560fc8acd1d1",
+    "campaign_tree_digest": "f32f6b21d0d3fb7dd07958e4cfd70a26cb31dc3450418c0233c7fecc4afc6a19",
+    "same_harness_both_hosts": true,
+    "note": "the runtime source SHA and the harness SHA are intentionally different; the harness is a post-release test/evidence revision and contains no runtime code"
+  },
+  "horizon_witness": {
+    "image": "quay.io/openstack.kolla/horizon:2026.1-ubuntu-noble",
+    "pinned_digest": "sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048",
+    "independent_re_resolution": "2026-09-22, manifest digest and config digest 737572c6cffdfe78e11e2c06a383f60218ebc86d274efe180c95035d6f7944b8 with 39 layers match the pin; both campaigns resolved the same digest from the running container",
+    "forked": false,
+    "source_patches": []
+  },
+  "ubuntu": {
+    "evidence_dir": "target/pp4-core-rc24-ubuntu-complete-2",
+    "backup": "pp4-evidence-backup/pp4-core-rc24-ubuntu-complete-2",
+    "host": {
+      "distro": "ubuntu",
+      "version": "24.04",
+      "kernel": "6.8.0-139-generic",
+      "architecture": "x86_64",
+      "kvm": true
+    },
+    "manifest_verdict": "PASS",
+    "gates": "23/23 PASS",
+    "phase_pass_count": 15,
+    "canonical_ids": {
+      "building_block": "142281f7-1e14-5bed-8b43-fe7922802ff0",
+      "placement_provider": "compute-agent",
+      "native_server": "009c1501-28ff-5f3f-a5b4-a4602d3a9a41",
+      "native_operation": "e63cb1c0-46c7-5a3e-9ab9-98d2e1edab13",
+      "native_owned_endpoint": "66831c31-dbb8-548e-85b9-ce4496c06ff3",
+      "caller_supplied_endpoint": "01a0ca52-71c4-74b2-9522-78aabd3c2101",
+      "compatibility_server": "03ea1326-677c-55a2-b150-24e7d0fb2301",
+      "native_projection_of_compatibility_server": "03ea1326-677c-55a2-b150-24e7d0fb2301",
+      "compatibility_provider_domain": "o3k-1028c71a9088417cb96d",
+      "native_provider_domain": "o3k-ed5b8a41b324b408cc2d"
+    },
+    "interface_symmetry": "phase 3 native create/Operation/replay/changed-body conflict PASS; phase 4 compatibility create with real provider path and native projection PASS; phase 5 cross-interface show/list and reboot convergence PASS; phase 9 both deletes PASS",
+    "endpoint_release": "phase 9 durable read after the cross-interface deletes shows zero `o3k-server:%` endpoints (evidence file server-endpoints-after-deletes.json); the compatibility-created server was deleted through the native interface, whose canonical delete returned HTTP 202 with complete=false",
+    "caller_supplied_endpoint_preserved": "192.0.2.2 on 01a0ca52-71c4-74b2-9522-78aabd3c2101 survived the server lifecycle",
+    "horizon": "HTTP ready, unscoped login, project discovery, project-scoped session, panels /identity/, /project/images/, /project/networks/, /project/instances/, both Core resource identities visible, no pagination guard, no unsupported API-version error; stop/restart of Horizon did not affect O3K readiness or the running guest",
+    "host_reboot": "guest boot id 8f39a9c8-6570-4d5b-8833-8234a273ca86 -> 7257568a-6fbc-44c2-9a62-e72b4c433627 with canonical identity preserved",
+    "lifecycle": "reset+reinstall, uninstall+reinstall, purge+reinstall PASS",
+    "foreign_state": "host and user canaries unchanged after every destructive contract",
+    "secret_scan": "0 findings",
+    "verdict": "PASS"
+  },
+  "debian": {
+    "evidence_dir": "target/pp4-core-rc24-debian-complete-2",
+    "backup": "pp4-evidence-backup/pp4-core-rc24-debian-complete-2",
+    "host": {
+      "distro": "debian",
+      "version": "12",
+      "kernel": "6.1.0-53-cloud-amd64",
+      "architecture": "x86_64",
+      "kvm": true
+    },
+    "manifest_verdict": "PASS",
+    "gates": "23/23 PASS",
+    "phase_pass_count": 15,
+    "canonical_ids": {
+      "building_block": "142281f7-1e14-5bed-8b43-fe7922802ff0",
+      "native_server": "009c1501-28ff-5f3f-a5b4-a4602d3a9a41",
+      "native_owned_endpoint": "a13f5ab8-1225-5782-bacf-d5938259090c",
+      "caller_supplied_endpoint": "01a0ca69-66ad-7670-839f-8840d42b10d6",
+      "compatibility_server": "03ea1326-677c-55a2-b150-24e7d0fb2301"
+    },
+    "endpoint_release": "phase 9 durable read after the cross-interface deletes shows zero `o3k-server:%` endpoints; the native delete of the compatibility-created server returned HTTP 202 with complete=false, so the release ran from the terminal outcome rather than from the request",
+    "horizon": "the harness runs the same pinned witness on Debian: bounded Horizon witness PASS (HTTP ready, login, project context, bounded panels, native resource visible, no pagination guard, no unsupported API-version error), Horizon independence and restart PASS",
+    "host_reboot": "guest boot id a6a85893-0975-4bc2-a114-70459a6d716a -> c1b4474c-6163-4c78-a573-8c17d4d72bdd with canonical identity preserved",
+    "lifecycle": "reset+reinstall, uninstall+reinstall, purge+reinstall PASS",
+    "foreign_state": "host and user canaries unchanged after every destructive contract",
+    "secret_scan": "0 findings",
+    "verdict": "PASS"
+  },
+  "harness_defect_runs": [
+    {
+      "evidence_dir": "target/pp4-core-rc24-ubuntu-complete-1",
+      "harness_sha": "7830d62e54eea4d73276ebe8f6e6c0e58e3397fc",
+      "campaign_verdict": "PASS",
+      "manifest_verdict": "BLOCKED",
+      "classification": "harness evidence-plumbing defect, not a product defect and not a downgraded required check",
+      "detail": "the manifest reboot gate reads the boot-id pair from the guest evidence root, but only the host driver observes the reboot and it wrote them host-side, so `host_reboot` could never be proven and the verdict was BLOCKED while 22 of 23 gates passed",
+      "repair": "1954db8e copies the driver's reboot evidence into the guest evidence root before the manifest is emitted and requires the emitted verdict to be PASS; both hosts were then re-run with that harness"
+    },
+    {
+      "evidence_dir": "target/pp4-core-rc24-debian-complete-1",
+      "harness_sha": "7830d62e54eea4d73276ebe8f6e6c0e58e3397fc",
+      "campaign_verdict": "PASS",
+      "manifest_verdict": "BLOCKED",
+      "classification": "same harness evidence-plumbing defect; recorded as Debian product evidence and superseded by the certification run"
+    }
+  ],
+  "product_defect": {
+    "issue": "#1034",
+    "failed_candidate": {
+      "version": "v0.4.0-rc.23",
+      "source_commit": "5cb24f0585d5899102b12e441bd6c4c9aa571f7b"
+    },
+    "repaired_in": "v0.4.0-rc.24",
+    "repair_evidence": "docs/evidence/pp4-core/server-endpoint-lifecycle-repair.json"
+  },
+  "claims": {
+    "proven": "the PP.4 Core (#973) matrix on the bounded o3k-demo-v1 profile: public release trust, canonical init/join, BuildingBlock/Placement/topology, bounded native network, native-first create with canonical Operation and same-key replay, compatibility create with native projection, cross-interface lifecycle and delete convergence with server-owned endpoint release, real libvirt/KVM guest boot, the pinned unmodified Horizon 2026.1 witness on both hosts, Horizon readiness independence, real host reboot with identity recovery, installer rerun, reset/uninstall/purge with reinstall, foreign-state preservation and a clean secret scan",
+    "not_proven": "PP.7 production readiness, GA, full OpenStack or Horizon parity, HA, multi-region, live migration, Araf (#1029), and any host or profile outside the two campaigns above",
+    "known_limitations": "the compatibility footprint stays at the accepted o3k-demo-v1 scope (Keystone/Glance/Neutron/Nova subsets); unsupported services are absent by design, and the crash window between a terminal compute delete and its endpoint release is bounded hardening tracked for PP.5"
+  }
+}

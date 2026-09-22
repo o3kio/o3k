@@ -61,7 +61,18 @@ Before an external side effect, persist:
 - a compensation timeout is an unknown outcome, not proof of absence;
 - allocations and ownership are retained while an external resource may still
   exist;
-- foreign resources are never adopted or removed implicitly.
+- foreign resources are never adopted or removed implicitly;
+- a server lifecycle releases only the endpoints it created. Ownership is decided
+  from durable endpoint identity (the reserved server-owned name of the
+  addressed project), never from a reference in the server intent: an endpoint
+  the caller created and the server merely attaches is preserved, a foreign
+  project's endpoint is never removed, and an already-absent endpoint is
+  idempotent success;
+- endpoint release follows that endpoint's terminal unbind, because the binding
+  teardown plan reads the durable endpoint it has to remove, and it is driven by
+  the terminal outcome of the server operation rather than by the request that
+  happened to observe it, so a non-blocking (accepted) delete converges on the
+  same durable state as a synchronous one.
 
 ## Server create workflow
 

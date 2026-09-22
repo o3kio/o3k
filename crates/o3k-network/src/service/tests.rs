@@ -859,6 +859,137 @@ async fn allocation_is_deterministic_collision_safe_and_restartable()
 }
 
 #[tokio::test]
+async fn caller_supplied_port_identity_is_stable_and_conflicts_on_replay()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("stable-port-id");
+    let _ = fs::remove_dir_all(&path);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open_for_test(&path, store).await?;
+    let network = service
+        .create_network(&auth("project-a"), "stable".to_owned())
+        .await?;
+    service
+        .create_subnet(
+            &auth("project-a"),
+            network.id,
+            "stable-subnet".to_owned(),
+            "192.0.2.0/29".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"native:stable-port");
+    // A compatibility/TestLab port owns the first pool address. Stable native
+    // identity must not imply a fixed address; allocation advances safely.
+    let occupied = service
+        .create_port(&auth("project-a"), network.id, "occupied".to_owned())
+        .await?;
+    let first = service
+        .create_port_for_project_with_stable_id(
+            "project-a",
+            id,
+            network.id,
+            "native-server-endpoint".to_owned(),
+        )
+        .await?;
+    assert_eq!(first.id, id);
+    assert_ne!(first.fixed_ip, occupied.fixed_ip);
+    assert!(matches!(
+        service
+            .create_port_for_project_with_stable_id(
+                "project-a",
+                id,
+                network.id,
+                "native-server-endpoint".to_owned(),
+            )
+            .await,
+        Err(NetworkError::Conflict)
+    ));
+    assert_eq!(service.get_port(&auth("project-a"), id).await?, first);
+    let _ = fs::remove_dir_all(path);
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_stable_native_ports_keep_identity_and_address_unique()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!("o3k-network-stable-race-{}", Uuid::now_v7()));
+    let sqlite_path = path.with_extension("sqlite");
+    fs::create_dir_all(&path)?;
+    let setup_store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+    let setup = NetworkService::open_for_test(&path, setup_store).await?;
+    let network = setup
+        .create_network(&auth("project-a"), "stable-race".to_owned())
+        .await?;
+    setup
+        .create_subnet(
+            &auth("project-a"),
+            network.id,
+            "stable-race-subnet".to_owned(),
+            "192.0.2.0/27".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    drop(setup);
+
+    let service_a = NetworkService::open_for_test(
+        &path,
+        Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?),
+    )
+    .await?;
+    let service_b = NetworkService::open_for_test(
+        &path,
+        Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?),
+    )
+    .await?;
+    let mut handles = Vec::new();
+    for index in 0..8 {
+        let service = if index % 2 == 0 {
+            service_a.clone()
+        } else {
+            service_b.clone()
+        };
+        let id = Uuid::new_v5(
+            &Uuid::NAMESPACE_OID,
+            format!("native:stable:{index}").as_bytes(),
+        );
+        handles.push(tokio::spawn(async move {
+            service
+                .create_port_for_project_with_stable_id(
+                    "project-a",
+                    id,
+                    network.id,
+                    format!("native-{index}"),
+                )
+                .await
+        }));
+    }
+    let mut ports = Vec::new();
+    for handle in handles {
+        ports.push(handle.await??);
+    }
+    let ids: HashSet<Uuid> = ports.iter().map(|port| port.id).collect();
+    let ips: HashSet<Ipv4Addr> = ports.iter().map(|port| port.fixed_ip).collect();
+    let macs: HashSet<String> = ports
+        .iter()
+        .map(|port| port.mac_address.to_ascii_lowercase())
+        .collect();
+    assert_eq!(ports.len(), ids.len());
+    assert_eq!(ports.len(), ips.len());
+    assert_eq!(ports.len(), macs.len());
+    drop(service_a);
+    drop(service_b);
+    fs::remove_dir_all(path)?;
+    let _ = fs::remove_file(&sqlite_path);
+    let _ = fs::remove_file(format!("{}-wal", sqlite_path.display()));
+    let _ = fs::remove_file(format!("{}-shm", sqlite_path.display()));
+    Ok(())
+}
+
+#[tokio::test]
 async fn legacy_metadata_file_is_imported_once_and_never_read_again()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = root("legacy-import");
@@ -2289,5 +2420,200 @@ async fn gateway_delete_with_active_attachments_is_conflict_not_concealed()
     assert_eq!(attachments.len(), 1);
     assert_eq!(attachments[0].state, "active");
     let _ = fs::remove_dir_all(&path);
+    Ok(())
+}
+
+/// The reserved server-owned endpoint identity is the discriminator a server
+/// delete uses to decide whether an endpoint it references may be released
+/// (#1034). A server attaching an endpoint is not the same as a server owning
+/// it, so only the exact `o3k-server:<this-project>:<context>` shape counts.
+#[test]
+fn server_owned_endpoint_identity_requires_the_owning_project_and_a_context() {
+    assert!(is_server_owned_endpoint_name(
+        "project-a",
+        "o3k-server:project-a:pp4-native"
+    ));
+    assert!(is_server_owned_endpoint_name(
+        "project-a",
+        "o3k-server:project-a:project-a:canonical:abc"
+    ));
+    assert_eq!(
+        server_owned_endpoint_context("project-a", "o3k-server:project-a:ctx"),
+        Some("ctx")
+    );
+    // Another project's endpoint, a bare prefix, and a context-less reserved
+    // name are all *not* owned by this project.
+    for name in [
+        "o3k-server:project-b:server",
+        "o3k-server:",
+        "o3k-server:project-a:",
+        "o3k-server:project-a",
+        "tenant-port",
+        "o3k-serverX:project-a:server",
+    ] {
+        assert!(
+            !is_server_owned_endpoint_name("project-a", name),
+            "{name} must not be treated as a server-owned endpoint of project-a"
+        );
+    }
+}
+
+/// The shared cleanup rule: only O3K server-owned endpoints of the addressed
+/// project are released, user-supplied and foreign endpoints survive, an
+/// absent endpoint is idempotent success, and the address plus the port quota
+/// become reusable.
+#[tokio::test]
+async fn server_owned_endpoint_cleanup_is_ownership_filtered_and_frees_the_address()
+-> Result<(), Box<dyn std::error::Error>> {
+    use o3k_store::QuotaRepository;
+
+    let path = root("server-owned-cleanup");
+    let sqlite_path = format!("{}.sqlite", path.display());
+    let _ = fs::remove_dir_all(&path);
+    let _ = fs::remove_file(&sqlite_path);
+    let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+    let service = NetworkService::open_for_test(&path, store.clone()).await?;
+    let auth_a = auth("project-a");
+    let network = service.create_network(&auth_a, "flat".to_owned()).await?;
+    service
+        .create_subnet(
+            &auth_a,
+            network.id,
+            "lab".to_owned(),
+            "192.0.2.0/29".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let foreign_network = service
+        .create_network(&auth("project-b"), "foreign".to_owned())
+        .await?;
+    service
+        .create_subnet(
+            &auth("project-b"),
+            foreign_network.id,
+            "foreign-lab".to_owned(),
+            "198.51.100.0/29".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+    let owned = service
+        .create_port_for_project(
+            "project-a",
+            network.id,
+            "o3k-server:project-a:server-one".to_owned(),
+        )
+        .await?;
+    let supplied = service
+        .create_port_for_project("project-a", network.id, "tenant-port".to_owned())
+        .await?;
+    let forged_owner = service
+        .create_port_for_project(
+            "project-a",
+            network.id,
+            "o3k-server:project-b:elsewhere".to_owned(),
+        )
+        .await?;
+    let contextless = service
+        .create_port_for_project("project-a", network.id, "o3k-server:project-a:".to_owned())
+        .await?;
+    let foreign = service
+        .create_port_for_project(
+            "project-b",
+            foreign_network.id,
+            "o3k-server:project-b:server-two".to_owned(),
+        )
+        .await?;
+
+    let scope_a = OwnershipScope::project(ScopeId::new_unchecked("project-a"), None, None);
+    let used_before = store
+        .get_usage(&scope_a, &LimitKey::network_ports())
+        .await?
+        .in_use;
+
+    service
+        .cleanup_server_owned_ports_for_project(
+            "project-a",
+            &[
+                owned.id,
+                supplied.id,
+                forged_owner.id,
+                contextless.id,
+                foreign.id,
+            ],
+        )
+        .await?;
+
+    assert!(matches!(
+        service.get_port_for_project("project-a", owned.id).await,
+        Err(NetworkError::NotFound)
+    ));
+    for preserved in [supplied.id, forged_owner.id, contextless.id] {
+        assert!(
+            service
+                .get_port_for_project("project-a", preserved)
+                .await
+                .is_ok(),
+            "{preserved} must survive as a non-owned endpoint"
+        );
+    }
+    assert!(
+        service
+            .get_port_for_project("project-b", foreign.id)
+            .await
+            .is_ok(),
+        "a foreign project's endpoint must never be released"
+    );
+    // Only the released endpoint leaves the project's collection.
+    let remaining = service.list_ports_for_project("project-a").await?;
+    assert_eq!(remaining.len(), 3);
+    assert_eq!(
+        store
+            .get_usage(&scope_a, &LimitKey::network_ports())
+            .await?
+            .in_use,
+        used_before.saturating_sub(1),
+        "releasing an endpoint must release its port quota"
+    );
+    // The address is reusable, and the endpoint surface really is gone.
+    assert!(matches!(
+        service.get_port(&auth_a, owned.id).await,
+        Err(NetworkError::NotFound)
+    ));
+    let replacement = service
+        .create_port_for_project("project-a", network.id, "replacement".to_owned())
+        .await?;
+    assert_eq!(replacement.fixed_ip, owned.fixed_ip);
+    // Replaying the cleanup is idempotent: the released endpoint is gone and
+    // the surviving endpoints are still untouched.
+    service
+        .cleanup_server_owned_ports_for_project(
+            "project-a",
+            &[
+                owned.id,
+                supplied.id,
+                forged_owner.id,
+                contextless.id,
+                foreign.id,
+            ],
+        )
+        .await?;
+    assert!(
+        service
+            .get_port_for_project("project-a", supplied.id)
+            .await
+            .is_ok()
+    );
+
+    drop(service);
+    drop(store);
+    let _ = fs::remove_dir_all(&path);
+    let _ = fs::remove_file(&sqlite_path);
+    let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+    let _ = fs::remove_file(format!("{sqlite_path}-shm"));
     Ok(())
 }

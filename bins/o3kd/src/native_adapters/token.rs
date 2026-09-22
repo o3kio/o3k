@@ -85,6 +85,12 @@ impl TokenIssuer for TokenIssuerAdapter {
                 return Err(ProblemDetails::bad_request("invalid federated credential"));
             }
         };
+        // Native token issuance stays project-scoped. Keystone's unscoped
+        // discovery flow is deliberately not exposed on the native surface, so
+        // a project-less native request remains a bounded rejection.
+        let Some(project_id) = request.auth.project_id.as_ref() else {
+            return Err(ProblemDetails::unauthorized());
+        };
         // Build a Keystone-compatible TokenRequest from native request
         let token_req = o3k_identity::TokenRequest {
             auth: o3k_identity::Auth {
@@ -93,17 +99,15 @@ impl TokenIssuer for TokenIssuerAdapter {
                     password,
                     token,
                 },
-                scope: request
-                    .auth
-                    .project_id
-                    .as_ref()
-                    .map(|pid| o3k_identity::Scope {
+                scope: Some(o3k_identity::ScopeRequest::Structured(
+                    o3k_identity::StructuredScope {
                         project: Some(o3k_identity::ProjectReference {
-                            id: Some(pid.clone()),
+                            id: Some(project_id.clone()),
                             name: None,
                             domain: None,
                         }),
-                    }),
+                    },
+                )),
             },
         };
 

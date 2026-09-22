@@ -92,6 +92,8 @@
     {"id": "identity.version_root", "status": "required", "success": [300], "errors": [], "issue": 290},
     {"id": "identity.version_v3", "status": "required", "success": [200], "errors": [], "issue": 290},
     {"id": "identity.token_password_scoped", "status": "required", "success": [201], "errors": [400, 401, 403], "issue": 290},
+    {"id": "identity.auth_projects_list", "status": "required", "success": [200], "errors": [401], "issue": 290},
+    {"id": "identity.projects_list", "status": "required", "success": [200], "errors": [401], "issue": 290},
     {"id": "image.collection_create", "status": "required", "success": [201], "errors": [400, 401, 403, 409], "issue": 291},
     {"id": "image.member_upload", "status": "required", "success": [204], "errors": [400, 401, 403, 404, 409, 413], "issue": 79},
     {"id": "image.collection_list", "status": "required", "success": [200], "errors": [401, 403], "issue": 291},

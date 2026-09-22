@@ -31,6 +31,87 @@ entries:
       - crates/o3k-identity/src/lib.rs::tests
     status: implemented
 
+  - service: identity
+    operation: token_issue_password_unscoped
+    api_version: keystone-v3
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-unscoped-token
+    supported_fields:
+      request: [auth.identity.password.user]
+      response: [token, expires_at, issued_at, methods, user]
+    known_deviations:
+      - An unscoped token carries no project, roles, or catalog and authorizes no O3K operation; project-scoped routes reject it with 401.
+      - No role assignment is required to obtain an unscoped token.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::keystone_unscoped_password_auth_without_scope_issues_token
+      - crates/o3k-api/tests/health.rs::keystone_unscoped_scope_keyword_issues_token
+      - crates/o3k-api/tests/health.rs::keystone_unscoped_auth_accepts_the_canonical_horizon_user_domain_form
+      - crates/o3k-api/tests/health.rs::keystone_unscoped_token_cannot_authorize_compatibility_or_native_routes
+      - crates/o3k-api/tests/health.rs::keystone_horizon_login_sequence_establishes_a_usable_scoped_session
+      - crates/o3k-identity/src/lib.rs::tests
+    status: implemented
+
+  - service: identity
+    operation: auth_projects_list
+    api_version: keystone-v3
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects
+    supported_fields:
+      request: [X-Auth-Token]
+      response: [projects.id, projects.name, projects.domain_id, projects.enabled]
+    known_deviations:
+      - Returns only the caller's durable role-assignment projects; no pagination, links, or project CRUD.
+      - Accepts both unscoped and project-scoped tokens.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::keystone_auth_projects_lists_authorized_projects_for_unscoped_token
+      - crates/o3k-api/tests/health.rs::keystone_auth_projects_never_returns_unrelated_projects
+      - crates/o3k-api/tests/health.rs::keystone_auth_projects_rejects_invalid_and_missing_tokens
+    status: implemented
+
+  - service: identity
+    operation: projects_list
+    api_version: keystone-v3
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects
+    supported_fields:
+      request: [X-Auth-Token]
+      response: [projects.id, projects.name, projects.domain_id, projects.enabled]
+    known_deviations:
+      - This is the bounded authorization-filtered project listing the accepted Horizon profile needs (the Instances panel resolves server project names through keystoneclient projects.list), not general Keystone project administration parity.
+      - Returns only the caller's durable role-assignment projects; no admin list-all, no pagination or links, and no project create/update/delete.
+      - Accepts both unscoped and project-scoped tokens; rejects missing, invalid, or expired tokens with 401.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::keystone_projects_lists_only_projects_authorized_for_the_caller
+      - crates/o3k-api/tests/health.rs::keystone_projects_accepts_unscoped_token_with_the_bounded_contract
+      - crates/o3k-api/tests/health.rs::keystone_projects_rejects_invalid_missing_and_expired_tokens
+      - crates/o3k-api/tests/health.rs::keystone_projects_never_returns_unrelated_projects
+      - crates/o3k-api/tests/health.rs::keystone_projects_returns_empty_list_for_identity_without_assignment
+      - crates/o3k-api/tests/health.rs::keystone_horizon_login_sequence_establishes_a_usable_scoped_session
+      - crates/o3k-identity/src/lib.rs::tests
+    status: implemented
+
+  - service: identity
+    operation: user_projects_list
+    api_version: keystone-v3
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects-for-user
+    supported_fields:
+      request: [X-Auth-Token, user_id]
+      response: [projects.id, projects.name, projects.domain_id, projects.enabled]
+    known_deviations:
+      - Bounded to the caller's own subject: any other user_id is a generic 403 that does not distinguish an unknown user from a foreign one.
+      - Returns only the caller's durable role-assignment projects; no pagination, links, or user/project CRUD.
+      - Accepts both unscoped and project-scoped tokens.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::keystone_user_projects_lists_own_authorized_projects
+      - crates/o3k-api/tests/health.rs::keystone_user_projects_never_leaks_another_subject
+      - crates/o3k-api/tests/health.rs::keystone_user_projects_rejects_invalid_and_missing_tokens
+    status: implemented
+
   - service: image
     operation: image_create
     api_version: glance-v2
@@ -116,8 +197,10 @@ entries:
     supported_fields: [id, name, project_id, status]
     known_deviations:
       - Routers, floating IPs, security groups, VXLAN, and DVR are out of scope.
+      - List pagination is bounded and honours limit and a UUID marker cursor, returning networks_links with a next link only while a further page exists, while sort_key, sort_dir and any filter beyond the single id selector remain unimplemented deviations.
     executable_tests:
       - crates/o3k-api/tests/health.rs::neutron_network_subnet_port_lifecycle_is_deterministic
+      - crates/o3k-api/tests/collection_pagination.rs
     evidence_artifacts:
       - docs/compatibility/p13-1/p13-2a-provider-lifecycle-evidence.json
     status: verified
@@ -279,9 +362,10 @@ entries:
       - https://docs.openstack.org/api-ref/compute/#delete-server
     supported_fields: [id, name, status, image, flavor, addresses, project_id]
     known_deviations:
-      - Pagination and the broader Nova query/filter surface are deferred.
+      - Pagination is bounded and honours limit and a UUID marker cursor, returning servers_links with a next link only while a further page exists, while sort_key, sort_dir and the broader Nova query/filter surface remain deferred.
     executable_tests:
       - crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes
+      - crates/o3k-api/tests/collection_pagination.rs
     evidence_artifacts:
       - docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json
     status: verified

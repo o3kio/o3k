@@ -17,7 +17,12 @@ paths:
   /v3/auth/tokens:
     post:
       operationId: issuePasswordScopedToken
-      summary: Issue a project-scoped password token
+      summary: Issue a password token, project-scoped or unscoped
+      description: >-
+        A request with a project scope returns a project-scoped token. A request
+        with no scope member, the "unscoped" keyword, or a scope object without
+        a project returns an unscoped token that carries no project, roles, or
+        catalog and authorizes no operation.
       requestBody:
         required: true
         content:
@@ -39,6 +44,47 @@ paths:
           description: Unsupported or malformed authentication request.
         '401':
           description: Authentication failed.
+        '503':
+          description: Bootstrap identity is not configured.
+  /v3/auth/projects:
+    get:
+      operationId: listAuthProjects
+      summary: List the projects the authenticated subject may scope into
+      description: >-
+        Client project discovery used by Horizon's project switcher. Accepts an
+        unscoped or project-scoped token and returns only the caller's durable
+        role-assignment projects. It is not project administration.
+      responses:
+        '200':
+          description: Caller's role-assignment projects.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorizedProjects'
+        '401':
+          description: Missing, invalid, or expired token.
+        '503':
+          description: Bootstrap identity is not configured.
+  /v3/projects:
+    get:
+      operationId: listProjects
+      summary: List the projects the authenticated subject holds a role assignment on
+      description: >-
+        Authorization-filtered project listing required by the pinned unmodified
+        Horizon 2026.1 client, whose Instances panel resolves each server's
+        project name through keystoneclient projects.list. It returns only the
+        caller's durable role-assignment projects and is not Keystone project
+        administration: there is no admin list-all and no project create,
+        update, or delete.
+      responses:
+        '200':
+          description: Caller's role-assignment projects.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorizedProjects'
+        '401':
+          description: Missing, invalid, or expired token.
         '503':
           description: Bootstrap identity is not configured.
   /healthz:
@@ -222,7 +268,7 @@ components:
       properties:
         auth:
           type: object
-          required: [identity, scope]
+          required: [identity]
           properties:
             identity:
               type: object
@@ -247,21 +293,24 @@ components:
                         name: {type: string}
                         password: {type: string, format: password}
             scope:
-              type: object
-              required: [project]
-              properties:
-                project:
-                  type: object
+              oneOf:
+                - type: string
+                  enum: [unscoped]
+                - type: object
+                  required: [project]
                   properties:
-                    id: {type: string}
-                    name: {type: string}
+                    project:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
     TokenResponse:
       type: object
       required: [token]
       properties:
         token:
           type: object
-          required: [expires_at, issued_at, methods, project, user, roles, catalog]
+          required: [expires_at, issued_at, methods, user]
           properties:
             expires_at: {type: string, format: date-time}
             issued_at: {type: string, format: date-time}
@@ -272,6 +321,20 @@ components:
             user: {type: object}
             roles: {type: array, items: {type: object}}
             catalog: {type: array, items: {type: object}}
+    AuthorizedProjects:
+      type: object
+      required: [projects]
+      properties:
+        projects:
+          type: array
+          items:
+            type: object
+            required: [id, name, domain_id, enabled]
+            properties:
+              id: {type: string}
+              name: {type: string}
+              domain_id: {type: string}
+              enabled: {type: boolean}
     KeypairCreate:
       type: object
       additionalProperties: false

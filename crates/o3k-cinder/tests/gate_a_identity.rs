@@ -43,7 +43,7 @@ fn connector() -> ComputeConnector {
 fn roles_of(token_response: &o3k_identity::TokenResponse) -> Vec<String> {
     token_response
         .token
-        .roles
+        .roles()
         .iter()
         .map(|role| role.name.clone())
         .collect()

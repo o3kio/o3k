@@ -1,11 +1,12 @@
 use super::{
     AgentNodeRegistry, Arc, AttachmentOrchestrator, ComputeError, ComputeService,
     CreateInstanceRequest, Duration, OperationJournal, PortBindingProjector, ProviderBackend,
-    Scheduler, StaticAuthorizer, Uuid, VolumeAttachmentProvider,
+    Scheduler, ServerState, StaticAuthorizer, Uuid, VolumeAttachmentProvider,
 };
 
 use o3k_kernel::{Authorizer, MemoryAuditSink, RequiredAuditPublisher};
 use o3k_store::ComputeRepository;
+use o3k_store::server_state_to_storage;
 
 impl ComputeService {
     /// Publish mandatory control-plane evidence before acknowledging an
@@ -264,8 +265,11 @@ impl ComputeService {
             state,
             o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
         ) {
-            self.project_terminal_binding_outcome(update.operation_id.to_string().as_str(), state)
-                .await;
+            self.project_terminal_outcome_best_effort(
+                update.operation_id.to_string().as_str(),
+                state,
+            )
+            .await;
         }
         if state == o3k_store::OperationState::Failed {
             self.compensate_failed_create(update.operation_id).await?;
@@ -274,42 +278,52 @@ impl ComputeService {
     }
 
     /// Reflects a terminal operation outcome into the durable port binding
-    /// state of the network control plane, and reaps the per-instance
-    /// config-drive media when a delete reached terminal success. The
-    /// server's ports are read from the durable desired-state snapshot, and
+    /// state of the network control plane, reaps the per-instance config-drive
+    /// media when a delete reached terminal success, and releases the
+    /// server-owned network endpoints the deleted server no longer needs.
+    ///
+    /// The server's ports are read from the durable desired-state snapshot, and
     /// the binding host comes from the intent the network service recorded at
-    /// dispatch. Projection and reaping are best-effort and idempotent: they
-    /// are side observations, never compute failures, and a replayed terminal
-    /// update projects and reaps the same state again. Integrity anomalies (a
-    /// missing operation or resource, or an unparseable desired-state
-    /// snapshot) are surfaced as warnings instead of failing the compute path.
+    /// dispatch. Projection, reaping and release are idempotent: a replayed
+    /// terminal update projects, reaps and releases the same state again.
+    /// Integrity anomalies (a missing operation or resource, or an unparseable
+    /// desired-state snapshot) are surfaced as warnings instead of failing the
+    /// compute path.
+    ///
+    /// The one outcome a caller may need to act on is a failed *endpoint
+    /// release* after a terminal delete: that is a live, consumable side effect
+    /// left behind, so it is reported as `Err` for the request-path delete
+    /// callers to fail the mutation (and retry), while projections that no
+    /// request is waiting on — the agent terminal-update consumer, the periodic
+    /// sweep, the create poll surface — log it and leave the durable delete
+    /// terminal. The next delete replay retries the release.
     pub(super) async fn project_terminal_binding_outcome(
         &self,
         operation_id: &str,
         state: o3k_store::OperationState,
-    ) {
+    ) -> Result<(), ComputeError> {
         let Ok(operation_id) = Uuid::parse_str(operation_id) else {
             tracing::warn!(
                 operation_id = %operation_id,
                 "port binding outcome skipped: operation id is not a UUID"
             );
-            return;
+            return Ok(());
         };
         let Ok(operation) = self.store.get_operation(operation_id).await else {
             tracing::warn!(
                 operation_id = %operation_id,
                 "port binding outcome skipped: operation is missing from the durable store"
             );
-            return;
+            return Ok(());
         };
-        // Terminal successful delete reaps the per-instance config-drive
-        // media owned by this control plane (best-effort, idempotent, and
-        // independent of the binding projector).
+        // Terminal successful delete reaps the per-instance config-drive media
+        // owned by this control plane (best-effort, idempotent, and independent
+        // of the binding projector).
         if operation.kind == "lifecycle:delete" && state == o3k_store::OperationState::Succeeded {
             self.cleanup_config_drive_best_effort(&operation.resource_id.to_string());
         }
         let Some(projector) = self.binding_projector.as_ref() else {
-            return;
+            return Ok(());
         };
         let Ok(resource) = self.store.get_resource(operation.resource_id).await else {
             tracing::warn!(
@@ -317,7 +331,7 @@ impl ComputeService {
                 resource_id = %operation.resource_id,
                 "port binding outcome skipped: server resource is missing from the durable store"
             );
-            return;
+            return Ok(());
         };
         let Ok(request) = serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
         else {
@@ -326,7 +340,7 @@ impl ComputeService {
                 resource_id = %operation.resource_id,
                 "port binding outcome skipped: server create intent is corrupt"
             );
-            return;
+            return Ok(());
         };
         for port_id in &request.network_ids {
             let outcome = match operation.kind.as_str() {
@@ -340,9 +354,25 @@ impl ComputeService {
                         .await
                 }
                 "lifecycle:delete" if state == o3k_store::OperationState::Succeeded => {
-                    projector
+                    let outcome = projector
                         .unbind_port(&request.project_id, port_id, operation_id)
-                        .await
+                        .await;
+                    // The endpoint may be released only after its binding was
+                    // cleared: the fabric teardown plan reads the durable
+                    // endpoint (address, MAC, realm) it has to remove. A failed
+                    // unbind therefore keeps the endpoint, so a later delete
+                    // replay can still tear the fabric down and then release.
+                    if outcome.is_ok() {
+                        projector
+                            .release_server_owned_endpoint(&request.project_id, port_id)
+                            .await
+                            .map_err(|error| {
+                                ComputeError::EndpointRelease(format!(
+                                    "server endpoint {port_id} could not be released: {error}"
+                                ))
+                            })?;
+                    }
+                    outcome
                 }
                 _ => continue,
             };
@@ -356,6 +386,55 @@ impl ComputeService {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Projects a terminal outcome that no request is waiting on.
+    ///
+    /// A failed server-owned endpoint release after a terminal delete is
+    /// logged: the durable delete stays terminal, the integration anomaly is
+    /// observable, and the next delete replay retries the release. Request-path
+    /// delete callers use `project_terminal_binding_outcome` directly so they
+    /// can fail the mutation instead.
+    pub(super) async fn project_terminal_outcome_best_effort(
+        &self,
+        operation_id: &str,
+        state: o3k_store::OperationState,
+    ) {
+        if let Err(error) = self
+            .project_terminal_binding_outcome(operation_id, state)
+            .await
+        {
+            tracing::warn!(
+                operation_id = %operation_id,
+                error = %error,
+                "terminal projection could not release a server-owned endpoint; a delete replay retries it"
+            );
+        }
+    }
+
+    /// Releases the O3K-owned endpoints named by the server's durable create
+    /// intent, after an unbind cleared their bindings.
+    ///
+    /// This is the retry seat for the delete mutation path: a transient failure
+    /// is reported to the caller (a failed delete mutation) and the next replay
+    /// of the same delete re-runs the release, which is idempotent because an
+    /// already-absent endpoint is success. Endpoints that are not O3K
+    /// server-owned — a port the caller supplied itself — are left untouched.
+    pub(super) async fn release_server_endpoints_from_intent(
+        &self,
+        request: &CreateInstanceRequest,
+    ) -> Result<(), ComputeError> {
+        let Some(projector) = self.binding_projector.as_ref() else {
+            return Ok(());
+        };
+        for port_id in &request.network_ids {
+            projector
+                .release_server_owned_endpoint(&request.project_id, port_id)
+                .await
+                .map_err(|error| ComputeError::EndpointRelease(error.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Clears the binding of every port named by the server's durable create
@@ -415,6 +494,31 @@ impl ComputeService {
             self.release_placement_allocation(resource.id, &request)
                 .await?;
         }
+        Ok(())
+    }
+
+    /// Projects a synchronously observed terminal create failure onto the
+    /// canonical resource. The direct create API can drive the journal in the
+    /// request path (rather than through the read-side convergence loop), so
+    /// it must not leave a failed operation visible as REQUESTED forever.
+    pub(super) async fn project_failed_create_error(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<(), ComputeError> {
+        let resource = self.store.get_resource(resource_id).await?;
+        if resource.observed_state == server_state_to_storage(ServerState::Error) {
+            return Ok(());
+        }
+        self.store
+            .update_resource(
+                resource.id,
+                resource.generation,
+                &resource.desired_state,
+                server_state_to_storage(ServerState::Error),
+                resource.generation,
+                resource.provider_id.as_deref(),
+            )
+            .await?;
         Ok(())
     }
 

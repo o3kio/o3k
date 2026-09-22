@@ -25,8 +25,8 @@ mod native_compute_tests {
         StorageVolumeObservation, StorageVolumeRequest,
     };
     use o3k_store::DurableStore;
-    use o3k_store::NetworkRepository;
     use o3k_store::StorageRepository;
+    use o3k_store::{KeypairRepository, NetworkRepository};
     use std::sync::Arc;
     use tower::util::ServiceExt;
     use uuid::Uuid;
@@ -426,6 +426,17 @@ mod native_compute_tests {
         Arc<FakeComputeProvider>,
         Uuid,
     ) {
+        let (router, store, provider, foreign_port, _) = setup_with_network().await;
+        (router, store, provider, foreign_port)
+    }
+
+    async fn setup_with_network() -> (
+        axum::Router,
+        Arc<o3k_store::unified::O3kStore>,
+        Arc<FakeComputeProvider>,
+        Uuid,
+        Arc<o3k_network::NetworkService>,
+    ) {
         use axum::routing::get;
         use axum::{Router, extract::DefaultBodyLimit};
         use o3k_native_api::{operation, resource};
@@ -470,6 +481,7 @@ mod native_compute_tests {
             .expect("foreign port")
             .id;
 
+        let network_for_test = network_service.clone();
         let app = GenericResourceApplication {
             compute: compute.clone(),
             image: None,
@@ -538,7 +550,7 @@ mod native_compute_tests {
             .layer(DefaultBodyLimit::max(1_048_576))
             .with_state(native);
 
-        (router, store, provider, foreign_port)
+        (router, store, provider, foreign_port, network_for_test)
     }
 
     fn authed(path: &str, project: &str) -> Request<Body> {
@@ -713,6 +725,211 @@ mod native_compute_tests {
         )
         .await;
         assert_eq!(stale_status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn native_compute_canonical_network_resolves_one_deterministic_port() {
+        let (router, store, provider, _, network) = setup_with_network().await;
+        let public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj o3k-test";
+        let (key_type, fingerprint, public_key) =
+            o3k_store::validate_public_key(public_key).expect("test key");
+        store
+            .insert_keypair(&o3k_store::KeypairRecord {
+                id: Uuid::new_v5(&Uuid::NAMESPACE_URL, b"o3k:test-keypair"),
+                user_id: "user-project-a".to_owned(),
+                project_id: "project-a".to_owned(),
+                name: "native-key".to_owned(),
+                key_type,
+                public_key: public_key.clone(),
+                fingerprint,
+                created_at: "1".to_owned(),
+            })
+            .await
+            .expect("keypair");
+        let canonical = network
+            .create_network_for_project("project-a", "native-network".to_owned())
+            .await
+            .expect("canonical network");
+        network
+            .create_subnet_for_project(
+                "project-a",
+                canonical.id,
+                "native-subnet".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                Some("192.0.2.2".parse().unwrap()),
+                Some("192.0.2.6".parse().unwrap()),
+            )
+            .await
+            .expect("canonical subnet");
+        let body = serde_json::json!({"spec": {
+            "name": "native-network-vm",
+            "image_id": "image-a",
+            "flavor_id": "00000000-0000-0000-0000-000000000001",
+            "network_ids": [canonical.id.to_string()],
+            "key_name": "native-key"
+        }});
+        let before = network
+            .list_ports_for_project("project-a")
+            .await
+            .unwrap()
+            .len();
+        let (status, first) = exec(
+            &router,
+            authed_post(
+                "/compute/servers",
+                "a",
+                "native-network-create",
+                body.clone(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(first["complete"].as_bool().unwrap());
+        let first_resource = first["resource_id"].as_str().unwrap();
+        let after_first = network.list_ports_for_project("project-a").await.unwrap();
+        assert_eq!(after_first.len(), before + 1);
+        assert_eq!(first_resource.len(), 36);
+        let request = provider.last_create_request().expect("provider request");
+        assert_eq!(request.key_name.as_deref(), Some("native-key"));
+        assert_eq!(
+            request
+                .config_drive
+                .as_ref()
+                .map(|drive| drive.ssh_public_key.as_str()),
+            Some(public_key.as_str())
+        );
+
+        let (status, replay) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "native-network-create", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(replay["resource_id"], first["resource_id"]);
+        assert_eq!(
+            network
+                .list_ports_for_project("project-a")
+                .await
+                .unwrap()
+                .len(),
+            before + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn native_compute_keypair_is_project_scoped_and_missing_key_fails_cleanly() {
+        let (router, store, provider, _, _) = setup_with_network().await;
+        let public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj o3k-test";
+        let (key_type, fingerprint, public_key) =
+            o3k_store::validate_public_key(public_key).expect("test key");
+        store
+            .insert_keypair(&o3k_store::KeypairRecord {
+                id: Uuid::new_v5(&Uuid::NAMESPACE_URL, b"o3k:scoped-keypair"),
+                user_id: "user-project-a".to_owned(),
+                project_id: "project-a".to_owned(),
+                name: "scoped-key".to_owned(),
+                key_type,
+                public_key,
+                fingerprint,
+                created_at: "1".to_owned(),
+            })
+            .await
+            .expect("keypair");
+        let body = serde_json::json!({"spec": {
+            "name": "scoped-key-server",
+            "image_id": "image-a",
+            "flavor_id": "00000000-0000-0000-0000-000000000001",
+            "network_ids": ["net-a"],
+            "key_name": "scoped-key"
+        }});
+        let (status, _) = exec(
+            &router,
+            authed_post("/compute/servers", "b", "foreign-key", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(provider.instance_count(), 0);
+        let (status, _) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "missing-key", {
+                let mut value = body;
+                value["spec"]["key_name"] = serde_json::json!("missing");
+                value
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(provider.instance_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn native_compute_failed_create_compensates_endpoint_and_keeps_canonical_error() {
+        let (router, store, provider, _, network) = setup_with_network().await;
+        provider
+            .set_failure(FailureInjection::Terminal)
+            .expect("failure injection");
+        let canonical = network
+            .create_network_for_project("project-a", "failed-native-network".to_owned())
+            .await
+            .expect("canonical network");
+        network
+            .create_subnet_for_project(
+                "project-a",
+                canonical.id,
+                "failed-native-subnet".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                Some("192.0.2.2".parse().unwrap()),
+                Some("192.0.2.6".parse().unwrap()),
+            )
+            .await
+            .expect("canonical subnet");
+        let before = network
+            .list_ports_for_project("project-a")
+            .await
+            .unwrap()
+            .len();
+        let body = serde_json::json!({"spec": {
+            "name": "failed-native-vm",
+            "image_id": "image-a",
+            "flavor_id": "00000000-0000-0000-0000-000000000001",
+            "network_ids": [canonical.id.to_string()]
+        }});
+        let (status, problem) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "failed-native-create", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{problem}");
+        assert_eq!(
+            network
+                .list_ports_for_project("project-a")
+                .await
+                .unwrap()
+                .len(),
+            before,
+            "failed create must remove the endpoint it materialized"
+        );
+
+        let resources = store
+            .list_resources("project-a", "compute_instance")
+            .await
+            .expect("compute resources");
+        assert_eq!(
+            resources.len(),
+            1,
+            "one canonical failed resource is retained"
+        );
+        assert!(resources[0].provider_id.is_none());
+        let intent: serde_json::Value = serde_json::from_str(&resources[0].desired_state).unwrap();
+        let operation_id = Uuid::parse_str(intent["operation_id"].as_str().unwrap()).unwrap();
+        let operation = store.get_operation(operation_id).await.expect("operation");
+        assert_eq!(
+            resources[0].observed_state, "ERROR",
+            "resources={resources:?} operation={operation:?}"
+        );
+        assert_eq!(operation.state, o3k_store::OperationState::Failed);
     }
 
     #[tokio::test]

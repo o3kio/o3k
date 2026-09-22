@@ -1,0 +1,138 @@
+{
+  "schema": "o3k.pp4-core.harness-defects.v1",
+  "runtime_under_test": {
+    "release": "v0.4.0-rc.23",
+    "source_commit": "5cb24f0585d5899102b12e441bd6c4c9aa571f7b",
+    "artifact_changed_by_these_fixes": false
+  },
+  "classification_rule": "A failure is a harness defect when the recorded observation contradicts the harness code rather than the product contract; the runtime stays the candidate under test and only tests/pp4-core-campaign/** may change.",
+  "attempts": [
+    {
+      "evidence_dir": "target/pp4-core-rc23-ubuntu-complete-1",
+      "raw_evidence_backup": "/root/pp4-evidence-backup/pp4-core-rc23-ubuntu-complete-1",
+      "harness_sha": "5cb24f0585d5899102b12e441bd6c4c9aa571f7b",
+      "phases_0_6_utc": "2026-09-22T14:30:25Z..2026-09-22T14:35:18Z",
+      "failure_utc": "2026-09-22T14:35:23Z",
+      "outcome": "FAILED at phase 7 (host reboot and identity recovery)",
+      "classification": "harness defect",
+      "observed": "jq: error: Could not open file /home/tester/pp4-evidence/durable-bootstrap-after-reboot.json: No such file or directory",
+      "root_cause": "in-vm-core-post.sh dumped the durable-state snapshot with json.dump(..., sys.stdout) but without the `>\"$EVID/...\"` redirection that in-vm-core-acceptance.sh uses, so the evidence file was never created; set -o pipefail then turned the following jq read into an abort",
+      "fix_commit": "32a7b476d36d5a4704755241a07248a73082d0a8",
+      "harness_only": true,
+      "product_evidence_from_this_attempt": [
+        "phases 0-6 PASS including the bounded Horizon witness (login, project context, identity/images/networks/instances panels, pagination guard, compute API selector, native resource visible)",
+        "Horizon independence PASS and Horizon restart recovery PASS"
+      ]
+    },
+    {
+      "evidence_dir": "target/pp4-core-rc23-ubuntu-complete-2",
+      "raw_evidence_backup": "/root/pp4-evidence-backup/pp4-core-rc23-ubuntu-complete-2",
+      "harness_sha": "32a7b476d36d5a4704755241a07248a73082d0a8",
+      "outcome": "aborted by operator",
+      "classification": "operator abort, not a product or campaign failure",
+      "reason": "the manifest replay-gate definition still had to be corrected and the final harness must be identical for Ubuntu and Debian, so the run was stopped before the post-reboot reinstall phases"
+    },
+    {
+      "evidence_dir": "target/pp4-core-rc23-ubuntu-complete-3",
+      "raw_evidence_backup": "/root/pp4-evidence-backup/pp4-core-rc23-ubuntu-complete-3",
+      "harness_sha": "6376adca12e66a1cee8fb37ed26a7a0fe78aba38",
+      "phases_0_7_utc": "2026-09-22T14:41:55Z..2026-09-22T14:46:11Z",
+      "failure_utc": "2026-09-22T14:46:11Z",
+      "outcome": "FAILED at phase 8 (exact public installer rerun)",
+      "classification": "harness defect",
+      "observed": "sha256sum: /etc/o3k/tls/agent-key.pem: Permission denied (then campaign exit 1)",
+      "root_cause": "the TLS identity gate hashed /etc/o3k/tls/* as the unprivileged campaign user, but the agent and server private keys are root-only; sha256sum exited 1 and set -o pipefail aborted the campaign",
+      "fix_commit": "54a88057b2b3a0fa5eac573bb8c3d690d94eb698",
+      "harness_only": true,
+      "product_evidence_from_this_attempt": [
+        "phases 0-7 PASS including the bounded Horizon witness, Horizon independence, Horizon restart and post-reboot identity/durable-state observation",
+        "phase-7 durable snapshot (written by the fixed step) shows the BuildingBlock ready and the Placement provider Enabled"
+      ]
+    },
+    {
+      "evidence_dir": "target/pp4-core-rc23-ubuntu-complete-4",
+      "raw_evidence_backup": "/root/pp4-evidence-backup/pp4-core-rc23-ubuntu-complete-4",
+      "harness_sha": "54a88057b2b3a0fa5eac573bb8c3d690d94eb698",
+      "outcome": "FAILED on SSH transport during the reboot boundary",
+      "classification": "harness defect (reboot gate was vacuous and racy)",
+      "observed": [
+        "Connection to 127.0.0.1 closed by remote host.",
+        "core acceptance log unavailable (scp status=255, status=255)",
+        "empty core-acceptance.log, campaign exit 255",
+        "the retained guest was up with sshd gone (qemu at ~115% CPU, port 2392 forwarding but every handshake closed)"
+      ],
+      "root_cause": "`ssh_vm 'sudo reboot'` returns immediately while sshd lingers, so the wait loop reconnected on its first 3s probe; the post-reboot phases therefore ran against the pre-reboot system and the delayed shutdown killed the transport mid-run. The same gate also reported phase-7 recovery PASS without any evidence that a reboot happened: in the previous attempt phase 7 began 5 seconds after phase 6, which cannot contain a reboot.",
+      "fix_commit": "de634dec2cdb6c4389b18cff4a5f1cfc4a448202",
+      "harness_only": true,
+      "fix": [
+        "record the guest boot id before the reboot, wait for the guest to become unreachable, wait for SSH to return, and require a changed boot id before the post-reboot phases run",
+        "the manifest host_reboot gate requires the same boot-id evidence, so a vacuous reboot can no longer be reported as PASS",
+        "qemu writes a serial console log which the trap copies into the evidence before teardown"
+      ],
+      "consequence_for_earlier_evidence": "any phase-7 'host reboot recovery' PASS recorded before this fix is not reboot evidence; the rc.23 reboot gate is only proven by a run with the fixed gate"
+    },
+    {
+      "evidence_dir": "target/pp4-core-rc23-ubuntu-complete-5",
+      "raw_evidence_backup": "/root/pp4-evidence-backup/pp4-core-rc23-ubuntu-complete-5",
+      "harness_sha": "de634dec2cdb6c4389b18cff4a5f1cfc4a448202",
+      "outcome": "FAILED at the reboot gate: the guest did not come back",
+      "classification": "harness/environment defect (the gate itself behaved correctly)",
+      "observed": [
+        "boot-id-before-reboot.txt recorded, boot-id-after-reboot.txt empty, campaign exit 1",
+        "guest-console.log ends in `libvirt-guests.sh: Waiting for 2 guests to shut down, 100 seconds left` and stops emitting",
+        "the retained guest was still unreachable minutes later, qemu at ~114% CPU"
+      ],
+      "root_cause": "the two nested tenant domains the campaign had running are CirrOS, which ignores the ACPI power button; stock Ubuntu libvirt-guests waits SHUTDOWN_TIMEOUT=120s per batch and never forces a shutdown, so the host shutdown wedged waiting for guests that will never power off",
+      "not_a_product_defect_because": "the same console log shows o3kd.service and o3k-compute.service stopping cleanly, so no O3K unit is implicated; the interaction is between the host distribution's libvirt-guests policy and a tenant image that does not implement ACPI shutdown",
+      "fix_commit": "a03e2bc45d0e313941a5a4a704bfa72e3d99e401",
+      "harness_only": true,
+      "fix": "bound the tenant shutdown before rebooting (ACPI shutdown for every running domain, short bounded wait, then virsh destroy for anything still running) and record both listings as evidence; raise the comeback window to 12 minutes",
+      "positive_evidence": "the boot-id gate introduced in de634dec refused to report the reboot as proven, and the console capture introduced in the same commit produced the diagnosis"
+    },
+    {
+      "evidence_dir": "target/pp4-core-rc23-ubuntu-complete-6",
+      "raw_evidence_backup": "/root/pp4-evidence-backup/pp4-core-rc23-ubuntu-complete-6",
+      "harness_sha": "a03e2bc45d0e313941a5a4a704bfa72e3d99e401",
+      "phases_0_7_utc": "2026-09-22T15:07:49Z..2026-09-22T15:12:56Z",
+      "failure_utc": "2026-09-22T15:13:28Z",
+      "outcome": "FAILED at phase 8: the exact public installer rerun aborted in its demo stage",
+      "classification": "harness sizing interaction, not a product defect",
+      "observed": [
+        "host reboot verified: guest boot id changed (the fixed gate now proves a real reboot)",
+        "phase 7 PASS: post-reboot identity, durable BuildingBlock and provider domain preserved",
+        "rerun-install.log: the installer verified and reinstalled the runtime, then 'compute host could not satisfy placement requirements (HTTP 409)' and 'TestLab bootstrap failed: server creation failed: test-vm'"
+      ],
+      "root_cause": "O3K reports the guest's own CPU count and disk as compute inventory. With the campaign host at -smp 2 the inventory was VCPU 2/2 once the campaign's pp4-native and pp4-openstack servers were running, so the installer's demo stage had no vCPU left for its own test-vm. The installer reported that truthfully and aborted; no O3K code was at fault.",
+      "note_on_phase_1_inventory": "the DISK_GB 10 / MEMORY_MB 512 / VCPU 1 recorded at phase 1 is the installer's demo test-vm itself, captured before the campaign deleted it, not a leaked allocation",
+      "fix_commit": "dade421513906eec4d519b3c407d5c83334b5a74",
+      "harness_only": true,
+      "fix": "size the campaign host for the required matrix: 4 vCPUs and a 48 GB overlay, so the rerun's demo workload fits alongside the campaign's servers. The rerun gate keeps its original strength instead of being weakened to accommodate an undersized host.",
+      "positive_evidence": [
+        "the boot-id gate proved a genuine reboot (boot-id-before-reboot.txt differs from boot-id-after-reboot.txt)",
+        "the tenant domains were destroyed by the bounded shutdown and O3K reconciled them back to running after the reboot",
+        "the public installer verified the exact rc.23 artifact and reinstalled the runtime before the demo stage ran out of capacity"
+      ]
+    }
+  ],
+  "manifest_gate_defects": [
+    {
+      "observed": "generate_core_manifest.py reported canonical_replay and changed_body_conflict as NOT PROVEN for a run whose phase 3 asserted both, forcing verdict=BLOCKED and contradicting the phase log of the same run",
+      "root_cause": "the manifest compared side-effects-before/after snapshots byte-for-byte, while the accepted invariant asserted in-run compares only resources, operations, network_ports, placement_allocations and the replaying operation's own quota reservation count",
+      "why_the_raw_counts_differ": "a replayed request legitimately records one additional quota_reservations row (8 -> 9) while the per-operation reservation count stays 1 and no canonical resource, operation, port or Placement allocation is duplicated",
+      "fix_commit": "6376adca12e66a1cee8fb37ed26a7a0fe78aba38",
+      "harness_only": true,
+      "verified_against": "preserved evidence of attempt complete-1: canonical_replay PASS and changed_body_conflict PASS after the fix",
+      "residual_transparency": "the manifest keeps the raw before/after counts, so replay_side_effects.quota_reservations.duplicate stays true while the gate verdict is PASS; the tolerated row-count delta is visible, not hidden"
+    },
+    {
+      "observed": "the host_reboot gate reported PASS from file existence alone, including for runs whose guest never rebooted",
+      "fix_commit": "de634dec2cdb6c4389b18cff4a5f1cfc4a448202",
+      "harness_only": true,
+      "verified_against": "preserved evidence of attempt complete-3 (no boot-id evidence): host_reboot NOT PROVEN"
+    }
+  ],
+  "historical_process_finding": {
+    "finding": "raw campaign directories complete-16, complete-17 and complete-18 were destroyed by an external wipe of the checkout",
+    "status": "closed as repaired process debt: host-run.sh copies summary, logs, identity and failure classification into an atomic backup under O3K_PP4_EVIDENCE_BACKUP before teardown, and the mechanism ran for every rc.23 attempt above"
+  }
+}

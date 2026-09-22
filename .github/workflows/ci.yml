@@ -49,6 +49,8 @@ jobs:
           for file in packaging/*.sh tests/*.sh scripts/*.sh scripts/ci/*.sh; do bash -n "$file"; done
           bash tests/ci-apt-provision.sh
           python3 -m compileall -q scripts
+      - name: Validate release signing trust transition
+        run: bash tests/release-signing-migration.sh
       - name: Test P13.5E deterministic fault proxy and evidence artifact
         run: |
           python3 scripts/p13_5e_fault_proxy.py --self-test
@@ -211,6 +213,10 @@ jobs:
         run: cargo test --workspace --all-features
       - name: P12.4 PostgreSQL conformance (mandatory)
         run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --ignored --nocapture
+      - name: P12.7 cross-process native replay conformance (mandatory)
+        # Independently-spawned runtimes share only the durable store, so the
+        # canonical replay authority is proven durable rather than process-local.
+        run: cargo test -p o3kd --test p12_7_cross_process_replay --all-features -- --ignored --nocapture
       - name: Emit exact-source binary build manifest (preparation for artifact pipeline)
         # Safest useful preparation for the follow-up pre-built-artifact pipeline:
         # record the exact commit and sha256 of the two protected-run binaries so
@@ -335,8 +341,39 @@ jobs:
         run: sudo bash tests/installer-negative.sh
       - name: Test PP.2 canonical-bootstrap installer contract
         run: bash tests/pp2-installer-contract.sh
-      - name: Test PP.3 Araf demo tuple/deployment contract
-        run: bash tests/pp3-araf-demo-contract.sh
+      - name: Test PP.4 Araf demo tuple/deployment contract
+        run: bash tests/pp4-araf-demo-contract.sh
+      - name: Test PP.4 Core installer trust contract
+        run: bash tests/pp4-core-installer-contract.sh
+      - name: Test v2 release consumer trust negatives
+        run: bash tests/release-consumer-trust.sh
+  oci-identity-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Ubuntu Docker engine — Araf rc.16 OCI identity
+        run: bash tests/pp4-campaign/oci-identity-smoke.sh
+      - name: Debian 12 Docker engine — Araf rc.16 OCI identity
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged --network host \
+            -v "$GITHUB_WORKSPACE/tests/pp4-campaign/oci-identity-smoke.sh:/usr/local/bin/oci-identity-smoke.sh:ro" \
+            debian:12@sha256:f37a335e82bca302e955fa39f9dfe28f1be618f016f8a2b56318e5a5111afc26 \
+            bash -lc '
+              set -euo pipefail
+              apt-get -qq update
+              DEBIAN_FRONTEND=noninteractive apt-get -y -qq install docker.io curl python3 ca-certificates >/dev/null
+              dockerd --host=unix:///tmp/docker.sock --storage-driver=vfs --iptables=false --bridge=none >/tmp/dockerd.log 2>&1 &
+              daemon=$!
+              trap "kill $daemon 2>/dev/null || true" EXIT
+              export DOCKER_HOST=unix:///tmp/docker.sock
+              for attempt in $(seq 1 90); do
+                docker info >/dev/null 2>&1 && break
+                sleep 1
+              done
+              docker info >/dev/null
+              bash /usr/local/bin/oci-identity-smoke.sh
+            '
   supply-chain:
     runs-on: ubuntu-latest
     steps:

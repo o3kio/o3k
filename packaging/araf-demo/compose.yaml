@@ -1,7 +1,7 @@
 # o3k-araf-demo — PP.3 (#972) demo-profile deployment stack.
 #
 # Araf services follow deploy/docker-compose.release.yml from the pinned
-# Araf release (v1.0.0-rc.12), with demo-profile adjustments: loopback-only
+# Araf release (v1.0.0-rc.16), with demo-profile adjustments: loopback-only
 # publication, demo-CA trust bundle mount, o3k-araf-demo ownership labels,
 # and the demo IdP / TLS proxy infrastructure services.
 #

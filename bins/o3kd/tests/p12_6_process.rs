@@ -836,6 +836,27 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     }));
     assert_eq!(store.list_relationships(parent_id).await?.len(), 1);
 
+    // The database workflow's network child is a canonical network, but a
+    // native compute attachment requires an active bounded-flat realm.  Seed
+    // that realm through the same Network authority before the controller
+    // reaches its dependent compute slot.
+    let network_id = store
+        .get_relationship(parent_id, "network-primary")
+        .await?
+        .child_resource_id
+        .ok_or("network child missing after composition race")?;
+    network_service
+        .create_subnet_for_project(
+            "project-a",
+            network_id,
+            "database-subnet".into(),
+            "192.0.2.0/24".into(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+
     let reconcile_request = o3k_kernel::ReconcileRequest {
         context,
         resource: o3k_kernel::ResourceSnapshot {
@@ -1382,6 +1403,20 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
             .await?
             .child_resource_id
             .ok_or("runtime A network child missing")?;
+        // Native compute resolves a canonical network UUID to an endpoint;
+        // make the composition fixture attachable through the same canonical
+        // network authority instead of relying on an opaque provider slot.
+        network
+            .create_subnet_for_project(
+                "project-runtime-recovery",
+                network_id,
+                "runtime-recovery-subnet".into(),
+                "192.0.2.0/24".into(),
+                None,
+                None,
+                None,
+            )
+            .await?;
         let compute_type = o3k_kernel::ResourceType::new("compute", "server")?;
         let compute_descriptor = runtime_dispatcher
             .resolve_resource_type(&compute_type)
@@ -1753,7 +1788,7 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             compute: left_compute.clone(),
             image: None,
             public_address_workflow: None,
-            network_service: left_network,
+            network_service: left_network.clone(),
             store: left_store.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),
@@ -1776,7 +1811,7 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             compute: right_compute.clone(),
             image: None,
             public_address_workflow: None,
-            network_service: right_network,
+            network_service: right_network.clone(),
             store: right_store.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),
@@ -1838,6 +1873,23 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                 } else {
                     String::new()
                 };
+                if candidate.slot == "compute-primary" {
+                    match left_network
+                        .create_subnet_for_project(
+                            "project-independent-race",
+                            network_id.parse()?,
+                            "independent-race-subnet".into(),
+                            "192.0.2.0/24".into(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(_) | Err(o3k_network::NetworkError::Conflict) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
                 let spec = match candidate.slot.as_str() {
                     "network-primary" => serde_json::json!({"name": "independent-race-network"}),
                     "volume-data" => {
@@ -1942,6 +1994,23 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                 } else {
                     String::new()
                 };
+                if candidate.slot == "compute-primary" {
+                    match right_network
+                        .create_subnet_for_project(
+                            "project-independent-race",
+                            network_id.parse()?,
+                            "independent-race-subnet".into(),
+                            "192.0.2.0/24".into(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(_) | Err(o3k_network::NetworkError::Conflict) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
                 let spec = match candidate.slot.as_str() {
                     "network-primary" => serde_json::json!({"name": "independent-race-network"}),
                     "volume-data" => {

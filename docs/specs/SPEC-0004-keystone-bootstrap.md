@@ -7,15 +7,41 @@ Normative trust model: [SPEC-0020](SPEC-0020-keystone-trust-catalog-and-auth-con
 ## Decision
 
 O3K supports `POST /v3/auth/tokens` with exactly one `password` identity method
-and a project scope in the TestLab bootstrap profile. Bootstrap credentials are
-configured explicitly with `O3K_BOOTSTRAP_PASSWORD` and
-`O3K_TOKEN_SIGNING_KEY`; the signing key is separate and must be at least 32
-bytes. The route is unavailable until both are configured.
+in the TestLab bootstrap profile, for both a project scope and an unscoped
+request. An unscoped request is one with no `scope` member, the `"unscoped"`
+keyword, or an object without a `project`; any other scope shape is a bounded
+rejection. Bootstrap credentials are configured explicitly with
+`O3K_BOOTSTRAP_PASSWORD` and `O3K_TOKEN_SIGNING_KEY`; the signing key is
+separate and must be at least 32 bytes. The route is unavailable until both are
+configured.
+
+An unscoped token authenticates the subject user only. It carries no project,
+roles, or catalog, requires no role assignment, and is rejected with 401 by
+every operation that requires a normalized `AuthContext` (OpenStack
+compatibility routes and native `/o3k/v1` routes alike).
+
+`GET /v3/auth/projects` supports client project discovery: it accepts an
+unscoped or project-scoped token and returns only the enabled projects the
+subject may scope into according to its durable role assignments. A subject
+with no assignment receives an empty list. It is not project administration and
+exposes no pagination, links, or write operations.
+
+`GET /v3/projects` is the same authorization question under the route the
+unmodified Horizon 2026.1 Instances panel issues: the panel resolves each
+server's project name through `api.keystone.tenant_list`, which lists projects
+with `keystoneclient`. It accepts an unscoped or project-scoped token and
+returns the enabled projects in an enabled domain where the subject's durable
+role assignments grant at least one role — the identical computation as
+`GET /v3/auth/projects` — and an empty list for a subject with no assignment.
+It is deliberately a bounded, authorization-filtered project-visibility read,
+not Keystone project administration: project create/update/delete, an
+administrator list-all, pagination, and links remain unsupported. No
+general Keystone project-administration parity is claimed.
 
 The token is an opaque URL-safe HMAC-SHA256 authenticated value containing the
-user, project, issue time, expiry, and random token ID. It is not a general JWT
-compatibility promise. Tokens expire after one hour in this alpha profile and
-remain verifiable across restart when the same key is retained.
+user, optional project scope, issue time, expiry, and random token ID. It is not
+a general JWT compatibility promise. Tokens expire after one hour in this alpha
+profile and remain verifiable across restart when the same key is retained.
 
 This spec defines only the implemented bootstrap subset. Durable identity
 resources, service identity, authorization context, catalog policy, and future
@@ -79,6 +105,15 @@ The in-process API tests cover:
 - successful issuance;
 - `X-Subject-Token`;
 - project scope;
+- unscoped issuance (omitted `scope` and the `"unscoped"` keyword) with no
+  `project`, `roles`, or `catalog` in the response body;
+- rejection of a valid unscoped token by a project-scoped OpenStack
+  compatibility route and by a native `/o3k/v1` route;
+- bounded rejection of unsupported scope shapes and identity methods;
+- `GET /v3/auth/projects` returning only the caller's role-assignment projects;
+- `GET /v3/projects` returning the same authorization-filtered set, an empty
+  list for a subject with no assignment, and 401 for invalid, missing, or
+  expired tokens;
 - project ID/name distinction;
 - invalid password redaction;
 - response shape;

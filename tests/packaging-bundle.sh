@@ -185,6 +185,8 @@ echo "release bundle fail-closed (no target compilation) passed"
 # assertions skip with an explicit message rather than fail spuriously.
 if [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; then
   ASSET_DIST="$WORK_DIR/asset-dist"
+  ASSET_VERSION="$(sed -n 's/^O3K_INSTALLER_VERSION="v\([^\"]*\)"$/\1/p' "$ROOT_DIR/packaging/get-o3k.sh")"
+  [[ -n "$ASSET_VERSION" ]] || { echo "missing baked installer version" >&2; exit 1; }
   # The upgrade_from fence is operator-declared: a build without
   # O3K_UPGRADE_FROM_MIN_VERSION must fail closed before any packaging.
   if O3K_RELEASE_DIST_DIR="$ASSET_DIST" O3K_RELEASE_BINARIES_DIR="$BUNDLE_DIR/bin" \
@@ -198,7 +200,7 @@ if [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; th
   O3K_UPGRADE_FROM_MIN_VERSION=0.0.1-prev \
   O3K_RELEASE_DIST_DIR="$ASSET_DIST" \
   O3K_RELEASE_BINARIES_DIR="$BUNDLE_DIR/bin" \
-    bash "$ROOT_DIR/packaging/make-release.sh" 0.0-installerasset fake
+    bash "$ROOT_DIR/packaging/make-release.sh" "$ASSET_VERSION" fake
   [[ -f "$ASSET_DIST/install.sh" && -x "$ASSET_DIST/install.sh" ]] \
     || { echo "install.sh release asset missing or not 0755" >&2; exit 1; }
   cmp -s "$ROOT_DIR/packaging/get-o3k.sh" "$ASSET_DIST/install.sh" \
@@ -211,7 +213,7 @@ if [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; th
     | sed 's|.*/||' | sed -n 's/^\([0-9][0-9]*\)_.*\.sql$/\1/p' \
     | sort -n | tail -n1 | sed 's/^0*//')"
   [[ -n "$EXPECTED_SCHEMA_VERSION" ]] || { echo "no migrations found" >&2; exit 1; }
-  python3 - "$ASSET_DIST/o3k-0.0-installerasset/manifest.json" \
+  python3 - "$ASSET_DIST/o3k-$ASSET_VERSION/manifest.json" \
     "$EXPECTED_INSTALLER_SHA256" "$EXPECTED_SCHEMA_VERSION" <<'PY'
 import json
 import sys

@@ -428,6 +428,11 @@ impl ComputeService {
                 accepted_operation_id.unwrap_or(intent.operation_id),
             )
             .await;
+            // The delete is already terminal, so this is the retry seat for the
+            // server-owned endpoint release: a replay of the same delete must
+            // finish cleanup that a transient failure left behind, and it
+            // reports the outcome so the caller can retry again.
+            self.release_server_endpoints_from_intent(&intent).await?;
             self.cleanup_config_drive_best_effort(&id.as_uuid().to_string());
             let _ = self
                 .store
@@ -526,11 +531,15 @@ impl ComputeService {
             self.release_placement_allocation(id.as_uuid(), &intent)
                 .await?;
             self.store.detach_server_keypair(id.as_uuid()).await?;
+            // The delete completed here, so this request owns the outcome: a
+            // server-owned endpoint that could not be released fails the
+            // mutation (the durable delete stays terminal, and a replay retries
+            // the release) instead of returning success with a live endpoint.
             self.project_terminal_binding_outcome(
                 operation_id.to_string().as_str(),
                 o3k_store::OperationState::Succeeded,
             )
-            .await;
+            .await?;
             let _ = self
                 .store
                 .release_reservation_for_operation(&intent.operation_id.to_string())
@@ -617,11 +626,13 @@ impl ComputeService {
         self.release_placement_allocation(id.as_uuid(), &intent)
             .await?;
         self.store.detach_server_keypair(id.as_uuid()).await?;
+        // Request owns the outcome: a server-owned endpoint that could not be
+        // released fails the mutation rather than reporting a converged delete.
         self.project_terminal_binding_outcome(
             operation_id.to_string().as_str(),
             o3k_store::OperationState::Succeeded,
         )
-        .await;
+        .await?;
         let _ = self
             .store
             .release_reservation_for_operation(&intent.operation_id.to_string())

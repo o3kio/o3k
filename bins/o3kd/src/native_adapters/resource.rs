@@ -43,6 +43,78 @@ pub struct GenericResourceApplication {
 }
 
 impl GenericResourceApplication {
+    /// Releases endpoints this request created for a server that was never
+    /// accepted, or whose canonical create outcome requires compensation.
+    ///
+    /// The shared O3K ownership rule decides which of `ports` may be released,
+    /// so an endpoint the caller supplied itself survives even when the server
+    /// intent names it, and an endpoint of another project is never touched.
+    /// An already-absent endpoint is idempotent success.
+    async fn compensate_native_network_ports(&self, project_id: &str, ports: &[Uuid]) {
+        if ports.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .network_service
+            .cleanup_server_owned_ports_for_project(project_id, ports)
+            .await
+        {
+            tracing::warn!(error = %error, "native create port compensation failed");
+        }
+    }
+
+    /// Compensates the endpoints of a native server create whose canonical
+    /// outcome this caller cannot classify from the error alone.
+    ///
+    /// The decision is derived from durable canonical state, never from the
+    /// error being reported: a create that is live, still converging, or
+    /// inconclusive preserves its endpoints so a real guest never loses its
+    /// network dependency, while a terminally failed create releases the
+    /// endpoints its intent still names — including endpoints an earlier
+    /// attempt allocated for the same create key.
+    async fn compensate_native_network_ports_after_create_failure(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        project_id: &str,
+        provider_idempotency_key: &str,
+        owned_network_ids: &[Uuid],
+    ) {
+        let server_id =
+            o3k_compute::ComputeService::server_id_for_create(project_id, provider_idempotency_key);
+        let dependency = match self
+            .compute
+            .create_dependency_state_for_auth(auth, o3k_domain::ServerId::from_uuid(server_id))
+            .await
+        {
+            Ok(dependency) => dependency,
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    %server_id,
+                    "native create outcome could not be classified; retaining endpoints"
+                );
+                return;
+            }
+        };
+        if dependency.disposition == o3k_compute::CreateDependencyDisposition::Preserve {
+            tracing::warn!(
+                %server_id,
+                "retaining native server endpoints for the durable create outcome"
+            );
+            return;
+        }
+        let mut candidates = owned_network_ids.to_vec();
+        for port_id in &dependency.network_ids {
+            if let Ok(port_id) = port_id.parse::<Uuid>()
+                && !candidates.contains(&port_id)
+            {
+                candidates.push(port_id);
+            }
+        }
+        self.compensate_native_network_ports(project_id, &candidates)
+            .await;
+    }
+
     /// Attaches the lifecycle metering observer used to open and close the
     /// volume allocation meter from canonical volume authority.
     #[must_use]
@@ -2300,39 +2372,175 @@ impl ResourceApplication for GenericResourceApplication {
         let semantic_request = serde_json::json!({"spec": request.spec});
         let spec: ComputeSpec = serde_json::from_value(semantic_request["spec"].clone())
             .map_err(|_| ResourceApplicationError::Validation)?;
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()))
+            .replace('/', "_");
+        let project_id = auth.effective_scope().id().as_str().to_owned();
+        let mut network_ids = Vec::with_capacity(spec.network_ids.len());
+        let mut owned_network_ids = Vec::new();
+        // Validate all UUID references before creating any endpoint, so a
+        // later invalid attachment cannot strand an earlier one.
+        for network_id in &spec.network_ids {
+            let Ok(id) = network_id.parse::<Uuid>() else {
+                continue;
+            };
+            if self.network_service.get_port(auth, id).await.is_ok() {
+                continue;
+            }
+            if self.network_service.get_network(auth, id).await.is_ok() {
+                continue;
+            }
+            if self
+                .network_service
+                .find_port_by_id(id)
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?
+                .is_some()
+            {
+                return Err(ResourceApplicationError::Forbidden);
+            }
+            return Err(ResourceApplicationError::NotFound);
+        }
         for network_id in &spec.network_ids {
             // Durable port references cross the Network authority boundary;
             // the provider's legacy opaque test references remain outside it.
             if let Ok(port_id) = network_id.parse::<Uuid>() {
                 match self.network_service.get_port(auth, port_id).await {
-                    Ok(_) => {}
+                    Ok(_) => network_ids.push(port_id.to_string()),
                     Err(o3k_network::NetworkError::Unauthorized) => {
+                        self.compensate_native_network_ports(&project_id, &owned_network_ids)
+                            .await;
                         return Err(ResourceApplicationError::Forbidden);
                     }
                     // P12.6 generic composition also carries UUID child
                     // slots which are not NetworkService ports. Preserve
                     // that contract; resolvable ports remain owner-checked.
                     Err(o3k_network::NetworkError::NotFound) => {
-                        if let Some(port) = self
-                            .network_service
-                            .find_port_by_id(port_id)
-                            .await
-                            .map_err(|_| ResourceApplicationError::Conflict)?
+                        let existing_port =
+                            match self.network_service.find_port_by_id(port_id).await {
+                                Ok(port) => port,
+                                Err(_) => {
+                                    self.compensate_native_network_ports(
+                                        &project_id,
+                                        &owned_network_ids,
+                                    )
+                                    .await;
+                                    return Err(ResourceApplicationError::Conflict);
+                                }
+                            };
+                        if let Some(port) = existing_port
                             && port.project_id != auth.effective_scope().id().as_str()
                         {
+                            self.compensate_native_network_ports(&project_id, &owned_network_ids)
+                                .await;
                             return Err(ResourceApplicationError::Forbidden);
                         }
+                        // Native callers select canonical networks, while the
+                        // compute provider consumes canonical ports. Resolve a
+                        // network through the same Network authority used by
+                        // the compatibility adapter and create one endpoint;
+                        // never treat compatibility-side network rows as
+                        // native authority.
+                        if self
+                            .network_service
+                            .get_network(auth, port_id)
+                            .await
+                            .is_ok()
+                        {
+                            let deterministic_port_id = Uuid::new_v5(
+                                &Uuid::NAMESPACE_OID,
+                                format!("{project_id}:compute.server:{key}:{port_id}").as_bytes(),
+                            );
+                            let (port, created_here) = match self
+                                .network_service
+                                .create_port_for_project_with_stable_id(
+                                    &project_id,
+                                    deterministic_port_id,
+                                    port_id,
+                                    format!("o3k-server:{project_id}:{key}"),
+                                )
+                                .await
+                            {
+                                Ok(port) => (port, true),
+                                Err(o3k_network::NetworkError::Conflict) => {
+                                    let existing = match self
+                                        .network_service
+                                        .get_port_for_project(&project_id, deterministic_port_id)
+                                        .await
+                                    {
+                                        Ok(existing) => existing,
+                                        Err(_) => {
+                                            self.compensate_native_network_ports(
+                                                &project_id,
+                                                &owned_network_ids,
+                                            )
+                                            .await;
+                                            return Err(ResourceApplicationError::Conflict);
+                                        }
+                                    };
+                                    if existing.network_id != port_id
+                                        || existing.name != format!("o3k-server:{project_id}:{key}")
+                                    {
+                                        self.compensate_native_network_ports(
+                                            &project_id,
+                                            &owned_network_ids,
+                                        )
+                                        .await;
+                                        return Err(ResourceApplicationError::Conflict);
+                                    }
+                                    (existing, false)
+                                }
+                                Err(_) => {
+                                    self.compensate_native_network_ports(
+                                        &project_id,
+                                        &owned_network_ids,
+                                    )
+                                    .await;
+                                    return Err(ResourceApplicationError::Conflict);
+                                }
+                            };
+                            network_ids.push(port.id.to_string());
+                            if created_here {
+                                owned_network_ids.push(port.id);
+                            }
+                        } else {
+                            self.compensate_native_network_ports(&project_id, &owned_network_ids)
+                                .await;
+                            return Err(ResourceApplicationError::NotFound);
+                        }
                     }
-                    Err(_) => return Err(ResourceApplicationError::Conflict),
+                    Err(_) => {
+                        self.compensate_native_network_ports(&project_id, &owned_network_ids)
+                            .await;
+                        return Err(ResourceApplicationError::Conflict);
+                    }
                 }
+            } else {
+                network_ids.push(network_id.clone());
             }
         }
-        let key = idempotency_key
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
-        let key = key.replace('/', "_");
         let canonical_id = spec._canonical_id;
         let compute_key = canonical_id.map_or_else(|| key.clone(), |id| format!("canonical:{id}"));
+        // Native callers may identify a keypair by its non-secret name. Resolve
+        // that reference at the Compute/IAM boundary so the provider receives
+        // only the public key needed for config-drive generation. Never make a
+        // client or compatibility adapter transport private key material.
+        let key_name = spec.key_name.clone();
+        let ssh_public_key = if let Some(public_key) = spec.ssh_public_key.clone() {
+            Some(public_key)
+        } else if let Some(key_name) = key_name.as_deref() {
+            match self.compute.show_keypair_for_auth(auth, key_name).await {
+                Ok(keypair) => Some(keypair.public_key),
+                Err(error) => {
+                    self.compensate_native_network_ports(&project_id, &owned_network_ids)
+                        .await;
+                    return Err(compute_error(error));
+                }
+            }
+        } else {
+            None
+        };
         let action = descriptor
             .lifecycle_actions
             .get(&o3k_native_api::resource::LifecycleOperation::Create)
@@ -2349,37 +2557,58 @@ impl ResourceApplication for GenericResourceApplication {
         .map_err(|error| {
             tracing::warn!(error = ?error, "canonical native server context rejected");
             ResourceApplicationError::Validation
-        })?;
-        let receipt = self
+        });
+        let context = match context {
+            Ok(context) => context,
+            Err(error) => {
+                self.compensate_native_network_ports(&project_id, &owned_network_ids)
+                    .await;
+                return Err(error);
+            }
+        };
+        // Keep provider command identity scoped even when the client reuses
+        // the same canonical key in another tenant. The same identity derives
+        // the durable server id, which the failure path needs to classify the
+        // create outcome.
+        let provider_idempotency_key = format!("{}:{compute_key}", auth.effective_scope().id());
+        let result = self
             .compute
             .create_server_for_auth_canonical(
                 auth,
                 o3k_compute::ServerCreateInput {
                     user_id: auth.principal().id().to_string(),
-                    project_id: auth.effective_scope().id().as_str().to_owned(),
+                    project_id: project_id.clone(),
                     name: spec.name,
                     image_id: spec.image_id,
                     flavor_id: spec.flavor_id,
-                    network_ids: spec.network_ids,
-                    key_name: spec.key_name,
-                    config_drive: spec.ssh_public_key.map(|ssh_public_key| {
+                    network_ids,
+                    key_name,
+                    config_drive: ssh_public_key.map(|ssh_public_key| {
                         o3k_provider::ConfigDriveRequest {
                             user_data: Vec::new(),
                             vendor_data: None,
                             ssh_public_key,
                         }
                     }),
-                    // Keep provider command identity scoped even when the
-                    // client reuses the same canonical key in another tenant.
-                    idempotency_key: format!("{}:{compute_key}", auth.effective_scope().id()),
+                    idempotency_key: provider_idempotency_key.clone(),
                 },
                 context,
             )
-            .await
-            .map_err(|error| {
+            .await;
+        let receipt = match result {
+            Ok(receipt) => receipt,
+            Err(error) => {
                 tracing::warn!(error = ?error, "canonical native server create failed");
-                compute_error(error)
-            })?;
+                self.compensate_native_network_ports_after_create_failure(
+                    auth,
+                    &project_id,
+                    &provider_idempotency_key,
+                    &owned_network_ids,
+                )
+                .await;
+                return Err(compute_error(error));
+            }
+        };
         let server = receipt.resource;
         let resource = if let (Some(migration_id), Some(source_key)) =
             (spec.migration_id.as_ref(), spec.source_key.as_deref())
@@ -3352,6 +3581,27 @@ impl ResourceApplication for GenericResourceApplication {
             serde_json::json!({"resource_id": id}),
         )
         .map_err(|_| ResourceApplicationError::Validation)?;
+        // The server's durable network attachments are read *before* the
+        // canonical delete so the endpoints that the lifecycle owns can be
+        // released once the delete is terminal. The read intentionally retains
+        // attachment intent after deletion, which is what lets a replay of the
+        // same delete retry endpoint cleanup after a transient failure.
+        let project_id = auth.effective_scope().id().as_str().to_owned();
+        let owned_ports = match self
+            .compute
+            .server_network_ids_for_auth(auth, o3k_domain::ServerId::from_uuid(resource_id))
+            .await
+        {
+            Ok(network_ids) => network_ids
+                .iter()
+                .filter_map(|port_id| port_id.parse::<Uuid>().ok())
+                .collect::<Vec<Uuid>>(),
+            Err(o3k_compute::ComputeError::NotFound) => Vec::new(),
+            Err(error) => {
+                tracing::warn!(error = ?error, %id, "native server endpoint read failed");
+                return Err(compute_error(error));
+            }
+        };
         let receipt = self
             .compute
             .delete_server_for_auth_canonical(
@@ -3361,6 +3611,20 @@ impl ResourceApplication for GenericResourceApplication {
             )
             .await
             .map_err(compute_error)?;
+        // Endpoints are released only after the canonical delete is terminal:
+        // a converging delete still has a provider-side server that needs its
+        // network dependency, and the retried delete releases them later.
+        if matches!(
+            receipt.operation_state,
+            o3k_store::OperationState::Succeeded
+        ) && let Err(error) = self
+            .network_service
+            .cleanup_server_owned_ports_for_project(&project_id, &owned_ports)
+            .await
+        {
+            tracing::error!(%error, %id, "native server endpoint cleanup failed");
+            return Err(ResourceApplicationError::Internal);
+        }
         Ok(MutationResult {
             operation_id: receipt.operation_id.to_string(),
             resource_id: Some(id.to_owned()),

@@ -9,6 +9,33 @@ use o3k_kernel::{
 use std::{net::Ipv4Addr, time::Duration};
 use uuid::Uuid;
 
+/// Reserved name prefix of an endpoint that O3K created for a server.
+///
+/// The tenant-facing create and rename paths reject this prefix, so only an
+/// O3K server lifecycle can produce a name carrying it. That makes the durable
+/// name a trustworthy ownership discriminator: a server delete may release such
+/// an endpoint, and must leave every other endpoint alone even when the server
+/// intent names it.
+pub const SERVER_OWNED_ENDPOINT_PREFIX: &str = "o3k-server:";
+
+/// Returns the server-context component of an O3K server-owned endpoint name.
+///
+/// The name is `o3k-server:<project-id>:<context>`. The context is non-empty
+/// and the encoded owner must equal `project_id`, so a project can never claim
+/// another project's endpoint by naming it, and a malformed reserved name is
+/// not treated as owned.
+pub fn server_owned_endpoint_context<'a>(project_id: &str, name: &'a str) -> Option<&'a str> {
+    let (owner, context) = name
+        .strip_prefix(SERVER_OWNED_ENDPOINT_PREFIX)?
+        .split_once(':')?;
+    (!context.is_empty() && owner == project_id).then_some(context)
+}
+
+/// Whether `name` is an O3K server-owned endpoint identity of `project_id`.
+pub fn is_server_owned_endpoint_name(project_id: &str, name: &str) -> bool {
+    server_owned_endpoint_context(project_id, name).is_some()
+}
+
 impl NetworkService {
     pub async fn create_port(
         &self,
@@ -27,7 +54,7 @@ impl NetworkService {
         name: String,
         requested_fixed_ip: Option<(Uuid, Option<Ipv4Addr>)>,
     ) -> Result<PortRecord, NetworkError> {
-        if name.starts_with("o3k-server:") {
+        if name.starts_with(SERVER_OWNED_ENDPOINT_PREFIX) {
             return Err(NetworkError::InvalidRequest);
         }
         let ns = ServiceNamespace::new("network")
@@ -116,6 +143,41 @@ impl NetworkService {
         name: String,
         requested_fixed_ip: Option<(Uuid, Option<Ipv4Addr>)>,
     ) -> Result<PortRecord, NetworkError> {
+        self.create_port_for_project_internal(
+            project_id,
+            id,
+            network_id,
+            name,
+            requested_fixed_ip,
+            requested_fixed_ip.is_some(),
+        )
+        .await
+    }
+
+    /// Creates an endpoint with a caller-owned identity even when the
+    /// address is allocated from a pool. Native compute uses this stable
+    /// entry point so replay cannot create a second endpoint; ordinary pool
+    /// allocation retains its collision-safe fresh identity behavior.
+    pub async fn create_port_for_project_with_stable_id(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        network_id: Uuid,
+        name: String,
+    ) -> Result<PortRecord, NetworkError> {
+        self.create_port_for_project_internal(project_id, id, network_id, name, None, true)
+            .await
+    }
+
+    async fn create_port_for_project_internal(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        network_id: Uuid,
+        name: String,
+        requested_fixed_ip: Option<(Uuid, Option<Ipv4Addr>)>,
+        stable_id: bool,
+    ) -> Result<PortRecord, NetworkError> {
         self.get_canonical_network_for_project(project_id, network_id)
             .await?;
         let realms = self
@@ -146,6 +208,20 @@ impl NetworkService {
             .into_iter()
             .next()
             .ok_or(NetworkError::NotFound)?;
+        // Stable native identities still use the canonical pool allocator. A
+        // compatibility/TestLab port may already occupy the first address;
+        // skip it rather than coupling deterministic port identity to a fixed
+        // IP. The database uniqueness constraint remains the race-safe guard
+        // when independent runtimes allocate concurrently.
+        let occupied_addresses = self
+            .inner
+            .repository
+            .list_canonical_endpoints(project_id, &realm.id)
+            .await
+            .map_err(map_store_error)?
+            .into_iter()
+            .map(|endpoint| endpoint.fixed_ip)
+            .collect::<std::collections::HashSet<_>>();
         let explicit_ip = requested_fixed_ip.and_then(|(_, ip)| ip);
         let mut candidate = explicit_ip
             .map(u32::from)
@@ -160,17 +236,15 @@ impl NetworkService {
                 && candidate >= u32::from(pool.first_usable)
                 && candidate <= u32::from(pool.last_usable)
             {
-                // Ordinary allocation must use a fresh operation identity for
-                // each candidate. A failed IP attempt releases its quota
-                // reservation, but the reservation key remains idempotent;
-                // reusing the same ID would turn a normal pool collision into
-                // a false Conflict. Explicit migration IDs are used only with
-                // requested addresses and remain stable for source mappings.
-                let port_id = if explicit_ip.is_some() {
-                    id
-                } else {
-                    Uuid::now_v7()
-                };
+                if explicit_ip.is_none() && occupied_addresses.contains(&address) {
+                    candidate = candidate.saturating_add(1);
+                    continue;
+                }
+                // Ordinary pool allocation uses a fresh identity for each
+                // candidate so an address collision can advance through the
+                // pool. Stable native/migration callers opt into the supplied
+                // identity to make replay deterministic.
+                let port_id = if stable_id { id } else { Uuid::now_v7() };
                 let port = PortRecord {
                     id: port_id,
                     network_id,
@@ -189,7 +263,11 @@ impl NetworkService {
                     None,
                 );
                 let amounts = vec![ResourceAmount::new(LimitKey::network_ports(), 1)];
-                let op_id = format!("o3k:port:create:{}:{}", project_id, port.id);
+                // A failed address attempt releases its reservation. Include
+                // the candidate in the idempotency key so a concurrent
+                // stable-id retry can advance without reusing a released
+                // reservation tombstone.
+                let op_id = format!("o3k:port:create:{}:{}:{}", project_id, port.id, address);
                 let quota_res = self
                     .inner
                     .repository
@@ -252,6 +330,24 @@ impl NetworkService {
                             .await;
                         if explicit_ip.is_some() {
                             return Err(NetworkError::Conflict);
+                        }
+                        if stable_id {
+                            // ResourceAlreadyExists can be either the stable
+                            // identity replay or a concurrent address winner.
+                            // Re-read the authoritative endpoint set to
+                            // distinguish them; only the former is a replay
+                            // conflict, while the latter advances to the next
+                            // free address.
+                            let identity_exists = self
+                                .inner
+                                .repository
+                                .get_canonical_endpoint(project_id, &id)
+                                .await
+                                .map_err(map_store_error)?
+                                .is_some();
+                            if identity_exists {
+                                return Err(NetworkError::Conflict);
+                            }
                         }
                     }
                     Err(error) => {
@@ -395,7 +491,7 @@ impl NetworkService {
         name: String,
     ) -> Result<PortRecord, NetworkError> {
         let current = self.get_port_for_project(project_id, id).await?;
-        if current.name.starts_with("o3k-server:") {
+        if current.name.starts_with(SERVER_OWNED_ENDPOINT_PREFIX) {
             return Err(NetworkError::Conflict);
         }
         self.inner
@@ -549,6 +645,52 @@ impl NetworkService {
             .repository
             .release_reservation_for_operation(&format!("o3k:port:create:{}:{}", project_id, id))
             .await;
+        Ok(())
+    }
+
+    /// Releases the O3K-owned endpoints a server lifecycle created for
+    /// `project_id`.
+    ///
+    /// `port_ids` is the caller's durable view of the server's network
+    /// attachments. Ownership is decided from the durable endpoint row, never
+    /// from the request: an endpoint is released only when it resolves inside
+    /// `project_id` **and** carries the reserved server-owned name
+    /// ([`is_server_owned_endpoint_name`]). Therefore:
+    ///
+    /// - an endpoint the caller supplied itself is preserved, because a server
+    ///   attaching an endpoint is not the same as a server owning it;
+    /// - an endpoint of another project is never touched, so a forged or
+    ///   guessed identifier cannot delete foreign network state;
+    /// - an already-absent endpoint is idempotent success, so a replay or a
+    ///   concurrent equivalent cleanup converges;
+    /// - any other store or lookup failure is returned, so the caller reports
+    ///   a failed mutation and retries instead of silently leaving a live,
+    ///   consumable side effect behind.
+    ///
+    /// Endpoint release removes the durable endpoint, its policy attachments
+    /// and its create reservation, which frees the address for reuse and
+    /// releases the network-port quota.
+    pub async fn cleanup_server_owned_ports_for_project(
+        &self,
+        project_id: &str,
+        port_ids: &[Uuid],
+    ) -> Result<(), NetworkError> {
+        for port_id in port_ids {
+            match self.get_port_for_project(project_id, *port_id).await {
+                Ok(port) => {
+                    if !is_server_owned_endpoint_name(project_id, &port.name) {
+                        continue;
+                    }
+                    if let Err(error) = self.delete_port_for_project(project_id, *port_id).await
+                        && !matches!(error, NetworkError::NotFound)
+                    {
+                        return Err(error);
+                    }
+                }
+                Err(NetworkError::NotFound) => {}
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
     }
 

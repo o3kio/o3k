@@ -217,9 +217,26 @@ profiles:
       - o3k-cli
       - araf-client-optional
     araf_integration: client-only-not-required-for-readiness
+    dashboard_boundary:
+      araf:
+        role: native-next-generation-o3k-dashboard
+        interface: o3k-native-apis
+        authority: none
+        certification: PP.4A-1029
+      horizon:
+        role: external-openstack-compatibility-witness
+        interface: openstack-compatible-apis
+        authority: none
+        product_dependency: false
+        artifact:
+          provider: quay
+          image: quay.io/openstack.kolla/horizon
+          version: 2026.1-ubuntu-noble
+          digest: sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048
+          unmodified: true
     araf_demo_tuple:
-      state: passed
-      tracking_issue: 972
+      state: not-proven
+      tracking_issue: 1029
       contract: contracts/araf-compatibility-v1.yaml
       evidence: >-
         PP.3 fresh-host campaign PASSED on Ubuntu 24.04 x86_64 against the
@@ -232,8 +249,13 @@ profiles:
         Araf remains a separately versioned client, is not part of the O3K
         release bundle, and is not required for O3K readiness. Deployment
         mechanism for the demo profile: Docker Engine + Compose v2 via
-        packaging/o3k-araf-demo.sh. One-line installer integration is PP.4
-        (#973) scope. No Araf production/HA claim (o3kio/araf#106).
+        packaging/o3k-araf-demo.sh. The historical one-line installer
+        integration was historically exercised with v0.4.0-rc.8 and
+        Araf v1.0.0-rc.12; those campaigns are retained under
+        docs/evidence/pp4/ and do not prove the required native browser
+        workload journey. The current PP.4 candidate pins Araf v1.0.0-rc.16;
+        the successor O3K release and fresh-host evidence remain pending.
+        No Araf production/HA claim (o3kio/araf#106).
     evidence_dependencies:
       - native-rust-testlab
       - p15-7-scale-composition-real-host-gate

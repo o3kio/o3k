@@ -1,0 +1,145 @@
+{
+  "status": "NON-CERTIFYING development confirmation",
+  "warning": "This is not PP.4 Core certification evidence. It was produced by hand-swapping a locally built o3kd binary into a retained rc.22 debug VM, which the campaign rules allow only for development confirmation. Final evidence must come from the public successor candidate installed on a fresh host.",
+  "purpose": "Prove the complete bounded Horizon witness (HTTP readiness, login, project context, panels, native resource visibility, O3K independence, and recovery after restart) against the pinned unmodified client before spending another immutable release candidate.",
+  "recorded_at": "2026-09-22",
+  "runtime_under_development": {
+    "binary": "o3kd built from the working tree (release profile)",
+    "tree": "branch pp4-trust-repair at 7aaa7a6e9a260ab8c915e86cd767c7d6cf05a9c5 plus uncommitted working-tree changes: bounded GET /v3/projects (issue 1031) and the bounded collection-pagination fix (issue 1032)",
+    "installed_over": "v0.4.0-rc.22 /usr/local/bin/o3kd (original preserved as /usr/local/bin/o3kd.rc22.bak)",
+    "host": "retained disposable Ubuntu 24.04 KVM debug VM at /tmp/o3k-pp4-core.NHLevK (ssh port 2392)"
+  },
+  "horizon_client": {
+    "role": "pinned external OpenStack compatibility witness, unmodified",
+    "image": "quay.io/openstack.kolla/horizon:2026.1-ubuntu-noble",
+    "digest": "sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048",
+    "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+    "config_digest": "sha256:737572c6cffdfe78e11e2c06a383f60218ebc86d274efe180c95035d6f7944b8",
+    "horizon_version": "25.7.4.dev26",
+    "kolla_version": "22.2.1",
+    "forked": false,
+    "source_patches": [],
+    "tag_resolution": "The mutable tag was re-resolved with an OCI Accept header on 2026-09-22 and still resolved to exactly the pinned digest. The digest, not the tag, is the evidence identity because Kolla rebuilds the tag continuously."
+  },
+  "harness_change_required_by_this_run": {
+    "file": "tests/pp4-core-campaign/horizon-witness.sh",
+    "change": "OPENSTACK_API_VERSIONS['compute'] 2.1 -> 2",
+    "classification": "harness configuration defect, not an O3K defect",
+    "why": "OPENSTACK_API_VERSIONS['compute'] selects the novaclient v2 client family, not a Nova REST microversion. Upstream Horizon 2026.1 defaults it to 2 (openstack_dashboard/defaults.py:341-346) and Horizon's own registry rejects other values (openstack_dashboard/api/base.py:104-116), which produced '2.1 is not a supported API version for the compute service, choices are: 2, 1.1, 2'.",
+    "o3k_discovery_is_correct": {
+      "GET /v2.1": "200",
+      "GET /v2.1/": "200 {\"version\":{\"id\":\"v2.1\",\"status\":\"CURRENT\",\"version\":\"2.1\",\"min_version\":\"2.1\",\"updated\":\"2013-07-23T00:00:00Z\"}}"
+    }
+  },
+  "observed_login_and_panel_sequence": [
+    "POST /v3/auth/tokens (unscoped password) -> 201, unscoped token",
+    "GET /v3/users/{user_id}/projects -> 200, the subject's authorized projects",
+    "POST /v3/auth/tokens (project-scoped password) -> 201, scoped token",
+    "login POST -> 302 and an authenticated Horizon session",
+    "GET /project/ -> 200 authenticated dashboard",
+    "GET /identity/, /project/images/, /project/networks/, /project/instances/ -> 200"
+  ],
+  "results": {
+    "horizon_http_ready": "PASS",
+    "horizon_login": "PASS (login POST -> 302, authenticated session established)",
+    "horizon_project_context": "PASS (GET /project/ -> 200)",
+    "horizon_panels": {
+      "/identity/": "PASS",
+      "/project/images/": "PASS",
+      "/project/networks/": "PASS",
+      "/project/instances/": "PASS (was HTTP 500 before the bounded GET /v3/projects route existed)"
+    },
+    "native_and_compatibility_resource_visibility": "PASS (the canonical native server name and the compatibility server name both appear in the rendered Horizon response)",
+    "horizon_independent_readiness": {
+      "with_horizon_active": "GET /readyz -> 200",
+      "horizon_stopped": "container not running, no HTTP on the witness port",
+      "after_horizon_stop": "GET /readyz -> 200",
+      "native_api_after_horizon_stop": "PASS (canonical server GET -> 200, state ACTIVE)",
+      "openstack_compatible_api_after_horizon_stop": "PASS (openstack server show -> status ACTIVE)",
+      "guest_still_running": "PASS (both libvirt domains still listed while Horizon was stopped)"
+    },
+    "horizon_restart_recovery": "PASS (the witness was re-created and the full bounded witness passed again: readiness, login, project context, all four panels, resource visibility)",
+    "client_pagination_guard": "PASS (no 'Endless pagination loop detected' in the client log after the bounded pagination fix; the same assertion tripped on the pre-fix runtime)",
+    "client_compute_api_selector": "PASS (no 'is not a supported API version' in the client log)"
+  },
+  "post_fix_pagination_verification": {
+    "note": "Direct probes on the same runtime after the bounded pagination fix, using the exact query strings the pinned client sent.",
+    "captured_pair_now_terminates": {
+      "page_1": "GET /v2.0/networks?limit=21&sort_key=id&sort_dir=asc&shared=True -> the network, networks_links carries only rel=self",
+      "marker_follow_up": "GET /v2.0/networks?sort_key=id&sort_dir=asc&shared=True&marker=01a0c884-805f-7231-a08d-00a7f5297eb2&limit=21 -> {\"networks\":[]}, so the client's marker probe ends the traversal instead of repeating the page"
+    },
+    "compute_collection": {
+      "page_1": "GET /v2.1/{project_id}/servers/detail?limit=1 -> one server plus a rel=next link whose marker is that server's id",
+      "follow_up": "GET /v2.1/{project_id}/servers/detail?limit=1&marker=<page 1 id> -> the remaining server and no rel=next link (final page)"
+    },
+    "bounded_rejections": "malformed marker -> 400; limit=0 -> 400",
+    "non_paginating_clients": "a collection request without limit keeps its previous response shape and gains no link array"
+  },
+  "residual_client_observations": [
+    {
+      "observation": "Recoverable error: 2.1 is not a supported API version for the compute service, choices are: 2, 1.1, 2",
+      "source": "openstack_dashboard/api/base.py:104-116 reading settings.OPENSTACK_API_VERSIONS['compute']",
+      "classification": "harness configuration defect",
+      "owner": "campaign harness",
+      "status": "fixed in tests/pp4-core-campaign/horizon-witness.sh; no O3K change made or required"
+    },
+    {
+      "observation": "Recoverable error: Endless pagination loop detected, aborting",
+      "source": "openstacksdk 4.10.0 openstack/resource.py Resource._list guard",
+      "classification": "O3K compatibility defect",
+      "owner": "O3K",
+      "issue": "1032",
+      "captured_request_pair": [
+        "GET /v2.0/networks?limit=21&sort_key=id&sort_dir=asc&shared=True",
+        "GET /v2.0/networks?sort_key=id&sort_dir=asc&shared=True&marker=01a0c884-805f-7231-a08d-00a7f5297eb2&limit=21"
+      ],
+      "why_it_loops": "Both responses returned the identical single network with no networks_links and no links key. The client re-requests with marker=<last id of the page>; a conformant service answers that follow-up with zero resources, which terminates the loop, but O3K ignores both limit and marker and repeats the page, so the guard fires.",
+      "same_class_on_compute": "GET /v2.1/{project_id}/servers/detail?limit=1&marker=009c1501-28ff-5f3f-a5b4-a4602d3a9a41 returned both servers with no servers_links; the pinned client did not loop because the project held fewer servers than its page size",
+      "status": "fixed on this branch and verified on the live witness; bounded to the Nova and Neutron collections the accepted journey exercises, with regression tests",
+      "verified_behavior": "the captured pair now terminates with an empty follow-up page, a page is never repeated, and a collection request without limit keeps its previous response shape"
+    },
+    {
+      "observation": "GET /v2.1/{project_id}/limits?reserved=1 -> HTTP 404, novaclient.exceptions.NotFound, logged as 'Failed to retrieve quota information'",
+      "source": "openstack_dashboard/dashboards/project/instances/tables.py:433 -> api/nova.py:900",
+      "classification": "O3K endpoint gap, recoverable",
+      "owner": "O3K, outside the accepted bounded witness bar",
+      "tracked_as": "docs/compatibility/backlog-inventory.yaml horizon-018 (rust_status missing, failure_seen rc.23-dev-preflight)",
+      "impact": "the Instances table's limits column renders empty; the instance rows and the required resource visibility are unaffected and the panel returns HTTP 200"
+    },
+    {
+      "observation": "GET /v2.1/{project_id}/os-simple-tenant-usage/{project_id} -> HTTP 404, novaclient.exceptions.NotFound",
+      "classification": "O3K endpoint gap, recoverable; already a tracked candidate",
+      "owner": "O3K, outside the accepted bounded witness bar",
+      "tracked_as": "docs/compatibility/backlog-inventory.yaml horizon-014",
+      "impact": "the project overview usage section cannot render; it does not affect the accepted panels or resource visibility"
+    },
+    {
+      "observation": "GET /v2.0/floatingips?... -> HTTP 503 'floating IP service is not configured'",
+      "classification": "unconfigured optional service, recoverable",
+      "owner": "O3K deployment profile (the floating-IP service is not configured in this TestLab profile)",
+      "impact": "the panels report 'Unable to connect to Neutron' for the floating-IP lookup only; fixed IP display, which comes from the server's own addresses, is unaffected. Classified as not required by the accepted bounded witness; the 503-versus-404 shape is recorded for a separate compatibility question and was not changed in this slice."
+    },
+    {
+      "observation": "oslo_policy warnings stating 'The token used to make the request was domain scoped'",
+      "classification": "client-side policy-context warning, not an O3K response",
+      "owner": "Horizon/oslo_policy",
+      "counter_evidence": "GET /v3/auth/tokens for the scoped token returns keys [catalog, expires_at, issued_at, methods, project, roles, user]: the project scope is present and no domain or system scope is present, so O3K does not report the session as domain scoped"
+    }
+  ],
+  "instances_panel_call_graph_probes": {
+    "note": "Direct probes with a project-scoped token against the same runtime, completing the call graph the pinned client exercised while loading the Instances and Overview panels.",
+    "results": {
+      "GET /v2.0/extensions": 200,
+      "GET /v2.0/subnets": 200,
+      "GET /v2.0/ports": 200,
+      "GET /v2.1/{project_id}/flavors/detail": 200,
+      "GET /v2.1/{project_id}/servers/detail": 200,
+      "GET /v2.1/{project_id}/limits?reserved=1": 404,
+      "GET /v2.1/{project_id}/os-simple-tenant-usage/{project_id}": 404,
+      "GET /v2.1/{project_id}": 404
+    },
+    "note_on_project_root": "The catalog advertises the compute endpoint as /v2.1/{project_id} (legacy Nova v2-style catalog), so an endpoint-root probe cannot resolve. Both pinned clients (novaclient and the openstack CLI) tolerate the 404 and proceed with the configured microversion, and no error was logged for it. Recorded as an observed bounded deviation with no observed impact, not a defect proven by this run."
+  },
+  "conclusion": "The bounded Horizon witness now passes end to end against the pinned unmodified client, including the Instances panel that previously answered HTTP 500, native resource visibility, O3K independence from Horizon, and recovery after the witness is re-created. The collection-pagination defect (issue 1032) is fixed on this branch and verified against the exact captured request pair, so the client's pagination guard is silent. PP.4 Core is still not certifiable from this file: it is a development confirmation on a hand-swapped runtime, and the three remaining client observations are tracked recoverable gaps outside the accepted witness bar (/limits and os-simple-tenant-usage reads, and the unconfigured floating-IP service). Final evidence must come from the public successor candidate on a fresh host.",
+  "secrets": "No credentials recorded. The Horizon session key used by the witness is a clearly non-secret local literal, and no token, password, or signing key appears in this file."
+}

@@ -208,19 +208,6 @@ impl ComputeService {
         {
             return Err(ComputeError::InvalidRequest);
         }
-        let keypair = match key_name.as_deref() {
-            Some(name) => Some(
-                self.store
-                    .get_keypair(&user_id, &project_id, name)
-                    .await
-                    .map_err(|error| match error {
-                        StoreError::KeypairNotFound => ComputeError::NotFound,
-                        other => ComputeError::Store(other),
-                    })?,
-            ),
-            None => None,
-        };
-        let flavor = self.flavor_for_project(&project_id, flavor_id).await?;
         let server_id = Self::server_id_for_create(&project_id, &idempotency_key);
         let existing_res = self.store.get_resource(server_id).await;
         let operation_id = match &existing_res {
@@ -250,6 +237,98 @@ impl ComputeService {
                 &Uuid::NAMESPACE_URL,
                 format!("o3k:operation:{project_id}:{idempotency_key}").as_bytes(),
             ),
+        };
+        // Canonical replays must be resolved before scheduling or reserving
+        // any new authority.  The first rc.18 create had already committed
+        // Placement capacity; re-entering the scheduler for the same key can
+        // legitimately return NoValidHost and was incorrectly surfaced as a
+        // native HTTP 500.  Probe the durable reservation first, then let the
+        // canonical store validate actor/scope/fingerprint/resource identity
+        // and return the original receipt without provider side effects.
+        if let Some(context) = canonical {
+            let resource_type =
+                ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?;
+            let replay_identity = o3k_store::IdempotencyReservationRequest::from_semantics(
+                context.owner_scope.id().as_str(),
+                context.action.to_string(),
+                context.idempotency_key.clone(),
+                &resource_type.to_string(),
+                None,
+                &context.semantic_request,
+                operation_id,
+            )
+            .map_err(ComputeError::Store)?;
+            if let Some(stored) = self
+                .store
+                .get_idempotency_reservation(
+                    &replay_identity.owner_scope,
+                    &replay_identity.action,
+                    &replay_identity.key,
+                )
+                .await
+                .map_err(ComputeError::Store)?
+            {
+                if stored.fingerprint != replay_identity.fingerprint {
+                    return Err(ComputeError::Conflict);
+                }
+                let durable_operation = self.store.get_operation(stored.operation_id).await?;
+                let durable_resource = self
+                    .store
+                    .get_resource(durable_operation.resource_id)
+                    .await?;
+                let replay_request: CreateInstanceRequest =
+                    serde_json::from_str(&durable_resource.desired_state).map_err(|_| {
+                        ComputeError::Store(StoreError::Corrupt(
+                            "canonical replay resource has invalid create intent".to_owned(),
+                        ))
+                    })?;
+                match self
+                    .journal
+                    .begin_canonical_create(&project_id, &replay_request, context)
+                    .await
+                    .map_err(ComputeError::Reconcile)?
+                {
+                    o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
+                        operation_id: existing_operation_id,
+                        resource_id,
+                    } => {
+                        let server = self
+                            .show_server_without_convergence(
+                                &project_id,
+                                ServerId::from_uuid(resource_id),
+                            )
+                            .await?;
+                        let operation = self.store.get_operation(existing_operation_id).await?;
+                        return Ok(CreateMutationReceipt {
+                            server,
+                            operation_id: existing_operation_id,
+                            operation_state: operation.state,
+                            replayed: true,
+                        });
+                    }
+                    o3k_store::CanonicalAcceptanceOutcome::Conflict => {
+                        return Err(ComputeError::Conflict);
+                    }
+                    o3k_store::CanonicalAcceptanceOutcome::Created { .. } => {
+                        return Err(ComputeError::Store(StoreError::Corrupt(
+                            "existing canonical reservation was recreated".to_owned(),
+                        )));
+                    }
+                }
+            }
+        }
+        let flavor = self.flavor_for_project(&project_id, flavor_id).await?;
+        let keypair = match key_name.as_deref() {
+            Some(name) => Some(
+                self.store
+                    .get_keypair(&user_id, &project_id, name)
+                    .await
+                    .map_err(|error| match error {
+                        StoreError::KeypairNotFound => ComputeError::NotFound,
+                        other => ComputeError::Store(other),
+                    })?,
+            ),
+            None => None,
         };
         let scope = OwnershipScope::project(ScopeId::new_unchecked(project_id.clone()), None, None);
         let amounts = vec![
@@ -374,7 +453,7 @@ impl ComputeService {
                             {
                                 Ok(o3k_store::OperationState::Failed) => {
                                     self.store.detach_server_keypair(server_id).await?;
-                                    self.project_terminal_binding_outcome(
+                                    self.project_terminal_outcome_best_effort(
                                         existing_request.operation_id.to_string().as_str(),
                                         o3k_store::OperationState::Failed,
                                     )
@@ -382,7 +461,7 @@ impl ComputeService {
                                     return Err(ComputeError::Conflict);
                                 }
                                 Ok(o3k_store::OperationState::Succeeded) => {
-                                    self.project_terminal_binding_outcome(
+                                    self.project_terminal_outcome_best_effort(
                                         existing_request.operation_id.to_string().as_str(),
                                         o3k_store::OperationState::Succeeded,
                                     )
@@ -422,12 +501,19 @@ impl ComputeService {
         // canonical replay carries the same server_id, so the name check must
         // be skipped to avoid rejecting an equivalent replay.
         let canonical_has_existing = canonical.is_some() && existing_res.is_ok();
+        // CANONICAL INVARIANT: a canonical request's deterministic server_id is
+        // its own durable identity. A concurrently persisted row carrying that
+        // identity is the same resource the caller is converging on, so it must
+        // not be surfaced as a name conflict — the canonical reservation
+        // resolves it as an equivalent replay. Only a *different* live server
+        // with the same name is a real conflict. `existing_res` was read before
+        // scheduling, so a racing create can persist this identity in between.
         if !canonical_has_existing
-            && self
-                .list_servers(&project_id)
-                .await?
-                .iter()
-                .any(|server| server.name == name && server.state != ServerState::Deleted)
+            && self.list_servers(&project_id).await?.iter().any(|server| {
+                server.id.as_uuid() != server_id
+                    && server.name == name
+                    && server.state != ServerState::Deleted
+            })
         {
             return Err(ComputeError::Conflict);
         }
@@ -483,9 +569,11 @@ impl ComputeService {
             }
         };
         if !canonical_has_existing
-            && servers
-                .iter()
-                .any(|server| server.name == name && server.state != ServerState::Deleted)
+            && servers.iter().any(|server| {
+                server.id.as_uuid() != server_id
+                    && server.name == name
+                    && server.state != ServerState::Deleted
+            })
         {
             // A racing identical request may have persisted this server while
             // the schedule was in flight; its allocation idempotently backs
@@ -717,7 +805,10 @@ impl ComputeService {
                             self.release_placement_decision(decision).await?;
                         }
                         let server = self
-                            .show_server(&project_id, ServerId::from_uuid(resource_id))
+                            .show_server_without_convergence(
+                                &project_id,
+                                ServerId::from_uuid(resource_id),
+                            )
                             .await?;
                         let operation = self.store.get_operation(existing_operation_id).await?;
                         match operation.state {
@@ -828,7 +919,7 @@ impl ComputeService {
                                     if let Err(error) = self.store.detach_server_keypair(id).await {
                                         release_quota_and_return!(ComputeError::Store(error));
                                     }
-                                    self.project_terminal_binding_outcome(
+                                    self.project_terminal_outcome_best_effort(
                                         request.operation_id.to_string().as_str(),
                                         o3k_store::OperationState::Failed,
                                     )
@@ -836,7 +927,7 @@ impl ComputeService {
                                     release_quota_and_return!(ComputeError::Conflict);
                                 }
                                 Ok(o3k_store::OperationState::Succeeded) => {
-                                    self.project_terminal_binding_outcome(
+                                    self.project_terminal_outcome_best_effort(
                                         request.operation_id.to_string().as_str(),
                                         o3k_store::OperationState::Succeeded,
                                     )
@@ -918,7 +1009,7 @@ impl ComputeService {
             reconcile_state,
             o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
         ) {
-            self.project_terminal_binding_outcome(
+            self.project_terminal_outcome_best_effort(
                 request.operation_id.to_string().as_str(),
                 reconcile_state,
             )
@@ -934,6 +1025,7 @@ impl ComputeService {
                     "server create reconciliation failed"
                 );
             }
+            self.project_failed_create_error(id).await?;
             if let Err(error) = self.store.detach_server_keypair(id).await {
                 release_quota_and_return!(ComputeError::Store(error));
             }

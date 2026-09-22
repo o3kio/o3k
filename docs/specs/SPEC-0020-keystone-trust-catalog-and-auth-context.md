@@ -257,6 +257,16 @@ including:
 Unsupported authentication methods fail with the selected
 Keystone-compatible error envelope and are not silently ignored.
 
+Bounded unscoped authentication, `GET /v3/auth/projects`, and
+`GET /v3/projects` are part of the same subset (see SPEC-0004). An unscoped
+token has no effective scope, so `AuthContext` construction fails closed for
+it: unscoped tokens authenticate a subject for client project discovery only
+and never authorize an operation. `GET /v3/auth/projects` returns only the
+caller's durable role-assignment projects and is not project administration.
+`GET /v3/projects` answers the same authorization question under the route the
+pinned Horizon Instances panel issues and is likewise a bounded visibility read,
+not an administrator list-all.
+
 ## Credential/token requirements
 
 A token or server-side credential record binds enough information to construct

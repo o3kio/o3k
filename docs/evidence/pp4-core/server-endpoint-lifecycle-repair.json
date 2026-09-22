@@ -1,0 +1,80 @@
+{
+  "schema": "o3k.pp4-core.product-repair.v1",
+  "issue": "#1034",
+  "title": "Server-owned network endpoint lifecycle across both interfaces",
+  "status": "repaired and proven on the public successor candidate",
+  "defect_found_on": {
+    "release": "v0.4.0-rc.23",
+    "source_commit": "5cb24f0585d5899102b12e441bd6c4c9aa571f7b",
+    "verdict": "failed immutable PP.4 candidate",
+    "raw_evidence": "/root/pp4-evidence-backup/rc23-rehearsal-native-delete-leak/ (local, non-certifying rehearsal) and /root/pp4-evidence-backup/pp4-core-rc23-ubuntu-complete-7/",
+    "finding_file": "docs/evidence/pp4-core/rc23-product-defect-native-delete-port.json"
+  },
+  "root_cause": {
+    "interface_asymmetry": "The compatibility delete path released the server's auto-created endpoint inline in `crates/o3k-api/src/compute.rs`; the native canonical delete path (`bins/o3kd/src/native_adapters/resource.rs` -> `ComputeService::delete_server_for_auth_canonical`) had no endpoint cleanup at all.",
+    "non_blocking_delete": "The rc.23 native DELETE returned `{\"complete\": false}` (a non-terminal canonical operation), so convergence completed later through the agent/reconciler path, which also released nothing. A terminal-only cleanup inside the native adapter alone would not have fired.",
+    "create_failure_preservation": "The compatibility create-failure path preserved a request-owned endpoint whenever the durable server row referenced it, so a terminally failed create kept an ACTIVE endpoint next to its ERROR resource (issue #1034 defect 2).",
+    "ordering_constraint": "The endpoint release deletes the durable endpoint, while the fabric teardown plan (`NetworkBindingProjector::unbind_port`) reads that endpoint (address, MAC, realm) to compile its plan. Releasing before the terminal unbind would skip the host fabric teardown, so release must follow the unbind, per endpoint."
+  },
+  "accepted_design": {
+    "decision": "synchronous + idempotent release on the normal mutation path; reconciler cleanup remains defence-in-depth (PP.5 follow-up)",
+    "ownership_rule": "o3k-network centralises the discriminator: `is_server_owned_endpoint_name` / `server_owned_endpoint_context` accept only `o3k-server:<addressed-project>:<non-empty context>`, and `NetworkService::cleanup_server_owned_ports_for_project` releases only those, treats an absent endpoint as idempotent success, and fails closed on unexpected store errors.",
+    "release_seat": "The terminal-success delete projection in `o3k-compute` (`project_terminal_binding_outcome`) releases each endpoint immediately after that endpoint's successful unbind, so every driver of convergence \u2014 request path, agent terminal-update consumer, periodic lifecycle sweep, poll surface \u2014 produces the same durable state for an accepted (202) and a synchronous delete.",
+    "retry_seat": "`delete_server_with_accepted_operation`'s already-deleted shortcut releases from the durable create intent and reports the outcome, so replaying the same delete finishes a release that failed transiently.",
+    "create_disposition": "`ComputeService::create_dependency_state_for_auth` derives `CreateDependencyDisposition` from durable canonical state: absent identity, DELETED, or ERROR with a terminally failed operation compensates; a live, in-flight, or inconclusive outcome (including UnknownOutcome) preserves the endpoint. The ERROR resource and the failed operation are retained as terminal evidence.",
+    "documented_deviation": "issue #1034 comment: a release failure is reported (500) only where a request waits on it (request-path delete sites and the replay shortcut); when a background driver completes convergence, the failure is logged and retried by the next delete replay."
+  },
+  "normative_anchor": {
+    "spec": "docs/specs/SPEC-0021-cross-service-workflows-and-compensation.md",
+    "clarification": "Compensation section now states the endpoint ownership discriminator, that caller-supplied and foreign endpoints are preserved, and that release follows the terminal unbind and the terminal outcome rather than the observing request.",
+    "public_api_change": "none \u2014 no OpenStack/Keystone compatibility surface is added, removed, or re-scoped"
+  },
+  "regressions": {
+    "interface_matrix": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::server_owned_endpoints_converge_for_every_interface_pair (native/native, native/OpenStack, OpenStack/native, OpenStack/OpenStack)",
+    "teardown_precondition": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::subnet_becomes_deletable_once_server_endpoints_are_released",
+    "failed_create_compensation": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::terminal_create_failure_releases_the_endpoint_and_keeps_the_evidence",
+    "in_flight_preservation": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::in_flight_create_outcome_preserves_the_endpoint",
+    "live_preservation": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::live_create_outcome_preserves_the_endpoint",
+    "caller_supplied_preservation": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::caller_supplied_endpoints_are_preserved_on_delete",
+    "delete_replay": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::delete_replay_keeps_the_endpoint_absent",
+    "foreign_endpoint": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::foreign_endpoint_can_neither_be_attached_nor_released",
+    "concurrent_delete": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::concurrent_equivalent_deletes_converge_once",
+    "ownership_rule": "crates/o3k-network/src/service/tests.rs::server_owned_endpoint_identity_requires_the_owning_project_and_a_context",
+    "cleanup_and_address_reuse": "crates/o3k-network/src/service/tests.rs::server_owned_endpoint_cleanup_is_ownership_filtered_and_frees_the_address",
+    "unbind_before_release": "crates/o3k-compute/src/lib.rs::create_and_delete_project_binding_outcomes_through_fake_provider (asserts the exact CreateOutcome, Unbind, Release sequence and the idempotent replay)",
+    "durable_disposition": "crates/o3k-compute/src/lib.rs::create_dependency_disposition_follows_durable_state",
+    "transient_release_retry": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::transient_release_failure_is_reported_and_repaired_by_replay (injects one release failure at the collaborator boundary; the delete mutation fails, the replay finishes the release against the real NetworkService)"
+  },
+  "fail_before_fix_after": {
+    "method": "the shared cleanup helper and the disposition read were neutered (cleanup returned success without deleting; the disposition always returned Preserve) and the new suite was re-run against the otherwise-complete fix",
+    "result": "6 of 9 interface tests fail, including the exact rc.23 campaign symptom: `DELETE /v2.0/subnets/<id>` -> 409 \"network operation is not allowed\"",
+    "observed_failures": [
+      "subnet_becomes_deletable_once_server_endpoints_are_released: subnet delete: {\"error\":{\"code\":409,\"message\":\"network operation is not allowed\"}}",
+      "terminal_create_failure_releases_the_endpoint_and_keeps_the_evidence: a terminally failed create left endpoints: [<uuid>]",
+      "server_owned_endpoints_converge_for_every_interface_pair, delete_replay_keeps_the_endpoint_absent, live_create_outcome_preserves_the_endpoint, concurrent_equivalent_deletes_converge_once"
+    ],
+    "discrimination": "the three preservation guards (caller-supplied endpoint, foreign endpoint rejection, in-flight outcome) still pass with the fix neutered, because they assert that endpoints survive; they therefore discriminate behaviour rather than restating the implementation"
+  },
+  "campaign_harness": {
+    "phase": "tests/pp4-core-campaign/in-vm-core-post.sh phase 9",
+    "addition": "after the cross-interface deletes, the durable `network_ports` rows named `o3k-server:%` must be empty (read-only sqlite read, evidence file `server-endpoints-after-deletes.json`), so the successor campaign asserts the repaired invariant directly rather than inferring it from the teardown",
+    "classification": "harness/evidence only; no runtime code"
+  },
+  "follow_up": {
+    "pp5": "crash window: process death after the canonical compute delete reaches terminal and before the cross-service endpoint release. Requires a bounded reconciler sweep that repairs orphaned server-owned endpoints of terminal-deleted servers. Not a substitute for the synchronous release; tracked for PP.5 hardening."
+  },
+  "claims": {
+    "proven": "source-level repair with in-process, fail-before/fix-after evidence covering both reported defect classes and the safety cases",
+    "not_proven": "no other host or profile is covered; the PP.5 crash window remains open"
+  },
+  "released_in": {
+    "version": "v0.4.0-rc.24",
+    "source_commit": "7830d62e54eea4d73276ebe8f6e6c0e58e3397fc",
+    "campaign_evidence": "docs/evidence/pp4-core/rc24-campaign-evidence.json"
+  },
+  "campaign_proof": {
+    "ubuntu": "phase 9 asserts zero durable `o3k-server:%` endpoints after the cross-interface deletes; the compatibility-created server was deleted through the native interface whose canonical delete returned HTTP 202 complete=false, so the release ran from the terminal outcome; the caller-supplied endpoint survived",
+    "debian": "same assertion and the same 202 path on Debian 12",
+    "verdict": "both hosts PASS with Core manifest verdict PASS"
+  }
+}

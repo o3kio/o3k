@@ -51,10 +51,10 @@
     {
       "id": "identity.token_password_scoped",
       "service": "identity",
-      "operation": "password_authentication_scoped_token",
+      "operation": "password_authentication_token",
       "method": "POST",
       "path": "/v3/auth/tokens",
-      "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-scoped-token"],
+      "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-scoped-token", "https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-unscoped-token"],
       "go_locations": ["internal/keystone/auth.go", "internal/keystone/handlers.go"],
       "rust_locations": ["crates/o3k-api/src/lib.rs:105", "crates/o3k-identity/src/lib.rs"],
       "cli_command": "openstack token issue",
@@ -63,7 +63,41 @@
       "cli_verification": "verified",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "known_gaps": ["Federation and non-password authentication are outside the alpha profile."]
+      "known_gaps": ["Federation and non-password authentication are outside the alpha profile.", "The route is the single canonical operation for both project-scoped and unscoped password authentication; an unscoped token carries no project, roles, or catalog and authorizes no O3K operation."]
+    },
+    {
+      "id": "identity.auth_projects_list",
+      "service": "identity",
+      "operation": "auth_projects_list",
+      "method": "GET",
+      "path": "/v3/auth/projects",
+      "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects"],
+      "go_locations": ["internal/keystone/handlers.go"],
+      "rust_locations": ["crates/o3k-api/src/lib.rs:407", "crates/o3k-api/src/identity.rs", "crates/o3k-identity/src/lib.rs"],
+      "cli_command": "openstack project list",
+      "implementation_state": "implemented",
+      "portable_contract": "verified",
+      "cli_verification": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "known_gaps": ["Client project discovery only: it returns the caller's durable role-assignment projects and exposes no pagination, links, or project writes."]
+    },
+    {
+      "id": "identity.projects_list",
+      "service": "identity",
+      "operation": "projects_list",
+      "method": "GET",
+      "path": "/v3/projects",
+      "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects"],
+      "go_locations": ["internal/keystone/handlers.go"],
+      "rust_locations": ["crates/o3k-api/src/lib.rs", "crates/o3k-api/src/identity.rs", "crates/o3k-identity/src/lib.rs"],
+      "cli_command": "openstack project list",
+      "implementation_state": "implemented",
+      "portable_contract": "verified",
+      "cli_verification": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "known_gaps": ["Bounded Horizon/Instances-panel project-visibility read for the accepted compatibility profile: it returns only the caller's durable role-assignment projects and adds no project create/update/delete, no admin list-all, and no pagination/links."]
     },
     {
       "id": "image.collection_create",
@@ -199,7 +233,7 @@
       "cli_verification": "pending",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "known_gaps": ["Filtering and pagination are limited to the alpha profile."]
+      "known_gaps": ["Filtering beyond the single `id` selector is out of scope, and `sort_key`/`sort_dir` are unimplemented deviations; bounded `limit`/`marker` paging with `networks_links` is implemented for the accepted profile."]
     },
     {
       "id": "network.network_member_show",
@@ -562,7 +596,7 @@
       "cli_verification": "pending",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "known_gaps": ["The broader Nova filter and pagination surface is deferred."]
+      "known_gaps": ["The broader Nova query/filter surface and `sort_key`/`sort_dir` are deferred; bounded `limit`/`marker` paging with `servers_links` is implemented for the accepted profile."]
     },
     {
       "id": "compute.server_collection_detail",

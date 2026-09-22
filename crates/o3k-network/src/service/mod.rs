@@ -126,6 +126,9 @@ pub use canonical::{
 pub(crate) use helpers::{
     parse_security_group_direction, parse_security_group_prefix, parse_security_group_protocol,
 };
+pub use port::{
+    SERVER_OWNED_ENDPOINT_PREFIX, is_server_owned_endpoint_name, server_owned_endpoint_context,
+};
 
 impl NetworkService {
     /// Publish a mandatory audit event through the durable asynchronous boundary.

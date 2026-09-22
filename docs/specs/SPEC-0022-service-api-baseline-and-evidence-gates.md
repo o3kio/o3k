@@ -101,6 +101,30 @@ Required behavior:
 
 - version discovery;
 - project-scoped password authentication;
+- unscoped password authentication: the password identity method with the
+  `scope` member omitted, with the `"unscoped"` keyword, or with a scope object
+  that carries no `project`. An unscoped token proves identity only. It carries
+  no project, roles or catalog, never implies system or domain scope, and is
+  never silently mapped to the bootstrap admin project. It is rejected with 401
+  by every operation that requires a normalized project-scoped `AuthContext`.
+  This is required by the bounded Horizon login bootstrap: the unmodified
+  external client authenticates unscoped, discovers the projects it may scope
+  into, and only then re-authenticates with the selected project scope;
+- available-scope discovery for the authenticated subject:
+  `GET /v3/auth/projects` and `GET /v3/users/{user_id}/projects` return, for the
+  caller's own durable identity, the enabled projects in an enabled domain where
+  the durable role assignments grant at least one role. Both are the same
+  bounded capability addressed by identity and by user ID, and neither is
+  project or user administration: no write operations, no pagination, no
+  listing of another subject's scopes;
+- the bounded project-visibility read `GET /v3/projects`, required by the
+  unmodified Horizon 2026.1 Instances panel, which resolves a server's project
+  name through `keystoneclient`'s project list. It returns the same
+  authorization-filtered set as `GET /v3/auth/projects` — the caller's durable
+  role-assignment projects, and an empty list for a subject with no assignment —
+  and is explicitly not Keystone project administration: project
+  create/update/delete and an administrator list-all are unsupported, so it does
+  not satisfy `GET /v3/projects` for an administrator use case;
 - `X-Subject-Token` issuance;
 - token expiry and verification;
 - catalog for enabled profile services;

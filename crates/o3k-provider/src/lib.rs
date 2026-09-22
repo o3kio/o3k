@@ -415,6 +415,7 @@ struct FakeState {
     idempotency: HashMap<String, (Uuid, String)>,
     block_devices: HashMap<(String, String), BlockDeviceObservation>,
     last_attached_device: Option<BlockDeviceAttachment>,
+    last_create_request: Option<CreateInstanceRequest>,
     create_calls: usize,
     inspect_dispatches: usize,
     last_inspect_provider_instance_id: Option<String>,
@@ -446,6 +447,7 @@ impl FakeComputeProvider {
                 idempotency: HashMap::new(),
                 block_devices: HashMap::new(),
                 last_attached_device: None,
+                last_create_request: None,
                 create_calls: 0,
                 inspect_dispatches: 0,
                 last_inspect_provider_instance_id: None,
@@ -519,6 +521,28 @@ impl FakeComputeProvider {
             .lock()
             .map(|state| state.instances.len())
             .unwrap_or_default()
+    }
+
+    /// The provider-side instance identities currently materialized by this
+    /// fake. Test-support accessor: it lets a process-boundary test assert that
+    /// independent runtimes converge on one deterministic provider identity
+    /// (`fake-<server id>`) instead of minting competing provider resources.
+    #[must_use]
+    pub fn instance_ids(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|state| state.instances.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Returns the latest create request for boundary tests. The request is
+    /// retained only by the in-memory fake and is never logged or serialized.
+    #[must_use]
+    pub fn last_create_request(&self) -> Option<CreateInstanceRequest> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|state| state.last_create_request.clone())
     }
 
     /// The most recent block-device attachment dispatched to the compute
@@ -630,6 +654,7 @@ impl ComputeProvider for FakeComputeProvider {
     ) -> Result<Operation, ProviderError> {
         let mut state = self.lock()?;
         state.create_calls += 1;
+        state.last_create_request = Some(request.clone());
         if matches!(state.failure, FailureInjection::TerminalOnRedrive) && state.create_calls > 1 {
             return Err(ProviderError::Terminal);
         }

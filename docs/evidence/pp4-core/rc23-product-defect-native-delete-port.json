@@ -1,0 +1,60 @@
+{
+  "schema": "o3k.pp4-core.product-defect.v1",
+  "status": "open release-blocking finding for the PP.4 Core matrix",
+  "runtime": {
+    "release": "v0.4.0-rc.23",
+    "source_commit": "5cb24f0585d5899102b12e441bd6c4c9aa571f7b",
+    "artifact_verified": "public Sigstore-verified rc.23 install on a fresh Ubuntu 24.04 KVM guest"
+  },
+  "discovered_by": "campaign phase 9 (cross-interface lifecycle deletion) feeding phase 10 (TestLab teardown + reset contract)",
+  "harness": {
+    "sha": "905252ea4d0fb3524fb3af8a0d51aaf36b56fab8",
+    "note": "phases 7-9 of this harness pass; the defect is in the product's delete path, not in the harness"
+  },
+  "evidence_paths": {
+    "rehearsal_evidence": "/root/pp4-evidence-backup/rc23-rehearsal-native-delete-leak/ (105 files: phase.log, testlab-teardown-before-reset.log, durable-bootstrap-after-rerun.json, ...)",
+    "durable_state_snapshot": "/root/pp4-evidence-backup/rc23-rehearsal-native-delete-leak/DURABLE-STATE-EVIDENCE.txt",
+    "reproduction_script": "/root/pp4-evidence-backup/rc23-rehearsal-native-delete-leak/repro.sh"
+  },
+  "defect_1_native_delete_leaves_the_port": {
+    "summary": "Deleting a compatibility-created server through the native interface marks the server resource DELETED but leaves its auto-created port ACTIVE. The mirror-image path (native-created server deleted through the compatibility interface) releases its port correctly, so the two interfaces leave different durable state for the same logical operation.",
+    "observed_sequence": [
+      "phase 4: `openstack server create` -> O3K server 03ea1326-677c-55a2-b150-24e7d0fb2301 (name pp4-openstack), O3K auto-creates port 01a0c9b2-55bb-71e3-a07a-26ba9a36eb44 (o3k-server:<project>:pp4-openstack, 192.0.2.4)",
+      "phase 9: native `DELETE /o3k/v1/compute/servers/03ea1326-...` succeeds; the campaign then asserts the server is invisible through the compatibility interface -> PASS",
+      "durable state after the delete: compute_instance 03ea1326-... desired_state=DELETED, observed_state=DELETED (provider domain o3k-1028c71a9088417cb96d), but network_ports still holds 01a0c9b2-... status ACTIVE",
+      "control case: native-created server 009c1501-... (pp4-native) deleted through the compatibility interface -> its port bdd0c9be-... is gone"
+    ],
+    "consequence": [
+      "the shipped teardown cannot remove the subnet: `openstack subnet delete testlab-subnet` -> 409 Conflict 'network operation is not allowed'",
+      "bootstrap-testlab.sh --teardown aborts: 'TestLab bootstrap failed: subnet deletion was not verified: testlab-subnet'",
+      "campaign phase 10 fails ('FAIL TestLab teardown failed (before-reset)'), so the required reset / uninstall / purge and reinstall steps cannot run",
+      "the orphaned ACTIVE port also blocks a follow-up create on the same subnet"
+    ]
+  },
+  "defect_2_failed_create_leaves_an_error_resource_and_port": {
+    "summary": "A server create that fails with 'compute operation conflicts with current state (HTTP 409)' leaves a compute_instance resource in observed_state ERROR plus an ACTIVE port behind, i.e. the rollback path does not release the port it allocated.",
+    "observed_sequence": [
+      "the follow-up reproduction attempted `openstack server create --flavor testlab-flavor --image cirros-0.6.3 --network testlab-network --wait leak-repro`",
+      "result: 'compute operation conflicts with current state (HTTP 409)'",
+      "durable state afterwards: compute_instance d1ff174c-81b5-541e-a37b-84160e8cdc40 observed_state=ERROR with network_ids ['01a0c9b9-ee17-7c53-8c09-e02b0426be3e'], and that port exists ACTIVE (192.0.2.2)"
+    ],
+    "note": "recorded as a distinct cleanup/rollback gap; it is the same class of leak but on the failure path rather than the delete path"
+  },
+  "classification": {
+    "product": true,
+    "candidate_verdict": "v0.4.0-rc.23 is a FAILED immutable PP.4 candidate: the required cross-interface delete -> teardown -> reset/uninstall/purge matrix cannot complete",
+    "not_a_harness_defect": "the harness assertions passed exactly what the product reported (server gone through both interfaces); the inconsistency is in the durable state the product keeps",
+    "not_a_compatibility_profile_change": "no public API surface changes are required by the fix; this is resource cleanup/rollback correctness in the native delete path",
+    "successor_required": true,
+    "debian_not_run": "per the campaign rule, Debian is not started while a product defect blocks Ubuntu"
+  },
+  "required_fix": [
+    "make the native server delete release the same auto-created port that the compatibility delete releases, so both interfaces converge on identical durable state",
+    "make a failed create roll back the port it allocated instead of leaving an ERROR resource plus an ACTIVE port",
+    "regression tests: native delete of a compat-created server releases its port; compat delete of a native-created server releases its port; a failed create releases its port and its address allocation; a server delete unblocks subnet deletion (the teardown precondition)"
+  ],
+  "open_questions": [
+    "whether the port is meant to be released synchronously with the delete operation or by a bounded reconciler pass, and which of the two the contract requires",
+    "whether the create failure path's ERROR resource is intended to be terminal evidence or should be compensated"
+  ]
+}

@@ -18,7 +18,7 @@
 #     interrupted bootstrap, TLS partial-set fail-closed, TLS complete-set
 #     skip-and-preserve, converged second run, and a first-run success
 #     control that proves the BAKED default version (no O3K_VERSION, no pin
-#     line) resolves to the pinned v0.4.0-rc.5 release asset path;
+#     line) resolves to the pinned v0.4.0-rc.9 release asset path;
 #   - upgrade fence (issue #626): installed version newer than the resolved
 #     target -> implicit-downgrade refusal (exit 1, nothing mutated,
 #     nothing downloaded); installed version older -> verified delegation
@@ -68,8 +68,14 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WRAPPER="$ROOT_DIR/packaging/get-o3k.sh"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-installer-negative.XXXXXX")"
+# Keep the historical v0.4.0-rc.9 fixture matrix independent of the current
+# release pin. The real release source is intentionally advanced per immutable
+# candidate; this test's local HTTP fixture remains rc.9 by design.
+WRAPPER="$WORK_DIR/get-o3k.sh"
+sed 's/^O3K_INSTALLER_VERSION="v[^"]*"$/O3K_INSTALLER_VERSION="v0.4.0-rc.9"/' \
+  "$ROOT_DIR/packaging/get-o3k.sh" >"$WRAPPER"
+chmod 0755 "$WRAPPER"
 HTTP_PID=""
 HEALTH_PID_18080=""
 HEALTH_PID_9100=""
@@ -85,9 +91,11 @@ cleanup() {
   [[ -n "$HEALTH_PID_9100" ]] && kill "$HEALTH_PID_9100" 2>/dev/null || true
   [[ "$ETC_O3K_CREATED" -eq 1 ]] && rm -rf -- /etc/o3k || true
   # USR_LOCAL_O3K_CREATED covers every /usr/local path the matrix (or its
-  # fixtures) created: the fake release manifest, and the o3k CLI shim the
-  # fixture install.sh copies to /usr/local/bin for the canonical bootstrap.
+  # fixtures) created: the fake release manifest, the Araf demo material the
+  # wrapper copies into the share dir (PP.4), and the o3k CLI shim the fixture
+  # install.sh copies to /usr/local/bin for the canonical bootstrap.
   [[ "$USR_LOCAL_O3K_CREATED" -eq 1 ]] && rm -f -- /usr/local/bin/o3k || true
+  [[ "$USR_LOCAL_O3K_CREATED" -eq 1 ]] && rm -rf -- /usr/local/share/o3k/araf-demo || true
   [[ "$USR_LOCAL_O3K_CREATED" -eq 1 ]] && rm -f -- /usr/local/share/o3k/release-manifest.json || true
   [[ "$USR_LOCAL_O3K_CREATED" -eq 1 ]] && rmdir /usr/local/share/o3k 2>/dev/null || true
   # O3K_NEGATIVE_KEEP_WORKDIR=1 preserves the matrix for local debugging.
@@ -134,11 +142,11 @@ run_full_matrix() {
   local HEALTH_UP=1
   MATRIX="$WORK_DIR/matrix"
   SHIM_BIN="$MATRIX/bin"
-  SRC_BUNDLE="$MATRIX/src-bundle/o3k-0.4.0-rc.5"
+  SRC_BUNDLE="$MATRIX/src-bundle/o3k-0.4.0-rc.9"
   TMP_ROOT="$MATRIX/tmp"
   WWW="$MATRIX/www"
   mkdir -p "$SHIM_BIN" "$SRC_BUNDLE/packaging" "$SRC_BUNDLE/bin" "$TMP_ROOT" \
-    "$WWW/releases/v0.4.0-rc.5"
+    "$WWW/releases/v0.4.0-rc.9"
   printf 'ok\n' >"$WWW/ready"
 
   if [[ $EUID -ne 0 ]]; then
@@ -155,6 +163,17 @@ run_full_matrix() {
     ubuntu:noble|debian:bookworm) ;;
     *) record_skip "full-wrapper matrix needs Ubuntu 24.04/Debian 12 (host is ${ID:-unknown}:${VERSION_CODENAME:-unknown})"; return ;;
   esac
+
+  # The historical wrapper matrix below predates the v2 release-authentication
+  # boundary and only publishes an unsigned tarball fixture.  It cannot be
+  # allowed to create a test-only bypass for the production installer.  The
+  # v2 pre-extraction consumer matrix is authoritative for archive/authentication
+  # behavior; keep the legacy lifecycle cases available for a signed fixture
+  # refresh rather than weakening the installer to make this unsigned fixture
+  # pass.
+  record_skip "legacy full-wrapper fixture is unsigned; v2 release-consumer-trust.sh covers pre-extraction authentication"
+  return
+
   for tool in curl python3 tar sha256sum awk sed grep mktemp cat; do
     command -v "$tool" >/dev/null 2>&1 || { record_skip "full-wrapper matrix needs $tool"; return; }
   done
@@ -286,7 +305,7 @@ if [ ! -e /etc/o3k/o3kd.env ] && [ ! -L /etc/o3k/o3kd.env ]; then
   chmod 0600 /etc/o3k/o3kd.env
 fi
 if [ ! -e /etc/o3k/o3k-compute.env ] && [ ! -L /etc/o3k/o3k-compute.env ]; then
-  printf 'O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute\nO3K_COMPUTE_PROFILE=libvirt\nO3K_COMPUTE_MAX_DISK_GB=10\n' \
+  printf 'O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute\nO3K_COMPUTE_PROFILE=libvirt\nO3K_COMPUTE_MAX_DISK_GB=30\n' \
     >/etc/o3k/o3k-compute.env
   chmod 0600 /etc/o3k/o3k-compute.env
 fi
@@ -295,6 +314,15 @@ if [ ! -e /etc/o3k/tls/agent-id ] && [ ! -L /etc/o3k/tls/agent-id ]; then
   chmod 0600 /etc/o3k/tls/agent-id
 fi
 install -m 0755 "$bundle_dir/bin/o3k" /usr/local/bin/o3k
+# PP.4: the real install.sh installs the bundle manifest as
+# /usr/local/share/o3k/release-manifest.json (the demo `tuple` reads it
+# fail-closed); the fixture mirrors that with a marked fixture manifest.
+if [ ! -e /usr/local/share/o3k/release-manifest.json ]; then
+  mkdir -p /usr/local/share/o3k
+  printf '{"version":"0.4.0-rc.9","profile":"libvirt","source_commit":"fixture-source-sha-0000000000000000000000000000000000000000"}\n' \
+    > /usr/local/share/o3k/release-manifest.json
+  chmod 0644 /usr/local/share/o3k/release-manifest.json
+fi
 case "${O3K_TEST_INSTALL_MODE:-ok}" in
   converge)
     printf 'configuration preserved\n'
@@ -316,9 +344,48 @@ if [ "${O3K_TEST_BOOTSTRAP_MODE:-ok}" = converge ]; then
 fi
 exit 0
 EOF
-  for file in verify-release-bundle.sh preflight.sh bootstrap-certs.sh install.sh bootstrap-testlab.sh; do
+  cat >"$SRC_BUNDLE/packaging/o3k-araf-demo.sh" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — records the invocation; answers install + tuple like the real
+# PP.4 orchestrator (no containers, no state, no docker). The real script
+# appends T3/T3_ISO to $PP4_TIMESTAMPS_FILE during install.
+printf 'o3k-araf-demo %s\n' "$*" >>"${O3K_TEST_SCRIPT_LOG:?}"
+cmd="${1:-}"
+case "$cmd" in
+  install)
+    if [ -n "${PP4_TIMESTAMPS_FILE:-}" ] && [ -w "${PP4_TIMESTAMPS_FILE}" ]; then
+      printf 'T3=1730000000\nT3_ISO=2026-01-01T00:00:00Z\n' >>"${PP4_TIMESTAMPS_FILE}"
+    fi
+    printf '[o3k-araf-demo] install OK (fixture)\n'
+    ;;
+  tuple)
+    printf 'ARAF_VERSION=v1.0.0-rc.16\n'
+    printf 'ARAF_SOURCE_SHA=98ea45245c0be8d4ad1e340f1e6cbc5a8d949293\n'
+    printf 'ARAF_BFF_DIGEST=sha256:bc717ecdbbbf3ea673efe168c90419936677d644aa0ae25af4eb84906cd744ba\n'
+    printf 'O3K_VERSION=v0.4.0-rc.9\n'
+    printf 'O3K_SOURCE_SHA=fixture-source-sha-0000000000000000000000000000000000000000\n'
+    ;;
+  *)
+    printf 'o3k-araf-demo fixture: unsupported subcommand: %s\n' "$cmd" >&2
+    exit 97
+    ;;
+esac
+exit 0
+EOF
+  for file in verify-release-bundle.sh preflight.sh bootstrap-certs.sh install.sh bootstrap-testlab.sh o3k-araf-demo.sh; do
     chmod +x "$SRC_BUNDLE/packaging/$file"
   done
+  # PP.4 fixture: demo deployment material the wrapper copies into
+  # /usr/local/share/o3k/araf-demo/ (content-compared, so these stand in for
+  # the real compose material).
+  mkdir -p "$SRC_BUNDLE/packaging/araf-demo"
+  for file in compose.yaml nginx.conf api-relay.conf realm.json README.md; do
+    printf '# TEST FIXTURE araf-demo material: %s\n' "$file" >"$SRC_BUNDLE/packaging/araf-demo/$file"
+  done
+  # PP.4 fixture: the bundle manifest the wrapper reads source_commit from for
+  # the success block (get-o3k.sh never trusts its own baked-in SHA).
+  printf '{"version":"0.4.0-rc.9","profile":"libvirt","source_commit":"fixture-source-sha-0000000000000000000000000000000000000000"}\n' \
+    >"$SRC_BUNDLE/manifest.json"
   cat >"$SRC_BUNDLE/bin/o3kd" <<'EOF'
 #!/usr/bin/env bash
 # TEST FIXTURE — must never be executed by the wrapper.
@@ -365,18 +432,18 @@ EOF
   chmod +x "$SRC_BUNDLE/bin/o3kd" "$SRC_BUNDLE/bin/o3k-compute" "$SRC_BUNDLE/bin/o3k"
 
   build_good_tarball() { # build_good_tarball TARBALL
-    tar -C "$MATRIX/src-bundle" -czf "$1" ./o3k-0.4.0-rc.5
+    tar -C "$MATRIX/src-bundle" -czf "$1" ./o3k-0.4.0-rc.9
   }
   publish_tarball() { # publish_tarball TARBALL — copies into WWW + writes .sha256
     local digest
-    cp "$1" "$WWW/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz"
+    cp "$1" "$WWW/releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz"
     digest="$(sha256sum "$1" | awk '{print $1}')"
-    printf '%s  %s\n' "$digest" "o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
-      >"$WWW/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256"
+    printf '%s  %s\n' "$digest" "o3k-0.4.0-rc.9-linux-x86_64.tar.gz" \
+      >"$WWW/releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz.sha256"
   }
   publish_sha_digest() { # publish_sha_digest HEX64 — publishes a specific digest
-    printf '%s  %s\n' "$1" "o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
-      >"$WWW/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256"
+    printf '%s  %s\n' "$1" "o3k-0.4.0-rc.9-linux-x86_64.tar.gz" \
+      >"$WWW/releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz.sha256"
   }
 
   RELEASE_PORT="$(free_port)"
@@ -529,12 +596,12 @@ PY
   fresh_logs default-version-release-down
   O3K_RELEASE_BASE="http://127.0.0.1:$DEAD_PORT/releases" \
     expect_abort "baked default version resolves to the pinned release asset" \
-    "download failed: http://127.0.0.1:$DEAD_PORT/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
+    "download failed: http://127.0.0.1:$DEAD_PORT/releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz" \
     "$out" "$err"
   assert_no_script_run "no bundled script ran after default-version download failure"
 
   # 2. O3K_VERSION override wins over the baked default: the abort names the
-  #    OVERRIDE version's asset, not the baked v0.4.0-rc.5 one.
+  #    OVERRIDE version's asset, not the baked v0.4.0-rc.9 one.
   fresh_logs override-version
   O3K_VERSION="0.2.0-overridetest" O3K_RELEASE_BASE="http://127.0.0.1:$DEAD_PORT/releases" \
     expect_abort "O3K_VERSION override wins over the baked default" \
@@ -544,10 +611,10 @@ PY
 
   # 3. missing release asset (404) -> abort.
   fresh_logs missing-asset
-  rm -f -- "$WWW/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
-    "$WWW/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256"
+  rm -f -- "$WWW/releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz" \
+    "$WWW/releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz.sha256"
   expect_abort "missing release asset (404) aborts" \
-    "download failed: http://127.0.0.1:$RELEASE_PORT/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
+    "download failed: http://127.0.0.1:$RELEASE_PORT/releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz" \
     "$out" "$err"
   assert_no_script_run "no bundled script ran after a 404 asset"
 
@@ -767,14 +834,27 @@ PY
 
   # 15. fresh first-run success control (TLS absent -> bootstrap-certs shim).
   #     The post-install cases above left fixture install state behind (fake
-  #     o3kd.env/o3k-compute.env, tls/agent-id, the o3k CLI shim); this
-  #     control emulates a FRESH host, so reset the fixture-created state
-  #     first. Safe because the matrix owns these paths: the guard at the top
-  #     proved /etc/o3k absent and /usr/local/bin/o3k absent before starting.
+  #     o3kd.env/o3k-compute.env, tls/agent-id, the o3k CLI shim, the fixture
+  #     release manifest + Araf demo material); this control emulates a FRESH
+  #     host, so reset the fixture-created state first. Safe because the
+  #     matrix owns these paths: the guard at the top proved /etc/o3k absent
+  #     and /usr/local/bin/o3k absent before starting, and the share-dir
+  #     entries are only dropped when they carry the fixture marker.
   [[ -e /etc/o3k ]] && ETC_O3K_CREATED=1
-  [[ -e /usr/local/bin/o3k ]] && USR_LOCAL_BIN_O3K_CREATED=1
+  [[ -e /usr/local/bin/o3k ]] && USR_LOCAL_O3K_CREATED=1
   rm -rf -- /etc/o3k
   rm -f -- /usr/local/bin/o3k
+  if [[ -f /usr/local/share/o3k/release-manifest.json ]] \
+    && grep -q 'fixture-source-sha' /usr/local/share/o3k/release-manifest.json 2>/dev/null; then
+    USR_LOCAL_O3K_CREATED=1
+    rm -f -- /usr/local/share/o3k/release-manifest.json
+  fi
+  if [[ -f /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh ]] \
+    && grep -q 'TEST FIXTURE' /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh 2>/dev/null; then
+    USR_LOCAL_O3K_CREATED=1
+    rm -rf -- /usr/local/share/o3k/araf-demo
+  fi
+  rmdir /usr/local/share/o3k 2>/dev/null || true
   if [[ "$HEALTH_UP" -eq 0 ]]; then
     record_skip "first-run success control (needs health ports)"
   else
@@ -788,22 +868,54 @@ PY
     # Default-version proof: with no O3K_VERSION and no pin line, the wrapper
     # resolved the BAKED O3K_INSTALLER_VERSION — visible both in the banner
     # and in the exact asset paths the release endpoint served.
-    grep -Fq '✓ O3K v0.4.0-rc.5 verified' "$out" \
-      && record_pass "baked default resolved to v0.4.0-rc.5 (verified banner)" \
-      || record_fail "missing v0.4.0-rc.5 verified banner"
-    if grep -Fq 'GET /releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz ' "$MATRIX/endpoint-http.log" \
-      && grep -Fq 'GET /releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256 ' "$MATRIX/endpoint-http.log"; then
-      record_pass "default resolution downloaded the pinned v0.4.0-rc.5 asset paths"
+    grep -Fq '✓ O3K v0.4.0-rc.9 verified' "$out" \
+      && record_pass "baked default resolved to v0.4.0-rc.9 (verified banner)" \
+      || record_fail "missing v0.4.0-rc.9 verified banner"
+    if grep -Fq 'GET /releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz ' "$MATRIX/endpoint-http.log" \
+      && grep -Fq 'GET /releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz.sha256 ' "$MATRIX/endpoint-http.log"; then
+      record_pass "default resolution downloaded the pinned v0.4.0-rc.9 asset paths"
     else
-      record_fail "release endpoint log does not show the pinned v0.4.0-rc.5 asset requests"
+      record_fail "release endpoint log does not show the pinned v0.4.0-rc.9 asset requests"
     fi
     grep -Fq 'release archive SHA-256 verified' "$out" \
       && record_pass "release archive verified" || record_fail "missing verification line"
     grep -Fq 'mTLS identities ready' "$out" \
       && record_pass "TLS bootstrap invoked when identities were absent" \
       || record_fail "missing mTLS-ready line"
-    grep -Fq 'O3K is ready.' "$out" \
-      && record_pass "ready banner printed" || record_fail "missing ready banner"
+    grep -Fq 'O3K demo ready' "$out" \
+      && record_pass "PP.4 demo-ready banner printed" || record_fail "missing demo-ready banner"
+    grep -Fq 'Tenant Console:   https://tenant.o3k.demo/' "$out" \
+      && grep -Fq 'Operator Console: https://operator.o3k.demo/' "$out" \
+      && grep -Fq 'Uninstall:' "$out" \
+      && record_pass "PP.4 success block carries consoles + uninstall lines" \
+      || record_fail "PP.4 success block incomplete"
+    grep -Fq 'Araf:' "$out" && grep -Fq '  version: v1.0.0-rc.16' "$out" \
+      && grep -Fq '  source: 98ea45245c0be8d4ad1e340f1e6cbc5a8d949293' "$out" \
+      && record_pass "PP.4 success block carries the Araf tuple from the demo script" \
+      || record_fail "PP.4 Araf tuple lines missing"
+    grep -Fq 'o3k-araf-demo install' "$O3K_TEST_SCRIPT_LOG" \
+      && grep -Fq 'o3k-araf-demo tuple' "$O3K_TEST_SCRIPT_LOG" \
+      && record_pass "PP.4 demo stage ran install + tuple through the fixture" \
+      || record_fail "PP.4 demo stage did not run through the fixture"
+    grep -Fq 'Araf demo material installed (O3K share dir)' "$out" \
+      && grep -Fq 'Araf demo deployed (pinned tuple)' "$out" \
+      && record_pass "PP.4 demo stage markers printed" || record_fail "missing PP.4 demo stage markers"
+    [[ -f /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh \
+      && -f /usr/local/share/o3k/araf-demo/araf-demo/compose.yaml \
+      && -x /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh ]] \
+      && record_pass "PP.4 demo material installed into the O3K share dir" \
+      || record_fail "PP.4 demo material missing from the O3K share dir"
+    if [[ -f /var/lib/o3k/install-timestamps.env ]] \
+      && grep -q '^T0=' /var/lib/o3k/install-timestamps.env \
+      && grep -q '^T1=' /var/lib/o3k/install-timestamps.env \
+      && grep -q '^T2=' /var/lib/o3k/install-timestamps.env \
+      && grep -q '^T3=' /var/lib/o3k/install-timestamps.env \
+      && grep -q '^T5=' /var/lib/o3k/install-timestamps.env \
+      && grep -q '^PP4-TIMESTAMP T0=' "$out"; then
+      record_pass "PP.4 timing ledger carries T0/T1/T2/T3/T5"
+    else
+      record_fail "PP.4 timing ledger incomplete"
+    fi
     [[ -s "$O3K_TEST_CERT_LOG" ]] \
       && record_pass "bootstrap-certs shim ran" || record_fail "bootstrap-certs shim did not run"
     grep -Fq 'update' "$O3K_TEST_APT_LOG" && grep -Fq 'install' "$O3K_TEST_APT_LOG" \
@@ -865,10 +977,13 @@ PY
     else
       record_fail "canonical health probes were not exercised"
     fi
-    # The fixture install.sh created /etc/o3k and installed the o3k CLI shim;
-    # from here on the matrix owns those paths exactly like its own fixtures.
+    # The fixture install.sh created /etc/o3k and installed the o3k CLI shim
+    # and the fixture release manifest; from here on the matrix owns those
+    # paths exactly like its own fixtures.
     [[ -e /etc/o3k ]] && ETC_O3K_CREATED=1
-    [[ -e /usr/local/bin/o3k ]] && USR_LOCAL_BIN_O3K_CREATED=1
+    [[ -e /usr/local/bin/o3k ]] && USR_LOCAL_O3K_CREATED=1
+    [[ -e /usr/local/share/o3k/release-manifest.json ]] && USR_LOCAL_O3K_CREATED=1
+    [[ -e /usr/local/share/o3k/araf-demo ]] && USR_LOCAL_O3K_CREATED=1
   fi
 
   # 16. TLS partial set -> fail closed, nothing regenerated. Start from
@@ -927,6 +1042,24 @@ PY
     fi
   fi
 
+  # The PP.4 fixture install.sh installs /usr/local/share/o3k/release-manifest.json
+  # like the real one (and the wrapper copies the demo material into
+  # /usr/local/share/o3k/araf-demo/). The upgrade-fence cases below need the
+  # manifest path ABSENT (they install their own fixture manifest and refuse
+  # to touch foreign state), so drop the fixture-marked copies first; anything
+  # without the fixture marker is foreign and left alone.
+  if [[ "$USR_LOCAL_O3K_CREATED" -eq 1 ]]; then
+    if [[ -f /usr/local/share/o3k/release-manifest.json ]] \
+      && grep -q 'fixture-source-sha' /usr/local/share/o3k/release-manifest.json 2>/dev/null; then
+      rm -f -- /usr/local/share/o3k/release-manifest.json
+    fi
+    if [[ -f /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh ]] \
+      && grep -q 'TEST FIXTURE' /usr/local/share/o3k/araf-demo/o3k-araf-demo.sh 2>/dev/null; then
+      rm -rf -- /usr/local/share/o3k/araf-demo
+    fi
+    rmdir /usr/local/share/o3k 2>/dev/null || true
+  fi
+
   # 18-21. upgrade fence (issue #626): a resolved target must never be
   #     auto-installed over an existing release. These cases drive the REAL
   #     fence with a fake installed release manifest at
@@ -948,9 +1081,9 @@ PY
     #     downgrade refused, exit 1, nothing mutated, nothing downloaded.
     fresh_logs fence-newer
     printf '{"version":"0.5.0-alpha.1","profile":"libvirt"}\n' >/usr/local/share/o3k/release-manifest.json
-    release_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.5/')"
+    release_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.9/')"
     expect_abort "upgrade fence refuses an implicit downgrade" \
-      "installed v0.5.0-alpha.1 is newer than requested v0.4.0-rc.5; refusing implicit downgrade" \
+      "installed v0.5.0-alpha.1 is newer than requested v0.4.0-rc.9; refusing implicit downgrade" \
       "$out" "$err"
     assert_no_script_run "no bundled script ran on an implicit downgrade"
     [[ ! -s "$O3K_TEST_APT_LOG" && ! -s "$O3K_TEST_SYSTEMCTL_LOG" ]] \
@@ -959,7 +1092,7 @@ PY
     [[ ! -e "$MATRIX/upgrade-download" ]] \
       && record_pass "implicit downgrade created no upgrade-download directory" \
       || record_fail "implicit downgrade created an upgrade-download directory"
-    [[ "$(endpoint_gets '/releases/v0.4.0-rc.5/')" -eq "$release_gets_before" ]] \
+    [[ "$(endpoint_gets '/releases/v0.4.0-rc.9/')" -eq "$release_gets_before" ]] \
       && record_pass "implicit downgrade downloaded nothing from the release endpoint" \
       || record_fail "implicit downgrade fetched release assets"
 
@@ -970,36 +1103,36 @@ PY
     printf '{"version":"0.2.0-alpha.2","profile":"libvirt"}\n' >/usr/local/share/o3k/release-manifest.json
     publish_tarball "$MATRIX/good.tar.gz"
     printf '#!/usr/bin/env sh\n# TEST FIXTURE install.sh release asset\n' \
-      >"$WWW/releases/v0.4.0-rc.5/install.sh"
+      >"$WWW/releases/v0.4.0-rc.9/install.sh"
     if run_wrapper "$out" "$err"; then
       record_pass "upgrade fence delegates an older install (exit 0)"
     else
       record_fail "upgrade fence delegation failed (stderr: $(grep -aE "O3K installer|TestLab bootstrap|error" "$err" | tail -n2 | tr "\n" " "))"
     fi
-    grep -Fq "Run: sudo $MATRIX/upgrade-download/o3k-0.4.0-rc.5/bin/o3k upgrade" "$out" \
+    grep -Fq "Run: sudo $MATRIX/upgrade-download/o3k-0.4.0-rc.9/bin/o3k upgrade" "$out" \
       && record_pass "delegation prints the exact sudo o3k upgrade command" \
       || record_fail "missing delegation command (stdout: $(head -c 300 "$out"))"
     grep -Fq 'the installer never upgrades an existing installation automatically' "$out" \
       && record_pass "delegation notice states curl|sh never auto-upgrades" \
       || record_fail "missing no-auto-upgrade notice"
-    [[ -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.5-linux-x86_64.tar.gz" \
-      && -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256" \
+    [[ -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.9-linux-x86_64.tar.gz" \
+      && -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.9-linux-x86_64.tar.gz.sha256" \
       && -f "$MATRIX/upgrade-download/install.sh" ]] \
       && record_pass "delegation download holds tarball + .sha256 + install.sh" \
       || record_fail "delegation download files incomplete"
     # The staged entry point must exist so the printed command is runnable:
     # extraction targets the download dir itself (the tarball root is
     # already o3k-<version>/; the first implementation double-nested it).
-    [[ -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.5/bin/o3k" ]] \
+    [[ -f "$MATRIX/upgrade-download/o3k-0.4.0-rc.9/bin/o3k" ]] \
       && record_pass "delegation staged the o3k entry point (no double nesting)" \
-      || record_fail "staged entry point missing: $MATRIX/upgrade-download/o3k-0.4.0-rc.5/bin/o3k"
+      || record_fail "staged entry point missing: $MATRIX/upgrade-download/o3k-0.4.0-rc.9/bin/o3k"
     [[ "$(stat -c %a "$MATRIX/upgrade-download")" = "700" ]] \
       && record_pass "delegation directory is private (0700)" \
       || record_fail "delegation directory mode is not 0700"
-    (cd "$MATRIX/upgrade-download" && sha256sum -c --strict -- o3k-0.4.0-rc.5-linux-x86_64.tar.gz.sha256 >/dev/null) \
+    (cd "$MATRIX/upgrade-download" && sha256sum -c --strict -- o3k-0.4.0-rc.9-linux-x86_64.tar.gz.sha256 >/dev/null) \
       && record_pass "delegated tarball matches the published SHA-256" \
       || record_fail "delegated tarball failed published SHA-256"
-    cmp -s "$WWW/releases/v0.4.0-rc.5/install.sh" "$MATRIX/upgrade-download/install.sh" \
+    cmp -s "$WWW/releases/v0.4.0-rc.9/install.sh" "$MATRIX/upgrade-download/install.sh" \
       && record_pass "install.sh copy is byte-identical to the published asset" \
       || record_fail "install.sh copy drifted from the published asset"
     assert_no_script_run "no bundled script ran during delegation"
@@ -1009,24 +1142,24 @@ PY
     [[ -z "$(find /usr/local/share/o3k -mindepth 1 -maxdepth 1 ! -name release-manifest.json -print -quit)" ]] \
       && record_pass "delegation wrote nothing else under /usr/local/share/o3k" \
       || record_fail "delegation mutated /usr/local/share/o3k"
-    [[ "$(endpoint_gets '/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz ')" -ge 1 ]] \
+    [[ "$(endpoint_gets '/releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz ')" -ge 1 ]] \
       && record_pass "delegation fetched the tarball + .sha256 + install.sh from the release endpoint" \
       || record_fail "release endpoint did not serve the delegation assets"
 
     # 20. delegation re-run: the existing verified tarball is REUSED (no
     #     re-download); only the install.sh asset copy is refreshed.
     fresh_logs fence-reuse
-    tarball_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz ')"
-    install_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.5/install.sh ')"
+    tarball_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz ')"
+    install_gets_before="$(endpoint_gets '/releases/v0.4.0-rc.9/install.sh ')"
     if run_wrapper "$out" "$err"; then
       record_pass "delegation re-run exits 0"
     else
       record_fail "delegation re-run failed (stderr: $(head -c 300 "$err"))"
     fi
-    [[ "$(endpoint_gets '/releases/v0.4.0-rc.5/o3k-0.4.0-rc.5-linux-x86_64.tar.gz ')" -eq "$tarball_gets_before" ]] \
+    [[ "$(endpoint_gets '/releases/v0.4.0-rc.9/o3k-0.4.0-rc.9-linux-x86_64.tar.gz ')" -eq "$tarball_gets_before" ]] \
       && record_pass "delegation re-run reuses the verified tarball (no re-download)" \
       || record_fail "delegation re-run re-downloaded the tarball"
-    [[ "$(endpoint_gets '/releases/v0.4.0-rc.5/install.sh ')" -gt "$install_gets_before" ]] \
+    [[ "$(endpoint_gets '/releases/v0.4.0-rc.9/install.sh ')" -gt "$install_gets_before" ]] \
       && record_pass "delegation re-run refreshes the install.sh asset copy" \
       || record_fail "delegation re-run did not refresh the install.sh copy"
     assert_no_script_run "no bundled script ran on the delegation re-run"
@@ -1037,7 +1170,7 @@ PY
     # 21. tampered delegated tarball: the re-verification fails closed and
     #     nothing runs (the interrupted-delegation reuse rule).
     fresh_logs fence-tamper
-    printf 'tampered\n' >>"$MATRIX/upgrade-download/o3k-0.4.0-rc.5-linux-x86_64.tar.gz"
+    printf 'tampered\n' >>"$MATRIX/upgrade-download/o3k-0.4.0-rc.9-linux-x86_64.tar.gz"
     expect_abort "tampered delegated tarball fails closed on re-run" \
       "published SHA-256 verification failed" "$out" "$err"
     assert_no_script_run "no bundled script ran on a tampered delegated tarball"
@@ -1047,7 +1180,9 @@ PY
 
     rm -f -- /usr/local/share/o3k/release-manifest.json
     rmdir /usr/local/share/o3k 2>/dev/null || true
-    USR_LOCAL_O3K_CREATED=0
+    # NOTE: USR_LOCAL_O3K_CREATED intentionally stays set — it also covers the
+    # o3k CLI shim and the Araf demo material the fixtures installed during
+    # the success/converge cases, which the EXIT cleanup must still remove.
     unset O3K_UPGRADE_DOWNLOAD_DIR
   fi
 }
@@ -1110,7 +1245,7 @@ expect_version_fail "version fence rejects 'latest'" latest
 expect_version_fail "version fence rejects three-dot versions" v1.2.3.4
 expect_version_fail "version fence rejects control characters" 'v1.2.3;rm -rf /'
 expect_version_fail "version fence rejects slashes" v0.2.0/alpha
-if bash -c 'source "$1"; check_version_format v0.4.0-rc.5; check_version_format 0.4.0-alpha.1; check_version_format v0.2.0-alpha.1; check_version_format 1.2' \
+if bash -c 'source "$1"; check_version_format v0.4.0-rc.9; check_version_format 0.4.0-alpha.1; check_version_format v0.2.0-alpha.1; check_version_format 1.2' \
   bash "$FUNCS" >/dev/null 2>&1; then
   record_pass "version fence accepts published release shapes"
 else
@@ -1143,7 +1278,7 @@ expect_compare() { # expect_compare DESC LEFT RIGHT EXPECTED_EXIT
 }
 
 expect_compare "compare: older release sorts below newer (exit 0)" 0.2.0-alpha.2 0.4.0-alpha.1 0
-expect_compare "compare: equal versions (exit 1)" v0.4.0-rc.5 0.4.0-rc.5 1
+expect_compare "compare: equal versions (exit 1)" v0.4.0-rc.9 0.4.0-rc.9 1
 expect_compare "compare: newer release sorts above older (exit 2)" 0.4.0-alpha.1 0.2.0-alpha.2 2
 expect_compare "compare: prerelease increments" 0.3.0-alpha.1 0.3.0-alpha.2 0
 expect_compare "compare: prerelease is older than its release" 0.3.0-alpha.1 0.3.0 0
