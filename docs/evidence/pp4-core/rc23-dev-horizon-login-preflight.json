@@ -1,0 +1,71 @@
+{
+  "status": "NON-CERTIFYING development confirmation",
+  "warning": "This is not PP.4 Core certification evidence. It was produced by hand-swapping a locally built o3kd binary into a retained rc.22 debug VM, which the campaign rules allow only for development confirmation. Final evidence must come from the public successor candidate installed on a fresh host.",
+  "purpose": "Confirm that the bounded Keystone unscoped-authentication change makes the pinned unmodified Horizon client able to establish an authenticated session, before spending a release candidate on it.",
+  "runtime_under_development": {
+    "binary": "o3kd built from the working tree (release profile)",
+    "installed_over": "v0.4.0-rc.22 /usr/local/bin/o3kd (original preserved as /usr/local/bin/o3kd.rc22.bak)",
+    "host": "retained disposable Ubuntu 24.04 KVM debug VM at /tmp/o3k-pp4-core.NHLevK (ssh port 2392)"
+  },
+  "horizon_client": {
+    "role": "pinned external OpenStack compatibility witness, unmodified",
+    "image": "quay.io/openstack.kolla/horizon:2026.1-ubuntu-noble",
+    "digest": "sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048",
+    "horizon_version": "25.7.4.dev26",
+    "served_by": "uWSGI (this image ships no Apache)"
+  },
+  "observed_identity_sequence": [
+    "POST /v3/auth/tokens (unscoped password) -> 201, unscoped token",
+    "GET /v3/users/{user_id}/projects -> 200, the subject's authorized projects",
+    "POST /v3/auth/tokens (project-scoped password) -> 201, scoped token",
+    "login POST -> 302 / and an authenticated Horizon session"
+  ],
+  "correction_to_the_accepted_assumption": {
+    "assumed_endpoint": "GET /v3/auth/projects",
+    "endpoint_the_pinned_client_actually_calls": "GET /v3/users/{user_id}/projects",
+    "client_source": "openstack_auth/plugin/base.py:87 -> client.projects.list(user=auth_ref.user_id)",
+    "note": "Both routes are the same upstream capability, identity:list_projects_for_user. The witness implements both; only the /v3/users/{user_id}/projects form is exercised by this client. This was found only by capturing the real sequence, which the campaign rules require instead of assuming it."
+  },
+  "results": {
+    "auth_matrix_unscoped_vs_scoped": {
+      "/v2.1/{project}/servers": "unscoped 401, scoped 200",
+      "/v2.1/{project}/servers/detail": "unscoped 401, scoped 200",
+      "/v2/images": "unscoped 401, scoped 200",
+      "/v2.0/networks": "unscoped 401, scoped 200",
+      "/v3/auth/projects": "unscoped 200, scoped 200"
+    },
+    "unscoped_token_body_keys": ["expires_at", "issued_at", "methods", "user"],
+    "unscoped_token_project_roles_catalog_keys_present": false,
+    "auth_projects_invalid_token": 401,
+    "auth_projects_missing_token": 401,
+    "horizon_http_ready": "PASS (GET / -> 302 /auth/login/)",
+    "horizon_login": "PASS (login POST -> 302 /, authenticated session established)",
+    "horizon_project_context": "PASS (GET /project/ -> 200 authenticated dashboard, 'Overview - OpenStack Dashboard')",
+    "horizon_panels": {
+      "/identity/": "PASS",
+      "/project/images/": "PASS",
+      "/project/networks/": "PASS",
+      "/project/instances/": "FAIL HTTP 500"
+    },
+    "horizon_independent_readiness": "NOT PROVEN (the witness aborted before this step)"
+  },
+  "remaining_proven_mandatory_gaps": [
+    {
+      "gap": "GET /v3/projects returns 404",
+      "why_required": "The Horizon instance table resolves each server's project name through api.keystone.tenant_list, which calls keystoneclient projects.list() -> GET /v3/projects. Confirmed by the server-side traceback in openstack_dashboard/dashboards/identity/projects/views.py:107.",
+      "authorization_status": "NOT AUTHORIZED by the accepted bounded slice. The campaign brief explicitly withholds general project listing (and all /v3/projects CRUD) unless a real client request proves it mandatory and it receives separate baseline approval. The request is now proven mandatory; the approval is outstanding."
+    },
+    {
+      "gap": "Horizon compute version negotiation reports '2.1 is not a supported API version for the compute service, choices are: 2, 1.1, 2'",
+      "why_required": "Recoverable error observed while loading the instances panel.",
+      "authorization_status": "NOT AUTHORIZED. Separate Nova compatibility question; classify before widening."
+    },
+    {
+      "gap": "Horizon reports 'Endless pagination loop detected, aborting'",
+      "why_required": "Recoverable error observed while loading the instances panel.",
+      "authorization_status": "NOT AUTHORIZED. Separate Nova list pagination question; classify before widening."
+    }
+  ],
+  "conclusion": "The rc.22 login blocker is fixed and the pinned unmodified client now reaches an authenticated session with project context. PP.4 Core is still not certifiable: the required bounded instances panel and native-server visibility do not work yet, and the remaining gaps are outside the authorized slice.",
+  "secrets": "No credentials recorded; the Horizon session key used is a clearly non-secret local literal."
+}

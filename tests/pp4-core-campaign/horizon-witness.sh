@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
 # Bounded external Horizon witness for PP.4 Core.
 #
-# The witness runs the pinned, unmodified OpenStack Horizon 2024.1 image and
-# deploys it the way that image's own packaging expects: an ordinary
-# Apache/mod_wsgi vhost, an ordinary openstack_dashboard local_settings
-# module, and ordinary endpoint/region/session settings. There is no fork,
-# no source patch and no O3K-specific Horizon code.
+# The witness runs the pinned, unmodified OpenStack Horizon 2026.1 image and
+# deploys it exactly the way its own Kolla packaging expects: a Kolla
+# config.json, an operator-supplied uWSGI configuration, and ordinary
+# endpoint/region/session settings. There is no fork, no source patch and no
+# O3K-specific Horizon code.
 #
-# The pinned image is not a Kolla image: it has no kolla_start entrypoint, no
-# /var/lib/kolla/config_files tree, and its CMD is /bin/bash. It is also not
-# reached through the Docker bridge, because the O3K identity endpoint is
-# loopback-bound (O3K_LISTEN_ADDR=127.0.0.1:18080 for the libvirt profile).
-# The container therefore runs with host networking and reuses the endpoint
-# that /etc/o3k/admin-openrc already records.
+# Three properties of the pinned image are harness assumptions, not O3K
+# contracts, and each one has already hidden a defect behind a misclassified
+# failure:
+#
+# - It is a genuine Kolla image (`kolla_start` + `/var/lib/kolla/config_files`),
+#   so it needs KOLLA_CONFIG_STRATEGY and a config.json; and its own
+#   `kolla_extend_start` collects static assets, so the witness does not have
+#   to work around Horizon's STATIC_ROOT.
+# - Horizon settings are read through
+#   `openstack_dashboard/local/local_settings.py`, which this image ships as a
+#   symlink to `/etc/openstack-dashboard/local_settings.py` (with the `.py`
+#   suffix). A Kolla `dest` of `/etc/openstack-dashboard/local_settings` is
+#   copied but never imported.
+# - The O3K identity endpoint is loopback-bound (`O3K_LISTEN_ADDR`, for example
+#   `127.0.0.1:18080` for the libvirt profile). A bridge-networked container
+#   cannot reach it at any address, so the witness runs the container with host
+#   networking and reads the endpoint and region from `/etc/o3k/admin-openrc`
+#   instead of hardcoding them.
 #
 # Docker access is host test infrastructure, not a product dependency.
 # shellcheck disable=SC1090,SC1091,SC2024,SC2034,SC2154
@@ -22,25 +34,22 @@ WORKDIR="$(mktemp -d /tmp/pp4-horizon.XXXXXX)"
 cleanup(){ rm -rf -- "$WORKDIR"; }
 trap cleanup EXIT
 OPENRC="$WORKDIR/admin-openrc"; sudo cp /etc/o3k/admin-openrc "$OPENRC"; sudo chown "$(id -u):$(id -g)" "$OPENRC"; chmod 600 "$OPENRC"; source "$OPENRC"
-IMAGE="docker.io/openstackhelm/horizon:2024.1-ubuntu_jammy-20250523@sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b"
+IMAGE="quay.io/openstack.kolla/horizon:2026.1-ubuntu-noble@sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048"
 # Paths inside the pinned image's own virtualenv layout; not an O3K contract.
-SITE=/var/lib/openstack/lib/python3.10/site-packages/openstack_dashboard
+VENV=/var/lib/kolla/venv
+SITE=$VENV/lib/python3.12/site-packages/openstack_dashboard
 PORT=18091
 NAME=pp4-horizon-witness; CONF="$WORKDIR/config"; JAR="$EVID/horizon.jar"
 DOCKER=(sudo docker)
 summary(){ printf '%s\n' "$*" | tee -a "$EVID/horizon-summary.txt"; }
-# apache2 logs to files inside this image, so `docker logs` alone is empty.
-# Record bounded, non-secret container state and the Apache logs before the
-# witness gives up, otherwise a failed run cannot be classified.
+# uWSGI in this image logs to stdout, so `docker logs` carries the real
+# failure; capture it together with bounded, non-secret container state before
+# the witness gives up, otherwise a failed run cannot be classified.
 capture_diagnostics(){
   "${DOCKER[@]}" inspect "$NAME" --format \
     'running={{.State.Running}} status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}} error={{.State.Error}}' \
     >"$EVID/horizon-container-state.txt" 2>&1 || true
   "${DOCKER[@]}" logs "$NAME" >"$EVID/horizon-docker.log" 2>&1 || true
-  for stream in error access; do
-    "${DOCKER[@]}" exec "$NAME" sh -c "cat /var/log/apache2/$stream.log" \
-      >"$EVID/horizon-apache-$stream.log" 2>&1 || true
-  done
 }
 fail(){ summary "RESULT: FAIL $1"; capture_diagnostics; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; }
 optional(){ summary "RESULT: $1"; [[ "$REQUIRED" == 1 ]] && exit 1 || exit 0; }
@@ -55,18 +64,33 @@ printf 'image=%s\n' "$IMAGE" >"$EVID/horizon-image.txt"
 [[ "${OS_AUTH_URL:-}" =~ ^https?://[A-Za-z0-9._:-]+/v3/?$ ]] || fail identity-endpoint-unusable
 [[ "${OS_REGION_NAME:-}" =~ ^[A-Za-z0-9._-]+$ ]] || fail identity-region-unusable
 KEYSTONE_URL="${OS_AUTH_URL%/}"; REGION="$OS_REGION_NAME"
-mkdir -p "$CONF/sites-enabled"
-cat >"$CONF/local_settings.py" <<EOF
+mkdir -p "$CONF"
+cat >"$CONF/config.json" <<EOF
+{"command":"$VENV/bin/uwsgi --ini /var/lib/kolla/config_files/horizon.ini",
+ "config_files":[{"source":"/var/lib/kolla/config_files/local_settings","dest":"/etc/openstack-dashboard/local_settings.py","owner":"horizon","perm":"0640"}]}
+EOF
+cat >"$CONF/horizon.ini" <<EOF
+[uwsgi]
+http-socket = 0.0.0.0:$PORT
+chdir = $SITE
+wsgi-file = $SITE/wsgi.py
+pythonpath = $VENV/lib/python3.12/site-packages
+master = true
+processes = 4
+threads = 4
+enable-threads = true
+uid = horizon
+gid = kolla
+buffer-size = 65535
+EOF
+cat >"$CONF/local_settings" <<EOF
+import os
 DEBUG = False
 ALLOWED_HOSTS = ['*']
+WEBROOT = '/'
 # Local witness session key for the unmodified image; not a credential.
 SECRET_KEY = 'pp4-core-witness-local-session-key'
-# The image installs the dashboard into a virtualenv, so Horizon's default
-# STATIC_ROOT (site-packages/static) does not exist and is not writable by the
-# horizon user; django-compressor would raise PermissionError while rendering
-# the login page. Serve the witness from an ordinary writable root instead.
-COMPRESS_ENABLED = False
-STATIC_ROOT = '/var/lib/horizon/static'
+STATIC_ROOT = '/var/lib/kolla/static'
 OPENSTACK_API_VERSIONS = {'identity': 3, 'image': 2, 'volume': 3, 'compute': 2.1}
 OPENSTACK_HOST = '127.0.0.1'
 OPENSTACK_KEYSTONE_URL = '$KEYSTONE_URL'
@@ -75,37 +99,18 @@ OPENSTACK_ENDPOINT_TYPE = 'publicURL'
 # Pin the region instead of relying on unauthenticated version discovery, so
 # the session region matches the region O3K advertises in its catalog.
 AVAILABLE_REGIONS = [(OPENSTACK_KEYSTONE_URL, '$REGION')]
+# The image's default session backend is a per-process cache, so a session
+# written by one uWSGI worker is invisible to the others and login appears to
+# succeed while every later request is anonymous. Cookie-backed sessions are
+# stateless across workers and are an ordinary, supported Horizon setting.
+SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
 CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
 EOF
-cat >"$CONF/ports.conf" <<EOF
-Listen $PORT
-EOF
-cat >"$CONF/wsgi.conf" <<'EOF'
-WSGIDaemonProcess horizon user=horizon group=horizon processes=3 threads=10 display-name=%{GROUP}
-WSGIApplicationGroup %{GLOBAL}
-EOF
-cat >"$CONF/sites-enabled/000-horizon.conf" <<EOF
-<VirtualHost *:$PORT>
-    ServerName localhost
-    WSGIProcessGroup horizon
-    WSGIScriptAlias / $SITE/wsgi.py
-    WSGIPassAuthorization On
-    Alias /static /var/lib/horizon/static
-    <Directory $SITE>
-        Require all granted
-    </Directory>
-    <Directory /var/lib/horizon/static>
-        Require all granted
-    </Directory>
-</VirtualHost>
-EOF
-chmod 644 "$CONF/local_settings.py" "$CONF/ports.conf" "$CONF/wsgi.conf" "$CONF/sites-enabled/000-horizon.conf"
+chmod 0644 "$CONF/config.json" "$CONF/horizon.ini" "$CONF/local_settings"
 "${DOCKER[@]}" run -d --name "$NAME" --restart no --network host \
-  -v "$CONF/local_settings.py:$SITE/local/local_settings.py:ro" \
-  -v "$CONF/ports.conf:/etc/apache2/ports.conf:ro" \
-  -v "$CONF/wsgi.conf:/etc/apache2/conf-enabled/zz-horizon-wsgi.conf:ro" \
-  -v "$CONF/sites-enabled:/etc/apache2/sites-enabled:ro" \
-  "$IMAGE" /usr/sbin/apache2ctl -DFOREGROUND >"$EVID/horizon-run.txt" 2>&1 || fail container-start
+  -e KOLLA_CONFIG_STRATEGY=COPY_ALWAYS \
+  -v "$CONF:/var/lib/kolla/config_files:ro" \
+  "$IMAGE" >"$EVID/horizon-run.txt" 2>&1 || fail container-start
 ready=0
 for _ in $(seq 1 60); do
   curl -sf "http://127.0.0.1:$PORT/" >/dev/null 2>&1 && ready=1 && break
@@ -161,7 +166,12 @@ summary "login POST: HTTP-$login_code"
 project_code=$(curl -s -b "$JAR" -c "$JAR" "http://127.0.0.1:$PORT/project/" \
   -o "$EVID/horizon-project.html" -w '%{http_code}' || true)
 summary "project context: HTTP-$project_code"
-if ! grep -qi 'Log Out' "$EVID/horizon-project.html"; then fail login-session; fi
+# An authenticated session renders the dashboard with a sign-out affordance and
+# a panel title; an unauthenticated request is redirected to the login page.
+# The affordance label differs between Horizon series ("Log Out" before 2026.1,
+# "Sign Out" from 2026.1), so accept both rather than pin a version's wording.
+if ! grep -qiE 'sign out|log out' "$EVID/horizon-project.html"; then fail login-session; fi
+if grep -qiE '<title>[^<]*login' "$EVID/horizon-project.html"; then fail login-session; fi
 summary 'login: PASS'
 summary 'project context: PASS'
 for panel in /identity/ /project/images/ /project/networks/ /project/instances/; do
