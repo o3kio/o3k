@@ -46,6 +46,7 @@ mod identity;
 mod image;
 mod middleware;
 mod network;
+mod pagination;
 mod placement;
 mod volume;
 mod volume_attachment;
@@ -64,7 +65,10 @@ use crate::{
         list_flavor_extra_specs, list_flavors, list_keypairs, list_servers, server_action,
         show_flavor, show_keypair, show_server, show_server_metadata, update_server,
     },
-    identity::{check_token, issue_token, list_auth_projects, list_user_projects, validate_token},
+    identity::{
+        check_token, issue_token, list_auth_projects, list_projects, list_user_projects,
+        validate_token,
+    },
     image::{create_image, delete_image, download_image, list_images, show_image, upload_image},
     middleware::{compatibility_trace_middleware, microversion_middleware},
     network::{
@@ -405,6 +409,7 @@ pub fn router_with_state(state: AppState) -> Router {
             post(issue_token).get(validate_token).head(check_token),
         )
         .route("/v3/auth/projects", get(list_auth_projects))
+        .route("/v3/projects", get(list_projects))
         .route("/v3/users/{user_id}/projects", get(list_user_projects))
         .route("/v2/images", get(list_images).post(create_image))
         .route("/v2/images/{id}", get(show_image).delete(delete_image))

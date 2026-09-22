@@ -117,6 +117,14 @@ Required behavior:
   bounded capability addressed by identity and by user ID, and neither is
   project or user administration: no write operations, no pagination, no
   listing of another subject's scopes;
+- the bounded project-visibility read `GET /v3/projects`, required by the
+  unmodified Horizon 2026.1 Instances panel, which resolves a server's project
+  name through `keystoneclient`'s project list. It returns the same
+  authorization-filtered set as `GET /v3/auth/projects` — the caller's durable
+  role-assignment projects, and an empty list for a subject with no assignment —
+  and is explicitly not Keystone project administration: project
+  create/update/delete and an administrator list-all are unsupported, so it does
+  not satisfy `GET /v3/projects` for an administrator use case;
 - `X-Subject-Token` issuance;
 - token expiry and verification;
 - catalog for enabled profile services;

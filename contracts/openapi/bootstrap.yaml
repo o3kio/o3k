@@ -65,6 +65,28 @@ paths:
           description: Missing, invalid, or expired token.
         '503':
           description: Bootstrap identity is not configured.
+  /v3/projects:
+    get:
+      operationId: listProjects
+      summary: List the projects the authenticated subject holds a role assignment on
+      description: >-
+        Authorization-filtered project listing required by the pinned unmodified
+        Horizon 2026.1 client, whose Instances panel resolves each server's
+        project name through keystoneclient projects.list. It returns only the
+        caller's durable role-assignment projects and is not Keystone project
+        administration: there is no admin list-all and no project create,
+        update, or delete.
+      responses:
+        '200':
+          description: Caller's role-assignment projects.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorizedProjects'
+        '401':
+          description: Missing, invalid, or expired token.
+        '503':
+          description: Bootstrap identity is not configured.
   /healthz:
     get:
       operationId: getHealth

@@ -1484,6 +1484,163 @@ async fn keystone_user_projects_accepts_project_scoped_token()
     Ok(())
 }
 
+/// The bounded `GET /v3/projects` listing the unmodified Horizon 2026.1
+/// Instances panel needs to resolve a server's project name. It is authorized
+/// as a project-visibility read, never as Keystone project administration.
+#[tokio::test]
+async fn keystone_projects_lists_only_projects_authorized_for_the_caller()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let (token, _) = issue_keystone_token(&router, project_scoped_password_body()).await?;
+    let response = get_with_token(&router, "/v3/projects", Some(("x-auth-token", &token))).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    let projects = body["projects"].as_array().ok_or("projects missing")?;
+    assert_eq!(projects.len(), 1, "{body}");
+    assert_eq!(projects[0]["id"], ADMIN_PROJECT_ID);
+    assert_eq!(projects[0]["name"], "admin");
+    assert_eq!(projects[0]["domain_id"], "default");
+    assert_eq!(projects[0]["enabled"], true);
+    // The listing is the same authorization question as scope discovery, so a
+    // caller must not be able to observe a project through one route that it
+    // cannot observe through the other.
+    let discovery =
+        get_with_token(&router, "/v3/auth/projects", Some(("x-auth-token", &token))).await?;
+    let discovery_body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(discovery.into_body(), 16 * 1024).await?)?;
+    assert_eq!(body, discovery_body);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_projects_accepts_unscoped_token_with_the_bounded_contract()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Bounded deviation, deliberately defined: an identity-only token is
+    // sufficient to ask which projects its identity can reach, but the answer
+    // is still filtered to that identity's durable assignments.
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let (token, _) = issue_keystone_token(&router, unscoped_password_body()).await?;
+    let response = get_with_token(&router, "/v3/projects", Some(("x-auth-token", &token))).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    let ids: Vec<&str> = body["projects"]
+        .as_array()
+        .ok_or("projects missing")?
+        .iter()
+        .filter_map(|project| project["id"].as_str())
+        .collect();
+    assert_eq!(ids, [ADMIN_PROJECT_ID], "{body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_projects_rejects_invalid_missing_and_expired_tokens()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let request: o3k_identity::TokenRequest = serde_json::from_value(unscoped_password_body())?;
+    let (expired, _) = service.issue(&request, SystemTime::now() - Duration::from_secs(7_200))?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    for header_value in [Some("not-a-token"), Some("a.b.c"), None, Some(&expired)] {
+        let response = get_with_token(
+            &router,
+            "/v3/projects",
+            header_value.map(|value| ("x-auth-token", value)),
+        )
+        .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "header {header_value:?}"
+        );
+        let text = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await?
+                .to_vec(),
+        )?;
+        if let Some(value) = header_value {
+            assert!(!text.contains(value), "{text}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_projects_never_returns_unrelated_projects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant_b = "8d1f3c4a-5b6e-4f2a-9c3d-1e2f3a4b5c6d";
+    let service = test_service_with_projects(
+        "http://127.0.0.1:8080",
+        vec![ExtraProjectSeed {
+            project_id: tenant_b.to_owned(),
+            project_name: "tenant-b".to_owned(),
+            user_id: "a7c2e9d1-4f3b-4c8e-9d2a-3b4c5d6e7f8a".to_owned(),
+            user_name: "tenant-b-user".to_owned(),
+            password: Secret::new("tenant-b-password".to_owned()),
+        }],
+    )
+    .await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    for (body, expected, foreign) in [
+        (unscoped_password_body(), ADMIN_PROJECT_ID, tenant_b),
+        (
+            unscoped_password_body_for("tenant-b-user", "tenant-b-password"),
+            tenant_b,
+            ADMIN_PROJECT_ID,
+        ),
+    ] {
+        let (token, _) = issue_keystone_token(&router, body).await?;
+        let response =
+            get_with_token(&router, "/v3/projects", Some(("x-auth-token", &token))).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let listed: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+        let ids: Vec<&str> = listed["projects"]
+            .as_array()
+            .ok_or("projects missing")?
+            .iter()
+            .filter_map(|project| project["id"].as_str())
+            .collect();
+        assert_eq!(ids, [expected], "{listed}");
+        assert!(!ids.contains(&foreign), "{listed}");
+        // `service-project` is a stored project the caller holds no role on.
+        assert!(!ids.contains(&"service-project"), "{listed}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_projects_returns_empty_list_for_identity_without_assignment()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = o3k_identity::testkit::test_service_with_unassigned_user(
+        "http://127.0.0.1:8080",
+        "unassigned-user",
+        "unassigned",
+        "unassigned-password",
+    )
+    .await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    // An identity-only token is issued without any role assignment; the listing
+    // must answer with an empty set rather than with the stored projects.
+    let (token, _) = issue_keystone_token(
+        &router,
+        unscoped_password_body_for("unassigned", "unassigned-password"),
+    )
+    .await?;
+    let response = get_with_token(&router, "/v3/projects", Some(("x-auth-token", &token))).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_eq!(body["projects"].as_array().map(Vec::len), Some(0), "{body}");
+    let text = body.to_string();
+    assert!(!text.contains(ADMIN_PROJECT_ID), "{text}");
+    assert!(!text.contains("service-project"), "{text}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn keystone_user_projects_rejects_invalid_and_missing_tokens()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -1699,6 +1856,115 @@ async fn keystone_project_scoped_password_auth_still_returns_project_roles_and_c
         .ok_or("catalog missing")?;
     assert!(!catalog.is_empty());
     assert!(catalog.iter().any(|service| service["type"] == "identity"));
+    Ok(())
+}
+
+/// The canonical OpenStack/Horizon unscoped password body: the user is
+/// identified by name inside its domain. The pinned client sends this exact
+/// shape, so the bounded profile must accept it with the user domain present
+/// rather than treating domain-less identification as the only supported form.
+fn horizon_unscoped_password_body() -> Value {
+    serde_json::json!({
+        "auth": {
+            "identity": {
+                "methods": ["password"],
+                "password": {
+                    "user": {
+                        "name": "admin",
+                        "domain": {"name": "Default"},
+                        "password": "password"
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn keystone_unscoped_auth_accepts_the_canonical_horizon_user_domain_form()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let mut explicit_unscoped = horizon_unscoped_password_body();
+    explicit_unscoped["auth"]["scope"] = serde_json::json!("unscoped");
+    for body in [horizon_unscoped_password_body(), explicit_unscoped] {
+        let (_, token_body) = issue_keystone_token(&router, body.clone()).await?;
+        assert_unscoped_token_body(&token_body);
+    }
+    Ok(())
+}
+
+/// The bounded login sequence the pinned, unmodified Horizon 2026.1 client
+/// performs, end to end against real identity routes: unscoped password
+/// authentication, available-scope discovery under the route `keystoneclient`
+/// actually issues, project-scoped authentication with the discovered project,
+/// the Instances-panel project listing, and finally a compatibility request
+/// authorized by the resulting scoped session. Nothing about the identity
+/// boundary is mocked.
+#[tokio::test]
+async fn keystone_horizon_login_sequence_establishes_a_usable_scoped_session()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/o3k-api-horizon-login-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let identity = test_service("http://127.0.0.1:8080").await?;
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let image = ImageService::open_for_test(&root, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+    let router = o3k_api::router_with_state(
+        o3k_api::AppState::new()
+            .with_identity(identity)
+            .with_image(image),
+    );
+
+    // Step 1: unscoped password authentication.
+    let (unscoped, unscoped_body) =
+        issue_keystone_token(&router, horizon_unscoped_password_body()).await?;
+    assert_unscoped_token_body(&unscoped_body);
+
+    // Step 2: available-scope discovery.
+    let discovered = get_with_token(
+        &router,
+        "/v3/users/bootstrap-user/projects",
+        Some(("x-auth-token", &unscoped)),
+    )
+    .await?;
+    assert_eq!(discovered.status(), StatusCode::OK);
+    let discovered_body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(discovered.into_body(), 16 * 1024).await?)?;
+    let project_id = discovered_body["projects"][0]["id"]
+        .as_str()
+        .ok_or("discovered project id missing")?
+        .to_owned();
+
+    // Step 3: project-scoped authentication for the discovered project.
+    let (scoped, scoped_body) =
+        issue_keystone_token(&router, project_scoped_password_body()).await?;
+    assert_eq!(scoped_body["token"]["project"]["id"], project_id);
+
+    // Step 4: the project listing the Instances panel resolves names through.
+    let projects = get_with_token(&router, "/v3/projects", Some(("x-auth-token", &scoped))).await?;
+    assert_eq!(projects.status(), StatusCode::OK);
+    let projects_body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(projects.into_body(), 16 * 1024).await?)?;
+    assert!(
+        projects_body["projects"]
+            .as_array()
+            .ok_or("projects missing")?
+            .iter()
+            .any(|project| project["id"] == project_id),
+        "{projects_body}"
+    );
+
+    // Step 5: the scoped session authorizes a compatibility request while the
+    // identity-only token still cannot.
+    let scoped_images =
+        get_with_token(&router, "/v2/images", Some(("x-auth-token", &scoped))).await?;
+    assert_eq!(scoped_images.status(), StatusCode::OK);
+    let unscoped_images =
+        get_with_token(&router, "/v2/images", Some(("x-auth-token", &unscoped))).await?;
+    assert_eq!(unscoped_images.status(), StatusCode::UNAUTHORIZED);
     Ok(())
 }
 

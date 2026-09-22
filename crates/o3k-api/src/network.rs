@@ -17,7 +17,12 @@ use o3k_network::{
 };
 use uuid::Uuid;
 
-use crate::{AppState, auth::require_auth_context, error::keystone_error};
+use crate::{
+    AppState,
+    auth::require_auth_context,
+    error::keystone_error,
+    pagination::{CollectionLink, CollectionPage},
+};
 
 #[derive(serde::Deserialize)]
 pub(crate) struct RouterRequestBody {
@@ -1144,6 +1149,10 @@ pub(crate) struct NetworkEnvelope {
 #[derive(serde::Serialize)]
 pub(crate) struct NetworkList {
     networks: Vec<NetworkResponse>,
+    // Emitted only for a paginating client (`limit` supplied); a plain listing
+    // keeps its existing byte-shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    networks_links: Option<Vec<CollectionLink>>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct NetworkResponse {
@@ -1347,6 +1356,13 @@ pub(crate) struct NetworkPolicyQuery {
 #[derive(serde::Deserialize)]
 pub(crate) struct NetworkQuery {
     id: Option<Uuid>,
+    // Collection pagination members. Every other query parameter the pinned
+    // Horizon client sends (`sort_key`, `sort_dir`, `shared`, ...) is ignored
+    // by serde and must keep being accepted.
+    #[serde(default)]
+    limit: Option<String>,
+    #[serde(default)]
+    marker: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -3230,6 +3246,7 @@ pub(crate) async fn list_networks(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Query(query): Query<NetworkQuery>,
+    request_uri: axum::http::Uri,
 ) -> axum::response::Response {
     let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
@@ -3239,19 +3256,26 @@ pub(crate) async fn list_networks(
         Ok(value) => value,
         Err(response) => return response,
     };
+    let page = match CollectionPage::parse(query.limit.as_deref(), query.marker.as_deref()) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     match service.list_networks(&auth).await {
-        Ok(values) => {
+        Ok(mut values) => {
+            values.retain(|value| query.id.is_none_or(|id| id == value.id));
+            let links = page.apply(&mut values, |value| value.id, &request_uri);
             let mut networks = Vec::with_capacity(values.len());
             for value in values {
-                if query.id.is_some_and(|id| id != value.id) {
-                    continue;
-                }
                 match canonical_network_response(service, value).await {
                     Ok(network) => networks.push(network),
                     Err(error) => return network_error(error),
                 }
             }
-            Json(NetworkList { networks }).into_response()
+            Json(NetworkList {
+                networks,
+                networks_links: links,
+            })
+            .into_response()
         }
         Err(error) => network_error(error),
     }

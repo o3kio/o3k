@@ -128,6 +128,16 @@
       "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects"]
     },
     {
+      "id": "identity.projects_list",
+      "name": "projects-list",
+      "service": "identity",
+      "method": "GET",
+      "path": "/v3/projects",
+      "expected_status": [200],
+      "required_json_keys": ["projects"],
+      "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects"]
+    },
+    {
       "id": "image.collection_create",
       "name": "image-create",
       "service": "image",

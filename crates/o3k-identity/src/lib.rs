@@ -2070,6 +2070,58 @@ pub mod testkit {
         .map(|svc| svc.with_catalog_endpoint(catalog_endpoint))
     }
 
+    /// Test-only identity service seeded with the deterministic bootstrap
+    /// universe plus a user that holds no role assignment on any project.
+    /// Used to prove an authorization-filtered project listing answers with an
+    /// empty set for an identity that can reach no project, instead of falling
+    /// back to the stored project universe.
+    pub async fn test_service_with_unassigned_user(
+        catalog_endpoint: &str,
+        user_id: &str,
+        user_name: &str,
+        password: &str,
+    ) -> Result<TokenService, AuthError> {
+        let store = Arc::new(
+            o3k_store::testkit::open_memory()
+                .await
+                .map_err(|_| AuthError::IdentityUnavailable)?,
+        );
+        seed_identity_defaults(
+            store.as_ref(),
+            &BootstrapConfig {
+                catalog_endpoint: catalog_endpoint.to_owned(),
+                bootstrap_password: Secret::new("password".to_owned()),
+                cinder_password: Some(Secret::new("password".to_owned())),
+                cinder_endpoint: Some("http://127.0.0.1:8776".to_owned()),
+                pbkdf2_iterations: 1_000,
+                extra_projects: Vec::new(),
+            },
+        )
+        .await
+        .map_err(|_| AuthError::IdentityUnavailable)?;
+        let hash = PasswordHash::derive_with_iterations(password, 1_000)
+            .map_err(|_| AuthError::IdentityUnavailable)?;
+        store
+            .insert_keystone_user(&o3k_store::KeystoneUserRecord {
+                id: user_id.to_owned(),
+                domain_id: "default".to_owned(),
+                name: user_name.to_owned(),
+                password_hash: hash.encoded().to_owned(),
+                email: None,
+                enabled: true,
+                created_at: now_rfc3339(),
+            })
+            .await
+            .map_err(|_| AuthError::IdentityUnavailable)?;
+        TokenService::load(
+            store,
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )
+        .await
+        .map(|svc| svc.with_catalog_endpoint(catalog_endpoint))
+    }
+
     /// A password authentication request for the bootstrap administrator in
     /// the bootstrap project.
     pub fn admin_request(password: &str) -> TokenRequest {

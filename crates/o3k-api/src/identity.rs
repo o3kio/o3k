@@ -271,6 +271,27 @@ pub(crate) async fn list_user_projects(
     authorized_projects_response(&service, &verified.user_id)
 }
 
+/// `GET /v3/projects` — the bounded, authorization-filtered project listing.
+///
+/// The unmodified Horizon 2026.1 Instances panel resolves each server's project
+/// name through `api.keystone.tenant_list`, which lists projects with
+/// `keystoneclient`; without this route the panel answers HTTP 500. It is
+/// deliberately *not* Keystone project administration: the response is
+/// restricted to the projects the authenticated subject is authorized to scope
+/// into (the same durable role assignments that decide `/v3/auth/projects`), so
+/// a caller can never observe a project it holds no role on, and project
+/// mutation stays unsupported.
+pub(crate) async fn list_projects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let (service, verified) = match authenticated_subject(&state, &headers) {
+        Ok(subject) => subject,
+        Err(response) => return response,
+    };
+    authorized_projects_response(&service, &verified.user_id)
+}
+
 fn unauthenticated() -> axum::response::Response {
     keystone_error(
         StatusCode::UNAUTHORIZED,

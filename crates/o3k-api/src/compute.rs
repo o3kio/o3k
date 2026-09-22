@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State, rejection::JsonRejection},
-    http::{HeaderMap, StatusCode},
+    extract::{Path, Query, State, rejection::JsonRejection},
+    http::{HeaderMap, StatusCode, Uri},
     response::IntoResponse,
 };
 use o3k_compute::{ComputeError, ComputeService, Flavor, Server};
@@ -17,8 +17,12 @@ use o3k_provider::{ConfigDriveRequest, InstanceAction};
 use serde::Serialize;
 
 use crate::{
-    AppState, CONSOLE_AGENT_DISPATCH_TIMEOUT, auth::require_auth_context, error::keystone_error,
-    image::image_error, network::network_error,
+    AppState, CONSOLE_AGENT_DISPATCH_TIMEOUT,
+    auth::require_auth_context,
+    error::keystone_error,
+    image::image_error,
+    network::network_error,
+    pagination::{CollectionLink, CollectionPage},
 };
 
 #[derive(Serialize)]
@@ -103,6 +107,22 @@ pub(crate) struct ServerEnvelope {
 #[derive(Serialize)]
 pub(crate) struct ServerListResponse {
     servers: Vec<ServerResponse>,
+    // Emitted only for a paginating client (`limit` supplied); a plain listing
+    // keeps its existing byte-shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    servers_links: Option<Vec<CollectionLink>>,
+}
+
+/// The `limit`/`marker` members of the shared `/servers` and `/servers/detail`
+/// collection. Every other query parameter the pinned Nova client sends
+/// (`sort_key`, `sort_dir`, `project_id`, `all_tenants`, `search_opts`,
+/// `is_public`, `device_id`) is ignored by serde and must keep being accepted.
+#[derive(serde::Deserialize)]
+pub(crate) struct ServerListQuery {
+    #[serde(default)]
+    limit: Option<String>,
+    #[serde(default)]
+    marker: Option<String>,
 }
 #[derive(Serialize)]
 pub(crate) struct ServerResponse {
@@ -982,6 +1002,8 @@ pub(crate) async fn list_servers(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(project_id): Path<String>,
+    Query(query): Query<ServerListQuery>,
+    request_uri: Uri,
 ) -> axum::response::Response {
     let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
@@ -991,14 +1013,20 @@ pub(crate) async fn list_servers(
         Ok(value) => value,
         Err(response) => return response,
     };
+    let page = match CollectionPage::parse(query.limit.as_deref(), query.marker.as_deref()) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     match service.list_servers_for_auth(&auth).await {
-        Ok(servers) => {
+        Ok(mut servers) => {
+            let links = page.apply(&mut servers, |server| server.id.as_uuid(), &request_uri);
             let mut server_responses = Vec::with_capacity(servers.len());
             for server in servers {
                 server_responses.push(server_response(server, state.network.as_deref()).await);
             }
             Json(ServerListResponse {
                 servers: server_responses,
+                servers_links: links,
             })
             .into_response()
         }

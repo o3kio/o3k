@@ -1530,7 +1530,7 @@
         },
         {
           "id": "horizon-005",
-          "user_outcome": "Horizon's project switcher dropdown lists the projects a user can access via GET /v3/auth/projects; the Rust identity router now registers the route for both unscoped and project-scoped tokens and returns only the caller's durable role-assignment projects.",
+          "user_outcome": "Horizon's project context resolves through the client's own project listing: the pinned Horizon 2026.1 client performs unscoped POST /v3/auth/tokens, then GET /v3/users/{user_id}/projects, then a project-scoped POST /v3/auth/tokens, and the Instances panel resolves each server's project name with GET /v3/projects (api.keystone.tenant_list -> keystoneclient projects.list()). The Rust identity router now registers GET /v3/auth/projects for both unscoped and project-scoped tokens and returns only the caller's durable role-assignment projects.",
           "client_command": "keystoneclient GET /v3/auth/projects (Horizon project switcher; keystoneclient projects.list for non-admin)",
           "official_sources": [
             "https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects-for-user"
@@ -1541,7 +1541,7 @@
           "rust_status": "implemented",
           "in_product_profile": true,
           "failure_seen": "rc.22-real-host",
-          "failure_evidence": "docs/evidence/pp4-core/rc22-horizon-unscoped-auth-defect.json (rc.22 real-host Horizon witness could not establish an authenticated login session: it submitted an unscoped POST /v3/auth/tokens, which O3K rc.22 rejected with HTTP 400 invalid authentication request)",
+          "failure_evidence": "docs/evidence/pp4-core/rc22-horizon-unscoped-auth-defect.json (rc.22 real-host Horizon witness could not establish an authenticated login session: it submitted an unscoped POST /v3/auth/tokens, which O3K rc.22 rejected with HTTP 400 invalid authentication request); docs/evidence/pp4-core/rc23-dev-horizon-login-preflight.json (the traced Horizon 2026.1 identity sequence on the retained rc.22 real-host VM: unscoped POST /v3/auth/tokens -> 201, GET /v3/users/{user_id}/projects -> 200, project-scoped POST /v3/auth/tokens -> 201, authenticated session established)",
           "priority": "blocks-declared-journey",
           "requires_before_implementation": [
             "SPEC-0022 amendment (identity baseline: auth-projects list)",
@@ -1775,6 +1775,51 @@
           "priority": "useful-later",
           "requires_before_implementation": [
             "SPEC-0022 amendment (network baseline: quota read API)",
+            "contract record",
+            "black-box test id"
+          ]
+        },
+        {
+          "id": "horizon-017",
+          "user_outcome": "The Horizon 2026.1 Instances panel resolves each server's project name through api.keystone.tenant_list -> keystoneclient projects.list() -> GET /v3/projects, which Rust did not route, so the panel answered HTTP 500 while the other panels passed. The identity router now registers GET /v3/projects and answers with only the caller's durable role-assignment projects; it is a bounded visibility read, not project administration.",
+          "client_command": "keystoneclient GET /v3/projects (Horizon Instances panel project-name resolution; api.keystone.tenant_list)",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "implemented",
+          "in_product_profile": true,
+          "failure_seen": "rc.23-dev-preflight",
+          "failure_evidence": "docs/evidence/pp4-core/rc23-dev-horizon-login-preflight.json (non-certifying development preflight: on the retained rc.22 VM, with a locally built o3kd swapped in by hand, the pinned Horizon 2026.1 client reached an authenticated session and /project/instances/ FAILed with HTTP 500; the remaining mandatory gap is recorded there as 'GET /v3/projects returns 404', confirmed by the server-side traceback in openstack_dashboard/dashboards/identity/projects/views.py:107. The rc.22 real-host campaign itself aborted at Horizon login, so it never reached the Instances panel.)",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (identity baseline: bounded authorization-filtered projects list)",
+            "contract record",
+            "black-box test id: crates/o3k-api/tests/health.rs::keystone_projects_lists_only_projects_authorized_for_the_caller"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "horizon-018",
+          "user_outcome": "Horizon's Instances table calls GET /v2.1/{project_id}/limits?reserved=1 through api.nova.tenant_absolute_limits to render the table's limits column; Rust does not route it, so novaclient raises NotFound (HTTP 404), Horizon logs a recoverable error, and the limits column renders empty while the instance rows themselves still display.",
+          "client_command": "novaclient GET /v2.1/{project_id}/limits?reserved=1 (limits.get) — Horizon Project > Instances table",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#show-limits"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/server.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "rc.23-dev-preflight",
+          "failure_evidence": "docs/evidence/pp4-core/rc23-dev-horizon-full-witness.json (observed on the pinned Horizon 2026.1 witness against a locally built o3kd: GET /v2.1/{project_id}/limits?reserved=1 answered 404, novaclient.exceptions.NotFound raised from openstack_dashboard/dashboards/project/instances/tables.py:433 via api/nova.py:900; the Instances panel still returned HTTP 200 and the expected Core resources were visible)",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (compute baseline: limits read API)",
             "contract record",
             "black-box test id"
           ]

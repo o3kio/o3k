@@ -83,6 +83,23 @@
       "known_gaps": ["Client project discovery only: it returns the caller's durable role-assignment projects and exposes no pagination, links, or project writes."]
     },
     {
+      "id": "identity.projects_list",
+      "service": "identity",
+      "operation": "projects_list",
+      "method": "GET",
+      "path": "/v3/projects",
+      "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects"],
+      "go_locations": ["internal/keystone/handlers.go"],
+      "rust_locations": ["crates/o3k-api/src/lib.rs", "crates/o3k-api/src/identity.rs", "crates/o3k-identity/src/lib.rs"],
+      "cli_command": "openstack project list",
+      "implementation_state": "implemented",
+      "portable_contract": "verified",
+      "cli_verification": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "known_gaps": ["Bounded Horizon/Instances-panel project-visibility read for the accepted compatibility profile: it returns only the caller's durable role-assignment projects and adds no project create/update/delete, no admin list-all, and no pagination/links."]
+    },
+    {
       "id": "image.collection_create",
       "service": "image",
       "operation": "image_create",
@@ -216,7 +233,7 @@
       "cli_verification": "pending",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "known_gaps": ["Filtering and pagination are limited to the alpha profile."]
+      "known_gaps": ["Filtering beyond the single `id` selector is out of scope, and `sort_key`/`sort_dir` are unimplemented deviations; bounded `limit`/`marker` paging with `networks_links` is implemented for the accepted profile."]
     },
     {
       "id": "network.network_member_show",
@@ -579,7 +596,7 @@
       "cli_verification": "pending",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "known_gaps": ["The broader Nova filter and pagination surface is deferred."]
+      "known_gaps": ["The broader Nova query/filter surface and `sort_key`/`sort_dir` are deferred; bounded `limit`/`marker` paging with `servers_links` is implemented for the accepted profile."]
     },
     {
       "id": "compute.server_collection_detail",
