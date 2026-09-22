@@ -48,7 +48,7 @@ grep -Fq "$(printf '%s\n' "$native_provider_domain")" "$EVID/libvirt-after-reboo
 pass 'host reboot recovery and canonical identity preservation'
 
 log 'phase 8: exact public installer rerun'
-before_tls="$(sha256sum /etc/o3k/tls/* | sha256sum | awk '{print $1}')"
+before_tls="$(sudo sha256sum /etc/o3k/tls/* | sha256sum | awk '{print $1}')"
 curl -sfL "https://github.com/o3kio/o3k/releases/download/$RELEASE_VERSION/install.sh" | sudo env O3K_SKIP_ARAF=1 sh - >"$EVID/rerun-install.log" 2>&1 || fail 'public installer rerun failed'
 sudo python3 /home/tester/verify_manifest.py "$RELEASE_VERSION" "$SOURCE_SHA" >"$EVID/rerun-identity.txt" || fail 'rerun source identity mismatch'
 native /identity/me GET "$EVID/identity-me-after-rerun.json" --expect 200
@@ -68,7 +68,7 @@ json.dump({"building_blocks": rows("SELECT block_id, state, cloud_profile_id, re
 print()
 PY
 [[ "$(jq -r '.building_blocks[] | select(.state == "ready") | .block_id' "$EVID/durable-bootstrap-after-rerun.json" | head -1)" == "$building_block_id" ]] || fail 'installer rerun created a duplicate BuildingBlock'
-after_tls="$(sha256sum /etc/o3k/tls/* | sha256sum | awk '{print $1}')"; [[ "$before_tls" == "$after_tls" ]] || fail 'installer rerun changed TLS identity'
+after_tls="$(sudo sha256sum /etc/o3k/tls/* | sha256sum | awk '{print $1}')"; [[ "$before_tls" == "$after_tls" ]] || fail 'installer rerun changed TLS identity'
 pass 'public rerun converged without duplicate canonical identity'
 
 log 'phase 9: lifecycle deletion before destructive contracts'
