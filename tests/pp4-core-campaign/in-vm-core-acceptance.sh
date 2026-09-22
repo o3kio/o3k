@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Frozen rc.22 PP.4 Core acceptance, phases 0-6.  This script is copied into
+# PP.4 Core acceptance, phases 0-6.  This script is copied into
 # a fresh VM by host-run.sh; it never reads the checkout or substitutes local
 # binaries for the public release.
 # shellcheck disable=SC1090,SC1091,SC2024,SC2034,SC2154
@@ -172,7 +172,7 @@ else
   printf 'test-vm=already-absent\n' >"$EVID/test-vm-core-capacity.txt"
 fi
 if openstack server show test-vm -f json >/dev/null 2>&1; then fail 'test-vm remained after campaign capacity cleanup'; fi
-# Address-realms is intentionally not advertised in the rc.22 native profile.
+# Address-realms is intentionally not advertised in the bounded native profile.
 # The supported canonical Network authority is the network collection/show
 # surface; retain the 501 response as evidence rather than inventing support.
 set +e

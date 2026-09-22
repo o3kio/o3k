@@ -56,7 +56,7 @@ def main() -> int:
         side_effects = {key: NOT_PROVEN for key in ("resources", "operations", "network_ports", "placement_allocations", "quota_reservations", "provider_execution")}
     manifest = {
         "schema": "o3k.pp4-core.evidence.v1",
-        "campaign": "PP.4 Core rc.22 complete matrix",
+        "campaign": f"PP.4 Core {version} complete matrix",
         "verdict": PASS if all(v in (PASS, "NOT_APPLICABLE_OPTIONAL") for v in required.values()) else "BLOCKED",
         "release": {"version": version, "source_sha": source, "public_url": f"https://github.com/o3kio/o3k/releases/tag/{version}"},
         "harness": {"commit_sha": harness},
