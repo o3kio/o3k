@@ -106,12 +106,21 @@ jobs:
           cat > release-notes.md <<EOF
           ## O3K $tag
 
-          PP.4 candidate. Not final release-gate approved and not production ready.
+          PP.4 Core candidate. Not production-ready and not PP.7 certified.
 
-          PP.4 successor to rc.18. Fixes canonical native compute-create
-          replay so an equivalent same-key request converges on the existing
-          resource/Operation without re-entering Placement or creating
-          duplicate side effects. This does not claim PP.4 completion.
+          This candidate includes the accumulated PP.4 corrections since the
+          previous failed candidates, including:
+
+          - canonical native compute-create replay convergence;
+          - bounded Keystone Horizon login/bootstrap compatibility;
+          - authorization-filtered project visibility required by the pinned
+            Horizon witness;
+          - bounded Nova/Neutron collection marker/limit pagination required by
+            the PP.4 witness;
+          - previously accepted native networking, keypair/config-drive and
+            release-trust repairs.
+
+          This does not claim full OpenStack or Horizon parity.
 
           Authenticity uses the protected O3K GitHub Actions release workflow,
           GitHub OIDC, and a Sigstore keyless bundle. This prerelease is

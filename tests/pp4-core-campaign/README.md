@@ -1,8 +1,9 @@
 # PP.4 Core campaign
 
 This directory is the current PP.4 Core campaign path. It consumes only the
-public immutable O3K release selected by the campaign (`v0.4.0-rc.22` for the
-current candidate) and has no Araf dependency. The historical Araf-era scripts
+public immutable O3K release selected explicitly by the campaign
+(`O3K_PP4_VERSION`; the campaign never falls back to a mutable channel or to
+`latest`) and has no Araf dependency. The historical Araf-era scripts
 remain under `tests/pp4-campaign/` and are not authoritative PP.4 Core
 evidence.
 

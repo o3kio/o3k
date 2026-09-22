@@ -14,9 +14,13 @@ under `docs/evidence/pp4-core/rc21-native-smoke-pass.json`: native replay and a
 fresh Ubuntu/KVM smoke passed, but the complete Ubuntu/Debian PP.4 Core
 campaign did not run. rc.21's publisher produced authenticated Sigstore
 metadata; its public installer did not consume that metadata before extraction.
-The source repair prepares the expected `v0.4.0-rc.22` successor without
-tagging or publishing it. No PP.4 completion or production-readiness claim is
-made.
+The immutable published `v0.4.0-rc.22` candidate came next: it passed the
+public trust chain and the fresh-Ubuntu native lifecycle, then failed the
+required unmodified Horizon witness because O3K had no Keystone unscoped
+password authentication for the login bootstrap. Both candidates are
+historical; the current source carries the two bounded repairs the pinned
+client proved necessary and no successor is named, tagged or published here.
+No PP.4 completion or production-readiness claim is made.
 
 Per Core campaign (added by the campaign run; absent until the campaign
 completes):

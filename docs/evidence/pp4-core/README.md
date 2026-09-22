@@ -57,9 +57,10 @@ rc.21 is not the final PP.4 Core candidate. The publisher generated and
 manually verified a Sigstore bundle, but the public installer did not consume
 that authentication before archive extraction. The two-OS PP.4 campaign,
 bounded Horizon witness, full cross-interface lifecycle, reinstall/purge, and
-foreign-state/secret evidence therefore remain **not-proven**. The current
-source repair prepares a successor candidate (expected `v0.4.0-rc.22`); no
-successor is tagged or published by this iteration.
+foreign-state/secret evidence therefore remain **not-proven**. The successor
+source now carries the two bounded repairs the pinned client proved necessary
+(see below); the successor version is selected by tag/release enumeration at
+publication time and no tag or publication occurs in this iteration.
 
 ## rc.22 failed candidate: unscoped Keystone authentication
 

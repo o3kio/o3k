@@ -63,9 +63,13 @@ The immutable `v0.4.0-rc.21` candidate at source
 Ubuntu native/KVM smoke portions of this gate. It does not prove the complete
 two-OS campaign, Horizon witness, or full lifecycle matrix. Its release
 publisher produced a Sigstore bundle, but the public installer did not enforce
-that authentication before extraction. Source repair is therefore preparing
-the next eligible candidate (`v0.4.0-rc.22`); no tag or publication occurs in
-this iteration.
+that authentication before extraction. The immutable `v0.4.0-rc.22` candidate
+at source `15162af7582f72d98475a79ee369e8902574ffee` then proved the public
+trust chain and the fresh-Ubuntu native lifecycle before failing the required
+unmodified Horizon witness on the missing Keystone login bootstrap. Source now
+carries the bounded identity and collection-pagination repairs the pinned
+client proved necessary; the successor version is selected by tag/release
+enumeration at publication time and is not named or reserved here.
 
 ### PP.4A — Araf Native Console Certification (#1029)
 

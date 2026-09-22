@@ -668,8 +668,16 @@ profiles:
           plus a fresh Ubuntu native/KVM smoke. It does not prove the complete
           two-OS campaign. Its publisher produced a valid Sigstore bundle, but
           the public installer did not consume that trust chain before
-          extraction; the successor repair is therefore source-level work and
-          rc.21 remains historical, not the final PP.4 candidate.
+          extraction. The immutable published v0.4.0-rc.22 candidate (source
+          15162af7582f72d98475a79ee369e8902574ffee) proved release trust,
+          canonical init/join, BuildingBlock, Placement/topology, native
+          network and native-first create, same-key replay, changed-body
+          conflict, OpenStack observation, compatibility create with native
+          projection and the cross-interface lifecycle on a fresh Ubuntu 24.04
+          KVM host, then failed the required unmodified Horizon witness: the
+          login bootstrap needs Keystone unscoped password authentication and
+          rc.22 answered it with HTTP 400. Both RC candidates are historical,
+          and neither is the final PP.4 candidate.
         note: >-
           O3K Ready is independent of Horizon Ready. Horizon is external
           compatibility evidence only and does not replace native API proof.
@@ -708,9 +716,10 @@ profiles:
       (docs/release-tracker.md, issues #93/#94) and PP.1-PP.2 evidence.
     blockers:
       - >-
-        successor release candidate with the repaired public-installer
-        Sigstore consumer path (expected v0.4.0-rc.22; publication is not
-        authorized in this iteration)
+        successor release candidate carrying the bounded Keystone Horizon
+        login/bootstrap identity compatibility and the bounded Nova/Neutron
+        collection pagination repairs; the version is selected by tag/release
+        enumeration at publication time and is not reserved here
       - >-
         PP.2 (#971) fresh-machine install evidence via canonical init/join —
         PASSED on both supported distros against the published v0.4.0-rc.5

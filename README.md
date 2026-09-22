@@ -79,14 +79,19 @@ Core principles:
 > These are strong implementation milestones, not a blanket production, full
 > OpenStack parity, multi-region, live-migration, or datacenter-scale claim.
 
-> **PP.4 Core status (2026-09-21):** immutable `v0.4.0-rc.21` preserved and
-> documented as a native replay/fresh-Ubuntu smoke success, not as complete
-> PP.4 certification. The full Ubuntu + Debian native-first campaign,
-> bounded Horizon witness, and complete cross-interface lifecycle remain
-> unproven. The current source repair makes the public v2 installer consume
-> Sigstore-authenticated release metadata before extraction; the expected
-> successor is `v0.4.0-rc.22`, which is not tagged or published here. O3K is
-> not production-ready by this evidence.
+> **PP.4 Core status (2026-09-22):** immutable `v0.4.0-rc.21` and
+> `v0.4.0-rc.22` are preserved as historical PP.4 candidates, not as
+> certification. rc.21 proves native replay convergence plus a fresh-Ubuntu
+> native/KVM smoke; rc.22 proves the fresh-Ubuntu native lifecycle,
+> bidirectional OpenStack compatibility and Horizon HTTP readiness, then
+> fails the required unmodified Horizon witness because O3K had no Keystone
+> unscoped password authentication for the login bootstrap. The current
+> source carries the two bounded repairs the pinned client proved necessary —
+> Horizon login/bootstrap identity compatibility and bounded Nova/Neutron
+> collection pagination. The successor is not named, tagged or published
+> here; the complete Ubuntu + Debian native-first campaign, bounded Horizon
+> witness and full cross-interface lifecycle remain unproven. O3K is not
+> production-ready by this evidence.
 
 Next program: **P15 — Scale & Composition Foundation** (issue #929,
 ADR-0184 (accepted), prompts in `docs/prompts/p15/`).
