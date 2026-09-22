@@ -93,6 +93,8 @@ pub enum ComputeError {
     Scheduler(#[from] SchedulerError),
     #[error("metering projection failed: {0}")]
     Metering(String),
+    #[error("server network dependency release failed: {0}")]
+    EndpointRelease(String),
     #[error("compute service is unavailable or misconfigured")]
     Unavailable,
 }

@@ -453,7 +453,7 @@ impl ComputeService {
                             {
                                 Ok(o3k_store::OperationState::Failed) => {
                                     self.store.detach_server_keypair(server_id).await?;
-                                    self.project_terminal_binding_outcome(
+                                    self.project_terminal_outcome_best_effort(
                                         existing_request.operation_id.to_string().as_str(),
                                         o3k_store::OperationState::Failed,
                                     )
@@ -461,7 +461,7 @@ impl ComputeService {
                                     return Err(ComputeError::Conflict);
                                 }
                                 Ok(o3k_store::OperationState::Succeeded) => {
-                                    self.project_terminal_binding_outcome(
+                                    self.project_terminal_outcome_best_effort(
                                         existing_request.operation_id.to_string().as_str(),
                                         o3k_store::OperationState::Succeeded,
                                     )
@@ -919,7 +919,7 @@ impl ComputeService {
                                     if let Err(error) = self.store.detach_server_keypair(id).await {
                                         release_quota_and_return!(ComputeError::Store(error));
                                     }
-                                    self.project_terminal_binding_outcome(
+                                    self.project_terminal_outcome_best_effort(
                                         request.operation_id.to_string().as_str(),
                                         o3k_store::OperationState::Failed,
                                     )
@@ -927,7 +927,7 @@ impl ComputeService {
                                     release_quota_and_return!(ComputeError::Conflict);
                                 }
                                 Ok(o3k_store::OperationState::Succeeded) => {
-                                    self.project_terminal_binding_outcome(
+                                    self.project_terminal_outcome_best_effort(
                                         request.operation_id.to_string().as_str(),
                                         o3k_store::OperationState::Succeeded,
                                     )
@@ -1009,7 +1009,7 @@ impl ComputeService {
             reconcile_state,
             o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
         ) {
-            self.project_terminal_binding_outcome(
+            self.project_terminal_outcome_best_effort(
                 request.operation_id.to_string().as_str(),
                 reconcile_state,
             )

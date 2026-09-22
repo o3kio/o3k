@@ -470,6 +470,29 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         Ok(())
     }
+
+    /// Releases the endpoint once its binding is cleared and its server is
+    /// terminally deleted. Only an endpoint carrying O3K's reserved
+    /// server-owned identity is removed: a port the caller created and supplied
+    /// itself is preserved, and so is a port of any other project. An endpoint
+    /// that is already gone is success.
+    async fn release_server_owned_endpoint(
+        &self,
+        project_id: &str,
+        port_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let port_id = port_id.parse::<Uuid>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid port id {port_id:?}: {error}"),
+            )
+        })?;
+        self.network
+            .cleanup_server_owned_ports_for_project(project_id, &[port_id])
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(())
+    }
 }
 
 impl NetworkBindingProjector {

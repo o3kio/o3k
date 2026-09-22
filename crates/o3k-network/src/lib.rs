@@ -49,7 +49,8 @@ pub use public::{
 pub use routed::{LinuxRoutedProvider, RoutedExternalConfig, RoutedNetworkError};
 pub use service::{
     CanonicalNetworkSnapshot, GatewayIntentMap, NetworkError, NetworkService, PortBindingState,
-    RealmCleanupObservation, RealmCleanupProgress, compile_l3_gateway_intents,
+    RealmCleanupObservation, RealmCleanupProgress, SERVER_OWNED_ENDPOINT_PREFIX,
+    compile_l3_gateway_intents, is_server_owned_endpoint_name, server_owned_endpoint_context,
 };
 
 /// Stable shared vocabulary for the P9 control-plane boundary. These values

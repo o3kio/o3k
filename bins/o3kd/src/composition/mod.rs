@@ -1503,6 +1503,8 @@ pub async fn shutdown_signal(state: o3k_api::AppState) {
 }
 
 #[cfg(test)]
+mod pp4_endpoint_lifecycle;
+#[cfg(test)]
 mod tests {
     use super::{
         DaemonCreateResolver, NetworkBindingProjector, locations_from_declarations,

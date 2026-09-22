@@ -84,6 +84,7 @@ fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
 }
 
 pub mod types;
+pub use read::{CreateDependencyDisposition, CreateDependencyState};
 pub use types::*;
 
 #[derive(Clone)]
@@ -137,6 +138,18 @@ pub trait PortBindingProjector: Send + Sync {
         project_id: &str,
         port_id: &str,
         operation_id: uuid::Uuid,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// The server owning `port_id` reached terminal deletion and its binding is
+    /// already cleared: the endpoint itself must now be released when it carries
+    /// O3K's reserved server-owned identity, so its address and network-port
+    /// quota become reusable. An endpoint the caller supplied itself is left
+    /// untouched — a server attaching an endpoint does not own it — and an
+    /// already-absent endpoint is success, so replays converge.
+    async fn release_server_owned_endpoint(
+        &self,
+        project_id: &str,
+        port_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
@@ -489,6 +502,10 @@ mod tests {
             project: String,
             port: String,
         },
+        Release {
+            project: String,
+            port: String,
+        },
     }
 
     #[derive(Default)]
@@ -525,6 +542,21 @@ mod tests {
                 .lock()
                 .map_err(|_| "recording projector lock poisoned".to_owned())?
                 .push(ProjectorCall::Unbind {
+                    project: project_id.to_owned(),
+                    port: port_id.to_owned(),
+                });
+            Ok(())
+        }
+
+        async fn release_server_owned_endpoint(
+            &self,
+            project_id: &str,
+            port_id: &str,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.calls
+                .lock()
+                .map_err(|_| "recording projector lock poisoned".to_owned())?
+                .push(ProjectorCall::Release {
                     project: project_id.to_owned(),
                     port: port_id.to_owned(),
                 });
@@ -3558,7 +3590,8 @@ mod tests {
             )
             .await?;
         // The fake provider completes create synchronously; the reconcile
-        // path projects the terminal outcome.
+        // path projects the terminal outcome. A create never releases the
+        // endpoints it attached: only a terminal *delete* does.
         assert_eq!(
             projector_calls(&projector),
             vec![ProjectorCall::CreateOutcome {
@@ -3568,14 +3601,29 @@ mod tests {
             }]
         );
         service.delete_server("project-a", server.id).await?;
-        assert!(
-            projector_calls(&projector).contains(&ProjectorCall::Unbind {
-                project: "project-a".to_owned(),
-                port: "port-1".to_owned(),
-            })
+        // The endpoint release must follow the binding unbind: the fabric
+        // teardown plan reads the durable endpoint it has to remove.
+        assert_eq!(
+            projector_calls(&projector),
+            vec![
+                ProjectorCall::CreateOutcome {
+                    project: "project-a".to_owned(),
+                    port: "port-1".to_owned(),
+                    succeeded: true,
+                },
+                ProjectorCall::Unbind {
+                    project: "project-a".to_owned(),
+                    port: "port-1".to_owned(),
+                },
+                ProjectorCall::Release {
+                    project: "project-a".to_owned(),
+                    port: "port-1".to_owned(),
+                },
+            ]
         );
-        // Deleting again takes the already-deleted shortcut and unbinds
-        // idempotently.
+        // Deleting again takes the already-deleted shortcut: the unbind and
+        // the endpoint release are retried idempotently, so a transient
+        // release failure is recoverable by replaying the delete.
         service.delete_server("project-a", server.id).await?;
         assert_eq!(
             projector_calls(&projector)
@@ -3584,6 +3632,70 @@ mod tests {
                 .count(),
             2
         );
+        assert_eq!(
+            projector_calls(&projector)
+                .iter()
+                .filter(|call| matches!(call, ProjectorCall::Release { .. }))
+                .count(),
+            2
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// The release decision comes from durable canonical state, never from the
+    /// error an API layer happens to be reporting (#1034).
+    #[tokio::test]
+    async fn create_dependency_disposition_follows_durable_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use CreateDependencyDisposition::{Compensate, Preserve};
+
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-disposition-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let provider = Arc::new(FakeComputeProvider::new());
+        let service = ComputeService::new_for_test(store.clone(), provider.clone());
+        let flavor = service
+            .create_flavor("project-a", "tiny".to_owned(), 1, 512, 1)
+            .await?;
+        let auth = test_compute_auth("project-a", "user-a", "admin");
+
+        // No durable identity at all: nothing can own the endpoints, so they
+        // are compensated, and the read discloses no attachment intent.
+        let absent = service
+            .create_dependency_state_for_auth(&auth, ServerId::from_uuid(Uuid::now_v7()))
+            .await?;
+        assert_eq!(absent.disposition, Compensate);
+        assert!(absent.network_ids.is_empty());
+
+        // A live server owns its endpoints.
+        let live = service
+            .create_server(
+                "project-a",
+                "live-server".to_owned(),
+                "image-1".to_owned(),
+                flavor.id,
+                vec!["port-live".to_owned()],
+                "disposition-live".to_owned(),
+            )
+            .await?;
+        let state = service
+            .create_dependency_state_for_auth(&auth, live.id)
+            .await?;
+        assert_eq!(state.disposition, Preserve);
+        assert_eq!(state.network_ids, vec!["port-live".to_owned()]);
+
+        // A deleted server leaves nothing to preserve.
+        service.delete_server("project-a", live.id).await?;
+        let state = service
+            .create_dependency_state_for_auth(&auth, live.id)
+            .await?;
+        assert_eq!(state.disposition, Compensate);
+
         std::fs::remove_file(database_path)?;
         Ok(())
     }

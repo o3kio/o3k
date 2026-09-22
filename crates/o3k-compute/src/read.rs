@@ -5,7 +5,34 @@ use super::{
 };
 
 use o3k_kernel::{ActionId, AuditEvent, AuditOutcome, AuthorizationRequest, ServiceNamespace};
-use o3k_store::server_state_to_storage;
+use o3k_store::{server_state_from_storage, server_state_to_storage};
+
+/// What a server create's request-owned network endpoints require.
+///
+/// The decision is derived from durable canonical state (resource state,
+/// canonical operation state, ownership), never from the HTTP status an API
+/// layer happens to be reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateDependencyDisposition {
+    /// The create provably produced no live server — no durable identity, an
+    /// already-deleted server, or a terminally failed create operation.
+    /// Request-owned endpoints must be released.
+    Compensate,
+    /// A live server may own the endpoints, or the outcome is still in flight,
+    /// ambiguous, or unknown. Request-owned endpoints must be preserved for the
+    /// resource or for reconciliation; releasing them could strip a real guest
+    /// of its network dependency.
+    Preserve,
+}
+
+/// Durable create-dependency view of a server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDependencyState {
+    /// Attachment intent retained by the durable create intent, even after the
+    /// server reached Deleted. Empty when no durable identity exists.
+    pub network_ids: Vec<String>,
+    pub disposition: CreateDependencyDisposition,
+}
 
 impl ComputeService {
     pub async fn list_servers_for_auth(
@@ -162,6 +189,72 @@ impl ComputeService {
         auth: &AuthContext,
         id: ServerId,
     ) -> Result<Vec<String>, ComputeError> {
+        let (_, request) = self.server_create_intent_for_auth(auth, id).await?;
+        Ok(request.network_ids)
+    }
+
+    /// Classifies the durable create outcome of a server for the purpose of
+    /// deciding whether its request-owned network endpoints must be released.
+    ///
+    /// This is deliberately a *durable-state* read, not an error classifier:
+    /// an API layer that observes a failed create must never decide endpoint
+    /// cleanup from the HTTP outcome it happens to be reporting, because the
+    /// canonical resource and operation are the authority on whether a live
+    /// server can own those endpoints.
+    pub async fn create_dependency_state_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+    ) -> Result<CreateDependencyState, ComputeError> {
+        let (resource, request) = match self.server_create_intent_for_auth(auth, id).await {
+            Ok(durable) => durable,
+            // No durable server identity was ever established for this create
+            // key: nothing can own the request's endpoints.
+            Err(ComputeError::NotFound) => {
+                return Ok(CreateDependencyState {
+                    network_ids: Vec::new(),
+                    disposition: CreateDependencyDisposition::Compensate,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let observed =
+            server_state_from_storage(&resource.observed_state).map_err(ComputeError::Store)?;
+        let disposition = match observed {
+            // The server is gone; its request-owned endpoints are dead weight.
+            ServerState::Deleted => CreateDependencyDisposition::Compensate,
+            // `Error` is terminal failure evidence, but the create may still
+            // be in flight or have an inconclusive provider outcome. Only a
+            // durable terminal *failed* operation proves that no live server
+            // owns the endpoints: every other operation state (including
+            // `UnknownOutcome`) preserves them so a real guest is never
+            // stripped of its network dependency, and so reconciliation can
+            // finish the decision from durable state.
+            ServerState::Error => match self.store.get_operation(request.operation_id).await {
+                Ok(operation) => {
+                    if operation.state == o3k_store::OperationState::Failed {
+                        CreateDependencyDisposition::Compensate
+                    } else {
+                        CreateDependencyDisposition::Preserve
+                    }
+                }
+                Err(_) => CreateDependencyDisposition::Preserve,
+            },
+            _ => CreateDependencyDisposition::Preserve,
+        };
+        Ok(CreateDependencyState {
+            network_ids: request.network_ids,
+            disposition,
+        })
+    }
+
+    /// Loads the durable create intent of a server under `ReadServer`
+    /// authorization, retaining attachment intent after deletion.
+    async fn server_create_intent_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+    ) -> Result<(o3k_store::ResourceRecord, CreateInstanceRequest), ComputeError> {
         let ns = ServiceNamespace::new("compute")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
         let act = ActionId::new("compute", "ReadServer").unwrap_or_else(|_| {
@@ -199,7 +292,7 @@ impl ComputeService {
         }
         let request: CreateInstanceRequest =
             serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
-        Ok(request.network_ids)
+        Ok((resource, request))
     }
 
     pub async fn show_server(
@@ -425,7 +518,7 @@ impl ComputeService {
         };
         match state {
             o3k_store::OperationState::Failed => {
-                self.project_terminal_binding_outcome(
+                self.project_terminal_outcome_best_effort(
                     request.operation_id.to_string().as_str(),
                     state,
                 )
@@ -484,7 +577,7 @@ impl ComputeService {
                 }
             }
             o3k_store::OperationState::Succeeded => {
-                self.project_terminal_binding_outcome(
+                self.project_terminal_outcome_best_effort(
                     request.operation_id.to_string().as_str(),
                     state,
                 )

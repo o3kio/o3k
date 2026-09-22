@@ -12,7 +12,7 @@ use axum::{
 use o3k_compute::{ComputeError, ComputeService, Flavor, Server};
 use o3k_console::ConsoleError;
 use o3k_domain::{ServerId, ServerState};
-use o3k_network::{NetworkError, NetworkService};
+use o3k_network::NetworkService;
 use o3k_provider::{ConfigDriveRequest, InstanceAction};
 use serde::Serialize;
 
@@ -358,6 +358,7 @@ pub(crate) fn compute_error(error: ComputeError) -> axum::response::Response {
         ComputeError::Store(_)
         | ComputeError::Reconcile(_)
         | ComputeError::Provider(_)
+        | ComputeError::EndpointRelease(_)
         | ComputeError::Metering(_) => keystone_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal Server Error",
@@ -944,12 +945,15 @@ pub(crate) async fn create_server(
         Err(error) => {
             if let Some(network_service) = state.network.as_ref() {
                 let _mutation_guard = state.network_mutation_lock.lock().await;
-                let durable_network_ids = match service
-                    .server_network_ids_for_auth(&auth, ServerId::from_uuid(server_id))
+                // The durable canonical outcome decides whether the request's
+                // endpoints may be released — not the error being reported. A
+                // create that is live, in flight, or inconclusive keeps its
+                // endpoints so a real guest never loses its network dependency.
+                let dependency = match service
+                    .create_dependency_state_for_auth(&auth, ServerId::from_uuid(server_id))
                     .await
                 {
-                    Ok(network_ids) => Some(network_ids),
-                    Err(ComputeError::NotFound) => None,
+                    Ok(dependency) => dependency,
                     Err(lookup_error) => {
                         tracing::error!(
                             %lookup_error,
@@ -963,34 +967,43 @@ pub(crate) async fn create_server(
                         );
                     }
                 };
-                for port_id in owned_network_ids {
-                    let preserve_for_durable_server = durable_network_ids
-                        .as_ref()
-                        .is_some_and(|network_ids| network_ids.iter().any(|id| id == &port_id));
-                    if preserve_for_durable_server {
-                        tracing::warn!(
-                            server_id = %server_id,
-                            port_id,
-                            "retaining server endpoint for durable create reconciliation"
-                        );
-                        continue;
-                    }
-                    if let Ok(port_id) = port_id.parse()
-                        && let Err(cleanup_error) = network_service
-                            .delete_port_for_project(&project_id, port_id)
-                            .await
+                if dependency.disposition == o3k_compute::CreateDependencyDisposition::Preserve {
+                    tracing::warn!(
+                        server_id = %server_id,
+                        "retaining server endpoints for the durable create outcome"
+                    );
+                    return compute_error(error);
+                }
+                // Compensate the request-owned endpoints *and* the endpoints the
+                // durable create intent still names: a terminally failed create
+                // may have allocated them in an earlier attempt, and the shared
+                // ownership rule releases only O3K server-owned endpoints of
+                // this project, so a caller-supplied endpoint is never removed.
+                let mut candidates = owned_network_ids
+                    .iter()
+                    .filter_map(|port_id| port_id.parse().ok())
+                    .collect::<Vec<uuid::Uuid>>();
+                for port_id in &dependency.network_ids {
+                    if let Ok(port_id) = port_id.parse::<uuid::Uuid>()
+                        && !candidates.contains(&port_id)
                     {
-                        tracing::error!(
-                            %cleanup_error,
-                            %port_id,
-                            "server create compensation could not remove owned endpoint"
-                        );
-                        return keystone_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "Internal Server Error",
-                            "server network compensation failed",
-                        );
+                        candidates.push(port_id);
                     }
+                }
+                if let Err(cleanup_error) = network_service
+                    .cleanup_server_owned_ports_for_project(&project_id, &candidates)
+                    .await
+                {
+                    tracing::error!(
+                        %cleanup_error,
+                        %server_id,
+                        "server create compensation could not remove owned endpoints"
+                    );
+                    return keystone_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal Server Error",
+                        "server network compensation failed",
+                    );
                 }
             }
             compute_error(error)
@@ -1157,44 +1170,17 @@ pub(crate) async fn delete_server(
                     "server console cleanup failed",
                 );
             }
-            if let Some(network_service) = state.network.as_ref() {
-                let mut cleanup_failed = false;
-                for port_id in owned_ports {
-                    match network_service
-                        .get_port_for_project(&project_id, port_id)
-                        .await
-                    {
-                        Ok(port) if port.name.starts_with(&format!("o3k-server:{project_id}:")) => {
-                            if let Err(error) = network_service
-                                .delete_port_for_project(&project_id, port_id)
-                                .await
-                            {
-                                cleanup_failed = true;
-                                tracing::error!(
-                                    %error,
-                                    %port_id,
-                                    "server-owned endpoint cleanup failed"
-                                );
-                            }
-                        }
-                        Ok(_) | Err(NetworkError::NotFound) => {}
-                        Err(error) => {
-                            cleanup_failed = true;
-                            tracing::error!(
-                                %error,
-                                %port_id,
-                                "server-owned endpoint lookup failed during cleanup"
-                            );
-                        }
-                    }
-                }
-                if cleanup_failed {
-                    return keystone_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Internal Server Error",
-                        "server network cleanup failed",
-                    );
-                }
+            if let Some(network_service) = state.network.as_ref()
+                && let Err(error) = network_service
+                    .cleanup_server_owned_ports_for_project(&project_id, &owned_ports)
+                    .await
+            {
+                tracing::error!(%error, %id, "server-owned endpoint cleanup failed");
+                return keystone_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                    "server network cleanup failed",
+                );
             }
             StatusCode::NO_CONTENT.into_response()
         }

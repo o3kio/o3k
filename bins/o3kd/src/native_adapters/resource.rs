@@ -43,16 +43,76 @@ pub struct GenericResourceApplication {
 }
 
 impl GenericResourceApplication {
+    /// Releases endpoints this request created for a server that was never
+    /// accepted, or whose canonical create outcome requires compensation.
+    ///
+    /// The shared O3K ownership rule decides which of `ports` may be released,
+    /// so an endpoint the caller supplied itself survives even when the server
+    /// intent names it, and an endpoint of another project is never touched.
+    /// An already-absent endpoint is idempotent success.
     async fn compensate_native_network_ports(&self, project_id: &str, ports: &[Uuid]) {
-        for port_id in ports {
-            if let Err(error) = self
-                .network_service
-                .delete_port_for_project(project_id, *port_id)
-                .await
+        if ports.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .network_service
+            .cleanup_server_owned_ports_for_project(project_id, ports)
+            .await
+        {
+            tracing::warn!(error = %error, "native create port compensation failed");
+        }
+    }
+
+    /// Compensates the endpoints of a native server create whose canonical
+    /// outcome this caller cannot classify from the error alone.
+    ///
+    /// The decision is derived from durable canonical state, never from the
+    /// error being reported: a create that is live, still converging, or
+    /// inconclusive preserves its endpoints so a real guest never loses its
+    /// network dependency, while a terminally failed create releases the
+    /// endpoints its intent still names — including endpoints an earlier
+    /// attempt allocated for the same create key.
+    async fn compensate_native_network_ports_after_create_failure(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        project_id: &str,
+        provider_idempotency_key: &str,
+        owned_network_ids: &[Uuid],
+    ) {
+        let server_id =
+            o3k_compute::ComputeService::server_id_for_create(project_id, provider_idempotency_key);
+        let dependency = match self
+            .compute
+            .create_dependency_state_for_auth(auth, o3k_domain::ServerId::from_uuid(server_id))
+            .await
+        {
+            Ok(dependency) => dependency,
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    %server_id,
+                    "native create outcome could not be classified; retaining endpoints"
+                );
+                return;
+            }
+        };
+        if dependency.disposition == o3k_compute::CreateDependencyDisposition::Preserve {
+            tracing::warn!(
+                %server_id,
+                "retaining native server endpoints for the durable create outcome"
+            );
+            return;
+        }
+        let mut candidates = owned_network_ids.to_vec();
+        for port_id in &dependency.network_ids {
+            if let Ok(port_id) = port_id.parse::<Uuid>()
+                && !candidates.contains(&port_id)
             {
-                tracing::warn!(%port_id, error = %error, "native create port compensation failed");
+                candidates.push(port_id);
             }
         }
+        self.compensate_native_network_ports(project_id, &candidates)
+            .await;
     }
 
     /// Attaches the lifecycle metering observer used to open and close the
@@ -2506,6 +2566,11 @@ impl ResourceApplication for GenericResourceApplication {
                 return Err(error);
             }
         };
+        // Keep provider command identity scoped even when the client reuses
+        // the same canonical key in another tenant. The same identity derives
+        // the durable server id, which the failure path needs to classify the
+        // create outcome.
+        let provider_idempotency_key = format!("{}:{compute_key}", auth.effective_scope().id());
         let result = self
             .compute
             .create_server_for_auth_canonical(
@@ -2525,9 +2590,7 @@ impl ResourceApplication for GenericResourceApplication {
                             ssh_public_key,
                         }
                     }),
-                    // Keep provider command identity scoped even when the
-                    // client reuses the same canonical key in another tenant.
-                    idempotency_key: format!("{}:{compute_key}", auth.effective_scope().id()),
+                    idempotency_key: provider_idempotency_key.clone(),
                 },
                 context,
             )
@@ -2536,8 +2599,13 @@ impl ResourceApplication for GenericResourceApplication {
             Ok(receipt) => receipt,
             Err(error) => {
                 tracing::warn!(error = ?error, "canonical native server create failed");
-                self.compensate_native_network_ports(&project_id, &owned_network_ids)
-                    .await;
+                self.compensate_native_network_ports_after_create_failure(
+                    auth,
+                    &project_id,
+                    &provider_idempotency_key,
+                    &owned_network_ids,
+                )
+                .await;
                 return Err(compute_error(error));
             }
         };
@@ -3513,6 +3581,27 @@ impl ResourceApplication for GenericResourceApplication {
             serde_json::json!({"resource_id": id}),
         )
         .map_err(|_| ResourceApplicationError::Validation)?;
+        // The server's durable network attachments are read *before* the
+        // canonical delete so the endpoints that the lifecycle owns can be
+        // released once the delete is terminal. The read intentionally retains
+        // attachment intent after deletion, which is what lets a replay of the
+        // same delete retry endpoint cleanup after a transient failure.
+        let project_id = auth.effective_scope().id().as_str().to_owned();
+        let owned_ports = match self
+            .compute
+            .server_network_ids_for_auth(auth, o3k_domain::ServerId::from_uuid(resource_id))
+            .await
+        {
+            Ok(network_ids) => network_ids
+                .iter()
+                .filter_map(|port_id| port_id.parse::<Uuid>().ok())
+                .collect::<Vec<Uuid>>(),
+            Err(o3k_compute::ComputeError::NotFound) => Vec::new(),
+            Err(error) => {
+                tracing::warn!(error = ?error, %id, "native server endpoint read failed");
+                return Err(compute_error(error));
+            }
+        };
         let receipt = self
             .compute
             .delete_server_for_auth_canonical(
@@ -3522,6 +3611,20 @@ impl ResourceApplication for GenericResourceApplication {
             )
             .await
             .map_err(compute_error)?;
+        // Endpoints are released only after the canonical delete is terminal:
+        // a converging delete still has a provider-side server that needs its
+        // network dependency, and the retried delete releases them later.
+        if matches!(
+            receipt.operation_state,
+            o3k_store::OperationState::Succeeded
+        ) && let Err(error) = self
+            .network_service
+            .cleanup_server_owned_ports_for_project(&project_id, &owned_ports)
+            .await
+        {
+            tracing::error!(%error, %id, "native server endpoint cleanup failed");
+            return Err(ResourceApplicationError::Internal);
+        }
         Ok(MutationResult {
             operation_id: receipt.operation_id.to_string(),
             resource_id: Some(id.to_owned()),
