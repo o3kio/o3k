@@ -90,3 +90,45 @@ before implementation, followed by a successor RC. See
 `rc22-horizon-unscoped-auth-defect.json` for the exact request/response
 matrix, the canonical identities proven before the failure, and the
 harness-defect lineage that preceded this classification.
+
+## Successor preparation: bounded Keystone login slice and the 2026.1 witness
+
+The successor candidate carries two bounded compatibility slices under SPEC-0022
+baseline change control, both tracked as issues and neither claiming blanket
+parity:
+
+- **#1031 — Keystone/Horizon login bootstrap.** Tracing the real pinned client
+  proved the sequence `POST /v3/auth/tokens` (unscoped) →
+  `GET /v3/users/{user_id}/projects` → `POST /v3/auth/tokens` (project-scoped) →
+  `GET /v3/projects`. O3K now answers all four, keeps an identity-only token
+  unable to authorize any operation, and authorizes `GET /v3/projects` as an
+  authorization-filtered project-visibility read rather than Keystone project
+  administration.
+- **#1032 — bounded collection pagination.** The pinned client's SDK guard
+  reported `Endless pagination loop detected` because O3K ignored `limit` and
+  `marker` and emitted no collection links, so the marker probe repeated a page
+  instead of ending. The bounded fix covers only the Nova and Neutron
+  collections the accepted journey exercises.
+
+The Horizon witness is pinned to **OpenStack 2026.1**,
+`quay.io/openstack.kolla/horizon:2026.1-ubuntu-noble` at OCI manifest digest
+`sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048`
+(Horizon `25.7.4.dev26`); `docs/evidence/pp4/horizon-artifact.yaml` records the
+resolution and the date it was checked. The rc.22 references to Horizon 2024.1
+above are historical and are deliberately never mixed with 2026.1 witness
+evidence.
+
+Two development confirmations exist for the successor slices, both explicitly
+non-certifying because they were produced by hand-swapping a locally built
+binary into the retained rc.22 VM:
+
+- `rc23-dev-horizon-login-preflight.json` — the login slice reaches an
+  authenticated session and exposes the remaining mandatory gaps.
+- `rc23-dev-horizon-full-witness.json` — the complete bounded witness passes,
+  including the Instances panel that previously answered HTTP 500, native
+  resource visibility, O3K independence from Horizon, and recovery after the
+  witness is re-created. It also records the residual client observations with
+  their classification: the compute API-selector message as a harness defect,
+  the pagination loop as an O3K defect (#1032), and the missing
+  `/limits` and `os-simple-tenant-usage` reads as tracked recoverable gaps
+  outside the accepted witness bar.

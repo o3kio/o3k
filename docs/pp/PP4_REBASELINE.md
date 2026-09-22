@@ -42,9 +42,15 @@ declared deterministic projection), with identity mapping recorded. No
 OpenStack shortcut or same-name second resource satisfies native proof.
 
 Horizon is pinned to one unmodified upstream container artifact for the
-campaign: Docker Hub `openstackhelm/horizon:2024.1-ubuntu_jammy-20250523`,
-manifest digest
-`sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b`.
+campaign: Quay.io `openstack.kolla/horizon:2026.1-ubuntu-noble` (Horizon
+`25.7.4.dev26`), OCI manifest digest
+`sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048`.
+The tag is rebuilt by Kolla continuously, so the digest — not the tag — is the
+evidence identity; `docs/evidence/pp4/horizon-artifact.yaml` records the
+resolution and the date it was checked. The failed rc.22 campaign used the
+earlier Docker Hub `openstackhelm/horizon:2024.1-ubuntu_jammy-20250523` pin,
+which remains historical rc.22 evidence only and is never mixed with 2026.1
+witness evidence.
 Normal Keystone endpoint/catalog/region/TLS/session configuration is allowed.
 The witness is limited to the capabilities advertised by
 `o3k-demo-v1`; unsupported services fail truthfully or are absent. O3K Ready

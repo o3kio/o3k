@@ -37,26 +37,43 @@ successor runtime candidate fixes it.
 ## Horizon witness boundary
 
 `horizon-witness.sh` runs the pinned image
-`docker.io/openstackhelm/horizon:2024.1-ubuntu_jammy-20250523` at digest
-`sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b`.
+`quay.io/openstack.kolla/horizon:2026.1-ubuntu-noble` at OCI manifest digest
+`sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048`
+(Horizon `25.7.4.dev26`). Kolla rebuilds that tag continuously, so the digest —
+not the tag — is the evidence identity, and
+`docs/evidence/pp4/horizon-artifact.yaml` records when it was resolved. The
+failed rc.22 campaign used the earlier Docker Hub
+`openstackhelm/horizon:2024.1-ubuntu_jammy-20250523` pin; that remains
+historical rc.22 evidence only and is never mixed with 2026.1 witness
+evidence.
+
 The image is unmodified: no fork, no source patch, no O3K-specific Horizon
-code. Only ordinary configuration is supplied — endpoint, region, session and
-`STATIC_ROOT` settings, an Apache/mod_wsgi vhost, and the container runtime
-invocation.
+code. Only ordinary configuration is supplied — endpoint, region, catalog,
+session, `STATIC_ROOT`, `OPENSTACK_API_VERSIONS`, Kolla `config.json`, an
+operator-supplied uWSGI ini, and the container runtime invocation.
 
-Three properties of that pinned image are harness assumptions, not O3K
-contracts, and each one has already hidden a defect behind a misclassified
-failure:
+Properties of that pinned image are harness assumptions, not O3K contracts, and
+each one has already hidden a defect behind a misclassified failure:
 
-- It is **not** a Kolla image. There is no `kolla_start` entrypoint and no
-  `/var/lib/kolla/config_files` tree; `CMD` is `/bin/bash`. The container must
-  be given the Apache command explicitly, and Horizon settings must be
-  mounted at `openstack_dashboard/local/local_settings.py` inside the image's
-  own virtualenv, which is the module `openstack_dashboard.settings` imports.
-- Horizon's default `STATIC_ROOT` resolves inside the read-only virtualenv, so
-  django-compressor raises `PermissionError` while rendering the login page.
-  The witness disables compression and points `STATIC_ROOT` at a writable
-  directory.
+- It **is** a Kolla image (`kolla_start` plus `/var/lib/kolla/config_files`), so
+  it needs `KOLLA_CONFIG_STRATEGY` and a `config.json`, and its own
+  `kolla_extend_start` collects static assets. Horizon settings are read through
+  `openstack_dashboard/local/local_settings.py`, which the image ships as a
+  symlink to `/etc/openstack-dashboard/local_settings.py` (with the `.py`
+  suffix); a Kolla `dest` without that suffix is copied but never imported.
+- The image ships no Apache; uWSGI serves the application, so the harness
+  supplies the ini. Its default session backend is a per-process cache, so a
+  session written by one uWSGI worker is invisible to the others and login
+  appears to succeed while every later request is anonymous. Cookie-backed
+  sessions are stateless across workers and are an ordinary Horizon setting.
+- `OPENSTACK_API_VERSIONS['compute']` selects the **novaclient v2 client
+  family**, not a Nova REST microversion. Upstream Horizon defaults it to `2`
+  (`openstack_dashboard/defaults.py`), and Horizon's own API-version registry
+  (`openstack_dashboard/api/base.py`) rejects any other value with
+  `2.1 is not a supported API version for the compute service`. O3K
+  legitimately exposes the bounded Nova v2.1 REST API while this setting stays
+  `2`: the two are different layers and must not be conflated. Setting
+  `compute: 2.1` here would be a harness defect, not an O3K defect.
 - The O3K identity endpoint is loopback-bound (`O3K_LISTEN_ADDR`, for example
   `127.0.0.1:18080` for the libvirt profile). A bridge-networked container
   cannot reach it at any address, so the witness runs the container with host

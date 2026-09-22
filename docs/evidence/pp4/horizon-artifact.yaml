@@ -5,23 +5,51 @@ authority: none
 product_dependency: false
 forked: false
 artifact:
-  image: docker.io/openstackhelm/horizon:2024.1-ubuntu_jammy-20250523
-  digest: sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b
-  provider: Docker Hub / openstackhelm
-  source: https://hub.docker.com/r/openstackhelm/horizon
+  image: quay.io/openstack.kolla/horizon:2026.1-ubuntu-noble
+  digest: sha256:723903d16317c53172f08c7f930b2c326f8b7fa16da98bf032e05ef287e0b048
+  provider: Quay.io / OpenStack Kolla
+  source: https://quay.io/repository/openstack.kolla/horizon
   upstream_image: true
   patches: []
+  horizon_version: 25.7.4.dev26
+  kolla_version: 22.2.1
   selection_basis: >-
-    The image is an unmodified OpenStack Horizon 2024.1 artifact whose
+    The image is an unmodified OpenStack Horizon 2026.1 artifact whose
     Keystone/Nova/Neutron/Glance client surface matches the bounded
-    o3k-demo-v1 compatibility journey. The immutable manifest digest is the
+    o3k-demo-v1 compatibility journey, and it matches the campaign's declared
+    2026.1 compatibility release. The immutable OCI manifest digest is the
     evidence identity; the tag is provenance only.
   registry_observation:
-    tag_last_pushed: 2025-05-23T04:59:14Z
-    digest_verified_against_registry_tag: true
+    # The tag is rebuilt by Kolla regularly, so only the digest is certification
+    # authority. Re-resolved for this campaign with an OCI Accept header.
+    checked_at: 2026-09-22
+    tag_is_mutable: true
+    tag_resolved_to_pinned_digest: true
+    manifest_media_type: application/vnd.oci.image.manifest.v1+json
+    config_digest: sha256:737572c6cffdfe78e11e2c06a383f60218ebc86d274efe180c95035d6f7944b8
+    layer_count: 39
+    architecture: amd64
+    resolution_method: >-
+      `curl -H 'Accept: application/vnd.oci.image.manifest.v1+json'
+      https://quay.io/v2/openstack.kolla/horizon/manifests/2026.1-ubuntu-noble`:
+      the mutable tag resolves to exactly the pinned digest, and the witness
+      pulls the digest, so the witnessed content is immutable.
+  superseded_by_this_pin:
+    note: >-
+      The failed rc.22 campaign used
+      docker.io/openstackhelm/horizon:2024.1-ubuntu_jammy-20250523
+      (sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b).
+      That pin is historical rc.22 evidence only
+      (docs/evidence/pp4-core/rc22-horizon-unscoped-auth-defect.json) and must
+      not be mixed with 2026.1 witness evidence.
 bounded_journey:
   keystone:
-    - auth
+    # Traced from the pinned, unmodified client, not assumed: Horizon
+    # authenticates unscoped, discovers the projects it may scope into, then
+    # re-authenticates with the selected project scope.
+    - unscoped-password-auth
+    - available-scope-discovery
+    - project-scoped-password-auth
     - token
     - project
     - service-catalog

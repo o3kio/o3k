@@ -91,7 +91,11 @@ WEBROOT = '/'
 # Local witness session key for the unmodified image; not a credential.
 SECRET_KEY = 'pp4-core-witness-local-session-key'
 STATIC_ROOT = '/var/lib/kolla/static'
-OPENSTACK_API_VERSIONS = {'identity': 3, 'image': 2, 'volume': 3, 'compute': 2.1}
+# Upstream Horizon defaults (openstack_dashboard/defaults.py). 'compute' selects
+# the novaclient v2 family; it is not a Nova REST microversion. A value of 2.1
+# here is rejected by Horizon's own API-version registry
+# (openstack_dashboard/api/base.py) as an unsupported compute version.
+OPENSTACK_API_VERSIONS = {'identity': 3, 'image': 2, 'volume': 3, 'compute': 2}
 OPENSTACK_HOST = '127.0.0.1'
 OPENSTACK_KEYSTONE_URL = '$KEYSTONE_URL'
 OPENSTACK_KEYSTONE_DEFAULT_ROLE = 'admin'
@@ -178,6 +182,24 @@ for panel in /identity/ /project/images/ /project/networks/ /project/instances/;
   code=$(curl -s -b "$JAR" -o "$EVID/horizon-${panel//\//_}.html" -w '%{http_code}' "http://127.0.0.1:$PORT$panel")
   if [[ "$code" == 200 ]]; then summary "panel $panel: PASS"; else summary "panel $panel: NOT_PROVEN HTTP-$code"; fi
 done
+# A panel can answer 200 and still leave the client reporting a recoverable
+# error, which is a real O3K compatibility signal rather than a cosmetic one.
+# Two such signals are asserted rather than tolerated:
+# - the client's pagination guard, which fires when a collection ignores
+#   `limit`/`marker` and re-serves the page instead of ending the traversal;
+# - the client's API-version registry, which rejects a configured version it
+#   does not support.
+# Other recoverable messages (for example a missing optional read such as
+# /limits) are recorded in the log and classified rather than asserted here.
+"${DOCKER[@]}" logs "$NAME" >"$EVID/horizon-docker.log" 2>&1 || true
+if grep -q 'Endless pagination loop detected' "$EVID/horizon-docker.log"; then
+  fail pagination-loop-detected
+fi
+if grep -q 'is not a supported API version' "$EVID/horizon-docker.log"; then
+  fail client-api-version-mismatch
+fi
+summary 'client pagination guard: PASS'
+summary 'client compute API selector: PASS'
 summary 'native_resource_identity='"${O3K_PP4_NATIVE_ID:-unknown}"; summary 'compatibility_resource_identity='"${O3K_PP4_COMPAT_ID:-unknown}"
 if grep -RqiE 'pp4-native|pp4-openstack|'"${O3K_PP4_NATIVE_ID:-nomatch}"'|'"${O3K_PP4_COMPAT_ID:-nomatch}" "$EVID"/horizon-*.html; then
   summary 'resource observation: PASS expected Core resources visible in Horizon response'

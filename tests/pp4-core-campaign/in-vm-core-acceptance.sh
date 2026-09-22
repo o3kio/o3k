@@ -9,6 +9,9 @@ RELEASE_VERSION=${O3K_PP4_VERSION:-}; SOURCE_SHA=${O3K_PP4_SOURCE_SHA:-}; HARNES
 [[ "$RELEASE_VERSION" =~ ^v0\.4\.0-rc\.[0-9]+$ && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && -n "$HARNESS_SHA" ]] \
   || { echo 'explicit release and harness identity is required' >&2; exit 2; }
 API=http://127.0.0.1:18080/o3k/v1
+# Mirrors the port the pinned Horizon witness binds; used only to assert that
+# Horizon has genuinely stopped serving when independence is checked.
+HORIZON_PORT=18091
 mkdir -p "$EVID"; chmod 0700 "$EVID"
 exec 9>"$EVID/.lock"; flock -n 9 || { echo 'evidence directory is already in use' >&2; exit 2; }
 log(){ printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$EVID/phase.log"; }
@@ -284,7 +287,30 @@ else
   O3K_PP4_HORIZON_REQUIRED=0 O3K_PP4_NATIVE_ID="$server_id" O3K_PP4_COMPAT_ID="$compat_id" bash /home/tester/horizon-witness.sh "$EVID" || true
 fi
 curl -fsS http://127.0.0.1:18080/readyz >"$EVID/ready-with-horizon.txt" || fail 'O3K readiness failed while Horizon witness was active'
-docker rm -f pp4-horizon-witness >/dev/null 2>&1 || true
+# Horizon is a witness, never a dependency: stop it and prove O3K readiness, both
+# public interfaces, and the already-running guest are all unaffected.
+sudo docker stop pp4-horizon-witness >/dev/null 2>&1 || fail 'Horizon witness container could not be stopped'
+[[ "$(sudo docker inspect -f '{{.State.Running}}' pp4-horizon-witness 2>/dev/null || true)" == false ]] || fail 'Horizon witness container still reported running after stop'
+if curl -sf --max-time 5 "http://127.0.0.1:$HORIZON_PORT/" >/dev/null 2>&1; then fail 'Horizon still served HTTP after stop'; fi
 curl -fsS http://127.0.0.1:18080/readyz >"$EVID/ready-after-horizon-stop.txt" || fail 'O3K readiness failed after Horizon stopped'
+native "/compute/servers/$server_id" GET "$EVID/horizon-independent-native-show.json" --expect 200 || fail 'native API failed while Horizon was stopped'
+openstack server show "$server_id" -f json >"$EVID/horizon-independent-compat-show.json" || fail 'OpenStack-compatible API failed while Horizon was stopped'
+[[ "$(jq -r '.status' "$EVID/horizon-independent-compat-show.json")" == ACTIVE ]] || fail 'guest left ACTIVE while Horizon was stopped'
+sudo virsh -c qemu:///system list --all --name | sed '/^$/d' | sort >"$EVID/horizon-independent-domains.txt"
+native_domain="$(head -1 "$EVID/native-domain.txt")"
+[[ -n "$native_domain" ]] || fail 'native libvirt domain name was not recorded'
+grep -qxF "$native_domain" "$EVID/horizon-independent-domains.txt" || fail 'guest libvirt domain disappeared while Horizon was stopped'
+pass 'O3K readiness, both interfaces and the running guest are independent of Horizon'
+# Recovery: the witness mounts a harness-owned configuration directory that its
+# exit trap deletes, so recovery is proven by removing the stopped container and
+# re-running the pinned witness end to end rather than by an in-place
+# `docker start` that would come up without its Kolla configuration.
+sudo docker rm -f pp4-horizon-witness >/dev/null 2>&1 || true
+mkdir -p "$EVID/horizon-restart"
+O3K_PP4_HORIZON_REQUIRED=1 O3K_PP4_NATIVE_ID="$server_id" O3K_PP4_COMPAT_ID="$compat_id" \
+  bash /home/tester/horizon-witness.sh "$EVID/horizon-restart" >"$EVID/horizon-restart-witness.txt" 2>&1 \
+  || fail 'Horizon witness did not recover after restart'
+grep -q 'RESULT: PASS' "$EVID/horizon-restart/horizon-summary.txt" || fail 'Horizon restart witness did not report PASS'
+pass 'Horizon restart recovered the full bounded witness'
 printf 'phase1_status=PASS\n' >"$EVID/pre-reboot.env"
 pass 'Horizon boundary and O3K readiness independent of Horizon'
