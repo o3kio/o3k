@@ -60,3 +60,33 @@ bounded Horizon witness, full cross-interface lifecycle, reinstall/purge, and
 foreign-state/secret evidence therefore remain **not-proven**. The current
 source repair prepares a successor candidate (expected `v0.4.0-rc.22`); no
 successor is tagged or published by this iteration.
+
+## rc.22 failed candidate: unscoped Keystone authentication
+
+`v0.4.0-rc.22` is an immutable published prerelease at source
+`15162af7582f72d98475a79ee369e8902574ffee`. Its public trust chain is green
+and its fresh disposable Ubuntu 24.04 KVM campaign passed release identity,
+canonical init/join, BuildingBlock, public topology, Placement, native network
+and native-first create, same-key replay, changed-body conflict, OpenStack
+observation, compatibility create with native projection, and the
+cross-interface lifecycle.
+
+It then failed the required unmodified Horizon witness, and the failure is a
+**product defect, not a harness defect**. Horizon 2024.1 authenticates
+unscoped first — `openstack_auth.backend.KeystoneBackend.authenticate`
+unconditionally calls `plugin.get_access_info(unscoped_auth, session=session)`
+before scoping to a project, and no Horizon setting supplies a project that
+would skip it. O3K rc.22 answers every unscoped (and every scope-less)
+`POST /v3/auth/tokens` with `400 invalid authentication request`, while the
+equivalent project-scoped request returns 201. `SPEC-0004` declares a project
+scope only, so this is a declared-subset boundary rather than an accident —
+but the subset cannot satisfy the Horizon journey that PP.4 Core requires.
+
+Consequently rc.22 is a **failed immutable candidate**, PP.4 Core is
+**INCOMPLETE** on it, the Debian matrix was not started, and Horizon was not
+patched around the gap. Supporting unscoped authentication is a normative
+scope change to `SPEC-0004` and requires an accepted issue/spec amendment
+before implementation, followed by a successor RC. See
+`rc22-horizon-unscoped-auth-defect.json` for the exact request/response
+matrix, the canonical identities proven before the failure, and the
+harness-defect lineage that preceded this classification.

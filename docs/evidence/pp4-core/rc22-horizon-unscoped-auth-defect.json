@@ -1,0 +1,137 @@
+{
+  "candidate": {
+    "release": "v0.4.0-rc.22",
+    "source_sha": "15162af7582f72d98475a79ee369e8902574ffee",
+    "public_url": "https://github.com/o3kio/o3k/releases/tag/v0.4.0-rc.22",
+    "campaign_harness_sha": "105d311d9e621ed71d368a40e910525797a11b77",
+    "runtime_changed_after_release": "NO",
+    "post_release_diff": "tests/pp4-core-campaign/** only (campaign harness; no crates/, bins/, packaging/, install.sh or migration change)"
+  },
+  "release_trust": {
+    "public_release_manifest": "PASS",
+    "sigstore": "PASS (release authenticity verified; Sigstore identity/transparency)",
+    "install_command": "curl -sfL https://github.com/o3kio/o3k/releases/download/v0.4.0-rc.22/install.sh | sudo env O3K_SKIP_ARAF=1 sh -"
+  },
+  "campaign": {
+    "harness": "tests/pp4-core-campaign/host-run.sh ubuntu target/pp4-core-rc22-ubuntu-complete-19",
+    "host": "fresh disposable Ubuntu 24.04 nested KVM VM",
+    "distro": "ubuntu",
+    "release": "24.04",
+    "kernel": "6.8.0-139-generic",
+    "architecture": "x86_64",
+    "kvm": "PASS",
+    "araf": false,
+    "verdict": "INCOMPLETE",
+    "phases_passed": [
+      "phase 0 release identity",
+      "phase 1 canonical bootstrap, topology, Placement and profile",
+      "phase 2 canonical native network and native-first workload",
+      "phase 3 same-key replay, changed-body conflict, OpenStack native observation",
+      "phase 4 compatibility create, real provider path and native projection",
+      "phase 5 cross-interface show/list and reboot convergence"
+    ],
+    "phase_failed": "phase 6 required Ubuntu Horizon witness",
+    "failure_marker": "required Ubuntu Horizon witness failed"
+  },
+  "canonical_identities": {
+    "building_block_id": "142281f7-1e14-5bed-8b43-fe7922802ff0",
+    "placement_provider_id": "compute-agent",
+    "network_id": "01a0c884-805f-7231-a08d-00a7f5297eb2",
+    "native_server_id": "009c1501-28ff-5f3f-a5b4-a4602d3a9a41",
+    "native_operation_id": "e63cb1c0-46c7-5a3e-9ab9-98d2e1edab13",
+    "native_port_id": "59247566-6035-5d19-9fe0-8a5587eab45c",
+    "native_ip": "192.0.2.3",
+    "native_provider_domain": "o3k-ed5b8a41b324b408cc2d",
+    "compatibility_server_id": "03ea1326-677c-55a2-b150-24e7d0fb2301",
+    "native_projection_id": "03ea1326-677c-55a2-b150-24e7d0fb2301",
+    "compatibility_provider_domain": "o3k-1028c71a9088417cb96d",
+    "previous_testlab_port_ip": "192.0.2.2",
+    "collision_safe_allocation": true
+  },
+  "horizon_witness": {
+    "boundary": "unmodified OpenStack Horizon 2024.1; no fork, no source patch, no O3K-specific Horizon code",
+    "image": "docker.io/openstackhelm/horizon:2024.1-ubuntu_jammy-20250523",
+    "digest": "sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b",
+    "container_network": "host (O3K identity endpoint is loopback-bound)",
+    "keystone_endpoint": "http://127.0.0.1:18080/v3",
+    "region": "RegionOne",
+    "image_pull": "PASS",
+    "container_boot": "PASS",
+    "http_readiness": "PASS (GET / -> 302 /auth/login/)",
+    "login_page": "PASS (GET /auth/login/ -> 200, CSRF token rendered, region choice value 0)",
+    "container_keystone_reachability": "PASS (keystoneauth1 v3.Password from inside the container obtained a token)",
+    "login_submit": "HTTP 200, form re-rendered; Horizon message \"An error occurred authenticating. Please try again later.\"",
+    "project_context": "HTTP 302 back to login (no authenticated session)",
+    "result": "FAIL login-session"
+  },
+  "defect": {
+    "classification": "real O3K compatibility defect (product/runtime)",
+    "not_harness": true,
+    "summary": "O3K rc.22 rejects every unscoped Keystone v3 password authentication. Unmodified Horizon 2024.1 cannot log in without it.",
+    "horizon_requirement": "openstack_auth.backend.KeystoneBackend.authenticate unconditionally performs an unscoped POST /v3/auth/tokens (plugin.get_access_info(unscoped_auth, session=session)) before project scoping; no Horizon/openstack_auth setting provides a project or otherwise skips that step.",
+    "o3k_normative_scope": "docs/specs/SPEC-0004-keystone-bootstrap.md declares POST /v3/auth/tokens with exactly one password identity method and a project scope only.",
+    "observed_auth_matrix": [
+      {
+        "request": "auth.identity.password.user={name,password,domain.name=Default}, no scope field",
+        "expected_upstream_keystone_v3": "unscoped token",
+        "o3k_rc22": "HTTP 400 {\"error\":{\"code\":400,\"title\":\"Bad Request\",\"message\":\"invalid authentication request\"}}"
+      },
+      {
+        "request": "auth.identity.password.user={name,password,domain.name=Default}, scope=\"unscoped\"",
+        "expected_upstream_keystone_v3": "unscoped token",
+        "o3k_rc22": "HTTP 400 invalid authentication request"
+      },
+      {
+        "request": "auth.identity.password.user={name,password,domain.name=Default}, scope={project:{name:admin,domain:{name:Default}}}",
+        "expected_upstream_keystone_v3": "project-scoped token",
+        "o3k_rc22": "HTTP 201 with X-Subject-Token"
+      },
+      {
+        "request": "auth.identity.password.user={name,password}, scope=\"unscoped\"",
+        "expected_upstream_keystone_v3": "unscoped token (default domain resolution)",
+        "o3k_rc22": "HTTP 400 invalid authentication request"
+      },
+      {
+        "request": "auth.identity.password.user={name,password}, no scope field",
+        "expected_upstream_keystone_v3": "unscoped token (default domain resolution)",
+        "o3k_rc22": "HTTP 400 invalid authentication request"
+      }
+    ],
+    "discriminator": "the authorization scope, not the presence of user.domain; project-scoped requests succeed, unscoped and scope-less requests fail",
+    "exact_horizon_request_body_observed": "{\"auth\": {\"identity\": {\"methods\": [\"password\"], \"password\": {\"user\": {\"password\": \"<redacted>\", \"name\": \"admin\"}}}, \"scope\": \"unscoped\"}}",
+    "exact_o3k_response_body": "{\"error\":{\"code\":400,\"title\":\"Bad Request\",\"message\":\"invalid authentication request\"}}",
+    "credentials_reused": false,
+    "credential_still_valid": "PASS (openstack token issue and a project-scoped keystoneauth1 v3.Password request both succeed with the same credential)"
+  },
+  "required_corrective_change": {
+    "authority": "SPEC-0004 currently declares a project scope only, so supporting unscoped authentication is a normative scope change and requires an accepted issue/spec amendment before implementation.",
+    "smallest_change": "Accept and issue an unscoped token for POST /v3/auth/tokens when scope is absent or \"unscoped\", bounded to the same single password identity method and bootstrap profile already declared.",
+    "consequence_for_candidate": "v0.4.0-rc.22 becomes a failed immutable candidate; a successor RC is required and PP.4 Core cannot be certified on rc.22.",
+    "horizon_must_not_be_patched": true
+  },
+  "historical_horizon_harness_defects": {
+    "note": "The historical Ubuntu Horizon attempt directories complete-15/16/17/18 were destroyed by an external process outside this session before they could be preserved; their classifications below are reconstructed from the commits that fixed them and from the local reproduction recorded here.",
+    "complete-16": "harness-only: campaign user lacked Docker access (fixed by explicit sudo docker)",
+    "complete-17": "harness-only: temporary Horizon configuration written under /var/lib/o3k hit permission denied (fixed by moving harness config to the work directory)",
+    "complete-18": "harness: pinned image pulled and container started, but Apache never became HTTP-ready (fixed by this session's harness change)",
+    "additional_harness_defects_found_and_fixed_in_this_session": [
+      "the pinned image is not a Kolla image: no kolla_start entrypoint, no /var/lib/kolla/config_files tree, CMD is /bin/bash, so the container exited immediately and produced no logs",
+      "Horizon settings must be mounted at openstack_dashboard/local/local_settings.py, not /etc/openstack-dashboard/local_settings",
+      "Horizon's default STATIC_ROOT resolves inside the read-only virtualenv and raised PermissionError while rendering the login page",
+      "the witness targeted a hardcoded 172.17.0.1:18090 that cannot reach the loopback-bound O3K identity endpoint; it now reads the endpoint and region from /etc/o3k/admin-openrc and runs the container with host networking",
+      "the login form region field is an index into AVAILABLE_REGIONS, not a region name; domain is only submitted when the form renders it",
+      "apache2 logs to files in this image, so docker logs alone was empty; bounded non-secret container state and Apache logs are now captured on failure"
+    ],
+    "harness_classification_after_fix": "the remaining Horizon failure in run 19 is NOT a harness defect"
+  },
+  "not_claimed": [
+    "PP.4 Core certification",
+    "Debian 12 matrix (not started; Ubuntu is not PASS)",
+    "PP.7 production readiness",
+    "GA",
+    "full OpenStack parity",
+    "Araf certification",
+    "HA certification"
+  ],
+  "secret_scan": "PASS (no Authorization/Bearer/token/private-key/password material in the recorded evidence; the login request body is recorded with the password redacted)"
+}
