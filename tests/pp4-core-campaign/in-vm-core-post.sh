@@ -91,7 +91,31 @@ if openstack server show "$native_server_id" >/dev/null 2>&1; then fail 'native 
 native "/compute/servers/$compatibility_server_id" DELETE "$EVID/native-compat-delete.json" --idempotency-key pp4-core-compat-delete-rc22 --expect 200 --expect 202 --expect 204 || fail 'native delete of compatibility-created server failed'
 for i in $(seq 1 60); do if ! openstack server show "$compatibility_server_id" >/dev/null 2>&1; then break; fi; sleep 2; done
 if openstack server show "$compatibility_server_id" >/dev/null 2>&1; then fail 'compatibility server did not delete through native interface'; fi
-pass 'cross-interface delete convergence'
+# #1034: the native delete must release the server-owned endpoints, not only
+# mark the server deleted. rc.23 left an ACTIVE `o3k-server:` endpoint behind and
+# the TestLab teardown could then no longer delete the subnet. This reads the
+# durable endpoint rows directly so the invariant is asserted where it lives,
+# independently of either projection.
+sudo python3 - "$EVID/server-endpoints-after-deletes.json" >"$EVID/server-endpoints-after-deletes.json" <<'PY'
+import json
+import sqlite3
+import sys
+out = sys.argv[1]
+db = sqlite3.connect("file:/var/lib/o3k/o3k.sqlite?mode=ro", uri=True)
+rows = db.execute(
+    "SELECT id, name, status FROM network_ports WHERE name LIKE 'o3k-server:%' ORDER BY id"
+).fetchall()
+json.dump({"server_owned_endpoints": [{"id": r[0], "name": r[1], "status": r[2]} for r in rows]},
+          sys.stdout, indent=2, sort_keys=True)
+print()
+PY
+if [[ "$(jq -r '.server_owned_endpoints | length' "$EVID/server-endpoints-after-deletes.json")" != 0 ]]; then
+  jq -r '.server_owned_endpoints[] | "\(.id) \(.status) \(.name)"' "$EVID/server-endpoints-after-deletes.json"
+  fail 'a server-owned endpoint survived the cross-interface deletes'
+fi
+# The shipped teardown must be able to remove the subnet the deleted servers
+# used; an ACTIVE server-owned endpoint keeps the network in use.
+pass 'cross-interface delete convergence and server-owned endpoint release'
 
 log 'phase 10: foreign canaries and reset contract'
 sudo mkdir -p /opt/pp4-foreign /etc/pp4-foreign
