@@ -17,6 +17,32 @@ def exists(root: Path, *names: str) -> bool:
 def equal_files(root: Path, left: str, right: str) -> bool:
     return exists(root, left, right) and (root / left).read_bytes() == (root / right).read_bytes()
 
+# The replay gates are defined by the invariants the campaign itself asserts
+# (in-vm-core-acceptance.sh, phase 3): a same-key replay and a changed-body
+# conflict must not add a canonical resource, operation, port or Placement
+# allocation, and must not change the replaying operation's own reservation
+# count. A replayed request legitimately records one more quota_reservations
+# row, so the raw table count is deliberately excluded there and must be
+# excluded here too; comparing the snapshots byte-for-byte would report a
+# passing replay as NOT PROVEN.
+SIDE_EFFECT_KEYS = (
+    "resources",
+    "operations",
+    "network_ports",
+    "placement_allocations",
+    "quota_reservations_for_operation",
+)
+
+def same_side_effect_counts(root: Path, left: str, right: str) -> bool:
+    if not exists(root, left, right):
+        return False
+    try:
+        before = json.loads((root / left).read_text(encoding="utf-8"))
+        after = json.loads((root / right).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    return all(before.get(key) == after.get(key) for key in SIDE_EFFECT_KEYS)
+
 def main() -> int:
     if len(sys.argv) != 6:
         raise SystemExit("usage: generate_core_manifest.py EVID VERSION SOURCE_SHA HARNESS_SHA DISTRO")
@@ -29,8 +55,8 @@ def main() -> int:
         "placement": PASS if exists(root, "placement-providers.json", "placement-inventory.json") else NOT_PROVEN,
         "native_network": PASS if exists(root, "native-networks.json", "native-network-show.json", "native-network.json", "native-subnets.json") else NOT_PROVEN,
         "native_first_create": PASS if exists(root, "native-create.json", "native-operation.json", "native-server.json", "native-domain.txt", "native-console.log") else NOT_PROVEN,
-        "canonical_replay": PASS if exists(root, "native-replay.json") and equal_files(root, "side-effects-before-replay.json", "side-effects-after-replay.json") else NOT_PROVEN,
-        "changed_body_conflict": PASS if exists(root, "native-conflict.json") and equal_files(root, "side-effects-before-replay.json", "side-effects-after-conflict.json") else NOT_PROVEN,
+        "canonical_replay": PASS if exists(root, "native-replay.json") and same_side_effect_counts(root, "side-effects-before-replay.json", "side-effects-after-replay.json") else NOT_PROVEN,
+        "changed_body_conflict": PASS if exists(root, "native-conflict.json") and same_side_effect_counts(root, "side-effects-before-replay.json", "side-effects-after-conflict.json") else NOT_PROVEN,
         "openstack_observation": PASS if exists(root, "openstack-native-show.json", "openstack-native-list.json", "openstack-native-port-show.json") else NOT_PROVEN,
         "compatibility_create": PASS if exists(root, "openstack-create.json", "compat-domain.txt", "compat-console.log") else NOT_PROVEN,
         "native_projection": PASS if exists(root, "native-compat-show.json") else NOT_PROVEN,
