@@ -89,3 +89,22 @@ absent unless multi-domain support is enabled, in which case Horizon uses
 panels and visibility of the Core resources. It makes no blanket
 Horizon/OpenStack parity claim, and the panels are informational while
 resource visibility is required.
+
+## Evidence safety
+
+An external wipe of `target/` once destroyed the only raw copy of a campaign's
+evidence. Every run therefore copies its evidence out of the mutable checkout
+before teardown: `host-run.sh` calls `backup_evidence` on the success path and
+again from the exit trap, which runs for failures too.
+
+The copy is staged inside `$O3K_PP4_EVIDENCE_BACKUP` (default
+`$HOME/pp4-evidence-backup`) and moved into place with an atomic rename, so a
+partially written backup is never visible. Alongside the raw evidence — the
+summary, the client log, the request capture, the manifest and any failure
+classification — the backup carries an `evidence-identity.txt` recording the
+release, the runtime source SHA, the campaign harness SHA, the distro, the
+campaign status and the backup time. An earlier run's backup is never
+overwritten; a name collision gets a timestamp suffix instead.
+
+This makes a lost checkout recoverable; it does not make a failed campaign
+pass, and it never substitutes for the fresh-host campaign itself.

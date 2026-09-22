@@ -59,7 +59,37 @@ qemu-system-x86_64 -name "$VM_NAME" -machine type=q35,accel=kvm -cpu host -smp 2
   -netdev user,id=net0,hostfwd=tcp::$SSH_PORT-:22 -device virtio-net-pci,netdev=net0 \
   -display none -daemonize -pidfile "$PIDFILE"
 ssh_vm() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p "$SSH_PORT" tester@127.0.0.1 "$@"; }
+# Protected evidence backup. An external wipe of target/ already destroyed one
+# campaign's raw evidence, so every run copies its evidence out of the mutable
+# checkout before teardown. The copy is staged inside the backup root and moved
+# into place with an atomic rename, so a half-written backup is never visible,
+# and an earlier run's backup is never overwritten.
+BACKUP_ROOT="${O3K_PP4_EVIDENCE_BACKUP-$HOME/pp4-evidence-backup}"
+BACKED_UP=0
+backup_evidence() {
+  (( BACKED_UP == 0 )) || return 0
+  [[ -d "$EVID" ]] || return 0
+  [[ -n "$(ls -A "$EVID" 2>/dev/null)" ]] || return 0
+  mkdir -p "$BACKUP_ROOT"
+  local name staging
+  name="$(basename "$EVID")"
+  [[ -e "$BACKUP_ROOT/$name" ]] && name="$name.$(date -u +%Y%m%dT%H%M%SZ)"
+  staging="$(mktemp -d "$BACKUP_ROOT/.incoming.XXXXXX")" || return 0
+  if cp -a "$EVID/." "$staging/" 2>/dev/null; then
+    printf 'release=%s\nsource_sha=%s\nharness_sha=%s\ndistro=%s\ncampaign_status=%s\nevidence_dir=%s\nbacked_up_at=%s\n' \
+      "$VERSION" "$EXPECTED_SHA" "$HARNESS_SHA" "$DISTRO" "${CAMPAIGN_STATUS:-incomplete}" \
+      "$EVID" "$(date -u +%FT%TZ)" >"$staging/evidence-identity.txt" 2>/dev/null || true
+    if mv -T "$staging" "$BACKUP_ROOT/$name" 2>/dev/null; then
+      BACKED_UP=1
+      echo "PP4 evidence backed up: $BACKUP_ROOT/$name" >&2
+      return 0
+    fi
+  fi
+  rm -rf "$staging"
+  echo 'PP4 evidence backup failed; raw evidence left in the checkout' >&2
+}
 cleanup() {
+  backup_evidence
   if [[ "${O3K_PP4_KEEP_VM-0}" == 1 ]]; then
     echo "PP4 debug VM retained: work=$WORK ssh_port=$SSH_PORT key=$SSH_KEY pidfile=$PIDFILE" >&2
     return 0
@@ -123,6 +153,10 @@ set +e
 scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$SSH_PORT" -r \
   tester@127.0.0.1:/home/tester/pp4-evidence/. "$EVID/" >/dev/null 2>&1
 set -e
-((smoke_status == 0)) || exit "$smoke_status"
+((smoke_status == 0)) || { CAMPAIGN_STATUS=FAILED; exit "$smoke_status"; }
+CAMPAIGN_STATUS=PASS
 printf 'release=%s\nsource_sha=%s\nharness_sha=%s\ndistro=%s\ncampaign_status=PASS\n' "$VERSION" "$EXPECTED_SHA" "$HARNESS_SHA" "$DISTRO" >"$EVID/campaign.env"
+# Back up before the teardown trap tears the run down, so a later wipe of the
+# checkout cannot take the only copy of a passed campaign with it.
+backup_evidence
 echo "PP4 CORE CAMPAIGN PASS: $DISTRO"
