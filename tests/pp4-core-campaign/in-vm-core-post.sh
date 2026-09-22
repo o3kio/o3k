@@ -12,6 +12,19 @@ cleanup(){ rm -rf -- "$WORKDIR"; }
 trap cleanup EXIT
 TOKEN_FILE="$WORKDIR/native-token-post"; OPENRC="$WORKDIR/admin-openrc-post"; sudo cp /etc/o3k/admin-openrc "$OPENRC"; sudo chown "$(id -u):$(id -g)" "$OPENRC"; chmod 600 "$OPENRC"
 source "$OPENRC"
+# /etc/o3k/clouds.yaml is root-only (0600), so an unprivileged client cannot read
+# it and every openstack command reports "Cloud o3k-testlab was not found".
+# Build a readable clouds file for the client the same way
+# in-vm-core-acceptance.sh does instead of depending on the installed
+# file's permissions; the installed credentials stay root-only by design.
+CLIENT_CLOUDS="$WORKDIR/clouds.yaml"
+python3 - "$CLIENT_CLOUDS" <<'PY'
+import json, os, sys
+p=sys.argv[1]; a=os.environ['OS_AUTH_URL']; base=a[:-3] if a.endswith('/v3') else a.rstrip('/')
+v={'clouds':{'o3k-testlab':{'auth':{'auth_url':a,'username':os.environ['OS_USERNAME'],'password':os.environ['OS_PASSWORD'],'project_name':os.environ['OS_PROJECT_NAME'],'user_domain_name':os.environ.get('OS_USER_DOMAIN_NAME','Default'),'project_domain_name':os.environ.get('OS_PROJECT_DOMAIN_NAME','Default')},'region_name':os.environ.get('OS_REGION_NAME','RegionOne'),'interface':'public','identity_api_version':'3','image_api_version':'2','image_endpoint_override':base+'/v2','network_endpoint_override':base+'/v2.0'}}}
+json.dump(v,open(p,'w',encoding='utf-8')); os.chmod(p,0o600)
+PY
+export OS_CLIENT_CONFIG_FILE="$CLIENT_CLOUDS"
 python3 "$HELPER" auth --admin-openrc "$OPENRC" --token-file "$TOKEN_FILE" >"$EVID/native-auth-post.json"
 native(){ python3 "$HELPER" request --token-file "$TOKEN_FILE" --url "$API$1" --method "${2:-GET}" --output-file "$3" "${@:4}"; }
 log(){ printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$EVID/phase.log"; }
@@ -97,9 +110,14 @@ teardown_testlab() {
   sudo /usr/local/share/o3k/bootstrap-testlab.sh --teardown >"$EVID/testlab-teardown-$label.log" 2>&1 || fail "TestLab teardown failed ($label)"
   sudo systemctl stop o3k-compute.service o3kd.service >/dev/null 2>&1 || true
   for root in /var/lib/o3k /var/log/o3k; do
-    [[ -f "$root/.o3k-owned" && ! -L "$root/.o3k-owned" ]] || fail "missing ownership marker: $root"
-    grep -Fqx "o3k-owned-v1 path=$root" "$root/.o3k-owned" || fail "invalid ownership marker: $root"
-    if find "$root" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -print -quit | grep -q .; then
+    # The declared state roots are daemon-owned: /var/lib/o3k is not even
+    # listable by an unprivileged user and its marker is mode 0600, so the
+    # marker must be validated and enumerated with sudo. The check itself is
+    # unchanged; only the privilege it runs with is.
+    sudo test -f "$root/.o3k-owned" || fail "missing ownership marker: $root"
+    sudo test ! -L "$root/.o3k-owned" || fail "ownership marker is a symlink: $root"
+    sudo grep -Fqx "o3k-owned-v1 path=$root" "$root/.o3k-owned" || fail "invalid ownership marker: $root"
+    if [[ -n "$(sudo find "$root" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -print -quit)" ]]; then
       sudo find "$root" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -exec rm -rf -- {} +
     fi
   done
@@ -163,7 +181,7 @@ pass 'reset, uninstall, purge, reinstall and foreign-state preservation'
 log 'phase 12: secret scan and owned-state check'
 if grep -RniE 'Authorization:|Bearer[[:space:]]+[A-Za-z0-9._~+/-]{8,}|access_token|refresh_token|bootstrap_secret|enrollment_token|BEGIN .*PRIVATE KEY|CHAP|session_cookie' "$EVID" >"$EVID/secret-findings.txt" 2>/dev/null; then fail 'secret pattern found in campaign artifacts'; fi
 printf 'secret_scan=PASS\nfalse_positive_count=0\n' >"$EVID/security.env"
-find /var/lib/o3k /var/log/o3k /etc/o3k -maxdepth 1 -mindepth 1 -print 2>/dev/null | sort >"$EVID/owned-state-final.txt" || true
+sudo find /var/lib/o3k /var/log/o3k /etc/o3k -maxdepth 1 -mindepth 1 -print 2>/dev/null | sort >"$EVID/owned-state-final.txt" || true
 pass 'secret scan and owned-state check'
 
 python3 /home/tester/generate_core_manifest.py "$EVID" "$RELEASE_VERSION" "$SOURCE_SHA" "$HARNESS_SHA" "$DISTRO" >"$EVID/manifest.json"
