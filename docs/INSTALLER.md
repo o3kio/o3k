@@ -42,7 +42,7 @@ RHEL/Fedora, other releases, and other profiles are not supported.
 2. creates a private `mktemp -d` temp dir with trap cleanup — nothing is
    executed from unverified content;
 3. resolves the version from the pin baked into the installer
-   (`O3K_INSTALLER_VERSION=v0.4.0-rc.22` in the current source); precedence is the `O3K_VERSION`
+   (`O3K_INSTALLER_VERSION=v0.4.0-rc.23` in the current source); precedence is the `O3K_VERSION`
    env override (dev/test only) > an optional endpoint-injected
    `O3K_PINNED_VERSION` first line > the baked pin. The installer never
    consults a channel service and never falls back to `main`/`latest`;
@@ -100,9 +100,10 @@ public-API resources.
 
 Every published installer is pinned to its own release version (the baked
 `O3K_INSTALLER_VERSION` constant in `packaging/get-o3k.sh`), so the plain
-`curl | sudo sh -` form installs exactly `v0.4.0-rc.22` in the current source.
-The rc.22 candidate contains the consumer trust repair and must be independently
-round-tripped before fresh-host PP.4 evidence is accepted. The
+`curl | sudo sh -` form installs exactly `v0.4.0-rc.23` in the current source.
+That candidate carries the bounded Keystone Horizon login/bootstrap and
+collection-pagination repairs and must be independently round-tripped before
+fresh-host PP.4 evidence is accepted. The
 installer never asks any endpoint which version to install.
 
 Version resolution precedence:
@@ -111,7 +112,7 @@ Version resolution precedence:
    precedence):
 
    ```sh
-   curl -sfL https://get.o3k.io | sudo env O3K_VERSION=v0.4.0-rc.22 sh -
+   curl -sfL https://get.o3k.io | sudo env O3K_VERSION=v0.4.0-rc.23 sh -
    ```
 
 2. an optional `O3K_PINNED_VERSION="<version>"` first line, kept for the
