@@ -167,10 +167,29 @@ if (( smoke_status == 0 )); then
     fi
   fi
   if (( smoke_status == 0 )); then
+    # The host driver owns the reboot proof (it observes the guest go down and
+    # come back), and the in-guest manifest is the authoritative record, so the
+    # driver's own reboot evidence must be present inside the guest evidence
+    # root before the manifest is emitted. Without this the manifest reports
+    # `host_reboot: NOT PROVEN` and a blocked verdict for a reboot the driver
+    # already proved.
+    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$SSH_PORT" \
+      "$EVID/boot-id-before-reboot.txt" "$EVID/boot-id-after-reboot.txt" \
+      "$EVID/tenant-domains-running-before-reboot.txt" "$EVID/tenant-domains-bounded-before-reboot.txt" \
+      "tester@127.0.0.1:/home/tester/pp4-evidence/" >/dev/null 2>&1 || smoke_status=1
     set +e
     ssh_vm "O3K_PP4_VERSION='$VERSION' O3K_PP4_SOURCE_SHA='$EXPECTED_SHA' O3K_PP4_HARNESS_SHA='$HARNESS_SHA' bash /home/tester/in-vm-core-post.sh /home/tester/pp4-evidence /home/tester/native_client.py '$DISTRO' >> /home/tester/core-acceptance.log 2>&1"
     smoke_status=$?
     set -e
+    if (( smoke_status == 0 )); then
+      # The authoritative record and the campaign verdict must agree: a manifest
+      # that is not PASS is a failed campaign, never a cosmetic difference.
+      verdict="$(ssh_vm 'python3 -c "import json;print(json.load(open(\"/home/tester/pp4-evidence/manifest.json\"))[\"verdict\"])"' 2>/dev/null || printf unknown)"
+      case "$verdict" in
+        PASS) ;;
+        *) echo "core manifest verdict is not PASS: $verdict" >&2; smoke_status=1 ;;
+      esac
+    fi
   fi
 fi
 set +e
