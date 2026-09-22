@@ -33,3 +33,42 @@ returned HTTP 500 instead of the original canonical result. See
 `docs/evidence/pp4-core/rc18-native-replay-failure.json`. Do not classify this
 as a harness failure or continue to Horizon/full-distro certification until a
 successor runtime candidate fixes it.
+
+## Horizon witness boundary
+
+`horizon-witness.sh` runs the pinned image
+`docker.io/openstackhelm/horizon:2024.1-ubuntu_jammy-20250523` at digest
+`sha256:53af8d4c6c6b4c9c339f535080e2b56c439f8b36c417a6eba8bbf16afeb04a2b`.
+The image is unmodified: no fork, no source patch, no O3K-specific Horizon
+code. Only ordinary configuration is supplied — endpoint, region, session and
+`STATIC_ROOT` settings, an Apache/mod_wsgi vhost, and the container runtime
+invocation.
+
+Three properties of that pinned image are harness assumptions, not O3K
+contracts, and each one has already hidden a defect behind a misclassified
+failure:
+
+- It is **not** a Kolla image. There is no `kolla_start` entrypoint and no
+  `/var/lib/kolla/config_files` tree; `CMD` is `/bin/bash`. The container must
+  be given the Apache command explicitly, and Horizon settings must be
+  mounted at `openstack_dashboard/local/local_settings.py` inside the image's
+  own virtualenv, which is the module `openstack_dashboard.settings` imports.
+- Horizon's default `STATIC_ROOT` resolves inside the read-only virtualenv, so
+  django-compressor raises `PermissionError` while rendering the login page.
+  The witness disables compression and points `STATIC_ROOT` at a writable
+  directory.
+- The O3K identity endpoint is loopback-bound (`O3K_LISTEN_ADDR`, for example
+  `127.0.0.1:18080` for the libvirt profile). A bridge-networked container
+  cannot reach it at any address, so the witness runs the container with host
+  networking and reads the endpoint and region from `/etc/o3k/admin-openrc`
+  instead of hardcoding them.
+
+The login form is submitted with the values the rendered page actually
+exposes: the `region` field value is an index into `AVAILABLE_REGIONS`, not a
+region name, and `domain` is submitted only when the form renders it (it is
+absent unless multi-domain support is enabled, in which case Horizon uses
+`OPENSTACK_KEYSTONE_DEFAULT_DOMAIN`). The witness asserts the bounded
+`o3k-demo-v1` journey only — HTTP readiness, login, project context, four
+panels and visibility of the Core resources. It makes no blanket
+Horizon/OpenStack parity claim, and the panels are informational while
+resource visibility is required.
