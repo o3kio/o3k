@@ -2,7 +2,7 @@
   "schema": "o3k.pp4-core.product-repair.v1",
   "issue": "#1034",
   "title": "Server-owned network endpoint lifecycle across both interfaces",
-  "status": "repaired in source; release evidence pending the successor candidate campaign",
+  "status": "repaired and proven on the public successor candidate",
   "defect_found_on": {
     "release": "v0.4.0-rc.23",
     "source_commit": "5cb24f0585d5899102b12e441bd6c4c9aa571f7b",
@@ -65,6 +65,16 @@
   },
   "claims": {
     "proven": "source-level repair with in-process, fail-before/fix-after evidence covering both reported defect classes and the safety cases",
-    "not_proven": "no public-artifact campaign evidence yet; PP.4 Core remains INCOMPLETE until a successor candidate passes the full Ubuntu and Debian matrix on one identical harness revision"
+    "not_proven": "no other host or profile is covered; the PP.5 crash window remains open"
+  },
+  "released_in": {
+    "version": "v0.4.0-rc.24",
+    "source_commit": "7830d62e54eea4d73276ebe8f6e6c0e58e3397fc",
+    "campaign_evidence": "docs/evidence/pp4-core/rc24-campaign-evidence.json"
+  },
+  "campaign_proof": {
+    "ubuntu": "phase 9 asserts zero durable `o3k-server:%` endpoints after the cross-interface deletes; the compatibility-created server was deleted through the native interface whose canonical delete returned HTTP 202 complete=false, so the release ran from the terminal outcome; the caller-supplied endpoint survived",
+    "debian": "same assertion and the same 202 path on Debian 12",
+    "verdict": "both hosts PASS with Core manifest verdict PASS"
   }
 }
