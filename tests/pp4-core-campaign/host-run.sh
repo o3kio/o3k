@@ -132,6 +132,15 @@ if (( smoke_status == 0 )); then
   # returns immediately while sshd lingers for a few seconds, so the guest must
   # be observed going down AND coming back with a different boot id: otherwise
   # the gate is vacuous and the delayed shutdown kills the post-reboot phases.
+  #
+  # Tenant images in the bounded TestLab profile (CirrOS) ignore the ACPI power
+  # button, and the stock libvirt-guests shutdown path waits for them without
+  # forcing anything, which wedges the host shutdown (guest console: "Waiting
+  # for 2 guests to shut down").  Bounding that is ordinary host operation for
+  # a single-node TestLab: ask politely, then force.  O3K's own units are not
+  # involved; the console shows o3kd and o3k-compute stopping cleanly.
+  ssh_vm 'sudo virsh -c qemu:///system list --state-running --name' >"$EVID/tenant-domains-running-before-reboot.txt" 2>/dev/null || true
+  ssh_vm 'for d in $(sudo virsh -c qemu:///system list --state-running --name); do sudo virsh -c qemu:///system shutdown "$d" >/dev/null 2>&1 || true; done; for _i in $(seq 1 20); do [ -z "$(sudo virsh -c qemu:///system list --state-running --name)" ] && break; sleep 3; done; for d in $(sudo virsh -c qemu:///system list --state-running --name); do sudo virsh -c qemu:///system destroy "$d" >/dev/null 2>&1 || true; done; sudo virsh -c qemu:///system list --all --name' >"$EVID/tenant-domains-bounded-before-reboot.txt" 2>&1 || true
   ssh_vm 'cat /proc/sys/kernel/random/boot_id' >"$EVID/boot-id-before-reboot.txt" 2>/dev/null || smoke_status=1
   ssh_vm 'sudo reboot' >/dev/null 2>&1 || true
   went_down=0
@@ -141,7 +150,7 @@ if (( smoke_status == 0 )); then
   done
   (( went_down == 1 )) || { echo 'guest never became unreachable during the reboot' >&2; smoke_status=1; }
   came_back=0
-  for _attempt in $(seq 1 120); do
+  for _attempt in $(seq 1 240); do
     if ssh_vm true 2>/dev/null; then came_back=1; break; fi
     sleep 3
   done
