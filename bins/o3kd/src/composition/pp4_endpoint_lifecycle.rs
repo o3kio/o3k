@@ -60,6 +60,17 @@ fn session(service: &str, namespace: &str) -> ControllerSession {
     }
 }
 
+/// Wraps the production binding projector; tests use it to fault-inject the
+/// collaborator boundary without replacing the authority behind it.
+type ProjectorWrapper = Arc<
+    dyn Fn(
+            &NetworkService,
+            Arc<dyn o3k_compute::PortBindingProjector>,
+        ) -> Arc<dyn o3k_compute::PortBindingProjector>
+        + Send
+        + Sync,
+>;
+
 struct Harness {
     app: axum::Router,
     store: Arc<O3kStore>,
@@ -75,6 +86,15 @@ struct Harness {
 
 impl Harness {
     async fn build() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::build_with(None).await
+    }
+
+    /// Builds the runtime with the production binding projector, optionally
+    /// wrapped in a fault injector so the transient-failure retry contract can
+    /// be exercised against the real projector behind it.
+    async fn build_with(
+        projector_wrapper: Option<ProjectorWrapper>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let root = std::env::temp_dir().join(format!("o3k-pp4-endpoint-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root)?;
         let sqlite_path = root.join("cloud.sqlite");
@@ -119,6 +139,11 @@ impl Harness {
             public_allocator: None,
             unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
         });
+        let projector: Arc<dyn o3k_compute::PortBindingProjector> = match projector_wrapper.as_ref()
+        {
+            Some(wrapper) => wrapper(&network, projector),
+            None => projector,
+        };
         let compute_service = ComputeService::new_for_test(store.clone(), provider.clone())
             .with_binding_projector(projector);
         let compute = Arc::new(compute_service.clone());
@@ -818,6 +843,116 @@ async fn concurrent_equivalent_deletes_converge_once()
         )
         .await?;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+
+    harness.cleanup();
+    Ok(())
+}
+
+/// Fails the next endpoint release for one chosen endpoint, and delegates
+/// everything else to the production projector underneath.
+///
+/// Only the collaborator boundary is doubled: the ownership decision and the
+/// deletion itself still run against the real `NetworkService`, so the test
+/// proves the retry contract rather than a scripted expectation.
+#[derive(Clone)]
+struct FaultInjectingProjector {
+    inner: Arc<dyn o3k_compute::PortBindingProjector>,
+    fail_next: Arc<std::sync::Mutex<Option<Uuid>>>,
+}
+
+impl FaultInjectingProjector {
+    fn wrap(
+        inner: Arc<dyn o3k_compute::PortBindingProjector>,
+        fail_next: Arc<std::sync::Mutex<Option<Uuid>>>,
+    ) -> Self {
+        Self { inner, fail_next }
+    }
+}
+
+#[async_trait::async_trait]
+impl o3k_compute::PortBindingProjector for FaultInjectingProjector {
+    async fn project_create_outcome(
+        &self,
+        project_id: &str,
+        port_id: &str,
+        succeeded: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .project_create_outcome(project_id, port_id, succeeded)
+            .await
+    }
+
+    async fn unbind_port(
+        &self,
+        project_id: &str,
+        port_id: &str,
+        operation_id: Uuid,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .unbind_port(project_id, port_id, operation_id)
+            .await
+    }
+
+    async fn release_server_owned_endpoint(
+        &self,
+        project_id: &str,
+        port_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let armed = self
+            .fail_next
+            .lock()
+            .map_err(|_| "fault slot poisoned".to_owned())?
+            .take();
+        if armed.is_some_and(|endpoint| endpoint.to_string() == port_id) {
+            return Err("injected transient endpoint release failure".into());
+        }
+        self.inner
+            .release_server_owned_endpoint(project_id, port_id)
+            .await
+    }
+}
+
+/// A transient endpoint-release failure must fail the delete mutation and be
+/// recoverable by replaying the same delete — never leave the endpoint behind
+/// silently.
+#[tokio::test]
+async fn transient_release_failure_is_reported_and_repaired_by_replay()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let fail_next: Arc<std::sync::Mutex<Option<Uuid>>> = Arc::new(std::sync::Mutex::new(None));
+    let wrapper: ProjectorWrapper = {
+        let fail_next = fail_next.clone();
+        Arc::new(move |_network, inner| {
+            Arc::new(FaultInjectingProjector::wrap(inner, fail_next.clone()))
+        })
+    };
+    let harness = Harness::build_with(Some(wrapper)).await?;
+    let network_id = harness.network_id;
+    let (status, body) = harness
+        .compat_create("pp4-transient", json!([{"uuid": network_id.to_string()}]))
+        .await?;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let id = body["server"]["id"].as_str().expect("server id").to_owned();
+    let ports = harness.intent_ports(&id).await?;
+    assert_eq!(ports.len(), 1);
+
+    *fail_next.lock().expect("fault slot") = Some(ports[0]);
+    let (status, body) = harness.native_delete(&id).await;
+    assert!(
+        status.is_server_error(),
+        "a failed endpoint release must fail the delete mutation: {status} {body}"
+    );
+    assert!(
+        harness.port_present(ports[0]).await,
+        "the injected failure must actually have blocked the release"
+    );
+
+    // The replay resolves the same canonical delete and retries the release.
+    let (status, body) = harness.native_delete(&id).await;
+    assert!(status.is_success(), "replay: {status} {body}");
+    assert!(
+        !harness.port_present(ports[0]).await,
+        "the replay did not finish the release a transient failure left behind"
+    );
 
     harness.cleanup();
     Ok(())

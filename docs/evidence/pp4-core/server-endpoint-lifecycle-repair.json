@@ -19,7 +19,7 @@
   "accepted_design": {
     "decision": "synchronous + idempotent release on the normal mutation path; reconciler cleanup remains defence-in-depth (PP.5 follow-up)",
     "ownership_rule": "o3k-network centralises the discriminator: `is_server_owned_endpoint_name` / `server_owned_endpoint_context` accept only `o3k-server:<addressed-project>:<non-empty context>`, and `NetworkService::cleanup_server_owned_ports_for_project` releases only those, treats an absent endpoint as idempotent success, and fails closed on unexpected store errors.",
-    "release_seat": "The terminal-success delete projection in `o3k-compute` (`project_terminal_binding_outcome`) releases each endpoint immediately after that endpoint's successful unbind, so every driver of convergence — request path, agent terminal-update consumer, periodic lifecycle sweep, poll surface — produces the same durable state for an accepted (202) and a synchronous delete.",
+    "release_seat": "The terminal-success delete projection in `o3k-compute` (`project_terminal_binding_outcome`) releases each endpoint immediately after that endpoint's successful unbind, so every driver of convergence \u2014 request path, agent terminal-update consumer, periodic lifecycle sweep, poll surface \u2014 produces the same durable state for an accepted (202) and a synchronous delete.",
     "retry_seat": "`delete_server_with_accepted_operation`'s already-deleted shortcut releases from the durable create intent and reports the outcome, so replaying the same delete finishes a release that failed transiently.",
     "create_disposition": "`ComputeService::create_dependency_state_for_auth` derives `CreateDependencyDisposition` from durable canonical state: absent identity, DELETED, or ERROR with a terminally failed operation compensates; a live, in-flight, or inconclusive outcome (including UnknownOutcome) preserves the endpoint. The ERROR resource and the failed operation are retained as terminal evidence.",
     "documented_deviation": "issue #1034 comment: a release failure is reported (500) only where a request waits on it (request-path delete sites and the replay shortcut); when a background driver completes convergence, the failure is logged and retried by the next delete replay."
@@ -27,7 +27,7 @@
   "normative_anchor": {
     "spec": "docs/specs/SPEC-0021-cross-service-workflows-and-compensation.md",
     "clarification": "Compensation section now states the endpoint ownership discriminator, that caller-supplied and foreign endpoints are preserved, and that release follows the terminal unbind and the terminal outcome rather than the observing request.",
-    "public_api_change": "none — no OpenStack/Keystone compatibility surface is added, removed, or re-scoped"
+    "public_api_change": "none \u2014 no OpenStack/Keystone compatibility surface is added, removed, or re-scoped"
   },
   "regressions": {
     "interface_matrix": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::server_owned_endpoints_converge_for_every_interface_pair (native/native, native/OpenStack, OpenStack/native, OpenStack/OpenStack)",
@@ -42,7 +42,8 @@
     "ownership_rule": "crates/o3k-network/src/service/tests.rs::server_owned_endpoint_identity_requires_the_owning_project_and_a_context",
     "cleanup_and_address_reuse": "crates/o3k-network/src/service/tests.rs::server_owned_endpoint_cleanup_is_ownership_filtered_and_frees_the_address",
     "unbind_before_release": "crates/o3k-compute/src/lib.rs::create_and_delete_project_binding_outcomes_through_fake_provider (asserts the exact CreateOutcome, Unbind, Release sequence and the idempotent replay)",
-    "durable_disposition": "crates/o3k-compute/src/lib.rs::create_dependency_disposition_follows_durable_state"
+    "durable_disposition": "crates/o3k-compute/src/lib.rs::create_dependency_disposition_follows_durable_state",
+    "transient_release_retry": "bins/o3kd/src/composition/pp4_endpoint_lifecycle.rs::transient_release_failure_is_reported_and_repaired_by_replay (injects one release failure at the collaborator boundary; the delete mutation fails, the replay finishes the release against the real NetworkService)"
   },
   "fail_before_fix_after": {
     "method": "the shared cleanup helper and the disposition read were neutered (cleanup returned success without deleting; the disposition always returned Preserve) and the new suite was re-run against the otherwise-complete fix",
