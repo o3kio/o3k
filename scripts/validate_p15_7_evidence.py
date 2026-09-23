@@ -108,6 +108,63 @@ def validate(
         if not isinstance(execution.get("block_count"), int) or execution["block_count"] < 2:
             fail(errors, "execution.block_count must be at least 2")
 
+    scale = mapping(root.get("scale_composition"), "scale_composition", errors)
+    if scale is not None:
+        # The S5 composition contract: six distinct identities are enrolled
+        # across the journey (block-a..block-f), at least five BuildingBlocks
+        # are concurrently Ready at peak and in the final topology, and no
+        # duplicate BuildingBlock/ResourceProvider identity exists.
+        if scale.get("duplicate_identities") is not False:
+            fail(errors, "scale_composition.duplicate_identities must be false")
+        if not isinstance(scale.get("drained_agent"), str) or not scale["drained_agent"].strip():
+            fail(errors, "scale_composition.drained_agent must be explicit")
+        if scale.get("replacement_agent") != "block-f":
+            fail(errors, "scale_composition.replacement_agent must be block-f")
+        enrolled = mapping(scale.get("enrolled_identities"), "scale_composition.enrolled_identities", errors)
+        if enrolled is not None:
+            if enrolled.get("distinct") is not True:
+                fail(errors, "scale_composition.enrolled_identities.distinct must be true")
+            count = enrolled.get("count")
+            if not isinstance(count, int) or count < 6:
+                fail(errors, "scale_composition.enrolled_identities.count must be at least 6")
+            for field in ("agents", "block_ids"):
+                values = enrolled.get(field)
+                if not isinstance(values, list) or not values:
+                    fail(errors, f"scale_composition.enrolled_identities.{field} must be a non-empty list")
+                    continue
+                if not all(isinstance(value, str) and value for value in values):
+                    fail(errors, f"scale_composition.enrolled_identities.{field} must contain non-empty strings")
+                elif len(set(values)) != len(values):
+                    fail(errors, f"scale_composition.enrolled_identities.{field} must be distinct")
+        for name, minimum in (
+            ("initial_concurrent_ready", None),
+            ("peak_concurrent_ready", 5),
+            ("final_concurrent_ready", 5),
+        ):
+            section = mapping(scale.get(name), f"scale_composition.{name}", errors)
+            if section is None:
+                continue
+            count = section.get("count")
+            if not isinstance(count, int):
+                fail(errors, f"scale_composition.{name}.count must be an integer")
+            elif minimum is None and count != 5:
+                fail(errors, f"scale_composition.{name}.count must be exactly 5")
+            elif minimum is not None and count < minimum:
+                fail(errors, f"scale_composition.{name}.count must be at least {minimum}")
+            # Identity lists are mandatory for the observed initial/final
+            # concurrent sets; the peak section records the count only.
+            if name == "peak_concurrent_ready":
+                continue
+            for field in ("agents", "block_ids"):
+                values = section.get(field)
+                if not isinstance(values, list):
+                    fail(errors, f"scale_composition.{name}.{field} must be a list")
+                    continue
+                if not all(isinstance(value, str) and value for value in values):
+                    fail(errors, f"scale_composition.{name}.{field} must contain non-empty strings")
+                elif len(set(values)) != len(values):
+                    fail(errors, f"scale_composition.{name}.{field} must be distinct")
+
     journey = mapping(root.get("journey"), "journey", errors)
     if journey is not None:
         missing = sorted(REQUIRED_STEPS - set(journey))
@@ -162,6 +219,20 @@ def validate(
         passed(recovery.get("canonical_state_survived"), "restart_recovery.canonical_state_survived", errors)
         passed(recovery.get("postgres"), "restart_recovery.postgres", errors)
         passed(recovery.get("sqlite_parity"), "restart_recovery.sqlite_parity", errors)
+
+    ownership = mapping(root.get("database_ownership"), "database_ownership", errors)
+    if ownership is not None:
+        # The production composition gate must prove which database backend the
+        # real o3kd process actually consumed; a missing or sqlite effective
+        # backend is not evidence of the postgres composition claim.
+        if ownership.get("effective_backend") != "postgres":
+            fail(errors, "database_ownership.effective_backend must be postgres")
+        proof = mapping(ownership.get("backend_proof"), "database_ownership.backend_proof", errors)
+        if proof is not None:
+            if proof.get("status") != "passed":
+                fail(errors, "database_ownership.backend_proof.status must be passed")
+            if not isinstance(proof.get("method"), str) or not proof["method"].strip():
+                fail(errors, "database_ownership.backend_proof.method must be explicit")
 
     timing = mapping(root.get("bootstrap_timing"), "bootstrap_timing", errors)
     if timing is not None:

@@ -58,6 +58,14 @@ fi
 python3 - "${EVIDENCE}" <<'PY'
 import json, sys
 sha = "0123456789abcdef0123456789abcdef01234567"
+block_ids = [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    "33333333-3333-4333-8333-333333333333",
+    "44444444-4444-4444-8444-444444444444",
+    "55555555-5555-4555-8555-555555555555",
+    "66666666-6666-4666-8666-666666666666",
+]
 doc = {
   "artifact_type":"o3k-p15-7-scale-composition-evidence", "schema_version":1,
   "phase":"P15.7", "status":"passed", "evidence_tier":"protected-real-host",
@@ -65,16 +73,32 @@ doc = {
   "tested_source_sha":sha,
   "execution":{"provider":"agent","hypervisor":"libvirt","database_backend":"postgres",
     "real_o3kd":True,"real_auth":True,"real_execution_boundary":True,
-    "multiple_real_hosts":True,"block_count":2,"sqlite_parity":True},
+    "multiple_real_hosts":True,"block_count":6,"provisioned_vms":6,"sqlite_parity":True},
+  "scale_composition":{
+    "enrolled_identities":{"count":6,"distinct":True,
+      "agents":["block-a","block-b","block-c","block-d","block-e","block-f"],
+      "block_ids":block_ids},
+    "initial_concurrent_ready":{"count":5,
+      "agents":["block-a","block-b","block-c","block-d","block-e"],
+      "block_ids":block_ids[:5]},
+    "peak_concurrent_ready":{"count":5,"minimum":5,"met":True},
+    "final_concurrent_ready":{"count":5,
+      "agents":["block-b","block-c","block-d","block-e","block-f"],
+      "block_ids":block_ids[1:]},
+    "drained_agent":"block-a","replacement_agent":"block-f","duplicate_identities":False},
   "journey":{"fresh_deployment":True,"init":True,"topology":True,"capacity":True,
     "constrained_placement":True,"add_block_capacity_growth":True,
-    "multiple_authenticated_joins":{"status":"passed","count":2,"each_authenticated":True},
+    "multiple_authenticated_joins":{"status":"passed","count":6,"each_authenticated":True},
     "drain":{"status":"passed","no_new_placement":True,"blockers_observed":True,"evacuation_claimed":False},
     "remove_rejoin_replace":True,"restart_recovery":True,
     "projections_convergent":{"native":True,"openstack":True,
       "araf":{"required":False,"status":"not_configured",
         "reason":"external_consumer_not_provisioned"}}},
   "restart_recovery":{"status":"passed","canonical_state_survived":True,"postgres":True,"sqlite_parity":True},
+  "database_ownership":{"mode":"disposable","effective_backend":"postgres",
+    "backend_proof":{"status":"passed","method":"o3kd_env_backend_configuration"},
+    "server_version":"16.4","redacted_endpoint":"postgres://REDACTED@127.0.0.1:5432/o3k_test",
+    "schema_prepared":True,"fault_injection":"docker_restart","managed":True},
   "security_negatives":{"unauthenticated_join_rejected":True,"replay_join_rejected":True,
     "cross_tenant_concealment":True,"foreign_state_preserved":True},
   "bootstrap_timing":{"measured":True,"sample_count":3,"boundary":"init request through ready state",
@@ -111,6 +135,50 @@ PY
 if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
   echo "fake provider accepted by P15.7 validator" >&2; exit 1
 fi
+# A below-S5 peak concurrency or a duplicate identity must fail closed.
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+d["execution"]["provider"] = "agent"
+d["scale_composition"]["peak_concurrent_ready"]["count"] = 4
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "below-S5 peak concurrency accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+d["scale_composition"]["peak_concurrent_ready"]["count"] = 5
+d["scale_composition"]["duplicate_identities"] = True
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "duplicate canonical identities accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+d["scale_composition"]["duplicate_identities"] = False
+d["scale_composition"]["initial_concurrent_ready"]["count"] = 4
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "four-identity initial topology accepted by P15.7 validator" >&2; exit 1
+fi
+# An evidence artifact that does not prove the postgres backend must fail
+# closed: a sqlite effective backend (or a missing proof) is not composable
+# with the production database claim.
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+d["scale_composition"]["initial_concurrent_ready"]["count"] = 5
+d["database_ownership"]["effective_backend"] = "sqlite"
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "sqlite effective backend accepted by P15.7 validator" >&2; exit 1
+fi
 
 # Araf is an optional external consumer. An artifact produced with no
 # O3K_P15_7_ARAF_URL must remain valid, while a required Araf projection must
@@ -119,6 +187,8 @@ python3 - "${EVIDENCE}" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
 d["execution"]["provider"] = "agent"
+d["scale_composition"]["initial_concurrent_ready"]["count"] = 5
+d["database_ownership"]["effective_backend"] = "postgres"
 d["journey"]["projections_convergent"]["araf"] = {
     "required": False, "status": "not_applicable",
     "reason": "external_consumer_not_provisioned"
@@ -165,16 +235,37 @@ diagnostic = Path(sys.argv[4]).read_text(encoding="utf-8")
 bootstrap = Path(sys.argv[5]).read_text(encoding="utf-8")
 upload = workflow.split("- name: Upload redacted real-host artifacts", 1)[1].split("if-no-files-found:", 1)[0]
 assert "target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json" in upload
-for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block-c", "block-d", "o3k init",
+for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block-c", "block-d", "block-e", "block-f", "o3k init",
                  "bootstrap/join", "actions/drain", "actions/remove", "docker restart",
-                 "capacity_total", "CAPACITY_AFTER_ADD", "drain_blockers", "cargo test --locked -p o3kd",
+                 "capacity_total", "CAPACITY_AFTER_ADD", "CAPACITY_AFTER_D", "CAPACITY_AFTER_E",
+                 "CAPACITY_AFTER_REMOVE", "CAPACITY_AFTER_F", "drain_blockers", "cargo test --locked -p o3kd",
                  "o3k-p15-7-journey-owned=", "o3k-p15-7-journey-owned-v1",
                  "rm -rf -- \"$WORK_ROOT\"", "second_real_host_required", "assert_owned_domains_absent",
                  "agent-id", "agent identity transfer failed", "/var/lib/o3k-compute/agent-id",
                  "actual_uuid", "DOMAINS+=(\"$d\")", "OVERLAYS+=(\"$overlay\")",
                  "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-c-uuid\")\"", "provision_vms_bounded",
+                 "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-d-uuid\")\"",
+                 "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-e-uuid\")\"",
+                 "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-f-uuid\")\"",
                  "capture-p15-7-provision-diagnostics.py", "p15-7-provisioning-diagnostics.json", "REPLAY_JOIN_FILE",
                  "REPLAY_JOIN_BY_AGENT[$DRAIN_AGENT]", "compute-agent-replay-join.json",
+                 "for agent in block-a block-b block-c block-d block-e block-f; do",
+                 "for required_agent in block-a block-b block-c block-d block-e block-f; do",
+                 "initial five BuildingBlocks are not concurrently Ready",
+                 "final BuildingBlock set is not concurrently Ready",
+                 "peak concurrent Ready count is below five",
+                 "drained block still present in canonical topology",
+                 "restart_o3kd_verified",
+                 "wait_o3kd_readyz",
+                 "pg_proxy_dsn",
+                 "rewrite_o3kd_env_for_proxy",
+                 "rejoin_bootstrap_agent",
+                 "bootstrap_store_probe",
+                 "PROXY_DSN",
+                 "pg_stat_activity WHERE datname = current_database()",
+                 "effective_backend",
+                 "backend_proof",
+                 "O3K_DATABASE_BACKEND=postgres",
                  "install -m 0644 \"$STATE_ROOT/tls/agent.pem\"",
                  "capture-p15-7-workload-diagnostics.py", "p15-7-workload-failure-diagnostics.json",
                  "capture_workload_failure_diagnostics", "${workload_label}-operation.raw.json", "/operations/$operation_id",
@@ -202,6 +293,9 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
     assert required in journey, required
 assert "--os-password" not in journey
 assert '! grep -Fq "$WORKLOAD_A" "$FOREIGN_SHOW"' not in journey
+# The protected workflows must authorize exactly the six journey identities.
+for workflow_text in (workflow, diagnostic):
+    assert "O3K_TESTLAB_ADDITIONAL_AGENT_IDS: block-a,block-b,block-c,block-d,block-e,block-f" in workflow_text
 for tenant_variable in ("O3K_EXTRA_TENANT_PROJECT_ID", "O3K_EXTRA_TENANT_PROJECT_NAME",
                         "O3K_EXTRA_TENANT_USER_ID", "O3K_EXTRA_TENANT_USER_NAME",
                         "O3K_EXTRA_TENANT_PASSWORD"):
@@ -218,6 +312,24 @@ assert 'p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$LIBVIRT_STORAGE
 assert 'p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert 'p15-7-libvirt-storage-pool.sh" cleanup "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert journey.index('p15-7-libvirt-storage-pool.sh" define') < journey.index('provision_vms_bounded block-a block-b')
+# S5 lifecycle ordering: the initial five identities must all be enrolled and
+# concurrently Ready before any drain; drain and removal precede the
+# replacement join; the replacement is measured against the post-removal
+# settled baseline, never against the pre-drain total.
+assert journey.index('blocks-initial-five.json') < journey.index('DRAIN_AGENT="$HOST_A"')
+assert journey.index('install_agent block-e "${IPS[4]}"') < journey.index('DRAIN_AGENT="$HOST_A"')
+assert journey.index('actions/drain') < journey.index('actions/remove')
+assert journey.index('actions/remove') < journey.index('join_block block-f "${IPS[5]}"')
+assert journey.index('capacity-after-remove.json') < journey.index('capacity-after-f.json')
+# External-mode PostgreSQL wiring: the restart helper is defined before the
+# wiring, the env rewrite immediately precedes the restart, the canonical
+# bootstrap identity is re-established before readiness is required, and the
+# late restart pairs the helper with the historical readyz wait unchanged.
+assert journey.index('restart_o3kd_verified() {') < journey.index('PROXY_DSN="$(pg_proxy_dsn)"')
+assert "  rewrite_o3kd_env_for_proxy\n  restart_o3kd_verified" in journey
+assert journey.index('  restart_o3kd_verified\n  # The previous backend') \
+    < journey.index('  rejoin_bootstrap_agent\n  wait_o3kd_readyz "readyz did not reconstruct after the PostgreSQL backend switch"')
+assert 'restart_o3kd_verified\nwait_o3kd_readyz "readyz did not reconstruct after restart"' in journey
 for required in ("pool-list --all --name", "pool-dumpxml", "pool-define", "pool-start",
                  "pool-destroy", "pool-undefine", "target/path",
                  "pool identity does not match its exact run-owned name and path",

@@ -31,6 +31,29 @@ LIBVIRT_STORAGE_ROOT="$LIBVIRT_IMAGE_ROOT/o3k-p15-7-$RUN_ID"
 AUTH_PORT="${O3K_TESTLAB_PORT:-28080}"
 CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-28551}"
 PG_CONTAINER="${O3K_P15_7_PG_CONTAINER:-o3k-p15-7-postgres-$RUN_ID}"
+# PostgreSQL ownership. `disposable` (the default) consumes a harness-owned
+# container and keeps the historical restart/failure gate. `external` consumes
+# a required, operator-owned PostgreSQL endpoint through O3K_DATABASE_URL and
+# must never start/stop/restart/drop that server. External mode exists because
+# the PP.5 host cannot publish container ports, so a disposable container is
+# unreachable from the control plane.
+POSTGRES_MODE="${O3K_P15_7_POSTGRES_MODE:-disposable}"
+# In external mode the run-owned proxy listens on this local port and forwards
+# to the operator-owned target ($O3K_P15_7_EXTERNAL_PG_TARGET). The control
+# plane consumes O3K_DATABASE_URL through the proxy, which is what makes an
+# external fault injecting a sever/restore of the proxy safe and reversible.
+POSTGRES_PROXY_PORT="${O3K_P15_7_POSTGRES_PROXY_PORT:-25432}"
+POSTGRES_SERVER_VERSION=""
+POSTGRES_SCHEMA_PREPARED=""
+POSTGRES_REDACTED_ENDPOINT=""
+# Effective-backend evidence. In external mode these are assigned only after
+# the identity-verified restart and the fail-closed backend proofs below; in
+# disposable mode they are derived from the bootstrap-written o3kd.env.
+BACKEND_EFFECTIVE=""
+BACKEND_PROOF_METHOD=""
+BACKEND_PROOF_POOL_SESSIONS=""
+BACKEND_PROOF_SEVER_OBSERVED=false
+BACKEND_PROOF_RECOVERY_OBSERVED=false
 API="http://127.0.0.1:$AUTH_PORT/o3k/v1"
 ARAF_URL="${O3K_P15_7_ARAF_URL:-}"
 ARAF_STATUS="not_configured"
@@ -59,6 +82,16 @@ fi
 for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
+[[ "$POSTGRES_MODE" == external || "$POSTGRES_MODE" == disposable ]] \
+  || die "postgres ownership mode is invalid: $POSTGRES_MODE"
+[[ "$POSTGRES_PROXY_PORT" =~ ^[1-9][0-9]{3,4}$ ]] || die "postgres proxy port is invalid"
+if [[ "$POSTGRES_MODE" == external ]]; then
+  [[ -n "${O3K_DATABASE_URL:-}" ]] || die "external PostgreSQL mode requires O3K_DATABASE_URL"
+  [[ -n "${O3K_P15_7_EXTERNAL_PG_TARGET:-}" ]] \
+    || die "external PostgreSQL mode requires O3K_P15_7_EXTERNAL_PG_TARGET (real pg host:port for the run-owned proxy)"
+  [[ "$O3K_P15_7_EXTERNAL_PG_TARGET" =~ ^[A-Za-z0-9_.:\-]+$ ]] || die "external PostgreSQL target is unsafe"
+  command -v psql >/dev/null 2>&1 || die "external PostgreSQL mode requires psql"
+fi
 RUNNER_UID="$(id -u)"
 RUNNER_GID="$(id -g)"
 LIBVIRT_QEMU_GROUP="$(id -gn libvirt-qemu 2>/dev/null || true)"
@@ -76,6 +109,230 @@ KNOWN_HOSTS="$WORK_ROOT/known_hosts"
 mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"; chmod 0700 "$WORK_ROOT"
 printf 'o3k-p15-7-journey-owned-v1\nrun=%s\n' "$RUN_ID" >"$WORK_ROOT/.o3k-owned"
 chmod 0600 "$WORK_ROOT/.o3k-owned"
+pg_redact_endpoint() {
+  # Credentials must never leak into output or evidence. Mask everything between
+  # the scheme and the '@' so the password is never echoed as part of a URL.
+  python3 - "$1" <<'PY'
+import sys
+url = sys.argv[1]
+sep = url.find('@')
+if sep == -1:
+    print(url, end=''); raise SystemExit(0)
+head = url[:sep]
+j = head.find('://')
+print(head[:j+3] + 'REDACTED' + url[sep:], end='')
+PY
+}
+pg_external_ready() {
+  # Reachability and all version/schema probes run as read-only SELECT/SHOW
+  # through O3K_DATABASE_URL; nothing is mutated, created, or dropped.
+  psql "$O3K_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SELECT 1' >/dev/null 2>&1
+}
+write_postgres_proxy() {
+  # Stage the run-owned forwarder inside WORK_ROOT so its path is unique to this
+  # run and the process identity check in stop_postgres_proxy cannot match a
+  # foreign process. A single-process asyncio forward is used (no forking) so
+  # $! is the reliable listener PID.
+  cat >"$WORK_ROOT/pg-proxy.py" <<'PY'
+import asyncio, sys
+LISTEN = ("127.0.0.1", int(sys.argv[1]))
+TARGET_HOST, TARGET_PORT = sys.argv[2].rsplit(":", 1)
+TARGET = (TARGET_HOST, int(TARGET_PORT))
+async def forward(reader, writer):
+    try:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+async def client(reader, writer):
+    try:
+        upstream_read, upstream_write = await asyncio.open_connection(*TARGET)
+    except Exception:
+        writer.close()
+        return
+    await asyncio.gather(forward(reader, upstream_write), forward(upstream_read, writer))
+async def main():
+    server = await asyncio.start_server(client, *LISTEN)
+    async with server:
+        await server.serve_forever()
+asyncio.run(main())
+PY
+  chmod 0600 "$WORK_ROOT/pg-proxy.py"
+}
+start_postgres_proxy() {
+  # A run-owned localhost TCP forward in front of the operator-owned endpoint.
+  # The forwarder never starts/stops/restarts the target PostgreSQL; it only
+  # forwards bytes, so severing it injects an unavailability that is fully
+  # reversible. The proxy is bounded (fixed local port) and its identity is
+  # recorded in a run-owned ownership file that cleanup requires before signal.
+  [[ -f "$WORK_ROOT/pg-proxy.pid" ]] && return 0
+  write_postgres_proxy
+  python3 "$WORK_ROOT/pg-proxy.py" "$POSTGRES_PROXY_PORT" \
+    "$O3K_P15_7_EXTERNAL_PG_TARGET" >>"$WORK_ROOT/pg-proxy.log" 2>&1 &
+  local spid=$!
+  printf '%s:o3k-p15-7-postgres-proxy:run=%s\n' "$spid" "$RUN_ID" \
+    >"$WORK_ROOT/pg-proxy.pid"
+  chmod 0600 "$WORK_ROOT/pg-proxy.pid"
+  for _ in $(seq 1 30); do pg_external_ready && return 0; sleep 1; done
+  return 1
+}
+stop_postgres_proxy() {
+  # Sever the run-owned proxy. Signal only when the ownership file and the live
+  # process both identify this exact run's forwarder path; anything else fails
+  # closed rather than killing an unrelated process.
+  local spid=""
+  [[ -f "$WORK_ROOT/pg-proxy.pid" && ! -L "$WORK_ROOT/pg-proxy.pid" ]] || return 0
+  grep -Fq 'o3k-p15-7-postgres-proxy' "$WORK_ROOT/pg-proxy.pid" || return 0
+  grep -Fq "run=$RUN_ID" "$WORK_ROOT/pg-proxy.pid" || return 1
+  spid="$(cut -d: -f1 "$WORK_ROOT/pg-proxy.pid")"
+  [[ "$spid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$(ps -o args= -p "$spid" 2>/dev/null || true)" == *"$WORK_ROOT/pg-proxy.py"* ]] || return 1
+  kill "$spid" 2>/dev/null || true
+  for _ in $(seq 1 30); do kill -0 "$spid" 2>/dev/null || break; sleep 1; done
+  kill -0 "$spid" 2>/dev/null && return 1
+  rm -f -- "$WORK_ROOT/pg-proxy.pid"
+}
+pg_proxy_dsn() {
+  # Rewrite the operator-owned DSN so it reaches the same server through the
+  # run-owned localhost proxy. Only the host:port changes; credentials,
+  # database, and query parameters are preserved byte-for-byte. The source DSN
+  # arrives through the process environment (never argv) and the rewritten DSN
+  # is never echoed; output is captured by the caller into a 0600-scoped shell
+  # variable and any diagnostic output uses pg_redact_endpoint.
+  O3K_SOURCE_DSN="$O3K_DATABASE_URL" python3 - "$POSTGRES_PROXY_PORT" <<'PY'
+import os, sys, urllib.parse
+port = sys.argv[1]
+parts = urllib.parse.urlsplit(os.environ["O3K_SOURCE_DSN"])
+if parts.scheme not in ("postgres", "postgresql") or not parts.hostname:
+    raise SystemExit("external PostgreSQL DSN is not a postgres URL")
+netloc = parts.netloc
+at = netloc.rfind("@")
+userinfo = netloc[: at + 1] if at != -1 else ""
+print(urllib.parse.urlunsplit(parts._replace(netloc=userinfo + "127.0.0.1:" + port)))
+PY
+}
+rewrite_o3kd_env_for_proxy() {
+  # Point the production o3kd environment at the run-owned proxy. The
+  # bootstrap-written file is consumed by `set -a; . o3kd.env`, so both lines
+  # are required: the URL alone does not select the postgres backend. Every
+  # other line is preserved exactly. The rewrite is staged in a 0600 runner
+  # temp and installed atomically with the daemon account ownership the
+  # bootstrap established; the rewritten credential never reaches stdout.
+  local env_tmp expected_backend_line expected_url_line
+  sudo -n test -r "$STATE_ROOT/o3kd.env" || die "o3kd environment is unreadable"
+  env_tmp="$(mktemp "$RUNNER_TEMP_ROOT/o3kd-env.XXXXXX")"
+  chmod 0600 "$env_tmp"
+  sudo -n cat "$STATE_ROOT/o3kd.env" | awk '!/^O3K_DATABASE_(BACKEND|URL)=/' >"$env_tmp" \
+    || { rm -f -- "$env_tmp"; die "cannot stage rewritten o3kd environment"; }
+  printf 'O3K_DATABASE_BACKEND=%s\n' "$(printf '%q' "postgres")" >>"$env_tmp"
+  printf 'O3K_DATABASE_URL=%s\n' "$(printf '%q' "$PROXY_DSN")" >>"$env_tmp"
+  expected_backend_line='O3K_DATABASE_BACKEND=postgres'
+  expected_url_line="O3K_DATABASE_URL=$(printf '%q' "$PROXY_DSN")"
+  grep -Fqx "$expected_backend_line" "$env_tmp" \
+    && grep -Fqx "$expected_url_line" "$env_tmp" \
+    || { rm -f -- "$env_tmp"; die "rewritten o3kd environment failed its content check"; }
+  sudo -n install -o "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -g "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -m 0600 \
+    "$env_tmp" "$STATE_ROOT/o3kd.env" \
+    || { rm -f -- "$env_tmp"; die "cannot install rewritten o3kd environment"; }
+  rm -f -- "$env_tmp"
+  sudo -n grep -Fqx "$expected_backend_line" "$STATE_ROOT/o3kd.env" \
+    && sudo -n grep -Fqx "$expected_url_line" "$STATE_ROOT/o3kd.env" \
+    || die "installed o3kd environment does not carry the proxy database configuration"
+}
+bootstrap_store_probe() {
+  # Minting an enrollment grant is the cheapest authenticated write that
+  # exercises the durable store. While the proxy is severed this must fail;
+  # after restore it must succeed. Grant JSON and the bootstrap secret never
+  # reach stdout.
+  O3K_API_URL="$API" O3K_BOOTSTRAP_SECRET="$(sudo -n cat "$STATE_ROOT/.bootstrap-secret")" \
+    "$STATE_ROOT/bin/o3k" init --profile-id default --agent-id compute-agent >/dev/null 2>&1
+}
+rejoin_bootstrap_agent() {
+  # Re-establish the canonical bootstrap identity on the current backend after
+  # the backend switch: the enrollment the bootstrap performed lives in the
+  # previous backend and does not exist on the operator-owned PostgreSQL.
+  # Without it the bootstrap readiness gate keeps /readyz down and the
+  # TestLab bootstrap block is missing from the canonical topology. This is
+  # the same production authenticated init/join path
+  # bootstrap-disposable-testlab.sh uses, reusing the durable TLS identity the
+  # canonical bootstrap already recorded.
+  local agent_id enrollment_token agent_epoch vcpus memory_mb join_attempt init_output
+  agent_id="$(sudo -n cat "$STATE_ROOT/tls/agent-id")"
+  [[ "$agent_id" =~ ^[A-Za-z0-9._-]+$ ]] || die "bootstrap agent identity is unavailable"
+  init_output="$WORK_ROOT/bootstrap-rejoin-init.json"
+  O3K_API_URL="$API" O3K_BOOTSTRAP_SECRET="$(sudo -n cat "$STATE_ROOT/.bootstrap-secret")" \
+    "$STATE_ROOT/bin/o3k" init --profile-id default --agent-id "$agent_id" >"$init_output" \
+    || die "bootstrap re-init failed after the PostgreSQL backend switch"
+  enrollment_token="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("enrollment_token", ""))' "$init_output")"
+  [[ -n "$enrollment_token" ]] || die "bootstrap re-init grant is missing"
+  agent_epoch="$(openssl rand -hex 16)"
+  vcpus="$(nproc --all 2>/dev/null || true)"
+  memory_mb="$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)"
+  [[ "$vcpus" =~ ^[1-9][0-9]*$ && "$memory_mb" =~ ^[1-9][0-9]*$ ]] \
+    || die "host inventory is unavailable for the bootstrap re-join"
+  for join_attempt in $(seq 1 5); do
+    if O3K_API_URL="$API" "$STATE_ROOT/bin/o3k" join --token "$enrollment_token" \
+      --agent-id "$agent_id" --agent-epoch "$agent_epoch" \
+      --certificate "$STATE_ROOT/tls/agent.pem" \
+      --vcpus "$vcpus" --memory-mb "$memory_mb" --disk-gb 10 >/dev/null; then
+      return 0
+    fi
+    if ((join_attempt < 5)); then
+      sleep 2
+    fi
+  done
+  die "bootstrap re-join did not converge after the PostgreSQL backend switch"
+}
+wait_o3kd_readyz() {
+  local message="$1"
+  for _ in $(seq 1 60); do curl --fail --silent "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+  curl --fail --silent "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1 || die "$message"
+}
+restart_o3kd_verified() {
+  # Restart the exact owned daemon from its run-scoped environment. Process
+  # identity is read from the ownership ledger; no process-name kill is
+  # permitted. The caller waits for readiness separately so a backend switch
+  # can re-establish canonical bootstrap state before /readyz is required to
+  # pass; the late restart therefore pairs this function with
+  # wait_o3kd_readyz exactly as the historical inline block did.
+  local PID_ROOT pid ticks uid binary extra new_pid new_ticks new_uid candidate
+  PID_ROOT="${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-testlab-pids/$RUN_ID}"
+  IFS='|' read -r pid ticks uid binary extra <"$PID_ROOT/o3kd.pid"
+  [[ -z "${extra:-}" && "$pid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ && "$uid" =~ ^[A-Za-z0-9._-]+$ && "$binary" == o3kd ]] || die "invalid o3kd ownership ledger"
+  [[ "$(sudo -n stat -c '%U' "/proc/$pid" 2>/dev/null || true)" == "$uid" ]] || die "o3kd PID ownership changed"
+  [[ "$(sudo -n awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)" == "$ticks" ]] || die "o3kd PID was reused"
+  [[ "$(sudo -n readlink -f "/proc/$pid/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] || die "o3kd executable identity changed"
+  sudo -n kill -0 "$pid" 2>/dev/null || die "owned o3kd is not running"
+  sudo -n kill "$pid"; for _ in $(seq 1 30); do sudo -n kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  sudo -n kill -0 "$pid" 2>/dev/null && die "owned o3kd did not stop"
+  sudo -n -u "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -- setsid nohup bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" >/dev/null 2>&1 &
+  new_pid=""
+  for _ in $(seq 1 120); do
+    while IFS= read -r candidate; do
+      [[ -n "$candidate" ]] || continue
+      [[ "$(sudo -n readlink -f "/proc/$candidate/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] \
+        || continue
+      new_pid="$candidate"
+      break
+    done < <(sudo -n pgrep -u "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -x o3kd 2>/dev/null || true)
+    [[ "$new_pid" ]] && break
+    sleep .25
+  done
+  [[ "$new_pid" ]] || die "o3kd restart failed"
+  new_ticks="$(sudo -n awk '{print $22}' "/proc/$new_pid/stat")"
+  new_uid="$(sudo -n stat -c '%U' "/proc/$new_pid")"
+  [[ "$new_uid" == "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" && "$(sudo -n readlink -f "/proc/$new_pid/exe")" == "$STATE_ROOT/bin/o3kd" ]] || die "restarted o3kd identity is not owned"
+  printf '%s|%s|%s|o3kd\n' "$new_pid" "$new_ticks" "$new_uid" >"$PID_ROOT/o3kd.pid"
+}
 capture_failure_diagnostics() {
   local exit_status="$1"
   [[ "$exit_status" -ne 0 && "$P15_PROVISION_DIAGNOSTICS_CAPTURED" == false ]] || return 0
@@ -104,7 +361,7 @@ capture_workload_failure_diagnostics() {
     "$API/operations/$operation_id" 2>/dev/null || true)"
   chmod 0600 "$WORK_ROOT/${workload_label}-state.raw.json" "$WORK_ROOT/${workload_label}-operation.raw.json" 2>/dev/null || true
   index=0
-  for agent in block-a block-b block-c; do
+  for agent in block-a block-b block-c block-d block-e block-f; do
     ip="${IPS[$index]:-}"
     if [[ "$ip" =~ ^[0-9.]+$ ]]; then
       ssh_vm "$ip" "sudo grep -F '$operation_id' /var/log/o3k-compute.log 2>/dev/null | tail -n 80" \
@@ -159,6 +416,9 @@ early_cleanup() {
       GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
       bash "$KEYCLOAK_AUTHORITY_SCRIPT" cleanup >/dev/null 2>&1 || true
   fi
+  if [[ "${POSTGRES_MODE:-}" == external ]]; then
+    stop_postgres_proxy >/dev/null 2>&1 || true
+  fi
   if [[ -f "$WORK_ROOT/.o3k-owned" ]] \
     && grep -Fqx 'o3k-p15-7-journey-owned-v1' "$WORK_ROOT/.o3k-owned" \
     && grep -Fqx "run=$RUN_ID" "$WORK_ROOT/.o3k-owned"; then
@@ -205,14 +465,94 @@ sudo -n install -o root -g "$LIBVIRT_QEMU_GROUP" -m 0640 "$HOST_IMAGE" "$BASE_IM
   || die "cannot stage pinned VM image for libvirt"
 printf '%s  %s\n' "$HOST_IMAGE_SHA256" "$BASE_IMAGE" |
   sudo -n sha256sum --check --strict --status || die "staged VM image digest mismatch"
-for required_agent in block-a block-b block-c block-d; do
+for required_agent in block-a block-b block-c block-d block-e block-f; do
   sudo -n test -f "$TLS_ROOT/agents/$required_agent/agent.pem" \
     || die "canonical capacity/replacement identities unavailable"
   sudo -n test ! -L "$TLS_ROOT/agents/$required_agent/agent.pem" \
     || die "canonical agent certificate is a symlink: $required_agent"
 done
-[[ "$(sudo -n docker inspect -f '{{.State.Running}}' "$PG_CONTAINER" 2>/dev/null || true)" == true ]] || die "run-scoped PostgreSQL unavailable"
-for agent_id in block-a block-b block-c block-d; do
+if [[ "$POSTGRES_MODE" == external ]]; then
+  # Consume a required, operator-owned endpoint. Fail closed on a missing or
+  # unreachable endpoint, verify and record the server version, and verify the
+  # O3K schema is prepared. The run-owned proxy in front of the endpoint is the
+  # same path the control plane uses, so reachability here is the real gate.
+  start_postgres_proxy || die "run-owned PostgreSQL proxy did not start"
+  POSTGRES_REDACTED_ENDPOINT="$(pg_redact_endpoint "$O3K_DATABASE_URL")"
+  pg_external_ready || die "external PostgreSQL endpoint unreachable: $POSTGRES_REDACTED_ENDPOINT"
+  POSTGRES_SERVER_VERSION="$(psql "$O3K_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version' 2>/dev/null || true)"
+  [[ "$POSTGRES_SERVER_VERSION" =~ ^[0-9]+\.[0-9]+ ]] \
+    || die "external PostgreSQL server version unavailable: $POSTGRES_REDACTED_ENDPOINT"
+  if [[ "$(psql "$O3K_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc "SELECT to_regclass('public._sqlx_migrations') IS NOT NULL" 2>/dev/null || true)" == t ]]; then
+    POSTGRES_SCHEMA_PREPARED=true
+  else
+    die "external PostgreSQL schema is not prepared: $POSTGRES_REDACTED_ENDPOINT"
+  fi
+  # The bootstrap started o3kd without database configuration (SQLite). Re-point
+  # the run-scoped environment at the proxy and restart the exact owned daemon
+  # BEFORE any journey phase so every subsequent durable write lands on the
+  # operator-owned PostgreSQL through the run-owned proxy.
+  PROXY_DSN="$(pg_proxy_dsn)" || die "cannot derive the run-owned proxy database URL"
+  [[ "$PROXY_DSN" == *127.0.0.1:"$POSTGRES_PROXY_PORT"* ]] \
+    || die "run-owned proxy database URL did not rewrite to the proxy endpoint"
+  rewrite_o3kd_env_for_proxy
+  restart_o3kd_verified
+  # The previous backend's enrollment does not exist on the operator-owned
+  # PostgreSQL; re-establish the canonical bootstrap identity through the
+  # production authenticated init/join path before readiness is required.
+  rejoin_bootstrap_agent
+  wait_o3kd_readyz "readyz did not reconstruct after the PostgreSQL backend switch"
+  # Effective-backend proof, fail closed: the bootstrap re-join already forced
+  # pool activity, so the server must now show at least two sessions on this
+  # database — the o3kd pool plus this proof's own psql connection. Nothing
+  # else uses this database.
+  BACKEND_PROOF_POOL_SESSIONS="$(psql "$PROXY_DSN" -v ON_ERROR_STOP=1 -tAc \
+    'SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()' 2>/dev/null || true)"
+  [[ "$BACKEND_PROOF_POOL_SESSIONS" =~ ^[1-9][0-9]*$ ]] \
+    || die "effective backend proof could not count server sessions"
+  [[ "$BACKEND_PROOF_POOL_SESSIONS" -ge 2 ]] \
+    || die "o3kd is not durably connected through the run-owned proxy (sessions=$BACKEND_PROOF_POOL_SESSIONS)"
+  # Transient dependency proof: severing the proxy must make the control plane
+  # unhealthy within a bounded window (an authenticated durable-store write
+  # fails fast once the backend is unreachable), and restoring it must bring
+  # the API back. This is the fast-fail wiring check; the formal outage
+  # evidence remains the late restart/failure gate below.
+  stop_postgres_proxy || die "run-owned PostgreSQL proxy failed to sever for the wiring proof"
+  for _ in $(seq 1 60); do
+    if ! curl --fail --silent --max-time 2 "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1; then
+      BACKEND_PROOF_SEVER_OBSERVED=true
+      break
+    fi
+    if ! bootstrap_store_probe; then
+      BACKEND_PROOF_SEVER_OBSERVED=true
+      break
+    fi
+    sleep 1
+  done
+  [[ "$BACKEND_PROOF_SEVER_OBSERVED" == true ]] \
+    || die "o3kd stayed healthy while the PostgreSQL proxy was severed"
+  start_postgres_proxy || die "run-owned PostgreSQL proxy failed to restore for the wiring proof"
+  for _ in $(seq 1 60); do
+    if curl --fail --silent --max-time 2 "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1 \
+      && bootstrap_store_probe; then
+      BACKEND_PROOF_RECOVERY_OBSERVED=true
+      break
+    fi
+    sleep 1
+  done
+  [[ "$BACKEND_PROOF_RECOVERY_OBSERVED" == true ]] \
+    || die "o3kd did not recover after the PostgreSQL proxy was restored"
+  BACKEND_EFFECTIVE="postgres"
+  BACKEND_PROOF_METHOD="pg_stat_activity_pool_count_and_proxy_sever_restore"
+elif [[ "$POSTGRES_MODE" == disposable ]]; then
+  [[ "$(sudo -n docker inspect -f '{{.State.Running}}' "$PG_CONTAINER" 2>/dev/null || true)" == true ]] || die "run-scoped PostgreSQL unavailable"
+  # Derive the effective backend honestly from the bootstrap-written
+  # environment; the disposable workflow sets both database lines there. An
+  # absent line means the o3kd default (sqlite) is in effect.
+  BACKEND_EFFECTIVE="$(sudo -n grep -E '^O3K_DATABASE_BACKEND=' "$STATE_ROOT/o3kd.env" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+  [[ -n "$BACKEND_EFFECTIVE" ]] || BACKEND_EFFECTIVE="sqlite"
+  BACKEND_PROOF_METHOD="o3kd_env_backend_configuration"
+fi
+for agent_id in block-a block-b block-c block-d block-e block-f; do
   sudo -n install -m 0644 "$TLS_ROOT/agents/$agent_id/agent.pem" "$WORK_ROOT/$agent_id.pem" || die "cannot read canonical certificate: $agent_id"
   sudo -n install -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0600 "$TLS_ROOT/agents/$agent_id/agent-key.pem" "$WORK_ROOT/$agent_id-key.pem" || die "cannot read canonical private key: $agent_id"
 done
@@ -277,6 +617,9 @@ cleanup() {
       bash "$KEYCLOAK_AUTHORITY_SCRIPT" cleanup >/dev/null 2>&1 || true
   fi
   local cleanup_failed=false
+  if [[ "$POSTGRES_MODE" == external ]]; then
+    stop_postgres_proxy || cleanup_failed=true
+  fi
   # Credentials and enrollment material are never retained for recovery.
   # Remove only this run's exact files; VM diagnostics and ownership records
   # remain available when cleanup itself is blocked.
@@ -814,6 +1157,59 @@ done
 [[ "$CAPACITY_AFTER_ADD" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_ADD" -gt "$CAPACITY_BEFORE" ]] \
   || die "Placement capacity did not grow after adding a genuine block"
 
+# A fourth and fifth genuine child VM complete the initial S5 topology. Every
+# join is validated against the settled capacity baseline of the CURRENT
+# topology measured before that join; comparing the new total against the
+# pre-join fleet is what makes growth observable. block-a..block-e must all be
+# concurrently enrolled and Ready before any drain begins.
+register_vm block-d; provision_vm block-d
+IPS+=("$(<"$WORK_ROOT/block-d-ip")")
+UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/block-d-uuid")"
+join_block block-d "${IPS[3]}"; install_agent block-d "${IPS[3]}"
+CAPACITY_AFTER_D=""
+for _ in $(seq 1 60); do
+  api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-after-d.json" || true
+  CAPACITY_AFTER_D="$(capacity_total "$WORK_ROOT/capacity-after-d.json" 2>/dev/null || true)"
+  [[ "$CAPACITY_AFTER_D" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_D" -gt "$CAPACITY_AFTER_ADD" ]] && break
+  sleep 2
+done
+[[ "$CAPACITY_AFTER_D" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_D" -gt "$CAPACITY_AFTER_ADD" ]] \
+  || die "Placement capacity did not grow after enrolling the fourth block"
+register_vm block-e; provision_vm block-e
+IPS+=("$(<"$WORK_ROOT/block-e-ip")")
+UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/block-e-uuid")"
+join_block block-e "${IPS[4]}"; install_agent block-e "${IPS[4]}"
+CAPACITY_AFTER_E=""
+for _ in $(seq 1 60); do
+  api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-after-e.json" || true
+  CAPACITY_AFTER_E="$(capacity_total "$WORK_ROOT/capacity-after-e.json" 2>/dev/null || true)"
+  [[ "$CAPACITY_AFTER_E" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_E" -gt "$CAPACITY_AFTER_D" ]] && break
+  sleep 2
+done
+[[ "$CAPACITY_AFTER_E" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_E" -gt "$CAPACITY_AFTER_D" ]] \
+  || die "Placement capacity did not grow after enrolling the fifth block"
+
+# Peak-concurrency observation for the S5 composition: the five initial
+# identities must concurrently reach Ready. The drain below only shrinks the
+# topology, so this is the maximum concurrent BuildingBlock count and must be
+# at least five; block-f later restores the same concurrency after the
+# drain/remove/replace cycle.
+api_get /operator/building-blocks >"$WORK_ROOT/blocks-initial-five.json"
+INITIAL_READY_COUNT="$(python3 - "$WORK_ROOT/blocks-initial-five.json" \
+  "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" <<'PY'
+import json,sys
+items=json.load(open(sys.argv[1], encoding="utf-8"))
+initial=list(sys.argv[2:7])
+if len(set(initial)) != 5:
+    raise SystemExit("initial canonical identities are not distinct")
+by_id={x.get("block",{}).get("id"): x.get("block",{}) for x in items}
+if any(by_id.get(block,{}).get("state") != "ready" for block in initial):
+    raise SystemExit("initial five BuildingBlocks are not concurrently Ready")
+print(5)
+PY
+)" || die "initial five BuildingBlocks are not concurrently Ready"
+[[ "$INITIAL_READY_COUNT" == 5 ]] || die "initial concurrent Ready count is not five"
+
 # Include the run-scoped TestLab bootstrap block and every newly enrolled
 # execution identity when resolving the selected workload host.  The local
 # compute-agent is a real authenticated TestLab provider too; assuming every
@@ -1016,21 +1412,81 @@ for _ in $(seq 1 60); do
 done
 [[ "$code" == 404 ]] || die "workload A deletion did not converge before block removal"
 
-# Remove block A, then provision a fresh fourth VM and enroll its new identity.
+# Remove the drained block, then provision a fresh sixth VM and enroll its new
+# identity (block-f) as the replacement. block-f's shared-array slot is
+# appended last so block-a..block-e keep their stable indices ([0..4]);
+# block-f is fixed at [5].
 REMOVE_GEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["block"]["generation"])' "$WORK_ROOT/drain.json")"
 operator_curl "$API/operator/building-blocks/$DRAIN_ID/actions/remove" -X POST -H 'Content-Type: application/json' -d "{\"expected_generation\":$REMOVE_GEN}" >"$WORK_ROOT/remove.json" || die "block removal failed"
-register_vm block-d; provision_vm block-d
-IPS+=("$(<"$WORK_ROOT/block-d-ip")")
-UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/block-d-uuid")"
-join_block block-d "${IPS[3]}"; install_agent block-d "${IPS[3]}"
+# Settle the post-removal topology before enrolling the replacement. The
+# baseline must describe the CURRENT (four surviving child blocks plus the
+# TestLab bootstrap block) topology; reading the total only after block-f
+# joins would compare the new total against itself and could never observe
+# growth. The canonical aggregate retains a removed provider's durable
+# inventory rows, so the settled baseline is observed honestly from the
+# diagnostics projection and block-f must push the total above it.
+CAPACITY_AFTER_REMOVE=""
+for _ in $(seq 1 60); do
+  api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-after-remove.json" || true
+  CAPACITY_AFTER_REMOVE="$(capacity_total "$WORK_ROOT/capacity-after-remove.json" 2>/dev/null || true)"
+  [[ "$CAPACITY_AFTER_REMOVE" =~ ^[1-9][0-9]*$ ]] && break
+  sleep 2
+done
+[[ "$CAPACITY_AFTER_REMOVE" =~ ^[1-9][0-9]*$ ]] \
+  || die "Placement capacity was not honest after removing the drained block"
+register_vm block-f; provision_vm block-f
+IPS+=("$(<"$WORK_ROOT/block-f-ip")")
+UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/block-f-uuid")"
+join_block block-f "${IPS[5]}"; install_agent block-f "${IPS[5]}"
+CAPACITY_AFTER_F=""
+for _ in $(seq 1 60); do
+  api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-after-f.json" || true
+  CAPACITY_AFTER_F="$(capacity_total "$WORK_ROOT/capacity-after-f.json" 2>/dev/null || true)"
+  [[ "$CAPACITY_AFTER_F" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_F" -gt "$CAPACITY_AFTER_REMOVE" ]] && break
+  sleep 2
+done
+[[ "$CAPACITY_AFTER_F" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_F" -gt "$CAPACITY_AFTER_REMOVE" ]] \
+  || die "Placement capacity did not grow after enrolling the replacement block"
+# Final S5 topology: the four surviving initial identities plus block-f must
+# be concurrently Ready and the drained identity must be absent. The drained
+# identity is resolved canonically (nominally block-a); when Placement hosted
+# workload A on the TestLab bootstrap compute-agent instead, all five initial
+# child identities survive and the replacement is additive. The final topology
+# must also be free of duplicate BuildingBlock and ResourceProvider
+# identities, and all six identities enrolled across the journey must be
+# distinct.
 api_get /operator/building-blocks >"$WORK_ROOT/blocks-after-replace.json"
-python3 - "$WORK_ROOT/blocks-after-replace.json" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${DRAIN_ID}" <<'PY'
+FINAL_READY_COUNT="$(python3 - "$WORK_ROOT/blocks-after-replace.json" \
+  "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" "${BLOCK_IDS[block-f]}" "$DRAIN_ID" <<'PY'
 import json,sys
 items=json.load(open(sys.argv[1], encoding="utf-8"))
-ids={x.get("block",{}).get("id") for x in items}
-assert all(value in ids for value in sys.argv[2:5])
-assert sys.argv[5] not in ids
+initial=list(sys.argv[2:7])
+replacement=sys.argv[7]
+drain=sys.argv[8]
+if len(set(initial+[replacement])) != 6:
+    raise SystemExit("canonical block identities are not distinct across the six identities")
+survivors=[block for block in initial if block != drain]
+expected=survivors+[replacement]
+by_id={x.get("block",{}).get("id"): x.get("block",{}) for x in items}
+if drain in by_id:
+    raise SystemExit("drained block still present in canonical topology")
+if any(by_id.get(block,{}).get("state") != "ready" for block in expected):
+    raise SystemExit("final BuildingBlock set is not concurrently Ready")
+identities=[by_id[block].get("execution_identity") for block in expected]
+providers=[tuple(by_id[block].get("resource_provider_ids") or ()) for block in expected]
+if any(not identity for identity in identities) or len(set(identities)) != len(expected):
+    raise SystemExit("final topology reports duplicate or empty execution identities")
+if any(len(ids) == 0 for ids in providers) or len(set(providers)) != len(expected):
+    raise SystemExit("final topology reports duplicate or empty resource provider identities")
+print(len(expected))
 PY
+)" || die "final BuildingBlock set is not concurrently Ready"
+[[ "$FINAL_READY_COUNT" =~ ^[1-9][0-9]*$ ]] || die "final concurrent Ready count was not observed"
+PEAK_CONCURRENT_READY="$INITIAL_READY_COUNT"
+if [[ "$FINAL_READY_COUNT" -gt "$PEAK_CONCURRENT_READY" ]]; then
+  PEAK_CONCURRENT_READY="$FINAL_READY_COUNT"
+fi
+[[ "$PEAK_CONCURRENT_READY" -ge 5 ]] || die "peak concurrent Ready count is below five"
 
 # Real negative probes: these requests must be rejected by the production API.
 # The axum JSON extractor rejects the credential-less body (missing required
@@ -1080,52 +1536,42 @@ fi
 [[ -n "$REPLAY_JOIN_FILE" && -f "$REPLAY_JOIN_FILE" ]] || die "replay join request was not retained for drained agent: $DRAIN_AGENT"
 code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST "$API/bootstrap/join" -H 'Content-Type: application/json' -d @"$REPLAY_JOIN_FILE")"
 [[ "$code" != 200 ]] || die "replayed join accepted for removed drained agent: $DRAIN_AGENT (code=$code)"
-code="$(curl --silent -o /dev/null -w '%{http_code}' "$API/operator/building-blocks/${BLOCK_IDS[block-a]}")"
+code="$(curl --silent -o /dev/null -w '%{http_code}' "$API/operator/building-blocks/$DRAIN_ID")"
 [[ "$code" == 401 || "$code" == 403 ]] || die "unauthenticated state read was not concealed"
 
 # Restart the exact owned daemon and PostgreSQL container.  Process identity is
-# read from the ownership ledger; no process-name kill is permitted.
-PID_ROOT="${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-testlab-pids/$RUN_ID}"
-IFS='|' read -r pid ticks uid binary extra <"$PID_ROOT/o3kd.pid"
-[[ -z "${extra:-}" && "$pid" =~ ^[0-9]+$ && "$ticks" =~ ^[0-9]+$ && "$uid" =~ ^[A-Za-z0-9._-]+$ && "$binary" == o3kd ]] || die "invalid o3kd ownership ledger"
-[[ "$(sudo -n stat -c '%U' "/proc/$pid" 2>/dev/null || true)" == "$uid" ]] || die "o3kd PID ownership changed"
-[[ "$(sudo -n awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)" == "$ticks" ]] || die "o3kd PID was reused"
-[[ "$(sudo -n readlink -f "/proc/$pid/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] || die "o3kd executable identity changed"
-sudo -n kill -0 "$pid" 2>/dev/null || die "owned o3kd is not running"
-sudo -n kill "$pid"; for _ in $(seq 1 30); do sudo -n kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-sudo -n kill -0 "$pid" 2>/dev/null && die "owned o3kd did not stop"
-sudo -n -u "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -- setsid nohup bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" >/dev/null 2>&1 &
-new_pid=""
-for _ in $(seq 1 120); do
-  while IFS= read -r candidate; do
-    [[ -n "$candidate" ]] || continue
-    [[ "$(sudo -n readlink -f "/proc/$candidate/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] \
-      || continue
-    new_pid="$candidate"
-    break
-  done < <(sudo -n pgrep -u "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -x o3kd 2>/dev/null || true)
-  [[ "$new_pid" ]] && break
-  sleep .25
-done
-[[ "$new_pid" ]] || die "o3kd restart failed"
-new_ticks="$(sudo -n awk '{print $22}' "/proc/$new_pid/stat")"
-new_uid="$(sudo -n stat -c '%U' "/proc/$new_pid")"
-[[ "$new_uid" == "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" && "$(sudo -n readlink -f "/proc/$new_pid/exe")" == "$STATE_ROOT/bin/o3kd" ]] || die "restarted o3kd identity is not owned"
-printf '%s|%s|%s|o3kd\n' "$new_pid" "$new_ticks" "$new_uid" >"$PID_ROOT/o3kd.pid"
-for _ in $(seq 1 60); do curl --fail --silent "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
-curl --fail --silent "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1 || die "readyz did not reconstruct after restart"
-sudo -n docker restart "$PG_CONTAINER" >/dev/null || die "PostgreSQL restart failed"
-for _ in $(seq 1 60); do sudo -n docker exec "$PG_CONTAINER" pg_isready -U o3k -d o3k_test >/dev/null 2>&1 && break; sleep 1; done
-sudo -n docker exec "$PG_CONTAINER" pg_isready -U o3k -d o3k_test >/dev/null 2>&1 || die "PostgreSQL did not recover"
+# read from the ownership ledger; no process-name kill is permitted. The
+# daemon re-sources the same run-scoped o3kd.env, so the effective backend
+# selected above is retained across the restart.
+restart_o3kd_verified
+wait_o3kd_readyz "readyz did not reconstruct after restart"
+if [[ "$POSTGRES_MODE" == external ]]; then
+  # External mode must never stop/start/restart/drop the operator-owned server.
+  # Unavailability is injected by severing the run-owned proxy the control
+  # plane consumes, then restored by starting it again. The proxy is stopped at
+  # gate time first, so this observes a genuine outage and recovery.
+  stop_postgres_proxy || die "external PostgreSQL proxy failed to sever"
+  for _ in $(seq 1 60); do pg_external_ready && sleep 1 || break; done
+  pg_external_ready && die "external PostgreSQL outage was not observed"
+  start_postgres_proxy || die "external PostgreSQL proxy failed to restore"
+  for _ in $(seq 1 60); do pg_external_ready && break; sleep 1; done
+  pg_external_ready || die "external PostgreSQL did not recover"
+else
+  sudo -n docker restart "$PG_CONTAINER" >/dev/null || die "PostgreSQL restart failed"
+  for _ in $(seq 1 60); do sudo -n docker exec "$PG_CONTAINER" pg_isready -U o3k -d o3k_test >/dev/null 2>&1 && break; sleep 1; done
+  sudo -n docker exec "$PG_CONTAINER" pg_isready -U o3k -d o3k_test >/dev/null 2>&1 || die "PostgreSQL did not recover"
+fi
 api_get /operator/building-blocks >"$WORK_ROOT/blocks-after-restart.json"
-python3 - "$WORK_ROOT/blocks-after-restart.json" "${BLOCK_IDS[block-b]}" <<'PY'
+python3 - "$WORK_ROOT/blocks-after-restart.json" \
+  "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" "${BLOCK_IDS[block-f]}" "$DRAIN_ID" <<'PY'
 import json,sys
-assert any(x.get('block',{}).get('id')==sys.argv[2] for x in json.load(open(sys.argv[1])))
-PY
-python3 - "$WORK_ROOT/blocks-after-restart.json" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "$DRAIN_ID" <<'PY'
-import json,sys
-ids={x.get('block',{}).get('id') for x in json.load(open(sys.argv[1]))}
-assert sys.argv[2] in ids and sys.argv[3] in ids and sys.argv[4] not in ids
+items=json.load(open(sys.argv[1]))
+ids={x.get('block',{}).get('id') for x in items}
+initial=list(sys.argv[2:7])
+drain=sys.argv[8]
+survivors=[block for block in initial if block != drain]
+expected=survivors+[sys.argv[7]]
+assert all(value in ids for value in expected) and drain not in ids
 PY
 
 FOREIGN_AFTER="$(virsh -c qemu:///system list --all --uuid 2>/dev/null | sed '/^$/d' | sort)"
@@ -1141,18 +1587,34 @@ assert_owned_domains_absent
 [[ ! -e "$SSH_KEY" && ! -e "$KNOWN_HOSTS" ]] || die "owned journey files remain after cleanup"
 JOURNEY_END_MS="$(date +%s%3N)"
 
-python3 - "$EVIDENCE_FILE" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" <<'PY'
+python3 - "$EVIDENCE_FILE" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" "$POSTGRES_MODE" "$POSTGRES_SERVER_VERSION" "$POSTGRES_REDACTED_ENDPOINT" "$POSTGRES_SCHEMA_PREPARED" "$INITIAL_READY_COUNT" "$FINAL_READY_COUNT" "$PEAK_CONCURRENT_READY" "$DRAIN_AGENT" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" "${BLOCK_IDS[block-f]}" "$BACKEND_EFFECTIVE" "$BACKEND_PROOF_METHOD" "$BACKEND_PROOF_POOL_SESSIONS" "$BACKEND_PROOF_SEVER_OBSERVED" "$BACKEND_PROOF_RECOVERY_OBSERVED" <<'PY'
 import json,pathlib,sys
-path=pathlib.Path(sys.argv[1]); sha=sys.argv[2].lower(); profile=sys.argv[3]; blocks=int(sys.argv[4]); start=int(sys.argv[5]); end=int(sys.argv[6]); cross_tenant=sys.argv[7] == "true"; araf_status=sys.argv[8]; araf_reason=sys.argv[9]; diagnostic_only=sys.argv[10] == "true"
+path=pathlib.Path(sys.argv[1]); sha=sys.argv[2].lower(); profile=sys.argv[3]; blocks=int(sys.argv[4]); start=int(sys.argv[5]); end=int(sys.argv[6]); cross_tenant=sys.argv[7] == "true"; araf_status=sys.argv[8]; araf_reason=sys.argv[9]; diagnostic_only=sys.argv[10] == "true"; postgres_mode=sys.argv[11]; postgres_version=sys.argv[12]; postgres_endpoint=sys.argv[13]; postgres_schema=sys.argv[14] == "true"; initial_ready=int(sys.argv[15]); final_ready=int(sys.argv[16]); peak_ready=int(sys.argv[17]); drain_agent=sys.argv[18]; block_ids_all=sys.argv[19:25]; backend_effective=sys.argv[25]; backend_proof_method=sys.argv[26]; backend_proof={"status":"passed","method":backend_proof_method}; pool_sessions=sys.argv[27]
+if postgres_mode == "external":
+    backend_proof["pool_sessions_observed"]=int(pool_sessions) if pool_sessions.isdigit() else None
+    backend_proof["proxy_sever_unhealthy_observed"]=sys.argv[28] == "true"
+    backend_proof["recovery_observed"]=sys.argv[29] == "true"
+initial_agents=["block-a","block-b","block-c","block-d","block-e"]
+initial_map=dict(zip(initial_agents, block_ids_all[:5]))
+survivors=[agent for agent in initial_agents if agent != drain_agent]
+final_agents=survivors+["block-f"]
+final_ids=[initial_map[agent] for agent in survivors]+[block_ids_all[5]]
 def passed():
     return {"status":"passed"}
 doc={
  "artifact_type":"o3k-p15-7-scale-composition-evidence","schema_version":1,"phase":"P15.7","status":"passed","evidence_tier":"protected-real-host","profile":profile,"tested_source_sha":sha,
- "execution":{"real_o3kd":passed(),"real_auth":passed(),"real_execution_boundary":passed(),"multiple_real_hosts":passed(),"sqlite_parity":passed(),"provider":"agent","hypervisor":"libvirt","database_backend":"postgres","block_count":blocks},
+ "execution":{"real_o3kd":passed(),"real_auth":passed(),"real_execution_boundary":passed(),"multiple_real_hosts":passed(),"sqlite_parity":passed(),"provider":"agent","hypervisor":"libvirt","database_backend":"postgres","block_count":blocks,"provisioned_vms":blocks},
+ "scale_composition":{
+  "enrolled_identities":{"count":6,"distinct":True,"agents":["block-a","block-b","block-c","block-d","block-e","block-f"],"block_ids":block_ids_all},
+  "initial_concurrent_ready":{"count":initial_ready,"agents":initial_agents,"block_ids":block_ids_all[:5]},
+  "peak_concurrent_ready":{"count":peak_ready,"minimum":5,"met":peak_ready>=5},
+  "final_concurrent_ready":{"count":final_ready,"agents":final_agents,"block_ids":final_ids},
+  "drained_agent":drain_agent,"replacement_agent":"block-f","duplicate_identities":False},
+ "database_ownership":{"mode":postgres_mode,"effective_backend":backend_effective,"backend_proof":backend_proof,"server_version":postgres_version or None,"redacted_endpoint":postgres_endpoint,"schema_prepared":postgres_schema,"fault_injection":("run-owned_proxy_sever_restore" if postgres_mode == "external" else "docker_restart"),"managed":postgres_mode=="disposable"},
  "journey":{"fresh_deployment":passed(),"init":passed(),"multiple_authenticated_joins":{"status":"passed","count":blocks,"each_authenticated":True},"topology":passed(),"capacity":passed(),"constrained_placement":passed(),"add_block_capacity_growth":passed(),"drain":{"status":"passed","no_new_placement":True,"blockers_observed":True,"evacuation_claimed":False},"remove_rejoin_replace":passed(),"restart_recovery":passed(),"projections_convergent":{"native":passed(),"openstack":passed(),"araf":{"required":False,"status":araf_status,"reason":araf_reason}}},
  "security_negatives":{"unauthenticated_join_rejected":True,"replay_join_rejected":True,"cross_tenant_concealment":cross_tenant,"foreign_state_preserved":True},
  "restart_recovery":{"status":"passed","canonical_state_survived":True,"postgres":True,"sqlite_parity":True},
- "bootstrap_timing":{"measured":end>start,"duration_ms":end-start,"excludes_preprovisioned_external_work":True,"sample_count":1,"boundary":"fresh o3kd through two authenticated joins","claim_scope":"profile-specific-measurement-only"},
+ "bootstrap_timing":{"measured":end>start,"duration_ms":end-start,"excludes_preprovisioned_external_work":True,"sample_count":1,"boundary":"fresh o3kd through six authenticated block joins","claim_scope":"profile-specific-measurement-only"},
  "leak_check":{"status":"passed","owned_leaks":0,"owned_inconsistencies":0,"foreign_state_changes":0},
  "defect_ledger":{"status":"passed","blockers":0,"high":0,"medium":0},
  "claim_validation":{"status":"passed","sources":["README.md","docs/ROADMAP.md","docs/status/current-state.yaml","compatibility/product-profiles.yaml","docs/compatibility/matrix.yaml","docs/architecture/p15-e2d-gap-register.md"],"unsupported_claims_preserved":True,"claims":["profile-specific protected P15.7 scale/composition convergence"]}}
