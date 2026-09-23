@@ -49,6 +49,11 @@ jobs:
           for file in packaging/*.sh tests/*.sh scripts/*.sh scripts/ci/*.sh; do bash -n "$file"; done
           bash tests/ci-apt-provision.sh
           python3 -m compileall -q scripts
+      - name: Validate PP.5 evidence validator fail-closed guards
+        # Tests the validator's own correctness (mutation/negative coverage)
+        # against locally-generated fixtures. It needs no real PP.5 campaign
+        # artifact, so an ordinary local dev / unit-test run is never blocked.
+        run: bash tests/pp5_evidence_validation.sh
       - name: Validate release signing trust transition
         run: bash tests/release-signing-migration.sh
       - name: Test P13.5E deterministic fault proxy and evidence artifact
@@ -213,6 +218,8 @@ jobs:
         run: cargo test --workspace --all-features
       - name: P12.4 PostgreSQL conformance (mandatory)
         run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --ignored --nocapture
+      - name: Endpoint-lifecycle 1035 PostgreSQL conformance (mandatory)
+        run: cargo test -p o3kd --all-features --lib pp4_endpoint_lifecycle -- --ignored --nocapture
       - name: P12.7 cross-process native replay conformance (mandatory)
         # Independently-spawned runtimes share only the durable store, so the
         # canonical replay authority is proven durable rather than process-local.
