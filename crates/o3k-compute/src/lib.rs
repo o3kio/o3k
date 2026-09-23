@@ -654,6 +654,69 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// A projector that counts unbind dispatches and models a stale `bound`
+    /// orphan (an unbound port reports `down`). Used to assert the sweep's
+    /// one-unbind-per-pass availability cap (issue #1035).
+    #[derive(Default)]
+    struct CapCountingProjector {
+        unbound: std::sync::Mutex<std::collections::HashSet<String>>,
+        unbinds: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl PortBindingProjector for CapCountingProjector {
+        async fn project_create_outcome(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+            _succeeded: bool,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+        async fn unbind_port(
+            &self,
+            _project_id: &str,
+            port_id: &str,
+            _operation_id: uuid::Uuid,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.unbound
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?
+                .insert(port_id.to_owned());
+            *self
+                .unbinds
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")? += 1;
+            Ok(())
+        }
+        async fn release_server_owned_endpoint(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+        ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(ServerEndpointRelease {
+                discovered: 1,
+                released: 1,
+                ..ServerEndpointRelease::default()
+            })
+        }
+        async fn port_binding(
+            &self,
+            _project_id: &str,
+            port_id: &str,
+        ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>> {
+            let is_bound = !self
+                .unbound
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?
+                .contains(port_id);
+            Ok(Some(PortBindingInfo {
+                server_owned: true,
+                binding_state: Some(if is_bound { "bound" } else { "down" }.to_owned()),
+            }))
+        }
+    }
+
     async fn service(label: &str) -> Result<ComputeService, ComputeError> {
         let path = PathBuf::from(format!(
             "/tmp/o3k-compute-{label}-{}.sqlite",
@@ -3810,6 +3873,188 @@ mod tests {
                 .filter(|call| matches!(call, ProjectorCall::Release { .. }))
                 .count(),
             2
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// Issue #1035: a replayed/late terminal delete projection must skip a port
+    /// that a NEW live server now references. A's delete is durably terminal
+    /// (the projection seat) but the request-path release never ran; B then
+    /// re-attaches A's port and is still `ACTIVE`. `project_terminal_binding_outcome`'s
+    /// delete branch gates every port on the live reference set, so it must not
+    /// unbind or release B's port — B's own delete releases it.
+    #[tokio::test]
+    async fn delete_terminal_projection_preserves_a_live_reattached_port()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-replay-terminal-bind-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(RecordingProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+
+        let a_id = Uuid::now_v7();
+        let b_id = Uuid::now_v7();
+        let delete_op = Uuid::now_v7();
+        let project = "project-a".to_owned();
+        let desired = |server_id: Uuid, name: &str| -> Result<String, serde_json::Error> {
+            serde_json::to_string(&serde_json::json!({
+                "operation_id": Uuid::now_v7().to_string(),
+                "o3k_server_id": server_id.to_string(),
+                "project_id": project,
+                "name": name,
+                "vcpus": 1,
+                "memory_mib": 512,
+                "flavor_id": "flavor-1",
+                "disk_gib": 1,
+                "image_id": "image-1",
+                "key_name": null,
+                "keypair_id": null,
+                "network_ids": ["port-1"],
+                "placement_provider_id": null,
+                "placement_allocation_id": null,
+                "config_drive": null,
+                "idempotency_key": format!("idem-{name}"),
+            }))
+        };
+        // A: terminally deleted, delete operation terminal success, request-path
+        // release never ran (the crash window leaves port-1 present).
+        let desired_a = desired(a_id, "server-a")?;
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: a_id,
+                kind: "compute_instance".to_owned(),
+                project_id: project.clone(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired_a,
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: delete_op,
+                resource_id: a_id,
+                kind: "lifecycle:delete".to_owned(),
+                state: o3k_store::OperationState::Succeeded,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        // B: a NEW live server that explicitly re-attached A's port.
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: b_id,
+                kind: "compute_instance".to_owned(),
+                project_id: project.clone(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired(b_id, "server-b")?,
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        // Replay A's terminal delete through the projection seat.
+        service
+            .project_terminal_binding_outcome(
+                delete_op.to_string().as_str(),
+                o3k_store::OperationState::Succeeded,
+            )
+            .await?;
+
+        // B's live re-attached port must be preserved: the gate skips it, so
+        // the projector records neither an unbind nor a release.
+        assert!(
+            projector_calls(&projector).is_empty(),
+            "the replayed terminal delete must not strip a live re-attached port: {:?}",
+            projector_calls(&projector)
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// Issue #1035, availability bound: the repair sweep makes at most ONE
+    /// fabric unbind dispatch per pass, so a burst of stale-bound orphans cannot
+    /// hold the orphan-repair lock (and therefore block every port-attaching
+    /// create) for the sum of their dispatch deadlines. Two stale-bound orphans
+    /// therefore take two passes — one unbind each — and converge.
+    #[tokio::test]
+    async fn sweep_makes_at_most_one_unbind_dispatch_per_pass()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path =
+            PathBuf::from(format!("/tmp/o3k-sweep-cap-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(CapCountingProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+        let project = "project-a".to_owned();
+
+        // Two terminally-deleted servers, each leaving a stale-bound orphan port.
+        for (server_id, port_id) in [(Uuid::now_v7(), "port-1"), (Uuid::now_v7(), "port-2")] {
+            let desired = serde_json::to_string(&serde_json::json!({
+                "operation_id": Uuid::now_v7().to_string(),
+                "o3k_server_id": server_id.to_string(),
+                "project_id": project,
+                "name": "server",
+                "vcpus": 1,
+                "memory_mib": 512,
+                "flavor_id": "flavor-1",
+                "disk_gib": 1,
+                "image_id": "image-1",
+                "key_name": null,
+                "keypair_id": null,
+                "network_ids": [port_id],
+                "placement_provider_id": null,
+                "placement_allocation_id": null,
+                "config_drive": null,
+                "idempotency_key": format!("idem-{port_id}"),
+            }))?;
+            store
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: server_id,
+                    kind: "compute_instance".to_owned(),
+                    project_id: project.clone(),
+                    generation: 1,
+                    observed_generation: 0,
+                    desired_state: desired,
+                    observed_state: "DELETED".to_owned(),
+                    provider_id: None,
+                })
+                .await?;
+        }
+
+        // Pass 1: exactly one unbind dispatch, despite two bound orphans.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            1,
+            "a single sweep pass must dispatch at most one fabric unbind"
+        );
+
+        // Pass 2: the second stale-bound orphan is repaired; total converges.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            2,
+            "repair must converge one unbind per pass"
         );
         std::fs::remove_file(database_path)?;
         Ok(())

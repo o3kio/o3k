@@ -3632,6 +3632,12 @@ impl ResourceApplication for GenericResourceApplication {
             receipt.operation_state,
             o3k_store::OperationState::Succeeded
         ) {
+            // #1035 (replay release): this direct network release consults the
+            // live-attached set and holds the orphan-repair lock across
+            // [scan -> release] so it is serialized against port-attaching
+            // creates and the orphan sweep; a port a live server now references
+            // is never handed back for deletion.
+            let _orphan_repair_guard = self.compute.orphan_repair_lock_guard().await;
             let attached = self
                 .compute
                 .live_attached_endpoint_ids()

@@ -1149,7 +1149,6 @@ pub(crate) async fn delete_server(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let _mutation_guard = state.network_mutation_lock.lock().await;
     let owned_ports = match service
         .server_network_ids_for_auth(&auth, ServerId::from_uuid(id))
         .await
@@ -1181,7 +1180,12 @@ pub(crate) async fn delete_server(
                 // endpoint a NEW live server has explicitly re-attached; the
                 // durable binding may already be cleared, so the direct network
                 // release must not be handed such a port. The live server's own
-                // delete releases it.
+                // delete releases it. The orphan-repair lock is acquired FIRST
+                // (before the network mutation lock) so the [live-attached scan
+                // -> release] window is serialized against port-attaching
+                // creates and the orphan sweep without inverting the lock order.
+                let _orphan_repair_guard = service.orphan_repair_lock_guard().await;
+                let _mutation_guard = state.network_mutation_lock.lock().await;
                 let attached = match service.live_attached_endpoint_ids().await {
                     Ok(set) => set,
                     Err(error) => return compute_error(error),

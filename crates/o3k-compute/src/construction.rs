@@ -343,6 +343,25 @@ impl ComputeService {
             );
             return Ok(());
         };
+        // Issue #1035: a delete release must never touch a port a NEW live
+        // server now references (a late or replayed terminal update can race a
+        // re-attachment and strip the live server's NIC), and it must be
+        // serialized against port-attaching creates and the orphan sweep.
+        // Take the orphan-repair lock and gate every port on the live
+        // reference set for the whole [scan -> unbind -> release] window.
+        // Create projections take no lock and are unaffected: a create-path
+        // caller may already hold the lock for its own create, and the create
+        // outcome needs no sweep serialization.
+        let (delete_release, _orphan_repair_guard, attached) = if operation.kind.as_str()
+            == "lifecycle:delete"
+            && state == o3k_store::OperationState::Succeeded
+        {
+            let guard = self.orphan_repair_lock.lock().await;
+            let attached = self.referenced_port_ids().await?;
+            (true, Some(guard), attached)
+        } else {
+            (false, None, std::collections::HashSet::new())
+        };
         for port_id in &request.network_ids {
             let outcome = match operation.kind.as_str() {
                 "create" => {
@@ -354,26 +373,33 @@ impl ComputeService {
                         )
                         .await
                 }
-                "lifecycle:delete" if state == o3k_store::OperationState::Succeeded => {
-                    let outcome = projector
-                        .unbind_port(&request.project_id, port_id, operation_id)
-                        .await;
-                    // The endpoint may be released only after its binding was
-                    // cleared: the fabric teardown plan reads the durable
-                    // endpoint (address, MAC, realm) it has to remove. A failed
-                    // unbind therefore keeps the endpoint, so a later delete
-                    // replay can still tear the fabric down and then release.
-                    if outcome.is_ok() {
-                        projector
-                            .release_server_owned_endpoint(&request.project_id, port_id)
-                            .await
-                            .map_err(|error| {
-                                ComputeError::EndpointRelease(format!(
-                                    "server endpoint {port_id} could not be released: {error}"
-                                ))
-                            })?;
+                "lifecycle:delete" if delete_release => {
+                    if attached.contains(port_id.as_str()) {
+                        // A non-terminal server durably references this port;
+                        // the late/replayed terminal update must not strip it.
+                        // The live server's own delete releases it.
+                        Ok(())
+                    } else {
+                        let outcome = projector
+                            .unbind_port(&request.project_id, port_id, operation_id)
+                            .await;
+                        // The endpoint may be released only after its binding was
+                        // cleared: the fabric teardown plan reads the durable
+                        // endpoint (address, MAC, realm) it has to remove. A failed
+                        // unbind therefore keeps the endpoint, so a later delete
+                        // replay can still tear the fabric down and then release.
+                        if outcome.is_ok() {
+                            projector
+                                .release_server_owned_endpoint(&request.project_id, port_id)
+                                .await
+                                .map_err(|error| {
+                                    ComputeError::EndpointRelease(format!(
+                                        "server endpoint {port_id} could not be released: {error}"
+                                    ))
+                                })?;
+                        }
+                        outcome
                     }
-                    outcome
                 }
                 _ => continue,
             };
@@ -437,6 +463,11 @@ impl ComputeService {
         let Some(projector) = self.binding_projector.as_ref() else {
             return Ok(());
         };
+        // Serialize the [referenced-scan -> release] window against port-attaching
+        // creates and the orphan sweep, so a create that wins the race is never
+        // clipped by this replay seat and a port the sweep just released is
+        // never re-referenced (issue #1035).
+        let _orphan_repair_guard = self.orphan_repair_lock.lock().await;
         let attached = self.referenced_port_ids().await?;
         for port_id in &request.network_ids {
             if attached.contains(port_id.as_str()) {
@@ -518,6 +549,11 @@ impl ComputeService {
         let Some(projector) = self.binding_projector.as_ref() else {
             return;
         };
+        // Serialize the [referenced-scan -> unbind] window against port-attaching
+        // creates and the orphan sweep (issue #1035): a port a live server now
+        // references is never unbound, and the scan is atomic with the unbind
+        // decisions.
+        let _orphan_repair_guard = self.orphan_repair_lock.lock().await;
         let attached = match self.referenced_port_ids().await {
             Ok(set) => set,
             Err(error) => {
@@ -1062,7 +1098,16 @@ impl ComputeService {
         let mut failures = 0usize;
         let mut skipped_attached = 0usize;
         let mut deleted_servers = 0usize;
-        for resource in resources {
+        // Bounded availability: at most ONE fabric unbind dispatch per pass so
+        // a burst of stale-bound orphans cannot hold the orphan-repair lock (and
+        // therefore block every port-attaching create) for the sum of their
+        // dispatch deadlines. Remaining bound orphans are retried on the next
+        // periodic pass (5s), so repair is bounded per pass and eventual. The
+        // honest worst case is a single repair-path unbind deadline (~30s,
+        // matching the request-path fabric teardown) of create stall per pass
+        // while stale-bound orphans exist.
+        let mut unbinds_dispatched = false;
+        'repair: for resource in resources {
             if resource.observed_state != deleted_state {
                 continue;
             }
@@ -1130,6 +1175,11 @@ impl ComputeService {
                             );
                             continue;
                         }
+                        // Cap this pass at one unbind dispatch (availability
+                        // bound); the release below still runs for this port,
+                        // then the pass ends and remaining bound orphans are
+                        // retried next pass.
+                        unbinds_dispatched = true;
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => {}
@@ -1170,6 +1220,9 @@ impl ComputeService {
                             "orphaned server-owned endpoint could not be repaired; the next pass retries it"
                         );
                     }
+                }
+                if unbinds_dispatched {
+                    break 'repair;
                 }
             }
         }

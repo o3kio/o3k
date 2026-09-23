@@ -716,6 +716,15 @@ impl NetworkService {
     ) -> Result<ServerOwnedEndpointRelease, NetworkError> {
         let mut report = ServerOwnedEndpointRelease::default();
         for port_id in port_ids {
+            // Hold the network-service lock across [binding-fence read -> delete]
+            // so the re-read and the delete cannot interleave with a binding
+            // transition (issue #1035, atomic fence): a live server that binds
+            // this port between the read and the delete is never stripped,
+            // because the delete only runs when the fence read just observed
+            // `down`. Neither `get_port_for_project` nor
+            // `delete_port_for_project` takes this lock, so there is no
+            // re-entrancy.
+            let _guard = self.lock().await;
             match self.get_port_for_project(project_id, *port_id).await {
                 Ok(port) => {
                     if !is_server_owned_endpoint_name(project_id, &port.name) {
@@ -731,9 +740,10 @@ impl NetworkService {
                     // or a scan that predates the attach must refuse to delete
                     // it, or it strips the live server's NIC. The binding is
                     // re-read immediately before the delete (observe-before-
-                    // destroy); while bound the endpoint is preserved and the
-                    // next pass retries it. Only an endpoint no longer bound to
-                    // any instance may be released.
+                    // destroy, now atomic under the network lock); while bound
+                    // the endpoint is preserved and the next pass retries it.
+                    // Only an endpoint no longer bound to any instance may be
+                    // released.
                     if is_bound_to_instance(&port) {
                         report.preserved += 1;
                         continue;
