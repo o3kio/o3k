@@ -146,11 +146,63 @@ pub trait PortBindingProjector: Send + Sync {
     /// quota become reusable. An endpoint the caller supplied itself is left
     /// untouched — a server attaching an endpoint does not own it — and an
     /// already-absent endpoint is success, so replays converge.
+    ///
+    /// The ownership decision stays entirely inside the implementation, from
+    /// the durable endpoint row. The returned [`ServerEndpointRelease`] is the
+    /// observability contract for the #1035 orphan repair sweep; the request
+    /// path ignores it.
     async fn release_server_owned_endpoint(
         &self,
         project_id: &str,
         port_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Read-only snapshot of a port's durable binding and server-owned
+    /// identity, used by the orphan-repair sweep to decide whether an orphan
+    /// still bound to its dead owner needs an unbind (dispatch network Remove +
+    /// record `down`) before it can be released. `None` when the port does not
+    /// resolve in `project_id`.
+    ///
+    /// The repair must not unbind a caller-supplied or foreign endpoint, so the
+    /// server-owned discriminator is resolved here, from the durable endpoint
+    /// row, not guessed from the request.
+    async fn port_binding(
+        &self,
+        project_id: &str,
+        port_id: &str,
+    ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// A port's durable binding and ownership snapshot, resolved by the binding
+/// projector from the durable endpoint row (never from the request).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortBindingInfo {
+    /// Whether the port carries O3K's reserved server-owned name for this
+    /// project, so a terminally-deleted server may release it.
+    pub server_owned: bool,
+    /// The durable binding state when a host was selected: one of
+    /// `bound`/`binding`/`down`/`error`. `None` means no host was ever
+    /// selected and no observation exists.
+    pub binding_state: Option<String>,
+}
+
+/// Bounded, endpoint-counted outcome of releasing one terminally deleted
+/// server's O3K-owned endpoint.
+///
+/// Counts only, so the report is safe to log and to assert on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerEndpointRelease {
+    /// O3K server-owned endpoints observed present in the owning project.
+    pub discovered: usize,
+    /// Of those, the ones now gone. A concurrent equivalent cleanup that won
+    /// the race restores the same invariant, so it counts here too.
+    pub released: usize,
+    /// Present endpoints that are not O3K server-owned — a caller-supplied
+    /// endpoint, or another project's — preserved untouched.
+    pub preserved: usize,
+    /// Nothing present to repair: an already-released endpoint, or an
+    /// identifier that does not resolve inside the owning project.
+    pub absent: usize,
 }
 
 /// Projects one authenticated agent capability snapshot into the inventory
@@ -506,6 +558,9 @@ mod tests {
             project: String,
             port: String,
         },
+        Binding {
+            port: String,
+        },
     }
 
     #[derive(Default)]
@@ -552,7 +607,7 @@ mod tests {
             &self,
             project_id: &str,
             port_id: &str,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>> {
             self.calls
                 .lock()
                 .map_err(|_| "recording projector lock poisoned".to_owned())?
@@ -560,7 +615,25 @@ mod tests {
                     project: project_id.to_owned(),
                     port: port_id.to_owned(),
                 });
-            Ok(())
+            Ok(ServerEndpointRelease {
+                discovered: 1,
+                released: 1,
+                ..ServerEndpointRelease::default()
+            })
+        }
+
+        async fn port_binding(
+            &self,
+            _project_id: &str,
+            port_id: &str,
+        ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>> {
+            self.calls
+                .lock()
+                .map_err(|_| "recording projector lock poisoned".to_owned())?
+                .push(ProjectorCall::Binding {
+                    port: port_id.to_owned(),
+                });
+            Ok(None)
         }
     }
 

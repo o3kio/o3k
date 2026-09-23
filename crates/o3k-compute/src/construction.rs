@@ -421,6 +421,14 @@ impl ComputeService {
     /// of the same delete re-runs the release, which is idempotent because an
     /// already-absent endpoint is success. Endpoints that are not O3K
     /// server-owned — a port the caller supplied itself — are left untouched.
+    ///
+    /// #1035 backstop: a port a NEW live server has explicitly attached must
+    /// never be released by replaying the terminally-deleted owner's delete.
+    /// The replay's preceding unbind clears the port's durable binding, so a
+    /// binding check alone cannot see the live attachment; the same
+    /// non-terminal attachment set the sweep uses is consulted instead and a
+    /// port any live server still references is left for that server's own
+    /// delete to release.
     pub(super) async fn release_server_endpoints_from_intent(
         &self,
         request: &CreateInstanceRequest,
@@ -428,7 +436,11 @@ impl ComputeService {
         let Some(projector) = self.binding_projector.as_ref() else {
             return Ok(());
         };
+        let attached = self.referenced_port_ids().await?;
         for port_id in &request.network_ids {
+            if attached.contains(port_id.as_str()) {
+                continue;
+            }
             projector
                 .release_server_owned_endpoint(&request.project_id, port_id)
                 .await
@@ -437,10 +449,55 @@ impl ComputeService {
         Ok(())
     }
 
+    /// The identifiers of the endpoints every non-terminally-deleted compute
+    /// instance references, built from a fresh durable scan of the compute
+    /// realm. A tenant may explicitly attach an existing project port — even a
+    /// server-owned one — to a running server, so a deleted server's stale
+    /// create intent can name an endpoint a live guest now depends on. Neither
+    /// the orphan repair sweep nor a delete replay may release a port in this
+    /// set; the live server's own delete releases it.
+    async fn referenced_port_ids(&self) -> Result<std::collections::HashSet<String>, ComputeError> {
+        let mentioned_deleted = server_state_to_storage(ServerState::Deleted);
+        let resources = self
+            .store
+            .list_resources_by_kind("compute_instance")
+            .await?;
+        let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for resource in &resources {
+            if resource.observed_state == mentioned_deleted {
+                continue;
+            }
+            if let Ok(request) =
+                serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
+            {
+                referenced.extend(request.network_ids.iter().cloned());
+            }
+        }
+        Ok(referenced)
+    }
+
+    /// Public form of [`Self::referenced_port_ids`] for a delete handler that
+    /// runs a direct network-side release after the canonical delete. Such a
+    /// handler must not hand a port back to the network release when a NEW live
+    /// server has explicitly attached it, or the replayed/repeated delete would
+    /// strip the live server's NIC (#1035).
+    pub async fn live_attached_endpoint_ids(
+        &self,
+    ) -> Result<std::collections::HashSet<String>, ComputeError> {
+        self.referenced_port_ids().await
+    }
+
     /// Clears the binding of every port named by the server's durable create
     /// intent. Used when a delete reached terminal success, including the
     /// already-deleted shortcut, where the delete completed in a previous
     /// run. Best-effort and idempotent like `project_terminal_binding_outcome`.
+    ///
+    /// #1035 backstop (delete-replay seat): a port a NEW live server has
+    /// explicitly re-attached must never be unbound here, or the replay tears
+    /// down the live server's NIC before release even runs. The same
+    /// non-terminal attachment set the sweep uses is consulted and such a port
+    /// is skipped; on scan failure nothing is unbound (fail closed) rather than
+    /// risk clearing a binding a live server depends on.
     pub(super) async fn unbind_ports_from_intent(
         &self,
         request: &CreateInstanceRequest,
@@ -449,7 +506,21 @@ impl ComputeService {
         let Some(projector) = self.binding_projector.as_ref() else {
             return;
         };
+        let attached = match self.referenced_port_ids().await {
+            Ok(set) => set,
+            Err(error) => {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    error = ?error,
+                    "port unbind skipped: live-server attachment set unavailable"
+                );
+                return;
+            }
+        };
         for port_id in &request.network_ids {
+            if attached.contains(port_id.as_str()) {
+                continue;
+            }
             if let Err(error) = projector
                 .unbind_port(&request.project_id, port_id, operation_id)
                 .await
@@ -895,6 +966,216 @@ impl ComputeService {
                     "server lifecycle convergence pass failed; server state is unchanged"
                 );
             }
+        }
+        // #1035: the same bounded pass is the repair authority for endpoints
+        // orphaned by an interrupted terminal delete. Listing non-terminal
+        // operations above cannot see them, because the delete is already
+        // terminal and the endpoint release never ran.
+        if let Err(error) = self.repair_orphaned_server_endpoints().await {
+            tracing::warn!(%error, "server-owned endpoint orphan repair pass failed");
+        }
+        Ok(())
+    }
+
+    /// Repairs server-owned endpoints orphaned by an interrupted terminal
+    /// delete (#1035).
+    ///
+    /// The crash window:
+    ///
+    /// ```text
+    /// canonical delete reaches durable terminal success
+    ///   -> process dies before the request-path endpoint release
+    ///   -> the server is DELETED but its `o3k-server:` endpoint stays behind
+    /// ```
+    ///
+    /// Such an endpoint blocks network teardown, and nothing else repairs it:
+    /// the periodic sweep above only lists **non-terminal** lifecycle
+    /// operations, and the delete *replay* seat
+    /// (`release_server_endpoints_from_intent`) needs a request to arrive.
+    ///
+    /// This is repair-only. The synchronous request-path release stays
+    /// authoritative; this pass is idempotent, so it converges whether it runs
+    /// once, repeatedly, or concurrently with a request-path delete and with
+    /// another reconciler.
+    ///
+    /// Scope is decided only by durable authority:
+    ///
+    /// - a server is considered only when its observed state is `DELETED`.
+    ///   That state and the delete operation's terminal success are written in
+    ///   ONE durable transaction (`DurableStore::terminalize_lifecycle`, issue
+    ///   #1041), so a live, in-flight or non-terminal server is never
+    ///   repaired, and a crashed control plane can no longer leave the delete
+    ///   terminal while this marker is absent. Keying on the later marker is
+    ///   deliberate — it is the only one that means the guest is gone;
+    /// - an endpoint is released only when the durable endpoint row resolves
+    ///   inside the server's own project **and** carries O3K's reserved
+    ///   server-owned identity. A caller-supplied endpoint is preserved and a
+    ///   foreign endpoint is never touched, even though the create intent
+    ///   names both;
+    /// - an endpoint is released only when no **non-terminal** server still
+    ///   references it. The reserved identity answers "who may release this
+    ///   name", not "is this endpoint still in use": a tenant may explicitly
+    ///   attach an existing project port — including a server-owned one — to a
+    ///   new server, so a deleted server's stale create intent can name an
+    ///   endpoint a running guest now depends on. Such an endpoint is counted
+    ///   as still attached and left alone; its own server's delete releases it.
+    ///
+    /// Bounded observability: one `info` line per pass that actually
+    /// discovered or repaired something, with a fixed field set, plus a
+    /// `warn` per failing server. A pass with nothing to repair stays at
+    /// `debug` so a healthy system does not fill the log.
+    pub(super) async fn repair_orphaned_server_endpoints(&self) -> Result<(), ComputeError> {
+        let Some(projector) = self.binding_projector.as_ref() else {
+            return Ok(());
+        };
+        let resources = self
+            .store
+            .list_resources_by_kind("compute_instance")
+            .await?;
+        // Endpoints a non-terminal server still references. Built from the same
+        // durable scan, so the guard needs no extra read and no extra authority.
+        let still_attached = self.referenced_port_ids().await?;
+        let deleted_state = server_state_to_storage(ServerState::Deleted);
+        let mut discovered = 0usize;
+        let mut released = 0usize;
+        let mut preserved = 0usize;
+        let mut absent = 0usize;
+        let mut failures = 0usize;
+        let mut skipped_attached = 0usize;
+        let mut deleted_servers = 0usize;
+        for resource in resources {
+            if resource.observed_state != deleted_state {
+                continue;
+            }
+            let Ok(request) =
+                serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
+            else {
+                failures += 1;
+                tracing::warn!(
+                    resource_id = %resource.id,
+                    "terminally deleted server has an undecodable create intent; orphan endpoint repair skipped"
+                );
+                continue;
+            };
+            deleted_servers += 1;
+            for port_id in &request.network_ids {
+                // Fast path: the pass-start scan already knows a live server
+                // references this endpoint.
+                if still_attached.contains(port_id.as_str()) {
+                    skipped_attached += 1;
+                    continue;
+                }
+                // Release-time re-read: closes the F1 same-pass TOCTOU properly
+                // instead of relying on the pass-start scan alone. A re-attacher
+                // whose durable create has committed is caught here regardless
+                // of binding realization; a re-attacher whose create has NOT
+                // committed yet is not attached in any durable sense, so
+                // releasing the orphan then is correct.
+                let attached_now = self.referenced_port_ids().await?;
+                if attached_now.contains(port_id.as_str()) {
+                    skipped_attached += 1;
+                    continue;
+                }
+                // Restore the request-path invariant for a genuine bound orphan:
+                // the process may have died after the delete terminalized but
+                // BEFORE the fabric unbind, leaving the port still `bound`. Such
+                // an endpoint must be unbound first (the projector dispatches the
+                // agent-side Remove and records the `down` tombstone), then
+                // released. The durable row is resolved first so a caller-
+                // supplied or foreign endpoint is never unbound.
+                match projector.port_binding(&resource.project_id, port_id).await {
+                    Ok(Some(info))
+                        if info.server_owned
+                            && matches!(
+                                info.binding_state.as_deref(),
+                                Some("bound") | Some("binding")
+                            ) =>
+                    {
+                        let operation_id = Uuid::new_v5(
+                            &Uuid::NAMESPACE_URL,
+                            format!("o3k:orphan-unbind:{}:{}", resource.id, port_id).as_bytes(),
+                        );
+                        if let Err(error) = projector
+                            .unbind_port(&resource.project_id, port_id, operation_id)
+                            .await
+                        {
+                            failures += 1;
+                            tracing::warn!(
+                                resource_id = %resource.id,
+                                project_id = %resource.project_id,
+                                port_id = %port_id,
+                                %error,
+                                "orphaned server-owned endpoint is still bound and could not be \
+                                 unbound; the next pass retries it (fail closed, never deleted \
+                                 while bound)"
+                            );
+                            continue;
+                        }
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => {}
+                    Err(error) => {
+                        failures += 1;
+                        tracing::warn!(
+                            resource_id = %resource.id,
+                            project_id = %resource.project_id,
+                            port_id = %port_id,
+                            %error,
+                            "orphaned server-owned endpoint binding could not be resolved; the \
+                             next pass retries it"
+                        );
+                        continue;
+                    }
+                }
+                // The resource row owns the project scope; the create intent is
+                // derived state and must not widen it. The binding fence in the
+                // network release stays as defense-in-depth: after the unbind
+                // above the port is `down`, so it passes.
+                match projector
+                    .release_server_owned_endpoint(&resource.project_id, port_id)
+                    .await
+                {
+                    Ok(report) => {
+                        discovered += report.discovered;
+                        released += report.released;
+                        preserved += report.preserved;
+                        absent += report.absent;
+                    }
+                    Err(error) => {
+                        failures += 1;
+                        tracing::warn!(
+                            resource_id = %resource.id,
+                            project_id = %resource.project_id,
+                            port_id = %port_id,
+                            %error,
+                            "orphaned server-owned endpoint could not be repaired; the next pass retries it"
+                        );
+                    }
+                }
+            }
+        }
+        if released > 0 || failures > 0 || skipped_attached > 0 {
+            tracing::info!(
+                deleted_servers,
+                discovered,
+                released,
+                preserved,
+                absent,
+                failures,
+                skipped_attached,
+                "server-owned endpoint orphan repair sweep"
+            );
+        } else {
+            tracing::debug!(
+                deleted_servers,
+                discovered,
+                released,
+                preserved,
+                absent,
+                failures,
+                skipped_attached,
+                "server-owned endpoint orphan repair sweep found nothing to repair"
+            );
         }
         Ok(())
     }

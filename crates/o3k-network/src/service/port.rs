@@ -36,6 +36,41 @@ pub fn is_server_owned_endpoint_name(project_id: &str, name: &str) -> bool {
     server_owned_endpoint_context(project_id, name).is_some()
 }
 
+/// Whether a port is durably attached to a (live or attaching) instance.
+///
+/// `bound` is an observed realized attachment; `binding` is an attachment whose
+/// dispatch selected a host but realization is not yet observed. Either means a
+/// guest depends on the endpoint, so a cleanup that does not know about that
+/// server must not delete it. `down` and `error` are terminal unbind outcomes
+/// recorded by the owning server's delete; those endpoints are safe to release.
+fn is_bound_to_instance(port: &PortRecord) -> bool {
+    matches!(
+        port.binding_state.as_deref(),
+        Some("bound") | Some("binding")
+    )
+}
+
+/// Bounded, endpoint-counted outcome of releasing the server-owned endpoints
+/// named by a server's durable create intent.
+///
+/// Counts only, so the report is safe to log and to assert on. It is the
+/// observability contract for the #1035 orphan repair sweep: the request path
+/// discards it, and the repair pass reports it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerOwnedEndpointRelease {
+    /// O3K server-owned endpoints observed present in `project_id`.
+    pub discovered: usize,
+    /// Of those, the ones now gone. A concurrent equivalent cleanup that won
+    /// the race restores the same invariant, so it counts here too.
+    pub released: usize,
+    /// Present endpoints that are not O3K server-owned — a caller-supplied
+    /// endpoint, or another project's — preserved untouched.
+    pub preserved: usize,
+    /// Identifiers with nothing present to repair: an already-released
+    /// endpoint, or an identifier that does not resolve inside `project_id`.
+    pub absent: usize,
+}
+
 impl NetworkService {
     pub async fn create_port(
         &self,
@@ -670,28 +705,54 @@ impl NetworkService {
     /// Endpoint release removes the durable endpoint, its policy attachments
     /// and its create reservation, which frees the address for reuse and
     /// releases the network-port quota.
+    ///
+    /// The returned [`ServerOwnedEndpointRelease`] is the bounded
+    /// observability contract for the #1035 orphan repair sweep. The request
+    /// path ignores it: what matters there is only whether the call failed.
     pub async fn cleanup_server_owned_ports_for_project(
         &self,
         project_id: &str,
         port_ids: &[Uuid],
-    ) -> Result<(), NetworkError> {
+    ) -> Result<ServerOwnedEndpointRelease, NetworkError> {
+        let mut report = ServerOwnedEndpointRelease::default();
         for port_id in port_ids {
             match self.get_port_for_project(project_id, *port_id).await {
                 Ok(port) => {
                     if !is_server_owned_endpoint_name(project_id, &port.name) {
+                        report.preserved += 1;
                         continue;
                     }
-                    if let Err(error) = self.delete_port_for_project(project_id, *port_id).await
-                        && !matches!(error, NetworkError::NotFound)
-                    {
-                        return Err(error);
+                    report.discovered += 1;
+                    // Durable-binding fence (backstop to the sweep's
+                    // `still_attached` scan): a terminally deleted server's
+                    // endpoint may have been explicitly re-attached by a NEW
+                    // live server, which leaves the port bound (or still
+                    // binding) even though its original owner is gone. A replay
+                    // or a scan that predates the attach must refuse to delete
+                    // it, or it strips the live server's NIC. The binding is
+                    // re-read immediately before the delete (observe-before-
+                    // destroy); while bound the endpoint is preserved and the
+                    // next pass retries it. Only an endpoint no longer bound to
+                    // any instance may be released.
+                    if is_bound_to_instance(&port) {
+                        report.preserved += 1;
+                        continue;
+                    }
+                    match self.delete_port_for_project(project_id, *port_id).await {
+                        Ok(()) => report.released += 1,
+                        // The endpoint was observed present and owned, then a
+                        // concurrent equivalent cleanup removed it first. The
+                        // invariant is restored either way, so the pass reports
+                        // it as released rather than as a failure.
+                        Err(NetworkError::NotFound) => report.released += 1,
+                        Err(error) => return Err(error),
                     }
                 }
-                Err(NetworkError::NotFound) => {}
+                Err(NetworkError::NotFound) => report.absent += 1,
                 Err(error) => return Err(error),
             }
         }
-        Ok(())
+        Ok(report)
     }
 
     pub async fn record_binding_intent(

@@ -3614,16 +3614,36 @@ impl ResourceApplication for GenericResourceApplication {
         // Endpoints are released only after the canonical delete is terminal:
         // a converging delete still has a provider-side server that needs its
         // network dependency, and the retried delete releases them later.
+        //
+        // #1035 (replay release): the deleted owner's intent can name an
+        // endpoint a NEW live server has explicitly re-attached. The network
+        // layer cannot see that — the durable binding may already be cleared —
+        // so this delete handler (which runs a direct, still-attached-blind
+        // network release) consults the compute layer and refuses to hand such
+        // a port back for deletion. The live server's own delete releases it.
         if matches!(
             receipt.operation_state,
             o3k_store::OperationState::Succeeded
-        ) && let Err(error) = self
-            .network_service
-            .cleanup_server_owned_ports_for_project(&project_id, &owned_ports)
-            .await
-        {
-            tracing::error!(%error, %id, "native server endpoint cleanup failed");
-            return Err(ResourceApplicationError::Internal);
+        ) {
+            let attached = self
+                .compute
+                .live_attached_endpoint_ids()
+                .await
+                .map_err(compute_error)?;
+            let releasable = owned_ports
+                .iter()
+                .copied()
+                .filter(|port_id| !attached.contains(&port_id.to_string()))
+                .collect::<Vec<_>>();
+            if !releasable.is_empty()
+                && let Err(error) = self
+                    .network_service
+                    .cleanup_server_owned_ports_for_project(&project_id, &releasable)
+                    .await
+            {
+                tracing::error!(%error, %id, "native server endpoint cleanup failed");
+                return Err(ResourceApplicationError::Internal);
+            }
         }
         Ok(MutationResult {
             operation_id: receipt.operation_id.to_string(),

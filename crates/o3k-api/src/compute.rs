@@ -1170,17 +1170,33 @@ pub(crate) async fn delete_server(
                     "server console cleanup failed",
                 );
             }
-            if let Some(network_service) = state.network.as_ref()
-                && let Err(error) = network_service
-                    .cleanup_server_owned_ports_for_project(&project_id, &owned_ports)
-                    .await
-            {
-                tracing::error!(%error, %id, "server-owned endpoint cleanup failed");
-                return keystone_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal Server Error",
-                    "server network cleanup failed",
-                );
+            if let Some(network_service) = state.network.as_ref() {
+                // #1035 (replay release): the deleted owner's intent can name an
+                // endpoint a NEW live server has explicitly re-attached; the
+                // durable binding may already be cleared, so the direct network
+                // release must not be handed such a port. The live server's own
+                // delete releases it.
+                let attached = match service.live_attached_endpoint_ids().await {
+                    Ok(set) => set,
+                    Err(error) => return compute_error(error),
+                };
+                let releasable = owned_ports
+                    .iter()
+                    .copied()
+                    .filter(|port_id| !attached.contains(&port_id.to_string()))
+                    .collect::<Vec<_>>();
+                if !releasable.is_empty()
+                    && let Err(error) = network_service
+                        .cleanup_server_owned_ports_for_project(&project_id, &releasable)
+                        .await
+                {
+                    tracing::error!(%error, %id, "server-owned endpoint cleanup failed");
+                    return keystone_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal Server Error",
+                        "server network cleanup failed",
+                    );
+                }
             }
             StatusCode::NO_CONTENT.into_response()
         }

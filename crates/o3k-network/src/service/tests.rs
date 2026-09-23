@@ -2535,7 +2535,7 @@ async fn server_owned_endpoint_cleanup_is_ownership_filtered_and_frees_the_addre
         .await?
         .in_use;
 
-    service
+    let released = service
         .cleanup_server_owned_ports_for_project(
             "project-a",
             &[
@@ -2547,6 +2547,19 @@ async fn server_owned_endpoint_cleanup_is_ownership_filtered_and_frees_the_addre
             ],
         )
         .await?;
+    // The report is the observability contract for the #1035 orphan repair
+    // sweep, so it must name exactly what happened: one owned endpoint
+    // discovered and released, three present-but-not-owned endpoints
+    // preserved, and one identifier with nothing to repair.
+    assert_eq!(
+        released,
+        ServerOwnedEndpointRelease {
+            discovered: 1,
+            released: 1,
+            preserved: 3,
+            absent: 1,
+        }
+    );
 
     assert!(matches!(
         service.get_port_for_project("project-a", owned.id).await,
@@ -2590,7 +2603,7 @@ async fn server_owned_endpoint_cleanup_is_ownership_filtered_and_frees_the_addre
     assert_eq!(replacement.fixed_ip, owned.fixed_ip);
     // Replaying the cleanup is idempotent: the released endpoint is gone and
     // the surviving endpoints are still untouched.
-    service
+    let replayed = service
         .cleanup_server_owned_ports_for_project(
             "project-a",
             &[
@@ -2602,12 +2615,120 @@ async fn server_owned_endpoint_cleanup_is_ownership_filtered_and_frees_the_addre
             ],
         )
         .await?;
+    assert_eq!(
+        replayed,
+        ServerOwnedEndpointRelease {
+            discovered: 0,
+            released: 0,
+            preserved: 3,
+            absent: 2,
+        },
+        "a replayed release must discover nothing and release nothing"
+    );
     assert!(
         service
             .get_port_for_project("project-a", supplied.id)
             .await
             .is_ok()
     );
+
+    drop(service);
+    drop(store);
+    let _ = fs::remove_dir_all(&path);
+    let _ = fs::remove_file(&sqlite_path);
+    let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+    let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+    Ok(())
+}
+
+/// The durable-binding fence on the compute release path (#1035): a sweep or
+/// delete replay must never delete a server-owned endpoint a NEW live server
+/// has explicitly re-attached, even when the sweep's `still_attached` scan did
+/// not see it. A bound (or binding) endpoint is preserved and retried on the
+/// next pass; only after an own unbind (`down`) is it actually released.
+#[tokio::test]
+async fn server_owned_endpoint_cleanup_preserves_a_bound_endpoint_until_unbound()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("server-owned-bound-fence");
+    let sqlite_path = format!("{}.sqlite", path.display());
+    let _ = fs::remove_dir_all(&path);
+    let _ = fs::remove_file(&sqlite_path);
+    let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+    let service = NetworkService::open_for_test(&path, store.clone()).await?;
+    let auth_a = auth("project-a");
+    let network = service.create_network(&auth_a, "flat".to_owned()).await?;
+    service
+        .create_subnet(
+            &auth_a,
+            network.id,
+            "lab".to_owned(),
+            "192.0.2.0/29".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let owned = service
+        .create_port_for_project(
+            "project-a",
+            network.id,
+            "o3k-server:project-a:server-one".to_owned(),
+        )
+        .await?;
+
+    // An attaching server realizes the endpoint: host selected, then observed
+    // bound. This is the durable state a NEW live server's attachment leaves.
+    service
+        .record_binding_intent("project-a", owned.id, "compute-1")
+        .await?;
+    service
+        .project_binding_observation("project-a", owned.id, "compute-1", "bound")
+        .await?;
+
+    // The release path must refuse while the endpoint is still bound: the
+    // endpoint stays, is counted preserved (not released, not a failure), and
+    // no port quota is freed for reuse.
+    let first = service
+        .cleanup_server_owned_ports_for_project("project-a", &[owned.id])
+        .await?;
+    assert_eq!(
+        first,
+        ServerOwnedEndpointRelease {
+            discovered: 1,
+            released: 0,
+            preserved: 1,
+            absent: 0,
+        }
+    );
+    let still_bound = service.get_port_for_project("project-a", owned.id).await?;
+    assert_eq!(still_bound.binding_state.as_deref(), Some("bound"));
+    assert!(
+        service
+            .get_port_for_project("project-a", owned.id)
+            .await
+            .is_ok(),
+        "a bound endpoint must survive an orphan repair release"
+    );
+
+    // The owning server's own delete unbinds first (recording `down`); only
+    // then may the release path delete it.
+    service.unbind_port("project-a", owned.id).await?;
+    let second = service
+        .cleanup_server_owned_ports_for_project("project-a", &[owned.id])
+        .await?;
+    assert_eq!(
+        second,
+        ServerOwnedEndpointRelease {
+            discovered: 1,
+            released: 1,
+            preserved: 0,
+            absent: 0,
+        }
+    );
+    assert!(matches!(
+        service.get_port_for_project("project-a", owned.id).await,
+        Err(NetworkError::NotFound)
+    ));
 
     drop(service);
     drop(store);
