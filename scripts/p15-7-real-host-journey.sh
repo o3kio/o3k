@@ -682,6 +682,22 @@ cleanup() {
   fi
   for i in "${!DOMAINS[@]}"; do
     d="${DOMAINS[$i]}"; u="${UUIDS[$i]}"
+    # The recorded UUID is the authoritative locator once provisioning
+    # captured it; the name is a validation/display attribute only. When no
+    # UUID was recorded (the VM failed before domuuid resolved), fall back to
+    # the name for diagnosis. Ownership must be proven from the domain XML
+    # before anything is destroyed.
+    if [[ "$u" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+      virsh -c qemu:///system domstate "$u" >/dev/null 2>&1 || continue
+      virsh -c qemu:///system dumpxml "$u" 2>/dev/null | grep -Fq "o3k-p15-7-journey-owned=$RUN_ID" || continue
+      virsh -c qemu:///system destroy "$u" >/dev/null 2>&1 || true
+      virsh -c qemu:///system undefine "$u" --nvram >/dev/null 2>&1 || virsh -c qemu:///system undefine "$u" >/dev/null 2>&1 || true
+      if virsh -c qemu:///system domstate "$u" >/dev/null 2>&1; then
+        echo "P15.7 cleanup: owned domain remains after destroy/undefine: $d ($u)" >&2
+        cleanup_failed=true
+      fi
+      continue
+    fi
     actual_uuid="$(virsh -c qemu:///system domuuid "$d" 2>/dev/null || true)"
     [[ "$actual_uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || continue
     [[ -z "$u" || "$actual_uuid" == "$u" ]] || continue
@@ -742,8 +758,12 @@ assert_owned_domains_absent() {
   local i d u
   for i in "${!DOMAINS[@]}"; do
     d="${DOMAINS[$i]}"; u="${UUIDS[$i]}"
-    if virsh -c qemu:///system domuuid "$d" >/dev/null 2>&1; then
-      die "owned VM remains after cleanup: $d ($u)"
+    if [[ "$u" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+      virsh -c qemu:///system domstate "$u" >/dev/null 2>&1 \
+        && die "owned VM remains after cleanup: $d ($u)"
+    else
+      virsh -c qemu:///system domuuid "$d" >/dev/null 2>&1 \
+        && die "owned VM remains after cleanup: $d"
     fi
   done
   for p in "${SEEDS[@]}" "${OVERLAYS[@]}"; do
@@ -807,29 +827,57 @@ capture_host_state() {
   fi
   chmod 0600 "$output" 2>/dev/null || true
 }
-find_ip() {
-  local d="$1" ip serial
-  for _ in $(seq 1 120); do
-    ip="$(virsh -c qemu:///system domifaddr "$d" --source lease 2>/dev/null |
-      awk '{for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\./) {sub(/\/.*/, "", $i); print $i; exit}}' || true)"
-    [[ "$ip" =~ ^[0-9.]+$ && "$ip" != "$GATEWAY" ]] && { echo "$ip"; return; }; sleep 2
-  done
-  # Keep the failure actionable without guessing an address or weakening the
-  # real DHCP/SSH boundary.  These queries are read-only and scoped to the
-  # run-owned domain/network; they intentionally contain no credentials.
-  echo "P15.7 network diagnostics for owned VM $d" >&2
+vm_network_diagnostics() {
+  local d="$1" uuid="$2" serial="$3" id="$4"
+  # Keep a bounded-provisioning failure actionable without guessing an address
+  # or weakening the real DHCP/SSH boundary. These queries are read-only and
+  # scoped to the run-owned domain/network; they intentionally contain no
+  # credentials. The recorded UUID is the locator; the name is echoed only as
+  # a human-readable cross-check.
+  echo "P15.7 network diagnostics for owned VM $id ($d, uuid=$uuid)" >&2
+  virsh -c qemu:///system domstate "$uuid" >&2 || true
   virsh -c qemu:///system domstate "$d" >&2 || true
-  virsh -c qemu:///system domiflist "$d" >&2 || true
-  virsh -c qemu:///system domifaddr "$d" --source lease >&2 || true
-  virsh -c qemu:///system domifaddr "$d" --source arp >&2 || true
+  virsh -c qemu:///system domiflist "$uuid" >&2 || true
+  virsh -c qemu:///system domifaddr "$uuid" --source lease >&2 || true
+  virsh -c qemu:///system domifaddr "$uuid" --source arp >&2 || true
   virsh -c qemu:///system net-dhcp-leases "$NETWORK" >&2 || true
   virsh -c qemu:///system net-dumpxml "$NETWORK" >&2 || true
-  serial="$LIBVIRT_STORAGE_ROOT/${d#o3k-p15-7-$RUN_ID-}-serial.log"
   if [[ -n "$serial" ]]; then
-    echo "P15.7 serial console tail for owned VM $d" >&2
+    echo "P15.7 serial console tail for owned VM $id" >&2
     sudo -n tail -n 120 -- "$serial" >&2 || true
   fi
-  die "VM did not receive a DHCP lease: $d"
+}
+wait_vm_ssh() {
+  # Combined DHCP + SSH readiness window. The address is re-resolved on
+  # EVERY retry through scripts/p15-7-vm-address.sh: a libvirt DHCP lease is
+  # not liveness proof — the journey derives its MACs deterministically from
+  # the run id and dnsmasq retains a prior boot's lease for the same MAC for
+  # up to an hour, so a rerun of the same run id can transiently observe the
+  # previous boot's address. The single bounded window must both exceed this
+  # shared host's worst-case guest boot profile (the PP.5 campaign harness
+  # documents 10-20 minutes under multi-guest parallel boot) and keep the
+  # six-VM journey inside the protected job's 120-minute budget: 300x2s
+  # per VM bounds provisioning at ~50 minutes worst case (the first pair
+  # boots in parallel), leaving the remaining phases their documented share.
+  # SSH itself remains the hard reachability proof. Returns only the IP that
+  # answered over SSH.
+  local d="$1" uuid="$2" mac="$3" serial="$4" id="$5" candidate=""
+  for _ in $(seq 1 300); do
+    # The resolver normally prints exactly one freshest MAC-bound address;
+    # when freshness data is unavailable it prints every MAC-bound candidate
+    # and each one is liveness-probed here over SSH — the resolver never
+    # guesses and SSH remains the only reachability proof.
+    while IFS= read -r candidate; do
+      [[ "$candidate" =~ ^[0-9.]+$ ]] || continue
+      if ssh_vm "$candidate" true >/dev/null 2>&1; then
+        echo "$candidate"
+        return 0
+      fi
+    done < <(bash "$ROOT_DIR/scripts/p15-7-vm-address.sh" resolve "$uuid" "$mac" "$NETWORK" "$GATEWAY" 2>/dev/null || true)
+    sleep 2
+  done
+  vm_network_diagnostics "$d" "$uuid" "$serial" "$id"
+  die "VM did not become SSH-reachable with a MAC-bound DHCP address: $id"
 }
 provision_vm() {
   local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" seed_tmp="$WORK_ROOT/$1-seed.iso" serial="$LIBVIRT_STORAGE_ROOT/$1-serial.log" ip uuid mac
@@ -889,9 +937,7 @@ EOF
   virt-install --connect qemu:///system --name "$d" --memory 2048 --vcpus 2 --import --disk "path=$overlay,format=qcow2" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --serial "file,path=$serial" --metadata "description=o3k-p15-7-journey-owned=$RUN_ID" --noautoconsole --wait 0 >/dev/null || die "VM boot failed: $id"
   uuid="$(virsh -c qemu:///system domuuid "$d")"; [[ "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || die "VM UUID unavailable: $id"
   printf '%s\n' "$uuid" >"$WORK_ROOT/$id-uuid"
-  ip="$(find_ip "$d")"
-  for _ in $(seq 1 120); do ssh_vm "$ip" true >/dev/null 2>&1 && break; sleep 2; done
-  ssh_vm "$ip" true >/dev/null 2>&1 || die "SSH unavailable on real VM: $id"
+  ip="$(wait_vm_ssh "$d" "$uuid" "$mac" "$serial" "$id")"
   ssh_vm "$ip" "sudo cloud-init status --wait" >/dev/null 2>&1 || die "cloud-init did not complete on real VM: $id"
   ssh_vm "$ip" "sudo virsh -c qemu:///system uri" >/dev/null 2>&1 || die "libvirt is not available on real VM: $id"
   printf '%s\n' "$ip" >"$WORK_ROOT/$id-ip"

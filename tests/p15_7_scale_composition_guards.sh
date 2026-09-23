@@ -225,7 +225,8 @@ python3 - "${ROOT_DIR}/scripts/p15-7-real-host-journey.sh" \
   "${ROOT_DIR}/.github/workflows/real-host-validation.yml" \
   "${ROOT_DIR}/scripts/p15-7-libvirt-storage-pool.sh" \
   "${ROOT_DIR}/.github/workflows/p15-7-diagnostic-fast-lane.yml" \
-  "${ROOT_DIR}/scripts/bootstrap-disposable-testlab.sh" <<'PY'
+  "${ROOT_DIR}/scripts/bootstrap-disposable-testlab.sh" \
+  "${ROOT_DIR}/scripts/p15-7-vm-address.sh" <<'PY'
 from pathlib import Path
 import sys
 journey = Path(sys.argv[1]).read_text(encoding="utf-8")
@@ -233,6 +234,7 @@ workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
 pool = Path(sys.argv[3]).read_text(encoding="utf-8")
 diagnostic = Path(sys.argv[4]).read_text(encoding="utf-8")
 bootstrap = Path(sys.argv[5]).read_text(encoding="utf-8")
+vm_address = Path(sys.argv[6]).read_text(encoding="utf-8")
 upload = workflow.split("- name: Upload redacted real-host artifacts", 1)[1].split("if-no-files-found:", 1)[0]
 assert "target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json" in upload
 for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block-c", "block-d", "block-e", "block-f", "o3k init",
@@ -288,8 +290,39 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "cannot stage cloud-init seed for libvirt", "network-config=$WORK_ROOT/network-config-$1",
                  "dhcp4: true", "dhcp6: false", "renderer: networkd", "set-name: eth0",
                  "macaddress: \"$mac\"", "mac=$mac", "net-dhcp-leases", "serial console tail",
-                 "--serial \"file,path=$serial\"", "for (i = 1; i <= NF; i++)",
+                 "--serial \"file,path=$serial\"",
                  "awk '/MemTotal:/ {print int(\\$2/1024); exit}' /proc/meminfo"):
+    assert required in journey, required
+# The stale-DHCP-lease regression (run 990923002 attempt 4): the journey must
+# resolve the VM address through the MAC-bound UUID-only resolver and must
+# never freeze a lease-derived address across the SSH window.
+for required in ("wait_vm_ssh() {", "vm_network_diagnostics() {",
+                 "p15-7-vm-address.sh\" resolve \"$uuid\" \"$mac\" \"$NETWORK\" \"$GATEWAY\"",
+                 "seq 1 300",
+                 "domifaddr \"$uuid\" --source lease", "domifaddr \"$uuid\" --source arp",
+                 "domiflist \"$uuid\""):
+    assert required in journey, required
+assert 'ip="$(find_ip' not in journey and "find_ip()" not in journey
+# Ownership-safe cleanup must prefer the recorded UUID as the locator.
+for required in ('if [[ "$u" =~ ^[0-9a-fA-F-]{36}$ ]]; then',
+                 'virsh -c qemu:///system domstate "$u" >/dev/null 2>&1 || continue',
+                 'virsh -c qemu:///system dumpxml "$u" 2>/dev/null | grep -Fq "o3k-p15-7-journey-owned=$RUN_ID"',
+                 'virsh -c qemu:///system destroy "$u"'):
+    assert required in journey, required
+assert journey.index('printf \'%s\\n\' "$uuid" >"$WORK_ROOT/$id-uuid"') \
+    < journey.index('wait_vm_ssh "$d" "$uuid" "$mac" "$serial" "$id"')
+# The resolver helper itself: UUID-only lookups, exact-MAC lease binding,
+# network lease-table fallback, and gateway rejection.
+for required in ("domifaddr \"$uuid\" --source lease", "net-dhcp-leases \"$network\"",
+                 "net-dumpxml \"$network\"", "for (i = 1; i <= NF; i++)",
+                 "tolower($i) == tolower(m)", "grep -Fxiq", "!= gw",
+                 "expiry-time", "DNSMASQ_STATUS_DIR",
+                 "printf '%s\\n' \"${candidates[@]}\""):
+    assert required in vm_address, required
+assert 'domifaddr "$d"' not in vm_address
+# The journey liveness-probes every emitted candidate instead of assuming a
+# single-address resolver result.
+for required in ("while IFS= read -r candidate", "ssh_vm \"$candidate\" true"):
     assert required in journey, required
 assert "--os-password" not in journey
 assert '! grep -Fq "$WORKLOAD_A" "$FOREIGN_SHOW"' not in journey

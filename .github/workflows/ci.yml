@@ -93,6 +93,8 @@ jobs:
         run: bash tests/p15_7_keycloak_authority_guards.sh
       - name: Test protected P15.7 journey and diagnostic guards
         run: bash tests/p15_7_scale_composition_guards.sh
+      - name: Test protected P15.7 VM address resolver guards
+        run: bash tests/p15_7_vm_address.sh
       - name: Test protected P15.7 libvirt pool ownership
         run: bash tests/p15_7_libvirt_pool_cleanup.sh
       - name: Test protected P15.7 dispatch guard
