@@ -4091,7 +4091,7 @@ mod tests {
                 .unbinds
                 .lock()
                 .map_err(|_| "failing projector lock poisoned")? += 1;
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "fabric unavailable").into())
+            Err(std::io::Error::other("fabric unavailable").into())
         }
         async fn release_server_owned_endpoint(
             &self,
@@ -4125,7 +4125,6 @@ mod tests {
     #[tokio::test]
     async fn sweep_dispatches_at_most_one_unbind_attempt_per_pass_even_when_unbind_fails()
     -> Result<(), Box<dyn std::error::Error>> {
-        use o3k_store::DurableStore;
         let database_path = PathBuf::from(format!(
             "/tmp/o3k-sweep-cap-failure-{}.sqlite",
             std::process::id()
