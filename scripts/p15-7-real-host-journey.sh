@@ -332,6 +332,23 @@ restart_o3kd_verified() {
   new_uid="$(sudo -n stat -c '%U' "/proc/$new_pid")"
   [[ "$new_uid" == "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" && "$(sudo -n readlink -f "/proc/$new_pid/exe")" == "$STATE_ROOT/bin/o3kd" ]] || die "restarted o3kd identity is not owned"
   printf '%s|%s|%s|o3kd\n' "$new_pid" "$new_ticks" "$new_uid" >"$PID_ROOT/o3kd.pid"
+  # Process existence is not serving readiness: o3kd binds AUTH_PORT only
+  # after pool init/seeding, measured at ~0.3s best case and ~1.5-2s on the
+  # canonical run on a fast idle host. The backend-switch rejoin fires an
+  # authenticated `o3k init` immediately after this function returns (only
+  # `join` has retries; `init` has none), so returning at process-detection
+  # deterministically raced the bind with ECONNREFUSED. Wait until the
+  # control plane accepts HTTP on AUTH_PORT. /readyz deliberately stays
+  # gated behind the rejoin, so any HTTP response (e.g. 404) is the signal.
+  local http_up=""
+  for _ in $(seq 1 120); do
+    if curl --silent --output /dev/null "http://127.0.0.1:$AUTH_PORT/" 2>/dev/null; then
+      http_up=1
+      break
+    fi
+    sleep .25
+  done
+  [[ "$http_up" ]] || die "restarted o3kd did not accept control-plane HTTP"
 }
 capture_failure_diagnostics() {
   local exit_status="$1"
