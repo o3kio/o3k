@@ -604,12 +604,23 @@ openstack_absent_code() {
 }
 delete_owned_openstack() {
   local kind="$1" id="$2"; shift 2
-  if openstack "$kind" show "$id" >/dev/null 2>&1; then
-    openstack "$kind" delete "$@" "$id" >/dev/null 2>&1 || return 1
-    openstack_absent_code "$kind" "$id"
-    return $?
-  fi
-  openstack_absent_code "$kind" "$id"
+  local attempt code=2
+  # A transient control-plane failure (5xx/transport, observed on run
+  # 990923002 as "compute service is unavailable" during the final cleanup
+  # immediately after the PostgreSQL fault gate) must not strand the cleanup
+  # and turn an otherwise complete journey into a failed one. Retry a bounded
+  # number of times; a genuinely unprovable outcome still fails closed.
+  for attempt in $(seq 1 5); do
+    if openstack "$kind" show "$id" >/dev/null 2>&1; then
+      openstack "$kind" delete "$@" "$id" >/dev/null 2>&1 || true
+    fi
+    if openstack_absent_code "$kind" "$id"; then
+      return 0
+    fi
+    code=$?
+    sleep 2
+  done
+  return "$code"
 }
 secure_remove_credentials() {
   local secret_file

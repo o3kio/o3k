@@ -409,6 +409,11 @@ assert 'ssh_vm "$ip" "sudo cloud-init status --wait"' in journey
 assert 'ssh_vm "$ip" "sudo virsh -c qemu:///system uri"' in journey
 assert 'if [[ "$cleanup_failed" == false ]]; then' in journey
 assert 'delete_owned_openstack()' in journey
+# Cleanup absence proofs must survive a transient control-plane failure with a
+# bounded retry (observed as a 500 "compute service is unavailable" during the
+# final cleanup) while remaining fail-closed on a genuinely unprovable result.
+assert 'must not strand the cleanup' in journey
+assert 'if openstack_absent_code "$kind" "$id"; then' in journey
 assert 'policy failures are deliberately not treated as absence' in journey
 assert 'DRAIN_AGENT="$HOST_A"' in journey
 assert 'scripts/resolve-p15-7-placement-block.py' in journey
