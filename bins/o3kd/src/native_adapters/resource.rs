@@ -2377,6 +2377,13 @@ impl ResourceApplication for GenericResourceApplication {
             .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()))
             .replace('/', "_");
         let project_id = auth.effective_scope().id().as_str().to_owned();
+        // Issue #1035: hold the orphan-repair serialization lock across
+        // [existing-port validation/resolution -> durable intent persist] so a
+        // concurrent orphan repair sweep can neither release a port mid-create
+        // nor allow this create to durably reference a port the sweep just
+        // released. The lock is taken before any network call, matching the
+        // sweep's locking.
+        let _orphan_repair_guard = self.compute.orphan_repair_lock_guard().await;
         let mut network_ids = Vec::with_capacity(spec.network_ids.len());
         let mut owned_network_ids = Vec::new();
         // Validate all UUID references before creating any endpoint, so a

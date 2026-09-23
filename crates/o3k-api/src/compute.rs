@@ -818,6 +818,12 @@ pub(crate) async fn create_server(
         .unwrap_or(&body.server.name)
         .to_owned();
     let server_id = ComputeService::server_id_for_create(&project_id, &idempotency);
+    // Issue #1035: hold the orphan-repair serialization lock across
+    // [existing-port validation/resolution -> durable intent persist] so a
+    // concurrent orphan repair sweep can neither release a port mid-create nor
+    // allow this create to durably reference a port the sweep just released.
+    // The lock is taken before any network call, matching the sweep's locking.
+    let _orphan_repair_guard = service.orphan_repair_lock_guard().await;
     let mut owned_network_ids = Vec::new();
     let mut network_ids = Vec::with_capacity(networks.len());
     if let Some(network_service) = state.network.as_ref() {

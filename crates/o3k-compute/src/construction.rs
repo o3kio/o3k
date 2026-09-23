@@ -43,6 +43,7 @@ impl ComputeService {
             cinder: None,
             attachments,
             binding_projector: None,
+            orphan_repair_lock: Arc::new(tokio::sync::Mutex::new(())),
             config_drive_cleaner: None,
             authorizer: Arc::new(StaticAuthorizer::standard()),
             audit_sink,
@@ -485,6 +486,17 @@ impl ComputeService {
         &self,
     ) -> Result<std::collections::HashSet<String>, ComputeError> {
         self.referenced_port_ids().await
+    }
+
+    /// Acquires the orphan-repair serialization lock (issue #1035) for the
+    /// caller to hold across [existing-port validation/resolution → durable
+    /// intent persist]. The adapter create paths call this and keep the
+    /// returned guard for exactly that window; the orphan repair sweep acquires
+    /// the same lock for its whole pass. The lock is always taken FIRST —
+    /// before any store read and before any projector/network call — so the
+    /// ordering is consistent everywhere and no layer can invert it.
+    pub async fn orphan_repair_lock_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.orphan_repair_lock.lock().await
     }
 
     /// Clears the binding of every port named by the server's durable create
@@ -1028,6 +1040,13 @@ impl ComputeService {
         let Some(projector) = self.binding_projector.as_ref() else {
             return Ok(());
         };
+        // Serialize the entire repair pass against the create paths that
+        // durably reference an existing port. This lock is taken FIRST —
+        // before any store read or projector/network call — matching the
+        // create-persist lock ordering, so a concurrent create can neither be
+        // interrupted mid-persist nor land a durable reference to a port this
+        // pass is about to release.
+        let _orphan_repair_guard = self.orphan_repair_lock.lock().await;
         let resources = self
             .store
             .list_resources_by_kind("compute_instance")

@@ -97,6 +97,15 @@ pub struct ComputeService {
     cinder: Option<Arc<dyn VolumeAttachmentProvider>>,
     attachments: AttachmentOrchestrator,
     binding_projector: Option<Arc<dyn PortBindingProjector>>,
+    /// Serializes the orphan-endpoint repair sweep (#1035) against the create
+    /// paths that make a non-terminal server durably reference an existing
+    /// port. Both the repair pass and the create's durable-intent persist take
+    /// this lock before any store read and before any projector/network call,
+    /// so a sweep can never release a port while a create is persisting a
+    /// durable reference to it, and a create cannot durably reference a port
+    /// the sweep just released. `tokio::sync::Mutex` is fair and leaf-level
+    /// here, so there is no inversion with the layer's network-mutation locks.
+    orphan_repair_lock: Arc<tokio::sync::Mutex<()>>,
     config_drive_cleaner: Option<o3k_config_drive::ConfigDriveStore>,
     authorizer: Arc<dyn Authorizer>,
     audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,

@@ -37,6 +37,7 @@ use o3k_kernel::{
 use o3k_native_api::auth::TokenIssuer;
 use o3k_network::NetworkService;
 use o3k_provider::{FailureInjection, FakeComputeProvider};
+use o3k_store::ComputeRepository;
 use o3k_store::DurableStore;
 use o3k_store::unified::O3kStore;
 use serde_json::{Value, json};
@@ -2455,6 +2456,159 @@ async fn postgres_orphan_endpoint_re_attached_by_live_server_is_skipped_and_rele
     };
     let harness = build_postgres(url.clone(), Some(wrapper)).await?;
     assert_attached_orphan_skipped_by_sweep_then_released_on_delete(&harness, &armed).await?;
+    harness.cleanup();
+    Ok(())
+}
+
+/// Issue #1035 regression: the orphan repair sweep is serialized (via
+/// `ComputeService::orphan_repair_lock`, held by the adapter create paths
+/// across [existing-port validation -> durable intent persist] and by the
+/// sweep for its whole pass) so a create racing the sweep resolves to exactly
+/// one durable outcome: either the create wins (a non-terminal server durably
+/// references the port, and the port survives the sweep) or the sweep wins
+/// (the port is released and the create is rejected — never leaving a durable
+/// reference to a deleted port). Proven on both the SQLite and PostgreSQL
+/// lanes.
+async fn run_orphan_serialization_race(
+    harness: &Harness,
+    armed: &Arc<std::sync::atomic::AtomicBool>,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _report_guard = REPORT_CAPTURE_LOCK.lock().await;
+
+    // A fresh orphan per iteration so each race is independent: a server-owned
+    // endpoint is 1:1 with a server, so reusing one port across iterations
+    // would couple the races.
+    for iteration in 0..4i32 {
+        // Re-arm the crash projector so this iteration's delete leaves a fresh
+        // orphan; then disarm so the race's release path works again.
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (deleted_id, port) =
+            create_orphaned_endpoint(harness, &format!("{label}-orphan-{iteration}")).await?;
+        assert_durable_terminal_delete_with_orphan(harness, &deleted_id, port).await?;
+        // The control plane "comes back": the release path works again.
+        armed.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // Race one sweep pass against a create that reuses the orphan's port.
+        let reconciler = spawn_shipped_sweeps(&harness.compute);
+        let (status, body) = harness
+            .native_create(
+                &format!("{label}-create-{iteration}"),
+                json!([port.to_string()]),
+            )
+            .await?;
+        // Let the in-flight sweep pass settle, then stop the reconciler.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        reconciler.abort();
+        let stopped = reconciler.await;
+        assert!(
+            stopped.is_err_and(|error| error.is_cancelled()),
+            "the shipped convergence sweep ended abnormally"
+        );
+
+        if status.is_success() {
+            // The create won the race: a live, non-terminal server durably
+            // references the port, and the port must still be present (the
+            // sweep must have preserved a still-referenced endpoint).
+            let id = body["resource_id"]
+                .as_str()
+                .or_else(|| body["server"]["id"].as_str())
+                .expect("created server id")
+                .to_owned();
+            let resource = harness
+                .store
+                .get_resource(Uuid::parse_str(&id)?)
+                .await
+                .expect("created server resource");
+            assert_ne!(
+                resource.observed_state, "DELETED",
+                "a create that won the race must leave a non-terminal server"
+            );
+            assert!(
+                harness.port_present(port).await,
+                "a referenced server-owned endpoint must survive the orphan sweep"
+            );
+        } else {
+            // The sweep won the race: the create was rejected and the port must
+            // have been released — a durable reference to a deleted port is the
+            // exact invariant this serialization exists to rule out.
+            assert!(
+                !harness.port_present(port).await,
+                "if the orphan sweep won, the endpoint must be released: {status} {body}"
+            );
+        }
+    }
+
+    // Realm-wide invariant: no non-terminal server's durable intent references
+    // a port that no longer exists.
+    let resources = harness
+        .store
+        .list_resources_by_kind("compute_instance")
+        .await
+        .expect("list compute resources");
+    for resource in &resources {
+        if resource.observed_state == "DELETED" {
+            continue;
+        }
+        let intent: Value = serde_json::from_str(&resource.desired_state)?;
+        let Some(ids) = intent["network_ids"].as_array() else {
+            continue;
+        };
+        for network_id in ids {
+            let Some(network_id) = network_id.as_str() else {
+                continue;
+            };
+            let Ok(port_id) = Uuid::parse_str(network_id) else {
+                continue;
+            };
+            assert!(
+                harness.port_present(port_id).await,
+                "non-terminal server {} references a deleted port {port_id}",
+                resource.id
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn orphan_repair_is_serialized_with_a_port_attaching_create()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let wrapper: ProjectorWrapper = {
+        let armed = armed.clone();
+        Arc::new(move |_network, inner| {
+            Arc::new(CrashBeforeReleaseProjector {
+                inner,
+                armed: armed.clone(),
+            })
+        })
+    };
+    let harness = Harness::build_with(Some(wrapper)).await?;
+    run_orphan_serialization_race(&harness, &armed, "pp5-race").await?;
+    harness.cleanup();
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires O3K_DATABASE_URL (PostgreSQL)"]
+async fn postgres_orphan_repair_is_serialized_with_a_port_attaching_create()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _pg_test_lock_guard = PG_TEST_DATABASE_LOCK.lock().await;
+    let url = postgres_test_url();
+    clean_postgres(&url).await;
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let wrapper: ProjectorWrapper = {
+        let armed = armed.clone();
+        Arc::new(move |_network, inner| {
+            Arc::new(CrashBeforeReleaseProjector {
+                inner,
+                armed: armed.clone(),
+            })
+        })
+    };
+    let harness = build_postgres(url.clone(), Some(wrapper)).await?;
+    run_orphan_serialization_race(&harness, &armed, "pp5-pg-race").await?;
     harness.cleanup();
     Ok(())
 }
