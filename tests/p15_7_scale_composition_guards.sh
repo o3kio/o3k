@@ -325,11 +325,13 @@ assert 'domifaddr "$d"' not in vm_address
 for required in ("while IFS= read -r candidate", "ssh_vm \"$candidate\" true"):
     assert required in journey, required
 # The project-token acquisition must survive transient control-plane
-# failures loudly instead of exiting silently under `set -e` (observed on
-# run 990923002 as a silent journey death concurrent with mass agent
-# lease-renewal DB errors).
-assert 'PROJECT_TOKEN="$(openstack token issue -f value -c id 2>/dev/null | tr -d '"'"'[:space:]'"'"' || true)"' in journey
+# failures loudly (with the CLI's own error text) instead of exiting
+# silently under `set -e` (observed on run 990923002 as a silent journey
+# death concurrent with control-plane DB errors).
+assert 'PROJECT_TOKEN="$(openstack token issue -f value -c id 2>"$PROJECT_TOKEN_ERR" | tr -d '"'"'[:space:]'"'"' || true)"' in journey
 assert '[[ "$PROJECT_TOKEN" ]] && break' in journey
+assert 'for _ in $(seq 1 15); do' in journey
+assert 'P15.7 project token acquisition diagnostics:' in journey
 assert "--os-password" not in journey
 assert '! grep -Fq "$WORKLOAD_A" "$FOREIGN_SHOW"' not in journey
 # The protected workflows must authorize exactly the six journey identities.

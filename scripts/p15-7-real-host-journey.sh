@@ -1087,20 +1087,27 @@ fi
   || die "system_operator_token_ownership_unproven"
 OPERATOR_TOKEN="$(<"$OPERATOR_TOKEN_FILE")"
 [[ -n "$OPERATOR_TOKEN" && "$OPERATOR_TOKEN" != *$'\n'* ]] || die "system_operator_token_empty"
-# Authenticated project token: bounded retries, then a loud failure. The
-# unguarded single-shot form exited silently under `set -e` when a transient
-# control-plane/DB hiccup made `openstack token issue` fail (observed on run
-# 990923002: mass agent lease-renewal DB errors at the same instant), which
-# destroyed the whole journey with no diagnostics. Token issue is a
-# read-only authenticated call; retrying a transient transport failure does
-# not weaken any check, and persistent failure still dies here.
+# Authenticated project token: bounded retries with captured diagnostics, then
+# a loud failure. The unguarded single-shot form exited silently under
+# `set -e` when a transient control-plane/DB hiccup made `openstack token
+# issue` fail (observed on run 990923002), which destroyed the whole journey
+# with no diagnostics. Token issue is a read-only authenticated call;
+# retrying a transient transport/stall failure does not weaken any check, and
+# persistent failure dies loudly WITH the CLI's own error text (status codes,
+# never credentials) so the cause is never guessed.
 PROJECT_TOKEN=""
-for _ in $(seq 1 5); do
-  PROJECT_TOKEN="$(openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]' || true)"
+PROJECT_TOKEN_ERR="$WORK_ROOT/project-token.err"
+for _ in $(seq 1 15); do
+  PROJECT_TOKEN="$(openstack token issue -f value -c id 2>"$PROJECT_TOKEN_ERR" | tr -d '[:space:]' || true)"
   [[ "$PROJECT_TOKEN" ]] && break
   sleep 2
 done
-[[ "$PROJECT_TOKEN" ]] || die "authenticated project token unavailable"
+if [[ -z "$PROJECT_TOKEN" ]]; then
+  echo "P15.7 project token acquisition diagnostics:" >&2
+  sed -e 's/[0-9a-fA-F]\{32,\}/<redacted>/g' "$PROJECT_TOKEN_ERR" >&2 2>/dev/null || true
+  die "authenticated project token unavailable"
+fi
+rm -f -- "$PROJECT_TOKEN_ERR"
 OPERATOR_CURL_CONFIG="$WORK_ROOT/operator-curl.conf"
 write_operator_curl_config() {
   printf 'header = "Authorization: Bearer %s"\n' "$OPERATOR_TOKEN" >"$OPERATOR_CURL_CONFIG"
