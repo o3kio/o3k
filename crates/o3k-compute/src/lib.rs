@@ -661,6 +661,7 @@ mod tests {
     struct CapCountingProjector {
         unbound: std::sync::Mutex<std::collections::HashSet<String>>,
         unbinds: std::sync::Mutex<usize>,
+        releases: std::sync::Mutex<usize>,
     }
 
     #[async_trait]
@@ -694,6 +695,10 @@ mod tests {
             _project_id: &str,
             _port_id: &str,
         ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>> {
+            *self
+                .releases
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")? += 1;
             Ok(ServerEndpointRelease {
                 discovered: 1,
                 released: 1,
@@ -4055,6 +4060,267 @@ mod tests {
                 .map_err(|_| "cap projector lock poisoned")?,
             2,
             "repair must converge one unbind per pass"
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct FailingUnbindProjector {
+        unbinds: std::sync::Mutex<usize>,
+        releases: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl PortBindingProjector for FailingUnbindProjector {
+        async fn project_create_outcome(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+            _succeeded: bool,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+        async fn unbind_port(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+            _operation_id: uuid::Uuid,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            *self
+                .unbinds
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")? += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "fabric unavailable").into())
+        }
+        async fn release_server_owned_endpoint(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+        ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>> {
+            *self
+                .releases
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")? += 1;
+            Ok(ServerEndpointRelease::default())
+        }
+        async fn port_binding(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+        ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(Some(PortBindingInfo {
+                server_owned: true,
+                binding_state: Some("bound".to_owned()),
+            }))
+        }
+    }
+
+    /// The one-unbind-per-pass cap must count ATTEMPTS, not successes: under a
+    /// fabric outage a single pass must not dispatch a failing unbind per
+    /// stale-bound orphan (each up to the dispatch deadline) while holding the
+    /// orphan-repair lock. Before the cap moved ahead of the dispatch, a
+    /// failed unbind `continue`d to the next orphan and a pass could burn the
+    /// sum of the deadlines — contradicting the documented availability bound.
+    #[tokio::test]
+    async fn sweep_dispatches_at_most_one_unbind_attempt_per_pass_even_when_unbind_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::DurableStore;
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-sweep-cap-failure-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(FailingUnbindProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+        let project = "project-a".to_owned();
+
+        for (server_id, port_id) in [(Uuid::now_v7(), "port-1"), (Uuid::now_v7(), "port-2")] {
+            let desired = serde_json::to_string(&serde_json::json!({
+                "operation_id": Uuid::now_v7().to_string(),
+                "o3k_server_id": server_id.to_string(),
+                "project_id": project,
+                "name": "server",
+                "vcpus": 1,
+                "memory_mib": 512,
+                "flavor_id": "flavor-1",
+                "disk_gib": 1,
+                "image_id": "image-1",
+                "key_name": null,
+                "keypair_id": null,
+                "network_ids": [port_id],
+                "placement_provider_id": null,
+                "placement_allocation_id": null,
+                "config_drive": null,
+                "idempotency_key": format!("idem-{port_id}"),
+            }))?;
+            store
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: server_id,
+                    kind: "compute_instance".to_owned(),
+                    project_id: project.clone(),
+                    generation: 1,
+                    observed_generation: 0,
+                    desired_state: desired,
+                    observed_state: "DELETED".to_owned(),
+                    provider_id: None,
+                })
+                .await?;
+        }
+
+        // Pass 1 under fabric outage: exactly one unbind ATTEMPT, and the
+        // bound orphan is never released while bound.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            1,
+            "a single sweep pass must dispatch at most one unbind attempt, even on failure"
+        );
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            0,
+            "a bound orphan must never be released while its unbind has not completed"
+        );
+
+        // Pass 2: the next bound orphan gets its single attempt; the pass
+        // stays bounded and retry-convergent across passes.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            2,
+            "repair must converge one unbind attempt per pass"
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// The orphan-repair pass must be fenced by the same coordination lease
+    /// that fences the re-drive arms: the orphan_repair_lock is process-local,
+    /// so a second controller on a shared PostgreSQL database must not sweep
+    /// concurrently. A Busy lease skips the pass (the orphan survives); once
+    /// the lease frees, one pass repairs it and releases the lease.
+    #[tokio::test]
+    async fn orphan_repair_pass_is_fenced_by_the_coordination_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::DurableStore;
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-sweep-lease-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store = Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let coord: Arc<dyn o3k_store::CoordinationRepository> = store.clone();
+        let projector = Arc::new(CapCountingProjector::default());
+        let ctrl_a = o3k_store::ControllerId::new("ctrl-a");
+        let epoch_a = o3k_store::ControllerEpoch::new("epoch-a");
+        let ctrl_b = o3k_store::ControllerId::new("ctrl-b");
+        let epoch_b = o3k_store::ControllerEpoch::new("epoch-b");
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone())
+                .with_coordination(coord.clone(), ctrl_a, epoch_a.clone());
+        let project = "project-a".to_owned();
+        let server_id = Uuid::now_v7();
+        let desired = serde_json::to_string(&serde_json::json!({
+            "operation_id": Uuid::now_v7().to_string(),
+            "o3k_server_id": server_id.to_string(),
+            "project_id": project,
+            "name": "server",
+            "vcpus": 1,
+            "memory_mib": 512,
+            "flavor_id": "flavor-1",
+            "disk_gib": 1,
+            "image_id": "image-1",
+            "key_name": null,
+            "keypair_id": null,
+            "network_ids": ["port-1"],
+            "placement_provider_id": null,
+            "placement_allocation_id": null,
+            "config_drive": null,
+            "idempotency_key": "idem-port-1",
+        }))?;
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: project.clone(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired,
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        // Controller B holds the repair lease: controller A's convergence pass
+        // must skip the sweep, leaving the orphan untouched.
+        let busy = coord
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_secs(60),
+            )
+            .await?;
+        let lease = match busy {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+            _ => return Err("expected controller B to acquire the repair lease".into()),
+        };
+        service.drive_all_lifecycle_convergence().await?;
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            0,
+            "a Busy repair lease must skip the sweep on this controller"
+        );
+
+        // Once the lease frees, one pass repairs the orphan and releases the
+        // lease again (controller B can re-acquire immediately).
+        coord
+            .release_work_lease(
+                "server-endpoint-orphan-repair",
+                &ctrl_b,
+                &epoch_b,
+                lease.fencing_token,
+            )
+            .await?;
+        service.drive_all_lifecycle_convergence().await?;
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            1,
+            "the sweep must run once the lease is free"
+        );
+        let reacquired = coord
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+        assert!(
+            matches!(reacquired, o3k_store::LeaseAcquireOutcome::Acquired { .. }),
+            "the sweep must release the repair lease after its pass"
         );
         std::fs::remove_file(database_path)?;
         Ok(())

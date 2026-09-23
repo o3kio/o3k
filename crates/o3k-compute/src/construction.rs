@@ -1019,7 +1019,50 @@ impl ComputeService {
         // orphaned by an interrupted terminal delete. Listing non-terminal
         // operations above cannot see them, because the delete is already
         // terminal and the endpoint release never ran.
-        if let Err(error) = self.repair_orphaned_server_endpoints().await {
+        //
+        // The pass is fenced by the same coordination lease that fences the
+        // re-drive arms: the orphan_repair_lock is process-local, so two
+        // controllers on a shared PostgreSQL database must not sweep
+        // concurrently (a foreign sweep could otherwise release a port between
+        // this controller's create validation and intent persist). Unleased
+        // controllers skip the pass, mirroring the Busy arm above.
+        if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
+            let work_key = "server-endpoint-orphan-repair".to_owned();
+            match coordination
+                .acquire_work_lease(
+                    &work_key,
+                    "repair",
+                    controller_id,
+                    controller_epoch,
+                    // The pass can hold the orphan-repair lock for up to one
+                    // fabric unbind deadline (~30s) plus local work.
+                    Duration::from_secs(60),
+                )
+                .await
+            {
+                Ok(o3k_store::LeaseAcquireOutcome::Acquired { lease }) => {
+                    if let Err(error) = self.repair_orphaned_server_endpoints().await {
+                        tracing::warn!(%error, "server-owned endpoint orphan repair pass failed");
+                    }
+                    let _ = coordination
+                        .release_work_lease(
+                            &work_key,
+                            controller_id,
+                            controller_epoch,
+                            lease.fencing_token,
+                        )
+                        .await;
+                }
+                Ok(o3k_store::LeaseAcquireOutcome::Busy { .. }) => {
+                    tracing::debug!(
+                        "orphan endpoint repair pass is currently leased by another controller; skipping"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to acquire orphan repair lease; skipping");
+                }
+            }
+        } else if let Err(error) = self.repair_orphaned_server_endpoints().await {
             tracing::warn!(%error, "server-owned endpoint orphan repair pass failed");
         }
         Ok(())
@@ -1098,14 +1141,16 @@ impl ComputeService {
         let mut failures = 0usize;
         let mut skipped_attached = 0usize;
         let mut deleted_servers = 0usize;
-        // Bounded availability: at most ONE fabric unbind dispatch per pass so
-        // a burst of stale-bound orphans cannot hold the orphan-repair lock (and
-        // therefore block every port-attaching create) for the sum of their
-        // dispatch deadlines. Remaining bound orphans are retried on the next
-        // periodic pass (5s), so repair is bounded per pass and eventual. The
-        // honest worst case is a single repair-path unbind deadline (~30s,
-        // matching the request-path fabric teardown) of create stall per pass
-        // while stale-bound orphans exist.
+        // Bounded availability: at most ONE fabric unbind dispatch ATTEMPT per
+        // pass so a burst of stale-bound orphans cannot hold the orphan-repair
+        // lock (and therefore block every port-attaching create) for the sum
+        // of their dispatch deadlines. The cap counts attempts, not successes:
+        // a failing dispatch still consumed this pass's single fabric budget,
+        // so the bound holds on the failure path too. Remaining bound orphans
+        // are retried on the next periodic pass (5s), so repair is bounded per
+        // pass and eventual. The honest worst case is a single repair-path
+        // unbind deadline (~30s, matching the request-path fabric teardown) of
+        // create stall per pass while stale-bound orphans exist.
         let mut unbinds_dispatched = false;
         'repair: for resource in resources {
             if resource.observed_state != deleted_state {
@@ -1159,6 +1204,14 @@ impl ComputeService {
                             &Uuid::NAMESPACE_URL,
                             format!("o3k:orphan-unbind:{}:{}", resource.id, port_id).as_bytes(),
                         );
+                        // Cap on ATTEMPT, not success: a failing dispatch still
+                        // consumed this pass's single fabric budget, so the
+                        // documented one-deadline availability bound holds on
+                        // the failure path too. The bound orphan cannot be
+                        // released this pass either (release while bound is
+                        // refused), so end the pass; the next periodic pass
+                        // retries it.
+                        unbinds_dispatched = true;
                         if let Err(error) = projector
                             .unbind_port(&resource.project_id, port_id, operation_id)
                             .await
@@ -1173,13 +1226,8 @@ impl ComputeService {
                                  unbound; the next pass retries it (fail closed, never deleted \
                                  while bound)"
                             );
-                            continue;
+                            break 'repair;
                         }
-                        // Cap this pass at one unbind dispatch (availability
-                        // bound); the release below still runs for this port,
-                        // then the pass ends and remaining bound orphans are
-                        // retried next pass.
-                        unbinds_dispatched = true;
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => {}
