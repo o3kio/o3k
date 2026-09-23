@@ -332,6 +332,14 @@ assert 'PROJECT_TOKEN="$(openstack token issue -f value -c id 2>"$PROJECT_TOKEN_
 assert '[[ "$PROJECT_TOKEN" ]] && break' in journey
 assert 'for _ in $(seq 1 15); do' in journey
 assert 'P15.7 project token acquisition diagnostics:' in journey
+# External-mode outage injection must observe the CONTROL PLANE's outage (the
+# run-owned proxy it consumes), never the operator-owned server's endpoint
+# (severing our proxy cannot affect that, so polling it can never observe the
+# outage and always dies) and must prove the operator server itself stays up.
+assert 'OUTAGE_OBSERVED=true' in journey
+assert 'operator-owned PostgreSQL became unreachable during the outage proof' in journey
+assert 'RECOVERY_OBSERVED=true' in journey
+assert 'for _ in $(seq 1 60); do pg_external_ready && sleep 1 || break; done' not in journey
 # The OpenStack host projection is case-sensitive and Nova-compatible:
 # `OS-EXT-SRV-ATTR:host` (lower case), as the product's own serialization and
 # evidence artifacts declare. The upper-case spelling silently yields an empty

@@ -1631,14 +1631,36 @@ wait_o3kd_readyz "readyz did not reconstruct after restart"
 if [[ "$POSTGRES_MODE" == external ]]; then
   # External mode must never stop/start/restart/drop the operator-owned server.
   # Unavailability is injected by severing the run-owned proxy the control
-  # plane consumes, then restored by starting it again. The proxy is stopped at
-  # gate time first, so this observes a genuine outage and recovery.
+  # plane consumes. The observed outage is therefore the CONTROL PLANE's:
+  # /readyz gating or an authenticated durable-store write (the same signals
+  # as the early wiring proof). The operator-owned server must simultaneously
+  # remain reachable via its own direct endpoint — proving we never manage it.
   stop_postgres_proxy || die "external PostgreSQL proxy failed to sever"
-  for _ in $(seq 1 60); do pg_external_ready && sleep 1 || break; done
-  pg_external_ready && die "external PostgreSQL outage was not observed"
+  OUTAGE_OBSERVED=false
+  for _ in $(seq 1 60); do
+    if ! curl --fail --silent --max-time 2 "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1; then
+      OUTAGE_OBSERVED=true
+      break
+    fi
+    if ! bootstrap_store_probe; then
+      OUTAGE_OBSERVED=true
+      break
+    fi
+    sleep 1
+  done
+  [[ "$OUTAGE_OBSERVED" == true ]] || die "external PostgreSQL outage was not observed"
+  pg_external_ready || die "operator-owned PostgreSQL became unreachable during the outage proof"
   start_postgres_proxy || die "external PostgreSQL proxy failed to restore"
-  for _ in $(seq 1 60); do pg_external_ready && break; sleep 1; done
-  pg_external_ready || die "external PostgreSQL did not recover"
+  RECOVERY_OBSERVED=false
+  for _ in $(seq 1 60); do
+    if curl --fail --silent --max-time 2 "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1 \
+      && bootstrap_store_probe; then
+      RECOVERY_OBSERVED=true
+      break
+    fi
+    sleep 1
+  done
+  [[ "$RECOVERY_OBSERVED" == true ]] || die "external PostgreSQL did not recover"
 else
   sudo -n docker restart "$PG_CONTAINER" >/dev/null || die "PostgreSQL restart failed"
   for _ in $(seq 1 60); do sudo -n docker exec "$PG_CONTAINER" pg_isready -U o3k -d o3k_test >/dev/null 2>&1 && break; sleep 1; done
