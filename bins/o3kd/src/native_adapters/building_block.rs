@@ -64,7 +64,7 @@ impl BuildingBlockAdapter {
             .is_some_and(|provider_id| ids.contains(provider_id)))
     }
 
-    async fn view(&self, block: BuildingBlock) -> Result<BuildingBlockView, String> {
+    async fn view(&self, mut block: BuildingBlock) -> Result<BuildingBlockView, String> {
         // References are part of the durable BuildingBlock identity.  Validate
         // them on every projection as well as on enrollment so a provider,
         // topology, profile, or execution identity change cannot turn an
@@ -110,6 +110,15 @@ impl BuildingBlockAdapter {
                 available,
             })
             .collect();
+        // The durable drain_blockers are a drain-time snapshot. A Draining
+        // block's resident workloads may reach terminal DELETED after the
+        // transition stored its blockers, so the read projection re-derives
+        // current truth instead of serving that stale snapshot (issue #1042).
+        // The stored record is left untouched; Ready/Unavailable blocks have
+        // empty blockers by construction and need no re-derivation.
+        if block.state == BuildingBlockState::Draining {
+            block.drain_blockers = self.derived_blockers(&block).await?;
+        }
         Ok(BuildingBlockView {
             block,
             capabilities: capabilities.into_iter().collect(),
@@ -629,6 +638,81 @@ mod tests {
                 .await
                 .is_err(),
             "a live resident workload must keep removal drain-blocked"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deleted_workload_leaves_draining_blocker_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (store, adapter) = test_adapter().await?;
+        let auth = operator_context();
+        let desired_state = serde_json::json!({
+            "operation_id": Uuid::new_v4(),
+            "o3k_server_id": Uuid::new_v4(),
+            "name": "workload-drain",
+            "vcpus": 1,
+            "memory_mib": 512,
+            "idempotency_key": "create-workload-drain",
+            "placement_provider_id": "agent-a",
+        })
+        .to_string();
+        let resource_id = Uuid::new_v4();
+        store
+            .insert_resource(&ResourceRecord {
+                id: resource_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: desired_state.clone(),
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        let draining = adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Draining,
+                2,
+                vec![],
+                &auth,
+            )
+            .await?;
+        assert_eq!(drain_workload_blockers(&draining), 1);
+        // The durable record legitimately captured the drain-time blocker...
+        let stored = store
+            .get_building_block("block-a")
+            .await?
+            .ok_or("block-a missing")?
+            .block()?;
+        assert_eq!(
+            stored
+                .drain_blockers
+                .iter()
+                .filter(|blocker| blocker.kind == o3k_kernel::DrainBlockerKind::Workload)
+                .map(|blocker| blocker.count)
+                .sum::<u64>(),
+            1
+        );
+
+        // ...but once the resident workload reaches terminal DELETED, the
+        // read projection must not keep serving that drain-time snapshot
+        // (issue #1042): GET must reflect current truth.
+        store
+            .update_resource(resource_id, 1, &desired_state, "DELETED", 1, None)
+            .await?;
+        let viewed = adapter
+            .get("block-a")
+            .await?
+            .ok_or("block-a view missing")?;
+        assert_eq!(
+            drain_workload_blockers(&viewed),
+            0,
+            "a DELETED workload must leave the Draining block's projected drain \
+             blockers: {:?}",
+            viewed.block.drain_blockers
         );
         Ok(())
     }
