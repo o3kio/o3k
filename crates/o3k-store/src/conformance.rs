@@ -10,6 +10,22 @@ use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Acquires a session-level advisory lock on the shared PostgreSQL test
+/// database, held by the provided connection for as long as the caller keeps
+/// it open. Lives in the persistence crate (the approved SQL boundary) so the
+/// o3kd endpoint-lifecycle harness and the o3k-store PostgreSQL test suites
+/// serialize against each other across separate `cargo test` processes without
+/// embedding raw SQL outside this boundary. Test-harness-only; no-op for any
+/// non-PostgreSQL caller.
+pub async fn acquire_shared_postgres_test_database_lock(
+    connection: &mut sqlx::postgres::PgConnection,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+        .execute(connection)
+        .await
+        .map(|_| ())
+}
+
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
     ArtifactTransferUpdate, CanonicalOperationRecord, ComputeRepository, ControllerEpoch,
@@ -2388,8 +2404,7 @@ mod tests {
 
     async fn prepare_shared_postgres_test_database(database_url: &str) -> Option<PgConnection> {
         let mut connection = PgConnection::connect(database_url).await.ok()?;
-        sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
-            .execute(&mut connection)
+        super::acquire_shared_postgres_test_database_lock(&mut connection)
             .await
             .ok()?;
         sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")

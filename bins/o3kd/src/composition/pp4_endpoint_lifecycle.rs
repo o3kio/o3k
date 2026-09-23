@@ -1931,8 +1931,7 @@ async fn acquire_postgres_database_guard(url: &str) -> PgConnection {
     let mut connection = PgConnection::connect(url)
         .await
         .expect("connect to the configured PostgreSQL conformance database");
-    sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
-        .execute(&mut connection)
+    o3k_store::conformance::acquire_shared_postgres_test_database_lock(&mut connection)
         .await
         .expect("acquire the shared PostgreSQL test-database advisory lock");
     connection
