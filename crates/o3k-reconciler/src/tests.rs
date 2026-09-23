@@ -3995,6 +3995,13 @@ mod reconciler_tests {
                 .await
         }
 
+        async fn terminalize_lifecycle(
+            &self,
+            terminalization: &o3k_store::LifecycleTerminalization<'_>,
+        ) -> Result<(OperationRecord, ResourceRecord), StoreError> {
+            self.inner.terminalize_lifecycle(terminalization).await
+        }
+
         async fn insert_operation(&self, operation: &OperationRecord) -> Result<(), StoreError> {
             self.inner.insert_operation(operation).await
         }
@@ -4346,6 +4353,722 @@ mod reconciler_tests {
         async fn readiness_check(&self) -> Result<(), StoreError> {
             self.inner.readiness_check().await
         }
+    }
+
+    /// Delegating durable store for the issue-#1041 crash boundary. Every
+    /// method passes through to the real store except
+    /// `terminalize_lifecycle`, which supports two fault modes:
+    ///
+    /// - `fail_next_terminalization()`: the NEXT terminalization fails on a
+    ///   sabotaged operation identity, so the REAL primitive fails with its
+    ///   genuine `OperationNotFound` error. This is the control-plane crash
+    ///   at the worst possible moment — the provider mutation has already
+    ///   succeeded and the durable terminalization is about to commit — and
+    ///   the invariant under test is that a failed terminalization commits
+    ///   nothing (the transaction is all-or-nothing).
+    /// - `arm_atomic_terminalization_assertion()`: after a delegated
+    ///   terminalization, the returned rows must BOTH be terminal. A split
+    ///   commit would surface here deterministically instead of needing a
+    ///   racy external observer.
+    struct TerminalizationFaultStore {
+        inner: TestStore,
+        fail_next: Arc<AtomicBool>,
+        assert_atomic: Arc<AtomicBool>,
+    }
+
+    impl TerminalizationFaultStore {
+        fn new(inner: TestStore) -> Self {
+            Self {
+                inner,
+                fail_next: Arc::new(AtomicBool::new(false)),
+                assert_atomic: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn fail_next_terminalization(&self) {
+            self.fail_next
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn arm_atomic_terminalization_assertion(&self) {
+            self.assert_atomic
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DurableStore for TerminalizationFaultStore {
+        async fn get_idempotency_reservation(
+            &self,
+            owner_scope: &str,
+            action: &str,
+            key: &str,
+        ) -> Result<Option<o3k_store::StoredIdempotencyReservation>, StoreError> {
+            self.inner
+                .get_idempotency_reservation(owner_scope, action, key)
+                .await
+        }
+
+        async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
+            self.inner.insert_resource(resource).await
+        }
+
+        async fn get_resource(&self, id: Uuid) -> Result<ResourceRecord, StoreError> {
+            self.inner.get_resource(id).await
+        }
+
+        async fn list_resources(
+            &self,
+            project_id: &str,
+            kind: &str,
+        ) -> Result<Vec<ResourceRecord>, StoreError> {
+            self.inner.list_resources(project_id, kind).await
+        }
+
+        async fn list_resources_page(
+            &self,
+            project_id: &str,
+            kind: &str,
+            after_id: Option<&str>,
+            limit: usize,
+        ) -> Result<o3k_store::RepositoryPage<ResourceRecord>, StoreError> {
+            self.inner
+                .list_resources_page(project_id, kind, after_id, limit)
+                .await
+        }
+
+        async fn update_resource(
+            &self,
+            id: Uuid,
+            expected_generation: i64,
+            desired_state: &str,
+            observed_state: &str,
+            observed_generation: i64,
+            provider_id: Option<&str>,
+        ) -> Result<ResourceRecord, StoreError> {
+            self.inner
+                .update_resource(
+                    id,
+                    expected_generation,
+                    desired_state,
+                    observed_state,
+                    observed_generation,
+                    provider_id,
+                )
+                .await
+        }
+
+        async fn update_resource_and_complete_operation(
+            &self,
+            resource_id: Uuid,
+            expected_generation: i64,
+            desired_state: &str,
+            observed_state: &str,
+            observed_generation: i64,
+            provider_id: Option<&str>,
+            operation_id: Uuid,
+            lifecycle: &o3k_store::CanonicalOperationLifecycleUpdate,
+        ) -> Result<ResourceRecord, StoreError> {
+            self.inner
+                .update_resource_and_complete_operation(
+                    resource_id,
+                    expected_generation,
+                    desired_state,
+                    observed_state,
+                    observed_generation,
+                    provider_id,
+                    operation_id,
+                    lifecycle,
+                )
+                .await
+        }
+
+        async fn update_resource_from_observation(
+            &self,
+            id: Uuid,
+            update: &ObservationUpdate<'_>,
+        ) -> Result<ResourceRecord, StoreError> {
+            self.inner
+                .update_resource_from_observation(id, update)
+                .await
+        }
+
+        async fn terminalize_lifecycle(
+            &self,
+            terminalization: &o3k_store::LifecycleTerminalization<'_>,
+        ) -> Result<(OperationRecord, ResourceRecord), StoreError> {
+            if self
+                .fail_next
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                // The simulated crash runs through the REAL primitive with a
+                // sabotaged operation identity: a genuine store failure, and
+                // (because the primitive is one transaction) provably no
+                // durable effect.
+                return self
+                    .inner
+                    .terminalize_lifecycle(&o3k_store::LifecycleTerminalization {
+                        operation_id: Uuid::now_v7(),
+                        ..terminalization.clone()
+                    })
+                    .await;
+            }
+            let outcome = self.inner.terminalize_lifecycle(terminalization).await?;
+            if self.assert_atomic.load(std::sync::atomic::Ordering::SeqCst) {
+                assert!(
+                    matches!(
+                        outcome.0.state,
+                        OperationState::Succeeded | OperationState::Failed
+                    ),
+                    "terminalize_lifecycle observed a non-terminal operation: {:?}",
+                    outcome.0.state
+                );
+                assert_eq!(
+                    outcome.1.observed_state, terminalization.observed_state,
+                    "terminalize_lifecycle observed a resource projection that does not \
+                     match the terminalization"
+                );
+            }
+            Ok(outcome)
+        }
+
+        async fn insert_operation(&self, operation: &OperationRecord) -> Result<(), StoreError> {
+            self.inner.insert_operation(operation).await
+        }
+
+        async fn reserve_idempotent_operation(
+            &self,
+            request: &IdempotencyReservationRequest,
+        ) -> Result<o3k_store::IdempotencyReservation, StoreError> {
+            self.inner.reserve_idempotent_operation(request).await
+        }
+
+        async fn create_or_replay_idempotent_operation(
+            &self,
+            operation: &OperationRecord,
+            request: &IdempotencyReservationRequest,
+        ) -> Result<o3k_store::IdempotencyReservation, StoreError> {
+            self.inner
+                .create_or_replay_idempotent_operation(operation, request)
+                .await
+        }
+
+        async fn create_or_replay_canonical_idempotent_operation(
+            &self,
+            operation: &OperationRecord,
+            canonical: &CanonicalOperationRecord,
+            request: &IdempotencyReservationRequest,
+        ) -> Result<o3k_store::IdempotencyReservation, StoreError> {
+            self.inner
+                .create_or_replay_canonical_idempotent_operation(operation, canonical, request)
+                .await
+        }
+
+        async fn create_or_replay_canonical_scoped_operation(
+            &self,
+            operation: &OperationRecord,
+            canonical: &CanonicalOperationRecord,
+            request: &IdempotencyReservationRequest,
+        ) -> Result<o3k_store::IdempotencyReservation, StoreError> {
+            self.inner
+                .create_or_replay_canonical_scoped_operation(operation, canonical, request)
+                .await
+        }
+
+        async fn create_or_replay_canonical_resource_operation(
+            &self,
+            resource: &ResourceRecord,
+            operation: &OperationRecord,
+            canonical: &CanonicalOperationRecord,
+            request: &IdempotencyReservationRequest,
+            expected_placement_allocation_id: Option<&str>,
+        ) -> Result<CanonicalAcceptanceOutcome, StoreError> {
+            self.inner
+                .create_or_replay_canonical_resource_operation(
+                    resource,
+                    operation,
+                    canonical,
+                    request,
+                    expected_placement_allocation_id,
+                )
+                .await
+        }
+
+        async fn create_or_replay_canonical_lifecycle_operation(
+            &self,
+            operation: &OperationRecord,
+            canonical: &CanonicalOperationRecord,
+            request: &IdempotencyReservationRequest,
+        ) -> Result<CanonicalAcceptanceOutcome, StoreError> {
+            self.inner
+                .create_or_replay_canonical_lifecycle_operation(operation, canonical, request)
+                .await
+        }
+
+        async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {
+            self.inner.get_operation(id).await
+        }
+
+        async fn get_canonical_operation(
+            &self,
+            id: Uuid,
+        ) -> Result<CanonicalOperationRecord, StoreError> {
+            self.inner.get_canonical_operation(id).await
+        }
+
+        async fn list_canonical_operations_page(
+            &self,
+            owner_scope: &str,
+            after_id: Option<Uuid>,
+            limit: u32,
+        ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+            self.inner
+                .list_canonical_operations_page(owner_scope, after_id, limit)
+                .await
+        }
+
+        async fn update_canonical_operation_lifecycle(
+            &self,
+            id: Uuid,
+            update: &o3k_store::CanonicalOperationLifecycleUpdate,
+        ) -> Result<CanonicalOperationRecord, StoreError> {
+            self.inner
+                .update_canonical_operation_lifecycle(id, update)
+                .await
+        }
+
+        async fn update_operation(
+            &self,
+            id: Uuid,
+            state: OperationState,
+            provider_operation_id: Option<&str>,
+            error_category: Option<&str>,
+            error_message: Option<&str>,
+        ) -> Result<OperationRecord, StoreError> {
+            self.inner
+                .update_operation(
+                    id,
+                    state,
+                    provider_operation_id,
+                    error_category,
+                    error_message,
+                )
+                .await
+        }
+
+        async fn list_non_terminal_lifecycle_operations(
+            &self,
+        ) -> Result<Vec<OperationRecord>, StoreError> {
+            self.inner.list_non_terminal_lifecycle_operations().await
+        }
+
+        async fn attach_provider_reference(
+            &self,
+            reference: &ProviderReference,
+        ) -> Result<(), StoreError> {
+            self.inner.attach_provider_reference(reference).await
+        }
+
+        async fn get_provider_reference(
+            &self,
+            resource_id: Uuid,
+            provider_name: &str,
+        ) -> Result<ProviderReference, StoreError> {
+            self.inner
+                .get_provider_reference(resource_id, provider_name)
+                .await
+        }
+
+        async fn insert_agent_command(
+            &self,
+            command: &AgentCommandRecord,
+        ) -> Result<AgentCommandRecord, StoreError> {
+            self.inner.insert_agent_command(command).await
+        }
+
+        async fn get_agent_command(
+            &self,
+            command_id: &str,
+        ) -> Result<AgentCommandRecord, StoreError> {
+            self.inner.get_agent_command(command_id).await
+        }
+
+        async fn get_agent_command_by_idempotency_key(
+            &self,
+            idempotency_key: &str,
+        ) -> Result<AgentCommandRecord, StoreError> {
+            self.inner
+                .get_agent_command_by_idempotency_key(idempotency_key)
+                .await
+        }
+
+        async fn get_agent_command_by_operation(
+            &self,
+            operation_id: Uuid,
+        ) -> Result<AgentCommandRecord, StoreError> {
+            self.inner
+                .get_agent_command_by_operation(operation_id)
+                .await
+        }
+
+        async fn update_agent_command(
+            &self,
+            command_id: &str,
+            state: AgentCommandState,
+            accepted_sequence: u64,
+            last_sequence: u64,
+            provider_operation_id: Option<&str>,
+            provider_resource_id: Option<&str>,
+        ) -> Result<AgentCommandRecord, StoreError> {
+            self.inner
+                .update_agent_command(
+                    command_id,
+                    state,
+                    accepted_sequence,
+                    last_sequence,
+                    provider_operation_id,
+                    provider_resource_id,
+                )
+                .await
+        }
+
+        async fn list_recoverable_agent_commands(
+            &self,
+        ) -> Result<Vec<AgentCommandRecord>, StoreError> {
+            self.inner.list_recoverable_agent_commands().await
+        }
+
+        async fn insert_artifact_transfer(
+            &self,
+            transfer: &o3k_store::ArtifactTransferRecord,
+        ) -> Result<o3k_store::ArtifactTransferRecord, StoreError> {
+            self.inner.insert_artifact_transfer(transfer).await
+        }
+
+        async fn get_artifact_transfer(
+            &self,
+            transfer_id: &str,
+        ) -> Result<o3k_store::ArtifactTransferRecord, StoreError> {
+            self.inner.get_artifact_transfer(transfer_id).await
+        }
+
+        async fn rebind_artifact_transfer_epoch(
+            &self,
+            transfer_id: &str,
+            expected_agent_epoch: &str,
+            new_agent_epoch: &str,
+        ) -> Result<o3k_store::ArtifactTransferRecord, StoreError> {
+            self.inner
+                .rebind_artifact_transfer_epoch(transfer_id, expected_agent_epoch, new_agent_epoch)
+                .await
+        }
+
+        async fn update_artifact_transfer(
+            &self,
+            transfer_id: &str,
+            expected_agent_epoch: &str,
+            update: o3k_store::ArtifactTransferUpdate,
+        ) -> Result<o3k_store::ArtifactTransferRecord, StoreError> {
+            self.inner
+                .update_artifact_transfer(transfer_id, expected_agent_epoch, update)
+                .await
+        }
+
+        async fn list_recoverable_artifact_transfers(
+            &self,
+        ) -> Result<Vec<o3k_store::ArtifactTransferRecord>, StoreError> {
+            self.inner.list_recoverable_artifact_transfers().await
+        }
+
+        async fn expire_transfers_of_terminal_operations(&self) -> Result<u64, StoreError> {
+            self.inner.expire_transfers_of_terminal_operations().await
+        }
+
+        async fn insert_image_overlay(
+            &self,
+            overlay: &o3k_store::ImageOverlayOwnershipRecord,
+        ) -> Result<o3k_store::ImageOverlayOwnershipRecord, StoreError> {
+            self.inner.insert_image_overlay(overlay).await
+        }
+
+        async fn get_image_overlay(
+            &self,
+            overlay_id: &str,
+        ) -> Result<o3k_store::ImageOverlayOwnershipRecord, StoreError> {
+            self.inner.get_image_overlay(overlay_id).await
+        }
+
+        async fn update_image_overlay(
+            &self,
+            overlay_id: &str,
+            expected_identity: &o3k_store::ImageOverlayIdentity,
+            update: o3k_store::ImageOverlayUpdate,
+        ) -> Result<o3k_store::ImageOverlayOwnershipRecord, StoreError> {
+            self.inner
+                .update_image_overlay(overlay_id, expected_identity, update)
+                .await
+        }
+
+        async fn list_image_overlays(
+            &self,
+            resource_id: Uuid,
+        ) -> Result<Vec<o3k_store::ImageOverlayOwnershipRecord>, StoreError> {
+            self.inner.list_image_overlays(resource_id).await
+        }
+
+        async fn count_image_overlay_references(
+            &self,
+            base_sha256: &str,
+            base_format: &str,
+        ) -> Result<u64, StoreError> {
+            self.inner
+                .count_image_overlay_references(base_sha256, base_format)
+                .await
+        }
+
+        async fn delete_image_overlay(
+            &self,
+            overlay_id: &str,
+            expected_identity: &o3k_store::ImageOverlayIdentity,
+        ) -> Result<o3k_store::ImageOverlayOwnershipRecord, StoreError> {
+            self.inner
+                .delete_image_overlay(overlay_id, expected_identity)
+                .await
+        }
+
+        async fn increment_operation_retry(&self, operation_id: Uuid) -> Result<u8, StoreError> {
+            self.inner.increment_operation_retry(operation_id).await
+        }
+
+        async fn insert_resource_and_operation(
+            &self,
+            resource: &ResourceRecord,
+            operation: &OperationRecord,
+            expected_placement_allocation_id: Option<&str>,
+        ) -> Result<(), StoreError> {
+            self.inner
+                .insert_resource_and_operation(
+                    resource,
+                    operation,
+                    expected_placement_allocation_id,
+                )
+                .await
+        }
+
+        async fn revive_resource_and_operation(
+            &self,
+            id: Uuid,
+            expected_generation: i64,
+            desired_state: &str,
+            observed_state: &str,
+            observed_generation: i64,
+            provider_id: Option<&str>,
+            operation: &OperationRecord,
+            expected_placement_allocation_id: Option<&str>,
+        ) -> Result<ResourceRecord, StoreError> {
+            self.inner
+                .revive_resource_and_operation(
+                    id,
+                    expected_generation,
+                    desired_state,
+                    observed_state,
+                    observed_generation,
+                    provider_id,
+                    operation,
+                    expected_placement_allocation_id,
+                )
+                .await
+        }
+
+        async fn readiness_check(&self) -> Result<(), StoreError> {
+            self.inner.readiness_check().await
+        }
+    }
+
+    async fn fault_journal(
+        label: &str,
+    ) -> Result<
+        (
+            OperationJournal<TerminalizationFaultStore, FakeComputeProvider>,
+            Arc<TerminalizationFaultStore>,
+            Arc<FakeComputeProvider>,
+        ),
+        ReconcileError,
+    > {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-reconciler-{label}-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let raw = o3k_store::testkit::open_file(&path).await?;
+        let store = Arc::new(TerminalizationFaultStore::new(raw));
+        let provider = Arc::new(FakeComputeProvider::new());
+        Ok((
+            OperationJournal::new(store.clone(), provider.clone(), 2),
+            store,
+            provider,
+        ))
+    }
+
+    /// Issue #1041, crash arm: the durable terminalization fails after the
+    /// provider delete already succeeded — the worst split-write moment. The
+    /// atomic primitive must commit NOTHING: the operation stays non-terminal,
+    /// the resource projection stays non-terminal, and re-driving the same
+    /// operation converges exactly once.
+    #[tokio::test]
+    async fn lifecycle_terminalization_failure_commits_nothing_and_recovers()
+    -> Result<(), ReconcileError> {
+        let (journal, store, provider) = fault_journal("terminalization-fault").await?;
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let generation_before = store.get_resource(request.o3k_server_id).await?.generation;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Delete)
+            .await?;
+
+        // The crash: the provider delete succeeds, then the terminalization
+        // fails inside the store.
+        store.fail_next_terminalization();
+        let outcome = journal.reconcile_lifecycle_once(operation_id).await;
+        assert!(
+            matches!(
+                outcome,
+                Err(ReconcileError::Store(StoreError::OperationNotFound))
+            ),
+            "the injected terminalization failure must propagate: {outcome:?}"
+        );
+        // The provider side effect DID happen — that is why this state must be
+        // re-drivable rather than terminal.
+        assert_eq!(provider.instance_count(), 0);
+        // Issue #1041 invariant after the crash: NEITHER durable half is
+        // committed, exactly as if the terminalization never ran.
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(
+            operation.state,
+            OperationState::Running,
+            "a failed terminalization must leave the operation non-terminal"
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_ne!(
+            resource.observed_state, "DELETED",
+            "a failed terminalization must leave the resource projection non-terminal"
+        );
+        assert_eq!(
+            resource.generation, generation_before,
+            "a failed terminalization must not bump the resource generation"
+        );
+
+        // Re-drive converges once: the absent instance proves the delete, the
+        // atomic primitive commits both halves together.
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.state, OperationState::Succeeded);
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "DELETED");
+        assert_eq!(
+            resource.generation,
+            generation_before + 1,
+            "re-drive must apply the terminalization exactly once"
+        );
+        Ok(())
+    }
+
+    /// Issue #1041, success arm: `finish_lifecycle` commits the terminal
+    /// operation and the terminal resource projection in one transaction, and
+    /// a replay of the terminal operation neither errors nor re-applies.
+    #[tokio::test]
+    async fn lifecycle_terminalization_commits_both_halves_together() -> Result<(), ReconcileError>
+    {
+        let (journal, store, _provider) = fault_journal("terminalization-atomic").await?;
+        store.arm_atomic_terminalization_assertion();
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let generation_before = store.get_resource(request.o3k_server_id).await?.generation;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Delete)
+            .await?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        // Both halves terminal, applied exactly once (the wrapper's
+        // post-call assertion proves no split outcome was observable).
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.state, OperationState::Succeeded);
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "DELETED");
+        assert_eq!(
+            resource.generation,
+            generation_before + 1,
+            "terminalization must apply exactly once"
+        );
+        // Reconcile of the now-terminal operation is an idempotent no-op.
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(
+            resource.generation,
+            generation_before + 1,
+            "a terminal replay must not double-apply the projection"
+        );
+        assert_eq!(resource.observed_state, "DELETED");
+        Ok(())
+    }
+
+    /// Issue #1041: the terminalization primitive also serves the
+    /// start/stop/reboot arms of `finish_lifecycle`, whose observed state is
+    /// derived from the provider instance rather than hard-coded to DELETED.
+    #[tokio::test]
+    async fn stop_lifecycle_terminalization_commits_both_halves_together()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _provider) = fault_journal("terminalization-stop").await?;
+        store.arm_atomic_terminalization_assertion();
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let generation_before = store.get_resource(request.o3k_server_id).await?.generation;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Stop)
+            .await?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.state, OperationState::Succeeded);
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(
+            resource.observed_state, "SHUTOFF",
+            "the stop projection must be committed atomically with the terminal operation"
+        );
+        assert_eq!(
+            resource.generation,
+            generation_before + 1,
+            "terminalization must apply exactly once"
+        );
+        Ok(())
     }
 
     /// A generation-CAS observation that loses the race must record no

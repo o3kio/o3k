@@ -12,17 +12,18 @@ use uuid::Uuid;
 
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, ComputeRepository, ControllerEpoch, ControllerId, ControllerSession,
-    ControllerState, CoordinationRepository, DurableStore, IdentityRepository, ImageMetadataRecord,
-    ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayState, ImageOverlayUpdate,
-    ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
-    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
-    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    LeaseAcquireOutcome, NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate,
-    OperationRecord, OperationState, PlacementAllocationRecord, PlacementIntentRecord,
-    PlacementInventoryRecord, PlacementRepository, PlacementResourceRecord, PortRecord,
-    ProviderReference, ResourceRecord, StoreError, SubnetRecord, VolumeAttachmentRecord,
-    VolumeAttachmentRepository, quota::QuotaRepository,
+    ArtifactTransferUpdate, CanonicalOperationRecord, ComputeRepository, ControllerEpoch,
+    ControllerId, ControllerSession, ControllerState, CoordinationRepository, DurableStore,
+    IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity,
+    ImageOverlayOwnershipRecord, ImageOverlayState, ImageOverlayUpdate, ImageRepository,
+    KeypairRecord, KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord,
+    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
+    KeystoneServiceRecord, KeystoneUserRecord, LeaseAcquireOutcome, LifecycleTerminalization,
+    NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
+    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    PlacementRepository, PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
+    StoreError, SubnetRecord, VolumeAttachmentRecord, VolumeAttachmentRepository,
+    quota::QuotaRepository,
 };
 use o3k_kernel::{
     LimitKey, LimitValue, OwnershipScope, ReservationState, ResourceAmount, ScopeId, ScopeKind,
@@ -64,7 +65,9 @@ impl<T> StoreUnderTest for T where
 
 pub async fn run_all_conformance_tests<S: StoreUnderTest>(store: Arc<S>) {
     test_durable_store_resources(store.clone()).await;
+    test_list_resources_by_kind_includes_deleted_tombstones(store.clone()).await;
     test_durable_store_operations(store.clone()).await;
+    test_durable_store_lifecycle_terminalization(store.clone()).await;
     test_durable_store_provider_references(store.clone()).await;
     test_durable_store_agent_commands(store.clone()).await;
     test_durable_store_artifact_transfers(store.clone()).await;
@@ -171,6 +174,81 @@ pub async fn test_durable_store_resources<S: StoreUnderTest>(store: Arc<S>) {
     assert_eq!(replay_res.generation, 3);
 }
 
+/// `list_resources_by_kind` is the restart/repair scan: it must return every
+/// resource of a kind across all projects, including `DELETED` tombstones.
+/// A backend that filters terminal records here silently hides them from the
+/// repair paths that reconcile tombstones, so this pins both adapters to the
+/// same set for the same durable state.
+pub async fn test_list_resources_by_kind_includes_deleted_tombstones<S: StoreUnderTest>(
+    store: Arc<S>,
+) {
+    let live_id = Uuid::now_v7();
+    let deleted_id = Uuid::now_v7();
+    let other_kind_id = Uuid::now_v7();
+    let proj_a = format!("proj-{}", Uuid::now_v7());
+    let proj_b = format!("proj-{}", Uuid::now_v7());
+
+    let record = |id: Uuid, kind: &str, project_id: &str, observed_state: &str| ResourceRecord {
+        id,
+        kind: kind.to_owned(),
+        project_id: project_id.to_owned(),
+        generation: 1,
+        observed_generation: 1,
+        desired_state: "{}".to_owned(),
+        observed_state: observed_state.to_owned(),
+        provider_id: None,
+    };
+
+    store
+        .insert_resource(&record(live_id, "compute_instance", &proj_a, "ACTIVE"))
+        .await
+        .expect("insert live resource");
+    store
+        .insert_resource(&record(deleted_id, "compute_instance", &proj_b, "DELETED"))
+        .await
+        .expect("insert deleted tombstone");
+    store
+        .insert_resource(&record(other_kind_id, "volume", &proj_a, "DELETED"))
+        .await
+        .expect("insert other-kind resource");
+
+    let listed = store
+        .list_resources_by_kind("compute_instance")
+        .await
+        .expect("list_resources_by_kind");
+    let ids: Vec<Uuid> = listed.iter().map(|resource| resource.id).collect();
+    assert!(
+        ids.contains(&live_id),
+        "list_resources_by_kind must return live resources"
+    );
+    assert!(
+        ids.contains(&deleted_id),
+        "list_resources_by_kind must return DELETED tombstones: the repair scan \
+         reconciles exactly the terminal records a terminal-state filter would hide"
+    );
+    assert!(
+        !ids.contains(&other_kind_id),
+        "list_resources_by_kind must be scoped to the requested kind"
+    );
+    let deleted = listed
+        .iter()
+        .find(|resource| resource.id == deleted_id)
+        .expect("deleted tombstone present");
+    assert_eq!(deleted.observed_state, "DELETED");
+    assert_eq!(
+        deleted.project_id, proj_b,
+        "the scan spans projects; callers apply their own authorization scope"
+    );
+
+    // The documented ordering is by resource id, so the two adapters agree.
+    let mut expected = ids.clone();
+    expected.sort();
+    assert_eq!(
+        ids, expected,
+        "list_resources_by_kind must be ordered by id"
+    );
+}
+
 pub async fn test_durable_store_operations<S: StoreUnderTest>(store: Arc<S>) {
     let res_id = Uuid::now_v7();
     let proj = format!("proj-{}", Uuid::now_v7());
@@ -247,6 +325,374 @@ pub async fn test_durable_store_operations<S: StoreUnderTest>(store: Arc<S>) {
         .await
         .expect("list_non_terminal_lifecycle_operations");
     assert!(!non_terminal_after.iter().any(|o| o.id == op_id));
+}
+
+/// Issue #1041: lifecycle terminalization must commit the operation row and
+/// the resource terminal projection in ONE transaction, reject stale writers
+/// without committing anything, and converge (not double-apply) under
+/// equivalent replay and concurrency. Both adapters must behave identically.
+pub async fn test_durable_store_lifecycle_terminalization<S: StoreUnderTest>(store: Arc<S>) {
+    // ── Fixture A: a canonical delete operation with canonical metadata ──
+    let res_a = Uuid::now_v7();
+    let proj_a = format!("proj-{}", Uuid::now_v7());
+    store
+        .insert_resource(&ResourceRecord {
+            id: res_a,
+            kind: "compute_instance".to_owned(),
+            project_id: proj_a.clone(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "active".to_owned(),
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: Some("prov-res-a".to_owned()),
+        })
+        .await
+        .expect("insert resource A");
+    let op_a = Uuid::now_v7();
+    let request_a = IdempotencyReservationRequest::from_semantics(
+        proj_a.clone(),
+        "compute:DeleteServer",
+        format!("terminalization-{op_a}"),
+        "compute:server",
+        None,
+        &serde_json::json!({ "name": "terminalization-a" }),
+        op_a,
+    )
+    .expect("idempotency request A");
+    let canonical_a = CanonicalOperationRecord {
+        id: op_a,
+        service: "compute".to_owned(),
+        action: "compute:DeleteServer".to_owned(),
+        actor: "user-a".to_owned(),
+        owner_scope: proj_a.clone(),
+        resource_type: "compute:server".to_owned(),
+        resource_id: Some(res_a.to_string()),
+        state: OperationState::Pending,
+        attempt: 0,
+        created_at: "2026-09-23T00:00:00Z".to_owned(),
+        started_at: None,
+        finished_at: None,
+        error: None,
+        request_id: Some(format!("request-{op_a}")),
+    };
+    store
+        .create_or_replay_canonical_lifecycle_operation(
+            &OperationRecord {
+                id: op_a,
+                resource_id: res_a,
+                kind: "lifecycle:delete".to_owned(),
+                state: OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            },
+            &canonical_a,
+            &request_a,
+        )
+        .await
+        .expect("create canonical lifecycle operation A");
+
+    // ── 1. Atomic terminalization: one call commits the terminal pair ──
+    let terminalization_a = LifecycleTerminalization {
+        operation_id: op_a,
+        terminal_state: OperationState::Succeeded,
+        provider_operation_id: Some("prov-op-a"),
+        error_category: None,
+        error_message: None,
+        resource_id: res_a,
+        expected_generation: 1,
+        desired_state: "active",
+        observed_state: "DELETED",
+        observed_generation: 1,
+        provider_id: Some("prov-res-a"),
+    };
+    let (op, resource) = store
+        .terminalize_lifecycle(&terminalization_a)
+        .await
+        .expect("terminalize A");
+    // Operation and resource identity are preserved on the returned rows.
+    assert_eq!(op.id, op_a);
+    assert_eq!(op.resource_id, res_a);
+    assert_eq!(op.state, OperationState::Succeeded);
+    assert_eq!(op.provider_operation_id.as_deref(), Some("prov-op-a"));
+    assert_eq!(resource.id, res_a);
+    assert_eq!(resource.generation, 2, "exactly one generation advance");
+    assert_eq!(resource.observed_state, "DELETED");
+    assert_eq!(resource.observed_generation, 1);
+    assert_eq!(resource.provider_id.as_deref(), Some("prov-res-a"));
+    // `update_operation` parity: the canonical metadata records the finish in
+    // the same transaction.
+    let canonical_after = store
+        .get_canonical_operation(op_a)
+        .await
+        .expect("canonical metadata after terminalization");
+    assert!(
+        canonical_after.finished_at.is_some(),
+        "terminalization must finish the canonical metadata exactly like update_operation"
+    );
+    // The #1041 invariant: no observable state has exactly one half terminal.
+    let terminal_pair = matches!(op.state, OperationState::Succeeded | OperationState::Failed)
+        && resource.observed_state == "DELETED";
+    assert!(
+        terminal_pair,
+        "operation and resource must be terminal together, got op={:?} resource={:?}",
+        op.state, resource.observed_state
+    );
+
+    // ── 2. Equivalent replay: no error, no double application ──
+    let (op_replay, resource_replay) = store
+        .terminalize_lifecycle(&terminalization_a)
+        .await
+        .expect("replay terminalization A");
+    assert_eq!(op_replay.state, OperationState::Succeeded);
+    assert_eq!(
+        resource_replay.generation, 2,
+        "replay must not bump the generation again"
+    );
+    assert_eq!(resource_replay.observed_state, "DELETED");
+    assert_eq!(resource_replay.observed_generation, 1);
+
+    // ── 3. A conflicting terminal state is rejected; nothing is rewritten ──
+    let conflict = store
+        .terminalize_lifecycle(&LifecycleTerminalization {
+            terminal_state: OperationState::Failed,
+            error_category: Some("terminal"),
+            error_message: Some("late failure evidence"),
+            ..terminalization_a.clone()
+        })
+        .await
+        .expect_err("a conflicting terminal state must be rejected");
+    assert!(matches!(conflict, StoreError::Corrupt(_)), "{conflict:?}");
+    let resource_after_conflict = store
+        .get_resource(res_a)
+        .await
+        .expect("resource A after conflict");
+    assert_eq!(resource_after_conflict.generation, 2);
+    assert_eq!(resource_after_conflict.observed_state, "DELETED");
+    let op_after_conflict = store
+        .get_operation(op_a)
+        .await
+        .expect("operation A after conflict");
+    assert_eq!(
+        op_after_conflict.state,
+        OperationState::Succeeded,
+        "a rejected conflict must not rewrite the terminal operation"
+    );
+    assert_eq!(op_after_conflict.error_category, None);
+
+    // ── 4. A conflicting provider identity is rejected ──
+    let identity_conflict = store
+        .terminalize_lifecycle(&LifecycleTerminalization {
+            provider_operation_id: Some("prov-op-other"),
+            ..terminalization_a.clone()
+        })
+        .await
+        .expect_err("a conflicting provider identity must be rejected");
+    assert!(
+        matches!(identity_conflict, StoreError::Corrupt(_)),
+        "{identity_conflict:?}"
+    );
+
+    // ── 5. A stale replay cannot clobber a newer legitimate write ──
+    // (the revive/recreate shape: the resource moved on after the
+    // terminalization; replaying the old terminalization must converge
+    // without restoring the terminal projection over the newer intent).
+    let advanced = store
+        .update_resource(res_a, 2, "active", "ACTIVE", 2, Some("prov-res-a"))
+        .await
+        .expect("advance resource A");
+    assert_eq!(advanced.generation, 3);
+    let (op_stale, resource_stale) = store
+        .terminalize_lifecycle(&terminalization_a)
+        .await
+        .expect("stale replay still converges without error");
+    assert_eq!(op_stale.state, OperationState::Succeeded);
+    assert_eq!(
+        resource_stale.generation, 3,
+        "replay must not clobber the newer write"
+    );
+    assert_eq!(resource_stale.observed_state, "ACTIVE");
+
+    // ── 6. Stale generation rejection rolls back the WHOLE terminalization ──
+    let res_b = Uuid::now_v7();
+    let proj_b = format!("proj-{}", Uuid::now_v7());
+    store
+        .insert_resource(&ResourceRecord {
+            id: res_b,
+            kind: "compute_instance".to_owned(),
+            project_id: proj_b,
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "active".to_owned(),
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: Some("prov-res-b".to_owned()),
+        })
+        .await
+        .expect("insert resource B");
+    let op_b = Uuid::now_v7();
+    store
+        .insert_operation(&OperationRecord {
+            id: op_b,
+            resource_id: res_b,
+            kind: "lifecycle:delete".to_owned(),
+            state: OperationState::Running,
+            provider_operation_id: Some("prov-op-b".to_owned()),
+            error_category: None,
+            error_message: None,
+        })
+        .await
+        .expect("insert operation B");
+    let stale = store
+        .terminalize_lifecycle(&LifecycleTerminalization {
+            operation_id: op_b,
+            terminal_state: OperationState::Succeeded,
+            provider_operation_id: Some("prov-op-b"),
+            error_category: None,
+            error_message: None,
+            resource_id: res_b,
+            expected_generation: 999,
+            desired_state: "active",
+            observed_state: "DELETED",
+            observed_generation: 999,
+            provider_id: Some("prov-res-b"),
+        })
+        .await
+        .expect_err("stale generation must be rejected");
+    assert!(matches!(stale, StoreError::StaleGeneration), "{stale:?}");
+    // The crash boundary: the rejected terminalization committed nothing —
+    // the operation is NOT terminal and the resource projection is untouched,
+    // so no half-committed pair exists and the operation stays re-drivable.
+    let op_b_after = store
+        .get_operation(op_b)
+        .await
+        .expect("operation B after stale rejection");
+    assert_eq!(
+        op_b_after.state,
+        OperationState::Running,
+        "a rejected terminalization must leave the operation non-terminal"
+    );
+    assert_eq!(
+        op_b_after.provider_operation_id.as_deref(),
+        Some("prov-op-b")
+    );
+    let res_b_after = store
+        .get_resource(res_b)
+        .await
+        .expect("resource B after stale rejection");
+    assert_eq!(res_b_after.generation, 1);
+    assert_eq!(res_b_after.observed_state, "ACTIVE");
+    let non_terminal_b = store
+        .list_non_terminal_lifecycle_operations()
+        .await
+        .expect("non-terminal lifecycle operations");
+    assert!(
+        non_terminal_b.iter().any(|o| o.id == op_b),
+        "the non-terminal operation must remain listed for re-drive"
+    );
+
+    // ── 7. Concurrent equivalent terminalizations converge exactly once ──
+    let res_c = Uuid::now_v7();
+    let proj_c = format!("proj-{}", Uuid::now_v7());
+    store
+        .insert_resource(&ResourceRecord {
+            id: res_c,
+            kind: "compute_instance".to_owned(),
+            project_id: proj_c.clone(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "active".to_owned(),
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: Some("prov-res-c".to_owned()),
+        })
+        .await
+        .expect("insert resource C");
+    let op_c = Uuid::now_v7();
+    store
+        .insert_operation(&OperationRecord {
+            id: op_c,
+            resource_id: res_c,
+            kind: "lifecycle:delete".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        })
+        .await
+        .expect("insert operation C");
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        tasks.push(tokio::spawn(async move {
+            store
+                .terminalize_lifecycle(&LifecycleTerminalization {
+                    operation_id: op_c,
+                    terminal_state: OperationState::Succeeded,
+                    provider_operation_id: Some("prov-op-c"),
+                    error_category: None,
+                    error_message: None,
+                    resource_id: res_c,
+                    expected_generation: 1,
+                    desired_state: "active",
+                    observed_state: "DELETED",
+                    observed_generation: 1,
+                    provider_id: Some("prov-res-c"),
+                })
+                .await
+        }));
+    }
+    for task in tasks {
+        let (op, resource) = task
+            .await
+            .expect("join concurrent terminalization")
+            .expect("concurrent equivalent terminalization converges");
+        assert_eq!(op.id, op_c);
+        assert_eq!(resource.id, res_c);
+    }
+    let op_c_final = store
+        .get_operation(op_c)
+        .await
+        .expect("operation C after concurrency");
+    assert_eq!(op_c_final.state, OperationState::Succeeded);
+    let res_c_final = store
+        .get_resource(res_c)
+        .await
+        .expect("resource C after concurrency");
+    assert_eq!(
+        res_c_final.generation, 2,
+        "exactly one of the concurrent terminalizations may apply"
+    );
+    assert_eq!(res_c_final.observed_state, "DELETED");
+    assert_eq!(res_c_final.observed_generation, 1);
+
+    // ── 8. Tombstone semantics: DELETED resources remain listed ──
+    let listed = store
+        .list_resources(&proj_a, "compute_instance")
+        .await
+        .expect("list_resources");
+    assert!(
+        listed.iter().any(|r| r.id == res_a),
+        "the terminal resource must remain visible to list_resources"
+    );
+    let listed_c = store
+        .list_resources(&proj_c, "compute_instance")
+        .await
+        .expect("list_resources C");
+    assert!(
+        listed_c
+            .iter()
+            .any(|r| r.id == res_c && r.observed_state == "DELETED"),
+        "the DELETED tombstone must remain visible to list_resources"
+    );
+    let by_kind = store
+        .list_resources_by_kind("compute_instance")
+        .await
+        .expect("list_resources_by_kind");
+    assert!(
+        by_kind
+            .iter()
+            .any(|r| r.id == res_c && r.observed_state == "DELETED"),
+        "the DELETED tombstone must remain visible to repair scans"
+    );
 }
 
 pub async fn test_durable_store_provider_references<S: StoreUnderTest>(store: Arc<S>) {
@@ -1979,5 +2425,114 @@ mod tests {
         } else {
             eprintln!("Skipping test_postgres_conformance: no Postgres instance available");
         }
+    }
+
+    /// Process-restart shape for the terminalization pair (issue #1041):
+    /// terminalize, drop every in-memory handle, reopen the same durable
+    /// file, and prove the terminal state is stable and an equivalent replay
+    /// stays a no-op. A restarted control plane must see exactly what the
+    /// crashed one committed — both halves or neither.
+    #[tokio::test]
+    async fn test_sqlite_lifecycle_terminalization_survives_store_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "o3k-terminalization-reopen-{}-{}.sqlite",
+            std::process::id(),
+            Uuid::now_v7()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::testkit::open_file(&path).await.unwrap();
+        let res_id = Uuid::now_v7();
+        let proj = format!("proj-{}", Uuid::now_v7());
+        store
+            .insert_resource(&ResourceRecord {
+                id: res_id,
+                kind: "compute_instance".to_owned(),
+                project_id: proj,
+                generation: 1,
+                observed_generation: 0,
+                desired_state: "active".to_owned(),
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: Some("prov-res".to_owned()),
+            })
+            .await
+            .unwrap();
+        let op_id = Uuid::now_v7();
+        store
+            .insert_operation(&OperationRecord {
+                id: op_id,
+                resource_id: res_id,
+                kind: "lifecycle:delete".to_owned(),
+                state: OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await
+            .unwrap();
+        let terminalization = LifecycleTerminalization {
+            operation_id: op_id,
+            terminal_state: OperationState::Succeeded,
+            provider_operation_id: Some("prov-op"),
+            error_category: None,
+            error_message: None,
+            resource_id: res_id,
+            expected_generation: 1,
+            desired_state: "active",
+            observed_state: "DELETED",
+            observed_generation: 1,
+            provider_id: Some("prov-res"),
+        };
+        store
+            .terminalize_lifecycle(&terminalization)
+            .await
+            .expect("terminalize before reopen");
+        drop(store);
+
+        // The process restarts: only the durable file survives.
+        let reopened = crate::testkit::open_file(&path).await.unwrap();
+        let (op, resource) = reopened
+            .terminalize_lifecycle(&terminalization)
+            .await
+            .expect("replay after reopen");
+        assert_eq!(op.id, op_id);
+        assert_eq!(op.state, OperationState::Succeeded);
+        assert_eq!(resource.id, res_id);
+        assert_eq!(
+            resource.generation, 2,
+            "replay after restart must not re-apply"
+        );
+        assert_eq!(resource.observed_state, "DELETED");
+        assert_eq!(resource.observed_generation, 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// PostgreSQL lane for the issue-#1041 terminalization semantics: real
+    /// concurrency against a real server, proving the atomic pair, the
+    /// exactly-once application, and the stale-write rollback hold under the
+    /// production engine's locking, not only SQLite's.
+    ///
+    /// Fails closed: a requested PostgreSQL regression with `O3K_DATABASE_URL`
+    /// unset or the host unreachable panics rather than silently skipping
+    /// (the `pp4_endpoint_lifecycle` PostgreSQL pattern).
+    #[tokio::test]
+    #[ignore = "requires O3K_DATABASE_URL (PostgreSQL)"]
+    async fn test_postgres_lifecycle_terminalization_regression() {
+        let db_url = std::env::var("O3K_DATABASE_URL").unwrap_or_else(|_| {
+            panic!("O3K_DATABASE_URL must be set to run the PostgreSQL terminalization regression")
+        });
+        let Some(_database_guard) = prepare_shared_postgres_test_database(&db_url).await else {
+            panic!(
+                "O3K_DATABASE_URL is configured but the PostgreSQL conformance database \
+                 could not be prepared; the PostgreSQL terminalization regression is unproven"
+            );
+        };
+        let store = PostgresStore::connect(&db_url)
+            .await
+            .expect("connect to the configured PostgreSQL conformance database");
+        store
+            .clean_tables_for_testing()
+            .await
+            .expect("clean the PostgreSQL conformance tables at test start");
+        test_durable_store_lifecycle_terminalization(Arc::new(store)).await;
     }
 }

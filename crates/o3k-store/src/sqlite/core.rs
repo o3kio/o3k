@@ -26,12 +26,12 @@ use crate::{
     CanonicalAcceptanceOutcome, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
     ComputeRepository, DatabaseHealth, DurableStore, IdempotencyReservation,
     IdempotencyReservationRequest, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
-    ImageOverlayState, ImageOverlayUpdate, ObservationUpdate, OperationRecord, OperationState,
-    ProviderReference, RepositoryPage, ResourceRecord, SQLITE_BUSY_MAX_ATTEMPTS, StoreError,
-    VolumeAttachmentRecord, WalCheckpointMode, is_sqlite_busy, restrict_sqlite_sidecars,
-    validate_canonical_idempotent_operation_identity, validate_canonical_lifecycle_update,
-    validate_canonical_operation_read, validate_canonical_resource_acceptance,
-    validate_canonical_scoped_operation_read,
+    ImageOverlayState, ImageOverlayUpdate, LifecycleTerminalization, ObservationUpdate,
+    OperationRecord, OperationState, ProviderReference, RepositoryPage, ResourceRecord,
+    SQLITE_BUSY_MAX_ATTEMPTS, StoreError, VolumeAttachmentRecord, WalCheckpointMode,
+    is_sqlite_busy, restrict_sqlite_sidecars, validate_canonical_idempotent_operation_identity,
+    validate_canonical_lifecycle_update, validate_canonical_operation_read,
+    validate_canonical_resource_acceptance, validate_canonical_scoped_operation_read,
 };
 
 pub(super) async fn insert_sqlite_canonical_acceptance(
@@ -1109,6 +1109,119 @@ impl DurableStore for SqliteStore {
         SqliteStore::commit_or_rollback(&mut connection, outcome).await?;
         drop(connection);
         self.get_resource(resource_id).await
+    }
+
+    async fn terminalize_lifecycle(
+        &self,
+        terminalization: &LifecycleTerminalization<'_>,
+    ) -> Result<(OperationRecord, ResourceRecord), StoreError> {
+        terminalization.validate()?;
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<(), StoreError> = async {
+            let row = sqlx::query(
+                "SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message FROM operations WHERE id = ?",
+            )
+            .bind(terminalization.operation_id.to_string())
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+            let current = operation_from_row(&row)?;
+            if matches!(
+                current.state,
+                OperationState::Succeeded | OperationState::Failed
+            ) {
+                // Equivalent replay: the first terminalization committed the
+                // resource projection in this same transaction, so
+                // re-applying it could only double-bump the generation or
+                // clobber a newer legitimate write. Fill in durable evidence
+                // the first write lacked (mirroring `update_operation`'s
+                // terminal replay arm) and leave the resource row untouched.
+                if current
+                    .provider_operation_id
+                    .as_deref()
+                    .is_some_and(|existing| {
+                        terminalization
+                            .provider_operation_id
+                            .is_some_and(|incoming| incoming != existing)
+                    })
+                {
+                    return Err(StoreError::Corrupt(
+                        "terminal operation provider identity conflicts with durable state"
+                            .to_owned(),
+                    ));
+                }
+                if current.state != terminalization.terminal_state {
+                    return Err(StoreError::Corrupt(
+                        "terminal operation state cannot conflict with durable state".to_owned(),
+                    ));
+                }
+                sqlx::query("UPDATE operations SET provider_operation_id = COALESCE(?, provider_operation_id), error_category = COALESCE(?, error_category), error_message = COALESCE(?, error_message) WHERE id = ?")
+                    .bind(terminalization.provider_operation_id)
+                    .bind(terminalization.error_category)
+                    .bind(terminalization.error_message)
+                    .bind(terminalization.operation_id.to_string())
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::Database)?;
+                return Ok(());
+            }
+            sqlx::query("UPDATE operations SET state = ?, provider_operation_id = ?, error_category = ?, error_message = ? WHERE id = ?")
+                .bind(terminalization.terminal_state.as_str())
+                .bind(terminalization.provider_operation_id)
+                .bind(terminalization.error_category)
+                .bind(terminalization.error_message)
+                .bind(terminalization.operation_id.to_string())
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            let now = Utc::now().to_rfc3339();
+            sqlx::query("UPDATE canonical_operation_metadata SET started_at=COALESCE(started_at, ?), finished_at=?, error=? WHERE operation_id=?")
+                .bind(Some(now.clone()))
+                .bind(Some(now))
+                .bind(terminalization.error_category)
+                .bind(terminalization.operation_id.to_string())
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            // The terminal resource projection is fenced on the caller's
+            // expected generation: a stale writer rolls the whole
+            // terminalization back, so no half-committed pair can exist
+            // (issue #1041).
+            let updated = sqlx::query("UPDATE resources SET generation = generation + 1, desired_state = ?, observed_state = ?, observed_generation = ?, provider_id = ? WHERE id = ? AND generation = ?")
+                .bind(terminalization.desired_state)
+                .bind(terminalization.observed_state)
+                .bind(terminalization.observed_generation)
+                .bind(terminalization.provider_id)
+                .bind(terminalization.resource_id.to_string())
+                .bind(terminalization.expected_generation)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            if updated.rows_affected() == 0 {
+                return match sqlx::query("SELECT id FROM resources WHERE id = ?")
+                    .bind(terminalization.resource_id.to_string())
+                    .fetch_optional(&mut *connection)
+                    .await
+                    .map_err(StoreError::Database)?
+                {
+                    Some(_) => Err(StoreError::StaleGeneration),
+                    None => Err(StoreError::ResourceNotFound),
+                };
+            }
+            Ok(())
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await?;
+        drop(connection);
+        Ok((
+            self.get_operation(terminalization.operation_id).await?,
+            self.get_resource(terminalization.resource_id).await?,
+        ))
     }
 
     async fn update_resource_from_observation(

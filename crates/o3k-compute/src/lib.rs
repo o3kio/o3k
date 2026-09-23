@@ -3025,6 +3025,71 @@ mod tests {
         Ok(())
     }
 
+    /// Issue #1041: the local delete completion terminalizes the operation and
+    /// the resource projection in ONE durable transaction. After the delete,
+    /// both rows must be terminal with exactly one generation advance; a
+    /// replay through the already-Deleted seat converges without re-applying.
+    #[tokio::test]
+    async fn local_delete_completion_terminalizes_operation_and_resource_together()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, placement, request) =
+            stranded_failed_create_fixture("delete-atomic-terminal", provider.clone()).await?;
+        let generation_at_delete = store.get_resource(request.o3k_server_id).await?.generation;
+
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+
+        // Both halves terminal, applied exactly once.
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "DELETED");
+        assert_eq!(
+            resource.generation,
+            generation_at_delete + 1,
+            "the terminalization must apply exactly one generation advance"
+        );
+        let delete_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:delete:project-a:{}:{}",
+                request.o3k_server_id, generation_at_delete
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            store.get_operation(delete_operation_id).await?.state,
+            o3k_store::OperationState::Succeeded,
+            "the operation and the resource projection must be terminal together"
+        );
+        assert!(
+            store
+                .list_non_terminal_lifecycle_operations()
+                .await?
+                .iter()
+                .all(|operation| operation.resource_id != request.o3k_server_id),
+            "a terminalized delete must leave no non-terminal lifecycle operation"
+        );
+        assert!(
+            placement.provider("node-a").await?.allocations.is_empty(),
+            "the delete must release the placement allocation"
+        );
+
+        // Replay through the already-Deleted seat: converges without
+        // double-applying the projection.
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(
+            resource.generation,
+            generation_at_delete + 1,
+            "a replay must not double-apply the terminal projection"
+        );
+        assert_eq!(resource.observed_state, "DELETED");
+        Ok(())
+    }
+
     /// Issue #88 S3 residue: a create that WAS accepted by an agent (the
     /// config-drive transfers committed before acceptance) which then crashed
     /// before any libvirt mutation leaves the ConfigDriveIso manifests and

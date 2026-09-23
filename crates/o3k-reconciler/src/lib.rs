@@ -1497,24 +1497,25 @@ where
         // Project before the terminalizing write so the observation lands while
         // the lifecycle is still retriable; the observation is idempotent.
         self.project_metering(&resource, &observed_state).await?;
+        // Issue #1041: the operation terminal state and the resource terminal
+        // projection commit in ONE durable transaction. The previous two
+        // sequential writes could crash between them, leaving the operation
+        // terminal with the resource projection non-terminal (or vice versa),
+        // which no reconciliation pass repairs.
         self.store
-            .update_operation(
+            .terminalize_lifecycle(&o3k_store::LifecycleTerminalization {
                 operation_id,
-                OperationState::Succeeded,
-                Some(&provider_operation_id),
-                None,
-                None,
-            )
-            .await?;
-        self.store
-            .update_resource(
-                resource.id,
-                resource.generation,
-                &resource.desired_state,
-                &observed_state,
-                resource.generation,
-                Some(&provider_id),
-            )
+                terminal_state: OperationState::Succeeded,
+                provider_operation_id: Some(&provider_operation_id),
+                error_category: None,
+                error_message: None,
+                resource_id: resource.id,
+                expected_generation: resource.generation,
+                desired_state: &resource.desired_state,
+                observed_state: &observed_state,
+                observed_generation: resource.generation,
+                provider_id: Some(&provider_id),
+            })
             .await?;
         self.event(operation_id, resource.id, JournalEventKind::Succeeded);
         Ok(OperationState::Succeeded)
