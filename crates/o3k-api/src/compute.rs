@@ -355,6 +355,16 @@ pub(crate) fn compute_error(error: ComputeError) -> axum::response::Response {
         ComputeError::Store(o3k_store::StoreError::InvalidKeypair(_)) => {
             keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "invalid public key")
         }
+        // A stale generation under a terminalizing write is an optimistic-
+        // concurrency conflict (a concurrent observation legitimately bumped
+        // the row), not an internal failure: the client can re-read and retry.
+        // Mapping it to 500 would misclassify the exactly-one-winner fence as
+        // an outage (issue #1041 review).
+        ComputeError::Store(o3k_store::StoreError::StaleGeneration) => keystone_error(
+            StatusCode::CONFLICT,
+            "Conflict",
+            "compute resource conflicts with current state",
+        ),
         ComputeError::Store(_)
         | ComputeError::Reconcile(_)
         | ComputeError::Provider(_)
@@ -1487,10 +1497,24 @@ pub(crate) fn requested_compute_289(headers: &HeaderMap) -> bool {
 #[cfg(test)]
 mod tests {
 
-    use super::{Server, ServerId, ServerState, server_response, should_query_live_console};
+    use super::{
+        Server, ServerId, ServerState, compute_error, server_response, should_query_live_console,
+    };
     use crate::CONSOLE_AGENT_DISPATCH_TIMEOUT;
     use std::time::Duration;
     use uuid::Uuid;
+
+    #[test]
+    fn stale_generation_terminalization_conflict_maps_to_conflict_not_500() {
+        // A stale generation under a terminalizing write is an
+        // optimistic-concurrency conflict, not an internal failure (#1041
+        // review): misclassifying it as 500 would report the exactly-one-
+        // winner fence as an outage.
+        let response = compute_error(o3k_compute::ComputeError::Store(
+            o3k_store::StoreError::StaleGeneration,
+        ));
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    }
 
     #[test]
     fn live_console_queries_are_limited_to_the_snapshot_offset() {
