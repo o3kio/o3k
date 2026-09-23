@@ -5071,6 +5071,163 @@ mod reconciler_tests {
         Ok(())
     }
 
+    /// Issue #1041, agent event-stream arm: a terminal delete delivered
+    /// through `apply_agent_update` must commit the terminal operation and
+    /// the DELETED resource projection in ONE transaction, through the same
+    /// `terminalize_lifecycle` primitive as the dispatch/poll finish path.
+    /// Before this fix the event-stream seat used two sequential writes, so a
+    /// crash between them durably exposed a terminal operation whose
+    /// projection never landed — and nothing re-drives a terminal operation.
+    #[tokio::test]
+    async fn agent_event_stream_delete_terminalizes_both_halves_together()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _provider) = fault_journal("agent-delete-terminalization").await?;
+        store.arm_atomic_terminalization_assertion();
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let generation_before = store.get_resource(request.o3k_server_id).await?.generation;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Delete)
+            .await?;
+        bind_command(
+            &store.inner,
+            format!("command-{operation_id}"),
+            operation_id,
+            resource.id,
+            "agent-a",
+            "epoch-a",
+        )
+        .await?;
+        let update = AgentOperationUpdate {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-a".to_owned(),
+            operation_sequence: 1,
+            operation_id,
+            resource_id: resource.id,
+            state: AgentOperationState::Succeeded,
+            error_category: None,
+            redacted_message: None,
+            // None: the create already attached the compute-agent provider
+            // reference with the fake provider's own identity; a different
+            // incoming id would be fenced as foreign.
+            provider_resource_id: None,
+        };
+        assert_eq!(
+            journal.apply_agent_update(&update).await?,
+            OperationState::Succeeded
+        );
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.state, OperationState::Succeeded);
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "DELETED");
+        assert_eq!(
+            resource.generation,
+            generation_before + 1,
+            "the projection must apply exactly once"
+        );
+        // A replayed delivery of the same terminal update stays converged
+        // without double-applying the projection.
+        assert_eq!(
+            journal.apply_agent_update(&update).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(
+            resource.generation,
+            generation_before + 1,
+            "a terminal replay must not double-apply the projection"
+        );
+        assert_eq!(resource.observed_state, "DELETED");
+        Ok(())
+    }
+
+    /// Issue #1041, agent event-stream crash arm: when the terminalization
+    /// transaction fails at the worst moment, the event-stream seat must
+    /// commit NOTHING — the operation stays non-terminal (so the lifecycle
+    /// sweep re-drives it) and the resource projection is untouched. The
+    /// pre-fix sequential seat committed the terminal operation first and
+    /// could not roll it back.
+    #[tokio::test]
+    async fn agent_event_stream_delete_terminalization_failure_commits_nothing()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _provider) =
+            fault_journal("agent-delete-terminalization-crash").await?;
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let generation_before = store.get_resource(request.o3k_server_id).await?.generation;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Delete)
+            .await?;
+        bind_command(
+            &store.inner,
+            format!("command-{operation_id}"),
+            operation_id,
+            resource.id,
+            "agent-a",
+            "epoch-a",
+        )
+        .await?;
+        let update = AgentOperationUpdate {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-a".to_owned(),
+            operation_sequence: 1,
+            operation_id,
+            resource_id: resource.id,
+            state: AgentOperationState::Succeeded,
+            error_category: None,
+            redacted_message: None,
+            provider_resource_id: None,
+        };
+        store.fail_next_terminalization();
+        assert!(journal.apply_agent_update(&update).await.is_err());
+        assert!(
+            !matches!(
+                store.get_operation(operation_id).await?.state,
+                OperationState::Succeeded | OperationState::Failed
+            ),
+            "a failed terminalization must leave the operation non-terminal"
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_ne!(
+            resource.observed_state, "DELETED",
+            "a failed terminalization must leave the resource projection non-terminal"
+        );
+        assert_eq!(
+            resource.generation, generation_before,
+            "a failed terminalization must not bump the resource generation"
+        );
+
+        // Re-delivery converges once: both halves commit together.
+        assert_eq!(
+            journal.apply_agent_update(&update).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "DELETED"
+        );
+        Ok(())
+    }
+
     /// A generation-CAS observation that loses the race must record no
     /// metering observation: the loser's state never became durable, so
     /// metering it would fabricate usage. The projection is applied only after
