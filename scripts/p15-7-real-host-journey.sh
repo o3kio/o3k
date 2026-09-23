@@ -1326,7 +1326,7 @@ if [[ "$A_STATE" != ACTIVE ]]; then
 fi
 HOST_A=""
 for _ in $(seq 1 60); do
-  HOST_A="$(openstack server show "$WORKLOAD_A" -f value -c OS-EXT-SRV-ATTR:HOST 2>/dev/null || true)"
+  HOST_A="$(openstack server show "$WORKLOAD_A" -f value -c OS-EXT-SRV-ATTR:host 2>/dev/null || true)"
   [[ -n "$HOST_A" && "$HOST_A" != "None" ]] && break
   sleep 1
 done
@@ -1435,7 +1435,7 @@ WORKLOAD_B="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).ge
 OS_WORKLOAD_B="$WORKLOAD_B"
 HOST_B=""
 for _ in $(seq 1 60); do
-  HOST_B="$(openstack server show "$WORKLOAD_B" -f value -c OS-EXT-SRV-ATTR:HOST 2>/dev/null || true)"
+  HOST_B="$(openstack server show "$WORKLOAD_B" -f value -c OS-EXT-SRV-ATTR:host 2>/dev/null || true)"
   [[ -n "$HOST_B" && "$HOST_B" != "None" ]] && break
   sleep 1
 done

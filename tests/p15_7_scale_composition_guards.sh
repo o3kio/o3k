@@ -332,6 +332,12 @@ assert 'PROJECT_TOKEN="$(openstack token issue -f value -c id 2>"$PROJECT_TOKEN_
 assert '[[ "$PROJECT_TOKEN" ]] && break' in journey
 assert 'for _ in $(seq 1 15); do' in journey
 assert 'P15.7 project token acquisition diagnostics:' in journey
+# The OpenStack host projection is case-sensitive and Nova-compatible:
+# `OS-EXT-SRV-ATTR:host` (lower case), as the product's own serialization and
+# evidence artifacts declare. The upper-case spelling silently yields an empty
+# host and strands the drain/placement resolution.
+assert '-c OS-EXT-SRV-ATTR:host 2>/dev/null' in journey
+assert 'OS-EXT-SRV-ATTR:HOST' not in journey
 assert "--os-password" not in journey
 assert '! grep -Fq "$WORKLOAD_A" "$FOREIGN_SHOW"' not in journey
 # The protected workflows must authorize exactly the six journey identities.
