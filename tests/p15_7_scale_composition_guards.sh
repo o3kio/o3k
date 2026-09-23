@@ -58,14 +58,75 @@ fi
 python3 - "${EVIDENCE}" <<'PY'
 import json, sys
 sha = "0123456789abcdef0123456789abcdef01234567"
-block_ids = [
-    "11111111-1111-4111-8111-111111111111",
-    "22222222-2222-4222-8222-222222222222",
-    "33333333-3333-4333-8333-333333333333",
-    "44444444-4444-4444-8444-444444444444",
-    "55555555-5555-4555-8555-555555555555",
-    "66666666-6666-4666-8666-666666666666",
+bootstrap_block_id = "99999999-9999-4999-8999-999999999999"
+child_ids = {
+    "block-a": "11111111-1111-4111-8111-111111111111",
+    "block-b": "22222222-2222-4222-8222-222222222222",
+    "block-c": "33333333-3333-4333-8333-333333333333",
+    "block-d": "44444444-4444-4444-8444-444444444444",
+    "block-e": "55555555-5555-4555-8555-555555555555",
+}
+ELIGIBILITY = ("placement_eligible = state=='ready' AND >=1 resource_provider_id in "
+               "/operator/diagnostics/providers with state 'Enabled' AND no drain_blockers; "
+               "all BuildingBlocks enumerated (bootstrap included by TLS agent identity)")
+
+def block_entry(agent, block_id, state="ready", enabled=True, eligible=True, bootstrap=False, blockers=()):
+    providers = [agent]
+    return {
+        "block_id": block_id,
+        "execution_identity": agent,
+        "resource_provider_ids": providers,
+        "provider_states": ["Enabled"] if enabled and state == "ready" else (
+            ["Draining"] if state == "draining" else ["Unavailable"]),
+        "state": state,
+        "drain_blockers": list(blockers),
+        "agent_available": True,
+        "is_bootstrap": bootstrap,
+        "compute_capable": True,
+        "placement_eligible": bool(eligible and state == "ready" and enabled),
+    }
+
+def checkpoint(phase, entries):
+    return {
+        "phase": phase,
+        "eligibility_basis": ELIGIBILITY,
+        "blocks": entries,
+        "total_blocks": len(entries),
+        "eligible_ready_count": sum(1 for entry in entries if entry["placement_eligible"]),
+    }
+
+bootstrap_ready = lambda: block_entry("compute-agent", bootstrap_block_id, bootstrap=True)
+initial_entries = [bootstrap_ready()] + [
+    block_entry(agent, child_ids[agent]) for agent in ("block-a", "block-b", "block-c", "block-d")]
+post_drain_entries = [bootstrap_ready()] + [
+    block_entry(agent, child_ids[agent], state=("draining" if agent == "block-a" else "ready"),
+                enabled=(agent != "block-a"), eligible=(agent != "block-a"),
+                blockers=({"kind": "workload", "count": 1},) if agent == "block-a" else ())
+    for agent in ("block-a", "block-b", "block-c", "block-d")]
+post_remove_entries = [bootstrap_ready()] + [
+    block_entry(agent, child_ids[agent]) for agent in ("block-b", "block-c", "block-d")]
+final_entries = [bootstrap_ready()] + [
+    block_entry(agent, child_ids[agent]) for agent in ("block-b", "block-c", "block-d", "block-e")]
+
+checkpoints = [
+    checkpoint("initial-scale-checkpoint", initial_entries),
+    checkpoint("pre-drain", [dict(entry) for entry in initial_entries]),
+    checkpoint("post-drain", post_drain_entries),
+    checkpoint("post-remove", post_remove_entries),
+    checkpoint("post-replacement", final_entries),
+    checkpoint("post-reboot", [dict(entry) for entry in final_entries]),
+    checkpoint("post-crash-repair", [dict(entry) for entry in final_entries]),
+    checkpoint("post-maintenance", [dict(entry) for entry in final_entries]),
 ]
+
+def eligible_projection(entries):
+    eligible = [entry for entry in entries if entry["placement_eligible"]]
+    return ([entry["execution_identity"] for entry in eligible],
+            [entry["block_id"] for entry in eligible])
+
+initial_agents, initial_blocks = eligible_projection(initial_entries)
+final_agents, final_blocks = eligible_projection(final_entries)
+
 doc = {
   "artifact_type":"o3k-p15-7-scale-composition-evidence", "schema_version":1,
   "phase":"P15.7", "status":"passed", "evidence_tier":"protected-real-host",
@@ -73,27 +134,74 @@ doc = {
   "tested_source_sha":sha,
   "execution":{"provider":"agent","hypervisor":"libvirt","database_backend":"postgres",
     "real_o3kd":True,"real_auth":True,"real_execution_boundary":True,
-    "multiple_real_hosts":True,"block_count":6,"provisioned_vms":6,"sqlite_parity":True},
+    "multiple_real_hosts":True,"block_count":5,"provisioned_vms":5,"sqlite_parity":True},
   "scale_composition":{
+    "counting_rule":"eligible_ready",
+    "eligibility_rule":ELIGIBILITY,
+    "bootstrap":{"agent_id":"compute-agent","block_id":bootstrap_block_id},
     "enrolled_identities":{"count":6,"distinct":True,
-      "agents":["block-a","block-b","block-c","block-d","block-e","block-f"],
-      "block_ids":block_ids},
-    "initial_concurrent_ready":{"count":5,
-      "agents":["block-a","block-b","block-c","block-d","block-e"],
-      "block_ids":block_ids[:5]},
+      "agents":["compute-agent","block-a","block-b","block-c","block-d","block-e"],
+      "block_ids":[bootstrap_block_id]+[child_ids[a] for a in ("block-a","block-b","block-c","block-d","block-e")]},
+    "initial_concurrent_ready":{"count":5,"agents":initial_agents,"block_ids":initial_blocks},
     "peak_concurrent_ready":{"count":5,"minimum":5,"met":True},
-    "final_concurrent_ready":{"count":5,
-      "agents":["block-b","block-c","block-d","block-e","block-f"],
-      "block_ids":block_ids[1:]},
-    "drained_agent":"block-a","replacement_agent":"block-f","duplicate_identities":False},
+    "final_concurrent_ready":{"count":5,"agents":final_agents,"block_ids":final_blocks},
+    "checkpoints":checkpoints,
+    "drained_agent":"block-a","replacement_agent":"block-e","duplicate_identities":False},
   "journey":{"fresh_deployment":True,"init":True,"topology":True,"capacity":True,
     "constrained_placement":True,"add_block_capacity_growth":True,
-    "multiple_authenticated_joins":{"status":"passed","count":6,"each_authenticated":True},
-    "drain":{"status":"passed","no_new_placement":True,"blockers_observed":True,"evacuation_claimed":False},
+    "multiple_authenticated_joins":{"status":"passed","count":5,"each_authenticated":True},
+    "drain":{"status":"passed","no_new_placement":True,"blockers_observed":True,"evacuation_claimed":False,
+      "blocker_requery":{"phase":"post-delete-pre-remove","drain_block_id":child_ids["block-a"],
+        "state":"draining","workload_id":"66666666-6666-4666-8666-666666666666",
+        "blockers_at_drain":[{"kind":"workload","count":1}],
+        "blockers_at_requery":[],"blockers_empty":True,
+        "attachment_blockers":[],"local_storage_blockers":[],
+        "deleted_workload_absent_from_blockers":True}},
     "remove_rejoin_replace":True,"restart_recovery":True,
+    "crash_injection_repair":{"status":"passed",
+      "fault_hook":{"env":"O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS","pause_ms":45000,
+        "semantics":"positive-ms sleep on the delete path after durable terminalization commits and before endpoint release"},
+      "server_c":{"resource_id":"66666666-6666-4666-8666-666666666666",
+        "owned_endpoint_id":"77777777-7777-4777-8777-777777777777","fixed_ip":"198.18.0.4"},
+      "endpoint_before_crash":{"port_id":"77777777-7777-4777-8777-777777777777","existed":True,
+        "binding_state_exposed":False,"presence_asserted_while_pause_held":True},
+      "operation_terminal_observed_ms":4200,
+      "kill":{"signal":"SIGKILL","pid":4242,"identity_verified":True,"orderly_restart":False},
+      "delete_request_observed_http_code":"000",
+      "restart":{"path":"normal boot path via start_o3kd_verified","readyz":"passed"},
+      "sweep":{"passes_observed":2,"time_to_repair_ms":9400,"bounded_wait_ms":180000,"endpoint_absent_after":True},
+      "fixed_ip_reuse":{"attempted":True,"succeeded":True},
+      "quota":{"dimension":"network:ports","before":3,"after":3,"restored":True},
+      "placement_allocation":{"vcpu_allocated_before":2,"vcpu_allocated_after":2,"leak":False},
+      "responsiveness_during_backlog":{"orphan_present_at_create":True,"create_call_latency_ms":2100,
+        "activation_latency_ms":41000,"server_active":True},
+      "caller_supplied_endpoint_preserved":True,
+      "foreign_project_endpoint_preserved":True},
+    "host_maintenance":{"status":"passed","block_id":child_ids["block-e"],
+      "execution_identity":"block-e","resource_provider_ids":["block-e"],
+      "drain":{"succeeded":True,"blockers_empty":True,"blockers":"no residents existed"},
+      "placement_rejected_on_draining_block":True,
+      "host_reboot":{"issued_from":"outer host via virsh reboot on the recorded domain UUID","guest_returned_ssh":True},
+      "agent_restart":{"modeled":"operator restarts the host service","reconnected":True},
+      "identity_preserved":{"same_building_block_id":True,"same_execution_identity":True,
+        "same_resource_provider_ids":True,"no_duplicate_block_or_provider":True},
+      "returned_to_ready":{"operator_transition":"POST /operator/building-blocks/{id}/actions/ready","succeeded":True,
+        "provider_reopened":True},
+      "final_eligible_ready_count":5},
+    "transient_failures":[{"type":"bounded_retry","api":"keystone token issue","at_unix_ms":1750000000000,
+      "fault_injection_active":False,"detail":"attempts=2 outcome=acquired"}],
     "projections_convergent":{"native":True,"openstack":True,
       "araf":{"required":False,"status":"not_configured",
         "reason":"external_consumer_not_provisioned"}}},
+  "network_observation":{"child_vms":[
+    {"domain":"o3k-p15-7-example-block-a","uuid":"88888888-8888-4888-8888-888888888888",
+     "expected_mac":"52:54:00:aa:bb:cc","selected_ip":"192.0.2.20","gateway":"192.0.2.1",
+     "candidates":[{"ip":"192.0.2.20","mac":"52:54:00:aa:bb:cc","expiry":"1727700000","source":"net-dhcp-leases"}],
+     "freshness":{"available":True,"freshest_ip":"192.0.2.20","source":"/var/lib/libvirt/dnsmasq/virbr0.status"},
+     "selection_reason":"freshest_valid_owned_lease_for_mac","ssh_proof":True,
+     "assertions":{"no_cross_mac":True,"not_gateway":True,"no_stale_over_fresh":True}}],
+    "all_ssh_proven":True,
+    "resolver_contract":"freshest valid owned DHCP lease for the expected MAC"},
   "restart_recovery":{"status":"passed","canonical_state_survived":True,"postgres":True,"sqlite_parity":True},
   "database_ownership":{"mode":"disposable","effective_backend":"postgres",
     "backend_proof":{"status":"passed","method":"o3kd_env_backend_configuration"},
@@ -101,7 +209,7 @@ doc = {
     "schema_prepared":True,"fault_injection":"docker_restart","managed":True},
   "security_negatives":{"unauthenticated_join_rejected":True,"replay_join_rejected":True,
     "cross_tenant_concealment":True,"foreign_state_preserved":True},
-  "bootstrap_timing":{"measured":True,"sample_count":3,"boundary":"init request through ready state",
+  "bootstrap_timing":{"measured":True,"sample_count":3,"boundary":"fresh o3kd through five authenticated block joins",
     "excludes_preprovisioned_external_work":True,"claim_scope":"profile-specific-measurement-only"},
   "leak_check":{"status":"passed","owned_leaks":0,"owned_inconsistencies":0,"foreign_state_changes":0},
   "defect_ledger":{"status":"passed","blockers":0,"high":0,"medium":0},
@@ -208,6 +316,96 @@ if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
   echo "required Araf projection accepted by P15.7 validator" >&2; exit 1
 fi
 
+# Eligibility-based counting guards (issues #974/#1037 decision): the
+# bootstrap block must be inside the eligible set and the checkpoints must
+# carry per-block eligibility derivations.
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+# Restore the Araf mutation above so each eligibility guard fails on its own reason.
+d["journey"]["projections_convergent"]["araf"]["required"] = False
+d["scale_composition"]["enrolled_identities"]["agents"] = [a for a in d["scale_composition"]["enrolled_identities"]["agents"] if a != "compute-agent"]
+d["scale_composition"]["enrolled_identities"]["count"] = 5
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "bootstrap-excluding enrolled identity set accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+enrolled = d["scale_composition"]["enrolled_identities"]
+enrolled["agents"] = ["compute-agent"] + [a for a in ("block-a","block-b","block-c","block-d","block-e")]
+enrolled["count"] = 6
+initial = d["scale_composition"]["initial_concurrent_ready"]
+initial["block_ids"] = [b for b in initial["block_ids"] if b != d["scale_composition"]["bootstrap"]["block_id"]]
+initial["agents"] = [a for a in initial["agents"] if a != "compute-agent"]
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "bootstrap-excluding initial eligible set accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+# Restore the initial eligible set, then corrupt the #1042 requery: the
+# deleted workload must never read as a resident blocker.
+bootstrap_block = d["scale_composition"]["bootstrap"]["block_id"]
+initial = d["scale_composition"]["initial_concurrent_ready"]
+initial["block_ids"] = [bootstrap_block] + initial["block_ids"]
+initial["agents"] = ["compute-agent"] + initial["agents"]
+requery = d["journey"]["drain"]["blocker_requery"]
+requery["blockers_at_requery"] = [{"kind": "workload", "count": 1}]
+requery["deleted_workload_absent_from_blockers"] = False
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "stale-workload blocker requery accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+requery = d["journey"]["drain"]["blocker_requery"]
+requery["blockers_at_requery"] = []
+requery["deleted_workload_absent_from_blockers"] = True
+del d["journey"]["crash_injection_repair"]
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "crash-injection leg missing from P15.7 evidence accepted" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+maintenance = d["journey"]["host_maintenance"]
+maintenance["identity_preserved"]["same_resource_provider_ids"] = False
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "broken maintenance identity preservation accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+maintenance = d["journey"]["host_maintenance"]
+maintenance["identity_preserved"]["same_resource_provider_ids"] = True
+d["network_observation"]["child_vms"][0]["ssh_proof"] = False
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "SSH-less lease evidence accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+d["network_observation"]["child_vms"][0]["ssh_proof"] = True
+d["scale_composition"]["checkpoints"] = []
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "checkpoint-free evidence accepted by P15.7 validator" >&2; exit 1
+fi
+
 GATE_ARTIFACT_DIR="${WORK_DIR}/gate-artifacts"
 if O3K_P15_7_REAL_HOST=1 O3K_PROVIDER=fake \
    O3K_P15_7_SOURCE_SHA=0123456789abcdef0123456789abcdef01234567 \
@@ -237,10 +435,10 @@ bootstrap = Path(sys.argv[5]).read_text(encoding="utf-8")
 vm_address = Path(sys.argv[6]).read_text(encoding="utf-8")
 upload = workflow.split("- name: Upload redacted real-host artifacts", 1)[1].split("if-no-files-found:", 1)[0]
 assert "target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json" in upload
-for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block-c", "block-d", "block-e", "block-f", "o3k init",
-                 "bootstrap/join", "actions/drain", "actions/remove", "docker restart",
-                 "capacity_total", "CAPACITY_AFTER_ADD", "CAPACITY_AFTER_D", "CAPACITY_AFTER_E",
-                 "CAPACITY_AFTER_REMOVE", "CAPACITY_AFTER_F", "drain_blockers", "cargo test --locked -p o3kd",
+for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block-c", "block-d", "block-e", "o3k init",
+                 "bootstrap/join", "actions/drain", "actions/remove", "actions/ready", "docker restart",
+                 "capacity_total", "CAPACITY_AFTER_ADD", "CAPACITY_AFTER_D",
+                 "CAPACITY_AFTER_REMOVE", "CAPACITY_AFTER_E", "drain_blockers", "cargo test --locked -p o3kd",
                  "o3k-p15-7-journey-owned=", "o3k-p15-7-journey-owned-v1",
                  "rm -rf -- \"$WORK_ROOT\"", "second_real_host_required", "assert_owned_domains_absent",
                  "agent-id", "agent identity transfer failed", "/var/lib/o3k-compute/agent-id",
@@ -248,15 +446,25 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-c-uuid\")\"", "provision_vms_bounded",
                  "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-d-uuid\")\"",
                  "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-e-uuid\")\"",
-                 "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-f-uuid\")\"",
                  "capture-p15-7-provision-diagnostics.py", "p15-7-provisioning-diagnostics.json", "REPLAY_JOIN_FILE",
                  "REPLAY_JOIN_BY_AGENT[$DRAIN_AGENT]", "compute-agent-replay-join.json",
-                 "for agent in block-a block-b block-c block-d block-e block-f; do",
-                 "for required_agent in block-a block-b block-c block-d block-e block-f; do",
-                 "initial five BuildingBlocks are not concurrently Ready",
-                 "final BuildingBlock set is not concurrently Ready",
+                 "for agent in block-a block-b block-c block-d block-e; do",
+                 "for required_agent in block-a block-b block-c block-d block-e; do",
+                 "initial eligible Ready count is not exactly five",
+                 "post-replacement eligible Ready count is not exactly five",
                  "peak concurrent Ready count is below five",
-                 "drained block still present in canonical topology",
+                 "removed block {absent_id} is still present in the canonical topology",
+                 "record_scale_checkpoint", "p15-7-scale-checkpoint-",
+                 "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS",
+                 "kill9_o3kd_verified", "start_o3kd_verified", "read_o3kd_ledger",
+                 "server-owned endpoint orphan repair sweep",
+                 "p15-7-drain-blocker-requery.json",
+                 "p15-7-crash-injection-evidence.json",
+                 "p15-7-host-maintenance-evidence.json",
+                 "p15-7-vm-lease-", "p15-7-transient-failures.jsonl",
+                 "record_lease_evidence", "record_transient",
+                 "actions/ready",
+                 'virsh -c qemu:///system reboot "$MAINT_UUID"',
                  "restart_o3kd_verified",
                  "wait_o3kd_readyz",
                  "pg_proxy_dsn",
@@ -348,9 +556,12 @@ assert '-c OS-EXT-SRV-ATTR:host 2>/dev/null' in journey
 assert 'OS-EXT-SRV-ATTR:HOST' not in journey
 assert "--os-password" not in journey
 assert '! grep -Fq "$WORKLOAD_A" "$FOREIGN_SHOW"' not in journey
-# The protected workflows must authorize exactly the six journey identities.
+# The protected workflows must authorize exactly the five journey child
+# identities (the bootstrap compute-agent is enrolled by the canonical
+# bootstrap itself, not by this list).
 for workflow_text in (workflow, diagnostic):
-    assert "O3K_TESTLAB_ADDITIONAL_AGENT_IDS: block-a,block-b,block-c,block-d,block-e,block-f" in workflow_text
+    assert "O3K_TESTLAB_ADDITIONAL_AGENT_IDS: block-a,block-b,block-c,block-d,block-e" in workflow_text
+    assert "block-f" not in workflow_text
 for tenant_variable in ("O3K_EXTRA_TENANT_PROJECT_ID", "O3K_EXTRA_TENANT_PROJECT_NAME",
                         "O3K_EXTRA_TENANT_USER_ID", "O3K_EXTRA_TENANT_USER_NAME",
                         "O3K_EXTRA_TENANT_PASSWORD"):
@@ -367,15 +578,23 @@ assert 'p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$LIBVIRT_STORAGE
 assert 'p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert 'p15-7-libvirt-storage-pool.sh" cleanup "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert journey.index('p15-7-libvirt-storage-pool.sh" define') < journey.index('provision_vms_bounded block-a block-b')
-# S5 lifecycle ordering: the initial five identities must all be enrolled and
-# concurrently Ready before any drain; drain and removal precede the
-# replacement join; the replacement is measured against the post-removal
-# settled baseline, never against the pre-drain total.
-assert journey.index('blocks-initial-five.json') < journey.index('DRAIN_AGENT="$HOST_A"')
-assert journey.index('install_agent block-e "${IPS[4]}"') < journey.index('DRAIN_AGENT="$HOST_A"')
-assert journey.index('actions/drain') < journey.index('actions/remove')
-assert journey.index('actions/remove') < journey.index('join_block block-f "${IPS[5]}"')
-assert journey.index('capacity-after-remove.json') < journey.index('capacity-after-f.json')
+# S5 lifecycle ordering: the eligibility-based initial checkpoint must run
+# after block-a..block-d join and before any drain; the #1042 blocker requery
+# sits between the workload deletion and the remove; drain and removal
+# precede the block-e replacement join; the replacement is measured against
+# the post-removal settled baseline, never against the pre-drain total; the
+# #1035 crash leg and the #1033 maintenance leg run after the post-replacement
+# checkpoint and before the historical late restart gate.
+assert journey.index('record_scale_checkpoint initial-scale-checkpoint') < journey.index('DRAIN_AGENT="$HOST_A"')
+assert journey.index('install_agent block-d "${IPS[3]}"') < journey.index('DRAIN_AGENT="$HOST_A"')
+assert journey.index('actions/drain') < journey.index('drain-blocker-requery.json')
+assert journey.index('drain-blocker-requery.json') < journey.index('actions/remove')
+assert journey.index('actions/remove') < journey.index('join_block block-e "${IPS[4]}"')
+assert journey.index('capacity-after-remove.json') < journey.index('capacity-after-e.json')
+assert journey.index('record_scale_checkpoint post-replacement') < journey.index('# ── #1035 crash-injection leg')
+assert journey.index('# ── #1035 crash-injection leg') < journey.index('# ── #1033 host-maintenance leg')
+assert journey.index('restart_o3kd_verified\nwait_o3kd_readyz "readyz did not reconstruct after restart"') < journey.index('# ── #1035 crash-injection leg')
+assert journey.index('record_scale_checkpoint post-crash-repair') < journey.index('record_scale_checkpoint post-maintenance')
 # External-mode PostgreSQL wiring: the restart helper is defined before the
 # wiring, the env rewrite immediately precedes the restart, the canonical
 # bootstrap identity is re-established before readiness is required, and the

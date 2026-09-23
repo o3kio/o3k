@@ -75,12 +75,16 @@ it, not rebuild it.
 2. **Exact release-artifact install.** The journey builds `o3kd`/`o3k`/`o3k-compute`
    from the local tree (`scripts/bootstrap-disposable-testlab.sh:458-465`).
    SPEC-0048 §6 requires "target hosts must not compile O3K from source".
-3. **Declared scale beyond 4 hosts.** The journey's four block ids are
-   hardcoded (`:208-218`); no path to 5–20 hypervisors.
+3. **Declared scale beyond 5 child hosts.** The journey's topology is the
+   bootstrap compute-agent plus five child identities (`block-a`..`block-e`,
+   four initial + one replacement); tiers beyond S5 (S10/S20) still have no
+   path.
 4. **Deliberate durable-workflow interruption.** The journey restarts the
    control plane only after workloads have settled (`:1017` then `:1086`).
    Nothing kills a control plane mid-create/delete/drain, and no compute,
-   network, or storage lifecycle operation is fault-injected.
+   network, or storage lifecycle operation is fault-injected. (The #1035
+   crash-injection leg now kills o3kd mid-delete in the S5 journey; the
+   carried-in-debt wording above it predates that leg.)
 5. **Soak / endurance.** No soak harness exists anywhere in `tests/` or `scripts/`.
 6. **Evidence binding.** `p15-7-scale-composition-evidence.json` binds source SHA
    and profile only. It does **not** bind a release artifact digest, SBOM,
@@ -441,12 +445,20 @@ the host above supports it at ~2 vCPU / 2 GiB per guest.
 
 ### 12.2 First installation
 
-The first execution step is a **5-host first installation** (`S5`), deliberately
-below the declared `S3`/`S10`/`S20` tiers: prove that five genuine nested-KVM
-hosts can be provisioned, joined, given canonical topology and ResourceProvider
-capacity, and torn down with zero owned leakage, *before* scaling. `S5` is a
-stepping stone, not a tier substitution — the declared tiers in §4.1 remain the
-acceptance targets.
+The first execution step is a **5-eligible-host first installation** (`S5`),
+deliberately below the declared `S3`/`S10`/`S20` tiers: prove that five
+genuine capacity hosts can be provisioned, joined, given canonical topology
+and ResourceProvider capacity, and torn down with zero owned leakage,
+*before* scaling. The S5 topology is the **bootstrap compute-agent plus four
+child hypervisors** concurrently eligible — the bootstrap agent is genuine
+Small Edge capacity by product design (SPEC-0048 §4.1/§5, issues #974/#1037
+decision) — with a **fifth child identity** (`block-e`) enrolled for the
+drain/remove/replacement cycle. Scale cardinality is counted on the
+eligibility rule (Ready + compute-capable + Placement-eligible), never on VM
+count, configured ids, host labels, or `block-` name prefixes: the journey
+asserts exactly five eligible Ready BuildingBlocks initially and finally.
+`S5` is a stepping stone, not a tier substitution — the declared tiers in
+§4.1 remain the acceptance targets.
 
 ### 12.3 Status
 
@@ -462,7 +474,7 @@ acceptance targets.
 | PP.5 evidence validator + CI gate | delivered — 26 validator cases, `rust`-job step, fail-closed `pp5-evidence-certify` workflow |
 | PostgreSQL provider modes (`external` / `disposable`) | delivered in the P15.7 journey config layer; external-mode fault injection via a run-owned proxy |
 | 5-host first installation | **provisioning proven** — 5 genuine nested-KVM hosts up with `/dev/kvm`, `svm`, 2 vCPU / ~1967 MiB, SSH reachable |
-| 5-host O3K lifecycle campaign | not yet run — the journey still carries 4 canonical block identities; the 5th is a separate increment |
+| 5-eligible-host O3K lifecycle journey (S5) | **topology and counting updated** — bootstrap compute-agent + 4 initial children + `block-e` replacement; eligibility-based counting (exactly 5 initial/final eligible Ready) with per-phase checkpoint identity sets; #1042 blocker re-query, #1035 crash-injection leg, and #1033 host-maintenance leg wired into `scripts/p15-7-real-host-journey.sh` — **not yet executed on the protected host** |
 | declared tiers `S3`/`S10`/`S20`, `K-min`/`K-full` | not started (deliberate — this run is the S5 foundation) |
 | #1033 host-reboot contract | **decided and documented** (`docs/operations/pp5-host-maintenance.md`); S5 maintenance journey not yet run |
 
@@ -508,11 +520,13 @@ acceptance targets.
    it does not check `observed_state`, while `finish_lifecycle` leaves
    `desired_state` intact on delete. On SQLite (which always returned
    tombstones) that means a deleted workload may still be reported as a
-   resident workload blocker. This is pre-existing and unchanged by the parity
-   fix, but it bears directly on the drain contract's promise to "report
-   resident blockers honestly", so the S5 drain journey must establish
-   empirically whether a deleted workload clears the blocker, and a defect gets
-   its own issue if it does not.
+   resident workload blocker. The tombstone skip is now implemented in
+   `derived_blockers` (issue #1042), and the S5 journey establishes it
+   empirically: after workload A's deletion is confirmed (404) and before the
+   remove is issued, the journey re-queries the drained block and requires
+   the deleted workload to be absent from the durable `drain_blockers`
+   projection, failing closed otherwise. The re-query evidence is recorded
+   under `journey.drain.blocker_requery`.
 5. **Shared-database PostgreSQL reset races.** See §8.1 item 7.
 6. **`PostgresStore::connect` backfill validation can fail on a dirty shared
    database.** Its canonical-network backfill validates existing rows before

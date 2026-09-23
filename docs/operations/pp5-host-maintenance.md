@@ -131,7 +131,28 @@ The contract is verified by the S5 maintenance journey, which must prove:
 9. no duplicate canonical objects exist;
 10. foreign libvirt state is unchanged.
 
-Until that journey passes, host reboot is not used as a PP.5 acceptance signal.
+The S5 journey topology is the bootstrap compute-agent plus four child
+hypervisors (`block-a`..`block-d`) concurrently eligible, with a fifth child
+identity (`block-e`) enrolled for the drain/remove/replacement cycle. Scale
+cardinality is counted on the **eligibility rule**, not on VM count,
+configured ids, host labels, or `block-` name prefixes: a BuildingBlock
+counts when it is Ready, compute-capable (a live Placement ResourceProvider),
+Placement-eligible (its provider is `Enabled`, no recorded drain blockers) —
+and the bootstrap block counts, by product design (SPEC-0048 §4.1/§5). The
+journey therefore asserts exactly five eligible Ready BuildingBlocks
+initially and finally, and records the full per-block identity set at every
+phase checkpoint.
+
+Items 2–5 and 6–10 are additionally exercised by the dedicated legs of the
+journey: the #1042 blocker re-query (a deleted workload must be absent from
+the drained block's durable blocker projection before removal) and the #1033
+host-maintenance leg (drain → placement rejection → guest reboot → agent
+reconnect → identity preservation → canonical `Draining -> Ready` operator
+transition, which exists in the BuildingBlock state machine and reopens
+capacity only after the durable block reaches Ready).
+
+Until that journey passes, host reboot is not used as a PP.5 acceptance
+signal.
 
 ## Non-goals
 
