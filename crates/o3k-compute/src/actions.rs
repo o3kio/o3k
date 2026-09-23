@@ -2,7 +2,7 @@ use super::{
     AuthContext, BTreeSet, ComputeError, ComputeProvider, ComputeService, CreateInstanceRequest,
     DeleteInstanceRequest, Duration, InstanceAction, LifecycleAction, MutationReceipt,
     ProviderError, ReconcileError, ResourceId, ResourceTarget, ResourceType, Scheduler,
-    SchedulerFlavor, Server, ServerId, ServerState, StoreError, Uuid,
+    SchedulerFlavor, Server, ServerId, ServerState, StoreError, Uuid, test_fault_pause_ms,
 };
 
 use o3k_kernel::{ActionId, AuditEvent, AuditOutcome, AuthorizationRequest, ServiceNamespace};
@@ -534,6 +534,14 @@ impl ComputeService {
             self.release_placement_allocation(id.as_uuid(), &intent)
                 .await?;
             self.store.detach_server_keypair(id.as_uuid()).await?;
+            // #1035 crash-window failpoint: the terminal delete is durably
+            // committed and no endpoint release has run. Killed here, the
+            // server is DELETED while its `o3k-server:` endpoint stays behind;
+            // the shipped orphan-repair sweep is the repair authority.
+            test_fault_pause_ms(
+                "before-endpoint-release",
+                "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS",
+            );
             // The delete completed here, so this request owns the outcome: a
             // server-owned endpoint that could not be released fails the
             // mutation (the durable delete stays terminal, and a replay retries
@@ -629,6 +637,14 @@ impl ComputeService {
         self.release_placement_allocation(id.as_uuid(), &intent)
             .await?;
         self.store.detach_server_keypair(id.as_uuid()).await?;
+        // #1035 crash-window failpoint: the terminal delete is durably
+        // committed and no endpoint release has run. Killed here, the
+        // server is DELETED while its `o3k-server:` endpoint stays behind;
+        // the shipped orphan-repair sweep is the repair authority.
+        test_fault_pause_ms(
+            "before-endpoint-release",
+            "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS",
+        );
         // Request owns the outcome: a server-owned endpoint that could not be
         // released fails the mutation rather than reporting a converged delete.
         self.project_terminal_binding_outcome(
