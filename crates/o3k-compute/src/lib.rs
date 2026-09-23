@@ -2785,6 +2785,12 @@ mod tests {
         let task = service.spawn_create_convergence_reconciler(1);
         // The first drive(s) hit the empty registry; the operation must stay
         // re-drivable and never become terminal Failed.
+        // Each of the two waits below is an independent convergence property,
+        // so each gets its own freshly-armed budget. A single deadline shared
+        // across both sequential loops is wrong: a first wait deferred by
+        // external load consumes most of the shared deadline, leaving the
+        // second wait to fail its assertion even though convergence is
+        // genuinely occurring (issue #1040).
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while provider.create_attempts() == 0 {
             assert!(
@@ -2800,7 +2806,10 @@ mod tests {
         );
         // The agent re-registers (reconnect backoff completed); a later sweep
         // tick re-dispatches the create and the provider reports the running
-        // instance observation.
+        // instance observation. Re-arm a fresh budget: the first wait above
+        // already consumed part of its own deadline, and this second wait must
+        // not inherit that consumption.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         provider.register();
         loop {
             let operation = store.get_operation(request.operation_id).await?;
@@ -2813,14 +2822,30 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert_eq!(provider.instance_count(), 1);
-        assert_eq!(
-            store
+        // The terminal operation state and the ACTIVE projection are separate
+        // committed writes on the create-observation path (the atomic
+        // terminalization primitive covers lifecycle finishes, not create
+        // projections), so poll the projection with a bounded deadline instead
+        // of asserting it synchronously — under parallel load the gap between
+        // the two writes stretches and a synchronous assert flakes (issue
+        // #1040 family: test timing, not a production budget regression).
+        let projection_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if store
                 .get_resource(request.o3k_server_id)
                 .await?
-                .observed_state,
-            "ACTIVE"
-        );
+                .observed_state
+                == "ACTIVE"
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < projection_deadline,
+                "create convergence sweep did not project ACTIVE after the operation succeeded"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(provider.instance_count(), 1);
         task.abort();
         let _ = task.await;
         Ok(())

@@ -782,10 +782,15 @@ mod tests {
         // process exits nonzero shortly after spawn. The exit is delayed past
         // the supervisor's spawn-time try_wait, so pre-fix this start
         // succeeds; the post-spawn liveness window must fail it closed.
+        // The artificial delay must stay comfortably inside LIVENESS_GRACE
+        // (500ms) even under maximal parallel-test CPU load: a starved
+        // `sleep 0.2` can overrun the window and flake this assertion (issue
+        // #1044), which is a test-setup margin problem, not a production
+        // budget bug.
         let binary = root.join("dies-after-spawn.sh");
         fs::write(
             &binary,
-            "#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$arg\" = \"--test\" ] && exit 0\ndone\nsleep 0.2\nexit 1\n",
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$arg\" = \"--test\" ] && exit 0\ndone\nsleep 0.02\nexit 1\n",
         )
         .map_err(DhcpError::Storage)?;
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
