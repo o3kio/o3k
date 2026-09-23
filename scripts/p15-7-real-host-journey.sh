@@ -377,7 +377,8 @@ stop_o3kd_orderly() {
   local pid="$1"
   sudo -n kill -0 "$pid" 2>/dev/null || die "owned o3kd is not running"
   sudo -n kill "$pid"; for _ in $(seq 1 30); do sudo -n kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-  sudo -n kill -0 "$pid" 2>/dev/null && die "owned o3kd did not stop"
+  if sudo -n kill -0 "$pid" 2>/dev/null; then die "owned o3kd did not stop"; fi
+  return 0
 }
 kill9_o3kd_verified() {
   # True process death for the #1035 crash-injection leg: identity-verified
@@ -389,7 +390,7 @@ kill9_o3kd_verified() {
   sudo -n kill -0 "$pid" 2>/dev/null || die "owned o3kd is not running"
   sudo -n kill -9 "$pid"
   for _ in $(seq 1 30); do sudo -n kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-  sudo -n kill -0 "$pid" 2>/dev/null && die "owned o3kd survived SIGKILL"
+  if sudo -n kill -0 "$pid" 2>/dev/null; then die "owned o3kd survived SIGKILL"; fi
   printf '%s\n' "$pid"
 }
 restart_o3kd_verified() {
@@ -919,6 +920,7 @@ assert_owned_domains_absent() {
   for p in "${SEEDS[@]}" "${OVERLAYS[@]}"; do
     [[ ! -e "$p" ]] || die "owned VM artifact remains after cleanup: $p"
   done
+  return 0
 }
 virsh -c qemu:///system net-info "$NETWORK" >/dev/null 2>&1 || die "libvirt network unavailable"
 # libvirt's XML serializer may use either single- or double-quoted attribute
