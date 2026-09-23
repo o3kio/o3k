@@ -7,15 +7,33 @@ use o3k_store::{
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
     CanonicalNetworkRecord, NetworkRepository, PortRecord, PostgresStore, StoreError, SubnetRecord,
 };
-use sqlx::{PgPool, Row, postgres::PgPoolOptions};
-use tokio::sync::Mutex;
+use sqlx::{
+    Connection, PgPool, Row,
+    postgres::{PgConnection, PgPoolOptions},
+};
 use uuid::Uuid;
-
-static TEST_DATABASE_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn database_url() -> String {
     std::env::var("O3K_DATABASE_URL")
         .expect("O3K_DATABASE_URL must be set for P13.1F1 PostgreSQL conformance")
+}
+
+/// Acquires a session-level advisory lock on the shared PostgreSQL test
+/// database, held by a dedicated connection for the caller's entire test.
+/// The shared `o3k-shared-test-database` key serializes every test group that
+/// destructively resets the database (this file, `pp4_endpoint_lifecycle`, and
+/// group C's conformance/postgres_ops helpers) against each other, even across
+/// separate `cargo test` processes. Matches
+/// `o3k_store::conformance::prepare_shared_postgres_test_database`.
+async fn acquire_database_guard(url: &str) -> PgConnection {
+    let mut connection = PgConnection::connect(url)
+        .await
+        .expect("connect to the shared PostgreSQL conformance database");
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+        .execute(&mut connection)
+        .await
+        .expect("acquire the shared PostgreSQL test-database advisory lock");
+    connection
 }
 
 async fn fresh_pool(url: &str) -> PgPool {
@@ -123,8 +141,8 @@ async fn seed_legacy_state(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
 #[tokio::test]
 #[ignore = "requires the configured PostgreSQL conformance database"]
 async fn postgres_p13_f1_migrates_and_reopens_canonical_network_state() {
-    let _database_guard = TEST_DATABASE_LOCK.lock().await;
     let url = database_url();
+    let _database_guard = acquire_database_guard(&url).await;
     let pool = fresh_pool(&url).await;
     apply_legacy_migrations(&pool).await;
     let (network_a, network_b, realm_a, endpoint_a) = seed_legacy_state(&pool).await;
@@ -312,8 +330,8 @@ async fn postgres_p13_f1_migrates_and_reopens_canonical_network_state() {
 #[tokio::test]
 #[ignore = "requires the configured PostgreSQL conformance database"]
 async fn postgres_p13_f1_invalid_legacy_state_fails_closed() {
-    let _database_guard = TEST_DATABASE_LOCK.lock().await;
     let url = database_url();
+    let _database_guard = acquire_database_guard(&url).await;
     let pool = fresh_pool(&url).await;
     apply_legacy_migrations(&pool).await;
     let network = Uuid::from_u128(0x1401);
@@ -356,8 +374,8 @@ async fn postgres_p13_f1_invalid_legacy_state_fails_closed() {
 #[tokio::test]
 #[ignore = "requires the configured PostgreSQL conformance database"]
 async fn postgres_p13_2a_network_rename_updates_projection_and_reopens() {
-    let _database_guard = TEST_DATABASE_LOCK.lock().await;
     let url = database_url();
+    let _database_guard = acquire_database_guard(&url).await;
     let pool = fresh_pool(&url).await;
     let network_id = Uuid::from_u128(0x13a1);
 
@@ -464,8 +482,8 @@ async fn postgres_p13_2a_network_rename_updates_projection_and_reopens() {
 #[tokio::test]
 #[ignore = "requires the configured PostgreSQL conformance database"]
 async fn postgres_p13_2b_subnet_bundle_cardinality_and_delete_reopen() {
-    let _database_guard = TEST_DATABASE_LOCK.lock().await;
     let url = database_url();
+    let _database_guard = acquire_database_guard(&url).await;
     let pool = fresh_pool(&url).await;
     let network_id = Uuid::from_u128(0x13b1);
     let realm_id = Uuid::from_u128(0x13b2);
@@ -605,8 +623,8 @@ async fn postgres_p13_2b_subnet_bundle_cardinality_and_delete_reopen() {
 #[tokio::test]
 #[ignore = "requires the configured PostgreSQL conformance database"]
 async fn postgres_p13_2c_endpoint_port_atomic_lifecycle_and_reopen() {
-    let _database_guard = TEST_DATABASE_LOCK.lock().await;
     let url = database_url();
+    let _database_guard = acquire_database_guard(&url).await;
     let pool = fresh_pool(&url).await;
     let network_id = Uuid::from_u128(0x13c1);
     let realm_id = Uuid::from_u128(0x13c2);

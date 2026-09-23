@@ -8,6 +8,7 @@ use std::{
 use o3k_kernel::{AuditQuery, DurableAuditRepository, OwnershipScope, ScopeId};
 use o3k_store::{AuditEventRecord, AuditRepository, PostgresStore, StoreError};
 use sqlx::postgres::PgPoolOptions;
+use sqlx::{Connection, postgres::PgConnection};
 
 fn event(id: &str, scope: &str) -> AuditEventRecord {
     AuditEventRecord {
@@ -39,9 +40,37 @@ async fn store() -> Option<PostgresStore> {
     Some(store)
 }
 
+/// Acquires a session-level advisory lock on the shared PostgreSQL test
+/// database, held by a dedicated connection for the caller's entire test
+/// (issue #1043). The shared `o3k-shared-test-database` key serializes every
+/// destructive shared-DB mutation (here the `audit_events` DELETE in
+/// `store()`) against the other shared-DB test groups even across separate
+/// `cargo test` processes -- unlike the in-process `test_lock`, which cannot
+/// see other processes. Returns `None` when the database is unavailable so
+/// callers can skip like the existing fixture helpers. Matches
+/// `o3k_store::conformance::prepare_shared_postgres_test_database`.
+async fn acquire_database_guard(url: &str) -> Option<PgConnection> {
+    let mut connection = PgConnection::connect(url).await.ok()?;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+        .execute(&mut connection)
+        .await
+        .ok()?;
+    Some(connection)
+}
+
 #[tokio::test]
 async fn postgres_unified_audit_query_pushes_all_supported_filters() {
     let _guard = test_lock().await;
+    let Some(url) = std::env::var("O3K_DATABASE_URL").ok() else {
+        eprintln!("skipping PostgreSQL unified Audit query: O3K_DATABASE_URL unavailable");
+        return;
+    };
+    let Some(_postgres_guard) = acquire_database_guard(&url).await else {
+        eprintln!(
+            "skipping PostgreSQL unified Audit query: cannot acquire shared test-database guard"
+        );
+        return;
+    };
     let Some(store) = store().await else {
         eprintln!("skipping PostgreSQL unified Audit query: O3K_DATABASE_URL unavailable");
         return;
@@ -205,6 +234,16 @@ async fn test_lock() -> tokio::sync::MutexGuard<'static, ()> {
 #[tokio::test]
 async fn postgres_audit_repository_conformance() {
     let _guard = test_lock().await;
+    let Some(url) = std::env::var("O3K_DATABASE_URL").ok() else {
+        eprintln!("skipping PostgreSQL Audit conformance: O3K_DATABASE_URL unavailable");
+        return;
+    };
+    let Some(_postgres_guard) = acquire_database_guard(&url).await else {
+        eprintln!(
+            "skipping PostgreSQL Audit conformance: cannot acquire shared test-database guard"
+        );
+        return;
+    };
     let Some(store) = store().await else {
         eprintln!("skipping PostgreSQL Audit conformance: O3K_DATABASE_URL unavailable");
         return;

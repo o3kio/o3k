@@ -41,6 +41,7 @@ use o3k_store::ComputeRepository;
 use o3k_store::DurableStore;
 use o3k_store::unified::O3kStore;
 use serde_json::{Value, json};
+use sqlx::{Connection, postgres::PgConnection};
 use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
@@ -1919,6 +1920,24 @@ async fn clean_postgres(url: &str) {
         .expect("clean the PostgreSQL conformance tables at test start");
 }
 
+/// Acquires a session-level advisory lock on the shared PostgreSQL test
+/// database, held by a dedicated connection for the caller's entire test. The
+/// shared `o3k-shared-test-database` key serializes every test group that
+/// destructively resets the database — the `postgres_p13_f1` suite and group
+/// C's `conformance`/`postgres_ops` helpers in o3k-store — against each other,
+/// even across separate `cargo test` processes. Matches
+/// `o3k_store::conformance::prepare_shared_postgres_test_database`.
+async fn acquire_postgres_database_guard(url: &str) -> PgConnection {
+    let mut connection = PgConnection::connect(url)
+        .await
+        .expect("connect to the configured PostgreSQL conformance database");
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+        .execute(&mut connection)
+        .await
+        .expect("acquire the shared PostgreSQL test-database advisory lock");
+    connection
+}
+
 /// Builds the production harness over PostgreSQL on a fresh temp root.
 async fn build_postgres(
     url: String,
@@ -2046,6 +2065,7 @@ async fn postgres_interrupted_delete_orphan_is_repaired_and_reuse_is_restored()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _pg_test_lock_guard = PG_TEST_DATABASE_LOCK.lock().await;
     let url = postgres_test_url();
+    let _database_guard = acquire_postgres_database_guard(&url).await;
     // Clean once at test start only; never between the crash and the repair.
     clean_postgres(&url).await;
 
@@ -2229,6 +2249,7 @@ async fn postgres_bound_orphan_is_unbound_and_released_by_the_shipped_sweep()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _pg_test_lock_guard = PG_TEST_DATABASE_LOCK.lock().await;
     let url = postgres_test_url();
+    let _database_guard = acquire_postgres_database_guard(&url).await;
     clean_postgres(&url).await;
 
     let fail_unbind = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -2349,6 +2370,7 @@ async fn postgres_concurrent_sweeps_and_delete_replay_converge_once()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _pg_test_lock_guard = PG_TEST_DATABASE_LOCK.lock().await;
     let url = postgres_test_url();
+    let _database_guard = acquire_postgres_database_guard(&url).await;
     clean_postgres(&url).await;
 
     let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -2442,6 +2464,7 @@ async fn postgres_orphan_endpoint_re_attached_by_live_server_is_skipped_and_rele
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _pg_test_lock_guard = PG_TEST_DATABASE_LOCK.lock().await;
     let url = postgres_test_url();
+    let _database_guard = acquire_postgres_database_guard(&url).await;
     clean_postgres(&url).await;
 
     let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));

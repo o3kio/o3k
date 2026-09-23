@@ -2411,20 +2411,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_postgres_conformance() {
-        let db_url = std::env::var("O3K_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://o3k:password@127.0.0.1/o3k_test".to_owned());
-        if let Some(_database_guard) = prepare_shared_postgres_test_database(&db_url).await {
-            let store = PostgresStore::connect(&db_url)
-                .await
-                .expect("connect to Postgres");
-            store
-                .clean_tables_for_testing()
-                .await
-                .expect("clean tables");
-            run_all_conformance_tests(Arc::new(store)).await;
-        } else {
+        // A configured backend is a requirement, not a hint. The whole point of
+        // this arm is to prove the PostgreSQL adapter, so an unreachable
+        // server must fail the suite when the backend was explicitly
+        // configured — otherwise `cargo test -p o3k-store` passes without ever
+        // exercising PostgreSQL. Only the unconfigured local default may skip.
+        let configured = std::env::var("O3K_DATABASE_URL").ok();
+        let db_url = configured
+            .clone()
+            .unwrap_or_else(|| "postgres://o3k:password@127.0.0.1/o3k_test".to_owned());
+        let Some(_database_guard) = prepare_shared_postgres_test_database(&db_url).await else {
+            assert!(
+                configured.is_none(),
+                "O3K_DATABASE_URL is configured but the PostgreSQL conformance database \
+                 could not be prepared; the PostgreSQL adapter is unproven"
+            );
             eprintln!("Skipping test_postgres_conformance: no Postgres instance available");
-        }
+            return;
+        };
+        let store = PostgresStore::connect(&db_url)
+            .await
+            .expect("connect to Postgres");
+        store
+            .clean_tables_for_testing()
+            .await
+            .expect("clean tables");
+        run_all_conformance_tests(Arc::new(store)).await;
     }
 
     /// Process-restart shape for the terminalization pair (issue #1041):
