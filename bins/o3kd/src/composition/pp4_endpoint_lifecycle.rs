@@ -1040,6 +1040,65 @@ async fn transient_release_failure_is_reported_and_repaired_by_replay()
     Ok(())
 }
 
+/// The #1035 crash-window failpoint must hold on the terminal release seat, not
+/// only on the first-pass delete path: a delete whose convergence completed
+/// before the request's own pass reaches this seat on a replay, and the crash
+/// window is exactly the state before this release runs. The seam takes the
+/// pause value as a parameter, so the failpoint is exercised without mutating
+/// the process environment.
+#[tokio::test]
+async fn terminal_release_seat_honours_the_endpoint_release_failpoint()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let fail_next: Arc<std::sync::Mutex<Option<Uuid>>> = Arc::new(std::sync::Mutex::new(None));
+    let wrapper: ProjectorWrapper = {
+        let fail_next = fail_next.clone();
+        Arc::new(move |_network, inner| {
+            Arc::new(FaultInjectingProjector::wrap(inner, fail_next.clone()))
+        })
+    };
+    let harness = Harness::build_with(Some(wrapper)).await?;
+    let network_id = harness.network_id;
+    let (status, body) = harness
+        .compat_create("pp4-failpoint", json!([{"uuid": network_id.to_string()}]))
+        .await?;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let id = body["server"]["id"].as_str().expect("server id").to_owned();
+    let ports = harness.intent_ports(&id).await?;
+    assert_eq!(ports.len(), 1);
+
+    // Leave exactly the #1035 interruption state: durable terminal delete with
+    // the server-owned endpoint still present.
+    *fail_next.lock().expect("fault slot") = Some(ports[0]);
+    let (status, body) = harness.native_delete(&id).await;
+    assert!(
+        status.is_server_error(),
+        "a failed endpoint release must fail the delete mutation: {status} {body}"
+    );
+    assert!(harness.port_present(ports[0]).await);
+
+    let resource = harness.store.get_resource(Uuid::parse_str(&id)?).await?;
+    let intent: o3k_provider::CreateInstanceRequest =
+        serde_json::from_str(&resource.desired_state)?;
+    let pause_ms = 1_200u64;
+    let started = std::time::Instant::now();
+    harness
+        .compute
+        .release_server_endpoints_from_intent_with_pause(&intent, Some(pause_ms))
+        .await?;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= std::time::Duration::from_millis(pause_ms),
+        "the terminal release seat did not honour the endpoint-release failpoint (elapsed {elapsed:?})"
+    );
+    assert!(
+        !harness.port_present(ports[0]).await,
+        "the release seat must still release the endpoint after the pause"
+    );
+
+    harness.cleanup();
+    Ok(())
+}
+
 // ─── PP.5 #1035 — orphaned server-owned endpoint repair ───────────────────
 
 /// Simulates a control plane that died between the durable terminal delete and

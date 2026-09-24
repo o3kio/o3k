@@ -460,9 +460,36 @@ impl ComputeService {
         &self,
         request: &CreateInstanceRequest,
     ) -> Result<(), ComputeError> {
+        let pause_ms = crate::test_fault_pause_ms_value(
+            std::env::var("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS").ok(),
+        );
+        self.release_server_endpoints_from_intent_with_pause(request, pause_ms)
+            .await
+    }
+
+    /// The terminal release seat with the crash-window failpoint injected.
+    ///
+    /// #1035 crash-window failpoint: the durable delete is already terminal
+    /// when this runs — on the first pass, on a replay of an already-deleted
+    /// resource, or after the request path returned early and background
+    /// convergence reached terminal — so a process death here leaves exactly
+    /// the interruption window the orphan-repair sweep must repair. The
+    /// failpoint therefore has to hold on EVERY terminal release path; keeping
+    /// it only on the first-pass delete path made the window unreachable for
+    /// any delete whose convergence completed before the request's own pass.
+    ///
+    /// The pause value is a parameter so the seam is exercisable without
+    /// mutating the process environment (edition 2024 makes `set_var`
+    /// unsafe).
+    pub async fn release_server_endpoints_from_intent_with_pause(
+        &self,
+        request: &CreateInstanceRequest,
+        pause_ms: Option<u64>,
+    ) -> Result<(), ComputeError> {
         let Some(projector) = self.binding_projector.as_ref() else {
             return Ok(());
         };
+        crate::test_fault_pause_ms_with("before-endpoint-release", pause_ms);
         // Serialize the [referenced-scan -> release] window against port-attaching
         // creates and the orphan sweep, so a create that wins the race is never
         // clipped by this replay seat and a port the sweep just released is

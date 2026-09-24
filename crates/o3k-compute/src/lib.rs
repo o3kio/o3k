@@ -63,7 +63,14 @@ pub use attachment::AttachmentOrchestrator;
 /// named env var is set. Absent, empty, non-numeric, or zero values are no-ops;
 /// production configuration never sets these variables.
 fn test_fault_pause_ms(name: &str, env_var: &str) {
-    let Some(ms) = test_fault_pause_ms_value(std::env::var(env_var).ok()) else {
+    test_fault_pause_ms_with(name, test_fault_pause_ms_value(std::env::var(env_var).ok()));
+}
+
+/// The unconditional half of `test_fault_pause_ms`, split out so a caller can
+/// inject the pause value and tests can exercise the failpoint seam without
+/// mutating the process environment.
+fn test_fault_pause_ms_with(name: &str, ms: Option<u64>) {
+    let Some(ms) = ms else {
         return;
     };
     tracing::warn!(pause_ms = ms, "test-only fault pause {} engaged", name);
