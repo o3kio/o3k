@@ -391,6 +391,11 @@ def validate(
                         fail(errors, "unrelated DB-backed probe must succeed while endpoint release is paused")
                     if not isinstance(probe.get("latency_ms"), int) or probe["latency_ms"] < 0:
                         fail(errors, "unrelated DB-backed probe latency must be recorded")
+                    if probe.get("curl_exit") != 0:
+                        fail(errors, "unrelated DB-backed probe curl_exit must be zero")
+                    status_code = probe.get("status_code")
+                    if not isinstance(status_code, int) or not 200 <= status_code < 300:
+                        fail(errors, "unrelated DB-backed probe status_code must be 2xx")
             if crash.get("caller_supplied_endpoint_preserved") is not True:
                 fail(errors, "journey.crash_injection_repair.caller_supplied_endpoint_preserved must be true")
             if crash.get("foreign_project_endpoint_preserved") is not True:

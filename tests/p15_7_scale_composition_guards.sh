@@ -214,7 +214,7 @@ doc = {
       "quota":{"dimension":"network:ports","before":3,"after":3,"restored":True},
       "placement_allocation":{"vcpu_allocated_before":2,"vcpu_allocated_after":2,"leak":False},
       "responsiveness_during_backlog":{"orphan_present_at_create":True,
-        "unrelated_db_backed_probe":{"path":"/operator/diagnostics/providers?limit=1","succeeded":True,"latency_ms":43},
+        "unrelated_db_backed_probe":{"path":"/operator/diagnostics/providers?limit=1","succeeded":True,"latency_ms":43,"curl_exit":0,"status_code":200},
         "create_call_latency_ms":2100,
         "activation_latency_ms":41000,"server_active":True},
       "caller_supplied_endpoint_preserved":True,
@@ -279,8 +279,32 @@ python3 - "${EVIDENCE}" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
 d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["unrelated_db_backed_probe"] = {
-    "path":"/operator/diagnostics/providers?limit=1", "succeeded":True, "latency_ms":43}
+    "path":"/operator/diagnostics/providers?limit=1", "succeeded":True, "latency_ms":43,"curl_exit":0,"status_code":200}
 p.write_text(json.dumps(d))
+PY
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+probe=d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["unrelated_db_backed_probe"]
+probe["status_code"]=403; p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "crash-pause probe with non-2xx status accepted" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+probe=d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["unrelated_db_backed_probe"]
+probe["status_code"]=200; probe["curl_exit"]=28; p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "crash-pause probe with curl failure accepted" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+probe=d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["unrelated_db_backed_probe"]
+probe["curl_exit"]=0; p.write_text(json.dumps(d))
 PY
 DIAGNOSTIC_EVIDENCE="${WORK_DIR}/diagnostic-only.json"
 python3 - "${DIAGNOSTIC_EVIDENCE}" <<'PY'
@@ -670,6 +694,8 @@ for required in ("pool-list --all --name", "pool-dumpxml", "pool-define", "pool-
 assert 'cleanup-stale-diagnostic-images "${RUNNER_TEMP}"' in diagnostic
 assert 'cirros-0.6.3-x86_64-disk.img.p15-7-diagnostic-${GITHUB_RUN_ID}.XXXXXX' in diagnostic
 assert 'operator_curl() {' in journey
+assert 'operator_curl "$API/operator/diagnostics/providers?limit=1" --max-time 10' in journey
+assert 'Authorization: Bearer $PROJECT_TOKEN" \\\n  "$API/operator/diagnostics/providers?limit=1"' not in journey
 assert 'refresh_operator_authority' in journey
 assert 'scripts/p15-7-refresh-operator-authority.sh' in journey
 assert 'secure_remove_credentials() {' in journey

@@ -2363,13 +2363,18 @@ ENDPOINT_PRESENT_WHILE_PAUSED=true
 # not globally frozen: this independent DB-backed read must complete within a
 # bounded interval or the crash leg fails closed.
 UNRELATED_DB_PROBE_START_MS="$(date +%s%3N)"
-if curl --fail --silent --show-error --max-time 10 \
-  -H "Authorization: Bearer $PROJECT_TOKEN" \
-  "$API/operator/diagnostics/providers?limit=1" >"$WORK_ROOT/unrelated-db-probe.json" 2>/dev/null; then
+UNRELATED_DB_PROBE_HTTP_CODE="000"
+UNRELATED_DB_PROBE_CURL_EXIT=1
+set +e
+UNRELATED_DB_PROBE_HTTP_CODE="$(operator_curl "$API/operator/diagnostics/providers?limit=1" --max-time 10 \
+  -o "$WORK_ROOT/unrelated-db-probe.json" -w '%{http_code}' 2>"$WORK_ROOT/unrelated-db-probe.stderr")"
+UNRELATED_DB_PROBE_CURL_EXIT=$?
+set -e
+if [[ "$UNRELATED_DB_PROBE_CURL_EXIT" -eq 0 && "$UNRELATED_DB_PROBE_HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
   UNRELATED_DB_PROBE_OK=true
 fi
 UNRELATED_DB_PROBE_LATENCY_MS="$(( $(date +%s%3N) - UNRELATED_DB_PROBE_START_MS ))"
-[[ "$UNRELATED_DB_PROBE_OK" == true ]] || die "unrelated_db_backed_probe_failed_during_endpoint_release_pause"
+[[ "$UNRELATED_DB_PROBE_OK" == true ]] || die "unrelated_db_backed_probe_failed_during_endpoint_release_pause: curl_exit=$UNRELATED_DB_PROBE_CURL_EXIT http_status=$UNRELATED_DB_PROBE_HTTP_CODE"
 
 # True process death of the run-owned control plane while the release is
 # parked, then clear the fault and restart through the normal boot path.
@@ -2517,13 +2522,14 @@ python3 - "$CRASH_EVIDENCE_FILE" "$O3K_FAULT_ENV_NAME" "$O3K_FAULT_ENV_VALUE" "$
   "$CRASH_KILLED_PID" "$CRASH_TERMINAL_OBSERVED_MS" "$CRASH_REPAIR_OBSERVED_MS" "$CRASH_DELETE_HTTP_CODE" "$CRASH_SWEEP_PASSES" \
   "$QUOTA_BEFORE_CRASH" "$QUOTA_AFTER_CRASH" "$ALLOC_BEFORE_CRASH" "$ALLOC_AFTER_CRASH" "$D_CREATE_START_MS" "$D_CREATE_END_MS" "$D_ACTIVE_MS" \
   "$ENDPOINT_PRESENT_WHILE_PAUSED" "$ORPHAN_PRESENT_AT_D_CREATE" "$FIXED_IP_REUSABLE" "$CALLER_SUPPLIED_PRESERVED" "$FOREIGN_PRESERVED" \
-  "$UNRELATED_DB_PROBE_OK" "$UNRELATED_DB_PROBE_LATENCY_MS" <<'PY'
+  "$UNRELATED_DB_PROBE_OK" "$UNRELATED_DB_PROBE_LATENCY_MS" "$UNRELATED_DB_PROBE_CURL_EXIT" "$UNRELATED_DB_PROBE_HTTP_CODE" <<'PY'
 import json, pathlib, sys
 
 (out, env_name, env_value, workload, port_id, fixed_ip, killed_pid,
  terminal_ms, repair_ms, delete_code, sweep_passes, quota_before, quota_after,
  alloc_before, alloc_after, d_start, d_end, d_active, endpoint_paused,
- orphan_at_d, fixed_ip_reusable, caller_preserved, foreign_preserved, unrelated_probe_ok, unrelated_probe_latency_ms) = sys.argv[1:26]
+ orphan_at_d, fixed_ip_reusable, caller_preserved, foreign_preserved, unrelated_probe_ok, unrelated_probe_latency_ms,
+ unrelated_probe_curl_exit, unrelated_probe_http_code) = sys.argv[1:28]
 doc = {
     "status": "passed",
     "fault_hook": {"env": env_name, "pause_ms": int(env_value),
@@ -2546,7 +2552,7 @@ doc = {
     "placement_allocation": {"vcpu_allocated_before": int(alloc_before), "vcpu_allocated_after": int(alloc_after),
                              "leak": alloc_before != alloc_after},
     "responsiveness_during_backlog": {
-        "unrelated_db_backed_probe": {"path": "/operator/diagnostics/providers?limit=1", "succeeded": unrelated_probe_ok == "true", "latency_ms": int(unrelated_probe_latency_ms)},
+        "unrelated_db_backed_probe": {"path": "/operator/diagnostics/providers?limit=1", "succeeded": unrelated_probe_ok == "true", "latency_ms": int(unrelated_probe_latency_ms), "curl_exit": int(unrelated_probe_curl_exit), "status_code": int(unrelated_probe_http_code)},
         "orphan_present_at_create": orphan_at_d == "true",
         "create_call_latency_ms": int(d_end) - int(d_start),
         "activation_latency_ms": int(d_active),
