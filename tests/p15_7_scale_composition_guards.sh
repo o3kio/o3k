@@ -5,6 +5,45 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p15-7-guards.XXXXXX")"
 trap 'rm -rf -- "${WORK_DIR}"' EXIT
 EVIDENCE="${WORK_DIR}/evidence.json"
+PYTHONPATH="${ROOT_DIR}/scripts${PYTHONPATH:+:${PYTHONPATH}}" python3 - <<'PY'
+from p15_7_scale_semantics import validate_bootstrap_scale_membership
+
+bootstrap = "bootstrap-block"
+initial = {"blocks": [
+    {"block_id": bootstrap, "placement_eligible": True},
+    {"block_id": "a", "placement_eligible": True},
+]}
+
+# Placement may drain the bootstrap block. After removal and replacement, the
+# canonical eligible set is still five, and bootstrap is correctly absent.
+bootstrap_drained = {
+    "blocks": [{"block_id": "a", "placement_eligible": True}],
+    "bootstrap_expect": "absent",
+}
+validate_bootstrap_scale_membership(
+    initial, bootstrap_drained, bootstrap, "compute-agent", "compute-agent")
+
+# When a child is drained, the bootstrap identity remains eligible.
+child_drained = {
+    "blocks": [{"block_id": bootstrap, "placement_eligible": True}],
+    "bootstrap_expect": "present",
+}
+validate_bootstrap_scale_membership(
+    initial, child_drained, bootstrap, "block-a", "compute-agent")
+
+for final, drain_agent in (
+    ({"blocks": [], "bootstrap_expect": "absent"}, "block-a"),
+    ({"blocks": [{"block_id": bootstrap, "placement_eligible": True}],
+      "bootstrap_expect": "present"}, "compute-agent"),
+):
+    try:
+        validate_bootstrap_scale_membership(
+            initial, final, bootstrap, drain_agent, "compute-agent")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("inconsistent bootstrap checkpoint was accepted")
+PY
 # The mandatory P15.7 path must remain valid when no Araf endpoint is
 # configured at all.  Keep this explicit so a future environment-level
 # prerequisite cannot accidentally turn the optional consumer into a gate.
