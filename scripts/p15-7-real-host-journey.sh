@@ -490,6 +490,36 @@ capture_failure_diagnostics() {
     tail -n 2000 "$STATE_ROOT/log/o3kd.log" >"$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
     chmod 0600 "$ARTIFACT_DIR/pg-proxy.log" "$ARTIFACT_DIR/pg-proxy.pid" "$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
   fi
+  # Hang forensics: two exact-head S5 runs (e0d690f7, 8fd6f828) hung o3kd
+  # within ~60 s of the fault-hook-armed restart, with the API dead for
+  # minutes and no error logs.  Capture per-thread kernel stacks, per-thread
+  # state/syscall, live TCP state, and (when available) a native backtrace
+  # so the recurrence is diagnosed from first evidence.  Fail open: this
+  # capture must never turn a failure into a different failure.
+  local hang_pid=""
+  hang_pid="$(sudo -n pgrep -u "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -x o3kd 2>/dev/null | head -n 1 || true)"
+  if [[ "$hang_pid" =~ ^[0-9]+$ ]]; then
+    mkdir -p "$ARTIFACT_DIR/o3kd-hang" 2>/dev/null || true
+    sudo -n bash -c '
+      pid="$1"
+      for task in /proc/"$pid"/task/*; do
+        tid="${task##*/}"
+        printf "== tid=%s comm=%s state=%s wchan=%s\n" \
+          "$tid" "$(cat "$task/comm" 2>/dev/null)" \
+          "$(awk "/^State/ {print \$2, \$3}" "$task/status" 2>/dev/null)" \
+          "$(cat "$task/wchan" 2>/dev/null)"
+        printf "syscall: %s\n" "$(cat "$task/syscall" 2>/dev/null)"
+        cat "$task/stack" 2>/dev/null
+      done
+      ss -tnp 2>/dev/null | grep "pid=$pid" || true
+    ' _ "$hang_pid" >"$ARTIFACT_DIR/o3kd-hang/thread-stacks.txt" 2>/dev/null || true
+    if command -v gdb >/dev/null 2>&1; then
+      timeout 60 gdb -p "$hang_pid" -batch \
+        -ex 'set pagination off' -ex 'thread apply all bt' \
+        >"$ARTIFACT_DIR/o3kd-hang/gdb-backtrace.txt" 2>/dev/null || true
+    fi
+    chmod -R 0600 "$ARTIFACT_DIR/o3kd-hang" 2>/dev/null || true
+  fi
 }
 capture_workload_failure_diagnostics() {
   local workload_label="${1:-workload-b}" workload_file workload_id

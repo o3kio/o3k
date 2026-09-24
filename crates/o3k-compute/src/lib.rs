@@ -66,8 +66,9 @@ fn test_fault_pause_ms(name: &str, env_var: &str) {
     let Some(ms) = test_fault_pause_ms_value(std::env::var(env_var).ok()) else {
         return;
     };
-    tracing::info!(pause_ms = ms, "test-only fault pause {} enabled", name);
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} engaged", name);
     std::thread::sleep(std::time::Duration::from_millis(ms));
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} released", name);
 }
 
 /// Parse/guard half of `test_fault_pause_ms`; split out so the no-op
