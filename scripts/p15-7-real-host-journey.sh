@@ -573,7 +573,9 @@ early_cleanup() {
       bash "$KEYCLOAK_AUTHORITY_SCRIPT" cleanup >/dev/null 2>&1 || true
   fi
   if [[ "${POSTGRES_MODE:-}" == external ]]; then
-    stop_postgres_proxy >/dev/null 2>&1 || true
+    # Teardown RESTORES connectivity: remove any run-tagged sever rules so a
+    # failed run cannot strand a kernel rule against the operator endpoint.
+    postgres_restore_rules >/dev/null 2>&1 || true
   fi
   if [[ -f "$WORK_ROOT/.o3k-owned" ]] \
     && grep -Fqx 'o3k-p15-7-journey-owned-v1' "$WORK_ROOT/.o3k-owned" \
@@ -820,7 +822,10 @@ cleanup() {
   fi
   local cleanup_failed=false
   if [[ "$POSTGRES_MODE" == external ]]; then
-    stop_postgres_proxy || cleanup_failed=true
+    # Leaving a run-tagged sever rule behind would wedge every later local
+    # consumer of the operator endpoint; a restore failure IS a cleanup
+    # failure.
+    postgres_restore_rules || cleanup_failed=true
   fi
   # Credentials and enrollment material are never retained for recovery.
   # Remove only this run's exact files; VM diagnostics and ownership records
