@@ -26,6 +26,8 @@ fn database_url() -> String {
 /// separate `cargo test` processes. Matches
 /// `o3k_store::conformance::prepare_shared_postgres_test_database`.
 async fn acquire_database_guard(url: &str) -> PgConnection {
+    o3k_store::conformance::assert_destructive_postgres_test_database(url)
+        .expect("destructive PostgreSQL test database must have the expected purpose");
     let mut connection = PgConnection::connect(url)
         .await
         .expect("connect to the shared PostgreSQL conformance database");

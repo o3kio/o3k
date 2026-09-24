@@ -26,6 +26,39 @@ pub async fn acquire_shared_postgres_test_database_lock(
         .map(|_| ())
 }
 
+/// Validate a database before any destructive PostgreSQL test operation.
+pub fn assert_destructive_postgres_test_database(database_url: &str) -> Result<(), String> {
+    let options: sqlx::postgres::PgConnectOptions = database_url
+        .parse()
+        .map_err(|error| format!("invalid PostgreSQL test URL: {error}"))?;
+    let purpose = std::env::var("O3K_TEST_DATABASE_PURPOSE").map_err(|_| {
+        "O3K_TEST_DATABASE_PURPOSE must identify the destructive test database".to_owned()
+    })?;
+    assert_destructive_postgres_test_database_name(options.get_database().unwrap_or(""), &purpose)
+}
+
+pub fn assert_destructive_postgres_test_database_name(
+    database: &str,
+    purpose: &str,
+) -> Result<(), String> {
+    let expected_prefix = match purpose {
+        "workspace" => "o3k_workspace_test_",
+        "endpoint" => "o3k_endpoint_test_",
+        "p13" => "o3k_p13_test_",
+        _ => {
+            return Err(format!(
+                "unsupported destructive PostgreSQL test purpose {purpose:?}"
+            ));
+        }
+    };
+    if !database.starts_with(expected_prefix) || database.len() == expected_prefix.len() {
+        return Err(format!(
+            "refusing destructive PostgreSQL {purpose} reset for database {database:?}"
+        ));
+    }
+    Ok(())
+}
+
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
     ArtifactTransferUpdate, CanonicalOperationRecord, ComputeRepository, ControllerEpoch,
@@ -2403,6 +2436,8 @@ mod tests {
     use sqlx::{Connection, postgres::PgConnection};
 
     async fn prepare_shared_postgres_test_database(database_url: &str) -> Option<PgConnection> {
+        super::assert_destructive_postgres_test_database(database_url)
+            .expect("destructive PostgreSQL test database must have the expected purpose");
         let mut connection = PgConnection::connect(database_url).await.ok()?;
         super::acquire_shared_postgres_test_database_lock(&mut connection)
             .await
@@ -2416,6 +2451,28 @@ mod tests {
             .await
             .ok()?;
         Some(connection)
+    }
+
+    #[test]
+    fn destructive_database_guard_rejects_campaign_and_accepts_distinct_test_purposes() {
+        let campaign = "o3k_pp5_s5_990924025";
+        let workspace = "o3k_workspace_test_990924025";
+        let endpoint = "o3k_endpoint_test_990924025";
+        assert_ne!(campaign, workspace);
+        assert_ne!(campaign, endpoint);
+        assert_ne!(workspace, endpoint);
+        assert!(
+            super::assert_destructive_postgres_test_database_name(campaign, "workspace").is_err()
+        );
+        assert!(
+            super::assert_destructive_postgres_test_database_name(workspace, "workspace").is_ok()
+        );
+        assert!(
+            super::assert_destructive_postgres_test_database_name(endpoint, "endpoint").is_ok()
+        );
+        assert!(
+            super::assert_destructive_postgres_test_database_name(workspace, "endpoint").is_err()
+        );
     }
 
     #[tokio::test]

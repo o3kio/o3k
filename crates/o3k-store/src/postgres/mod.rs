@@ -92,6 +92,15 @@ impl PostgresStore {
 
     #[doc(hidden)]
     pub async fn clean_tables_for_testing(&self) -> Result<(), StoreError> {
+        let options = self.pool.connect_options();
+        let database = options.get_database().unwrap_or("");
+        let purpose = std::env::var("O3K_TEST_DATABASE_PURPOSE").map_err(|_| {
+            StoreError::Corrupt(
+                "O3K_TEST_DATABASE_PURPOSE must identify the destructive test database".into(),
+            )
+        })?;
+        crate::conformance::assert_destructive_postgres_test_database_name(database, &purpose)
+            .map_err(StoreError::Corrupt)?;
         sqlx::query(
             "TRUNCATE TABLE
                 resources, operations, canonical_operation_metadata, idempotency_reservations,
