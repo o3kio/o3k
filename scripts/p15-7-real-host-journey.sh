@@ -1454,15 +1454,15 @@ record_scale_checkpoint() {
   # block id that must be ABSENT (post-remove); $4 optionally lists comma-
   # separated block ids that must be present AND eligible. Writes one fragment
   # per phase into ARTIFACT_DIR and prints the eligible Ready count.
-  local phase="$1" expected="$2" absent_id="${3:-}" required_ids="${4:-}"
+  local phase="$1" expected="$2" absent_id="${3:-}" required_ids="${4:-}" bootstrap_expect="${5:-present}"
   api_get /operator/building-blocks >"$WORK_ROOT/blocks-checkpoint-$phase.json"
   api_get "/operator/diagnostics/providers?limit=200" >"$WORK_ROOT/providers-checkpoint-$phase.json"
   python3 - "$WORK_ROOT/blocks-checkpoint-$phase.json" "$WORK_ROOT/providers-checkpoint-$phase.json" \
     "$ARTIFACT_DIR/p15-7-scale-checkpoint-$phase.json" "$phase" "$BOOTSTRAP_AGENT_ID" \
-    "$expected" "$absent_id" "$required_ids" <<'PY'
+    "$expected" "$absent_id" "$required_ids" "$bootstrap_expect" <<'PY'
 import json, pathlib, sys
 
-blocks_path, providers_path, out_path, phase, bootstrap_agent, expected, absent_id, required_ids = sys.argv[1:9]
+blocks_path, providers_path, out_path, phase, bootstrap_agent, expected, absent_id, required_ids, bootstrap_expect = sys.argv[1:10]
 items = json.load(open(blocks_path, encoding="utf-8"))
 page = json.load(open(providers_path, encoding="utf-8"))
 if not isinstance(items, list):
@@ -1513,14 +1513,24 @@ if any(not identity for identity in identities) or len(set(identities)) != len(i
     raise SystemExit(f"{phase}: duplicate or empty execution identities in the canonical topology")
 if len(set(provider_ids)) != len(provider_ids):
     raise SystemExit(f"{phase}: duplicate resource provider identities in the canonical topology")
-if not any(entry["is_bootstrap"] for entry in entries):
+# The bootstrap block is a first-class eligible compute BuildingBlock (Case A)
+# and Placement may legitimately select it as the drain target.  Removal is
+# the only phase transition that can legitimately erase the bootstrap block
+# from the canonical topology, so bootstrap presence is asserted per phase:
+# 'present' (default), 'absent' (post-remove/replacement when the drain
+# target was the bootstrap block), or 'any'.
+has_bootstrap = any(entry["is_bootstrap"] for entry in entries)
+if bootstrap_expect == "present" and not has_bootstrap:
     raise SystemExit(f"{phase}: bootstrap BuildingBlock missing from the canonical topology")
+if bootstrap_expect == "absent" and has_bootstrap:
+    raise SystemExit(f"{phase}: bootstrap BuildingBlock still present in the canonical topology")
 fragment = {
     "phase": phase,
     "eligibility_basis": "state=='ready' AND >=1 resource_provider_id in /operator/diagnostics/providers with state 'Enabled' AND drain_blockers empty; all BuildingBlocks enumerated (bootstrap included by TLS agent identity)",
     "blocks": entries,
     "total_blocks": len(entries),
     "eligible_ready_count": eligible_ready,
+    "bootstrap_expect": bootstrap_expect,
 }
 pathlib.Path(out_path).write_text(json.dumps(fragment, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print(eligible_ready)
@@ -1664,6 +1674,21 @@ INITIAL_READY_COUNT="$(record_scale_checkpoint initial-scale-checkpoint 5 "" \
   "${BLOCK_IDS[block-a]},${BLOCK_IDS[block-b]},${BLOCK_IDS[block-c]},${BLOCK_IDS[block-d]}")" \
   || die "initial eligible Ready count is not exactly five"
 [[ "$INITIAL_READY_COUNT" == 5 ]] || die "initial eligible Ready count is not exactly five"
+# The bootstrap block's canonical id, resolved from the checkpoint evidence.
+# Placement truth selects the drain target; when that target IS the bootstrap
+# block its removal legitimately erases the bootstrap identity from every
+# later-phase topology assertion (Case A scale semantics).
+BOOTSTRAP_BLOCK_ID="$(python3 - "$ARTIFACT_DIR/p15-7-scale-checkpoint-initial-scale-checkpoint.json" "$BOOTSTRAP_AGENT_ID" <<'PY'
+import json, sys
+fragment = json.load(open(sys.argv[1], encoding="utf-8"))
+for entry in fragment.get("blocks", []):
+    if entry.get("is_bootstrap") and entry.get("block_id"):
+        print(entry["block_id"])
+        break
+PY
+)"
+[[ "$BOOTSTRAP_BLOCK_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "bootstrap block id unresolved from initial checkpoint"
+BOOTSTRAP_REMOVED=false
 
 # Include the run-scoped TestLab bootstrap block and every newly enrolled
 # execution identity when resolving the selected workload host.  The local
@@ -1942,10 +1967,15 @@ PY
 # block-e is fixed at [4].
 REMOVE_GEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["block"]["generation"])' "$WORK_ROOT/drain.json")"
 operator_curl "$API/operator/building-blocks/$DRAIN_ID/actions/remove" -X POST -H 'Content-Type: application/json' -d "{\"expected_generation\":$REMOVE_GEN}" >"$WORK_ROOT/remove.json" || die "block removal failed"
+[[ "$DRAIN_ID" != "$BOOTSTRAP_BLOCK_ID" ]] || BOOTSTRAP_REMOVED=true
+POST_REMOVE_BOOTSTRAP_EXPECT=present
+[[ "$BOOTSTRAP_REMOVED" == true ]] && POST_REMOVE_BOOTSTRAP_EXPECT=absent
 # Post-remove checkpoint: the removed identity is absent from the canonical
-# topology and the eligible Ready set is still exactly four (the surviving
-# children plus the bootstrap block).
+# topology and the eligible Ready set is exactly four (the surviving initial
+# identities — children, or children plus the bootstrap block when a child
+# was drained).
 record_scale_checkpoint post-remove 4 "$DRAIN_ID" "$SURVIVOR_IDS" \
+  "$POST_REMOVE_BOOTSTRAP_EXPECT" \
   >/dev/null || die "post-remove eligible Ready count is not exactly four"
 # Settle the post-removal topology before enrolling the replacement. The
 # baseline must describe the CURRENT topology; reading the total only after
@@ -1976,11 +2006,13 @@ done
 [[ "$CAPACITY_AFTER_E" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_E" -gt "$CAPACITY_AFTER_REMOVE" ]] \
   || die "Placement capacity did not grow after enrolling the replacement block"
 # Final S5 topology checkpoint: the eligible Ready set must be EXACTLY five
-# again — the bootstrap block plus the surviving initial children plus
-# block-e — with the drained identity absent and no duplicate BuildingBlock or
-# ResourceProvider identity anywhere in the canonical topology.
+# again — the surviving initial identities plus block-e — with the drained
+# identity absent and no duplicate BuildingBlock or ResourceProvider identity
+# anywhere in the canonical topology.  When Placement selected the bootstrap
+# block as the drain target, the bootstrap identity legitimately stays
+# removed and block-e takes its eligible slot (Case A scale semantics).
 FINAL_READY_COUNT="$(record_scale_checkpoint post-replacement 5 "$DRAIN_ID" \
-  "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}")" \
+  "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" "$POST_REMOVE_BOOTSTRAP_EXPECT")" \
   || die "post-replacement eligible Ready count is not exactly five"
 [[ "$FINAL_READY_COUNT" == 5 ]] || die "post-replacement eligible Ready count is not exactly five"
 PEAK_CONCURRENT_READY="$INITIAL_READY_COUNT"
@@ -2090,6 +2122,7 @@ fi
 # PostgreSQL fault gate must not change the eligible topology — still exactly
 # five (bootstrap + survivors + block-e), drained identity still absent.
 record_scale_checkpoint post-reboot 5 "$DRAIN_ID" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
+  "$POST_REMOVE_BOOTSTRAP_EXPECT" \
   >/dev/null || die "post-reboot eligible Ready count is not exactly five"
 
 # ── #1035 crash-injection leg ──────────────────────────────────────────────
@@ -2406,6 +2439,7 @@ doc = {
 pathlib.Path(out).write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 record_scale_checkpoint post-crash-repair 5 "" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
+  "$POST_REMOVE_BOOTSTRAP_EXPECT" \
   >/dev/null || die "post-crash-repair eligible Ready count is not exactly five"
 
 # ── #1033 host-maintenance leg ─────────────────────────────────────────────
@@ -2578,7 +2612,8 @@ PY
 done
 [[ "$MAINT_PROVIDER_STATE" == Enabled ]] || die "maintenance block provider did not reopen after the ready transition"
 MAINT_RETURNED_TO_READY=true
-MAINT_FINAL_ELIGIBLE="$(record_scale_checkpoint post-maintenance 5 "" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}")" \
+MAINT_FINAL_ELIGIBLE="$(record_scale_checkpoint post-maintenance 5 "" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
+  "$POST_REMOVE_BOOTSTRAP_EXPECT")" \
   || die "post-maintenance eligible Ready count is not exactly five"
 [[ "$MAINT_FINAL_ELIGIBLE" == 5 ]] || die "post-maintenance eligible Ready count is not exactly five"
 python3 - "$MAINT_EVIDENCE_FILE" "$MAINT_ID" "$MAINT_EXEC_IDENTITY_BEFORE" "$MAINT_PROVIDER_IDS_BEFORE" \
