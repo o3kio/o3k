@@ -67,6 +67,8 @@ jobs:
         # against locally-generated fixtures. It needs no real PP.5 campaign
         # artifact, so an ordinary local dev / unit-test run is never blocked.
         run: bash tests/pp5_evidence_validation.sh
+      - name: Validate destructive PostgreSQL test database guards
+        run: bash tests/postgres_test_database_guards.sh
       - name: Validate release signing trust transition
         run: bash tests/release-signing-migration.sh
       - name: Test P13.5E deterministic fault proxy and evidence artifact

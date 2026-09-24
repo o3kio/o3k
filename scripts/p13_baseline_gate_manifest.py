@@ -186,6 +186,8 @@ def reset_postgres_schema() -> None:
         return
     if os.environ.get("O3K_P13_ALLOW_DESTRUCTIVE_POSTGRES_RESET") != "1":
         raise RuntimeError("postgres_schema_reset_requires_explicit_opt_in")
+    guard = Path(__file__).resolve().with_name("assert_disposable_postgres_test_database.py")
+    subprocess.run([sys.executable, str(guard)], check=True)
     result = subprocess.run(
         [
             "psql",

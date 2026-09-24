@@ -62,6 +62,11 @@ if [[ "${O3K_DATABASE_BACKEND:-sqlite}" == postgres ]]; then
   if [[ "${O3K_P13_ALLOW_DESTRUCTIVE_POSTGRES_RESET:-0}" != 1 ]]; then
     blocked "PostgreSQL scenario isolation requires explicit disposable-schema reset opt-in"
   fi
+  if ! O3K_TEST_DATABASE_PURPOSE="${O3K_TEST_DATABASE_PURPOSE:-}" \
+      O3K_DATABASE_URL="${O3K_DATABASE_URL:-}" \
+      python3 "$root_dir/scripts/assert_disposable_postgres_test_database.py"; then
+    blocked "PostgreSQL scenario reset requires an owned P13 test database"
+  fi
   psql "$O3K_DATABASE_URL" -v ON_ERROR_STOP=1 -c \
     'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' >/dev/null
 fi

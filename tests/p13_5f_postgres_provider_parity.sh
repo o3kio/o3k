@@ -27,6 +27,7 @@ if [[ -z "${O3K_DATABASE_URL:-}" ]]; then
   echo "P13.5F PostgreSQL parity BLOCKED: O3K_DATABASE_URL is required" >&2
   exit 2
 fi
+export O3K_TEST_DATABASE_PURPOSE=p13
 if ! command -v pg_isready >/dev/null 2>&1 || ! pg_isready -d "$O3K_DATABASE_URL" >/dev/null 2>&1; then
   echo "P13.5F PostgreSQL parity BLOCKED: PostgreSQL is not ready" >&2
   exit 2
@@ -71,6 +72,7 @@ PY
   fi
 elif O3K_DATABASE_BACKEND=postgres \
      O3K_P13_ALLOW_DESTRUCTIVE_POSTGRES_RESET=1 \
+     O3K_TEST_DATABASE_PURPOSE=p13 \
      python3 "$root_dir/scripts/p13_baseline_gate_manifest.py" --output "$baseline" >"$work_dir/baseline.log" 2>&1; then
   baseline_result=verified
 else
