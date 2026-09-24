@@ -38,11 +38,12 @@ PG_CONTAINER="${O3K_P15_7_PG_CONTAINER:-o3k-p15-7-postgres-$RUN_ID}"
 # the PP.5 host cannot publish container ports, so a disposable container is
 # unreachable from the control plane.
 POSTGRES_MODE="${O3K_P15_7_POSTGRES_MODE:-disposable}"
-# In external mode the run-owned proxy listens on this local port and forwards
-# to the operator-owned target ($O3K_P15_7_EXTERNAL_PG_TARGET). The control
-# plane consumes O3K_DATABASE_URL through the proxy, which is what makes an
-# external fault injecting a sever/restore of the proxy safe and reversible.
-POSTGRES_PROXY_PORT="${O3K_P15_7_POSTGRES_PROXY_PORT:-25432}"
+# In external mode the control plane consumes O3K_DATABASE_URL directly and
+# the run severs/restores connectivity to the operator-owned target
+# ($O3K_P15_7_EXTERNAL_PG_TARGET) with run-tagged kernel OUTPUT rules, which
+# makes the external fault injection fully reversible without a userspace
+# forwarder process (the asyncio forwarder was removed after silently
+# stopping accepting in three consecutive runs; issue #1048).
 POSTGRES_SERVER_VERSION=""
 POSTGRES_SCHEMA_PREPARED=""
 POSTGRES_REDACTED_ENDPOINT=""
@@ -105,13 +106,14 @@ for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp
 done
 [[ "$POSTGRES_MODE" == external || "$POSTGRES_MODE" == disposable ]] \
   || die "postgres ownership mode is invalid: $POSTGRES_MODE"
-[[ "$POSTGRES_PROXY_PORT" =~ ^[1-9][0-9]{3,4}$ ]] || die "postgres proxy port is invalid"
 if [[ "$POSTGRES_MODE" == external ]]; then
   [[ -n "${O3K_DATABASE_URL:-}" ]] || die "external PostgreSQL mode requires O3K_DATABASE_URL"
   [[ -n "${O3K_P15_7_EXTERNAL_PG_TARGET:-}" ]] \
-    || die "external PostgreSQL mode requires O3K_P15_7_EXTERNAL_PG_TARGET (real pg host:port for the run-owned proxy)"
-  [[ "$O3K_P15_7_EXTERNAL_PG_TARGET" =~ ^[A-Za-z0-9_.:\-]+$ ]] || die "external PostgreSQL target is unsafe"
+    || die "external PostgreSQL mode requires O3K_P15_7_EXTERNAL_PG_TARGET (operator-owned pg host:port)"
+  [[ "$O3K_P15_7_EXTERNAL_PG_TARGET" =~ ^127\.0\.0\.1:[0-9]{1,5}$ ]] \
+    || die "external PostgreSQL target must be a loopback host:port so the sever rule cannot touch foreign endpoints"
   command -v psql >/dev/null 2>&1 || die "external PostgreSQL mode requires psql"
+  command -v iptables >/dev/null 2>&1 || die "external PostgreSQL mode requires iptables for the sever/restore fault mechanism"
 fi
 RUNNER_UID="$(id -u)"
 RUNNER_GID="$(id -g)"
@@ -149,115 +151,89 @@ pg_external_ready() {
   # through O3K_DATABASE_URL; nothing is mutated, created, or dropped.
   psql "$O3K_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SELECT 1' >/dev/null 2>&1
 }
-write_postgres_proxy() {
-  # Stage the run-owned forwarder inside WORK_ROOT so its path is unique to this
-  # run and the process identity check in stop_postgres_proxy cannot match a
-  # foreign process. A single-process asyncio forward is used (no forking) so
-  # $! is the reliable listener PID.
-  cat >"$WORK_ROOT/pg-proxy.py" <<'PY'
-import asyncio, sys, time
-LISTEN = ("127.0.0.1", int(sys.argv[1]))
-TARGET_HOST, TARGET_PORT = sys.argv[2].rsplit(":", 1)
-TARGET = (TARGET_HOST, int(TARGET_PORT))
-def log(msg):
-    # One line per accepted connection: the forwarder is a test fault
-    # mechanism, and a silent forwarding wedge is otherwise
-    # indistinguishable from a control-plane pool defect without
-    # first evidence (observed on run 990924001 as a ~10 min pool
-    # outage that began ~40 s after an o3kd restart while the proxy
-    # process itself was still alive).
-    print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}", flush=True)
-async def forward(reader, writer):
-    try:
-        while True:
-            data = await reader.read(65536)
-            if not data:
-                break
-            writer.write(data)
-            await writer.drain()
-    except Exception:
-        pass
-    finally:
-        try:
-            writer.close()
-        except Exception:
-            pass
-async def client(reader, writer):
-    peer = writer.get_extra_info("peername")
-    try:
-        upstream_read, upstream_write = await asyncio.open_connection(*TARGET)
-    except Exception as error:
-        log(f"upstream-connect-failed peer={peer} error={error!r}")
-        writer.close()
-        return
-    log(f"connected peer={peer}")
-    try:
-        await asyncio.gather(forward(reader, upstream_write), forward(upstream_read, writer))
-    finally:
-        log(f"closed peer={peer}")
-async def main():
-    server = await asyncio.start_server(client, *LISTEN)
-    log(f"listening on {LISTEN[0]}:{LISTEN[1]} target {TARGET[0]}:{TARGET[1]}")
-    async with server:
-        await server.serve_forever()
-asyncio.run(main())
-PY
-  chmod 0600 "$WORK_ROOT/pg-proxy.py"
+postgres_sever_host() {
+  # The sever rule may only ever target the loopback operator-owned endpoint
+  # this run was configured for; anything else fails closed.
+  local target="${O3K_P15_7_EXTERNAL_PG_TARGET:-}"
+  [[ "$target" =~ ^127\.0\.0\.1:[0-9]{1,5}$ ]] || return 1
+  printf '127.0.0.1'
+}
+postgres_sever_port() {
+  local target="${O3K_P15_7_EXTERNAL_PG_TARGET:-}"
+  [[ "$target" =~ ^127\.0\.0\.1:([0-9]{1,5})$ ]] || return 1
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+postgres_sever_tag() {
+  printf 'o3k-p15-7-pg-sever:run=%s' "$RUN_ID"
+}
+postgres_restore_rules() {
+  # Remove every OUTPUT rule this run tagged. Kernel rules are matched by
+  # their run-scoped comment; anything untagged is untouched.  Bounded loop:
+  # the rule set is small and each iteration deletes at most one rule.
+  local tag line_num
+  tag="$(postgres_sever_tag)" || return 1
+  command -v iptables >/dev/null 2>&1 || return 1
+  for _ in $(seq 1 20); do
+    line_num="$(iptables -n -L OUTPUT --line-numbers 2>/dev/null | grep -F "/* $tag */" | awk 'NR==1 {print $1}')"
+    [[ "$line_num" =~ ^[0-9]+$ ]] || return 0
+    iptables -D OUTPUT "$line_num" 2>/dev/null || return 1
+  done
+  return 1
 }
 start_postgres_proxy() {
-  # A run-owned localhost TCP forward in front of the operator-owned endpoint.
-  # The forwarder never starts/stops/restarts the target PostgreSQL; it only
-  # forwards bytes, so severing it injects an unavailability that is fully
-  # reversible. The proxy is bounded (fixed local port) and its identity is
-  # recorded in a run-owned ownership file that cleanup requires before signal.
-  [[ -f "$WORK_ROOT/pg-proxy.pid" ]] && return 0
-  write_postgres_proxy
-  python3 "$WORK_ROOT/pg-proxy.py" "$POSTGRES_PROXY_PORT" \
-    "$O3K_P15_7_EXTERNAL_PG_TARGET" >>"$WORK_ROOT/pg-proxy.log" 2>&1 &
-  local spid=$!
-  printf '%s:o3k-p15-7-postgres-proxy:run=%s\n' "$spid" "$RUN_ID" \
-    >"$WORK_ROOT/pg-proxy.pid"
-  chmod 0600 "$WORK_ROOT/pg-proxy.pid"
+  # RESTORE semantics (name kept for call-site stability): remove any
+  # run-owned sever rules, then prove the operator-owned PostgreSQL endpoint
+  # answers.  Connectivity is severed and restored with kernel OUTPUT rules
+  # tagged by this run id; the previous userspace asyncio forwarder was
+  # removed after it silently stopped accepting (no traceback, no OOM, no
+  # killer) in three consecutive exact-head S5 runs and took the control
+  # plane down with it (issue #1048).
+  postgres_restore_rules || return 1
   for _ in $(seq 1 30); do pg_external_ready && return 0; sleep 1; done
   return 1
 }
 stop_postgres_proxy() {
-  # Sever the run-owned proxy. Signal only when the ownership file and the live
-  # process both identify this exact run's forwarder path; anything else fails
-  # closed rather than killing an unrelated process.
-  local spid=""
-  [[ -f "$WORK_ROOT/pg-proxy.pid" && ! -L "$WORK_ROOT/pg-proxy.pid" ]] || return 0
-  grep -Fq 'o3k-p15-7-postgres-proxy' "$WORK_ROOT/pg-proxy.pid" || return 0
-  grep -Fq "run=$RUN_ID" "$WORK_ROOT/pg-proxy.pid" || return 1
-  spid="$(cut -d: -f1 "$WORK_ROOT/pg-proxy.pid")"
-  [[ "$spid" =~ ^[0-9]+$ ]] || return 1
-  [[ "$(ps -o args= -p "$spid" 2>/dev/null || true)" == *"$WORK_ROOT/pg-proxy.py"* ]] || return 1
-  kill "$spid" 2>/dev/null || true
-  for _ in $(seq 1 30); do kill -0 "$spid" 2>/dev/null || break; sleep 1; done
-  kill -0 "$spid" 2>/dev/null && return 1
-  rm -f -- "$WORK_ROOT/pg-proxy.pid"
+  # SEVER semantics: reject loopback traffic to the operator-owned PostgreSQL
+  # endpoint with TCP RST, so unavailability is injected fast-fail and is
+  # fully reversible by deleting the rule.  Idempotent: existing run-tagged
+  # rules are removed first so at most one sever rule exists.
+  local host port tag
+  host="$(postgres_sever_host)" || return 1
+  port="$(postgres_sever_port)" || return 1
+  tag="$(postgres_sever_tag)" || return 1
+  command -v iptables >/dev/null 2>&1 || return 1
+  postgres_restore_rules || return 1
+  iptables -A OUTPUT -p tcp -d "$host" --dport "$port" \
+    -m comment --comment "$tag" -j REJECT --reject-with tcp-reset 2>/dev/null \
+    || return 1
+  # Record the exact run-owned rule set for first-evidence capture.
+  iptables -S OUTPUT 2>/dev/null | grep -F -- "--comment $tag" >"$WORK_ROOT/pg-sever-rules.txt" 2>/dev/null \
+    || true
+  chmod 0600 "$WORK_ROOT/pg-sever-rules.txt" 2>/dev/null || true
+  # Prove the sever is effective: the direct probe must now fail fast.
+  for _ in $(seq 1 15); do
+    pg_external_ready || return 0
+    sleep 1
+  done
+  return 1
 }
 pg_proxy_dsn() {
-  # Rewrite the operator-owned DSN so it reaches the same server through the
-  # run-owned localhost proxy. Only the host:port changes; credentials,
-  # database, and query parameters are preserved byte-for-byte. The source DSN
-  # arrives through the process environment (never argv) and the rewritten DSN
-  # is never echoed; output is captured by the caller into a 0600-scoped shell
-  # variable and any diagnostic output uses pg_redact_endpoint.
-  O3K_SOURCE_DSN="$O3K_DATABASE_URL" python3 - "$POSTGRES_PROXY_PORT" <<'PY'
-import os, sys, urllib.parse
-port = sys.argv[1]
+  # The PostgreSQL endpoint is now reached DIRECTLY (kernel-managed sever
+  # rules replace the removed userspace forwarder), so the "proxy DSN" is the
+  # operator-owned DSN itself.  The name and call sites are kept so the
+  # liveness/rewrite plumbing is unchanged; the credential never reaches
+  # stdout and diagnostics use pg_redact_endpoint.
+  O3K_SOURCE_DSN="$O3K_DATABASE_URL" python3 - <<'PY'
+import os, urllib.parse
 parts = urllib.parse.urlsplit(os.environ["O3K_SOURCE_DSN"])
 if parts.scheme not in ("postgres", "postgresql") or not parts.hostname:
     raise SystemExit("external PostgreSQL DSN is not a postgres URL")
-netloc = parts.netloc
-at = netloc.rfind("@")
-userinfo = netloc[: at + 1] if at != -1 else ""
-print(urllib.parse.urlunsplit(parts._replace(netloc=userinfo + "127.0.0.1:" + port)))
+print(os.environ["O3K_SOURCE_DSN"])
 PY
 }
 rewrite_o3kd_env_for_proxy() {
-  # Point the production o3kd environment at the run-owned proxy. The
+  # Point the production o3kd environment at the operator-owned PostgreSQL
+  # endpoint directly. The
   # bootstrap-written file is consumed by `set -a; . o3kd.env`, so both lines
   # are required: the URL alone does not select the postgres backend. Every
   # other line is preserved exactly. The rewrite is staged in a 0600 runner
@@ -282,11 +258,11 @@ rewrite_o3kd_env_for_proxy() {
   rm -f -- "$env_tmp"
   sudo -n grep -Fqx "$expected_backend_line" "$STATE_ROOT/o3kd.env" \
     && sudo -n grep -Fqx "$expected_url_line" "$STATE_ROOT/o3kd.env" \
-    || die "installed o3kd environment does not carry the proxy database configuration"
+    || die "installed o3kd environment does not carry the external PostgreSQL configuration"
 }
 bootstrap_store_probe() {
   # Minting an enrollment grant is the cheapest authenticated write that
-  # exercises the durable store. While the proxy is severed this must fail;
+  # exercises the durable store. While connectivity is severed this must fail;
   # after restore it must succeed. Grant JSON and the bootstrap secret never
   # reach stdout.
   O3K_API_URL="$API" O3K_BOOTSTRAP_SECRET="$(sudo -n cat "$STATE_ROOT/.bootstrap-secret")" \
@@ -481,14 +457,12 @@ capture_failure_diagnostics() {
     || echo "P15.7 journey diagnostics could not be safely captured" >&2
   # Preserve the run-owned PostgreSQL proxy log and the o3kd tail verbatim so
   # a post-restore 5xx recurrence can be classified from first evidence
-  # (proxy forwarding vs control-plane pool recovery) instead of inference.
-  [[ -f "$WORK_ROOT/pg-proxy.log" ]] \
-    && cp "$WORK_ROOT/pg-proxy.log" "$ARTIFACT_DIR/pg-proxy.log" 2>/dev/null || true
-  [[ -f "$WORK_ROOT/pg-proxy.pid" ]] \
-    && cp "$WORK_ROOT/pg-proxy.pid" "$ARTIFACT_DIR/pg-proxy.pid" 2>/dev/null || true
+  # (endpoint reachability vs control-plane pool recovery) instead of inference.
+  [[ -f "$WORK_ROOT/pg-sever-rules.txt" ]] \
+    && cp "$WORK_ROOT/pg-sever-rules.txt" "$ARTIFACT_DIR/pg-sever-rules.txt" 2>/dev/null || true
   if [[ -n "${STATE_ROOT:-}" && -f "$STATE_ROOT/log/o3kd.log" ]]; then
     tail -n 2000 "$STATE_ROOT/log/o3kd.log" >"$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
-    chmod 0600 "$ARTIFACT_DIR/pg-proxy.log" "$ARTIFACT_DIR/pg-proxy.pid" "$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
+    chmod 0600 "$ARTIFACT_DIR/pg-sever-rules.txt" "$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
   fi
   # Hang forensics: two exact-head S5 runs (e0d690f7, 8fd6f828) hung o3kd
   # within ~60 s of the fault-hook-armed restart, with the API dead for
@@ -662,9 +636,9 @@ BOOTSTRAP_AGENT_ID="$(sudo -n cat "$STATE_ROOT/tls/agent-id" 2>/dev/null || true
 if [[ "$POSTGRES_MODE" == external ]]; then
   # Consume a required, operator-owned endpoint. Fail closed on a missing or
   # unreachable endpoint, verify and record the server version, and verify the
-  # O3K schema is prepared. The run-owned proxy in front of the endpoint is the
+  # O3K schema is prepared. The run-tagged kernel sever rules in front of the endpoint are the
   # same path the control plane uses, so reachability here is the real gate.
-  start_postgres_proxy || die "run-owned PostgreSQL proxy did not start"
+  start_postgres_proxy || die "external PostgreSQL endpoint did not become reachable"
   POSTGRES_REDACTED_ENDPOINT="$(pg_redact_endpoint "$O3K_DATABASE_URL")"
   pg_external_ready || die "external PostgreSQL endpoint unreachable: $POSTGRES_REDACTED_ENDPOINT"
   POSTGRES_SERVER_VERSION="$(psql "$O3K_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version' 2>/dev/null || true)"
@@ -678,10 +652,10 @@ if [[ "$POSTGRES_MODE" == external ]]; then
   # The bootstrap started o3kd without database configuration (SQLite). Re-point
   # the run-scoped environment at the proxy and restart the exact owned daemon
   # BEFORE any journey phase so every subsequent durable write lands on the
-  # operator-owned PostgreSQL through the run-owned proxy.
-  PROXY_DSN="$(pg_proxy_dsn)" || die "cannot derive the run-owned proxy database URL"
-  [[ "$PROXY_DSN" == *127.0.0.1:"$POSTGRES_PROXY_PORT"* ]] \
-    || die "run-owned proxy database URL did not rewrite to the proxy endpoint"
+  # operator-owned PostgreSQL directly (kernel-managed sever/restore).
+  PROXY_DSN="$(pg_proxy_dsn)" || die "cannot derive the external PostgreSQL database URL"
+  [[ "$PROXY_DSN" == postgres://*"$O3K_P15_7_EXTERNAL_PG_TARGET"* || "$PROXY_DSN" == postgresql://*"$O3K_P15_7_EXTERNAL_PG_TARGET"* ]] \
+    || die "external PostgreSQL database URL does not reach the operator-owned endpoint"
   rewrite_o3kd_env_for_proxy
   restart_o3kd_verified
   # The previous backend's enrollment does not exist on the operator-owned
@@ -698,7 +672,7 @@ if [[ "$POSTGRES_MODE" == external ]]; then
   [[ "$BACKEND_PROOF_POOL_SESSIONS" =~ ^[1-9][0-9]*$ ]] \
     || die "effective backend proof could not count server sessions"
   [[ "$BACKEND_PROOF_POOL_SESSIONS" -ge 2 ]] \
-    || die "o3kd is not durably connected through the run-owned proxy (sessions=$BACKEND_PROOF_POOL_SESSIONS)"
+    || die "o3kd is not durably connected to the external PostgreSQL endpoint (sessions=$BACKEND_PROOF_POOL_SESSIONS)"
   # Transient dependency proof: severing the proxy must make the control plane
   # unhealthy within a bounded window (an authenticated durable-store write
   # fails fast once the backend is unreachable), and restoring it must bring
@@ -2127,7 +2101,8 @@ restart_o3kd_verified
 wait_o3kd_readyz "readyz did not reconstruct after restart"
 if [[ "$POSTGRES_MODE" == external ]]; then
   # External mode must never stop/start/restart/drop the operator-owned server.
-  # Unavailability is injected by severing the run-owned proxy the control
+  # Unavailability is injected by severing connectivity to the operator-owned
+  # PostgreSQL endpoint the control
   # plane consumes. The observed outage is therefore the CONTROL PLANE's:
   # /readyz gating or an authenticated durable-store write (the same signals
   # as the early wiring proof). The operator-owned server must simultaneously
@@ -2211,7 +2186,7 @@ append_o3kd_fault_env
 restart_o3kd_verified
 wait_o3kd_readyz "readyz did not reconstruct with the fault hook armed"
 # Backend liveness gate: readyz alone does not prove the sqlx pool can
-# acquire through the run-owned proxy.  On run 990924001 the pool timed out
+# acquire through the sever rules.  On run 990924001 the pool timed out
 # for ~10 min immediately after this restart while the proxy process was
 # still alive and PostgreSQL was checkpointing normally, and the run burned
 # the window down inside bounded retries instead of failing at the boundary.
