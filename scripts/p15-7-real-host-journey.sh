@@ -155,10 +155,18 @@ write_postgres_proxy() {
   # foreign process. A single-process asyncio forward is used (no forking) so
   # $! is the reliable listener PID.
   cat >"$WORK_ROOT/pg-proxy.py" <<'PY'
-import asyncio, sys
+import asyncio, sys, time
 LISTEN = ("127.0.0.1", int(sys.argv[1]))
 TARGET_HOST, TARGET_PORT = sys.argv[2].rsplit(":", 1)
 TARGET = (TARGET_HOST, int(TARGET_PORT))
+def log(msg):
+    # One line per accepted connection: the forwarder is a test fault
+    # mechanism, and a silent forwarding wedge is otherwise
+    # indistinguishable from a control-plane pool defect without
+    # first evidence (observed on run 990924001 as a ~10 min pool
+    # outage that began ~40 s after an o3kd restart while the proxy
+    # process itself was still alive).
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}", flush=True)
 async def forward(reader, writer):
     try:
         while True:
@@ -175,14 +183,21 @@ async def forward(reader, writer):
         except Exception:
             pass
 async def client(reader, writer):
+    peer = writer.get_extra_info("peername")
     try:
         upstream_read, upstream_write = await asyncio.open_connection(*TARGET)
-    except Exception:
+    except Exception as error:
+        log(f"upstream-connect-failed peer={peer} error={error!r}")
         writer.close()
         return
-    await asyncio.gather(forward(reader, upstream_write), forward(upstream_read, writer))
+    log(f"connected peer={peer}")
+    try:
+        await asyncio.gather(forward(reader, upstream_write), forward(upstream_read, writer))
+    finally:
+        log(f"closed peer={peer}")
 async def main():
     server = await asyncio.start_server(client, *LISTEN)
+    log(f"listening on {LISTEN[0]}:{LISTEN[1]} target {TARGET[0]}:{TARGET[1]}")
     async with server:
         await server.serve_forever()
 asyncio.run(main())
@@ -2165,6 +2180,29 @@ PY
 append_o3kd_fault_env
 restart_o3kd_verified
 wait_o3kd_readyz "readyz did not reconstruct with the fault hook armed"
+# Backend liveness gate: readyz alone does not prove the sqlx pool can
+# acquire through the run-owned proxy.  On run 990924001 the pool timed out
+# for ~10 min immediately after this restart while the proxy process was
+# still alive and PostgreSQL was checkpointing normally, and the run burned
+# the window down inside bounded retries instead of failing at the boundary.
+# Prove end-to-end forwarding (psql through the proxy DSN) AND one
+# authenticated pool-backed API read before creating server C; fail closed
+# here with a distinct message so any recurrence is classified at the
+# boundary, from the preserved proxy log.
+BACKEND_LIVE=false
+for _ in $(seq 1 30); do
+  if [[ -n "${PROXY_DSN:-}" ]]; then
+    psql "$PROXY_DSN" -v ON_ERROR_STOP=1 -tAc 'SELECT 1' >/dev/null 2>&1 || { sleep 2; continue; }
+  else
+    bootstrap_store_probe || { sleep 2; continue; }
+  fi
+  if api_get "/operator/diagnostics/providers?limit=1" >"$WORK_ROOT/backend-liveness-probe.json" 2>/dev/null; then
+    BACKEND_LIVE=true
+    break
+  fi
+  sleep 2
+done
+[[ "$BACKEND_LIVE" == true ]] || die "backend_liveness_gate_failed_after_fault_hook_restart"
 api_get "/operator/diagnostics/providers?limit=200" >"$WORK_ROOT/providers-before-crash.json"
 ALLOC_BEFORE_CRASH="$(allocated_vcpu_total "$WORK_ROOT/providers-before-crash.json")"
 [[ "$ALLOC_BEFORE_CRASH" =~ ^[0-9]+$ ]] || die "Placement allocation baseline unavailable"
