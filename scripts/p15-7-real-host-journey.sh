@@ -194,25 +194,36 @@ start_postgres_proxy() {
 }
 stop_postgres_proxy() {
   # SEVER semantics: reject loopback traffic to the operator-owned PostgreSQL
-  # endpoint with TCP RST, so unavailability is injected fast-fail and is
-  # fully reversible by deleting the rule.  Idempotent: existing run-tagged
-  # rules are removed first so at most one sever rule exists.
-  local host port tag
+  # endpoint with TCP RST, scoped to the o3kd daemon uid only, so the
+  # operator's own probes (root) keep working and the wiring proof can
+  # distinguish an injected outage from a real endpoint failure.  Fully
+  # reversible by deleting the rule.  Idempotent: existing run-tagged rules
+  # are removed first so at most one sever rule exists.
+  local host port tag daemon_uid
   host="$(postgres_sever_host)" || return 1
   port="$(postgres_sever_port)" || return 1
   tag="$(postgres_sever_tag)" || return 1
+  daemon_uid="$(id -u "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" 2>/dev/null || true)"
+  [[ "$daemon_uid" =~ ^[0-9]+$ ]] || return 1
   command -v iptables >/dev/null 2>&1 || return 1
   postgres_restore_rules || return 1
   iptables -A OUTPUT -p tcp -d "$host" --dport "$port" \
+    -m owner --uid-owner "$daemon_uid" \
     -m comment --comment "$tag" -j REJECT --reject-with tcp-reset 2>/dev/null \
     || return 1
   # Record the exact run-owned rule set for first-evidence capture.
   iptables -S OUTPUT 2>/dev/null | grep -F -- "--comment $tag" >"$WORK_ROOT/pg-sever-rules.txt" 2>/dev/null \
     || true
   chmod 0600 "$WORK_ROOT/pg-sever-rules.txt" 2>/dev/null || true
-  # Prove the sever is effective: the direct probe must now fail fast.
+  # Prove the sever is effective for the daemon uid and invisible to the
+  # operator path: the uid-scoped probe must fail fast while the root probe
+  # keeps working.
+  local probe_uid="${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}"
   for _ in $(seq 1 15); do
-    pg_external_ready || return 0
+    if ! sudo -n -u "$probe_uid" psql "$O3K_DATABASE_URL" -tAc 'SELECT 1' >/dev/null 2>&1 \
+      && pg_external_ready; then
+      return 0
+    fi
     sleep 1
   done
   return 1
