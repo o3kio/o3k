@@ -464,6 +464,17 @@ capture_failure_diagnostics() {
   python3 "$ROOT_DIR/scripts/capture-p15-7-provision-diagnostics.py" \
     "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" "$WORK_ROOT" "$SOURCE_SHA" "$RUN_ID" journey_failed \
     || echo "P15.7 journey diagnostics could not be safely captured" >&2
+  # Preserve the run-owned PostgreSQL proxy log and the o3kd tail verbatim so
+  # a post-restore 5xx recurrence can be classified from first evidence
+  # (proxy forwarding vs control-plane pool recovery) instead of inference.
+  [[ -f "$WORK_ROOT/pg-proxy.log" ]] \
+    && cp "$WORK_ROOT/pg-proxy.log" "$ARTIFACT_DIR/pg-proxy.log" 2>/dev/null || true
+  [[ -f "$WORK_ROOT/pg-proxy.pid" ]] \
+    && cp "$WORK_ROOT/pg-proxy.pid" "$ARTIFACT_DIR/pg-proxy.pid" 2>/dev/null || true
+  if [[ -n "${STATE_ROOT:-}" && -f "$STATE_ROOT/log/o3kd.log" ]]; then
+    tail -n 2000 "$STATE_ROOT/log/o3kd.log" >"$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
+    chmod 0600 "$ARTIFACT_DIR/pg-proxy.log" "$ARTIFACT_DIR/pg-proxy.pid" "$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
+  fi
 }
 capture_workload_failure_diagnostics() {
   local workload_label="${1:-workload-b}" workload_file workload_id
@@ -673,6 +684,25 @@ if [[ "$POSTGRES_MODE" == external ]]; then
   done
   [[ "$BACKEND_PROOF_RECOVERY_OBSERVED" == true ]] \
     || die "o3kd did not recover after the PostgreSQL proxy was restored"
+  # Pool-settle gate: one successful readyz/store probe only proves a single
+  # request landed during pool recycling.  The first privileged native
+  # exchange (and the authenticated joins that follow) must not run while the
+  # sqlx pool is still replacing mass-severed connections, so require a
+  # bounded run of consecutive durable-store successes before proceeding.
+  # Failure here is a genuine recovery defect signal, not a retry target.
+  BACKEND_POOL_SETTLED=false
+  settle_ok=0
+  for _ in $(seq 1 60); do
+    if bootstrap_store_probe; then
+      settle_ok=$((settle_ok + 1))
+      [[ "$settle_ok" -ge 5 ]] && { BACKEND_POOL_SETTLED=true; break; }
+    else
+      settle_ok=0
+    fi
+    sleep 2
+  done
+  [[ "$BACKEND_POOL_SETTLED" == true ]] \
+    || die "postgresql_pool_did_not_settle_after_proxy_restore"
   BACKEND_EFFECTIVE="postgres"
   BACKEND_PROOF_METHOD="pg_stat_activity_pool_count_and_proxy_sever_restore"
 elif [[ "$POSTGRES_MODE" == disposable ]]; then

@@ -292,6 +292,15 @@ exchange() {
       "$api/identity/tokens" 2>"$STATE_ROOT/exchange.curl-$attempt.log" || true)"
     [[ "$response_code" == 2* ]] && break
     echo "P15.7 Keycloak authority: native federated exchange attempt $attempt returned HTTP $response_code; retrying" >&2
+    # Preserve a bounded response-body snippet and transport detail for
+    # post-mortem classification (expected fault-injection transient vs
+    # control-plane defect); the full files are run-scoped 0600 temporaries.
+    if [[ -s "$response" ]]; then
+      echo "P15.7 Keycloak authority: attempt $attempt response body: $(head -c 300 "$response")" >&2
+    fi
+    if [[ -s "$STATE_ROOT/exchange.curl-$attempt.log" ]]; then
+      echo "P15.7 Keycloak authority: attempt $attempt transport: $(head -c 300 "$STATE_ROOT/exchange.curl-$attempt.log")" >&2
+    fi
     [[ "$attempt" == 6 ]] && die "native federated exchange failed"
     sleep 5
   done
