@@ -1266,7 +1266,28 @@ EOF
   uuid="$(virsh -c qemu:///system domuuid "$d")"; [[ "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || die "VM UUID unavailable: $id"
   printf '%s\n' "$uuid" >"$WORK_ROOT/$id-uuid"
   ip="$(wait_vm_ssh "$d" "$uuid" "$mac" "$serial" "$id")"
-  ssh_vm "$ip" "sudo cloud-init status --wait" >/dev/null 2>&1 || die "cloud-init did not complete on real VM: $id"
+  # cloud-init installs the compute-boundary packages from the network
+  # (libvirt, qemu, curl), and two VMs provision in parallel, so a loaded host
+  # can exceed a single wait. Retry a bounded number of times, then preserve
+  # the guest's cloud-init evidence before failing closed so a genuine
+  # provisioning defect is never mistaken for network flakiness.
+  local cloud_init_ok=false cloud_init_attempt=0
+  for cloud_init_attempt in 1 2 3; do
+    if ssh_vm "$ip" "sudo cloud-init status --wait" >/dev/null 2>&1; then
+      cloud_init_ok=true
+      break
+    fi
+    sleep 30
+  done
+  if [[ "$cloud_init_ok" != true ]]; then
+    {
+      ssh_vm "$ip" "sudo cloud-init status --long 2>&1" || true
+      ssh_vm "$ip" "sudo tail -n 150 /var/log/cloud-init-output.log 2>&1" || true
+      ssh_vm "$ip" "sudo systemctl --no-pager --failed 2>&1 | head -n 40" || true
+    } >"$WORK_ROOT/$id-cloud-init.log" 2>&1 || true
+    sudo -n tail -n 100 "$serial" >"$WORK_ROOT/$id-serial-tail.log" 2>/dev/null || true
+    die "cloud-init did not complete on real VM: $id"
+  fi
   ssh_vm "$ip" "sudo virsh -c qemu:///system uri" >/dev/null 2>&1 || die "libvirt is not available on real VM: $id"
   printf '%s\n' "$ip" >"$WORK_ROOT/$id-ip"
   record_lease_evidence "$id"
