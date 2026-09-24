@@ -81,6 +81,22 @@ pub(crate) fn config_drive_ssh_public_key(
         .ok_or("key_name or ssh_public_key is required when config_drive is enabled")
 }
 
+/// Nova's `config_drive` member is an optional hint. O3K's canonical create
+/// resolves a config-drive artifact from an SSH public key, so an ABSENT
+/// member is treated like the native create path: materialize the config
+/// drive when the request can supply a public key (`key_name` or
+/// `ssh_public_key`), and otherwise keep the previous accepted behavior
+/// instead of failing a keyless create at the adapter. An explicit `false`
+/// keeps its accepted explicit-no-op meaning, and an explicit `true` keeps
+/// requiring a resolvable key exactly as before.
+pub(crate) fn config_drive_enabled(requested: Option<bool>, key_available: bool) -> bool {
+    match requested {
+        Some(false) => false,
+        Some(true) => true,
+        None => key_available,
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 pub(crate) enum IdReference {
@@ -718,7 +734,10 @@ pub(crate) async fn create_server(
             "invalid server request",
         );
     };
-    let config_drive = if body.server.config_drive == Some(true) {
+    let config_drive = if config_drive_enabled(
+        body.server.config_drive,
+        body.server.ssh_public_key.is_some() || body.server.key_name.is_some(),
+    ) {
         let keypair_public_key = if body.server.ssh_public_key.is_none() {
             if let Some(key_name) = body.server.key_name.as_deref() {
                 match service.show_keypair_for_auth(&auth, key_name).await {
@@ -1541,6 +1560,18 @@ mod tests {
         let parsed: super::CreateServerRequest = serde_json::from_value(request)?;
         assert_eq!(parsed.config_drive, Some(true));
         Ok(())
+    }
+
+    #[test]
+    fn absent_config_drive_is_materialized_like_the_native_create_path() {
+        // The canonical create resolves a config-drive artifact from an SSH
+        // public key, so an absent Nova `config_drive` hint is materialized
+        // when the request can supply a key, and a keyless create keeps its
+        // previously accepted behavior.
+        assert!(super::config_drive_enabled(None, true));
+        assert!(!super::config_drive_enabled(None, false));
+        assert!(super::config_drive_enabled(Some(true), false));
+        assert!(!super::config_drive_enabled(Some(false), true));
     }
 
     #[test]
