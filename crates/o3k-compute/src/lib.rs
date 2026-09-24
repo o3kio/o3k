@@ -78,6 +78,18 @@ fn test_fault_pause_ms_with(name: &str, ms: Option<u64>) {
     tracing::warn!(pause_ms = ms, "test-only fault pause {} released", name);
 }
 
+/// Async endpoint-release fault pause. Keeping the runtime schedulable lets
+/// concurrent repair/replay and unrelated DB-backed requests contend with the
+/// held serialization boundary while the crash window is open.
+async fn test_fault_pause_async_with(name: &str, ms: Option<u64>) {
+    let Some(ms) = ms else {
+        return;
+    };
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} engaged", name);
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} released", name);
+}
+
 /// Parse/guard half of `test_fault_pause_ms`; split out so the no-op
 /// conditions can be unit-tested without sleeping.
 fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {

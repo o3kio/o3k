@@ -303,6 +303,20 @@ impl ComputeService {
         operation_id: &str,
         state: o3k_store::OperationState,
     ) -> Result<(), ComputeError> {
+        let pause_ms = crate::test_fault_pause_ms_value(
+            std::env::var("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS").ok(),
+        );
+        self.project_terminal_binding_outcome_with_pause(operation_id, state, pause_ms)
+            .await
+    }
+
+    /// Terminal projection seat with an explicit crash-window pause for tests.
+    pub async fn project_terminal_binding_outcome_with_pause(
+        &self,
+        operation_id: &str,
+        state: o3k_store::OperationState,
+        pause_ms: Option<u64>,
+    ) -> Result<(), ComputeError> {
         let Ok(operation_id) = Uuid::parse_str(operation_id) else {
             tracing::warn!(
                 operation_id = %operation_id,
@@ -362,6 +376,14 @@ impl ComputeService {
         } else {
             (false, None, std::collections::HashSet::new())
         };
+        // The terminal state is already durable when this seat is entered.
+        // Hold the same serialization boundary as replay and orphan repair
+        // while pausing in the post-terminalization/pre-release crash window;
+        // otherwise a sweep can win during the pause and make the evidence
+        // nondeterministic.
+        if delete_release {
+            crate::test_fault_pause_async_with("before-endpoint-release", pause_ms).await;
+        }
         for port_id in &request.network_ids {
             let outcome = match operation.kind.as_str() {
                 "create" => {
@@ -489,13 +511,15 @@ impl ComputeService {
         let Some(projector) = self.binding_projector.as_ref() else {
             return Ok(());
         };
-        crate::test_fault_pause_ms_with("before-endpoint-release", pause_ms);
         // Serialize the [referenced-scan -> release] window against port-attaching
         // creates and the orphan sweep, so a create that wins the race is never
         // clipped by this replay seat and a port the sweep just released is
         // never re-referenced (issue #1035).
         let _orphan_repair_guard = self.orphan_repair_lock.lock().await;
         let attached = self.referenced_port_ids().await?;
+        // Keep the endpoint-release crash window inside the replay seat's
+        // serialization boundary so sweep/projection cannot release first.
+        crate::test_fault_pause_async_with("before-endpoint-release", pause_ms).await;
         for port_id in &request.network_ids {
             if attached.contains(port_id.as_str()) {
                 continue;

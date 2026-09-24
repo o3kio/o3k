@@ -1099,6 +1099,98 @@ async fn terminal_release_seat_honours_the_endpoint_release_failpoint()
     Ok(())
 }
 
+/// The real terminal projection path must hold the endpoint through the crash
+/// window too. The campaign exercises this path when background convergence
+/// reaches terminal before the request handler's delete pass.
+#[tokio::test]
+async fn terminal_projection_honours_the_endpoint_release_failpoint()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let wrapper: ProjectorWrapper = {
+        let armed = armed.clone();
+        Arc::new(move |_network, inner| {
+            Arc::new(CrashBeforeReleaseProjector {
+                inner,
+                armed: armed.clone(),
+            })
+        })
+    };
+    let harness = Harness::build_with(Some(wrapper)).await?;
+    let (id, port) = create_orphaned_endpoint(&harness, "pp5-terminal-projection").await?;
+
+    let operation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:canonical-delete:{PROJECT_A}:{id}:pp4-endpoint-delete-{id}").as_bytes(),
+    );
+    let operation = harness.store.get_operation(operation_id).await?;
+    assert_eq!(operation.kind, "lifecycle:delete");
+    assert_eq!(operation.state, o3k_store::OperationState::Succeeded);
+    // Queue terminal projection before the shipped sweep on the same lock.
+    // This makes the concurrent repair reach the lock while the release
+    // failpoint is active, without relying on scheduler timing to choose a
+    // winner.
+    let serialization_barrier = harness.compute.orphan_repair_lock_guard().await;
+    let compute = harness.compute.clone();
+    let started = std::time::Instant::now();
+    let projection = tokio::spawn(async move {
+        compute
+            .project_terminal_binding_outcome_with_pause(
+                &operation_id.to_string(),
+                o3k_store::OperationState::Succeeded,
+                Some(2_500),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    // Let the shipped sweep reach its next interval while terminal projection
+    // owns the release serialization lock. It must wait at that boundary,
+    // leaving the endpoint available for the crash-recovery proof.
+    let sweep = spawn_shipped_sweeps(&harness.compute);
+    tokio::task::yield_now().await;
+    drop(serialization_barrier);
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            harness.compute.orphan_repair_lock_guard(),
+        )
+        .await
+        .is_err(),
+        "terminal projection did not hold endpoint-release serialization"
+    );
+    assert!(
+        harness.port_present(port).await,
+        "concurrent orphan repair released the endpoint during the crash pause"
+    );
+    sweep.abort();
+    assert!(sweep.await.is_err_and(|error| error.is_cancelled()));
+    let projection_result = projection.await?;
+    assert!(
+        started.elapsed() >= Duration::from_millis(2_500),
+        "terminal projection did not hold the injected crash pause"
+    );
+    assert!(
+        projection_result.is_err(),
+        "armed projector unexpectedly released endpoint"
+    );
+    armed.store(false, std::sync::atomic::Ordering::SeqCst);
+    harness
+        .compute
+        .project_terminal_binding_outcome_with_pause(
+            &operation_id.to_string(),
+            o3k_store::OperationState::Succeeded,
+            None,
+        )
+        .await?;
+    assert!(
+        !harness.port_present(port).await,
+        "terminal projection did not release the endpoint after the pause"
+    );
+
+    harness.cleanup();
+    Ok(())
+}
+
 // ─── PP.5 #1035 — orphaned server-owned endpoint repair ───────────────────
 
 /// Simulates a control plane that died between the durable terminal delete and
@@ -1970,6 +2062,8 @@ fn postgres_test_url() -> String {
 /// Cleans the conformance database at test start. Fails closed (panics) if the
 /// configured PostgreSQL host is unreachable.
 async fn clean_postgres(url: &str) {
+    o3k_store::conformance::assert_destructive_postgres_test_database(url)
+        .expect("destructive PostgreSQL test database must have the expected purpose");
     let store = o3k_store::PostgresStore::connect(url)
         .await
         .expect("connect to the configured PostgreSQL conformance database");
