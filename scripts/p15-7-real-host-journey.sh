@@ -2266,8 +2266,28 @@ OS_WORKLOAD_C="$WORKLOAD_C"
 openstack port list -f value -c ID >"$WORK_ROOT/ports-after-c.txt" || die "port observation listing failed"
 PORT_C_ID="$(comm -13 <(sort "$WORK_ROOT/ports-before-c.txt") <(sort "$WORK_ROOT/ports-after-c.txt") | head -n 1 | tr -d '[:space:]')"
 [[ "$PORT_C_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "server C's server-owned endpoint was not observed"
-PORT_C_FIXED_IP="$(openstack port show "$PORT_C_ID" -f json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["port"]["fixed_ips"][0]["ip_address"])' 2>/dev/null || true)"
-[[ "$PORT_C_FIXED_IP" =~ ^[0-9.]+$ ]] || die "server C endpoint fixed IP unavailable"
+# OpenStackClient's JSON formatter may print the port object directly or
+# wrapped under "port" depending on the version; accept either shape and
+# preserve the raw projection as evidence when no address is available.
+openstack port show "$PORT_C_ID" -f json >"$WORK_ROOT/port-c-show.json" 2>"$WORK_ROOT/port-c-show.err" || true
+PORT_C_FIXED_IP="$(python3 - "$WORK_ROOT/port-c-show.json" <<'PY'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    print("")
+    raise SystemExit(0)
+port = doc.get("port", doc) if isinstance(doc, dict) else {}
+fixed_ips = port.get("fixed_ips") or []
+address = fixed_ips[0].get("ip_address", "") if fixed_ips and isinstance(fixed_ips[0], dict) else ""
+print(address)
+PY
+)"
+[[ "$PORT_C_FIXED_IP" =~ ^[0-9.]+$ ]] || {
+  cp "$WORK_ROOT/port-c-show.json" "$ARTIFACT_DIR/p15-7-server-c-endpoint-show.json" 2>/dev/null || true
+  chmod 0600 "$ARTIFACT_DIR/p15-7-server-c-endpoint-show.json" 2>/dev/null || true
+  die "server C endpoint fixed IP unavailable"
+}
 C_STATE=""
 for _ in $(seq 1 180); do
   code_c="$(curl --silent --output "$WORK_ROOT/workload-c-show.json" --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_C" || true)"
