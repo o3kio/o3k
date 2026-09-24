@@ -9,6 +9,10 @@ ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-$ROOT_DIR/target/real-host-workflow-
 EVIDENCE_FILE="${O3K_P15_7_EVIDENCE_FILE:-$ARTIFACT_DIR/p15-7-scale-composition-evidence.json}"
 RUN_ID="${GITHUB_RUN_ID:-local-$$}"
 SOURCE_SHA="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-}}"
+PREFLIGHT_ARTIFACT="${O3K_P15_7_PREFLIGHT_ARTIFACT:-$ARTIFACT_DIR/p15-7-protected-preflight.json}"
+CHECKOUT_HEAD="${O3K_P15_7_CHECKOUT_HEAD:-}"
+TREE_CLEAN="${O3K_P15_7_TREE_CLEAN:-false}"
+HARNESS_DIGEST="${O3K_P15_7_HARNESS_DIGEST:-}"
 PROFILE="${O3K_P15_7_PROFILE:-small-edge-cloud}"
 DIAGNOSTIC_ONLY="${O3K_P15_7_DIAGNOSTIC_ONLY:-false}"
 AUTHORITY_MODE="${O3K_P15_7_AUTHORITY_MODE:-testlab-keycloak}"
@@ -2198,6 +2202,8 @@ CRASH_REPAIR_OBSERVED_MS=""
 CRASH_DELETE_HTTP_CODE=""
 CRASH_SWEEP_PASSES=0
 ENDPOINT_PRESENT_WHILE_PAUSED=false
+UNRELATED_DB_PROBE_OK=false
+UNRELATED_DB_PROBE_LATENCY_MS=""
 ORPHAN_PRESENT_AT_D_CREATE=false
 quota_usage() {
   curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
@@ -2353,6 +2359,17 @@ if openstack_absent_code port "$PORT_C_ID"; then
   die "server-owned endpoint was released before the crash; the fault hook did not hold on the delete path"
 fi
 ENDPOINT_PRESENT_WHILE_PAUSED=true
+# While the endpoint-release serialization is held, prove the control plane is
+# not globally frozen: this independent DB-backed read must complete within a
+# bounded interval or the crash leg fails closed.
+UNRELATED_DB_PROBE_START_MS="$(date +%s%3N)"
+if curl --fail --silent --show-error --max-time 10 \
+  -H "Authorization: Bearer $PROJECT_TOKEN" \
+  "$API/operator/diagnostics/providers?limit=1" >"$WORK_ROOT/unrelated-db-probe.json" 2>/dev/null; then
+  UNRELATED_DB_PROBE_OK=true
+fi
+UNRELATED_DB_PROBE_LATENCY_MS="$(( $(date +%s%3N) - UNRELATED_DB_PROBE_START_MS ))"
+[[ "$UNRELATED_DB_PROBE_OK" == true ]] || die "unrelated_db_backed_probe_failed_during_endpoint_release_pause"
 
 # True process death of the run-owned control plane while the release is
 # parked, then clear the fault and restart through the normal boot path.
@@ -2499,13 +2516,14 @@ fi
 python3 - "$CRASH_EVIDENCE_FILE" "$O3K_FAULT_ENV_NAME" "$O3K_FAULT_ENV_VALUE" "$WORKLOAD_C" "$PORT_C_ID" "$PORT_C_FIXED_IP" \
   "$CRASH_KILLED_PID" "$CRASH_TERMINAL_OBSERVED_MS" "$CRASH_REPAIR_OBSERVED_MS" "$CRASH_DELETE_HTTP_CODE" "$CRASH_SWEEP_PASSES" \
   "$QUOTA_BEFORE_CRASH" "$QUOTA_AFTER_CRASH" "$ALLOC_BEFORE_CRASH" "$ALLOC_AFTER_CRASH" "$D_CREATE_START_MS" "$D_CREATE_END_MS" "$D_ACTIVE_MS" \
-  "$ENDPOINT_PRESENT_WHILE_PAUSED" "$ORPHAN_PRESENT_AT_D_CREATE" "$FIXED_IP_REUSABLE" "$CALLER_SUPPLIED_PRESERVED" "$FOREIGN_PRESERVED" <<'PY'
+  "$ENDPOINT_PRESENT_WHILE_PAUSED" "$ORPHAN_PRESENT_AT_D_CREATE" "$FIXED_IP_REUSABLE" "$CALLER_SUPPLIED_PRESERVED" "$FOREIGN_PRESERVED" \
+  "$UNRELATED_DB_PROBE_OK" "$UNRELATED_DB_PROBE_LATENCY_MS" <<'PY'
 import json, pathlib, sys
 
 (out, env_name, env_value, workload, port_id, fixed_ip, killed_pid,
  terminal_ms, repair_ms, delete_code, sweep_passes, quota_before, quota_after,
  alloc_before, alloc_after, d_start, d_end, d_active, endpoint_paused,
- orphan_at_d, fixed_ip_reusable, caller_preserved, foreign_preserved) = sys.argv[1:24]
+ orphan_at_d, fixed_ip_reusable, caller_preserved, foreign_preserved, unrelated_probe_ok, unrelated_probe_latency_ms) = sys.argv[1:26]
 doc = {
     "status": "passed",
     "fault_hook": {"env": env_name, "pause_ms": int(env_value),
@@ -2528,6 +2546,7 @@ doc = {
     "placement_allocation": {"vcpu_allocated_before": int(alloc_before), "vcpu_allocated_after": int(alloc_after),
                              "leak": alloc_before != alloc_after},
     "responsiveness_during_backlog": {
+        "unrelated_db_backed_probe": {"path": "/operator/diagnostics/providers?limit=1", "succeeded": unrelated_probe_ok == "true", "latency_ms": int(unrelated_probe_latency_ms)},
         "orphan_present_at_create": orphan_at_d == "true",
         "create_call_latency_ms": int(d_end) - int(d_start),
         "activation_latency_ms": int(d_active),
@@ -2765,10 +2784,13 @@ assert_owned_domains_absent
 [[ ! -e "$SSH_KEY" && ! -e "$KNOWN_HOSTS" ]] || die "owned journey files remain after cleanup"
 JOURNEY_END_MS="$(date +%s%3N)"
 
-PYTHONPATH="$ROOT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 - "$EVIDENCE_FILE" "$ARTIFACT_DIR" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" "$POSTGRES_MODE" "$POSTGRES_SERVER_VERSION" "$POSTGRES_REDACTED_ENDPOINT" "$POSTGRES_SCHEMA_PREPARED" "$INITIAL_READY_COUNT" "$FINAL_READY_COUNT" "$PEAK_CONCURRENT_READY" "$DRAIN_AGENT" "$BOOTSTRAP_AGENT_ID" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" "$BACKEND_EFFECTIVE" "$BACKEND_PROOF_METHOD" "$BACKEND_PROOF_POOL_SESSIONS" "$BACKEND_PROOF_SEVER_OBSERVED" "$BACKEND_PROOF_RECOVERY_OBSERVED" <<'PY'
+PYTHONPATH="$ROOT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 - "$EVIDENCE_FILE" "$ARTIFACT_DIR" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" "$POSTGRES_MODE" "$POSTGRES_SERVER_VERSION" "$POSTGRES_REDACTED_ENDPOINT" "$POSTGRES_SCHEMA_PREPARED" "$INITIAL_READY_COUNT" "$FINAL_READY_COUNT" "$PEAK_CONCURRENT_READY" "$DRAIN_AGENT" "$BOOTSTRAP_AGENT_ID" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" "$BACKEND_EFFECTIVE" "$BACKEND_PROOF_METHOD" "$BACKEND_PROOF_POOL_SESSIONS" "$BACKEND_PROOF_SEVER_OBSERVED" "$BACKEND_PROOF_RECOVERY_OBSERVED" "$PREFLIGHT_ARTIFACT" "$CHECKOUT_HEAD" "$TREE_CLEAN" "$HARNESS_DIGEST" <<'PY'
 from p15_7_scale_semantics import validate_bootstrap_scale_membership
 import json,pathlib,sys
-path=pathlib.Path(sys.argv[1]); artifact=pathlib.Path(sys.argv[2]); sha=sys.argv[3].lower(); profile=sys.argv[4]; blocks=int(sys.argv[5]); start=int(sys.argv[6]); end=int(sys.argv[7]); cross_tenant=sys.argv[8] == "true"; araf_status=sys.argv[9]; araf_reason=sys.argv[10]; diagnostic_only=sys.argv[11] == "true"; postgres_mode=sys.argv[12]; postgres_version=sys.argv[13]; postgres_endpoint=sys.argv[14]; postgres_schema=sys.argv[15] == "true"; initial_ready=int(sys.argv[16]); final_ready=int(sys.argv[17]); peak_ready=int(sys.argv[18]); drain_agent=sys.argv[19]; bootstrap_agent=sys.argv[20]; child_block_ids=sys.argv[21:26]; backend_effective=sys.argv[26]; backend_proof_method=sys.argv[27]; backend_proof={"status":"passed","method":backend_proof_method}; pool_sessions=sys.argv[28]
+path=pathlib.Path(sys.argv[1]); artifact=pathlib.Path(sys.argv[2]); sha=sys.argv[3].lower(); profile=sys.argv[4]; blocks=int(sys.argv[5]); start=int(sys.argv[6]); end=int(sys.argv[7]); cross_tenant=sys.argv[8] == "true"; araf_status=sys.argv[9]; araf_reason=sys.argv[10]; diagnostic_only=sys.argv[11] == "true"; postgres_mode=sys.argv[12]; postgres_version=sys.argv[13]; postgres_endpoint=sys.argv[14]; postgres_schema=sys.argv[15] == "true"; initial_ready=int(sys.argv[16]); final_ready=int(sys.argv[17]); peak_ready=int(sys.argv[18]); drain_agent=sys.argv[19]; bootstrap_agent=sys.argv[20]; child_block_ids=sys.argv[21:26]; backend_effective=sys.argv[26]; backend_proof_method=sys.argv[27]; backend_proof={"status":"passed","method":backend_proof_method}; pool_sessions=sys.argv[28]; preflight_path=pathlib.Path(sys.argv[31]); checkout_head=sys.argv[32].lower(); tree_clean=sys.argv[33] == "true"; harness_digest=sys.argv[34]
+preflight=json.loads(preflight_path.read_text(encoding="utf-8"))
+if checkout_head != sha or preflight.get("checkout_head") != sha or tree_clean is not True or preflight.get("git_tree_clean") is not True or len(harness_digest) != 64 or preflight.get("harness_inputs_sha256") != harness_digest:
+    raise SystemExit("preflight identity is missing or does not match the journey source")
 if postgres_mode == "external":
     backend_proof["pool_sessions_observed"]=int(pool_sessions) if pool_sessions.isdigit() else None
     backend_proof["proxy_sever_unhealthy_observed"]=sys.argv[29] == "true"
@@ -2824,7 +2846,7 @@ if len(child_vms) != blocks or not all(vm.get("ssh_proof") for vm in child_vms):
 def passed():
     return {"status":"passed"}
 doc={
- "artifact_type":"o3k-p15-7-scale-composition-evidence","schema_version":1,"phase":"P15.7","status":"passed","evidence_tier":"protected-real-host","profile":profile,"tested_source_sha":sha,
+ "artifact_type":"o3k-p15-7-scale-composition-evidence","schema_version":1,"phase":"P15.7","status":"passed","evidence_tier":"protected-real-host","profile":profile,"tested_source_sha":sha,"checkout_head":checkout_head,"git_tree_clean":tree_clean,"harness_inputs_sha256":harness_digest,
  "execution":{"real_o3kd":passed(),"real_auth":passed(),"real_execution_boundary":passed(),"multiple_real_hosts":passed(),"sqlite_parity":passed(),"provider":"agent","hypervisor":"libvirt","database_backend":"postgres","block_count":blocks,"provisioned_vms":blocks},
  "scale_composition":{
   "counting_rule":"eligible_ready",

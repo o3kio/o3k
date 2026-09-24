@@ -171,6 +171,7 @@ doc = {
   "phase":"P15.7", "status":"passed", "evidence_tier":"protected-real-host",
   "profile":"small-edge-cloud",
   "tested_source_sha":sha,
+  "checkout_head":sha,"git_tree_clean":True,"harness_inputs_sha256":"0" * 64,
   "execution":{"provider":"agent","hypervisor":"libvirt","database_backend":"postgres",
     "real_o3kd":True,"real_auth":True,"real_execution_boundary":True,
     "multiple_real_hosts":True,"block_count":5,"provisioned_vms":5,"sqlite_parity":True},
@@ -212,7 +213,9 @@ doc = {
       "fixed_ip_reuse":{"attempted":True,"succeeded":True},
       "quota":{"dimension":"network:ports","before":3,"after":3,"restored":True},
       "placement_allocation":{"vcpu_allocated_before":2,"vcpu_allocated_after":2,"leak":False},
-      "responsiveness_during_backlog":{"orphan_present_at_create":True,"create_call_latency_ms":2100,
+      "responsiveness_during_backlog":{"orphan_present_at_create":True,
+        "unrelated_db_backed_probe":{"path":"/operator/diagnostics/providers?limit=1","succeeded":True,"latency_ms":43},
+        "create_call_latency_ms":2100,
         "activation_latency_ms":41000,"server_active":True},
       "caller_supplied_endpoint_preserved":True,
       "foreign_project_endpoint_preserved":True},
@@ -263,6 +266,22 @@ PY
 env -u O3K_P15_7_ARAF_URL python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
   --expected-source-sha 0123456789abcdef0123456789abcdef01234567 \
   --expected-profile small-edge-cloud
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+del d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["unrelated_db_backed_probe"]
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "crash-pause responsiveness probe missing from evidence accepted" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["unrelated_db_backed_probe"] = {
+    "path":"/operator/diagnostics/providers?limit=1", "succeeded":True, "latency_ms":43}
+p.write_text(json.dumps(d))
+PY
 DIAGNOSTIC_EVIDENCE="${WORK_DIR}/diagnostic-only.json"
 python3 - "${DIAGNOSTIC_EVIDENCE}" <<'PY'
 import json, sys

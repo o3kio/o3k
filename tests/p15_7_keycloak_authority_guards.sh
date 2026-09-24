@@ -56,6 +56,18 @@ cat >"$FAKE_BIN/curl" <<'SH'
 exit 0
 SH
 chmod +x "$FAKE_BIN/virsh" "$FAKE_BIN/docker" "$FAKE_BIN/curl"
+# The production preflight must reject this developer checkout's intentional
+# repair edits. Model the clean checkout used by this isolated guard test while
+# delegating every other git operation (HEAD and harness identity) to real git.
+REAL_GIT="$(command -v git)"
+cat >"$FAKE_BIN/git" <<SH
+#!/usr/bin/env bash
+if [[ "\$1" == -C && "\$3" == status ]]; then
+  exit 0
+fi
+exec "$REAL_GIT" "\$@"
+SH
+chmod +x "$FAKE_BIN/git"
 FAKE_AUTHORITY="$WORK/fake-authority.sh"
 cat >"$FAKE_AUTHORITY" <<'SH'
 #!/usr/bin/env bash

@@ -24,6 +24,9 @@ KEYCLOAK_AUTHORITY_SCRIPT="${O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT:-$ROOT_DIR/scri
 TEMP_ROOT="${RUNNER_TEMP:-/tmp}"
 LIBVIRT_IMAGE_ROOT="${O3K_P15_7_LIBVIRT_IMAGE_ROOT:-/var/lib/libvirt/images}"
 PREFLIGHT_SUCCESS=false
+SOURCE_HEAD=""
+TREE_CLEAN="false"
+HARNESS_DIGEST=""
 
 cleanup_preflight() {
   rm -f -- "${EXCHANGE_OUTPUT:-}" "${EXCHANGE_OUTPUT:-}.stdout" "${EXCHANGE_OUTPUT:-}.stderr"
@@ -39,9 +42,9 @@ cleanup_preflight() {
 
 write_artifact() {
   local status="$1" reason="$2" authority="$3" ttl="$4" capacity="$5"
-  python3 - "$ARTIFACT" "$status" "$reason" "$authority" "$ttl" "$capacity" "$SOURCE_SHA" <<'PY'
+  python3 - "$ARTIFACT" "$status" "$reason" "$authority" "$ttl" "$capacity" "$SOURCE_SHA" "$SOURCE_HEAD" "$TREE_CLEAN" "$HARNESS_DIGEST" <<'PY'
 import json, os, sys, time
-path, status, reason, authority, ttl, capacity, sha = sys.argv[1:]
+path, status, reason, authority, ttl, capacity, sha, head, clean, harness = sys.argv[1:]
 doc = {
     "artifact_type": "o3k-p15-7-protected-preflight",
     "schema_version": 1,
@@ -49,6 +52,9 @@ doc = {
     "reason": reason,
     "redacted": True,
     "tested_source_sha": sha if len(sha) == 40 else "",
+    "checkout_head": head if len(head) == 40 else "",
+    "git_tree_clean": clean == "true",
+    "harness_inputs_sha256": harness if len(harness) == 64 else "",
     "system_operator_authority": authority,
     "token_ttl": ttl,
     "multi_vm_capacity": capacity,
@@ -75,8 +81,24 @@ blocked() {
 mkdir -p -- "$ARTIFACT_DIR"
 chmod 0755 -- "$ARTIFACT_DIR"
 
+SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
+# Exact-head evidence is invalid when an execution-affecting input is present
+# outside the commit.  `dist/` is the repository's documented packaging output
+# and is intentionally ignored here; all other tracked or untracked changes
+# fail before any TestLab, database, image, or VM work begins.
+tree_status="$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
+unexpected_status="$(printf '%s\n' "$tree_status" | awk 'NF && $0 !~ /^\?\? dist\// {print}')"
+if [[ -n "$unexpected_status" ]]; then
+  write_artifact blocked dirty_checkout blocked blocked blocked
+  echo "P15_7_PROTECTED_PREFLIGHT: BLOCKED (dirty_checkout)" >&2
+  exit 2
+fi
+TREE_CLEAN=true
+HARNESS_DIGEST="$(git -C "$ROOT_DIR" ls-files -- 'scripts/**' 'tests/p15_7_*' '.github/workflows/*p15*' \
+  | while IFS= read -r path; do printf '%s  %s\n' "$(git -C "$ROOT_DIR" hash-object -- "$path")" "$path"; done \
+  | sha256sum | awk '{print $1}')"
 [[ "$SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || blocked exact_source_sha_required
-[[ "$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)" == "$SOURCE_SHA" ]] || blocked source_checkout_mismatch
+[[ "$SOURCE_HEAD" == "$SOURCE_SHA" ]] || blocked source_checkout_mismatch
 [[ -f "$JOURNEY" && ! -L "$JOURNEY" ]] || blocked journey_driver_missing
 grep -Fq 'o3k init' "$JOURNEY" || blocked journey_driver_contract_missing
 grep -Fq 'o3k-p15-7-journey-owned-v1' "$JOURNEY" || blocked journey_ownership_contract_missing
@@ -271,7 +293,8 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   } >>"$GITHUB_OUTPUT"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  printf 'O3K_P15_7_OPERATOR_TOKEN_FILE=%s\n' "$TOKEN_FILE" >>"$GITHUB_ENV"
+  printf 'O3K_P15_7_OPERATOR_TOKEN_FILE=%s\nO3K_P15_7_PREFLIGHT_ARTIFACT=%s\nO3K_P15_7_CHECKOUT_HEAD=%s\nO3K_P15_7_TREE_CLEAN=%s\nO3K_P15_7_HARNESS_DIGEST=%s\n' \
+    "$TOKEN_FILE" "$ARTIFACT" "$SOURCE_HEAD" "$TREE_CLEAN" "$HARNESS_DIGEST" >>"$GITHUB_ENV"
 fi
 PREFLIGHT_SUCCESS=true
 echo "P15_7_PROTECTED_PREFLIGHT: PASS"

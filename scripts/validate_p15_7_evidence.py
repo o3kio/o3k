@@ -109,6 +109,17 @@ def validate(
     elif expected_sha and source_sha != expected_sha:
         fail(errors, f"tested_source_sha does not match expected source {expected_sha}")
 
+    checkout_head = root.get("checkout_head")
+    if not isinstance(checkout_head, str) or not SHA.fullmatch(checkout_head):
+        fail(errors, "checkout_head must be a lowercase 40-character commit SHA")
+    elif checkout_head != source_sha or (expected_sha and checkout_head != expected_sha):
+        fail(errors, "checkout_head must match the tested and expected source SHA")
+    if root.get("git_tree_clean") is not True:
+        fail(errors, "git_tree_clean must be true for protected evidence")
+    harness_digest = root.get("harness_inputs_sha256")
+    if not isinstance(harness_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", harness_digest):
+        fail(errors, "harness_inputs_sha256 must be a lowercase SHA-256 digest")
+
     execution = mapping(root.get("execution"), "execution", errors)
     if execution is not None:
         for key in ("real_o3kd", "real_auth", "real_execution_boundary", "multiple_real_hosts", "sqlite_parity"):
@@ -372,6 +383,14 @@ def validate(
                     fail(errors, "journey.crash_injection_repair.responsiveness_during_backlog.server_active must be true")
                 if not isinstance(responsiveness.get("create_call_latency_ms"), int) or responsiveness["create_call_latency_ms"] < 0:
                     fail(errors, "journey.crash_injection_repair.responsiveness_during_backlog.create_call_latency_ms must be recorded")
+                probe = mapping(responsiveness.get("unrelated_db_backed_probe"), "journey.crash_injection_repair.responsiveness_during_backlog.unrelated_db_backed_probe", errors)
+                if probe is not None:
+                    if probe.get("path") != "/operator/diagnostics/providers?limit=1":
+                        fail(errors, "unrelated DB-backed probe path is invalid")
+                    if probe.get("succeeded") is not True:
+                        fail(errors, "unrelated DB-backed probe must succeed while endpoint release is paused")
+                    if not isinstance(probe.get("latency_ms"), int) or probe["latency_ms"] < 0:
+                        fail(errors, "unrelated DB-backed probe latency must be recorded")
             if crash.get("caller_supplied_endpoint_preserved") is not True:
                 fail(errors, "journey.crash_injection_repair.caller_supplied_endpoint_preserved must be true")
             if crash.get("foreign_project_endpoint_preserved") is not True:
