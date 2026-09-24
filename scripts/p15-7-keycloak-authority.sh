@@ -278,9 +278,23 @@ exchange() {
   request="$(mktemp "$STATE_ROOT/exchange.XXXXXX")"; response="$(mktemp "$STATE_ROOT/native.XXXXXX")"
   chmod 0600 "$request" "$response"
   printf '{"auth":{"method":"federated","federated":{"access_token":"%s","scope":{"kind":"system"}}}}\n' "$token" >"$request"
-  curl --fail --silent --show-error --proto '=http,https' --max-time 20 \
-    -H 'Content-Type: application/json' --data-binary "@$request" \
-    "$api/identity/tokens" -o "$response" || die "native federated exchange failed"
+  # Bounded, loud retry: the exchange immediately follows the external-mode
+  # proxy sever/restore wiring proof, and the control plane's PostgreSQL pool
+  # can still be recycling severed connections when it runs (observed 503s on
+  # run 990924001 while readyz had already recovered). This is the same
+  # transient class the P15.7 journey already absorbs with bounded retries;
+  # a permanent failure still fails closed after the bounded attempts.
+  local attempt response_code
+  for attempt in 1 2 3 4 5 6; do
+    response_code="$(curl --silent --show-error --proto '=http,https' --max-time 20 \
+      -H 'Content-Type: application/json' --data-binary "@$request" \
+      -o "$response" --write-out '%{http_code}' \
+      "$api/identity/tokens" 2>"$STATE_ROOT/exchange.curl-$attempt.log" || true)"
+    [[ "$response_code" == 2* ]] && break
+    echo "P15.7 Keycloak authority: native federated exchange attempt $attempt returned HTTP $response_code; retrying" >&2
+    [[ "$attempt" == 6 ]] && die "native federated exchange failed"
+    sleep 5
+  done
   native="$(python3 - "$response" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding='utf-8'))['token']['id']
@@ -307,6 +321,7 @@ cleanup() {
     "$STATE_ROOT"/admin-response.* "$STATE_ROOT"/users-response.* \
     "$STATE_ROOT"/reset-curl.* "$STATE_ROOT"/reset-body.* \
     "$STATE_ROOT"/curl.* "$STATE_ROOT"/oauth-response.* \
+    "$STATE_ROOT"/exchange.curl-*.log \
     "$STATE_ROOT"/exchange.* "$STATE_ROOT"/native.*
   if [[ -f "$RUN_MARKER" && ! -L "$RUN_MARKER" ]]; then
     grep -Fqx 'o3k-p15-7-keycloak-container-v1' "$RUN_MARKER" || die "invalid Keycloak container ledger"
