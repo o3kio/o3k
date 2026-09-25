@@ -27,6 +27,7 @@ if [[ "$RUN_ID" =~ ^local- ]]; then
 else
   STATE_ROOT="${SERVICE_STATE_BASE}/${RUN_ID}"
 fi
+BOOTSTRAP_ENV_FILE="$STATE_ROOT/bootstrap.env"
 SERVICE_ACCOUNT=o3k
 COMPUTE_ACCOUNT=o3k-compute
 # Native LVM commands require access to the device-mapper control node.  The
@@ -893,6 +894,42 @@ rm -f -- "$OPENSTACK_CLOUD_CONFIG_TMP"
 export OS_CLOUD=o3k-testlab OS_CLIENT_CONFIG_FILE="$OPENSTACK_CLOUD_CONFIG"
 openstack token issue >/dev/null 2>&1 || fail "generated password failed OpenStack authentication"
 
+# GitHub Actions imports GITHUB_ENV only at the next step boundary.  Manual
+# protected-run drivers have no such implicit boundary, so publish the same
+# canonical environment as one run-owned, mode-0600 artifact.  Consumers must
+# parse this file with an allowlist; it is deliberately not a shell script.
+bootstrap_env_tmp="$(mktemp "${RUNNER_TEMP%/}/bootstrap.env.XXXXXX")"
+umask 077
+{
+  printf 'OS_AUTH_URL=%s\n' "$OS_AUTH_URL"
+  printf 'OS_USERNAME=%s\n' "$OS_USERNAME"
+  printf 'OS_PASSWORD=%s\n' "$OS_PASSWORD"
+  printf 'OS_PROJECT_NAME=%s\n' "$OS_PROJECT_NAME"
+  printf 'OS_REGION_NAME=%s\n' "$OS_REGION_NAME"
+  printf 'OS_USER_DOMAIN_NAME=%s\n' "$OS_USER_DOMAIN_NAME"
+  printf 'OS_PROJECT_DOMAIN_NAME=%s\n' "$OS_PROJECT_DOMAIN_NAME"
+  printf 'OS_INTERFACE=%s\n' "$OS_INTERFACE"
+  printf 'OS_IDENTITY_API_VERSION=%s\n' "$OS_IDENTITY_API_VERSION"
+  printf 'OS_CLOUD=%s\n' "$OS_CLOUD"
+  printf 'OS_CLIENT_CONFIG_FILE=%s\n' "$OS_CLIENT_CONFIG_FILE"
+  printf 'O3K_TESTLAB_STATE_ROOT=%s\n' "$STATE_ROOT"
+  printf 'O3K_REAL_HOST_SERVICE_ACCOUNT=%s\n' "$(id -un)"
+  printf 'O3K_REAL_HOST_COMPUTE_BINARY=%s\n' "$STATE_ROOT/bin/o3k-compute"
+  printf 'O3K_REAL_HOST_NETWORK_CAPABILITY=ambient-net-admin\n'
+  printf 'O3K_REAL_HOST_DAEMON_ACCOUNT=%s\n' "$SERVICE_ACCOUNT"
+  printf 'O3K_REAL_HOST_COMPUTE_ACCOUNT=%s\n' "$COMPUTE_ACCOUNT"
+  printf 'O3K_COMPUTE_BRIDGE_NAME=%s\n' "$BRIDGE_NAME"
+  printf 'O3K_TESTLAB_PID_ROOT=%s\n' "$PID_ROOT"
+  printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\n' "$INVENTORY_ROOT"
+  printf 'O3K_REAL_HOST_INVENTORY_ROOT=%s\n' "$INVENTORY_ROOT"
+  printf 'O3K_OPENSTACK_VENV=%s\n' "$OPENSTACK_VENV"
+  printf 'O3K_TESTLAB_ENV_FILE=%s\n' "$BOOTSTRAP_ENV_FILE"
+  printf 'O3K_BOOTSTRAP_SECRET=%s\n' "$BOOTSTRAP_SECRET"
+} >"$bootstrap_env_tmp"
+sudo -n install -o "$(id -u)" -g "$(id -g)" -m 0600 \
+  "$bootstrap_env_tmp" "$BOOTSTRAP_ENV_FILE"
+rm -f -- "$bootstrap_env_tmp"
+
 printf 'O3K_TESTLAB_STATE_ROOT=%s\nO3K_REAL_HOST_SERVICE_ACCOUNT=%s\n' "$STATE_ROOT" "$(id -un)" >>"${GITHUB_ENV:-/dev/null}"
 if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
   printf 'O3K_AGENT_INSPECT_PROBE_OUTPUT=%s/agent-inspect-probe.json\n' "$STATE_ROOT" >>"${GITHUB_ENV:-/dev/null}"
@@ -909,6 +946,7 @@ printf 'OS_AUTH_URL=%s\nOS_USERNAME=admin\nOS_PROJECT_NAME=admin\nOS_REGION_NAME
   "$OS_AUTH_URL" "$PASSWORD" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_BOOTSTRAP_SECRET=%s\n' "$BOOTSTRAP_SECRET" >>"${GITHUB_ENV:-/dev/null}"
 printf 'OS_CLOUD=%s\nOS_CLIENT_CONFIG_FILE=%s\n' "$OS_CLOUD" "$OPENSTACK_CLOUD_CONFIG" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_TESTLAB_ENV_FILE=%s\n' "$BOOTSTRAP_ENV_FILE" >>"${GITHUB_ENV:-/dev/null}"
 write_result passed authenticated
 trap - EXIT
 echo "disposable TestLab bootstrap completed"
