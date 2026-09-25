@@ -144,6 +144,10 @@ if [[ ! -f "${EVIDENCE_FILE}" ]]; then
         write_result blocked project_auth_smoke_failed
         exit 2
     fi
+    if [[ "${O3K_P15_7_AUTH_SMOKE_ONLY:-}" == 1 ]]; then
+        write_result passed project_auth_smoke_only
+        exit 0
+    fi
     export O3K_P15_7_EVIDENCE_FILE="${EVIDENCE_FILE}"
     bash -lc "${O3K_P15_7_JOURNEY_COMMAND}"
 fi
