@@ -342,24 +342,42 @@ read_o3kd_ledger() {
   [[ "$(sudo -n readlink -f "/proc/$pid/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] || die "o3kd executable identity changed"
   printf '%s\n' "$pid"
 }
+listener_owner_pids() {
+  local port="$1"
+  sudo -n ss -H -ltnp "sport = :$port" 2>/dev/null \
+    | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true
+}
 start_o3kd_verified() {
   # Start the exact owned daemon from its run-scoped environment through the
   # normal boot path, wait until the control plane accepts HTTP, and record
   # the new ownership ledger entry. The caller waits for readiness separately
   # so backend-specific canonical state can be re-established first.
-  local new_pid new_ticks new_uid candidate
-  sudo -n -u "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -- setsid nohup bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" >/dev/null 2>&1 &
+  local new_pid new_ticks new_uid launch_pid_file http_listener_pid control_listener_pid
+  launch_pid_file="$STATE_ROOT/data/o3kd-launch.pid"
+  sudo -n rm -f -- "$launch_pid_file" "$launch_pid_file.tmp"
+  sudo -n -u "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -- setsid nohup bash -c '
+    set -a
+    . "$1"
+    set +a
+    printf "%s\\n" "$$" >"$4.tmp"
+    mv -f -- "$4.tmp" "$4"
+    exec "$2" >>"$3" 2>&1
+  ' _ "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$launch_pid_file" >/dev/null 2>&1 &
   new_pid=""
   for _ in $(seq 1 120); do
-    while IFS= read -r candidate; do
-      [[ -n "$candidate" ]] || continue
-      [[ "$(sudo -n readlink -f "/proc/$candidate/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] \
-        || continue
-      new_pid="$candidate"
-      break
-    done < <(sudo -n pgrep -u "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -x o3kd 2>/dev/null || true)
+    new_pid="$(sudo -n cat "$launch_pid_file" 2>/dev/null || true)"
+    [[ "$new_pid" =~ ^[0-9]+$ ]] || { new_pid=""; sleep .25; continue; }
+    [[ "$(sudo -n stat -c '%U' "/proc/$new_pid" 2>/dev/null || true)" == "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" ]] \
+      || { new_pid=""; sleep .25; continue; }
+    [[ "$(sudo -n readlink -f "/proc/$new_pid/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] \
+      || { new_pid=""; sleep .25; continue; }
+    if ! sudo -n cat "/proc/$new_pid/environ" 2>/dev/null | tr '\0' '\n' \
+      | grep -Fqx "O3K_DATA_DIR=$STATE_ROOT/data"; then
+      new_pid=""
+      sleep .25
+      continue
+    fi
     [[ "$new_pid" ]] && break
-    sleep .25
   done
   [[ "$new_pid" ]] || die "o3kd restart failed"
   new_ticks="$(sudo -n awk '{print $22}' "/proc/$new_pid/stat")"
@@ -376,13 +394,18 @@ start_o3kd_verified() {
   # gated behind the rejoin, so any HTTP response (e.g. 404) is the signal.
   local http_up=""
   for _ in $(seq 1 120); do
-    if curl --silent --output /dev/null "http://127.0.0.1:$AUTH_PORT/" 2>/dev/null; then
+    http_listener_pid="$(listener_owner_pids "$AUTH_PORT")"
+    control_listener_pid="$(listener_owner_pids "$CONTROL_PORT")"
+    if [[ "$http_listener_pid" == "$new_pid" && "$control_listener_pid" == "$new_pid" ]] \
+      && curl --silent --output /dev/null "http://127.0.0.1:$AUTH_PORT/" 2>/dev/null; then
       http_up=1
       break
     fi
     sleep .25
   done
-  [[ "$http_up" ]] || die "restarted o3kd did not accept control-plane HTTP"
+  [[ "$http_up" ]] || die "run-owned o3kd listeners did not belong to the captured restart PID"
+  O3KD_HTTP_LISTENER_PID="$http_listener_pid"
+  O3KD_CONTROL_LISTENER_PID="$control_listener_pid"
 }
 stop_o3kd_orderly() {
   local pid="$1"
@@ -519,7 +542,10 @@ capture_failure_diagnostics() {
   # so the recurrence is diagnosed from first evidence.  Fail open: this
   # capture must never turn a failure into a different failure.
   local hang_pid=""
-  hang_pid="$(sudo -n pgrep -u "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -x o3kd 2>/dev/null | head -n 1 || true)"
+  hang_pid="$(awk -F'|' '$4 == "o3kd" {print $1; exit}' \
+    "${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-testlab-pids/$RUN_ID}/o3kd.pid" 2>/dev/null || true)"
+  [[ "$(sudo -n readlink -f "/proc/$hang_pid/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] \
+    || hang_pid=""
   if [[ "$hang_pid" =~ ^[0-9]+$ ]]; then
     mkdir -p "$ARTIFACT_DIR/o3kd-hang" 2>/dev/null || true
     sudo -n bash -c '
@@ -2471,9 +2497,34 @@ UNRELATED_DB_PROBE_LATENCY_MS="$(( $(date +%s%3N) - UNRELATED_DB_PROBE_START_MS 
 
 # True process death of the run-owned control plane while the release is
 # parked, then clear the fault and restart through the normal boot path.
+OLD_O3KD_PID="$(read_o3kd_ledger)"
+OLD_O3KD_STARTTIME="$(sudo -n awk '{print $22}' "/proc/$OLD_O3KD_PID/stat")"
+OLD_O3KD_EXE="$(sudo -n readlink -f "/proc/$OLD_O3KD_PID/exe")"
+OLD_O3KD_HTTP_LISTENER_PID="$(listener_owner_pids "$AUTH_PORT")"
+OLD_O3KD_CONTROL_LISTENER_PID="$(listener_owner_pids "$CONTROL_PORT")"
+[[ "$OLD_O3KD_EXE" == "$STATE_ROOT/bin/o3kd" \
+  && "$OLD_O3KD_HTTP_LISTENER_PID" == "$OLD_O3KD_PID" \
+  && "$OLD_O3KD_CONTROL_LISTENER_PID" == "$OLD_O3KD_PID" ]] \
+  || die "old o3kd identity or listener ownership was not proven before SIGKILL"
+persist_crash_checkpoint process_identity_armed running \
+  pid "$OLD_O3KD_PID" starttime "$OLD_O3KD_STARTTIME" executable "$OLD_O3KD_EXE" \
+  http_listener_pid "$OLD_O3KD_HTTP_LISTENER_PID" control_listener_pid "$OLD_O3KD_CONTROL_LISTENER_PID" \
+  state_root "$STATE_ROOT"
+CRASH_SIGKILL_MS="$(date +%s%3N)"
 CRASH_KILLED_PID="$(kill9_o3kd_verified)"
+CRASH_OLD_GONE_MS="$(date +%s%3N)"
+for _ in $(seq 1 30); do
+  [[ -z "$(listener_owner_pids "$AUTH_PORT")" && -z "$(listener_owner_pids "$CONTROL_PORT")" ]] && break
+  sleep 1
+done
+[[ -z "$(listener_owner_pids "$AUTH_PORT")" && -z "$(listener_owner_pids "$CONTROL_PORT")" ]] \
+  || die "old o3kd listeners remained after SIGKILL"
 persist_crash_checkpoint process_killed running \
-  signal SIGKILL pid "$CRASH_KILLED_PID" identity_verified true
+  signal SIGKILL pid "$CRASH_KILLED_PID" identity_verified true \
+  old_starttime "$OLD_O3KD_STARTTIME" old_executable "$OLD_O3KD_EXE" \
+  old_http_listener_pid "$OLD_O3KD_HTTP_LISTENER_PID" \
+  old_control_listener_pid "$OLD_O3KD_CONTROL_LISTENER_PID" \
+  sigkill_unix_ms "$CRASH_SIGKILL_MS" old_process_gone_unix_ms "$CRASH_OLD_GONE_MS"
 wait "$CRASH_DELETE_PID" 2>/dev/null || true
 CRASH_DELETE_HTTP_CODE="$(tr -d '[:space:]' <"$WORK_ROOT/workload-c-delete.code" 2>/dev/null || true)"
 clear_o3kd_fault_env || die "fault hook could not be cleared from the o3kd environment"
@@ -2504,6 +2555,11 @@ fi
   || die "restarted o3kd did not consume the run-owned repair synchronization environment"
 persist_crash_checkpoint process_restarted running \
   restart_path normal_boot readyz passed restart_unix_ms "$CRASH_RESTART_MS" restarted_pid "$RESTARTED_O3KD_PID" \
+  restarted_starttime "$(sudo -n awk '{print $22}' "/proc/$RESTARTED_O3KD_PID/stat" 2>/dev/null || true)" \
+  restarted_executable "$STATE_ROOT/bin/o3kd" \
+  restarted_state_root "$STATE_ROOT" \
+  restarted_http_listener_pid "${O3KD_HTTP_LISTENER_PID:-}" \
+  restarted_control_listener_pid "${O3KD_CONTROL_LISTENER_PID:-}" \
   repair_release_file_env_consumed "$REPAIR_RELEASE_ENV_CONSUMED" \
   repair_timeout_env_consumed "$REPAIR_TIMEOUT_ENV_CONSUMED" \
   create_waiter_env_consumed "$CREATE_WAITER_ENV_CONSUMED" \
