@@ -2258,6 +2258,14 @@ CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE=false
 CRASH_REPAIR_PAUSE_RELEASED_UNIX_MS=""
 CONTENDING_CREATE_LOCK_WAIT_OBSERVED=false
 CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS=""
+# A killed controller does not release a durable work lease.  The accepted
+# coordination contract transfers ownership only after the 60s lease TTL, and
+# the lifecycle reconciler runs on a 5s cadence.  The old 10s marker poll could
+# therefore fail before the replacement had a legal opportunity to acquire
+# the repair lease.  Keep this bound explicit in the evidence rather than
+# treating Busy as an unexplained startup failure.
+CRASH_REPAIR_LOCK_WAIT_BOUND_MS=65000
+CRASH_REPAIR_LEASE_TAKEOVER="ttl_expiry"
 CRASH_OPERATION_ID=""
 persist_crash_checkpoint() {
   local phase="$1" status="$2"
@@ -2476,8 +2484,32 @@ start_o3kd_verified
 remove_o3kd_repair_pause_env || die "repair contention pause could not be removed from daemon environment"
 wait_o3kd_readyz "readyz did not reconstruct after the crash restart"
 CRASH_RESTART_MS="$(date +%s%3N)"
+RESTARTED_O3KD_PID="$(read_o3kd_ledger)"
+REPAIR_RELEASE_ENV_CONSUMED=false
+REPAIR_TIMEOUT_ENV_CONSUMED=false
+CREATE_WAITER_ENV_CONSUMED=false
+if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
+  | grep -Fqx "$O3K_REPAIR_RELEASE_ENV_NAME=$CRASH_REPAIR_RELEASE_FILE"; then
+  REPAIR_RELEASE_ENV_CONSUMED=true
+fi
+if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
+  | grep -Fqx "$O3K_REPAIR_TIMEOUT_ENV_NAME=$CONTENDING_CREATE_REPAIR_PAUSE_MS"; then
+  REPAIR_TIMEOUT_ENV_CONSUMED=true
+fi
+if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
+  | grep -Fqx "$O3K_CREATE_WAITER_ENV_NAME=$CRASH_REPAIR_WAITER_FILE"; then
+  CREATE_WAITER_ENV_CONSUMED=true
+fi
+[[ "$REPAIR_RELEASE_ENV_CONSUMED" == true && "$REPAIR_TIMEOUT_ENV_CONSUMED" == true && "$CREATE_WAITER_ENV_CONSUMED" == true ]] \
+  || die "restarted o3kd did not consume the run-owned repair synchronization environment"
 persist_crash_checkpoint process_restarted running \
-  restart_path normal_boot readyz passed restart_unix_ms "$CRASH_RESTART_MS"
+  restart_path normal_boot readyz passed restart_unix_ms "$CRASH_RESTART_MS" restarted_pid "$RESTARTED_O3KD_PID" \
+  repair_release_file_env_consumed "$REPAIR_RELEASE_ENV_CONSUMED" \
+  repair_timeout_env_consumed "$REPAIR_TIMEOUT_ENV_CONSUMED" \
+  create_waiter_env_consumed "$CREATE_WAITER_ENV_CONSUMED" \
+  repair_work_key server-endpoint-orphan-repair repair_lease_ttl_seconds 60 \
+  repair_interval_seconds 5 repair_lease_takeover "$CRASH_REPAIR_LEASE_TAKEOVER" \
+  repair_lock_wait_bound_ms "$CRASH_REPAIR_LOCK_WAIT_BOUND_MS"
 
 # Foreign-project fixture created DURING the orphan backlog: the sweep must
 # never touch it even though foreign endpoints exist in the same control
@@ -2517,7 +2549,8 @@ OS_PORT_D_ID="$(tr -d '[:space:]' <"$WORK_ROOT/port-d-create.txt")"
 [[ "$OS_PORT_D_ID" =~ ^[0-9a-fA-F-]{36}$ && "$OS_PORT_D_ID" != "$OS_PORT_A_ID" && "$OS_PORT_D_ID" != "$OS_PORT_B_ID" ]] \
   || die "caller-supplied probe port returned an invalid or reused id"
 REPAIR_LOCK_HELD=false
-for _ in $(seq 1 100); do
+REPAIR_LOCK_WAIT_START_MS="$(date +%s%3N)"
+for _ in $(seq 1 650); do
   current_lines="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
   new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
   if (( new_lines > 0 )) && sudo -n tail -n "$new_lines" "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
@@ -2528,6 +2561,9 @@ for _ in $(seq 1 100); do
   sleep 0.1
 done
 [[ "$REPAIR_LOCK_HELD" == true ]] || die "orphan repair did not enter the deterministic lock-hold window"
+CRASH_REPAIR_LOCK_WAIT_MS="$(( $(date +%s%3N) - REPAIR_LOCK_WAIT_START_MS ))"
+(( CRASH_REPAIR_LOCK_WAIT_MS <= CRASH_REPAIR_LOCK_WAIT_BOUND_MS )) \
+  || die "orphan repair exceeded the contract-derived 65s lease/cadence bound"
 current_lines="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
 new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
 if (( new_lines > 0 )) && sudo -n tail -n "$new_lines" "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
@@ -2541,7 +2577,9 @@ fi
 [[ "$ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED" == true ]] \
   || die "repair lock was held but the expected server-owned orphan was already absent"
 persist_crash_checkpoint repair_lock_acquired running \
-  repair_pass_active true lock "orphan_repair_lock" orphan_present true
+  repair_pass_active true lock "orphan_repair_lock" orphan_present true \
+  repair_lock_wait_ms "$CRASH_REPAIR_LOCK_WAIT_MS" repair_lock_wait_bound_ms "$CRASH_REPAIR_LOCK_WAIT_BOUND_MS" \
+  repair_lease_takeover "$CRASH_REPAIR_LEASE_TAKEOVER"
 CONTENDING_CREATE_REQUEST_START_MS="$(date +%s%3N)"
 timeout --signal=TERM 67s openstack server create --image "$OS_IMAGE_ID" --flavor "$OS_FLAVOR_ID" --key-name "$OS_KEYPAIR_NAME" \
   --nic "port-id=$OS_PORT_D_ID" "o3k-p15-7-$RUN_ID-d" -f value -c id >"$WORK_ROOT/workload-d-create.txt" 2>"$WORK_ROOT/workload-d-create.err" &
