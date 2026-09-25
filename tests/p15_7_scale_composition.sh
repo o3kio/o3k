@@ -100,7 +100,7 @@ import_bootstrap_environment() {
 }
 
 project_auth_smoke() {
-    local expected_project_id project_id project_id_check
+    local expected_project_id project_id project_listing
     expected_project_id="$(python3 - "${ARTIFACT_DIR}/disposable-testlab-bootstrap.json" <<'PY'
 import json
 import pathlib
@@ -116,8 +116,15 @@ PY
     [[ "$expected_project_id" =~ ^[0-9a-fA-F-]{36}$ ]] || return 1
     project_id="$(openstack token issue -f value -c project_id 2>/dev/null | tr -d '[:space:]')" || return 1
     [[ "$project_id" == "$expected_project_id" ]] || return 1
-    project_id_check="$(openstack project show "$project_id" -f value -c id 2>/dev/null | tr -d '[:space:]')" || return 1
-    [[ "$project_id_check" == "$expected_project_id" ]] || return 1
+    project_listing="$(openstack server list -f json 2>/dev/null)" || return 1
+    python3 - "$project_listing" <<'PY' || return 1
+import json
+import sys
+
+value = json.loads(sys.argv[1])
+if not isinstance(value, list):
+    raise SystemExit(1)
+PY
     write_project_auth_result passed authenticated "$project_id"
 }
 
