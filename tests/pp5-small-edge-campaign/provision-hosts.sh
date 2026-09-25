@@ -83,11 +83,11 @@ done
 [ -e "$EVID" ] && fail "evidence dir already exists: $EVID"
 [ -e "$RUNS_ROOT" ] && [ ! -d "$RUNS_ROOT" ] && fail "runs root is not a directory: $RUNS_ROOT"
 
-mkdir -p "$EVID/keys"
 umask 077
+mkdir -p "$EVID/keys"
 printf 'o3k-pp5-owned-v1\nprefix=%s\nrun=%s\nstarted=%s\nhost_count=%s\n' \
   "$PREFIX" "$RUN_ID" "$START_TS" "$HOST_COUNT" >"$EVID/.o3k-pp5-owned"
-chmod 0644 "$EVID/.o3k-pp5-owned"
+chmod 0600 "$EVID/.o3k-pp5-owned"
 
 # --- per-host helpers --------------------------------------------------------
 host_letter() { # 1 -> a, 2 -> b, ...

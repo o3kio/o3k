@@ -54,23 +54,23 @@ reach the asserted KVM state. Run `teardown-hosts.sh` to reclaim that run.
 
 ## Ownership model
 
-Every resource a run owns is identifiable by **exactly one mechanism**: its
-`o3k-pp5-<RUN_ID>-` prefix.
+The run marker records the exact `RUN_ID`, resource prefix, and host count.
+Teardown verifies that marker, then derives the domain names and disk/seed paths
+for each host letter in the recorded count. It does not select resources by
+prefix substring or wildcard, because one valid run ID can begin with another.
 
-- Domains: `virsh list --all` filtered by the prefix.
-- Disks / seed ISOs: files in `/var/lib/libvirt/images` matching
-  `o3k-pp5-<RUN_ID>-…`.
-- The run root `tests/pp5-small-edge-campaign/runs/<RUN_ID>/` carries a
-  `0600` ownership marker (`.o3k-pp5-owned`) recording the exact prefix, run id
-  and start time.
+Domains are undefined without asking libvirt to remove attached storage. The
+script then removes only the exact per-host COW disk and seed ISO paths that the
+provisioner creates. An operator-attached disk is left in place. The run root
+`tests/pp5-small-edge-campaign/runs/<RUN_ID>/` carries a `0600` ownership marker
+(`.o3k-pp5-owned`).
 
 Teardown **refuses to run** unless the ownership marker exists, matches the
-requested `RUN_ID`, and the prefix matches. It then removes only names derived
-from that prefix and asserts no owned domain or volume remains before declaring
-success. The shared base image
+requested `RUN_ID` and exact prefix, and contains a valid host count. It asserts
+no derived domain or artifact remains before declaring success. The shared base image
 `/var/lib/libvirt/images/noble-server-cloudimg-amd64.img` does not match the
-prefix and is never a deletion candidate. The pre-existing `p14-*` domains are
-never matched, listed as ours, or touched.
+exact per-host paths and is never a deletion candidate. The pre-existing
+`p14-*` domains are never listed as run-owned or touched.
 
 ## Observed environment limitations
 

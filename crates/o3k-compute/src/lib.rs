@@ -4166,6 +4166,50 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn create_lock_wait_marker_is_written_only_after_mutex_waits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-wait-marker-{}.sqlite",
+            std::process::id()
+        ));
+        let marker_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-wait-marker-{}.observed",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_file(&marker_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let service = Arc::new(ComputeService::new_for_test(
+            store,
+            Arc::new(FakeComputeProvider::new()),
+        ));
+        let held = service.orphan_repair_lock_guard().await;
+        let waiting_service = service.clone();
+        let waiting_marker = marker_path.clone();
+        let waiter = tokio::spawn(async move {
+            let _guard = waiting_service
+                .orphan_repair_create_lock_guard(Some(&waiting_marker))
+                .await;
+        });
+        for _ in 0..32 {
+            if marker_path.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            marker_path.exists(),
+            "waiter marker must prove mutex Pending"
+        );
+        drop(held);
+        waiter.await?;
+        std::fs::remove_file(marker_path)?;
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
     #[derive(Default)]
     struct FailingUnbindProjector {
         unbinds: std::sync::Mutex<usize>,

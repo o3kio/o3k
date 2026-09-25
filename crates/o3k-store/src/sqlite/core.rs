@@ -1131,6 +1131,12 @@ impl DurableStore for SqliteStore {
             .map_err(StoreError::Database)?
             .ok_or(StoreError::OperationNotFound)?;
             let current = operation_from_row(&row)?;
+            if current.resource_id != terminalization.resource_id {
+                return Err(StoreError::Corrupt(
+                    "lifecycle operation resource identity does not match terminalization"
+                        .to_owned(),
+                ));
+            }
             if matches!(
                 current.state,
                 OperationState::Succeeded | OperationState::Failed

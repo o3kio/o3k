@@ -418,7 +418,8 @@ def validate(
                     if contention.get("classification") != "contending":
                         fail(errors, "existing-port create must be classified as contending")
                     for field in ("repair_lock_acquired_before_create", "orphan_present_at_request_start",
-                                  "accepted_within_bound", "repair_completed_before_acceptance", "active"):
+                                  "mutex_wait_observed", "accepted_within_bound",
+                                  "repair_completed_before_acceptance", "active"):
                         if contention.get(field) is not True:
                             fail(errors, f"contending existing-port create {field} must be true")
                     for field in ("resource_id", "operation_id", "existing_port_id"):
@@ -433,16 +434,23 @@ def validate(
                         fail(errors, "contending create request acceptance and ACTIVE timing is invalid")
                     if bound != 65000:
                         fail(errors, "contending create bound must match the 30s + 30s + 5s derivation")
-                    if contention.get("release_signal_sent_after_request_start") is not True or \
+                    if contention.get("release_signal_sent_after_mutex_wait_observed") is not True or \
                        contention.get("repair_pause_released_after_create_start") is not True:
-                        fail(errors, "repair lock release must follow the contending request start")
+                        fail(errors, "repair lock release must follow observed mutex contention")
                     released = contention.get("repair_pause_released_unix_ms")
                     if not isinstance(released, int) or not isinstance(start, int) or released < start:
                         fail(errors, "repair pause release timestamp must follow contending request start")
-                    if contention.get("repair_acceptance_order_basis") != "repair completion log is emitted before the sweep releases orphan_repair_lock; durable create acceptance requires that same lock":
+                    waiter_observed = contention.get("mutex_wait_observed_unix_ms")
+                    if not isinstance(waiter_observed, int) or not isinstance(start, int) or \
+                       not isinstance(released, int) or not start <= waiter_observed <= released:
+                        fail(errors, "create mutex wait must be observed after request start and before repair release")
+                    if contention.get("repair_acceptance_order_basis") != "repair completion log is emitted before the sweep releases orphan_repair_lock; create mutex future reported Pending before repair was released":
                         fail(errors, "contending create acceptance must be causally ordered after repair lock release")
-                    if not isinstance(contention.get("repair_completion_observed_unix_ms"), int):
+                    repair_completed = contention.get("repair_completion_observed_unix_ms")
+                    if not isinstance(repair_completed, int):
                         fail(errors, "repair completion observation timestamp must be recorded")
+                    elif isinstance(released, int) and isinstance(accepted, int) and not released <= repair_completed <= accepted:
+                        fail(errors, "repair completion must be observed after release and before create acceptance")
                     if crash.get("sweep", {}).get("completion_log_observed") is not True:
                         fail(errors, "orphan repair must have a completion log")
             if crash.get("caller_supplied_endpoint_preserved") is not True:

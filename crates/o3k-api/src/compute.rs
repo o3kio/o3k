@@ -852,7 +852,15 @@ pub(crate) async fn create_server(
     // concurrent orphan repair sweep can neither release a port mid-create nor
     // allow this create to durably reference a port the sweep just released.
     // The lock is taken before any network call, matching the sweep's locking.
-    let _orphan_repair_guard = service.orphan_repair_lock_guard().await;
+    // This opt-in marker is a protected-harness test seam: it is created only
+    // if this create's lock future is actually polled to Pending. It lets the
+    // campaign release the deterministic repair pause after the request has
+    // entered the mutex queue, rather than after merely spawning a CLI.
+    let create_wait_marker =
+        std::env::var_os("O3K_TEST_CREATE_LOCK_WAITER_MARKER").map(std::path::PathBuf::from);
+    let _orphan_repair_guard = service
+        .orphan_repair_create_lock_guard(create_wait_marker.as_deref())
+        .await;
     let mut owned_network_ids = Vec::new();
     let mut network_ids = Vec::with_capacity(networks.len());
     if let Some(network_service) = state.network.as_ref() {

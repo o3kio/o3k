@@ -67,6 +67,8 @@ jobs:
         # against locally-generated fixtures. It needs no real PP.5 campaign
         # artifact, so an ordinary local dev / unit-test run is never blocked.
         run: bash tests/pp5_evidence_validation.sh
+      - name: Validate PP.5 small-edge teardown ownership
+        run: bash tests/pp5-small-edge-campaign-ownership.sh
       - name: Validate destructive PostgreSQL test database guards
         run: bash tests/postgres_test_database_guards.sh
       - name: Validate release signing trust transition

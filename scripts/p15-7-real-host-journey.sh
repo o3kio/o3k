@@ -86,6 +86,7 @@ FAULT_ACTIVE=false
 O3K_FAULT_ENV_NAME="O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"
 O3K_REPAIR_RELEASE_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE"
 O3K_REPAIR_TIMEOUT_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_TIMEOUT_MS"
+O3K_CREATE_WAITER_ENV_NAME="O3K_TEST_CREATE_LOCK_WAITER_MARKER"
 # The pause must be long enough for the journey to observe the durable
 # terminal delete and kill the control plane inside the window, and short
 # enough to keep the bounded delete request and the protected-run budget
@@ -432,10 +433,13 @@ append_o3kd_repair_pause_env() {
     || die "repair contention pause timeout is invalid"
   sudo -n test -r "$STATE_ROOT/o3kd.env" || die "o3kd environment is unreadable"
   CRASH_REPAIR_RELEASE_FILE="$STATE_ROOT/orphan-repair-release-$RUN_ID"
+  CRASH_REPAIR_WAITER_FILE="$STATE_ROOT/orphan-create-waiter-$RUN_ID"
   sudo -n rm -f -- "$CRASH_REPAIR_RELEASE_FILE"
-  printf '%s=%s\n%s=%s\n' \
+  sudo -n rm -f -- "$CRASH_REPAIR_WAITER_FILE"
+  printf '%s=%s\n%s=%s\n%s=%s\n' \
     "$O3K_REPAIR_RELEASE_ENV_NAME" "$CRASH_REPAIR_RELEASE_FILE" \
     "$O3K_REPAIR_TIMEOUT_ENV_NAME" "$CONTENDING_CREATE_REPAIR_PAUSE_MS" \
+    "$O3K_CREATE_WAITER_ENV_NAME" "$CRASH_REPAIR_WAITER_FILE" \
     | sudo -n tee -a "$STATE_ROOT/o3kd.env" >/dev/null \
     || die "cannot append repair contention pause to o3kd environment"
 }
@@ -446,7 +450,8 @@ remove_o3kd_repair_pause_env() {
   chmod 0600 "$env_tmp"
   sudo -n cat "$STATE_ROOT/o3kd.env" \
     | grep -Fv "$O3K_REPAIR_RELEASE_ENV_NAME=" \
-    | grep -Fv "$O3K_REPAIR_TIMEOUT_ENV_NAME=" >"$env_tmp" || true
+    | grep -Fv "$O3K_REPAIR_TIMEOUT_ENV_NAME=" \
+    | grep -Fv "$O3K_CREATE_WAITER_ENV_NAME=" >"$env_tmp" || true
   sudo -n install -o "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -g "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -m 0600 \
     "$env_tmp" "$STATE_ROOT/o3kd.env" || { rm -f -- "$env_tmp"; return 1; }
   rm -f -- "$env_tmp"
@@ -2251,6 +2256,8 @@ CONTENDING_CREATE_RESOURCE_ID=""
 CONTENDING_CREATE_BOUND_MS=65000
 CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE=false
 CRASH_REPAIR_PAUSE_RELEASED_UNIX_MS=""
+CONTENDING_CREATE_LOCK_WAIT_OBSERVED=false
+CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS=""
 CRASH_OPERATION_ID=""
 persist_crash_checkpoint() {
   local phase="$1" status="$2"
@@ -2539,11 +2546,26 @@ CONTENDING_CREATE_REQUEST_START_MS="$(date +%s%3N)"
 timeout --signal=TERM 67s openstack server create --image "$OS_IMAGE_ID" --flavor "$OS_FLAVOR_ID" --key-name "$OS_KEYPAIR_NAME" \
   --nic "port-id=$OS_PORT_D_ID" "o3k-p15-7-$RUN_ID-d" -f value -c id >"$WORK_ROOT/workload-d-create.txt" 2>"$WORK_ROOT/workload-d-create.err" &
 CONTENDING_CREATE_PID=$!
+for _ in $(seq 1 100); do
+  if sudo -n test -f "$CRASH_REPAIR_WAITER_FILE"; then
+    CONTENDING_CREATE_LOCK_WAIT_OBSERVED=true
+    CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS="$(date +%s%3N)"
+    break
+  fi
+  sleep 0.1
+done
+[[ "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED" == true ]] \
+  || die "existing-port create did not observably queue on orphan_repair_lock while repair held it"
+sudo -n rm -f -- "$CRASH_REPAIR_WAITER_FILE" \
+  || die "could not remove run-owned create waiter marker"
+persist_crash_checkpoint contending_create_waiting running \
+  lock_wait_observed true waiter_marker "$CRASH_REPAIR_WAITER_FILE" \
+  observed_unix_ms "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS"
 sudo -n touch -- "$CRASH_REPAIR_RELEASE_FILE" \
   || die "could not release the deterministic repair/create overlap seam"
 persist_crash_checkpoint contending_create_started running \
   request_start_unix_ms "$CONTENDING_CREATE_REQUEST_START_MS" endpoint_id "$OS_PORT_D_ID" \
-  release_signal_sent_after_request_start true
+  release_signal_sent_after_lock_wait_observed true
 for _ in $(seq 1 50); do
   current_lines="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
   new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
@@ -2557,6 +2579,7 @@ for _ in $(seq 1 50); do
 done
 [[ "$CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE" == true ]] \
   || die "repair/create overlap seam did not release after the contending request started"
+sudo -n rm -f -- "$CRASH_REPAIR_WAITER_FILE"
 # Observe repair completion while the contending create is still in flight;
 # this records the required ordering instead of inferring a race from sleeps.
 SWEEP_CONVERGED=false
@@ -2715,7 +2738,8 @@ python3 - "$CRASH_EVIDENCE_FILE" "$O3K_FAULT_ENV_NAME" "$O3K_FAULT_ENV_VALUE" "$
   "$CONTENDING_CREATE_BOUND_MS" "$CONTENDING_CREATE_ACTIVE_MS" "$CONTENDING_CREATE_ACTIVE_LATENCY_MS" \
   "$WORKLOAD_D" "$CONTENDING_CREATE_OPERATION_ID" "$ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED" \
   "$CRASH_REPAIR_COMPLETED_MS" "$CRASH_OPERATION_ID" "$OS_PORT_D_ID" \
-  "$CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE" "$CRASH_REPAIR_PAUSE_RELEASED_UNIX_MS" <<'PY'
+  "$CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE" "$CRASH_REPAIR_PAUSE_RELEASED_UNIX_MS" \
+  "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED" "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS" <<'PY'
 import json, os, pathlib, sys, tempfile
 (out, env_name, env_value, workload, port_id, fixed_ip, killed_pid,
  terminal_ms, repair_ms, delete_code, sweep_passes, quota_before, quota_after,
@@ -2724,7 +2748,8 @@ import json, os, pathlib, sys, tempfile
  unrelated_probe_curl_exit, unrelated_probe_http_code, request_start, request_accepted,
  lock_latency, bound_ms, active_at, active_latency, create_resource, create_operation,
  orphan_present, repair_completed_observed, delete_operation, create_port,
- repair_released_after_start, repair_release_ms) = sys.argv[1:38]
+ repair_released_after_start, repair_release_ms, create_lock_wait_observed,
+ create_lock_wait_observed_ms) = sys.argv[1:40]
 path=pathlib.Path(out)
 doc = {
     "fault_hook": {"env": env_name, "pause_ms": int(env_value), "semantics": "pause after durable terminalization and before endpoint release"},
@@ -2740,7 +2765,7 @@ doc = {
     "placement_allocation": {"vcpu_allocated_before": int(alloc_before), "vcpu_allocated_after": int(alloc_after), "leak": alloc_before != alloc_after},
     "responsiveness_during_backlog": {
         "unrelated_db_backed_probe": {"path": "/operator/diagnostics/providers?limit=1", "succeeded": unrelated_probe_ok == "true", "latency_ms": int(unrelated_probe_latency_ms), "curl_exit": int(unrelated_probe_curl_exit), "status_code": int(unrelated_probe_http_code)},
-        "contending_existing_port_create": {"classification": "contending", "existing_port_id": create_port, "resource_id": create_resource, "operation_id": create_operation, "repair_lock_acquired_before_create": True, "orphan_present_at_request_start": orphan_present == "true", "request_start_unix_ms": int(request_start), "request_accepted_unix_ms": int(request_accepted), "lock_contention_latency_ms": int(lock_latency), "acceptance_bound_ms": int(bound_ms), "accepted_within_bound": int(lock_latency) <= int(bound_ms), "release_signal_sent_after_request_start": True, "repair_pause_released_after_create_start": repair_released_after_start == "true", "repair_pause_released_unix_ms": int(repair_release_ms), "repair_completion_observed_unix_ms": int(repair_completed_observed), "repair_completed_before_acceptance": True, "repair_acceptance_order_basis": "repair completion log is emitted before the sweep releases orphan_repair_lock; durable create acceptance requires that same lock", "active_unix_ms": int(active_at), "create_to_active_ms": int(active_latency), "active": True}},
+        "contending_existing_port_create": {"classification": "contending", "existing_port_id": create_port, "resource_id": create_resource, "operation_id": create_operation, "repair_lock_acquired_before_create": True, "orphan_present_at_request_start": orphan_present == "true", "request_start_unix_ms": int(request_start), "mutex_wait_observed": create_lock_wait_observed == "true", "mutex_wait_observed_unix_ms": int(create_lock_wait_observed_ms), "request_accepted_unix_ms": int(request_accepted), "lock_contention_latency_ms": int(lock_latency), "acceptance_bound_ms": int(bound_ms), "accepted_within_bound": int(lock_latency) <= int(bound_ms), "release_signal_sent_after_mutex_wait_observed": create_lock_wait_observed == "true", "repair_pause_released_after_create_start": repair_released_after_start == "true", "repair_pause_released_unix_ms": int(repair_release_ms), "repair_completion_observed_unix_ms": int(repair_completed_observed), "repair_completed_before_acceptance": True, "repair_acceptance_order_basis": "repair completion log is emitted before the sweep releases orphan_repair_lock; create mutex future reported Pending before repair was released", "active_unix_ms": int(active_at), "create_to_active_ms": int(active_latency), "active": True}},
     "caller_supplied_endpoint_preserved": caller_preserved == "true",
     "foreign_project_endpoint_preserved": foreign_preserved == "true",
 }

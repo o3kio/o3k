@@ -581,6 +581,43 @@ impl ComputeService {
         self.orphan_repair_lock.lock().await
     }
 
+    /// Test-seam variant that creates a run-owned marker only after Tokio has
+    /// polled this create's lock acquisition to `Pending`. With the repair
+    /// pass holding the mutex, that is an observable proof the create is
+    /// actually queued before the harness releases the repair pause. Passing
+    /// `None` is behaviorally identical to [`Self::orphan_repair_lock_guard`].
+    pub async fn orphan_repair_create_lock_guard(
+        &self,
+        waiter_marker: Option<&std::path::Path>,
+    ) -> tokio::sync::MutexGuard<'_, ()> {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let lock = self.orphan_repair_lock.lock();
+        tokio::pin!(lock);
+        let mut marker_written = false;
+        std::future::poll_fn(|cx| match lock.as_mut().poll(cx) {
+            Poll::Pending => {
+                if !marker_written {
+                    if let Some(path) = waiter_marker {
+                        // The marker is strictly opt-in from the protected
+                        // harness environment. Do not change lock behavior if
+                        // an evidence marker cannot be written; the harness
+                        // will fail its bounded wait rather than claim overlap.
+                        let _ = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(path);
+                    }
+                    marker_written = true;
+                }
+                Poll::Pending
+            }
+            Poll::Ready(guard) => Poll::Ready(guard),
+        })
+        .await
+    }
+
     /// Clears the binding of every port named by the server's durable create
     /// intent. Used when a delete reached terminal success, including the
     /// already-deleted shortcut, where the delete completed in a previous

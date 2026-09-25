@@ -591,6 +591,44 @@ pub async fn test_durable_store_lifecycle_terminalization<S: StoreUnderTest>(sto
         })
         .await
         .expect("insert operation B");
+    let mismatched_resource = store
+        .terminalize_lifecycle(&LifecycleTerminalization {
+            operation_id: op_b,
+            terminal_state: OperationState::Succeeded,
+            provider_operation_id: Some("prov-op-b"),
+            error_category: None,
+            error_message: None,
+            // Operation B belongs to resource B. Supplying resource A must
+            // not let one transaction terminalize B while projecting A.
+            resource_id: res_a,
+            expected_generation: 3,
+            desired_state: "active",
+            observed_state: "DELETED",
+            observed_generation: 3,
+            provider_id: Some("prov-res-a"),
+        })
+        .await
+        .expect_err("operation/resource identity mismatch must be rejected");
+    assert!(
+        matches!(mismatched_resource, StoreError::Corrupt(_)),
+        "{mismatched_resource:?}"
+    );
+    assert_eq!(
+        store
+            .get_operation(op_b)
+            .await
+            .expect("operation B after identity mismatch")
+            .state,
+        OperationState::Running,
+        "identity mismatch must leave the operation non-terminal"
+    );
+    let res_a_after_mismatch = store
+        .get_resource(res_a)
+        .await
+        .expect("resource A after identity mismatch");
+    assert_eq!(res_a_after_mismatch.generation, 3);
+    assert_eq!(res_a_after_mismatch.observed_state, "ACTIVE");
+
     let stale = store
         .terminalize_lifecycle(&LifecycleTerminalization {
             operation_id: op_b,

@@ -107,6 +107,8 @@ elif mutation == "drop_declared_soak":
     drop(doc, "campaign.declared_soak_tier")
 elif mutation == "drop_results":
     doc["results"] = []
+elif mutation == "missing_acceptance_row":
+    doc["results"] = [r for r in doc["results"] if r["acceptance_row"] != "M"]
 elif mutation == "drop_non_claims":
     doc["non_claims"] = []
 elif mutation == "drop_required_non_claim":
@@ -133,16 +135,24 @@ elif mutation == "drop_archive_sha256":
     drop(doc, "release.archive_sha256")
 elif mutation == "drop_signature_verified":
     drop(doc, "release.signature_verified")
+elif mutation == "false_signature_verified":
+    doc["release"]["signature_verified"] = False
 elif mutation == "drop_server_version":
     drop(doc, "database.server_version")
 elif mutation == "missing_scale_tier":
     doc["campaign"]["scale_tiers"] = [
         t for t in doc["campaign"]["scale_tiers"] if t["name"] != "S5"
     ]
+elif mutation == "wrong_scale_cardinality":
+    doc["campaign"]["scale_tiers"][2]["hypervisors"] = 4
 elif mutation == "missing_soak_tier":
     doc["campaign"]["soak_tiers"] = [
         t for t in doc["campaign"]["soak_tiers"] if t["name"] != "K-full"
     ]
+elif mutation == "short_soak":
+    doc["campaign"]["soak_tiers"][0]["duration"] = "1s"
+elif mutation == "wrong_soak_scale":
+    doc["campaign"]["soak_tiers"][1]["scale"] = "S10"
 elif mutation == "db_url_with_password":
     doc["database"]["url"] = "postgres://o3k:password@127.0.0.1:5432/o3k_test"
 else:
@@ -161,6 +171,7 @@ cases=(
     "drop_migrations|1|database.migrations_applied must be an integer"
     "drop_declared_soak|1|campaign.declared_soak_tier must be a non-empty string"
     "drop_results|1|results must be a non-empty list"
+    "missing_acceptance_row|1|missing acceptance row(s): M"
     "drop_non_claims|1|non_claims must be a non-empty explicit list"
     "drop_required_non_claim|1|non_claims missing required disclaimer"
     "flip_result|1|must be 'pass'"
@@ -173,10 +184,14 @@ cases=(
     "drop_sbom_sha256|1|release.sbom_sha256 must be a lowercase 64-character hex digest"
     "drop_provenance_sha256|1|release.provenance_sha256 must be a lowercase 64-character hex digest"
     "drop_archive_sha256|1|release.archive_sha256 must be a lowercase 64-character hex digest"
-    "drop_signature_verified|1|release.signature_verified must be a boolean"
+    "drop_signature_verified|1|release.signature_verified must be true"
+    "false_signature_verified|1|release.signature_verified must be true"
     "drop_server_version|1|database.server_version must be a non-empty string"
     "missing_scale_tier|1|missing required tier(s): S5"
+    "wrong_scale_cardinality|1|campaign.scale_tiers[2] S5 must declare 5 hypervisors"
     "missing_soak_tier|1|missing required tier(s): K-full"
+    "short_soak|1|K-min must declare duration 2h"
+    "wrong_soak_scale|1|K-full must declare scale S20"
     "db_url_with_password|1|secret-bearing field(s) present"
 )
 

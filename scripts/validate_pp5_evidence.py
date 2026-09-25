@@ -27,11 +27,21 @@ PHASE = "PP.5"
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-# The declared matrix from §4 as executed.  Scale tiers carry their declared
-# hypervisor count; soak tiers must declare a non-empty duration.  Each tier
-# records its executed verdict, and a claimed campaign pass requires every
-# verdict to be "pass".
+# The declared matrix from §4 as executed. Each tier records its executed
+# verdict, and a claimed campaign pass requires every verdict to be "pass".
 ACCEPTANCE_ROWS = "ABCDEFGHIJKLMNOPQRS"
+REQUIRED_SCALE_CARDINALITIES = {
+    "S1": 1,
+    "S2": 2,
+    "S3": 3,
+    "S5": 5,
+    "S10": 10,
+    "S20": 20,
+}
+REQUIRED_SOAK_ENVELOPES = {
+    "K-min": ("2h", "S10"),
+    "K-full": ("12h", "S20"),
+}
 
 # Every tier the plan declares as required (PP5_EXECUTION_PLAN.md §4.1, §4.2,
 # §12.2) must actually appear in the executed campaign.  A certification that
@@ -117,8 +127,8 @@ def validate_release(root: Mapping[str, Any], errors: list[str]) -> None:
         value = release.get(key)
         if not isinstance(value, str) or not SHA256.fullmatch(value):
             fail(errors, f"release.{key} must be a lowercase 64-character hex digest")
-    if not isinstance(release.get("signature_verified"), bool):
-        fail(errors, "release.signature_verified must be a boolean")
+    if release.get("signature_verified") is not True:
+        fail(errors, "release.signature_verified must be true")
 
 
 def validate_harness(root: Mapping[str, Any], errors: list[str]) -> None:
@@ -178,7 +188,12 @@ def validate_scale_tier(tier: Any, index: int, errors: list[str]) -> None:
     if tier is None:
         return
     required_string(tier.get("name"), f"{name}.name", errors)
-    required_int(tier.get("hypervisors"), f"{name}.hypervisors", errors, minimum=1)
+    tier_name = tier.get("name")
+    hypervisors = tier.get("hypervisors")
+    if required_int(hypervisors, f"{name}.hypervisors", errors, minimum=1):
+        expected = REQUIRED_SCALE_CARDINALITIES.get(tier_name) if isinstance(tier_name, str) else None
+        if expected is not None and hypervisors != expected:
+            fail(errors, f"{name} {tier_name} must declare {expected} hypervisors")
     validate_tier_verdict(tier.get("verdict"), f"{name}.verdict", errors)
 
 
@@ -190,8 +205,18 @@ def validate_soak_tier(tier: Any, index: int, errors: list[str]) -> None:
     required_string(tier.get("name"), f"{name}.name", errors)
     # A soak tier whose declared duration is missing cannot be executed to the
     # declared envelope; fail closed on it.
-    required_string(tier.get("duration"), f"{name}.duration", errors)
-    required_string(tier.get("scale"), f"{name}.scale", errors)
+    tier_name = tier.get("name")
+    duration = tier.get("duration")
+    scale = tier.get("scale")
+    required_string(duration, f"{name}.duration", errors)
+    required_string(scale, f"{name}.scale", errors)
+    expected = REQUIRED_SOAK_ENVELOPES.get(tier_name) if isinstance(tier_name, str) else None
+    if expected is not None:
+        expected_duration, expected_scale = expected
+        if duration != expected_duration:
+            fail(errors, f"{name} {tier_name} must declare duration {expected_duration}")
+        if scale != expected_scale:
+            fail(errors, f"{name} {tier_name} must declare scale {expected_scale}")
     validate_tier_verdict(tier.get("verdict"), f"{name}.verdict", errors)
 
 
@@ -221,6 +246,9 @@ def validate_campaign(root: Mapping[str, Any], errors: list[str]) -> None:
         missing_scale = [name for name in REQUIRED_SCALE_TIERS if name not in scale_names]
         if missing_scale:
             fail(errors, "campaign.scale_tiers missing required tier(s): " + ", ".join(missing_scale))
+        duplicate_scale = sorted({name for name in scale_names if scale_names.count(name) > 1})
+        if duplicate_scale:
+            fail(errors, "campaign.scale_tiers duplicate tier(s): " + ", ".join(duplicate_scale))
 
     soak_tiers = campaign.get("soak_tiers")
     if not isinstance(soak_tiers, list) or not soak_tiers:
@@ -241,6 +269,9 @@ def validate_campaign(root: Mapping[str, Any], errors: list[str]) -> None:
         missing_soak = [name for name in REQUIRED_SOAK_TIERS if name not in soak_names]
         if missing_soak:
             fail(errors, "campaign.soak_tiers missing required tier(s): " + ", ".join(missing_soak))
+        duplicate_soak = sorted({name for name in soak_names if soak_names.count(name) > 1})
+        if duplicate_soak:
+            fail(errors, "campaign.soak_tiers duplicate tier(s): " + ", ".join(duplicate_soak))
 
 
 def validate_results(root: Mapping[str, Any], errors: list[str]) -> None:
@@ -263,6 +294,9 @@ def validate_results(root: Mapping[str, Any], errors: list[str]) -> None:
             rows_seen.add(row)
         # A claimed pass is not supported while any acceptance row is not pass.
         validate_tier_verdict(result.get("verdict"), f"{name}.verdict", errors)
+    missing_rows = sorted(set(ACCEPTANCE_ROWS) - rows_seen)
+    if missing_rows:
+        fail(errors, "results missing acceptance row(s): " + ", ".join(missing_rows))
 
 
 def validate_negatives(root: Mapping[str, Any], errors: list[str]) -> None:

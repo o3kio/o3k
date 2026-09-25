@@ -239,10 +239,11 @@ doc = {
           "repair_lock_acquired_before_create":True,"orphan_present_at_request_start":True,
           "request_start_unix_ms":1750000000000,"request_accepted_unix_ms":1750000004000,
           "lock_contention_latency_ms":4000,"acceptance_bound_ms":65000,"accepted_within_bound":True,
-          "release_signal_sent_after_request_start":True,"repair_pause_released_after_create_start":True,
+          "mutex_wait_observed":True,"mutex_wait_observed_unix_ms":1750000002000,
+          "release_signal_sent_after_mutex_wait_observed":True,"repair_pause_released_after_create_start":True,
           "repair_pause_released_unix_ms":1750000002500,
           "repair_completion_observed_unix_ms":1750000003500,"repair_completed_before_acceptance":True,
-          "repair_acceptance_order_basis":"repair completion log is emitted before the sweep releases orphan_repair_lock; durable create acceptance requires that same lock",
+          "repair_acceptance_order_basis":"repair completion log is emitted before the sweep releases orphan_repair_lock; create mutex future reported Pending before repair was released",
           "active_unix_ms":1750000044000,"create_to_active_ms":40000,"active":True}},
       "caller_supplied_endpoint_preserved":True,
       "foreign_project_endpoint_preserved":True},
@@ -293,6 +294,22 @@ PY
 env -u O3K_P15_7_ARAF_URL python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
   --expected-source-sha 0123456789abcdef0123456789abcdef01234567 \
   --expected-profile small-edge-cloud
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+c=d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["contending_existing_port_create"]
+c["mutex_wait_observed"] = False
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "contending create without observed mutex wait accepted" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["contending_existing_port_create"]["mutex_wait_observed"] = True
+p.write_text(json.dumps(d))
+PY
 python3 - "${EVIDENCE}" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
