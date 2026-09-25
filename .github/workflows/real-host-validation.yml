@@ -309,6 +309,7 @@ jobs:
         if: steps.storage_postgres_bootstrap.outcome == 'success'
         env:
           O3K_DATABASE_BACKEND: postgres
+          O3K_TEST_DATABASE_PURPOSE: p13
         run: cargo test --locked -p o3k-store --test postgres_p13_4_storage --all-features -- --ignored --nocapture
 
       - name: Prepare P13.4 disposable guest inputs
