@@ -73,6 +73,8 @@ COMPUTE_LOG_FILTER="${O3K_COMPUTE_LOG_FILTER:-warn}"
 JOIN_REGION="${O3K_P15_7_REGION:-}"
 P15_PROVISION_DIAGNOSTICS_CAPTURED=false
 P15_WORKLOAD_DIAGNOSTICS_CAPTURED=false
+CRASH_STARTED=false
+CRASH_PHASE=""
 # Transient-failure instrumentation: every bounded-retry event and every
 # observed 5xx observed by the journey is appended to this JSONL fragment and
 # merged into the final evidence under journey.transient_failures[].
@@ -82,6 +84,8 @@ TRANSIENT_EVENTS_FILE="$ARTIFACT_DIR/p15-7-transient-failures.jsonl"
 # injected window.
 FAULT_ACTIVE=false
 O3K_FAULT_ENV_NAME="O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"
+O3K_REPAIR_RELEASE_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE"
+O3K_REPAIR_TIMEOUT_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_TIMEOUT_MS"
 # The pause must be long enough for the journey to observe the durable
 # terminal delete and kill the control plane inside the window, and short
 # enough to keep the bounded delete request and the protected-run budget
@@ -423,6 +427,30 @@ append_o3kd_fault_env() {
     || die "fault hook missing from o3kd environment"
   FAULT_ACTIVE=true
 }
+append_o3kd_repair_pause_env() {
+  [[ "$CONTENDING_CREATE_REPAIR_PAUSE_MS" =~ ^[0-9]+$ ]] \
+    || die "repair contention pause timeout is invalid"
+  sudo -n test -r "$STATE_ROOT/o3kd.env" || die "o3kd environment is unreadable"
+  CRASH_REPAIR_RELEASE_FILE="$STATE_ROOT/orphan-repair-release-$RUN_ID"
+  sudo -n rm -f -- "$CRASH_REPAIR_RELEASE_FILE"
+  printf '%s=%s\n%s=%s\n' \
+    "$O3K_REPAIR_RELEASE_ENV_NAME" "$CRASH_REPAIR_RELEASE_FILE" \
+    "$O3K_REPAIR_TIMEOUT_ENV_NAME" "$CONTENDING_CREATE_REPAIR_PAUSE_MS" \
+    | sudo -n tee -a "$STATE_ROOT/o3kd.env" >/dev/null \
+    || die "cannot append repair contention pause to o3kd environment"
+}
+remove_o3kd_repair_pause_env() {
+  local env_tmp
+  sudo -n test -r "$STATE_ROOT/o3kd.env" || return 0
+  env_tmp="$(mktemp "$RUNNER_TEMP_ROOT/o3kd-repair-pause-clear.XXXXXX")"
+  chmod 0600 "$env_tmp"
+  sudo -n cat "$STATE_ROOT/o3kd.env" \
+    | grep -Fv "$O3K_REPAIR_RELEASE_ENV_NAME=" \
+    | grep -Fv "$O3K_REPAIR_TIMEOUT_ENV_NAME=" >"$env_tmp" || true
+  sudo -n install -o "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -g "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -m 0600 \
+    "$env_tmp" "$STATE_ROOT/o3kd.env" || { rm -f -- "$env_tmp"; return 1; }
+  rm -f -- "$env_tmp"
+}
 clear_o3kd_fault_env() {
   # Remove the fault hook line, preserving every other environment line
   # byte-for-byte and the daemon-account ownership. Idempotent; used by the
@@ -582,6 +610,9 @@ early_cleanup() {
   set +e
   capture_failure_diagnostics "$exit_status"
   clear_o3kd_fault_env >/dev/null 2>&1 || true
+  if [[ -n "${CRASH_REPAIR_RELEASE_FILE:-}" ]]; then
+    sudo -n rm -f -- "$CRASH_REPAIR_RELEASE_FILE" >/dev/null 2>&1 || true
+  fi
   if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
     O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
       GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
@@ -827,6 +858,12 @@ secure_remove_credentials() {
 cleanup() {
   local exit_status=$?
   set +e
+  if [[ "${CRASH_STARTED:-false}" == true && "${CRASH_PHASE:-}" != completed ]]; then
+    python3 "$ROOT_DIR/scripts/p15-7-crash-evidence.py" \
+      "$ARTIFACT_DIR/p15-7-crash-injection-evidence.json" \
+      "${CRASH_PHASE:-fault_armed}" failed failure_phase "${CRASH_PHASE:-fault_armed}" \
+      >/dev/null 2>&1 || true
+  fi
   capture_failure_diagnostics "$exit_status"
   clear_o3kd_fault_env >/dev/null 2>&1 || true
   [[ "$CLEANUP_DONE" == true ]] && { set -e; return; }
@@ -2199,12 +2236,29 @@ CRASH_EVIDENCE_FILE="$ARTIFACT_DIR/p15-7-crash-injection-evidence.json"
 CRASH_KILLED_PID=""
 CRASH_TERMINAL_OBSERVED_MS=""
 CRASH_REPAIR_OBSERVED_MS=""
+CRASH_REPAIR_COMPLETED_MS=""
 CRASH_DELETE_HTTP_CODE=""
 CRASH_SWEEP_PASSES=0
 ENDPOINT_PRESENT_WHILE_PAUSED=false
 UNRELATED_DB_PROBE_OK=false
 UNRELATED_DB_PROBE_LATENCY_MS=""
-ORPHAN_PRESENT_AT_D_CREATE=false
+CONTENDING_CREATE_REQUEST_START_MS=""
+CONTENDING_CREATE_REQUEST_ACCEPTED_MS=""
+CONTENDING_CREATE_ACTIVE_MS=""
+CONTENDING_CREATE_WAIT_MS=""
+CONTENDING_CREATE_OPERATION_ID=""
+CONTENDING_CREATE_RESOURCE_ID=""
+CONTENDING_CREATE_BOUND_MS=65000
+CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE=false
+CRASH_REPAIR_PAUSE_RELEASED_UNIX_MS=""
+CRASH_OPERATION_ID=""
+persist_crash_checkpoint() {
+  local phase="$1" status="$2"
+  shift 2
+  CRASH_PHASE="$phase"
+  python3 "$ROOT_DIR/scripts/p15-7-crash-evidence.py" "$CRASH_EVIDENCE_FILE" \
+    "$phase" "$status" "$@" || die "could not persist #1035 crash evidence phase $phase"
+}
 quota_usage() {
   curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
     "$API/quota/network/ports" 2>/dev/null | \
@@ -2225,6 +2279,12 @@ PY
 # Arm the fault hook and restart so the delete below parks inside the
 # injected window. The hook is a positive-ms sleep on the delete path after
 # durable terminalization commits and before endpoint release.
+CRASH_STARTED=true
+persist_crash_checkpoint fault_armed running \
+  source_sha "$SOURCE_SHA" run_id "$RUN_ID" repair_dispatch_cap 1 \
+  repair_interval_seconds 5 fabric_unbind_deadline_seconds 30 \
+  contending_create_bound_ms "$CONTENDING_CREATE_BOUND_MS" \
+  bound_derivation "30s one-dispatch network deadline + 30s bounded test-seam fail-safe + 5s cadence/API margin"
 append_o3kd_fault_env
 restart_o3kd_verified
 wait_o3kd_readyz "readyz did not reconstruct with the fault hook armed"
@@ -2326,7 +2386,7 @@ OPERATION_SUCCEEDED=false
 SERVER_DELETED=false
 for _ in $(seq 1 30); do
   curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" "$API/operations?limit=100" >"$WORK_ROOT/operations-c.json" 2>/dev/null || true
-  OP_STATE="$(python3 - "$WORK_ROOT/operations-c.json" "$WORKLOAD_C" <<'PY'
+  OP_ROW="$(python3 - "$WORK_ROOT/operations-c.json" "$WORKLOAD_C" <<'PY'
 import json,sys
 try:
     doc=json.load(open(sys.argv[1], encoding="utf-8"))
@@ -2334,12 +2394,15 @@ except (OSError, ValueError):
     print(""); raise SystemExit(0)
 target=sys.argv[2]
 state=""
+operation_id=""
 for item in doc.get("items", []):
     if item.get("resource_id") == target and "delete" in str(item.get("action", "")).lower():
         state=item.get("state", "")
-print(state)
+        operation_id=item.get("id", item.get("operation_id", ""))
+print(state + "\t" + operation_id)
 PY
 )"
+  IFS=$'\t' read -r OP_STATE CRASH_OPERATION_ID <<<"$OP_ROW"
   [[ "$OP_STATE" == "succeeded" ]] && OPERATION_SUCCEEDED=true
   code_c="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" "$API/compute/servers/$WORKLOAD_C" || true)"
   if [[ "$code_c" == 5* ]]; then
@@ -2352,6 +2415,10 @@ done
 [[ "$OPERATION_SUCCEEDED" == true ]] || die "server C delete did not reach durable terminal success inside the fault window"
 [[ "$SERVER_DELETED" == true ]] || die "server C was not observed DELETED inside the fault window"
 CRASH_TERMINAL_OBSERVED_MS="$(($(date +%s%3N) - CRASH_DELETE_START_MS))"
+persist_crash_checkpoint terminal_state_observed running \
+  operation_id "$CRASH_OPERATION_ID" server_id "$WORKLOAD_C" \
+  operation_state Succeeded resource_state DELETED \
+  request_start_unix_ms "$CRASH_DELETE_START_MS" observed_after_ms "$CRASH_TERMINAL_OBSERVED_MS"
 # The owned endpoint must still exist while the pause holds. The public port
 # projection does not expose binding state, so presence is the assertion and
 # that limitation is recorded honestly in the evidence.
@@ -2359,6 +2426,17 @@ if openstack_absent_code port "$PORT_C_ID"; then
   die "server-owned endpoint was released before the crash; the fault hook did not hold on the delete path"
 fi
 ENDPOINT_PRESENT_WHILE_PAUSED=true
+python3 - "$ARTIFACT_DIR/p15-7-crash-endpoint-before.json" "$PORT_C_ID" <<'PY'
+import json, subprocess, sys
+raw=subprocess.run(["openstack", "port", "show", sys.argv[2], "-f", "json"],
+                   check=True, capture_output=True, text=True).stdout
+doc=json.loads(raw); doc=doc.get("port", doc)
+keys=("id", "name", "status", "device_id", "device_owner", "binding:host_id", "binding:vif_type")
+json.dump({k:doc.get(k) for k in keys}, open(sys.argv[1], "w", encoding="utf-8"), indent=2)
+PY
+persist_crash_checkpoint endpoint_present_pre_crash running \
+  server_id "$WORKLOAD_C" endpoint_id "$PORT_C_ID" endpoint_owned_by_server true \
+  binding_state_file "p15-7-crash-endpoint-before.json"
 # While the endpoint-release serialization is held, prove the control plane is
 # not globally frozen: this independent DB-backed read must complete within a
 # bounded interval or the crash leg fails closed.
@@ -2379,12 +2457,20 @@ UNRELATED_DB_PROBE_LATENCY_MS="$(( $(date +%s%3N) - UNRELATED_DB_PROBE_START_MS 
 # True process death of the run-owned control plane while the release is
 # parked, then clear the fault and restart through the normal boot path.
 CRASH_KILLED_PID="$(kill9_o3kd_verified)"
+persist_crash_checkpoint process_killed running \
+  signal SIGKILL pid "$CRASH_KILLED_PID" identity_verified true
 wait "$CRASH_DELETE_PID" 2>/dev/null || true
 CRASH_DELETE_HTTP_CODE="$(tr -d '[:space:]' <"$WORK_ROOT/workload-c-delete.code" 2>/dev/null || true)"
 clear_o3kd_fault_env || die "fault hook could not be cleared from the o3kd environment"
+CONTENDING_CREATE_REPAIR_PAUSE_MS=30000
+append_o3kd_repair_pause_env
+CRASH_REPAIR_LOCK_LOG_BASELINE="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
 start_o3kd_verified
+remove_o3kd_repair_pause_env || die "repair contention pause could not be removed from daemon environment"
 wait_o3kd_readyz "readyz did not reconstruct after the crash restart"
 CRASH_RESTART_MS="$(date +%s%3N)"
+persist_crash_checkpoint process_restarted running \
+  restart_path normal_boot readyz passed restart_unix_ms "$CRASH_RESTART_MS"
 
 # Foreign-project fixture created DURING the orphan backlog: the sweep must
 # never touch it even though foreign endpoints exist in the same control
@@ -2411,36 +2497,132 @@ FOREIGN_PORT_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-T
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("port") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
 [[ "$FOREIGN_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project endpoint fixture creation failed"
 
-# Responsiveness probe: an unrelated server create issued while the orphan
-# backlog still exists must return responsively. Time the create call and the
-# activation; the orphan's presence is verified immediately before issuing.
-openstack_absent_code port "$PORT_C_ID" || ORPHAN_PRESENT_AT_D_CREATE=true
+# Contention/fairness probe: a Nova create with a caller-supplied existing
+# port contends on orphan_repair_lock by design. The repair-pass test seam is
+# armed to an absolute deadline and its log proves the real sweep owns the
+# lock before this request starts. Acceptance is bounded by the one 30s
+# network-operation critical section, configured 5s cadence/API margin, and
+# the 30s bounded fail-safe on the deterministic harness handshake;
+# ACTIVE convergence is measured separately and is not part of this bound.
 openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN_ID-port-d" -f value -c id >"$WORK_ROOT/port-d-create.txt" 2>"$WORK_ROOT/port-d-create.err" \
   || die "caller-supplied probe port creation failed"
 OS_PORT_D_ID="$(tr -d '[:space:]' <"$WORK_ROOT/port-d-create.txt")"
 [[ "$OS_PORT_D_ID" =~ ^[0-9a-fA-F-]{36}$ && "$OS_PORT_D_ID" != "$OS_PORT_A_ID" && "$OS_PORT_D_ID" != "$OS_PORT_B_ID" ]] \
   || die "caller-supplied probe port returned an invalid or reused id"
-D_CREATE_START_MS="$(date +%s%3N)"
-openstack server create --image "$OS_IMAGE_ID" --flavor "$OS_FLAVOR_ID" --key-name "$OS_KEYPAIR_NAME" \
-  --nic "port-id=$OS_PORT_D_ID" "o3k-p15-7-$RUN_ID-d" -f value -c id >"$WORK_ROOT/workload-d-create.txt" 2>"$WORK_ROOT/workload-d-create.err" \
-  || die "responsiveness probe server create failed during the orphan backlog"
-D_CREATE_END_MS="$(date +%s%3N)"
-WORKLOAD_D="$(tr -d '[:space:]' <"$WORK_ROOT/workload-d-create.txt")"
-[[ "$WORKLOAD_D" =~ ^[0-9a-fA-F-]{36}$ ]] || die "responsiveness probe returned an invalid server id"
-OS_WORKLOAD_D="$WORKLOAD_D"
-
-# Orphan-repair convergence: bounded wait (<=180s) for the sweep to release
-# the orphaned endpoint, counting the bounded observability lines the sweep
-# emits per pass that discovered or repaired something.
+REPAIR_LOCK_HELD=false
+for _ in $(seq 1 100); do
+  current_lines="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+  new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
+  if (( new_lines > 0 )) && sudo -n tail -n "$new_lines" "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
+    | grep -Fq 'test-only fault pause orphan-repair-lock engaged'; then
+    REPAIR_LOCK_HELD=true
+    break
+  fi
+  sleep 0.1
+done
+[[ "$REPAIR_LOCK_HELD" == true ]] || die "orphan repair did not enter the deterministic lock-hold window"
+current_lines="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
+if (( new_lines > 0 )) && sudo -n tail -n "$new_lines" "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
+  | grep -Fq 'test-only fault pause orphan-repair-lock released'; then
+  die "repair lock hold expired before the contending request began"
+fi
+ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED=false
+if ! openstack_absent_code port "$PORT_C_ID"; then
+  ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED=true
+fi
+[[ "$ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED" == true ]] \
+  || die "repair lock was held but the expected server-owned orphan was already absent"
+persist_crash_checkpoint repair_lock_acquired running \
+  repair_pass_active true lock "orphan_repair_lock" orphan_present true
+CONTENDING_CREATE_REQUEST_START_MS="$(date +%s%3N)"
+timeout --signal=TERM 67s openstack server create --image "$OS_IMAGE_ID" --flavor "$OS_FLAVOR_ID" --key-name "$OS_KEYPAIR_NAME" \
+  --nic "port-id=$OS_PORT_D_ID" "o3k-p15-7-$RUN_ID-d" -f value -c id >"$WORK_ROOT/workload-d-create.txt" 2>"$WORK_ROOT/workload-d-create.err" &
+CONTENDING_CREATE_PID=$!
+sudo -n touch -- "$CRASH_REPAIR_RELEASE_FILE" \
+  || die "could not release the deterministic repair/create overlap seam"
+persist_crash_checkpoint contending_create_started running \
+  request_start_unix_ms "$CONTENDING_CREATE_REQUEST_START_MS" endpoint_id "$OS_PORT_D_ID" \
+  release_signal_sent_after_request_start true
+for _ in $(seq 1 50); do
+  current_lines="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+  new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
+  if (( new_lines > 0 )) && sudo -n tail -n "$new_lines" "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
+    | grep -Fq 'test-only fault pause orphan-repair-lock released'; then
+    CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE=true
+    CRASH_REPAIR_PAUSE_RELEASED_UNIX_MS="$(date +%s%3N)"
+    break
+  fi
+  sleep 0.1
+done
+[[ "$CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE" == true ]] \
+  || die "repair/create overlap seam did not release after the contending request started"
+# Observe repair completion while the contending create is still in flight;
+# this records the required ordering instead of inferring a race from sleeps.
 SWEEP_CONVERGED=false
 for _ in $(seq 1 90); do
   if openstack_absent_code port "$PORT_C_ID"; then
     SWEEP_CONVERGED=true
     CRASH_REPAIR_OBSERVED_MS="$(($(date +%s%3N) - CRASH_RESTART_MS))"
+    CRASH_REPAIR_COMPLETED_MS="$(date +%s%3N)"
     break
+  fi
+  elapsed="$(( $(date +%s%3N) - CONTENDING_CREATE_REQUEST_START_MS ))"
+  if (( elapsed > CONTENDING_CREATE_BOUND_MS )); then
+    kill "$CONTENDING_CREATE_PID" 2>/dev/null || true
+    wait "$CONTENDING_CREATE_PID" 2>/dev/null || true
+    die "contending existing-port create exceeded its derived 65s acceptance bound"
   fi
   sleep 2
 done
+if [[ "$SWEEP_CONVERGED" == true ]]; then
+  CRASH_LOG_LINES_AFTER="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+  CRASH_SWEEP_LOG="$(sudo -n tail -n "$((CRASH_LOG_LINES_AFTER - CRASH_LOG_LINES_BEFORE))" "$STATE_ROOT/log/o3kd.log" 2>/dev/null | grep -F "server-owned endpoint orphan repair sweep" || true)"
+  CRASH_SWEEP_PASSES="$(printf '%s\n' "$CRASH_SWEEP_LOG" | grep -Fc "server-owned endpoint orphan repair sweep" || true)"
+  [[ "$CRASH_SWEEP_PASSES" =~ ^[0-9]+$ ]] || CRASH_SWEEP_PASSES=0
+  [[ "$CRASH_SWEEP_PASSES" -gt 0 ]] || die "orphan endpoint disappeared without a repair-pass completion log"
+  persist_crash_checkpoint orphan_discovered running \
+    server_id "$WORKLOAD_C" endpoint_id "$PORT_C_ID" repair_sweep_passes "$CRASH_SWEEP_PASSES"
+  persist_crash_checkpoint repair_completed running \
+    endpoint_absent true fixed_ip_reusable_pending true repair_latency_ms "$CRASH_REPAIR_OBSERVED_MS"
+fi
+wait "$CONTENDING_CREATE_PID" || die "contending existing-port create failed after orphan repair completed"
+CONTENDING_CREATE_REQUEST_ACCEPTED_MS="$(date +%s%3N)"
+CONTENDING_CREATE_WAIT_MS="$((CONTENDING_CREATE_REQUEST_ACCEPTED_MS - CONTENDING_CREATE_REQUEST_START_MS))"
+(( CONTENDING_CREATE_WAIT_MS <= CONTENDING_CREATE_BOUND_MS )) \
+  || die "contending existing-port create exceeded its derived acceptance bound"
+persist_crash_checkpoint contending_create_accepted running \
+  request_accepted_unix_ms "$CONTENDING_CREATE_REQUEST_ACCEPTED_MS" \
+  lock_contention_latency_ms "$CONTENDING_CREATE_WAIT_MS" request_accepted true
+WORKLOAD_D="$(tr -d '[:space:]' <"$WORK_ROOT/workload-d-create.txt")"
+[[ "$WORKLOAD_D" =~ ^[0-9a-fA-F-]{36}$ ]] || die "contending create returned an invalid server id"
+OS_WORKLOAD_D="$WORKLOAD_D"
+CONTENDING_CREATE_RESOURCE_ID="$WORKLOAD_D"
+for _ in $(seq 1 10); do
+  curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
+    "$API/operations?limit=100" >"$WORK_ROOT/operations-d.json" 2>/dev/null || true
+  CONTENDING_CREATE_OPERATION_ID="$(python3 - "$WORK_ROOT/operations-d.json" "$WORKLOAD_D" <<'PY'
+import json,sys
+try:
+    doc=json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    print(""); raise SystemExit(0)
+for item in doc.get("items", []):
+    if item.get("resource_id") == sys.argv[2] and "create" in str(item.get("action", item.get("kind", ""))).lower():
+        print(item.get("id", item.get("operation_id", ""))); break
+else:
+    print("")
+PY
+)"
+  [[ "$CONTENDING_CREATE_OPERATION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] && break
+  sleep 1
+done
+[[ "$CONTENDING_CREATE_OPERATION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] \
+  || die "contending create operation id was not observable"
+
+# Orphan-repair convergence: bounded wait (<=180s) for the sweep to release
+# the orphaned endpoint, counting the bounded observability lines the sweep
+# emits per pass that discovered or repaired something.
 CRASH_LOG_LINES_AFTER="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
 CRASH_SWEEP_PASSES="$(sudo -n tail -n "$((CRASH_LOG_LINES_AFTER - CRASH_LOG_LINES_BEFORE))" "$STATE_ROOT/log/o3kd.log" 2>/dev/null | grep -Fc "server-owned endpoint orphan repair sweep" || true)"
 [[ "$CRASH_SWEEP_PASSES" =~ ^[0-9]+$ ]] || CRASH_SWEEP_PASSES=0
@@ -2450,20 +2632,21 @@ for _ in $(seq 1 180); do
   if [[ "$code_d" == 200 ]]; then
     D_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", {}).get("state", ""))' "$WORK_ROOT/workload-d-show.json" 2>/dev/null || true)"
     [[ "$D_STATE" == "ACTIVE" ]] && break
-    [[ "$D_STATE" == "ERROR" ]] && die "responsiveness probe server entered ERROR"
+  [[ "$D_STATE" == "ERROR" ]] && die "contending create workload entered ERROR"
   fi
   sleep 2
 done
-D_ACTIVE_MS="$(($(date +%s%3N) - D_CREATE_END_MS))"
-[[ "$D_STATE" == "ACTIVE" ]] || die "responsiveness probe server did not become ACTIVE"
+[[ "$D_STATE" == "ACTIVE" ]] || die "contending create workload did not become ACTIVE"
+CONTENDING_CREATE_ACTIVE_MS="$(date +%s%3N)"
+CONTENDING_CREATE_ACTIVE_LATENCY_MS="$((CONTENDING_CREATE_ACTIVE_MS - CONTENDING_CREATE_REQUEST_ACCEPTED_MS))"
 
 # Fail-closed tail: no die is permitted between here and the foreign-fixture
 # teardown below, so an assertion failure cannot strand foreign-owned state.
 CRASH_FAILURE=""
 if [[ "$SWEEP_CONVERGED" != true ]]; then
   CRASH_FAILURE="orphan-repair sweep did not release the orphaned endpoint within 180s"
-elif [[ "$ORPHAN_PRESENT_AT_D_CREATE" != true ]]; then
-  CRASH_FAILURE="orphan backlog was repaired before the responsiveness probe was issued"
+elif [[ "$ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED" != true ]]; then
+  CRASH_FAILURE="expected orphan was not present when the contending create began"
 elif [[ "$CRASH_REPAIR_OBSERVED_MS" -gt 180000 ]]; then
   CRASH_FAILURE="orphan repair exceeded the 180s bound"
 fi
@@ -2483,7 +2666,7 @@ if [[ -z "$CRASH_FAILURE" ]]; then
     REUSE_FAILURE="orphan fixed IP was not reusable after repair"
   fi
 fi
-# Delete the responsiveness probe server and prove the caller-supplied port
+# Delete the contending create workload and prove the caller-supplied port
 # survived (only server-owned endpoints may ever be released).
 CALLER_SUPPLIED_PRESERVED=false
 GEN_D="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metadata"]["generation"])' "$WORK_ROOT/workload-d-show.json")"
@@ -2518,51 +2701,71 @@ fi
 [[ "$ALLOC_AFTER_CRASH" == "$ALLOC_BEFORE_CRASH" ]] || die "Placement allocation leaked across the crash leg"
 [[ "$CALLER_SUPPLIED_PRESERVED" == true ]] || die "caller-supplied endpoint was not preserved across the orphan sweep"
 [[ "$FOREIGN_PRESERVED" == true ]] || die "foreign-project endpoint was not preserved across the orphan sweep"
+persist_crash_checkpoint accounting_verified running \
+  network_ports_quota_before "$QUOTA_BEFORE_CRASH" network_ports_quota_after "$QUOTA_AFTER_CRASH" \
+  placement_vcpu_before "$ALLOC_BEFORE_CRASH" placement_vcpu_after "$ALLOC_AFTER_CRASH" \
+  fixed_ip_reusable "$FIXED_IP_REUSABLE" caller_supplied_preserved "$CALLER_SUPPLIED_PRESERVED" \
+  foreign_preserved "$FOREIGN_PRESERVED"
 python3 - "$CRASH_EVIDENCE_FILE" "$O3K_FAULT_ENV_NAME" "$O3K_FAULT_ENV_VALUE" "$WORKLOAD_C" "$PORT_C_ID" "$PORT_C_FIXED_IP" \
   "$CRASH_KILLED_PID" "$CRASH_TERMINAL_OBSERVED_MS" "$CRASH_REPAIR_OBSERVED_MS" "$CRASH_DELETE_HTTP_CODE" "$CRASH_SWEEP_PASSES" \
-  "$QUOTA_BEFORE_CRASH" "$QUOTA_AFTER_CRASH" "$ALLOC_BEFORE_CRASH" "$ALLOC_AFTER_CRASH" "$D_CREATE_START_MS" "$D_CREATE_END_MS" "$D_ACTIVE_MS" \
-  "$ENDPOINT_PRESENT_WHILE_PAUSED" "$ORPHAN_PRESENT_AT_D_CREATE" "$FIXED_IP_REUSABLE" "$CALLER_SUPPLIED_PRESERVED" "$FOREIGN_PRESERVED" \
-  "$UNRELATED_DB_PROBE_OK" "$UNRELATED_DB_PROBE_LATENCY_MS" "$UNRELATED_DB_PROBE_CURL_EXIT" "$UNRELATED_DB_PROBE_HTTP_CODE" <<'PY'
-import json, pathlib, sys
-
+  "$QUOTA_BEFORE_CRASH" "$QUOTA_AFTER_CRASH" "$ALLOC_BEFORE_CRASH" "$ALLOC_AFTER_CRASH" \
+  "$ENDPOINT_PRESENT_WHILE_PAUSED" "$FIXED_IP_REUSABLE" "$CALLER_SUPPLIED_PRESERVED" "$FOREIGN_PRESERVED" \
+  "$UNRELATED_DB_PROBE_OK" "$UNRELATED_DB_PROBE_LATENCY_MS" "$UNRELATED_DB_PROBE_CURL_EXIT" "$UNRELATED_DB_PROBE_HTTP_CODE" \
+  "$CONTENDING_CREATE_REQUEST_START_MS" "$CONTENDING_CREATE_REQUEST_ACCEPTED_MS" "$CONTENDING_CREATE_WAIT_MS" \
+  "$CONTENDING_CREATE_BOUND_MS" "$CONTENDING_CREATE_ACTIVE_MS" "$CONTENDING_CREATE_ACTIVE_LATENCY_MS" \
+  "$WORKLOAD_D" "$CONTENDING_CREATE_OPERATION_ID" "$ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED" \
+  "$CRASH_REPAIR_COMPLETED_MS" "$CRASH_OPERATION_ID" "$OS_PORT_D_ID" \
+  "$CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE" "$CRASH_REPAIR_PAUSE_RELEASED_UNIX_MS" <<'PY'
+import json, os, pathlib, sys, tempfile
 (out, env_name, env_value, workload, port_id, fixed_ip, killed_pid,
  terminal_ms, repair_ms, delete_code, sweep_passes, quota_before, quota_after,
- alloc_before, alloc_after, d_start, d_end, d_active, endpoint_paused,
- orphan_at_d, fixed_ip_reusable, caller_preserved, foreign_preserved, unrelated_probe_ok, unrelated_probe_latency_ms,
- unrelated_probe_curl_exit, unrelated_probe_http_code) = sys.argv[1:28]
+ alloc_before, alloc_after, endpoint_paused, fixed_ip_reusable,
+ caller_preserved, foreign_preserved, unrelated_probe_ok, unrelated_probe_latency_ms,
+ unrelated_probe_curl_exit, unrelated_probe_http_code, request_start, request_accepted,
+ lock_latency, bound_ms, active_at, active_latency, create_resource, create_operation,
+ orphan_present, repair_completed_observed, delete_operation, create_port,
+ repair_released_after_start, repair_release_ms) = sys.argv[1:38]
+path=pathlib.Path(out)
 doc = {
-    "status": "passed",
-    "fault_hook": {"env": env_name, "pause_ms": int(env_value),
-                   "semantics": "positive-ms sleep on the delete path after durable terminalization commits and before endpoint release"},
+    "fault_hook": {"env": env_name, "pause_ms": int(env_value), "semantics": "pause after durable terminalization and before endpoint release"},
     "server_c": {"resource_id": workload, "owned_endpoint_id": port_id, "fixed_ip": fixed_ip},
-    "endpoint_before_crash": {"port_id": port_id, "existed": True,
-                              "binding_state_exposed": False,
-                              "presence_asserted_while_pause_held": endpoint_paused == "true",
-                              "note": "the public port projection does not expose binding state; presence while the pause held is the asserted invariant"},
-    "operation_terminal_observed_ms": int(terminal_ms),
-    "kill": {"signal": "SIGKILL", "pid": int(killed_pid), "identity_verified": True,
-             "orderly_restart": False},
+    "operation": {"operation_id": delete_operation, "state": "Succeeded", "server_resource_state": "DELETED", "observed_after_ms": int(terminal_ms)},
+    "endpoint_before_crash": {"port_id": port_id, "existed": True, "server_owned": True, "presence_asserted_while_pause_held": endpoint_paused == "true", "binding_state_file": "p15-7-crash-endpoint-before.json"},
+    "kill": {"signal": "SIGKILL", "pid": int(killed_pid), "identity_verified": True, "orderly_restart": False},
     "delete_request_observed_http_code": delete_code or None,
     "restart": {"path": "normal boot path via start_o3kd_verified", "readyz": "passed"},
-    "sweep": {"passes_observed": int(sweep_passes), "time_to_repair_ms": int(repair_ms),
-              "bounded_wait_ms": 180000, "endpoint_absent_after": True},
+    "sweep": {"passes_observed": int(sweep_passes), "completion_log_observed": int(sweep_passes) > 0, "time_to_repair_ms": int(repair_ms), "bounded_wait_ms": 180000, "endpoint_absent_after": True, "repair_completion_observed_unix_ms": int(repair_completed_observed)},
     "fixed_ip_reuse": {"attempted": True, "succeeded": fixed_ip_reusable == "true"},
-    "quota": {"dimension": "network:ports", "before": int(quota_before), "after": int(quota_after),
-              "restored": quota_before == quota_after},
-    "placement_allocation": {"vcpu_allocated_before": int(alloc_before), "vcpu_allocated_after": int(alloc_after),
-                             "leak": alloc_before != alloc_after},
+    "quota": {"dimension": "network:ports", "before": int(quota_before), "after": int(quota_after), "restored": quota_before == quota_after},
+    "placement_allocation": {"vcpu_allocated_before": int(alloc_before), "vcpu_allocated_after": int(alloc_after), "leak": alloc_before != alloc_after},
     "responsiveness_during_backlog": {
         "unrelated_db_backed_probe": {"path": "/operator/diagnostics/providers?limit=1", "succeeded": unrelated_probe_ok == "true", "latency_ms": int(unrelated_probe_latency_ms), "curl_exit": int(unrelated_probe_curl_exit), "status_code": int(unrelated_probe_http_code)},
-        "orphan_present_at_create": orphan_at_d == "true",
-        "create_call_latency_ms": int(d_end) - int(d_start),
-        "activation_latency_ms": int(d_active),
-        "server_active": True,
-    },
+        "contending_existing_port_create": {"classification": "contending", "existing_port_id": create_port, "resource_id": create_resource, "operation_id": create_operation, "repair_lock_acquired_before_create": True, "orphan_present_at_request_start": orphan_present == "true", "request_start_unix_ms": int(request_start), "request_accepted_unix_ms": int(request_accepted), "lock_contention_latency_ms": int(lock_latency), "acceptance_bound_ms": int(bound_ms), "accepted_within_bound": int(lock_latency) <= int(bound_ms), "release_signal_sent_after_request_start": True, "repair_pause_released_after_create_start": repair_released_after_start == "true", "repair_pause_released_unix_ms": int(repair_release_ms), "repair_completion_observed_unix_ms": int(repair_completed_observed), "repair_completed_before_acceptance": True, "repair_acceptance_order_basis": "repair completion log is emitted before the sweep releases orphan_repair_lock; durable create acceptance requires that same lock", "active_unix_ms": int(active_at), "create_to_active_ms": int(active_latency), "active": True}},
     "caller_supplied_endpoint_preserved": caller_preserved == "true",
     "foreign_project_endpoint_preserved": foreign_preserved == "true",
 }
-pathlib.Path(out).write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+try:
+    prior=json.loads(path.read_text(encoding="utf-8"))
+except (OSError, ValueError) as error:
+    raise SystemExit(f"cannot merge final crash evidence: {error}")
+prior.update(doc)
+fd,tmp=tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+with os.fdopen(fd,"w",encoding="utf-8") as stream:
+    json.dump(prior,stream,indent=2,sort_keys=True); stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+os.replace(tmp,path)
+dir_fd=os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
 PY
+persist_crash_checkpoint completed passed source_sha "$SOURCE_SHA" run_id "$RUN_ID" \
+  operation_id "$CRASH_OPERATION_ID" server_id "$WORKLOAD_C" endpoint_id "$PORT_C_ID" \
+  endpoint_absent_after_repair true fixed_ip_reusable "$FIXED_IP_REUSABLE" \
+  network_ports_quota_restored true placement_allocation_leak false \
+  caller_supplied_preserved "$CALLER_SUPPLIED_PRESERVED" foreign_preserved "$FOREIGN_PRESERVED" \
+  contending_create_request_accepted true contending_create_bound_ms "$CONTENDING_CREATE_BOUND_MS" \
+  repair_pause_released_after_create_start "$CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE"
 record_scale_checkpoint post-crash-repair 5 "" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
   "$POST_REMOVE_BOOTSTRAP_EXPECT" \
   >/dev/null || die "post-crash-repair eligible Ready count is not exactly five"

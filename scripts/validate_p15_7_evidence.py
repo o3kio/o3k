@@ -337,6 +337,29 @@ def validate(
                         fail(errors, "journey.drain.blocker_requery still reports the deleted workload as a resident blocker")
         crash = mapping(journey.get("crash_injection_repair"), "journey.crash_injection_repair", errors)
         if crash is not None:
+            if crash.get("schema_version") != 2:
+                fail(errors, "journey.crash_injection_repair.schema_version must be 2")
+            if crash.get("phase") != "completed" or crash.get("status") != "passed":
+                fail(errors, "#1035 crash evidence must be completed and passed")
+            checkpoints = crash.get("checkpoints")
+            required_checkpoints = [
+                "fault_armed", "terminal_state_observed", "endpoint_present_pre_crash",
+                "process_killed", "process_restarted", "repair_lock_acquired",
+                "contending_create_started", "orphan_discovered", "repair_completed",
+                "contending_create_accepted", "accounting_verified", "completed",
+            ]
+            if not isinstance(checkpoints, list):
+                fail(errors, "#1035 incremental checkpoints must be a list")
+            else:
+                phases = [item.get("phase") for item in checkpoints if isinstance(item, dict)]
+                cursor = -1
+                for required in required_checkpoints:
+                    try:
+                        cursor = phases.index(required, cursor + 1)
+                    except ValueError:
+                        fail(errors, f"#1035 checkpoint {required} missing or out of order")
+                if checkpoints and checkpoints[-1].get("status") != "passed":
+                    fail(errors, "#1035 final checkpoint must be passed")
             passed(crash.get("status"), "journey.crash_injection_repair.status", errors)
             hook = mapping(crash.get("fault_hook"), "journey.crash_injection_repair.fault_hook", errors)
             if hook is not None:
@@ -377,12 +400,6 @@ def validate(
                 fail(errors, "journey.crash_injection_repair.placement_allocation.leak must be false")
             responsiveness = mapping(crash.get("responsiveness_during_backlog"), "journey.crash_injection_repair.responsiveness_during_backlog", errors)
             if responsiveness is not None:
-                if responsiveness.get("orphan_present_at_create") is not True:
-                    fail(errors, "journey.crash_injection_repair.responsiveness_during_backlog.orphan_present_at_create must be true")
-                if responsiveness.get("server_active") is not True:
-                    fail(errors, "journey.crash_injection_repair.responsiveness_during_backlog.server_active must be true")
-                if not isinstance(responsiveness.get("create_call_latency_ms"), int) or responsiveness["create_call_latency_ms"] < 0:
-                    fail(errors, "journey.crash_injection_repair.responsiveness_during_backlog.create_call_latency_ms must be recorded")
                 probe = mapping(responsiveness.get("unrelated_db_backed_probe"), "journey.crash_injection_repair.responsiveness_during_backlog.unrelated_db_backed_probe", errors)
                 if probe is not None:
                     if probe.get("path") != "/operator/diagnostics/providers?limit=1":
@@ -396,6 +413,38 @@ def validate(
                     status_code = probe.get("status_code")
                     if not isinstance(status_code, int) or not 200 <= status_code < 300:
                         fail(errors, "unrelated DB-backed probe status_code must be 2xx")
+                contention = mapping(responsiveness.get("contending_existing_port_create"), "journey.crash_injection_repair.responsiveness_during_backlog.contending_existing_port_create", errors)
+                if contention is not None:
+                    if contention.get("classification") != "contending":
+                        fail(errors, "existing-port create must be classified as contending")
+                    for field in ("repair_lock_acquired_before_create", "orphan_present_at_request_start",
+                                  "accepted_within_bound", "repair_completed_before_acceptance", "active"):
+                        if contention.get(field) is not True:
+                            fail(errors, f"contending existing-port create {field} must be true")
+                    for field in ("resource_id", "operation_id", "existing_port_id"):
+                        if not isinstance(contention.get(field), str) or not contention[field].strip():
+                            fail(errors, f"contending existing-port create {field} must be explicit")
+                    start, accepted = contention.get("request_start_unix_ms"), contention.get("request_accepted_unix_ms")
+                    bound, latency = contention.get("acceptance_bound_ms"), contention.get("lock_contention_latency_ms")
+                    active_at, active_latency = contention.get("active_unix_ms"), contention.get("create_to_active_ms")
+                    if not all(isinstance(value, int) for value in (start, accepted, bound, latency, active_at, active_latency)):
+                        fail(errors, "contending create request/ACTIVE timing fields must be integers")
+                    elif not (start <= accepted <= active_at and 0 <= latency <= bound and active_latency >= 0):
+                        fail(errors, "contending create request acceptance and ACTIVE timing is invalid")
+                    if bound != 65000:
+                        fail(errors, "contending create bound must match the 30s + 30s + 5s derivation")
+                    if contention.get("release_signal_sent_after_request_start") is not True or \
+                       contention.get("repair_pause_released_after_create_start") is not True:
+                        fail(errors, "repair lock release must follow the contending request start")
+                    released = contention.get("repair_pause_released_unix_ms")
+                    if not isinstance(released, int) or not isinstance(start, int) or released < start:
+                        fail(errors, "repair pause release timestamp must follow contending request start")
+                    if contention.get("repair_acceptance_order_basis") != "repair completion log is emitted before the sweep releases orphan_repair_lock; durable create acceptance requires that same lock":
+                        fail(errors, "contending create acceptance must be causally ordered after repair lock release")
+                    if not isinstance(contention.get("repair_completion_observed_unix_ms"), int):
+                        fail(errors, "repair completion observation timestamp must be recorded")
+                    if crash.get("sweep", {}).get("completion_log_observed") is not True:
+                        fail(errors, "orphan repair must have a completion log")
             if crash.get("caller_supplied_endpoint_preserved") is not True:
                 fail(errors, "journey.crash_injection_repair.caller_supplied_endpoint_preserved must be true")
             if crash.get("foreign_project_endpoint_preserved") is not True:

@@ -5,6 +5,21 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p15-7-guards.XXXXXX")"
 trap 'rm -rf -- "${WORK_DIR}"' EXIT
 EVIDENCE="${WORK_DIR}/evidence.json"
+
+# Incremental crash evidence must survive a later assertion failure. Exercise
+# the atomic writer through two durable checkpoints, then fail after restart.
+CRASH_EVIDENCE="${WORK_DIR}/crash-evidence.json"
+python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "${CRASH_EVIDENCE}" \
+  process_restarted running restart_path normal_boot
+python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "${CRASH_EVIDENCE}" \
+  process_restarted failed failure_phase post_restart_assertion
+python3 - "${CRASH_EVIDENCE}" <<'PY'
+import json, pathlib, sys
+path=pathlib.Path(sys.argv[1]); doc=json.loads(path.read_text())
+assert doc["status"] == "failed" and doc["failure_phase"] == "post_restart_assertion"
+assert [item["phase"] for item in doc["checkpoints"]] == ["process_restarted", "process_restarted"]
+assert not list(path.parent.glob(f".{path.name}.*")), "atomic writer left a temporary artifact"
+PY
 PYTHONPATH="${ROOT_DIR}/scripts${PYTHONPATH:+:${PYTHONPATH}}" python3 - <<'PY'
 from p15_7_scale_semantics import validate_bootstrap_scale_membership
 
@@ -198,7 +213,11 @@ doc = {
         "attachment_blockers":[],"local_storage_blockers":[],
         "deleted_workload_absent_from_blockers":True}},
     "remove_rejoin_replace":True,"restart_recovery":True,
-    "crash_injection_repair":{"status":"passed",
+    "crash_injection_repair":{"schema_version":2,"phase":"completed","status":"passed",
+      "checkpoints":[{"phase":phase,"status":"passed" if phase == "completed" else "running"} for phase in
+        ["fault_armed","terminal_state_observed","endpoint_present_pre_crash","process_killed",
+         "process_restarted","repair_lock_acquired","contending_create_started","orphan_discovered",
+         "repair_completed","contending_create_accepted","accounting_verified","completed"]],
       "fault_hook":{"env":"O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS","pause_ms":45000,
         "semantics":"positive-ms sleep on the delete path after durable terminalization commits and before endpoint release"},
       "server_c":{"resource_id":"66666666-6666-4666-8666-666666666666",
@@ -209,14 +228,22 @@ doc = {
       "kill":{"signal":"SIGKILL","pid":4242,"identity_verified":True,"orderly_restart":False},
       "delete_request_observed_http_code":"000",
       "restart":{"path":"normal boot path via start_o3kd_verified","readyz":"passed"},
-      "sweep":{"passes_observed":2,"time_to_repair_ms":9400,"bounded_wait_ms":180000,"endpoint_absent_after":True},
+      "sweep":{"passes_observed":2,"completion_log_observed":True,"time_to_repair_ms":9400,"bounded_wait_ms":180000,"endpoint_absent_after":True,"repair_completion_observed_unix_ms":1750000003500},
       "fixed_ip_reuse":{"attempted":True,"succeeded":True},
       "quota":{"dimension":"network:ports","before":3,"after":3,"restored":True},
       "placement_allocation":{"vcpu_allocated_before":2,"vcpu_allocated_after":2,"leak":False},
       "responsiveness_during_backlog":{"orphan_present_at_create":True,
         "unrelated_db_backed_probe":{"path":"/operator/diagnostics/providers?limit=1","succeeded":True,"latency_ms":43,"curl_exit":0,"status_code":200},
-        "create_call_latency_ms":2100,
-        "activation_latency_ms":41000,"server_active":True},
+        "contending_existing_port_create":{"classification":"contending","existing_port_id":"99999999-9999-4999-8999-999999999999",
+          "resource_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","operation_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "repair_lock_acquired_before_create":True,"orphan_present_at_request_start":True,
+          "request_start_unix_ms":1750000000000,"request_accepted_unix_ms":1750000004000,
+          "lock_contention_latency_ms":4000,"acceptance_bound_ms":65000,"accepted_within_bound":True,
+          "release_signal_sent_after_request_start":True,"repair_pause_released_after_create_start":True,
+          "repair_pause_released_unix_ms":1750000002500,
+          "repair_completion_observed_unix_ms":1750000003500,"repair_completed_before_acceptance":True,
+          "repair_acceptance_order_basis":"repair completion log is emitted before the sweep releases orphan_repair_lock; durable create acceptance requires that same lock",
+          "active_unix_ms":1750000044000,"create_to_active_ms":40000,"active":True}},
       "caller_supplied_endpoint_preserved":True,
       "foreign_project_endpoint_preserved":True},
     "host_maintenance":{"status":"passed","block_id":child_ids["block-e"],

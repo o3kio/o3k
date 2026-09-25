@@ -90,6 +90,41 @@ async fn test_fault_pause_async_with(name: &str, ms: Option<u64>) {
     tracing::warn!(pause_ms = ms, "test-only fault pause {} released", name);
 }
 
+/// Test-only repair-pass hold used to queue a port-attaching create behind an
+/// orphan sweep. The harness releases it through a run-owned file after
+/// starting the create request. The timeout is a fail-safe, and a process-local
+/// one-shot keeps later periodic passes from pausing.
+async fn test_fault_wait_for_file_once_async(name: &str, env_var: &str, timeout_env: &str) {
+    let Some(release_file) = std::env::var_os(env_var).map(std::path::PathBuf::from) else {
+        return;
+    };
+    let Some(timeout_ms) = std::env::var(timeout_env)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0 && *value <= 30_000)
+    else {
+        return;
+    };
+    static ORPHAN_REPAIR_PAUSE_USED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if ORPHAN_REPAIR_PAUSE_USED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    tracing::warn!("test-only fault pause {} engaged", name);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        if release_file.exists() {
+            tracing::warn!("test-only fault pause {} released", name);
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!("test-only fault pause {} timed out", name);
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 /// Parse/guard half of `test_fault_pause_ms`; split out so the no-op
 /// conditions can be unit-tested without sleeping.
 fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
@@ -4081,6 +4116,52 @@ mod tests {
             2,
             "repair must converge one unbind per pass"
         );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// A waiting port-reference create receives the FIFO opportunity between
+    /// one-orphan repair passes. The Tokio mutex contract is FIFO: once these
+    /// three acquisitions are queued in order, a later periodic pass cannot
+    /// repeatedly jump ahead of the create. Combined with the one-dispatch
+    /// cap above, multiple repairable orphans cannot starve the create.
+    #[tokio::test]
+    async fn orphan_repair_lock_gives_waiting_create_fifo_turn_between_passes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-fairness-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let service = Arc::new(ComputeService::new_for_test(
+            store,
+            Arc::new(FakeComputeProvider::new()),
+        ));
+        let first_pass = service.orphan_repair_lock_guard().await;
+        let (queued_tx, mut queued_rx) = tokio::sync::mpsc::unbounded_channel();
+        let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        for label in ["waiting_create", "next_repair_pass"] {
+            let service = service.clone();
+            let queued_tx = queued_tx.clone();
+            let order = order.clone();
+            tokio::spawn(async move {
+                let _ = queued_tx.send(label);
+                let _guard = service.orphan_repair_lock_guard().await;
+                order.lock().await.push(label);
+            });
+            assert_eq!(queued_rx.recv().await, Some(label));
+            // This is a current-thread Tokio test. Yield once after the
+            // notification so the waiter polls lock() and enters its FIFO
+            // queue before the next waiter is spawned.
+            tokio::task::yield_now().await;
+        }
+        drop(first_pass);
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*order.lock().await, ["waiting_create", "next_repair_pass"]);
         std::fs::remove_file(database_path)?;
         Ok(())
     }

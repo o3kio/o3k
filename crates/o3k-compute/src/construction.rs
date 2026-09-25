@@ -1177,6 +1177,15 @@ impl ComputeService {
         // interrupted mid-persist nor land a durable reference to a port this
         // pass is about to release.
         let _orphan_repair_guard = self.orphan_repair_lock.lock().await;
+        // Test-only bounded handshake lets the protected journey start a
+        // contending existing-port create behind this real periodic pass. It
+        // is process-local one-shot, so later sweeps do not pause.
+        crate::test_fault_wait_for_file_once_async(
+            "orphan-repair-lock",
+            "O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE",
+            "O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_TIMEOUT_MS",
+        )
+        .await;
         let resources = self
             .store
             .list_resources_by_kind("compute_instance")
