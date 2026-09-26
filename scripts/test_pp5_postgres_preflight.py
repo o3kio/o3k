@@ -208,6 +208,45 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("lock_timeout=10000", effective["PGOPTIONS"])
         self.assertFalse(Path(effective["PGPASSFILE"]).exists())
 
+    def test_psql_escapes_passfile_delimiters_and_filters_sensitive_environment(self):
+        url = "postgresql://admin:p%3Ass%5Cword@127.0.0.1:5432/postgres"
+        with patch.dict(os.environ, {
+            "app_DATABASE_URL": "postgresql://should-not-be-inherited",
+            "service_token": "should-not-be-inherited",
+            "lower_pgpassword": "should-not-be-inherited",
+            "o3k_pp5_postgres_admin_url": "postgresql://should-not-be-inherited",
+        }, clear=False), patch.object(
+            pg.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0, "ok", ""),
+        ) as run:
+            pg.psql("SELECT 1", url)
+        effective = run.call_args.kwargs["env"]
+        self.assertNotIn("app_DATABASE_URL", effective)
+        self.assertNotIn("service_token", effective)
+        self.assertNotIn("lower_pgpassword", effective)
+        self.assertNotIn("o3k_pp5_postgres_admin_url", effective)
+
+    def test_psql_passfile_escaping_is_written_before_subprocess(self):
+        url = "postgresql://admin:p%3Ass%5Cword@127.0.0.1:5432/postgres"
+        observed = {}
+
+        def capture(command, **kwargs):
+            observed["passfile"] = Path(kwargs["env"]["PGPASSFILE"]).read_text()
+            return subprocess.CompletedProcess(command, 0, "ok", "")
+
+        with patch.object(pg.subprocess, "run", side_effect=capture):
+            pg.psql("SELECT 1", url)
+        self.assertEqual(observed["passfile"], "127.0.0.1:5432:postgres:admin:p\\:ss\\\\word\n")
+
+    def test_psql_rejects_newline_in_password(self):
+        url = "postgresql://admin:p%0Asecret@127.0.0.1:5432/postgres"
+        before = set(Path(tempfile.gettempdir()).glob("pp5-pgpass-*"))
+        with patch.object(pg.subprocess, "run") as run, \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            pg.psql("SELECT 1", url)
+        run.assert_not_called()
+        self.assertEqual(before, set(Path(tempfile.gettempdir()).glob("pp5-pgpass-*")))
+
     def test_manifest_role_is_exact_run_owned_role(self):
         manifest = {
             "schema": pg.SCHEMA,
@@ -237,6 +276,64 @@ class PreflightTests(unittest.TestCase):
         with patch.object(pg, "psql", return_value="foreign_role"), \
                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             pg.verify_database_ownership(manifest, os.environ["O3K_PP5_POSTGRES_ADMIN_URL"])
+
+    def test_cleanup_owner_check_allows_missing_partial_database(self):
+        manifest = {
+            "role": pg.expected_role("preflight_unit"),
+            "databases": {
+                purpose: {"name": name}
+                for purpose, name in pg.expected_names("preflight_unit").items()
+            },
+        }
+        responses = iter(("", manifest["role"], manifest["role"], manifest["role"]))
+        with patch.object(pg, "psql", side_effect=lambda *args: next(responses)):
+            pg.verify_database_ownership(
+                manifest, os.environ["O3K_PP5_POSTGRES_ADMIN_URL"], allow_missing=True
+            )
+
+    def test_missing_database_is_still_rejected_during_strict_verify(self):
+        manifest = {
+            "role": pg.expected_role("preflight_unit"),
+            "databases": {
+                purpose: {"name": name}
+                for purpose, name in pg.expected_names("preflight_unit").items()
+            },
+        }
+        with patch.object(pg, "psql", return_value=""), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            pg.verify_database_ownership(
+                manifest, os.environ["O3K_PP5_POSTGRES_ADMIN_URL"]
+            )
+
+    def test_verify_after_p13_checks_actual_database_name(self):
+        manifest = {
+            "run_id": "preflight_unit",
+            "source_sha": "a" * 40,
+            "provisioning": {"status": "completed"},
+            "databases": {
+                purpose: {"name": name}
+                for purpose, name in pg.expected_names("preflight_unit").items()
+            },
+        }
+        urls = {purpose: f"postgresql://role@127.0.0.1:5432/{name}"
+                for purpose, name in pg.expected_names("preflight_unit").items()}
+        with patch.object(pg, "load_manifest", return_value=manifest), \
+                patch.object(pg, "verify_database_ownership"), \
+                patch.object(pg, "urls_from_env", return_value=urls), \
+                patch.object(pg, "db_psql", return_value="wrong_database"), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            pg.verify_after_p13()
+
+    def test_unexpected_preflight_exception_is_recorded_and_redacted(self):
+        with patch.object(pg.shutil, "which", return_value="/usr/bin/psql"), \
+                patch.object(pg, "psql", side_effect=RuntimeError("DO_NOT_LOG")), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                pg.preflight()
+        artifact = json.loads(Path(self.temp.name, "pp5-postgres-preflight.json").read_text())
+        self.assertEqual(artifact["status"], "failed")
+        self.assertEqual(artifact["failure_phase"], "admin_connection")
+        self.assertNotIn("DO_NOT_LOG", json.dumps(artifact))
 
     def test_psql_redacts_failures_and_timeout(self):
         for error in (subprocess.CalledProcessError(2, ["psql"], stderr="DO_NOT_LOG"),

@@ -12,29 +12,38 @@ case "${phase}" in
     exec python3 scripts/provision_pp5_postgres.py "${phase}"
     ;;
   qualification)
-    cleanup_on_exit() {
-      rc=$?
-      if [[ -f "${O3K_PP5_ARTIFACT_DIR:-target/real-host-workflow-artifacts}/pp5-postgres-purpose-map.json" ]]; then
-        python3 scripts/provision_pp5_postgres.py cleanup || rc=1
-      fi
-      exit "${rc}"
-    }
-    trap cleanup_on_exit EXIT
-    python3 scripts/provision_pp5_postgres.py preflight
-    python3 scripts/provision_pp5_postgres.py provision
-    set -a
-    # The mode-0600 file is run-owned and is never echoed or traced.
-    . "${O3K_PP5_ENV_FILE:-target/pp5-postgres.env}"
-    set +a
-    export O3K_DATABASE_BACKEND=postgres
-    export O3K_TEST_DATABASE_PURPOSE=p13
-    export O3K_DATABASE_URL="${O3K_PP5_P13_DATABASE_URL}"
-    cargo test --locked -p o3k-store --test postgres_p13_f1 --all-features -- --ignored --nocapture
-    cargo test --locked -p o3k-store --test postgres_p13_b1 --all-features -- --ignored --nocapture
-    cargo test --locked -p o3k-store --test postgres_p13_4_storage --all-features -- --ignored --nocapture
-    python3 scripts/provision_pp5_postgres.py verify-p13
-    trap - EXIT
-    python3 scripts/provision_pp5_postgres.py cleanup
+    (
+      cleanup_on_exit() {
+        rc=$?
+        if [[ -f "${O3K_PP5_ARTIFACT_DIR:-target/real-host-workflow-artifacts}/pp5-postgres-purpose-map.json" ]]; then
+          python3 scripts/provision_pp5_postgres.py cleanup || rc=1
+        fi
+        exit "${rc}"
+      }
+      trap cleanup_on_exit EXIT
+      python3 scripts/provision_pp5_postgres.py preflight
+      python3 scripts/provision_pp5_postgres.py provision
+      set -a
+      # The mode-0600 file is run-owned and is never echoed or traced.
+      . "${O3K_PP5_ENV_FILE:-target/pp5-postgres.env}"
+      set +a
+      # Destructive tests receive only their purpose-owned URL.  Keep the other
+      # purpose URLs in the parent shell for verify-p13, but never expose them to
+      # a test process that could accidentally select a different database.
+      (
+        export O3K_DATABASE_BACKEND=postgres
+        export O3K_TEST_DATABASE_PURPOSE=p13
+        export O3K_DATABASE_URL="${O3K_PP5_P13_DATABASE_URL}"
+        unset O3K_PP5_CAMPAIGN_DATABASE_URL O3K_PP5_WORKSPACE_DATABASE_URL O3K_PP5_ENDPOINT_DATABASE_URL
+        cargo test --locked -p o3k-store --test postgres_p13_f1 --all-features -- --ignored --nocapture
+        cargo test --locked -p o3k-store --test postgres_p13_b1 --all-features -- --ignored --nocapture
+        cargo test --locked -p o3k-store --test postgres_p13_4_storage --all-features -- --ignored --nocapture
+      )
+      unset O3K_DATABASE_BACKEND O3K_TEST_DATABASE_PURPOSE O3K_DATABASE_URL
+      python3 scripts/provision_pp5_postgres.py verify-p13
+      trap - EXIT
+      python3 scripts/provision_pp5_postgres.py cleanup
+    )
     ;;
   *)
     printf 'usage: %s {preflight|qualification|provision|verify|cleanup}\n' "$0" >&2

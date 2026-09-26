@@ -81,6 +81,12 @@ def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def pgpass_escape(value: str) -> str:
+    if "\n" in value or "\r" in value:
+        die("PostgreSQL connection fields cannot contain newlines")
+    return value.replace("\\", "\\\\").replace(":", "\\:")
+
+
 def expected_role(run: str) -> str:
     role = f"o3k_pp5_{run.replace('-', '_')}"
     if len(role.encode("ascii")) > 63:
@@ -95,11 +101,12 @@ def admin_url() -> str:
     try:
         parsed = urllib.parse.urlsplit(configured)
         port = parsed.port or 5432
+        hostname = parsed.hostname
     except ValueError:
         die("O3K_PP5_POSTGRES_ADMIN_URL has invalid endpoint syntax")
-    if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname or not 1 <= port <= 65535:
+    if parsed.scheme not in ("postgres", "postgresql") or not hostname or not 1 <= port <= 65535:
         die("O3K_PP5_POSTGRES_ADMIN_URL must be a PostgreSQL URL")
-    if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+    if hostname not in ("localhost", "127.0.0.1", "::1"):
         die("PP.5 PostgreSQL must use loopback for owned fault injection")
     # libpq query parameters can override host/user/database. Do not let them
     # bypass endpoint or ownership validation. Only TLS settings are supported.
@@ -120,10 +127,15 @@ def psql(sql: str, database_url: str = "") -> str:
         "O3K_PP5_ENDPOINT_DATABASE_URL",
         "O3K_PP5_P13_DATABASE_URL",
     }
-    process_env = {
-        key: value for key, value in os.environ.items()
-        if not key.startswith("PG") and key not in sensitive_env
-    }
+    sensitive_env_upper = {key.upper() for key in sensitive_env}
+    process_env = {}
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if upper.startswith("PG") or upper in sensitive_env_upper or upper.endswith("DATABASE_URL"):
+            continue
+        if any(marker in upper for marker in ("PASSWORD", "TOKEN", "SECRET", "PRIVATE_KEY")):
+            continue
+        process_env[key] = value
     process_env.update(PGCONNECT_TIMEOUT="5", PGOPTIONS="-c statement_timeout=20000 -c lock_timeout=10000")
     flags = ["-X", "-w", "-v", "ON_ERROR_STOP=1", "-At"]
     passfile: Path | None = None
@@ -133,12 +145,17 @@ def psql(sql: str, database_url: str = "") -> str:
         try:
             parsed = urllib.parse.urlsplit(database_url)
             port = parsed.port or 5432
+            hostname = parsed.hostname
         except ValueError:
             die("PostgreSQL connection has invalid endpoint syntax")
-        if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname or not 1 <= port <= 65535:
+        if parsed.fragment:
+            die("PostgreSQL connection has an unsupported fragment")
+        if parsed.scheme not in ("postgres", "postgresql") or not hostname or not 1 <= port <= 65535:
             die("PostgreSQL connection must be a PostgreSQL URL")
-        process_env.update(PGHOST=parsed.hostname, PGPORT=str(port),
-                           PGDATABASE=urllib.parse.unquote(parsed.path.removeprefix("/")))
+        database = urllib.parse.unquote(parsed.path.removeprefix("/"))
+        if not database:
+            die("PostgreSQL connection must name a database")
+        process_env.update(PGHOST=hostname, PGPORT=str(port), PGDATABASE=database)
         if parsed.username is not None:
             process_env["PGUSER"] = urllib.parse.unquote(parsed.username)
         tls_fields = {"sslmode": "PGSSLMODE", "sslrootcert": "PGSSLROOTCERT",
@@ -150,12 +167,14 @@ def psql(sql: str, database_url: str = "") -> str:
             tls_values[tls_fields[key]] = value
         process_env.update(tls_values)
         if parsed.password is not None:
+            fields = (hostname, str(port), process_env["PGDATABASE"],
+                      process_env.get("PGUSER", ""), urllib.parse.unquote(parsed.password))
+            escaped_fields = tuple(pgpass_escape(field) for field in fields)
             fd, passfile_name = tempfile.mkstemp(prefix="pp5-pgpass-", text=True)
             passfile = Path(passfile_name)
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(":".join((parsed.hostname, str(port), process_env["PGDATABASE"],
-                                      process_env.get("PGUSER", ""), urllib.parse.unquote(parsed.password))) + "\n")
+                handle.write(":".join(escaped_fields) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             process_env["PGPASSFILE"] = str(passfile)
@@ -302,6 +321,13 @@ def preflight() -> None:
         artifact["failure_phase"] = artifact["current_phase"]
         checkpoint(artifact["current_phase"])
         raise
+    except Exception:
+        # Never expose an unexpected client/library exception: its text may
+        # contain a connection string or server-provided credential data.
+        artifact["status"] = "failed"
+        artifact["failure_phase"] = artifact["current_phase"]
+        checkpoint(artifact["current_phase"])
+        die("PostgreSQL preflight failed; diagnostics withheld")
     artifact["status"] = "passed"
     checkpoint("completed")
     print(f"PP.5 PostgreSQL preflight PASS run={run} (read-only; not S5 acceptance)")
@@ -369,7 +395,7 @@ def provision() -> None:
         lines.append(f"{ENV_NAMES[purpose]}={urls[purpose]}\n")
     atomic_write(env_file(), "".join(lines), 0o600)
     github_env = env("GITHUB_ENV")
-    if github_env:
+    if github_env and env("O3K_PP5_PERSIST_ENV", "1") == "1":
         with open(github_env, "a", encoding="utf-8") as handle:
             for line in lines:
                 handle.write(line)
@@ -424,7 +450,7 @@ def urls_from_env(manifest: dict) -> dict[str, str]:
     return urls
 
 
-def verify_database_ownership(manifest: dict, admin: str) -> None:
+def verify_database_ownership(manifest: dict, admin: str, allow_missing: bool = False) -> None:
     role = manifest["role"]
     for purpose in PURPOSES:
         name = manifest["databases"][purpose]["name"]
@@ -433,6 +459,8 @@ def verify_database_ownership(manifest: dict, admin: str) -> None:
             f"WHERE datname={quote_literal(name)}",
             admin,
         )
+        if not owner and allow_missing:
+            continue
         if owner != role:
             die(f"{purpose} database owner does not match the run-owned role")
 
@@ -468,7 +496,9 @@ def verify_after_p13() -> None:
             die(f"{purpose} database sentinel changed or is missing after P13")
     # P13/P13.4 are destructive by contract; prove only that their exact
     # database remains reachable and run-owned after its reset.
-    db_psql("SELECT current_database()", urls["p13"])
+    current_database = db_psql("SELECT current_database()", urls["p13"])
+    if current_database != manifest["databases"]["p13"]["name"]:
+        die("P13 database connection resolved to an unexpected database")
     print(f"verified PP.5 campaign/workspace/endpoint isolation after P13 run={run}")
 
 
@@ -476,7 +506,7 @@ def cleanup() -> None:
     manifest = load_manifest()
     names = {purpose: manifest["databases"][purpose]["name"] for purpose in PURPOSES}
     admin = admin_url()
-    verify_database_ownership(manifest, admin)
+    verify_database_ownership(manifest, admin, allow_missing=True)
     joined = ",".join(quote_literal(name) for name in names.values())
     psql(f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN ({joined}) AND pid <> pg_backend_pid()", admin)
     for name in names.values():
