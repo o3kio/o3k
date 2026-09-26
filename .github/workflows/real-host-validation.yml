@@ -765,6 +765,7 @@ jobs:
             target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json
             target/real-host-workflow-artifacts/p15-7-protected-preflight.json
             target/real-host-workflow-artifacts/pp5-postgres-preflight*.json
+            target/real-host-workflow-artifacts/pp5-runner-prerequisite*.json
             target/real-host-workflow-artifacts/pp5-postgres-purpose-map.json
             target/real-host-workflow-artifacts/p13-4-volume-trace.jsonl
             target/real-host-workflow-artifacts/p13-4-storage-evidence.json

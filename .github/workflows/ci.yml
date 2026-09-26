@@ -73,6 +73,8 @@ jobs:
         run: bash tests/postgres_test_database_guards.sh
       - name: Validate PP.5 PostgreSQL prerequisite failure boundaries
         run: python3 scripts/test_pp5_postgres_preflight.py
+      - name: Validate PP.5 runner prerequisite boundaries
+        run: python3 scripts/test_pp5_runner_prerequisite.py
       - name: Validate PP.5 fast prerequisite entrypoint
         run: bash tests/pp5-fast-gate-guards.sh
       - name: Validate release signing trust transition

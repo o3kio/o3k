@@ -724,8 +724,12 @@ pg_step = text.split(f"- name: {pg_preflight}", 1)[1].split("\n      - ", 1)[0]
 assert "continue-on-error:" not in pg_step
 assert "if:" not in pg_step
 assert "scripts/pp5-fast-gate.sh qualification" in text
+fast_gate_text = pathlib.Path("scripts/pp5-fast-gate.sh").read_text(encoding="utf-8")
+assert "scripts/pp5-runner-prerequisite.py" in fast_gate_text
 assert Path("scripts/pp5-fast-gate.sh").is_file()
+assert Path("scripts/pp5-runner-prerequisite.py").is_file()
 assert "pp5-postgres-preflight*.json" in text
+assert "pp5-runner-prerequisite*.json" in text
 assert text.index("Protected P15.7 authority and capacity preflight") < text.index("Bootstrap disposable TestLab")
 assert "if: always() && steps.protected_preflight.outcome == 'success'" in text
 assert text.count("if: always() && steps.protected_preflight.outcome == 'success'") >= 5

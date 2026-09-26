@@ -30,6 +30,24 @@ case "${phase}" in
         printf 'PP5 fast gate requires a clean tracked tree\n' >&2
         exit 2
       }
+      # Generated build outputs may remain on the shared runner, but no
+      # untracked source or harness file may be executed under an exact SHA.
+      while IFS= read -r entry; do
+        [[ -n "${entry}" ]] || continue
+        [[ "${entry}" == '?? '* ]] || {
+          printf 'PP5 fast gate requires a clean execution tree: %s\n' "${entry}" >&2
+          exit 2
+        }
+        path="${entry#?? }"
+        case "${path}" in
+          target/*|bins/o3kd/bins/*|bins/o3kd/target/*|dist/*) ;;
+          *)
+            printf 'PP5 fast gate rejects untracked source/harness path: %s\n' "${path}" >&2
+            exit 2
+            ;;
+        esac
+      done < <(git status --porcelain=v1 --untracked-files=all)
+      python3 scripts/pp5-runner-prerequisite.py
       cleanup_on_exit() {
         rc=$?
         if [[ -f "${O3K_PP5_ARTIFACT_DIR:-target/real-host-workflow-artifacts}/pp5-postgres-purpose-map.json" ]]; then
