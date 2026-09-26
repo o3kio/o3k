@@ -70,6 +70,30 @@ class RunnerPrerequisiteTests(unittest.TestCase):
         self.assertEqual(artifact["failure_phase"], "configuration")
         self.assertFalse(artifact["admin_url_valid"])
 
+    def test_external_authority_marks_service_state_as_not_owned(self):
+        environment = dict(self.env, O3K_PP5_POSTGRES_ADMIN_URL="postgres://user@127.0.0.1/postgres")
+        with patch.dict(os.environ, environment, clear=False), \
+                patch.object(MODULE, "canonical_admin_url_is_valid", return_value=True), \
+                patch.object(MODULE, "install_client", return_value=(True, "already_present")), \
+                patch.object(MODULE.shutil, "which", return_value="/usr/bin/psql"):
+            self.assertEqual(MODULE.main(), 0)
+        state = json.loads(Path(self.temp.name, "pp5-runner-postgres-service-state.json").read_text())
+        self.assertEqual(state["run_id"], "unit-run")
+        self.assertFalse(state["local_service_started"])
+
+    def test_stale_service_state_is_ignored_without_mutation(self):
+        state = {
+            "run_id": "prior-run",
+            "source_sha": "b" * 40,
+            "local_service_started": True,
+            "local_service_was_active": False,
+        }
+        Path(self.temp.name, "pp5-runner-postgres-service-state.json").write_text(json.dumps(state))
+        with patch.dict(os.environ, self.env, clear=False), \
+                patch.object(MODULE, "stop_local_service") as stop:
+            self.assertEqual(MODULE.restore_service(), 0)
+        stop.assert_not_called()
+
     def test_attempt_artifact_is_preserved_across_runs(self):
         with patch.dict(os.environ, self.env, clear=False), \
                 patch.object(MODULE.shutil, "which", return_value="/usr/bin/psql"), \

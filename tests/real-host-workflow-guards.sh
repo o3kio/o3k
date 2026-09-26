@@ -724,6 +724,16 @@ pg_step = text.split(f"- name: {pg_preflight}", 1)[1].split("\n      - ", 1)[0]
 assert "continue-on-error:" not in pg_step
 assert "if:" not in pg_step
 assert "scripts/pp5-fast-gate.sh qualification" in text
+prepare_pg = "Prepare local PP.5 PostgreSQL for authoritative S5"
+assert prepare_pg in text
+assert text.index(pg_preflight) < text.index(prepare_pg)
+prepare_pg_step = text.split(f"- name: {prepare_pg}", 1)[1].split("\n      - ", 1)[0]
+assert "python3 scripts/pp5-runner-prerequisite.py" in prepare_pg_step
+assert "O3K_PP5_RUN_ID:" in prepare_pg_step
+assert "O3K_PP5_SOURCE_SHA:" in prepare_pg_step
+assert "O3K_PP5_POSTGRES_ADMIN_URL:" in prepare_pg_step
+assert text.index(prepare_pg) < text.index("Protected P15.7 authority and capacity preflight")
+assert text.index(prepare_pg) < text.index("Provision isolated PP.5 PostgreSQL purpose databases")
 fast_gate_text = pathlib.Path("scripts/pp5-fast-gate.sh").read_text(encoding="utf-8")
 assert "scripts/pp5-runner-prerequisite.py" in fast_gate_text
 assert Path("scripts/pp5-fast-gate.sh").is_file()

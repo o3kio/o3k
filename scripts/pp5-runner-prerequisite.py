@@ -178,10 +178,16 @@ def restore_service() -> int:
         return 2
     expected_run = env("O3K_PP5_RUN_ID") or env("GITHUB_RUN_ID")
     expected_sha = env("O3K_PP5_SOURCE_SHA") or env("GITHUB_SHA")
-    if not expected_run or state.get("run_id") != expected_run:
+    if not expected_run:
         print("PP5 PostgreSQL service state run mismatch", file=sys.stderr)
         return 2
-    if expected_sha and state.get("source_sha") != expected_sha:
+    # A prior workflow may leave its redacted state artifact on a shared
+    # runner. Never mutate a service based on another run's ledger; leave that
+    # artifact untouched and let the current run's own state be restored by a
+    # later invocation. This is safe because ownership is exact run-scoped.
+    if state.get("run_id") != expected_run:
+        return 0
+    if not expected_sha or state.get("source_sha") != expected_sha:
         print("PP5 PostgreSQL service state source mismatch", file=sys.stderr)
         return 2
     if state.get("local_service_started") and not state.get("local_service_was_active"):
@@ -264,6 +270,10 @@ def main() -> int:
         server_action = "external_admin_url"
         service_was_active = None
         server_installed = False
+        # Mark this run as external-authority-only so a stale service-state
+        # artifact from an earlier run cannot cause final cleanup to stop a
+        # service it did not start.
+        write_service_state(False, False, False)
     else:
         document["current_phase"] = "postgres_server"
         checkpoint()

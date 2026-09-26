@@ -78,6 +78,19 @@ jobs:
           O3K_PP5_PERSIST_ENV: "0"
         run: bash scripts/pp5-fast-gate.sh qualification
 
+      # The fast gate restores the host to its pre-gate service state. Re-open
+      # the run-owned local service before the later campaign database
+      # provision step so a host that was initially inactive is not left
+      # stopped when authoritative S5 begins. The final always-run restore
+      # below returns the host to its original state.
+      - name: Prepare local PP.5 PostgreSQL for authoritative S5
+        env:
+          O3K_PP5_RUN_ID: ${{ github.run_id }}
+          O3K_PP5_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_PP5_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_PP5_POSTGRES_ADMIN_URL: ${{ secrets.O3K_PP5_POSTGRES_ADMIN_URL }}
+        run: python3 scripts/pp5-runner-prerequisite.py
+
       - name: Protected P15.7 authority and capacity preflight
         id: protected_preflight
         continue-on-error: true
