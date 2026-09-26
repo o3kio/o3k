@@ -106,6 +106,7 @@ jobs:
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_PROVIDER: agent
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
           # Storage bootstrap remains SQLite.  PP.5 provisions four isolated
           # external PostgreSQL databases below; the generic/P15.7 phase binds
           # only its campaign database after this fresh TestLab is created.
