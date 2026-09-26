@@ -728,6 +728,17 @@ assert journey.index('record_scale_checkpoint post-crash-repair') < journey.inde
 # late restart pairs the helper with the historical readyz wait unchanged.
 assert journey.index('restart_o3kd_verified() {') < journey.index('PROXY_DSN="$(pg_proxy_dsn)"')
 assert "  rewrite_o3kd_env_for_proxy\n  restart_o3kd_verified" in journey
+# The protected GitHub runner is normally an unprivileged service account.
+# External-mode fault injection must cross the existing non-interactive sudo
+# boundary for every run-owned iptables read/mutation; direct invocations fail
+# before the sever rule can be installed and are therefore not an acceptable
+# wiring proof.
+assert 'iptables_root() {' in journey
+assert 'sudo -n iptables "$@"' in journey
+assert 'iptables_root -A OUTPUT' in journey
+assert 'iptables_root -D OUTPUT "$line_num"' in journey
+assert 'iptables_root -n -L OUTPUT --line-numbers' in journey
+assert 'iptables_root -S OUTPUT' in journey
 assert journey.index('  restart_o3kd_verified\n  # The previous backend') \
     < journey.index('  rejoin_bootstrap_agent\n  wait_o3kd_readyz "readyz did not reconstruct after the PostgreSQL backend switch"')
 assert 'restart_o3kd_verified\nwait_o3kd_readyz "readyz did not reconstruct after restart"' in journey

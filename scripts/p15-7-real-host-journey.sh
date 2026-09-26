@@ -175,6 +175,18 @@ postgres_sever_port() {
 postgres_sever_tag() {
   printf 'o3k-p15-7-pg-sever:run=%s' "$RUN_ID"
 }
+iptables_root() {
+  # The protected runner is normally an unprivileged service account.  Rule
+  # mutation/readback must therefore use the existing non-interactive sudo
+  # boundary; invoking iptables directly makes the external PostgreSQL fault
+  # proof fail before it can install the run-owned rule.  Keep the helper
+  # bounded and side-effect free apart from the explicit iptables arguments.
+  if [[ "$(id -u)" == 0 ]]; then
+    command iptables "$@"
+  else
+    sudo -n iptables "$@"
+  fi
+}
 postgres_restore_rules() {
   # Remove every OUTPUT rule this run tagged. Kernel rules are matched by
   # their run-scoped comment; anything untagged is untouched.  Bounded loop:
@@ -183,9 +195,9 @@ postgres_restore_rules() {
   tag="$(postgres_sever_tag)" || return 1
   command -v iptables >/dev/null 2>&1 || return 1
   for _ in $(seq 1 20); do
-    line_num="$(iptables -n -L OUTPUT --line-numbers 2>/dev/null | grep -F "/* $tag */" | awk 'NR==1 {print $1}')"
+    line_num="$(iptables_root -n -L OUTPUT --line-numbers 2>/dev/null | grep -F "/* $tag */" | awk 'NR==1 {print $1}')"
     [[ "$line_num" =~ ^[0-9]+$ ]] || return 0
-    iptables -D OUTPUT "$line_num" 2>/dev/null || return 1
+    iptables_root -D OUTPUT "$line_num" 2>/dev/null || return 1
   done
   return 1
 }
@@ -216,12 +228,12 @@ stop_postgres_proxy() {
   [[ "$daemon_uid" =~ ^[0-9]+$ ]] || return 1
   command -v iptables >/dev/null 2>&1 || return 1
   postgres_restore_rules || return 1
-  iptables -A OUTPUT -p tcp -d "$host" --dport "$port" \
+  iptables_root -A OUTPUT -p tcp -d "$host" --dport "$port" \
     -m owner --uid-owner "$daemon_uid" \
     -m comment --comment "$tag" -j REJECT --reject-with tcp-reset 2>/dev/null \
     || return 1
   # Record the exact run-owned rule set for first-evidence capture.
-  iptables -S OUTPUT 2>/dev/null | grep -F -- "--comment $tag" >"$WORK_ROOT/pg-sever-rules.txt" 2>/dev/null \
+  iptables_root -S OUTPUT 2>/dev/null | grep -F -- "--comment $tag" >"$WORK_ROOT/pg-sever-rules.txt" 2>/dev/null \
     || true
   chmod 0600 "$WORK_ROOT/pg-sever-rules.txt" 2>/dev/null || true
   # Prove the sever is effective for the daemon uid and invisible to the
