@@ -12,6 +12,8 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
+import shutil
 import secrets
 import subprocess
 import sys
@@ -49,7 +51,7 @@ def env(name: str, default: str = "") -> str:
 
 def run_id() -> str:
     value = env("O3K_PP5_RUN_ID") or env("GITHUB_RUN_ID")
-    if not value or not all(c.isalnum() or c in "-_" for c in value):
+    if not value or not value.isascii() or not all(c.isalnum() or c in "-_" for c in value):
         die("O3K_PP5_RUN_ID/GITHUB_RUN_ID must be a non-empty run-safe identifier")
     return value
 
@@ -79,28 +81,122 @@ def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def pgpass_escape(value: str) -> str:
+    if "\n" in value or "\r" in value:
+        die("PostgreSQL connection fields cannot contain newlines")
+    return value.replace("\\", "\\\\").replace(":", "\\:")
+
+
+def expected_role(run: str) -> str:
+    role = f"o3k_pp5_{run.replace('-', '_')}"
+    if len(role.encode("ascii")) > 63:
+        die("run identifier exceeds PostgreSQL's 63-byte role boundary")
+    return role
+
+
 def admin_url() -> str:
     configured = env("O3K_PP5_POSTGRES_ADMIN_URL")
     if not configured:
         return ""
-    parsed = urllib.parse.urlsplit(configured)
-    if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname:
+    try:
+        parsed = urllib.parse.urlsplit(configured)
+        port = parsed.port or 5432
+        hostname = parsed.hostname
+    except ValueError:
+        die("O3K_PP5_POSTGRES_ADMIN_URL has invalid endpoint syntax")
+    if parsed.scheme not in ("postgres", "postgresql") or not hostname or not 1 <= port <= 65535:
         die("O3K_PP5_POSTGRES_ADMIN_URL must be a PostgreSQL URL")
+    if hostname not in ("localhost", "127.0.0.1", "::1"):
+        die("PP.5 PostgreSQL must use loopback for owned fault injection")
+    # libpq query parameters can override host/user/database. Do not let them
+    # bypass endpoint or ownership validation. Only TLS settings are supported.
+    allowed = {"sslmode", "sslrootcert", "sslcert", "sslkey"}
+    if parsed.fragment or any(key not in allowed for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)):
+        die("O3K_PP5_POSTGRES_ADMIN_URL has unsupported connection overrides")
     return urllib.parse.urlunsplit(
         (parsed.scheme, parsed.netloc, "/postgres", parsed.query, parsed.fragment)
     )
 
 
 def psql(sql: str, database_url: str = "") -> str:
+    sensitive_env = {
+        "O3K_PP5_POSTGRES_ADMIN_URL",
+        "O3K_DATABASE_URL",
+        "O3K_PP5_CAMPAIGN_DATABASE_URL",
+        "O3K_PP5_WORKSPACE_DATABASE_URL",
+        "O3K_PP5_ENDPOINT_DATABASE_URL",
+        "O3K_PP5_P13_DATABASE_URL",
+    }
+    sensitive_env_upper = {key.upper() for key in sensitive_env}
+    process_env = {}
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if upper.startswith("PG") or upper in sensitive_env_upper or upper.endswith("DATABASE_URL"):
+            continue
+        if any(marker in upper for marker in ("PASSWORD", "TOKEN", "SECRET", "PRIVATE_KEY")):
+            continue
+        process_env[key] = value
+    process_env.update(PGCONNECT_TIMEOUT="5", PGOPTIONS="-c statement_timeout=20000 -c lock_timeout=10000")
+    flags = ["-X", "-w", "-v", "ON_ERROR_STOP=1", "-At"]
+    passfile: Path | None = None
     if database_url:
-        command = ["psql", database_url, "-v", "ON_ERROR_STOP=1", "-Atqc", sql]
+        # PGDATABASE is a database name, not a connection URI. Split the URI
+        # into libpq environment fields so credentials never enter argv.
+        try:
+            parsed = urllib.parse.urlsplit(database_url)
+            port = parsed.port or 5432
+            hostname = parsed.hostname
+        except ValueError:
+            die("PostgreSQL connection has invalid endpoint syntax")
+        if parsed.fragment:
+            die("PostgreSQL connection has an unsupported fragment")
+        if parsed.scheme not in ("postgres", "postgresql") or not hostname or not 1 <= port <= 65535:
+            die("PostgreSQL connection must be a PostgreSQL URL")
+        database = urllib.parse.unquote(parsed.path.removeprefix("/"))
+        if not database:
+            die("PostgreSQL connection must name a database")
+        process_env.update(PGHOST=hostname, PGPORT=str(port), PGDATABASE=database)
+        if parsed.username is not None:
+            process_env["PGUSER"] = urllib.parse.unquote(parsed.username)
+        tls_fields = {"sslmode": "PGSSLMODE", "sslrootcert": "PGSSLROOTCERT",
+                      "sslcert": "PGSSLCERT", "sslkey": "PGSSLKEY"}
+        tls_values = {}
+        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+            if key not in tls_fields:
+                die("PostgreSQL connection has unsupported connection overrides")
+            tls_values[tls_fields[key]] = value
+        process_env.update(tls_values)
+        if parsed.password is not None:
+            fields = (hostname, str(port), process_env["PGDATABASE"],
+                      process_env.get("PGUSER", ""), urllib.parse.unquote(parsed.password))
+            escaped_fields = tuple(pgpass_escape(field) for field in fields)
+            fd, passfile_name = tempfile.mkstemp(prefix="pp5-pgpass-", text=True)
+            passfile = Path(passfile_name)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(":".join(escaped_fields) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            process_env["PGPASSFILE"] = str(passfile)
+        command = ["psql", *flags]
     else:
-        command = ["sudo", "-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atqc", sql]
+        command = ["sudo", "-n", "-u", "postgres", "env", "PGCONNECT_TIMEOUT=5",
+                   "PGOPTIONS=-c statement_timeout=20000 -c lock_timeout=10000",
+                   "psql", "-d", "postgres", *flags]
     try:
-        result = subprocess.run(command, check=True, text=True, capture_output=True)
+        result = subprocess.run(command, input=sql, env=process_env, timeout=30,
+                                check=True, text=True, capture_output=True)
+    except subprocess.TimeoutExpired:
+        die("PostgreSQL command timed out; diagnostics withheld")
     except (OSError, subprocess.CalledProcessError) as exc:
-        detail = getattr(exc, "stderr", "")
-        die(f"PostgreSQL command failed: {detail[-400:].strip()}")
+        code = getattr(exc, "returncode", "unavailable")
+        die(f"PostgreSQL command failed (exit={code}); diagnostics withheld")
+    finally:
+        if passfile is not None:
+            try:
+                passfile.unlink()
+            except FileNotFoundError:
+                pass
     return result.stdout.strip()
 
 
@@ -147,6 +243,8 @@ def build_url(base: str, role: str, password: str, database: str) -> str:
 
 def expected_names(run: str) -> dict[str, str]:
     names = {purpose: f"{prefix}{run}" for purpose, prefix in PREFIXES.items()}
+    if any(len(name.encode("ascii")) > 63 for name in names.values()):
+        die("run identifier exceeds PostgreSQL's 63-byte name boundary")
     if len(set(names.values())) != len(names):
         die("database purpose names are not distinct")
     return names
@@ -156,18 +254,92 @@ def validate_names(names: dict[str, str], run: str) -> None:
     if set(names) != set(PURPOSES) or len(set(names.values())) != 4:
         die("database purpose map is incomplete or names are not distinct")
     for purpose, name in names.items():
-        if not name.startswith(PREFIXES[purpose]) or not name.endswith(run):
+        if name != expected_names(run)[purpose]:
             die(f"database {purpose} has an invalid run-owned name")
 
 
+def preflight() -> None:
+    """Read-only prerequisite checks, repeated before provisioning mutation."""
+    artifact = {
+        "artifact_type": "pp5-postgres-preflight", "schema_version": 1,
+        "status": "running", "current_phase": "configuration",
+        "failure_phase": None, "redacted": True,
+        "harness_digest": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    }
+    output = manifest_path().with_name("pp5-postgres-preflight.json")
+    # Rechecking immediately before provision must not erase the earlier
+    # result, especially a failed attempt. Keep a unique per-invocation copy.
+    fd, attempt_path = tempfile.mkstemp(prefix="pp5-postgres-preflight-", suffix=".json", dir=output.parent)
+    os.close(fd)
+    attempt = Path(attempt_path)
+    artifact["attempt_artifact"] = attempt.name
+
+    def checkpoint(phase: str) -> None:
+        artifact["current_phase"] = phase
+        artifact["updated_at"] = int(time.time())
+        content = json.dumps(artifact, indent=2, sort_keys=True) + "\n"
+        atomic_write(attempt, content)
+        atomic_write(output, content)
+
+    checkpoint("configuration")
+    try:
+        run = run_id()
+        artifact.update(run_id=run, source_sha=source_sha(), databases=expected_names(run),
+                        role=expected_role(run))
+        admin = admin_url()
+        checkpoint("client_tools")
+        if not shutil.which("psql"):
+            die("PostgreSQL prerequisite missing: psql client")
+        if not admin:
+            if not shutil.which("sudo"):
+                die("configure O3K_PP5_POSTGRES_ADMIN_URL or local noninteractive postgres access")
+            try:
+                pwd.getpwnam("postgres")
+            except KeyError:
+                die("configure O3K_PP5_POSTGRES_ADMIN_URL: local postgres account is absent")
+        artifact["admin_mode"] = "configured-url" if admin else "local-peer"
+        artifact["server"] = dict(zip(("host", "port"), parse_target(admin)))
+        checkpoint("admin_connection")
+        row = psql("SELECT current_setting('server_version_num'),rolsuper,rolcreatedb,rolcreaterole "
+                   "FROM pg_roles WHERE rolname=current_user", admin)
+        checkpoint("admin_privileges")
+        fields = row.split("|")
+        if len(fields) != 4 or not fields[0].isdigit() or any(value not in ("t", "f") for value in fields[1:]):
+            die("PostgreSQL prerequisite returned an invalid privilege response")
+        if fields[1] != "t" and fields[2:] != ["t", "t"]:
+            die("PostgreSQL admin requires CREATEDB and CREATEROLE or superuser")
+        artifact["server_version_num"] = int(fields[0])
+        checkpoint("name_availability")
+        for name in artifact["databases"].values():
+            if psql(f"SELECT 1 FROM pg_database WHERE datname={quote_literal(name)}", admin):
+                die("refusing to reuse an existing run database")
+        role = expected_role(run)
+        if psql(f"SELECT 1 FROM pg_roles WHERE rolname={quote_literal(role)}", admin):
+            die("refusing to reuse an existing run role")
+    except SystemExit:
+        artifact["status"] = "failed"
+        artifact["failure_phase"] = artifact["current_phase"]
+        checkpoint(artifact["current_phase"])
+        raise
+    except Exception:
+        # Never expose an unexpected client/library exception: its text may
+        # contain a connection string or server-provided credential data.
+        artifact["status"] = "failed"
+        artifact["failure_phase"] = artifact["current_phase"]
+        checkpoint(artifact["current_phase"])
+        die("PostgreSQL preflight failed; diagnostics withheld")
+    artifact["status"] = "passed"
+    checkpoint("completed")
+    print(f"PP.5 PostgreSQL preflight PASS run={run} (read-only; not S5 acceptance)")
+
+
 def provision() -> None:
+    preflight()
     run = run_id()
     sha = source_sha()
     names = expected_names(run)
     admin = admin_url()
-    role = f"o3k_pp5_{run.replace('-', '_')}"
-    if len(role) > 63:
-        role = role[:63]
+    role = expected_role(run)
     password = secrets.token_urlsafe(32)
     for name in names.values():
         if psql(f"SELECT 1 FROM pg_database WHERE datname={quote_literal(name)}", admin):
@@ -223,7 +395,7 @@ def provision() -> None:
         lines.append(f"{ENV_NAMES[purpose]}={urls[purpose]}\n")
     atomic_write(env_file(), "".join(lines), 0o600)
     github_env = env("GITHUB_ENV")
-    if github_env:
+    if github_env and env("O3K_PP5_PERSIST_ENV", "1") == "1":
         with open(github_env, "a", encoding="utf-8") as handle:
             for line in lines:
                 handle.write(line)
@@ -245,6 +417,12 @@ def load_manifest() -> dict:
         die("unsupported PP.5 PostgreSQL manifest schema")
     if value.get("run_id") != run_id() or value.get("source_sha") != source_sha():
         die("PP.5 PostgreSQL manifest run/source mismatch")
+    if value.get("role") != expected_role(run_id()):
+        die("PP.5 PostgreSQL manifest role is not the deterministic run-owned role")
+    server = value.get("server", {})
+    expected_server = dict(zip(("host", "port"), parse_target(admin_url())))
+    if server.get("host") != expected_server["host"] or server.get("port") != expected_server["port"]:
+        die("PP.5 PostgreSQL manifest server does not match the configured local endpoint")
     names = {purpose: value.get("databases", {}).get(purpose, {}).get("name", "") for purpose in PURPOSES}
     validate_names(names, run_id())
     if value.get("all_distinct") is not True:
@@ -263,14 +441,35 @@ def urls_from_env(manifest: dict) -> dict[str, str]:
         expected = manifest["databases"][purpose]["name"]
         if actual != expected:
             die(f"{purpose} database URL does not target its manifest database")
+        if parsed.username is None or urllib.parse.unquote(parsed.username) != manifest["role"]:
+            die(f"{purpose} database URL does not use the manifest role")
+        host, port = parse_target(value)
+        if host != manifest["server"]["host"] or port != manifest["server"]["port"]:
+            die(f"{purpose} database URL does not use the manifest server")
         urls[purpose] = value
     return urls
+
+
+def verify_database_ownership(manifest: dict, admin: str, allow_missing: bool = False) -> None:
+    role = manifest["role"]
+    for purpose in PURPOSES:
+        name = manifest["databases"][purpose]["name"]
+        owner = psql(
+            "SELECT pg_get_userbyid(datdba) FROM pg_database "
+            f"WHERE datname={quote_literal(name)}",
+            admin,
+        )
+        if not owner and allow_missing:
+            continue
+        if owner != role:
+            die(f"{purpose} database owner does not match the run-owned role")
 
 
 def verify() -> None:
     manifest = load_manifest()
     if manifest.get("provisioning", {}).get("status") != "completed":
         die("PP.5 PostgreSQL provisioning did not complete")
+    verify_database_ownership(manifest, admin_url())
     urls = urls_from_env(manifest)
     run = manifest["run_id"]
     sha = manifest["source_sha"]
@@ -281,10 +480,33 @@ def verify() -> None:
     print(f"verified PP.5 PostgreSQL purpose isolation run={run}")
 
 
+def verify_after_p13() -> None:
+    """Verify non-destructive sentinels after the P13-owned reset lane."""
+    manifest = load_manifest()
+    if manifest.get("provisioning", {}).get("status") != "completed":
+        die("PP.5 PostgreSQL provisioning did not complete")
+    admin = admin_url()
+    verify_database_ownership(manifest, admin)
+    urls = urls_from_env(manifest)
+    run = manifest["run_id"]
+    sha = manifest["source_sha"]
+    for purpose in ("campaign", "workspace", "endpoint"):
+        row = db_psql(f"SELECT purpose,run_id,source_sha FROM {SENTINEL_TABLE} WHERE id=1", urls[purpose])
+        if row != f"{purpose}|{run}|{sha}":
+            die(f"{purpose} database sentinel changed or is missing after P13")
+    # P13/P13.4 are destructive by contract; prove only that their exact
+    # database remains reachable and run-owned after its reset.
+    current_database = db_psql("SELECT current_database()", urls["p13"])
+    if current_database != manifest["databases"]["p13"]["name"]:
+        die("P13 database connection resolved to an unexpected database")
+    print(f"verified PP.5 campaign/workspace/endpoint isolation after P13 run={run}")
+
+
 def cleanup() -> None:
     manifest = load_manifest()
     names = {purpose: manifest["databases"][purpose]["name"] for purpose in PURPOSES}
     admin = admin_url()
+    verify_database_ownership(manifest, admin, allow_missing=True)
     joined = ",".join(quote_literal(name) for name in names.values())
     psql(f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN ({joined}) AND pid <> pg_backend_pid()", admin)
     for name in names.values():
@@ -302,9 +524,10 @@ def cleanup() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("provision", "verify", "cleanup"))
+    parser.add_argument("command", choices=("preflight", "provision", "verify", "verify-p13", "cleanup"))
     args = parser.parse_args()
-    {"provision": provision, "verify": verify, "cleanup": cleanup}[args.command]()
+    {"preflight": preflight, "provision": provision, "verify": verify,
+     "verify-p13": verify_after_p13, "cleanup": cleanup}[args.command]()
 
 
 if __name__ == "__main__":

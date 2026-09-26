@@ -62,6 +62,22 @@ jobs:
           mkdir -p target
           printf 'tested_source_sha=%s\n' "${TARGET_SHA}" > target/tested-source-sha.txt
 
+      # Qualify the external dependency before Keycloak/TestLab/LVM mutation.
+      # A runner label is not proof of PostgreSQL configuration or privileges.
+      # This owns fresh four-DB provision, sentinel/P13 smoke, verification,
+      # and exact cleanup; the later campaign provision is a separate fresh
+      # runtime map.
+      - name: Run PP5 fast PostgreSQL prerequisite qualification
+        env:
+          O3K_PP5_RUN_ID: ${{ github.run_id }}
+          O3K_PP5_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_PP5_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_PP5_POSTGRES_ADMIN_URL: ${{ secrets.O3K_PP5_POSTGRES_ADMIN_URL }}
+          # The qualification owns and cleans its own map; do not leak its
+          # purpose URLs into later workflow steps.
+          O3K_PP5_PERSIST_ENV: "0"
+        run: bash scripts/pp5-fast-gate.sh qualification
+
       - name: Protected P15.7 authority and capacity preflight
         id: protected_preflight
         continue-on-error: true
@@ -264,6 +280,8 @@ jobs:
           set -euo pipefail
           test -n "${O3K_PP5_P13_DATABASE_URL:-}"
           test "${O3K_PP5_P13_DATABASE_URL##*/}" = "o3k_p13_test_${GITHUB_RUN_ID}"
+          unset O3K_PP5_CAMPAIGN_DATABASE_URL O3K_PP5_WORKSPACE_DATABASE_URL O3K_PP5_ENDPOINT_DATABASE_URL
+          unset O3K_DATABASE_URL
           printf 'P13.4 bound to the run-owned p13 database (credentials redacted)\n'
 
       - name: Run P13.4 PostgreSQL storage conformance
@@ -275,6 +293,7 @@ jobs:
         run: |
           set -euo pipefail
           export O3K_DATABASE_URL="${O3K_PP5_P13_DATABASE_URL}"
+          unset O3K_PP5_CAMPAIGN_DATABASE_URL O3K_PP5_WORKSPACE_DATABASE_URL O3K_PP5_ENDPOINT_DATABASE_URL
           cargo test --locked -p o3k-store --test postgres_p13_4_storage --all-features -- --ignored --nocapture
 
       - name: Verify PP.5 PostgreSQL isolation after P13.4
@@ -412,11 +431,15 @@ jobs:
         run: |
           set -euo pipefail
           test "${O3K_PP5_CAMPAIGN_DATABASE_URL##*/}" = "o3k_pp5_s5_${GITHUB_RUN_ID}"
+          unset O3K_PP5_WORKSPACE_DATABASE_URL O3K_PP5_ENDPOINT_DATABASE_URL O3K_PP5_P13_DATABASE_URL
           {
             printf 'O3K_DATABASE_BACKEND=postgres\n'
             printf 'O3K_DATABASE_URL=%s\n' "${O3K_PP5_CAMPAIGN_DATABASE_URL}"
             printf 'O3K_P15_7_POSTGRES_MODE=external\n'
             printf 'O3K_P15_7_EXTERNAL_PG_TARGET=%s\n' "${O3K_PP5_POSTGRES_TARGET}"
+            printf 'O3K_PP5_WORKSPACE_DATABASE_URL=\n'
+            printf 'O3K_PP5_ENDPOINT_DATABASE_URL=\n'
+            printf 'O3K_PP5_P13_DATABASE_URL=\n'
           } >>"${GITHUB_ENV}"
 
       - name: Prepare fresh generic TestLab image
@@ -741,6 +764,7 @@ jobs:
             target/real-host-workflow-artifacts/p15-7-gate-result.json
             target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json
             target/real-host-workflow-artifacts/p15-7-protected-preflight.json
+            target/real-host-workflow-artifacts/pp5-postgres-preflight*.json
             target/real-host-workflow-artifacts/pp5-postgres-purpose-map.json
             target/real-host-workflow-artifacts/p13-4-volume-trace.jsonl
             target/real-host-workflow-artifacts/p13-4-storage-evidence.json

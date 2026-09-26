@@ -622,6 +622,7 @@ PY
 
 python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
 import pathlib, re, sys
+from pathlib import Path
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 preflight_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
 dispatch_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-dispatch.yml").read_text(encoding="utf-8")
@@ -716,6 +717,15 @@ assert "ref: ${{ inputs.target_sha || github.sha }}" in text
 assert "persist-credentials: false" in text
 assert "Verify immutable source checkout" in text
 assert text.index("Verify immutable source checkout") < text.index("Protected P15.7 authority and capacity preflight")
+pg_preflight = "Run PP5 fast PostgreSQL prerequisite qualification"
+assert text.index("Verify immutable source checkout") < text.index(pg_preflight)
+assert text.index(pg_preflight) < text.index("Protected P15.7 authority and capacity preflight")
+pg_step = text.split(f"- name: {pg_preflight}", 1)[1].split("\n      - ", 1)[0]
+assert "continue-on-error:" not in pg_step
+assert "if:" not in pg_step
+assert "scripts/pp5-fast-gate.sh qualification" in text
+assert Path("scripts/pp5-fast-gate.sh").is_file()
+assert "pp5-postgres-preflight*.json" in text
 assert text.index("Protected P15.7 authority and capacity preflight") < text.index("Bootstrap disposable TestLab")
 assert "if: always() && steps.protected_preflight.outcome == 'success'" in text
 assert text.count("if: always() && steps.protected_preflight.outcome == 'success'") >= 5

@@ -71,6 +71,10 @@ jobs:
         run: bash tests/pp5-small-edge-campaign-ownership.sh
       - name: Validate destructive PostgreSQL test database guards
         run: bash tests/postgres_test_database_guards.sh
+      - name: Validate PP.5 PostgreSQL prerequisite failure boundaries
+        run: python3 scripts/test_pp5_postgres_preflight.py
+      - name: Validate PP.5 fast prerequisite entrypoint
+        run: bash tests/pp5-fast-gate-guards.sh
       - name: Validate release signing trust transition
         run: bash tests/release-signing-migration.sh
       - name: Test P13.5E deterministic fault proxy and evidence artifact
