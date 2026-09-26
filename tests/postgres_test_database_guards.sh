@@ -13,6 +13,7 @@ for purpose_url in \
   'endpoint|postgres://postgres@127.0.0.1/o3k_p13_test_run' \
   'p137|postgres://postgres@127.0.0.1/o3k_pp5_s5_run' \
   'p137|postgres://postgres@127.0.0.1/o3k_p13_test_run' \
+  'p13|postgres://postgres@127.0.0.1/arbitrary' \
   'p13|postgres://postgres@127.0.0.1/o3k_p13_test_'; do
   purpose="${purpose_url%%|*}"
   url="${purpose_url#*|}"
