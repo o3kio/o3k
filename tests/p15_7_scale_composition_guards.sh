@@ -628,6 +628,12 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "--serial \"file,path=$serial\"",
                  "awk '/MemTotal:/ {print int(\\$2/1024); exit}' /proc/meminfo"):
     assert required in journey, required
+# Root-owned TestLab logs must be inspected entirely inside the privileged
+# boundary.  A shell-side input redirection is evaluated before sudo and
+# regresses the protected #1035 crash leg with Permission denied.
+assert "o3kd_log_line_count()" in journey
+assert 'sudo -n wc -l <"$STATE_ROOT/log/o3kd.log"' not in journey
+assert 'sudo -n test -f "$STATE_ROOT/log/o3kd.log"' in journey
 # The stale-DHCP-lease regression (run 990923002 attempt 4): the journey must
 # resolve the VM address through the MAC-bound UUID-only resolver and must
 # never freeze a lease-derived address across the SSH window.

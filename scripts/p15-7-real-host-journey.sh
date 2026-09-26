@@ -359,6 +359,15 @@ listener_owner_pids() {
   sudo -n ss -H -ltnp "sport = :$port" 2>/dev/null \
     | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true
 }
+o3kd_log_line_count() {
+  # The protected TestLab daemon owns its log.  Keep the redirection inside
+  # the privileged boundary; a shell-side ` < "$path"` is evaluated before
+  # sudo and fails when the runner cannot traverse/read the root-owned file.
+  local count
+  count="$(sudo -n wc -l -- "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
+    | awk 'NR == 1 { print $1 }' || true)"
+  [[ "$count" =~ ^[0-9]+$ ]] && printf '%s\n' "$count" || printf '0\n'
+}
 start_o3kd_verified() {
   # Start the exact owned daemon from its run-scoped environment through the
   # normal boot path, wait until the control plane accepts HTTP, and record
@@ -548,8 +557,9 @@ capture_failure_diagnostics() {
   # (endpoint reachability vs control-plane pool recovery) instead of inference.
   [[ -f "$WORK_ROOT/pg-sever-rules.txt" ]] \
     && cp "$WORK_ROOT/pg-sever-rules.txt" "$ARTIFACT_DIR/pg-sever-rules.txt" 2>/dev/null || true
-  if [[ -n "${STATE_ROOT:-}" && -f "$STATE_ROOT/log/o3kd.log" ]]; then
-    tail -n 2000 "$STATE_ROOT/log/o3kd.log" >"$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
+  if [[ -n "${STATE_ROOT:-}" ]] && sudo -n test -f "$STATE_ROOT/log/o3kd.log" 2>/dev/null; then
+    sudo -n tail -n 2000 "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
+      | tee "$ARTIFACT_DIR/o3kd.log.tail" >/dev/null || true
     chmod 0600 "$ARTIFACT_DIR/pg-sever-rules.txt" "$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
   fi
   # Hang forensics: two exact-head S5 runs (e0d690f7, 8fd6f828) hung o3kd
@@ -2374,7 +2384,7 @@ ALLOC_BEFORE_CRASH="$(allocated_vcpu_total "$WORK_ROOT/providers-before-crash.js
 [[ "$ALLOC_BEFORE_CRASH" =~ ^[0-9]+$ ]] || die "Placement allocation baseline unavailable"
 QUOTA_BEFORE_CRASH="$(quota_usage)"
 [[ "$QUOTA_BEFORE_CRASH" =~ ^[0-9]+$ ]] || die "network:ports quota baseline unavailable"
-CRASH_LOG_LINES_BEFORE="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+CRASH_LOG_LINES_BEFORE="$(o3kd_log_line_count)"
 
 # Server C is created through the compatibility API with a NETWORK reference
 # so the control plane mints exactly one server-owned endpoint
@@ -2547,7 +2557,7 @@ CRASH_DELETE_HTTP_CODE="$(tr -d '[:space:]' <"$WORK_ROOT/workload-c-delete.code"
 clear_o3kd_fault_env || die "fault hook could not be cleared from the o3kd environment"
 CONTENDING_CREATE_REPAIR_PAUSE_MS=30000
 append_o3kd_repair_pause_env
-CRASH_REPAIR_LOCK_LOG_BASELINE="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+CRASH_REPAIR_LOCK_LOG_BASELINE="$(o3kd_log_line_count)"
 start_o3kd_verified
 RESTARTED_O3KD_PID="$(read_o3kd_ledger)"
 REPAIR_RELEASE_ENV_CONSUMED=false
@@ -2627,10 +2637,10 @@ OS_PORT_D_ID="$(tr -d '[:space:]' <"$WORK_ROOT/port-d-create.txt")"
 REPAIR_LOCK_HELD=false
 REPAIR_LOCK_WAIT_START_MS="$(date +%s%3N)"
 for _ in $(seq 1 650); do
-  current_lines="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+  current_lines="$(o3kd_log_line_count)"
   new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
   if (( new_lines > 0 )) && sudo -n tail -n "$new_lines" "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
-    | grep -Fq 'test-only fault pause orphan-repair-lock engaged'; then
+    | grep -F 'test-only fault pause orphan-repair-lock engaged' >/dev/null; then
     REPAIR_LOCK_HELD=true
     break
   fi
@@ -2640,10 +2650,10 @@ done
 CRASH_REPAIR_LOCK_WAIT_MS="$(( $(date +%s%3N) - REPAIR_LOCK_WAIT_START_MS ))"
 (( CRASH_REPAIR_LOCK_WAIT_MS <= CRASH_REPAIR_LOCK_WAIT_BOUND_MS )) \
   || die "orphan repair exceeded the contract-derived 65s lease/cadence bound"
-current_lines="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+current_lines="$(o3kd_log_line_count)"
 new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
 if (( new_lines > 0 )) && sudo -n tail -n "$new_lines" "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
-  | grep -Fq 'test-only fault pause orphan-repair-lock released'; then
+  | grep -F 'test-only fault pause orphan-repair-lock released' >/dev/null; then
   die "repair lock hold expired before the contending request began"
 fi
 ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED=false
@@ -2681,10 +2691,10 @@ persist_crash_checkpoint contending_create_started running \
   request_start_unix_ms "$CONTENDING_CREATE_REQUEST_START_MS" endpoint_id "$OS_PORT_D_ID" \
   release_signal_sent_after_lock_wait_observed true
 for _ in $(seq 1 50); do
-  current_lines="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+  current_lines="$(o3kd_log_line_count)"
   new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
   if (( new_lines > 0 )) && sudo -n tail -n "$new_lines" "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
-    | grep -Fq 'test-only fault pause orphan-repair-lock released'; then
+    | grep -F 'test-only fault pause orphan-repair-lock released' >/dev/null; then
     CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE=true
     CRASH_REPAIR_PAUSE_RELEASED_UNIX_MS="$(date +%s%3N)"
     break
@@ -2713,7 +2723,7 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 if [[ "$SWEEP_CONVERGED" == true ]]; then
-  CRASH_LOG_LINES_AFTER="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+  CRASH_LOG_LINES_AFTER="$(o3kd_log_line_count)"
   CRASH_SWEEP_LOG="$(sudo -n tail -n "$((CRASH_LOG_LINES_AFTER - CRASH_LOG_LINES_BEFORE))" "$STATE_ROOT/log/o3kd.log" 2>/dev/null | grep -F "server-owned endpoint orphan repair sweep" || true)"
   CRASH_SWEEP_PASSES="$(printf '%s\n' "$CRASH_SWEEP_LOG" | grep -Fc "server-owned endpoint orphan repair sweep" || true)"
   [[ "$CRASH_SWEEP_PASSES" =~ ^[0-9]+$ ]] || CRASH_SWEEP_PASSES=0
@@ -2760,7 +2770,7 @@ done
 # Orphan-repair convergence: bounded wait (<=180s) for the sweep to release
 # the orphaned endpoint, counting the bounded observability lines the sweep
 # emits per pass that discovered or repaired something.
-CRASH_LOG_LINES_AFTER="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
+CRASH_LOG_LINES_AFTER="$(o3kd_log_line_count)"
 CRASH_SWEEP_PASSES="$(sudo -n tail -n "$((CRASH_LOG_LINES_AFTER - CRASH_LOG_LINES_BEFORE))" "$STATE_ROOT/log/o3kd.log" 2>/dev/null | grep -Fc "server-owned endpoint orphan repair sweep" || true)"
 [[ "$CRASH_SWEEP_PASSES" =~ ^[0-9]+$ ]] || CRASH_SWEEP_PASSES=0
 D_STATE=""
