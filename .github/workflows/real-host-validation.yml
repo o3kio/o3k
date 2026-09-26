@@ -668,6 +668,14 @@ jobs:
             python3 scripts/provision_pp5_postgres.py cleanup
           fi
 
+      - name: Restore local PP.5 PostgreSQL service state
+        if: always()
+        env:
+          O3K_PP5_RUN_ID: ${{ github.run_id }}
+          O3K_PP5_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_PP5_ARTIFACT_DIR: target/real-host-workflow-artifacts
+        run: python3 scripts/pp5-runner-prerequisite.py restore
+
       # The post-run guard snapshots the host at the stable post-cleanup
       # point, matching the pre-run baseline's lifecycle position. The owned
       # OpenStack inventory stays not_checked: the disposable TestLab API and
@@ -766,6 +774,7 @@ jobs:
             target/real-host-workflow-artifacts/p15-7-protected-preflight.json
             target/real-host-workflow-artifacts/pp5-postgres-preflight*.json
             target/real-host-workflow-artifacts/pp5-runner-prerequisite*.json
+            target/real-host-workflow-artifacts/pp5-runner-postgres-service-state.json
             target/real-host-workflow-artifacts/pp5-postgres-purpose-map.json
             target/real-host-workflow-artifacts/p13-4-volume-trace.jsonl
             target/real-host-workflow-artifacts/p13-4-storage-evidence.json

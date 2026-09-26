@@ -730,6 +730,9 @@ assert Path("scripts/pp5-fast-gate.sh").is_file()
 assert Path("scripts/pp5-runner-prerequisite.py").is_file()
 assert "pp5-postgres-preflight*.json" in text
 assert "pp5-runner-prerequisite*.json" in text
+assert "Restore local PP.5 PostgreSQL service state" in text
+assert "pp5-runner-prerequisite.py restore" in text
+assert "pp5-runner-postgres-service-state.json" in text
 assert text.index("Protected P15.7 authority and capacity preflight") < text.index("Bootstrap disposable TestLab")
 assert "if: always() && steps.protected_preflight.outcome == 'success'" in text
 assert text.count("if: always() && steps.protected_preflight.outcome == 'success'") >= 5

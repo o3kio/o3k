@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,7 +49,7 @@ class RunnerPrerequisiteTests(unittest.TestCase):
                 patch.object(MODULE, "run_silent", return_value=False):
             self.assertEqual(MODULE.main(), 2)
         artifact = self.artifact()
-        self.assertEqual(artifact["failure_phase"], "client_tools")
+        self.assertEqual(artifact["failure_phase"], "postgres_server")
         self.assertFalse(artifact["client_present_after"])
 
     def test_missing_admin_path_fails_closed(self):
@@ -57,7 +58,7 @@ class RunnerPrerequisiteTests(unittest.TestCase):
                 patch.object(MODULE.pwd, "getpwnam", side_effect=KeyError("postgres")), \
                 patch.object(MODULE, "run_silent", return_value=False):
             self.assertEqual(MODULE.main(), 2)
-        self.assertEqual(self.artifact()["failure_phase"], "postgres_admin")
+        self.assertEqual(self.artifact()["failure_phase"], "postgres_server")
 
     def test_invalid_configured_admin_url_fails_before_probe(self):
         environment = dict(self.env, O3K_PP5_POSTGRES_ADMIN_URL="postgres://user@remote.invalid/postgres")
@@ -94,6 +95,78 @@ class RunnerPrerequisiteTests(unittest.TestCase):
             self.assertEqual(MODULE.main(), 0)
         self.assertEqual(json.loads(failed.read_text())["status"], "failed")
         self.assertEqual(failed.read_text(), failed_content)
+
+    def test_missing_server_is_installed_and_started(self):
+        with patch.dict(os.environ, self.env, clear=False), \
+                patch.object(MODULE, "local_service_active", return_value=False), \
+                patch.object(MODULE.pwd, "getpwnam", side_effect=KeyError("postgres")), \
+                patch.object(MODULE.shutil, "which", side_effect=lambda name: "/usr/bin/psql" if name == "psql" else None), \
+                patch.object(MODULE, "install_packages", return_value=(True, "installed")) as install, \
+                patch.object(MODULE, "start_local_service", return_value=True), \
+                patch.object(MODULE, "run_silent", return_value=True):
+            ok, reason, was_active, installed = MODULE.ensure_local_server()
+        self.assertTrue(ok)
+        self.assertEqual(reason, "started")
+        self.assertFalse(was_active)
+        self.assertTrue(installed)
+        install.assert_called_once_with(["postgresql"])
+        state = json.loads(Path(self.temp.name, "pp5-runner-postgres-service-state.json").read_text())
+        self.assertTrue(state["local_service_started"])
+        self.assertTrue(state["server_package_installed"])
+
+    def test_server_start_failure_is_bounded_and_recorded(self):
+        with patch.dict(os.environ, self.env, clear=False), \
+                patch.object(MODULE, "local_service_active", return_value=False), \
+                patch.object(MODULE.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=100)), \
+                patch.object(MODULE.shutil, "which", return_value="/usr/bin/psql"), \
+                patch.object(MODULE, "start_local_service", return_value=False):
+            ok, reason, _, _ = MODULE.ensure_local_server()
+        self.assertFalse(ok)
+        self.assertEqual(reason, "postgresql_service_start_failed")
+        self.assertTrue(Path(self.temp.name, "pp5-runner-postgres-service-state.json").is_file())
+
+    def test_service_start_and_probe_are_bounded(self):
+        calls = []
+
+        def capture(command, timeout):
+            calls.append((command, timeout))
+            return True
+
+        with patch.object(MODULE, "run_silent", side_effect=capture), \
+                patch.object(MODULE, "local_service_active", return_value=True):
+            self.assertTrue(MODULE.start_local_service())
+        self.assertEqual(calls[0][1], 60)
+
+    def test_peer_probe_binds_to_postgres_os_account(self):
+        calls = []
+
+        def capture(command, timeout):
+            calls.append((command, timeout))
+            return True
+
+        with patch.dict(os.environ, self.env, clear=False), \
+                patch.object(MODULE, "ensure_local_server", return_value=(True, "started", False, True)), \
+                patch.object(MODULE.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=100)), \
+                patch.object(MODULE.shutil, "which", return_value="/usr/bin/psql"), \
+                patch.object(MODULE, "run_silent", side_effect=capture):
+            self.assertEqual(MODULE.main(), 0)
+        self.assertEqual(calls, [([
+            "sudo", "-n", "-u", "postgres", "psql", "-X", "-w", "-d", "postgres",
+            "-v", "ON_ERROR_STOP=1", "-Atqc", "SELECT 1",
+        ], 30)])
+
+    def test_restore_requires_exact_run_and_source(self):
+        state = {
+            "run_id": "unit-run",
+            "source_sha": "a" * 40,
+            "local_service_started": True,
+            "local_service_was_active": False,
+        }
+        Path(self.temp.name, "pp5-runner-postgres-service-state.json").write_text(json.dumps(state))
+        with patch.dict(os.environ, self.env, clear=False), \
+                patch.object(MODULE, "stop_local_service", return_value=True) as stop:
+            self.assertEqual(MODULE.restore_service(), 0)
+        stop.assert_called_once_with()
 
 
 if __name__ == "__main__":

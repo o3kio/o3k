@@ -17,6 +17,7 @@ grep -Fq 'postgres_p13_f1' "${helper}"
 grep -Fq 'postgres_p13_b1' "${helper}"
 grep -Fq 'postgres_p13_4_storage' "${helper}"
 grep -Fq 'provision_pp5_postgres.py verify-p13' "${helper}"
+grep -Fq 'pp5-runner-prerequisite.py restore' "${helper}"
 ! grep -Fq 'provision_pp5_postgres.py preflight' "${workflow}"
 ! grep -Eq 'pp5-fast-gate.sh.*(cargo|lvm|virsh|qemu|docker)' "${helper}"
 

@@ -53,6 +53,7 @@ case "${phase}" in
         if [[ -f "${O3K_PP5_ARTIFACT_DIR:-target/real-host-workflow-artifacts}/pp5-postgres-purpose-map.json" ]]; then
           python3 scripts/provision_pp5_postgres.py cleanup || rc=1
         fi
+        python3 scripts/pp5-runner-prerequisite.py restore || rc=1
         exit "${rc}"
       }
       trap cleanup_on_exit EXIT

@@ -358,7 +358,7 @@ def provision() -> None:
         "run_id": run,
         "source_sha": sha,
         "harness_digest": script_digest,
-        "server": {"host": host, "port": port, "external": True},
+        "server": {"host": host, "port": port, "external": bool(admin)},
         "role": role,
         "sentinel": {"table": SENTINEL_TABLE, "id": 1},
         "databases": {
