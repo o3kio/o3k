@@ -33,14 +33,15 @@ jobs:
       - name: Repair prior protected artifact ownership
         run: |
           set -euo pipefail
-          for artifact_dir in \
-            "${GITHUB_WORKSPACE}/target/real-host-workflow-artifacts" \
-            "${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts" \
-            "${GITHUB_WORKSPACE}/target/debug"; do
-            if test -e "${artifact_dir}"; then
-              sudo -n chown -R "$(id -u):$(id -g)" "${artifact_dir}"
-            fi
-          done
+          # A prior privileged phase may leave target itself, or a child
+          # directory, inaccessible to the runner account.  Test existence
+          # and repair ownership through sudo so checkout's clean step can
+          # traverse and remove every stale run-owned artifact.
+          target_dir="${GITHUB_WORKSPACE}/target"
+          if sudo -n test -e "${target_dir}"; then
+            sudo -n chown -R "$(id -u):$(id -g)" "${target_dir}"
+            sudo -n chmod -R u+rwX "${target_dir}"
+          fi
 
       - name: Check out the canonical repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

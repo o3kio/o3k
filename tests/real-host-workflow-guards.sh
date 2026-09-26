@@ -709,7 +709,10 @@ for needle in ("workflow_dispatch:",
     assert needle in text, needle
 assert "Repair prior protected artifact ownership" in text
 assert 'sudo -n chown -R "$(id -u):$(id -g)"' in text
-assert '"${GITHUB_WORKSPACE}/target/debug"' in text
+assert 'target_dir="${GITHUB_WORKSPACE}/target"' in text
+assert 'sudo -n test -e "${target_dir}"' in text
+assert 'sudo -n chmod -R u+rwX "${target_dir}"' in text
+assert 'checkout\'s clean step can' in text
 assert "github.repository == 'o3kio/o3k'" in text
 assert "github.event_name == 'workflow_dispatch'" in text
 assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in text
