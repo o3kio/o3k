@@ -452,6 +452,26 @@ def verify() -> None:
     print(f"verified PP.5 PostgreSQL purpose isolation run={run}")
 
 
+def verify_after_p13() -> None:
+    """Verify non-destructive sentinels after the P13-owned reset lane."""
+    manifest = load_manifest()
+    if manifest.get("provisioning", {}).get("status") != "completed":
+        die("PP.5 PostgreSQL provisioning did not complete")
+    admin = admin_url()
+    verify_database_ownership(manifest, admin)
+    urls = urls_from_env(manifest)
+    run = manifest["run_id"]
+    sha = manifest["source_sha"]
+    for purpose in ("campaign", "workspace", "endpoint"):
+        row = db_psql(f"SELECT purpose,run_id,source_sha FROM {SENTINEL_TABLE} WHERE id=1", urls[purpose])
+        if row != f"{purpose}|{run}|{sha}":
+            die(f"{purpose} database sentinel changed or is missing after P13")
+    # P13/P13.4 are destructive by contract; prove only that their exact
+    # database remains reachable and run-owned after its reset.
+    db_psql("SELECT current_database()", urls["p13"])
+    print(f"verified PP.5 campaign/workspace/endpoint isolation after P13 run={run}")
+
+
 def cleanup() -> None:
     manifest = load_manifest()
     names = {purpose: manifest["databases"][purpose]["name"] for purpose in PURPOSES}
@@ -474,9 +494,10 @@ def cleanup() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("preflight", "provision", "verify", "cleanup"))
+    parser.add_argument("command", choices=("preflight", "provision", "verify", "verify-p13", "cleanup"))
     args = parser.parse_args()
-    {"preflight": preflight, "provision": provision, "verify": verify, "cleanup": cleanup}[args.command]()
+    {"preflight": preflight, "provision": provision, "verify": verify,
+     "verify-p13": verify_after_p13, "cleanup": cleanup}[args.command]()
 
 
 if __name__ == "__main__":

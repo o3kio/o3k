@@ -32,7 +32,7 @@ case "${phase}" in
     cargo test --locked -p o3k-store --test postgres_p13_f1 --all-features -- --ignored --nocapture
     cargo test --locked -p o3k-store --test postgres_p13_b1 --all-features -- --ignored --nocapture
     cargo test --locked -p o3k-store --test postgres_p13_4_storage --all-features -- --ignored --nocapture
-    python3 scripts/provision_pp5_postgres.py verify
+    python3 scripts/provision_pp5_postgres.py verify-p13
     trap - EXIT
     python3 scripts/provision_pp5_postgres.py cleanup
     ;;
