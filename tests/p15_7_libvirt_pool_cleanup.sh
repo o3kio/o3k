@@ -31,10 +31,14 @@ case "$command" in
       done
       exit 0
     fi
+    # libvirt 10.x pads `pool-list --name` output to a fixed column width with
+    # trailing spaces (observed on the PP.5 host); pool names cannot contain
+    # whitespace, so emit the same padded shape to prove the helper parses the
+    # real wire format instead of a sanitized one.
     for f in "$P15_7_FAKE_POOL_STATE_DIR"/*.pool; do
       [[ -e "$f" ]] || continue
       name="${f##*/}"; name="${name%.pool}"
-      printf '%s\n' "$name"
+      printf '%s   \n' "$name"
     done
     ;;
   pool-dumpxml)

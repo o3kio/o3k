@@ -472,17 +472,23 @@ pg_admin() {
         sudo -n -u postgres psql -v ON_ERROR_STOP=1 -Atqc "$1"
     fi
 }
+assert_owned_p137_database() {
+    O3K_TEST_DATABASE_PURPOSE=p137 O3K_TEST_DATABASE_NAME="$DB_NAME" \
+        python3 "$ROOT_DIR/scripts/assert_disposable_postgres_test_database.py"
+}
 pg_setup() {
     # Drop-then-create so a rerun with the same run id is idempotent; both
     # statements run in separate psql invocations (multi-statement -c runs in
     # a single transaction, which rejects CREATE/DROP DATABASE).
-    pg_admin "DROP DATABASE IF EXISTS $DB_NAME" >/dev/null 2>&1 || true
-    pg_admin "DROP ROLE IF EXISTS $DB_USER" >/dev/null 2>&1 || true
+    assert_owned_p137_database
+    pg_admin "DROP DATABASE IF EXISTS $DB_NAME"
+    pg_admin "DROP ROLE IF EXISTS $DB_USER"
     pg_admin "CREATE ROLE $DB_USER LOGIN PASSWORD '$DB_PASSWORD'"
     pg_admin "CREATE DATABASE $DB_NAME OWNER $DB_USER"
     PG_CREATED=1
 }
 pg_drop() {
+    assert_owned_p137_database
     pg_admin "DROP DATABASE IF EXISTS $DB_NAME" >/dev/null 2>&1 || true
     pg_admin "DROP ROLE IF EXISTS $DB_USER" >/dev/null 2>&1 || true
 }

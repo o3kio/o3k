@@ -81,6 +81,22 @@ pub(crate) fn config_drive_ssh_public_key(
         .ok_or("key_name or ssh_public_key is required when config_drive is enabled")
 }
 
+/// Nova's `config_drive` member is an optional hint. O3K's canonical create
+/// resolves a config-drive artifact from an SSH public key, so an ABSENT
+/// member is treated like the native create path: materialize the config
+/// drive when the request can supply a public key (`key_name` or
+/// `ssh_public_key`), and otherwise keep the previous accepted behavior
+/// instead of failing a keyless create at the adapter. An explicit `false`
+/// keeps its accepted explicit-no-op meaning, and an explicit `true` keeps
+/// requiring a resolvable key exactly as before.
+pub(crate) fn config_drive_enabled(requested: Option<bool>, key_available: bool) -> bool {
+    match requested {
+        Some(false) => false,
+        Some(true) => true,
+        None => key_available,
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 pub(crate) enum IdReference {
@@ -355,6 +371,16 @@ pub(crate) fn compute_error(error: ComputeError) -> axum::response::Response {
         ComputeError::Store(o3k_store::StoreError::InvalidKeypair(_)) => {
             keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "invalid public key")
         }
+        // A stale generation under a terminalizing write is an optimistic-
+        // concurrency conflict (a concurrent observation legitimately bumped
+        // the row), not an internal failure: the client can re-read and retry.
+        // Mapping it to 500 would misclassify the exactly-one-winner fence as
+        // an outage (issue #1041 review).
+        ComputeError::Store(o3k_store::StoreError::StaleGeneration) => keystone_error(
+            StatusCode::CONFLICT,
+            "Conflict",
+            "compute resource conflicts with current state",
+        ),
         ComputeError::Store(_)
         | ComputeError::Reconcile(_)
         | ComputeError::Provider(_)
@@ -708,7 +734,10 @@ pub(crate) async fn create_server(
             "invalid server request",
         );
     };
-    let config_drive = if body.server.config_drive == Some(true) {
+    let config_drive = if config_drive_enabled(
+        body.server.config_drive,
+        body.server.ssh_public_key.is_some() || body.server.key_name.is_some(),
+    ) {
         let keypair_public_key = if body.server.ssh_public_key.is_none() {
             if let Some(key_name) = body.server.key_name.as_deref() {
                 match service.show_keypair_for_auth(&auth, key_name).await {
@@ -818,6 +847,20 @@ pub(crate) async fn create_server(
         .unwrap_or(&body.server.name)
         .to_owned();
     let server_id = ComputeService::server_id_for_create(&project_id, &idempotency);
+    // Issue #1035: hold the orphan-repair serialization lock across
+    // [existing-port validation/resolution -> durable intent persist] so a
+    // concurrent orphan repair sweep can neither release a port mid-create nor
+    // allow this create to durably reference a port the sweep just released.
+    // The lock is taken before any network call, matching the sweep's locking.
+    // This opt-in marker is a protected-harness test seam: it is created only
+    // if this create's lock future is actually polled to Pending. It lets the
+    // campaign release the deterministic repair pause after the request has
+    // entered the mutex queue, rather than after merely spawning a CLI.
+    let create_wait_marker =
+        std::env::var_os("O3K_TEST_CREATE_LOCK_WAITER_MARKER").map(std::path::PathBuf::from);
+    let _orphan_repair_guard = service
+        .orphan_repair_create_lock_guard(create_wait_marker.as_deref())
+        .await;
     let mut owned_network_ids = Vec::new();
     let mut network_ids = Vec::with_capacity(networks.len());
     if let Some(network_service) = state.network.as_ref() {
@@ -1143,7 +1186,6 @@ pub(crate) async fn delete_server(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let _mutation_guard = state.network_mutation_lock.lock().await;
     let owned_ports = match service
         .server_network_ids_for_auth(&auth, ServerId::from_uuid(id))
         .await
@@ -1170,17 +1212,38 @@ pub(crate) async fn delete_server(
                     "server console cleanup failed",
                 );
             }
-            if let Some(network_service) = state.network.as_ref()
-                && let Err(error) = network_service
-                    .cleanup_server_owned_ports_for_project(&project_id, &owned_ports)
-                    .await
-            {
-                tracing::error!(%error, %id, "server-owned endpoint cleanup failed");
-                return keystone_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal Server Error",
-                    "server network cleanup failed",
-                );
+            if let Some(network_service) = state.network.as_ref() {
+                // #1035 (replay release): the deleted owner's intent can name an
+                // endpoint a NEW live server has explicitly re-attached; the
+                // durable binding may already be cleared, so the direct network
+                // release must not be handed such a port. The live server's own
+                // delete releases it. The orphan-repair lock is acquired FIRST
+                // (before the network mutation lock) so the [live-attached scan
+                // -> release] window is serialized against port-attaching
+                // creates and the orphan sweep without inverting the lock order.
+                let _orphan_repair_guard = service.orphan_repair_lock_guard().await;
+                let _mutation_guard = state.network_mutation_lock.lock().await;
+                let attached = match service.live_attached_endpoint_ids().await {
+                    Ok(set) => set,
+                    Err(error) => return compute_error(error),
+                };
+                let releasable = owned_ports
+                    .iter()
+                    .copied()
+                    .filter(|port_id| !attached.contains(&port_id.to_string()))
+                    .collect::<Vec<_>>();
+                if !releasable.is_empty()
+                    && let Err(error) = network_service
+                        .cleanup_server_owned_ports_for_project(&project_id, &releasable)
+                        .await
+                {
+                    tracing::error!(%error, %id, "server-owned endpoint cleanup failed");
+                    return keystone_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal Server Error",
+                        "server network cleanup failed",
+                    );
+                }
             }
             StatusCode::NO_CONTENT.into_response()
         }
@@ -1461,10 +1524,24 @@ pub(crate) fn requested_compute_289(headers: &HeaderMap) -> bool {
 #[cfg(test)]
 mod tests {
 
-    use super::{Server, ServerId, ServerState, server_response, should_query_live_console};
+    use super::{
+        Server, ServerId, ServerState, compute_error, server_response, should_query_live_console,
+    };
     use crate::CONSOLE_AGENT_DISPATCH_TIMEOUT;
     use std::time::Duration;
     use uuid::Uuid;
+
+    #[test]
+    fn stale_generation_terminalization_conflict_maps_to_conflict_not_500() {
+        // A stale generation under a terminalizing write is an
+        // optimistic-concurrency conflict, not an internal failure (#1041
+        // review): misclassifying it as 500 would report the exactly-one-
+        // winner fence as an outage.
+        let response = compute_error(o3k_compute::ComputeError::Store(
+            o3k_store::StoreError::StaleGeneration,
+        ));
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    }
 
     #[test]
     fn live_console_queries_are_limited_to_the_snapshot_offset() {
@@ -1491,6 +1568,18 @@ mod tests {
         let parsed: super::CreateServerRequest = serde_json::from_value(request)?;
         assert_eq!(parsed.config_drive, Some(true));
         Ok(())
+    }
+
+    #[test]
+    fn absent_config_drive_is_materialized_like_the_native_create_path() {
+        // The canonical create resolves a config-drive artifact from an SSH
+        // public key, so an absent Nova `config_drive` hint is materialized
+        // when the request can supply a key, and a keyless create keeps its
+        // previously accepted behavior.
+        assert!(super::config_drive_enabled(None, true));
+        assert!(!super::config_drive_enabled(None, false));
+        assert!(super::config_drive_enabled(Some(true), false));
+        assert!(!super::config_drive_enabled(Some(false), true));
     }
 
     #[test]

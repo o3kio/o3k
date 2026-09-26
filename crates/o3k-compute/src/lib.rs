@@ -63,11 +63,66 @@ pub use attachment::AttachmentOrchestrator;
 /// named env var is set. Absent, empty, non-numeric, or zero values are no-ops;
 /// production configuration never sets these variables.
 fn test_fault_pause_ms(name: &str, env_var: &str) {
-    let Some(ms) = test_fault_pause_ms_value(std::env::var(env_var).ok()) else {
+    test_fault_pause_ms_with(name, test_fault_pause_ms_value(std::env::var(env_var).ok()));
+}
+
+/// The unconditional half of `test_fault_pause_ms`, split out so a caller can
+/// inject the pause value and tests can exercise the failpoint seam without
+/// mutating the process environment.
+fn test_fault_pause_ms_with(name: &str, ms: Option<u64>) {
+    let Some(ms) = ms else {
         return;
     };
-    tracing::info!(pause_ms = ms, "test-only fault pause {} enabled", name);
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} engaged", name);
     std::thread::sleep(std::time::Duration::from_millis(ms));
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} released", name);
+}
+
+/// Async endpoint-release fault pause. Keeping the runtime schedulable lets
+/// concurrent repair/replay and unrelated DB-backed requests contend with the
+/// held serialization boundary while the crash window is open.
+async fn test_fault_pause_async_with(name: &str, ms: Option<u64>) {
+    let Some(ms) = ms else {
+        return;
+    };
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} engaged", name);
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} released", name);
+}
+
+/// Test-only repair-pass hold used to queue a port-attaching create behind an
+/// orphan sweep. The harness releases it through a run-owned file after
+/// starting the create request. The timeout is a fail-safe, and a process-local
+/// one-shot keeps later periodic passes from pausing.
+async fn test_fault_wait_for_file_once_async(name: &str, env_var: &str, timeout_env: &str) {
+    let Some(release_file) = std::env::var_os(env_var).map(std::path::PathBuf::from) else {
+        return;
+    };
+    let Some(timeout_ms) = std::env::var(timeout_env)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0 && *value <= 30_000)
+    else {
+        return;
+    };
+    static ORPHAN_REPAIR_PAUSE_USED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if ORPHAN_REPAIR_PAUSE_USED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    tracing::warn!("test-only fault pause {} engaged", name);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        if release_file.exists() {
+            tracing::warn!("test-only fault pause {} released", name);
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!("test-only fault pause {} timed out", name);
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 /// Parse/guard half of `test_fault_pause_ms`; split out so the no-op
@@ -97,6 +152,15 @@ pub struct ComputeService {
     cinder: Option<Arc<dyn VolumeAttachmentProvider>>,
     attachments: AttachmentOrchestrator,
     binding_projector: Option<Arc<dyn PortBindingProjector>>,
+    /// Serializes the orphan-endpoint repair sweep (#1035) against the create
+    /// paths that make a non-terminal server durably reference an existing
+    /// port. Both the repair pass and the create's durable-intent persist take
+    /// this lock before any store read and before any projector/network call,
+    /// so a sweep can never release a port while a create is persisting a
+    /// durable reference to it, and a create cannot durably reference a port
+    /// the sweep just released. `tokio::sync::Mutex` is fair and leaf-level
+    /// here, so there is no inversion with the layer's network-mutation locks.
+    orphan_repair_lock: Arc<tokio::sync::Mutex<()>>,
     config_drive_cleaner: Option<o3k_config_drive::ConfigDriveStore>,
     authorizer: Arc<dyn Authorizer>,
     audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
@@ -146,11 +210,63 @@ pub trait PortBindingProjector: Send + Sync {
     /// quota become reusable. An endpoint the caller supplied itself is left
     /// untouched — a server attaching an endpoint does not own it — and an
     /// already-absent endpoint is success, so replays converge.
+    ///
+    /// The ownership decision stays entirely inside the implementation, from
+    /// the durable endpoint row. The returned [`ServerEndpointRelease`] is the
+    /// observability contract for the #1035 orphan repair sweep; the request
+    /// path ignores it.
     async fn release_server_owned_endpoint(
         &self,
         project_id: &str,
         port_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Read-only snapshot of a port's durable binding and server-owned
+    /// identity, used by the orphan-repair sweep to decide whether an orphan
+    /// still bound to its dead owner needs an unbind (dispatch network Remove +
+    /// record `down`) before it can be released. `None` when the port does not
+    /// resolve in `project_id`.
+    ///
+    /// The repair must not unbind a caller-supplied or foreign endpoint, so the
+    /// server-owned discriminator is resolved here, from the durable endpoint
+    /// row, not guessed from the request.
+    async fn port_binding(
+        &self,
+        project_id: &str,
+        port_id: &str,
+    ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// A port's durable binding and ownership snapshot, resolved by the binding
+/// projector from the durable endpoint row (never from the request).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortBindingInfo {
+    /// Whether the port carries O3K's reserved server-owned name for this
+    /// project, so a terminally-deleted server may release it.
+    pub server_owned: bool,
+    /// The durable binding state when a host was selected: one of
+    /// `bound`/`binding`/`down`/`error`. `None` means no host was ever
+    /// selected and no observation exists.
+    pub binding_state: Option<String>,
+}
+
+/// Bounded, endpoint-counted outcome of releasing one terminally deleted
+/// server's O3K-owned endpoint.
+///
+/// Counts only, so the report is safe to log and to assert on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerEndpointRelease {
+    /// O3K server-owned endpoints observed present in the owning project.
+    pub discovered: usize,
+    /// Of those, the ones now gone. A concurrent equivalent cleanup that won
+    /// the race restores the same invariant, so it counts here too.
+    pub released: usize,
+    /// Present endpoints that are not O3K server-owned — a caller-supplied
+    /// endpoint, or another project's — preserved untouched.
+    pub preserved: usize,
+    /// Nothing present to repair: an already-released endpoint, or an
+    /// identifier that does not resolve inside the owning project.
+    pub absent: usize,
 }
 
 /// Projects one authenticated agent capability snapshot into the inventory
@@ -506,6 +622,9 @@ mod tests {
             project: String,
             port: String,
         },
+        Binding {
+            port: String,
+        },
     }
 
     #[derive(Default)]
@@ -552,7 +671,7 @@ mod tests {
             &self,
             project_id: &str,
             port_id: &str,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>> {
             self.calls
                 .lock()
                 .map_err(|_| "recording projector lock poisoned".to_owned())?
@@ -560,7 +679,25 @@ mod tests {
                     project: project_id.to_owned(),
                     port: port_id.to_owned(),
                 });
-            Ok(())
+            Ok(ServerEndpointRelease {
+                discovered: 1,
+                released: 1,
+                ..ServerEndpointRelease::default()
+            })
+        }
+
+        async fn port_binding(
+            &self,
+            _project_id: &str,
+            port_id: &str,
+        ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>> {
+            self.calls
+                .lock()
+                .map_err(|_| "recording projector lock poisoned".to_owned())?
+                .push(ProjectorCall::Binding {
+                    port: port_id.to_owned(),
+                });
+            Ok(None)
         }
     }
 
@@ -570,6 +707,74 @@ mod tests {
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default()
+    }
+
+    /// A projector that counts unbind dispatches and models a stale `bound`
+    /// orphan (an unbound port reports `down`). Used to assert the sweep's
+    /// one-unbind-per-pass availability cap (issue #1035).
+    #[derive(Default)]
+    struct CapCountingProjector {
+        unbound: std::sync::Mutex<std::collections::HashSet<String>>,
+        unbinds: std::sync::Mutex<usize>,
+        releases: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl PortBindingProjector for CapCountingProjector {
+        async fn project_create_outcome(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+            _succeeded: bool,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+        async fn unbind_port(
+            &self,
+            _project_id: &str,
+            port_id: &str,
+            _operation_id: uuid::Uuid,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.unbound
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?
+                .insert(port_id.to_owned());
+            *self
+                .unbinds
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")? += 1;
+            Ok(())
+        }
+        async fn release_server_owned_endpoint(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+        ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>> {
+            *self
+                .releases
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")? += 1;
+            Ok(ServerEndpointRelease {
+                discovered: 1,
+                released: 1,
+                ..ServerEndpointRelease::default()
+            })
+        }
+        async fn port_binding(
+            &self,
+            _project_id: &str,
+            port_id: &str,
+        ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>> {
+            let is_bound = !self
+                .unbound
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?
+                .contains(port_id);
+            Ok(Some(PortBindingInfo {
+                server_owned: true,
+                binding_state: Some(if is_bound { "bound" } else { "down" }.to_owned()),
+            }))
+        }
     }
 
     async fn service(label: &str) -> Result<ComputeService, ComputeError> {
@@ -2703,6 +2908,12 @@ mod tests {
         let task = service.spawn_create_convergence_reconciler(1);
         // The first drive(s) hit the empty registry; the operation must stay
         // re-drivable and never become terminal Failed.
+        // Each of the two waits below is an independent convergence property,
+        // so each gets its own freshly-armed budget. A single deadline shared
+        // across both sequential loops is wrong: a first wait deferred by
+        // external load consumes most of the shared deadline, leaving the
+        // second wait to fail its assertion even though convergence is
+        // genuinely occurring (issue #1040).
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while provider.create_attempts() == 0 {
             assert!(
@@ -2718,7 +2929,10 @@ mod tests {
         );
         // The agent re-registers (reconnect backoff completed); a later sweep
         // tick re-dispatches the create and the provider reports the running
-        // instance observation.
+        // instance observation. Re-arm a fresh budget: the first wait above
+        // already consumed part of its own deadline, and this second wait must
+        // not inherit that consumption.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         provider.register();
         loop {
             let operation = store.get_operation(request.operation_id).await?;
@@ -2731,14 +2945,30 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert_eq!(provider.instance_count(), 1);
-        assert_eq!(
-            store
+        // The terminal operation state and the ACTIVE projection are separate
+        // committed writes on the create-observation path (the atomic
+        // terminalization primitive covers lifecycle finishes, not create
+        // projections), so poll the projection with a bounded deadline instead
+        // of asserting it synchronously — under parallel load the gap between
+        // the two writes stretches and a synchronous assert flakes (issue
+        // #1040 family: test timing, not a production budget regression).
+        let projection_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if store
                 .get_resource(request.o3k_server_id)
                 .await?
-                .observed_state,
-            "ACTIVE"
-        );
+                .observed_state
+                == "ACTIVE"
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < projection_deadline,
+                "create convergence sweep did not project ACTIVE after the operation succeeded"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(provider.instance_count(), 1);
         task.abort();
         let _ = task.await;
         Ok(())
@@ -3022,6 +3252,71 @@ mod tests {
             o3k_store::OperationState::Succeeded,
             "the local delete must record a terminal Succeeded delete operation"
         );
+        Ok(())
+    }
+
+    /// Issue #1041: the local delete completion terminalizes the operation and
+    /// the resource projection in ONE durable transaction. After the delete,
+    /// both rows must be terminal with exactly one generation advance; a
+    /// replay through the already-Deleted seat converges without re-applying.
+    #[tokio::test]
+    async fn local_delete_completion_terminalizes_operation_and_resource_together()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, placement, request) =
+            stranded_failed_create_fixture("delete-atomic-terminal", provider.clone()).await?;
+        let generation_at_delete = store.get_resource(request.o3k_server_id).await?.generation;
+
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+
+        // Both halves terminal, applied exactly once.
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "DELETED");
+        assert_eq!(
+            resource.generation,
+            generation_at_delete + 1,
+            "the terminalization must apply exactly one generation advance"
+        );
+        let delete_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:delete:project-a:{}:{}",
+                request.o3k_server_id, generation_at_delete
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            store.get_operation(delete_operation_id).await?.state,
+            o3k_store::OperationState::Succeeded,
+            "the operation and the resource projection must be terminal together"
+        );
+        assert!(
+            store
+                .list_non_terminal_lifecycle_operations()
+                .await?
+                .iter()
+                .all(|operation| operation.resource_id != request.o3k_server_id),
+            "a terminalized delete must leave no non-terminal lifecycle operation"
+        );
+        assert!(
+            placement.provider("node-a").await?.allocations.is_empty(),
+            "the delete must release the placement allocation"
+        );
+
+        // Replay through the already-Deleted seat: converges without
+        // double-applying the projection.
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(
+            resource.generation,
+            generation_at_delete + 1,
+            "a replay must not double-apply the terminal projection"
+        );
+        assert_eq!(resource.observed_state, "DELETED");
         Ok(())
     }
 
@@ -3638,6 +3933,538 @@ mod tests {
                 .filter(|call| matches!(call, ProjectorCall::Release { .. }))
                 .count(),
             2
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// Issue #1035: a replayed/late terminal delete projection must skip a port
+    /// that a NEW live server now references. A's delete is durably terminal
+    /// (the projection seat) but the request-path release never ran; B then
+    /// re-attaches A's port and is still `ACTIVE`. `project_terminal_binding_outcome`'s
+    /// delete branch gates every port on the live reference set, so it must not
+    /// unbind or release B's port — B's own delete releases it.
+    #[tokio::test]
+    async fn delete_terminal_projection_preserves_a_live_reattached_port()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-replay-terminal-bind-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(RecordingProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+
+        let a_id = Uuid::now_v7();
+        let b_id = Uuid::now_v7();
+        let delete_op = Uuid::now_v7();
+        let project = "project-a".to_owned();
+        let desired = |server_id: Uuid, name: &str| -> Result<String, serde_json::Error> {
+            serde_json::to_string(&serde_json::json!({
+                "operation_id": Uuid::now_v7().to_string(),
+                "o3k_server_id": server_id.to_string(),
+                "project_id": project,
+                "name": name,
+                "vcpus": 1,
+                "memory_mib": 512,
+                "flavor_id": "flavor-1",
+                "disk_gib": 1,
+                "image_id": "image-1",
+                "key_name": null,
+                "keypair_id": null,
+                "network_ids": ["port-1"],
+                "placement_provider_id": null,
+                "placement_allocation_id": null,
+                "config_drive": null,
+                "idempotency_key": format!("idem-{name}"),
+            }))
+        };
+        // A: terminally deleted, delete operation terminal success, request-path
+        // release never ran (the crash window leaves port-1 present).
+        let desired_a = desired(a_id, "server-a")?;
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: a_id,
+                kind: "compute_instance".to_owned(),
+                project_id: project.clone(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired_a,
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: delete_op,
+                resource_id: a_id,
+                kind: "lifecycle:delete".to_owned(),
+                state: o3k_store::OperationState::Succeeded,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        // B: a NEW live server that explicitly re-attached A's port.
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: b_id,
+                kind: "compute_instance".to_owned(),
+                project_id: project.clone(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired(b_id, "server-b")?,
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        // Replay A's terminal delete through the projection seat.
+        service
+            .project_terminal_binding_outcome(
+                delete_op.to_string().as_str(),
+                o3k_store::OperationState::Succeeded,
+            )
+            .await?;
+
+        // B's live re-attached port must be preserved: the gate skips it, so
+        // the projector records neither an unbind nor a release.
+        assert!(
+            projector_calls(&projector).is_empty(),
+            "the replayed terminal delete must not strip a live re-attached port: {:?}",
+            projector_calls(&projector)
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// Issue #1035, availability bound: the repair sweep makes at most ONE
+    /// fabric unbind dispatch per pass, so a burst of stale-bound orphans cannot
+    /// hold the orphan-repair lock (and therefore block every port-attaching
+    /// create) for the sum of their dispatch deadlines. Two stale-bound orphans
+    /// therefore take two passes — one unbind each — and converge.
+    #[tokio::test]
+    async fn sweep_makes_at_most_one_unbind_dispatch_per_pass()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path =
+            PathBuf::from(format!("/tmp/o3k-sweep-cap-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(CapCountingProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+        let project = "project-a".to_owned();
+
+        // Two terminally-deleted servers, each leaving a stale-bound orphan port.
+        for (server_id, port_id) in [(Uuid::now_v7(), "port-1"), (Uuid::now_v7(), "port-2")] {
+            let desired = serde_json::to_string(&serde_json::json!({
+                "operation_id": Uuid::now_v7().to_string(),
+                "o3k_server_id": server_id.to_string(),
+                "project_id": project,
+                "name": "server",
+                "vcpus": 1,
+                "memory_mib": 512,
+                "flavor_id": "flavor-1",
+                "disk_gib": 1,
+                "image_id": "image-1",
+                "key_name": null,
+                "keypair_id": null,
+                "network_ids": [port_id],
+                "placement_provider_id": null,
+                "placement_allocation_id": null,
+                "config_drive": null,
+                "idempotency_key": format!("idem-{port_id}"),
+            }))?;
+            store
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: server_id,
+                    kind: "compute_instance".to_owned(),
+                    project_id: project.clone(),
+                    generation: 1,
+                    observed_generation: 0,
+                    desired_state: desired,
+                    observed_state: "DELETED".to_owned(),
+                    provider_id: None,
+                })
+                .await?;
+        }
+
+        // Pass 1: exactly one unbind dispatch, despite two bound orphans.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            1,
+            "a single sweep pass must dispatch at most one fabric unbind"
+        );
+
+        // Pass 2: the second stale-bound orphan is repaired; total converges.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            2,
+            "repair must converge one unbind per pass"
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// A waiting port-reference create receives the FIFO opportunity between
+    /// one-orphan repair passes. The Tokio mutex contract is FIFO: once these
+    /// three acquisitions are queued in order, a later periodic pass cannot
+    /// repeatedly jump ahead of the create. Combined with the one-dispatch
+    /// cap above, multiple repairable orphans cannot starve the create.
+    #[tokio::test]
+    async fn orphan_repair_lock_gives_waiting_create_fifo_turn_between_passes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-fairness-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let service = Arc::new(ComputeService::new_for_test(
+            store,
+            Arc::new(FakeComputeProvider::new()),
+        ));
+        let first_pass = service.orphan_repair_lock_guard().await;
+        let (queued_tx, mut queued_rx) = tokio::sync::mpsc::unbounded_channel();
+        let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        for label in ["waiting_create", "next_repair_pass"] {
+            let service = service.clone();
+            let queued_tx = queued_tx.clone();
+            let order = order.clone();
+            tokio::spawn(async move {
+                let _ = queued_tx.send(label);
+                let _guard = service.orphan_repair_lock_guard().await;
+                order.lock().await.push(label);
+            });
+            assert_eq!(queued_rx.recv().await, Some(label));
+            // This is a current-thread Tokio test. Yield once after the
+            // notification so the waiter polls lock() and enters its FIFO
+            // queue before the next waiter is spawned.
+            tokio::task::yield_now().await;
+        }
+        drop(first_pass);
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*order.lock().await, ["waiting_create", "next_repair_pass"]);
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_lock_wait_marker_is_written_only_after_mutex_waits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-wait-marker-{}.sqlite",
+            std::process::id()
+        ));
+        let marker_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-wait-marker-{}.observed",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_file(&marker_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let service = Arc::new(ComputeService::new_for_test(
+            store,
+            Arc::new(FakeComputeProvider::new()),
+        ));
+        let held = service.orphan_repair_lock_guard().await;
+        let waiting_service = service.clone();
+        let waiting_marker = marker_path.clone();
+        let waiter = tokio::spawn(async move {
+            let _guard = waiting_service
+                .orphan_repair_create_lock_guard(Some(&waiting_marker))
+                .await;
+        });
+        for _ in 0..32 {
+            if marker_path.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            marker_path.exists(),
+            "waiter marker must prove mutex Pending"
+        );
+        drop(held);
+        waiter.await?;
+        std::fs::remove_file(marker_path)?;
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct FailingUnbindProjector {
+        unbinds: std::sync::Mutex<usize>,
+        releases: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl PortBindingProjector for FailingUnbindProjector {
+        async fn project_create_outcome(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+            _succeeded: bool,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+        async fn unbind_port(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+            _operation_id: uuid::Uuid,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            *self
+                .unbinds
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")? += 1;
+            Err(std::io::Error::other("fabric unavailable").into())
+        }
+        async fn release_server_owned_endpoint(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+        ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>> {
+            *self
+                .releases
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")? += 1;
+            Ok(ServerEndpointRelease::default())
+        }
+        async fn port_binding(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+        ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(Some(PortBindingInfo {
+                server_owned: true,
+                binding_state: Some("bound".to_owned()),
+            }))
+        }
+    }
+
+    /// The one-unbind-per-pass cap must count ATTEMPTS, not successes: under a
+    /// fabric outage a single pass must not dispatch a failing unbind per
+    /// stale-bound orphan (each up to the dispatch deadline) while holding the
+    /// orphan-repair lock. Before the cap moved ahead of the dispatch, a
+    /// failed unbind `continue`d to the next orphan and a pass could burn the
+    /// sum of the deadlines — contradicting the documented availability bound.
+    #[tokio::test]
+    async fn sweep_dispatches_at_most_one_unbind_attempt_per_pass_even_when_unbind_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-sweep-cap-failure-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(FailingUnbindProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+        let project = "project-a".to_owned();
+
+        for (server_id, port_id) in [(Uuid::now_v7(), "port-1"), (Uuid::now_v7(), "port-2")] {
+            let desired = serde_json::to_string(&serde_json::json!({
+                "operation_id": Uuid::now_v7().to_string(),
+                "o3k_server_id": server_id.to_string(),
+                "project_id": project,
+                "name": "server",
+                "vcpus": 1,
+                "memory_mib": 512,
+                "flavor_id": "flavor-1",
+                "disk_gib": 1,
+                "image_id": "image-1",
+                "key_name": null,
+                "keypair_id": null,
+                "network_ids": [port_id],
+                "placement_provider_id": null,
+                "placement_allocation_id": null,
+                "config_drive": null,
+                "idempotency_key": format!("idem-{port_id}"),
+            }))?;
+            store
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: server_id,
+                    kind: "compute_instance".to_owned(),
+                    project_id: project.clone(),
+                    generation: 1,
+                    observed_generation: 0,
+                    desired_state: desired,
+                    observed_state: "DELETED".to_owned(),
+                    provider_id: None,
+                })
+                .await?;
+        }
+
+        // Pass 1 under fabric outage: exactly one unbind ATTEMPT, and the
+        // bound orphan is never released while bound.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            1,
+            "a single sweep pass must dispatch at most one unbind attempt, even on failure"
+        );
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            0,
+            "a bound orphan must never be released while its unbind has not completed"
+        );
+
+        // Pass 2: the next bound orphan gets its single attempt; the pass
+        // stays bounded and retry-convergent across passes.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            2,
+            "repair must converge one unbind attempt per pass"
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// The orphan-repair pass must be fenced by the same coordination lease
+    /// that fences the re-drive arms: the orphan_repair_lock is process-local,
+    /// so a second controller on a shared PostgreSQL database must not sweep
+    /// concurrently. A Busy lease skips the pass (the orphan survives); once
+    /// the lease frees, one pass repairs it and releases the lease.
+    #[tokio::test]
+    async fn orphan_repair_pass_is_fenced_by_the_coordination_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::DurableStore;
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-sweep-lease-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store = Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let coord: Arc<dyn o3k_store::CoordinationRepository> = store.clone();
+        let projector = Arc::new(CapCountingProjector::default());
+        let ctrl_a = o3k_store::ControllerId::new("ctrl-a");
+        let epoch_a = o3k_store::ControllerEpoch::new("epoch-a");
+        let ctrl_b = o3k_store::ControllerId::new("ctrl-b");
+        let epoch_b = o3k_store::ControllerEpoch::new("epoch-b");
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone())
+                .with_coordination(coord.clone(), ctrl_a, epoch_a.clone());
+        let project = "project-a".to_owned();
+        let server_id = Uuid::now_v7();
+        let desired = serde_json::to_string(&serde_json::json!({
+            "operation_id": Uuid::now_v7().to_string(),
+            "o3k_server_id": server_id.to_string(),
+            "project_id": project,
+            "name": "server",
+            "vcpus": 1,
+            "memory_mib": 512,
+            "flavor_id": "flavor-1",
+            "disk_gib": 1,
+            "image_id": "image-1",
+            "key_name": null,
+            "keypair_id": null,
+            "network_ids": ["port-1"],
+            "placement_provider_id": null,
+            "placement_allocation_id": null,
+            "config_drive": null,
+            "idempotency_key": "idem-port-1",
+        }))?;
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: project.clone(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired,
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        // Controller B holds the repair lease: controller A's convergence pass
+        // must skip the sweep, leaving the orphan untouched.
+        let busy = coord
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_secs(60),
+            )
+            .await?;
+        let lease = match busy {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+            _ => return Err("expected controller B to acquire the repair lease".into()),
+        };
+        service.drive_all_lifecycle_convergence().await?;
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            0,
+            "a Busy repair lease must skip the sweep on this controller"
+        );
+
+        // Once the lease frees, one pass repairs the orphan and releases the
+        // lease again (controller B can re-acquire immediately).
+        coord
+            .release_work_lease(
+                "server-endpoint-orphan-repair",
+                &ctrl_b,
+                &epoch_b,
+                lease.fencing_token,
+            )
+            .await?;
+        service.drive_all_lifecycle_convergence().await?;
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            1,
+            "the sweep must run once the lease is free"
+        );
+        let reacquired = coord
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+        assert!(
+            matches!(reacquired, o3k_store::LeaseAcquireOutcome::Acquired { .. }),
+            "the sweep must release the repair lease after its pass"
         );
         std::fs::remove_file(database_path)?;
         Ok(())

@@ -2377,6 +2377,18 @@ impl ResourceApplication for GenericResourceApplication {
             .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()))
             .replace('/', "_");
         let project_id = auth.effective_scope().id().as_str().to_owned();
+        // Issue #1035: hold the orphan-repair serialization lock across
+        // [existing-port validation/resolution -> durable intent persist] so a
+        // concurrent orphan repair sweep can neither release a port mid-create
+        // nor allow this create to durably reference a port the sweep just
+        // released. The lock is taken before any network call, matching the
+        // sweep's locking.
+        let create_wait_marker =
+            std::env::var_os("O3K_TEST_CREATE_LOCK_WAITER_MARKER").map(std::path::PathBuf::from);
+        let _orphan_repair_guard = self
+            .compute
+            .orphan_repair_create_lock_guard(create_wait_marker.as_deref())
+            .await;
         let mut network_ids = Vec::with_capacity(spec.network_ids.len());
         let mut owned_network_ids = Vec::new();
         // Validate all UUID references before creating any endpoint, so a
@@ -3614,16 +3626,42 @@ impl ResourceApplication for GenericResourceApplication {
         // Endpoints are released only after the canonical delete is terminal:
         // a converging delete still has a provider-side server that needs its
         // network dependency, and the retried delete releases them later.
+        //
+        // #1035 (replay release): the deleted owner's intent can name an
+        // endpoint a NEW live server has explicitly re-attached. The network
+        // layer cannot see that — the durable binding may already be cleared —
+        // so this delete handler (which runs a direct, still-attached-blind
+        // network release) consults the compute layer and refuses to hand such
+        // a port back for deletion. The live server's own delete releases it.
         if matches!(
             receipt.operation_state,
             o3k_store::OperationState::Succeeded
-        ) && let Err(error) = self
-            .network_service
-            .cleanup_server_owned_ports_for_project(&project_id, &owned_ports)
-            .await
-        {
-            tracing::error!(%error, %id, "native server endpoint cleanup failed");
-            return Err(ResourceApplicationError::Internal);
+        ) {
+            // #1035 (replay release): this direct network release consults the
+            // live-attached set and holds the orphan-repair lock across
+            // [scan -> release] so it is serialized against port-attaching
+            // creates and the orphan sweep; a port a live server now references
+            // is never handed back for deletion.
+            let _orphan_repair_guard = self.compute.orphan_repair_lock_guard().await;
+            let attached = self
+                .compute
+                .live_attached_endpoint_ids()
+                .await
+                .map_err(compute_error)?;
+            let releasable = owned_ports
+                .iter()
+                .copied()
+                .filter(|port_id| !attached.contains(&port_id.to_string()))
+                .collect::<Vec<_>>();
+            if !releasable.is_empty()
+                && let Err(error) = self
+                    .network_service
+                    .cleanup_server_owned_ports_for_project(&project_id, &releasable)
+                    .await
+            {
+                tracing::error!(%error, %id, "native server endpoint cleanup failed");
+                return Err(ResourceApplicationError::Internal);
+            }
         }
         Ok(MutationResult {
             operation_id: receipt.operation_id.to_string(),

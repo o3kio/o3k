@@ -4,18 +4,26 @@
 //! real installation existing. `doctor --json` must always emit a valid JSON
 //! document on stdout regardless of the host state, exiting 0 (healthy) or
 //! 1 (warning/unhealthy).
+#![allow(clippy::panic)]
 
 use std::process::Command;
 
 /// Runs the binary and returns (exit code, stdout, stderr).
+///
+/// A failure to *execute* the binary is a harness defect, not product
+/// behaviour, so it panics with the underlying error instead of reporting a
+/// synthetic exit code that hides the cause. (`--version` and friends must
+/// always be runnable; if they are not, the test has nothing to say about the
+/// CLI.)
 fn run(args: &[&str]) -> (i32, String, String) {
-    match Command::new(env!("CARGO_BIN_EXE_o3k")).args(args).output() {
+    let binary = env!("CARGO_BIN_EXE_o3k");
+    match Command::new(binary).args(args).output() {
         Ok(output) => (
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).into_owned(),
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ),
-        Err(_) => (99, String::new(), String::new()),
+        Err(error) => panic!("could not execute the o3k binary at {binary}: {error}"),
     }
 }
 

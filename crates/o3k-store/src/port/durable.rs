@@ -7,7 +7,8 @@ use crate::domain::error::StoreError;
 use crate::domain::records::{
     AgentCommandRecord, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
     IdempotencyReservationRequest, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
-    ImageOverlayUpdate, ObservationUpdate, OperationRecord, ProviderReference, ResourceRecord,
+    ImageOverlayUpdate, LifecycleTerminalization, ObservationUpdate, OperationRecord,
+    ProviderReference, ResourceRecord,
 };
 use crate::domain::state::{
     AgentCommandState, CanonicalAcceptanceOutcome, IdempotencyReservation, OperationState,
@@ -208,6 +209,17 @@ pub trait DurableStore: Send + Sync {
         operation_id: Uuid,
         lifecycle: &CanonicalOperationLifecycleUpdate,
     ) -> Result<ResourceRecord, StoreError>;
+    /// Atomically terminalizes a lifecycle operation and writes the terminal
+    /// observed-state projection of its resource in a single transaction
+    /// (issue #1041). The pair used to be two sequential durable writes; a
+    /// crash between them left the operation terminal while the resource
+    /// projection was not (or vice versa), which no reconciliation pass
+    /// repairs. See [`LifecycleTerminalization`] for the exact contract,
+    /// including idempotent replay and stale-generation rejection.
+    async fn terminalize_lifecycle(
+        &self,
+        terminalization: &LifecycleTerminalization<'_>,
+    ) -> Result<(OperationRecord, ResourceRecord), StoreError>;
     async fn update_resource_from_observation(
         &self,
         id: Uuid,

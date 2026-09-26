@@ -549,7 +549,8 @@ pub async fn build_composition(
             );
         }
     };
-    let agent_control_enabled = config.compute_server_certificate.is_some()
+    let agent_control_enabled = config.provider == o3k_config::Provider::Agent
+        && config.compute_server_certificate.is_some()
         && config.compute_server_private_key.is_some()
         && config.compute_client_ca.is_some();
     let binding_projector = Arc::new(NetworkBindingProjector {

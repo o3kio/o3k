@@ -237,7 +237,7 @@ jobs:
           O3K_PROVIDER: agent
           O3K_LOG_FILTER: debug
           O3K_COMPUTE_LOG_FILTER: debug
-          O3K_TESTLAB_ADDITIONAL_AGENT_IDS: block-a,block-b,block-c,block-d
+          O3K_TESTLAB_ADDITIONAL_AGENT_IDS: block-a,block-b,block-c,block-d,block-e
           O3K_TESTLAB_CONTROL_BIND_ADDR: 0.0.0.0
           O3K_AGENT_INSPECT_PROBE_ENABLED: true
           O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ env.DIAGNOSTIC_REPO }}/target/p15-7-diagnostic-artifacts/agent-inspect-resource-id

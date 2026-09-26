@@ -622,6 +622,7 @@ PY
 
 python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
 import pathlib, re, sys
+from pathlib import Path
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 preflight_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
 dispatch_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-dispatch.yml").read_text(encoding="utf-8")
@@ -687,8 +688,13 @@ for needle in ("workflow_dispatch:",
                "Run P13.4 VolumeAttachment provider gate",
                "tests/p13_4_provider_volume_attachment_smoke.sh",
                "Run P13.4 storage recovery and fencing tests",
-               "Start disposable P13.4 PostgreSQL",
+               "Provision isolated PP.5 PostgreSQL purpose databases",
+               "scripts/provision_pp5_postgres.py provision",
+               "o3k_p13_test_",
+               "Bind P13.4 to isolated PP.5 PostgreSQL",
                "-p o3k-store --test postgres_p13_4_storage",
+               "O3K_TEST_DATABASE_PURPOSE: p13",
+               "Verify PP.5 PostgreSQL isolation after P13.4",
                "Run P13.4 real LVM/libvirt guest gate",
                "scripts/real-lvm-guest-gate.sh",
                "p13-4-storage-evidence.json",
@@ -711,19 +717,30 @@ assert "ref: ${{ inputs.target_sha || github.sha }}" in text
 assert "persist-credentials: false" in text
 assert "Verify immutable source checkout" in text
 assert text.index("Verify immutable source checkout") < text.index("Protected P15.7 authority and capacity preflight")
+pg_preflight = "Run PP5 fast PostgreSQL prerequisite qualification"
+assert text.index("Verify immutable source checkout") < text.index(pg_preflight)
+assert text.index(pg_preflight) < text.index("Protected P15.7 authority and capacity preflight")
+pg_step = text.split(f"- name: {pg_preflight}", 1)[1].split("\n      - ", 1)[0]
+assert "continue-on-error:" not in pg_step
+assert "if:" not in pg_step
+assert "scripts/pp5-fast-gate.sh qualification" in text
+fast_gate_text = pathlib.Path("scripts/pp5-fast-gate.sh").read_text(encoding="utf-8")
+assert "scripts/pp5-runner-prerequisite.py" in fast_gate_text
+assert Path("scripts/pp5-fast-gate.sh").is_file()
+assert Path("scripts/pp5-runner-prerequisite.py").is_file()
+assert "pp5-postgres-preflight*.json" in text
+assert "pp5-runner-prerequisite*.json" in text
 assert text.index("Protected P15.7 authority and capacity preflight") < text.index("Bootstrap disposable TestLab")
 assert "if: always() && steps.protected_preflight.outcome == 'success'" in text
 assert text.count("if: always() && steps.protected_preflight.outcome == 'success'") >= 5
 assert "id-token: write" in text
 assert "O3K_P15_7_OPERATOR_TOKEN:" not in text
-assert "p15-7-postgres-ownership.json" in text
-# The embedded ownership JSON must start at column zero after YAML block
-# scalar dedentation; retaining the shell indentation makes Python fail before
-# the generic TestLab and falsely blocks the protected journey.
-assert re.search(r"p15-7-postgres-ownership\.json <<'PY'\n          import json, subprocess, sys", text)
-assert not re.search(r"p15-7-postgres-ownership\.json <<'PY'\n\s{12}import json, subprocess, sys", text)
-assert "--label o3k.owner=o3k" in text
-assert "container_id" in text
+assert "pp5-postgres-purpose-map.json" in text
+assert "O3K_P15_7_POSTGRES_MODE=external" in text
+assert "O3K_P15_7_EXTERNAL_PG_TARGET" in text
+assert "p15-7-postgres-ownership.json" not in text
+assert "p13-4-postgres-ownership.json" not in text
+assert "postgres:16.4" not in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
 p15_image_step = text.split("      - name: Prepare pinned P15.7 VM host image\n", 1)[1]

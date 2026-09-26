@@ -5,8 +5,8 @@ use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
     CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, DurableStore,
     IdempotencyReservation, IdempotencyReservationRequest, ImageOverlayIdentity,
-    ImageOverlayOwnershipRecord, ImageOverlayUpdate, ObservationUpdate, OperationRecord,
-    OperationState, ProviderReference, RepositoryPage, ResourceRecord, StoreError,
+    ImageOverlayOwnershipRecord, ImageOverlayUpdate, LifecycleTerminalization, ObservationUpdate,
+    OperationRecord, OperationState, ProviderReference, RepositoryPage, ResourceRecord, StoreError,
     StoredIdempotencyReservation,
 };
 
@@ -142,6 +142,16 @@ impl DurableStore for O3kStore {
         match self {
             Self::Sqlite(s) => s.update_resource_from_observation(id, update).await,
             Self::Postgres(s) => s.update_resource_from_observation(id, update).await,
+        }
+    }
+
+    async fn terminalize_lifecycle(
+        &self,
+        terminalization: &LifecycleTerminalization<'_>,
+    ) -> Result<(OperationRecord, ResourceRecord), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.terminalize_lifecycle(terminalization).await,
+            Self::Postgres(s) => s.terminalize_lifecycle(terminalization).await,
         }
     }
 
