@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p15-7-guards.XXXXXX")"
 trap 'rm -rf -- "${WORK_DIR}"' EXIT
 EVIDENCE="${WORK_DIR}/evidence.json"
+bash "$ROOT_DIR/tests/p15_7_restart_environment_guards.sh"
 
 # Incremental crash evidence must survive a later assertion failure. Exercise
 # the atomic writer through two durable checkpoints, then fail after restart.

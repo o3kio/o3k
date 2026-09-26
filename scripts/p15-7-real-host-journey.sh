@@ -371,8 +371,17 @@ start_o3kd_verified() {
       || { new_pid=""; sleep .25; continue; }
     [[ "$(sudo -n readlink -f "/proc/$new_pid/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] \
       || { new_pid=""; sleep .25; continue; }
+    # Record the strongly identified replacement before a later environment
+    # or listener check can reject it. Cleanup must not retain only the dead
+    # predecessor's ledger when a live replacement fails verification.
+    new_ticks="$(sudo -n awk '{print $22}' "/proc/$new_pid/stat")"
+    new_uid="$(sudo -n stat -c '%U' "/proc/$new_pid")"
+    [[ "$new_uid" == "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" && "$(sudo -n readlink -f "/proc/$new_pid/exe")" == "$STATE_ROOT/bin/o3kd" ]] || die "restarted o3kd identity is not owned"
+    printf '%s|%s|%s|o3kd\n' "$new_pid" "$new_ticks" "$new_uid" >"${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-testlab-pids/$RUN_ID}/o3kd.pid"
+    # Consume the entire stream: grep -q can SIGPIPE tr under pipefail and
+    # falsely reject an exact match in a sufficiently large live environment.
     if ! sudo -n cat "/proc/$new_pid/environ" 2>/dev/null | tr '\0' '\n' \
-      | grep -Fqx "O3K_DATA_DIR=$STATE_ROOT/data"; then
+      | grep -Fx "O3K_DATA_DIR=$STATE_ROOT/data" >/dev/null; then
       new_pid=""
       sleep .25
       continue
@@ -380,10 +389,6 @@ start_o3kd_verified() {
     [[ "$new_pid" ]] && break
   done
   [[ "$new_pid" ]] || die "o3kd restart failed"
-  new_ticks="$(sudo -n awk '{print $22}' "/proc/$new_pid/stat")"
-  new_uid="$(sudo -n stat -c '%U' "/proc/$new_pid")"
-  [[ "$new_uid" == "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" && "$(sudo -n readlink -f "/proc/$new_pid/exe")" == "$STATE_ROOT/bin/o3kd" ]] || die "restarted o3kd identity is not owned"
-  printf '%s|%s|%s|o3kd\n' "$new_pid" "$new_ticks" "$new_uid" >"${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-testlab-pids/$RUN_ID}/o3kd.pid"
   # Process existence is not serving readiness: o3kd binds AUTH_PORT only
   # after pool init/seeding, measured at ~0.3s best case and ~1.5-2s on the
   # canonical run on a fast idle host. The backend-switch rejoin fires an
@@ -2540,15 +2545,15 @@ CREATE_WAITER_ENV_CONSUMED=false
 # settings before removing the source environment file.  This keeps the
 # evidence bound to the exact process that will execute the restart proof.
 if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
-  | grep -Fqx "$O3K_REPAIR_RELEASE_ENV_NAME=$CRASH_REPAIR_RELEASE_FILE"; then
+  | grep -Fx "$O3K_REPAIR_RELEASE_ENV_NAME=$CRASH_REPAIR_RELEASE_FILE" >/dev/null; then
   REPAIR_RELEASE_ENV_CONSUMED=true
 fi
 if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
-  | grep -Fqx "$O3K_REPAIR_TIMEOUT_ENV_NAME=$CONTENDING_CREATE_REPAIR_PAUSE_MS"; then
+  | grep -Fx "$O3K_REPAIR_TIMEOUT_ENV_NAME=$CONTENDING_CREATE_REPAIR_PAUSE_MS" >/dev/null; then
   REPAIR_TIMEOUT_ENV_CONSUMED=true
 fi
 if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
-  | grep -Fqx "$O3K_CREATE_WAITER_ENV_NAME=$CRASH_REPAIR_WAITER_FILE"; then
+  | grep -Fx "$O3K_CREATE_WAITER_ENV_NAME=$CRASH_REPAIR_WAITER_FILE" >/dev/null; then
   CREATE_WAITER_ENV_CONSUMED=true
 fi
 [[ "$REPAIR_RELEASE_ENV_CONSUMED" == true && "$REPAIR_TIMEOUT_ENV_CONSUMED" == true && "$CREATE_WAITER_ENV_CONSUMED" == true ]] \
