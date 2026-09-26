@@ -687,9 +687,13 @@ for needle in ("workflow_dispatch:",
                "Run P13.4 VolumeAttachment provider gate",
                "tests/p13_4_provider_volume_attachment_smoke.sh",
                "Run P13.4 storage recovery and fencing tests",
-               "Start disposable P13.4 PostgreSQL",
+               "Provision isolated PP.5 PostgreSQL purpose databases",
+               "scripts/provision_pp5_postgres.py provision",
+               "o3k_p13_test_",
+               "Bind P13.4 to isolated PP.5 PostgreSQL",
                "-p o3k-store --test postgres_p13_4_storage",
                "O3K_TEST_DATABASE_PURPOSE: p13",
+               "Verify PP.5 PostgreSQL isolation after P13.4",
                "Run P13.4 real LVM/libvirt guest gate",
                "scripts/real-lvm-guest-gate.sh",
                "p13-4-storage-evidence.json",
@@ -717,14 +721,12 @@ assert "if: always() && steps.protected_preflight.outcome == 'success'" in text
 assert text.count("if: always() && steps.protected_preflight.outcome == 'success'") >= 5
 assert "id-token: write" in text
 assert "O3K_P15_7_OPERATOR_TOKEN:" not in text
-assert "p15-7-postgres-ownership.json" in text
-# The embedded ownership JSON must start at column zero after YAML block
-# scalar dedentation; retaining the shell indentation makes Python fail before
-# the generic TestLab and falsely blocks the protected journey.
-assert re.search(r"p15-7-postgres-ownership\.json <<'PY'\n          import json, subprocess, sys", text)
-assert not re.search(r"p15-7-postgres-ownership\.json <<'PY'\n\s{12}import json, subprocess, sys", text)
-assert "--label o3k.owner=o3k" in text
-assert "container_id" in text
+assert "pp5-postgres-purpose-map.json" in text
+assert "O3K_P15_7_POSTGRES_MODE=external" in text
+assert "O3K_P15_7_EXTERNAL_PG_TARGET" in text
+assert "p15-7-postgres-ownership.json" not in text
+assert "p13-4-postgres-ownership.json" not in text
+assert "postgres:16.4" not in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
 p15_image_step = text.split("      - name: Prepare pinned P15.7 VM host image\n", 1)[1]
