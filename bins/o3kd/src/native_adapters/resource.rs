@@ -2383,7 +2383,12 @@ impl ResourceApplication for GenericResourceApplication {
         // nor allow this create to durably reference a port the sweep just
         // released. The lock is taken before any network call, matching the
         // sweep's locking.
-        let _orphan_repair_guard = self.compute.orphan_repair_lock_guard().await;
+        let create_wait_marker =
+            std::env::var_os("O3K_TEST_CREATE_LOCK_WAITER_MARKER").map(std::path::PathBuf::from);
+        let _orphan_repair_guard = self
+            .compute
+            .orphan_repair_create_lock_guard(create_wait_marker.as_deref())
+            .await;
         let mut network_ids = Vec::with_capacity(spec.network_ids.len());
         let mut owned_network_ids = Vec::new();
         // Validate all UUID references before creating any endpoint, so a
