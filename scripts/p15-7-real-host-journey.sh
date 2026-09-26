@@ -2532,13 +2532,13 @@ CONTENDING_CREATE_REPAIR_PAUSE_MS=30000
 append_o3kd_repair_pause_env
 CRASH_REPAIR_LOCK_LOG_BASELINE="$(sudo -n wc -l <"$STATE_ROOT/log/o3kd.log" 2>/dev/null || echo 0)"
 start_o3kd_verified
-remove_o3kd_repair_pause_env || die "repair contention pause could not be removed from daemon environment"
-wait_o3kd_readyz "readyz did not reconstruct after the crash restart"
-CRASH_RESTART_MS="$(date +%s%3N)"
 RESTARTED_O3KD_PID="$(read_o3kd_ledger)"
 REPAIR_RELEASE_ENV_CONSUMED=false
 REPAIR_TIMEOUT_ENV_CONSUMED=false
 CREATE_WAITER_ENV_CONSUMED=false
+# Verify the live replacement process consumed the run-owned synchronization
+# settings before removing the source environment file.  This keeps the
+# evidence bound to the exact process that will execute the restart proof.
 if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
   | grep -Fqx "$O3K_REPAIR_RELEASE_ENV_NAME=$CRASH_REPAIR_RELEASE_FILE"; then
   REPAIR_RELEASE_ENV_CONSUMED=true
@@ -2553,6 +2553,9 @@ if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
 fi
 [[ "$REPAIR_RELEASE_ENV_CONSUMED" == true && "$REPAIR_TIMEOUT_ENV_CONSUMED" == true && "$CREATE_WAITER_ENV_CONSUMED" == true ]] \
   || die "restarted o3kd did not consume the run-owned repair synchronization environment"
+remove_o3kd_repair_pause_env || die "repair contention pause could not be removed from daemon environment"
+wait_o3kd_readyz "readyz did not reconstruct after the crash restart"
+CRASH_RESTART_MS="$(date +%s%3N)"
 persist_crash_checkpoint process_restarted running \
   restart_path normal_boot readyz passed restart_unix_ms "$CRASH_RESTART_MS" restarted_pid "$RESTARTED_O3KD_PID" \
   restarted_starttime "$(sudo -n awk '{print $22}' "/proc/$RESTARTED_O3KD_PID/stat" 2>/dev/null || true)" \
