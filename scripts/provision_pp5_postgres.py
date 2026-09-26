@@ -141,6 +141,14 @@ def psql(sql: str, database_url: str = "") -> str:
                            PGDATABASE=urllib.parse.unquote(parsed.path.removeprefix("/")))
         if parsed.username is not None:
             process_env["PGUSER"] = urllib.parse.unquote(parsed.username)
+        tls_fields = {"sslmode": "PGSSLMODE", "sslrootcert": "PGSSLROOTCERT",
+                      "sslcert": "PGSSLCERT", "sslkey": "PGSSLKEY"}
+        tls_values = {}
+        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+            if key not in tls_fields:
+                die("PostgreSQL connection has unsupported connection overrides")
+            tls_values[tls_fields[key]] = value
+        process_env.update(tls_values)
         if parsed.password is not None:
             fd, passfile_name = tempfile.mkstemp(prefix="pp5-pgpass-", text=True)
             passfile = Path(passfile_name)
@@ -151,12 +159,6 @@ def psql(sql: str, database_url: str = "") -> str:
                 handle.flush()
                 os.fsync(handle.fileno())
             process_env["PGPASSFILE"] = str(passfile)
-        tls_fields = {"sslmode": "PGSSLMODE", "sslrootcert": "PGSSLROOTCERT",
-                      "sslcert": "PGSSLCERT", "sslkey": "PGSSLKEY"}
-        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-            if key not in tls_fields:
-                die("PostgreSQL connection has unsupported connection overrides")
-            process_env[tls_fields[key]] = value
         command = ["psql", *flags]
     else:
         command = ["sudo", "-n", "-u", "postgres", "env", "PGCONNECT_TIMEOUT=5",
@@ -422,10 +424,24 @@ def urls_from_env(manifest: dict) -> dict[str, str]:
     return urls
 
 
+def verify_database_ownership(manifest: dict, admin: str) -> None:
+    role = manifest["role"]
+    for purpose in PURPOSES:
+        name = manifest["databases"][purpose]["name"]
+        owner = psql(
+            "SELECT pg_get_userbyid(datdba) FROM pg_database "
+            f"WHERE datname={quote_literal(name)}",
+            admin,
+        )
+        if owner != role:
+            die(f"{purpose} database owner does not match the run-owned role")
+
+
 def verify() -> None:
     manifest = load_manifest()
     if manifest.get("provisioning", {}).get("status") != "completed":
         die("PP.5 PostgreSQL provisioning did not complete")
+    verify_database_ownership(manifest, admin_url())
     urls = urls_from_env(manifest)
     run = manifest["run_id"]
     sha = manifest["source_sha"]
@@ -440,6 +456,7 @@ def cleanup() -> None:
     manifest = load_manifest()
     names = {purpose: manifest["databases"][purpose]["name"] for purpose in PURPOSES}
     admin = admin_url()
+    verify_database_ownership(manifest, admin)
     joined = ",".join(quote_literal(name) for name in names.values())
     psql(f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN ({joined}) AND pid <> pg_backend_pid()", admin)
     for name in names.values():

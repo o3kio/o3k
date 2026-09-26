@@ -77,9 +77,11 @@ credential-bearing connection variables from child-process environments. SQL
 continues to be supplied on stdin and subprocess failures remain redacted.
 
 `scripts/pp5-fast-gate.sh` is the canonical repository-owned entrypoint for
-manual and workflow PostgreSQL prerequisite phases. Its preflight phase is
-deliberately before TestLab mutation; provisioning, verification, and cleanup
-delegate to the same purpose-map authority. Project/operator authentication
-and P13 provider tests remain later phases because they depend on the
-bootstrapped TestLab and built provider surface; the workflow records those
-dependencies rather than pretending they are pre-bootstrap checks.
+manual and workflow PostgreSQL prerequisite phases. Its `qualification` phase
+is deliberately before TestLab mutation: it performs read-only preflight,
+four-DB provision, P13/P13.4 PostgreSQL smoke, sentinel verification, and
+exact cleanup. Provisioning, verification, and cleanup all delegate to the
+same purpose-map authority. Project/operator authentication and provider/LVM
+tests remain later phases because they depend on the bootstrapped TestLab and
+built provider surface; the workflow records those dependencies rather than
+pretending they are pre-bootstrap checks.

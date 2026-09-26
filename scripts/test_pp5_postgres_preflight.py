@@ -226,6 +226,18 @@ class PreflightTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             pg.load_manifest()
 
+    def test_database_owner_must_match_manifest_role(self):
+        manifest = {
+            "role": pg.expected_role("preflight_unit"),
+            "databases": {
+                purpose: {"name": name}
+                for purpose, name in pg.expected_names("preflight_unit").items()
+            },
+        }
+        with patch.object(pg, "psql", return_value="foreign_role"), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            pg.verify_database_ownership(manifest, os.environ["O3K_PP5_POSTGRES_ADMIN_URL"])
+
     def test_psql_redacts_failures_and_timeout(self):
         for error in (subprocess.CalledProcessError(2, ["psql"], stderr="DO_NOT_LOG"),
                       subprocess.TimeoutExpired(["psql"], 30, stderr="DO_NOT_LOG"),
@@ -235,6 +247,13 @@ class PreflightTests(unittest.TestCase):
                     contextlib.redirect_stderr(stream), self.assertRaises(SystemExit):
                 pg.psql("SELECT 1", os.environ["O3K_PP5_POSTGRES_ADMIN_URL"])
             self.assertNotIn("DO_NOT_LOG", stream.getvalue())
+
+    def test_rejected_connection_override_does_not_leave_passfile(self):
+        url = "postgresql://admin:DO_NOT_LOG@127.0.0.1:5432/postgres?host=evil.invalid"
+        before = set(Path(tempfile.gettempdir()).glob("pp5-pgpass-*"))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            pg.psql("SELECT 1", url)
+        self.assertEqual(before, set(Path(tempfile.gettempdir()).glob("pp5-pgpass-*")))
 
 
 if __name__ == "__main__":

@@ -62,15 +62,18 @@ jobs:
           mkdir -p target
           printf 'tested_source_sha=%s\n' "${TARGET_SHA}" > target/tested-source-sha.txt
 
-      # Check the external dependency before Keycloak/TestLab/LVM mutation.
+      # Qualify the external dependency before Keycloak/TestLab/LVM mutation.
       # A runner label is not proof of PostgreSQL configuration or privileges.
-      - name: Verify PP.5 PostgreSQL prerequisites before host mutation
+      # This owns fresh four-DB provision, sentinel/P13 smoke, verification,
+      # and exact cleanup; the later campaign provision is a separate fresh
+      # runtime map.
+      - name: Run PP5 fast PostgreSQL prerequisite qualification
         env:
           O3K_PP5_RUN_ID: ${{ github.run_id }}
           O3K_PP5_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
           O3K_PP5_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_PP5_POSTGRES_ADMIN_URL: ${{ secrets.O3K_PP5_POSTGRES_ADMIN_URL }}
-        run: bash scripts/pp5-fast-gate.sh preflight
+        run: bash scripts/pp5-fast-gate.sh qualification
 
       - name: Protected P15.7 authority and capacity preflight
         id: protected_preflight
