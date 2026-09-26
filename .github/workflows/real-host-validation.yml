@@ -62,6 +62,16 @@ jobs:
           mkdir -p target
           printf 'tested_source_sha=%s\n' "${TARGET_SHA}" > target/tested-source-sha.txt
 
+      # Check the external dependency before Keycloak/TestLab/LVM mutation.
+      # A runner label is not proof of PostgreSQL configuration or privileges.
+      - name: Verify PP.5 PostgreSQL prerequisites before host mutation
+        env:
+          O3K_PP5_RUN_ID: ${{ github.run_id }}
+          O3K_PP5_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_PP5_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_PP5_POSTGRES_ADMIN_URL: ${{ secrets.O3K_PP5_POSTGRES_ADMIN_URL }}
+        run: bash scripts/pp5-fast-gate.sh preflight
+
       - name: Protected P15.7 authority and capacity preflight
         id: protected_preflight
         continue-on-error: true
@@ -741,6 +751,7 @@ jobs:
             target/real-host-workflow-artifacts/p15-7-gate-result.json
             target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json
             target/real-host-workflow-artifacts/p15-7-protected-preflight.json
+            target/real-host-workflow-artifacts/pp5-postgres-preflight*.json
             target/real-host-workflow-artifacts/pp5-postgres-purpose-map.json
             target/real-host-workflow-artifacts/p13-4-volume-trace.jsonl
             target/real-host-workflow-artifacts/p13-4-storage-evidence.json
