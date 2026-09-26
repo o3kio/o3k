@@ -338,7 +338,8 @@ class PreflightTests(unittest.TestCase):
     def test_psql_redacts_failures_and_timeout(self):
         for error in (subprocess.CalledProcessError(2, ["psql"], stderr="DO_NOT_LOG"),
                       subprocess.TimeoutExpired(["psql"], 30, stderr="DO_NOT_LOG"),
-                      FileNotFoundError("DO_NOT_LOG")):
+                      FileNotFoundError("DO_NOT_LOG"),
+                      ValueError("DO_NOT_LOG")):
             stream = io.StringIO()
             with patch.object(pg.subprocess, "run", side_effect=error), \
                     contextlib.redirect_stderr(stream), self.assertRaises(SystemExit):

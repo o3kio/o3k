@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Canonical, cheap PP.5 PostgreSQL prerequisite entrypoint.  Both the
-# protected workflow and manual qualification invoke this wrapper; it only
-# delegates to the repository-owned purpose-map authority and never performs
-# TestLab/VM provisioning.
+# Canonical, cheap PP.5 PostgreSQL prerequisite entrypoint. Both the protected
+# workflow and manual qualification invoke this wrapper; it only delegates to
+# the repository-owned purpose-map authority and never performs TestLab/VM
+# provisioning.
 
 phase="${1:-}"
 case "${phase}" in
@@ -13,6 +13,23 @@ case "${phase}" in
     ;;
   qualification)
     (
+      repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+      cd "${repo_root}"
+      expected_sha="${O3K_PP5_SOURCE_SHA:?O3K_PP5_SOURCE_SHA must identify the exact checkout}"
+      [[ "${expected_sha}" =~ ^[0-9a-fA-F]{40}$ ]] || {
+        printf 'PP5 fast gate requires a full source SHA\n' >&2
+        exit 2
+      }
+      actual_sha="$(git rev-parse HEAD)"
+      expected_sha="$(printf '%s' "${expected_sha}" | tr '[:upper:]' '[:lower:]')"
+      test "${actual_sha}" = "${expected_sha}" || {
+        printf 'PP5 fast gate source mismatch: expected %s, got %s\n' "${expected_sha}" "${actual_sha}" >&2
+        exit 2
+      }
+      git diff --quiet && git diff --cached --quiet || {
+        printf 'PP5 fast gate requires a clean tracked tree\n' >&2
+        exit 2
+      }
       cleanup_on_exit() {
         rc=$?
         if [[ -f "${O3K_PP5_ARTIFACT_DIR:-target/real-host-workflow-artifacts}/pp5-postgres-purpose-map.json" ]]; then
@@ -27,9 +44,9 @@ case "${phase}" in
       # The mode-0600 file is run-owned and is never echoed or traced.
       . "${O3K_PP5_ENV_FILE:-target/pp5-postgres.env}"
       set +a
-      # Destructive tests receive only their purpose-owned URL.  Keep the other
-      # purpose URLs in the parent shell for verify-p13, but never expose them to
-      # a test process that could accidentally select a different database.
+      # Destructive tests receive only their purpose-owned URL. Keep the other
+      # purpose URLs in the parent shell for verify-p13, but never expose them
+      # to a test process that could accidentally select a different database.
       (
         export O3K_DATABASE_BACKEND=postgres
         export O3K_TEST_DATABASE_PURPOSE=p13

@@ -188,7 +188,7 @@ def psql(sql: str, database_url: str = "") -> str:
                                 check=True, text=True, capture_output=True)
     except subprocess.TimeoutExpired:
         die("PostgreSQL command timed out; diagnostics withheld")
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         code = getattr(exc, "returncode", "unavailable")
         die(f"PostgreSQL command failed (exit={code}); diagnostics withheld")
     finally:
