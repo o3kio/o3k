@@ -194,10 +194,12 @@ pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
         return;
     };
     let sweep_id = uuid::Uuid::new_v4().to_string();
+    let published_at = chrono::Utc::now().to_rfc3339();
     let checkpoint = serde_json::json!({
         "schema_version": 1,
         "run_id": run_id,
         "sweep_id": sweep_id,
+        "published_at": published_at,
         "server_id": server_id,
         "endpoint_id": endpoint_id,
         "phase": "orphan_confirmed",

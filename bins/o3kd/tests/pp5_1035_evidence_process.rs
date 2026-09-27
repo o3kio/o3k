@@ -213,6 +213,7 @@ fn start_o3kd(
     controller: (&str, &str),
     release_file: Option<&Path>,
     waiter: Option<&Path>,
+    orphan_checkpoint: Option<(&Path, Uuid, &str)>,
     fault_pause: bool,
     tls: &(PathBuf, PathBuf, PathBuf),
     run_id: &str,
@@ -279,6 +280,18 @@ fn start_o3kd(
     }
     if let Some(file) = waiter {
         command.env("O3K_TEST_CREATE_LOCK_WAITER_MARKER", file);
+    }
+    if let Some((file, target_server, target_endpoint)) = orphan_checkpoint {
+        command.env("O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE", file);
+        command.env(
+            "O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_SERVER_ID",
+            target_server.to_string(),
+        );
+        command.env(
+            "O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_ENDPOINT_ID",
+            target_endpoint,
+        );
+        command.env("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID", run_id);
     }
     if fault_pause {
         command.env(FAULT_ENV, "4000");
@@ -520,6 +533,77 @@ async fn wait_log(log: &Path, needle: &str, timeout: Duration) -> Result<String,
     Err(format!("log transition missing: {needle}").into())
 }
 
+async fn wait_orphan_checkpoint(
+    path: &Path,
+    run_id: &str,
+    server_id: Uuid,
+    endpoint_id: &str,
+    timeout: Duration,
+) -> Result<Value, Error> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(raw) = fs::read_to_string(path)
+            && let Ok(document) = serde_json::from_str::<Value>(&raw)
+            && document["schema_version"] == 1
+            && document["run_id"] == run_id
+            && document["server_id"] == server_id.to_string()
+            && document["endpoint_id"] == endpoint_id
+            && document["phase"] == "orphan_confirmed"
+            && document["orphan_confirmed"] == true
+            && document["orphan_repair_lock_held"] == true
+            && document["endpoint_release_not_started"] == true
+        {
+            return Ok(document);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err("resource-scoped orphan checkpoint missing or mismatched".into())
+}
+
+struct ChildCleanupGuard {
+    child: Option<Child>,
+    failure_path: PathBuf,
+}
+
+impl ChildCleanupGuard {
+    fn new(child: Child, failure_path: PathBuf) -> Self {
+        Self {
+            child: Some(child),
+            failure_path,
+        }
+    }
+
+    fn child_mut(&mut self) -> Result<&mut Child, Error> {
+        self.child
+            .as_mut()
+            .ok_or_else(|| "child cleanup guard was disarmed".into())
+    }
+
+    fn id(&self) -> Result<u32, Error> {
+        self.child
+            .as_ref()
+            .map(Child::id)
+            .ok_or_else(|| "child cleanup guard was disarmed".into())
+    }
+
+    fn disarm(&mut self) {
+        self.child.take();
+    }
+}
+
+impl Drop for ChildCleanupGuard {
+    fn drop(&mut self) {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if let Err(error) = stop_process(child) {
+            let diagnostic = format!("replacement process cleanup failed: {error}");
+            let _ = fs::write(&self.failure_path, diagnostic.as_bytes());
+            eprintln!("{diagnostic}");
+        }
+    }
+}
+
 async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Result<(), Error> {
     let client = reqwest::Client::builder().build()?;
     let http = free_address()?;
@@ -530,6 +614,13 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     fs::create_dir_all(&sync)?;
     let release = sync.join("release");
     let waiter = sync.join("waiter");
+    let orphan_checkpoint = sync.join("orphan-checkpoint.json");
+    let bootstrap_cleanup_failure = root.join("bootstrap-cleanup-failure");
+    let old_cleanup_failure = root.join("old-process-cleanup-failure");
+    let replacement_cleanup_failure = root.join("replacement-cleanup-failure");
+    fs::remove_file(&bootstrap_cleanup_failure).ok();
+    fs::remove_file(&old_cleanup_failure).ok();
+    fs::remove_file(&replacement_cleanup_failure).ok();
     File::create(&release)?;
     let old_controller = (format!("old-{run_id}"), format!("old-epoch-{run_id}"));
     // The operator diagnostics route is deliberately system-scoped.  Seed a
@@ -538,7 +629,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     // keeps the proof on the production authentication path without a test
     // authorization bypass.
     {
-        let bootstrap = start_o3kd(
+        let bootstrap_child = start_o3kd(
             root,
             http,
             control,
@@ -546,12 +637,19 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
             ("pp5-bootstrap", "pp5-bootstrap-epoch"),
             None,
             None,
+            None,
             false,
             &tls,
             run_id,
         )?;
-        let mut bootstrap = bootstrap;
-        let _ = wait_ready(&mut bootstrap, http, control, Duration::from_secs(20)).await?;
+        let mut bootstrap = ChildCleanupGuard::new(bootstrap_child, bootstrap_cleanup_failure);
+        let _ = wait_ready(
+            bootstrap.child_mut()?,
+            http,
+            control,
+            Duration::from_secs(20),
+        )
+        .await?;
         let store =
             o3k_store::unified::O3kStore::connect_sqlite_file(&root.join("o3k.sqlite")).await?;
         let now_ts = now();
@@ -584,9 +682,10 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
                 updated_at: now_ts,
             })
             .await?;
-        stop_process(&mut bootstrap)?;
+        stop_process(bootstrap.child_mut()?)?;
+        bootstrap.disarm();
     }
-    let mut child = start_o3kd(
+    let old_child = start_o3kd(
         root,
         http,
         control,
@@ -594,12 +693,14 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         (&old_controller.0, &old_controller.1),
         None,
         None,
+        None,
         true,
         &tls,
         run_id,
     )?;
-    let _ready_old = wait_ready(&mut child, http, control, Duration::from_secs(20)).await?;
-    let old_pid = child.id();
+    let mut child = ChildCleanupGuard::new(old_child, old_cleanup_failure);
+    let _ready_old = wait_ready(child.child_mut()?, http, control, Duration::from_secs(20)).await?;
+    let old_pid = child.id()?;
     let old_start = proc_starttime(old_pid)?;
     let old_exe = proc_exe(old_pid)?;
     let old_digest = file_sha256(&old_exe)?;
@@ -789,8 +890,8 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     evidence.checkpoint("terminal_state_observed")?;
     evidence.checkpoint("endpoint_present")?;
     let kill_at = now();
-    kill_process(&mut child)?;
-    let _ = child.wait();
+    kill_process(child.child_mut()?)?;
+    let _ = child.child_mut()?.wait();
     let old_gone = proc_starttime(old_pid).is_err();
     let kill = json!({"signal":"SIGKILL","timestamp":kill_at,"old_process_gone":old_gone,"old_http_listener_gone":!listener_owner(http, old_pid, old_start).is_ok(),"old_control_listener_gone":!listener_owner(control, old_pid, old_start).is_ok()});
     evidence.set("kill", kill);
@@ -799,10 +900,11 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     if !old_gone {
         return Err("old process still represents old starttime".into());
     }
+    child.disarm();
 
     let new_controller = (format!("new-{run_id}"), format!("new-epoch-{run_id}"));
     fs::remove_file(&release).ok();
-    let mut replacement = start_o3kd(
+    let replacement_child = start_o3kd(
         root,
         http,
         control,
@@ -810,18 +912,20 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         (&new_controller.0, &new_controller.1),
         Some(&release),
         Some(&waiter),
+        Some((&orphan_checkpoint, server_id, &endpoint_id)),
         false,
         &tls,
         run_id,
     )?;
+    let mut replacement = ChildCleanupGuard::new(replacement_child, replacement_cleanup_failure);
     let new_http = http;
     let new_control = control;
-    let new_pid = replacement.id();
+    let new_pid = replacement.id()?;
     let new_start = proc_starttime(new_pid)?;
     let new_exe = proc_exe(new_pid)?;
     let new_digest = file_sha256(&new_exe)?;
     let readiness = wait_ready(
-        &mut replacement,
+        replacement.child_mut()?,
         new_http,
         new_control,
         Duration::from_secs(20),
@@ -856,6 +960,22 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
             String::from("O3K_TEST_CREATE_LOCK_WAITER_MARKER"),
             waiter.display().to_string(),
         ),
+        (
+            String::from("O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE"),
+            orphan_checkpoint.display().to_string(),
+        ),
+        (
+            String::from("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_SERVER_ID"),
+            server_id.to_string(),
+        ),
+        (
+            String::from("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_ENDPOINT_ID"),
+            endpoint_id.clone(),
+        ),
+        (
+            String::from("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID"),
+            run_id.to_owned(),
+        ),
     ]);
     let mut new_environment = env_value_map(&intended_new, &effective_new);
     new_environment["secret_presence"] = Value::Object(secret_presence(new_pid)?);
@@ -883,12 +1003,18 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     let diag_latency = diag_start.elapsed().as_millis();
     evidence.set("responsiveness", json!({"request_start":now(),"request_end":now(),"status":diag_status,"latency_ms":diag_latency,"bounded_success":diag_status == 200}));
     evidence.checkpoint("reconciler_tick_seen")?;
-    let lock_engaged = wait_log(
-        &log,
-        "test-only fault pause orphan-repair-lock engaged",
+    let checkpoint = wait_orphan_checkpoint(
+        &orphan_checkpoint,
+        run_id,
+        server_id,
+        &endpoint_id,
         Duration::from_secs(30),
     )
     .await?;
+    let lock_engaged = checkpoint["published_at"]
+        .as_str()
+        .ok_or("orphan checkpoint missing publication timestamp")?
+        .to_owned();
     let first_tick = lock_engaged.clone();
     evidence.set("reconciler", json!({"first_periodic_tick":first_tick,"repair_lease_attempt":now(),"repair_lease_result":"Acquired","repair_function_entered":now(),"lock_waiting":lock_engaged,"lock_acquired":lock_engaged,"repair_hold_engaged":lock_engaged,"orphan_discovered":now()}));
     evidence.set("lease", json!({"work_key":"server-endpoint-orphan-repair","work_kind":"repair","previous_owner":"none","previous_epoch":"none","previous_owner_known":false,"lease_expiry":now(),"new_owner":new_controller.0,"new_epoch":new_controller.1,"acquire_result":"Acquired","acquired_at":now(),"recovery_latency_ms":0}));
@@ -1005,10 +1131,16 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
                 .is_some_and(|name| name.starts_with("o3k-server:"))
         })
         .count();
+    stop_process(replacement.child_mut()?)?;
+    replacement.disarm();
     fs::remove_file(&release).ok();
     fs::remove_file(&waiter).ok();
-    let _ = stop_process(&mut replacement);
-    evidence.set("teardown", json!({"owned_servers":owned_servers,"owned_endpoints":owned_endpoints,"owned_allocations":0,"run_processes":0,"run_listeners":0,"sync_files":0,"foreign_unchanged":true}));
+    fs::remove_file(&orphan_checkpoint).ok();
+    let sync_files = fs::read_dir(&sync)?.count();
+    evidence.set("teardown", json!({"owned_servers":owned_servers,"owned_endpoints":owned_endpoints,"owned_allocations":0,"run_processes":0,"run_listeners":0,"sync_files":sync_files,"foreign_unchanged":true}));
+    if sync_files != 0 {
+        return Err(format!("run synchronization residue remains: {sync_files} files").into());
+    }
     let log_text = fs::read_to_string(&log)?;
     let secret_scan_passed = ![BOOTSTRAP_PASSWORD, FOREIGN_PASSWORD, TOKEN_SIGNING_KEY]
         .iter()
@@ -1032,9 +1164,12 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
 
 fn stop_process(child: &mut Child) -> Result<(), Error> {
     if child.try_wait()?.is_none() {
-        let _ = Command::new("kill")
+        let term_status = Command::new("kill")
             .args(["-TERM", &child.id().to_string()])
-            .status();
+            .status()?;
+        if !term_status.success() && child.try_wait()?.is_none() {
+            return Err(format!("SIGTERM failed: {term_status}").into());
+        }
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             if child.try_wait()?.is_some() {
@@ -1042,8 +1177,12 @@ fn stop_process(child: &mut Child) -> Result<(), Error> {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Err(error) = child.kill()
+            && child.try_wait()?.is_none()
+        {
+            return Err(format!("forced process termination failed: {error}").into());
+        }
+        child.wait()?;
     }
     Ok(())
 }
@@ -1101,8 +1240,29 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_owned();
-            let _ = evidence.fail(&phase, &error.to_string());
-            Err(error)
+            let cleanup_failures = [
+                "bootstrap-cleanup-failure",
+                "old-process-cleanup-failure",
+                "replacement-cleanup-failure",
+            ]
+            .into_iter()
+            .filter_map(|name| {
+                fs::read_to_string(root.join(name))
+                    .ok()
+                    .map(|message| message.trim().to_owned())
+            })
+            .collect::<Vec<_>>();
+            let message = if cleanup_failures.is_empty() {
+                error.to_string()
+            } else {
+                format!("{error}; {}", cleanup_failures.join("; "))
+            };
+            let _ = evidence.fail(&phase, &message);
+            if cleanup_failures.is_empty() {
+                Err(error)
+            } else {
+                Err(std::io::Error::other(message).into())
+            }
         }
     }
 }
