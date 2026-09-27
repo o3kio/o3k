@@ -425,6 +425,8 @@ def validate(
                     fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must match server_c.resource_id")
                 if fault_armed is not None and target_resource_id != fault_armed.get("target_resource_id"):
                     fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must match fault_armed.target_resource_id")
+                if fault_armed is not None and fault_armed.get("target_env_consumed") not in (True, "true"):
+                    fail(errors, "journey.crash_injection_repair.fault_armed.target_env_consumed must be true")
             endpoint = mapping(crash.get("endpoint_before_crash"), "journey.crash_injection_repair.endpoint_before_crash", errors)
             if endpoint is not None:
                 if endpoint.get("existed") is not True:

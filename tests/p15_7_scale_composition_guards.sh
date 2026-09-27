@@ -226,7 +226,7 @@ doc = {
     "remove_rejoin_replace":True,"restart_recovery":True,
     "crash_injection_repair":{"schema_version":2,"phase":"completed","status":"passed",
       "checkpoints":[{"phase":phase,"status":"passed" if phase == "completed" else "running",
-        **({"target_resource_id":"66666666-6666-4666-8666-666666666666"}
+        **({"target_resource_id":"66666666-6666-4666-8666-666666666666", "target_env_consumed":"true"}
            if phase == "fault_armed" else {}),
         **({"pid":"4242","starttime":"123","executable":"/run/o3k/bin/o3kd",
             "http_listener_pid":"4242","control_listener_pid":"4242","state_root":"/run/o3k"}
@@ -315,6 +315,36 @@ PY
 env -u O3K_P15_7_ARAF_URL python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
   --expected-source-sha 0123456789abcdef0123456789abcdef01234567 \
   --expected-profile small-edge-cloud
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+fault = d["journey"]["crash_injection_repair"]
+fault["fault_hook"]["target_env"] = "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "unscoped endpoint-release fault hook accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+fault = d["journey"]["crash_injection_repair"]
+fault["fault_hook"]["target_env"] = "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID"
+fault["fault_hook"]["target_resource_id"] = "88888888-8888-4888-8888-888888888888"
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "mismatched endpoint-release fault target accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+fault = d["journey"]["crash_injection_repair"]
+fault["fault_hook"]["target_resource_id"] = fault["server_c"]["resource_id"]
+fault["checkpoints"][0]["target_resource_id"] = fault["server_c"]["resource_id"]
+fault["checkpoints"][0]["target_env_consumed"] = "true"
+p.write_text(json.dumps(d))
+PY
 python3 - "${EVIDENCE}" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
