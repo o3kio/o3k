@@ -344,8 +344,8 @@ def validate(
             checkpoints = crash.get("checkpoints")
             required_checkpoints = [
                 "fault_armed", "terminal_state_observed", "endpoint_present_pre_crash",
-                "process_killed", "process_restarted", "repair_lock_acquired",
-                "contending_create_started", "orphan_discovered", "repair_completed",
+                "process_identity_armed", "process_killed", "process_restarted", "repair_lock_acquired",
+                "contending_create_waiting", "contending_create_started", "orphan_discovered", "repair_completed",
                 "contending_create_accepted", "accounting_verified", "completed",
             ]
             if not isinstance(checkpoints, list):
@@ -360,6 +360,49 @@ def validate(
                         fail(errors, f"#1035 checkpoint {required} missing or out of order")
                 if checkpoints and checkpoints[-1].get("status") != "passed":
                     fail(errors, "#1035 final checkpoint must be passed")
+                identity = next(
+                    (item for item in checkpoints
+                     if isinstance(item, dict) and item.get("phase") == "process_identity_armed"),
+                    None,
+                )
+                killed = next(
+                    (item for item in checkpoints
+                     if isinstance(item, dict) and item.get("phase") == "process_killed"),
+                    None,
+                )
+                if identity is not None:
+                    for field in ("pid", "starttime", "executable", "http_listener_pid",
+                                  "control_listener_pid", "state_root"):
+                        value = identity.get(field)
+                        if not isinstance(value, str) or not value.strip():
+                            fail(errors, f"#1035 process_identity_armed.{field} must be a non-empty string")
+                    if isinstance(identity.get("pid"), str) and not identity["pid"].isdigit():
+                        fail(errors, "#1035 process_identity_armed.pid must be numeric")
+                    if isinstance(identity.get("starttime"), str) and not identity["starttime"].isdigit():
+                        fail(errors, "#1035 process_identity_armed.starttime must be numeric")
+                    for field in ("http_listener_pid", "control_listener_pid"):
+                        if isinstance(identity.get(field), str) and not identity[field].isdigit():
+                            fail(errors, f"#1035 process_identity_armed.{field} must be numeric")
+                    state_root = identity.get("state_root")
+                    executable = identity.get("executable")
+                    if isinstance(state_root, str) and isinstance(executable, str):
+                        if not state_root.startswith("/") or state_root == "/":
+                            fail(errors, "#1035 process_identity_armed.state_root must be a non-root absolute path")
+                        if executable != state_root.rstrip("/") + "/bin/o3kd":
+                            fail(errors, "#1035 process_identity_armed.executable must be state_root/bin/o3kd")
+                    if isinstance(identity.get("pid"), str):
+                        for field in ("http_listener_pid", "control_listener_pid"):
+                            if identity.get(field) != identity["pid"]:
+                                fail(errors, f"#1035 process_identity_armed.{field} must equal pid")
+                if identity is not None and killed is not None:
+                    for identity_field, killed_field in (
+                        ("pid", "pid"), ("starttime", "old_starttime"),
+                        ("executable", "old_executable"),
+                        ("http_listener_pid", "old_http_listener_pid"),
+                        ("control_listener_pid", "old_control_listener_pid"),
+                    ):
+                        if identity.get(identity_field) != killed.get(killed_field):
+                            fail(errors, f"#1035 process identity does not match process_killed.{killed_field}")
             passed(crash.get("status"), "journey.crash_injection_repair.status", errors)
             hook = mapping(crash.get("fault_hook"), "journey.crash_injection_repair.fault_hook", errors)
             if hook is not None:

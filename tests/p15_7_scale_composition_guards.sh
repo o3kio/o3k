@@ -21,6 +21,16 @@ assert doc["status"] == "failed" and doc["failure_phase"] == "post_restart_asser
 assert [item["phase"] for item in doc["checkpoints"]] == ["process_restarted", "process_restarted"]
 assert not list(path.parent.glob(f".{path.name}.*")), "atomic writer left a temporary artifact"
 PY
+# The real journey records process identity before SIGKILL; the writer and
+# aggregate validator must accept and require this ownership checkpoint.
+python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "${WORK_DIR}/process-identity-evidence.json" \
+  process_identity_armed running pid 4242 starttime 123 executable /run/o3kd
+python3 - "${WORK_DIR}/process-identity-evidence.json" <<'PY'
+import json, pathlib, sys
+doc = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert doc["phase"] == "process_identity_armed"
+assert doc["checkpoints"][0]["pid"] == "4242"
+PY
 PYTHONPATH="${ROOT_DIR}/scripts${PYTHONPATH:+:${PYTHONPATH}}" python3 - <<'PY'
 from p15_7_scale_semantics import validate_bootstrap_scale_membership
 
@@ -215,9 +225,15 @@ doc = {
         "deleted_workload_absent_from_blockers":True}},
     "remove_rejoin_replace":True,"restart_recovery":True,
     "crash_injection_repair":{"schema_version":2,"phase":"completed","status":"passed",
-      "checkpoints":[{"phase":phase,"status":"passed" if phase == "completed" else "running"} for phase in
-        ["fault_armed","terminal_state_observed","endpoint_present_pre_crash","process_killed",
-         "process_restarted","repair_lock_acquired","contending_create_started","orphan_discovered",
+      "checkpoints":[{"phase":phase,"status":"passed" if phase == "completed" else "running",
+        **({"pid":"4242","starttime":"123","executable":"/run/o3k/bin/o3kd",
+            "http_listener_pid":"4242","control_listener_pid":"4242","state_root":"/run/o3k"}
+           if phase == "process_identity_armed" else {}),
+        **({"pid":"4242","old_starttime":"123","old_executable":"/run/o3k/bin/o3kd",
+            "old_http_listener_pid":"4242","old_control_listener_pid":"4242"}
+           if phase == "process_killed" else {})} for phase in
+        ["fault_armed","terminal_state_observed","endpoint_present_pre_crash","process_identity_armed","process_killed",
+         "process_restarted","repair_lock_acquired","contending_create_waiting","contending_create_started","orphan_discovered",
          "repair_completed","contending_create_accepted","accounting_verified","completed"]],
       "fault_hook":{"env":"O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS","pause_ms":45000,
         "semantics":"positive-ms sleep on the delete path after durable terminalization commits and before endpoint release"},
@@ -295,6 +311,48 @@ PY
 env -u O3K_P15_7_ARAF_URL python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
   --expected-source-sha 0123456789abcdef0123456789abcdef01234567 \
   --expected-profile small-edge-cloud
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+for item in d["journey"]["crash_injection_repair"]["checkpoints"]:
+    if item.get("phase") == "process_identity_armed":
+        item["pid"] = ""
+        break
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "empty process identity payload accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+for item in d["journey"]["crash_injection_repair"]["checkpoints"]:
+    if item.get("phase") == "process_identity_armed":
+        item["pid"] = "4242"
+        break
+p.write_text(json.dumps(d))
+PY
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+for item in d["journey"]["crash_injection_repair"]["checkpoints"]:
+    if item.get("phase") == "process_identity_armed":
+        item["executable"] = "/tmp/not-o3kd"
+        break
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "non-owned process executable accepted by P15.7 validator" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+for item in d["journey"]["crash_injection_repair"]["checkpoints"]:
+    if item.get("phase") == "process_identity_armed":
+        item["executable"] = "/run/o3k/bin/o3kd"
+        break
+p.write_text(json.dumps(d))
+PY
 python3 - "${EVIDENCE}" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
