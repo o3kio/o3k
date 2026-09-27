@@ -118,15 +118,40 @@ jobs:
           set -euo pipefail
           # Keep all disposable endpoints isolated from stale or ambient host
           # services while retaining the bootstrap script's fail-closed port
-          # ownership checks.
-          offset=$((GITHUB_RUN_ID % 1000))
+          # ownership checks.  A deterministic offset alone is insufficient on
+          # a persistent runner: an unrelated service may already own that
+          # offset.  Select the first currently-free triplet in the run-scoped
+          # range and let bootstrap re-check immediately before binding.
+          listeners="$(ss -H -ltn 2>/dev/null)" || {
+            echo "cannot inspect listening TCP ports before TestLab bootstrap" >&2
+            exit 1
+          }
+          port_free() {
+            local port="$1"
+            ! awk -v suffix=":${port}" \
+              'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit found}' \
+              <<<"${listeners}"
+          }
+          start_offset=$((GITHUB_RUN_ID % 1000))
+          selected_offset=""
+          for ((step = 0; step < 1000; step++)); do
+            offset=$(((start_offset + step) % 1000))
+            auth_port=$((28080 + offset))
+            control_port=$((28551 + offset))
+            compute_health_port=$((29100 + offset))
+            if port_free "${auth_port}" && port_free "${control_port}" && port_free "${compute_health_port}"; then
+              selected_offset="${offset}"
+              break
+            fi
+          done
+          [[ -n "${selected_offset}" ]] || {
+            echo "no free run-scoped TestLab port triplet is available" >&2
+            exit 1
+          }
           {
-            # Keep the protected run range separate from the historical
-            # 18080/18551/19100 defaults, which may remain occupied by an
-            # interrupted pre-scoping run on the shared runner.
-            printf 'O3K_TESTLAB_PORT=%s\n' "$((28080 + offset))"
-            printf 'O3K_TESTLAB_CONTROL_PORT=%s\n' "$((28551 + offset))"
-            printf 'O3K_TESTLAB_COMPUTE_HEALTH_PORT=%s\n' "$((29100 + offset))"
+            printf 'O3K_TESTLAB_PORT=%s\n' "$((28080 + selected_offset))"
+            printf 'O3K_TESTLAB_CONTROL_PORT=%s\n' "$((28551 + selected_offset))"
+            printf 'O3K_TESTLAB_COMPUTE_HEALTH_PORT=%s\n' "$((29100 + selected_offset))"
           } >> "$GITHUB_ENV"
 
       - name: Bootstrap disposable TestLab
