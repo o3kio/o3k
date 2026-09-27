@@ -93,10 +93,10 @@ select_free_ports() {
     if ! awk -v suffix=":${auth_port}" \
       'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit found}' \
       <<<"${listeners}" \
-      && ! awk -v suffix=":${control_port}" \
+      || ! awk -v suffix=":${control_port}" \
       'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit found}' \
       <<<"${listeners}" \
-      && ! awk -v suffix=":${compute_health_port}" \
+      || ! awk -v suffix=":${compute_health_port}" \
       'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit found}' \
       <<<"${listeners}"; then
       continue
@@ -319,9 +319,9 @@ if [[ ! -e "$STATE_ROOT" ]]; then
   [[ ! -e "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
     || fail "run inventory state already exists without matching service state"
   if [[ "${AUTO_SELECT_PORTS}" == true ]] && {
-    ! port_is_listening "${AUTH_PORT}" ||
-    ! port_is_listening "${CONTROL_PORT}" ||
-    ! port_is_listening "${COMPUTE_HEALTH_PORT}"
+    port_is_listening "${AUTH_PORT}" ||
+    port_is_listening "${CONTROL_PORT}" ||
+    port_is_listening "${COMPUTE_HEALTH_PORT}"
   }; then
     # The workflow performs an early availability scan, but a persistent host
     # can acquire a port in the gap before bootstrap starts.  Re-select at
