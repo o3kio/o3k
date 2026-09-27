@@ -122,6 +122,130 @@ fn test_fault_target_matches(
     resource_id == Some(target)
 }
 
+/// Return whether the protected crash experiment must keep the terminal
+/// delete release seat parked for this exact resource.  The replacement
+/// process replays the already-terminal delete after a crash; without this
+/// test-only seam that replay can release the endpoint before the orphan
+/// repair sweep observes it.  The seam is deliberately inert unless all of
+/// the following hold:
+///
+/// * the target resource UUID matches;
+/// * the configured run identity matches the live process run identity; and
+/// * the run-owned orphan checkpoint does not exist yet.
+///
+/// The checkpoint path is the phase boundary.  Once the repair sweep publishes
+/// it, replay is allowed to resume and normal production behavior is restored
+/// even though the replacement process inherited its environment at startup.
+fn test_fault_suppress_terminal_delete_release_matches(
+    raw_target: Option<&std::ffi::OsStr>,
+    raw_run: Option<&std::ffi::OsStr>,
+    current_run: Option<&std::ffi::OsStr>,
+    checkpoint_exists: bool,
+    resource_id: uuid::Uuid,
+) -> bool {
+    if checkpoint_exists {
+        return false;
+    }
+    let Some(raw_target) = raw_target else {
+        return false;
+    };
+    let Ok(target) = raw_target.to_string_lossy().parse::<uuid::Uuid>() else {
+        return false;
+    };
+    if target != resource_id {
+        return false;
+    }
+    let Some(raw_run) = raw_run else {
+        return false;
+    };
+    let Some(current_run) = current_run else {
+        return false;
+    };
+    let configured_run = raw_run.to_string_lossy();
+    let live_run = current_run.to_string_lossy();
+    !configured_run.is_empty() && configured_run == live_run
+}
+
+/// Validate the checkpoint that ends the replay-suppression window.  Merely
+/// seeing a file at the expected path is not sufficient: a stale or foreign
+/// marker must not re-enable endpoint release for the current crash target.
+fn test_fault_checkpoint_matches_current_run(
+    path: &std::path::Path,
+    resource_id: uuid::Uuid,
+) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(checkpoint) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let configured_run = std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID");
+    let live_run = std::env::var_os("O3K_PP5_RUN_ID");
+    let target_endpoint = std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_ENDPOINT_ID");
+    let Some(configured_run) = configured_run else {
+        return false;
+    };
+    let Some(live_run) = live_run else {
+        return false;
+    };
+    let Some(target_endpoint) = target_endpoint else {
+        return false;
+    };
+    let configured_run = configured_run.to_string_lossy();
+    let live_run = live_run.to_string_lossy();
+    let target_endpoint = target_endpoint.to_string_lossy();
+    let Some(server_id) = checkpoint
+        .get("server_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(endpoint_id) = checkpoint
+        .get("endpoint_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    configured_run == live_run
+        && !configured_run.is_empty()
+        && checkpoint
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1)
+        && checkpoint.get("run_id").and_then(serde_json::Value::as_str)
+            == Some(configured_run.as_ref())
+        && server_id == resource_id.to_string()
+        && endpoint_id == target_endpoint
+        && checkpoint.get("phase").and_then(serde_json::Value::as_str) == Some("orphan_confirmed")
+        && checkpoint
+            .get("orphan_confirmed")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("orphan_repair_lock_held")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("endpoint_release_not_started")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+/// Runtime wrapper for [`test_fault_suppress_terminal_delete_release_matches`].
+/// This only reads test-only environment and never changes production behavior.
+pub(crate) fn test_fault_suppress_terminal_delete_release(resource_id: uuid::Uuid) -> bool {
+    let checkpoint_published = std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE")
+        .map(std::path::PathBuf::from)
+        .is_some_and(|path| test_fault_checkpoint_matches_current_run(&path, resource_id));
+    test_fault_suppress_terminal_delete_release_matches(
+        std::env::var_os("O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RESOURCE_ID").as_deref(),
+        std::env::var_os("O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RUN_ID").as_deref(),
+        std::env::var_os("O3K_PP5_RUN_ID").as_deref(),
+        checkpoint_published,
+        resource_id,
+    )
+}
+
 /// Test-only repair-pass hold used to queue a port-attaching create behind an
 /// orphan sweep. The harness releases it through a run-owned file after
 /// starting the create request. The timeout is a fail-safe, and a process-local
@@ -658,6 +782,53 @@ mod tests {
         assert!(!test_fault_target_matches(
             Some(std::ffi::OsStr::new(&resource.to_string())),
             None
+        ));
+    }
+
+    #[test]
+    fn terminal_release_replay_suppression_is_run_and_phase_scoped() {
+        let resource = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let resource_text = resource.to_string();
+        let target = std::ffi::OsStr::new(&resource_text);
+        let run = std::ffi::OsStr::new("run-123");
+        let same_run = std::ffi::OsStr::new("run-123");
+        let different_run = std::ffi::OsStr::new("run-456");
+
+        assert!(test_fault_suppress_terminal_delete_release_matches(
+            Some(target),
+            Some(run),
+            Some(same_run),
+            false,
+            resource,
+        ));
+        assert!(!test_fault_suppress_terminal_delete_release_matches(
+            Some(target),
+            Some(run),
+            Some(different_run),
+            false,
+            resource,
+        ));
+        assert!(!test_fault_suppress_terminal_delete_release_matches(
+            Some(target),
+            Some(run),
+            Some(same_run),
+            false,
+            other,
+        ));
+        assert!(!test_fault_suppress_terminal_delete_release_matches(
+            Some(target),
+            Some(run),
+            Some(same_run),
+            true,
+            resource,
+        ));
+        assert!(!test_fault_suppress_terminal_delete_release_matches(
+            Some(target),
+            None,
+            Some(same_run),
+            false,
+            resource,
         ));
     }
 

@@ -357,6 +357,23 @@ impl ComputeService {
             );
             return Ok(());
         };
+        // The replacement process replays the terminal delete after the
+        // crash.  Keep this exact server's endpoint until the resource-scoped
+        // orphan-repair checkpoint is published so the protected #1035
+        // experiment observes the real repair path instead of a replay race.
+        // This is a fail-closed, run-scoped test seam; absent its complete
+        // environment it is a no-op and production behavior is unchanged.
+        if operation.kind == "lifecycle:delete"
+            && state == o3k_store::OperationState::Succeeded
+            && crate::test_fault_suppress_terminal_delete_release(operation.resource_id)
+        {
+            tracing::warn!(
+                operation_id = %operation_id,
+                resource_id = %operation.resource_id,
+                "test-only terminal delete replay release suppressed until orphan checkpoint"
+            );
+            return Ok(());
+        }
         // Issue #1035: a delete release must never touch a port a NEW live
         // server now references (a late or replayed terminal update can race a
         // re-attachment and strip the live server's NIC), and it must be
@@ -513,6 +530,17 @@ impl ComputeService {
         request: &CreateInstanceRequest,
         pause_ms: Option<u64>,
     ) -> Result<(), ComputeError> {
+        // A restarted control plane may enter this request-path replay seat
+        // before the periodic orphan sweep.  Preserve the exact target
+        // endpoint until that sweep publishes its run-owned checkpoint; the
+        // helper is inert without a matching resource/run/phase identity.
+        if crate::test_fault_suppress_terminal_delete_release(request.o3k_server_id) {
+            tracing::warn!(
+                resource_id = %request.o3k_server_id,
+                "test-only terminal release replay suppressed until orphan checkpoint"
+            );
+            return Ok(());
+        }
         let Some(projector) = self.binding_projector.as_ref() else {
             return Ok(());
         };
