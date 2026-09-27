@@ -851,6 +851,19 @@ jobs:
             target/real-host-workflow-artifacts/compute-agent-process-mtls-result.json
             target/real-host-workflow-artifacts/p15-7-scale-composition-evidence.json
             target/real-host-workflow-artifacts/p15-7-gate-result.json
+            target/real-host-workflow-artifacts/p15-7-failure-classification.json
+            target/real-host-workflow-artifacts/p15-7-transient-failures.jsonl
+            target/real-host-workflow-artifacts/p15-7-crash-injection-evidence.json
+            target/real-host-workflow-artifacts/p15-7-crash-endpoint-before.json
+            target/real-host-workflow-artifacts/p15-7-drain-failure-context.json
+            target/real-host-workflow-artifacts/p15-7-drain-blocker-requery.json
+            target/real-host-workflow-artifacts/p15-7-scale-checkpoint-*.json
+            target/real-host-workflow-artifacts/p15-7-vm-lease-*.json
+            target/real-host-workflow-artifacts/p15-7-workload-failure-diagnostics.json
+            target/real-host-workflow-artifacts/p15-7-orphan-repair-diagnostics-*.json
+            target/real-host-workflow-artifacts/p15-7-host-maintenance-evidence.json
+            target/real-host-workflow-artifacts/p15-7-araf-projection.json
+            target/real-host-workflow-artifacts/p15-7-server-c-endpoint-show.json
             target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json
             target/real-host-workflow-artifacts/p15-7-protected-preflight.json
             target/real-host-workflow-artifacts/pp5-postgres-preflight*.json

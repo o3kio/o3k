@@ -12,7 +12,7 @@ source = Path(sys.argv[1]).read_text()
 checks = re.findall(
     r'sudo -n cat "/proc/\$(?:new_pid|RESTARTED_O3KD_PID)/environ"'
     r' 2>/dev/null \| tr.*?\| grep[^\n;]+(?=; then)', source, re.S)
-assert len(checks) == 7, f'expected seven live environment checks, got {len(checks)}'
+assert len(checks) == 8, f'expected eight live environment checks, got {len(checks)}'
 # A real /proc environment larger than pipe buffers reproduces the early
 # grep -q/SIGPIPE false rejection without exposing any real credentials.
 environment = {
@@ -22,6 +22,7 @@ environment = {
     'REPAIR_CHECKPOINT': '/tmp/pp5-guard/checkpoint',
     'REPLAY_SUPPRESS_RESOURCE': '00000000-0000-0000-0000-000000000001',
     'REPLAY_SUPPRESS_RUN': 'guard-run',
+    'O3K_PP5_RUN_ID': 'guard-run',
     **{f'PADDING_{i}': 'x' * 4096 for i in range(64)},
 }
 process = subprocess.Popen(['sleep', '60'], env=environment)
@@ -40,6 +41,7 @@ try:
         'O3K_REPLAY_SUPPRESS_RESOURCE_ENV_NAME': 'REPLAY_SUPPRESS_RESOURCE',
         'WORKLOAD_C': '00000000-0000-0000-0000-000000000001',
         'O3K_REPLAY_SUPPRESS_RUN_ENV_NAME': 'REPLAY_SUPPRESS_RUN',
+        'O3K_PP5_RUN_ENV_NAME': 'O3K_PP5_RUN_ID',
         'RUN_ID': 'guard-run',
     }
     for index, check in enumerate(checks):
@@ -64,6 +66,11 @@ try:
     ledger = launcher.index('>"${O3K_TESTLAB_PID_ROOT:')
     env_check = launcher.index('if ! sudo -n cat')
     assert ledger < env_check, 'verified replacement must be recorded before later rejection'
+    repair_env = source.split('append_o3kd_repair_pause_env() {', 1)[1].split('\nremove_o3kd_repair_pause_env()', 1)[0]
+    assert 'O3K_PP5_RUN_ENV_NAME' in repair_env, 'repair seam must persist the live PP5 run identity'
+    assert 'PP5 run identity missing from o3kd environment' in repair_env, 'repair seam must fail closed when run identity is not persisted'
+    remove_env = source.split('remove_o3kd_repair_pause_env() {', 1)[1].split('\nclear_o3kd_fault_env()', 1)[0]
+    assert 'O3K_PP5_RUN_ENV_NAME=' in remove_env, 'repair cleanup must remove only the run identity seam'
 finally:
     process.terminate()
     process.wait(timeout=5)

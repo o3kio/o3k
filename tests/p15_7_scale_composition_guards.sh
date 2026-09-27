@@ -803,6 +803,9 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "server-owned endpoint orphan repair sweep",
                  "p15-7-drain-blocker-requery.json",
                  "p15-7-crash-injection-evidence.json",
+                 "p15-7-failure-classification.json", "p15-7-crash-endpoint-before.json",
+                 "p15-7-drain-failure-context.json", "p15-7-drain-blocker-requery.json",
+                 "p15-7-workload-failure-diagnostics.json", "p15-7-orphan-repair-diagnostics-",
                  "p15-7-host-maintenance-evidence.json",
                  "p15-7-vm-lease-", "p15-7-transient-failures.jsonl",
                  "record_lease_evidence", "record_transient",
@@ -844,6 +847,16 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "--serial \"file,path=$serial\"",
                  "awk '/MemTotal:/ {print int(\\$2/1024); exit}' /proc/meminfo"):
     assert required in journey, required
+for required_upload in (
+    "p15-7-failure-classification.json", "p15-7-transient-failures.jsonl",
+    "p15-7-crash-injection-evidence.json", "p15-7-crash-endpoint-before.json",
+    "p15-7-drain-failure-context.json", "p15-7-drain-blocker-requery.json",
+    "p15-7-scale-checkpoint-*.json", "p15-7-vm-lease-*.json",
+    "p15-7-workload-failure-diagnostics.json", "p15-7-orphan-repair-diagnostics-*.json",
+    "p15-7-host-maintenance-evidence.json", "p15-7-araf-projection.json",
+    "p15-7-server-c-endpoint-show.json",
+):
+    assert required_upload in upload, required_upload
 # Arm the crash pause only after server C is active and before its delete is
 # dispatched; otherwise unrelated reconciliation work can consume the window.
 arm = journey.index('append_o3kd_fault_env "$WORKLOAD_C"')

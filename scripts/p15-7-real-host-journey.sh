@@ -103,6 +103,7 @@ O3K_REPAIR_CHECKPOINT_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE"
 O3K_REPAIR_TARGET_SERVER_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_SERVER_ID"
 O3K_REPAIR_TARGET_ENDPOINT_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_ENDPOINT_ID"
 O3K_REPAIR_RUN_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID"
+O3K_PP5_RUN_ENV_NAME="O3K_PP5_RUN_ID"
 O3K_REPLAY_SUPPRESS_RESOURCE_ENV_NAME="O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RESOURCE_ID"
 O3K_REPLAY_SUPPRESS_RUN_ENV_NAME="O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RUN_ID"
 # The pause must be long enough for the journey to observe the durable
@@ -572,6 +573,18 @@ append_o3kd_repair_pause_env() {
     "$O3K_REPAIR_RUN_ENV_NAME" "$RUN_ID" \
     | sudo -n tee -a "$STATE_ROOT/o3kd.env" >/dev/null \
     || die "cannot append resource-scoped repair checkpoint to o3kd environment"
+  # The replay-suppression fence independently compares the configured seam
+  # run to O3K_PP5_RUN_ID from the live daemon environment.  The protected
+  # launcher runs under sudo/systemd boundaries, so the workflow's shell
+  # environment is not a safe source for that identity.  Persist the exact
+  # run identity in the same run-owned environment consumed by the verified
+  # replacement process; otherwise a replacement can legally release the
+  # target before the resource-scoped checkpoint is published.
+  printf '%s=%s\n' "$O3K_PP5_RUN_ENV_NAME" "$RUN_ID" \
+    | sudo -n tee -a "$STATE_ROOT/o3kd.env" >/dev/null \
+    || die "cannot append PP5 run identity to o3kd environment"
+  sudo -n grep -Fqx "$O3K_PP5_RUN_ENV_NAME=$RUN_ID" "$STATE_ROOT/o3kd.env" \
+    || die "PP5 run identity missing from o3kd environment"
   printf '%s=%s\n%s=%s\n' \
     "$O3K_REPLAY_SUPPRESS_RESOURCE_ENV_NAME" "$WORKLOAD_C" \
     "$O3K_REPLAY_SUPPRESS_RUN_ENV_NAME" "$RUN_ID" \
@@ -591,6 +604,7 @@ remove_o3kd_repair_pause_env() {
     | grep -Fv "$O3K_REPAIR_TARGET_SERVER_ENV_NAME=" \
     | grep -Fv "$O3K_REPAIR_TARGET_ENDPOINT_ENV_NAME=" \
     | grep -Fv "$O3K_REPAIR_RUN_ENV_NAME=" \
+    | grep -Fv "$O3K_PP5_RUN_ENV_NAME=" \
     | grep -Fv "$O3K_REPLAY_SUPPRESS_RESOURCE_ENV_NAME=" \
     | grep -Fv "$O3K_REPLAY_SUPPRESS_RUN_ENV_NAME=" >"$env_tmp" || true
   sudo -n install -o "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -g "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -m 0600 \
@@ -2985,6 +2999,7 @@ CREATE_WAITER_ENV_CONSUMED=false
 REPAIR_CHECKPOINT_ENV_CONSUMED=false
 REPLAY_SUPPRESS_RESOURCE_ENV_CONSUMED=false
 REPLAY_SUPPRESS_RUN_ENV_CONSUMED=false
+PP5_RUN_ID_ENV_CONSUMED=false
 # Verify the live replacement process consumed the run-owned synchronization
 # settings before removing the source environment file.  This keeps the
 # evidence bound to the exact process that will execute the restart proof.
@@ -3012,8 +3027,13 @@ if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
   | grep -Fx "$O3K_REPLAY_SUPPRESS_RUN_ENV_NAME=$RUN_ID" >/dev/null; then
   REPLAY_SUPPRESS_RUN_ENV_CONSUMED=true
 fi
+if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
+  | grep -Fx "$O3K_PP5_RUN_ENV_NAME=$RUN_ID" >/dev/null; then
+  PP5_RUN_ID_ENV_CONSUMED=true
+fi
 [[ "$REPAIR_RELEASE_ENV_CONSUMED" == true && "$REPAIR_TIMEOUT_ENV_CONSUMED" == true && "$CREATE_WAITER_ENV_CONSUMED" == true && "$REPAIR_CHECKPOINT_ENV_CONSUMED" == true \
-  && "$REPLAY_SUPPRESS_RESOURCE_ENV_CONSUMED" == true && "$REPLAY_SUPPRESS_RUN_ENV_CONSUMED" == true ]] \
+  && "$REPLAY_SUPPRESS_RESOURCE_ENV_CONSUMED" == true && "$REPLAY_SUPPRESS_RUN_ENV_CONSUMED" == true \
+  && "$PP5_RUN_ID_ENV_CONSUMED" == true ]] \
   || die "restarted o3kd did not consume the run-owned repair synchronization environment"
 remove_o3kd_repair_pause_env || die "repair contention pause could not be removed from daemon environment"
 wait_o3kd_readyz "readyz did not reconstruct after the crash restart"
@@ -3030,6 +3050,7 @@ persist_crash_checkpoint process_restarted running \
   create_waiter_env_consumed "$CREATE_WAITER_ENV_CONSUMED" \
   replay_suppression_resource_env_consumed "$REPLAY_SUPPRESS_RESOURCE_ENV_CONSUMED" \
   replay_suppression_run_env_consumed "$REPLAY_SUPPRESS_RUN_ENV_CONSUMED" \
+  pp5_run_id_env_consumed "$PP5_RUN_ID_ENV_CONSUMED" \
   repair_work_key server-endpoint-orphan-repair repair_lease_ttl_seconds 60 \
   repair_interval_seconds 5 repair_lease_takeover "$CRASH_REPAIR_LEASE_TAKEOVER" \
   repair_lock_wait_bound_ms "$CRASH_REPAIR_LOCK_WAIT_BOUND_MS"
