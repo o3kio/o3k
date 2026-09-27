@@ -124,7 +124,7 @@ fi
   || die "P15.7 API read delay is invalid or unbounded"
 [[ "$P15_7_API_READ_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ && "$P15_7_API_READ_TIMEOUT_SECONDS" -le 60 ]] \
   || die "P15.7 API read timeout is invalid or unbounded"
-for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id; do
+for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id setsid ps; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
 [[ "$POSTGRES_MODE" == external || "$POSTGRES_MODE" == disposable ]] \
@@ -695,6 +695,7 @@ early_cleanup() {
   local exit_status=$?
   set +e
   capture_failure_diagnostics "$exit_status"
+  stop_contending_create >/dev/null 2>&1 || true
   clear_o3kd_fault_env >/dev/null 2>&1 || true
   if [[ -n "${CRASH_REPAIR_RELEASE_FILE:-}" ]]; then
     sudo -n rm -f -- "$CRASH_REPAIR_RELEASE_FILE" >/dev/null 2>&1 || true
@@ -944,6 +945,10 @@ secure_remove_credentials() {
 cleanup() {
   local exit_status=$?
   set +e
+  local cleanup_failed=false
+  if ! stop_contending_create; then
+    cleanup_failed=true
+  fi
   if [[ "${CRASH_STARTED:-false}" == true && "${CRASH_PHASE:-}" != completed ]]; then
     python3 "$ROOT_DIR/scripts/p15-7-crash-evidence.py" \
       "$ARTIFACT_DIR/p15-7-crash-injection-evidence.json" \
@@ -958,7 +963,6 @@ cleanup() {
       GITHUB_RUN_ID="$RUN_ID" O3K_P15_7_SOURCE_SHA="$SOURCE_SHA" \
       bash "$KEYCLOAK_AUTHORITY_SCRIPT" cleanup >/dev/null 2>&1 || true
   fi
-  local cleanup_failed=false
   if [[ "$POSTGRES_MODE" == external ]]; then
     # Leaving a run-tagged sever rule behind would wedge every later local
     # consumer of the operator endpoint; a restore failure IS a cleanup
@@ -2443,6 +2447,13 @@ CONTENDING_CREATE_ACTIVE_MS=""
 CONTENDING_CREATE_WAIT_MS=""
 CONTENDING_CREATE_OPERATION_ID=""
 CONTENDING_CREATE_RESOURCE_ID=""
+CONTENDING_CREATE_PID=""
+CONTENDING_CREATE_PGID=""
+CONTENDING_CREATE_STARTTIME=""
+CONTENDING_CREATE_REAPED=false
+CONTENDING_CREATE_WAITER_BOUND_MS=""
+CONTENDING_CREATE_WAITER_WAIT_START_MS=""
+CONTENDING_CREATE_WAITER_WAIT_MS=""
 CONTENDING_CREATE_BOUND_MS=65000
 CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE=false
 CRASH_REPAIR_PAUSE_RELEASED_UNIX_MS=""
@@ -2463,6 +2474,61 @@ persist_crash_checkpoint() {
   CRASH_PHASE="$phase"
   python3 "$ROOT_DIR/scripts/p15-7-crash-evidence.py" "$CRASH_EVIDENCE_FILE" \
     "$phase" "$status" "$@" || die "could not persist #1035 crash evidence phase $phase"
+}
+stop_contending_create() {
+  # Address only the exact run-owned background child, reap it, and remove
+  # only this run's synchronization markers. Never kill by process name.
+  local pid="${CONTENDING_CREATE_PID:-}" pgid="${CONTENDING_CREATE_PGID:-}" marker failed=false current_starttime current_pgid wait_status=0
+  if [[ -n "$pid" ]]; then
+    if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+      echo "P15.7 cleanup: refusing non-numeric contending-create PID" >&2
+      failed=true
+    else
+      if kill -0 "$pid" 2>/dev/null; then
+        current_starttime="$(sudo -n awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+        current_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+        if [[ -z "${CONTENDING_CREATE_STARTTIME:-}" || "$current_starttime" != "$CONTENDING_CREATE_STARTTIME" \
+          || -z "$pgid" || ! "$pgid" =~ ^[0-9]+$ || "$current_pgid" != "$pgid" ]]; then
+          echo "P15.7 cleanup: contending-create PID identity changed before signal: $pid" >&2
+          failed=true
+        fi
+      fi
+      if [[ "$failed" == false ]] && kill -0 "$pid" 2>/dev/null; then
+        kill -TERM -- "-$pgid" 2>/dev/null || true
+        for _ in $(seq 1 50); do
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 0.1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -KILL -- "-$pgid" 2>/dev/null || true
+          for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+          done
+        fi
+      fi
+      wait "$pid" 2>/dev/null || wait_status=$?
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "P15.7 cleanup: contending-create PID remains after reap: $pid" >&2
+        failed=true
+      fi
+      if [[ "$failed" == false && -n "$pgid" ]] && ps -eo pid=,pgid= 2>/dev/null | awk -v pgid="$pgid" '$2 == pgid { found=1 } END { exit found ? 0 : 1 }'; then
+        echo "P15.7 cleanup: contending-create process group remains after reap: $pgid" >&2
+        failed=true
+      fi
+      [[ "$wait_status" -eq 0 || "$failed" == false ]] || failed=true
+    fi
+    if [[ "$failed" == false ]]; then
+      CONTENDING_CREATE_REAPED=true
+      CONTENDING_CREATE_PID=""
+      CONTENDING_CREATE_PGID=""
+    fi
+  fi
+  for marker in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}"; do
+    [[ -n "$marker" ]] || continue
+    sudo -n rm -f -- "$marker" || failed=true
+  done
+  [[ "$failed" == false ]]
 }
 quota_usage() {
   curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
@@ -2696,6 +2762,13 @@ wait "$CRASH_DELETE_PID" 2>/dev/null || true
 CRASH_DELETE_HTTP_CODE="$(tr -d '[:space:]' <"$WORK_ROOT/workload-c-delete.code" 2>/dev/null || true)"
 clear_o3kd_fault_env || die "fault hook could not be cleared from the o3kd environment"
 CONTENDING_CREATE_REPAIR_PAUSE_MS=30000
+[[ "$CONTENDING_CREATE_REPAIR_PAUSE_MS" =~ ^[1-9][0-9]*$ ]] \
+  || die "contending-create repair pause is invalid"
+(( CONTENDING_CREATE_REPAIR_PAUSE_MS >= 10000 && CONTENDING_CREATE_REPAIR_PAUSE_MS <= 120000 )) \
+  || die "contending-create repair pause is outside the bounded contract"
+CONTENDING_CREATE_WAITER_BOUND_MS=$((CONTENDING_CREATE_REPAIR_PAUSE_MS - 5000))
+(( CONTENDING_CREATE_WAITER_BOUND_MS > 0 )) \
+  || die "contending-create waiter bound is invalid"
 append_o3kd_repair_pause_env
 CRASH_REPAIR_LOCK_LOG_BASELINE="$(o3kd_log_line_count)"
 start_o3kd_verified
@@ -2807,24 +2880,47 @@ persist_crash_checkpoint repair_lock_acquired running \
   repair_lock_wait_ms "$CRASH_REPAIR_LOCK_WAIT_MS" repair_lock_wait_bound_ms "$CRASH_REPAIR_LOCK_WAIT_BOUND_MS" \
   repair_lease_takeover "$CRASH_REPAIR_LEASE_TAKEOVER"
 CONTENDING_CREATE_REQUEST_START_MS="$(date +%s%3N)"
-timeout --signal=TERM 67s openstack server create --image "$OS_IMAGE_ID" --flavor "$OS_FLAVOR_ID" --key-name "$OS_KEYPAIR_NAME" \
+setsid --wait timeout --foreground --kill-after=5s --signal=TERM 67s openstack server create --image "$OS_IMAGE_ID" --flavor "$OS_FLAVOR_ID" --key-name "$OS_KEYPAIR_NAME" \
   --nic "port-id=$OS_PORT_D_ID" "o3k-p15-7-$RUN_ID-d" -f value -c id >"$WORK_ROOT/workload-d-create.txt" 2>"$WORK_ROOT/workload-d-create.err" &
 CONTENDING_CREATE_PID=$!
-for _ in $(seq 1 100); do
+CONTENDING_CREATE_PGID="$CONTENDING_CREATE_PID"
+CONTENDING_CREATE_STARTTIME="$(sudo -n awk '{print $22}' "/proc/$CONTENDING_CREATE_PID/stat" 2>/dev/null || true)"
+[[ "$CONTENDING_CREATE_STARTTIME" =~ ^[0-9]+$ ]] \
+  || die "contending existing-port create process starttime could not be recorded"
+[[ "$(ps -o pgid= -p "$CONTENDING_CREATE_PID" 2>/dev/null | tr -d '[:space:]')" == "$CONTENDING_CREATE_PGID" ]] \
+  || die "contending existing-port create process group could not be verified"
+CONTENDING_CREATE_WAITER_WAIT_START_MS="$(date +%s%3N)"
+while :; do
   if sudo -n test -f "$CRASH_REPAIR_WAITER_FILE"; then
     CONTENDING_CREATE_LOCK_WAIT_OBSERVED=true
     CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS="$(date +%s%3N)"
     break
   fi
+  if (( $(date +%s%3N) - CONTENDING_CREATE_WAITER_WAIT_START_MS >= CONTENDING_CREATE_WAITER_BOUND_MS )); then
+    break
+  fi
   sleep 0.1
 done
+CONTENDING_CREATE_WAITER_WAIT_MS="$(( $(date +%s%3N) - CONTENDING_CREATE_WAITER_WAIT_START_MS ))"
 [[ "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED" == true ]] \
-  || die "existing-port create did not observably queue on orphan_repair_lock while repair held it"
+  || {
+    stop_contending_create || true
+    persist_crash_checkpoint contending_create_waiting failed \
+      failure_phase contention_waiter_observation \
+      waiter_wait_start_unix_ms "$CONTENDING_CREATE_WAITER_WAIT_START_MS" \
+      waiter_wait_ms "$CONTENDING_CREATE_WAITER_WAIT_MS" \
+      waiter_wait_bound_ms "$CONTENDING_CREATE_WAITER_BOUND_MS" \
+      create_reaped "$CONTENDING_CREATE_REAPED" || true
+    die "existing-port create did not observably queue on orphan_repair_lock while repair held it (waited ${CONTENDING_CREATE_WAITER_WAIT_MS}ms of ${CONTENDING_CREATE_WAITER_BOUND_MS}ms)"
+  }
 sudo -n rm -f -- "$CRASH_REPAIR_WAITER_FILE" \
   || die "could not remove run-owned create waiter marker"
 persist_crash_checkpoint contending_create_waiting running \
   lock_wait_observed true waiter_marker "$CRASH_REPAIR_WAITER_FILE" \
-  observed_unix_ms "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS"
+  observed_unix_ms "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS" \
+  waiter_wait_start_unix_ms "$CONTENDING_CREATE_WAITER_WAIT_START_MS" \
+  waiter_wait_ms "$CONTENDING_CREATE_WAITER_WAIT_MS" \
+  waiter_wait_bound_ms "$CONTENDING_CREATE_WAITER_BOUND_MS"
 sudo -n touch -- "$CRASH_REPAIR_RELEASE_FILE" \
   || die "could not release the deterministic repair/create overlap seam"
 persist_crash_checkpoint contending_create_started running \
@@ -2874,6 +2970,9 @@ if [[ "$SWEEP_CONVERGED" == true ]]; then
     endpoint_absent true fixed_ip_reusable_pending true repair_latency_ms "$CRASH_REPAIR_OBSERVED_MS"
 fi
 wait "$CONTENDING_CREATE_PID" || die "contending existing-port create failed after orphan repair completed"
+CONTENDING_CREATE_REAPED=true
+CONTENDING_CREATE_PID=""
+CONTENDING_CREATE_PGID=""
 CONTENDING_CREATE_REQUEST_ACCEPTED_MS="$(date +%s%3N)"
 CONTENDING_CREATE_WAIT_MS="$((CONTENDING_CREATE_REQUEST_ACCEPTED_MS - CONTENDING_CREATE_REQUEST_START_MS))"
 (( CONTENDING_CREATE_WAIT_MS <= CONTENDING_CREATE_BOUND_MS )) \
@@ -3003,7 +3102,10 @@ python3 - "$CRASH_EVIDENCE_FILE" "$O3K_FAULT_ENV_NAME" "$O3K_FAULT_ENV_VALUE" "$
   "$WORKLOAD_D" "$CONTENDING_CREATE_OPERATION_ID" "$ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED" \
   "$CRASH_REPAIR_COMPLETED_MS" "$CRASH_OPERATION_ID" "$OS_PORT_D_ID" \
   "$CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE" "$CRASH_REPAIR_PAUSE_RELEASED_UNIX_MS" \
-  "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED" "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS" <<'PY'
+  "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED" "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS" \
+  "$CONTENDING_CREATE_WAITER_BOUND_MS" "$CONTENDING_CREATE_WAITER_WAIT_START_MS" \
+  "$CONTENDING_CREATE_WAITER_WAIT_MS" "$CONTENDING_CREATE_REPAIR_PAUSE_MS" \
+  "$CONTENDING_CREATE_REAPED" <<'PY'
 import json, os, pathlib, sys, tempfile
 (out, env_name, env_value, workload, port_id, fixed_ip, killed_pid,
  terminal_ms, repair_ms, delete_code, sweep_passes, quota_before, quota_after,
@@ -3013,7 +3115,8 @@ import json, os, pathlib, sys, tempfile
  lock_latency, bound_ms, active_at, active_latency, create_resource, create_operation,
  orphan_present, repair_completed_observed, delete_operation, create_port,
  repair_released_after_start, repair_release_ms, create_lock_wait_observed,
- create_lock_wait_observed_ms) = sys.argv[1:40]
+ create_lock_wait_observed_ms, waiter_bound_ms, waiter_wait_start_ms,
+ waiter_wait_ms, repair_pause_ms, create_reaped) = sys.argv[1:46]
 path=pathlib.Path(out)
 doc = {
     "fault_hook": {"env": env_name, "pause_ms": int(env_value), "target_env": "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID", "target_resource_id": workload, "semantics": "pause after durable terminalization and before endpoint release for the targeted resource only"},
@@ -3029,7 +3132,7 @@ doc = {
     "placement_allocation": {"vcpu_allocated_before": int(alloc_before), "vcpu_allocated_after": int(alloc_after), "leak": alloc_before != alloc_after},
     "responsiveness_during_backlog": {
         "unrelated_db_backed_probe": {"path": "/operator/diagnostics/providers?limit=1", "succeeded": unrelated_probe_ok == "true", "latency_ms": int(unrelated_probe_latency_ms), "curl_exit": int(unrelated_probe_curl_exit), "status_code": int(unrelated_probe_http_code)},
-        "contending_existing_port_create": {"classification": "contending", "existing_port_id": create_port, "resource_id": create_resource, "operation_id": create_operation, "repair_lock_acquired_before_create": True, "orphan_present_at_request_start": orphan_present == "true", "request_start_unix_ms": int(request_start), "mutex_wait_observed": create_lock_wait_observed == "true", "mutex_wait_observed_unix_ms": int(create_lock_wait_observed_ms), "request_accepted_unix_ms": int(request_accepted), "lock_contention_latency_ms": int(lock_latency), "acceptance_bound_ms": int(bound_ms), "accepted_within_bound": int(lock_latency) <= int(bound_ms), "release_signal_sent_after_mutex_wait_observed": create_lock_wait_observed == "true", "repair_pause_released_after_create_start": repair_released_after_start == "true", "repair_pause_released_unix_ms": int(repair_release_ms), "repair_completion_observed_unix_ms": int(repair_completed_observed), "repair_completed_before_acceptance": True, "repair_acceptance_order_basis": "repair completion log is emitted before the sweep releases orphan_repair_lock; create mutex future reported Pending before repair was released", "active_unix_ms": int(active_at), "create_to_active_ms": int(active_latency), "active": True}},
+        "contending_existing_port_create": {"classification": "contending", "existing_port_id": create_port, "resource_id": create_resource, "operation_id": create_operation, "repair_lock_acquired_before_create": True, "orphan_present_at_request_start": orphan_present == "true", "request_start_unix_ms": int(request_start), "mutex_wait_observed": create_lock_wait_observed == "true", "mutex_wait_observed_unix_ms": int(create_lock_wait_observed_ms), "waiter_observation_wait_start_unix_ms": int(waiter_wait_start_ms), "waiter_observation_wait_ms": int(waiter_wait_ms), "waiter_observation_bound_ms": int(waiter_bound_ms), "waiter_observation_within_bound": int(waiter_wait_ms) <= int(waiter_bound_ms), "repair_pause_ms": int(repair_pause_ms), "waiter_bound_slack_ms": int(repair_pause_ms) - int(waiter_bound_ms), "background_create_reaped": create_reaped == "true", "request_accepted_unix_ms": int(request_accepted), "lock_contention_latency_ms": int(lock_latency), "acceptance_bound_ms": int(bound_ms), "accepted_within_bound": int(lock_latency) <= int(bound_ms), "release_signal_sent_after_mutex_wait_observed": create_lock_wait_observed == "true", "repair_pause_released_after_create_start": repair_released_after_start == "true", "repair_pause_released_unix_ms": int(repair_release_ms), "repair_completion_observed_unix_ms": int(repair_completed_observed), "repair_completed_before_acceptance": True, "repair_acceptance_order_basis": "repair completion log is emitted before the sweep releases orphan_repair_lock; create mutex future reported Pending before repair was released", "active_unix_ms": int(active_at), "create_to_active_ms": int(active_latency), "active": True}},
     "caller_supplied_endpoint_preserved": caller_preserved == "true",
     "foreign_project_endpoint_preserved": foreign_preserved == "true",
 }

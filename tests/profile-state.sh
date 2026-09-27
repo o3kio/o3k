@@ -6,6 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "Running product-profile status governance validator..."
 python3 "${repo_root}/scripts/validate-profile-state.py" --root "${repo_root}"
 bash "${repo_root}/tests/p15_7_scale_composition_guards.sh"
+bash "${repo_root}/tests/p15_7_contention_cleanup_guards.sh"
 bash "${repo_root}/tests/p15_7_api_read_retry_guards.sh"
 
 echo "Running PP.0 frozen profile and release/installer contract validation..."

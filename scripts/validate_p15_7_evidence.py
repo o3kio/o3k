@@ -479,7 +479,7 @@ def validate(
                         fail(errors, "existing-port create must be classified as contending")
                     for field in ("repair_lock_acquired_before_create", "orphan_present_at_request_start",
                                   "mutex_wait_observed", "accepted_within_bound",
-                                  "repair_completed_before_acceptance", "active"):
+                                  "repair_completed_before_acceptance", "background_create_reaped", "active"):
                         if contention.get(field) is not True:
                             fail(errors, f"contending existing-port create {field} must be true")
                     for field in ("resource_id", "operation_id", "existing_port_id"):
@@ -504,6 +504,22 @@ def validate(
                     if not isinstance(waiter_observed, int) or not isinstance(start, int) or \
                        not isinstance(released, int) or not start <= waiter_observed <= released:
                         fail(errors, "create mutex wait must be observed after request start and before repair release")
+                    waiter_start = contention.get("waiter_observation_wait_start_unix_ms")
+                    waiter_wait = contention.get("waiter_observation_wait_ms")
+                    waiter_bound = contention.get("waiter_observation_bound_ms")
+                    if not all(isinstance(value, int) for value in (waiter_start, waiter_wait, waiter_bound)):
+                        fail(errors, "waiter observation timing fields must be integers")
+                    repair_pause = contention.get("repair_pause_ms")
+                    if not isinstance(repair_pause, int) or repair_pause < 10000 or repair_pause > 120000:
+                        fail(errors, "repair pause must be a bounded integer")
+                    elif waiter_bound != repair_pause - 5000:
+                        fail(errors, "waiter bound must equal repair pause minus 5000ms")
+                    elif not isinstance(waiter_observed, int) or waiter_bound <= 0 or waiter_wait < 0 or \
+                         waiter_wait > waiter_bound or waiter_start > waiter_observed or \
+                         waiter_observed - waiter_start != waiter_wait or start > waiter_start:
+                        fail(errors, "waiter observation timing is invalid or unbounded")
+                    if contention.get("waiter_observation_within_bound") is not True:
+                        fail(errors, "waiter observation must be explicitly within its derived bound")
                     if contention.get("repair_acceptance_order_basis") != "repair completion log is emitted before the sweep releases orphan_repair_lock; create mutex future reported Pending before repair was released":
                         fail(errors, "contending create acceptance must be causally ordered after repair lock release")
                     repair_completed = contention.get("repair_completion_observed_unix_ms")

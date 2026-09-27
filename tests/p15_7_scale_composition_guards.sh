@@ -261,6 +261,10 @@ doc = {
           "request_start_unix_ms":1750000000000,"request_accepted_unix_ms":1750000004000,
           "lock_contention_latency_ms":4000,"acceptance_bound_ms":65000,"accepted_within_bound":True,
           "mutex_wait_observed":True,"mutex_wait_observed_unix_ms":1750000002000,
+          "waiter_observation_wait_start_unix_ms":1750000000000,
+          "waiter_observation_wait_ms":2000,"waiter_observation_bound_ms":25000,
+          "waiter_observation_within_bound":True,"repair_pause_ms":30000,
+          "background_create_reaped":True,
           "release_signal_sent_after_mutex_wait_observed":True,"repair_pause_released_after_create_start":True,
           "repair_pause_released_unix_ms":1750000002500,
           "repair_completion_observed_unix_ms":1750000003500,"repair_completed_before_acceptance":True,
@@ -401,6 +405,79 @@ python3 - "${EVIDENCE}" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
 d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["contending_existing_port_create"]["mutex_wait_observed"] = True
+p.write_text(json.dumps(d))
+PY
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+c = d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["contending_existing_port_create"]
+del c["waiter_observation_bound_ms"]
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "contending create without bounded waiter timing accepted" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+c = d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["contending_existing_port_create"]
+c["waiter_observation_bound_ms"] = 25000
+p.write_text(json.dumps(d))
+PY
+for mutation in missing_wait_start missing_wait_elapsed elapsed_mismatch elapsed_over_bound outside_pause ordering_violation; do
+  python3 - "${EVIDENCE}" "$mutation" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); mutation = sys.argv[2]; d=json.loads(p.read_text())
+c = d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["contending_existing_port_create"]
+if mutation == "missing_wait_start": c.pop("waiter_observation_wait_start_unix_ms", None)
+elif mutation == "missing_wait_elapsed": c.pop("waiter_observation_wait_ms", None)
+elif mutation == "elapsed_mismatch": c["waiter_observation_wait_ms"] = 2001
+elif mutation == "elapsed_over_bound": c["waiter_observation_wait_ms"] = 25001
+elif mutation == "outside_pause": c["waiter_observation_bound_ms"] = 35000
+elif mutation == "ordering_violation": c["waiter_observation_wait_start_unix_ms"] = 1749999999000
+p.write_text(json.dumps(d))
+PY
+  if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+    echo "waiter timing mutation accepted: ${mutation}" >&2; exit 1
+  fi
+  python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+c = d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["contending_existing_port_create"]
+c.update({"waiter_observation_wait_start_unix_ms":1750000000000,
+          "waiter_observation_wait_ms":2000,
+          "waiter_observation_bound_ms":25000,
+          "waiter_observation_within_bound":True,
+          "repair_pause_ms":30000})
+p.write_text(json.dumps(d))
+PY
+done
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+c = d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["contending_existing_port_create"]
+c["waiter_observation_within_bound"] = False
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "waiter within-bound false mutation accepted" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+c = d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["contending_existing_port_create"]
+c["waiter_observation_within_bound"] = True
+c["release_signal_sent_after_mutex_wait_observed"] = False
+p.write_text(json.dumps(d))
+PY
+if python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}"; then
+  echo "release-order mutation accepted" >&2; exit 1
+fi
+python3 - "${EVIDENCE}" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d=json.loads(p.read_text())
+c = d["journey"]["crash_injection_repair"]["responsiveness_during_backlog"]["contending_existing_port_create"]
+c["release_signal_sent_after_mutex_wait_observed"] = True
 p.write_text(json.dumps(d))
 PY
 python3 - "${EVIDENCE}" <<'PY'
