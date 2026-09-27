@@ -859,6 +859,20 @@ assert 'operator_curl "$API/operator/diagnostics/providers?limit=1" --max-time 1
 assert 'Authorization: Bearer $PROJECT_TOKEN" \\\n  "$API/operator/diagnostics/providers?limit=1"' not in journey
 assert 'refresh_operator_authority' in journey
 assert 'scripts/p15-7-refresh-operator-authority.sh' in journey
+assert 'write_api_read_failure_evidence() {' in journey
+assert 'api_get() {' in journey
+assert 'P15_7_API_READ_ATTEMPTS' in journey
+assert 'P15_7_API_READ_TIMEOUT_SECONDS' in journey
+assert '--write-out \'%{http_code}\'' in journey
+assert 'http_status" =~ ^5[0-9][0-9]$' in journey
+assert 'curl_exit" -ne 0 && "$http_status" == 000' in journey
+assert 'write_api_read_failure_evidence "$phase" "$path"' in journey
+assert 'initial-provider-diagnostics' in journey
+# Only read-only GETs may receive the bounded convergence retry. Mutating
+# operator_curl calls remain fail-fast and retain curl --fail semantics.
+assert 'curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG"' in journey
+assert 'if [[ -n "$retry_kind" && "$attempt" -lt "$P15_7_API_READ_ATTEMPTS" ]]' in journey
+assert 'http_status" =~ ^4[0-9][0-9]$' not in journey
 assert 'secure_remove_credentials() {' in journey
 assert 'secure_remove_credentials "$OPERATOR_CURL_CONFIG" "$SSH_KEY"' in journey
 assert 'secure_remove_credentials "$OPERATOR_TOKEN_FILE" "$WORK_ROOT/operator.token"' in journey

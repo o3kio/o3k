@@ -79,6 +79,13 @@ CRASH_PHASE=""
 # observed 5xx observed by the journey is appended to this JSONL fragment and
 # merged into the final evidence under journey.transient_failures[].
 TRANSIENT_EVENTS_FILE="$ARTIFACT_DIR/p15-7-transient-failures.jsonl"
+# Read-only control-plane projections can lag immediately after a real agent
+# joins. Keep this convergence allowance bounded and restricted to GETs: a
+# persistent 5xx, a 4xx contract response, or any mutating request must still
+# fail the journey on the first proven error.
+P15_7_API_READ_ATTEMPTS="${O3K_P15_7_API_READ_ATTEMPTS:-8}"
+P15_7_API_READ_DELAY_SECONDS="${O3K_P15_7_API_READ_DELAY_SECONDS:-2}"
+P15_7_API_READ_TIMEOUT_SECONDS="${O3K_P15_7_API_READ_TIMEOUT_SECONDS:-15}"
 # True only while the #1035 endpoint-release fault hook is present in the
 # control-plane environment, so transient events can be correlated with the
 # injected window.
@@ -111,6 +118,12 @@ fi
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ ]] || die "TestLab ports are invalid"
 [[ "$VM_DISK_SIZE_GB" =~ ^[1-9][0-9]*$ ]] || die "VM disk size is invalid"
 [[ "$COMPUTE_LOG_FILTER" =~ ^[A-Za-z0-9_=,:.-]+$ ]] || die "compute log filter is invalid"
+[[ "$P15_7_API_READ_ATTEMPTS" =~ ^[1-9][0-9]*$ && "$P15_7_API_READ_ATTEMPTS" -le 12 ]] \
+  || die "P15.7 API read attempts are invalid or unbounded"
+[[ "$P15_7_API_READ_DELAY_SECONDS" =~ ^[0-9]+$ && "$P15_7_API_READ_DELAY_SECONDS" -le 10 ]] \
+  || die "P15.7 API read delay is invalid or unbounded"
+[[ "$P15_7_API_READ_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ && "$P15_7_API_READ_TIMEOUT_SECONDS" -le 60 ]] \
+  || die "P15.7 API read timeout is invalid or unbounded"
 for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
@@ -1606,7 +1619,116 @@ operator_curl() {
   refresh_operator_authority
   curl --fail --silent --show-error --config "$OPERATOR_CURL_CONFIG" "$@" "$url"
 }
-api_get() { operator_curl "$API$1"; }
+write_api_read_failure_evidence() {
+  # Persist only metadata and hashes: an API error body can contain provider
+  # details or user data, so it must never be copied into the protected
+  # artifact. The create/flush/rename sequence preserves the first failed
+  # observation if a later phase happens to use the same label.
+  local phase="$1" path="$2" attempts="$3" curl_exit="$4" http_status="$5" body_file="$6" error_file="$7"
+  python3 - "$ARTIFACT_DIR" "$phase" "$path" "$attempts" "$curl_exit" "$http_status" \
+    "$body_file" "$error_file" "$RUN_ID" "$SOURCE_SHA" <<'PY'
+import hashlib, json, os, pathlib, re, sys, tempfile, time
+
+root, phase, path, attempts, curl_exit, http_status, body_file, error_file, run_id, source_sha = sys.argv[1:]
+safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", phase).strip("._-") or "read"
+
+def digest(name):
+    path = pathlib.Path(name)
+    if not path.is_file():
+        return {"bytes": 0, "sha256": None}
+    data = path.read_bytes()
+    return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+doc = {
+    "artifact_type": "o3k-p15-7-api-read-failure",
+    "schema_version": 1,
+    "status": "failed",
+    "run_id": run_id,
+    "source_sha": source_sha,
+    "phase": phase,
+    "endpoint": path,
+    "attempts": int(attempts),
+    "curl_exit": int(curl_exit),
+    "http_status": http_status,
+    "response": digest(body_file),
+    "transport_diagnostics": digest(error_file),
+    "recorded_at_unix_ms": int(time.time() * 1000),
+}
+root_path = pathlib.Path(root)
+root_path.mkdir(parents=True, exist_ok=True)
+for index in range(1, 100):
+    destination = root_path / f"p15-7-api-read-failure-{safe}-{index:02d}.json"
+    if destination.exists():
+        continue
+    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+        directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    break
+else:
+    raise SystemExit("too many API read failure artifacts")
+PY
+  echo "P15.7 API read failed: phase=$phase endpoint=$path http_status=$http_status curl_exit=$curl_exit attempts=$attempts (metadata artifact preserved)" >&2
+}
+api_get() {
+  local path="$1" phase="${2:-${1#/}}" attempt body_file error_file http_status curl_exit retry_kind
+  [[ "$path" == /* ]] || { echo "P15.7 API read path is not absolute: $path" >&2; return 1; }
+  for ((attempt = 1; attempt <= P15_7_API_READ_ATTEMPTS; attempt++)); do
+    body_file="$(mktemp "$WORK_ROOT/api-read-body.XXXXXX")"
+    error_file="$(mktemp "$WORK_ROOT/api-read-error.XXXXXX")"
+    refresh_operator_authority
+    http_status="000"
+    curl_exit=0
+    if http_status="$(curl --silent --show-error --config "$OPERATOR_CURL_CONFIG" \
+      --connect-timeout 5 --max-time "$P15_7_API_READ_TIMEOUT_SECONDS" \
+      --output "$body_file" --write-out '%{http_code}' "$API$path" 2>"$error_file")"; then
+      :
+    else
+      curl_exit=$?
+    fi
+    if [[ "$curl_exit" -eq 0 && "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+      cat "$body_file"
+      rm -f -- "$body_file" "$error_file"
+      return 0
+    fi
+    if [[ "$http_status" =~ ^5[0-9][0-9]$ ]]; then
+      retry_kind=http_5xx
+    elif [[ "$curl_exit" -ne 0 && "$http_status" == 000 ]]; then
+      retry_kind=bounded_retry
+    else
+      retry_kind=""
+    fi
+    if [[ -n "$retry_kind" && "$attempt" -lt "$P15_7_API_READ_ATTEMPTS" ]]; then
+      record_transient "$retry_kind" "GET $path" "phase=$phase attempt=$attempt" "$http_status"
+      rm -f -- "$body_file" "$error_file"
+      sleep "$P15_7_API_READ_DELAY_SECONDS"
+      continue
+    fi
+    if [[ -n "$retry_kind" ]]; then
+      record_transient "$retry_kind" "GET $path" "phase=$phase attempts=$attempt outcome=failed" "$http_status"
+    fi
+    write_api_read_failure_evidence "$phase" "$path" "$attempt" "$curl_exit" "$http_status" \
+      "$body_file" "$error_file"
+    rm -f -- "$body_file" "$error_file"
+    return 1
+  done
+  return 1
+}
 record_scale_checkpoint() {
   # Eligibility-based scale checkpoint (issues #974/#1037 decision): enumerate
   # EVERY canonical BuildingBlock — the bootstrap block (identified by the
@@ -1706,13 +1828,13 @@ pathlib.Path(out_path).write_text(json.dumps(fragment, indent=2, sort_keys=True)
 print(eligible_ready)
 PY
 }
-api_get /operator/building-blocks >"$WORK_ROOT/blocks.json"
-api_get /regions >"$WORK_ROOT/regions.json"
-api_get /topology/failure-domains >"$WORK_ROOT/failure-domains.json"
-api_get /operator/diagnostics/providers >"$WORK_ROOT/providers.json"
-api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity.json"
-api_get /services >"$WORK_ROOT/services.json"
-api_get /resource-types >"$WORK_ROOT/resource-types.json"
+api_get /operator/building-blocks initial-building-blocks >"$WORK_ROOT/blocks.json"
+api_get /regions initial-regions >"$WORK_ROOT/regions.json"
+api_get /topology/failure-domains initial-failure-domains >"$WORK_ROOT/failure-domains.json"
+api_get /operator/diagnostics/providers initial-provider-diagnostics >"$WORK_ROOT/providers.json"
+api_get /operator/diagnostics/capacity initial-capacity-diagnostics >"$WORK_ROOT/capacity.json"
+api_get /services initial-services >"$WORK_ROOT/services.json"
+api_get /resource-types initial-resource-types >"$WORK_ROOT/resource-types.json"
 python3 - "$WORK_ROOT/blocks.json" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" <<'PY'
 import json,sys
 ids={x.get('block',{}).get('id') for x in json.load(open(sys.argv[1]))}
