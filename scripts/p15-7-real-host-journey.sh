@@ -2634,7 +2634,12 @@ document = {
     "source_sha": source_sha,
     "server_id": server_id,
     "endpoint_id": endpoint_id,
-    "replacement_process_identity_verified": bool(replacement_pid),
+    # This fallback artifact is written after the identity-gated restart path
+    # has already failed.  A PID string alone is not proof of process
+    # identity, so do not claim that starttime/executable/listener ownership
+    # was verified here.
+    "replacement_pid_observed": replacement_pid.isdigit(),
+    "replacement_process_identity_verified": False,
     "replacement_pid": int(replacement_pid) if replacement_pid.isdigit() else None,
     "elapsed_ms": int(elapsed_ms),
     "lease_takeover_expected_at_ms": int(expected_at),
