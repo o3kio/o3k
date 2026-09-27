@@ -44,6 +44,11 @@ case "${O3K_FAKE_CURL_MODE:-transient}" in
     printf '{"error":"still-unavailable","secret":"must-not-be-stored"}\n' >"$output"
     printf '503'
     ;;
+  transport)
+    printf '{"error":"transport-secret"}\n' >"$output"
+    printf '000'
+    exit 28
+    ;;
   *)
     echo "unknown fake curl mode" >&2
     exit 2
@@ -114,6 +119,26 @@ assert doc["attempts"] == 3
 assert doc["response"]["bytes"] > 0
 assert "must-not-be-stored" not in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 PY
+
+export O3K_FAKE_CURL_MODE=transport
+printf '0\n' >"$O3K_FAKE_CURL_COUNTER"
+if api_get /operator/diagnostics/providers transport-read >/dev/null; then
+  echo "transport API read unexpectedly succeeded" >&2
+  exit 1
+fi
+[[ "$(<"$O3K_FAKE_CURL_COUNTER")" == 3 ]]
+python3 - "$ARTIFACT_DIR/p15-7-api-read-failure-transport-read-01.json" <<'PY'
+import json, pathlib, sys
+doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert doc["http_status"] == "000"
+assert doc["curl_exit"] == 28
+assert doc["attempts"] == 3
+assert "transport-secret" not in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+PY
+if find "$WORK_DIR/work" -maxdepth 1 -name 'api-read-body.*' -o -name 'api-read-error.*' | grep -q .; then
+  echo "temporary API read files were not cleaned up" >&2
+  exit 1
+fi
 
 # A repeated phase label must preserve the first diagnostic rather than
 # replacing it. Both response and transport files are represented only by
