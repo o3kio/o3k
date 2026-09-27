@@ -50,6 +50,9 @@ case_name="$1"; expected="$2"; status="${3:-}"; shift 3
 work="${O3K_PREFLIGHT_TEST_WORK:?}"; fake="${O3K_PREFLIGHT_TEST_FAKE:?}"; sha="${O3K_PREFLIGHT_TEST_SHA:?}"
 root_dir="${O3K_PREFLIGHT_TEST_ROOT:?}"
 out="$work/$case_name"; mkdir -p "$out"
+# The qualification invokes the production preflight in-process with the
+# test runner. Isolate its workflow-step outputs so a successful fixture
+# cannot append O3K_P15_7_* values to the parent GitHub Actions environment.
 env \
   PATH="$fake:$PATH" \
   O3K_PREFLIGHT_TEST_STATUS="$status" \
@@ -58,6 +61,8 @@ env \
   RUNNER_TEMP="$out" \
   O3K_REAL_HOST_ARTIFACT_DIR="$out" \
   O3K_P15_7_PREFLIGHT_ARTIFACT="$out/preflight.json" \
+  GITHUB_ENV="$out/github-env" \
+  GITHUB_OUTPUT="$out/github-output" \
   O3K_P15_7_SOURCE_SHA="$sha" GITHUB_SHA="$sha" GITHUB_RUN_ID="$case_name" \
   O3K_P15_7_OIDC_ISSUER=https://issuer.example.test \
   O3K_P15_7_OIDC_AUDIENCE=o3k \
@@ -76,6 +81,11 @@ assert d['redacted'] is True
 assert ('passed' if sys.argv[2]=='pass' else 'blocked') == d['status']
 assert 'secret-token' not in json.dumps(d)
 PY
+if [[ "$expected" == pass ]]; then
+  test -f "$out/github-env"
+  ! grep -Fq 'O3K_P15_7_PREFLIGHT_ARTIFACT=' "$out/github-env"
+  ! grep -Fq 'O3K_P15_7_OPERATOR_TOKEN_FILE=' "$out/github-env"
+fi
 if [[ "$expected" == pass ]]; then
   token="$out/o3k-p15-7-operator-${case_name}.token"
   marker="${token}.o3k-owned"
