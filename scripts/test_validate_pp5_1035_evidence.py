@@ -81,6 +81,26 @@ class ValidatorMutationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate_artifact(artifact)
 
+    def test_repair_flags_must_be_boolean(self) -> None:
+        artifact = valid_artifact()
+        artifact["repair"]["unbind_attempted"] = "true"
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+        artifact = valid_artifact()
+        artifact["repair"]["release_attempted"] = 1
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+
+    def test_unknown_binding_state_rejected(self) -> None:
+        artifact = valid_artifact()
+        artifact["orphan_checkpoint"]["binding_state"] = "unbound"
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+        artifact = valid_artifact()
+        del artifact["orphan_checkpoint"]["binding_state"]
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,6 +48,13 @@ def _bool(obj: dict[str, Any], *path: str) -> bool:
     return True
 
 
+def _boolean(obj: dict[str, Any], *path: str) -> bool:
+    value = _get(obj, *path)
+    if not isinstance(value, bool):
+        raise ValidationError("expected boolean: " + ".".join(path))
+    return value
+
+
 def validate_artifact(artifact: dict[str, Any], expected_sha: str | None = None) -> None:
     if _get(artifact, "artifact_type") != ARTIFACT_TYPE:
         raise ValidationError("wrong artifact_type")
@@ -162,7 +169,10 @@ def validate_artifact(artifact: dict[str, Any], expected_sha: str | None = None)
         raise ValidationError("wrong orphan checkpoint schema")
     for field in ("run_id", "server_id", "endpoint_id", "phase"):
         _nonempty(checkpoint, field)
-    if "binding_state" not in checkpoint or checkpoint["binding_state"] is not None and not isinstance(checkpoint["binding_state"], str):
+    if "binding_state" not in checkpoint:
+        raise ValidationError("missing orphan checkpoint binding state")
+    binding_state = checkpoint["binding_state"]
+    if binding_state is not None and binding_state not in {"binding", "bound", "down", "error"}:
         raise ValidationError("invalid orphan checkpoint binding state")
     if checkpoint["run_id"] != run_id or checkpoint["server_id"] != artifact["terminal_state"]["server_id"] or checkpoint["endpoint_id"] != artifact["terminal_state"]["endpoint_id"]:
         raise ValidationError("orphan checkpoint target does not match terminal state")
@@ -185,8 +195,10 @@ def validate_artifact(artifact: dict[str, Any], expected_sha: str | None = None)
     if not isinstance(contention["create_to_active_latency_ms"], (int, float)) or contention["create_to_active_latency_ms"] < 0:
         raise ValidationError("invalid create-to-active latency")
     repair = _get(artifact, "repair")
-    for field in ("unbind_attempted", "unbind_result", "release_attempted", "release_result", "pass_number", "completed_at"):
+    for field in ("unbind_result", "release_result", "pass_number", "completed_at"):
         _nonempty(repair, field)
+    _boolean(repair, "unbind_attempted")
+    _bool(repair, "release_attempted")
     if repair["unbind_attempted"]:
         _nonempty(repair, "unbind_started_at")
         _bool(repair, "unbind_after_checkpoint")

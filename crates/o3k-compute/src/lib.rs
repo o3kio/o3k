@@ -210,6 +210,12 @@ fn test_fault_checkpoint_document_matches(
     live_run: &str,
     target_endpoint: &str,
 ) -> bool {
+    let binding_state_valid = checkpoint.get("binding_state").is_some_and(|value| {
+        value.is_null()
+            || value
+                .as_str()
+                .is_some_and(|state| matches!(state, "binding" | "bound" | "down" | "error"))
+    });
     let Some(server_id) = checkpoint
         .get("server_id")
         .and_then(serde_json::Value::as_str)
@@ -253,9 +259,7 @@ fn test_fault_checkpoint_document_matches(
             .get("live_reference_absent")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
-        && checkpoint
-            .get("binding_state")
-            .is_some_and(|value| value.is_null() || value.as_str().is_some())
+        && binding_state_valid
         && checkpoint
             .get("unbind_not_started")
             .and_then(serde_json::Value::as_bool)
@@ -923,6 +927,14 @@ mod tests {
                 .and_then(|object| object.remove("binding_state"))
                 .is_some()
         );
+        assert!(!test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+        checkpoint["binding_state"] = serde_json::json!("unbound");
         assert!(!test_fault_checkpoint_document_matches(
             &checkpoint,
             resource,

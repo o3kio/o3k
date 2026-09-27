@@ -2553,6 +2553,129 @@ persist_crash_checkpoint() {
     LAST_SUCCESSFUL_CHECKPOINT="$phase"
   fi
 }
+write_orphan_repair_diagnostics() {
+  local output="$ARTIFACT_DIR/p15-7-orphan-repair-diagnostics-$RUN_ID.json"
+  local server_raw="$WORK_ROOT/orphan-repair-server.raw.json"
+  local endpoint_raw="$WORK_ROOT/orphan-repair-endpoint.raw.json"
+  local server_status=000 endpoint_status=000 elapsed_ms expected_at
+  fetch_redacted_json() {
+    local url="$1" output_path="$2" header_name="$3" header_file status
+    header_file="$(mktemp "$RUNNER_TEMP_ROOT/pp5-diagnostic-header.XXXXXX")"
+    chmod 0600 "$header_file"
+    printf '%s: Bearer %s\n' "$header_name" "$PROJECT_TOKEN" >"$header_file"
+    status="$(curl --silent --show-error --max-time 10 \
+      --output "$output_path" --write-out '%{http_code}' \
+      -H "@$header_file" "$url" 2>/dev/null || true)"
+    unlink "$header_file" 2>/dev/null || true
+    printf '%s' "$status"
+  }
+  elapsed_ms="$(( $(date +%s%3N) - CRASH_RESTART_MS ))"
+  expected_at="$(( CRASH_RESTART_MS + CRASH_REPAIR_LOCK_WAIT_BOUND_MS ))"
+  : >"$server_raw"
+  : >"$endpoint_raw"
+  if [[ "${WORKLOAD_C:-}" =~ ^[0-9a-fA-F-]{36}$ && -n "${PROJECT_TOKEN:-}" ]]; then
+    server_status="$(fetch_redacted_json "$API/compute/servers/$WORKLOAD_C" "$server_raw" Authorization)"
+  fi
+  if [[ "${PORT_C_ID:-}" =~ ^[0-9a-fA-F-]{36}$ && -n "${PROJECT_TOKEN:-}" ]]; then
+    endpoint_status="$(fetch_redacted_json "http://127.0.0.1:$AUTH_PORT/v2.0/ports/$PORT_C_ID" "$endpoint_raw" X-Auth-Token)"
+  fi
+  python3 - "$output" "$RUN_ID" "$SOURCE_SHA" "${WORKLOAD_C:-}" "${PORT_C_ID:-}" \
+    "${RESTARTED_O3KD_PID:-}" "$elapsed_ms" "$expected_at" "$server_status" "$endpoint_status" \
+    "$server_raw" "$endpoint_raw" "$CRASH_REPAIR_CHECKPOINT_FILE" "$STATE_ROOT/log/o3kd.log" \
+    "${REPAIR_RELEASE_ENV_CONSUMED:-false}" "${REPAIR_TIMEOUT_ENV_CONSUMED:-false}" \
+    "${CREATE_WAITER_ENV_CONSUMED:-false}" "${REPAIR_CHECKPOINT_ENV_CONSUMED:-false}" \
+    "${REPLAY_SUPPRESS_RESOURCE_ENV_CONSUMED:-false}" "${REPLAY_SUPPRESS_RUN_ENV_CONSUMED:-false}" <<'PY'
+import json
+import pathlib
+import sys
+
+(
+    output, run_id, source_sha, server_id, endpoint_id, replacement_pid,
+    elapsed_ms, expected_at, server_status, endpoint_status, server_path,
+    endpoint_path, checkpoint_path, log_path, repair_release_env, repair_timeout_env,
+    create_waiter_env, repair_checkpoint_env, replay_resource_env, replay_run_env,
+) = sys.argv[1:]
+
+def safe_json(path):
+    try:
+        return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+def resource_summary(value, keys):
+    if not isinstance(value, dict):
+        return None
+    value = value.get("server", value.get("port", value))
+    if not isinstance(value, dict):
+        return None
+    return {key: value.get(key) for key in keys if key in value}
+
+log_messages = []
+try:
+    for line in pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        message = event.get("message")
+        if isinstance(message, str) and any(
+            marker in message.lower()
+            for marker in ("orphan", "repair", "lease", "checkpoint")
+        ):
+            log_messages.append(message)
+except OSError:
+    pass
+
+checkpoint = pathlib.Path(checkpoint_path)
+temp_matches = list(checkpoint.parent.glob(f".{checkpoint.name}.*.tmp")) if checkpoint.parent.exists() else []
+document = {
+    "schema_version": 1,
+    "run_id": run_id,
+    "source_sha": source_sha,
+    "server_id": server_id,
+    "endpoint_id": endpoint_id,
+    "replacement_process_identity_verified": bool(replacement_pid),
+    "replacement_pid": int(replacement_pid) if replacement_pid.isdigit() else None,
+    "elapsed_ms": int(elapsed_ms),
+    "lease_takeover_expected_at_ms": int(expected_at),
+    "repair_env_consumed": {
+        "release_file": repair_release_env == "true",
+        "repair_timeout": repair_timeout_env == "true",
+        "contention_waiter": create_waiter_env == "true",
+        "checkpoint_file": repair_checkpoint_env == "true",
+        "replay_resource_target": replay_resource_env == "true",
+        "replay_run_id": replay_run_env == "true",
+    },
+    "target_server": {
+        "http_status": int(server_status) if server_status.isdigit() else 0,
+        "state": resource_summary(safe_json(server_path), ("id", "observed_state", "state", "generation")),
+    },
+    "target_endpoint": {
+        "http_status": int(endpoint_status) if endpoint_status.isdigit() else 0,
+        "state": resource_summary(safe_json(endpoint_path), ("id", "project_id", "status", "device_id", "device_owner", "binding_state")),
+    },
+    "checkpoint_file_exists": checkpoint.is_file(),
+    "checkpoint_temp_file_exists": bool(temp_matches),
+    "checkpoint_publication_error_observed": any("checkpoint could not be published" in message.lower() for message in log_messages),
+    "last_repair_messages": log_messages[-20:],
+}
+try:
+    pathlib.Path(output).parent.mkdir(parents=True, exist_ok=True)
+    pathlib.Path(output).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+finally:
+    # Raw API responses are only an implementation detail for redaction.  Do
+    # not leave them beside the diagnostic artifact where a secret-bearing
+    # provider response could survive a failed evidence write.
+    for raw_path in (server_path, endpoint_path):
+        try:
+            pathlib.Path(raw_path).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+PY
+  chmod 0600 "$output" "$server_raw" "$endpoint_raw" 2>/dev/null || true
+}
 stop_contending_create() {
   # Address only the exact run-owned background child, reap it, and remove
   # only this run's synchronization markers. Never kill by process name.
@@ -2977,7 +3100,12 @@ PY
   fi
   sleep 0.1
 done
-[[ "$REPAIR_LOCK_HELD" == true ]] || die "orphan repair did not publish the resource-scoped checkpoint"
+if [[ "$REPAIR_LOCK_HELD" != true ]]; then
+  if ! write_orphan_repair_diagnostics; then
+    printf '%s\n' "orphan repair diagnostics could not be persisted" >&2
+  fi
+  die "orphan repair did not publish the resource-scoped checkpoint"
+fi
 CRASH_REPAIR_LOCK_WAIT_MS="$(( $(date +%s%3N) - REPAIR_LOCK_WAIT_START_MS ))"
 (( CRASH_REPAIR_LOCK_WAIT_MS <= CRASH_REPAIR_LOCK_WAIT_BOUND_MS )) \
   || die "orphan repair exceeded the contract-derived 65s lease/cadence bound"
