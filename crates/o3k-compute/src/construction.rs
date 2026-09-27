@@ -1318,53 +1318,76 @@ impl ComputeService {
                 // released. The durable row is resolved first so a caller-
                 // supplied or foreign endpoint is never unbound.
                 match projector.port_binding(&resource.project_id, port_id).await {
-                    Ok(Some(info))
-                        if info.server_owned
-                            && matches!(
-                                info.binding_state.as_deref(),
-                                Some("bound") | Some("binding")
-                            ) =>
-                    {
-                        let operation_id = Uuid::new_v5(
-                            &Uuid::NAMESPACE_URL,
-                            format!("o3k:orphan-unbind:{}:{}", resource.id, port_id).as_bytes(),
-                        );
-                        // Cap on ATTEMPT, not success: a failing dispatch still
-                        // consumed this pass's single fabric budget, so the
-                        // documented one-deadline availability bound holds on
-                        // the failure path too. The bound orphan cannot be
-                        // released this pass either (release while bound is
-                        // refused), so end the pass; the next periodic pass
-                        // retries it.
-                        unbinds_dispatched = true;
-                        if let Err(error) = projector
-                            .unbind_port(&resource.project_id, port_id, operation_id)
-                            .await
-                        {
-                            failures += 1;
-                            tracing::warn!(
-                                resource_id = %resource.id,
-                                project_id = %resource.project_id,
-                                port_id = %port_id,
-                                %error,
-                                "orphaned server-owned endpoint is still bound and could not be \
-                                 unbound; the next pass retries it (fail closed, never deleted \
-                                 while bound)"
-                            );
-                            break 'repair;
-                        }
-                        crate::test_fault_orphan_checkpoint_and_wait(resource.id, port_id, true)
-                            .await;
-                    }
-                    Ok(Some(info)) => {
+                    Ok(Some(info)) if info.server_owned => {
+                        // Publish the test-only checkpoint at the exact
+                        // pre-mutation boundary. The repair lock remains held
+                        // and no unbind/release call has started yet. This is
+                        // the authoritative ownership/binding snapshot used
+                        // by the seam; it is never inferred from create intent.
                         crate::test_fault_orphan_checkpoint_and_wait(
                             resource.id,
                             port_id,
-                            info.server_owned,
+                            info.binding_state.as_deref(),
+                            true,
                         )
                         .await;
+
+                        if matches!(
+                            info.binding_state.as_deref(),
+                            Some("bound") | Some("binding")
+                        ) {
+                            let operation_id = Uuid::new_v5(
+                                &Uuid::NAMESPACE_URL,
+                                format!("o3k:orphan-unbind:{}:{}", resource.id, port_id).as_bytes(),
+                            );
+                            // Cap on ATTEMPT, not success: a failing dispatch
+                            // still consumed this pass's single fabric budget.
+                            unbinds_dispatched = true;
+                            tracing::info!(
+                                resource_id = %resource.id,
+                                project_id = %resource.project_id,
+                                port_id = %port_id,
+                                binding_state = ?info.binding_state,
+                                "orphan unbind dispatch started after pre-mutation checkpoint"
+                            );
+                            if let Err(error) = projector
+                                .unbind_port(&resource.project_id, port_id, operation_id)
+                                .await
+                            {
+                                failures += 1;
+                                tracing::warn!(
+                                    resource_id = %resource.id,
+                                    project_id = %resource.project_id,
+                                    port_id = %port_id,
+                                    %error,
+                                    "orphaned server-owned endpoint is still bound and could not be \
+                                     unbound; the next pass retries it (fail closed, never deleted \
+                                     while bound)"
+                                );
+                                break 'repair;
+                            }
+                        }
                     }
-                    Ok(None) => {}
+                    Ok(Some(_info)) => {
+                        // Ownership is explicitly foreign/caller-supplied.
+                        // Preserve it without invoking the release authority.
+                        preserved += 1;
+                        continue;
+                    }
+                    Ok(None) => {
+                        // A missing binding authority result cannot prove
+                        // ownership. Fail closed and retry on a later sweep;
+                        // do not turn a create-intent endpoint ID into release
+                        // authority.
+                        absent += 1;
+                        tracing::warn!(
+                            resource_id = %resource.id,
+                            project_id = %resource.project_id,
+                            port_id = %port_id,
+                            "orphan endpoint ownership could not be proven; repair preserved it"
+                        );
+                        continue;
+                    }
                     Err(error) => {
                         failures += 1;
                         tracing::warn!(

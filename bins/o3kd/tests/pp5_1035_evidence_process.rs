@@ -544,13 +544,17 @@ async fn wait_orphan_checkpoint(
     while Instant::now() < deadline {
         if let Ok(raw) = fs::read_to_string(path)
             && let Ok(document) = serde_json::from_str::<Value>(&raw)
-            && document["schema_version"] == 1
+            && document["schema_version"] == 2
             && document["run_id"] == run_id
             && document["server_id"] == server_id.to_string()
             && document["endpoint_id"] == endpoint_id
-            && document["phase"] == "orphan_confirmed"
+            && document["phase"] == "orphan_confirmed_pre_mutation"
             && document["orphan_confirmed"] == true
+            && document["server_terminal_deleted"] == true
+            && document["server_owned"] == true
+            && document["live_reference_absent"] == true
             && document["orphan_repair_lock_held"] == true
+            && document["unbind_not_started"] == true
             && document["endpoint_release_not_started"] == true
         {
             return Ok(document);
@@ -1017,6 +1021,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         Duration::from_secs(30),
     )
     .await?;
+    evidence.set("orphan_checkpoint", checkpoint.clone());
     let lock_engaged = checkpoint["published_at"]
         .as_str()
         .ok_or("orphan checkpoint missing publication timestamp")?
@@ -1059,8 +1064,24 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         .into());
     }
     let quota_during = quota_usage(&client, new_http, &admin_token).await?;
+    let binding_state = checkpoint["binding_state"].as_str().map(str::to_owned);
+    let unbind_required = matches!(binding_state.as_deref(), Some("bound") | Some("binding"));
     let release_at = now();
     File::create(&release)?;
+    let unbind_started_at = if unbind_required {
+        let started = wait_log(
+            &log,
+            "orphan unbind dispatch started after pre-mutation checkpoint",
+            Duration::from_secs(30),
+        )
+        .await?;
+        if started < lock_engaged {
+            return Err("orphan unbind started before the pre-mutation checkpoint".into());
+        }
+        Some(started)
+    } else {
+        None
+    };
     let repair_released_at = wait_log(
         &log,
         "test-only fault pause orphan-repair-lock released",
@@ -1097,7 +1118,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         .any(|port| port["id"] == endpoint_id);
     let quota_after = quota_usage(&client, new_http, &admin_token).await?;
     let repair_completed_at = now();
-    evidence.set("repair", json!({"unbind_attempted":true,"unbind_result":"Succeeded","release_attempted":true,"release_result":"Succeeded","pass_number":1,"completed_at":repair_completed_at,"endpoint_absent":endpoint_absent}));
+    evidence.set("repair", json!({"binding_state":binding_state,"unbind_attempted":unbind_required,"unbind_started_at":unbind_started_at,"unbind_after_checkpoint":unbind_started_at.is_some(),"unbind_result":if unbind_required { "Succeeded" } else { "NotRequired" },"release_attempted":true,"release_result":"Succeeded","pass_number":1,"completed_at":repair_completed_at,"endpoint_absent":endpoint_absent}));
     // The earlier checkpoint records the sweep transition observed while the
     // waiter was blocked.  Replace that provisional timestamp with the
     // terminal repair completion timestamp so the final artifact has one

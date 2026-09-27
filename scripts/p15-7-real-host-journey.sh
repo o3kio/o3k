@@ -2952,12 +2952,17 @@ for _ in $(seq 1 650); do
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
 expected = {
+    "schema_version": 2,
     "run_id": sys.argv[2],
     "server_id": sys.argv[3],
     "endpoint_id": sys.argv[4],
-    "phase": "orphan_confirmed",
+    "phase": "orphan_confirmed_pre_mutation",
     "orphan_confirmed": True,
+    "server_terminal_deleted": True,
+    "server_owned": True,
+    "live_reference_absent": True,
     "orphan_repair_lock_held": True,
+    "unbind_not_started": True,
     "endpoint_release_not_started": True,
 }
 if any(doc.get(key) != value for key, value in expected.items()):

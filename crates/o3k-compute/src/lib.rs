@@ -194,6 +194,22 @@ fn test_fault_checkpoint_matches_current_run(
     let configured_run = configured_run.to_string_lossy();
     let live_run = live_run.to_string_lossy();
     let target_endpoint = target_endpoint.to_string_lossy();
+    test_fault_checkpoint_document_matches(
+        &checkpoint,
+        resource_id,
+        configured_run.as_ref(),
+        live_run.as_ref(),
+        target_endpoint.as_ref(),
+    )
+}
+
+fn test_fault_checkpoint_document_matches(
+    checkpoint: &serde_json::Value,
+    resource_id: uuid::Uuid,
+    configured_run: &str,
+    live_run: &str,
+    target_endpoint: &str,
+) -> bool {
     let Some(server_id) = checkpoint
         .get("server_id")
         .and_then(serde_json::Value::as_str)
@@ -211,18 +227,37 @@ fn test_fault_checkpoint_matches_current_run(
         && checkpoint
             .get("schema_version")
             .and_then(serde_json::Value::as_u64)
-            == Some(1)
-        && checkpoint.get("run_id").and_then(serde_json::Value::as_str)
-            == Some(configured_run.as_ref())
+            == Some(2)
+        && checkpoint.get("run_id").and_then(serde_json::Value::as_str) == Some(configured_run)
         && server_id == resource_id.to_string()
         && endpoint_id == target_endpoint
-        && checkpoint.get("phase").and_then(serde_json::Value::as_str) == Some("orphan_confirmed")
+        && checkpoint.get("phase").and_then(serde_json::Value::as_str)
+            == Some("orphan_confirmed_pre_mutation")
         && checkpoint
             .get("orphan_confirmed")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
         && checkpoint
             .get("orphan_repair_lock_held")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("server_terminal_deleted")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("server_owned")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("live_reference_absent")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("binding_state")
+            .is_some_and(|value| value.is_null() || value.as_str().is_some())
+        && checkpoint
+            .get("unbind_not_started")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
         && checkpoint
@@ -281,8 +316,9 @@ async fn test_fault_wait_for_file_once_async(name: &str, env_var: &str, timeout_
     }
 }
 
-/// Publish the resource-scoped orphan-repair checkpoint used by the protected
-/// #1035 campaign.  This is deliberately a test-only, non-authoritative seam:
+/// Publish the resource-scoped, pre-mutation orphan-repair checkpoint used by
+/// the protected #1035 campaign. This is deliberately a test-only,
+/// non-authoritative seam:
 /// it is inert unless every target/checkpoint variable is present, and the
 /// durable store/projector remain the only repair authority.  The file is
 /// created with `create_new` and atomically renamed so a stale or competing
@@ -290,14 +326,15 @@ async fn test_fault_wait_for_file_once_async(name: &str, env_var: &str, timeout_
 pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
     server_id: uuid::Uuid,
     endpoint_id: &str,
-    endpoint_server_owned: bool,
+    binding_state: Option<&str>,
+    live_reference_absent: bool,
 ) {
     let Some(path) = std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE")
         .map(std::path::PathBuf::from)
     else {
         return;
     };
-    if !endpoint_server_owned {
+    if !live_reference_absent {
         return;
     }
     let target_server = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_SERVER_ID").ok();
@@ -320,17 +357,30 @@ pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
     let sweep_id = uuid::Uuid::new_v4().to_string();
     let published_at = chrono::Utc::now().to_rfc3339();
     let checkpoint = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
         "sweep_id": sweep_id,
         "published_at": published_at,
         "server_id": server_id,
         "endpoint_id": endpoint_id,
-        "phase": "orphan_confirmed",
+        "phase": "orphan_confirmed_pre_mutation",
         "orphan_confirmed": true,
+        "server_terminal_deleted": true,
+        "server_owned": true,
+        "live_reference_absent": true,
+        "binding_state": binding_state,
         "orphan_repair_lock_held": true,
+        "unbind_not_started": true,
         "endpoint_release_not_started": true,
     });
+    tracing::info!(
+        server_id = %server_id,
+        endpoint_id,
+        binding_state = ?binding_state,
+        run_id,
+        sweep_id,
+        "test-only orphan pre-mutation checkpoint published"
+    );
     let Some(parent) = path.parent() else {
         tracing::warn!("test-only orphan checkpoint path has no parent");
         return;
@@ -829,6 +879,96 @@ mod tests {
             Some(same_run),
             false,
             resource,
+        ));
+    }
+
+    #[test]
+    fn orphan_checkpoint_requires_pre_mutation_authoritative_snapshot() {
+        let resource = uuid::Uuid::new_v4();
+        let endpoint = "endpoint-1";
+        let mut checkpoint = serde_json::json!({
+            "schema_version": 2,
+            "run_id": "run-1",
+            "server_id": resource,
+            "endpoint_id": endpoint,
+            "phase": "orphan_confirmed_pre_mutation",
+            "orphan_confirmed": true,
+            "server_terminal_deleted": true,
+            "server_owned": true,
+            "live_reference_absent": true,
+            "binding_state": "bound",
+            "orphan_repair_lock_held": true,
+            "unbind_not_started": true,
+            "endpoint_release_not_started": true,
+        });
+        assert!(test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+
+        checkpoint["binding_state"] = serde_json::Value::Null;
+        assert!(test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+        assert!(
+            checkpoint
+                .as_object_mut()
+                .and_then(|object| object.remove("binding_state"))
+                .is_some()
+        );
+        assert!(!test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+        checkpoint["binding_state"] = serde_json::json!("bound");
+
+        for field in [
+            "server_terminal_deleted",
+            "server_owned",
+            "live_reference_absent",
+            "orphan_repair_lock_held",
+            "unbind_not_started",
+            "endpoint_release_not_started",
+        ] {
+            checkpoint[field] = serde_json::json!(false);
+            assert!(
+                !test_fault_checkpoint_document_matches(
+                    &checkpoint,
+                    resource,
+                    "run-1",
+                    "run-1",
+                    endpoint,
+                ),
+                "checkpoint accepted without {field}"
+            );
+            checkpoint[field] = serde_json::json!(true);
+        }
+        checkpoint["phase"] = serde_json::json!("orphan_confirmed");
+        assert!(!test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+        checkpoint["phase"] = serde_json::json!("orphan_confirmed_pre_mutation");
+        checkpoint["schema_version"] = serde_json::json!(1);
+        assert!(!test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
         ));
     }
 

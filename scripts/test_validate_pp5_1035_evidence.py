@@ -32,6 +32,7 @@ def valid_artifact() -> dict:
         "reconciler": {k: "t" for k in ("first_periodic_tick", "repair_lease_attempt", "repair_lease_result", "repair_function_entered", "lock_waiting", "lock_acquired", "repair_hold_engaged", "orphan_discovered")},
         "lease": {"work_key": "server-endpoint-orphan-repair", "work_kind": "repair", "previous_owner": "none", "previous_epoch": "none", "lease_expiry": "t", "new_owner": "new", "new_epoch": "2", "acquire_result": "Acquired", "acquired_at": "t", "recovery_latency_ms": 0},
         "orphan": {k: True for k in ("operation_succeeded", "resource_deleted", "endpoint_present", "ownership_valid", "project_matches", "no_live_references", "orphan_eligible")},
+        "orphan_checkpoint": {"schema_version": 2, "run_id": "run", "server_id": "s", "endpoint_id": "e", "phase": "orphan_confirmed_pre_mutation", "orphan_confirmed": True, "server_terminal_deleted": True, "server_owned": True, "live_reference_absent": True, "binding_state": "bound", "orphan_repair_lock_held": True, "unbind_not_started": True, "endpoint_release_not_started": True},
         "responsiveness": {"request_start": "t", "request_end": "t", "status": 200, "latency_ms": 1, "bounded_success": True},
         "contention": {"create_request_start": "t", "waiter_marker_at": "t", "repair_release_at": "t", "repair_released_at": "t", "repair_completed_at": "t", "create_accepted_at": "t", "create_resource_id": "s2", "create_operation_id": "op2", "waiter_observed": True, "acceptance_latency_ms": 1, "create_to_active_latency_ms": 1},
         "repair": {"unbind_attempted": True, "unbind_result": "Succeeded", "release_attempted": True, "release_result": "Succeeded", "pass_number": 1, "completed_at": "t", "endpoint_absent": True},
@@ -61,6 +62,7 @@ class ValidatorMutationTests(unittest.TestCase):
             ("old", "listeners", "http", "owned"), ("environment", "match"),
             ("controller", "new", "id"), ("reconciler", "first_periodic_tick"),
             ("lease", "work_key"), ("orphan", "orphan_eligible"),
+            ("orphan_checkpoint", "server_owned"),
             ("contention", "waiter_observed"), ("accounting", "quota_after"),
             ("caller", "endpoint_id"), ("foreign", "port_id"), ("teardown", "sync_files"),
         ):

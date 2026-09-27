@@ -157,6 +157,19 @@ def validate_artifact(artifact: dict[str, Any], expected_sha: str | None = None)
     orphan = _get(artifact, "orphan")
     for field in ("operation_succeeded", "resource_deleted", "endpoint_present", "ownership_valid", "project_matches", "no_live_references", "orphan_eligible"):
         _bool(orphan, field)
+    checkpoint = _get(artifact, "orphan_checkpoint")
+    if checkpoint.get("schema_version") != 2:
+        raise ValidationError("wrong orphan checkpoint schema")
+    for field in ("run_id", "server_id", "endpoint_id", "phase"):
+        _nonempty(checkpoint, field)
+    if "binding_state" not in checkpoint or checkpoint["binding_state"] is not None and not isinstance(checkpoint["binding_state"], str):
+        raise ValidationError("invalid orphan checkpoint binding state")
+    if checkpoint["run_id"] != run_id or checkpoint["server_id"] != artifact["terminal_state"]["server_id"] or checkpoint["endpoint_id"] != artifact["terminal_state"]["endpoint_id"]:
+        raise ValidationError("orphan checkpoint target does not match terminal state")
+    if checkpoint["phase"] != "orphan_confirmed_pre_mutation":
+        raise ValidationError("wrong orphan checkpoint phase")
+    for field in ("orphan_confirmed", "server_terminal_deleted", "server_owned", "live_reference_absent", "orphan_repair_lock_held", "unbind_not_started", "endpoint_release_not_started"):
+        _bool(checkpoint, field)
     response = _get(artifact, "responsiveness")
     _nonempty(response, "request_start")
     _nonempty(response, "request_end")

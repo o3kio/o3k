@@ -20,6 +20,11 @@ for needle in (
     "O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RUN_ID",
     "orphan-repair-checkpoint",
     "orphan_confirmed",
+    "orphan_confirmed_pre_mutation",
+    "server_terminal_deleted",
+    "server_owned",
+    "live_reference_absent",
+    "unbind_not_started",
     "endpoint_release_not_started",
 ):
     assert needle in journey or needle in compute, needle
