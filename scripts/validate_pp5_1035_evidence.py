@@ -187,6 +187,11 @@ def validate_artifact(artifact: dict[str, Any], expected_sha: str | None = None)
     repair = _get(artifact, "repair")
     for field in ("unbind_attempted", "unbind_result", "release_attempted", "release_result", "pass_number", "completed_at"):
         _nonempty(repair, field)
+    if repair["unbind_attempted"]:
+        _nonempty(repair, "unbind_started_at")
+        _bool(repair, "unbind_after_checkpoint")
+    elif repair.get("unbind_result") != "NotRequired" or repair.get("unbind_after_checkpoint") is not False:
+        raise ValidationError("non-bound orphan has invalid unbind evidence")
     _bool(repair, "endpoint_absent")
     accounting = _get(artifact, "accounting")
     _nonempty(accounting, "fixed_ip")

@@ -373,14 +373,6 @@ pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
         "unbind_not_started": true,
         "endpoint_release_not_started": true,
     });
-    tracing::info!(
-        server_id = %server_id,
-        endpoint_id,
-        binding_state = ?binding_state,
-        run_id,
-        sweep_id,
-        "test-only orphan pre-mutation checkpoint published"
-    );
     let Some(parent) = path.parent() else {
         tracing::warn!("test-only orphan checkpoint path has no parent");
         return;
@@ -417,6 +409,14 @@ pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
         tracing::warn!(%error, "test-only orphan checkpoint could not be published");
         return;
     }
+    tracing::info!(
+        server_id = %server_id,
+        endpoint_id,
+        binding_state = ?binding_state,
+        run_id,
+        sweep_id,
+        "test-only orphan pre-mutation checkpoint published"
+    );
     test_fault_wait_for_file_once_async(
         "orphan-repair-lock",
         "O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE",
