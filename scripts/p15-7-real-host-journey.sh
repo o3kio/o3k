@@ -84,6 +84,7 @@ TRANSIENT_EVENTS_FILE="$ARTIFACT_DIR/p15-7-transient-failures.jsonl"
 # injected window.
 FAULT_ACTIVE=false
 O3K_FAULT_ENV_NAME="O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"
+O3K_FAULT_TARGET_ENV_NAME="O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID"
 O3K_REPAIR_RELEASE_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE"
 O3K_REPAIR_TIMEOUT_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_TIMEOUT_MS"
 O3K_CREATE_WAITER_ENV_NAME="O3K_TEST_CREATE_LOCK_WAITER_MARKER"
@@ -466,15 +467,25 @@ append_o3kd_fault_env() {
   # environment (root-owned; edited with the same sudo install boundary as
   # the PostgreSQL proxy rewrite). The control plane must be restarted
   # through restart_o3kd_verified before the hook takes effect.
+  local target_resource_id="${1:-}"
+  [[ "$target_resource_id" =~ ^[0-9a-fA-F-]{36}$ ]] || die "fault target resource id is unsafe"
   [[ "$O3K_FAULT_ENV_VALUE" =~ ^[0-9]+$ && "$O3K_FAULT_ENV_VALUE" -ge 1000 && "$O3K_FAULT_ENV_VALUE" -le 300000 ]] \
     || die "fault pause value is unsafe"
   sudo -n test -r "$STATE_ROOT/o3kd.env" || die "o3kd environment is unreadable"
-  sudo -n grep -Fqx "$O3K_FAULT_ENV_NAME=$O3K_FAULT_ENV_VALUE" "$STATE_ROOT/o3kd.env" && { FAULT_ACTIVE=true; return 0; }
-  printf '%s=%s\n' "$O3K_FAULT_ENV_NAME" "$O3K_FAULT_ENV_VALUE" \
+  if sudo -n grep -Fqx "$O3K_FAULT_ENV_NAME=$O3K_FAULT_ENV_VALUE" "$STATE_ROOT/o3kd.env"; then
+    sudo -n grep -Fqx "$O3K_FAULT_TARGET_ENV_NAME=$target_resource_id" "$STATE_ROOT/o3kd.env" \
+      || die "fault pause exists with a different target resource"
+    FAULT_ACTIVE=true
+    return 0
+  fi
+  printf '%s=%s\n%s=%s\n' "$O3K_FAULT_ENV_NAME" "$O3K_FAULT_ENV_VALUE" \
+    "$O3K_FAULT_TARGET_ENV_NAME" "$target_resource_id" \
     | sudo -n tee -a "$STATE_ROOT/o3kd.env" >/dev/null \
     || die "cannot append fault hook to o3kd environment"
   sudo -n grep -Fqx "$O3K_FAULT_ENV_NAME=$O3K_FAULT_ENV_VALUE" "$STATE_ROOT/o3kd.env" \
     || die "fault hook missing from o3kd environment"
+  sudo -n grep -Fqx "$O3K_FAULT_TARGET_ENV_NAME=$target_resource_id" "$STATE_ROOT/o3kd.env" \
+    || die "fault target missing from o3kd environment"
   FAULT_ACTIVE=true
 }
 append_o3kd_repair_pause_env() {
@@ -515,10 +526,14 @@ clear_o3kd_fault_env() {
   sudo -n test -r "$STATE_ROOT/o3kd.env" || { FAULT_ACTIVE=false; return 0; }
   env_tmp="$(mktemp "$RUNNER_TEMP_ROOT/o3kd-env-clear.XXXXXX")"
   chmod 0600 "$env_tmp"
-  sudo -n cat "$STATE_ROOT/o3kd.env" | grep -Fvx "$O3K_FAULT_ENV_NAME=$O3K_FAULT_ENV_VALUE" >"$env_tmp" \
-    || { rm -f -- "$env_tmp"; FAULT_ACTIVE=false; return 0; }
+  if ! sudo -n awk -v pause_name="$O3K_FAULT_ENV_NAME" -v target_name="$O3K_FAULT_TARGET_ENV_NAME" \
+    'index($0, pause_name "=") != 1 && index($0, target_name "=") != 1 { print }' \
+    "$STATE_ROOT/o3kd.env" >"$env_tmp"; then
+    rm -f -- "$env_tmp"
+    return 1
+  fi
   sudo -n install -o "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -g "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -m 0600 \
-    "$env_tmp" "$STATE_ROOT/o3kd.env" || { rm -f -- "$env_tmp"; FAULT_ACTIVE=false; return 0; }
+    "$env_tmp" "$STATE_ROOT/o3kd.env" || { rm -f -- "$env_tmp"; return 1; }
   rm -f -- "$env_tmp"
   sudo -n grep -Fq "$O3K_FAULT_ENV_NAME=" "$STATE_ROOT/o3kd.env" || FAULT_ACTIVE=false
 }
@@ -2344,48 +2359,9 @@ for item in page.get("items", []):
 print(total)
 PY
 }
-# Arm the fault hook and restart so the delete below parks inside the
-# injected window. The hook is a positive-ms sleep on the delete path after
-# durable terminalization commits and before endpoint release.
+# Prepare the crash leg. The resource-scoped hook is armed only after server C
+# has a durable identity, immediately before the targeted delete is issued.
 CRASH_STARTED=true
-persist_crash_checkpoint fault_armed running \
-  source_sha "$SOURCE_SHA" run_id "$RUN_ID" repair_dispatch_cap 1 \
-  repair_interval_seconds 5 fabric_unbind_deadline_seconds 30 \
-  contending_create_bound_ms "$CONTENDING_CREATE_BOUND_MS" \
-  bound_derivation "30s one-dispatch network deadline + 30s bounded test-seam fail-safe + 5s cadence/API margin"
-append_o3kd_fault_env
-restart_o3kd_verified
-wait_o3kd_readyz "readyz did not reconstruct with the fault hook armed"
-# Backend liveness gate: readyz alone does not prove the sqlx pool can
-# acquire through the sever rules.  On run 990924001 the pool timed out
-# for ~10 min immediately after this restart while the proxy process was
-# still alive and PostgreSQL was checkpointing normally, and the run burned
-# the window down inside bounded retries instead of failing at the boundary.
-# Prove end-to-end forwarding (psql through the proxy DSN) AND one
-# authenticated pool-backed API read before creating server C; fail closed
-# here with a distinct message so any recurrence is classified at the
-# boundary, from the preserved proxy log.
-BACKEND_LIVE=false
-for _ in $(seq 1 30); do
-  if [[ -n "${PROXY_DSN:-}" ]]; then
-    psql "$PROXY_DSN" -v ON_ERROR_STOP=1 -tAc 'SELECT 1' >/dev/null 2>&1 || { sleep 2; continue; }
-  else
-    bootstrap_store_probe || { sleep 2; continue; }
-  fi
-  if api_get "/operator/diagnostics/providers?limit=1" >"$WORK_ROOT/backend-liveness-probe.json" 2>/dev/null; then
-    BACKEND_LIVE=true
-    break
-  fi
-  sleep 2
-done
-[[ "$BACKEND_LIVE" == true ]] || die "backend_liveness_gate_failed_after_fault_hook_restart"
-api_get "/operator/diagnostics/providers?limit=200" >"$WORK_ROOT/providers-before-crash.json"
-ALLOC_BEFORE_CRASH="$(allocated_vcpu_total "$WORK_ROOT/providers-before-crash.json")"
-[[ "$ALLOC_BEFORE_CRASH" =~ ^[0-9]+$ ]] || die "Placement allocation baseline unavailable"
-QUOTA_BEFORE_CRASH="$(quota_usage)"
-[[ "$QUOTA_BEFORE_CRASH" =~ ^[0-9]+$ ]] || die "network:ports quota baseline unavailable"
-CRASH_LOG_LINES_BEFORE="$(o3kd_log_line_count)"
-
 # Server C is created through the compatibility API with a NETWORK reference
 # so the control plane mints exactly one server-owned endpoint
 # (o3k-server:<project>:<context>) — the orphan shape #1035 repairs. The
@@ -2437,6 +2413,48 @@ for _ in $(seq 1 180); do
 done
 [[ "$C_STATE" == "ACTIVE" ]] || die "server C did not become ACTIVE"
 GEN_C="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metadata"]["generation"])' "$WORK_ROOT/workload-c-show.json")"
+
+# Arm the crash window only after the target server identity is known.  The
+# resource-scoped hook prevents unrelated terminal/replay work during daemon
+# startup from consuming the pause before server C's delete reaches it.
+append_o3kd_fault_env "$WORKLOAD_C"
+restart_o3kd_verified
+wait_o3kd_readyz "readyz did not reconstruct with the targeted fault hook armed"
+FAULT_TARGET_ENV_CONSUMED=false
+if sudo -n cat "/proc/$(read_o3kd_ledger)/environ" 2>/dev/null | tr '\0' '\n' \
+  | grep -Fx "$O3K_FAULT_TARGET_ENV_NAME=$WORKLOAD_C" >/dev/null; then
+  FAULT_TARGET_ENV_CONSUMED=true
+fi
+[[ "$FAULT_TARGET_ENV_CONSUMED" == true ]] || die "replacement o3kd did not consume the targeted endpoint-release environment"
+# Backend liveness gate: readyz alone does not prove the sqlx pool can
+# acquire through the sever rules.  Prove end-to-end forwarding and one
+# authenticated pool-backed API read before issuing the targeted delete.
+BACKEND_LIVE=false
+for _ in $(seq 1 30); do
+  if [[ -n "${PROXY_DSN:-}" ]]; then
+    psql "$PROXY_DSN" -v ON_ERROR_STOP=1 -tAc 'SELECT 1' >/dev/null 2>&1 || { sleep 2; continue; }
+  else
+    bootstrap_store_probe || { sleep 2; continue; }
+  fi
+  if api_get "/operator/diagnostics/providers?limit=1" >"$WORK_ROOT/backend-liveness-probe.json" 2>/dev/null; then
+    BACKEND_LIVE=true
+    break
+  fi
+  sleep 2
+done
+[[ "$BACKEND_LIVE" == true ]] || die "backend_liveness_gate_failed_after_fault_hook_restart"
+api_get "/operator/diagnostics/providers?limit=200" >"$WORK_ROOT/providers-before-crash.json"
+ALLOC_BEFORE_CRASH="$(allocated_vcpu_total "$WORK_ROOT/providers-before-crash.json")"
+[[ "$ALLOC_BEFORE_CRASH" =~ ^[0-9]+$ ]] || die "Placement allocation baseline unavailable"
+QUOTA_BEFORE_CRASH="$(quota_usage)"
+[[ "$QUOTA_BEFORE_CRASH" =~ ^[0-9]+$ ]] || die "network:ports quota baseline unavailable"
+CRASH_LOG_LINES_BEFORE="$(o3kd_log_line_count)"
+persist_crash_checkpoint fault_armed running \
+  source_sha "$SOURCE_SHA" run_id "$RUN_ID" target_resource_id "$WORKLOAD_C" \
+  target_env_consumed "$FAULT_TARGET_ENV_CONSUMED" \
+  repair_dispatch_cap 1 repair_interval_seconds 5 fabric_unbind_deadline_seconds 30 \
+  contending_create_bound_ms "$CONTENDING_CREATE_BOUND_MS" \
+  bound_derivation "30s one-dispatch network deadline + 30s bounded test-seam fail-safe + 5s cadence/API margin"
 
 # Issue the delete in the background: with the pause on the delete path the
 # request stays in flight while the durable terminal state is already
@@ -2876,7 +2894,7 @@ import json, os, pathlib, sys, tempfile
  create_lock_wait_observed_ms) = sys.argv[1:40]
 path=pathlib.Path(out)
 doc = {
-    "fault_hook": {"env": env_name, "pause_ms": int(env_value), "semantics": "pause after durable terminalization and before endpoint release"},
+    "fault_hook": {"env": env_name, "pause_ms": int(env_value), "target_env": "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID", "target_resource_id": workload, "semantics": "pause after durable terminalization and before endpoint release for the targeted resource only"},
     "server_c": {"resource_id": workload, "owned_endpoint_id": port_id, "fixed_ip": fixed_ip},
     "operation": {"operation_id": delete_operation, "state": "Succeeded", "server_resource_state": "DELETED", "observed_after_ms": int(terminal_ms)},
     "endpoint_before_crash": {"port_id": port_id, "existed": True, "server_owned": True, "presence_asserted_while_pause_held": endpoint_paused == "true", "binding_state_file": "p15-7-crash-endpoint-before.json"},

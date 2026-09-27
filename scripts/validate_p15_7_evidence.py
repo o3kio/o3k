@@ -405,11 +405,26 @@ def validate(
                             fail(errors, f"#1035 process identity does not match process_killed.{killed_field}")
             passed(crash.get("status"), "journey.crash_injection_repair.status", errors)
             hook = mapping(crash.get("fault_hook"), "journey.crash_injection_repair.fault_hook", errors)
+            server_c = mapping(crash.get("server_c"), "journey.crash_injection_repair.server_c", errors)
+            fault_armed = next(
+                (item for item in checkpoints
+                 if isinstance(item, dict) and item.get("phase") == "fault_armed"),
+                None,
+            ) if isinstance(checkpoints, list) else None
             if hook is not None:
                 if hook.get("env") != "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS":
                     fail(errors, "journey.crash_injection_repair.fault_hook.env must be the endpoint-release pause hook")
                 if not isinstance(hook.get("pause_ms"), int) or hook["pause_ms"] < 1:
                     fail(errors, "journey.crash_injection_repair.fault_hook.pause_ms must be a positive integer")
+                if hook.get("target_env") != "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID":
+                    fail(errors, "journey.crash_injection_repair.fault_hook.target_env must identify the resource-scoped endpoint-release target")
+                target_resource_id = hook.get("target_resource_id")
+                if not isinstance(target_resource_id, str) or not target_resource_id.strip():
+                    fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must be non-empty")
+                if server_c is not None and target_resource_id != server_c.get("resource_id"):
+                    fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must match server_c.resource_id")
+                if fault_armed is not None and target_resource_id != fault_armed.get("target_resource_id"):
+                    fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must match fault_armed.target_resource_id")
             endpoint = mapping(crash.get("endpoint_before_crash"), "journey.crash_injection_repair.endpoint_before_crash", errors)
             if endpoint is not None:
                 if endpoint.get("existed") is not True:

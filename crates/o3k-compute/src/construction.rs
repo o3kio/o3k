@@ -382,7 +382,12 @@ impl ComputeService {
         // otherwise a sweep can win during the pause and make the evidence
         // nondeterministic.
         if delete_release {
-            crate::test_fault_pause_async_with("before-endpoint-release", pause_ms).await;
+            crate::test_fault_pause_async_for_resource(
+                "before-endpoint-release",
+                pause_ms,
+                Some(operation.resource_id),
+            )
+            .await;
         }
         for port_id in &request.network_ids {
             let outcome = match operation.kind.as_str() {
@@ -519,7 +524,11 @@ impl ComputeService {
         let attached = self.referenced_port_ids().await?;
         // Keep the endpoint-release crash window inside the replay seat's
         // serialization boundary so sweep/projection cannot release first.
-        crate::test_fault_pause_async_with("before-endpoint-release", pause_ms).await;
+        // A targeted crash window is consumed only by the terminal projection
+        // for that resource.  Replay callers do not have a resource identity
+        // here; when a target is configured they must not steal the window
+        // from the intended delete.
+        crate::test_fault_pause_async_for_resource("before-endpoint-release", pause_ms, None).await;
         for port_id in &request.network_ids {
             if attached.contains(port_id.as_str()) {
                 continue;

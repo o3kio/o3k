@@ -226,6 +226,8 @@ doc = {
     "remove_rejoin_replace":True,"restart_recovery":True,
     "crash_injection_repair":{"schema_version":2,"phase":"completed","status":"passed",
       "checkpoints":[{"phase":phase,"status":"passed" if phase == "completed" else "running",
+        **({"target_resource_id":"66666666-6666-4666-8666-666666666666"}
+           if phase == "fault_armed" else {}),
         **({"pid":"4242","starttime":"123","executable":"/run/o3k/bin/o3kd",
             "http_listener_pid":"4242","control_listener_pid":"4242","state_root":"/run/o3k"}
            if phase == "process_identity_armed" else {}),
@@ -236,7 +238,9 @@ doc = {
          "process_restarted","repair_lock_acquired","contending_create_waiting","contending_create_started","orphan_discovered",
          "repair_completed","contending_create_accepted","accounting_verified","completed"]],
       "fault_hook":{"env":"O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS","pause_ms":45000,
-        "semantics":"positive-ms sleep on the delete path after durable terminalization commits and before endpoint release"},
+        "target_env":"O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID",
+        "target_resource_id":"66666666-6666-4666-8666-666666666666",
+        "semantics":"positive-ms sleep on the targeted delete path after durable terminalization commits and before endpoint release"},
       "server_c":{"resource_id":"66666666-6666-4666-8666-666666666666",
         "owned_endpoint_id":"77777777-7777-4777-8777-777777777777","fixed_ip":"198.18.0.4"},
       "endpoint_before_crash":{"port_id":"77777777-7777-4777-8777-777777777777","existed":True,
@@ -641,6 +645,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "removed block {absent_id} is still present in the canonical topology",
                  "record_scale_checkpoint", "p15-7-scale-checkpoint-",
                  "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS",
+                 "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID",
                  "kill9_o3kd_verified", "start_o3kd_verified", "read_o3kd_ledger",
                  "server-owned endpoint orphan repair sweep",
                  "p15-7-drain-blocker-requery.json",
@@ -686,6 +691,12 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "--serial \"file,path=$serial\"",
                  "awk '/MemTotal:/ {print int(\\$2/1024); exit}' /proc/meminfo"):
     assert required in journey, required
+# Arm the crash pause only after server C is active and before its delete is
+# dispatched; otherwise unrelated reconciliation work can consume the window.
+arm = journey.index('append_o3kd_fault_env "$WORKLOAD_C"')
+server_active = journey.index('[[ "$C_STATE" == "ACTIVE" ]]')
+delete_dispatch = journey.index('"$API/compute/servers/$WORKLOAD_C" >"$WORK_ROOT/workload-c-delete.code"')
+assert server_active < arm < delete_dispatch
 # Root-owned TestLab logs must be inspected entirely inside the privileged
 # boundary.  A shell-side input redirection is evaluated before sudo and
 # regresses the protected #1035 crash leg with Permission denied.

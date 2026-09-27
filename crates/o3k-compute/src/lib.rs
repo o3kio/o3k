@@ -90,6 +90,38 @@ async fn test_fault_pause_async_with(name: &str, ms: Option<u64>) {
     tracing::warn!(pause_ms = ms, "test-only fault pause {} released", name);
 }
 
+/// Apply the endpoint-release crash-window pause only to the explicitly
+/// targeted server when a target is configured.  The protected #1035 journey
+/// arms the daemon before a delete is dispatched, so unrelated terminal
+/// projections/replays must not consume the one crash window first.
+pub(crate) async fn test_fault_pause_async_for_resource(
+    name: &str,
+    ms: Option<u64>,
+    resource_id: Option<uuid::Uuid>,
+) {
+    let raw_target = std::env::var_os("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID");
+    if !test_fault_target_matches(raw_target.as_deref(), resource_id) {
+        if raw_target.is_some() {
+            tracing::debug!("test-only endpoint-release fault target did not match");
+        }
+        return;
+    }
+    test_fault_pause_async_with(name, ms).await;
+}
+
+fn test_fault_target_matches(
+    raw_target: Option<&std::ffi::OsStr>,
+    resource_id: Option<uuid::Uuid>,
+) -> bool {
+    let Some(raw_target) = raw_target else {
+        return true;
+    };
+    let Ok(target) = raw_target.to_string_lossy().parse::<uuid::Uuid>() else {
+        return false;
+    };
+    resource_id == Some(target)
+}
+
 /// Test-only repair-pass hold used to queue a port-attaching create behind an
 /// orphan sweep. The harness releases it through a run-owned file after
 /// starting the create request. The timeout is a fail-safe, and a process-local
@@ -512,6 +544,28 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn endpoint_release_fault_target_is_fail_closed_and_resource_scoped() {
+        let resource = uuid::Uuid::new_v4();
+        assert!(test_fault_target_matches(None, Some(resource)));
+        assert!(test_fault_target_matches(
+            Some(std::ffi::OsStr::new(&resource.to_string())),
+            Some(resource)
+        ));
+        assert!(!test_fault_target_matches(
+            Some(std::ffi::OsStr::new(&uuid::Uuid::new_v4().to_string())),
+            Some(resource)
+        ));
+        assert!(!test_fault_target_matches(
+            Some(std::ffi::OsStr::new("not-a-uuid")),
+            Some(resource)
+        ));
+        assert!(!test_fault_target_matches(
+            Some(std::ffi::OsStr::new(&resource.to_string())),
+            None
+        ));
+    }
 
     /// Stateful in-memory agent registry used to test application scheduling
     /// and inventory behavior without wire types. The snapshots are
