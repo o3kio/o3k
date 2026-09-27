@@ -650,6 +650,14 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
             Duration::from_secs(20),
         )
         .await?;
+        // Finish the bootstrap process before opening the same SQLite file for
+        // direct test-fixture writes.  Keeping the daemon alive here creates a
+        // writer-vs-writer race during CI (the daemon may still be completing
+        // startup persistence), which can surface as SQLITE_BUSY.  The
+        // readiness probe already proves schema/bootstrap completion; all
+        // subsequent daemon processes reopen this run-owned database normally.
+        stop_process(bootstrap.child_mut()?)?;
+        bootstrap.disarm();
         let store =
             o3k_store::unified::O3kStore::connect_sqlite_file(&root.join("o3k.sqlite")).await?;
         let now_ts = now();
@@ -682,8 +690,6 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
                 updated_at: now_ts,
             })
             .await?;
-        stop_process(bootstrap.child_mut()?)?;
-        bootstrap.disarm();
     }
     let old_child = start_o3kd(
         root,
