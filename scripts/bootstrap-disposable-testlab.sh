@@ -48,6 +48,7 @@ APT_LOCK=/run/lock/o3k-testlab-apt.lock
 AUTH_PORT="${O3K_TESTLAB_PORT:-18080}"
 CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-18551}"
 COMPUTE_HEALTH_PORT="${O3K_TESTLAB_COMPUTE_HEALTH_PORT:-19100}"
+AUTO_SELECT_PORTS="${O3K_TESTLAB_AUTO_SELECT_PORTS:-false}"
 O3K_PROVIDER="${O3K_PROVIDER:-fake}"
 BRIDGE_NAME="${O3K_COMPUTE_BRIDGE_NAME:-o3k-b${RUN_ID: -8}}"
 case "${O3K_PROVIDER}" in
@@ -67,6 +68,53 @@ SUPPLEMENTARY_GROUPS_ADDED=false
 FAIL_REASON=bootstrap_failed
 
 fail() { FAIL_REASON="$1"; echo "disposable TestLab bootstrap failed: $1" >&2; exit 1; }
+
+port_is_listening() {
+  local port="$1" listeners
+  listeners="$(ss -H -ltn 2>/dev/null)" || fail "cannot inspect listening TCP ports"
+  awk -v suffix=":${port}" \
+    'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit !found}' \
+    <<<"${listeners}"
+}
+
+select_free_ports() {
+  local listeners start_offset offset step selected_offset=""
+  listeners="$(ss -H -ltn 2>/dev/null)" || fail "cannot inspect listening TCP ports"
+  if [[ "${RUN_ID}" =~ ^[0-9]+$ ]]; then
+    start_offset=$((RUN_ID % 1000))
+  else
+    start_offset=0
+  fi
+  for ((step = 0; step < 1000; step++)); do
+    offset=$(((start_offset + step) % 1000))
+    local auth_port=$((28080 + offset))
+    local control_port=$((28551 + offset))
+    local compute_health_port=$((29100 + offset))
+    if ! awk -v suffix=":${auth_port}" \
+      'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit found}' \
+      <<<"${listeners}" \
+      && ! awk -v suffix=":${control_port}" \
+      'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit found}' \
+      <<<"${listeners}" \
+      && ! awk -v suffix=":${compute_health_port}" \
+      'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit found}' \
+      <<<"${listeners}"; then
+      continue
+    fi
+    selected_offset="${offset}"
+    AUTH_PORT="${auth_port}"
+    CONTROL_PORT="${control_port}"
+    COMPUTE_HEALTH_PORT="${compute_health_port}"
+    break
+  done
+  [[ -n "${selected_offset}" ]] || fail "no free run-scoped TestLab port triplet is available"
+  if [[ -n "${GITHUB_ENV:-}" ]]; then
+    [[ "${GITHUB_ENV}" == /* && "${GITHUB_ENV}" != *..* && ! -L "${GITHUB_ENV}" ]] \
+      || fail "GitHub environment file path is unsafe"
+    printf 'O3K_TESTLAB_PORT=%s\nO3K_TESTLAB_CONTROL_PORT=%s\nO3K_TESTLAB_COMPUTE_HEALTH_PORT=%s\n' \
+      "${AUTH_PORT}" "${CONTROL_PORT}" "${COMPUTE_HEALTH_PORT}" >>"${GITHUB_ENV}"
+  fi
+}
 
 process_matches() {
   local pid="$1" binary="$2" expected executable
@@ -270,9 +318,20 @@ done
 if [[ ! -e "$STATE_ROOT" ]]; then
   [[ ! -e "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
     || fail "run inventory state already exists without matching service state"
+  if [[ "${AUTO_SELECT_PORTS}" == true ]] && {
+    ! port_is_listening "${AUTH_PORT}" ||
+    ! port_is_listening "${CONTROL_PORT}" ||
+    ! port_is_listening "${COMPUTE_HEALTH_PORT}"
+  }; then
+    # The workflow performs an early availability scan, but a persistent host
+    # can acquire a port in the gap before bootstrap starts.  Re-select at
+    # this authoritative boundary and publish the actual values to later
+    # workflow steps.  With auto-selection disabled, preserve the explicit
+    # caller-provided fail-closed behavior below.
+    select_free_ports
+  fi
   for port in "$AUTH_PORT" "$CONTROL_PORT" "$COMPUTE_HEALTH_PORT"; do
-    if ss -H -ltn 2>/dev/null | awk -v suffix=":${port}" \
-      'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit !found}'; then
+    if port_is_listening "${port}"; then
       fail "run port ${port} is already occupied by an existing service"
     fi
   done
