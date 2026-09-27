@@ -25,6 +25,8 @@ jobs:
       (github.ref == 'refs/heads/main' || inputs.target_sha != '')
     env:
       TARGET_SHA: ${{ inputs.target_sha || github.sha }}
+      O3K_P15_7_CAMPAIGN_LOCK_PATH: /tmp/o3k-p15-7-campaign.lock
+      O3K_P15_7_RUN_ID: ${{ github.run_id }}
     timeout-minutes: 120
     # Configure this environment to require maintainer approval.
     environment: o3k-real-host-validation
@@ -37,11 +39,37 @@ jobs:
           # directory, inaccessible to the runner account.  Test existence
           # and repair ownership through sudo so checkout's clean step can
           # traverse and remove every stale run-owned artifact.
-          target_dir="${GITHUB_WORKSPACE}/target"
-          if sudo -n test -e "${target_dir}"; then
-            sudo -n chown -R "$(id -u):$(id -g)" "${target_dir}"
-            sudo -n chmod -R u+rwX "${target_dir}"
+          target_root="${GITHUB_WORKSPACE}/target"
+          if sudo -n test -L "${target_root}"; then
+            echo "refusing to traverse symlinked checkout target root" >&2
+            exit 1
+          elif [[ "$?" -ne 1 ]]; then
+            echo "cannot verify checkout target root safety" >&2
+            exit 1
           fi
+          for target_dir in \
+            "${GITHUB_WORKSPACE}/target/real-host-workflow-artifacts" \
+            "${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts" \
+            "${GITHUB_WORKSPACE}/target/debug" \
+            "${GITHUB_WORKSPACE}/target/release"; do
+            if sudo -n test -L "${target_dir}"; then
+              echo "refusing to repair symlinked checkout artifact root: ${target_dir}" >&2
+              exit 1
+            elif [[ "$?" -ne 1 ]]; then
+              echo "cannot verify checkout artifact root safety: ${target_dir}" >&2
+              exit 1
+            fi
+            if sudo -n test -e "${target_dir}"; then
+              sudo -n chown -R "$(id -u):$(id -g)" "${target_dir}"
+              sudo -n chmod -R u+rwX "${target_dir}"
+              # Verify traversal under the runner identity before checkout
+              # attempts its own clean.  Do not delete an ambiguous path.
+              sudo -n -u "$(id -un)" find "${target_dir}" -xdev -print >/dev/null
+            elif [[ "$?" -ne 1 ]]; then
+              echo "cannot inspect checkout artifact root: ${target_dir}" >&2
+              exit 1
+            fi
+          done
 
       - name: Check out the canonical repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -62,6 +90,17 @@ jobs:
           test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
           mkdir -p target
           printf 'tested_source_sha=%s\n' "${TARGET_SHA}" > target/tested-source-sha.txt
+
+      - name: Acquire protected campaign lock
+        id: campaign_lock
+        env:
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+        run: python3 scripts/p15-7-campaign-lock.py acquire
+
+      - name: Run PP5 harness qualification
+        env:
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+        run: bash scripts/p15-7-harness-qualification.sh
 
       # Qualify the external dependency before Keycloak/TestLab/LVM mutation.
       # A runner label is not proof of PostgreSQL configuration or privileges.
@@ -827,3 +866,9 @@ jobs:
             target/tested-source-sha.txt
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Release protected campaign lock
+        if: always()
+        env:
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+        run: python3 scripts/p15-7-campaign-lock.py release

@@ -337,8 +337,12 @@ def validate(
                         fail(errors, "journey.drain.blocker_requery still reports the deleted workload as a resident blocker")
         crash = mapping(journey.get("crash_injection_repair"), "journey.crash_injection_repair", errors)
         if crash is not None:
-            if crash.get("schema_version") != 2:
-                fail(errors, "journey.crash_injection_repair.schema_version must be 2")
+            if crash.get("schema_version") != 3:
+                fail(errors, "journey.crash_injection_repair.schema_version must be 3")
+            if not isinstance(crash.get("run_id"), str) or not crash["run_id"].strip():
+                fail(errors, "#1035 crash evidence run_id must be explicit")
+            if not isinstance(crash.get("source_sha"), str) or not SHA.fullmatch(crash["source_sha"]):
+                fail(errors, "#1035 crash evidence source_sha must be a full SHA")
             if crash.get("phase") != "completed" or crash.get("status") != "passed":
                 fail(errors, "#1035 crash evidence must be completed and passed")
             checkpoints = crash.get("checkpoints")
@@ -352,6 +356,8 @@ def validate(
                 fail(errors, "#1035 incremental checkpoints must be a list")
             else:
                 phases = [item.get("phase") for item in checkpoints if isinstance(item, dict)]
+                if phases != required_checkpoints:
+                    fail(errors, "#1035 crash checkpoints must be the exact legal phase sequence")
                 cursor = -1
                 for required in required_checkpoints:
                     try:
@@ -507,16 +513,18 @@ def validate(
                     waiter_start = contention.get("waiter_observation_wait_start_unix_ms")
                     waiter_wait = contention.get("waiter_observation_wait_ms")
                     waiter_bound = contention.get("waiter_observation_bound_ms")
-                    if not all(isinstance(value, int) for value in (waiter_start, waiter_wait, waiter_bound)):
+                    waiter_timing_valid = all(isinstance(value, int) for value in (waiter_start, waiter_wait, waiter_bound))
+                    if not waiter_timing_valid:
                         fail(errors, "waiter observation timing fields must be integers")
                     repair_pause = contention.get("repair_pause_ms")
-                    if not isinstance(repair_pause, int) or repair_pause < 10000 or repair_pause > 120000:
+                    repair_pause_valid = isinstance(repair_pause, int) and 10000 <= repair_pause <= 120000
+                    if not repair_pause_valid:
                         fail(errors, "repair pause must be a bounded integer")
-                    elif waiter_bound != repair_pause - 5000:
+                    elif waiter_timing_valid and waiter_bound != repair_pause - 5000:
                         fail(errors, "waiter bound must equal repair pause minus 5000ms")
-                    elif not isinstance(waiter_observed, int) or waiter_bound <= 0 or waiter_wait < 0 or \
+                    elif waiter_timing_valid and (not isinstance(waiter_observed, int) or waiter_bound <= 0 or waiter_wait < 0 or \
                          waiter_wait > waiter_bound or waiter_start > waiter_observed or \
-                         waiter_observed - waiter_start != waiter_wait or start > waiter_start:
+                         waiter_observed - waiter_start != waiter_wait or start > waiter_start):
                         fail(errors, "waiter observation timing is invalid or unbounded")
                     if contention.get("waiter_observation_within_bound") is not True:
                         fail(errors, "waiter observation must be explicitly within its derived bound")

@@ -208,7 +208,12 @@ def ensure_local_server() -> tuple[bool, str, bool, bool]:
     server_present = account_present and local_server_binary_present()
     server_installed = False
     if not server_present or not client_present:
-        ok, reason = install_packages(["postgresql"])
+        packages = []
+        if not server_present:
+            packages.append("postgresql")
+        if not client_present:
+            packages.append("postgresql-client")
+        ok, reason = install_packages(packages)
         if not ok:
             write_service_state(was_active, not was_active and local_service_active(), False)
             return False, reason, was_active, False

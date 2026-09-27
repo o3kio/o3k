@@ -636,6 +636,9 @@ for needle in ("P15.7 protected preflight", "id-token: write",
     assert needle in preflight_text, needle
 workflow_step = text.split("      - name: Run public real-host lifecycle\n", 1)[1]
 workflow_step = workflow_step.split("        run: bash tests/testlab-libvirt.sh\n", 1)[0]
+assert "scripts/p15-7-campaign-lock.py acquire" in text
+assert "scripts/p15-7-harness-qualification.sh" in text
+assert "O3K_P15_7_CAMPAIGN_LOCK_PATH" in text
 assert "          OS_PASSWORD:" not in workflow_step
 for needle in ("workflow_dispatch:",
                "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
@@ -711,9 +714,16 @@ for needle in ("workflow_dispatch:",
     assert needle in text, needle
 assert "Repair prior protected artifact ownership" in text
 assert 'sudo -n chown -R "$(id -u):$(id -g)"' in text
-assert 'target_dir="${GITHUB_WORKSPACE}/target"' in text
+assert '"${GITHUB_WORKSPACE}/target/real-host-workflow-artifacts"' in text
+assert 'target_root="${GITHUB_WORKSPACE}/target"' in text
+assert 'sudo -n test -L "${target_root}"' in text
+assert 'sudo -n test -L "${target_dir}"' in text
+assert 'cannot verify checkout target root safety' in text
+assert 'cannot verify checkout artifact root safety: ${target_dir}' in text
+assert 'cannot inspect checkout artifact root: ${target_dir}' in text
 assert 'sudo -n test -e "${target_dir}"' in text
 assert 'sudo -n chmod -R u+rwX "${target_dir}"' in text
+assert 'sudo -n -u "$(id -un)" find "${target_dir}" -xdev -print' in text
 assert 'checkout\'s clean step can' in text
 assert "github.repository == 'o3kio/o3k'" in text
 assert "github.event_name == 'workflow_dispatch'" in text

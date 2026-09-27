@@ -138,6 +138,21 @@ class RunnerPrerequisiteTests(unittest.TestCase):
         self.assertTrue(state["local_service_started"])
         self.assertTrue(state["server_package_installed"])
 
+    def test_missing_client_is_installed_when_server_exists(self):
+        which = iter([None, "/usr/bin/psql"])
+        with patch.dict(os.environ, self.env, clear=False), \
+                patch.object(MODULE, "local_service_active", return_value=True), \
+                patch.object(MODULE.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=100)), \
+                patch.object(MODULE, "local_server_binary_present", return_value=True), \
+                patch.object(MODULE.shutil, "which", side_effect=lambda name: next(which)), \
+                patch.object(MODULE, "install_packages", return_value=(True, "installed")) as install:
+            ok, reason, was_active, installed = MODULE.ensure_local_server()
+        self.assertTrue(ok)
+        self.assertEqual(reason, "already_active")
+        self.assertTrue(was_active)
+        self.assertTrue(installed)
+        install.assert_called_once_with(["postgresql-client"])
+
     def test_server_start_failure_is_bounded_and_recorded(self):
         with patch.dict(os.environ, self.env, clear=False), \
                 patch.object(MODULE, "local_service_active", return_value=False), \

@@ -7,29 +7,68 @@ trap 'rm -rf -- "${WORK_DIR}"' EXIT
 EVIDENCE="${WORK_DIR}/evidence.json"
 bash "$ROOT_DIR/tests/p15_7_restart_environment_guards.sh"
 
+python3 - "$ROOT_DIR/scripts/p15-7-real-host-journey.sh" "$ROOT_DIR/crates/o3k-compute/src/lib.rs" <<'PY'
+import pathlib, sys
+journey = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+compute = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+for needle in (
+    "O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE",
+    "O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_SERVER_ID",
+    "O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_ENDPOINT_ID",
+    "O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID",
+    "orphan-repair-checkpoint",
+    "orphan_confirmed",
+    "endpoint_release_not_started",
+):
+    assert needle in journey or needle in compute, needle
+assert "test_fault_orphan_checkpoint_and_wait" in compute
+assert "CRASH_REPAIR_CHECKPOINT_FILE" in journey
+assert "REPAIR_LOCK_HELD=true" in journey
+# The checkpoint, not an unrelated log/API pair, is the synchronization
+# authority for the contending create.
+assert "orphan-repair-checkpoint.json" in journey
+assert "CRASH_REPAIR_CHECKPOINT_FILE" in journey
+PY
+
 # Incremental crash evidence must survive a later assertion failure. Exercise
-# the atomic writer through two durable checkpoints, then fail after restart.
+# the atomic writer through a legal checkpoint and then fail that same phase.
 CRASH_EVIDENCE="${WORK_DIR}/crash-evidence.json"
 python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "${CRASH_EVIDENCE}" \
-  process_restarted running restart_path normal_boot
+  fault_armed running source_sha 0000000000000000000000000000000000000000 run_id guard-run
 python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "${CRASH_EVIDENCE}" \
-  process_restarted failed failure_phase post_restart_assertion
+  fault_armed failed failure_phase fault_armed
 python3 - "${CRASH_EVIDENCE}" <<'PY'
 import json, pathlib, sys
 path=pathlib.Path(sys.argv[1]); doc=json.loads(path.read_text())
-assert doc["status"] == "failed" and doc["failure_phase"] == "post_restart_assertion"
-assert [item["phase"] for item in doc["checkpoints"]] == ["process_restarted", "process_restarted"]
+assert doc["status"] == "failed" and doc["failure_phase"] == "fault_armed"
+assert [item["phase"] for item in doc["checkpoints"]] == ["fault_armed", "fault_armed"]
 assert not list(path.parent.glob(f".{path.name}.*")), "atomic writer left a temporary artifact"
 PY
+# Illegal order, stale identity, and post-failure overwrite must fail closed.
+if python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "${WORK_DIR}/illegal.json" \
+  process_restarted running source_sha 0000000000000000000000000000000000000000 run_id guard-run; then
+  echo "out-of-order crash phase was accepted" >&2; exit 1
+fi
+if python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "${CRASH_EVIDENCE}" \
+  terminal_state_observed running source_sha ffffffffffffffffffffffffffffffffffffffff run_id guard-run; then
+  echo "failed crash evidence was overwritten" >&2; exit 1
+fi
 # The real journey records process identity before SIGKILL; the writer and
 # aggregate validator must accept and require this ownership checkpoint.
-python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "${WORK_DIR}/process-identity-evidence.json" \
+IDENTITY_EVIDENCE="${WORK_DIR}/process-identity-evidence.json"
+python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "$IDENTITY_EVIDENCE" \
+  fault_armed running source_sha 0000000000000000000000000000000000000000 run_id identity-run
+python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "$IDENTITY_EVIDENCE" \
+  terminal_state_observed running
+python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "$IDENTITY_EVIDENCE" \
+  endpoint_present_pre_crash running server_id 11111111-1111-4111-8111-111111111111 endpoint_id 22222222-2222-4222-8222-222222222222
+python3 "${ROOT_DIR}/scripts/p15-7-crash-evidence.py" "$IDENTITY_EVIDENCE" \
   process_identity_armed running pid 4242 starttime 123 executable /run/o3kd
 python3 - "${WORK_DIR}/process-identity-evidence.json" <<'PY'
 import json, pathlib, sys
 doc = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert doc["phase"] == "process_identity_armed"
-assert doc["checkpoints"][0]["pid"] == "4242"
+assert next(item for item in doc["checkpoints"] if item["phase"] == "process_identity_armed")["pid"] == "4242"
 PY
 PYTHONPATH="${ROOT_DIR}/scripts${PYTHONPATH:+:${PYTHONPATH}}" python3 - <<'PY'
 from p15_7_scale_semantics import validate_bootstrap_scale_membership
@@ -224,7 +263,7 @@ doc = {
         "attachment_blockers":[],"local_storage_blockers":[],
         "deleted_workload_absent_from_blockers":True}},
     "remove_rejoin_replace":True,"restart_recovery":True,
-    "crash_injection_repair":{"schema_version":2,"phase":"completed","status":"passed",
+    "crash_injection_repair":{"schema_version":3,"run_id":"guard-run","source_sha":sha,"phase":"completed","status":"passed",
       "checkpoints":[{"phase":phase,"status":"passed" if phase == "completed" else "running",
         **({"target_resource_id":"66666666-6666-4666-8666-666666666666", "target_env_consumed":"true"}
            if phase == "fault_armed" else {}),

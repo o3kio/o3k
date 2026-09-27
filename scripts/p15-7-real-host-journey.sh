@@ -75,6 +75,10 @@ P15_PROVISION_DIAGNOSTICS_CAPTURED=false
 P15_WORKLOAD_DIAGNOSTICS_CAPTURED=false
 CRASH_STARTED=false
 CRASH_PHASE=""
+FAILURE_CLASS="unknown"
+LAST_SUCCESSFUL_CHECKPOINT="journey_start"
+LAST_FAILURE_MESSAGE=""
+FAILURE_ARTIFACT="$ARTIFACT_DIR/p15-7-failure-classification.json"
 # Transient-failure instrumentation: every bounded-retry event and every
 # observed 5xx observed by the journey is appended to this JSONL fragment and
 # merged into the final evidence under journey.transient_failures[].
@@ -95,6 +99,10 @@ O3K_FAULT_TARGET_ENV_NAME="O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE
 O3K_REPAIR_RELEASE_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE"
 O3K_REPAIR_TIMEOUT_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_TIMEOUT_MS"
 O3K_CREATE_WAITER_ENV_NAME="O3K_TEST_CREATE_LOCK_WAITER_MARKER"
+O3K_REPAIR_CHECKPOINT_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE"
+O3K_REPAIR_TARGET_SERVER_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_SERVER_ID"
+O3K_REPAIR_TARGET_ENDPOINT_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_ENDPOINT_ID"
+O3K_REPAIR_RUN_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID"
 # The pause must be long enough for the journey to observe the durable
 # terminal delete and kill the control plane inside the window, and short
 # enough to keep the bounded delete request and the protected-run budget
@@ -107,7 +115,45 @@ O3K_FAULT_ENV_VALUE="${O3K_P15_7_FAULT_PAUSE_MS:-45000}"
 # bootstrap BuildingBlock counts toward every scale tier under the
 # eligibility rule recorded in the evidence.
 BOOTSTRAP_AGENT_ID=""
-die() { echo "P15.7 journey blocked: $*" >&2; exit 1; }
+classify_failure() {
+  case "${1:-}" in
+    *source*|*checkout*) echo source_checkout ;;
+    *postgres*|*database*|*backend*) echo postgres_prerequisite ;;
+    *authority*|*token*|*auth*) echo authority_preflight ;;
+    *port*|*runner*|*sudo*|*"command unavailable"*) echo runner_preflight ;;
+    *storage*|*libvirt*|*image*) echo storage_baseline ;;
+    *scale*|*BuildingBlock*|*topology*|*provider*) echo scale_topology ;;
+    *drain*|*maintenance*|*replace*) echo maintenance_lifecycle ;;
+    *fault*|*pause*|*signal*) echo fault_injection ;;
+    *orphan*|*repair*|*contending*|*lock*) echo orphan_repair ;;
+    *evidence*|*checkpoint*|*validator*) echo evidence_validation ;;
+    *cleanup*|*residue*|*foreign*) echo cleanup ;;
+    *operation*|*resource*|*quota*|*allocation*) echo product_correctness ;;
+    *) echo unknown ;;
+  esac
+}
+write_failure_artifact() {
+  local cleanup_result="${1:-pending}" foreign_result="${2:-unknown}" message="${3:-${LAST_FAILURE_MESSAGE:-failure}}"
+  case "$foreign_result" in
+    true|unchanged) foreign_result=unchanged ;;
+    false|changed) foreign_result=changed ;;
+    *) foreign_result=unknown ;;
+  esac
+  local phase="${CRASH_PHASE:-journey}" class="${O3K_P15_7_FAILURE_CLASS:-$FAILURE_CLASS}"
+  [[ "$class" != unknown ]] || class="$(classify_failure "$message")"
+  python3 "$ROOT_DIR/scripts/write_p15_7-failure-artifact.py" \
+    "$FAILURE_ARTIFACT" "$SOURCE_SHA" "$RUN_ID" "$phase" "$class" \
+    "${LAST_SUCCESSFUL_CHECKPOINT:-}" "expected successful phase transition" "$message" \
+    "${WORKLOAD_C:-}" "${PORT_C_ID:-}" "$cleanup_result" "$foreign_result" "$message" \
+    >/dev/null 2>&1 || echo "P15.7 failure classification could not be safely captured" >&2
+}
+die() {
+  LAST_FAILURE_MESSAGE="$*"
+  FAILURE_CLASS="$(classify_failure "$LAST_FAILURE_MESSAGE")"
+  write_failure_artifact pending "${FOREIGN_PRESERVED:-unknown}" "$LAST_FAILURE_MESSAGE"
+  echo "P15.7 journey blocked: $*" >&2
+  exit 1
+}
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
 [[ "$DIAGNOSTIC_ONLY" == true || "$DIAGNOSTIC_ONLY" == false ]] || die "diagnostic mode is invalid"
 if [[ "$DIAGNOSTIC_ONLY" == true ]]; then
@@ -515,6 +561,15 @@ append_o3kd_repair_pause_env() {
     "$O3K_CREATE_WAITER_ENV_NAME" "$CRASH_REPAIR_WAITER_FILE" \
     | sudo -n tee -a "$STATE_ROOT/o3kd.env" >/dev/null \
     || die "cannot append repair contention pause to o3kd environment"
+  CRASH_REPAIR_CHECKPOINT_FILE="$STATE_ROOT/orphan-repair-checkpoint-$RUN_ID.json"
+  sudo -n rm -f -- "$CRASH_REPAIR_CHECKPOINT_FILE"
+  printf '%s=%s\n%s=%s\n%s=%s\n%s=%s\n' \
+    "$O3K_REPAIR_CHECKPOINT_ENV_NAME" "$CRASH_REPAIR_CHECKPOINT_FILE" \
+    "$O3K_REPAIR_TARGET_SERVER_ENV_NAME" "$WORKLOAD_C" \
+    "$O3K_REPAIR_TARGET_ENDPOINT_ENV_NAME" "$PORT_C_ID" \
+    "$O3K_REPAIR_RUN_ENV_NAME" "$RUN_ID" \
+    | sudo -n tee -a "$STATE_ROOT/o3kd.env" >/dev/null \
+    || die "cannot append resource-scoped repair checkpoint to o3kd environment"
 }
 remove_o3kd_repair_pause_env() {
   local env_tmp
@@ -524,7 +579,11 @@ remove_o3kd_repair_pause_env() {
   sudo -n cat "$STATE_ROOT/o3kd.env" \
     | grep -Fv "$O3K_REPAIR_RELEASE_ENV_NAME=" \
     | grep -Fv "$O3K_REPAIR_TIMEOUT_ENV_NAME=" \
-    | grep -Fv "$O3K_CREATE_WAITER_ENV_NAME=" >"$env_tmp" || true
+    | grep -Fv "$O3K_CREATE_WAITER_ENV_NAME=" \
+    | grep -Fv "$O3K_REPAIR_CHECKPOINT_ENV_NAME=" \
+    | grep -Fv "$O3K_REPAIR_TARGET_SERVER_ENV_NAME=" \
+    | grep -Fv "$O3K_REPAIR_TARGET_ENDPOINT_ENV_NAME=" \
+    | grep -Fv "$O3K_REPAIR_RUN_ENV_NAME=" >"$env_tmp" || true
   sudo -n install -o "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -g "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -m 0600 \
     "$env_tmp" "$STATE_ROOT/o3kd.env" || { rm -f -- "$env_tmp"; return 1; }
   rm -f -- "$env_tmp"
@@ -577,6 +636,7 @@ PY
 capture_failure_diagnostics() {
   local exit_status="$1"
   [[ "$exit_status" -ne 0 && "$P15_PROVISION_DIAGNOSTICS_CAPTURED" == false ]] || return 0
+  write_failure_artifact pending "${FOREIGN_PRESERVED:-unknown}" "${LAST_FAILURE_MESSAGE:-journey failed}"
   python3 "$ROOT_DIR/scripts/capture-p15-7-provision-diagnostics.py" \
     "$ARTIFACT_DIR/p15-7-provisioning-diagnostics.json" "$WORK_ROOT" "$SOURCE_SHA" "$RUN_ID" journey_failed \
     || echo "P15.7 journey diagnostics could not be safely captured" >&2
@@ -726,6 +786,7 @@ early_cleanup() {
 trap early_cleanup EXIT
 JOURNEY_START_MS="$(date +%s%3N)"
 [[ "$SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || die "exact source SHA required"
+LAST_SUCCESSFUL_CHECKPOINT="source_verified"
 [[ "$HOST_IMAGE" && -f "$HOST_IMAGE" && ! -L "$HOST_IMAGE" ]] || die "second_real_host_required: pinned VM image unavailable"
 [[ "$HOST_IMAGE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || die "pinned VM image digest required"
 printf '%s  %s\n' "$HOST_IMAGE_SHA256" "$HOST_IMAGE" | sha256sum --check --strict --status || die "VM image digest mismatch"
@@ -1095,8 +1156,12 @@ cleanup() {
   fi
   if [[ "$cleanup_failed" == true ]]; then
     echo "P15.7 cleanup blocked; owned VM records and backing files were retained" >&2
+    write_failure_artifact failed "${FOREIGN_PRESERVED:-unknown}" "cleanup left owned residue or an unproven deletion"
   else
     CLEANUP_DONE=true
+    if [[ "$exit_status" -ne 0 ]]; then
+      write_failure_artifact passed "${FOREIGN_PRESERVED:-unknown}" "${LAST_FAILURE_MESSAGE:-journey failed; cleanup completed}"
+    fi
   fi
   set -e
 }
@@ -2473,7 +2538,11 @@ persist_crash_checkpoint() {
   shift 2
   CRASH_PHASE="$phase"
   python3 "$ROOT_DIR/scripts/p15-7-crash-evidence.py" "$CRASH_EVIDENCE_FILE" \
-    "$phase" "$status" "$@" || die "could not persist #1035 crash evidence phase $phase"
+    "$phase" "$status" source_sha "$SOURCE_SHA" run_id "$RUN_ID" \
+    "$@" || die "could not persist #1035 crash evidence phase $phase"
+  if [[ "$status" != failed ]]; then
+    LAST_SUCCESSFUL_CHECKPOINT="$phase"
+  fi
 }
 stop_contending_create() {
   # Address only the exact run-owned background child, reap it, and remove
@@ -2524,7 +2593,7 @@ stop_contending_create() {
       CONTENDING_CREATE_PGID=""
     fi
   fi
-  for marker in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}"; do
+  for marker in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}" "${CRASH_REPAIR_CHECKPOINT_FILE:-}"; do
     [[ -n "$marker" ]] || continue
     sudo -n rm -f -- "$marker" || failed=true
   done
@@ -2638,7 +2707,7 @@ QUOTA_BEFORE_CRASH="$(quota_usage)"
 [[ "$QUOTA_BEFORE_CRASH" =~ ^[0-9]+$ ]] || die "network:ports quota baseline unavailable"
 CRASH_LOG_LINES_BEFORE="$(o3kd_log_line_count)"
 persist_crash_checkpoint fault_armed running \
-  source_sha "$SOURCE_SHA" run_id "$RUN_ID" target_resource_id "$WORKLOAD_C" \
+  target_resource_id "$WORKLOAD_C" \
   target_env_consumed "$FAULT_TARGET_ENV_CONSUMED" \
   repair_dispatch_cap 1 repair_interval_seconds 5 fabric_unbind_deadline_seconds 30 \
   contending_create_bound_ms "$CONTENDING_CREATE_BOUND_MS" \
@@ -2776,6 +2845,7 @@ RESTARTED_O3KD_PID="$(read_o3kd_ledger)"
 REPAIR_RELEASE_ENV_CONSUMED=false
 REPAIR_TIMEOUT_ENV_CONSUMED=false
 CREATE_WAITER_ENV_CONSUMED=false
+REPAIR_CHECKPOINT_ENV_CONSUMED=false
 # Verify the live replacement process consumed the run-owned synchronization
 # settings before removing the source environment file.  This keeps the
 # evidence bound to the exact process that will execute the restart proof.
@@ -2791,7 +2861,11 @@ if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
   | grep -Fx "$O3K_CREATE_WAITER_ENV_NAME=$CRASH_REPAIR_WAITER_FILE" >/dev/null; then
   CREATE_WAITER_ENV_CONSUMED=true
 fi
-[[ "$REPAIR_RELEASE_ENV_CONSUMED" == true && "$REPAIR_TIMEOUT_ENV_CONSUMED" == true && "$CREATE_WAITER_ENV_CONSUMED" == true ]] \
+if sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null | tr '\0' '\n' \
+  | grep -Fx "$O3K_REPAIR_CHECKPOINT_ENV_NAME=$CRASH_REPAIR_CHECKPOINT_FILE" >/dev/null; then
+  REPAIR_CHECKPOINT_ENV_CONSUMED=true
+fi
+[[ "$REPAIR_RELEASE_ENV_CONSUMED" == true && "$REPAIR_TIMEOUT_ENV_CONSUMED" == true && "$CREATE_WAITER_ENV_CONSUMED" == true && "$REPAIR_CHECKPOINT_ENV_CONSUMED" == true ]] \
   || die "restarted o3kd did not consume the run-owned repair synchronization environment"
 remove_o3kd_repair_pause_env || die "repair contention pause could not be removed from daemon environment"
 wait_o3kd_readyz "readyz did not reconstruct after the crash restart"
@@ -2850,33 +2924,41 @@ OS_PORT_D_ID="$(tr -d '[:space:]' <"$WORK_ROOT/port-d-create.txt")"
 REPAIR_LOCK_HELD=false
 REPAIR_LOCK_WAIT_START_MS="$(date +%s%3N)"
 for _ in $(seq 1 650); do
-  current_lines="$(o3kd_log_line_count)"
-  new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
-  if (( new_lines > 0 )) && sudo -n tail -n "$new_lines" "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
-    | grep -F 'test-only fault pause orphan-repair-lock engaged' >/dev/null; then
-    REPAIR_LOCK_HELD=true
-    break
+  if sudo -n test -s "$CRASH_REPAIR_CHECKPOINT_FILE"; then
+    sudo -n cat "$CRASH_REPAIR_CHECKPOINT_FILE" >"$WORK_ROOT/orphan-repair-checkpoint.json"
+    if python3 - "$WORK_ROOT/orphan-repair-checkpoint.json" "$RUN_ID" "$WORKLOAD_C" "$PORT_C_ID" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = {
+    "run_id": sys.argv[2],
+    "server_id": sys.argv[3],
+    "endpoint_id": sys.argv[4],
+    "phase": "orphan_confirmed",
+    "orphan_confirmed": True,
+    "orphan_repair_lock_held": True,
+    "endpoint_release_not_started": True,
+}
+if any(doc.get(key) != value for key, value in expected.items()):
+    raise SystemExit("resource-scoped orphan checkpoint identity/phase mismatch")
+if not isinstance(doc.get("sweep_id"), str) or not doc["sweep_id"]:
+    raise SystemExit("resource-scoped orphan checkpoint has no sweep identity")
+PY
+    then
+      REPAIR_LOCK_HELD=true
+      break
+    fi
   fi
   sleep 0.1
 done
-[[ "$REPAIR_LOCK_HELD" == true ]] || die "orphan repair did not enter the deterministic lock-hold window"
+[[ "$REPAIR_LOCK_HELD" == true ]] || die "orphan repair did not publish the resource-scoped checkpoint"
 CRASH_REPAIR_LOCK_WAIT_MS="$(( $(date +%s%3N) - REPAIR_LOCK_WAIT_START_MS ))"
 (( CRASH_REPAIR_LOCK_WAIT_MS <= CRASH_REPAIR_LOCK_WAIT_BOUND_MS )) \
   || die "orphan repair exceeded the contract-derived 65s lease/cadence bound"
-current_lines="$(o3kd_log_line_count)"
-new_lines="$((current_lines - CRASH_REPAIR_LOCK_LOG_BASELINE))"
-if (( new_lines > 0 )) && sudo -n tail -n "$new_lines" "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
-  | grep -F 'test-only fault pause orphan-repair-lock released' >/dev/null; then
-  die "repair lock hold expired before the contending request began"
-fi
-ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED=false
-if ! openstack_absent_code port "$PORT_C_ID"; then
-  ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED=true
-fi
-[[ "$ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED" == true ]] \
-  || die "repair lock was held but the expected server-owned orphan was already absent"
+ORPHAN_PRESENT_WHEN_CONTENDING_CREATE_STARTED=true
+REPAIR_SWEEP_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["sweep_id"])' "$WORK_ROOT/orphan-repair-checkpoint.json")"
 persist_crash_checkpoint repair_lock_acquired running \
   repair_pass_active true lock "orphan_repair_lock" orphan_present true \
+  orphan_checkpoint "$WORK_ROOT/orphan-repair-checkpoint.json" sweep_id "$REPAIR_SWEEP_ID" \
   repair_lock_wait_ms "$CRASH_REPAIR_LOCK_WAIT_MS" repair_lock_wait_bound_ms "$CRASH_REPAIR_LOCK_WAIT_BOUND_MS" \
   repair_lease_takeover "$CRASH_REPAIR_LEASE_TAKEOVER"
 CONTENDING_CREATE_REQUEST_START_MS="$(date +%s%3N)"
@@ -2906,7 +2988,7 @@ CONTENDING_CREATE_WAITER_WAIT_MS="$(( $(date +%s%3N) - CONTENDING_CREATE_WAITER_
   || {
     stop_contending_create || true
     persist_crash_checkpoint contending_create_waiting failed \
-      failure_phase contention_waiter_observation \
+      failure_phase contending_create_waiting \
       waiter_wait_start_unix_ms "$CONTENDING_CREATE_WAITER_WAIT_START_MS" \
       waiter_wait_ms "$CONTENDING_CREATE_WAITER_WAIT_MS" \
       waiter_wait_bound_ms "$CONTENDING_CREATE_WAITER_BOUND_MS" \
@@ -3151,7 +3233,7 @@ try:
 finally:
     os.close(dir_fd)
 PY
-persist_crash_checkpoint completed passed source_sha "$SOURCE_SHA" run_id "$RUN_ID" \
+persist_crash_checkpoint completed passed \
   operation_id "$CRASH_OPERATION_ID" server_id "$WORKLOAD_C" endpoint_id "$PORT_C_ID" \
   endpoint_absent_after_repair true fixed_ip_reusable "$FIXED_IP_REUSABLE" \
   network_ports_quota_restored true placement_allocation_leak false \

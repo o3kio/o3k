@@ -157,6 +157,98 @@ async fn test_fault_wait_for_file_once_async(name: &str, env_var: &str, timeout_
     }
 }
 
+/// Publish the resource-scoped orphan-repair checkpoint used by the protected
+/// #1035 campaign.  This is deliberately a test-only, non-authoritative seam:
+/// it is inert unless every target/checkpoint variable is present, and the
+/// durable store/projector remain the only repair authority.  The file is
+/// created with `create_new` and atomically renamed so a stale or competing
+/// run cannot overwrite evidence for another resource.
+pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
+    server_id: uuid::Uuid,
+    endpoint_id: &str,
+    endpoint_server_owned: bool,
+) {
+    let Some(path) = std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE")
+        .map(std::path::PathBuf::from)
+    else {
+        return;
+    };
+    if !endpoint_server_owned {
+        return;
+    }
+    let target_server = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_SERVER_ID").ok();
+    let target_endpoint = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_ENDPOINT_ID").ok();
+    if target_server
+        .as_deref()
+        .and_then(|value| value.parse::<uuid::Uuid>().ok())
+        != Some(server_id)
+        || target_endpoint.as_deref() != Some(endpoint_id)
+    {
+        return;
+    }
+    let run_id = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let Some(run_id) = run_id else {
+        tracing::warn!("test-only orphan checkpoint missing run identity; skipping");
+        return;
+    };
+    let sweep_id = uuid::Uuid::new_v4().to_string();
+    let checkpoint = serde_json::json!({
+        "schema_version": 1,
+        "run_id": run_id,
+        "sweep_id": sweep_id,
+        "server_id": server_id,
+        "endpoint_id": endpoint_id,
+        "phase": "orphan_confirmed",
+        "orphan_confirmed": true,
+        "orphan_repair_lock_held": true,
+        "endpoint_release_not_started": true,
+    });
+    let Some(parent) = path.parent() else {
+        tracing::warn!("test-only orphan checkpoint path has no parent");
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(parent) {
+        tracing::warn!(%error, "test-only orphan checkpoint directory could not be created");
+        return;
+    }
+    let temp = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        serde_json::to_writer(&mut file, &checkpoint).map_err(std::io::Error::other)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        // Publish without replacing an existing checkpoint.  `rename` would
+        // silently overwrite a stale/foreign run's marker; a hard-link is an
+        // atomic create-at-destination operation and therefore fails closed.
+        std::fs::hard_link(&temp, &path)?;
+        std::fs::remove_file(&temp)?;
+        let dir = std::fs::File::open(parent)?;
+        dir.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temp);
+        tracing::warn!(%error, "test-only orphan checkpoint could not be published");
+        return;
+    }
+    test_fault_wait_for_file_once_async(
+        "orphan-repair-lock",
+        "O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE",
+        "O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_TIMEOUT_MS",
+    )
+    .await;
+}
+
 /// Parse/guard half of `test_fault_pause_ms`; split out so the no-op
 /// conditions can be unit-tested without sleeping.
 fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
