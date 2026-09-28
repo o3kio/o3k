@@ -1,8 +1,11 @@
-# P11 implementation prompt — AddressRealm-encapsulated Edge Fabric v2
+# P11 historical implementation prompt — AddressRealm-encapsulated Edge Fabric v2
 
-**ADR-0171 and SPEC-0029 are accepted. Use this prompt only for bounded
-implementation that follows those normative documents; it does not authorize
-unsupported product or real-host claims.**
+**Superseded by ADR-0186/SPEC-0049.** This document records the historical v2
+Geneve implementation plan and must not be used for new privileged work. Use
+the accepted v3 sources (`docs/adr/ADR-0186-stretched-l2-edge-fabric-vxlan-her.md`,
+`docs/specs/SPEC-0049-stretched-l2-edge-fabric-v3.md`, and
+`contracts/edge-fabric-stretched-l2.md`) for the VXLAN/HER migration. Existing
+v2 evidence remains historical and does not establish a v3 runtime claim.
 
 Repository: `o3kio/o3k`
 

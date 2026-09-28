@@ -91,19 +91,23 @@ service-testbed profile, not native Volume authority. Boot-from-volume,
 multi-attach, migration, backups, replication/mirroring, CephFS/NFS, and KMS
 remain later profiles unless separately accepted and proven.
 
-## P11 — Small multi-hypervisor edge cloud — completed profile
+## P11 — Small multi-hypervisor edge cloud — historical v2 evidence
 
 P11 turned the proven compute + P9 network + P10 storage model into the first real
 multi-hypervisor edge profile for roughly 10–20 hypervisors. Run 50 (commit
 3bcf814) passed the complete real-host evidence gate on three independent KVM
 hosts with overlapping AddressRealm CIDRs.
 
-ADR-0171/SPEC-0029 plus `contracts/edge-fabric-realm-overlay.md` are the accepted
-v2 architecture authority. ADR-0170/SPEC-0028 are superseded.
+The accepted successor is ADR-0186/SPEC-0049 and
+`contracts/edge-fabric-stretched-l2.md`. The v2 documents and Run 50 evidence
+below are retained as historical implementation/evidence records only; they do
+not certify the v3 VXLAN/HER dataplane. The current runtime remains the v2
+Geneve provider until the bounded v3 migration and its evidence gates pass.
 
-The confirmed P11 support profile is described below.
+The confirmed historical v2 evidence profile is described below. It remains
+bounded to the v2 Geneve implementation and does not create a v3 support claim.
 
-### Accepted P11 v2 user outcome
+### Historical P11 v2 user outcome
 
 > Independent tenants can use identical private CIDRs in separate AddressRealms,
 > place real VMs from each realm on different eligible hypervisors, use normal
@@ -115,7 +119,7 @@ The confirmed P11 support profile is described below.
 > scenarios, and delete the environment without duplicate resources, realm
 > misdelivery, owned leaks, or foreign-state mutation.
 
-### P11 proven network topology
+### Historical P11 v2 network topology
 
 - one VM-facing host-local Linux bridge per active AddressRealm on a host,
   preserving the proven libvirt/TAP path;
@@ -146,7 +150,7 @@ The confirmed P11 support profile is described below.
 - arbitrary cross-host broadcast/multicast/unknown-unicast flooding remains out
   of scope.
 
-### P11 placement and host lifecycle
+### Historical P11 v2 placement and host lifecycle
 
 - reuse existing authenticated agent inventory, Placement, scheduling, durable
   work leases, fencing, agent epochs, and reconciliation;
@@ -162,7 +166,7 @@ The confirmed P11 support profile is described below.
   P11 does not blindly evacuate VMs or reactivate an exclusive shared-storage
   writer elsewhere without accepted fencing proof.
 
-### P11 proven evidence summary
+### Historical P11 v2 evidence summary
 
 Evidence gate run 50 (commit 3bcf814) on three independent nested KVM hosts
 (p11h1/p11h2/p11h3) with overlapping CIDRs across two AddressRealms.
@@ -210,7 +214,7 @@ RBD) = 0. Zero foreign mutations.
 > recovery matrix and provider conformance tests, not the post-cleanup
 > snapshot.
 
-### P11 non-goals
+### Historical P11 v2 non-goals
 
 The accepted P11 successor does not mean:
 

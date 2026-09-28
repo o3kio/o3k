@@ -559,9 +559,9 @@ This ADR does not add:
 
 ## Migration from ADR-0170 / PR #703
 
-ADR-0171 is accepted and is now the active authority for P11 v2. The v1
-documents remain useful historical references but are superseded for successor
-fabric implementation.
+ADR-0171 was accepted as the P11 v2 authority and is now superseded for new
+fabric implementation by ADR-0186. The v1 and v2 documents remain useful
+historical references for behavior retained by the v3 successor.
 
 The migration requires:
 

@@ -12,6 +12,9 @@ Related decisions:
 - [SPEC-0021](../docs/specs/SPEC-0021-cross-service-workflows-and-compensation.md)
 - [SPEC-0028](../docs/specs/SPEC-0028-namespaced-routed-edge-fabric-v1.md) (Accepted)
 - [P11 edge-fabric contract](edge-fabric-v1.md) (Accepted)
+- [ADR-0186](../docs/adr/ADR-0186-stretched-l2-edge-fabric-vxlan-her.md) (Accepted)
+- [SPEC-0049](../docs/specs/SPEC-0049-stretched-l2-edge-fabric-v3.md) (Accepted)
+- [P11 stretched-L2 contract](edge-fabric-stretched-l2.md) (Accepted)
 
 ## Purpose
 
@@ -26,8 +29,10 @@ The current protobuf schema may implement only a subset. New wire fields or
 actions must preserve these authority, identity, security, retry, and evidence
 rules.
 
-Accepted P11 fabric additions remain bounded by ADR-0170, SPEC-0028, and the
-evidence gates; acceptance does not itself establish runtime or product claims.
+Accepted P11 fabric additions remain bounded by the active P11 authority
+ADR-0186/SPEC-0049 and the evidence gates; historical ADR-0170/0171 and
+SPEC-0028/0029 details remain applicable only where the successor explicitly
+retains them. Acceptance does not itself establish runtime or product claims.
 
 ## Authority boundary
 
@@ -260,10 +265,11 @@ The network executor cannot allocate a different public fixed IP or MAC, change
 AddressRealm/project ownership, or select a different endpoint host without an
 accepted control-plane operation.
 
-### Accepted P11 namespaced routed-fabric actions
+### Historical P11 v1/v2 namespaced routed-fabric actions
 
-When ADR-0170/SPEC-0028 are accepted, the P11 contract additionally allows
-semantic actions equivalent to:
+The following semantic actions document the historical routed/Geneve provider
+surface from ADR-0170/SPEC-0028 and ADR-0171/SPEC-0029. They remain relevant
+only to retained v1/v2 implementations; new v3 work follows the section below.
 
 - realize/inspect/remove one host-local AddressRealm L2 island;
 - realize/inspect/remove one routed AddressRealm namespace attachment;
@@ -293,7 +299,7 @@ MTU capability/selection
 It must not carry raw `ip`/`bridge`/`nft`/`wg` command text as canonical
 application intent.
 
-### P11 neighbor and fabric invariants
+### Historical P11 v1/v2 neighbor and fabric invariants
 
 - same-host/same-realm endpoints may use normal ARP and actual endpoint MACs;
 - local bridge forwarding must remain subject to accepted endpoint anti-spoofing
@@ -314,7 +320,41 @@ application intent.
 - WireGuard private keys remain host-local and are never protocol payload or
   ordinary evidence.
 
-See `contracts/edge-fabric-v1.md` for the full accepted contract.
+See `contracts/edge-fabric-v1.md` and the historical v2 realm-overlay contract
+for those providers. They do not override the active v3 contract.
+
+### P11 v3 stretched-L2 actions and invariants
+
+Under ADR-0186/SPEC-0049, the network executor additionally supports semantic
+actions equivalent to:
+
+- realize/inspect/remove one per-realm VXLAN binding and learning attachment;
+- publish/withdraw the bounded head-end-replication flood list derived from the
+  accepted realm endpoint directory;
+- reconcile current enrolled WireGuard peers and realm VTEP transport identity;
+- inspect/reconcile VNI-to-realm bindings, source-host authentication, and
+  generation fences;
+- apply/inspect mandatory local TAP/bridge source-MAC, source-IP, ARP-sender,
+  and NetworkPolicy enforcement;
+- rebuild provider FDB cache after restart without treating it as placement
+  authority.
+
+V3 commands reference the same typed canonical identity and generation fields
+listed above, plus the current realm VNI/binding generation and flood-list
+generation. They never carry raw provider commands or accept a tenant-supplied
+VNI, VTEP, MAC, or transport identity.
+
+V3 invariants are:
+
+- each active realm has exactly one current VXLAN binding per host;
+- HER targets only enrolled peers currently hosting endpoints in that realm;
+- unknown/stale VNI, VTEP, source-host, placement, or generation fails closed;
+- actual endpoint MACs may cross hosts, while anti-spoof and NetworkPolicy are
+  enforced before guest delivery;
+- WireGuard authenticates/encrypts host transport only and never carries tenant
+  endpoint prefixes in AllowedIPs;
+- provider learning/FDB state is cache, not placement authority, and foreign
+  VXLAN/FDB/WireGuard state is never adopted or deleted.
 
 ## Storage actions
 

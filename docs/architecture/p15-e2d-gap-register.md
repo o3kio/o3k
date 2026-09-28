@@ -261,9 +261,11 @@ Rules:
   OVN, hardware integration, or another provider); define inter-block routing,
   gateway/public-address HA, route/endpoint distribution, and scale limits
   without leaking provider technology into the Cloud Kernel (ADR-0182).
-- **Current implementation:** P11 Geneve+WireGuard/Linux fabric proven on three
-  real hosts plus 15 simulated agents (`docs/ROADMAP.md:100-175`,
-  SPEC-0028/0029). The DC fabric candidate
+- **Current implementation:** the current runtime/evidence is the historical
+  P11 v2 Geneve+WireGuard/Linux fabric, proven on three real hosts plus 15
+  simulated agents (`docs/ROADMAP.md:100-175`, SPEC-0028/0029). The accepted
+  P11 v3 successor (ADR-0186/SPEC-0049) is architecture-only until its bounded
+  VXLAN/HER implementation and evidence gates pass. The DC fabric candidate
   `compatibility/p9-routed-fabric-v1-planned.yaml` has status `planned` and is
   not advertised; there is no OVN/EVPN/hardware provider.
 - **Evidence:** P11 fabric evidence `docs/ROADMAP.md:100-175`; the planned
