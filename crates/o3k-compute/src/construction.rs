@@ -1369,6 +1369,15 @@ impl ComputeService {
             );
             return Ok(());
         };
+        if let Err(error) = crate::test_fault_orphan_checkpoint_validate_configuration() {
+            tracing::warn!(
+                event = "orphan_repair_checkpoint_failed_closed",
+                run_id = ?std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID").ok(),
+                failure_reason = %error,
+                "targeted orphan repair checkpoint configuration failed; repair pass preserved all endpoints"
+            );
+            return Ok(());
+        }
         // Serialize the entire repair pass against the create paths that
         // durably reference an existing port. This lock is taken FIRST —
         // before any store read or projector/network call — matching the
@@ -1483,13 +1492,32 @@ impl ComputeService {
                         // and no unbind/release call has started yet. This is
                         // the authoritative ownership/binding snapshot used
                         // by the seam; it is never inferred from create intent.
-                        crate::test_fault_orphan_checkpoint_and_wait(
+                        match crate::test_fault_orphan_checkpoint_and_wait(
                             resource.id,
+                            &resource.project_id,
                             port_id,
                             info.binding_state.as_deref(),
                             true,
                         )
-                        .await;
+                        .await
+                        {
+                            Ok(crate::TestFaultCheckpointDisposition::Inactive)
+                            | Ok(crate::TestFaultCheckpointDisposition::PublishedAndReleased) => {}
+                            Err(error) => {
+                                failures += 1;
+                                tracing::warn!(
+                                    event = "orphan_repair_checkpoint_failed_closed",
+                                    resource_id = %resource.id,
+                                    project_id = %resource.project_id,
+                                    port_id = %port_id,
+                                    run_id = ?std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID").ok(),
+                                    binding_state = ?info.binding_state,
+                                    failure_reason = %error,
+                                    "targeted orphan repair checkpoint failed; endpoint preserved"
+                                );
+                                continue;
+                            }
+                        }
 
                         if matches!(
                             info.binding_state.as_deref(),

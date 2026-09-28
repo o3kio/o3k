@@ -512,6 +512,30 @@ start_o3kd_verified() {
   O3KD_HTTP_LISTENER_PID="$http_listener_pid"
   O3KD_CONTROL_LISTENER_PID="$control_listener_pid"
 }
+verify_replacement_repair_environment() {
+  local env_dump expected
+  env_dump="$(sudo -n cat "/proc/$RESTARTED_O3KD_PID/environ" 2>/dev/null \
+    | while IFS= read -r -d '' value; do printf '%s\n' "$value"; done)" \
+    || die "could not inspect replacement o3kd environment"
+  for expected in \
+    "$O3K_REPAIR_CHECKPOINT_ENV_NAME=$CRASH_REPAIR_CHECKPOINT_FILE" \
+    "$O3K_REPAIR_TARGET_SERVER_ENV_NAME=$WORKLOAD_C" \
+    "$O3K_REPAIR_TARGET_ENDPOINT_ENV_NAME=$PORT_C_ID" \
+    "$O3K_REPAIR_RUN_ENV_NAME=$RUN_ID" \
+    "$O3K_PP5_RUN_ENV_NAME=$RUN_ID" \
+    "$O3K_REPAIR_RELEASE_ENV_NAME=$CRASH_REPAIR_RELEASE_FILE" \
+    "$O3K_REPAIR_TIMEOUT_ENV_NAME=$CONTENDING_CREATE_REPAIR_PAUSE_MS" \
+    "$O3K_CREATE_WAITER_ENV_NAME=$CRASH_REPAIR_WAITER_FILE"; do
+    local found=false line
+    while IFS= read -r line; do
+      if [[ "$line" == "$expected" ]]; then
+        found=true
+        break
+      fi
+    done <<<"$env_dump"
+    [[ "$found" == true ]] || die "replacement o3kd environment mismatch: $expected"
+  done
+}
 stop_o3kd_orderly() {
   local pid="$1"
   sudo -n kill -0 "$pid" 2>/dev/null || die "owned o3kd is not running"
@@ -3117,6 +3141,7 @@ append_o3kd_repair_pause_env
 CRASH_REPAIR_LOCK_LOG_BASELINE="$(o3kd_log_line_count)"
 start_o3kd_verified
 RESTARTED_O3KD_PID="$(read_o3kd_ledger)"
+verify_replacement_repair_environment
 REPAIR_RELEASE_ENV_CONSUMED=false
 REPAIR_TIMEOUT_ENV_CONSUMED=false
 CREATE_WAITER_ENV_CONSUMED=false

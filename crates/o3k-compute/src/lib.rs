@@ -48,6 +48,7 @@ use o3k_store::server_state_to_storage;
 use o3k_store::{ComputeRepository, StoreError, VolumeAttachmentRecord, server_state_from_storage};
 
 use std::{collections::BTreeSet, time::Duration};
+use thiserror::Error;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -285,84 +286,210 @@ pub(crate) fn test_fault_suppress_terminal_delete_release(resource_id: uuid::Uui
     )
 }
 
-/// Test-only repair-pass hold used to queue a port-attaching create behind an
-/// orphan sweep. The harness releases it through a run-owned file after
-/// starting the create request. The timeout is a fail-safe, and a process-local
-/// one-shot keeps later periodic passes from pausing.
-async fn test_fault_wait_for_file_once_async(name: &str, env_var: &str, timeout_env: &str) {
-    let Some(release_file) = std::env::var_os(env_var).map(std::path::PathBuf::from) else {
-        return;
-    };
-    let Some(timeout_ms) = std::env::var(timeout_env)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0 && *value <= 30_000)
-    else {
-        return;
-    };
-    static ORPHAN_REPAIR_PAUSE_USED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    if ORPHAN_REPAIR_PAUSE_USED.swap(true, std::sync::atomic::Ordering::AcqRel) {
-        return;
-    }
-    tracing::warn!("test-only fault pause {} engaged", name);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-    loop {
-        if release_file.exists() {
-            tracing::warn!("test-only fault pause {} released", name);
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            tracing::warn!("test-only fault pause {} timed out", name);
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestFaultCheckpointDisposition {
+    Inactive,
+    PublishedAndReleased,
 }
 
-/// Publish the resource-scoped, pre-mutation orphan-repair checkpoint used by
-/// the protected #1035 campaign. This is deliberately a test-only,
-/// non-authoritative seam:
-/// it is inert unless every target/checkpoint variable is present, and the
-/// durable store/projector remain the only repair authority.  The file is
-/// created with `create_new` and atomically renamed so a stale or competing
-/// run cannot overwrite evidence for another resource.
-pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
-    server_id: uuid::Uuid,
-    endpoint_id: &str,
-    binding_state: Option<&str>,
-    live_reference_absent: bool,
-) {
-    let Some(path) = std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE")
-        .map(std::path::PathBuf::from)
-    else {
-        return;
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub(crate) enum TestFaultCheckpointError {
+    #[error("targeted orphan checkpoint configuration is invalid: {0}")]
+    InvalidConfiguration(String),
+    #[error("targeted orphan checkpoint run identity does not match the live PP5 run")]
+    RunIdentityMismatch,
+    #[error("targeted orphan checkpoint publication failed: {0}")]
+    Publication(String),
+    #[error("targeted orphan checkpoint release wait timed out")]
+    ReleaseTimeout,
+    #[error("targeted orphan checkpoint authoritative precondition is missing")]
+    PreconditionMissing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TestFaultCheckpointConfig {
+    checkpoint_path: std::path::PathBuf,
+    target_server_id: Uuid,
+    target_endpoint_id: String,
+    run_id: String,
+    live_run_id: String,
+    lock_release_path: std::path::PathBuf,
+    lock_timeout: Duration,
+}
+
+fn test_fault_checkpoint_config_from_values(
+    checkpoint_path: Option<&std::ffi::OsStr>,
+    target_server_id: Option<&str>,
+    target_endpoint_id: Option<&str>,
+    run_id: Option<&str>,
+    live_run_id: Option<&str>,
+    lock_release_path: Option<&std::ffi::OsStr>,
+    lock_timeout_ms: Option<&str>,
+) -> Result<Option<TestFaultCheckpointConfig>, TestFaultCheckpointError> {
+    let Some(checkpoint_path) = checkpoint_path else {
+        return Ok(None);
     };
-    if !live_reference_absent {
-        return;
+    if checkpoint_path.is_empty() {
+        return Err(TestFaultCheckpointError::InvalidConfiguration(
+            "checkpoint path is empty".to_owned(),
+        ));
     }
+    let target_server_id = target_server_id
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration("target server id is missing".to_owned())
+        })?
+        .parse::<Uuid>()
+        .map_err(|_| {
+            TestFaultCheckpointError::InvalidConfiguration(
+                "target server id is not a UUID".to_owned(),
+            )
+        })?;
+    let target_endpoint_id = target_endpoint_id
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration(
+                "target endpoint id is missing".to_owned(),
+            )
+        })?
+        .to_owned();
+    let run_id = run_id
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration("target run id is missing".to_owned())
+        })?
+        .to_owned();
+    let live_run_id = live_run_id
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration("live PP5 run id is missing".to_owned())
+        })?
+        .to_owned();
+    let lock_release_path = lock_release_path
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration(
+                "lock release path is missing".to_owned(),
+            )
+        })?;
+    let timeout_ms = lock_timeout_ms
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration("lock timeout is missing".to_owned())
+        })?
+        .parse::<u64>()
+        .ok()
+        .filter(|value| (1..=30_000).contains(value))
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration(
+                "lock timeout is outside the bounded range".to_owned(),
+            )
+        })?;
+    Ok(Some(TestFaultCheckpointConfig {
+        checkpoint_path: std::path::PathBuf::from(checkpoint_path),
+        target_server_id,
+        target_endpoint_id,
+        run_id,
+        live_run_id,
+        lock_release_path,
+        lock_timeout: Duration::from_millis(timeout_ms),
+    }))
+}
+
+fn test_fault_checkpoint_config_from_env()
+-> Result<Option<TestFaultCheckpointConfig>, TestFaultCheckpointError> {
     let target_server = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_SERVER_ID").ok();
     let target_endpoint = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_ENDPOINT_ID").ok();
-    if target_server
-        .as_deref()
-        .and_then(|value| value.parse::<uuid::Uuid>().ok())
-        != Some(server_id)
-        || target_endpoint.as_deref() != Some(endpoint_id)
-    {
-        return;
+    let run_id = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID").ok();
+    let live_run_id = std::env::var("O3K_PP5_RUN_ID").ok();
+    let timeout = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_TIMEOUT_MS").ok();
+    test_fault_checkpoint_config_from_values(
+        std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE").as_deref(),
+        target_server.as_deref(),
+        target_endpoint.as_deref(),
+        run_id.as_deref(),
+        live_run_id.as_deref(),
+        std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE").as_deref(),
+        timeout.as_deref(),
+    )
+}
+
+pub(crate) fn test_fault_orphan_checkpoint_validate_configuration()
+-> Result<(), TestFaultCheckpointError> {
+    let _ = test_fault_checkpoint_config_from_env()?;
+    Ok(())
+}
+
+fn test_fault_checkpoint_publish(
+    config: &TestFaultCheckpointConfig,
+    server_id: Uuid,
+    endpoint_id: &str,
+    binding_state: Option<&str>,
+) -> Result<(), TestFaultCheckpointError> {
+    if config.checkpoint_path.exists() {
+        let server_id_string = server_id.to_string();
+        let existing_is_this_checkpoint = std::fs::read_to_string(&config.checkpoint_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .is_some_and(|existing| {
+                existing
+                    .get("schema_version")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(2)
+                    && existing.get("run_id").and_then(serde_json::Value::as_str)
+                        == Some(config.run_id.as_str())
+                    && existing
+                        .get("server_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(server_id_string.as_str())
+                    && existing
+                        .get("endpoint_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(endpoint_id)
+                    && existing.get("phase").and_then(serde_json::Value::as_str)
+                        == Some("orphan_confirmed_pre_mutation")
+                    && existing
+                        .get("orphan_confirmed")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("server_terminal_deleted")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("server_owned")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("live_reference_absent")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("orphan_repair_lock_held")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("unbind_not_started")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("endpoint_release_not_started")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+            });
+        if existing_is_this_checkpoint {
+            return Ok(());
+        }
+        return Err(TestFaultCheckpointError::Publication(
+            "checkpoint destination already exists".to_owned(),
+        ));
     }
-    let run_id = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID")
-        .ok()
-        .filter(|value| !value.is_empty());
-    let Some(run_id) = run_id else {
-        tracing::warn!("test-only orphan checkpoint missing run identity; skipping");
-        return;
-    };
     let sweep_id = uuid::Uuid::new_v4().to_string();
     let published_at = chrono::Utc::now().to_rfc3339();
     let checkpoint = serde_json::json!({
         "schema_version": 2,
-        "run_id": run_id,
+        "run_id": config.run_id,
         "sweep_id": sweep_id,
         "published_at": published_at,
         "server_id": server_id,
@@ -377,17 +504,21 @@ pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
         "unbind_not_started": true,
         "endpoint_release_not_started": true,
     });
-    let Some(parent) = path.parent() else {
-        tracing::warn!("test-only orphan checkpoint path has no parent");
-        return;
+    let Some(parent) = config.checkpoint_path.parent() else {
+        return Err(TestFaultCheckpointError::Publication(
+            "checkpoint path has no parent".to_owned(),
+        ));
     };
-    if let Err(error) = std::fs::create_dir_all(parent) {
-        tracing::warn!(%error, "test-only orphan checkpoint directory could not be created");
-        return;
-    }
+    std::fs::create_dir_all(parent).map_err(|error| {
+        TestFaultCheckpointError::Publication(format!("checkpoint directory: {error}"))
+    })?;
     let temp = parent.join(format!(
         ".{}.{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy(),
+        config
+            .checkpoint_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy(),
         std::process::id()
     ));
     let result = (|| -> std::io::Result<()> {
@@ -399,10 +530,7 @@ pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
         serde_json::to_writer(&mut file, &checkpoint).map_err(std::io::Error::other)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
-        // Publish without replacing an existing checkpoint.  `rename` would
-        // silently overwrite a stale/foreign run's marker; a hard-link is an
-        // atomic create-at-destination operation and therefore fails closed.
-        std::fs::hard_link(&temp, &path)?;
+        std::fs::hard_link(&temp, &config.checkpoint_path)?;
         std::fs::remove_file(&temp)?;
         let dir = std::fs::File::open(parent)?;
         dir.sync_all()?;
@@ -410,26 +538,61 @@ pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
     })();
     if let Err(error) = result {
         let _ = std::fs::remove_file(&temp);
-        tracing::warn!(%error, "test-only orphan checkpoint could not be published");
-        return;
+        return Err(TestFaultCheckpointError::Publication(error.to_string()));
     }
+    Ok(())
+}
+
+async fn test_fault_checkpoint_wait_for_release(
+    config: &TestFaultCheckpointConfig,
+) -> Result<(), TestFaultCheckpointError> {
+    let deadline = tokio::time::Instant::now() + config.lock_timeout;
+    loop {
+        if std::fs::metadata(&config.lock_release_path).is_ok_and(|metadata| metadata.is_file()) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(TestFaultCheckpointError::ReleaseTimeout);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
+    server_id: uuid::Uuid,
+    project_id: &str,
+    endpoint_id: &str,
+    binding_state: Option<&str>,
+    live_reference_absent: bool,
+) -> Result<TestFaultCheckpointDisposition, TestFaultCheckpointError> {
+    let Some(config) = test_fault_checkpoint_config_from_env()? else {
+        return Ok(TestFaultCheckpointDisposition::Inactive);
+    };
+    if config.target_server_id != server_id || config.target_endpoint_id != endpoint_id {
+        return Ok(TestFaultCheckpointDisposition::Inactive);
+    }
+    tracing::info!(event = "orphan_repair_checkpoint_targeted", resource_id = %server_id, project_id, port_id = endpoint_id, run_id = %config.run_id, binding_state = ?binding_state, "targeted orphan repair checkpoint engaged");
+    if config.run_id != config.live_run_id {
+        return Err(TestFaultCheckpointError::RunIdentityMismatch);
+    }
+    if !live_reference_absent {
+        return Err(TestFaultCheckpointError::PreconditionMissing);
+    }
+    test_fault_checkpoint_publish(&config, server_id, endpoint_id, binding_state)?;
     tracing::info!(
         event = "orphan_repair_pre_mutation_checkpoint",
         resource_id = %server_id,
+        project_id,
         port_id = endpoint_id,
         server_id = %server_id,
         endpoint_id,
         binding_state = ?binding_state,
-        run_id,
-        sweep_id,
+        run_id = %config.run_id,
         "test-only orphan pre-mutation checkpoint published"
     );
-    test_fault_wait_for_file_once_async(
-        "orphan-repair-lock",
-        "O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE",
-        "O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_TIMEOUT_MS",
-    )
-    .await;
+    test_fault_checkpoint_wait_for_release(&config).await?;
+    tracing::info!(event = "orphan_repair_checkpoint_released", resource_id = %server_id, project_id, port_id = endpoint_id, run_id = %config.run_id, binding_state = ?binding_state, "test-only fault pause orphan-repair-lock released; targeted orphan repair checkpoint release observed");
+    Ok(TestFaultCheckpointDisposition::PublishedAndReleased)
 }
 
 /// Parse/guard half of `test_fault_pause_ms`; split out so the no-op
@@ -840,6 +1003,114 @@ mod tests {
             Some(std::ffi::OsStr::new(&resource.to_string())),
             None
         ));
+    }
+
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn checkpoint_test_config(
+        checkpoint_path: &std::path::Path,
+        release_path: &std::path::Path,
+        server_id: Uuid,
+        run_id: &str,
+        timeout_ms: &str,
+    ) -> TestFaultCheckpointConfig {
+        test_fault_checkpoint_config_from_values(
+            Some(checkpoint_path.as_os_str()),
+            Some(&server_id.to_string()),
+            Some("endpoint-1"),
+            Some(run_id),
+            Some(run_id),
+            Some(release_path.as_os_str()),
+            Some(timeout_ms),
+        )
+        .expect("valid checkpoint test configuration")
+        .expect("checkpoint seam should be active")
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn targeted_checkpoint_configuration_is_inactive_only_when_absent() {
+        assert_eq!(
+            test_fault_checkpoint_config_from_values(None, None, None, None, None, None, None)
+                .expect("absent seam is valid"),
+            None
+        );
+        let server = Uuid::new_v4();
+        let error = test_fault_checkpoint_config_from_values(
+            Some(std::ffi::OsStr::new("/tmp/checkpoint")),
+            Some(&server.to_string()),
+            None,
+            Some("run"),
+            Some("run"),
+            Some(std::ffi::OsStr::new("/tmp/release")),
+            Some("100"),
+        )
+        .expect_err("incomplete targeted configuration must fail closed");
+        assert!(matches!(
+            error,
+            TestFaultCheckpointError::InvalidConfiguration(_)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn targeted_checkpoint_scope_and_run_mismatch_are_distinct() {
+        let server = Uuid::new_v4();
+        let config = checkpoint_test_config(
+            Path::new("/tmp/o3k-checkpoint-test.json"),
+            Path::new("/tmp/o3k-release-test"),
+            server,
+            "run-1",
+            "100",
+        );
+        assert_eq!(config.target_server_id, server);
+        assert_eq!(config.target_endpoint_id, "endpoint-1");
+        assert_ne!(config.run_id, "run-2");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn targeted_checkpoint_publication_rejects_existing_destination() {
+        let root = std::env::temp_dir().join(format!("o3k-checkpoint-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("test directory");
+        let checkpoint_path = root.join("checkpoint.json");
+        let release_path = root.join("release");
+        std::fs::write(&checkpoint_path, b"stale").expect("stale checkpoint");
+        let server = Uuid::new_v4();
+        let config =
+            checkpoint_test_config(&checkpoint_path, &release_path, server, "run-1", "100");
+        let error = test_fault_checkpoint_publish(&config, server, "endpoint-1", Some("bound"))
+            .expect_err("existing destination must fail closed");
+        assert!(matches!(error, TestFaultCheckpointError::Publication(_)));
+        assert_eq!(
+            std::fs::read(&checkpoint_path).expect("checkpoint"),
+            b"stale"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn targeted_checkpoint_release_wait_is_bounded_and_succeeds_only_on_file() {
+        let root = std::env::temp_dir().join(format!("o3k-checkpoint-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("test directory");
+        let checkpoint_path = root.join("checkpoint.json");
+        let release_path = root.join("release");
+        let server = Uuid::new_v4();
+        let timeout_config =
+            checkpoint_test_config(&checkpoint_path, &release_path, server, "run-1", "1");
+        assert_eq!(
+            test_fault_checkpoint_wait_for_release(&timeout_config)
+                .await
+                .expect_err("missing release must fail closed"),
+            TestFaultCheckpointError::ReleaseTimeout
+        );
+        std::fs::write(&release_path, b"release").expect("release marker");
+        let success_config =
+            checkpoint_test_config(&checkpoint_path, &release_path, server, "run-1", "100");
+        test_fault_checkpoint_wait_for_release(&success_config)
+            .await
+            .expect("release marker should allow mutation");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
