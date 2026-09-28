@@ -8,6 +8,8 @@ use o3k_kernel::{Authorizer, MemoryAuditSink, RequiredAuditPublisher};
 use o3k_store::ComputeRepository;
 use o3k_store::server_state_to_storage;
 
+const ORPHAN_REPAIR_LEASE_TTL_SECS: u64 = 60;
+
 impl ComputeService {
     /// Publish mandatory control-plane evidence before acknowledging an
     /// authenticated mutation/action. Legacy synchronous sinks fail closed;
@@ -1059,6 +1061,43 @@ impl ComputeService {
         })
     }
 
+    /// Periodically repairs server-owned endpoints left behind after a
+    /// terminal delete was interrupted.  This scheduler is deliberately
+    /// independent from lifecycle convergence: the repair discovery bound is
+    /// the configured cadence plus durable-lease takeover and the separately
+    /// bounded local serialization/provider steps, not the sum of an unrelated
+    /// lifecycle backlog and its provider deadlines.
+    pub fn spawn_orphan_endpoint_reconciler(
+        &self,
+        interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        let service = self.clone();
+        let interval_secs = interval_secs.max(1);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            // Do not run synchronously during startup; the first opportunity
+            // is one complete cadence after the controller is ready.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                tracing::debug!(
+                    event = "orphan_repair_tick",
+                    work_key = "server-endpoint-orphan-repair",
+                    interval_secs,
+                    lease_ttl_secs = ORPHAN_REPAIR_LEASE_TTL_SECS,
+                    "orphan endpoint repair scheduler tick"
+                );
+                if let Err(error) = service.run_orphan_repair_pass().await {
+                    tracing::warn!(
+                        event = "orphan_repair_pass_failed",
+                        error = %error,
+                        "server-owned endpoint orphan repair pass failed"
+                    );
+                }
+            }
+        })
+    }
+
     /// Drives lifecycle convergence for every non-terminal lifecycle
     /// operation. The per-operation drive is lazy and bounded, so healthy
     /// operations are skipped and a stranded operation converges regardless
@@ -1140,57 +1179,93 @@ impl ComputeService {
                 );
             }
         }
-        // #1035: the same bounded pass is the repair authority for endpoints
-        // orphaned by an interrupted terminal delete. Listing non-terminal
-        // operations above cannot see them, because the delete is already
-        // terminal and the endpoint release never ran.
-        //
-        // The pass is fenced by the same coordination lease that fences the
-        // re-drive arms: the orphan_repair_lock is process-local, so two
-        // controllers on a shared PostgreSQL database must not sweep
-        // concurrently (a foreign sweep could otherwise release a port between
-        // this controller's create validation and intent persist). Unleased
-        // controllers skip the pass, mirroring the Busy arm above.
+        Ok(())
+    }
+
+    /// Run one independently scheduled repair opportunity.  The durable lease
+    /// is the cross-controller fence; `orphan_repair_lock` remains the local
+    /// create/delete/release serialization boundary inside the repair pass.
+    pub(super) async fn run_orphan_repair_pass(&self) -> Result<(), ComputeError> {
+        let work_key = "server-endpoint-orphan-repair";
         if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
-            let work_key = "server-endpoint-orphan-repair".to_owned();
+            tracing::debug!(
+                event = "orphan_repair_lease_attempt",
+                work_key,
+                "attempting orphan repair lease"
+            );
             match coordination
                 .acquire_work_lease(
-                    &work_key,
+                    work_key,
                     "repair",
                     controller_id,
                     controller_epoch,
-                    // The pass can hold the orphan-repair lock for up to one
-                    // fabric unbind deadline (~30s) plus local work.
-                    Duration::from_secs(60),
+                    Duration::from_secs(ORPHAN_REPAIR_LEASE_TTL_SECS),
                 )
                 .await
             {
                 Ok(o3k_store::LeaseAcquireOutcome::Acquired { lease }) => {
-                    if let Err(error) = self.repair_orphaned_server_endpoints().await {
-                        tracing::warn!(%error, "server-owned endpoint orphan repair pass failed");
-                    }
-                    let _ = coordination
+                    tracing::info!(
+                        event = "orphan_repair_lease_acquired",
+                        work_key,
+                        lease_until = %lease.lease_until,
+                        fencing_token = lease.fencing_token,
+                        "orphan repair lease acquired"
+                    );
+                    let result = self.repair_orphaned_server_endpoints().await;
+                    tracing::debug!(
+                        event = "orphan_repair_lease_release_started",
+                        work_key,
+                        fencing_token = lease.fencing_token,
+                        "orphan repair lease release started"
+                    );
+                    let released = coordination
                         .release_work_lease(
-                            &work_key,
+                            work_key,
                             controller_id,
                             controller_epoch,
                             lease.fencing_token,
                         )
                         .await;
-                }
-                Ok(o3k_store::LeaseAcquireOutcome::Busy { .. }) => {
                     tracing::debug!(
-                        "orphan endpoint repair pass is currently leased by another controller; skipping"
+                        event = "orphan_repair_lease_released",
+                        work_key,
+                        release_result = ?released,
+                        "orphan repair lease released"
                     );
+                    result
+                }
+                Ok(o3k_store::LeaseAcquireOutcome::Busy {
+                    owner_controller_id,
+                    owner_controller_epoch,
+                    fencing_token,
+                    lease_created_at,
+                    lease_until,
+                }) => {
+                    tracing::info!(
+                        event = "orphan_repair_lease_busy",
+                        work_key,
+                        owner_controller_id = %owner_controller_id,
+                        owner_controller_epoch = %owner_controller_epoch,
+                        fencing_token,
+                        lease_created_at = %lease_created_at,
+                        lease_until = %lease_until,
+                        "orphan repair lease busy; pass skipped"
+                    );
+                    Ok(())
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "failed to acquire orphan repair lease; skipping");
+                    tracing::warn!(
+                        event = "orphan_repair_lease_error",
+                        work_key,
+                        error = %error,
+                        "orphan repair lease attempt failed"
+                    );
+                    Ok(())
                 }
             }
-        } else if let Err(error) = self.repair_orphaned_server_endpoints().await {
-            tracing::warn!(%error, "server-owned endpoint orphan repair pass failed");
+        } else {
+            self.repair_orphaned_server_endpoints().await
         }
-        Ok(())
     }
 
     /// Repairs server-owned endpoints orphaned by an interrupted terminal
@@ -1242,6 +1317,11 @@ impl ComputeService {
     /// `debug` so a healthy system does not fill the log.
     pub(super) async fn repair_orphaned_server_endpoints(&self) -> Result<(), ComputeError> {
         let Some(projector) = self.binding_projector.as_ref() else {
+            tracing::warn!(
+                event = "orphan_repair_projector_unavailable",
+                work_key = "server-endpoint-orphan-repair",
+                "orphan repair pass skipped because the binding projector is unavailable"
+            );
             return Ok(());
         };
         // Serialize the entire repair pass against the create paths that
@@ -1251,6 +1331,11 @@ impl ComputeService {
         // interrupted mid-persist nor land a durable reference to a port this
         // pass is about to release.
         let _orphan_repair_guard = self.orphan_repair_lock.lock().await;
+        tracing::debug!(
+            event = "orphan_repair_lock_acquired",
+            work_key = "server-endpoint-orphan-repair",
+            "orphan repair local serialization lock acquired"
+        );
         let resources = self
             .store
             .list_resources_by_kind("compute_instance")
@@ -1266,6 +1351,11 @@ impl ComputeService {
         let mut failures = 0usize;
         let mut skipped_attached = 0usize;
         let mut deleted_servers = 0usize;
+        tracing::debug!(
+            event = "orphan_repair_scan_started",
+            work_key = "server-endpoint-orphan-repair",
+            "orphan repair durable scan started"
+        );
         // Bounded availability: at most ONE fabric unbind dispatch ATTEMPT per
         // pass so a burst of stale-bound orphans cannot hold the orphan-repair
         // lock (and therefore block every port-attaching create) for the sum
@@ -1297,6 +1387,14 @@ impl ComputeService {
                 // references this endpoint.
                 if still_attached.contains(port_id.as_str()) {
                     skipped_attached += 1;
+                    tracing::debug!(
+                        event = "orphan_repair_live_reference_fence",
+                        resource_id = %resource.id,
+                        project_id = %resource.project_id,
+                        port_id = %port_id,
+                        fence = "pass_start_live_reference",
+                        "orphan endpoint preserved by live-reference fence"
+                    );
                     continue;
                 }
                 // Release-time re-read: closes the F1 same-pass TOCTOU properly
@@ -1308,6 +1406,14 @@ impl ComputeService {
                 let attached_now = self.referenced_port_ids().await?;
                 if attached_now.contains(port_id.as_str()) {
                     skipped_attached += 1;
+                    tracing::debug!(
+                        event = "orphan_repair_live_reference_fence",
+                        resource_id = %resource.id,
+                        project_id = %resource.project_id,
+                        port_id = %port_id,
+                        fence = "release_time_live_reference",
+                        "orphan endpoint preserved by release-time live-reference fence"
+                    );
                     continue;
                 }
                 // Restore the request-path invariant for a genuine bound orphan:
@@ -1319,6 +1425,14 @@ impl ComputeService {
                 // supplied or foreign endpoint is never unbound.
                 match projector.port_binding(&resource.project_id, port_id).await {
                     Ok(Some(info)) if info.server_owned => {
+                        tracing::debug!(
+                            event = "orphan_repair_ownership_proven",
+                            resource_id = %resource.id,
+                            project_id = %resource.project_id,
+                            port_id = %port_id,
+                            binding_state = ?info.binding_state,
+                            "orphan endpoint ownership proven"
+                        );
                         // Publish the test-only checkpoint at the exact
                         // pre-mutation boundary. The repair lock remains held
                         // and no unbind/release call has started yet. This is
@@ -1366,12 +1480,26 @@ impl ComputeService {
                                 );
                                 break 'repair;
                             }
+                            tracing::info!(
+                                event = "orphan_repair_unbind_finished",
+                                resource_id = %resource.id,
+                                project_id = %resource.project_id,
+                                port_id = %port_id,
+                                "orphan endpoint unbind finished"
+                            );
                         }
                     }
                     Ok(Some(_info)) => {
                         // Ownership is explicitly foreign/caller-supplied.
                         // Preserve it without invoking the release authority.
                         preserved += 1;
+                        tracing::info!(
+                            event = "orphan_repair_foreign_endpoint_preserved",
+                            resource_id = %resource.id,
+                            project_id = %resource.project_id,
+                            port_id = %port_id,
+                            "foreign or caller-owned endpoint preserved"
+                        );
                         continue;
                     }
                     Ok(None) => {
@@ -1380,6 +1508,13 @@ impl ComputeService {
                         // do not turn a create-intent endpoint ID into release
                         // authority.
                         absent += 1;
+                        tracing::warn!(
+                            event = "orphan_repair_endpoint_binding_absent",
+                            resource_id = %resource.id,
+                            project_id = %resource.project_id,
+                            port_id = %port_id,
+                            "orphan endpoint binding was not found; ownership unresolved"
+                        );
                         tracing::warn!(
                             resource_id = %resource.id,
                             project_id = %resource.project_id,
@@ -1405,11 +1540,26 @@ impl ComputeService {
                 // derived state and must not widen it. The binding fence in the
                 // network release stays as defense-in-depth: after the unbind
                 // above the port is `down`, so it passes.
+                tracing::info!(
+                    event = "orphan_repair_release_started",
+                    resource_id = %resource.id,
+                    project_id = %resource.project_id,
+                    port_id = %port_id,
+                    "orphan endpoint release started"
+                );
                 match projector
                     .release_server_owned_endpoint(&resource.project_id, port_id)
                     .await
                 {
                     Ok(report) => {
+                        tracing::info!(
+                            event = "orphan_repair_release_finished",
+                            resource_id = %resource.id,
+                            project_id = %resource.project_id,
+                            port_id = %port_id,
+                            released = report.released,
+                            "orphan endpoint release finished"
+                        );
                         discovered += report.discovered;
                         released += report.released;
                         preserved += report.preserved;
@@ -1431,6 +1581,18 @@ impl ComputeService {
                 }
             }
         }
+        tracing::debug!(
+            event = "orphan_repair_scan_finished",
+            work_key = "server-endpoint-orphan-repair",
+            deleted_servers,
+            discovered,
+            released,
+            preserved,
+            absent,
+            failures,
+            skipped_attached,
+            "orphan repair durable scan finished"
+        );
         if released > 0 || failures > 0 || skipped_attached > 0 {
             tracing::info!(
                 deleted_servers,

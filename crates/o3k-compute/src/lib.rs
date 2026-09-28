@@ -4822,6 +4822,72 @@ mod tests {
         Ok(())
     }
 
+    /// The periodic repair scheduler is an independent authority for timing:
+    /// a lifecycle convergence backlog cannot prevent a repair tick from
+    /// reaching the same durable, fenced repair pass.
+    #[tokio::test]
+    async fn orphan_repair_scheduler_runs_without_lifecycle_drive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-scheduler-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(CapCountingProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+        let server_id = Uuid::now_v7();
+        let desired = serde_json::to_string(&serde_json::json!({
+            "operation_id": Uuid::now_v7().to_string(),
+            "o3k_server_id": server_id.to_string(),
+            "project_id": "project-a",
+            "name": "server",
+            "vcpus": 1,
+            "memory_mib": 512,
+            "flavor_id": "flavor-1",
+            "disk_gib": 1,
+            "image_id": "image-1",
+            "key_name": null,
+            "keypair_id": null,
+            "network_ids": ["port-1"],
+            "placement_provider_id": null,
+            "placement_allocation_id": null,
+            "config_drive": null,
+            "idempotency_key": "idem-port-1",
+        }))?;
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired,
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        let task = service.spawn_orphan_endpoint_reconciler(1);
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "scheduler projector lock poisoned")?,
+            1,
+            "a repair tick must run without a lifecycle convergence call"
+        );
+        task.abort();
+        let _ = task.await;
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
     /// The orphan-repair pass must be fenced by the same coordination lease
     /// that fences the re-drive arms: the orphan_repair_lock is process-local,
     /// so a second controller on a shared PostgreSQL database must not sweep
@@ -4880,7 +4946,7 @@ mod tests {
             })
             .await?;
 
-        // Controller B holds the repair lease: controller A's convergence pass
+        // Controller B holds the repair lease: controller A's dedicated repair pass
         // must skip the sweep, leaving the orphan untouched.
         let busy = coord
             .acquire_work_lease(
@@ -4895,7 +4961,7 @@ mod tests {
             o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
             _ => return Err("expected controller B to acquire the repair lease".into()),
         };
-        service.drive_all_lifecycle_convergence().await?;
+        service.run_orphan_repair_pass().await?;
         assert_eq!(
             *projector
                 .releases
@@ -4915,7 +4981,7 @@ mod tests {
                 lease.fencing_token,
             )
             .await?;
-        service.drive_all_lifecycle_convergence().await?;
+        service.run_orphan_repair_pass().await?;
         assert_eq!(
             *projector
                 .releases
@@ -4924,7 +4990,22 @@ mod tests {
             1,
             "the sweep must run once the lease is free"
         );
-        let reacquired = coord
+        let stale = coord
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_millis(20),
+            )
+            .await?;
+        assert!(
+            matches!(stale, o3k_store::LeaseAcquireOutcome::Acquired { .. }),
+            "controller B must be able to acquire after controller A releases"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        service.run_orphan_repair_pass().await?;
+        let after_takeover = coord
             .acquire_work_lease(
                 "server-endpoint-orphan-repair",
                 "repair",
@@ -4934,8 +5015,11 @@ mod tests {
             )
             .await?;
         assert!(
-            matches!(reacquired, o3k_store::LeaseAcquireOutcome::Acquired { .. }),
-            "the sweep must release the repair lease after its pass"
+            matches!(
+                after_takeover,
+                o3k_store::LeaseAcquireOutcome::Acquired { .. }
+            ),
+            "an expired durable lease must eventually permit the repair pass"
         );
         std::fs::remove_file(database_path)?;
         Ok(())
