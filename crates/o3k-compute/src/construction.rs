@@ -609,6 +609,18 @@ impl ComputeService {
         self.referenced_port_ids().await
     }
 
+    /// Returns whether the run-scoped #1035 terminal-release test seam is
+    /// currently holding this server's endpoint for orphan repair.
+    ///
+    /// This is a read-only, fail-closed bridge for adapters that have their
+    /// own terminal cleanup seat. It does not create a second repair
+    /// authority: the durable orphan reconciler still owns the checkpoint and
+    /// subsequent release decision.
+    #[doc(hidden)]
+    pub fn terminal_delete_release_is_suppressed(&self, resource_id: Uuid) -> bool {
+        crate::test_fault_suppress_terminal_delete_release(resource_id)
+    }
+
     /// Acquires the orphan-repair serialization lock (issue #1035) for the
     /// caller to hold across [existing-port validation/resolution → durable
     /// intent persist]. The adapter create paths call this and keep the

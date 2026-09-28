@@ -2723,6 +2723,12 @@ def resource_summary(value, keys):
     return {key: value.get(key) for key in keys if key in value}
 
 log_messages = []
+structured_events = []
+allowed = {
+    "timestamp", "event", "work_key", "resource_id", "project_id", "port_id",
+    "owner_controller_id", "owner_controller_epoch", "lease_created_at",
+    "lease_until", "fencing_token", "binding_state",
+}
 try:
     for line in pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines():
         try:
@@ -2730,6 +2736,12 @@ try:
         except ValueError:
             continue
         fields = event.get("fields") if isinstance(event.get("fields"), dict) else event
+        event_name = fields.get("event")
+        if isinstance(event_name, str) and event_name.startswith("orphan_repair_"):
+            selected = {key: fields[key] for key in allowed if key in fields}
+            if isinstance(event.get("timestamp"), str):
+                selected["timestamp"] = event["timestamp"]
+            structured_events.append(selected)
         message = fields.get("message")
         if isinstance(message, str) and any(
             marker in message.lower()
@@ -2775,6 +2787,11 @@ document = {
     "checkpoint_file_exists": checkpoint.is_file(),
     "checkpoint_temp_file_exists": bool(temp_matches),
     "checkpoint_publication_error_observed": any("checkpoint could not be published" in message.lower() for message in log_messages),
+    # Keep structured chronology in the bounded fallback as well. The
+    # dedicated timeline artifact is the preferred evidence, but this copy
+    # remains useful if artifact collection is interrupted before that file is
+    # uploaded.
+    "structured_repair_events": structured_events[-200:],
     "last_repair_messages": log_messages[-20:],
 }
 try:

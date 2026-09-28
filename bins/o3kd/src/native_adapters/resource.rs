@@ -3637,30 +3637,48 @@ impl ResourceApplication for GenericResourceApplication {
             receipt.operation_state,
             o3k_store::OperationState::Succeeded
         ) {
-            // #1035 (replay release): this direct network release consults the
-            // live-attached set and holds the orphan-repair lock across
-            // [scan -> release] so it is serialized against port-attaching
-            // creates and the orphan sweep; a port a live server now references
-            // is never handed back for deletion.
-            let _orphan_repair_guard = self.compute.orphan_repair_lock_guard().await;
-            let attached = self
+            // This adapter has a direct terminal cleanup seat in addition to
+            // the compute replay/projector seats. During the protected #1035
+            // crash window, defer this seat until the resource-scoped orphan
+            // checkpoint is published; otherwise it can consume the endpoint
+            // before the independent repair reconciler proves ownership.
+            // The compute service's run-scoped, fail-closed fence is inert
+            // immediately after that checkpoint and absent in normal
+            // production operation.
+            if self
                 .compute
-                .live_attached_endpoint_ids()
-                .await
-                .map_err(compute_error)?;
-            let releasable = owned_ports
-                .iter()
-                .copied()
-                .filter(|port_id| !attached.contains(&port_id.to_string()))
-                .collect::<Vec<_>>();
-            if !releasable.is_empty()
-                && let Err(error) = self
-                    .network_service
-                    .cleanup_server_owned_ports_for_project(&project_id, &releasable)
-                    .await
+                .terminal_delete_release_is_suppressed(resource_id)
             {
-                tracing::error!(%error, %id, "native server endpoint cleanup failed");
-                return Err(ResourceApplicationError::Internal);
+                tracing::warn!(
+                    resource_id = %resource_id,
+                    "test-only native terminal endpoint cleanup suppressed until orphan checkpoint"
+                );
+            } else {
+                // #1035 (replay release): this direct network release consults the
+                // live-attached set and holds the orphan-repair lock across
+                // [scan -> release] so it is serialized against port-attaching
+                // creates and the orphan sweep; a port a live server now references
+                // is never handed back for deletion.
+                let _orphan_repair_guard = self.compute.orphan_repair_lock_guard().await;
+                let attached = self
+                    .compute
+                    .live_attached_endpoint_ids()
+                    .await
+                    .map_err(compute_error)?;
+                let releasable = owned_ports
+                    .iter()
+                    .copied()
+                    .filter(|port_id| !attached.contains(&port_id.to_string()))
+                    .collect::<Vec<_>>();
+                if !releasable.is_empty()
+                    && let Err(error) = self
+                        .network_service
+                        .cleanup_server_owned_ports_for_project(&project_id, &releasable)
+                        .await
+                {
+                    tracing::error!(%error, %id, "native server endpoint cleanup failed");
+                    return Err(ResourceApplicationError::Internal);
+                }
             }
         }
         Ok(MutationResult {

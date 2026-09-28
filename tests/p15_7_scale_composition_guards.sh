@@ -7,10 +7,11 @@ trap 'rm -rf -- "${WORK_DIR}"' EXIT
 EVIDENCE="${WORK_DIR}/evidence.json"
 bash "$ROOT_DIR/tests/p15_7_restart_environment_guards.sh"
 
-python3 - "$ROOT_DIR/scripts/p15-7-real-host-journey.sh" "$ROOT_DIR/crates/o3k-compute/src/lib.rs" <<'PY'
+python3 - "$ROOT_DIR/scripts/p15-7-real-host-journey.sh" "$ROOT_DIR/crates/o3k-compute/src/lib.rs" "$ROOT_DIR/bins/o3kd/src/native_adapters/resource.rs" <<'PY'
 import pathlib, sys
 journey = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 compute = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+native = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 for needle in (
     "O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE",
     "O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_SERVER_ID",
@@ -29,6 +30,10 @@ for needle in (
 ):
     assert needle in journey or needle in compute, needle
 assert "test_fault_orphan_checkpoint_and_wait" in compute
+assert "terminal_delete_release_is_suppressed" in native
+cleanup_guard = native.index("terminal_delete_release_is_suppressed")
+cleanup_call = native.index("cleanup_server_owned_ports_for_project", native.index("if matches!("))
+assert cleanup_guard < cleanup_call, "native terminal cleanup must honor the run-scoped fence before network release"
 assert "CRASH_REPAIR_CHECKPOINT_FILE" in journey
 assert "REPAIR_LOCK_HELD=true" in journey
 # The checkpoint, not an unrelated log/API pair, is the synchronization

@@ -397,6 +397,17 @@ fn start_o3kd(
             target_endpoint,
         );
         command.env("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID", run_id);
+        // Exercise every terminal-delete cleanup seat, including the native
+        // adapter's direct fallback. Each seat must preserve the exact target
+        // until the resource-scoped orphan checkpoint is published.
+        command.env(
+            "O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RESOURCE_ID",
+            target_server.to_string(),
+        );
+        command.env(
+            "O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RUN_ID",
+            run_id,
+        );
     }
     if fault_pause {
         command.env(FAULT_ENV, "4000");
@@ -1142,6 +1153,14 @@ async fn run_iteration(
         ),
         (
             String::from("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID"),
+            run_id.to_owned(),
+        ),
+        (
+            String::from("O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RESOURCE_ID"),
+            server_id.to_string(),
+        ),
+        (
+            String::from("O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RUN_ID"),
             run_id.to_owned(),
         ),
     ]);

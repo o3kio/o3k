@@ -893,6 +893,7 @@ jobs:
             target/real-host-workflow-artifacts/p15-7-vm-lease-*.json
             target/real-host-workflow-artifacts/p15-7-workload-failure-diagnostics.json
             target/real-host-workflow-artifacts/p15-7-orphan-repair-diagnostics-*.json
+            target/real-host-workflow-artifacts/p15-7-orphan-repair-timeline.json
             target/real-host-workflow-artifacts/p15-7-host-maintenance-evidence.json
             target/real-host-workflow-artifacts/p15-7-araf-projection.json
             target/real-host-workflow-artifacts/p15-7-server-c-endpoint-show.json
