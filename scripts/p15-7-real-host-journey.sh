@@ -161,6 +161,18 @@ die() {
   echo "P15.7 journey blocked: $*" >&2
   exit 1
 }
+PP5_PHASE="${O3K_P15_7_PHASE:-integrated}"
+case "${PP5_PHASE}" in
+  integrated|s5-scale|1035-crash-recovery|host-maintenance) ;;
+  *) die "unsupported PP.5 phase: ${PP5_PHASE}" ;;
+esac
+RUN_CRASH=false
+RUN_MAINTENANCE=false
+case "${PP5_PHASE}" in
+  integrated) RUN_CRASH=true; RUN_MAINTENANCE=true ;;
+  1035-crash-recovery) RUN_CRASH=true ;;
+  host-maintenance) RUN_MAINTENANCE=true ;;
+esac
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
 [[ "$DIAGNOSTIC_ONLY" == true || "$DIAGNOSTIC_ONLY" == false ]] || die "diagnostic mode is invalid"
 if [[ "$DIAGNOSTIC_ONLY" == true ]]; then
@@ -2518,10 +2530,11 @@ record_scale_checkpoint post-reboot 5 "$DRAIN_ID" "$SURVIVOR_IDS,${BLOCK_IDS[blo
 # EXIT cleanup still tears down only this run's owned resources, while the
 # phase-result classifier consumes the six S5 checkpoint fragments.  Crash
 # injection and host maintenance remain exclusively in the integrated lane.
-if [[ "${O3K_P15_7_PHASE:-integrated}" == "s5-scale" ]]; then
+if [[ "${PP5_PHASE}" == "s5-scale" ]]; then
   exit 0
 fi
 
+if [[ "${RUN_CRASH}" == true ]]; then
 # ── #1035 crash-injection leg ──────────────────────────────────────────────
 # Interrupt a real delete inside the fault hook's window — after the delete
 # is durably terminal (operation Succeeded, resource observed DELETED) and
@@ -3453,6 +3466,11 @@ persist_crash_checkpoint completed passed \
 record_scale_checkpoint post-crash-repair 5 "" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
   "$POST_REMOVE_BOOTSTRAP_EXPECT" \
   >/dev/null || die "post-crash-repair eligible Ready count is not exactly five"
+fi
+
+if [[ "${RUN_MAINTENANCE}" != true ]]; then
+  exit 0
+fi
 
 # ── #1033 host-maintenance leg ─────────────────────────────────────────────
 # Planned maintenance on one eligible child hypervisor (block-e), per the

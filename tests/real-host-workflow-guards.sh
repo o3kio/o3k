@@ -665,7 +665,7 @@ for needle in ("workflow_dispatch:",
                "Run compute-agent process-boundary evidence",
                "tests/real-compute-agent-process-mtls.sh",
                "compute-agent-process-mtls-result.json",
-               "Run PP.5 integrated S5 + #1035 + host-maintenance campaign",
+               "Run selected PP.5 acceptance lane",
                "tests/p15_7_scale_composition.sh",
                "Protected P15.7 authority and capacity preflight",
                "scripts/p15-7-protected-preflight.sh",
@@ -776,7 +776,7 @@ assert "postgres:16.4" not in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
 p15_image_step = text.split("      - name: Prepare pinned P15.7 VM host image\n", 1)[1]
-p15_image_step = p15_image_step.split("      - name: Run PP.5 integrated S5 + #1035 + host-maintenance campaign\n", 1)[0]
+p15_image_step = p15_image_step.split("      - name: Run selected PP.5 acceptance lane\n", 1)[0]
 # Large owned images are tracked by their marker and exact cleanup path. They
 # must not enter the protected-path inventory, whose bounded file-size policy
 # is intentionally fail-closed.

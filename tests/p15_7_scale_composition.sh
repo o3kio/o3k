@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# The protected runner supplies O3K_P15_7_JOURNEY_COMMAND.  It is deliberately
-# not implemented as a fake/local fallback: a green P15.7 result requires the
-# real o3kd, authenticated multi-block joins, and the real execution boundary.
+# The repository owns the canonical protected journey.  An explicitly supplied
+# command remains available for separately configured external certification
+# profiles, but the normal TestLab path never depends on an opaque variable.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-target/real-host-workflow-artifacts}"
 EVIDENCE_FILE="${O3K_P15_7_EVIDENCE_FILE:-${ARTIFACT_DIR}/p15-7-scale-composition-evidence.json}"
 GATE_RESULT="${ARTIFACT_DIR}/p15-7-gate-result.json"
 SOURCE_SHA="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-}}"
 PROFILE="${O3K_P15_7_PROFILE:-small-edge-cloud}"
-FOCUSED_PHASE="${O3K_P15_7_FOCUSED_PHASE:-}"
+PHASE="${O3K_P15_7_PHASE:-integrated}"
+JOURNEY_COMMAND="${O3K_P15_7_JOURNEY_COMMAND:-bash scripts/p15-7-real-host-journey.sh}"
+case "${PHASE}" in
+    integrated|s5-scale|1035-crash-recovery|host-maintenance) ;;
+    *) echo "unsupported PP.5 phase: ${PHASE}" >&2; exit 2 ;;
+esac
 mkdir -p "${ARTIFACT_DIR}"
 
 write_phase_results() {
     python3 "${ROOT_DIR}/scripts/write_pp5_phase_results.py" "${ARTIFACT_DIR}" \
-        --source-sha "${SOURCE_SHA}" >/dev/null 2>&1 || true
+        --source-sha "${SOURCE_SHA}" --phase "${PHASE}" >/dev/null 2>&1 || true
 }
 
 write_result() {
@@ -140,7 +145,6 @@ PY
 [[ "${SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || { write_result blocked exact_source_sha_required; exit 2; }
 
 if [[ ! -f "${EVIDENCE_FILE}" ]]; then
-    [[ -n "${O3K_P15_7_JOURNEY_COMMAND:-}" ]] || { write_result blocked journey_driver_not_configured; exit 2; }
     if ! import_bootstrap_environment; then
         write_project_auth_result blocked canonical_bootstrap_environment_missing
         write_result blocked project_auth_environment_missing
@@ -156,26 +160,28 @@ if [[ ! -f "${EVIDENCE_FILE}" ]]; then
         exit 0
     fi
     export O3K_P15_7_EVIDENCE_FILE="${EVIDENCE_FILE}"
-    if [[ "${FOCUSED_PHASE}" == "s5" ]]; then
-        export O3K_P15_7_PHASE=s5-scale
-    fi
     journey_status=0
-    bash -lc "${O3K_P15_7_JOURNEY_COMMAND}" || journey_status=$?
+    bash -lc "${JOURNEY_COMMAND}" || journey_status=$?
     write_phase_results
     if [[ "${journey_status}" -ne 0 ]]; then
         write_result failed journey_failed
         exit "${journey_status}"
     fi
 fi
-if [[ "${FOCUSED_PHASE}" == "s5" ]]; then
+if [[ "${PHASE}" != integrated ]]; then
     write_phase_results
-    python3 - "${ARTIFACT_DIR}/pp5-s5-scale-result.json" <<'PY' || { write_result failed s5_phase_result_missing_or_failed; exit 1; }
+    case "${PHASE}" in
+        s5-scale) selected_result="${ARTIFACT_DIR}/pp5-s5-scale-result.json" ;;
+        1035-crash-recovery) selected_result="${ARTIFACT_DIR}/pp5-1035-crash-recovery-result.json" ;;
+        host-maintenance) selected_result="${ARTIFACT_DIR}/pp5-host-maintenance-result.json" ;;
+    esac
+    python3 - "${selected_result}" <<'PY' || { write_result failed focused_phase_result_missing_or_failed; exit 1; }
 import json, pathlib, sys
 value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 if value.get("status") != "passed":
     raise SystemExit(1)
 PY
-    write_result passed s5_scale_validated
+    write_result passed "${PHASE}_validated"
     exit 0
 fi
 [[ -f "${EVIDENCE_FILE}" ]] || { write_result failed evidence_artifact_missing; exit 1; }

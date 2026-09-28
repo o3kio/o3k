@@ -112,16 +112,53 @@ def maintenance_result(artifact_dir: Path, source_sha: str) -> dict:
     }
 
 
+def not_run_result(phase: str, source_sha: str, reason: str) -> dict:
+    return {
+        "artifact_type": "o3k-pp5-phase-result",
+        "schema_version": 1,
+        "phase": phase,
+        "status": "not_run",
+        "reason": reason,
+        "tested_source_sha": source_sha or None,
+        "redacted": True,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("artifact_dir", type=Path)
     parser.add_argument("--source-sha", default="")
+    parser.add_argument(
+        "--phase",
+        choices=("integrated", "s5-scale", "1035-crash-recovery", "host-maintenance"),
+        default="integrated",
+    )
     args = parser.parse_args()
     args.artifact_dir.mkdir(parents=True, exist_ok=True)
     s5 = s5_result(args.artifact_dir, args.source_sha)
     crash = crash_result(args.artifact_dir, args.source_sha)
     maintenance = maintenance_result(args.artifact_dir, args.source_sha)
-    overall_status = "passed" if all(item["status"] == "passed" for item in (s5, crash, maintenance)) else "failed"
+    if args.phase == "s5-scale":
+        crash = not_run_result("crash_recovery", args.source_sha, "focused_s5_lane")
+        maintenance = not_run_result("host_maintenance", args.source_sha, "focused_s5_lane")
+    elif args.phase == "1035-crash-recovery":
+        maintenance = not_run_result("host_maintenance", args.source_sha, "focused_crash_recovery_lane")
+    elif args.phase == "host-maintenance":
+        crash = not_run_result("crash_recovery", args.source_sha, "focused_host_maintenance_lane")
+    selected = {
+        "integrated": None,
+        "s5-scale": s5,
+        "1035-crash-recovery": crash,
+        "host-maintenance": maintenance,
+    }[args.phase]
+    if selected is None:
+        overall_status = "passed" if all(item["status"] == "passed" for item in (s5, crash, maintenance)) else "failed"
+    elif selected["status"] == "passed":
+        # A focused lane proves only its requested phase.  Do not present
+        # deliberately skipped phases as an integrated certification result.
+        overall_status = "not_run"
+    else:
+        overall_status = "failed"
     overall = {
         "artifact_type": "o3k-pp5-overall-result",
         "schema_version": 1,
@@ -129,6 +166,7 @@ def main() -> int:
         "crash_recovery": crash["status"],
         "host_maintenance": maintenance["status"],
         "overall": overall_status,
+        "requested_phase": args.phase,
         "tested_source_sha": args.source_sha or None,
         "redacted": True,
     }

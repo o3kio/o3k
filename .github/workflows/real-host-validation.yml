@@ -7,6 +7,16 @@ on:
         description: "Full 40-character commit SHA to validate (defaults to main)"
         required: false
         type: string
+      lane:
+        description: "PP.5 protected acceptance lane"
+        required: false
+        default: integrated
+        type: choice
+        options:
+          - integrated
+          - s5-scale
+          - 1035-crash-recovery
+          - host-maintenance
 
 permissions:
   contents: read
@@ -25,6 +35,7 @@ jobs:
       (github.ref == 'refs/heads/main' || inputs.target_sha != '')
     env:
       TARGET_SHA: ${{ inputs.target_sha || github.sha }}
+      PP5_LANE: ${{ inputs.lane || 'integrated' }}
       O3K_P15_7_CAMPAIGN_LOCK_PATH: /tmp/o3k-p15-7-campaign.lock
       O3K_P15_7_RUN_ID: ${{ github.run_id }}
     timeout-minutes: 120
@@ -90,6 +101,14 @@ jobs:
           test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
           mkdir -p target
           printf 'tested_source_sha=%s\n' "${TARGET_SHA}" > target/tested-source-sha.txt
+
+      - name: Validate PP.5 lane selection
+        run: |
+          set -euo pipefail
+          case "${PP5_LANE}" in
+            integrated|s5-scale|1035-crash-recovery|host-maintenance) ;;
+            *) echo "unsupported PP.5 lane: ${PP5_LANE}" >&2; exit 2 ;;
+          esac
 
       - name: Acquire protected campaign lock
         id: campaign_lock
@@ -653,7 +672,7 @@ jobs:
             printf 'O3K_P15_7_HOST_IMAGE_SHA256=%s\n' "${P15_7_HOST_IMAGE_SHA256}"
           } >>"${GITHUB_ENV}"
 
-      - name: Run PP.5 integrated S5 + #1035 + host-maintenance campaign
+      - name: Run selected PP.5 acceptance lane
         id: p15_7
         if: steps.protected_preflight.outcome == 'success' && steps.generic_guard.outputs.ready == 'true' && steps.p15_7_host_image.outcome == 'success'
         env:
@@ -663,15 +682,24 @@ jobs:
           O3K_P15_7_PROFILE: small-edge-cloud
           O3K_PROVIDER: agent
           O3K_P15_7_OPERATOR_TOKEN_FILE: ${{ runner.temp }}/o3k-p15-7-operator-${{ github.run_id }}.token
+          O3K_P15_7_PHASE: ${{ inputs.lane || 'integrated' }}
           # The early preflight launches the self-contained authority.  The
           # journey performs the short-lived canonical federation exchange
           # immediately before privileged work; no bearer token is placed in
           # workflow YAML, argv, logs, or evidence.
-          # The repository-owned journey is the default.  A separately
-          # configured command may still be supplied for external certification
-          # profiles, but no GitHub variable is required for testlab-keycloak.
-          O3K_P15_7_JOURNEY_COMMAND: ${{ vars.O3K_P15_7_JOURNEY_COMMAND || 'bash scripts/p15-7-real-host-journey.sh' }}
-        run: bash tests/p15_7_scale_composition.sh
+          # The canonical TestLab path is repository-owned.  This explicit
+          # value is not a repository command variable and cannot be replaced
+          # by opaque workflow configuration.
+          O3K_P15_7_JOURNEY_COMMAND: bash scripts/p15-7-real-host-journey.sh
+        run: |
+          set -euo pipefail
+          case "${PP5_LANE}" in
+            integrated) bash tests/p15_7_scale_composition.sh ;;
+            s5-scale) bash tests/pp5_s5_scale.sh ;;
+            1035-crash-recovery) bash tests/pp5_1035_crash_recovery.sh ;;
+            host-maintenance) bash tests/pp5_host_maintenance.sh ;;
+            *) echo "unsupported PP.5 lane: ${PP5_LANE}" >&2; exit 2 ;;
+          esac
 
       - name: Extract redacted create diagnostics
         if: always() && steps.protected_preflight.outcome == 'success'
