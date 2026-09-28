@@ -71,6 +71,19 @@ try:
     assert 'PP5 run identity missing from o3kd environment' in repair_env, 'repair seam must fail closed when run identity is not persisted'
     remove_env = source.split('remove_o3kd_repair_pause_env() {', 1)[1].split('\nclear_o3kd_fault_env()', 1)[0]
     assert 'O3K_PP5_RUN_ENV_NAME=' in remove_env, 'repair cleanup must remove only the run identity seam'
+    diagnostics = source.split('write_orphan_repair_diagnostics() {', 1)[1].split('\nstop_contending_create()', 1)[0]
+    assert 'sudo -n tail -n 2000' in diagnostics, 'orphan diagnostics must read the protected daemon log through sudo'
+    assert 'rm -f -- "$log_snapshot"' in diagnostics, 'raw daemon-log snapshot must be removed after redaction'
+    assert 'endpoint_status="$(fetch_redacted_json "http://127.0.0.1:$AUTH_PORT/v2.0/ports/$PORT_C_ID" "$endpoint_raw" X-Auth-Token)"' in diagnostics, 'endpoint diagnostics must retain the Neutron token header contract'
+    classifier = source.split('classify_failure() {', 1)[1].split('\nwrite_failure_artifact()', 1)[0]
+    assert classifier.index('*orphan*|*repair*') < classifier.index('*source*|*checkout*'), 'orphan failures must not be shadowed by resource/source substring matching'
+    classifier_fn = source.split('classify_failure() {', 1)[1].split('\nwrite_failure_artifact()', 1)[0]
+    classifier_fn = 'classify_failure() {' + classifier_fn
+    classified = subprocess.run(
+        ['bash', '-c', classifier_fn + "\nclassify_failure 'orphan repair did not publish the resource-scoped checkpoint'"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert classified == 'orphan_repair', f'orphan checkpoint failure was classified as {classified!r}'
 finally:
     process.terminate()
     process.wait(timeout=5)

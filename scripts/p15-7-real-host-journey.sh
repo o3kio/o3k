@@ -120,6 +120,11 @@ O3K_FAULT_ENV_VALUE="${O3K_P15_7_FAULT_PAUSE_MS:-45000}"
 BOOTSTRAP_AGENT_ID=""
 classify_failure() {
   case "${1:-}" in
+    # Match the most specific crash/repair terms before the generic
+    # "source" pattern: the word "resource" contains the substring
+    # "source", so the old ordering misclassified
+    # "resource-scoped orphan checkpoint" as source_checkout.
+    *orphan*|*repair*|*contending*|*lock*) echo orphan_repair ;;
     *source*|*checkout*) echo source_checkout ;;
     *postgres*|*database*|*backend*) echo postgres_prerequisite ;;
     *authority*|*token*|*auth*) echo authority_preflight ;;
@@ -128,7 +133,6 @@ classify_failure() {
     *scale*|*BuildingBlock*|*topology*|*provider*) echo scale_topology ;;
     *drain*|*maintenance*|*replace*) echo maintenance_lifecycle ;;
     *fault*|*pause*|*signal*) echo fault_injection ;;
-    *orphan*|*repair*|*contending*|*lock*) echo orphan_repair ;;
     *evidence*|*checkpoint*|*validator*) echo evidence_validation ;;
     *cleanup*|*residue*|*foreign*) echo cleanup ;;
     *operation*|*resource*|*quota*|*allocation*) echo product_correctness ;;
@@ -2571,6 +2575,7 @@ write_orphan_repair_diagnostics() {
   local output="$ARTIFACT_DIR/p15-7-orphan-repair-diagnostics-$RUN_ID.json"
   local server_raw="$WORK_ROOT/orphan-repair-server.raw.json"
   local endpoint_raw="$WORK_ROOT/orphan-repair-endpoint.raw.json"
+  local log_snapshot="$WORK_ROOT/orphan-repair-log-$RUN_ID.jsonl"
   local server_status=000 endpoint_status=000 elapsed_ms expected_at
   fetch_redacted_json() {
     local url="$1" output_path="$2" header_name="$3" header_file status
@@ -2593,9 +2598,17 @@ write_orphan_repair_diagnostics() {
   if [[ "${PORT_C_ID:-}" =~ ^[0-9a-fA-F-]{36}$ && -n "${PROJECT_TOKEN:-}" ]]; then
     endpoint_status="$(fetch_redacted_json "http://127.0.0.1:$AUTH_PORT/v2.0/ports/$PORT_C_ID" "$endpoint_raw" X-Auth-Token)"
   fi
+  # The daemon log is owned by the protected service account and is not
+  # readable through a shell-side redirection.  Snapshot only a bounded tail
+  # through the existing sudo boundary, then parse that run-local copy.  The
+  # raw snapshot is deleted after the redacted diagnostic is written so a
+  # failed run never leaves an unreviewed log dump in its artifact root.
+  : >"$log_snapshot"
+  sudo -n tail -n 2000 -- "$STATE_ROOT/log/o3kd.log" >"$log_snapshot" 2>/dev/null || true
+  chmod 0600 "$log_snapshot"
   python3 - "$output" "$RUN_ID" "$SOURCE_SHA" "${WORKLOAD_C:-}" "${PORT_C_ID:-}" \
     "${RESTARTED_O3KD_PID:-}" "$elapsed_ms" "$expected_at" "$server_status" "$endpoint_status" \
-    "$server_raw" "$endpoint_raw" "$CRASH_REPAIR_CHECKPOINT_FILE" "$STATE_ROOT/log/o3kd.log" \
+    "$server_raw" "$endpoint_raw" "$CRASH_REPAIR_CHECKPOINT_FILE" "$log_snapshot" \
     "${REPAIR_RELEASE_ENV_CONSUMED:-false}" "${REPAIR_TIMEOUT_ENV_CONSUMED:-false}" \
     "${CREATE_WAITER_ENV_CONSUMED:-false}" "${REPAIR_CHECKPOINT_ENV_CONSUMED:-false}" \
     "${REPLAY_SUPPRESS_RESOURCE_ENV_CONSUMED:-false}" "${REPLAY_SUPPRESS_RUN_ENV_CONSUMED:-false}" <<'PY'
@@ -2694,6 +2707,7 @@ finally:
             pass
 PY
   chmod 0600 "$output" "$server_raw" "$endpoint_raw" 2>/dev/null || true
+  rm -f -- "$log_snapshot"
 }
 stop_contending_create() {
   # Address only the exact run-owned background child, reap it, and remove
