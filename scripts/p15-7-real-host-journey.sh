@@ -2606,7 +2606,7 @@ write_orphan_repair_diagnostics() {
   : >"$log_snapshot"
   sudo -n tail -n 2000 -- "$STATE_ROOT/log/o3kd.log" >"$log_snapshot" 2>/dev/null || true
   chmod 0600 "$log_snapshot"
-  python3 - "$output" "$RUN_ID" "$SOURCE_SHA" "${WORKLOAD_C:-}" "${PORT_C_ID:-}" \
+  if ! python3 - "$output" "$RUN_ID" "$SOURCE_SHA" "${WORKLOAD_C:-}" "${PORT_C_ID:-}" \
     "${RESTARTED_O3KD_PID:-}" "$elapsed_ms" "$expected_at" "$server_status" "$endpoint_status" \
     "$server_raw" "$endpoint_raw" "$CRASH_REPAIR_CHECKPOINT_FILE" "$log_snapshot" \
     "${REPAIR_RELEASE_ENV_CONSUMED:-false}" "${REPAIR_TIMEOUT_ENV_CONSUMED:-false}" \
@@ -2706,6 +2706,13 @@ finally:
         except OSError:
             pass
 PY
+  then
+    # Keep the protected log snapshot out of the artifact root even when
+    # redaction itself fails.  The failure artifact still records the
+    # diagnostic failure through the caller's existing error path.
+    rm -f -- "$log_snapshot"
+    return 1
+  fi
   chmod 0600 "$output" "$server_raw" "$endpoint_raw" 2>/dev/null || true
   rm -f -- "$log_snapshot"
 }
