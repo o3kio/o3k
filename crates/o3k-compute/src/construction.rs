@@ -1182,15 +1182,31 @@ impl ComputeService {
         Ok(())
     }
 
-    /// Run one independently scheduled repair opportunity.  The durable lease
-    /// is the cross-controller fence; `orphan_repair_lock` remains the local
-    /// create/delete/release serialization boundary inside the repair pass.
+    /// Run one independently scheduled repair opportunity. Local
+    /// create/delete/release serialization is entered before claiming the
+    /// durable cross-controller lease. A process killed while it is only
+    /// waiting behind local work therefore cannot strand a lease that delays
+    /// the replacement controller. The durable lease is still acquired before
+    /// any scan or mutation and remains the cross-controller fence.
     pub(super) async fn run_orphan_repair_pass(&self) -> Result<(), ComputeError> {
         let work_key = "server-endpoint-orphan-repair";
+        tracing::debug!(
+            event = "orphan_repair_lock_attempt",
+            work_key,
+            "attempting orphan repair local serialization lock"
+        );
+        let _orphan_repair_guard = self.orphan_repair_lock.lock().await;
+        tracing::debug!(
+            event = "orphan_repair_lock_acquired",
+            work_key,
+            "orphan repair local serialization lock acquired"
+        );
         if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
             tracing::debug!(
                 event = "orphan_repair_lease_attempt",
                 work_key,
+                owner_controller_id = %controller_id,
+                owner_controller_epoch = %controller_epoch,
                 "attempting orphan repair lease"
             );
             match coordination
@@ -1207,11 +1223,13 @@ impl ComputeService {
                     tracing::info!(
                         event = "orphan_repair_lease_acquired",
                         work_key,
+                        owner_controller_id = %controller_id,
+                        owner_controller_epoch = %controller_epoch,
                         lease_until = %lease.lease_until,
                         fencing_token = lease.fencing_token,
                         "orphan repair lease acquired"
                     );
-                    let result = self.repair_orphaned_server_endpoints().await;
+                    let result = self.repair_orphaned_server_endpoints_locked().await;
                     tracing::debug!(
                         event = "orphan_repair_lease_release_started",
                         work_key,
@@ -1264,7 +1282,7 @@ impl ComputeService {
                 }
             }
         } else {
-            self.repair_orphaned_server_endpoints().await
+            self.repair_orphaned_server_endpoints_locked().await
         }
     }
 
@@ -1315,7 +1333,22 @@ impl ComputeService {
     /// discovered or repaired something, with a fixed field set, plus a
     /// `warn` per failing server. A pass with nothing to repair stays at
     /// `debug` so a healthy system does not fill the log.
+    #[cfg(test)]
     pub(super) async fn repair_orphaned_server_endpoints(&self) -> Result<(), ComputeError> {
+        let _orphan_repair_guard = self.orphan_repair_lock.lock().await;
+        tracing::debug!(
+            event = "orphan_repair_lock_acquired",
+            work_key = "server-endpoint-orphan-repair",
+            "orphan repair local serialization lock acquired"
+        );
+        self.repair_orphaned_server_endpoints_locked().await
+    }
+
+    /// Executes one repair scan while the caller holds
+    /// `orphan_repair_lock`. Scheduled passes additionally hold the durable
+    /// coordination lease; direct calls are lower-level test/request helpers
+    /// and never constitute a second scheduled authority.
+    async fn repair_orphaned_server_endpoints_locked(&self) -> Result<(), ComputeError> {
         let Some(projector) = self.binding_projector.as_ref() else {
             tracing::warn!(
                 event = "orphan_repair_projector_unavailable",
@@ -1330,12 +1363,6 @@ impl ComputeService {
         // create-persist lock ordering, so a concurrent create can neither be
         // interrupted mid-persist nor land a durable reference to a port this
         // pass is about to release.
-        let _orphan_repair_guard = self.orphan_repair_lock.lock().await;
-        tracing::debug!(
-            event = "orphan_repair_lock_acquired",
-            work_key = "server-endpoint-orphan-repair",
-            "orphan repair local serialization lock acquired"
-        );
         let resources = self
             .store
             .list_resources_by_kind("compute_instance")
@@ -1382,6 +1409,12 @@ impl ComputeService {
                 continue;
             };
             deleted_servers += 1;
+            tracing::debug!(
+                event = "orphan_repair_server_scanned",
+                resource_id = %resource.id,
+                project_id = %resource.project_id,
+                "terminally deleted server scanned for orphan endpoints"
+            );
             for port_id in &request.network_ids {
                 // Fast path: the pass-start scan already knows a live server
                 // references this endpoint.
@@ -1458,6 +1491,7 @@ impl ComputeService {
                             // still consumed this pass's single fabric budget.
                             unbinds_dispatched = true;
                             tracing::info!(
+                                event = "orphan_repair_unbind_started",
                                 resource_id = %resource.id,
                                 project_id = %resource.project_id,
                                 port_id = %port_id,

@@ -75,6 +75,14 @@ try:
     assert 'sudo -n tail -n 2000' in diagnostics, 'orphan diagnostics must read the protected daemon log through sudo'
     assert 'rm -f -- "$log_snapshot"' in diagnostics, 'raw daemon-log snapshot must be removed after redaction'
     assert 'endpoint_status="$(fetch_redacted_json "http://127.0.0.1:$AUTH_PORT/v2.0/ports/$PORT_C_ID" "$endpoint_raw" X-Auth-Token)"' in diagnostics, 'endpoint diagnostics must retain the Neutron token header contract'
+    assert 'X-Auth-Token) header_value="$PROJECT_TOKEN"' in diagnostics, 'Neutron diagnostics must send the token without a Bearer prefix'
+    assert 'X-Auth-Token) header_value="Bearer $PROJECT_TOKEN"' not in diagnostics, 'Bearer must never be prepended to X-Auth-Token'
+    assert 'Authorization) header_value="Bearer $PROJECT_TOKEN"' in diagnostics, 'native diagnostics must retain Bearer authentication'
+    timeline = source.split('write_orphan_repair_timeline() {', 1)[1].split('\nwrite_orphan_repair_diagnostics()', 1)[0]
+    assert 'event.startswith("orphan_repair_")' in timeline, 'timeline must select structured repair events'
+    assert 'events[-1000:]' in timeline, 'timeline artifact must stay bounded'
+    assert 'owner_controller_id' in timeline and 'fencing_token' in timeline, 'timeline must retain coordination identity and fencing fields'
+    assert 'rm -f -- "$log_snapshot"' in timeline, 'timeline must remove its raw daemon-log suffix'
     classifier = source.split('classify_failure() {', 1)[1].split('\nwrite_failure_artifact()', 1)[0]
     assert classifier.index('*orphan*|*repair*') < classifier.index('*source*|*checkout*'), 'orphan failures must not be shadowed by resource/source substring matching'
     classifier_fn = source.split('classify_failure() {', 1)[1].split('\nwrite_failure_artifact()', 1)[0]

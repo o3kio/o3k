@@ -2592,6 +2592,64 @@ persist_crash_checkpoint() {
     LAST_SUCCESSFUL_CHECKPOINT="$phase"
   fi
 }
+write_orphan_repair_timeline() {
+  local output="$ARTIFACT_DIR/p15-7-orphan-repair-timeline.json"
+  local log_snapshot="$WORK_ROOT/orphan-repair-timeline-$RUN_ID.jsonl"
+  local first_line="$(( ${CRASH_REPAIR_LOCK_LOG_BASELINE:-0} + 1 ))"
+  : >"$log_snapshot"
+  # Capture only the run-local restart suffix, cap it before parsing, and
+  # delete the raw copy after the allowlisted structured artifact is written.
+  sudo -n tail -n "+$first_line" -- "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
+    | tail -n 4000 >"$log_snapshot" || true
+  chmod 0600 "$log_snapshot"
+  if ! python3 - "$output" "$RUN_ID" "$SOURCE_SHA" "$log_snapshot" <<'PY'
+import json
+import pathlib
+import sys
+
+output, run_id, source_sha, log_path = sys.argv[1:]
+allowed = {
+    "timestamp", "event", "work_key", "resource_id", "project_id", "port_id",
+    "owner_controller_id", "owner_controller_epoch", "lease_created_at",
+    "lease_until", "fencing_token", "binding_state",
+}
+events = []
+try:
+    lines = pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
+except OSError:
+    lines = []
+for line in lines:
+    try:
+        record = json.loads(line)
+    except ValueError:
+        continue
+    fields = record.get("fields") if isinstance(record.get("fields"), dict) else record
+    event = fields.get("event")
+    if not isinstance(event, str) or not event.startswith("orphan_repair_"):
+        continue
+    selected = {key: fields[key] for key in allowed if key in fields}
+    if "timestamp" in record:
+        selected["timestamp"] = record["timestamp"]
+    events.append(selected)
+document = {
+    "schema_version": 1,
+    "source_sha": source_sha,
+    "run_id": run_id,
+    "events": events[-1000:],
+}
+path = pathlib.Path(output)
+path.parent.mkdir(parents=True, exist_ok=True)
+temporary = path.with_suffix(path.suffix + ".tmp")
+temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+temporary.replace(path)
+PY
+  then
+    rm -f -- "$log_snapshot"
+    return 1
+  fi
+  chmod 0600 "$output"
+  rm -f -- "$log_snapshot"
+}
 write_orphan_repair_diagnostics() {
   local output="$ARTIFACT_DIR/p15-7-orphan-repair-diagnostics-$RUN_ID.json"
   local server_raw="$WORK_ROOT/orphan-repair-server.raw.json"
@@ -2599,10 +2657,15 @@ write_orphan_repair_diagnostics() {
   local log_snapshot="$WORK_ROOT/orphan-repair-log-$RUN_ID.jsonl"
   local server_status=000 endpoint_status=000 elapsed_ms expected_at
   fetch_redacted_json() {
-    local url="$1" output_path="$2" header_name="$3" header_file status
+    local url="$1" output_path="$2" header_name="$3" header_file status header_value
     header_file="$(mktemp "$RUNNER_TEMP_ROOT/pp5-diagnostic-header.XXXXXX")"
     chmod 0600 "$header_file"
-    printf '%s: Bearer %s\n' "$header_name" "$PROJECT_TOKEN" >"$header_file"
+    case "$header_name" in
+      Authorization) header_value="Bearer $PROJECT_TOKEN" ;;
+      X-Auth-Token) header_value="$PROJECT_TOKEN" ;;
+      *) unlink "$header_file" 2>/dev/null || true; return 2 ;;
+    esac
+    printf '%s: %s\n' "$header_name" "$header_value" >"$header_file"
     status="$(curl --silent --show-error --max-time 10 \
       --output "$output_path" --write-out '%{http_code}' \
       -H "@$header_file" "$url" 2>/dev/null || true)"
@@ -2619,6 +2682,7 @@ write_orphan_repair_diagnostics() {
   if [[ "${PORT_C_ID:-}" =~ ^[0-9a-fA-F-]{36}$ && -n "${PROJECT_TOKEN:-}" ]]; then
     endpoint_status="$(fetch_redacted_json "http://127.0.0.1:$AUTH_PORT/v2.0/ports/$PORT_C_ID" "$endpoint_raw" X-Auth-Token)"
   fi
+  write_orphan_repair_timeline || true
   # The daemon log is owned by the protected service account and is not
   # readable through a shell-side redirection.  Snapshot only a bounded tail
   # through the existing sudo boundary, then parse that run-local copy.  The
@@ -2665,7 +2729,8 @@ try:
             event = json.loads(line)
         except ValueError:
             continue
-        message = event.get("message")
+        fields = event.get("fields") if isinstance(event.get("fields"), dict) else event
+        message = fields.get("message")
         if isinstance(message, str) and any(
             marker in message.lower()
             for marker in ("orphan", "repair", "lease", "checkpoint")
@@ -3273,6 +3338,8 @@ if [[ "$SWEEP_CONVERGED" == true ]]; then
     server_id "$WORKLOAD_C" endpoint_id "$PORT_C_ID" repair_sweep_passes "$CRASH_SWEEP_PASSES"
   persist_crash_checkpoint repair_completed running \
     endpoint_absent true fixed_ip_reusable_pending true repair_latency_ms "$CRASH_REPAIR_OBSERVED_MS"
+  write_orphan_repair_timeline \
+    || die "structured orphan-repair timeline could not be persisted"
 fi
 wait "$CONTENDING_CREATE_PID" || die "contending existing-port create failed after orphan repair completed"
 CONTENDING_CREATE_REAPED=true

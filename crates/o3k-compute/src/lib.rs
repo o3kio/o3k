@@ -414,6 +414,9 @@ pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
         return;
     }
     tracing::info!(
+        event = "orphan_repair_pre_mutation_checkpoint",
+        resource_id = %server_id,
+        port_id = endpoint_id,
         server_id = %server_id,
         endpoint_id,
         binding_state = ?binding_state,
@@ -5020,6 +5023,57 @@ mod tests {
                 o3k_store::LeaseAcquireOutcome::Acquired { .. }
             ),
             "an expired durable lease must eventually permit the repair pass"
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// A process-local delete/create critical section must be entered before
+    /// the controller claims the durable cross-controller repair lease. If a
+    /// controller is killed while merely waiting for this local lock, it must
+    /// not strand a 60-second lease that delays the replacement controller's
+    /// first legal repair opportunity.
+    #[tokio::test]
+    async fn orphan_repair_waiting_on_local_lock_does_not_claim_durable_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-sweep-lock-before-lease-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store = Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let coord: Arc<dyn o3k_store::CoordinationRepository> = store.clone();
+        let projector = Arc::new(CapCountingProjector::default());
+        let service = Arc::new(
+            ComputeService::new_for_test(store, Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector)
+                .with_coordination(
+                    coord.clone(),
+                    o3k_store::ControllerId::new("ctrl-a"),
+                    o3k_store::ControllerEpoch::new("epoch-a"),
+                ),
+        );
+
+        let held = service.orphan_repair_lock_guard().await;
+        let waiting_service = service.clone();
+        let pass = tokio::spawn(async move { waiting_service.run_orphan_repair_pass().await });
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert!(
+            coord
+                .inspect_work_lease("server-endpoint-orphan-repair")
+                .await?
+                .is_none(),
+            "a repair pass waiting on the local lock must not strand a durable lease"
+        );
+
+        drop(held);
+        pass.await??;
+        assert!(
+            coord
+                .inspect_work_lease("server-endpoint-orphan-repair")
+                .await?
+                .is_none(),
+            "a completed repair pass must release its durable lease"
         );
         std::fs::remove_file(database_path)?;
         Ok(())

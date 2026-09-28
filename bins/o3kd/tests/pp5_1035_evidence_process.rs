@@ -15,9 +15,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use o3k_store::{DurableStore, IdentityRepository};
+use o3k_store::{CoordinationRepository, DurableStore, IdentityRepository, NetworkRepository};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 const PROJECT_ID: &str = "eba29e2d-53de-461d-ae91-ede7402713cb";
@@ -29,6 +30,112 @@ const FLAVOR_ID: &str = "00000000-0000-0000-0000-000000000001";
 const FAULT_ENV: &str = "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS";
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
+
+#[derive(Clone)]
+enum Backend {
+    Sqlite(PathBuf),
+    Postgres(String),
+}
+
+impl Backend {
+    fn configure(&self, command: &mut Command) {
+        match self {
+            Self::Sqlite(path) => {
+                command.env("O3K_DATABASE_ID", format!("sqlite:{}", path.display()));
+            }
+            Self::Postgres(url) => {
+                command
+                    .env("O3K_DATABASE_BACKEND", "postgres")
+                    .env("O3K_DATABASE_URL", url)
+                    .env("O3K_DATABASE_ID", "postgresql:disposable-pp5-1035");
+            }
+        }
+    }
+
+    fn evidence_id(&self) -> String {
+        match self {
+            Self::Sqlite(path) => format!("sqlite:{}", path.display()),
+            Self::Postgres(_) => "postgresql:disposable-pp5-1035".to_owned(),
+        }
+    }
+
+    async fn connect(&self) -> Result<o3k_store::unified::O3kStore, Error> {
+        Ok(match self {
+            Self::Sqlite(path) => o3k_store::unified::O3kStore::connect_sqlite_file(path).await?,
+            Self::Postgres(url) => o3k_store::unified::O3kStore::connect_postgres(url).await?,
+        })
+    }
+
+    fn is_postgres(&self) -> bool {
+        matches!(self, Self::Postgres(_))
+    }
+}
+
+struct PgFixture {
+    admin_url: String,
+    database: String,
+    url: String,
+}
+
+impl PgFixture {
+    async fn new() -> Result<Option<Self>, Error> {
+        let Ok(source_url) = std::env::var("O3K_DATABASE_URL") else {
+            eprintln!("skipping PostgreSQL #1035 process regression: O3K_DATABASE_URL is unset");
+            return Ok(None);
+        };
+        let purpose = std::env::var("O3K_TEST_DATABASE_PURPOSE").map_err(
+            |_| "O3K_TEST_DATABASE_PURPOSE must identify the disposable PostgreSQL test database",
+        )?;
+        if purpose.is_empty()
+            || !purpose
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err("O3K_TEST_DATABASE_PURPOSE contains unsafe database-name bytes".into());
+        }
+        let parsed = url::Url::parse(&source_url)?;
+        let database = format!("o3k_{}_pp5_1035_{}", purpose, Uuid::now_v7().simple());
+        let mut admin = parsed.clone();
+        admin.set_path("/postgres");
+        let admin_url = admin.to_string();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await?;
+        sqlx::query(&format!("CREATE DATABASE {database}"))
+            .execute(&pool)
+            .await?;
+        pool.close().await;
+        let mut isolated = parsed;
+        isolated.set_path(&format!("/{database}"));
+        Ok(Some(Self {
+            admin_url,
+            database,
+            url: isolated.to_string(),
+        }))
+    }
+
+    async fn dispose(self) {
+        let Ok(pool) = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&self.admin_url)
+            .await
+        else {
+            return;
+        };
+        let _ = sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE datname = $1 AND pid <> pg_backend_pid()",
+        )
+        .bind(&self.database)
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
+            .execute(&pool)
+            .await;
+        pool.close().await;
+    }
+}
 
 fn now() -> String {
     Utc::now().to_rfc3339()
@@ -207,6 +314,7 @@ fn make_tls(root: &Path) -> Result<(PathBuf, PathBuf, PathBuf), Error> {
 #[allow(clippy::too_many_arguments)]
 fn start_o3kd(
     root: &Path,
+    backend: &Backend,
     http: SocketAddr,
     control: SocketAddr,
     log: &Path,
@@ -261,10 +369,6 @@ fn start_o3kd(
         .env("O3K_STATE_ROOT", root)
         .env("O3K_HTTP_ADDRESS", http.to_string())
         .env("O3K_CONTROL_ADDRESS", control.to_string())
-        .env(
-            "O3K_DATABASE_ID",
-            format!("sqlite:{}", root.join("o3k.sqlite").display()),
-        )
         .env("O3K_REPAIR_TIMEOUT_MS", "30000")
         .env(
             "O3K_SOURCE_COMMIT",
@@ -274,6 +378,7 @@ fn start_o3kd(
         .env("O3K_AUTHORITY_MODE", "o3k-implemented")
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_copy));
+    backend.configure(&mut command);
     if let Some(file) = release_file {
         command.env("O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE", file);
         command.env("O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_TIMEOUT_MS", "30000");
@@ -441,7 +546,7 @@ async fn create_existing_port(
 }
 
 async fn wait_state(
-    probe: &o3k_store::testkit::TestStore,
+    probe: &o3k_store::unified::O3kStore,
     id: Uuid,
     state: &str,
     timeout: Duration,
@@ -520,6 +625,18 @@ fn log_has(log: &Path, needle: &str) -> bool {
     fs::read_to_string(log)
         .map(|text| text.contains(needle))
         .unwrap_or(false)
+}
+
+fn last_structured_event(log: &Path, event_name: &str) -> Option<Value> {
+    fs::read_to_string(log)
+        .ok()?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|record| {
+            let fields = record.get("fields")?.as_object()?;
+            (fields.get("event")?.as_str()? == event_name).then(|| Value::Object(fields.clone()))
+        })
+        .next_back()
 }
 
 async fn wait_log(log: &Path, needle: &str, timeout: Duration) -> Result<String, Error> {
@@ -608,7 +725,12 @@ impl Drop for ChildCleanupGuard {
     }
 }
 
-async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Result<(), Error> {
+async fn run_iteration(
+    evidence: &mut Evidence,
+    root: &Path,
+    run_id: &str,
+    backend: &Backend,
+) -> Result<(), Error> {
     let client = reqwest::Client::builder().build()?;
     let http = free_address()?;
     let control = free_address()?;
@@ -635,6 +757,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     {
         let bootstrap_child = start_o3kd(
             root,
+            backend,
             http,
             control,
             &log,
@@ -662,8 +785,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         // subsequent daemon processes reopen this run-owned database normally.
         stop_process(bootstrap.child_mut()?)?;
         bootstrap.disarm();
-        let store =
-            o3k_store::unified::O3kStore::connect_sqlite_file(&root.join("o3k.sqlite")).await?;
+        let store = backend.connect().await?;
         let now_ts = now();
         store
             .insert_keystone_project(&o3k_store::KeystoneProjectRecord {
@@ -697,6 +819,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     }
     let old_child = start_o3kd(
         root,
+        backend,
         http,
         control,
         &log,
@@ -729,10 +852,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         (String::from("O3K_STATE_ROOT"), root.display().to_string()),
         (String::from("O3K_HTTP_ADDRESS"), http.to_string()),
         (String::from("O3K_CONTROL_ADDRESS"), control.to_string()),
-        (
-            String::from("O3K_DATABASE_ID"),
-            format!("sqlite:{}", root.join("o3k.sqlite").display()),
-        ),
+        (String::from("O3K_DATABASE_ID"), backend.evidence_id()),
         (String::from("O3K_REPAIR_TIMEOUT_MS"), String::from("30000")),
         (
             String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"),
@@ -770,7 +890,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         .ok_or("network id")?
         .to_owned();
     let (_, subnet_value) = post(&client, http, &admin_token, "/v2.0/subnets", json!({"subnet":{"name":format!("pp5-subnet-{fixture}"),"network_id":network_id,"cidr":"192.0.2.0/24","ip_version":4}})).await?;
-    let _subnet_id = subnet_value["subnet"]["id"]
+    let subnet_id = subnet_value["subnet"]["id"]
         .as_str()
         .ok_or("subnet id")?
         .to_owned();
@@ -818,7 +938,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     evidence.set("foreign", json!({"project":FOREIGN_PROJECT_ID,"port_id":foreign_port_id,"network_id":foreign_network,"subnet_id":foreign_subnet,"attachment_id":"not-applicable-in-fake-provider-topology","before":foreign_port,"after":foreign_port,"changed":false}));
     evidence.checkpoint("prepared")?;
 
-    let probe = o3k_store::testkit::open_file(&root.join("o3k.sqlite")).await?;
+    let probe = backend.connect().await?;
     let quota_baseline = quota_usage(&client, http, &admin_token).await?;
     let (server_id, _) = create_native(
         &client,
@@ -839,6 +959,15 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         })
         .ok_or("owned endpoint missing")?;
     let endpoint_id = owned_before["id"].as_str().ok_or("endpoint id")?.to_owned();
+    let endpoint_uuid = Uuid::parse_str(&endpoint_id)?;
+    probe
+        .update_port_binding(
+            PROJECT_ID,
+            &endpoint_uuid,
+            Some("pp5-compute-agent"),
+            Some("bound"),
+        )
+        .await?;
     let fixed_ip = owned_before["fixed_ips"][0]["ip_address"]
         .as_str()
         .ok_or("fixed ip")?
@@ -899,6 +1028,37 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     evidence.set("terminal_state", json!({"server_id":server_id,"delete_operation_id":operation_id,"project_id":PROJECT_ID,"endpoint_id":endpoint_id,"operation_state":"Succeeded","resource_state":"DELETED","owned_endpoint_present":true,"endpoint":{"ownership":owned_endpoint["project_id"],"project":PROJECT_ID,"binding":{"device_id":owned_endpoint["device_id"],"device_owner":owned_endpoint["device_owner"],"status":owned_endpoint["status"]},"ip":fixed_ip}}));
     evidence.checkpoint("terminal_state_observed")?;
     evidence.checkpoint("endpoint_present")?;
+    let stale_lease = if backend.is_postgres() {
+        let coordination = backend.connect().await?;
+        let outcome = coordination
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                &o3k_store::ControllerId::new(old_controller.0.clone()),
+                &o3k_store::ControllerEpoch::new(old_controller.1.clone()),
+                Duration::from_secs(12),
+            )
+            .await?;
+        let lease = match outcome {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                return Err("old controller could not seed the short PostgreSQL repair lease; scheduled repair claimed it while only waiting on the local lock".into());
+            }
+        };
+        evidence.set(
+            "stale_lease",
+            json!({
+                "owner_controller_id": old_controller.0,
+                "owner_controller_epoch": old_controller.1,
+                "fencing_token": lease.fencing_token,
+                "lease_until": lease.lease_until,
+                "ttl_ms": 12000,
+            }),
+        );
+        Some(lease)
+    } else {
+        None
+    };
     let kill_at = now();
     kill_process(child.child_mut()?)?;
     let _ = child.child_mut()?.wait();
@@ -916,6 +1076,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     fs::remove_file(&release).ok();
     let replacement_child = start_o3kd(
         root,
+        backend,
         http,
         control,
         &log,
@@ -957,10 +1118,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         (String::from("O3K_STATE_ROOT"), root.display().to_string()),
         (String::from("O3K_HTTP_ADDRESS"), new_http.to_string()),
         (String::from("O3K_CONTROL_ADDRESS"), new_control.to_string()),
-        (
-            String::from("O3K_DATABASE_ID"),
-            format!("sqlite:{}", root.join("o3k.sqlite").display()),
-        ),
+        (String::from("O3K_DATABASE_ID"), backend.evidence_id()),
         (String::from("O3K_REPAIR_TIMEOUT_MS"), String::from("30000")),
         (
             String::from("O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE"),
@@ -1000,6 +1158,63 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     evidence.checkpoint("readyz_verified")?;
     evidence.checkpoint("controller_identity_verified")?;
 
+    let reconstructed_server = probe.get_resource(server_id).await?;
+    if reconstructed_server.observed_state != "DELETED" {
+        return Err("PostgreSQL restart did not reconstruct the terminal compute resource".into());
+    }
+    let reconstructed_endpoint = ports(&client, new_http, &admin_token)
+        .await?
+        .into_iter()
+        .find(|port| port["id"] == endpoint_id)
+        .ok_or("restart did not reconstruct the durable server-owned endpoint")?;
+    let reconstructed_name = reconstructed_endpoint["name"]
+        .as_str()
+        .ok_or("reconstructed endpoint has no durable name")?;
+    let reconstructed_port = probe
+        .get_port(PROJECT_ID, &endpoint_uuid)
+        .await?
+        .ok_or("restart did not reconstruct the durable endpoint record")?;
+    let reconstructed_binding_state = reconstructed_port
+        .binding_state
+        .clone()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    if reconstructed_endpoint["project_id"] != PROJECT_ID
+        || !o3k_network::is_server_owned_endpoint_name(PROJECT_ID, reconstructed_name)
+    {
+        return Err("restart did not reconstruct server-owned endpoint authority".into());
+    }
+    if backend.is_postgres() && reconstructed_binding_state.as_str().is_none() {
+        return Err("PostgreSQL restart did not reconstruct the endpoint binding state".into());
+    }
+    evidence.set(
+        "postgres_reconstruction",
+        json!({
+            "enabled": backend.is_postgres(),
+            "server_state": reconstructed_server.observed_state,
+            "endpoint_id": endpoint_id,
+            "project_id": reconstructed_endpoint["project_id"],
+            "name_reconstructed": true,
+            "server_owned": true,
+            "binding_state": reconstructed_binding_state,
+            "port_binding_expected_some": true,
+        }),
+    );
+
+    if let Some(stale_lease) = stale_lease.as_ref() {
+        let busy = last_structured_event(&log, "orphan_repair_lease_busy")
+            .ok_or("shipped PostgreSQL scheduler did not observe Busy before lease takeover")?;
+        if busy["owner_controller_id"] != old_controller.0
+            || busy["owner_controller_epoch"] != old_controller.1
+            || busy["fencing_token"].as_u64() != Some(stale_lease.fencing_token)
+            || busy["lease_created_at"].as_str().is_none_or(str::is_empty)
+            || busy["lease_until"].as_str().is_none_or(str::is_empty)
+        {
+            return Err("PostgreSQL Busy scheduler event did not preserve the old owner and timestamp fields".into());
+        }
+        evidence.set("lease_busy_before_expiry", busy);
+    }
+
     let operator_token = token(&client, new_http, "admin", BOOTSTRAP_PASSWORD, "system").await?;
     let diag_start = Instant::now();
     let diag = client
@@ -1021,6 +1236,43 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         Duration::from_secs(30),
     )
     .await?;
+    if backend.is_postgres() && checkpoint["binding_state"] != reconstructed_binding_state {
+        return Err(
+            "PostgreSQL restart changed the durable endpoint binding before orphan repair".into(),
+        );
+    }
+    if let Some(stale_lease) = stale_lease.as_ref() {
+        if !log_has(&log, "orphan repair lease busy; pass skipped") {
+            return Err(
+                "shipped PostgreSQL scheduler did not observe Busy before lease takeover".into(),
+            );
+        }
+        let current = backend
+            .connect()
+            .await?
+            .inspect_work_lease("server-endpoint-orphan-repair")
+            .await?
+            .ok_or("repair lease was not held at the pre-mutation checkpoint")?;
+        if current.owner_controller_id.0 != new_controller.0
+            || current.owner_controller_epoch.0 != new_controller.1
+            || current.fencing_token <= stale_lease.fencing_token
+        {
+            return Err("replacement scheduler did not take over the expired PostgreSQL repair lease with a higher fencing token".into());
+        }
+        evidence.set(
+            "lease_takeover",
+            json!({
+                "busy_before_expiry": true,
+                "acquired_after_expiry": true,
+                "old_fencing_token": stale_lease.fencing_token,
+                "new_fencing_token": current.fencing_token,
+                "fencing_token_incremented": true,
+                "new_owner_controller_id": current.owner_controller_id.0,
+                "new_owner_controller_epoch": current.owner_controller_epoch.0,
+                "lease_until": current.lease_until,
+            }),
+        );
+    }
     evidence.set("orphan_checkpoint", checkpoint.clone());
     let lock_engaged = checkpoint["published_at"]
         .as_str()
@@ -1028,7 +1280,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         .to_owned();
     let first_tick = lock_engaged.clone();
     evidence.set("reconciler", json!({"first_periodic_tick":first_tick,"repair_lease_attempt":now(),"repair_lease_result":"Acquired","repair_function_entered":now(),"lock_waiting":lock_engaged,"lock_acquired":lock_engaged,"repair_hold_engaged":lock_engaged,"orphan_discovered":now()}));
-    evidence.set("lease", json!({"work_key":"server-endpoint-orphan-repair","work_kind":"repair","previous_owner":"none","previous_epoch":"none","previous_owner_known":false,"lease_expiry":now(),"new_owner":new_controller.0,"new_epoch":new_controller.1,"acquire_result":"Acquired","acquired_at":now(),"recovery_latency_ms":0}));
+    evidence.set("lease", json!({"work_key":"server-endpoint-orphan-repair","work_kind":"repair","previous_owner":stale_lease.as_ref().map(|_| old_controller.0.as_str()),"previous_epoch":stale_lease.as_ref().map(|_| old_controller.1.as_str()),"previous_owner_known":stale_lease.is_some(),"lease_expiry":stale_lease.as_ref().map(|lease| lease.lease_until.as_str()),"new_owner":new_controller.0,"new_epoch":new_controller.1,"acquire_result":"Acquired","acquired_at":now()}));
     evidence.set("orphan", json!({"operation_succeeded":true,"resource_deleted":true,"endpoint_present":true,"ownership_valid":true,"project_matches":true,"no_live_references":true,"orphan_eligible":true}));
     evidence.checkpoint("repair_authority_seen")?;
     evidence.checkpoint("repair_lock_seen")?;
@@ -1116,7 +1368,47 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
         .await?
         .iter()
         .any(|port| port["id"] == endpoint_id);
+    if !endpoint_absent {
+        return Err("orphan endpoint remained after the shipped repair scheduler completed".into());
+    }
+    let (_, reuse_value) = post(
+        &client,
+        new_http,
+        &admin_token,
+        "/v2.0/ports",
+        json!({"port": {
+            "network_id": network_id,
+            "name": format!("pp5-fixed-ip-reuse-{fixture}"),
+            "fixed_ips": [{"subnet_id": subnet_id, "ip_address": fixed_ip}],
+        }}),
+    )
+    .await?;
+    let reuse_port = &reuse_value["port"];
+    let reuse_port_id = reuse_port["id"]
+        .as_str()
+        .ok_or("fixed-IP reuse port has no id")?;
+    if reuse_port["fixed_ips"][0]["ip_address"] != fixed_ip {
+        return Err("released server-owned fixed IP was not reusable".into());
+    }
+    let reuse_delete = client
+        .delete(format!("http://{new_http}/v2.0/ports/{reuse_port_id}"))
+        .header("x-auth-token", &admin_token)
+        .send()
+        .await?;
+    if !reuse_delete.status().is_success() {
+        return Err(format!(
+            "fixed-IP reuse fixture cleanup failed: {}",
+            reuse_delete.status()
+        )
+        .into());
+    }
     let quota_after = quota_usage(&client, new_http, &admin_token).await?;
+    if quota_after != quota_during - 1 {
+        return Err(format!(
+            "orphan endpoint repair did not restore exactly one network-port quota slot: during={quota_during} after={quota_after}"
+        )
+        .into());
+    }
     let repair_completed_at = now();
     evidence.set("repair", json!({"binding_state":binding_state,"unbind_attempted":unbind_required,"unbind_started_at":unbind_started_at,"unbind_after_checkpoint":unbind_started_at.is_some(),"unbind_result":if unbind_required { "Succeeded" } else { "NotRequired" },"release_attempted":true,"release_result":"Succeeded","pass_number":1,"completed_at":repair_completed_at,"endpoint_absent":endpoint_absent}));
     // The earlier checkpoint records the sweep transition observed while the
@@ -1124,7 +1416,7 @@ async fn run_iteration(evidence: &mut Evidence, root: &Path, run_id: &str) -> Re
     // terminal repair completion timestamp so the final artifact has one
     // monotonic contention/repair timeline.
     evidence.set("contention", json!({"create_request_start":create_request_start,"waiter_marker_at":waiter_at,"repair_release_at":release_at,"repair_released_at":repair_released_at,"repair_completed_at":repair_completed_at,"create_accepted_at":create_accepted_at,"create_resource_id":created_id,"create_operation_id":created_body["operation_id"],"waiter_observed":true,"acceptance_latency_ms":accepted,"create_to_active_latency_ms":create_to_active_latency}));
-    evidence.set("accounting", json!({"fixed_ip":fixed_ip,"quota_baseline":quota_baseline,"quota_before":quota_before,"quota_during":quota_during,"quota_after":quota_after,"fixed_ip_reusable":true,"no_duplicate_endpoint":true,"no_duplicate_allocation":true,"quota_restored":quota_after == quota_baseline}));
+    evidence.set("accounting", json!({"fixed_ip":fixed_ip,"fixed_ip_reuse_port_id":reuse_port_id,"quota_baseline":quota_baseline,"quota_before":quota_before,"quota_during":quota_during,"quota_after":quota_after,"fixed_ip_reusable":true,"no_duplicate_endpoint":true,"no_duplicate_allocation":true,"quota_restored":quota_after == quota_during - 1}));
     evidence.checkpoint("repair_completed")?;
     evidence.checkpoint("accounting_verified")?;
     evidence.checkpoint("preservation_verified")?;
@@ -1254,7 +1546,8 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
         })
         .unwrap_or_else(|_| "0".repeat(64));
     let mut evidence = Evidence::new(artifact, &run_id, &source_sha, &harness_digest)?;
-    let result = run_iteration(&mut evidence, &root, &run_id).await;
+    let backend = Backend::Sqlite(root.join("o3k.sqlite"));
+    let result = run_iteration(&mut evidence, &root, &run_id, &backend).await;
     match result {
         Ok(()) => {
             evidence.complete()?;
@@ -1292,6 +1585,42 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn pp5_1035_postgres_restart_takes_over_lease_and_reconstructs_endpoint() -> Result<(), Error>
+{
+    let Some(fixture) = PgFixture::new().await? else {
+        return Ok(());
+    };
+    let run_id = format!("postgres-{}", Uuid::now_v7());
+    let root = std::env::temp_dir().join(format!("o3k-pp5-evidence-{run_id}"));
+    fs::create_dir_all(&root)?;
+    let artifact = root.join("pp5-1035-postgres-restart-evidence.json");
+    let source_sha = git_sha().unwrap_or_else(|_| "0".repeat(40));
+    let harness_digest = file_sha256(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/pp5_1035_evidence_process.rs")
+            .as_path(),
+    )?;
+    let mut evidence = Evidence::new(artifact, &run_id, &source_sha, &harness_digest)?;
+    let backend = Backend::Postgres(fixture.url.clone());
+    let result = run_iteration(&mut evidence, &root, &run_id, &backend).await;
+    let completion = match result {
+        Ok(()) => evidence.complete(),
+        Err(error) => {
+            let phase = evidence
+                .data
+                .get("current_phase")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned();
+            let _ = evidence.fail(&phase, &error.to_string());
+            Err(error)
+        }
+    };
+    fixture.dispose().await;
+    completion
 }
 
 fn git_sha() -> Result<String, Error> {
