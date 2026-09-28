@@ -12,7 +12,7 @@ product rules. Summaries explain these decisions but do not override them.
 | O3K IAM and Keystone compatibility | `docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md` and `docs/specs/SPEC-0020-keystone-trust-catalog-and-auth-context.md` | `README.md`, `docs/ARCHITECTURE.md` |
 | Kubernetes-native control-plane deployment and PostgreSQL requirement for HA Kubernetes | `docs/adr/ADR-0167-kubernetes-native-control-plane-deployment.md` | `README.md`, `docs/ROADMAP.md`, `docs/ARCHITECTURE.md` |
 | P9 O3K network intent, Routed Fabric, and node-local network execution | `docs/adr/ADR-0168-o3k-routed-fabric-and-network-execution.md` and `docs/specs/SPEC-0026-o3k-routed-fabric-v1.md` | `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/PRODUCT_REQUIREMENTS.md` |
-| P11 accepted overlapping-AddressRealm v2 fabric | `docs/adr/ADR-0171-addressrealm-encapsulated-edge-fabric.md`, `docs/specs/SPEC-0029-addressrealm-encapsulated-edge-fabric-v2.md`, and `contracts/edge-fabric-realm-overlay.md` (Accepted 2026-08-20; supersedes the v1 P11 fabric authority for implementation) | `docs/ROADMAP.md`, `docs/P11_REALM_OVERLAY_IMPLEMENTATION_PROMPT.md` |
+| P11 accepted stretched-L2 v3 fabric (per-realm VXLAN head-end replication over the WireGuard host fabric) | `docs/adr/ADR-0186-stretched-l2-edge-fabric-vxlan-her.md`, `docs/specs/SPEC-0049-stretched-l2-edge-fabric-v3.md`, and `contracts/edge-fabric-stretched-l2.md` (Accepted 2026-09-28; supersedes the v2 P11 fabric authority for implementation) | `docs/ROADMAP.md`, `docs/P11_REALM_OVERLAY_IMPLEMENTATION_PROMPT.md` |
 | Canonical Network / AddressRealm lifecycle | `docs/adr/ADR-0176-canonical-network-and-addressrealm-lifecycle-separation.md`, `docs/specs/SPEC-0033-canonical-network-addressrealm-lifecycle-v1.md` (Accepted 2026-08-24; bounded runtime implementation and evidence are complete for P13.3) | `docs/compatibility/p13-1/p13-2-managed-resource-requirements.yaml` |
 | Canonical NetworkPolicy / PolicyRule / PolicyAttachment lifecycle | `docs/adr/ADR-0177-canonical-networkpolicy-and-reusable-policy-set.md`, `docs/specs/SPEC-0034-canonical-networkpolicy-lifecycle-v1.md` (Accepted 2026-08-26 against reviewed proposal baseline 8429a56a32aa1963edd98291000418f02bb87d03; bounded runtime and provider evidence are complete for P13.3) | `docs/compatibility/p13-3/p13-3a-security-group-provider-contract.json` |
 | Canonical L3 gateway and Realm connectivity | `docs/adr/ADR-0178-canonical-l3-gateway-and-realm-connectivity.md`, `docs/specs/SPEC-0035-canonical-l3-gateway-lifecycle-v1.md` (Accepted 2026-08-27; bounded runtime and compatibility evidence are defined, but the committed gateway artifacts require rerun after subsequent implementation changes) | `docs/compatibility/p13-3/p13-3c-router-architecture-decision-request.md` |
@@ -121,19 +121,24 @@ advanced by, not amended by, ADR-0184 — and the gap register
 - ADR-0170/SPEC-0028 define the superseded P11 v1 authority. They introduced the
   realm bridge/netns, distributed endpoint directory, proxy-MAC remote neighbor
   resolution, and one shared WireGuard host fabric.
-- ADR-0171/SPEC-0029 and the realm-overlay contract are the active P11 v2
+- ADR-0171/SPEC-0029 and the realm-overlay contract defined the superseded P11
+  v2 authority (Geneve realm encapsulation, known-unicast only, no cross-host
+  flooding).
+- ADR-0186/SPEC-0049 and the stretched-L2 contract are the active P11 v3
   implementation authority. Acceptance does not create a runtime, product, or
   real-host support claim.
-- P11 implementation must follow the v2 authority; PR #703's portable
-  realm-scoped endpoint-directory/planner semantics may be retained where
-  compatible.
+- P11 implementation must follow the v3 authority; the portable realm-scoped
+  endpoint-directory/planner semantics and the VNI binding registry from v2 may
+  be retained where compatible.
 - The accepted successor interprets cross-host tenant addresses as
   `(AddressRealm, IP)`, uses a durable provider mapping from AddressRealm to a
-  Geneve VNI, and makes WireGuard route only unique provider host-fabric
+  VXLAN VNI, and makes WireGuard route only unique provider host-fabric
   transport addresses rather than tenant endpoint `/32`s.
-- Geneve in the accepted successor carries realm identity for known-unicast
-  traffic; it does not create an implicit regional ARP/broadcast/unknown-unicast
-  flooding domain.
+- VXLAN in the accepted successor carries realm identity and realizes one
+  literal L2 broadcast domain per AddressRealm across enrolled hosts: guest ARP
+  is answered by the remote endpoint's actual canonical MAC, and broadcast,
+  unknown-unicast, and multicast traverse via bounded head-end replication to
+  peers currently hosting realm endpoints only.
 - In both P11 designs, same-host/same-realm local L2 is allowed only when
   anti-spoofing and canonical NetworkPolicy are enforced on the TAP/bridge
   path. Packet learning/FDB/ARP observations never become endpoint authority.

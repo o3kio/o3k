@@ -2,6 +2,8 @@
 
 Status: Accepted
 
+Superseded-by: SPEC-0049
+
 Decision-accepted: 2026-08-20
 Human-approval: requester acceptance recorded in issue #705 comment 5349129789
 
