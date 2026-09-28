@@ -653,7 +653,7 @@ jobs:
             printf 'O3K_P15_7_HOST_IMAGE_SHA256=%s\n' "${P15_7_HOST_IMAGE_SHA256}"
           } >>"${GITHUB_ENV}"
 
-      - name: Run P15.7 scale/composition convergence gate
+      - name: Run PP.5 integrated S5 + #1035 + host-maintenance campaign
         id: p15_7
         if: steps.protected_preflight.outcome == 'success' && steps.generic_guard.outputs.ready == 'true' && steps.p15_7_host_image.outcome == 'success'
         env:
@@ -851,6 +851,10 @@ jobs:
             target/real-host-workflow-artifacts/compute-agent-process-mtls-result.json
             target/real-host-workflow-artifacts/p15-7-scale-composition-evidence.json
             target/real-host-workflow-artifacts/p15-7-gate-result.json
+            target/real-host-workflow-artifacts/pp5-s5-scale-result.json
+            target/real-host-workflow-artifacts/pp5-1035-crash-recovery-result.json
+            target/real-host-workflow-artifacts/pp5-host-maintenance-result.json
+            target/real-host-workflow-artifacts/pp5-overall-result.json
             target/real-host-workflow-artifacts/p15-7-failure-classification.json
             target/real-host-workflow-artifacts/p15-7-transient-failures.jsonl
             target/real-host-workflow-artifacts/p15-7-crash-injection-evidence.json

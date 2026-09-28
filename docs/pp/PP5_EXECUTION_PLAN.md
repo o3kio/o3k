@@ -478,6 +478,21 @@ asserts exactly five eligible Ready BuildingBlocks initially and finally.
 | declared tiers `S3`/`S10`/`S20`, `K-min`/`K-full` | not started (deliberate — this run is the S5 foundation) |
 | #1033 host-reboot contract | **decided and documented** (`docs/operations/pp5-host-maintenance.md`); S5 maintenance journey not yet run |
 
+### 12.3.1 PP.5 acceptance lanes
+
+The protected campaign has three independently classified phases.  The S5
+lane stops after the `5 -> 5 -> 4 -> 4 -> 5 -> 5` lifecycle checkpoints;
+the #1035 lane exercises the real PostgreSQL/o3kd/compute/network crash and
+orphan-repair contract on its minimum runner-provided topology; and the
+maintenance lane owns the planned drain/reboot/recovery contract.  The
+integrated campaign remains the certification authority and requires all
+three phase results to be `passed`.
+
+The phase artifacts are `pp5-s5-scale-result.json`,
+`pp5-1035-crash-recovery-result.json`, `pp5-host-maintenance-result.json`,
+and `pp5-overall-result.json`.  A downstream crash or maintenance failure is
+therefore never reported as an S5 scale failure.
+
 ### 12.4 #1035 follow-ups (recorded, not silently deferred)
 
 1. **Sweep cost under churn.** `repair_orphaned_server_endpoints` enumerates

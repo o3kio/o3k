@@ -32,6 +32,7 @@ bash "$ROOT_DIR/tests/p15_7_restart_environment_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_contention_cleanup_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_api_read_retry_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_scale_composition_guards.sh"
+bash "$ROOT_DIR/tests/pp5_focused_lane_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_protected_preflight.sh"
 
 echo "PP5_FAST_HARNESS_QUALIFICATION=PASS (machinery only; no product or real-host claim)"

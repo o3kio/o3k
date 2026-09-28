@@ -10,10 +10,17 @@ EVIDENCE_FILE="${O3K_P15_7_EVIDENCE_FILE:-${ARTIFACT_DIR}/p15-7-scale-compositio
 GATE_RESULT="${ARTIFACT_DIR}/p15-7-gate-result.json"
 SOURCE_SHA="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-}}"
 PROFILE="${O3K_P15_7_PROFILE:-small-edge-cloud}"
+FOCUSED_PHASE="${O3K_P15_7_FOCUSED_PHASE:-}"
 mkdir -p "${ARTIFACT_DIR}"
+
+write_phase_results() {
+    python3 "${ROOT_DIR}/scripts/write_pp5_phase_results.py" "${ARTIFACT_DIR}" \
+        --source-sha "${SOURCE_SHA}" >/dev/null 2>&1 || true
+}
 
 write_result() {
     local status="$1" reason="$2"
+    write_phase_results
     python3 - "${GATE_RESULT}" "${status}" "${reason}" "${SOURCE_SHA}" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
@@ -149,7 +156,27 @@ if [[ ! -f "${EVIDENCE_FILE}" ]]; then
         exit 0
     fi
     export O3K_P15_7_EVIDENCE_FILE="${EVIDENCE_FILE}"
-    bash -lc "${O3K_P15_7_JOURNEY_COMMAND}"
+    if [[ "${FOCUSED_PHASE}" == "s5" ]]; then
+        export O3K_P15_7_PHASE=s5-scale
+    fi
+    journey_status=0
+    bash -lc "${O3K_P15_7_JOURNEY_COMMAND}" || journey_status=$?
+    write_phase_results
+    if [[ "${journey_status}" -ne 0 ]]; then
+        write_result failed journey_failed
+        exit "${journey_status}"
+    fi
+fi
+if [[ "${FOCUSED_PHASE}" == "s5" ]]; then
+    write_phase_results
+    python3 - "${ARTIFACT_DIR}/pp5-s5-scale-result.json" <<'PY' || { write_result failed s5_phase_result_missing_or_failed; exit 1; }
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if value.get("status") != "passed":
+    raise SystemExit(1)
+PY
+    write_result passed s5_scale_validated
+    exit 0
 fi
 [[ -f "${EVIDENCE_FILE}" ]] || { write_result failed evidence_artifact_missing; exit 1; }
 
@@ -158,4 +185,11 @@ if ! python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE_FILE}"
     write_result failed evidence_validation_failed
     exit 1
 fi
+write_phase_results
+python3 - "${ARTIFACT_DIR}/pp5-overall-result.json" <<'PY' || { write_result failed phase_result_missing_or_failed; exit 1; }
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if value.get("overall") != "passed":
+    raise SystemExit(1)
+PY
 write_result passed evidence_validated

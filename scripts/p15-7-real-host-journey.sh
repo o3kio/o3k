@@ -2514,6 +2514,14 @@ record_scale_checkpoint post-reboot 5 "$DRAIN_ID" "$SURVIVOR_IDS,${BLOCK_IDS[blo
   "$POST_REMOVE_BOOTSTRAP_EXPECT" \
   >/dev/null || die "post-reboot eligible Ready count is not exactly five"
 
+# Focused development lane: S5 ends at the restart checkpoint.  The normal
+# EXIT cleanup still tears down only this run's owned resources, while the
+# phase-result classifier consumes the six S5 checkpoint fragments.  Crash
+# injection and host maintenance remain exclusively in the integrated lane.
+if [[ "${O3K_P15_7_PHASE:-integrated}" == "s5-scale" ]]; then
+  exit 0
+fi
+
 # ── #1035 crash-injection leg ──────────────────────────────────────────────
 # Interrupt a real delete inside the fault hook's window — after the delete
 # is durably terminal (operation Succeeded, resource observed DELETED) and
@@ -3410,7 +3418,7 @@ doc = {
     "kill": {"signal": "SIGKILL", "pid": int(killed_pid), "identity_verified": True, "orderly_restart": False},
     "delete_request_observed_http_code": delete_code or None,
     "restart": {"path": "normal boot path via start_o3kd_verified", "readyz": "passed"},
-    "sweep": {"passes_observed": int(sweep_passes), "completion_log_observed": int(sweep_passes) > 0, "time_to_repair_ms": int(repair_ms), "bounded_wait_ms": 180000, "endpoint_absent_after": True, "repair_completion_observed_unix_ms": int(repair_completed_observed)},
+    "sweep": {"passes_observed": int(sweep_passes), "completion_log_observed": int(sweep_passes) > 0, "time_to_repair_ms": int(repair_ms), "bounded_wait_ms": 180000, "repair_discovery_cadence_ms": 5000, "repair_lease_ttl_ms": 60000, "bound_model": "discovery cadence, stale-lease takeover, unbind deadline, and release deadline are measured separately", "pre_mutation_checkpoint": "orphan_discovered", "endpoint_absent_after": True, "repair_completion_observed_unix_ms": int(repair_completed_observed)},
     "fixed_ip_reuse": {"attempted": True, "succeeded": fixed_ip_reusable == "true"},
     "quota": {"dimension": "network:ports", "before": int(quota_before), "after": int(quota_after), "restored": quota_before == quota_after},
     "placement_allocation": {"vcpu_allocated_before": int(alloc_before), "vcpu_allocated_after": int(alloc_after), "leak": alloc_before != alloc_after},

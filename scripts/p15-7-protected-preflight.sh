@@ -94,7 +94,8 @@ if [[ -n "$unexpected_status" ]]; then
   exit 2
 fi
 TREE_CLEAN=true
-HARNESS_DIGEST="$(git -C "$ROOT_DIR" ls-files -- 'scripts/**' 'tests/p15_7_*' '.github/workflows/*p15*' \
+HARNESS_DIGEST="$(git -C "$ROOT_DIR" ls-files -- 'scripts/**' 'tests/p15_7_*' 'tests/pp5_*' \
+  '.github/workflows/*p15*' '.github/workflows/pp5-*' \
   | while IFS= read -r path; do printf '%s  %s\n' "$(git -C "$ROOT_DIR" hash-object -- "$path")" "$path"; done \
   | sha256sum | awk '{print $1}')"
 [[ "$SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || blocked exact_source_sha_required
