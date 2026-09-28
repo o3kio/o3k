@@ -64,6 +64,15 @@ EOF
 # 1. Verify valid mock passes
 python3 "${repo_root}/scripts/validate-adr-index.py" --root "${temp_dir}" >/dev/null
 
+# 1b. Reciprocal supersession metadata is valid and must not be reported as a
+# cycle: the forward edge is recorded by the successor and the reverse edge
+# by the predecessor.
+sed -i 's/Supersedes: none/Supersedes: ADR-0001/' "${temp_dir}/docs/adr/ADR-0002-test-two.md"
+sed -i 's/Superseded-by: none/Superseded-by: ADR-0002/' "${temp_dir}/docs/adr/ADR-0001-test-one.md"
+python3 "${repo_root}/scripts/validate-adr-index.py" --root "${temp_dir}" >/dev/null
+sed -i 's/Supersedes: ADR-0001/Supersedes: none/' "${temp_dir}/docs/adr/ADR-0002-test-two.md"
+sed -i 's/Superseded-by: ADR-0002/Superseded-by: none/' "${temp_dir}/docs/adr/ADR-0001-test-one.md"
+
 # 2. Test invalid status fails
 sed -i 's/Status: Accepted/Status: InvalidStatus/' "${temp_dir}/docs/adr/ADR-0001-test-one.md"
 if python3 "${repo_root}/scripts/validate-adr-index.py" --root "${temp_dir}" >/dev/null 2>&1; then

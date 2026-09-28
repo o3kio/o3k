@@ -126,7 +126,11 @@ def validate_adr_dir(adr_dir: pathlib.Path):
         if rec["status"] == "Superseded" and not rec["superseded_by"]:
             raise ValueError(f"{rec['filename']}: Status is Superseded but Superseded-by metadata is empty")
 
-    # Cycle detection
+    # Cycle detection follows the canonical forward relation only.  The
+    # metadata is intentionally bidirectional: a successor may declare
+    # ``Supersedes: ADR-xxxx`` while the predecessor records the reciprocal
+    # ``Superseded-by: ADR-yyyy``.  Traversing both fields treats every valid
+    # reciprocal pair as a false cycle.
     visited = set()
 
     def visit(adr_id, stack):
@@ -136,7 +140,7 @@ def validate_adr_dir(adr_dir: pathlib.Path):
         if adr_id in visited:
             return
         stack.append(adr_id)
-        for target in records[adr_id]["supersedes"] + records[adr_id]["superseded_by"]:
+        for target in records[adr_id]["supersedes"]:
             visit(target, stack)
         stack.pop()
         visited.add(adr_id)

@@ -2,6 +2,8 @@
 
 Status: Accepted
 
+Superseded-by: `contracts/edge-fabric-stretched-l2.md` for P11 v3
+
 Decision-accepted: 2026-08-20
 Human-approval: requester acceptance recorded in issue #705 comment 5349129789
 
@@ -14,7 +16,10 @@ Related architecture:
 - [current execution-boundary contract](execution-boundaries.md)
 
 This accepted contract supersedes `contracts/edge-fabric-v1.md` for P11 v2
-implementation authority. Acceptance authorizes bounded implementation only;
+implementation authority. It is superseded for P11 v3 by
+`contracts/edge-fabric-stretched-l2.md` (stretched-L2 VXLAN/head-end-replication
+fabric); it remains useful only for v2 behavior that is explicitly retained by
+the v3 authority. Acceptance authorizes bounded implementation only;
 runtime, product, and real-host support claims remain gated by the evidence
 requirements in this contract and SPEC-0029.
 

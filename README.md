@@ -166,7 +166,7 @@ current gaps are:
 | E2D-05 | BLOCKER-to-composable-catalog | O3K lacks a declarative desired service-composition/`CloudProfile` layer distinct from runtime service discovery. |
 | E2D-06 | HIGH | Reusable hosted OpenStack service install/version/dependency/upgrade/conformance machinery is not yet generalized beyond bounded profiles such as Cinder. |
 | E2D-07 | BLOCKER-to-edge-product | Local site autonomy and WAN-loss semantics are not yet an explicit product contract; same OS must not mean one stretched WAN-dependent control plane. |
-| E2D-08 | BLOCKER-to-DC-scale | The P11 Linux/Geneve/WireGuard fabric is a bounded edge reference provider, not datacenter-scale fabric evidence. |
+| E2D-08 | BLOCKER-to-DC-scale | The historical P11 v2 Linux/Geneve/WireGuard fabric is a bounded edge reference provider, not datacenter-scale fabric evidence; the accepted v3 VXLAN/HER successor is not yet runtime evidence. |
 | E2D-09 | HIGH | Drain exists, but mature workload mobility/relocation/live migration/fenced evacuation and storage movement remain unproven. |
 | E2D-10 | BLOCKER-to-DC-scale | Multi-controller leases/fencing exist, but cells/shards/hierarchical work partitioning and large PostgreSQL/control-plane scale remain unproven. |
 | E2D-11 | HIGH | Operator diagnostics/capacity projection (SPEC-0045), durable audit (SPEC-0042), and metering (SPEC-0046) now exist; `o3kd` still lacks a declared metrics surface (no `/metrics`, no OTLP) and latency/lag/lease telemetry (P17). |
@@ -285,14 +285,18 @@ SQLite/PostgreSQL + O3K domain/scheduler/reconciler
       |
  o3k-compute  o3k-network  o3k-storage
       |            |            |
-libvirt     Geneve+WG     LVM / Ceph RBD
+libvirt     Geneve+WG (v2) LVM / Ceph RBD
 ```
 
 `o3kd` is the current integrated control-plane composition shell. Host-local
 real compute, network, and storage execution cross typed gRPC+mTLS agent
-boundaries. Multi-host topology with overlapping tenant CIDRs, Geneve realm
-encapsulation over WireGuard host transport, and LVM/RBD storage is proven on
-three real hosts with 15 simulated scale hosts for the bounded edge profile.
+boundaries. The current runtime/evidence is the P11 v2 multi-host topology
+with overlapping tenant CIDRs, Geneve realm encapsulation over WireGuard host
+transport, and LVM/RBD storage, proven on three real hosts with 15 simulated
+scale hosts for the bounded edge profile. The accepted P11 v3 VXLAN/HER
+successor remains architecture-only until its implementation and evidence
+gates pass.
+
 Durable work leases/controller fencing and PostgreSQL support provide important
 scale foundations, but do not themselves prove datacenter-scale scheduling,
 networking, database or control-plane throughput.
@@ -572,7 +576,7 @@ separate O3K products:
   against declared O3K compatibility surfaces;
 - **native O3K TestLab/cloud** — minimal/single-host evidence for the native
   Cloud Kernel and IaaS path;
-- **small edge cloud** — the first real multi-host scale rung: P11 proves
+- **small edge cloud** — the first real multi-host scale rung: P11 v2 proves
   overlapping CIDRs, Geneve+WireGuard fabric, LVM locality, serial RBD,
   drain/restart/failure recovery, three real hosts and 15 simulated scale hosts,
   with an initial target around 10–20 hypervisors;

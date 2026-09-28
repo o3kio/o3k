@@ -2,6 +2,8 @@
 
 Status: Accepted
 
+Superseded-by: SPEC-0049
+
 Decision-accepted: 2026-08-20
 Human-approval: requester acceptance recorded in issue #705 comment 5349129789
 
@@ -30,9 +32,10 @@ SPEC-0028 with a realm-encapsulated P11 provider that supports overlapping
 customer CIDRs across hypervisors while retaining the existing O3K authority,
 neighbor-directory, policy, scheduling, storage, failure, and evidence model.
 
-ADR-0171 and this SPEC are now the active P11 v2 architecture authority.
-Privileged Geneve realization is still subject to the implementation, safety,
-and real-host evidence gates in this document and the successor contract.
+ADR-0171 and this SPEC were the P11 v2 architecture authority and are now
+superseded for new fabric implementation by ADR-0186/SPEC-0049. The historical
+Geneve realization remains subject to the implementation, safety, and real-host
+evidence gates recorded here; it does not establish a v3 VXLAN/HER claim.
 
 PR #703 is an already-merged portable semantic slice and remains reusable only
 where its types/behavior do not depend on global tenant-IP uniqueness.

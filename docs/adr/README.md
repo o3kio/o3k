@@ -180,7 +180,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0168](ADR-0168-o3k-routed-fabric-and-network-execution.md)
 - [ADR-0169](ADR-0169-native-persistent-storage-and-o3k-storage-boundary.md)
 - [ADR-0170](ADR-0170-namespaced-routed-edge-fabric.md) (superseded by accepted ADR-0171)
-- [ADR-0171](ADR-0171-addressrealm-encapsulated-edge-fabric.md) (accepted)
+- [ADR-0171](ADR-0171-addressrealm-encapsulated-edge-fabric.md) (superseded by accepted ADR-0186)
 - [ADR-0172](ADR-0172-configurable-edge-fabric-transport-ports.md) (accepted)
 - [ADR-0173](ADR-0173-native-o3k-resource-api-and-resource-model.md) (accepted)
 - [ADR-0174](ADR-0174-service-manifest-and-resource-provider-controller.md) (accepted)
@@ -195,6 +195,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0183](ADR-0183-authoritative-metering-and-bounded-usage-aggregation.md) (accepted)
 - [ADR-0184](ADR-0184-p15-scale-and-composition-foundation.md) (accepted)
 - [ADR-0185](ADR-0185-release-signing-trust-transition.md) (accepted)
+- [ADR-0186](ADR-0186-stretched-l2-edge-fabric-vxlan-her.md) (accepted; supersedes ADR-0171)
 
 ## Required audit
 
