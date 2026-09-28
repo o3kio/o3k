@@ -2362,11 +2362,16 @@ pub async fn test_coordination_repository<S: StoreUnderTest>(store: Arc<S>) {
     match busy_outcome {
         LeaseAcquireOutcome::Busy {
             owner_controller_id,
+            owner_controller_epoch,
             fencing_token,
-            ..
+            lease_created_at,
+            lease_until,
         } => {
             assert_eq!(owner_controller_id, ctrl1);
+            assert_eq!(owner_controller_epoch, epoch1);
             assert_eq!(fencing_token, 1);
+            assert!(!lease_created_at.trim().is_empty());
+            assert!(!lease_until.trim().is_empty());
         }
         _ => panic!("competing controller must see Busy on active lease"),
     }

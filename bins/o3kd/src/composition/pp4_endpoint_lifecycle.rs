@@ -1145,7 +1145,7 @@ async fn terminal_projection_honours_the_endpoint_release_failpoint()
     // Let the shipped sweep reach its next interval while terminal projection
     // owns the release serialization lock. It must wait at that boundary,
     // leaving the endpoint available for the crash-recovery proof.
-    let sweep = spawn_shipped_sweeps(&harness.compute);
+    let sweep = spawn_shipped_orphan_repair(&harness.compute);
     tokio::task::yield_now().await;
     drop(serialization_barrier);
     tokio::time::sleep(Duration::from_millis(1_200)).await;
@@ -1320,13 +1320,14 @@ impl o3k_compute::PortBindingProjector for CrashBeforeUnbindProjector {
     }
 }
 
-/// Spawns the shipped periodic lifecycle convergence reconciler.
+/// Spawns the shipped periodic orphan endpoint repair reconciler.
 ///
-/// The PP.5 tests deliberately use the production driver
-/// (`spawn_lifecycle_convergence_reconciler`) rather than a test-only
-/// convergence call, so what repairs an orphan here is the sweep that ships.
-fn spawn_shipped_sweeps(compute: &ComputeService) -> tokio::task::JoinHandle<()> {
-    compute.spawn_lifecycle_convergence_reconciler(1)
+/// These tests deliberately use the production driver
+/// (`spawn_orphan_endpoint_reconciler`) rather than a test-only convergence
+/// call, so what repairs an orphan here is the independently scheduled sweep
+/// that ships.
+fn spawn_shipped_orphan_repair(compute: &ComputeService) -> tokio::task::JoinHandle<()> {
+    compute.spawn_orphan_endpoint_reconciler(1)
 }
 
 /// Waits for `settled`, then aborts `reconciler` and asserts it did not panic.
@@ -1348,25 +1349,25 @@ where
     let stopped = reconciler.await;
     assert!(
         stopped.is_err_and(|error| error.is_cancelled()),
-        "the shipped convergence sweep ended abnormally"
+        "the shipped orphan repair reconciler ended abnormally"
     );
     assert!(
         outcome.is_ok(),
-        "the shipped convergence sweep did not settle in time"
+        "the shipped orphan repair reconciler did not settle in time"
     );
 }
 
 /// Runs the shipped reconciler long enough to complete at least two full
 /// passes, then stops it. Used by the no-op cases, which have nothing to wait
 /// for: the assertion is that a settled system is left alone.
-async fn run_shipped_sweeps_for(compute: &ComputeService, duration: Duration) {
-    let reconciler = spawn_shipped_sweeps(compute);
+async fn run_shipped_orphan_repair_for(compute: &ComputeService, duration: Duration) {
+    let reconciler = spawn_shipped_orphan_repair(compute);
     tokio::time::sleep(duration).await;
     reconciler.abort();
     let stopped = reconciler.await;
     assert!(
         stopped.is_err_and(|error| error.is_cancelled()),
-        "the shipped convergence sweep ended abnormally"
+        "the shipped orphan repair reconciler ended abnormally"
     );
 }
 
@@ -1511,7 +1512,7 @@ async fn interrupted_terminal_delete_orphan_is_repaired_by_the_shipped_sweep()
     // so a concurrent sweep from another harness would interleave its reports
     // into this test's capture window (see REPORT_CAPTURE_LOCK).
     let _report_guard = REPORT_CAPTURE_LOCK.lock().await;
-    let reconciler = spawn_shipped_sweeps(&harness.compute);
+    let reconciler = spawn_shipped_orphan_repair(&harness.compute);
     let network = harness.network.clone();
     wait_for_settled(reconciler, || {
         let network = network.clone();
@@ -1525,7 +1526,7 @@ async fn interrupted_terminal_delete_orphan_is_repaired_by_the_shipped_sweep()
 
     // Idempotent: a further pass over the repaired state changes nothing and
     // does not fail.
-    run_shipped_sweeps_for(&harness.compute, Duration::from_millis(2500)).await;
+    run_shipped_orphan_repair_for(&harness.compute, Duration::from_millis(2500)).await;
     assert!(!harness.port_present(port).await);
 
     // The address and the network-port quota are reusable afterwards.
@@ -1586,7 +1587,7 @@ async fn orphaned_bound_endpoint_is_unbound_then_released_by_the_shipped_sweep()
     let _report_guard = REPORT_CAPTURE_LOCK.lock().await;
     install_global_report_collector();
     reset_report_collector();
-    run_shipped_sweeps_for(&harness.compute, Duration::from_millis(2500)).await;
+    run_shipped_orphan_repair_for(&harness.compute, Duration::from_millis(2500)).await;
     assert!(
         harness.port_present(port).await,
         "a still-failing release must keep the endpoint present after the unbind"
@@ -1606,7 +1607,7 @@ async fn orphaned_bound_endpoint_is_unbound_then_released_by_the_shipped_sweep()
     // (now unbound) endpoint, frees its address, and leaves no quota residue.
     fail_release.store(false, std::sync::atomic::Ordering::SeqCst);
     reset_report_collector();
-    let reconciler = spawn_shipped_sweeps(&harness.compute);
+    let reconciler = spawn_shipped_orphan_repair(&harness.compute);
     let network = harness.network.clone();
     wait_for_settled(reconciler, || {
         let network = network.clone();
@@ -1624,7 +1625,7 @@ async fn orphaned_bound_endpoint_is_unbound_then_released_by_the_shipped_sweep()
     );
 
     // Idempotent: a further pass over the repaired state changes nothing.
-    run_shipped_sweeps_for(&harness.compute, Duration::from_millis(2500)).await;
+    run_shipped_orphan_repair_for(&harness.compute, Duration::from_millis(2500)).await;
     assert!(!harness.port_present(port).await);
 
     // The released address allocation is reusable and the project's endpoint
@@ -1680,7 +1681,7 @@ async fn orphan_repair_survives_a_control_plane_restart()
     {
         // Serialize all sweep emissions process-wide (see REPORT_CAPTURE_LOCK).
         let _report_guard = REPORT_CAPTURE_LOCK.lock().await;
-        let reconciler = spawn_shipped_sweeps(&restarted.compute);
+        let reconciler = spawn_shipped_orphan_repair(&restarted.compute);
         let network = restarted.network.clone();
         wait_for_settled(reconciler, || {
             let network = network.clone();
@@ -1759,7 +1760,7 @@ async fn orphan_repair_is_a_no_op_for_live_in_flight_caller_supplied_and_foreign
 
     // Serialize all sweep emissions process-wide (see REPORT_CAPTURE_LOCK).
     let _report_guard = REPORT_CAPTURE_LOCK.lock().await;
-    run_shipped_sweeps_for(&harness.compute, Duration::from_millis(2500)).await;
+    run_shipped_orphan_repair_for(&harness.compute, Duration::from_millis(2500)).await;
 
     assert!(
         harness.port_present(live_ports[0]).await,
@@ -1833,8 +1834,8 @@ async fn concurrent_orphan_repairs_converge_once()
 
     // Serialize all sweep emissions process-wide (see REPORT_CAPTURE_LOCK).
     let _report_guard = REPORT_CAPTURE_LOCK.lock().await;
-    let first = spawn_shipped_sweeps(&harness.compute);
-    let second = spawn_shipped_sweeps(&harness.compute);
+    let first = spawn_shipped_orphan_repair(&harness.compute);
+    let second = spawn_shipped_orphan_repair(&harness.compute);
     let network = harness.network.clone();
     let gone = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
@@ -1850,7 +1851,7 @@ async fn concurrent_orphan_repairs_converge_once()
         let stopped = reconciler.await;
         assert!(
             stopped.is_err_and(|error| error.is_cancelled()),
-            "a concurrent convergence sweep ended abnormally"
+            "a concurrent orphan repair reconciler ended abnormally"
         );
     }
     assert!(
@@ -1915,7 +1916,7 @@ async fn assert_attached_orphan_skipped_by_sweep_then_released_on_delete(
     // report so the assertion is on what the sweep actually did.
     install_global_report_collector();
     reset_report_collector();
-    run_shipped_sweeps_for(&harness.compute, Duration::from_millis(2500)).await;
+    run_shipped_orphan_repair_for(&harness.compute, Duration::from_millis(2500)).await;
 
     let reports = sweep_reports();
     let report = reports.first().ok_or_else(|| {
@@ -2277,14 +2278,14 @@ async fn postgres_interrupted_delete_orphan_is_repaired_and_reuse_is_restored()
         "the orphan must survive a PostgreSQL control-plane restart"
     );
 
-    // __6. Run the shipped lifecycle reconciler.__ __7. Endpoint removed.__ Collect
+    // __6. Run the shipped orphan endpoint reconciler.__ __7. Endpoint removed.__ Collect
     // the sweep's own report so point 11/12 cannot pass because the sweep did
     // nothing. Serialized with the other sweep-report captures: the report
     // buffer is process-global (see REPORT_CAPTURE_LOCK).
     let _report_guard = REPORT_CAPTURE_LOCK.lock().await;
     install_global_report_collector();
     reset_report_collector();
-    let reconciler = spawn_shipped_sweeps(&restarted.compute);
+    let reconciler = spawn_shipped_orphan_repair(&restarted.compute);
     let network = restarted.network.clone();
     wait_for_settled(reconciler, || {
         let network = network.clone();
@@ -2336,7 +2337,7 @@ async fn postgres_interrupted_delete_orphan_is_repaired_and_reuse_is_restored()
 
     // __8. Idempotent: replay converges; released/discovered go to zero; nothing
     // double-deleted.__
-    run_shipped_sweeps_for(&restarted.compute, Duration::from_millis(2500)).await;
+    run_shipped_orphan_repair_for(&restarted.compute, Duration::from_millis(2500)).await;
     assert!(!restarted.port_present(port).await);
     let report = restarted
         .network
@@ -2449,7 +2450,7 @@ async fn postgres_bound_orphan_is_unbound_and_released_by_the_shipped_sweep()
     let _report_guard = REPORT_CAPTURE_LOCK.lock().await;
     install_global_report_collector();
     reset_report_collector();
-    run_shipped_sweeps_for(&restarted.compute, Duration::from_millis(2500)).await;
+    run_shipped_orphan_repair_for(&restarted.compute, Duration::from_millis(2500)).await;
     assert_eq!(
         restarted
             .network
@@ -2465,7 +2466,7 @@ async fn postgres_bound_orphan_is_unbound_and_released_by_the_shipped_sweep()
     // address, and leaves no quota residue.
     fail_release.store(false, std::sync::atomic::Ordering::SeqCst);
     reset_report_collector();
-    let reconciler = spawn_shipped_sweeps(&restarted.compute);
+    let reconciler = spawn_shipped_orphan_repair(&restarted.compute);
     let network = restarted.network.clone();
     wait_for_settled(reconciler, || {
         let network = network.clone();
@@ -2544,8 +2545,8 @@ async fn postgres_concurrent_sweeps_and_delete_replay_converge_once()
     // __13. Two concurrent shipped sweeps race.__
     // Serialize all sweep emissions process-wide (see REPORT_CAPTURE_LOCK).
     let _report_guard = REPORT_CAPTURE_LOCK.lock().await;
-    let first = spawn_shipped_sweeps(&harness.compute);
-    let second = spawn_shipped_sweeps(&harness.compute);
+    let first = spawn_shipped_orphan_repair(&harness.compute);
+    let second = spawn_shipped_orphan_repair(&harness.compute);
     // __14. A delete replay races the sweeps: it must converge, not conflict.__
     let (replay_status, replay_body) = harness.native_delete(&id).await;
     assert!(
@@ -2568,7 +2569,7 @@ async fn postgres_concurrent_sweeps_and_delete_replay_converge_once()
         let stopped = reconciler.await;
         assert!(
             stopped.is_err_and(|error| error.is_cancelled()),
-            "a concurrent PostgreSQL convergence sweep ended abnormally"
+            "a concurrent PostgreSQL orphan repair reconciler ended abnormally"
         );
     }
     assert!(
@@ -2665,7 +2666,7 @@ async fn run_orphan_serialization_race(
         armed.store(false, std::sync::atomic::Ordering::SeqCst);
 
         // Race one sweep pass against a create that reuses the orphan's port.
-        let reconciler = spawn_shipped_sweeps(&harness.compute);
+        let reconciler = spawn_shipped_orphan_repair(&harness.compute);
         let (status, body) = harness
             .native_create(
                 &format!("{label}-create-{iteration}"),
@@ -2678,7 +2679,7 @@ async fn run_orphan_serialization_race(
         let stopped = reconciler.await;
         assert!(
             stopped.is_err_and(|error| error.is_cancelled()),
-            "the shipped convergence sweep ended abnormally"
+            "the shipped orphan repair reconciler ended abnormally"
         );
 
         if status.is_success() {

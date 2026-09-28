@@ -310,7 +310,8 @@ impl CoordinationRepository for PostgresStore {
         let maybe_row = sqlx::query(
             r#"
             SELECT work_key, work_kind, owner_controller_id, owner_controller_epoch,
-                   fencing_token, lease_until, created_at, updated_at,
+                   fencing_token, lease_until::text AS lease_until,
+                   created_at::text AS created_at, updated_at::text AS updated_at,
                    (lease_until < NOW()) AS is_expired
             FROM work_leases
             WHERE work_key = $1
