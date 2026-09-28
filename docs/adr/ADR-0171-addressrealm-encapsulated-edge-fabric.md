@@ -1,11 +1,11 @@
 # ADR-0171 — AddressRealm-encapsulated edge fabric for overlapping tenant CIDRs
 
-Status: Accepted
+Status: Superseded
 Date: 2026-08-20
 Decision-accepted: 2026-08-20
 Human-approval: requester acceptance recorded in issue #705 comment 5349129789
 Supersedes: ADR-0170
-Superseded-by: none
+Superseded-by: ADR-0186
 Affected-services: network, compute, placement, scheduler, storage, kernel, edge, governance
 
 Related issue: [#705](https://github.com/o3kio/o3k/issues/705)
@@ -559,9 +559,9 @@ This ADR does not add:
 
 ## Migration from ADR-0170 / PR #703
 
-ADR-0171 is accepted and is now the active authority for P11 v2. The v1
-documents remain useful historical references but are superseded for successor
-fabric implementation.
+ADR-0171 was accepted as the P11 v2 authority and is now superseded for new
+fabric implementation by ADR-0186. The v1 and v2 documents remain useful
+historical references for behavior retained by the v3 successor.
 
 The migration requires:
 

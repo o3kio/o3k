@@ -13,17 +13,21 @@ Related decisions and specifications:
 - [ADR-0168 — O3K Routed Fabric and node-local network execution](ADR-0168-o3k-routed-fabric-and-network-execution.md)
 - [ADR-0171 — AddressRealm-encapsulated edge fabric](ADR-0171-addressrealm-encapsulated-edge-fabric.md)
 - [SPEC-0029 — AddressRealm-encapsulated Edge Fabric v2](../specs/SPEC-0029-addressrealm-encapsulated-edge-fabric-v2.md)
+- [ADR-0186 — Stretched-L2 edge fabric](ADR-0186-stretched-l2-edge-fabric-vxlan-her.md)
+- [SPEC-0049 — Stretched-L2 Edge Fabric v3](../specs/SPEC-0049-stretched-l2-edge-fabric-v3.md)
 - [P11 realm-overlay contract](../../contracts/edge-fabric-realm-overlay.md)
 - [Execution-boundary contract](../../contracts/execution-boundaries.md)
 
-This ADR refines only provider transport-port ownership and configuration for the
-accepted P11 fabric. It does not supersede ADR-0171, change `AddressRealm`
-semantics, alter Geneve/WireGuard responsibilities, or create a P11 support
+This ADR remains authoritative for WireGuard transport-port ownership and
+configuration. Its Geneve-specific P11 v2 text is historical and is superseded
+for the v3 dataplane by ADR-0186/SPEC-0049, which specifies per-realm VXLAN on
+UDP/4789. It does not change `AddressRealm` semantics or create a P11 support
 claim.
 
 This decision affects privileged multi-host networking and operational firewall
-configuration. It must remain `Proposed` until explicit human architecture and
-security approval is recorded according to ADR-0154.
+configuration. It was accepted under the human architecture and security
+approval process required by ADR-0154; the P11 v3 dataplane-specific provisions
+are now governed by ADR-0186/SPEC-0049.
 
 ## Context
 
@@ -56,9 +60,10 @@ O3K deployment default, but it is not reserved for O3K and cannot be assumed to
 be globally unused. Port availability must be treated as a host/operator
 configuration concern rather than as a protocol invariant.
 
-Geneve uses UDP/6081 as its standard destination port. In the P11 reference
-profile Geneve packets travel over the authenticated WireGuard host transport,
-so UDP/6081 is not normally an underlay-facing firewall/service requirement.
+The superseded P11 v2 Geneve provider used UDP/6081 as its standard destination
+port. P11 v3 uses per-realm VXLAN on UDP/4789 as specified by ADR-0186 and
+SPEC-0049; that port is likewise inside the authenticated WireGuard host
+transport and is not normally an underlay-facing firewall/service requirement.
 
 ## Decision
 
@@ -151,19 +156,20 @@ considered removed.
 Stale peer endpoint configuration must not become authoritative merely because a
 kernel WireGuard peer still exists.
 
-### 6. Geneve defaults to UDP/6081 and remains configurable
+### 6. Historical P11 v2 Geneve port
 
-The P11 Geneve provider default remains:
+For historical P11 v2 implementations, the Geneve provider default was:
 
 ```text
 UDP/6081
 ```
 
-The destination port is provider configuration and may be overridden when an
-operator environment requires it, but UDP/6081 remains the reference default.
+That v2 destination port was provider configuration. It does not apply to the
+P11 v3 VXLAN dataplane, whose destination port is fixed at UDP/4789 by
+SPEC-0049.
 
-In the accepted P11 topology, Geneve transport is carried across the protected
-WireGuard host fabric. Therefore the physical compute underlay normally needs to
+In the historical P11 v2 topology, Geneve transport was carried across the
+protected WireGuard host fabric. Therefore the physical compute underlay normally needs to
 permit the configured WireGuard UDP port, not Geneve UDP/6081 between tenant or
 underlay addresses.
 
@@ -290,7 +296,7 @@ Rejected. Tenant isolation is provided by AddressRealm/VNI and NetworkPolicy,
 not by transport port separation. Per-tenant listeners would unnecessarily
 multiply interfaces, keys, peer state, and firewall rules.
 
-### Expose Geneve UDP/6081 directly on the underlay
+### Historical v2: expose Geneve UDP/6081 directly on the underlay
 
 Rejected for the reference profile. ADR-0171 intentionally places Geneve realm
 identity inside the authenticated/encrypted WireGuard host transport.
@@ -299,12 +305,15 @@ identity inside the authenticated/encrypted WireGuard host transport.
 
 Before this decision can support a runtime claim, tests/evidence should prove:
 
-1. provider default resolves to WireGuard UDP/65001 and Geneve UDP/6081;
+1. provider default resolves to WireGuard UDP/65001; a v2 Geneve provider, if
+   still exercised for compatibility, resolves to UDP/6081 and the v3 provider
+   resolves VXLAN to UDP/4789;
 2. a custom WireGuard port such as UDP/65123 is accepted and used by the real
    listener;
 3. peers use the advertised remote `IP:port`, including asymmetric host ports if
    host override is supported;
-4. a custom Geneve destination port is reflected in provider realization;
+4. a custom v2 Geneve destination port, where that historical provider remains
+   exercised, is reflected in provider realization;
 5. invalid values such as `0` or values above `65535` are rejected before
    privileged mutation;
 6. doctor/preflight detects an occupied configured UDP port without mutating the
@@ -313,8 +322,9 @@ Before this decision can support a runtime claim, tests/evidence should prove:
    the configured value rather than a duplicated `51820`/`65001` constant;
 8. changing a host port advances/reconciles fabric provider state and stale peer
    endpoints are not accepted as current;
-9. underlay evidence shows WireGuard on the configured port while tenant Geneve
-   traffic remains protected inside the host transport;
+9. underlay evidence shows WireGuard on the configured port while tenant
+   VXLAN (or historical Geneve) traffic remains protected inside the host
+   transport;
 10. canonical tenant network resources remain independent of provider port
     numbers.
 
@@ -322,7 +332,8 @@ Before this decision can support a runtime claim, tests/evidence should prove:
 
 This ADR does not:
 
-- solve the currently open P11 Geneve dataplane forwarding bug;
+- solve the historical P11 v2 Geneve dataplane forwarding bug or implement the
+  P11 v3 VXLAN migration;
 - change AddressRealm, VNI, proxy-neighbor, policy, scheduling, drain, or storage
   semantics;
 - introduce NAT traversal, STUN/TURN, relay services, or dynamic port discovery;
