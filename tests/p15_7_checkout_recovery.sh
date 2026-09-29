@@ -107,9 +107,9 @@ env \
   bash "$REPAIR"
 
 hang="$workspace/target/real-host-workflow-artifacts/o3kd-hang"
-test "$(stat -c '%a' "$hang")" = 700
-test "$(stat -c '%a' "$hang/thread-stacks.txt")" = 600
-test "$(stat -c '%u:%g' "$hang")" = "$boundary_uid:$boundary_gid"
+test "$(sudo -n stat -c '%a' "$hang")" = 700
+test "$(sudo -n stat -c '%a' "$hang/thread-stacks.txt")" = 600
+test "$(sudo -n stat -c '%u:%g' "$hang")" = "$boundary_uid:$boundary_gid"
 sudo -n -u "#$boundary_uid" find -P "$hang" -xdev -type f -readable -print >/dev/null
 
 # Prove the actual checkout cleaner can traverse and remove the repaired tree.
@@ -117,7 +117,7 @@ sudo -n chown "$boundary_uid:$boundary_gid" "$workspace"
 sudo -n chmod 0700 "$workspace"
 sudo -n -u "#$boundary_uid" env HOME="$WORK/home" git -C "$workspace" init -q
 sudo -n -u "#$boundary_uid" git -C "$workspace" clean -ffdx -q
-test ! -e "$workspace/target"
+sudo -n test ! -e "$workspace/target"
 
 # A nested symlink is rejected before any ownership or mode repair.
 symlink_workspace="$WORK/symlink-workspace"
