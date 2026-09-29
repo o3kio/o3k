@@ -37,4 +37,6 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# Shared Kubedo stretched-L2 fabric provider (ADR-0186 / SPEC-0049),
+# consumed by git tag per the fabric repository's change control.
+allow-git = ["https://github.com/o3kio/fabric"]
