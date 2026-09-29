@@ -292,6 +292,22 @@ pub(crate) enum TestFaultCheckpointDisposition {
     PublishedAndReleased,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TestFaultCheckpointPublicationFailure {
+    step: &'static str,
+    kind: &'static str,
+    errno: Option<i32>,
+}
+
+impl std::fmt::Display for TestFaultCheckpointPublicationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Keep the event's human-readable reason bounded and path-free.  The
+        // structured step/kind/errno fields carry the actionable diagnostic;
+        // filesystem error strings can contain run-local paths.
+        write!(formatter, "{} ({})", self.step, self.kind)
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub(crate) enum TestFaultCheckpointError {
     #[error("targeted orphan checkpoint configuration is invalid: {0}")]
@@ -299,11 +315,43 @@ pub(crate) enum TestFaultCheckpointError {
     #[error("targeted orphan checkpoint run identity does not match the live PP5 run")]
     RunIdentityMismatch,
     #[error("targeted orphan checkpoint publication failed: {0}")]
-    Publication(String),
+    Publication(TestFaultCheckpointPublicationFailure),
     #[error("targeted orphan checkpoint release wait timed out")]
     ReleaseTimeout,
     #[error("targeted orphan checkpoint authoritative precondition is missing")]
     PreconditionMissing,
+}
+
+impl TestFaultCheckpointError {
+    pub(crate) fn failure_step(&self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration(_) => "configuration",
+            Self::RunIdentityMismatch => "run_identity",
+            Self::Publication(failure) => failure.step,
+            Self::ReleaseTimeout => "release_wait",
+            Self::PreconditionMissing => "precondition",
+        }
+    }
+
+    pub(crate) fn failure_kind(&self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration(_) => "invalid_configuration",
+            Self::RunIdentityMismatch => "run_identity_mismatch",
+            Self::Publication(failure) => failure.kind,
+            Self::ReleaseTimeout => "release_timeout",
+            Self::PreconditionMissing => "precondition_missing",
+        }
+    }
+
+    pub(crate) fn failure_errno(&self) -> Option<i32> {
+        match self {
+            Self::Publication(failure) => failure.errno,
+            Self::InvalidConfiguration(_)
+            | Self::RunIdentityMismatch
+            | Self::ReleaseTimeout
+            | Self::PreconditionMissing => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -415,6 +463,37 @@ fn test_fault_checkpoint_config_from_env()
     )
 }
 
+fn test_fault_checkpoint_publication_failure(
+    step: &'static str,
+    error: std::io::Error,
+) -> TestFaultCheckpointError {
+    let kind = match error.kind() {
+        std::io::ErrorKind::AlreadyExists => "destination_exists",
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        std::io::ErrorKind::NotFound => "not_found",
+        std::io::ErrorKind::InvalidInput => "invalid_input",
+        std::io::ErrorKind::Unsupported => "unsupported",
+        std::io::ErrorKind::WouldBlock => "would_block",
+        _ => "io_error",
+    };
+    TestFaultCheckpointError::Publication(TestFaultCheckpointPublicationFailure {
+        step,
+        kind,
+        errno: error.raw_os_error(),
+    })
+}
+
+fn test_fault_checkpoint_publication_failure_text(
+    step: &'static str,
+    kind: &'static str,
+) -> TestFaultCheckpointError {
+    TestFaultCheckpointError::Publication(TestFaultCheckpointPublicationFailure {
+        step,
+        kind,
+        errno: None,
+    })
+}
+
 pub(crate) fn test_fault_orphan_checkpoint_validate_configuration()
 -> Result<(), TestFaultCheckpointError> {
     let _ = test_fault_checkpoint_config_from_env()?;
@@ -481,8 +560,9 @@ fn test_fault_checkpoint_publish(
         if existing_is_this_checkpoint {
             return Ok(());
         }
-        return Err(TestFaultCheckpointError::Publication(
-            "checkpoint destination already exists".to_owned(),
+        return Err(test_fault_checkpoint_publication_failure_text(
+            "destination_precheck",
+            "destination_exists",
         ));
     }
     let sweep_id = uuid::Uuid::new_v4().to_string();
@@ -505,13 +585,13 @@ fn test_fault_checkpoint_publish(
         "endpoint_release_not_started": true,
     });
     let Some(parent) = config.checkpoint_path.parent() else {
-        return Err(TestFaultCheckpointError::Publication(
-            "checkpoint path has no parent".to_owned(),
+        return Err(test_fault_checkpoint_publication_failure_text(
+            "directory_parent",
+            "invalid_path",
         ));
     };
-    std::fs::create_dir_all(parent).map_err(|error| {
-        TestFaultCheckpointError::Publication(format!("checkpoint directory: {error}"))
-    })?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| test_fault_checkpoint_publication_failure("directory_create", error))?;
     let temp = parent.join(format!(
         ".{}.{}.tmp",
         config
@@ -521,24 +601,37 @@ fn test_fault_checkpoint_publish(
             .to_string_lossy(),
         std::process::id()
     ));
-    let result = (|| -> std::io::Result<()> {
+    let result = (|| -> Result<(), TestFaultCheckpointError> {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&temp)?;
-        serde_json::to_writer(&mut file, &checkpoint).map_err(std::io::Error::other)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        std::fs::hard_link(&temp, &config.checkpoint_path)?;
-        std::fs::remove_file(&temp)?;
-        let dir = std::fs::File::open(parent)?;
-        dir.sync_all()?;
+            .open(&temp)
+            .map_err(|error| {
+                test_fault_checkpoint_publication_failure("temporary_create", error)
+            })?;
+        serde_json::to_writer(&mut file, &checkpoint)
+            .map_err(std::io::Error::other)
+            .map_err(|error| test_fault_checkpoint_publication_failure("json_serialize", error))?;
+        file.write_all(b"\n")
+            .map_err(|error| test_fault_checkpoint_publication_failure("temporary_write", error))?;
+        file.sync_all()
+            .map_err(|error| test_fault_checkpoint_publication_failure("file_fsync", error))?;
+        std::fs::hard_link(&temp, &config.checkpoint_path).map_err(|error| {
+            test_fault_checkpoint_publication_failure("destination_link", error)
+        })?;
+        std::fs::remove_file(&temp).map_err(|error| {
+            test_fault_checkpoint_publication_failure("temporary_cleanup", error)
+        })?;
+        let dir = std::fs::File::open(parent)
+            .map_err(|error| test_fault_checkpoint_publication_failure("directory_open", error))?;
+        dir.sync_all()
+            .map_err(|error| test_fault_checkpoint_publication_failure("directory_fsync", error))?;
         Ok(())
     })();
     if let Err(error) = result {
         let _ = std::fs::remove_file(&temp);
-        return Err(TestFaultCheckpointError::Publication(error.to_string()));
+        return Err(error);
     }
     Ok(())
 }
@@ -971,6 +1064,10 @@ fn keypair_from_record(record: o3k_store::KeypairRecord) -> Keypair {
         created_at: record.created_at,
     }
 }
+
+#[cfg(test)]
+#[path = "checkpoint_tests.rs"]
+mod checkpoint_tests;
 
 #[cfg(test)]
 mod tests {

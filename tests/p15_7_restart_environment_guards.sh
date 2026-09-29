@@ -17,9 +17,9 @@ assert len(checks) == 8, f'expected eight live environment checks, got {len(chec
 # grep -q/SIGPIPE false rejection without exposing any real credentials.
 environment = {
     'PATH': os.environ['PATH'], 'O3K_DATA_DIR': '/tmp/pp5-guard/data',
-    'REPAIR_RELEASE': '/tmp/pp5-guard/release', 'REPAIR_TIMEOUT': '30000',
-    'CREATE_WAITER': '/tmp/pp5-guard/waiter',
-    'REPAIR_CHECKPOINT': '/tmp/pp5-guard/checkpoint',
+    'REPAIR_RELEASE': '/tmp/pp5-guard/data/p15-7-orphan-repair-run/release', 'REPAIR_TIMEOUT': '30000',
+    'CREATE_WAITER': '/tmp/pp5-guard/data/p15-7-orphan-repair-run/contention-waiter',
+    'REPAIR_CHECKPOINT': '/tmp/pp5-guard/data/p15-7-orphan-repair-run/checkpoint.json',
     'REPLAY_SUPPRESS_RESOURCE': '00000000-0000-0000-0000-000000000001',
     'REPLAY_SUPPRESS_RUN': 'guard-run',
     'O3K_PP5_RUN_ID': 'guard-run',
@@ -31,13 +31,13 @@ try:
         'PATH': os.environ['PATH'], 'new_pid': str(process.pid),
         'RESTARTED_O3KD_PID': str(process.pid), 'STATE_ROOT': '/tmp/pp5-guard',
         'O3K_REPAIR_RELEASE_ENV_NAME': 'REPAIR_RELEASE',
-        'CRASH_REPAIR_RELEASE_FILE': '/tmp/pp5-guard/release',
+        'CRASH_REPAIR_RELEASE_FILE': '/tmp/pp5-guard/data/p15-7-orphan-repair-run/release',
         'O3K_REPAIR_TIMEOUT_ENV_NAME': 'REPAIR_TIMEOUT',
         'CONTENDING_CREATE_REPAIR_PAUSE_MS': '30000',
         'O3K_CREATE_WAITER_ENV_NAME': 'CREATE_WAITER',
-        'CRASH_REPAIR_WAITER_FILE': '/tmp/pp5-guard/waiter',
+        'CRASH_REPAIR_WAITER_FILE': '/tmp/pp5-guard/data/p15-7-orphan-repair-run/contention-waiter',
         'O3K_REPAIR_CHECKPOINT_ENV_NAME': 'REPAIR_CHECKPOINT',
-        'CRASH_REPAIR_CHECKPOINT_FILE': '/tmp/pp5-guard/checkpoint',
+        'CRASH_REPAIR_CHECKPOINT_FILE': '/tmp/pp5-guard/data/p15-7-orphan-repair-run/checkpoint.json',
         'O3K_REPLAY_SUPPRESS_RESOURCE_ENV_NAME': 'REPLAY_SUPPRESS_RESOURCE',
         'WORKLOAD_C': '00000000-0000-0000-0000-000000000001',
         'O3K_REPLAY_SUPPRESS_RUN_ENV_NAME': 'REPLAY_SUPPRESS_RUN',
@@ -67,12 +67,20 @@ try:
     env_check = launcher.index('if ! sudo -n cat')
     assert ledger < env_check, 'verified replacement must be recorded before later rejection'
     repair_env = source.split('append_o3kd_repair_pause_env() {', 1)[1].split('\nremove_o3kd_repair_pause_env()', 1)[0]
+    assert '$STATE_ROOT/data/p15-7-orphan-repair-$RUN_ID' in repair_env, 'repair seam must use the private run-scoped data directory'
+    assert 'install -d -o "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}"' in repair_env, 'repair seam directory must be daemon-owned'
     assert 'O3K_PP5_RUN_ENV_NAME' in repair_env, 'repair seam must persist the live PP5 run identity'
     assert 'PP5 run identity missing from o3kd environment' in repair_env, 'repair seam must fail closed when run identity is not persisted'
     remove_env = source.split('remove_o3kd_repair_pause_env() {', 1)[1].split('\nclear_o3kd_fault_env()', 1)[0]
     assert 'O3K_PP5_RUN_ENV_NAME=' in remove_env, 'repair cleanup must remove only the run identity seam'
     diagnostics = source.split('write_orphan_repair_diagnostics() {', 1)[1].split('\nstop_contending_create()', 1)[0]
     assert 'sudo -n tail -n 2000' in diagnostics, 'orphan diagnostics must read the protected daemon log through sudo'
+    assert 'failure_step' in diagnostics and 'failure_kind' in diagnostics and 'failure_errno' in diagnostics, \
+        'bounded diagnostics must retain sanitized publication step/kind/errno'
+    assert 'checkpoint_publication_error_observed": bool(publication_failure_events)' in diagnostics, \
+        'publication-error detection must use structured failure events'
+    assert 'checkpoint could not be published' not in diagnostics, \
+        'publication-error detection must not rely on the stale message substring'
     assert 'rm -f -- "$log_snapshot"' in diagnostics, 'raw daemon-log snapshot must be removed after redaction'
     assert 'endpoint_status="$(fetch_redacted_json "http://127.0.0.1:$AUTH_PORT/v2.0/ports/$PORT_C_ID" "$endpoint_raw" X-Auth-Token)"' in diagnostics, 'endpoint diagnostics must retain the Neutron token header contract'
     assert 'X-Auth-Token) header_value="$PROJECT_TOKEN"' in diagnostics, 'Neutron diagnostics must send the token without a Bearer prefix'
@@ -92,6 +100,9 @@ try:
         check=True, capture_output=True, text=True,
     ).stdout.strip()
     assert classified == 'orphan_repair', f'orphan checkpoint failure was classified as {classified!r}'
+    assert source.index('run_checkpoint_path_diagnostic') < source.index('provision_vms_bounded block-a block-b'), \
+        'checkpoint path diagnostic must run before VM provisioning'
+    assert 'O3K_CHECKPOINT_BOUNDARY_ROOT=' in source, 'runner must pass the checkpoint boundary diagnostic root'
 finally:
     process.terminate()
     process.wait(timeout=5)

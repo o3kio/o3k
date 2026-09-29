@@ -106,6 +106,7 @@ O3K_REPAIR_RUN_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID"
 O3K_PP5_RUN_ENV_NAME="O3K_PP5_RUN_ID"
 O3K_REPLAY_SUPPRESS_RESOURCE_ENV_NAME="O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RESOURCE_ID"
 O3K_REPLAY_SUPPRESS_RUN_ENV_NAME="O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RUN_ID"
+CRASH_REPAIR_DIR=""
 # The pause must be long enough for the journey to observe the durable
 # terminal delete and kill the control plane inside the window, and short
 # enough to keep the bounded delete request and the protected-run budget
@@ -189,7 +190,7 @@ fi
   || die "P15.7 API read delay is invalid or unbounded"
 [[ "$P15_7_API_READ_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ && "$P15_7_API_READ_TIMEOUT_SECONDS" -le 60 ]] \
   || die "P15.7 API read timeout is invalid or unbounded"
-for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id setsid ps; do
+for cmd in cargo curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id setsid ps; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
 [[ "$POSTGRES_MODE" == external || "$POSTGRES_MODE" == disposable ]] \
@@ -594,8 +595,15 @@ append_o3kd_repair_pause_env() {
   [[ "$CONTENDING_CREATE_REPAIR_PAUSE_MS" =~ ^[0-9]+$ ]] \
     || die "repair contention pause timeout is invalid"
   sudo -n test -r "$STATE_ROOT/o3kd.env" || die "o3kd environment is unreadable"
-  CRASH_REPAIR_RELEASE_FILE="$STATE_ROOT/orphan-repair-release-$RUN_ID"
-  CRASH_REPAIR_WAITER_FILE="$STATE_ROOT/orphan-create-waiter-$RUN_ID"
+  CRASH_REPAIR_DIR="$STATE_ROOT/data/p15-7-orphan-repair-$RUN_ID"
+  sudo -n install -d -o "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" \
+    -g "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -m 0700 "$CRASH_REPAIR_DIR" \
+    || die "cannot create daemon-owned orphan-repair handshake directory"
+  [[ "$(sudo -n stat -c '%U:%G:%a' "$CRASH_REPAIR_DIR" 2>/dev/null || true)" == \
+    "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}:${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}:700" ]] \
+    || die "orphan-repair handshake directory ownership or mode is invalid"
+  CRASH_REPAIR_RELEASE_FILE="$CRASH_REPAIR_DIR/release"
+  CRASH_REPAIR_WAITER_FILE="$CRASH_REPAIR_DIR/contention-waiter"
   sudo -n rm -f -- "$CRASH_REPAIR_RELEASE_FILE"
   sudo -n rm -f -- "$CRASH_REPAIR_WAITER_FILE"
   printf '%s=%s\n%s=%s\n%s=%s\n' \
@@ -604,7 +612,7 @@ append_o3kd_repair_pause_env() {
     "$O3K_CREATE_WAITER_ENV_NAME" "$CRASH_REPAIR_WAITER_FILE" \
     | sudo -n tee -a "$STATE_ROOT/o3kd.env" >/dev/null \
     || die "cannot append repair contention pause to o3kd environment"
-  CRASH_REPAIR_CHECKPOINT_FILE="$STATE_ROOT/orphan-repair-checkpoint-$RUN_ID.json"
+  CRASH_REPAIR_CHECKPOINT_FILE="$CRASH_REPAIR_DIR/checkpoint.json"
   sudo -n rm -f -- "$CRASH_REPAIR_CHECKPOINT_FILE"
   printf '%s=%s\n%s=%s\n%s=%s\n%s=%s\n' \
     "$O3K_REPAIR_CHECKPOINT_ENV_NAME" "$CRASH_REPAIR_CHECKPOINT_FILE" \
@@ -822,6 +830,15 @@ early_cleanup() {
   clear_o3kd_fault_env >/dev/null 2>&1 || true
   if [[ -n "${CRASH_REPAIR_RELEASE_FILE:-}" ]]; then
     sudo -n rm -f -- "$CRASH_REPAIR_RELEASE_FILE" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${CRASH_REPAIR_WAITER_FILE:-}" ]]; then
+    sudo -n rm -f -- "$CRASH_REPAIR_WAITER_FILE" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${CRASH_REPAIR_CHECKPOINT_FILE:-}" ]]; then
+    sudo -n rm -f -- "$CRASH_REPAIR_CHECKPOINT_FILE" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${CRASH_REPAIR_DIR:-}" ]]; then
+    sudo -n rmdir -- "$CRASH_REPAIR_DIR" >/dev/null 2>&1 || true
   fi
   if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
     O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
@@ -1081,6 +1098,13 @@ cleanup() {
   fi
   capture_failure_diagnostics "$exit_status"
   clear_o3kd_fault_env >/dev/null 2>&1 || true
+  for marker in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}" "${CRASH_REPAIR_CHECKPOINT_FILE:-}"; do
+    [[ -n "$marker" ]] || continue
+    sudo -n rm -f -- "$marker" || cleanup_failed=true
+  done
+  if [[ -n "${CRASH_REPAIR_DIR:-}" ]]; then
+    sudo -n rmdir -- "$CRASH_REPAIR_DIR" >/dev/null 2>&1 || cleanup_failed=true
+  fi
   [[ "$CLEANUP_DONE" == true ]] && { set -e; return; }
   if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
     O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
@@ -1658,9 +1682,39 @@ provision_vms_bounded() {
     UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/$id-uuid")"
   done
 }
+run_checkpoint_path_diagnostic() {
+  # Exercise the same publisher and release handshake used by the daemon
+  # before any VM is provisioned.  The child test drops to the daemon account
+  # and records both the legacy root-owned layout and the corrected private
+  # run directory; a failure is a hard preflight failure, not a VM failure.
+  local diagnostic_root="$STATE_ROOT/data/p15-7-checkpoint-diagnostic-$RUN_ID"
+  local diagnostic_target="$WORK_ROOT/checkpoint-diagnostic-target"
+  local diagnostic_log="$ARTIFACT_DIR/p15-7-checkpoint-path-diagnostic.log"
+  sudo -n install -d -o root -g root -m 0755 "$diagnostic_root" \
+    || die "cannot create checkpoint path diagnostic root"
+  if ! (cd "$ROOT_DIR" && \
+    sudo -n env \
+      O3K_CHECKPOINT_BOUNDARY_ROOT="$diagnostic_root" \
+      O3K_CHECKPOINT_BOUNDARY_EVIDENCE="$ARTIFACT_DIR/p15-7-checkpoint-path-diagnostic.json" \
+      CARGO_TARGET_DIR="$diagnostic_target" \
+      cargo test --locked -p o3k-compute --lib \
+        targeted_checkpoint_unprivileged_boundary_publishes_and_releases -- --nocapture) \
+      >"$diagnostic_log" 2>&1; then
+    sudo -n rm -rf -- "$diagnostic_root" >/dev/null 2>&1 || true
+    sudo -n rm -rf -- "$diagnostic_target" >/dev/null 2>&1 || true
+    die "checkpoint path diagnostic failed; inspect p15-7-checkpoint-path-diagnostic.log"
+  fi
+  [[ -s "$ARTIFACT_DIR/p15-7-checkpoint-path-diagnostic.json" ]] \
+    || { sudo -n rm -rf -- "$diagnostic_root" "$diagnostic_target" >/dev/null 2>&1 || true; die "checkpoint path diagnostic did not produce evidence"; }
+  sudo -n rm -rf -- "$diagnostic_root" \
+    || die "checkpoint path diagnostic cleanup failed"
+  sudo -n rm -rf -- "$diagnostic_target" \
+    || die "checkpoint diagnostic build cleanup failed"
+}
 O3K_P15_7_LIBVIRT_IMAGE_ROOT="$LIBVIRT_IMAGE_ROOT" \
   bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT" \
   || die "cannot define run-owned libvirt storage pool"
+run_checkpoint_path_diagnostic
 provision_vms_bounded block-a block-b
 join_block block-a "${IPS[0]}"; join_block block-b "${IPS[1]}"
 install_agent block-a "${IPS[0]}"; install_agent block-b "${IPS[1]}"
@@ -2635,7 +2689,8 @@ output, run_id, source_sha, log_path = sys.argv[1:]
 allowed = {
     "timestamp", "event", "work_key", "resource_id", "project_id", "port_id",
     "owner_controller_id", "owner_controller_epoch", "lease_created_at",
-    "lease_until", "fencing_token", "binding_state",
+    "lease_until", "fencing_token", "binding_state", "failure_reason",
+    "failure_step", "failure_kind", "failure_errno",
 }
 events = []
 try:
@@ -2751,7 +2806,8 @@ structured_events = []
 allowed = {
     "timestamp", "event", "work_key", "resource_id", "project_id", "port_id",
     "owner_controller_id", "owner_controller_epoch", "lease_created_at",
-    "lease_until", "fencing_token", "binding_state",
+    "lease_until", "fencing_token", "binding_state", "failure_reason",
+    "failure_step", "failure_kind", "failure_errno",
 }
 try:
     for line in pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines():
@@ -2777,6 +2833,19 @@ except OSError:
 
 checkpoint = pathlib.Path(checkpoint_path)
 temp_matches = list(checkpoint.parent.glob(f".{checkpoint.name}.*.tmp")) if checkpoint.parent.exists() else []
+publication_steps = {
+    "directory_parent", "directory_create", "temporary_create", "json_serialize",
+    "temporary_write", "file_fsync", "destination_link", "temporary_cleanup",
+    "directory_open", "directory_fsync", "destination_precheck",
+}
+checkpoint_failure_events = [
+    event for event in structured_events
+    if event.get("event") == "orphan_repair_checkpoint_failed_closed"
+]
+publication_failure_events = [
+    event for event in checkpoint_failure_events
+    if event.get("failure_step") in publication_steps
+]
 document = {
     "schema_version": 1,
     "run_id": run_id,
@@ -2810,7 +2879,9 @@ document = {
     },
     "checkpoint_file_exists": checkpoint.is_file(),
     "checkpoint_temp_file_exists": bool(temp_matches),
-    "checkpoint_publication_error_observed": any("checkpoint could not be published" in message.lower() for message in log_messages),
+    "checkpoint_publication_error_observed": bool(publication_failure_events),
+    "checkpoint_failure_events": checkpoint_failure_events[-20:],
+    "checkpoint_publication_failures": publication_failure_events[-20:],
     # Keep structured chronology in the bounded fallback as well. The
     # dedicated timeline artifact is the preferred evidence, but this copy
     # remains useful if artifact collection is interrupted before that file is
