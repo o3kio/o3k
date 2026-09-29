@@ -533,7 +533,7 @@ start_o3kd_verified() {
       printf '%s\n' 'ss_snapshot:'
       sudo -n ss -H -ltnp "sport = :$AUTH_PORT or sport = :$CONTROL_PORT" 2>/dev/null \
         | sed -n '1,20p' || true
-    } >"$WORK_ROOT/restart-listener-verification-failure.txt"
+    } >"$ARTIFACT_DIR/p15-7-restart-listener-verification-failure.txt"
     die "run-owned o3kd listeners did not belong to the captured restart PID"
   fi
   O3KD_HTTP_LISTENER_PID="$http_listener_pid"
