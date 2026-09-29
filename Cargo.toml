@@ -46,6 +46,13 @@ repository = "https://github.com/o3kio/o3k"
 axum = "0.8"
 async-trait = "0.1"
 base64 = "0.22"
+# Shared Kubedo stretched-L2 fabric provider (ADR-0186 / SPEC-0049),
+# pinned to tag v0.1.5 per the single-tag fleet policy in the fabric
+# repository's docs/change-control.md. Consumers never fork or patch
+# it; changes flow upstream through o3kio/fabric change control.
+fabric-plan = { git = "https://github.com/o3kio/fabric", tag = "v0.1.5" }
+fabric-linux = { git = "https://github.com/o3kio/fabric", tag = "v0.1.5" }
+fabric-conformance = { git = "https://github.com/o3kio/fabric", tag = "v0.1.5" }
 md-5 = "0.10"
 hmac = "0.12"
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }

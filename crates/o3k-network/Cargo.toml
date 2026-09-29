@@ -24,5 +24,6 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+fabric-conformance.workspace = true
 o3k-network-protocol = { path = "../o3k-network-protocol" }
 sqlx = { workspace = true }
