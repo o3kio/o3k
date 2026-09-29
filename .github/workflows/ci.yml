@@ -110,6 +110,8 @@ jobs:
         run: bash tests/workflow-validation.sh actionlint
       - name: Test protected real-host workflow guards
         run: bash tests/real-host-workflow-guards.sh
+      - name: Test protected checkout recovery boundary
+        run: bash tests/p15_7_checkout_recovery.sh
       - name: Test protected P15.7 authority preflight
         run: bash tests/p15_7_protected_preflight.sh
       - name: Test protected P15.7 Keycloak authority guards

@@ -632,7 +632,7 @@ assert not re.search(r"(?m)^  push:", dispatch_trigger), "protected full validat
 for needle in ("P15.7 protected preflight", "id-token: write",
                "scripts/p15-7-protected-preflight.sh", "target_sha:",
                "if-no-files-found: error",
-               '"${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts"'):
+               '"$workspace/target/lvm-real-guest-artifacts"'):
     assert needle in preflight_text, needle
 workflow_step = text.split("      - name: Run public real-host lifecycle\n", 1)[1]
 workflow_step = workflow_step.split("        run: bash tests/testlab-libvirt.sh\n", 1)[0]
@@ -717,18 +717,15 @@ for needle in ("workflow_dispatch:",
                "steps.generic_guard.outputs.ready == 'true'"):
     assert needle in text, needle
 assert "Repair prior protected artifact ownership" in text
-assert 'sudo -n chown -R "$(id -u):$(id -g)"' in text
-assert '"${GITHUB_WORKSPACE}/target/real-host-workflow-artifacts"' in text
-assert 'target_root="${GITHUB_WORKSPACE}/target"' in text
-assert 'sudo -n test -L "${target_root}"' in text
-assert 'sudo -n test -L "${target_dir}"' in text
-assert 'cannot verify checkout target root safety' in text
-assert 'cannot verify checkout artifact root safety: ${target_dir}' in text
-assert 'cannot inspect checkout artifact root: ${target_dir}' in text
-assert 'sudo -n test -e "${target_dir}"' in text
-assert 'sudo -n chmod -R u+rwX "${target_dir}"' in text
-assert 'sudo -n -u "$(id -un)" find "${target_dir}" -xdev -print' in text
-assert 'checkout\'s clean step can' in text
+assert 'repair_tree()' in text
+assert 'runner_uid="${O3K_PREFLIGHT_RUNNER_UID:-$(id -u)}"' in text
+assert 'sudo -n test -L "$path"' in text
+assert 'sudo -n realpath -e -- "$path"' in text
+assert 'find -P "$path" -xdev' in text
+assert 'refusing symlink or special file under checkout path' in text
+assert 'sudo -n find -P "$path" -xdev -type d -exec chmod 0700' in text
+assert 'sudo -n find -P "$path" -xdev -type f -exec chmod 0600' in text
+assert 'sudo -n -u "#$runner_uid" find -P "$path" -xdev -print' in text
 assert "github.repository == 'o3kio/o3k'" in text
 assert "github.event_name == 'workflow_dispatch'" in text
 assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in text

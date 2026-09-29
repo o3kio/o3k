@@ -759,7 +759,11 @@ capture_failure_diagnostics() {
         -ex 'set pagination off' -ex 'thread apply all bt' \
         >"$ARTIFACT_DIR/o3kd-hang/gdb-backtrace.txt" 2>/dev/null || true
     fi
-    chmod -R 0600 "$ARTIFACT_DIR/o3kd-hang" 2>/dev/null || true
+    # Keep the diagnostic subtree private without removing directory
+    # traversal.  Applying 0600 recursively to directories leaves the
+    # evidence unreadable even to the runner during checkout cleanup.
+    find -P "$ARTIFACT_DIR/o3kd-hang" -type d -exec chmod 0700 -- {} + 2>/dev/null || true
+    find -P "$ARTIFACT_DIR/o3kd-hang" -type f -exec chmod 0600 -- {} + 2>/dev/null || true
   fi
 }
 capture_workload_failure_diagnostics() {

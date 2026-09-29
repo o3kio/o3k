@@ -45,41 +45,69 @@ jobs:
     steps:
       - name: Repair prior protected artifact ownership
         run: |
-          set -euo pipefail
-          # A prior privileged phase may leave target itself, or a child
-          # directory, inaccessible to the runner account.  Test existence
-          # and repair ownership through sudo so checkout's clean step can
-          # traverse and remove every stale run-owned artifact.
-          target_root="${GITHUB_WORKSPACE}/target"
-          if sudo -n test -L "${target_root}"; then
-            echo "refusing to traverse symlinked checkout target root" >&2
+          set -Eeuo pipefail
+          workspace="${GITHUB_WORKSPACE%/}"
+          [[ "$workspace" == /* && -d "$workspace" && ! -L "$workspace" ]] || {
+            echo "unsafe checkout workspace" >&2
             exit 1
-          elif [[ "$?" -ne 1 ]]; then
-            echo "cannot verify checkout target root safety" >&2
+          }
+          workspace="$(realpath -e -- "$workspace")"
+          runner_uid="${O3K_PREFLIGHT_RUNNER_UID:-$(id -u)}"
+          runner_gid="${O3K_PREFLIGHT_RUNNER_GID:-$(id -g)}"
+          [[ "$runner_uid" =~ ^[0-9]+$ && "$runner_gid" =~ ^[0-9]+$ ]] || {
+            echo "invalid runner identity" >&2
             exit 1
-          fi
-          for target_dir in \
-            "${GITHUB_WORKSPACE}/target/real-host-workflow-artifacts" \
-            "${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts" \
-            "${GITHUB_WORKSPACE}/target/debug" \
-            "${GITHUB_WORKSPACE}/target/release"; do
-            if sudo -n test -L "${target_dir}"; then
-              echo "refusing to repair symlinked checkout artifact root: ${target_dir}" >&2
-              exit 1
-            elif [[ "$?" -ne 1 ]]; then
-              echo "cannot verify checkout artifact root safety: ${target_dir}" >&2
-              exit 1
+          }
+
+          repair_tree() {
+            local path="$1" resolved unsafe rc
+            if sudo -n test -L "$path"; then
+              echo "refusing symlinked checkout path: $path" >&2
+              return 1
+            else
+              rc=$?
+              [[ "$rc" -eq 1 ]] || {
+                echo "cannot inspect checkout path: $path" >&2
+                return 1
+              }
             fi
-            if sudo -n test -e "${target_dir}"; then
-              sudo -n chown -R "$(id -u):$(id -g)" "${target_dir}"
-              sudo -n chmod -R u+rwX "${target_dir}"
-              # Verify traversal under the runner identity before checkout
-              # attempts its own clean.  Do not delete an ambiguous path.
-              sudo -n -u "$(id -un)" find "${target_dir}" -xdev -print >/dev/null
-            elif [[ "$?" -ne 1 ]]; then
-              echo "cannot inspect checkout artifact root: ${target_dir}" >&2
-              exit 1
+            if sudo -n test -e "$path"; then
+              :
+            else
+              rc=$?
+              [[ "$rc" -eq 1 ]] && return 0
+              echo "cannot inspect checkout path: $path" >&2
+              return 1
             fi
+            sudo -n test -d "$path" || {
+              echo "checkout path is not a directory: $path" >&2
+              return 1
+            }
+            resolved="$(sudo -n realpath -e -- "$path")" || return 1
+            case "$resolved" in
+              "$workspace"/*) ;;
+              *) echo "checkout path escaped workspace: $path" >&2; return 1 ;;
+            esac
+            unsafe="$(sudo -n find -P "$path" -xdev \( -type l -o ! \( -type d -o -type f \) \) -print -quit)"
+            [[ -z "$unsafe" ]] || {
+              echo "refusing symlink or special file under checkout path: $unsafe" >&2
+              return 1
+            }
+            sudo -n find -P "$path" -xdev -type d -exec chown --no-dereference "$runner_uid:$runner_gid" {} +
+            sudo -n find -P "$path" -xdev -type f -exec chown --no-dereference "$runner_uid:$runner_gid" {} +
+            sudo -n find -P "$path" -xdev -type d -exec chmod 0700 -- {} +
+            sudo -n find -P "$path" -xdev -type f -exec chmod 0600 -- {} +
+            sudo -n -u "#$runner_uid" test -x "$path"
+            sudo -n -u "#$runner_uid" find -P "$path" -xdev -print >/dev/null
+          }
+
+          for checkout_path in \
+            "$workspace/target" \
+            "$workspace/target/real-host-workflow-artifacts" \
+            "$workspace/target/lvm-real-guest-artifacts" \
+            "$workspace/target/debug" \
+            "$workspace/target/release"; do
+            repair_tree "$checkout_path"
           done
 
       - name: Check out the canonical repository
