@@ -116,6 +116,9 @@ CONTENDING_CREATE_PID=""
 CONTENDING_CREATE_PGID=""
 CONTENDING_CREATE_STARTTIME=""
 CONTENDING_CREATE_REAPED=false
+CONTENDING_CREATE_WRAPPER_EXIT_STATUS=""
+CONTENDING_CREATE_REQUEST_END_MS=""
+CONTENDER_EVIDENCE_CAPTURED=false
 # The pause must be long enough for the journey to observe the durable
 # terminal delete and kill the control plane inside the window, and short
 # enough to keep the bounded delete request and the protected-run budget
@@ -730,8 +733,51 @@ except OSError:
     pass
 PY
 }
+capture_contending_create_evidence() {
+  local phase="${1:-${CRASH_PHASE:-journey}}" end_ms="${CONTENDING_CREATE_REQUEST_END_MS:-$(date +%s%3N)}"
+  local server_http="${CONTENDING_CREATE_SERVER_HTTP_STATUS:-unknown}"
+  local operation_http="${CONTENDING_CREATE_OPERATION_HTTP_STATUS:-unknown}"
+  local server_state="${D_STATE:-}" operation_state="${CONTENDING_CREATE_OPERATION_STATE:-}"
+  local daemon_log="$WORK_ROOT/contender-daemon.log"
+  local agent_log="$WORK_ROOT/contender-agent.log"
+  local provider_log="$WORK_ROOT/contender-provider.log"
+  [[ -n "${CONTENDING_CREATE_WRAPPER_EXIT_STATUS:-}" ]] || return 0
+  # Capture only bounded, run-owned snapshots. The Python boundary redacts and
+  # bounds these before publication; raw snapshots remain in WORK_ROOT and are
+  # removed by the normal ownership-checked cleanup path.
+  if [[ -n "${STATE_ROOT:-}" ]] && sudo -n test -f "$STATE_ROOT/log/o3kd.log" 2>/dev/null; then
+    sudo -n tail -n 1200 "$STATE_ROOT/log/o3kd.log" >"$daemon_log" 2>/dev/null || true
+  fi
+  if [[ -n "${STATE_ROOT:-}" ]] && sudo -n test -f "$STATE_ROOT/log/o3k-compute.log" 2>/dev/null; then
+    sudo -n tail -n 1200 "$STATE_ROOT/log/o3k-compute.log" >"$agent_log" 2>/dev/null || true
+  fi
+  # The provider side is normally emitted by the same compute-agent log in a
+  # disposable TestLab. Keep a separate labelled projection so the artifact
+  # distinguishes daemon, agent, and provider evidence without claiming a
+  # provider log that was not present.
+  if [[ -s "$agent_log" ]]; then
+    cp -- "$agent_log" "$provider_log" 2>/dev/null || true
+  fi
+  python3 "$ROOT_DIR/scripts/capture-p15-7-contender-evidence.py" \
+    --artifact "$ARTIFACT_DIR/p15-7-contender-evidence.json" \
+    --work-root "$WORK_ROOT" --source-sha "$SOURCE_SHA" --run-id "$RUN_ID" \
+    --phase "$phase" --wrapper-exit-status "$CONTENDING_CREATE_WRAPPER_EXIT_STATUS" \
+    --pid "${CONTENDING_CREATE_PID:-}" --pgid "${CONTENDING_CREATE_PGID:-}" \
+    --starttime "${CONTENDING_CREATE_STARTTIME:-}" \
+    --request-start-ms "${CONTENDING_CREATE_REQUEST_START_MS:-$end_ms}" --request-end-ms "$end_ms" \
+    --endpoint-id "${OS_PORT_D_ID:-}" --server-id "${WORKLOAD_D:-}" \
+    --operation-id "${CONTENDING_CREATE_OPERATION_ID:-}" \
+    --server-http-status "$server_http" --operation-http-status "$operation_http" \
+    --server-state "$server_state" --operation-state "$operation_state" \
+    >/dev/null 2>&1 || echo "P15.7 contender evidence could not be safely captured" >&2
+  [[ -f "$ARTIFACT_DIR/p15-7-contender-evidence.json" ]] && CONTENDER_EVIDENCE_CAPTURED=true
+}
 capture_failure_diagnostics() {
   local exit_status="$1"
+  if [[ "$exit_status" -ne 0 && "${CONTENDING_CREATE_WRAPPER_EXIT_STATUS:-}" =~ ^[0-9]+$ ]] \
+    && [[ ! -f "$ARTIFACT_DIR/p15-7-contender-evidence.json" ]]; then
+    capture_contending_create_evidence "journey_failed"
+  fi
   [[ "$exit_status" -ne 0 && "$P15_PROVISION_DIAGNOSTICS_CAPTURED" == false ]] || return 0
   write_failure_artifact pending "${FOREIGN_PRESERVED:-unknown}" "${LAST_FAILURE_MESSAGE:-journey failed}"
   python3 "$ROOT_DIR/scripts/capture-p15-7-provision-diagnostics.py" \
@@ -890,6 +936,8 @@ stop_contending_create() {
         fi
       fi
       wait "$pid" 2>/dev/null || wait_status=$?
+      CONTENDING_CREATE_WRAPPER_EXIT_STATUS="$wait_status"
+      CONTENDING_CREATE_REQUEST_END_MS="${CONTENDING_CREATE_REQUEST_END_MS:-$(date +%s%3N)}"
       if kill -0 "$pid" 2>/dev/null; then
         echo "P15.7 cleanup: contending-create process remains after reap: $pid" >&2
         failed=true
@@ -3586,7 +3634,15 @@ if [[ "$SWEEP_CONVERGED" == true ]]; then
   write_orphan_repair_timeline \
     || die "structured orphan-repair timeline could not be persisted"
 fi
-wait "$CONTENDING_CREATE_PID" || die "contending existing-port create failed after orphan repair completed"
+set +e
+wait "$CONTENDING_CREATE_PID"
+CONTENDING_CREATE_WRAPPER_EXIT_STATUS=$?
+set -e
+CONTENDING_CREATE_REQUEST_END_MS="$(date +%s%3N)"
+if [[ "$CONTENDING_CREATE_WRAPPER_EXIT_STATUS" -ne 0 ]]; then
+  capture_contending_create_evidence "repair_completed"
+  die "contending existing-port create failed after orphan repair completed (wrapper_exit_status=$CONTENDING_CREATE_WRAPPER_EXIT_STATUS)"
+fi
 CONTENDING_CREATE_REAPED=true
 CONTENDING_CREATE_PID=""
 CONTENDING_CREATE_PGID=""
@@ -3622,6 +3678,7 @@ PY
 done
 [[ "$CONTENDING_CREATE_OPERATION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] \
   || die "contending create operation id was not observable"
+capture_contending_create_evidence "contending_create_accepted"
 
 # Orphan-repair convergence: bounded wait (<=180s) for the sweep to release
 # the orphaned endpoint, counting the bounded observability lines the sweep
@@ -3642,6 +3699,9 @@ done
 [[ "$D_STATE" == "ACTIVE" ]] || die "contending create workload did not become ACTIVE"
 CONTENDING_CREATE_ACTIVE_MS="$(date +%s%3N)"
 CONTENDING_CREATE_ACTIVE_LATENCY_MS="$((CONTENDING_CREATE_ACTIVE_MS - CONTENDING_CREATE_REQUEST_ACCEPTED_MS))"
+CONTENDING_CREATE_SERVER_HTTP_STATUS="200"
+CONTENDING_CREATE_OPERATION_STATE="succeeded"
+capture_contending_create_evidence "contending_create_active"
 
 # Fail-closed tail: no die is permitted between here and the foreign-fixture
 # teardown below, so an assertion failure cannot strand foreign-owned state.
