@@ -40,11 +40,12 @@ def atomic_write(path: Path, document: dict) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 14:
+    if len(sys.argv) not in {14, 15}:
         return fail(
             "usage: write_p15_7-failure-artifact.py PATH SOURCE_SHA RUN_ID PHASE "
             "FAILURE_CLASS LAST_SUCCESSFUL_CHECKPOINT EXPECTED OBSERVED "
-            "SERVER_ID ENDPOINT_ID CLEANUP_RESULT FOREIGN_STATE_RESULT MESSAGE"
+            "SERVER_ID ENDPOINT_ID CLEANUP_RESULT FOREIGN_STATE_RESULT MESSAGE "
+            "[ATTEMPTED_PHASE]"
         )
     (
         path,
@@ -60,7 +61,9 @@ def main() -> int:
         cleanup_result,
         foreign_state_result,
         message,
+        *optional,
     ) = sys.argv[1:]
+    attempted_phase = optional[0] if optional else ""
     if len(source_sha) != 40 or any(char not in "0123456789abcdefABCDEF" for char in source_sha):
         return fail("failure artifact requires an exact source SHA")
     if not run_id or not failure_class or not phase:
@@ -96,6 +99,7 @@ def main() -> int:
         "source_sha": source_sha.lower(),
         "run_id": run_id,
         "phase": phase,
+        "attempted_phase": attempted_phase or None,
         "failure_class": failure_class,
         "last_successful_checkpoint": last_checkpoint or None,
         "expected": expected,

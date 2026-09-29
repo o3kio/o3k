@@ -439,6 +439,20 @@ def validate(
                     fail(errors, "journey.crash_injection_repair.endpoint_before_crash.existed must be true")
                 if endpoint.get("presence_asserted_while_pause_held") is not True:
                     fail(errors, "journey.crash_injection_repair.endpoint_before_crash.presence_asserted_while_pause_held must be true")
+            contending_checkpoint = next(
+                (item for item in checkpoints
+                 if isinstance(item, dict) and item.get("phase") == "contending_create_started"),
+                None,
+            ) if isinstance(checkpoints, list) else None
+            if contending_checkpoint is not None and server_c is not None:
+                target_endpoint = server_c.get("owned_endpoint_id")
+                if contending_checkpoint.get("endpoint_id") != target_endpoint:
+                    fail(errors, "#1035 contending_create_started.endpoint_id must remain the crash target endpoint")
+                contender_endpoint = contending_checkpoint.get("contending_endpoint_id")
+                if not isinstance(contender_endpoint, str) or not contender_endpoint.strip():
+                    fail(errors, "#1035 contending_create_started.contending_endpoint_id must be explicit")
+                elif contender_endpoint == target_endpoint:
+                    fail(errors, "#1035 contender endpoint must be distinct from the crash target endpoint")
             kill = mapping(crash.get("kill"), "journey.crash_injection_repair.kill", errors)
             if kill is not None:
                 if kill.get("signal") != "SIGKILL":

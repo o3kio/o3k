@@ -284,7 +284,10 @@ doc = {
            if phase == "process_identity_armed" else {}),
         **({"pid":"4242","old_starttime":"123","old_executable":"/run/o3k/bin/o3kd",
             "old_http_listener_pid":"4242","old_control_listener_pid":"4242"}
-           if phase == "process_killed" else {})} for phase in
+           if phase == "process_killed" else {}),
+        **({"endpoint_id":"77777777-7777-4777-8777-777777777777",
+            "contending_endpoint_id":"88888888-8888-4888-8888-888888888888"}
+           if phase == "contending_create_started" else {})} for phase in
         ["fault_armed","terminal_state_observed","endpoint_present_pre_crash","process_identity_armed","process_killed",
          "process_restarted","repair_lock_acquired","contending_create_waiting","contending_create_started","orphan_discovered",
          "repair_completed","contending_create_accepted","accounting_verified","completed"]],

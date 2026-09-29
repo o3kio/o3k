@@ -75,6 +75,7 @@ P15_PROVISION_DIAGNOSTICS_CAPTURED=false
 P15_WORKLOAD_DIAGNOSTICS_CAPTURED=false
 CRASH_STARTED=false
 CRASH_PHASE=""
+CRASH_ATTEMPTED_PHASE=""
 FAILURE_CLASS="unknown"
 LAST_SUCCESSFUL_CHECKPOINT="journey_start"
 LAST_FAILURE_MESSAGE=""
@@ -160,6 +161,7 @@ write_failure_artifact() {
     "$FAILURE_ARTIFACT" "$SOURCE_SHA" "$RUN_ID" "$phase" "$class" \
     "${LAST_SUCCESSFUL_CHECKPOINT:-}" "expected successful phase transition" "$message" \
     "${WORKLOAD_C:-}" "${PORT_C_ID:-}" "$cleanup_result" "$foreign_result" "$message" \
+    "${CRASH_ATTEMPTED_PHASE:-}" \
     >/dev/null 2>&1 || echo "P15.7 failure classification could not be safely captured" >&2
 }
 die() {
@@ -169,6 +171,7 @@ die() {
   echo "P15.7 journey blocked: $*" >&2
   exit 1
 }
+source "$ROOT_DIR/scripts/p15-7-crash-evidence-state.sh"
 PP5_PHASE="${O3K_P15_7_PHASE:-integrated}"
 case "${PP5_PHASE}" in
   integrated|s5-scale|1035-crash-recovery|host-maintenance) ;;
@@ -1158,9 +1161,10 @@ cleanup() {
     cleanup_failed=true
   fi
   if [[ "${CRASH_STARTED:-false}" == true && "${CRASH_PHASE:-}" != completed ]]; then
+    local evidence_failure_phase="${CRASH_ATTEMPTED_PHASE:-${CRASH_PHASE:-fault_armed}}"
     python3 "$ROOT_DIR/scripts/p15-7-crash-evidence.py" \
       "$ARTIFACT_DIR/p15-7-crash-injection-evidence.json" \
-      "${CRASH_PHASE:-fault_armed}" failed failure_phase "${CRASH_PHASE:-fault_armed}" \
+      "$evidence_failure_phase" failed failure_phase "$evidence_failure_phase" \
       >/dev/null 2>&1 || true
   fi
   capture_failure_diagnostics "$exit_status"
@@ -2711,17 +2715,6 @@ CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS=""
 CRASH_REPAIR_LOCK_WAIT_BOUND_MS=65000
 CRASH_REPAIR_LEASE_TAKEOVER="ttl_expiry"
 CRASH_OPERATION_ID=""
-persist_crash_checkpoint() {
-  local phase="$1" status="$2"
-  shift 2
-  CRASH_PHASE="$phase"
-  python3 "$ROOT_DIR/scripts/p15-7-crash-evidence.py" "$CRASH_EVIDENCE_FILE" \
-    "$phase" "$status" source_sha "$SOURCE_SHA" run_id "$RUN_ID" \
-    "$@" || die "could not persist #1035 crash evidence phase $phase"
-  if [[ "$status" != failed ]]; then
-    LAST_SUCCESSFUL_CHECKPOINT="$phase"
-  fi
-}
 write_orphan_repair_timeline() {
   local output="$ARTIFACT_DIR/p15-7-orphan-repair-timeline.json"
   local log_snapshot="$WORK_ROOT/orphan-repair-timeline-$RUN_ID.jsonl"
@@ -3404,7 +3397,7 @@ persist_crash_checkpoint contending_create_waiting running \
 sudo -n touch -- "$CRASH_REPAIR_RELEASE_FILE" \
   || die "could not release the deterministic repair/create overlap seam"
 persist_crash_checkpoint contending_create_started running \
-  request_start_unix_ms "$CONTENDING_CREATE_REQUEST_START_MS" endpoint_id "$OS_PORT_D_ID" \
+  request_start_unix_ms "$CONTENDING_CREATE_REQUEST_START_MS" contending_endpoint_id "$OS_PORT_D_ID" \
   release_signal_sent_after_lock_wait_observed true
 for _ in $(seq 1 50); do
   current_lines="$(o3kd_log_line_count)"
