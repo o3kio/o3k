@@ -84,7 +84,11 @@ make_legacy_tree() {
   printf 'bounded debugger evidence\n' >"$root/target/real-host-workflow-artifacts/o3kd-hang/gdb-backtrace.txt"
   sudo -n chown -R root:root "$root/target"
   sudo -n chmod 0600 "$root/target/real-host-workflow-artifacts/o3kd-hang"
-  sudo -n chmod 0600 "$root/target/real-host-workflow-artifacts/o3kd-hang"/*
+  # The fixture directory is intentionally inaccessible to the invoking
+  # account.  Enumerate its files as root instead of relying on a shell glob
+  # that cannot expand through a 0600 directory.
+  sudo -n find -P "$root/target/real-host-workflow-artifacts/o3kd-hang" \
+    -type f -exec chmod 0600 -- {} +
 }
 
 workspace="$WORK/workspace"
