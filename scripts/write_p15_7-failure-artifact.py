@@ -39,6 +39,41 @@ def atomic_write(path: Path, document: dict) -> None:
             pass
 
 
+def merge_cleanup_result(path: Path, document: dict) -> dict:
+    """Preserve the first failure while recording the independent cleanup result."""
+    if document["cleanup_result"] not in {"passed", "failed"}:
+        return document
+    try:
+        previous = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return document
+    if not isinstance(previous, dict) or previous.get("status") != "failed":
+        return document
+    if previous.get("source_sha") != document["source_sha"] or previous.get("run_id") != document["run_id"]:
+        return document
+    # Cleanup is a secondary observation. Never let its synthetic journey
+    # classification replace the primary API/product failure.
+    if document["failure_class"] != "cleanup" and document["phase"] != "journey":
+        return document
+    for key in (
+        "phase",
+        "attempted_phase",
+        "failure_class",
+        "last_successful_checkpoint",
+        "expected",
+        "observed",
+        "target_resource_ids",
+        "message",
+    ):
+        if key in previous:
+            document[key] = previous[key]
+    document["cleanup_result"] = document["cleanup_result"]
+    document["cleanup_message"] = (
+        "cleanup completed" if document["cleanup_result"] == "passed" else "cleanup left owned residue"
+    )
+    return document
+
+
 def main() -> int:
     if len(sys.argv) not in {14, 15}:
         return fail(
@@ -117,8 +152,12 @@ def main() -> int:
     }
     digest_input = json.dumps(document, sort_keys=True).encode("utf-8")
     document["classification_digest"] = hashlib.sha256(digest_input).hexdigest()
+    destination = Path(path)
     try:
-        atomic_write(Path(path), document)
+        document = merge_cleanup_result(destination, document)
+        digest_input = json.dumps(document, sort_keys=True).encode("utf-8")
+        document["classification_digest"] = hashlib.sha256(digest_input).hexdigest()
+        atomic_write(destination, document)
     except OSError as error:
         return fail(f"cannot persist failure classification atomically: {error}")
     return 0

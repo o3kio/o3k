@@ -918,6 +918,9 @@ jobs:
             target/real-host-workflow-artifacts/pp5-overall-result.json
             target/real-host-workflow-artifacts/p15-7-failure-classification.json
             target/real-host-workflow-artifacts/p15-7-transient-failures.jsonl
+            target/real-host-workflow-artifacts/p15-7-api-read-attempt-*.json
+            target/real-host-workflow-artifacts/p15-7-api-read-failure-*.json
+            target/real-host-workflow-artifacts/p15-7-capacity-diagnostics.json
             target/real-host-workflow-artifacts/p15-7-crash-injection-evidence.json
             target/real-host-workflow-artifacts/p15-7-crash-endpoint-before.json
             target/real-host-workflow-artifacts/p15-7-drain-failure-context.json

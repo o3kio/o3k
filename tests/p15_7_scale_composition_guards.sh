@@ -816,6 +816,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "p15-7-workload-failure-diagnostics.json", "p15-7-orphan-repair-diagnostics-",
                  "p15-7-host-maintenance-evidence.json",
                  "p15-7-vm-lease-", "p15-7-transient-failures.jsonl",
+                 "p15-7-api-read-attempt-", "p15-7-api-read-failure-", "p15-7-capacity-diagnostics.json",
                  "record_lease_evidence", "record_transient",
                  "actions/ready",
                  'virsh -c qemu:///system reboot "$MAINT_UUID"',
@@ -857,6 +858,8 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
     assert required in journey, required
 for required_upload in (
     "p15-7-failure-classification.json", "p15-7-transient-failures.jsonl",
+    "p15-7-api-read-attempt-*.json", "p15-7-api-read-failure-*.json",
+    "p15-7-capacity-diagnostics.json",
     "p15-7-crash-injection-evidence.json", "p15-7-crash-endpoint-before.json",
     "p15-7-drain-failure-context.json", "p15-7-drain-blocker-requery.json",
     "p15-7-scale-checkpoint-*.json", "p15-7-vm-lease-*.json",

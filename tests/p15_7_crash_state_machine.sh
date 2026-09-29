@@ -99,6 +99,28 @@ assert doc["last_successful_checkpoint"] == "fault_armed"
 assert doc["attempted_phase"] == "terminal_state_observed"
 PY
 
+# Cleanup is reported independently and must not replace the first API
+# failure with the synthetic cleanup classification.
+PRIMARY_FAILURE="$WORK_DIR/primary-failure.json"
+python3 "$ROOT_DIR/scripts/write_p15_7-failure-artifact.py" \
+  "$PRIMARY_FAILURE" "$SHA" "$RUN" initial-capacity-diagnostics \
+  product_correctness journey_start "capacity diagnostics must return 200" \
+  "API read failed: HTTP 500" "$SERVER" "$ENDPOINT" pending unknown \
+  "API read failed: HTTP 500" initial-capacity-diagnostics
+python3 "$ROOT_DIR/scripts/write_p15_7-failure-artifact.py" \
+  "$PRIMARY_FAILURE" "$SHA" "$RUN" journey cleanup journey_start \
+  "journey cleanup" "journey failed; cleanup completed" "$SERVER" "$ENDPOINT" \
+  passed unchanged "journey failed; cleanup completed"
+python3 - "$PRIMARY_FAILURE" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc["phase"] == "initial-capacity-diagnostics"
+assert doc["failure_class"] == "product_correctness"
+assert doc["message"] == "API read failed: HTTP 500"
+assert doc["cleanup_result"] == "passed"
+assert doc["cleanup_message"] == "cleanup completed"
+PY
+
 # Exercise the actual journey persistence helper: a failed write records the
 # attempted phase without advancing the last successful phase used by cleanup.
 STATE_TEST="$WORK_DIR/state-helper-test.sh"

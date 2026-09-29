@@ -77,6 +77,7 @@ CRASH_STARTED=false
 CRASH_PHASE=""
 CRASH_ATTEMPTED_PHASE=""
 FAILURE_CLASS="unknown"
+FAILURE_PHASE=""
 LAST_SUCCESSFUL_CHECKPOINT="journey_start"
 LAST_FAILURE_MESSAGE=""
 FAILURE_ARTIFACT="$ARTIFACT_DIR/p15-7-failure-classification.json"
@@ -155,7 +156,7 @@ write_failure_artifact() {
     false|changed) foreign_result=changed ;;
     *) foreign_result=unknown ;;
   esac
-  local phase="${CRASH_PHASE:-journey}" class="${O3K_P15_7_FAILURE_CLASS:-$FAILURE_CLASS}"
+  local phase="${FAILURE_PHASE:-${CRASH_PHASE:-journey}}" class="${O3K_P15_7_FAILURE_CLASS:-$FAILURE_CLASS}"
   [[ "$class" != unknown ]] || class="$(classify_failure "$message")"
   python3 "$ROOT_DIR/scripts/write_p15_7-failure-artifact.py" \
     "$FAILURE_ARTIFACT" "$SOURCE_SHA" "$RUN_ID" "$phase" "$class" \
@@ -726,10 +727,15 @@ capture_failure_diagnostics() {
   # (endpoint reachability vs control-plane pool recovery) instead of inference.
   [[ -f "$WORK_ROOT/pg-sever-rules.txt" ]] \
     && cp "$WORK_ROOT/pg-sever-rules.txt" "$ARTIFACT_DIR/pg-sever-rules.txt" 2>/dev/null || true
-  if [[ -n "${STATE_ROOT:-}" ]] && sudo -n test -f "$STATE_ROOT/log/o3kd.log" 2>/dev/null; then
-    sudo -n tail -n 2000 "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
-      | tee "$ARTIFACT_DIR/o3kd.log.tail" >/dev/null || true
-    chmod 0600 "$ARTIFACT_DIR/pg-sever-rules.txt" "$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
+  if [[ -n "${STATE_ROOT:-}" ]]; then
+    # Keep only capacity-related, redacted lines; raw daemon logs may contain
+    # connection strings or other privileged context.
+    if sudo -n test -f "$STATE_ROOT/log/o3kd.log" 2>/dev/null; then
+      sudo -n tail -n 2000 "$STATE_ROOT/log/o3kd.log" 2>/dev/null >"$WORK_ROOT/o3kd.log" || true
+    fi
+    python3 "$ROOT_DIR/scripts/capture-p15-7-capacity-diagnostics.py" \
+      "$WORK_ROOT/o3kd.log" "$ARTIFACT_DIR/p15-7-capacity-diagnostics.json" || true
+    rm -f -- "$WORK_ROOT/o3kd.log"
   fi
   # Hang forensics: two exact-head S5 runs (e0d690f7, 8fd6f828) hung o3kd
   # within ~60 s of the fault-hook-armed restart, with the API dead for
@@ -1881,6 +1887,25 @@ def digest(name):
     data = path.read_bytes()
     return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
+body = pathlib.Path(body_file).read_bytes()[:16384] if pathlib.Path(body_file).is_file() else b""
+try:
+    problem = json.loads(body.decode("utf-8"))
+except (UnicodeDecodeError, json.JSONDecodeError):
+    problem = None
+problem_summary = {}
+if isinstance(problem, dict):
+    for key in ("code", "title", "status"):
+        value = problem.get(key)
+        if isinstance(value, (str, int)):
+            problem_summary[key] = str(value)[:128]
+    if isinstance(problem.get("request_id"), str):
+        problem_summary["request_id"] = re.sub(r"[^A-Za-z0-9._:-]", "", problem["request_id"])[:128]
+transport_text = pathlib.Path(error_file).read_text(encoding="utf-8", errors="replace") if pathlib.Path(error_file).is_file() else ""
+error_match = re.search(r"curl:\s*\((\d+)\)", transport_text)
+error_number = int(error_match.group(1)) if error_match else int(curl_exit)
+errno_match = re.search(r"\berrno\s*[=:]\s*(\d+)\b", transport_text, re.IGNORECASE)
+error_kind = {6: "dns", 7: "connection_refused", 28: "timeout", 35: "tls", 52: "empty_reply", 56: "connection_reset"}.get(error_number, "http" if str(http_status).startswith("5") else "transport")
+
 doc = {
     "artifact_type": "o3k-p15-7-api-read-failure",
     "schema_version": 1,
@@ -1894,6 +1919,11 @@ doc = {
     "http_status": http_status,
     "response": digest(body_file),
     "transport_diagnostics": digest(error_file),
+    "publication_step": "api_read",
+    "sanitized_body": problem_summary or None,
+    "response_summary": problem_summary,
+    "error_kind": error_kind,
+    "errno": int(errno_match.group(1)) if errno_match else None,
     "recorded_at_unix_ms": int(time.time() * 1000),
 }
 root_path = pathlib.Path(root)
@@ -1927,6 +1957,96 @@ else:
 PY
   echo "P15.7 API read failed: phase=$phase endpoint=$path http_status=$http_status curl_exit=$curl_exit attempts=$attempts (metadata artifact preserved)" >&2
 }
+write_api_read_attempt_evidence() {
+  # Keep per-attempt response identity and transport classification bounded;
+  # raw bodies/stderr are temporary and never enter protected artifacts.
+  local phase="$1" path="$2" attempt="$3" curl_exit="$4" http_status="$5" body_file="$6" error_file="$7"
+  python3 - "$ARTIFACT_DIR" "$phase" "$path" "$attempt" "$curl_exit" "$http_status" \
+    "$body_file" "$error_file" "$RUN_ID" "$SOURCE_SHA" <<'PY'
+import hashlib, json, os, pathlib, re, sys, tempfile, time
+
+root, phase, endpoint, attempt, curl_exit, http_status, body_file, error_file, run_id, source_sha = sys.argv[1:]
+safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", phase).strip("._-") or "read"
+
+def read_bytes(name):
+    path = pathlib.Path(name)
+    if not path.is_file():
+        return b""
+    with path.open("rb") as stream:
+        return stream.read(16384)
+
+body = read_bytes(body_file)
+transport = read_bytes(error_file)
+summary = {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest() if body else None}
+try:
+    parsed = json.loads(body.decode("utf-8"))
+except (UnicodeDecodeError, json.JSONDecodeError):
+    parsed = None
+if isinstance(parsed, dict):
+    safe_fields = {}
+    for key in ("code", "title", "status"):
+        value = parsed.get(key)
+        if isinstance(value, (str, int)):
+            safe_fields[key] = str(value)[:128]
+    request_id = parsed.get("request_id")
+    if isinstance(request_id, str):
+        safe_fields["request_id"] = re.sub(r"[^A-Za-z0-9._:-]", "", request_id)[:128]
+    if safe_fields:
+        summary["problem"] = safe_fields
+
+text = transport.decode("utf-8", "replace")
+match = re.search(r"curl:\s*\((\d+)\)", text)
+error_number = int(match.group(1)) if match else int(curl_exit)
+errno_match = re.search(r"\berrno\s*[=:]\s*(\d+)\b", text, re.IGNORECASE)
+error_kind = {
+    6: "dns",
+    7: "connection_refused",
+    28: "timeout",
+    35: "tls",
+    52: "empty_reply",
+    56: "connection_reset",
+}.get(error_number, "http" if str(http_status).startswith("5") else "transport")
+doc = {
+    "artifact_type": "o3k-p15-7-api-read-attempt",
+    "schema_version": 1,
+    "status": "failed",
+    "run_id": run_id,
+    "source_sha": source_sha,
+    "phase": phase,
+    "endpoint": endpoint,
+    "attempt": int(attempt),
+    "curl_exit": int(curl_exit),
+    "http_status": http_status,
+    "publication_step": "api_read",
+    "sanitized_body": summary.get("problem"),
+    "response": summary,
+    "transport": {
+        "kind": error_kind,
+        "errno": int(errno_match.group(1)) if errno_match else None,
+        "bytes": len(transport),
+        "sha256": hashlib.sha256(transport).hexdigest() if transport else None,
+    },
+    "recorded_at_unix_ms": int(time.time() * 1000),
+}
+root_path = pathlib.Path(root)
+root_path.mkdir(parents=True, exist_ok=True)
+destination = root_path / f"p15-7-api-read-attempt-{safe}-{int(attempt):02d}.json"
+fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=root)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
 api_get() {
   local path="$1" phase="${2:-${1#/}}" attempt body_file error_file http_status curl_exit retry_kind
   [[ "$path" == /* ]] || { echo "P15.7 API read path is not absolute: $path" >&2; return 1; }
@@ -1956,6 +2076,8 @@ api_get() {
       retry_kind=""
     fi
     if [[ -n "$retry_kind" && "$attempt" -lt "$P15_7_API_READ_ATTEMPTS" ]]; then
+      write_api_read_attempt_evidence "$phase" "$path" "$attempt" "$curl_exit" "$http_status" \
+        "$body_file" "$error_file" || true
       record_transient "$retry_kind" "GET $path" "phase=$phase attempt=$attempt" "$http_status"
       rm -f -- "$body_file" "$error_file"
       sleep "$P15_7_API_READ_DELAY_SECONDS"
@@ -1964,8 +2086,13 @@ api_get() {
     if [[ -n "$retry_kind" ]]; then
       record_transient "$retry_kind" "GET $path" "phase=$phase attempts=$attempt outcome=failed" "$http_status"
     fi
+    write_api_read_attempt_evidence "$phase" "$path" "$attempt" "$curl_exit" "$http_status" \
+      "$body_file" "$error_file" || true
     write_api_read_failure_evidence "$phase" "$path" "$attempt" "$curl_exit" "$http_status" \
       "$body_file" "$error_file"
+    FAILURE_PHASE="$phase"
+    FAILURE_CLASS="product_correctness"
+    LAST_FAILURE_MESSAGE="API read failed: phase=$phase endpoint=$path http_status=$http_status curl_exit=$curl_exit attempts=$attempt"
     rm -f -- "$body_file" "$error_file"
     return 1
   done
