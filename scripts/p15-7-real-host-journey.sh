@@ -107,6 +107,13 @@ O3K_PP5_RUN_ENV_NAME="O3K_PP5_RUN_ID"
 O3K_REPLAY_SUPPRESS_RESOURCE_ENV_NAME="O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RESOURCE_ID"
 O3K_REPLAY_SUPPRESS_RUN_ENV_NAME="O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RUN_ID"
 CRASH_REPAIR_DIR=""
+# Initialize contention state before installing either EXIT trap.  A failure
+# during bootstrap/diagnostic setup must be able to run the same idempotent
+# cleanup helper before the contention phase has assigned any process ID.
+CONTENDING_CREATE_PID=""
+CONTENDING_CREATE_PGID=""
+CONTENDING_CREATE_STARTTIME=""
+CONTENDING_CREATE_REAPED=false
 # The pause must be long enough for the journey to observe the durable
 # terminal delete and kill the control plane inside the window, and short
 # enough to keep the bounded delete request and the protected-run budget
@@ -822,6 +829,62 @@ capture_workload_failure_diagnostics() {
     "$server_http" "$operation_http" "$workload_label" || echo "P15.7 workload diagnostics could not be safely captured" >&2
   P15_WORKLOAD_DIAGNOSTICS_CAPTURED=true
 }
+stop_contending_create() {
+  # Address only the exact run-owned background child, reap it, and remove
+  # only this run's synchronization markers. Never kill by process name.
+  local pid="${CONTENDING_CREATE_PID:-}" pgid="${CONTENDING_CREATE_PGID:-}" marker failed=false current_starttime current_pgid wait_status=0
+  if [[ -n "$pid" ]]; then
+    if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+      echo "P15.7 cleanup: refusing non-numeric contending-create PID" >&2
+      failed=true
+    else
+      if kill -0 "$pid" 2>/dev/null; then
+        current_starttime="$(sudo -n awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+        current_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+        if [[ -z "${CONTENDING_CREATE_STARTTIME:-}" || "$current_starttime" != "$CONTENDING_CREATE_STARTTIME" \
+          || -z "$pgid" || ! "$pgid" =~ ^[0-9]+$ || "$current_pgid" != "$pgid" ]]; then
+          echo "P15.7 cleanup: contending-create PID identity changed before signal: $pid" >&2
+          failed=true
+        fi
+      fi
+      if [[ "$failed" == false ]] && kill -0 "$pid" 2>/dev/null; then
+        kill -TERM -- "-$pgid" 2>/dev/null || true
+        for _ in $(seq 1 50); do
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 0.1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -KILL -- "-$pgid" 2>/dev/null || true
+          for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+          done
+        fi
+      fi
+      wait "$pid" 2>/dev/null || wait_status=$?
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "P15.7 cleanup: contending-create process remains after reap: $pid" >&2
+        failed=true
+      fi
+      if [[ "$failed" == false && -n "$pgid" ]] && ps -eo pid=,pgid= 2>/dev/null | awk -v pgid="$pgid" '$2 == pgid { found=1 } END { exit found ? 0 : 1 }'; then
+        echo "P15.7 cleanup: contending-create process group remains after reap: $pgid" >&2
+        failed=true
+      fi
+      [[ "$wait_status" -eq 0 || "$failed" == false ]] || failed=true
+    fi
+    if [[ "$failed" == false ]]; then
+      CONTENDING_CREATE_REAPED=true
+      CONTENDING_CREATE_PID=""
+      CONTENDING_CREATE_PGID=""
+    fi
+  fi
+  for marker in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}" "${CRASH_REPAIR_CHECKPOINT_FILE:-}"; do
+    [[ -n "$marker" ]] || continue
+    sudo -n rm -f -- "$marker" || failed=true
+  done
+  [[ "$failed" == false ]]
+}
+
 early_cleanup() {
   local exit_status=$?
   set +e
@@ -1242,7 +1305,14 @@ cleanup() {
     rm -rf -- "$WORK_ROOT"
   fi
   if [[ "$cleanup_failed" == true ]]; then
-    echo "P15.7 cleanup blocked; owned VM records and backing files were retained" >&2
+    echo "P15.7 cleanup blocked; run-owned residue (run=$RUN_ID) was retained:" >&2
+    for residue in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}" \
+      "${CRASH_REPAIR_CHECKPOINT_FILE:-}" "$LIBVIRT_STORAGE_ROOT" "$WORK_ROOT"; do
+      [[ -n "$residue" && -e "$residue" ]] && echo "  residue=$residue" >&2 || true
+    done
+    for residue_domain in "${DOMAINS[@]:-}"; do
+      [[ -n "$residue_domain" ]] && echo "  owned_domain_candidate=$residue_domain" >&2 || true
+    done
     write_failure_artifact failed "${FOREIGN_PRESERVED:-unknown}" "cleanup left owned residue or an unproven deletion"
   else
     CLEANUP_DONE=true
@@ -1683,33 +1753,11 @@ provision_vms_bounded() {
   done
 }
 run_checkpoint_path_diagnostic() {
-  # Exercise the same publisher and release handshake used by the daemon
-  # before any VM is provisioned.  The child test drops to the daemon account
-  # and records both the legacy root-owned layout and the corrected private
-  # run directory; a failure is a hard preflight failure, not a VM failure.
-  local diagnostic_root="$STATE_ROOT/data/p15-7-checkpoint-diagnostic-$RUN_ID"
-  local diagnostic_target="$WORK_ROOT/checkpoint-diagnostic-target"
-  local diagnostic_log="$ARTIFACT_DIR/p15-7-checkpoint-path-diagnostic.log"
-  sudo -n install -d -o root -g root -m 0755 "$diagnostic_root" \
-    || die "cannot create checkpoint path diagnostic root"
-  if ! (cd "$ROOT_DIR" && \
-    sudo -n env \
-      O3K_CHECKPOINT_BOUNDARY_ROOT="$diagnostic_root" \
-      O3K_CHECKPOINT_BOUNDARY_EVIDENCE="$ARTIFACT_DIR/p15-7-checkpoint-path-diagnostic.json" \
-      CARGO_TARGET_DIR="$diagnostic_target" \
-      cargo test --locked -p o3k-compute --lib \
-        targeted_checkpoint_unprivileged_boundary_publishes_and_releases -- --nocapture) \
-      >"$diagnostic_log" 2>&1; then
-    sudo -n rm -rf -- "$diagnostic_root" >/dev/null 2>&1 || true
-    sudo -n rm -rf -- "$diagnostic_target" >/dev/null 2>&1 || true
-    die "checkpoint path diagnostic failed; inspect p15-7-checkpoint-path-diagnostic.log"
-  fi
-  [[ -s "$ARTIFACT_DIR/p15-7-checkpoint-path-diagnostic.json" ]] \
-    || { sudo -n rm -rf -- "$diagnostic_root" "$diagnostic_target" >/dev/null 2>&1 || true; die "checkpoint path diagnostic did not produce evidence"; }
-  sudo -n rm -rf -- "$diagnostic_root" \
-    || die "checkpoint path diagnostic cleanup failed"
-  sudo -n rm -rf -- "$diagnostic_target" \
-    || die "checkpoint diagnostic build cleanup failed"
+  # The helper passes O3K_CHECKPOINT_BOUNDARY_ROOT= to the staged boundary
+  # executable; this diagnostic root is intentionally outside STATE_ROOT/data.
+  bash "$ROOT_DIR/scripts/p15-7-checkpoint-path-diagnostic.sh" \
+    "$ROOT_DIR" "$ARTIFACT_DIR" "$WORK_ROOT" "$RUN_ID" \
+    || die "checkpoint path diagnostic failed; inspect p15-7-checkpoint-path-diagnostic.log"
 }
 O3K_P15_7_LIBVIRT_IMAGE_ROOT="$LIBVIRT_IMAGE_ROOT" \
   bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT" \
@@ -2913,61 +2961,6 @@ PY
   fi
   chmod 0600 "$output" "$server_raw" "$endpoint_raw" 2>/dev/null || true
   rm -f -- "$log_snapshot"
-}
-stop_contending_create() {
-  # Address only the exact run-owned background child, reap it, and remove
-  # only this run's synchronization markers. Never kill by process name.
-  local pid="${CONTENDING_CREATE_PID:-}" pgid="${CONTENDING_CREATE_PGID:-}" marker failed=false current_starttime current_pgid wait_status=0
-  if [[ -n "$pid" ]]; then
-    if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
-      echo "P15.7 cleanup: refusing non-numeric contending-create PID" >&2
-      failed=true
-    else
-      if kill -0 "$pid" 2>/dev/null; then
-        current_starttime="$(sudo -n awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
-        current_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
-        if [[ -z "${CONTENDING_CREATE_STARTTIME:-}" || "$current_starttime" != "$CONTENDING_CREATE_STARTTIME" \
-          || -z "$pgid" || ! "$pgid" =~ ^[0-9]+$ || "$current_pgid" != "$pgid" ]]; then
-          echo "P15.7 cleanup: contending-create PID identity changed before signal: $pid" >&2
-          failed=true
-        fi
-      fi
-      if [[ "$failed" == false ]] && kill -0 "$pid" 2>/dev/null; then
-        kill -TERM -- "-$pgid" 2>/dev/null || true
-        for _ in $(seq 1 50); do
-          kill -0 "$pid" 2>/dev/null || break
-          sleep 0.1
-        done
-        if kill -0 "$pid" 2>/dev/null; then
-          kill -KILL -- "-$pgid" 2>/dev/null || true
-          for _ in $(seq 1 20); do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 0.1
-          done
-        fi
-      fi
-      wait "$pid" 2>/dev/null || wait_status=$?
-      if kill -0 "$pid" 2>/dev/null; then
-        echo "P15.7 cleanup: contending-create PID remains after reap: $pid" >&2
-        failed=true
-      fi
-      if [[ "$failed" == false && -n "$pgid" ]] && ps -eo pid=,pgid= 2>/dev/null | awk -v pgid="$pgid" '$2 == pgid { found=1 } END { exit found ? 0 : 1 }'; then
-        echo "P15.7 cleanup: contending-create process group remains after reap: $pgid" >&2
-        failed=true
-      fi
-      [[ "$wait_status" -eq 0 || "$failed" == false ]] || failed=true
-    fi
-    if [[ "$failed" == false ]]; then
-      CONTENDING_CREATE_REAPED=true
-      CONTENDING_CREATE_PID=""
-      CONTENDING_CREATE_PGID=""
-    fi
-  fi
-  for marker in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}" "${CRASH_REPAIR_CHECKPOINT_FILE:-}"; do
-    [[ -n "$marker" ]] || continue
-    sudo -n rm -f -- "$marker" || failed=true
-  done
-  [[ "$failed" == false ]]
 }
 quota_usage() {
   curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \

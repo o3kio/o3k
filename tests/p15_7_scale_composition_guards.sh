@@ -858,6 +858,7 @@ for required_upload in (
     "p15-7-drain-failure-context.json", "p15-7-drain-blocker-requery.json",
     "p15-7-scale-checkpoint-*.json", "p15-7-vm-lease-*.json",
     "p15-7-workload-failure-diagnostics.json", "p15-7-orphan-repair-diagnostics-*.json",
+    "p15-7-checkpoint-path-diagnostic.log", "p15-7-checkpoint-path-diagnostic.json",
     "p15-7-host-maintenance-evidence.json", "p15-7-araf-projection.json",
     "p15-7-server-c-endpoint-show.json",
 ):
