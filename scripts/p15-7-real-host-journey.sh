@@ -490,10 +490,14 @@ start_o3kd_verified() {
     new_uid="$(sudo -n stat -c '%U' "/proc/$new_pid")"
     [[ "$new_uid" == "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" && "$(sudo -n readlink -f "/proc/$new_pid/exe")" == "$STATE_ROOT/bin/o3kd" ]] || die "restarted o3kd identity is not owned"
     printf '%s|%s|%s|o3kd\n' "$new_pid" "$new_ticks" "$new_uid" >"${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-testlab-pids/$RUN_ID}/o3kd.pid"
-    # Consume the entire stream: grep -q can SIGPIPE tr under pipefail and
-    # falsely reject an exact match in a sufficiently large live environment.
-    if ! sudo -n cat "/proc/$new_pid/environ" 2>/dev/null | tr '\0' '\n' \
-      | grep -Fx "O3K_DATA_DIR=$STATE_ROOT/data" >/dev/null; then
+    # Drain the environment before matching.  A grep process in the same
+    # pipeline can exit as soon as it sees the expected entry, causing tr to
+    # receive SIGPIPE under `pipefail`; that used to discard a valid
+    # replacement PID after the external-PostgreSQL environment rewrite.
+    local env_dump
+    env_dump="$(sudo -n cat "/proc/$new_pid/environ" 2>/dev/null | tr '\0' '\n')" \
+      || { new_pid=""; sleep .25; continue; }
+    if ! grep -Fx "O3K_DATA_DIR=$STATE_ROOT/data" <<<"$env_dump" >/dev/null; then
       new_pid=""
       sleep .25
       continue
@@ -520,7 +524,18 @@ start_o3kd_verified() {
     fi
     sleep .25
   done
-  [[ "$http_up" ]] || die "run-owned o3kd listeners did not belong to the captured restart PID"
+  if [[ -z "$http_up" ]]; then
+    {
+      printf 'captured_restart_pid=%s\n' "$new_pid"
+      printf 'auth_listener_pids=%s\n' "$http_listener_pid"
+      printf 'control_listener_pids=%s\n' "$control_listener_pid"
+      printf 'auth_port=%s control_port=%s\n' "$AUTH_PORT" "$CONTROL_PORT"
+      printf '%s\n' 'ss_snapshot:'
+      sudo -n ss -H -ltnp "sport = :$AUTH_PORT or sport = :$CONTROL_PORT" 2>/dev/null \
+        | sed -n '1,20p' || true
+    } >"$WORK_ROOT/restart-listener-verification-failure.txt"
+    die "run-owned o3kd listeners did not belong to the captured restart PID"
+  fi
   O3KD_HTTP_LISTENER_PID="$http_listener_pid"
   O3KD_CONTROL_LISTENER_PID="$control_listener_pid"
 }

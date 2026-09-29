@@ -10,9 +10,16 @@ import sys
 
 source = Path(sys.argv[1]).read_text()
 checks = re.findall(
-    r'sudo -n cat "/proc/\$(?:new_pid|RESTARTED_O3KD_PID)/environ"'
+    r'sudo -n cat "/proc/\$RESTARTED_O3KD_PID/environ"'
     r' 2>/dev/null \| tr.*?\| grep[^\n;]+(?=; then)', source, re.S)
-assert len(checks) == 8, f'expected eight live environment checks, got {len(checks)}'
+assert len(checks) == 7, f'expected seven post-restart live environment checks, got {len(checks)}'
+# The replacement-PID guard drains /proc before matching. Keep this separate
+# from the older repair-seam checks so a broad source regex cannot turn the
+# shell command itself into an oversized argv entry.
+assert re.search(
+    r'env_dump="\$\(sudo -n cat "/proc/\$new_pid/environ" 2>/dev/null \| tr',
+    source), 'replacement environment must be drained before matching'
+assert 'grep -Fx "O3K_DATA_DIR=$STATE_ROOT/data" <<<"$env_dump"' in source
 # A real /proc environment larger than pipe buffers reproduces the early
 # grep -q/SIGPIPE false rejection without exposing any real credentials.
 environment = {
@@ -23,7 +30,7 @@ environment = {
     'REPLAY_SUPPRESS_RESOURCE': '00000000-0000-0000-0000-000000000001',
     'REPLAY_SUPPRESS_RUN': 'guard-run',
     'O3K_PP5_RUN_ID': 'guard-run',
-    **{f'PADDING_{i}': 'x' * 4096 for i in range(64)},
+    **{f'PADDING_{i}': 'x' * 4096 for i in range(24)},
 }
 process = subprocess.Popen(['sleep', '60'], env=environment)
 try:
@@ -44,7 +51,13 @@ try:
         'O3K_PP5_RUN_ENV_NAME': 'O3K_PP5_RUN_ID',
         'RUN_ID': 'guard-run',
     }
-    for index, check in enumerate(checks):
+    replacement_check = (
+        'set -o pipefail\n'
+        'env_dump="$(cat "/proc/$new_pid/environ" 2>/dev/null | tr \'\\0\' \'\\n\')"\n'
+        'grep -Fx "O3K_DATA_DIR=$STATE_ROOT/data" <<<"$env_dump" >/dev/null'
+    )
+    all_checks = [replacement_check] + checks
+    for index, check in enumerate(all_checks):
         command = 'set -o pipefail\n' + check.replace('sudo -n cat', 'cat', 1)
         result = subprocess.run(['bash', '-c', command], env=test_env,
                                 capture_output=True, timeout=5)
@@ -64,7 +77,7 @@ try:
                               capture_output=True, timeout=5).returncode != 0
     launcher = source.split('start_o3kd_verified() {', 1)[1].split('\nstop_o3kd_orderly()', 1)[0]
     ledger = launcher.index('>"${O3K_TESTLAB_PID_ROOT:')
-    env_check = launcher.index('if ! sudo -n cat')
+    env_check = launcher.index('env_dump="$(sudo -n cat')
     assert ledger < env_check, 'verified replacement must be recorded before later rejection'
     repair_env = source.split('append_o3kd_repair_pause_env() {', 1)[1].split('\nremove_o3kd_repair_pause_env()', 1)[0]
     assert '$STATE_ROOT/data/p15-7-orphan-repair-$RUN_ID' in repair_env, 'repair seam must use the private run-scoped data directory'
