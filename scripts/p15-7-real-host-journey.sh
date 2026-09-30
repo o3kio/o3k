@@ -435,6 +435,46 @@ wait_o3kd_readyz() {
   for _ in $(seq 1 60); do curl --fail --silent "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
   curl --fail --silent "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1 || die "$message"
 }
+wait_for_agent_streams() {
+  # A daemon restart creates a fresh in-memory execution registry while the
+  # agent-stream work leases intentionally outlive a lost controller for their
+  # bounded TTL.  /readyz therefore is not sufficient to prove that real
+  # execution is available: a freshly started daemon can be healthy while all
+  # agents are still fenced by the previous controller.  Require two
+  # consecutive diagnostics observations that prove every durable provider has
+  # a live, fresh agent snapshot before issuing the next real workload.
+  local phase="$1" readiness_file="$WORK_ROOT/agent-stream-readiness-$phase.json"
+  local ready_streak=0
+  for _ in $(seq 1 60); do
+    if api_get "/operator/diagnostics/providers?limit=200" "agent-stream-readiness-$phase" >"$readiness_file" 2>/dev/null \
+      && python3 - "$readiness_file" <<'PY'
+import json, sys, time
+
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+items = doc.get("items")
+if not isinstance(items, list) or not items:
+    raise SystemExit(1)
+now = int(time.time() * 1000)
+for item in items:
+    if item.get("status") != "healthy" or item.get("availability") != "available":
+        raise SystemExit(1)
+    observed = item.get("observed_at_unix_ms")
+    if not isinstance(observed, int) or now - observed < 0 or now - observed > 15_000:
+        raise SystemExit(1)
+PY
+    then
+      ready_streak=$((ready_streak + 1))
+      if ((ready_streak >= 2)); then
+        return 0
+      fi
+    else
+      ready_streak=0
+    fi
+    sleep 1
+  done
+  cp -- "$readiness_file" "$ARTIFACT_DIR/p15-7-agent-stream-readiness-$phase.json" 2>/dev/null || true
+  die "real agent streams did not become live after daemon restart: phase=$phase"
+}
 read_o3kd_ledger() {
   # Read the run-owned o3kd ownership ledger and verify the recorded process
   # identity (owner uid, start ticks, executable path). No process-name lookup
@@ -2849,6 +2889,7 @@ fi
 record_scale_checkpoint post-reboot 5 "$DRAIN_ID" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
   "$POST_REMOVE_BOOTSTRAP_EXPECT" \
   >/dev/null || die "post-reboot eligible Ready count is not exactly five"
+wait_for_agent_streams post-reboot
 
 # Focused development lane: S5 ends at the restart checkpoint.  The normal
 # EXIT cleanup still tears down only this run's owned resources, while the
@@ -3227,6 +3268,7 @@ GEN_C="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metada
 append_o3kd_fault_env "$WORKLOAD_C"
 restart_o3kd_verified
 wait_o3kd_readyz "readyz did not reconstruct with the targeted fault hook armed"
+wait_for_agent_streams pre-crash-target-delete
 FAULT_TARGET_ENV_CONSUMED=false
 if sudo -n cat "/proc/$(read_o3kd_ledger)/environ" 2>/dev/null | tr '\0' '\n' \
   | grep -Fx "$O3K_FAULT_TARGET_ENV_NAME=$WORKLOAD_C" >/dev/null; then
