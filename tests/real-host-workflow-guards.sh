@@ -622,6 +622,7 @@ PY
 
 python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
 import pathlib, re, sys
+import os, subprocess
 from pathlib import Path
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 preflight_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
@@ -640,6 +641,29 @@ assert "scripts/p15-7-campaign-lock.py acquire" in text
 assert "scripts/p15-7-harness-qualification.sh" in text
 assert "O3K_P15_7_CAMPAIGN_LOCK_PATH" in text
 assert "          OS_PASSWORD:" not in workflow_step
+
+# Exercise the exact shell predicate embedded in the workflow.  A listener
+# snapshot with no matching port must be considered free; a matching local or
+# wildcard listener must be considered occupied.
+port_free_match = re.search(
+    r"(?ms)^\s+port_free\(\) \{\n(?P<body>.*?)^\s+\}", text
+)
+assert port_free_match, "workflow must retain a testable port_free predicate"
+port_free_function = text[port_free_match.start():port_free_match.end()]
+port_free_script = f'listeners="$MOCK_LISTENERS"\n{port_free_function}\nport_free "$PORT"'
+for port, listeners, expected in (
+    ("28080", "", 0),
+    ("28080", "LISTEN 0 128 127.0.0.1:28080 0.0.0.0:*\n", 1),
+    ("28080", "LISTEN 0 128 0.0.0.0:28080 0.0.0.0:*\n", 1),
+    ("28080", "LISTEN 0 128 127.0.0.1:28081 0.0.0.0:*\n", 0),
+):
+    env = os.environ.copy()
+    env.update(PORT=port, MOCK_LISTENERS=listeners)
+    result = subprocess.run(["bash", "-c", port_free_script], env=env, check=False)
+    assert result.returncode == expected, (
+        f"port_free({port}) returned {result.returncode} for listeners {listeners!r}; "
+        f"expected {expected}"
+    )
 for needle in ("workflow_dispatch:",
                "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",

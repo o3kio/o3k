@@ -216,7 +216,7 @@ jobs:
           }
           port_free() {
             local port="$1"
-            ! awk -v suffix=":${port}" \
+            awk -v suffix=":${port}" \
               'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit found}' \
               <<<"${listeners}"
           }
