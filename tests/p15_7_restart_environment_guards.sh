@@ -10,8 +10,18 @@ import sys
 
 source = Path(sys.argv[1]).read_text()
 stream_helper = source.split('wait_for_agent_streams() {', 1)[1].split('\n}', 1)[0]
-assert 'local phase="$1"\n  local readiness_file="$WORK_ROOT/agent-stream-readiness-$phase.json"' in stream_helper, \
+assert 'local phase="$1"\n  local required_providers="${2:-}"\n  local readiness_file="$WORK_ROOT/agent-stream-readiness-$phase.json"' in stream_helper, \
     'agent stream readiness must assign phase before expanding it in the readiness path'
+assert 'local required_providers="${2:-}"' in stream_helper, \
+    'agent stream readiness must accept the expected surviving provider set'
+assert 'python3 - "$readiness_file" "$required_providers"' in stream_helper, \
+    'agent stream readiness must pass the expected provider set to validation'
+assert 'provider_id' in stream_helper and 'any(provider not in by_id for provider in required)' in stream_helper, \
+    'agent stream readiness must fail closed when an expected provider is absent'
+assert 'wait_for_agent_streams post-reboot "$STREAM_REQUIRED_PROVIDERS"' in source, \
+    'post-reboot readiness must validate the surviving provider set'
+assert 'wait_for_agent_streams pre-crash-target-delete "$STREAM_REQUIRED_PROVIDERS"' in source, \
+    'pre-crash readiness must validate the surviving provider set'
 checks = re.findall(
     r'sudo -n cat "/proc/\$RESTARTED_O3KD_PID/environ"'
     r' 2>/dev/null \| tr.*?\| grep[^\n;]+(?=; then)', source, re.S)

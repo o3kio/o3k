@@ -444,17 +444,24 @@ wait_for_agent_streams() {
   # consecutive diagnostics observations that prove every durable provider has
   # a live, fresh agent snapshot before issuing the next real workload.
   local phase="$1"
+  local required_providers="${2:-}"
   local readiness_file="$WORK_ROOT/agent-stream-readiness-$phase.json"
   local ready_streak=0
   for _ in $(seq 1 60); do
     if api_get "/operator/diagnostics/providers?limit=200" "agent-stream-readiness-$phase" >"$readiness_file" 2>/dev/null \
-      && python3 - "$readiness_file" <<'PY'
+      && python3 - "$readiness_file" "$required_providers" <<'PY'
 import json, sys, time
 
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
 items = doc.get("items")
 if not isinstance(items, list) or not items:
     raise SystemExit(1)
+required = [provider for provider in sys.argv[2].split(",") if provider]
+if required:
+    by_id = {item.get("provider_id"): item for item in items if item.get("provider_id")}
+    if len(by_id) != len(items) or any(provider not in by_id for provider in required):
+        raise SystemExit(1)
+    items = [by_id[provider] for provider in required]
 now = int(time.time() * 1000)
 for item in items:
     if item.get("status") != "healthy" or item.get("availability") != "available":
@@ -2890,7 +2897,12 @@ fi
 record_scale_checkpoint post-reboot 5 "$DRAIN_ID" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
   "$POST_REMOVE_BOOTSTRAP_EXPECT" \
   >/dev/null || die "post-reboot eligible Ready count is not exactly five"
-wait_for_agent_streams post-reboot
+STREAM_REQUIRED_PROVIDERS=""
+for provider in compute-agent block-a block-b block-c block-d block-e; do
+  [[ "$provider" == "$DRAIN_AGENT" ]] && continue
+  STREAM_REQUIRED_PROVIDERS+="${STREAM_REQUIRED_PROVIDERS:+,}$provider"
+done
+wait_for_agent_streams post-reboot "$STREAM_REQUIRED_PROVIDERS"
 
 # Focused development lane: S5 ends at the restart checkpoint.  The normal
 # EXIT cleanup still tears down only this run's owned resources, while the
@@ -3269,7 +3281,7 @@ GEN_C="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metada
 append_o3kd_fault_env "$WORKLOAD_C"
 restart_o3kd_verified
 wait_o3kd_readyz "readyz did not reconstruct with the targeted fault hook armed"
-wait_for_agent_streams pre-crash-target-delete
+wait_for_agent_streams pre-crash-target-delete "$STREAM_REQUIRED_PROVIDERS"
 FAULT_TARGET_ENV_CONSUMED=false
 if sudo -n cat "/proc/$(read_o3kd_ledger)/environ" 2>/dev/null | tr '\0' '\n' \
   | grep -Fx "$O3K_FAULT_TARGET_ENV_NAME=$WORKLOAD_C" >/dev/null; then
