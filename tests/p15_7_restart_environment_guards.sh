@@ -9,6 +9,9 @@ import subprocess
 import sys
 
 source = Path(sys.argv[1]).read_text()
+stream_helper = source.split('wait_for_agent_streams() {', 1)[1].split('\n}', 1)[0]
+assert 'local phase="$1"\n  local readiness_file="$WORK_ROOT/agent-stream-readiness-$phase.json"' in stream_helper, \
+    'agent stream readiness must assign phase before expanding it in the readiness path'
 checks = re.findall(
     r'sudo -n cat "/proc/\$RESTARTED_O3KD_PID/environ"'
     r' 2>/dev/null \| tr.*?\| grep[^\n;]+(?=; then)', source, re.S)

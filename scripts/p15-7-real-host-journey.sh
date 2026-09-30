@@ -443,7 +443,8 @@ wait_for_agent_streams() {
   # agents are still fenced by the previous controller.  Require two
   # consecutive diagnostics observations that prove every durable provider has
   # a live, fresh agent snapshot before issuing the next real workload.
-  local phase="$1" readiness_file="$WORK_ROOT/agent-stream-readiness-$phase.json"
+  local phase="$1"
+  local readiness_file="$WORK_ROOT/agent-stream-readiness-$phase.json"
   local ready_streak=0
   for _ in $(seq 1 60); do
     if api_get "/operator/diagnostics/providers?limit=200" "agent-stream-readiness-$phase" >"$readiness_file" 2>/dev/null \
