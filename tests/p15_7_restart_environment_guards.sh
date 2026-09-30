@@ -22,6 +22,12 @@ assert 'wait_for_agent_streams post-reboot "$STREAM_REQUIRED_PROVIDERS"' in sour
     'post-reboot readiness must validate the surviving provider set'
 assert 'wait_for_agent_streams pre-crash-target-delete "$STREAM_REQUIRED_PROVIDERS"' in source, \
     'pre-crash readiness must validate the surviving provider set'
+assert 'wait_for_agent_streams post-crash-restart "$STREAM_REQUIRED_PROVIDERS"' in source, \
+    'post-crash readiness must validate the surviving provider set before contention'
+assert 'workload-c-show-before-delete.json' in source, \
+    'crash delete must retain the post-restart generation read'
+assert 'GEN_C="$(python3 -c' in source[source.index('workload-c-show-before-delete.json'):], \
+    'crash delete must refresh If-Match generation after restart'
 checks = re.findall(
     r'sudo -n cat "/proc/\$RESTARTED_O3KD_PID/environ"'
     r' 2>/dev/null \| tr.*?\| grep[^\n;]+(?=; then)', source, re.S)
@@ -91,7 +97,7 @@ try:
     launcher = source.split('start_o3kd_verified() {', 1)[1].split('\nstop_o3kd_orderly()', 1)[0]
     ledger = launcher.index('>"${O3K_TESTLAB_PID_ROOT:')
     env_check = launcher.index('env_dump="$(sudo -n cat')
-    assert ledger < env_check, 'verified replacement must be recorded before later rejection'
+    assert ledger > env_check, 'ownership ledger must be published only after environment verification'
     repair_env = source.split('append_o3kd_repair_pause_env() {', 1)[1].split('\nremove_o3kd_repair_pause_env()', 1)[0]
     assert '$STATE_ROOT/data/p15-7-orphan-repair-$RUN_ID' in repair_env, 'repair seam must use the private run-scoped data directory'
     assert 'install -d -o "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}"' in repair_env, 'repair seam directory must be daemon-owned'

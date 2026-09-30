@@ -12,6 +12,7 @@ use axum::{
 use o3k_compute::{ComputeError, ComputeService, Flavor, Server};
 use o3k_console::ConsoleError;
 use o3k_domain::{ServerId, ServerState};
+use o3k_kernel::ActionId;
 use o3k_network::NetworkService;
 use o3k_provider::{ConfigDriveRequest, InstanceAction};
 use serde::Serialize;
@@ -933,24 +934,59 @@ pub(crate) async fn create_server(
             "network is required",
         );
     }
+    let server_name = body.server.name;
+    let server_key_name = body.server.key_name;
+    let server_config_drive = config_drive;
+    let server_image = image;
+    let server_flavor = flavor;
+    let server_network_ids = network_ids;
+    let create_action = ActionId::new_unchecked("compute".to_owned(), "CreateServer".to_owned());
+    let create_context = match o3k_reconciler::CanonicalMutationContext::new(
+        create_action,
+        auth.principal().id().to_string(),
+        auth.effective_scope().clone(),
+        None,
+        idempotency.clone(),
+        serde_json::json!({
+            "spec": {
+                "name": server_name,
+                "image_id": server_image,
+                "flavor_id": server_flavor,
+                "network_ids": server_network_ids,
+                "key_name": server_key_name,
+                "config_drive": server_config_drive,
+            }
+        }),
+    ) {
+        Ok(context) => context,
+        Err(_) => {
+            return keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "invalid server request",
+            );
+        }
+    };
     let result = service
-        .create_server_for_auth(
+        .create_server_for_auth_canonical(
             &auth,
             o3k_compute::ServerCreateInput {
                 user_id: auth.principal().id().as_str().to_owned(),
                 project_id: auth.effective_scope().id().as_str().to_owned(),
-                name: body.server.name,
-                image_id: image,
-                flavor_id: flavor,
-                network_ids,
-                key_name: body.server.key_name,
-                config_drive,
+                name: server_name,
+                image_id: server_image,
+                flavor_id: server_flavor,
+                network_ids: server_network_ids,
+                key_name: server_key_name,
+                config_drive: server_config_drive,
                 idempotency_key: idempotency,
             },
+            create_context,
         )
         .await;
     match result {
-        Ok(server) => {
+        Ok(receipt) => {
+            let server = receipt.resource;
             if let Some(network_service) = state.network.as_ref() {
                 let _mutation_guard = state.network_mutation_lock.lock().await;
                 let mut cleanup_failed = false;

@@ -15,7 +15,7 @@ MAX_INPUT_BYTES = 256 * 1024
 MAX_OUTPUT_CHARS = 32 * 1024
 MAX_LOG_LINES = 96
 MAX_LOG_CHARS = 24 * 1024
-UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b")
+UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b")
 REQUEST_ID_RE = re.compile(
     r"(?i)(?:x[-_ ]?openstack[-_ ]?request[-_ ]?id|request[-_ ]?id|req[-_ ]?id)"
     r"\s*[:=]\s*[<\[\(]?([A-Za-z0-9._:-]{4,160})"
@@ -167,6 +167,7 @@ def main() -> int:
     stderr_raw = read_text(root, "workload-d-create.err")
     stdout, stdout_truncated = sanitize(stdout_raw)
     stderr, stderr_truncated = sanitize(stderr_raw)
+    reuse_stderr, reuse_truncated = sanitize(read_text(root, "reuse-port.err"))
     server_doc = json_document(root, "workload-d-show.json")
     operations_doc = json_document(root, "operations-d.json")
     server_id = clean_id(args.server_id) or next(iter(UUID_RE.findall(stdout_raw)), None)
@@ -228,6 +229,10 @@ def main() -> int:
             "id": operation_id,
             "state": operation_state,
             "http_status": args.operation_http_status or "unknown",
+        },
+        "fixed_ip_reuse": {
+            "stderr": reuse_stderr,
+            "stderr_truncated": reuse_truncated,
         },
         "correlated_errors": logs,
     }

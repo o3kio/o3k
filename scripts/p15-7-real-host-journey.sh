@@ -534,13 +534,9 @@ start_o3kd_verified() {
       || { new_pid=""; sleep .25; continue; }
     [[ "$(sudo -n readlink -f "/proc/$new_pid/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] \
       || { new_pid=""; sleep .25; continue; }
-    # Record the strongly identified replacement before a later environment
-    # or listener check can reject it. Cleanup must not retain only the dead
-    # predecessor's ledger when a live replacement fails verification.
     new_ticks="$(sudo -n awk '{print $22}' "/proc/$new_pid/stat")"
     new_uid="$(sudo -n stat -c '%U' "/proc/$new_pid")"
     [[ "$new_uid" == "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" && "$(sudo -n readlink -f "/proc/$new_pid/exe")" == "$STATE_ROOT/bin/o3kd" ]] || die "restarted o3kd identity is not owned"
-    printf '%s|%s|%s|o3kd\n' "$new_pid" "$new_ticks" "$new_uid" >"${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-testlab-pids/$RUN_ID}/o3kd.pid"
     # Drain the environment before matching.  A grep process in the same
     # pipeline can exit as soon as it sees the expected entry, causing tr to
     # receive SIGPIPE under `pipefail`; that used to discard a valid
@@ -553,6 +549,10 @@ start_o3kd_verified() {
       sleep .25
       continue
     fi
+    # Publish the ownership ledger only after the replacement has passed all
+    # identity and environment checks.  A transient launch-wrapper candidate
+    # must never overwrite the predecessor ledger with a foreign/root PID.
+    printf '%s|%s|%s|o3kd\n' "$new_pid" "$new_ticks" "$new_uid" >"${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-testlab-pids/$RUN_ID}/o3kd.pid"
     [[ "$new_pid" ]] && break
   done
   [[ "$new_pid" ]] || die "o3kd restart failed"
@@ -794,10 +794,10 @@ capture_contending_create_evidence() {
   # bounds these before publication; raw snapshots remain in WORK_ROOT and are
   # removed by the normal ownership-checked cleanup path.
   if [[ -n "${STATE_ROOT:-}" ]] && sudo -n test -f "$STATE_ROOT/log/o3kd.log" 2>/dev/null; then
-    sudo -n tail -n 1200 "$STATE_ROOT/log/o3kd.log" >"$daemon_log" 2>/dev/null || true
+    sudo -n tail -n 1200 "$STATE_ROOT/log/o3kd.log" | tail -c 262144 >"$daemon_log" 2>/dev/null || true
   fi
   if [[ -n "${STATE_ROOT:-}" ]] && sudo -n test -f "$STATE_ROOT/log/o3k-compute.log" 2>/dev/null; then
-    sudo -n tail -n 1200 "$STATE_ROOT/log/o3k-compute.log" >"$agent_log" 2>/dev/null || true
+    sudo -n tail -n 1200 "$STATE_ROOT/log/o3k-compute.log" | tail -c 262144 >"$agent_log" 2>/dev/null || true
   fi
   # The provider side is normally emitted by the same compute-agent log in a
   # disposable TestLab. Keep a separate labelled projection so the artifact
@@ -810,7 +810,7 @@ capture_contending_create_evidence() {
     --artifact "$ARTIFACT_DIR/p15-7-contender-evidence.json" \
     --work-root "$WORK_ROOT" --source-sha "$SOURCE_SHA" --run-id "$RUN_ID" \
     --phase "$phase" --wrapper-exit-status "$CONTENDING_CREATE_WRAPPER_EXIT_STATUS" \
-    --pid "${CONTENDING_CREATE_PID:-}" --pgid "${CONTENDING_CREATE_PGID:-}" \
+    --pid "${CONTENDING_CREATE_OBSERVED_PID:-${CONTENDING_CREATE_PID:-}}" --pgid "${CONTENDING_CREATE_OBSERVED_PGID:-${CONTENDING_CREATE_PGID:-}}" \
     --starttime "${CONTENDING_CREATE_STARTTIME:-}" \
     --request-start-ms "${CONTENDING_CREATE_REQUEST_START_MS:-$end_ms}" --request-end-ms "$end_ms" \
     --endpoint-id "${OS_PORT_D_ID:-}" --server-id "${WORKLOAD_D:-}" \
@@ -3305,6 +3305,21 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 [[ "$BACKEND_LIVE" == true ]] || die "backend_liveness_gate_failed_after_fault_hook_restart"
+# Restart-time observation/reconciliation may legitimately advance the
+# resource generation after the pre-restart activation poll.  The delete is a
+# conditional mutation, so bind its If-Match value to the last authenticated
+# read immediately before issuing the request rather than replaying the stale
+# pre-restart generation.  Preserve this projection as part of the crash
+# checkpoint inputs so a conflict remains diagnosable without weakening the
+# optimistic-concurrency contract.
+code_c="$(curl --silent --output "$WORK_ROOT/workload-c-show-before-delete.json" \
+  --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" \
+  "$API/compute/servers/$WORKLOAD_C" || true)"
+[[ "$code_c" == 200 ]] || die "server C pre-delete generation read failed (http=$code_c)"
+C_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", {}).get("state", ""))' "$WORK_ROOT/workload-c-show-before-delete.json" 2>/dev/null || true)"
+[[ "$C_STATE" == "ACTIVE" ]] || die "server C was not ACTIVE before crash-leg delete (state=$C_STATE)"
+GEN_C="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["metadata"]["generation"])' "$WORK_ROOT/workload-c-show-before-delete.json" 2>/dev/null || true)"
+[[ "$GEN_C" =~ ^[0-9]+$ ]] || die "server C pre-delete generation was unavailable"
 api_get "/operator/diagnostics/providers?limit=200" >"$WORK_ROOT/providers-before-crash.json"
 ALLOC_BEFORE_CRASH="$(allocated_vcpu_total "$WORK_ROOT/providers-before-crash.json")"
 [[ "$ALLOC_BEFORE_CRASH" =~ ^[0-9]+$ ]] || die "Placement allocation baseline unavailable"
@@ -3492,6 +3507,7 @@ fi
   || die "restarted o3kd did not consume the run-owned repair synchronization environment"
 remove_o3kd_repair_pause_env || die "repair contention pause could not be removed from daemon environment"
 wait_o3kd_readyz "readyz did not reconstruct after the crash restart"
+wait_for_agent_streams post-crash-restart "$STREAM_REQUIRED_PROVIDERS"
 CRASH_RESTART_MS="$(date +%s%3N)"
 persist_crash_checkpoint process_restarted running \
   restart_path normal_boot readyz passed restart_unix_ms "$CRASH_RESTART_MS" restarted_pid "$RESTARTED_O3KD_PID" \
@@ -3698,6 +3714,8 @@ if [[ "$CONTENDING_CREATE_WRAPPER_EXIT_STATUS" -ne 0 ]]; then
   capture_contending_create_evidence "repair_completed"
   die "contending existing-port create failed after orphan repair completed (wrapper_exit_status=$CONTENDING_CREATE_WRAPPER_EXIT_STATUS)"
 fi
+CONTENDING_CREATE_OBSERVED_PID="$CONTENDING_CREATE_PID"
+CONTENDING_CREATE_OBSERVED_PGID="$CONTENDING_CREATE_PGID"
 CONTENDING_CREATE_REAPED=true
 CONTENDING_CREATE_PID=""
 CONTENDING_CREATE_PGID=""
@@ -3713,8 +3731,9 @@ WORKLOAD_D="$(tr -d '[:space:]' <"$WORK_ROOT/workload-d-create.txt")"
 OS_WORKLOAD_D="$WORKLOAD_D"
 CONTENDING_CREATE_RESOURCE_ID="$WORKLOAD_D"
 for _ in $(seq 1 10); do
-  curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
-    "$API/operations?limit=100" >"$WORK_ROOT/operations-d.json" 2>/dev/null || true
+  CONTENDING_CREATE_OPERATION_HTTP_STATUS="$(curl --silent --show-error --output "$WORK_ROOT/operations-d.json" \
+    --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" \
+    "$API/operations?limit=100" 2>"$WORK_ROOT/operations-d.err" || true)"
   CONTENDING_CREATE_OPERATION_ID="$(python3 - "$WORK_ROOT/operations-d.json" "$WORKLOAD_D" <<'PY'
 import json,sys
 try:
@@ -3755,7 +3774,11 @@ done
 CONTENDING_CREATE_ACTIVE_MS="$(date +%s%3N)"
 CONTENDING_CREATE_ACTIVE_LATENCY_MS="$((CONTENDING_CREATE_ACTIVE_MS - CONTENDING_CREATE_REQUEST_ACCEPTED_MS))"
 CONTENDING_CREATE_SERVER_HTTP_STATUS="200"
-CONTENDING_CREATE_OPERATION_STATE="succeeded"
+# Read the operation projection again after observing ACTIVE. Do not infer
+# operation success from resource state: its durable projection can lag.
+CONTENDING_CREATE_OPERATION_HTTP_STATUS="$(curl --silent --show-error --output "$WORK_ROOT/operations-d.json" \
+  --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" \
+  "$API/operations?limit=100" 2>"$WORK_ROOT/operations-d.err" || true)"
 capture_contending_create_evidence "contending_create_active"
 
 # Fail-closed tail: no die is permitted between here and the foreign-fixture
@@ -3775,7 +3798,7 @@ ALLOC_AFTER_CRASH="$(allocated_vcpu_total "$WORK_ROOT/providers-after-crash.json
 FIXED_IP_REUSABLE=false
 REUSE_FAILURE=""
 if [[ -z "$CRASH_FAILURE" ]]; then
-  if REUSE_PORT_ID="$(openstack port create --network "$OS_NETWORK_ID" --fixed-ip "ip-address=$PORT_C_FIXED_IP" "o3k-p15-7-$RUN_ID-reuse" -f value -c id 2>"$WORK_ROOT/reuse-port.err" | tr -d '[:space:]')" \
+  if REUSE_PORT_ID="$(openstack port create --network "$OS_NETWORK_ID" --fixed-ip "subnet=$OS_SUBNET_ID,ip-address=$PORT_C_FIXED_IP" "o3k-p15-7-$RUN_ID-reuse" -f value -c id 2>"$WORK_ROOT/reuse-port.err" | tr -d '[:space:]')" \
     && [[ "$REUSE_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
     FIXED_IP_REUSABLE=true
     delete_owned_openstack port "$REUSE_PORT_ID" || REUSE_FAILURE="reuse proof port could not be deleted"
@@ -3783,6 +3806,7 @@ if [[ -z "$CRASH_FAILURE" ]]; then
   else
     REUSE_FAILURE="orphan fixed IP was not reusable after repair"
   fi
+  capture_contending_create_evidence "fixed_ip_reuse_observed"
 fi
 # Delete the contending create workload and prove the caller-supplied port
 # survived (only server-owned endpoints may ever be released).
