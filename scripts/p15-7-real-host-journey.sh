@@ -998,6 +998,8 @@ stop_contending_create() {
     fi
     if [[ "$failed" == false ]]; then
       CONTENDING_CREATE_REAPED=true
+      CONTENDING_CREATE_OBSERVED_PID="$pid"
+      CONTENDING_CREATE_OBSERVED_PGID="$pgid"
       CONTENDING_CREATE_PID=""
       CONTENDING_CREATE_PGID=""
     fi
@@ -1274,6 +1276,11 @@ cleanup() {
   local exit_status=$?
   set +e
   local cleanup_failed=false
+  # Preserve the resource checkpoint and structured timeline before the
+  # contender cleanup removes the run-owned synchronization markers.
+  if [[ "$exit_status" -ne 0 && "${CRASH_STARTED:-false}" == true ]]; then
+    write_orphan_repair_diagnostics || true
+  fi
   if ! stop_contending_create; then
     cleanup_failed=true
   fi
@@ -3024,6 +3031,14 @@ write_orphan_repair_diagnostics() {
   local endpoint_raw="$WORK_ROOT/orphan-repair-endpoint.raw.json"
   local log_snapshot="$WORK_ROOT/orphan-repair-log-$RUN_ID.jsonl"
   local server_status=000 endpoint_status=000 elapsed_ms expected_at
+  # This run-owned file is the canonical schema-v2 identity/boolean
+  # checkpoint, not a provider payload. Retain it before marker cleanup;
+  # publication failures must not manufacture a replacement checkpoint.
+  if sudo -n test -s "$CRASH_REPAIR_CHECKPOINT_FILE"; then
+    sudo -n head -c 8192 -- "$CRASH_REPAIR_CHECKPOINT_FILE" \
+      >"$ARTIFACT_DIR/p15-7-orphan-repair-checkpoint.json"
+    chmod 0600 "$ARTIFACT_DIR/p15-7-orphan-repair-checkpoint.json"
+  fi
   fetch_redacted_json() {
     local url="$1" output_path="$2" header_name="$3" header_file status header_value
     header_file="$(mktemp "$RUNNER_TEMP_ROOT/pp5-diagnostic-header.XXXXXX")"
@@ -3417,6 +3432,46 @@ fi
 UNRELATED_DB_PROBE_LATENCY_MS="$(( $(date +%s%3N) - UNRELATED_DB_PROBE_START_MS ))"
 [[ "$UNRELATED_DB_PROBE_OK" == true ]] || die "unrelated_db_backed_probe_failed_during_endpoint_release_pause: curl_exit=$UNRELATED_DB_PROBE_CURL_EXIT http_status=$UNRELATED_DB_PROBE_HTTP_CODE"
 
+# Fixtures are created DURING the terminal-delete orphan backlog, before
+# SIGKILL. Preparing them here keeps setup out of the repair checkpoint's
+# fixed release window while preserving real caller/foreign canaries.
+# Foreign-project fixture: the sweep must
+# never touch it even though foreign endpoints exist in the same control
+# plane. Deleted at leg end (the fixture credentials are not retained). The
+# token is re-minted here: the leg runs long after the concealment-phase
+# token was issued and a bounded foreign fixture must not depend on it.
+FOREIGN_TOKEN="$(
+  OS_USERNAME="$FOREIGN_USER_NAME" OS_PASSWORD="${O3K_P15_7_FOREIGN_PASSWORD:-${O3K_EXTRA_TENANT_PASSWORD:-}}" \
+  OS_PROJECT_ID="$FOREIGN_PROJECT_ID" OS_PROJECT_NAME="$FOREIGN_PROJECT_NAME" \
+  OS_USER_DOMAIN_NAME=Default OS_PROJECT_DOMAIN_NAME=Default \
+    openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]' || true
+)"
+[[ -n "$FOREIGN_TOKEN" ]] || die "foreign-project token re-issue for the crash leg failed"
+FOREIGN_NET_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
+  "http://127.0.0.1:$AUTH_PORT/v2.0/networks" -d "{\"network\":{\"name\":\"o3k-p15-7-$RUN_ID-foreign-net\"}}" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("network") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
+[[ "$FOREIGN_NET_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project network fixture creation failed"
+FOREIGN_SUBNET_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
+  "http://127.0.0.1:$AUTH_PORT/v2.0/subnets" -d "{\"subnet\":{\"network_id\":\"$FOREIGN_NET_ID\",\"ip_version\":4,\"cidr\":\"198.19.0.0/29\",\"name\":\"o3k-p15-7-$RUN_ID-foreign-subnet\"}}" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("subnet") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
+[[ "$FOREIGN_SUBNET_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project subnet fixture creation failed"
+FOREIGN_PORT_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
+  "http://127.0.0.1:$AUTH_PORT/v2.0/ports" -d "{\"port\":{\"network_id\":\"$FOREIGN_NET_ID\",\"name\":\"o3k-p15-7-$RUN_ID-foreign-port\"}}" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("port") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
+[[ "$FOREIGN_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project endpoint fixture creation failed"
+
+# Contention/fairness probe: a Nova create with a caller-supplied existing
+# port contends on orphan_repair_lock by design. The repair-pass test seam is
+# armed to an absolute deadline and its log proves the real sweep owns the
+# lock before this request starts. Acceptance is bounded by the one 30s
+# network-operation critical section, configured 5s cadence/API margin, and
+# the 30s bounded fail-safe on the deterministic harness handshake;
+# ACTIVE convergence is measured separately and is not part of this bound.
+openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN_ID-port-d" -f value -c id >"$WORK_ROOT/port-d-create.txt" 2>"$WORK_ROOT/port-d-create.err" \
+  || die "caller-supplied probe port creation failed"
+OS_PORT_D_ID="$(tr -d '[:space:]' <"$WORK_ROOT/port-d-create.txt")"
+[[ "$OS_PORT_D_ID" =~ ^[0-9a-fA-F-]{36}$ && "$OS_PORT_D_ID" != "$OS_PORT_A_ID" && "$OS_PORT_D_ID" != "$OS_PORT_B_ID" ]] \
+  || die "caller-supplied probe port returned an invalid or reused id"
 # True process death of the run-owned control plane while the release is
 # parked, then clear the fault and restart through the normal boot path.
 OLD_O3KD_PID="$(read_o3kd_ledger)"
@@ -3526,43 +3581,6 @@ persist_crash_checkpoint process_restarted running \
   repair_interval_seconds 5 repair_lease_takeover "$CRASH_REPAIR_LEASE_TAKEOVER" \
   repair_lock_wait_bound_ms "$CRASH_REPAIR_LOCK_WAIT_BOUND_MS"
 
-# Foreign-project fixture created DURING the orphan backlog: the sweep must
-# never touch it even though foreign endpoints exist in the same control
-# plane. Deleted at leg end (the fixture credentials are not retained). The
-# token is re-minted here: the leg runs long after the concealment-phase
-# token was issued and a bounded foreign fixture must not depend on it.
-FOREIGN_TOKEN="$(
-  OS_USERNAME="$FOREIGN_USER_NAME" OS_PASSWORD="${O3K_P15_7_FOREIGN_PASSWORD:-${O3K_EXTRA_TENANT_PASSWORD:-}}" \
-  OS_PROJECT_ID="$FOREIGN_PROJECT_ID" OS_PROJECT_NAME="$FOREIGN_PROJECT_NAME" \
-  OS_USER_DOMAIN_NAME=Default OS_PROJECT_DOMAIN_NAME=Default \
-    openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]' || true
-)"
-[[ -n "$FOREIGN_TOKEN" ]] || die "foreign-project token re-issue for the crash leg failed"
-FOREIGN_NET_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
-  "http://127.0.0.1:$AUTH_PORT/v2.0/networks" -d "{\"network\":{\"name\":\"o3k-p15-7-$RUN_ID-foreign-net\"}}" \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("network") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
-[[ "$FOREIGN_NET_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project network fixture creation failed"
-FOREIGN_SUBNET_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
-  "http://127.0.0.1:$AUTH_PORT/v2.0/subnets" -d "{\"subnet\":{\"network_id\":\"$FOREIGN_NET_ID\",\"ip_version\":4,\"cidr\":\"198.19.0.0/29\",\"name\":\"o3k-p15-7-$RUN_ID-foreign-subnet\"}}" \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("subnet") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
-[[ "$FOREIGN_SUBNET_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project subnet fixture creation failed"
-FOREIGN_PORT_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
-  "http://127.0.0.1:$AUTH_PORT/v2.0/ports" -d "{\"port\":{\"network_id\":\"$FOREIGN_NET_ID\",\"name\":\"o3k-p15-7-$RUN_ID-foreign-port\"}}" \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("port") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
-[[ "$FOREIGN_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project endpoint fixture creation failed"
-
-# Contention/fairness probe: a Nova create with a caller-supplied existing
-# port contends on orphan_repair_lock by design. The repair-pass test seam is
-# armed to an absolute deadline and its log proves the real sweep owns the
-# lock before this request starts. Acceptance is bounded by the one 30s
-# network-operation critical section, configured 5s cadence/API margin, and
-# the 30s bounded fail-safe on the deterministic harness handshake;
-# ACTIVE convergence is measured separately and is not part of this bound.
-openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN_ID-port-d" -f value -c id >"$WORK_ROOT/port-d-create.txt" 2>"$WORK_ROOT/port-d-create.err" \
-  || die "caller-supplied probe port creation failed"
-OS_PORT_D_ID="$(tr -d '[:space:]' <"$WORK_ROOT/port-d-create.txt")"
-[[ "$OS_PORT_D_ID" =~ ^[0-9a-fA-F-]{36}$ && "$OS_PORT_D_ID" != "$OS_PORT_A_ID" && "$OS_PORT_D_ID" != "$OS_PORT_B_ID" ]] \
-  || die "caller-supplied probe port returned an invalid or reused id"
 REPAIR_LOCK_HELD=false
 REPAIR_LOCK_WAIT_START_MS="$(date +%s%3N)"
 for _ in $(seq 1 650); do
@@ -3603,6 +3621,9 @@ if [[ "$REPAIR_LOCK_HELD" != true ]]; then
   fi
   die "orphan repair did not publish the resource-scoped checkpoint"
 fi
+cp -- "$WORK_ROOT/orphan-repair-checkpoint.json" "$ARTIFACT_DIR/p15-7-orphan-repair-checkpoint.json" \
+  || die "published orphan checkpoint could not be retained"
+chmod 0600 "$ARTIFACT_DIR/p15-7-orphan-repair-checkpoint.json"
 CRASH_REPAIR_LOCK_WAIT_MS="$(( $(date +%s%3N) - REPAIR_LOCK_WAIT_START_MS ))"
 (( CRASH_REPAIR_LOCK_WAIT_MS <= CRASH_REPAIR_LOCK_WAIT_BOUND_MS )) \
   || die "orphan repair exceeded the contract-derived 65s lease/cadence bound"
