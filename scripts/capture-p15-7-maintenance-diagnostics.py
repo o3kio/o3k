@@ -100,8 +100,10 @@ def selected_state(raw: str, block_id: str, execution_identity: str) -> dict[str
         "block_id": observed_id if isinstance(observed_id, str) else None,
         "execution_identity": identity if isinstance(identity, str) else None,
         "state": block.get("state") if isinstance(block.get("state"), str) else None,
-        "agent_available": block.get("agent_available") if isinstance(block.get("agent_available"), bool) else None,
+        # BuildingBlockView places availability beside (not inside) `block`.
+        "agent_available": value.get("agent_available") if isinstance(value.get("agent_available"), bool) else None,
         "last_seen": block.get("last_seen") if isinstance(block.get("last_seen"), str) else None,
+        "generation": block.get("generation") if isinstance(block.get("generation"), int) else None,
         "resource_provider_ids": [x for x in block.get("resource_provider_ids", []) if isinstance(x, str)][:16]
         if isinstance(block.get("resource_provider_ids", []), list) else [],
         "maintenance_epoch": block.get("maintenance_epoch") if isinstance(block.get("maintenance_epoch"), (int, str)) else None,
@@ -114,12 +116,32 @@ def signal_name(status: int) -> str | None:
             return signal.Signals(status - 128).name
         except ValueError:
             return f"SIG{status - 128}"
-    return None
+
+
+def selected_providers(path: str, provider_ids: list[str]) -> list[dict[str, Any]]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = value.get("items") if isinstance(value, dict) else None
+    if not isinstance(items, list):
+        return []
+    wanted = set(provider_ids)
+    result: list[dict[str, Any]] = []
+    for item in items[:200]:
+        if not isinstance(item, dict) or item.get("provider_id") not in wanted:
+            continue
+        result.append({
+            key: item[key]
+            for key in ("provider_id", "state", "availability", "status", "observed_at_unix_ms", "reason")
+            if key in item and (item[key] is None or isinstance(item[key], (str, int, bool)))
+        })
+    return result
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    for name in ("artifact", "api-body", "api-headers", "daemon-log", "agent-log", "agent-ready", "daemon-log-stderr", "agent-log-stderr", "agent-ready-stderr", "api-stderr", "probe-meta", "source-sha", "run-id", "block-id", "execution-identity", "http-status"):
+    for name in ("artifact", "api-body", "api-headers", "provider-body", "provider-http-status", "provider-exit-status", "daemon-log", "agent-log", "agent-ready", "daemon-log-stderr", "agent-log-stderr", "agent-ready-stderr", "api-stderr", "probe-meta", "source-sha", "run-id", "block-id", "execution-identity", "http-status"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--started-ms", type=int, required=True)
     parser.add_argument("--finished-ms", type=int, required=True)
@@ -148,6 +170,7 @@ def main() -> int:
         issues.append("http_status_invalid")
 
     api_body, api_info = read_bounded(args.api_body, 64 * 1024)
+    provider_body, provider_info = read_bounded(args.provider_body, 64 * 1024)
     headers, headers_info = read_bounded(args.api_headers, 16 * 1024)
     daemon_log, daemon_log_info = read_bounded(args.daemon_log, MAX_LOG_BYTES)
     log, log_info = read_bounded(args.agent_log, MAX_LOG_BYTES)
@@ -156,7 +179,7 @@ def main() -> int:
     daemon_stderr, daemon_stderr_info = read_bounded(args.daemon_log_stderr, 4096)
     log_stderr, log_stderr_info = read_bounded(args.agent_log_stderr, 4096)
     ready_stderr, ready_stderr_info = read_bounded(args.agent_ready_stderr, 4096)
-    for name, info in (("api_body", api_info), ("api_headers", headers_info), ("daemon_log", daemon_log_info), ("agent_log", log_info), ("agent_ready", readiness_info), ("probe_metadata", {"available": bool(metadata)})):
+    for name, info in (("api_body", api_info), ("api_headers", headers_info), ("provider_diagnostics", provider_info), ("daemon_log", daemon_log_info), ("agent_log", log_info), ("agent_ready", readiness_info), ("probe_metadata", {"available": bool(metadata)})):
         if not info.get("available"):
             issues.append(f"{name}_unavailable")
     state = selected_state(api_body, args.block_id, args.execution_identity)
@@ -221,6 +244,12 @@ def main() -> int:
             "request_ids": ids,
             "response_excerpt": api_excerpt,
             "observed": state,
+            "provider_diagnostics": {
+                "http_status": args.provider_http_status,
+                "exit_status": int(args.provider_exit_status),
+                "capture": provider_info,
+                "providers": selected_providers(args.provider_body, state.get("resource_provider_ids", []) if isinstance(state, dict) else []),
+            },
             "state_transition_observation": {
                 "expected_before": "ready",
                 "observed_after_reboot": state.get("state") if isinstance(state, dict) else None,
@@ -240,7 +269,7 @@ def main() -> int:
             "readiness_capture": readiness_info,
         },
         "probe_stderr": redacted_probe_errors,
-        "capture_inputs": {"api_body": api_info, "api_headers": headers_info, "daemon_log_stderr": daemon_stderr_info, "api_stderr": api_stderr_info, "agent_log_stderr": log_stderr_info, "agent_ready_stderr": ready_stderr_info},
+        "capture_inputs": {"api_body": api_info, "api_headers": headers_info, "provider_diagnostics": provider_info, "daemon_log_stderr": daemon_stderr_info, "api_stderr": api_stderr_info, "agent_log_stderr": log_stderr_info, "agent_ready_stderr": ready_stderr_info},
         "capture_status": "captured" if not issues else "incomplete",
         "capture_issues": sorted(set(issues)),
     }

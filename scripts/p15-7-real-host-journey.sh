@@ -828,6 +828,7 @@ capture_failure_diagnostics() {
     local capture_started_ms capture_finished_ms capture_http="000"
     local api_started_ms api_finished_ms api_exit=0 daemon_started_ms daemon_finished_ms daemon_exit=0
     local log_started_ms log_finished_ms log_exit=0
+    local provider_http="000" provider_exit=0
     local ready_started_ms ready_finished_ms ready_exit=0
     local probe_meta="$WORK_ROOT/maintenance-probe-meta.json"
     capture_started_ms="$(date +%s%3N)"
@@ -841,6 +842,14 @@ capture_failure_diagnostics() {
     api_finished_ms="$(date +%s%3N)"
     capture_http="$(tr -cd '0-9' <"$WORK_ROOT/maintenance-api.status.raw" 2>/dev/null | head -c 3)"
     [[ "$capture_http" =~ ^[0-9]{3}$ ]] || capture_http=000
+    curl --silent --show-error --config "$OPERATOR_CURL_CONFIG" \
+      --connect-timeout 5 --max-time "$P15_7_API_READ_TIMEOUT_SECONDS" \
+      --output "$WORK_ROOT/maintenance-provider-diagnostics.raw" \
+      --write-out '%{http_code}' "$API/operator/diagnostics/providers?limit=200" \
+      >"$WORK_ROOT/maintenance-provider-diagnostics.status.raw" \
+      2>"$WORK_ROOT/maintenance-provider-diagnostics.stderr.raw" || provider_exit=$?
+    provider_http="$(tr -cd '0-9' <"$WORK_ROOT/maintenance-provider-diagnostics.status.raw" 2>/dev/null | head -c 3)"
+    [[ "$provider_http" =~ ^[0-9]{3}$ ]] || provider_http=000
     daemon_started_ms="$(date +%s%3N)"
     timeout --foreground --signal=TERM --kill-after=2 8 sudo -n tail -c 65536 "$STATE_ROOT/log/o3kd.log" \
       >"$WORK_ROOT/maintenance-daemon.log.raw" 2>"$WORK_ROOT/maintenance-daemon.log.stderr.raw" || daemon_exit=$?
@@ -896,6 +905,9 @@ PY
       --artifact "$ARTIFACT_DIR/p15-7-maintenance-reconnect-diagnostics.json" \
       --api-body "$WORK_ROOT/maintenance-api.body.raw" \
       --api-headers "$WORK_ROOT/maintenance-api.headers.raw" \
+      --provider-body "$WORK_ROOT/maintenance-provider-diagnostics.raw" \
+      --provider-http-status "$provider_http" \
+      --provider-exit-status "$provider_exit" \
       --api-stderr "$WORK_ROOT/maintenance-api.stderr.raw" \
       --daemon-log "$WORK_ROOT/maintenance-daemon.log.raw" \
       --daemon-log-stderr "$WORK_ROOT/maintenance-daemon.log.stderr.raw" \
@@ -912,6 +924,8 @@ PY
     secure_remove_credentials "$WORK_ROOT/maintenance-api.body.raw" \
       "$WORK_ROOT/maintenance-api.headers.raw" "$WORK_ROOT/maintenance-api.status.raw" \
       "$WORK_ROOT/maintenance-api.stderr.raw" \
+      "$WORK_ROOT/maintenance-provider-diagnostics.raw" "$WORK_ROOT/maintenance-provider-diagnostics.status.raw" \
+      "$WORK_ROOT/maintenance-provider-diagnostics.stderr.raw" \
       "$WORK_ROOT/maintenance-daemon.log.raw" "$WORK_ROOT/maintenance-daemon.log.stderr.raw" \
       "$WORK_ROOT/maintenance-agent.log.raw" "$WORK_ROOT/maintenance-agent-ready.raw"
     secure_remove_credentials "$WORK_ROOT/maintenance-agent.log.stderr.raw" \
@@ -2261,8 +2275,12 @@ finally:
 PY
 }
 api_get() {
-  local path="$1" phase="${2:-${1#/}}" attempt body_file error_file http_status curl_exit retry_kind
+  local path="$1" phase="${2:-${1#/}}" headers_file="${3:-}" attempt body_file error_file http_status curl_exit retry_kind
+  local -a header_args=()
+  [[ -z "$headers_file" ]] || header_args=(--dump-header "$headers_file")
   [[ "$path" == /* ]] || { echo "P15.7 API read path is not absolute: $path" >&2; return 1; }
+  API_GET_LAST_HTTP_STATUS=000
+  API_GET_LAST_CURL_EXIT=0
   for ((attempt = 1; attempt <= P15_7_API_READ_ATTEMPTS; attempt++)); do
     body_file="$(mktemp "$WORK_ROOT/api-read-body.XXXXXX")"
     error_file="$(mktemp "$WORK_ROOT/api-read-error.XXXXXX")"
@@ -2271,11 +2289,14 @@ api_get() {
     curl_exit=0
     if http_status="$(curl --silent --show-error --config "$OPERATOR_CURL_CONFIG" \
       --connect-timeout 5 --max-time "$P15_7_API_READ_TIMEOUT_SECONDS" \
+      "${header_args[@]}" \
       --output "$body_file" --write-out '%{http_code}' "$API$path" 2>"$error_file")"; then
       :
     else
       curl_exit=$?
     fi
+    API_GET_LAST_HTTP_STATUS="$http_status"
+    API_GET_LAST_CURL_EXIT="$curl_exit"
     if [[ "$curl_exit" -eq 0 && "$http_status" =~ ^2[0-9][0-9]$ ]]; then
       cat "$body_file"
       rm -f -- "$body_file" "$error_file"
@@ -4154,8 +4175,34 @@ ssh_vm "$MAINT_IP_AFTER" "sudo pkill -x o3k-compute || true; sudo sh -c 'RUST_LO
 for _ in $(seq 1 90); do ssh_vm "$MAINT_IP_AFTER" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 && break; sleep 2; done
 ssh_vm "$MAINT_IP_AFTER" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 || die "maintenance agent did not become ready after reboot"
 # Bounded wait for the control plane to observe the reconnected agent.
+MAINT_OBSERVATIONS_FILE="$ARTIFACT_DIR/p15-7-maintenance-agent-observations.jsonl"
+: >"$MAINT_OBSERVATIONS_FILE"
+chmod 0600 "$MAINT_OBSERVATIONS_FILE"
 for _ in $(seq 1 120); do
-  AGENT_AVAILABLE="$(api_get "/operator/building-blocks/$MAINT_ID" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("agent_available", ""))' 2>/dev/null || true)"
+  observation_start_ms="$(date +%s%3N)"
+  observation_body="$WORK_ROOT/maintenance-observation.body.raw"
+  observation_headers="$WORK_ROOT/maintenance-observation.headers.raw"
+  observation_http=000
+  observation_exit=0
+  observation_curl_exit=0
+  if api_get "/operator/building-blocks/$MAINT_ID" maintenance-reconnect "$observation_headers" \
+    >"$observation_body" 2>/dev/null; then
+    observation_http="$API_GET_LAST_HTTP_STATUS"
+  else
+    observation_exit=$?
+    observation_http="$API_GET_LAST_HTTP_STATUS"
+    observation_curl_exit="$API_GET_LAST_CURL_EXIT"
+    : >"$observation_body"
+  fi
+  observation_finish_ms="$(date +%s%3N)"
+  AGENT_AVAILABLE="$(python3 "$ROOT_DIR/scripts/capture-p15-7-maintenance-observation.py" \
+    --artifact "$MAINT_OBSERVATIONS_FILE" --body "$observation_body" --headers "$observation_headers" \
+    --started-ms "$observation_start_ms" --finished-ms "$observation_finish_ms" \
+    --http-status "$observation_http" --exit-status "$observation_exit" --curl-exit-status "$observation_curl_exit" \
+    --block-id "$MAINT_ID" --execution-identity "$MAINT_EXEC_IDENTITY_BEFORE" \
+    --run-id "$RUN_ID" --source-sha "$SOURCE_SHA")" \
+    || die "maintenance observation evidence could not be safely published"
+  rm -f -- "$observation_body" "$observation_headers"
   [[ "$AGENT_AVAILABLE" == true ]] && break
   sleep 2
 done
