@@ -1782,7 +1782,7 @@ wait_vm_ssh() {
   # boots in parallel), leaving the remaining phases their documented share.
   # SSH itself remains the hard reachability proof. Returns only the IP that
   # answered over SSH.
-  local d="$1" uuid="$2" mac="$3" serial="$4" id="$5" candidate=""
+  local d="$1" uuid="$2" mac="$3" serial="$4" id="$5" expected_boot_id="${6:-}" candidate="" observed_boot_id=""
   for _ in $(seq 1 300); do
     # The resolver normally prints exactly one freshest MAC-bound address;
     # when freshness data is unavailable it prints every MAC-bound candidate
@@ -1791,14 +1791,27 @@ wait_vm_ssh() {
     while IFS= read -r candidate; do
       [[ "$candidate" =~ ^[0-9.]+$ ]] || continue
       if ssh_vm "$candidate" true >/dev/null 2>&1; then
-        echo "$candidate"
-        return 0
+        if [[ -z "$expected_boot_id" ]]; then
+          echo "$candidate"
+          return 0
+        fi
+        observed_boot_id="$(ssh_vm "$candidate" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
+        if [[ "$observed_boot_id" =~ ^[0-9a-fA-F-]{36}$ && "$observed_boot_id" != "$expected_boot_id" ]]; then
+          echo "$candidate"
+          return 0
+        fi
       fi
     done < <(bash "$ROOT_DIR/scripts/p15-7-vm-address.sh" resolve "$uuid" "$mac" "$NETWORK" "$GATEWAY" 2>/dev/null || true)
     sleep 2
   done
   vm_network_diagnostics "$d" "$uuid" "$serial" "$id"
   die "VM did not become SSH-reachable with a MAC-bound DHCP address: $id"
+}
+wait_vm_rebooted() {
+  local d="$1" uuid="$2" mac="$3" serial="$4" id="$5" prior_boot_id="$6"
+  [[ "$prior_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || die "invalid prior boot identity for reboot wait: $id"
+  local wait_args=("$d" "$uuid" "$mac" "$serial" "$id" "$prior_boot_id")
+  wait_vm_ssh "${wait_args[@]}"
 }
 provision_vm() {
   local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" seed_tmp="$WORK_ROOT/$1-seed.iso" serial="$LIBVIRT_STORAGE_ROOT/$1-serial.log" ip uuid mac
@@ -4160,10 +4173,34 @@ OS_WORKLOAD_M=""
 # Planned host reboot from the outer host, then wait bounded for the child to
 # return. The address is re-resolved through the MAC-bound resolver on every
 # retry (a DHCP lease is not liveness proof).
+MAINT_BOOT_ID_BEFORE="$(ssh_vm "${IPS[4]}" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n')"
+[[ "$MAINT_BOOT_ID_BEFORE" =~ ^[0-9a-fA-F-]{36}$ ]] || die "could not capture maintenance guest boot identity before reboot"
+MAINT_BOOT_ID_BEFORE_MS="$(date +%s%3N)"
+python3 - "$ARTIFACT_DIR/maintenance-boot-identity-before.json" "$RUN_ID" "$SOURCE_SHA" "$MAINT_ID" "$MAINT_EXEC_IDENTITY_BEFORE" "$MAINT_UUID" "$MAINT_BOOT_ID_BEFORE" "$MAINT_BOOT_ID_BEFORE_MS" <<'PY'
+import json, pathlib, sys
+out, run_id, source_sha, block_id, execution_identity, domain_uuid, boot_id, timestamp_ms = sys.argv[1:]
+pathlib.Path(out).write_text(json.dumps({"run_id": run_id, "source_sha": source_sha,
+    "block_id": block_id, "execution_identity": execution_identity,
+    "domain_uuid": domain_uuid, "boot_id": boot_id,
+    "captured_at_unix_ms": int(timestamp_ms)}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 MAINT_REBOOT_REQUEST_MS="$(date +%s%3N)"
 virsh -c qemu:///system reboot "$MAINT_UUID" >/dev/null || die "maintenance child reboot failed"
-MAINT_IP_AFTER="$(wait_vm_ssh "$MAINT_DOMAIN" "$MAINT_UUID" "$(<"$WORK_ROOT/block-e-mac")" "$MAINT_SERIAL" block-e)" \
+MAINT_IP_AFTER="$(wait_vm_rebooted "$MAINT_DOMAIN" "$MAINT_UUID" "$(<"$WORK_ROOT/block-e-mac")" "$MAINT_SERIAL" block-e "$MAINT_BOOT_ID_BEFORE")" \
   || die "maintenance child did not become SSH-reachable after reboot"
+MAINT_BOOT_ID_AFTER="$(ssh_vm "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n')"
+[[ "$MAINT_BOOT_ID_AFTER" =~ ^[0-9a-fA-F-]{36}$ && "$MAINT_BOOT_ID_AFTER" != "$MAINT_BOOT_ID_BEFORE" ]] \
+  || die "maintenance guest boot identity did not change after reboot"
+MAINT_BOOT_ID_AFTER_MS="$(date +%s%3N)"
+python3 - "$ARTIFACT_DIR/maintenance-boot-identity-after.json" "$RUN_ID" "$SOURCE_SHA" "$MAINT_ID" "$MAINT_EXEC_IDENTITY_BEFORE" "$MAINT_UUID" "$MAINT_BOOT_ID_BEFORE" "$MAINT_BOOT_ID_AFTER" "$MAINT_BOOT_ID_AFTER_MS" <<'PY'
+import json, pathlib, sys
+out, run_id, source_sha, block_id, execution_identity, domain_uuid, before, after, timestamp_ms = sys.argv[1:]
+pathlib.Path(out).write_text(json.dumps({"run_id": run_id, "source_sha": source_sha,
+    "block_id": block_id, "execution_identity": execution_identity,
+    "domain_uuid": domain_uuid, "boot_id_before": before,
+    "boot_id_after": after, "boot_id_changed": before != after,
+    "captured_at_unix_ms": int(timestamp_ms)}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 ssh_vm "$MAINT_IP_AFTER" "sudo cloud-init status --wait" >/dev/null 2>&1 || true
 # Restart the compute agent from its durable guest identity. O3K packaging
 # deliberately installs no host-global service persistence (the operator owns
@@ -4264,11 +4301,11 @@ MAINT_FINAL_ELIGIBLE="$(record_scale_checkpoint post-maintenance 5 "" "$SURVIVOR
 [[ "$MAINT_FINAL_ELIGIBLE" == 5 ]] || die "post-maintenance eligible Ready count is not exactly five"
 python3 - "$MAINT_EVIDENCE_FILE" "$MAINT_ID" "$MAINT_EXEC_IDENTITY_BEFORE" "$MAINT_PROVIDER_IDS_BEFORE" \
   "$MAINT_DRAIN_BLOCKERS_EMPTY" "$MAINT_PLACEMENT_REJECTED" "$MAINT_AGENT_RECONNECTED" "$MAINT_IDENTITY_PRESERVED" \
-  "$MAINT_RETURNED_TO_READY" "$MAINT_FINAL_ELIGIBLE" <<'PY'
+  "$MAINT_RETURNED_TO_READY" "$MAINT_FINAL_ELIGIBLE" "$MAINT_BOOT_ID_BEFORE" "$MAINT_BOOT_ID_AFTER" <<'PY'
 import json, pathlib, sys
 
 out, block_id, exec_identity, providers, blockers_empty, placement_rejected, \
-    agent_reconnected, identity_preserved, returned_to_ready, final_eligible = sys.argv[1:11]
+    agent_reconnected, identity_preserved, returned_to_ready, final_eligible, boot_id_before, boot_id_after = sys.argv[1:13]
 doc = {
     "status": "passed",
     "block_id": block_id,
@@ -4279,7 +4316,8 @@ doc = {
               "blockers": "no residents existed; the honest blocker projection is empty"},
     "placement_rejected_on_draining_block": placement_rejected == "true",
     "host_reboot": {"issued_from": "outer host via virsh reboot on the recorded domain UUID",
-                    "guest_returned_ssh": True},
+                    "guest_returned_ssh": True, "boot_id_before": boot_id_before,
+                    "boot_id_after": boot_id_after, "boot_id_changed": boot_id_before != boot_id_after},
     "agent_restart": {"modeled": "operator restarts the host service; O3K installs no host-global service persistence",
                       "reconnected": agent_reconnected == "true"},
     "identity_preserved": {

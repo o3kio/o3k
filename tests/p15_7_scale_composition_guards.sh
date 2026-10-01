@@ -980,6 +980,18 @@ assert journey.index('record_scale_checkpoint post-replacement') < journey.index
 assert journey.index('# ── #1035 crash-injection leg') < journey.index('# ── #1033 host-maintenance leg')
 assert journey.index('restart_o3kd_verified\nwait_o3kd_readyz "readyz did not reconstruct after restart"') < journey.index('# ── #1035 crash-injection leg')
 assert journey.index('record_scale_checkpoint post-crash-repair') < journey.index('record_scale_checkpoint post-maintenance')
+# A successful SSH probe immediately after `virsh reboot` may still be served
+# by the pre-reboot guest. Require a boot-id transition within the same bounded
+# MAC-bound readiness window before restarting the maintenance agent.
+maintenance_reboot = journey.split('# Planned host reboot from the outer host', 1)[1].split(
+    '# Bounded wait for the control plane to observe the reconnected agent.', 1)[0]
+assert 'MAINT_BOOT_ID_BEFORE=' in maintenance_reboot
+assert 'cat /proc/sys/kernel/random/boot_id' in maintenance_reboot
+assert 'wait_vm_rebooted' in maintenance_reboot
+assert maintenance_reboot.index('MAINT_BOOT_ID_BEFORE=') < maintenance_reboot.index(
+    'virsh -c qemu:///system reboot "$MAINT_UUID"')
+assert maintenance_reboot.index('virsh -c qemu:///system reboot "$MAINT_UUID"') < maintenance_reboot.index(
+    'MAINT_IP_AFTER="$(wait_vm_rebooted')
 # External-mode PostgreSQL wiring: the restart helper is defined before the
 # wiring, the env rewrite immediately precedes the restart, the canonical
 # bootstrap identity is re-established before readiness is required, and the
