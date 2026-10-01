@@ -4342,7 +4342,24 @@ while IFS= read -r uuid; do [[ -z "$uuid" || "$FOREIGN_AFTER" == *"$uuid"* ]] ||
 [[ "$foreign_ok" == true ]] || die "foreign libvirt state changed"
 
 # SQLite parity remains an actual process boundary, not a boolean fixture.
-cargo test --locked -p o3kd --all-features --test p15_1_topology_process --test p15_5_building_block_process -- --test-threads=1 >/dev/null || die "SQLite parity process boundary failed"
+# Failure output is retained in a bounded sanitized artifact: attempt03
+# (run 1790852758) failed here with stdout discarded to /dev/null, leaving no
+# retained root cause. The cargo child inherits journey env, so credentials
+# in URLs are redacted the same way as other retained logs.
+SQLITE_PARITY_LOG="$WORK_ROOT/sqlite-parity-cargo-test.raw.log"
+if ! cargo test --locked -p o3kd --all-features --test p15_1_topology_process --test p15_5_building_block_process -- --test-threads=1 >"$SQLITE_PARITY_LOG" 2>&1; then
+  python3 - "$SQLITE_PARITY_LOG" "$ARTIFACT_DIR/p15-7-sqlite-parity-cargo-test.log" <<'PY'
+import pathlib, re, sys
+raw = pathlib.Path(sys.argv[1])
+out = pathlib.Path(sys.argv[2])
+text = raw.read_text(encoding="utf-8", errors="replace") if raw.exists() else ""
+text = re.sub(r"(postgres(?:ql)?://[^:/\s]+:)[^@\s]+(@)", r"\1REDACTED\2", text)
+out.write_text(text[-65536:], encoding="utf-8")
+PY
+  rm -f "$SQLITE_PARITY_LOG"
+  die "SQLite parity process boundary failed (bounded sanitized output retained: p15-7-sqlite-parity-cargo-test.log)"
+fi
+rm -f "$SQLITE_PARITY_LOG"
 record_optional_araf
 cleanup
 assert_owned_domains_absent
