@@ -18,7 +18,8 @@ MAX_LINE_CHARS = 1000
 SECRET_VALUE = re.compile(
     r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?|(?:access|refresh|id)?_?token\s*[:=]\s*|"
     r"password\s*[:=]\s*|passwd\s*[:=]\s*|client[_-]?secret\s*[:=]\s*|"
-    r"(?:api[_-]?key|credential|private[_ -]?key)\s*[:=]\s*)[^\s,;]+"
+    r"(?:api[_-]?key|credential|private[_ -]?key)\s*[:=]\s*)"
+    r'("[^"\r\n]*"|\x27[^\x27\r\n]*\x27|[^\s,;]+)'
 )
 SECRET_JSON_FIELD = re.compile(r"(?i)(?:token|secret|password|passwd|credential|authorization|private.?key|api.?key)")
 URL_USERINFO = re.compile(r"(?i)(https?://[^:/\s]+:)[^@/\s]+@")

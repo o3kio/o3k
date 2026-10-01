@@ -59,9 +59,10 @@ class MaintenanceDiagnosticsTests(unittest.TestCase):
     def test_redacts_url_and_structured_secret_fields(self):
         value = MODULE.sanitize(
             "Authorization: Bearer abc123 password=pwd-value client_secret=client-value "
-            "https://user:pass@example.invalid/path?access_token=querysecret"
+            "https://user:pass@example.invalid/path?access_token=querysecret "
+            'password="multi word secret" export TOKEN=\'quoted token value\''
         )
-        for secret in ("abc123", "pwd-value", "client-value", "user:pass", "querysecret"):
+        for secret in ("abc123", "pwd-value", "client-value", "user:pass", "querysecret", "multi word secret", "quoted token value"):
             self.assertNotIn(secret, value)
         redacted = MODULE.redact_json({"access_token": "json-secret", "provider": {"api_key": "key-secret"}})
         self.assertEqual(redacted["access_token"], "[REDACTED]")
