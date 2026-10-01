@@ -287,6 +287,37 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 [[ "$alive" == false ]] || { echo "cleanup: service did not stop" >&2; exit 1; }
+# The PID ledger is run-temp scoped.  A mismatched RUNNER_TEMP can make both
+# records invisible while the run-owned executables are still serving.  Never
+# discard STATE_ROOT until /proc proves that neither exact run-owned binary is
+# live; if a process is present without its matching ledger record, fail
+# closed and retain the state for identity-verified recovery.
+for binary in o3kd o3k-compute; do
+  expected_exe="$STATE_ROOT/bin/$binary"
+  expected_pid_file="$PID_ROOT/$binary.pid"
+  for proc_exe in /proc/[0-9]*/exe; do
+    [[ -e "$proc_exe" ]] || continue
+    pid="${proc_exe#/proc/}"
+    pid="${pid%/exe}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    actual_exe="$(sudo -n readlink "$proc_exe" 2>/dev/null || true)"
+    case "$actual_exe" in
+      "$expected_exe"|"$expected_exe (deleted)") ;;
+      *) continue ;;
+    esac
+    if [[ ! -f "$expected_pid_file" ]]; then
+      echo "cleanup: refusing to discard state: unrecorded run-owned service process $binary pid=$pid" >&2
+      exit 1
+    fi
+    IFS='|' read -r recorded_pid _recorded_ticks _recorded_uid recorded_binary _extra <"$expected_pid_file"
+    if [[ "$recorded_pid" != "$pid" || "$recorded_binary" != "$binary" ]]; then
+      echo "cleanup: refusing to discard state: unrecorded run-owned service process $binary pid=$pid" >&2
+      exit 1
+    fi
+    echo "cleanup: refusing to discard state: service did not stop $binary pid=$pid" >&2
+    exit 1
+  done
+done
 assert_no_owned_host_state || exit 1
 remove_added_supplementary_groups || exit 1
 if [[ "$account_created" == true || "$group_created" == true || \

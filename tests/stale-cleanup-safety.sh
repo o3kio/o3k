@@ -3,7 +3,15 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-stale-cleanup.XXXXXX")"
-trap 'rm -rf -- "$WORK_DIR"' EXIT
+UNRECORDED_PID=""
+cleanup_test_state() {
+  if [[ -n "$UNRECORDED_PID" ]]; then
+    kill "$UNRECORDED_PID" 2>/dev/null || true
+    wait "$UNRECORDED_PID" 2>/dev/null || true
+  fi
+  rm -rf -- "$WORK_DIR"
+}
+trap cleanup_test_state EXIT
 
 mkdir -p "$WORK_DIR/bin" "$WORK_DIR/runner/o3k-testlab"
 cat >"$WORK_DIR/bin/virsh" <<'EOF'
@@ -110,3 +118,39 @@ kill "$proc_pid" 2>/dev/null || true
 wait "$proc_pid" 2>/dev/null || true
 
 echo "stale cleanup owned-process preservation test passed"
+
+# If the caller supplies the wrong RUNNER_TEMP, the exact run-owned PID ledger
+# can be absent even though a service binary from STATE_ROOT is still live.
+# Cleanup must detect that executable identity and preserve the state rather
+# than silently discarding the only ownership record.
+MISSING_PID_RUN="local-43"
+MISSING_PID_TEMP="$WORK_DIR/missing-pid-runner"
+MISSING_PID_STATE="$MISSING_PID_TEMP/o3k-testlab/$MISSING_PID_RUN"
+mkdir -p "$MISSING_PID_STATE/bin" "$MISSING_PID_TEMP/o3k-testlab-pids" \
+  "$MISSING_PID_TEMP/o3k-testlab-inventory"
+printf 'o3k-disposable-testlab-v1\nrun=%s\n' "$MISSING_PID_RUN" >"$MISSING_PID_STATE/.o3k-run-owned"
+printf 'o3k-owned-v1 path=%s\n' "$MISSING_PID_STATE" >"$MISSING_PID_STATE/.o3k-owned"
+chmod 0755 "$MISSING_PID_STATE"
+cp /usr/bin/sleep "$MISSING_PID_STATE/bin/o3kd"
+chmod 0755 "$MISSING_PID_STATE/bin/o3kd"
+"$MISSING_PID_STATE/bin/o3kd" 300 & UNRECORDED_PID=$!
+
+set +e
+missing_pid_out="$(PATH="$WORK_DIR/bin:/usr/bin:/bin" \
+  RUNNER_TEMP="$MISSING_PID_TEMP" GITHUB_RUN_ID="$MISSING_PID_RUN" \
+  O3K_TESTLAB_STATE_ROOT="$MISSING_PID_STATE" \
+  O3K_OPENSTACK_VENV="" O3K_TESTLAB_IMAGE_PATH="" \
+  bash "$ROOT_DIR/scripts/cleanup-disposable-testlab.sh" 2>&1)"
+missing_pid_rc=$?
+set -e
+[[ "$missing_pid_rc" != 0 ]] \
+  || { echo "cleanup deleted state with a live unrecorded run-owned executable" >&2; exit 1; }
+grep -Fq "unrecorded run-owned service process" <<<"$missing_pid_out" \
+  || { echo "cleanup did not identify the live unrecorded run-owned process" >&2; exit 1; }
+[[ -d "$MISSING_PID_STATE" ]] \
+  || { echo "STATE_ROOT deleted while an unrecorded run-owned daemon was alive" >&2; exit 1; }
+kill "$UNRECORDED_PID" 2>/dev/null || true
+wait "$UNRECORDED_PID" 2>/dev/null || true
+UNRECORDED_PID=""
+
+echo "stale cleanup missing-ledger process test passed"
