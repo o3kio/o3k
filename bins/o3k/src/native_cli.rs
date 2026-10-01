@@ -13,13 +13,21 @@
 
 use serde_json::Value;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::HttpClient;
 use crate::context::HttpResponse;
-use crate::sys::SystemHttpClient;
+use crate::sys::{RequestError, SystemHttpClient, request_with_key};
 
 /// Default native API base URL.
 const DEFAULT_API_BASE: &str = "http://127.0.0.1:18080/o3k/v1";
+
+/// Maximum number of `bootstrap/init` attempts after a transport failure.
+const INIT_MAX_ATTEMPTS: usize = 3;
+/// Fixed backoff between `bootstrap/init` attempts.
+const INIT_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+/// Total deadline across all `bootstrap/init` attempts and backoffs.
+const INIT_TOTAL_DEADLINE: Duration = Duration::from_secs(12);
 
 /// Returns the effective API base URL from environment or default.
 fn api_base() -> String {
@@ -67,6 +75,84 @@ fn secret_from(env_value: Option<String>, file_path: Option<String>) -> Result<S
     Ok(value)
 }
 
+/// One recorded `bootstrap/init` attempt outcome for stderr diagnostics.
+#[derive(Debug)]
+struct InitAttemptRecord {
+    attempt: usize,
+    class: &'static str,
+    detail: String,
+    elapsed_ms: u128,
+}
+
+/// Testable core of `o3k init`: performs the bounded, classified retry of the
+/// bootstrap-init exchange and returns the response body plus a record of
+/// failed attempts (printed to stderr by the caller). Only transport
+/// failures — cases where no HTTP status was received — are retried; the
+/// bootstrap-init handler is intentionally replay-safe, while any received
+/// HTTP status (including errors) or a malformed response is final. The
+/// identical JSON body is sent on every attempt so logical request identity
+/// is preserved. The bootstrap secret is never included in any record.
+fn init_inner(
+    base: &str,
+    secret: &str,
+    profile_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> Result<(String, Vec<InitAttemptRecord>), (String, Vec<InitAttemptRecord>)> {
+    let body = serde_json::json!({ "profile_id": profile_id, "agent_id": agent_id }).to_string();
+    let url = format!("{base}/bootstrap/init");
+    let started = Instant::now();
+    let mut records = Vec::new();
+    let mut attempt = 0usize;
+    loop {
+        attempt += 1;
+        match request_with_key(
+            &url,
+            "POST",
+            Some(&body),
+            None,
+            Some(("X-O3K-Bootstrap-Secret", secret)),
+        ) {
+            Ok(response) => {
+                if response.status != 200 {
+                    let detail = format!("API returned status {}", response.status);
+                    records.push(InitAttemptRecord {
+                        attempt,
+                        class: "http-status",
+                        detail: detail.clone(),
+                        elapsed_ms: started.elapsed().as_millis(),
+                    });
+                    return Err((detail, records));
+                }
+                return Ok((response.body, records));
+            }
+            Err(RequestError::Malformed(message)) => {
+                records.push(InitAttemptRecord {
+                    attempt,
+                    class: "malformed",
+                    detail: message.clone(),
+                    elapsed_ms: started.elapsed().as_millis(),
+                });
+                return Err((message, records));
+            }
+            Err(RequestError::Transport(message)) => {
+                records.push(InitAttemptRecord {
+                    attempt,
+                    class: "transport",
+                    detail: message.clone(),
+                    elapsed_ms: started.elapsed().as_millis(),
+                });
+                if attempt >= INIT_MAX_ATTEMPTS || started.elapsed() >= INIT_TOTAL_DEADLINE {
+                    return Err((message, records));
+                }
+                std::thread::sleep(INIT_RETRY_BACKOFF);
+                if started.elapsed() >= INIT_TOTAL_DEADLINE {
+                    return Err((message, records));
+                }
+            }
+        }
+    }
+}
+
 /// Initializes canonical Cloud Kernel bootstrap state. The bootstrap secret is
 /// sent only as a request header and is never printed.
 pub fn init(profile_id: Option<&str>, agent_id: Option<&str>) -> Result<(), String> {
@@ -74,19 +160,44 @@ pub fn init(profile_id: Option<&str>, agent_id: Option<&str>) -> Result<(), Stri
     if secret.contains(['\r', '\n']) {
         return Err("bootstrap secret contains a newline".to_owned());
     }
-    let body = serde_json::json!({ "profile_id": profile_id, "agent_id": agent_id });
-    let client = SystemHttpClient;
-    let rt = runtime()?;
-    let response = rt.block_on(client.post_json_with_header(
-        &format!("{}/bootstrap/init", api_base()),
-        &body.to_string(),
-        Some(("X-O3K-Bootstrap-Secret", secret.as_str())),
-    ))?;
-    if response.status != 200 {
-        return Err(format!("API returned status {}", response.status));
+    match init_inner(&api_base(), &secret, profile_id, agent_id) {
+        Ok((body, records)) => {
+            print_init_records(&records);
+            println!("{body}");
+            Ok(())
+        }
+        Err((error, records)) => {
+            print_init_records(&records);
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "bootstrap-init-failed",
+                    "attempts": records.len(),
+                    "detail": error,
+                })
+            );
+            Err(error)
+        }
     }
-    println!("{}", response.body);
-    Ok(())
+}
+
+/// Emits one sanitized stderr line per failed `bootstrap/init` attempt. Never
+/// includes the secret, the request body, or a full URL; stdout stays pure
+/// JSON for callers that parse the enrollment token.
+fn print_init_records(records: &[InitAttemptRecord]) {
+    for record in records {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "event": "bootstrap-init-retry",
+                "attempt": record.attempt,
+                "max_attempts": INIT_MAX_ATTEMPTS,
+                "elapsed_ms": record.elapsed_ms,
+                "class": record.class,
+                "detail": record.detail,
+            })
+        );
+    }
 }
 
 /// Enrolls a prepared host. Certificate material is read locally and only the
@@ -333,7 +444,7 @@ pub fn print_help() {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::secret_from;
     use std::io::Write;
@@ -387,5 +498,154 @@ mod tests {
             secret_from(None, Some(path.to_string_lossy().into_owned())).expect_err("must fail");
         assert!(error.contains("is empty"), "{error}");
         std::fs::remove_file(&path).expect("fixture cleanup");
+    }
+
+    use super::init_inner;
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+
+    /// Reads one full HTTP request (headers plus the declared Content-Length
+    /// body) from a stub-server connection.
+    fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).expect("stub read");
+            assert!(read > 0, "stub connection closed mid-headers");
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let head_end = buffer.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let content_length = String::from_utf8_lossy(&buffer[..head_end])
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                (name.eq_ignore_ascii_case("content-length"))
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        while buffer.len() < head_end + content_length {
+            let read = stream.read(&mut chunk).expect("stub read");
+            assert!(read > 0, "stub connection closed mid-body");
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        buffer
+    }
+
+    fn request_body(request: &[u8]) -> &[u8] {
+        let head_end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        &request[head_end..]
+    }
+
+    #[test]
+    fn init_retries_after_lost_response_with_identical_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("local_addr");
+        let received: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&received);
+        let server = std::thread::spawn(move || {
+            // First connection: read the full request (the server "commits"),
+            // then never answer so the client's read times out (transport).
+            let (mut stream, _) = listener.accept().expect("accept 1");
+            let first = read_http_request(&mut stream);
+            seen.lock().expect("lock").push(first);
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            drop(stream);
+            // Second connection: answer normally.
+            let (mut stream, _) = listener.accept().expect("accept 2");
+            let second = read_http_request(&mut stream);
+            seen.lock().expect("lock").push(second);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 31\r\n\r\n{\"enrollment_token\":\"tok-123\"}",
+                )
+                .expect("stub write");
+        });
+        let (body, records) = init_inner(
+            &format!("http://{address}/o3k/v1"),
+            "test-secret",
+            None,
+            Some("agent-1"),
+        )
+        .expect("init must succeed on the retried attempt");
+        let received = received.lock().expect("lock");
+        assert_eq!(received.len(), 2, "expected exactly two requests");
+        assert_eq!(
+            request_body(&received[0]),
+            request_body(&received[1]),
+            "retry must send a byte-identical body"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("response JSON");
+        assert_eq!(parsed["enrollment_token"], "tok-123");
+        assert!(
+            records.iter().any(|record| record.class == "transport"),
+            "expected a recorded transport failure, got {records:?}"
+        );
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn init_does_not_retry_http_status_failures() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("local_addr");
+        let received: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let seen = Arc::clone(&received);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _request = read_http_request(&mut stream);
+            *seen.lock().expect("lock") += 1;
+            stream
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                .expect("stub write");
+        });
+        let error = init_inner(
+            &format!("http://{address}/o3k/v1"),
+            "test-secret",
+            None,
+            None,
+        )
+        .expect_err("401 must fail");
+        assert_eq!(error.0, "API returned status 401");
+        assert_eq!(
+            *received.lock().expect("lock"),
+            1,
+            "401 must not be retried"
+        );
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn init_does_not_retry_malformed_responses() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("local_addr");
+        let received: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let seen = Arc::clone(&received);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _request = read_http_request(&mut stream);
+            *seen.lock().expect("lock") += 1;
+            stream
+                .write_all(b"GARBAGE BYTES\r\n\r\n")
+                .expect("stub write");
+        });
+        let error = init_inner(
+            &format!("http://{address}/o3k/v1"),
+            "test-secret",
+            None,
+            None,
+        )
+        .expect_err("garbage response must fail");
+        assert!(
+            error.0.contains("unknown protocol"),
+            "error must mention the malformed response, got: {}",
+            error.0
+        );
+        assert_eq!(
+            *received.lock().expect("lock"),
+            1,
+            "malformed response must not be retried"
+        );
+        server.join().expect("server thread");
     }
 }
