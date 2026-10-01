@@ -504,6 +504,7 @@ mod tests {
     use std::io::Read;
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     /// Reads one full HTTP request (headers plus the declared Content-Length
     /// body) from a stub-server connection.
@@ -646,6 +647,127 @@ mod tests {
             1,
             "malformed response must not be retried"
         );
+        server.join().expect("server thread");
+    }
+
+    /// Stub handler that reads the full request, then stalls forever without
+    /// answering (the protected-gate failure shape: the request commits, the
+    /// response is lost).
+    fn never_respond(mut stream: TcpStream, received: Arc<Mutex<usize>>) {
+        let _request = read_http_request(&mut stream);
+        *received.lock().expect("lock") += 1;
+        std::thread::sleep(Duration::from_secs(10));
+    }
+
+    /// Stub handler that starts a valid response, then stalls mid-response
+    /// past the client's 2s read timeout before sending the remainder.
+    fn stall_mid_response(mut stream: TcpStream, received: Arc<Mutex<usize>>) {
+        let _request = read_http_request(&mut stream);
+        *received.lock().expect("lock") += 1;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 31\r\n\r\n{")
+            .expect("partial write");
+        std::thread::sleep(Duration::from_secs(3));
+        // The client timed out and moved on long ago; the remainder write
+        // may hit a closed socket, which must not fail the test.
+        let _ = stream.write_all(b"\"enrollment_token\":\"tok-123\"}");
+    }
+
+    fn assert_deadline_bounded(received: Arc<Mutex<usize>>, elapsed: Duration) {
+        // Nominal: 3 attempts x 2s in-flight read timeout + 2 x 250ms
+        // backoff = 6.5s; the 12s total deadline must bound the sum.
+        assert!(
+            elapsed <= Duration::from_secs(11),
+            "init_inner exceeded the total deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(5),
+            "init_inner gave up suspiciously early: {elapsed:?}"
+        );
+        assert_eq!(
+            *received.lock().expect("lock"),
+            3,
+            "init_inner must make exactly 3 attempts against a silent stub"
+        );
+        eprintln!("init_inner bounded-run elapsed: {elapsed:?}");
+    }
+
+    #[test]
+    fn init_total_deadline_bounds_silent_stub() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("local_addr");
+        let received: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let server = {
+            let received = Arc::clone(&received);
+            std::thread::spawn(move || {
+                for _ in 0..3 {
+                    let (stream, _) = listener.accept().expect("accept");
+                    let received = Arc::clone(&received);
+                    std::thread::spawn(move || never_respond(stream, received));
+                }
+            })
+        };
+        let started = Instant::now();
+        let error = init_inner(
+            &format!("http://{address}/o3k/v1"),
+            "test-secret",
+            None,
+            None,
+        )
+        .expect_err("a silent stub must exhaust attempts and fail");
+        let elapsed = started.elapsed();
+        assert_deadline_bounded(received, elapsed);
+        let records = error.1;
+        assert_eq!(records.len(), 3, "one diagnostic record per attempt");
+        for (index, record) in records.iter().enumerate() {
+            assert_eq!(record.attempt, index + 1);
+            assert_eq!(record.class, "transport");
+            assert!(
+                record.detail.starts_with("response read failed:"),
+                "unexpected detail: {}",
+                record.detail
+            );
+        }
+        assert!(
+            records[1].elapsed_ms > records[0].elapsed_ms,
+            "per-attempt elapsed must increase"
+        );
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn init_total_deadline_bounds_repeated_mid_response_stalls() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("local_addr");
+        let received: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let server = {
+            let received = Arc::clone(&received);
+            std::thread::spawn(move || {
+                for _ in 0..3 {
+                    let (stream, _) = listener.accept().expect("accept");
+                    let received = Arc::clone(&received);
+                    std::thread::spawn(move || stall_mid_response(stream, received));
+                }
+            })
+        };
+        let started = Instant::now();
+        let error = init_inner(
+            &format!("http://{address}/o3k/v1"),
+            "test-secret",
+            None,
+            None,
+        )
+        .expect_err("mid-response stalls must exhaust attempts and fail");
+        let elapsed = started.elapsed();
+        assert_deadline_bounded(received, elapsed);
+        for record in &error.1 {
+            assert_eq!(record.class, "transport");
+            assert!(
+                record.detail.starts_with("response read failed:"),
+                "unexpected detail: {}",
+                record.detail
+            );
+        }
         server.join().expect("server thread");
     }
 }
