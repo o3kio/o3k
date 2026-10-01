@@ -914,9 +914,19 @@ for required in ("domifaddr \"$uuid\" --source lease", "net-dhcp-leases \"$netwo
     assert required in vm_address, required
 assert 'domifaddr "$d"' not in vm_address
 # The journey liveness-probes every emitted candidate instead of assuming a
-# single-address resolver result.
-for required in ("while IFS= read -r candidate", "ssh_vm \"$candidate\" true"):
+# single-address resolver result. Readiness probes (the `true` liveness check
+# and the boot-id read) must run under the dedicated readiness-only watchdog
+# so a guest that accepts SSH but never completes the read-only command cannot
+# stall the bounded readiness window; ssh_vm itself stays unbounded for longer
+# legitimate cloud-init/diagnostic commands.
+for required in ("while IFS= read -r candidate", "wait_vm_ssh() {",
+                 'readiness_probe "$id" "readiness-true" "$candidate" true',
+                 'readiness_probe "$id" "readiness-boot-id" "$candidate" cat /proc/sys/kernel/random/boot_id',
+                 "SSH_READINESS_TIMEOUT_SECONDS=\"${O3K_P15_7_SSH_READINESS_TIMEOUT:-15}\"",
+                 "timeout --foreground --signal=TERM --kill-after=2 \"$SSH_READINESS_TIMEOUT_SECONDS\" \\\n    ssh \"${SSH_VM_OPTS[@]}\" \"$VM_USER@$ip\"",
+                 "p15-7-readiness-probes.jsonl"):
     assert required in journey, required
+assert 'ssh_vm "$candidate" true' not in journey, "readiness liveness probe must use the bounded watchdog"
 # The project-token acquisition must survive transient control-plane
 # failures loudly (with the CLI's own error text) instead of exiting
 # silently under `set -e` (observed on run 990923002 as a silent journey

@@ -1595,7 +1595,33 @@ for element in root.iter():
 [[ "$GATEWAY" =~ ^[0-9.]+$ ]] || die "libvirt gateway unavailable"
 ssh-keygen -q -t ed25519 -N '' -f "$SSH_KEY" -C "o3k-p15-7-$RUN_ID" || die "VM SSH key generation failed"
 touch "$KNOWN_HOSTS"
-ssh_vm() { ssh -F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$VM_USER@$1" "${@:2}"; }
+SSH_VM_OPTS=(-F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS")
+ssh_vm() { ssh "${SSH_VM_OPTS[@]}" "$VM_USER@$1" "${@:2}"; }
+
+# Readiness-only SSH watchdog. ssh_vm itself stays unbounded: cloud-init and
+# diagnostic commands can legitimately outlive 15s. Only the read-only
+# readiness probes (the `true` liveness check and the boot-id read inside
+# wait_vm_ssh) run under this dedicated watchdog, so a guest that accepts SSH
+# but never completes the read-only command cannot stall the bounded
+# readiness window. Every probe records start/finish ms, exact exit, timeout
+# classification, and VM/purpose identity to a bounded sanitized JSONL.
+SSH_READINESS_TIMEOUT_SECONDS="${O3K_P15_7_SSH_READINESS_TIMEOUT:-15}"
+SSH_READINESS_PROBE_LOG="${O3K_P15_7_SSH_READINESS_PROBE_LOG:-$ARTIFACT_DIR/p15-7-readiness-probes.jsonl}"
+readiness_probe() {
+  # Usage: readiness_probe <vm-id> <purpose> <ip> <command...>
+  local id="$1" purpose="$2" ip="$3"; shift 3
+  local started_ms finished_ms exit_code=0 timed_out=false
+  started_ms="$(date +%s%3N)"
+  # timeout(1) can only exec real binaries, so the watchdog inlines the shared
+  # SSH_VM_OPTS option set instead of calling the ssh_vm shell function.
+  timeout --foreground --signal=TERM --kill-after=2 "$SSH_READINESS_TIMEOUT_SECONDS" \
+    ssh "${SSH_VM_OPTS[@]}" "$VM_USER@$ip" "$@" || exit_code=$?
+  finished_ms="$(date +%s%3N)"
+  case "$exit_code" in 124|137|143) timed_out=true ;; esac
+  printf '{"vm_id":"%s","purpose":"%s","start_ms":%s,"finish_ms":%s,"exit_code":%s,"timed_out":%s}\n' \
+    "$id" "$purpose" "$started_ms" "$finished_ms" "$exit_code" "$timed_out" >>"$SSH_READINESS_PROBE_LOG" 2>/dev/null || true
+  return "$exit_code"
+}
 domain_name_for_resource() {
   python3 - "$1" <<'PY'
 import hashlib, sys
@@ -1790,12 +1816,12 @@ wait_vm_ssh() {
     # guesses and SSH remains the only reachability proof.
     while IFS= read -r candidate; do
       [[ "$candidate" =~ ^[0-9.]+$ ]] || continue
-      if ssh_vm "$candidate" true >/dev/null 2>&1; then
+      if readiness_probe "$id" "readiness-true" "$candidate" true >/dev/null 2>&1; then
         if [[ -z "$expected_boot_id" ]]; then
           echo "$candidate"
           return 0
         fi
-        observed_boot_id="$(ssh_vm "$candidate" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
+        observed_boot_id="$(readiness_probe "$id" "readiness-boot-id" "$candidate" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
         if [[ "$observed_boot_id" =~ ^[0-9a-fA-F-]{36}$ && "$observed_boot_id" != "$expected_boot_id" ]]; then
           echo "$candidate"
           return 0
