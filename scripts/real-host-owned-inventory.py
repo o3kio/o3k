@@ -220,7 +220,9 @@ foreign identities, and environment contents are never written.
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -228,6 +230,7 @@ import stat as stat_module
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import urllib.error
 import urllib.request
 import uuid as uuid_module
@@ -346,12 +349,20 @@ def failure_detail(stderr: str) -> str:
     return "unspecified"
 
 
-def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> str | None:
+def command(
+    args: tuple[str, ...],
+    *,
+    scrub_provider_config: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> str | None:
     global LAST_FAILURE_REASON
     environment = os.environ.copy()
+    environment.pop("O3K_DATABASE_URL", None)
     if scrub_provider_config:
         environment.pop("OS_CLOUD", None)
         environment.pop("OS_CLIENT_CONFIG_FILE", None)
+    if extra_env:
+        environment.update(extra_env)
     try:
         result = subprocess.run(
             args,
@@ -1237,27 +1248,89 @@ def collect_injection_root() -> dict[str, object] | None:
 
 
 def collect_durable(state_root: Path) -> dict[str, object] | None:
-    """Read-only sqlite3 inventory of the durable ledger with real predicates.
+    """Read-only inventory of the durable ledger with real predicates.
 
     The ledger lives under ``<state_root>/data`` in the testlab layout and
-    directly under ``<state_root>`` in the installed layout; both are probed.
+    directly under ``<state_root>`` in the installed layout; both are probed
+    for SQLite. PostgreSQL uses the daemon's configured URL, passed to libpq
+    only through environment fields (never argv).
     """
     global LAST_FAILURE_REASON
-    if command(("sqlite3", "--version")) is None:
-        LAST_FAILURE_REASON = "tool_unavailable:sqlite3"
+    backend = os.environ.get("O3K_DATABASE_BACKEND", "sqlite").strip().lower()
+    postgres_args: tuple[str, ...] | None = None
+    postgres_env: dict[str, str] = {}
+    uri = ""
+    if backend == "postgres":
+        raw_url = os.environ.get("O3K_DATABASE_URL", "")
+        try:
+            parsed = urllib.parse.urlsplit(raw_url)
+            port = parsed.port or 5432
+            database_name = urllib.parse.unquote(parsed.path.removeprefix("/"))
+            if (parsed.scheme not in ("postgres", "postgresql")
+                    or not parsed.hostname or not database_name
+                    or not 1 <= port <= 65535 or parsed.fragment):
+                raise ValueError("unsupported PostgreSQL URL")
+            postgres_env = {
+                "PGHOST": parsed.hostname,
+                "PGPORT": str(port),
+                "PGDATABASE": database_name,
+                "PGCONNECT_TIMEOUT": "5",
+                "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=8000",
+            }
+            if parsed.username is not None:
+                postgres_env["PGUSER"] = urllib.parse.unquote(parsed.username)
+            if parsed.password is not None:
+                postgres_env["PGPASSWORD"] = urllib.parse.unquote(parsed.password)
+            pg_option_names = {
+                "sslmode": "PGSSLMODE",
+                "sslcert": "PGSSLCERT",
+                "sslkey": "PGSSLKEY",
+                "sslrootcert": "PGSSLROOTCERT",
+                "sslcrl": "PGSSLCRL",
+            }
+            for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+                if key not in pg_option_names:
+                    raise ValueError("unsupported PostgreSQL URL option")
+                postgres_env[pg_option_names[key]] = urllib.parse.unquote(value)
+        except (ValueError, UnicodeError):
+            LAST_FAILURE_REASON = "durable_database_config_invalid"
+            return None
+        postgres_args = (
+            "psql", "--no-psqlrc", "--no-align", "--tuples-only", "--csv",
+            "--set=ON_ERROR_STOP=1",
+        )
+        if command(("psql", "--version")) is None:
+            LAST_FAILURE_REASON = "tool_unavailable:psql"
+            return None
+    elif backend == "sqlite":
+        if command(("sqlite3", "--version")) is None:
+            LAST_FAILURE_REASON = "tool_unavailable:sqlite3"
+            return None
+        database = state_root / "data" / "o3k.sqlite"
+        if not database.is_file():
+            database = state_root / "o3k.sqlite"
+        if not database.is_file():
+            LAST_FAILURE_REASON = "durable_database_missing"
+            return None
+        uri = f"file:{database}?mode=ro"
+    else:
+        LAST_FAILURE_REASON = "durable_database_backend_unsupported"
         return None
-    database = state_root / "data" / "o3k.sqlite"
-    if not database.is_file():
-        database = state_root / "o3k.sqlite"
-    if not database.is_file():
-        LAST_FAILURE_REASON = "durable_database_missing"
-        return None
-    uri = f"file:{database}?mode=ro"
 
     def query(sql: str) -> list[tuple[str, ...]] | None:
-        output = command(("sqlite3", "-separator", "|", uri, sql))
+        if backend == "postgres":
+            assert postgres_args is not None
+            output = command((*postgres_args, "--command", sql), extra_env=postgres_env)
+        else:
+            output = command(("sqlite3", "-separator", "|", uri, sql))
         if output is None:
             return None
+        if backend == "postgres":
+            try:
+                return [tuple(row) for row in csv.reader(io.StringIO(output)) if row]
+            except csv.Error:
+                LAST_FAILURE_REASON = "durable_database_response_invalid"
+                return None
         rows: list[tuple[str, ...]] = []
         for line in output.splitlines():
             if not line.strip():
