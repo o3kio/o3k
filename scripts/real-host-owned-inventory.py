@@ -1318,6 +1318,7 @@ def collect_durable(state_root: Path) -> dict[str, object] | None:
         return None
 
     def query(sql: str) -> list[tuple[str, ...]] | None:
+        global LAST_FAILURE_REASON
         if backend == "postgres":
             assert postgres_args is not None
             output = command((*postgres_args, "--command", sql), extra_env=postgres_env)
@@ -1327,7 +1328,7 @@ def collect_durable(state_root: Path) -> dict[str, object] | None:
             return None
         if backend == "postgres":
             try:
-                return [tuple(row) for row in csv.reader(io.StringIO(output)) if row]
+                return [tuple(row) for row in csv.reader(io.StringIO(output), strict=True) if row]
             except csv.Error:
                 LAST_FAILURE_REASON = "durable_database_response_invalid"
                 return None
