@@ -818,6 +818,7 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "p15-7-vm-lease-", "p15-7-transient-failures.jsonl",
                  "p15-7-api-read-attempt-", "p15-7-api-read-failure-", "p15-7-capacity-diagnostics.json",
                  "record_lease_evidence", "record_transient",
+                 "capture-p15-7-maintenance-diagnostics.py", "p15-7-maintenance-reconnect-diagnostics.json",
                  "actions/ready",
                  'virsh -c qemu:///system reboot "$MAINT_UUID"',
                  "restart_o3kd_verified",

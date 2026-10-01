@@ -822,6 +822,44 @@ capture_contending_create_evidence() {
 }
 capture_failure_diagnostics() {
   local exit_status="$1"
+  if [[ "$exit_status" -ne 0 && "${RUN_MAINTENANCE:-false}" == true \
+    && -n "${MAINT_ID:-}" && -n "${MAINT_IP_AFTER:-}" \
+    && ! -f "$ARTIFACT_DIR/p15-7-maintenance-reconnect-diagnostics.json" ]]; then
+    local capture_started_ms capture_finished_ms capture_http="000"
+    capture_started_ms="$(date +%s%3N)"
+    curl --silent --show-error --config "$OPERATOR_CURL_CONFIG" \
+      --connect-timeout 5 --max-time "$P15_7_API_READ_TIMEOUT_SECONDS" \
+      --dump-header "$WORK_ROOT/maintenance-api.headers.raw" \
+      --output "$WORK_ROOT/maintenance-api.body.raw" \
+      --write-out '%{http_code}' "$API/operator/building-blocks/$MAINT_ID" \
+      >"$WORK_ROOT/maintenance-api.status.raw" 2>/dev/null || true
+    capture_http="$(tr -cd '0-9' <"$WORK_ROOT/maintenance-api.status.raw" 2>/dev/null | head -c 3)"
+    [[ "$capture_http" =~ ^[0-9]{3}$ ]] || capture_http=000
+    # Logs and readiness are collected over the run-owned SSH identity before
+    # guest teardown. Only the sanitizer publishes them; raw snapshots remain
+    # under WORK_ROOT and follow the existing owned cleanup path.
+    ssh_vm "$MAINT_IP_AFTER" \
+      "sudo tail -n 800 /var/log/o3k-compute.log 2>/dev/null" \
+      >"$WORK_ROOT/maintenance-agent.log.raw" 2>/dev/null || true
+    ssh_vm "$MAINT_IP_AFTER" \
+      "curl --silent --show-error --max-time 5 -w '\\nhttp_status=%{http_code}\\n' http://127.0.0.1:19101/readyz 2>&1" \
+      >"$WORK_ROOT/maintenance-agent-ready.raw" 2>/dev/null || true
+    capture_finished_ms="$(date +%s%3N)"
+    python3 "$ROOT_DIR/scripts/capture-p15-7-maintenance-diagnostics.py" \
+      --artifact "$ARTIFACT_DIR/p15-7-maintenance-reconnect-diagnostics.json" \
+      --api-body "$WORK_ROOT/maintenance-api.body.raw" \
+      --api-headers "$WORK_ROOT/maintenance-api.headers.raw" \
+      --agent-log "$WORK_ROOT/maintenance-agent.log.raw" \
+      --agent-ready "$WORK_ROOT/maintenance-agent-ready.raw" \
+      --source-sha "$SOURCE_SHA" --run-id "$RUN_ID" --block-id "$MAINT_ID" \
+      --execution-identity "${MAINT_EXEC_IDENTITY_BEFORE:-unknown}" \
+      --http-status "$capture_http" --started-ms "$capture_started_ms" \
+      --finished-ms "$capture_finished_ms" >/dev/null 2>&1 \
+      || echo "P15.7 maintenance reconnect evidence could not be safely captured" >&2
+    rm -f -- "$WORK_ROOT/maintenance-api.body.raw" \
+      "$WORK_ROOT/maintenance-api.headers.raw" "$WORK_ROOT/maintenance-api.status.raw" \
+      "$WORK_ROOT/maintenance-agent.log.raw" "$WORK_ROOT/maintenance-agent-ready.raw"
+  fi
   if [[ "$exit_status" -ne 0 && "${CONTENDING_CREATE_WRAPPER_EXIT_STATUS:-}" =~ ^[0-9]+$ ]] \
     && [[ ! -f "$ARTIFACT_DIR/p15-7-contender-evidence.json" ]]; then
     capture_contending_create_evidence "journey_failed"
