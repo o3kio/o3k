@@ -3812,6 +3812,14 @@ while :; do
   sleep 0.1
 done
 CONTENDING_CREATE_WAITER_WAIT_MS="$(( $(date +%s%3N) - CONTENDING_CREATE_WAITER_WAIT_START_MS ))"
+if [[ "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED" == true ]]; then
+  # Derive the recorded wait from the SAME observation instant the evidence
+  # cites: a post-loop date would drift a few milliseconds past
+  # LOCK_WAIT_OBSERVED_UNIX_MS and fail the exact
+  # observed - start == wait_ms validator identity (attempt10, run
+  # 1790859057, observed a 1302ms span against a 1305ms recorded wait).
+  CONTENDING_CREATE_WAITER_WAIT_MS="$(( CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS - CONTENDING_CREATE_WAITER_WAIT_START_MS ))"
+fi
 [[ "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED" == true ]] \
   || {
     stop_contending_create || true
