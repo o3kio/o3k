@@ -1,0 +1,46 @@
+name: OKF repository memory
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".okf/**"
+      - "scripts/okf-memory.py"
+      - "scripts/tests/test_okf_memory.py"
+      - "docs/OKF_MEMORY.md"
+      - "AGENTS.md"
+      - ".github/workflows/okf-memory.yml"
+  pull_request:
+    paths:
+      - ".okf/**"
+      - "scripts/okf-memory.py"
+      - "scripts/tests/test_okf_memory.py"
+      - "docs/OKF_MEMORY.md"
+      - "AGENTS.md"
+      - ".github/workflows/okf-memory.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  okf-memory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Compile helper
+        run: python3 -m py_compile scripts/okf-memory.py scripts/tests/test_okf_memory.py
+      - name: Test helper behavior
+        run: python3 scripts/tests/test_okf_memory.py
+      - name: Validate repository memory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/okf-memory.py check
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            python3 scripts/okf-memory.py check --base "origin/${GITHUB_BASE_REF}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" && "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            python3 scripts/okf-memory.py check --base "${{ github.event.before }}"
+          fi
