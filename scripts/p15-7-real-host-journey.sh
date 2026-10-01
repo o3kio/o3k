@@ -4378,13 +4378,22 @@ while IFS= read -r uuid; do [[ -z "$uuid" || "$FOREIGN_AFTER" == *"$uuid"* ]] ||
 # least-privilege campaign DSN (no CREATEDB by design, see
 # scripts/provision_pp5_postgres.py), so CREATE DATABASE is denied. This step
 # asserts the SQLite process boundary (validator key sqlite_parity); the
-# PostgreSQL half is covered in CI with a CREATEDB-capable o3k role. The
-# parity children must also not inherit O3K_DATABASE_BACKEND: p15_5 spawns a
-# real o3kd whose config fails closed on backend=postgres without a URL.
-# Strip both journey bindings for the parity run; no assertion is removed or
-# weakened (the PostgreSQL half skips by design without a URL).
+# PostgreSQL half is covered in CI with a CREATEDB-capable o3k role.
+# Attempt06 (run 1790859057) exposed the next layer: the parity children
+# spawn real o3kd processes whose config ingests EVERY O3K_* export
+# (o3k_config::Config::from_sources(std::env::vars())), so journey exports --
+# the database bindings, the bootstrap secret, the federated identity -- all
+# change daemon behavior (backend without URL fails closed; bootstrap secret
+# plus federated identity never becomes ready). The parity environment must
+# therefore be deterministic: scrub it to a minimal toolchain environment
+# instead of playing whack-a-mole with individual variables. No assertion is
+# removed or weakened (the PostgreSQL half skips by design without a URL).
 SQLITE_PARITY_LOG="$WORK_ROOT/sqlite-parity-cargo-test.raw.log"
-if ! env -u O3K_DATABASE_URL -u O3K_DATABASE_BACKEND cargo test --locked -p o3kd --all-features --test p15_1_topology_process --test p15_5_building_block_process -- --test-threads=1 >"$SQLITE_PARITY_LOG" 2>&1; then
+SQLITE_PARITY_ENV=(env -i PATH="$PATH" HOME="$HOME")
+[[ -n "${CARGO_HOME:-}" ]] && SQLITE_PARITY_ENV+=("CARGO_HOME=$CARGO_HOME")
+[[ -n "${RUSTUP_HOME:-}" ]] && SQLITE_PARITY_ENV+=("RUSTUP_HOME=$RUSTUP_HOME")
+[[ -n "${CARGO_NET_OFFLINE:-}" ]] && SQLITE_PARITY_ENV+=("CARGO_NET_OFFLINE=$CARGO_NET_OFFLINE")
+if ! "${SQLITE_PARITY_ENV[@]}" cargo test --locked -p o3kd --all-features --test p15_1_topology_process --test p15_5_building_block_process -- --test-threads=1 >"$SQLITE_PARITY_LOG" 2>&1; then
   python3 - "$SQLITE_PARITY_LOG" "$ARTIFACT_DIR/p15-7-sqlite-parity-cargo-test.log" <<'PY'
 import pathlib, re, sys
 raw = pathlib.Path(sys.argv[1])
