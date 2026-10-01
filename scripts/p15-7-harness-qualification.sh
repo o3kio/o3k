@@ -23,6 +23,7 @@ bash -n "$ROOT_DIR/scripts/p15-7-real-host-journey.sh"
 python3 -m py_compile \
   "$ROOT_DIR/scripts/p15-7-crash-evidence.py" \
   "$ROOT_DIR/scripts/p15-7-campaign-lock.py" \
+  "$ROOT_DIR/scripts/capture-p15-7-maintenance-diagnostics.py" \
   "$ROOT_DIR/scripts/write_p15_7-failure-artifact.py" \
   "$ROOT_DIR/scripts/validate_p15_7_evidence.py"
 bash "$ROOT_DIR/tests/p15_7_crash_state_machine.sh"
@@ -33,6 +34,7 @@ bash "$ROOT_DIR/tests/p15_7_contention_cleanup_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_api_read_retry_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_capacity_diagnostic_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_scale_composition_guards.sh"
+python3 "$ROOT_DIR/tests/test_p15_7_maintenance_diagnostics.py"
 bash "$ROOT_DIR/tests/pp5_focused_lane_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_protected_preflight.sh"
 

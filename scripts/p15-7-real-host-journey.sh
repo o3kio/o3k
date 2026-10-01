@@ -823,42 +823,99 @@ capture_contending_create_evidence() {
 capture_failure_diagnostics() {
   local exit_status="$1"
   if [[ "$exit_status" -ne 0 && "${RUN_MAINTENANCE:-false}" == true \
-    && -n "${MAINT_ID:-}" && -n "${MAINT_IP_AFTER:-}" \
+    && -n "${MAINT_ID:-}" \
     && ! -f "$ARTIFACT_DIR/p15-7-maintenance-reconnect-diagnostics.json" ]]; then
     local capture_started_ms capture_finished_ms capture_http="000"
+    local api_started_ms api_finished_ms api_exit=0 daemon_started_ms daemon_finished_ms daemon_exit=0
+    local log_started_ms log_finished_ms log_exit=0
+    local ready_started_ms ready_finished_ms ready_exit=0
+    local probe_meta="$WORK_ROOT/maintenance-probe-meta.json"
     capture_started_ms="$(date +%s%3N)"
+    api_started_ms="$(date +%s%3N)"
     curl --silent --show-error --config "$OPERATOR_CURL_CONFIG" \
       --connect-timeout 5 --max-time "$P15_7_API_READ_TIMEOUT_SECONDS" \
       --dump-header "$WORK_ROOT/maintenance-api.headers.raw" \
       --output "$WORK_ROOT/maintenance-api.body.raw" \
       --write-out '%{http_code}' "$API/operator/building-blocks/$MAINT_ID" \
-      >"$WORK_ROOT/maintenance-api.status.raw" 2>/dev/null || true
+      >"$WORK_ROOT/maintenance-api.status.raw" 2>"$WORK_ROOT/maintenance-api.stderr.raw" || api_exit=$?
+    api_finished_ms="$(date +%s%3N)"
     capture_http="$(tr -cd '0-9' <"$WORK_ROOT/maintenance-api.status.raw" 2>/dev/null | head -c 3)"
     [[ "$capture_http" =~ ^[0-9]{3}$ ]] || capture_http=000
+    daemon_started_ms="$(date +%s%3N)"
+    timeout --foreground --signal=TERM --kill-after=2 8 sudo -n tail -c 65536 "$STATE_ROOT/log/o3kd.log" \
+      >"$WORK_ROOT/maintenance-daemon.log.raw" 2>"$WORK_ROOT/maintenance-daemon.log.stderr.raw" || daemon_exit=$?
+    daemon_finished_ms="$(date +%s%3N)"
     # Logs and readiness are collected over the run-owned SSH identity before
-    # guest teardown. Only the sanitizer publishes them; raw snapshots remain
-    # under WORK_ROOT and follow the existing owned cleanup path.
-    ssh_vm "$MAINT_IP_AFTER" \
-      "sudo tail -n 800 /var/log/o3k-compute.log 2>/dev/null" \
-      >"$WORK_ROOT/maintenance-agent.log.raw" 2>/dev/null || true
-    ssh_vm "$MAINT_IP_AFTER" \
-      "curl --silent --show-error --max-time 5 -w '\\nhttp_status=%{http_code}\\n' http://127.0.0.1:19101/readyz 2>&1" \
-      >"$WORK_ROOT/maintenance-agent-ready.raw" 2>/dev/null || true
+    # guest teardown. Retain exit status, stderr and bounded timing for each
+    # probe; the sanitizer is the only publisher of their output.
+    log_started_ms="$(date +%s%3N)"
+    if [[ "${MAINT_IP_AFTER:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      timeout --foreground --signal=TERM --kill-after=2 15 \
+        ssh -F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
+        "$VM_USER@$MAINT_IP_AFTER" "sudo tail -c 65536 /var/log/o3k-compute.log 2>/dev/null" \
+        >"$WORK_ROOT/maintenance-agent.log.raw" 2>"$WORK_ROOT/maintenance-agent.log.stderr.raw" || log_exit=$?
+    else
+      log_exit=125
+      printf 'agent address unavailable or invalid\n' >"$WORK_ROOT/maintenance-agent.log.stderr.raw"
+    fi
+    log_finished_ms="$(date +%s%3N)"
+    ready_started_ms="$(date +%s%3N)"
+    if [[ "${MAINT_IP_AFTER:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      timeout --foreground --signal=TERM --kill-after=2 15 \
+        ssh -F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
+        "$VM_USER@$MAINT_IP_AFTER" \
+        "curl --silent --show-error --max-time 5 -w '\\nhttp_status=%{http_code}\\n' http://127.0.0.1:19101/readyz 2>&1" \
+        >"$WORK_ROOT/maintenance-agent-ready.raw" 2>"$WORK_ROOT/maintenance-agent-ready.stderr.raw" || ready_exit=$?
+    else
+      ready_exit=125
+      printf 'agent address unavailable or invalid\n' >"$WORK_ROOT/maintenance-agent-ready.stderr.raw"
+    fi
+    ready_finished_ms="$(date +%s%3N)"
     capture_finished_ms="$(date +%s%3N)"
+    python3 - "$probe_meta" "$capture_started_ms" "$capture_finished_ms" \
+      "$api_started_ms" "$api_finished_ms" "$api_exit" \
+      "$daemon_started_ms" "$daemon_finished_ms" "$daemon_exit" \
+      "$log_started_ms" "$log_finished_ms" "$log_exit" \
+      "$ready_started_ms" "$ready_finished_ms" "$ready_exit" <<'PY'
+import json,sys
+from pathlib import Path
+out=Path(sys.argv[1]); values=list(map(int,sys.argv[2:]))
+outer_start,outer_finish,api_start,api_finish,api_exit,daemon_start,daemon_finish,daemon_exit,log_start,log_finish,log_exit,ready_start,ready_finish,ready_exit=values
+doc={
+ "capture_start_ms":outer_start,"capture_finish_ms":outer_finish,
+ "api_get":{"start_ms":api_start,"finish_ms":api_finish,"exit_status":api_exit,"timed_out":api_exit in (28,124,137,143)},
+ "daemon_log_local":{"start_ms":daemon_start,"finish_ms":daemon_finish,"exit_status":daemon_exit,"timed_out":daemon_exit in (124,137,143)},
+ "agent_log_ssh":{"start_ms":log_start,"finish_ms":log_finish,"exit_status":log_exit,"timed_out":log_exit in (124,137,143)},
+ "agent_ready_ssh":{"start_ms":ready_start,"finish_ms":ready_finish,"exit_status":ready_exit,"timed_out":ready_exit in (124,137,143)},
+}
+out.write_text(json.dumps(doc,sort_keys=True)+'\n',encoding='utf-8'); out.chmod(0o600)
+PY
     python3 "$ROOT_DIR/scripts/capture-p15-7-maintenance-diagnostics.py" \
       --artifact "$ARTIFACT_DIR/p15-7-maintenance-reconnect-diagnostics.json" \
       --api-body "$WORK_ROOT/maintenance-api.body.raw" \
       --api-headers "$WORK_ROOT/maintenance-api.headers.raw" \
+      --api-stderr "$WORK_ROOT/maintenance-api.stderr.raw" \
+      --daemon-log "$WORK_ROOT/maintenance-daemon.log.raw" \
+      --daemon-log-stderr "$WORK_ROOT/maintenance-daemon.log.stderr.raw" \
       --agent-log "$WORK_ROOT/maintenance-agent.log.raw" \
       --agent-ready "$WORK_ROOT/maintenance-agent-ready.raw" \
+      --agent-log-stderr "$WORK_ROOT/maintenance-agent.log.stderr.raw" \
+      --agent-ready-stderr "$WORK_ROOT/maintenance-agent-ready.stderr.raw" \
+      --probe-meta "$probe_meta" \
       --source-sha "$SOURCE_SHA" --run-id "$RUN_ID" --block-id "$MAINT_ID" \
-      --execution-identity "${MAINT_EXEC_IDENTITY_BEFORE:-unknown}" \
+      --execution-identity "${MAINT_EXEC_IDENTITY_BEFORE:-}" \
       --http-status "$capture_http" --started-ms "$capture_started_ms" \
-      --finished-ms "$capture_finished_ms" >/dev/null 2>&1 \
+      --finished-ms "$capture_finished_ms" --reboot-request-ms "${MAINT_REBOOT_REQUEST_MS:-0}" >/dev/null 2>&1 \
       || echo "P15.7 maintenance reconnect evidence could not be safely captured" >&2
-    rm -f -- "$WORK_ROOT/maintenance-api.body.raw" \
+    secure_remove_credentials "$WORK_ROOT/maintenance-api.body.raw" \
       "$WORK_ROOT/maintenance-api.headers.raw" "$WORK_ROOT/maintenance-api.status.raw" \
+      "$WORK_ROOT/maintenance-api.stderr.raw" \
+      "$WORK_ROOT/maintenance-daemon.log.raw" "$WORK_ROOT/maintenance-daemon.log.stderr.raw" \
       "$WORK_ROOT/maintenance-agent.log.raw" "$WORK_ROOT/maintenance-agent-ready.raw"
+    secure_remove_credentials "$WORK_ROOT/maintenance-agent.log.stderr.raw" \
+      "$WORK_ROOT/maintenance-agent-ready.stderr.raw" "$probe_meta"
   fi
   if [[ "$exit_status" -ne 0 && "${CONTENDING_CREATE_WRAPPER_EXIT_STATUS:-}" =~ ^[0-9]+$ ]] \
     && [[ ! -f "$ARTIFACT_DIR/p15-7-contender-evidence.json" ]]; then
@@ -4006,6 +4063,7 @@ MAINT_AGENT_RECONNECTED=false
 MAINT_IDENTITY_PRESERVED=false
 MAINT_RETURNED_TO_READY=false
 MAINT_FINAL_ELIGIBLE=""
+MAINT_REBOOT_REQUEST_MS=0
 api_get "/operator/building-blocks/$MAINT_ID" >"$WORK_ROOT/maintenance-block-before.json"
 python3 - "$WORK_ROOT/maintenance-block-before.json" "$MAINT_ID" <<'PY' \
   || die "maintenance block is not eligible before the maintenance leg"
@@ -4081,6 +4139,7 @@ OS_WORKLOAD_M=""
 # Planned host reboot from the outer host, then wait bounded for the child to
 # return. The address is re-resolved through the MAC-bound resolver on every
 # retry (a DHCP lease is not liveness proof).
+MAINT_REBOOT_REQUEST_MS="$(date +%s%3N)"
 virsh -c qemu:///system reboot "$MAINT_UUID" >/dev/null || die "maintenance child reboot failed"
 MAINT_IP_AFTER="$(wait_vm_ssh "$MAINT_DOMAIN" "$MAINT_UUID" "$(<"$WORK_ROOT/block-e-mac")" "$MAINT_SERIAL" block-e)" \
   || die "maintenance child did not become SSH-reachable after reboot"
