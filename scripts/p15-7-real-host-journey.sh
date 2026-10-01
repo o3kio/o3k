@@ -204,6 +204,10 @@ fi
   || die "P15.7 API read delay is invalid or unbounded"
 [[ "$P15_7_API_READ_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ && "$P15_7_API_READ_TIMEOUT_SECONDS" -le 60 ]] \
   || die "P15.7 API read timeout is invalid or unbounded"
+# Readiness watchdog bound: when overridden it must still be a positive integer
+# of seconds (fail closed; unset keeps the 15s default).
+[[ -z "${O3K_P15_7_SSH_READINESS_TIMEOUT:-}" || "${O3K_P15_7_SSH_READINESS_TIMEOUT}" =~ ^[1-9][0-9]*$ ]] \
+  || die "SSH readiness timeout is invalid"
 for cmd in cargo curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id setsid ps; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
@@ -4207,7 +4211,7 @@ OS_WORKLOAD_M=""
 # Planned host reboot from the outer host, then wait bounded for the child to
 # return. The address is re-resolved through the MAC-bound resolver on every
 # retry (a DHCP lease is not liveness proof).
-MAINT_BOOT_ID_BEFORE="$(ssh_vm "${IPS[4]}" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n')"
+MAINT_BOOT_ID_BEFORE="$(readiness_probe block-e "maintenance-boot-id-before" "${IPS[4]}" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
 [[ "$MAINT_BOOT_ID_BEFORE" =~ ^[0-9a-fA-F-]{36}$ ]] || die "could not capture maintenance guest boot identity before reboot"
 MAINT_BOOT_ID_BEFORE_MS="$(date +%s%3N)"
 python3 - "$ARTIFACT_DIR/maintenance-boot-identity-before.json" "$RUN_ID" "$SOURCE_SHA" "$MAINT_ID" "$MAINT_EXEC_IDENTITY_BEFORE" "$MAINT_UUID" "$MAINT_BOOT_ID_BEFORE" "$MAINT_BOOT_ID_BEFORE_MS" <<'PY'
@@ -4222,7 +4226,7 @@ MAINT_REBOOT_REQUEST_MS="$(date +%s%3N)"
 virsh -c qemu:///system reboot "$MAINT_UUID" >/dev/null || die "maintenance child reboot failed"
 MAINT_IP_AFTER="$(wait_vm_rebooted "$MAINT_DOMAIN" "$MAINT_UUID" "$(<"$WORK_ROOT/block-e-mac")" "$MAINT_SERIAL" block-e "$MAINT_BOOT_ID_BEFORE")" \
   || die "maintenance child did not become SSH-reachable after reboot"
-MAINT_BOOT_ID_AFTER="$(ssh_vm "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n')"
+MAINT_BOOT_ID_AFTER="$(readiness_probe block-e "maintenance-boot-id-after" "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
 [[ "$MAINT_BOOT_ID_AFTER" =~ ^[0-9a-fA-F-]{36}$ && "$MAINT_BOOT_ID_AFTER" != "$MAINT_BOOT_ID_BEFORE" ]] \
   || die "maintenance guest boot identity did not change after reboot"
 MAINT_BOOT_ID_AFTER_MS="$(date +%s%3N)"
@@ -4378,8 +4382,12 @@ while IFS= read -r uuid; do [[ -z "$uuid" || "$FOREIGN_AFTER" == *"$uuid"* ]] ||
 # SQLite parity remains an actual process boundary, not a boolean fixture.
 # Failure output is retained in a bounded sanitized artifact: attempt03
 # (run 1790852758) failed here with stdout discarded to /dev/null, leaving no
-# retained root cause. The cargo child inherits journey env, so credentials
-# in URLs are redacted the same way as other retained logs.
+# retained root cause. The redaction step is deliberately narrow: it strips
+# only postgres DSN userinfo (user:password@) from the retained tail. The
+# primary credential defense is the env scrub below (env -i with the minimal
+# toolchain set), which keeps journey exports — database bindings, bootstrap
+# secret, federated identity — from ever reaching the cargo children; the
+# redactor is a backstop, not the boundary.
 # Attempt04 (run 1790859057) exposed the retained root cause: the
 # p15_1_topology_process PostgreSQL half derives its disposable-database
 # admin connection from O3K_DATABASE_URL, but the journey env carries the
@@ -4500,7 +4508,7 @@ if len(child_vms) != blocks or not all(vm.get("ssh_proof") for vm in child_vms):
 def passed():
     return {"status":"passed"}
 doc={
- "artifact_type":"o3k-p15-7-scale-composition-evidence","schema_version":1,"phase":"P15.7","status":"passed","evidence_tier":"protected-real-host","profile":profile,"tested_source_sha":sha,"checkout_head":checkout_head,"git_tree_clean":tree_clean,"harness_inputs_sha256":harness_digest,
+ "artifact_type":"o3k-p15-7-scale-composition-evidence","schema_version":1,"phase":"P15.7","status":"passed","evidence_tier":"protected-real-host","profile":profile,"tested_source_sha":sha,"checkout_head":checkout_head,"git_tree_clean":tree_clean,"harness_inputs_sha256":harness_digest,"pp5_phase":pp5_phase,
  "execution":{"real_o3kd":passed(),"real_auth":passed(),"real_execution_boundary":passed(),"multiple_real_hosts":passed(),"sqlite_parity":passed(),"provider":"agent","hypervisor":"libvirt","database_backend":"postgres","block_count":blocks,"provisioned_vms":blocks},
  "scale_composition":{
   "counting_rule":"eligible_ready",

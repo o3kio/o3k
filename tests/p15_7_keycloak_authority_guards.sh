@@ -111,6 +111,12 @@ for secret in secret-keycloak-admin-password secret-keycloak-operator-password \
 done
 test "$(stat -c '%a' "$run_root/o3k-p15-7-keycloak-authority-default/admin-password")" = 600
 test "$(stat -c '%a' "$run_root/o3k-p15-7-keycloak-authority-default/operator-password")" = 600
+# The testlab-keycloak preflight must publish the journey's identity inputs to
+# GITHUB_ENV so the final evidence writer can fail closed on exact-head
+# identity (checkout head, tree cleanliness, harness digest).
+grep -Fq "O3K_P15_7_CHECKOUT_HEAD=$sha" "$WORK/github-env"
+grep -Fq "O3K_P15_7_TREE_CLEAN=true" "$WORK/github-env"
+grep -Eq '^O3K_P15_7_HARNESS_DIGEST=[0-9a-f]{64}$' "$WORK/github-env"
 
 # A near-expiry native token must take the helper's canonical exchange path,
 # replace its curl credential config, and remain untouched while still fresh.

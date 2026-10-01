@@ -120,6 +120,14 @@ def validate(
     if not isinstance(harness_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", harness_digest):
         fail(errors, "harness_inputs_sha256 must be a lowercase SHA-256 digest")
 
+    # Phase-aware crash-leg contract: the journey records the selected phase
+    # so the validator never has to parse reasons. Legacy artifacts without
+    # pp5_phase fail closed and must be re-validated explicitly.
+    pp5_phase = root.get("pp5_phase")
+    if not isinstance(pp5_phase, str) or not pp5_phase.strip():
+        fail(errors, "pp5_phase must be recorded in the artifact (legacy artifacts must be re-validated explicitly)")
+    crash_phase_selected = pp5_phase in ("integrated", "1035-crash-recovery")
+
     execution = mapping(root.get("execution"), "execution", errors)
     if execution is not None:
         for key in ("real_o3kd", "real_auth", "real_execution_boundary", "multiple_real_hosts", "sqlite_parity"):
@@ -246,7 +254,15 @@ def validate(
                 else:
                     seen_phases.add(phase)
                 blocks = checkpoint.get("blocks")
-                if not isinstance(blocks, list) or not blocks:
+                if not crash_phase_selected and phase == "post-crash-repair":
+                    # A phase that did not run the crash leg records an
+                    # explicit not_run placeholder instead of identity blocks.
+                    if checkpoint.get("status") != "not_run":
+                        fail(errors, f"{cname}.status must be 'not_run' when pp5_phase did not run the crash leg")
+                    if checkpoint.get("blocks"):
+                        fail(errors, f"{cname} records identity blocks but pp5_phase did not run the crash leg")
+                    continue
+                elif not isinstance(blocks, list) or not blocks:
                     fail(errors, f"{cname}.blocks must be a non-empty list")
                     continue
                 eligible = 0
@@ -293,6 +309,8 @@ def validate(
                     fail(errors, f"scale_composition.checkpoints[{required_phase}] must enumerate the bootstrap BuildingBlock")
             if not bootstrap_removed:
                 for phase in REQUIRED_CHECKPOINT_PHASES:
+                    if not crash_phase_selected and phase == "post-crash-repair":
+                        continue
                     if checkpoints_per_phase.get(phase, 0) == 0:
                         fail(errors, f"scale_composition.checkpoints[{phase}] excludes the bootstrap BuildingBlock from the enumeration")
 
@@ -301,7 +319,12 @@ def validate(
         missing = sorted(REQUIRED_STEPS - set(journey))
         for step in missing:
             fail(errors, f"journey.{step} is required")
-        for step in sorted(REQUIRED_STEPS - {"drain", "multiple_authenticated_joins", "projections_convergent"}):
+        passed_exempt = {"drain", "multiple_authenticated_joins", "projections_convergent"}
+        if not crash_phase_selected:
+            # The crash leg is required in the artifact but records an
+            # explicit not_run placeholder when the phase did not run it.
+            passed_exempt.add("crash_injection_repair")
+        for step in sorted(REQUIRED_STEPS - passed_exempt):
             if step in journey:
                 passed(journey[step], f"journey.{step}", errors)
         joins = mapping(journey.get("multiple_authenticated_joins"), "journey.multiple_authenticated_joins", errors)
@@ -337,224 +360,231 @@ def validate(
                         fail(errors, "journey.drain.blocker_requery still reports the deleted workload as a resident blocker")
         crash = mapping(journey.get("crash_injection_repair"), "journey.crash_injection_repair", errors)
         if crash is not None:
-            if crash.get("schema_version") != 3:
-                fail(errors, "journey.crash_injection_repair.schema_version must be 3")
-            if not isinstance(crash.get("run_id"), str) or not crash["run_id"].strip():
-                fail(errors, "#1035 crash evidence run_id must be explicit")
-            if not isinstance(crash.get("source_sha"), str) or not SHA.fullmatch(crash["source_sha"]):
-                fail(errors, "#1035 crash evidence source_sha must be a full SHA")
-            if crash.get("phase") != "completed" or crash.get("status") != "passed":
-                fail(errors, "#1035 crash evidence must be completed and passed")
-            checkpoints = crash.get("checkpoints")
-            required_checkpoints = [
-                "fault_armed", "terminal_state_observed", "endpoint_present_pre_crash",
-                "process_identity_armed", "process_killed", "process_restarted", "repair_lock_acquired",
-                "contending_create_waiting", "contending_create_started", "orphan_discovered", "repair_completed",
-                "contending_create_accepted", "accounting_verified", "completed",
-            ]
-            if not isinstance(checkpoints, list):
-                fail(errors, "#1035 incremental checkpoints must be a list")
+            if not crash_phase_selected:
+                # A phase that did not run the crash leg must record an
+                # explicit not_run placeholder; a passed (or missing) status
+                # fails closed so a skipped leg cannot masquerade as evidence.
+                if crash.get("status") != "not_run":
+                    fail(errors, "journey.crash_injection_repair.status must be 'not_run' when pp5_phase did not run the #1035 crash leg")
             else:
-                phases = [item.get("phase") for item in checkpoints if isinstance(item, dict)]
-                if phases != required_checkpoints:
-                    fail(errors, "#1035 crash checkpoints must be the exact legal phase sequence")
-                cursor = -1
-                for required in required_checkpoints:
-                    try:
-                        cursor = phases.index(required, cursor + 1)
-                    except ValueError:
-                        fail(errors, f"#1035 checkpoint {required} missing or out of order")
-                if checkpoints and checkpoints[-1].get("status") != "passed":
-                    fail(errors, "#1035 final checkpoint must be passed")
-                identity = next(
-                    (item for item in checkpoints
-                     if isinstance(item, dict) and item.get("phase") == "process_identity_armed"),
-                    None,
-                )
-                killed = next(
-                    (item for item in checkpoints
-                     if isinstance(item, dict) and item.get("phase") == "process_killed"),
-                    None,
-                )
-                if identity is not None:
-                    for field in ("pid", "starttime", "executable", "http_listener_pid",
-                                  "control_listener_pid", "state_root"):
-                        value = identity.get(field)
-                        if not isinstance(value, str) or not value.strip():
-                            fail(errors, f"#1035 process_identity_armed.{field} must be a non-empty string")
-                    if isinstance(identity.get("pid"), str) and not identity["pid"].isdigit():
-                        fail(errors, "#1035 process_identity_armed.pid must be numeric")
-                    if isinstance(identity.get("starttime"), str) and not identity["starttime"].isdigit():
-                        fail(errors, "#1035 process_identity_armed.starttime must be numeric")
-                    for field in ("http_listener_pid", "control_listener_pid"):
-                        if isinstance(identity.get(field), str) and not identity[field].isdigit():
-                            fail(errors, f"#1035 process_identity_armed.{field} must be numeric")
-                    state_root = identity.get("state_root")
-                    executable = identity.get("executable")
-                    if isinstance(state_root, str) and isinstance(executable, str):
-                        if not state_root.startswith("/") or state_root == "/":
-                            fail(errors, "#1035 process_identity_armed.state_root must be a non-root absolute path")
-                        if executable != state_root.rstrip("/") + "/bin/o3kd":
-                            fail(errors, "#1035 process_identity_armed.executable must be state_root/bin/o3kd")
-                    if isinstance(identity.get("pid"), str):
+                if crash.get("schema_version") != 3:
+                    fail(errors, "journey.crash_injection_repair.schema_version must be 3")
+                if not isinstance(crash.get("run_id"), str) or not crash["run_id"].strip():
+                    fail(errors, "#1035 crash evidence run_id must be explicit")
+                if not isinstance(crash.get("source_sha"), str) or not SHA.fullmatch(crash["source_sha"]):
+                    fail(errors, "#1035 crash evidence source_sha must be a full SHA")
+                if crash.get("phase") != "completed" or crash.get("status") != "passed":
+                    fail(errors, "#1035 crash evidence must be completed and passed")
+                checkpoints = crash.get("checkpoints")
+                required_checkpoints = [
+                    "fault_armed", "terminal_state_observed", "endpoint_present_pre_crash",
+                    "process_identity_armed", "process_killed", "process_restarted", "repair_lock_acquired",
+                    "contending_create_waiting", "contending_create_started", "orphan_discovered", "repair_completed",
+                    "contending_create_accepted", "accounting_verified", "completed",
+                ]
+                if not isinstance(checkpoints, list):
+                    fail(errors, "#1035 incremental checkpoints must be a list")
+                else:
+                    phases = [item.get("phase") for item in checkpoints if isinstance(item, dict)]
+                    if phases != required_checkpoints:
+                        fail(errors, "#1035 crash checkpoints must be the exact legal phase sequence")
+                    cursor = -1
+                    for required in required_checkpoints:
+                        try:
+                            cursor = phases.index(required, cursor + 1)
+                        except ValueError:
+                            fail(errors, f"#1035 checkpoint {required} missing or out of order")
+                    if checkpoints and checkpoints[-1].get("status") != "passed":
+                        fail(errors, "#1035 final checkpoint must be passed")
+                    identity = next(
+                        (item for item in checkpoints
+                         if isinstance(item, dict) and item.get("phase") == "process_identity_armed"),
+                        None,
+                    )
+                    killed = next(
+                        (item for item in checkpoints
+                         if isinstance(item, dict) and item.get("phase") == "process_killed"),
+                        None,
+                    )
+                    if identity is not None:
+                        for field in ("pid", "starttime", "executable", "http_listener_pid",
+                                      "control_listener_pid", "state_root"):
+                            value = identity.get(field)
+                            if not isinstance(value, str) or not value.strip():
+                                fail(errors, f"#1035 process_identity_armed.{field} must be a non-empty string")
+                        if isinstance(identity.get("pid"), str) and not identity["pid"].isdigit():
+                            fail(errors, "#1035 process_identity_armed.pid must be numeric")
+                        if isinstance(identity.get("starttime"), str) and not identity["starttime"].isdigit():
+                            fail(errors, "#1035 process_identity_armed.starttime must be numeric")
                         for field in ("http_listener_pid", "control_listener_pid"):
-                            if identity.get(field) != identity["pid"]:
-                                fail(errors, f"#1035 process_identity_armed.{field} must equal pid")
-                if identity is not None and killed is not None:
-                    for identity_field, killed_field in (
-                        ("pid", "pid"), ("starttime", "old_starttime"),
-                        ("executable", "old_executable"),
-                        ("http_listener_pid", "old_http_listener_pid"),
-                        ("control_listener_pid", "old_control_listener_pid"),
-                    ):
-                        if identity.get(identity_field) != killed.get(killed_field):
-                            fail(errors, f"#1035 process identity does not match process_killed.{killed_field}")
-            passed(crash.get("status"), "journey.crash_injection_repair.status", errors)
-            hook = mapping(crash.get("fault_hook"), "journey.crash_injection_repair.fault_hook", errors)
-            server_c = mapping(crash.get("server_c"), "journey.crash_injection_repair.server_c", errors)
-            fault_armed = next(
-                (item for item in checkpoints
-                 if isinstance(item, dict) and item.get("phase") == "fault_armed"),
-                None,
-            ) if isinstance(checkpoints, list) else None
-            if hook is not None:
-                if hook.get("env") != "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS":
-                    fail(errors, "journey.crash_injection_repair.fault_hook.env must be the endpoint-release pause hook")
-                if not isinstance(hook.get("pause_ms"), int) or hook["pause_ms"] < 1:
-                    fail(errors, "journey.crash_injection_repair.fault_hook.pause_ms must be a positive integer")
-                if hook.get("target_env") != "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID":
-                    fail(errors, "journey.crash_injection_repair.fault_hook.target_env must identify the resource-scoped endpoint-release target")
-                target_resource_id = hook.get("target_resource_id")
-                if not isinstance(target_resource_id, str) or not target_resource_id.strip():
-                    fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must be non-empty")
-                if server_c is not None and target_resource_id != server_c.get("resource_id"):
-                    fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must match server_c.resource_id")
-                if fault_armed is not None and target_resource_id != fault_armed.get("target_resource_id"):
-                    fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must match fault_armed.target_resource_id")
-                if fault_armed is not None and fault_armed.get("target_env_consumed") not in (True, "true"):
-                    fail(errors, "journey.crash_injection_repair.fault_armed.target_env_consumed must be true")
-            endpoint = mapping(crash.get("endpoint_before_crash"), "journey.crash_injection_repair.endpoint_before_crash", errors)
-            if endpoint is not None:
-                if endpoint.get("existed") is not True:
-                    fail(errors, "journey.crash_injection_repair.endpoint_before_crash.existed must be true")
-                if endpoint.get("presence_asserted_while_pause_held") is not True:
-                    fail(errors, "journey.crash_injection_repair.endpoint_before_crash.presence_asserted_while_pause_held must be true")
-            contending_checkpoint = next(
-                (item for item in checkpoints
-                 if isinstance(item, dict) and item.get("phase") == "contending_create_started"),
-                None,
-            ) if isinstance(checkpoints, list) else None
-            if contending_checkpoint is not None and server_c is not None:
-                target_endpoint = server_c.get("owned_endpoint_id")
-                if contending_checkpoint.get("endpoint_id") != target_endpoint:
-                    fail(errors, "#1035 contending_create_started.endpoint_id must remain the crash target endpoint")
-                contender_endpoint = contending_checkpoint.get("contending_endpoint_id")
-                if not isinstance(contender_endpoint, str) or not contender_endpoint.strip():
-                    fail(errors, "#1035 contending_create_started.contending_endpoint_id must be explicit")
-                elif contender_endpoint == target_endpoint:
-                    fail(errors, "#1035 contender endpoint must be distinct from the crash target endpoint")
-            kill = mapping(crash.get("kill"), "journey.crash_injection_repair.kill", errors)
-            if kill is not None:
-                if kill.get("signal") != "SIGKILL":
-                    fail(errors, "journey.crash_injection_repair.kill.signal must be SIGKILL (true process death)")
-                if kill.get("orderly_restart") is not False:
-                    fail(errors, "journey.crash_injection_repair.kill.orderly_restart must be false")
-                if kill.get("identity_verified") is not True:
-                    fail(errors, "journey.crash_injection_repair.kill.identity_verified must be true")
-            sweep = mapping(crash.get("sweep"), "journey.crash_injection_repair.sweep", errors)
-            if sweep is not None:
-                if not isinstance(sweep.get("passes_observed"), int) or sweep["passes_observed"] < 1:
-                    fail(errors, "journey.crash_injection_repair.sweep.passes_observed must be at least 1")
-                if not isinstance(sweep.get("time_to_repair_ms"), int) or sweep["time_to_repair_ms"] > 180000:
-                    fail(errors, "journey.crash_injection_repair.sweep.time_to_repair_ms must be within the 180s bound")
-                if sweep.get("endpoint_absent_after") is not True:
-                    fail(errors, "journey.crash_injection_repair.sweep.endpoint_absent_after must be true")
-            reuse = mapping(crash.get("fixed_ip_reuse"), "journey.crash_injection_repair.fixed_ip_reuse", errors)
-            if reuse is not None and reuse.get("succeeded") is not True:
-                fail(errors, "journey.crash_injection_repair.fixed_ip_reuse.succeeded must be true")
-            quota = mapping(crash.get("quota"), "journey.crash_injection_repair.quota", errors)
-            if quota is not None and quota.get("restored") is not True:
-                fail(errors, "journey.crash_injection_repair.quota.restored must be true")
-            allocation = mapping(crash.get("placement_allocation"), "journey.crash_injection_repair.placement_allocation", errors)
-            if allocation is not None and allocation.get("leak") is not False:
-                fail(errors, "journey.crash_injection_repair.placement_allocation.leak must be false")
-            responsiveness = mapping(crash.get("responsiveness_during_backlog"), "journey.crash_injection_repair.responsiveness_during_backlog", errors)
-            if responsiveness is not None:
-                probe = mapping(responsiveness.get("unrelated_db_backed_probe"), "journey.crash_injection_repair.responsiveness_during_backlog.unrelated_db_backed_probe", errors)
-                if probe is not None:
-                    if probe.get("path") != "/operator/diagnostics/providers?limit=1":
-                        fail(errors, "unrelated DB-backed probe path is invalid")
-                    if probe.get("succeeded") is not True:
-                        fail(errors, "unrelated DB-backed probe must succeed while endpoint release is paused")
-                    if not isinstance(probe.get("latency_ms"), int) or probe["latency_ms"] < 0:
-                        fail(errors, "unrelated DB-backed probe latency must be recorded")
-                    if probe.get("curl_exit") != 0:
-                        fail(errors, "unrelated DB-backed probe curl_exit must be zero")
-                    status_code = probe.get("status_code")
-                    if not isinstance(status_code, int) or not 200 <= status_code < 300:
-                        fail(errors, "unrelated DB-backed probe status_code must be 2xx")
-                contention = mapping(responsiveness.get("contending_existing_port_create"), "journey.crash_injection_repair.responsiveness_during_backlog.contending_existing_port_create", errors)
-                if contention is not None:
-                    if contention.get("classification") != "contending":
-                        fail(errors, "existing-port create must be classified as contending")
-                    for field in ("repair_lock_acquired_before_create", "orphan_present_at_request_start",
-                                  "mutex_wait_observed", "accepted_within_bound",
-                                  "repair_completed_before_acceptance", "background_create_reaped", "active"):
-                        if contention.get(field) is not True:
-                            fail(errors, f"contending existing-port create {field} must be true")
-                    for field in ("resource_id", "operation_id", "existing_port_id"):
-                        if not isinstance(contention.get(field), str) or not contention[field].strip():
-                            fail(errors, f"contending existing-port create {field} must be explicit")
-                    start, accepted = contention.get("request_start_unix_ms"), contention.get("request_accepted_unix_ms")
-                    bound, latency = contention.get("acceptance_bound_ms"), contention.get("lock_contention_latency_ms")
-                    active_at, active_latency = contention.get("active_unix_ms"), contention.get("create_to_active_ms")
-                    if not all(isinstance(value, int) for value in (start, accepted, bound, latency, active_at, active_latency)):
-                        fail(errors, "contending create request/ACTIVE timing fields must be integers")
-                    elif not (start <= accepted <= active_at and 0 <= latency <= bound and active_latency >= 0):
-                        fail(errors, "contending create request acceptance and ACTIVE timing is invalid")
-                    if bound != 65000:
-                        fail(errors, "contending create bound must match the 30s + 30s + 5s derivation")
-                    if contention.get("release_signal_sent_after_mutex_wait_observed") is not True or \
-                       contention.get("repair_pause_released_after_create_start") is not True:
-                        fail(errors, "repair lock release must follow observed mutex contention")
-                    released = contention.get("repair_pause_released_unix_ms")
-                    if not isinstance(released, int) or not isinstance(start, int) or released < start:
-                        fail(errors, "repair pause release timestamp must follow contending request start")
-                    waiter_observed = contention.get("mutex_wait_observed_unix_ms")
-                    if not isinstance(waiter_observed, int) or not isinstance(start, int) or \
-                       not isinstance(released, int) or not start <= waiter_observed <= released:
-                        fail(errors, "create mutex wait must be observed after request start and before repair release")
-                    waiter_start = contention.get("waiter_observation_wait_start_unix_ms")
-                    waiter_wait = contention.get("waiter_observation_wait_ms")
-                    waiter_bound = contention.get("waiter_observation_bound_ms")
-                    waiter_timing_valid = all(isinstance(value, int) for value in (waiter_start, waiter_wait, waiter_bound))
-                    if not waiter_timing_valid:
-                        fail(errors, "waiter observation timing fields must be integers")
-                    repair_pause = contention.get("repair_pause_ms")
-                    repair_pause_valid = isinstance(repair_pause, int) and 10000 <= repair_pause <= 120000
-                    if not repair_pause_valid:
-                        fail(errors, "repair pause must be a bounded integer")
-                    elif waiter_timing_valid and waiter_bound != repair_pause - 5000:
-                        fail(errors, "waiter bound must equal repair pause minus 5000ms")
-                    elif waiter_timing_valid and (not isinstance(waiter_observed, int) or waiter_bound <= 0 or waiter_wait < 0 or \
-                         waiter_wait > waiter_bound or waiter_start > waiter_observed or \
-                         waiter_observed - waiter_start != waiter_wait or start > waiter_start):
-                        fail(errors, "waiter observation timing is invalid or unbounded")
-                    if contention.get("waiter_observation_within_bound") is not True:
-                        fail(errors, "waiter observation must be explicitly within its derived bound")
-                    if contention.get("repair_acceptance_order_basis") != "repair completion log is emitted before the sweep releases orphan_repair_lock; create mutex future reported Pending before repair was released":
-                        fail(errors, "contending create acceptance must be causally ordered after repair lock release")
-                    repair_completed = contention.get("repair_completion_observed_unix_ms")
-                    if not isinstance(repair_completed, int):
-                        fail(errors, "repair completion observation timestamp must be recorded")
-                    elif isinstance(released, int) and isinstance(accepted, int) and not released <= repair_completed <= accepted:
-                        fail(errors, "repair completion must be observed after release and before create acceptance")
-                    if crash.get("sweep", {}).get("completion_log_observed") is not True:
-                        fail(errors, "orphan repair must have a completion log")
-            if crash.get("caller_supplied_endpoint_preserved") is not True:
-                fail(errors, "journey.crash_injection_repair.caller_supplied_endpoint_preserved must be true")
-            if crash.get("foreign_project_endpoint_preserved") is not True:
-                fail(errors, "journey.crash_injection_repair.foreign_project_endpoint_preserved must be true")
+                            if isinstance(identity.get(field), str) and not identity[field].isdigit():
+                                fail(errors, f"#1035 process_identity_armed.{field} must be numeric")
+                        state_root = identity.get("state_root")
+                        executable = identity.get("executable")
+                        if isinstance(state_root, str) and isinstance(executable, str):
+                            if not state_root.startswith("/") or state_root == "/":
+                                fail(errors, "#1035 process_identity_armed.state_root must be a non-root absolute path")
+                            if executable != state_root.rstrip("/") + "/bin/o3kd":
+                                fail(errors, "#1035 process_identity_armed.executable must be state_root/bin/o3kd")
+                        if isinstance(identity.get("pid"), str):
+                            for field in ("http_listener_pid", "control_listener_pid"):
+                                if identity.get(field) != identity["pid"]:
+                                    fail(errors, f"#1035 process_identity_armed.{field} must equal pid")
+                    if identity is not None and killed is not None:
+                        for identity_field, killed_field in (
+                            ("pid", "pid"), ("starttime", "old_starttime"),
+                            ("executable", "old_executable"),
+                            ("http_listener_pid", "old_http_listener_pid"),
+                            ("control_listener_pid", "old_control_listener_pid"),
+                        ):
+                            if identity.get(identity_field) != killed.get(killed_field):
+                                fail(errors, f"#1035 process identity does not match process_killed.{killed_field}")
+                passed(crash.get("status"), "journey.crash_injection_repair.status", errors)
+                hook = mapping(crash.get("fault_hook"), "journey.crash_injection_repair.fault_hook", errors)
+                server_c = mapping(crash.get("server_c"), "journey.crash_injection_repair.server_c", errors)
+                fault_armed = next(
+                    (item for item in checkpoints
+                     if isinstance(item, dict) and item.get("phase") == "fault_armed"),
+                    None,
+                ) if isinstance(checkpoints, list) else None
+                if hook is not None:
+                    if hook.get("env") != "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS":
+                        fail(errors, "journey.crash_injection_repair.fault_hook.env must be the endpoint-release pause hook")
+                    if not isinstance(hook.get("pause_ms"), int) or hook["pause_ms"] < 1:
+                        fail(errors, "journey.crash_injection_repair.fault_hook.pause_ms must be a positive integer")
+                    if hook.get("target_env") != "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID":
+                        fail(errors, "journey.crash_injection_repair.fault_hook.target_env must identify the resource-scoped endpoint-release target")
+                    target_resource_id = hook.get("target_resource_id")
+                    if not isinstance(target_resource_id, str) or not target_resource_id.strip():
+                        fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must be non-empty")
+                    if server_c is not None and target_resource_id != server_c.get("resource_id"):
+                        fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must match server_c.resource_id")
+                    if fault_armed is not None and target_resource_id != fault_armed.get("target_resource_id"):
+                        fail(errors, "journey.crash_injection_repair.fault_hook.target_resource_id must match fault_armed.target_resource_id")
+                    if fault_armed is not None and fault_armed.get("target_env_consumed") not in (True, "true"):
+                        fail(errors, "journey.crash_injection_repair.fault_armed.target_env_consumed must be true")
+                endpoint = mapping(crash.get("endpoint_before_crash"), "journey.crash_injection_repair.endpoint_before_crash", errors)
+                if endpoint is not None:
+                    if endpoint.get("existed") is not True:
+                        fail(errors, "journey.crash_injection_repair.endpoint_before_crash.existed must be true")
+                    if endpoint.get("presence_asserted_while_pause_held") is not True:
+                        fail(errors, "journey.crash_injection_repair.endpoint_before_crash.presence_asserted_while_pause_held must be true")
+                contending_checkpoint = next(
+                    (item for item in checkpoints
+                     if isinstance(item, dict) and item.get("phase") == "contending_create_started"),
+                    None,
+                ) if isinstance(checkpoints, list) else None
+                if contending_checkpoint is not None and server_c is not None:
+                    target_endpoint = server_c.get("owned_endpoint_id")
+                    if contending_checkpoint.get("endpoint_id") != target_endpoint:
+                        fail(errors, "#1035 contending_create_started.endpoint_id must remain the crash target endpoint")
+                    contender_endpoint = contending_checkpoint.get("contending_endpoint_id")
+                    if not isinstance(contender_endpoint, str) or not contender_endpoint.strip():
+                        fail(errors, "#1035 contending_create_started.contending_endpoint_id must be explicit")
+                    elif contender_endpoint == target_endpoint:
+                        fail(errors, "#1035 contender endpoint must be distinct from the crash target endpoint")
+                kill = mapping(crash.get("kill"), "journey.crash_injection_repair.kill", errors)
+                if kill is not None:
+                    if kill.get("signal") != "SIGKILL":
+                        fail(errors, "journey.crash_injection_repair.kill.signal must be SIGKILL (true process death)")
+                    if kill.get("orderly_restart") is not False:
+                        fail(errors, "journey.crash_injection_repair.kill.orderly_restart must be false")
+                    if kill.get("identity_verified") is not True:
+                        fail(errors, "journey.crash_injection_repair.kill.identity_verified must be true")
+                sweep = mapping(crash.get("sweep"), "journey.crash_injection_repair.sweep", errors)
+                if sweep is not None:
+                    if not isinstance(sweep.get("passes_observed"), int) or sweep["passes_observed"] < 1:
+                        fail(errors, "journey.crash_injection_repair.sweep.passes_observed must be at least 1")
+                    if not isinstance(sweep.get("time_to_repair_ms"), int) or sweep["time_to_repair_ms"] > 180000:
+                        fail(errors, "journey.crash_injection_repair.sweep.time_to_repair_ms must be within the 180s bound")
+                    if sweep.get("endpoint_absent_after") is not True:
+                        fail(errors, "journey.crash_injection_repair.sweep.endpoint_absent_after must be true")
+                reuse = mapping(crash.get("fixed_ip_reuse"), "journey.crash_injection_repair.fixed_ip_reuse", errors)
+                if reuse is not None and reuse.get("succeeded") is not True:
+                    fail(errors, "journey.crash_injection_repair.fixed_ip_reuse.succeeded must be true")
+                quota = mapping(crash.get("quota"), "journey.crash_injection_repair.quota", errors)
+                if quota is not None and quota.get("restored") is not True:
+                    fail(errors, "journey.crash_injection_repair.quota.restored must be true")
+                allocation = mapping(crash.get("placement_allocation"), "journey.crash_injection_repair.placement_allocation", errors)
+                if allocation is not None and allocation.get("leak") is not False:
+                    fail(errors, "journey.crash_injection_repair.placement_allocation.leak must be false")
+                responsiveness = mapping(crash.get("responsiveness_during_backlog"), "journey.crash_injection_repair.responsiveness_during_backlog", errors)
+                if responsiveness is not None:
+                    probe = mapping(responsiveness.get("unrelated_db_backed_probe"), "journey.crash_injection_repair.responsiveness_during_backlog.unrelated_db_backed_probe", errors)
+                    if probe is not None:
+                        if probe.get("path") != "/operator/diagnostics/providers?limit=1":
+                            fail(errors, "unrelated DB-backed probe path is invalid")
+                        if probe.get("succeeded") is not True:
+                            fail(errors, "unrelated DB-backed probe must succeed while endpoint release is paused")
+                        if not isinstance(probe.get("latency_ms"), int) or probe["latency_ms"] < 0:
+                            fail(errors, "unrelated DB-backed probe latency must be recorded")
+                        if probe.get("curl_exit") != 0:
+                            fail(errors, "unrelated DB-backed probe curl_exit must be zero")
+                        status_code = probe.get("status_code")
+                        if not isinstance(status_code, int) or not 200 <= status_code < 300:
+                            fail(errors, "unrelated DB-backed probe status_code must be 2xx")
+                    contention = mapping(responsiveness.get("contending_existing_port_create"), "journey.crash_injection_repair.responsiveness_during_backlog.contending_existing_port_create", errors)
+                    if contention is not None:
+                        if contention.get("classification") != "contending":
+                            fail(errors, "existing-port create must be classified as contending")
+                        for field in ("repair_lock_acquired_before_create", "orphan_present_at_request_start",
+                                      "mutex_wait_observed", "accepted_within_bound",
+                                      "repair_completed_before_acceptance", "background_create_reaped", "active"):
+                            if contention.get(field) is not True:
+                                fail(errors, f"contending existing-port create {field} must be true")
+                        for field in ("resource_id", "operation_id", "existing_port_id"):
+                            if not isinstance(contention.get(field), str) or not contention[field].strip():
+                                fail(errors, f"contending existing-port create {field} must be explicit")
+                        start, accepted = contention.get("request_start_unix_ms"), contention.get("request_accepted_unix_ms")
+                        bound, latency = contention.get("acceptance_bound_ms"), contention.get("lock_contention_latency_ms")
+                        active_at, active_latency = contention.get("active_unix_ms"), contention.get("create_to_active_ms")
+                        if not all(isinstance(value, int) for value in (start, accepted, bound, latency, active_at, active_latency)):
+                            fail(errors, "contending create request/ACTIVE timing fields must be integers")
+                        elif not (start <= accepted <= active_at and 0 <= latency <= bound and active_latency >= 0):
+                            fail(errors, "contending create request acceptance and ACTIVE timing is invalid")
+                        if bound != 65000:
+                            fail(errors, "contending create bound must match the 30s + 30s + 5s derivation")
+                        if contention.get("release_signal_sent_after_mutex_wait_observed") is not True or \
+                           contention.get("repair_pause_released_after_create_start") is not True:
+                            fail(errors, "repair lock release must follow observed mutex contention")
+                        released = contention.get("repair_pause_released_unix_ms")
+                        if not isinstance(released, int) or not isinstance(start, int) or released < start:
+                            fail(errors, "repair pause release timestamp must follow contending request start")
+                        waiter_observed = contention.get("mutex_wait_observed_unix_ms")
+                        if not isinstance(waiter_observed, int) or not isinstance(start, int) or \
+                           not isinstance(released, int) or not start <= waiter_observed <= released:
+                            fail(errors, "create mutex wait must be observed after request start and before repair release")
+                        waiter_start = contention.get("waiter_observation_wait_start_unix_ms")
+                        waiter_wait = contention.get("waiter_observation_wait_ms")
+                        waiter_bound = contention.get("waiter_observation_bound_ms")
+                        waiter_timing_valid = all(isinstance(value, int) for value in (waiter_start, waiter_wait, waiter_bound))
+                        if not waiter_timing_valid:
+                            fail(errors, "waiter observation timing fields must be integers")
+                        repair_pause = contention.get("repair_pause_ms")
+                        repair_pause_valid = isinstance(repair_pause, int) and 10000 <= repair_pause <= 120000
+                        if not repair_pause_valid:
+                            fail(errors, "repair pause must be a bounded integer")
+                        elif waiter_timing_valid and waiter_bound != repair_pause - 5000:
+                            fail(errors, "waiter bound must equal repair pause minus 5000ms")
+                        elif waiter_timing_valid and (not isinstance(waiter_observed, int) or waiter_bound <= 0 or waiter_wait < 0 or \
+                             waiter_wait > waiter_bound or waiter_start > waiter_observed or \
+                             waiter_observed - waiter_start != waiter_wait or start > waiter_start):
+                            fail(errors, "waiter observation timing is invalid or unbounded")
+                        if contention.get("waiter_observation_within_bound") is not True:
+                            fail(errors, "waiter observation must be explicitly within its derived bound")
+                        if contention.get("repair_acceptance_order_basis") != "repair completion log is emitted before the sweep releases orphan_repair_lock; create mutex future reported Pending before repair was released":
+                            fail(errors, "contending create acceptance must be causally ordered after repair lock release")
+                        repair_completed = contention.get("repair_completion_observed_unix_ms")
+                        if not isinstance(repair_completed, int):
+                            fail(errors, "repair completion observation timestamp must be recorded")
+                        elif isinstance(released, int) and isinstance(accepted, int) and not released <= repair_completed <= accepted:
+                            fail(errors, "repair completion must be observed after release and before create acceptance")
+                        if crash.get("sweep", {}).get("completion_log_observed") is not True:
+                            fail(errors, "orphan repair must have a completion log")
+                if crash.get("caller_supplied_endpoint_preserved") is not True:
+                    fail(errors, "journey.crash_injection_repair.caller_supplied_endpoint_preserved must be true")
+                if crash.get("foreign_project_endpoint_preserved") is not True:
+                    fail(errors, "journey.crash_injection_repair.foreign_project_endpoint_preserved must be true")
         maintenance = mapping(journey.get("host_maintenance"), "journey.host_maintenance", errors)
         if maintenance is not None:
             passed(maintenance.get("status"), "journey.host_maintenance.status", errors)
