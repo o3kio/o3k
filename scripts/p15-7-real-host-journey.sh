@@ -4412,10 +4412,10 @@ assert_owned_domains_absent
 [[ ! -e "$SSH_KEY" && ! -e "$KNOWN_HOSTS" ]] || die "owned journey files remain after cleanup"
 JOURNEY_END_MS="$(date +%s%3N)"
 
-PYTHONPATH="$ROOT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 - "$EVIDENCE_FILE" "$ARTIFACT_DIR" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" "$POSTGRES_MODE" "$POSTGRES_SERVER_VERSION" "$POSTGRES_REDACTED_ENDPOINT" "$POSTGRES_SCHEMA_PREPARED" "$INITIAL_READY_COUNT" "$FINAL_READY_COUNT" "$PEAK_CONCURRENT_READY" "$DRAIN_AGENT" "$BOOTSTRAP_AGENT_ID" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" "$BACKEND_EFFECTIVE" "$BACKEND_PROOF_METHOD" "$BACKEND_PROOF_POOL_SESSIONS" "$BACKEND_PROOF_SEVER_OBSERVED" "$BACKEND_PROOF_RECOVERY_OBSERVED" "$PREFLIGHT_ARTIFACT" "$CHECKOUT_HEAD" "$TREE_CLEAN" "$HARNESS_DIGEST" <<'PY'
+PYTHONPATH="$ROOT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 - "$EVIDENCE_FILE" "$ARTIFACT_DIR" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" "$POSTGRES_MODE" "$POSTGRES_SERVER_VERSION" "$POSTGRES_REDACTED_ENDPOINT" "$POSTGRES_SCHEMA_PREPARED" "$INITIAL_READY_COUNT" "$FINAL_READY_COUNT" "$PEAK_CONCURRENT_READY" "$DRAIN_AGENT" "$BOOTSTRAP_AGENT_ID" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" "$BACKEND_EFFECTIVE" "$BACKEND_PROOF_METHOD" "$BACKEND_PROOF_POOL_SESSIONS" "$BACKEND_PROOF_SEVER_OBSERVED" "$BACKEND_PROOF_RECOVERY_OBSERVED" "$PREFLIGHT_ARTIFACT" "$CHECKOUT_HEAD" "$TREE_CLEAN" "$HARNESS_DIGEST" "$PP5_PHASE" <<'PY'
 from p15_7_scale_semantics import validate_bootstrap_scale_membership
 import json,pathlib,sys
-path=pathlib.Path(sys.argv[1]); artifact=pathlib.Path(sys.argv[2]); sha=sys.argv[3].lower(); profile=sys.argv[4]; blocks=int(sys.argv[5]); start=int(sys.argv[6]); end=int(sys.argv[7]); cross_tenant=sys.argv[8] == "true"; araf_status=sys.argv[9]; araf_reason=sys.argv[10]; diagnostic_only=sys.argv[11] == "true"; postgres_mode=sys.argv[12]; postgres_version=sys.argv[13]; postgres_endpoint=sys.argv[14]; postgres_schema=sys.argv[15] == "true"; initial_ready=int(sys.argv[16]); final_ready=int(sys.argv[17]); peak_ready=int(sys.argv[18]); drain_agent=sys.argv[19]; bootstrap_agent=sys.argv[20]; child_block_ids=sys.argv[21:26]; backend_effective=sys.argv[26]; backend_proof_method=sys.argv[27]; backend_proof={"status":"passed","method":backend_proof_method}; pool_sessions=sys.argv[28]; preflight_path=pathlib.Path(sys.argv[31]); checkout_head=sys.argv[32].lower(); tree_clean=sys.argv[33] == "true"; harness_digest=sys.argv[34]
+path=pathlib.Path(sys.argv[1]); artifact=pathlib.Path(sys.argv[2]); sha=sys.argv[3].lower(); profile=sys.argv[4]; blocks=int(sys.argv[5]); start=int(sys.argv[6]); end=int(sys.argv[7]); cross_tenant=sys.argv[8] == "true"; araf_status=sys.argv[9]; araf_reason=sys.argv[10]; diagnostic_only=sys.argv[11] == "true"; postgres_mode=sys.argv[12]; postgres_version=sys.argv[13]; postgres_endpoint=sys.argv[14]; postgres_schema=sys.argv[15] == "true"; initial_ready=int(sys.argv[16]); final_ready=int(sys.argv[17]); peak_ready=int(sys.argv[18]); drain_agent=sys.argv[19]; bootstrap_agent=sys.argv[20]; child_block_ids=sys.argv[21:26]; backend_effective=sys.argv[26]; backend_proof_method=sys.argv[27]; backend_proof={"status":"passed","method":backend_proof_method}; pool_sessions=sys.argv[28]; preflight_path=pathlib.Path(sys.argv[31]); checkout_head=sys.argv[32].lower(); tree_clean=sys.argv[33] == "true"; harness_digest=sys.argv[34]; pp5_phase=sys.argv[35]
 preflight=json.loads(preflight_path.read_text(encoding="utf-8"))
 if checkout_head != sha or preflight.get("checkout_head") != sha or tree_clean is not True or preflight.get("git_tree_clean") is not True or len(harness_digest) != 64 or preflight.get("harness_inputs_sha256") != harness_digest:
     raise SystemExit("preflight identity is missing or does not match the journey source")
@@ -4425,12 +4425,30 @@ if postgres_mode == "external":
     backend_proof["recovery_observed"]=sys.argv[30] == "true"
 
 CHECKPOINT_PHASES=["initial-scale-checkpoint","pre-drain","post-drain","post-remove","post-replacement","post-reboot","post-crash-repair","post-maintenance"]
+# The #1035 crash leg runs only in phases that select it (integrated and
+# 1035-crash-recovery). The crash checkpoint and crash evidence must exist
+# exactly when the leg ran and must be absent exactly when it did not;
+# silently tolerating either direction would let a skipped leg masquerade as
+# evidence or a failed leg vanish.
+crash_ran = pp5_phase in ("integrated", "1035-crash-recovery")
+crash_checkpoint_path = artifact / "p15-7-scale-checkpoint-post-crash-repair.json"
+crash_evidence_path = artifact / "p15-7-crash-injection-evidence.json"
+if crash_ran:
+    if not crash_checkpoint_path.is_file() or not crash_evidence_path.is_file():
+        raise SystemExit("crash leg ran but its checkpoint or evidence is missing")
+else:
+    if crash_checkpoint_path.exists() or crash_evidence_path.exists():
+        raise SystemExit("crash-leg evidence exists but the phase did not run the crash leg")
 ELIGIBILITY_RULE=("placement_eligible = state=='ready' AND >=1 resource_provider_id present in "
                   "/operator/diagnostics/providers with state 'Enabled' AND no recorded drain_blockers; "
                   "every BuildingBlock is enumerated, including the bootstrap block (identified by the "
                   "canonical TLS agent identity, never filtered by name or label)")
 checkpoints=[]
 for phase in CHECKPOINT_PHASES:
+    if phase == "post-crash-repair" and not crash_ran:
+        checkpoints.append({"phase": "post-crash-repair", "status": "not_run",
+                            "reason": f"#1035 crash leg not selected by phase {pp5_phase}"})
+        continue
     fragment_path=artifact / f"p15-7-scale-checkpoint-{phase}.json"
     checkpoints.append(json.loads(fragment_path.read_text(encoding="utf-8")))
 initial_checkpoint=checkpoints[0]
@@ -4459,7 +4477,7 @@ if len(set(enrolled_block_ids)) != 6 or len(set(enrolled_agents)) != 6:
 def load_fragment(name):
     return json.loads((artifact / name).read_text(encoding="utf-8"))
 drain_blocker_requery=load_fragment("p15-7-drain-blocker-requery.json")
-crash_repair=load_fragment("p15-7-crash-injection-evidence.json")
+crash_repair=load_fragment("p15-7-crash-injection-evidence.json") if crash_ran else {"status":"not_run","reason":f"#1035 crash leg not selected by phase {pp5_phase}"}
 host_maintenance=load_fragment("p15-7-host-maintenance-evidence.json")
 transient_path=artifact / "p15-7-transient-failures.jsonl"
 transient_failures=[]
