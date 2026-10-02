@@ -16,6 +16,8 @@ use o3k_store::{
 };
 
 async fn prepare_test_database(database_url: &str) -> Option<PgConnection> {
+    o3k_store::conformance::assert_destructive_postgres_test_database(database_url)
+        .expect("destructive PostgreSQL test database must have the expected purpose");
     let mut database_guard = PgConnection::connect(database_url).await.ok()?;
     sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
         .execute(&mut database_guard)

@@ -830,6 +830,69 @@ pub struct ObservationUpdate<'a> {
     pub observation_sequence: u64,
 }
 
+/// One-transaction terminalization of a lifecycle operation and the terminal
+/// observed-state projection of its resource (issue #1041).
+///
+/// Lifecycle success previously committed two durable writes in sequence —
+/// the operation row terminal, then the resource projection terminal (e.g.
+/// `DELETED`) — and a crash between them left exactly one half committed,
+/// which neither lifecycle reconciliation nor the orphan-endpoint sweep
+/// repairs. This primitive makes the pair atomic: either both rows reach
+/// their terminal shape or neither does.
+///
+/// Semantics, applied in a single database transaction:
+///
+/// - the operation row transitions to `terminal_state` carrying the provider
+///   operation identity and error fields, exactly as
+///   [`DurableStore::update_operation`](crate::DurableStore) would persist
+///   them, including the canonical metadata (`started_at`/`finished_at`/
+///   `error`) row when one exists;
+/// - the resource row receives the terminal projection
+///   (`observed_state`/`observed_generation`/`provider_id`) behind a
+///   generation fence (`WHERE generation = expected_generation`), so a stale
+///   writer is rejected with [`StoreError::StaleGeneration`] exactly like
+///   [`DurableStore::update_resource`](crate::DurableStore) rejects it, and
+///   nothing is committed at all when the fence fails;
+/// - an equivalent replay — the operation already terminal with the same
+///   terminal state and a compatible provider identity — succeeds without
+///   touching the resource row: the first terminalization's projection was
+///   committed in the same transaction as the terminal state, so re-applying
+///   it could only double-bump the generation or clobber a newer legitimate
+///   write. Conflicting terminal state or provider identity is rejected with
+///   [`StoreError::Corrupt`], mirroring `update_operation`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleTerminalization<'a> {
+    pub operation_id: Uuid,
+    /// Contract: [`OperationState::Succeeded`] or [`OperationState::Failed`].
+    /// Anything else is rejected before a transaction is opened.
+    pub terminal_state: OperationState,
+    pub provider_operation_id: Option<&'a str>,
+    pub error_category: Option<&'a str>,
+    pub error_message: Option<&'a str>,
+    pub resource_id: Uuid,
+    pub expected_generation: i64,
+    pub desired_state: &'a str,
+    pub observed_state: &'a str,
+    pub observed_generation: i64,
+    pub provider_id: Option<&'a str>,
+}
+
+impl LifecycleTerminalization<'_> {
+    /// Checks that hold before a backend opens a transaction, so both
+    /// adapters fail identically without depending on engine behavior.
+    pub(crate) fn validate(&self) -> Result<(), StoreError> {
+        if !matches!(
+            self.terminal_state,
+            OperationState::Succeeded | OperationState::Failed
+        ) {
+            return Err(StoreError::Corrupt(
+                "lifecycle terminalization requires a terminal state".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationRecord {
     pub id: Uuid,

@@ -18,20 +18,33 @@ jobs:
         env:
           POSTGRES_USER: o3k
           POSTGRES_PASSWORD: password
-          POSTGRES_DB: o3k_test
+          POSTGRES_DB: o3k_workspace_test_ci
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U o3k -d o3k_test"
+          --health-cmd="pg_isready -U o3k -d o3k_workspace_test_ci"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=10
     env:
-      O3K_DATABASE_URL: postgres://o3k:password@127.0.0.1:5432/o3k_test
+      O3K_DATABASE_URL: postgres://o3k:password@127.0.0.1:5432/o3k_workspace_test_ci
+      O3K_TEST_DATABASE_PURPOSE: workspace
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - name: Prepare separate endpoint PostgreSQL test database
+        env:
+          PGPASSWORD: password
+        run: |
+          set -euo pipefail
+          workspace_db=o3k_workspace_test_ci
+          endpoint_db=o3k_endpoint_test_ci
+          [[ "$workspace_db" != "$endpoint_db" ]]
+          if ! psql -h 127.0.0.1 -U o3k -d "$workspace_db" -tAc \
+            "SELECT 1 FROM pg_database WHERE datname = '$endpoint_db'" | grep -qx 1; then
+            createdb -h 127.0.0.1 -U o3k "$endpoint_db"
+          fi
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install protobuf compiler and compatibility-test parser
@@ -49,6 +62,21 @@ jobs:
           for file in packaging/*.sh tests/*.sh scripts/*.sh scripts/ci/*.sh; do bash -n "$file"; done
           bash tests/ci-apt-provision.sh
           python3 -m compileall -q scripts
+      - name: Validate PP.5 evidence validator fail-closed guards
+        # Tests the validator's own correctness (mutation/negative coverage)
+        # against locally-generated fixtures. It needs no real PP.5 campaign
+        # artifact, so an ordinary local dev / unit-test run is never blocked.
+        run: bash tests/pp5_evidence_validation.sh
+      - name: Validate PP.5 small-edge teardown ownership
+        run: bash tests/pp5-small-edge-campaign-ownership.sh
+      - name: Validate destructive PostgreSQL test database guards
+        run: bash tests/postgres_test_database_guards.sh
+      - name: Validate PP.5 PostgreSQL prerequisite failure boundaries
+        run: python3 scripts/test_pp5_postgres_preflight.py
+      - name: Validate PP.5 runner prerequisite boundaries
+        run: python3 scripts/test_pp5_runner_prerequisite.py
+      - name: Validate PP.5 fast prerequisite entrypoint
+        run: bash tests/pp5-fast-gate-guards.sh
       - name: Validate release signing trust transition
         run: bash tests/release-signing-migration.sh
       - name: Test P13.5E deterministic fault proxy and evidence artifact
@@ -88,6 +116,8 @@ jobs:
         run: bash tests/p15_7_keycloak_authority_guards.sh
       - name: Test protected P15.7 journey and diagnostic guards
         run: bash tests/p15_7_scale_composition_guards.sh
+      - name: Test protected P15.7 VM address resolver guards
+        run: bash tests/p15_7_vm_address.sh
       - name: Test protected P15.7 libvirt pool ownership
         run: bash tests/p15_7_libvirt_pool_cleanup.sh
       - name: Test protected P15.7 dispatch guard
@@ -213,6 +243,11 @@ jobs:
         run: cargo test --workspace --all-features
       - name: P12.4 PostgreSQL conformance (mandatory)
         run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --ignored --nocapture
+      - name: Endpoint-lifecycle 1035 PostgreSQL conformance (mandatory)
+        env:
+          O3K_DATABASE_URL: postgres://o3k:password@127.0.0.1:5432/o3k_endpoint_test_ci
+          O3K_TEST_DATABASE_PURPOSE: endpoint
+        run: cargo test -p o3kd --all-features --lib pp4_endpoint_lifecycle -- --ignored --nocapture
       - name: P12.7 cross-process native replay conformance (mandatory)
         # Independently-spawned runtimes share only the durable store, so the
         # canonical replay authority is proven durable rather than process-local.

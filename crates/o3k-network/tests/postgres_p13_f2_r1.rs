@@ -5,6 +5,7 @@ use std::{path::PathBuf, sync::Arc};
 use o3k_network::{NetworkService, RealmCleanupObservation, RealmCleanupProgress};
 use o3k_store::PostgresStore;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::{Connection, postgres::PgConnection};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -13,6 +14,26 @@ static DATABASE_LOCK: Mutex<()> = Mutex::const_new(());
 fn database_url() -> String {
     std::env::var("O3K_DATABASE_URL")
         .expect("O3K_DATABASE_URL must be set for P13.1F2 PostgreSQL conformance")
+}
+
+/// Acquires a session-level advisory lock on the shared PostgreSQL test
+/// database, held by a dedicated connection for the caller's entire test
+/// (issue #1043). The shared `o3k-shared-test-database` key serializes this
+/// file's destructive `DROP SCHEMA public CASCADE` reset against the other
+/// shared-DB test groups even across separate `cargo test` processes, unlike
+/// the in-process `DATABASE_LOCK`. Matches
+/// `o3k_store::conformance::prepare_shared_postgres_test_database`.
+async fn acquire_database_guard(url: &str) -> PgConnection {
+    o3k_store::conformance::assert_destructive_postgres_test_database(url)
+        .expect("destructive PostgreSQL test database must have the expected purpose");
+    let mut connection = PgConnection::connect(url)
+        .await
+        .expect("connect to the shared PostgreSQL test database");
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+        .execute(&mut connection)
+        .await
+        .expect("acquire the shared PostgreSQL test-database advisory lock");
+    connection
 }
 
 fn runtime_root() -> PathBuf {
@@ -25,6 +46,7 @@ async fn postgres_p13_f2_r1_reconstructs_and_recovers_realm_cleanup()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = DATABASE_LOCK.lock().await;
     let url = database_url();
+    let _postgres_guard = acquire_database_guard(&url).await;
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .connect(&url)
@@ -175,6 +197,7 @@ async fn postgres_p13_f3_fresh_runtime_reconstructs_policy_and_zero_realm_networ
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = DATABASE_LOCK.lock().await;
     let url = database_url();
+    let _postgres_guard = acquire_database_guard(&url).await;
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .connect(&url)

@@ -622,6 +622,7 @@ PY
 
 python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
 import pathlib, re, sys
+from pathlib import Path
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 preflight_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
 dispatch_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-dispatch.yml").read_text(encoding="utf-8")
@@ -635,11 +636,16 @@ for needle in ("P15.7 protected preflight", "id-token: write",
     assert needle in preflight_text, needle
 workflow_step = text.split("      - name: Run public real-host lifecycle\n", 1)[1]
 workflow_step = workflow_step.split("        run: bash tests/testlab-libvirt.sh\n", 1)[0]
+assert "scripts/p15-7-campaign-lock.py acquire" in text
+assert "scripts/p15-7-harness-qualification.sh" in text
+assert "O3K_P15_7_CAMPAIGN_LOCK_PATH" in text
 assert "          OS_PASSWORD:" not in workflow_step
 for needle in ("workflow_dispatch:",
                "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",
                "Allocate run-scoped TestLab ports", "O3K_TESTLAB_COMPUTE_HEALTH_PORT",
+               "listeners=\"$(ss -H -ltn", "port_free()", "no free run-scoped TestLab port triplet is available",
+               "O3K_TESTLAB_AUTO_SELECT_PORTS: \"true\"",
                "Bootstrap disposable TestLab",
                "scripts/bootstrap-disposable-testlab.sh",
                "O3K_PROVIDER: agent",
@@ -659,7 +665,7 @@ for needle in ("workflow_dispatch:",
                "Run compute-agent process-boundary evidence",
                "tests/real-compute-agent-process-mtls.sh",
                "compute-agent-process-mtls-result.json",
-               "Run P15.7 scale/composition convergence gate",
+               "Run selected PP.5 acceptance lane",
                "tests/p15_7_scale_composition.sh",
                "Protected P15.7 authority and capacity preflight",
                "scripts/p15-7-protected-preflight.sh",
@@ -673,6 +679,10 @@ for needle in ("workflow_dispatch:",
                "O3K_P15_7_JOURNEY_COMMAND:",
                "p15-7-scale-composition-evidence.json",
                "p15-7-gate-result.json",
+               "pp5-s5-scale-result.json",
+               "pp5-1035-crash-recovery-result.json",
+               "pp5-host-maintenance-result.json",
+               "pp5-overall-result.json",
                "O3K_REAL_HOST_P15_7_STEP_STATUS:",
                "Install pinned P13.4 provider tools and build runtime",
                "scripts/ci/apt-provision.sh install unzip",
@@ -687,8 +697,13 @@ for needle in ("workflow_dispatch:",
                "Run P13.4 VolumeAttachment provider gate",
                "tests/p13_4_provider_volume_attachment_smoke.sh",
                "Run P13.4 storage recovery and fencing tests",
-               "Start disposable P13.4 PostgreSQL",
+               "Provision isolated PP.5 PostgreSQL purpose databases",
+               "scripts/provision_pp5_postgres.py provision",
+               "o3k_p13_test_",
+               "Bind P13.4 to isolated PP.5 PostgreSQL",
                "-p o3k-store --test postgres_p13_4_storage",
+               "O3K_TEST_DATABASE_PURPOSE: p13",
+               "Verify PP.5 PostgreSQL isolation after P13.4",
                "Run P13.4 real LVM/libvirt guest gate",
                "scripts/real-lvm-guest-gate.sh",
                "p13-4-storage-evidence.json",
@@ -703,7 +718,17 @@ for needle in ("workflow_dispatch:",
     assert needle in text, needle
 assert "Repair prior protected artifact ownership" in text
 assert 'sudo -n chown -R "$(id -u):$(id -g)"' in text
-assert '"${GITHUB_WORKSPACE}/target/debug"' in text
+assert '"${GITHUB_WORKSPACE}/target/real-host-workflow-artifacts"' in text
+assert 'target_root="${GITHUB_WORKSPACE}/target"' in text
+assert 'sudo -n test -L "${target_root}"' in text
+assert 'sudo -n test -L "${target_dir}"' in text
+assert 'cannot verify checkout target root safety' in text
+assert 'cannot verify checkout artifact root safety: ${target_dir}' in text
+assert 'cannot inspect checkout artifact root: ${target_dir}' in text
+assert 'sudo -n test -e "${target_dir}"' in text
+assert 'sudo -n chmod -R u+rwX "${target_dir}"' in text
+assert 'sudo -n -u "$(id -un)" find "${target_dir}" -xdev -print' in text
+assert 'checkout\'s clean step can' in text
 assert "github.repository == 'o3kio/o3k'" in text
 assert "github.event_name == 'workflow_dispatch'" in text
 assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in text
@@ -711,23 +736,47 @@ assert "ref: ${{ inputs.target_sha || github.sha }}" in text
 assert "persist-credentials: false" in text
 assert "Verify immutable source checkout" in text
 assert text.index("Verify immutable source checkout") < text.index("Protected P15.7 authority and capacity preflight")
+pg_preflight = "Run PP5 fast PostgreSQL prerequisite qualification"
+assert text.index("Verify immutable source checkout") < text.index(pg_preflight)
+assert text.index(pg_preflight) < text.index("Protected P15.7 authority and capacity preflight")
+pg_step = text.split(f"- name: {pg_preflight}", 1)[1].split("\n      - ", 1)[0]
+assert "continue-on-error:" not in pg_step
+assert "if:" not in pg_step
+assert "scripts/pp5-fast-gate.sh qualification" in text
+prepare_pg = "Prepare local PP.5 PostgreSQL for authoritative S5"
+assert prepare_pg in text
+assert text.index(pg_preflight) < text.index(prepare_pg)
+prepare_pg_step = text.split(f"- name: {prepare_pg}", 1)[1].split("\n      - ", 1)[0]
+assert "python3 scripts/pp5-runner-prerequisite.py" in prepare_pg_step
+assert "O3K_PP5_RUN_ID:" in prepare_pg_step
+assert "O3K_PP5_SOURCE_SHA:" in prepare_pg_step
+assert "O3K_PP5_POSTGRES_ADMIN_URL:" in prepare_pg_step
+assert text.index(prepare_pg) < text.index("Protected P15.7 authority and capacity preflight")
+assert text.index(prepare_pg) < text.index("Provision isolated PP.5 PostgreSQL purpose databases")
+fast_gate_text = pathlib.Path("scripts/pp5-fast-gate.sh").read_text(encoding="utf-8")
+assert "scripts/pp5-runner-prerequisite.py" in fast_gate_text
+assert Path("scripts/pp5-fast-gate.sh").is_file()
+assert Path("scripts/pp5-runner-prerequisite.py").is_file()
+assert "pp5-postgres-preflight*.json" in text
+assert "pp5-runner-prerequisite*.json" in text
+assert "Restore local PP.5 PostgreSQL service state" in text
+assert "pp5-runner-prerequisite.py restore" in text
+assert "pp5-runner-postgres-service-state.json" in text
 assert text.index("Protected P15.7 authority and capacity preflight") < text.index("Bootstrap disposable TestLab")
 assert "if: always() && steps.protected_preflight.outcome == 'success'" in text
 assert text.count("if: always() && steps.protected_preflight.outcome == 'success'") >= 5
 assert "id-token: write" in text
 assert "O3K_P15_7_OPERATOR_TOKEN:" not in text
-assert "p15-7-postgres-ownership.json" in text
-# The embedded ownership JSON must start at column zero after YAML block
-# scalar dedentation; retaining the shell indentation makes Python fail before
-# the generic TestLab and falsely blocks the protected journey.
-assert re.search(r"p15-7-postgres-ownership\.json <<'PY'\n          import json, subprocess, sys", text)
-assert not re.search(r"p15-7-postgres-ownership\.json <<'PY'\n\s{12}import json, subprocess, sys", text)
-assert "--label o3k.owner=o3k" in text
-assert "container_id" in text
+assert "pp5-postgres-purpose-map.json" in text
+assert "O3K_P15_7_POSTGRES_MODE=external" in text
+assert "O3K_P15_7_EXTERNAL_PG_TARGET" in text
+assert "p15-7-postgres-ownership.json" not in text
+assert "p13-4-postgres-ownership.json" not in text
+assert "postgres:16.4" not in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
 p15_image_step = text.split("      - name: Prepare pinned P15.7 VM host image\n", 1)[1]
-p15_image_step = p15_image_step.split("      - name: Run P15.7 scale/composition convergence gate\n", 1)[0]
+p15_image_step = p15_image_step.split("      - name: Run selected PP.5 acceptance lane\n", 1)[0]
 # Large owned images are tracked by their marker and exact cleanup path. They
 # must not enter the protected-path inventory, whose bounded file-size policy
 # is intentionally fail-closed.

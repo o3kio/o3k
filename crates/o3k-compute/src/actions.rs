@@ -509,28 +509,35 @@ impl ComputeService {
             // between the projection and the writes is repaired by re-drive.
             self.project_metering(&resource, server_state_to_storage(ServerState::Deleted))
                 .await?;
+            // Issue #1041: the operation terminal state and the resource
+            // terminal projection commit in ONE durable transaction; the
+            // previous sequential pair could crash between the two writes and
+            // leave exactly one half committed, which no reconciliation pass
+            // repairs. The endpoint release below stays outside the
+            // transaction by design: if the process dies before it runs, the
+            // shipped orphan-endpoint sweep repairs it (issue #1035).
             self.store
-                .update_operation(
+                .terminalize_lifecycle(&o3k_store::LifecycleTerminalization {
                     operation_id,
-                    o3k_store::OperationState::Succeeded,
-                    None,
-                    None,
-                    None,
-                )
-                .await?;
-            self.store
-                .update_resource(
-                    id.as_uuid(),
-                    resource.generation,
-                    &resource.desired_state,
-                    server_state_to_storage(ServerState::Deleted),
-                    resource.generation,
-                    None,
-                )
+                    terminal_state: o3k_store::OperationState::Succeeded,
+                    provider_operation_id: None,
+                    error_category: None,
+                    error_message: None,
+                    resource_id: id.as_uuid(),
+                    expected_generation: resource.generation,
+                    desired_state: &resource.desired_state,
+                    observed_state: server_state_to_storage(ServerState::Deleted),
+                    observed_generation: resource.generation,
+                    provider_id: None,
+                })
                 .await?;
             self.release_placement_allocation(id.as_uuid(), &intent)
                 .await?;
             self.store.detach_server_keypair(id.as_uuid()).await?;
+            // #1035 crash-window failpoint: the terminal delete is durably
+            // committed and no endpoint release has run. Killed here, the
+            // server is DELETED while its `o3k-server:` endpoint stays behind;
+            // the shipped orphan-repair sweep is the repair authority.
             // The delete completed here, so this request owns the outcome: a
             // server-owned endpoint that could not be released fails the
             // mutation (the durable delete stays terminal, and a replay retries
@@ -626,6 +633,10 @@ impl ComputeService {
         self.release_placement_allocation(id.as_uuid(), &intent)
             .await?;
         self.store.detach_server_keypair(id.as_uuid()).await?;
+        // #1035 crash-window failpoint: the terminal delete is durably
+        // committed and no endpoint release has run. Killed here, the
+        // server is DELETED while its `o3k-server:` endpoint stays behind;
+        // the shipped orphan-repair sweep is the repair authority.
         // Request owns the outcome: a server-owned endpoint that could not be
         // released fails the mutation rather than reporting a converged delete.
         self.project_terminal_binding_outcome(

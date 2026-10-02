@@ -61,6 +61,13 @@ EVENT_ERROR_KINDS = {
     "journal",
     "protocol",
 }
+# Every journey-provisioned child hypervisor identity (block-a..block-f) plus
+# the run-scoped TestLab bootstrap agent. Files for identities that have not
+# been provisioned yet are simply absent and skipped.
+AGENT_LABELS = (
+    "block-a", "block-b", "block-c", "block-d", "block-e", "block-f",
+    "compute-agent",
+)
 
 
 def safe_child(root: pathlib.Path, name: str) -> pathlib.Path:
@@ -131,7 +138,7 @@ def operation_error_category(document: object) -> str:
 
 def agent_events(root: pathlib.Path, operation_id: str) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
-    for agent in ("block-a", "block-b", "block-c", "compute-agent"):
+    for agent in AGENT_LABELS:
         path = safe_child(root, f"agent-{agent}-events.raw.jsonl")
         if not path.exists():
             continue
@@ -191,7 +198,7 @@ def agent_events(root: pathlib.Path, operation_id: str) -> list[dict[str, object
 
 def agent_log_probes(root: pathlib.Path) -> list[dict[str, object]]:
     probes: list[dict[str, object]] = []
-    for agent in ("block-a", "block-b", "block-c", "compute-agent"):
+    for agent in AGENT_LABELS:
         path = safe_child(root, f"agent-{agent}-log-probe.raw")
         if not path.exists():
             continue
@@ -218,7 +225,7 @@ def agent_log_probes(root: pathlib.Path) -> list[dict[str, object]]:
 
 def agent_message_probes(root: pathlib.Path, operation_id: str) -> list[dict[str, object]]:
     probes: list[dict[str, object]] = []
-    for agent in ("block-a", "block-b", "block-c", "compute-agent"):
+    for agent in AGENT_LABELS:
         path = safe_child(root, f"agent-{agent}-message-probe.raw.jsonl")
         if not path.exists():
             continue

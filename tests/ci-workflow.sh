@@ -24,6 +24,12 @@ assert "run: bash tests/p13_1_provider_harness.sh" in text
 assert "run: bash tests/openapi-governance.sh" in text
 assert "run: bash tests/toolchain-evidence.sh" in text
 assert "run: cargo test --workspace --all-features" in text
+assert "POSTGRES_DB: o3k_workspace_test_ci" in text
+assert "O3K_TEST_DATABASE_PURPOSE: workspace" in text
+assert "Prepare separate endpoint PostgreSQL test database" in text
+assert "endpoint_db=o3k_endpoint_test_ci" in text
+assert "O3K_TEST_DATABASE_PURPOSE: endpoint" in text
+assert "o3k_endpoint_test_ci" in text
 assert "run: bash tests/packaging-safety.sh" in text
 assert "run: bash tests/packaging-bundle.sh" in text
 assert "run: bash tests/doctor-process.sh" in text

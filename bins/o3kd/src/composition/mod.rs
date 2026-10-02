@@ -280,6 +280,7 @@ pub struct Composition {
     attachment_reconciler: tokio::task::JoinHandle<()>,
     create_convergence_reconciler: tokio::task::JoinHandle<()>,
     lifecycle_convergence_reconciler: tokio::task::JoinHandle<()>,
+    orphan_endpoint_reconciler: tokio::task::JoinHandle<()>,
     inventory_task: Option<tokio::task::JoinHandle<()>>,
     composition_task: Option<tokio::task::JoinHandle<()>>,
     native_storage_recovery_task: Option<tokio::task::JoinHandle<()>>,
@@ -324,11 +325,13 @@ impl Composition {
         self.create_convergence_reconciler.abort();
         let _ = self.create_convergence_reconciler.await;
         self.lifecycle_convergence_reconciler.abort();
+        self.orphan_endpoint_reconciler.abort();
         if let Some(task) = self.native_storage_recovery_task {
             task.abort();
             let _ = task.await;
         }
         let _ = self.lifecycle_convergence_reconciler.await;
+        let _ = self.orphan_endpoint_reconciler.await;
         if let Some(task) = self.inventory_task {
             task.abort();
             let _ = task.await;
@@ -549,7 +552,8 @@ pub async fn build_composition(
             );
         }
     };
-    let agent_control_enabled = config.compute_server_certificate.is_some()
+    let agent_control_enabled = config.provider == o3k_config::Provider::Agent
+        && config.compute_server_certificate.is_some()
         && config.compute_server_private_key.is_some()
         && config.compute_client_ca.is_some();
     let binding_projector = Arc::new(NetworkBindingProjector {
@@ -704,6 +708,9 @@ pub async fn build_composition(
     let create_convergence_reconciler = compute_service.spawn_create_convergence_reconciler(5);
     let lifecycle_convergence_reconciler =
         compute_service.spawn_lifecycle_convergence_reconciler(5);
+    // #1035 repair discovery is an independent bounded schedule.  It must not
+    // wait behind unrelated lifecycle convergence operations/provider calls.
+    let orphan_endpoint_reconciler = compute_service.spawn_orphan_endpoint_reconciler(5);
     let extra_projects = parse_extra_project_seeds()?;
     let mut identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => {
@@ -1398,6 +1405,7 @@ pub async fn build_composition(
         attachment_reconciler,
         create_convergence_reconciler,
         lifecycle_convergence_reconciler,
+        orphan_endpoint_reconciler,
         inventory_task,
         composition_task,
         native_storage_recovery_task,

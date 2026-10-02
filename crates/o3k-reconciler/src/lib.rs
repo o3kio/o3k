@@ -645,33 +645,16 @@ where
                 None
             };
 
-        let provider_operation_id = operation.provider_operation_id.as_deref();
-        self.store
-            .update_operation(
-                update.operation_id,
-                durable_state,
-                provider_operation_id,
-                error_category,
-                error_message.as_deref(),
-            )
-            .await?;
-
-        if let Some(resource) = failed_create_resource {
-            // Projecting ERROR keeps the failure durable and visible while
-            // observations remain the only success projection.
-            self.store
-                .update_resource(
-                    update.resource_id,
-                    resource.generation,
-                    &resource.desired_state,
-                    server_state_to_storage(ServerState::Error),
-                    resource.generation,
-                    resource.provider_id.as_deref(),
-                )
-                .await?;
-        }
-
-        if durable_state == OperationState::Succeeded {
+        // #1041: a succeeded lifecycle delete must commit the terminal
+        // operation and the terminal (DELETED) resource projection in ONE
+        // transaction, exactly like the dispatch/poll finish path. The former
+        // pair of sequential writes could crash between them and durably
+        // expose a terminal operation whose projection never landed — which
+        // no reconciliation pass repairs (the lifecycle sweep only re-drives
+        // non-terminal operations).
+        let terminal_delete = durable_state == OperationState::Succeeded
+            && operation.kind == LifecycleAction::Delete.kind();
+        if terminal_delete {
             let resource = self.store.get_resource(update.resource_id).await?;
             let provider_id = update
                 .provider_resource_id
@@ -698,15 +681,84 @@ where
                 }
             }
             self.store
-                .update_resource(
-                    update.resource_id,
-                    resource.generation,
-                    &resource.desired_state,
-                    &resource.observed_state,
-                    resource.generation,
+                .terminalize_lifecycle(&o3k_store::LifecycleTerminalization {
+                    operation_id: update.operation_id,
+                    terminal_state: OperationState::Succeeded,
+                    provider_operation_id: operation.provider_operation_id.as_deref(),
+                    error_category: None,
+                    error_message: None,
+                    resource_id: update.resource_id,
+                    expected_generation: resource.generation,
+                    desired_state: &resource.desired_state,
+                    observed_state: server_state_to_storage(ServerState::Deleted),
+                    observed_generation: resource.generation,
                     provider_id,
+                })
+                .await?;
+        } else {
+            let provider_operation_id = operation.provider_operation_id.as_deref();
+            self.store
+                .update_operation(
+                    update.operation_id,
+                    durable_state,
+                    provider_operation_id,
+                    error_category,
+                    error_message.as_deref(),
                 )
                 .await?;
+
+            if let Some(resource) = failed_create_resource {
+                // Projecting ERROR keeps the failure durable and visible while
+                // observations remain the only success projection.
+                self.store
+                    .update_resource(
+                        update.resource_id,
+                        resource.generation,
+                        &resource.desired_state,
+                        server_state_to_storage(ServerState::Error),
+                        resource.generation,
+                        resource.provider_id.as_deref(),
+                    )
+                    .await?;
+            }
+
+            if durable_state == OperationState::Succeeded {
+                let resource = self.store.get_resource(update.resource_id).await?;
+                let provider_id = update
+                    .provider_resource_id
+                    .as_deref()
+                    .or(resource.provider_id.as_deref());
+                if let Some(provider_resource_id) = provider_id {
+                    match self
+                        .store
+                        .get_provider_reference(update.resource_id, "compute-agent")
+                        .await
+                    {
+                        Ok(existing) if existing.provider_resource_id == provider_resource_id => {}
+                        Ok(_) => return Err(StoreError::ProviderReferenceAlreadyExists.into()),
+                        Err(StoreError::ProviderReferenceNotFound) => {
+                            self.store
+                                .attach_provider_reference(&ProviderReference {
+                                    resource_id: update.resource_id,
+                                    provider_name: "compute-agent".to_owned(),
+                                    provider_resource_id: provider_resource_id.to_owned(),
+                                })
+                                .await?;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                self.store
+                    .update_resource(
+                        update.resource_id,
+                        resource.generation,
+                        &resource.desired_state,
+                        &resource.observed_state,
+                        resource.generation,
+                        provider_id,
+                    )
+                    .await?;
+            }
         }
         if evidence_permit.disposition == EvidenceDisposition::New {
             self.event(
@@ -1497,24 +1549,25 @@ where
         // Project before the terminalizing write so the observation lands while
         // the lifecycle is still retriable; the observation is idempotent.
         self.project_metering(&resource, &observed_state).await?;
+        // Issue #1041: the operation terminal state and the resource terminal
+        // projection commit in ONE durable transaction. The previous two
+        // sequential writes could crash between them, leaving the operation
+        // terminal with the resource projection non-terminal (or vice versa),
+        // which no reconciliation pass repairs.
         self.store
-            .update_operation(
+            .terminalize_lifecycle(&o3k_store::LifecycleTerminalization {
                 operation_id,
-                OperationState::Succeeded,
-                Some(&provider_operation_id),
-                None,
-                None,
-            )
-            .await?;
-        self.store
-            .update_resource(
-                resource.id,
-                resource.generation,
-                &resource.desired_state,
-                &observed_state,
-                resource.generation,
-                Some(&provider_id),
-            )
+                terminal_state: OperationState::Succeeded,
+                provider_operation_id: Some(&provider_operation_id),
+                error_category: None,
+                error_message: None,
+                resource_id: resource.id,
+                expected_generation: resource.generation,
+                desired_state: &resource.desired_state,
+                observed_state: &observed_state,
+                observed_generation: resource.generation,
+                provider_id: Some(&provider_id),
+            })
             .await?;
         self.event(operation_id, resource.id, JournalEventKind::Succeeded);
         Ok(OperationState::Succeeded)

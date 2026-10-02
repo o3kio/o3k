@@ -25,7 +25,12 @@ expected_pool_path() {
 }
 
 pool_listing() {
-  "${VIRSH[@]}" pool-list --all --name
+  # libvirt 10.x pads `pool-list --name` output to a fixed column width with
+  # trailing spaces (observed on the PP.5 real host), which would defeat the
+  # exact-line `grep -Fxq` checks below and silently disable pool detection.
+  # Pool names cannot contain whitespace, so trimming trailing spaces per
+  # line preserves exact-name semantics.
+  "${VIRSH[@]}" pool-list --all --name | sed 's/[[:space:]]*$//'
 }
 
 pool_present() {
