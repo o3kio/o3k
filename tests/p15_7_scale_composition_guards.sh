@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p15-7-guards.XXXXXX")"
 trap 'rm -rf -- "${WORK_DIR}"' EXIT
 EVIDENCE="${WORK_DIR}/evidence.json"
+PRISTINE="${WORK_DIR}/evidence-pristine.json"
 bash "$ROOT_DIR/tests/p15_7_restart_environment_guards.sh"
 
 python3 - "$ROOT_DIR/scripts/p15-7-real-host-journey.sh" "$ROOT_DIR/crates/o3k-compute/src/lib.rs" "$ROOT_DIR/bins/o3kd/src/native_adapters/resource.rs" <<'PY'
@@ -171,7 +172,7 @@ if python3 "${ROOT_DIR}/scripts/resolve-p15-7-placement-block.py" \
   "${WORK_DIR}/placement-blocks-ambiguous.json" compute-agent >/dev/null 2>&1; then
   echo "ambiguous placement host mapping accepted" >&2; exit 1
 fi
-python3 - "${EVIDENCE}" <<'PY'
+python3 - "${EVIDENCE}" "${PRISTINE}" <<'PY'
 import json, sys
 sha = "0123456789abcdef0123456789abcdef01234567"
 bootstrap_block_id = "99999999-9999-4999-8999-999999999999"
@@ -247,6 +248,7 @@ doc = {
   "artifact_type":"o3k-p15-7-scale-composition-evidence", "schema_version":1,
   "phase":"P15.7", "status":"passed", "evidence_tier":"protected-real-host",
   "profile":"small-edge-cloud",
+  "pp5_phase":"integrated",
   "tested_source_sha":sha,
   "checkout_head":sha,"git_tree_clean":True,"harness_inputs_sha256":"0" * 64,
   "execution":{"provider":"agent","hypervisor":"libvirt","database_backend":"postgres",
@@ -284,7 +286,10 @@ doc = {
            if phase == "process_identity_armed" else {}),
         **({"pid":"4242","old_starttime":"123","old_executable":"/run/o3k/bin/o3kd",
             "old_http_listener_pid":"4242","old_control_listener_pid":"4242"}
-           if phase == "process_killed" else {})} for phase in
+           if phase == "process_killed" else {}),
+        **({"endpoint_id":"77777777-7777-4777-8777-777777777777",
+            "contending_endpoint_id":"88888888-8888-4888-8888-888888888888"}
+           if phase == "contending_create_started" else {})} for phase in
         ["fault_armed","terminal_state_observed","endpoint_present_pre_crash","process_identity_armed","process_killed",
          "process_restarted","repair_lock_acquired","contending_create_waiting","contending_create_started","orphan_discovered",
          "repair_completed","contending_create_accepted","accounting_verified","completed"]],
@@ -365,6 +370,7 @@ doc = {
     "unsupported_claims_preserved":True,"claims":["bounded small-edge profile convergence"]}
 }
 json.dump(doc, open(sys.argv[1], "w", encoding="utf-8"), indent=2)
+json.dump(doc, open(sys.argv[2], "w", encoding="utf-8"), indent=2)
 PY
 
 env -u O3K_P15_7_ARAF_URL python3 "${ROOT_DIR}/scripts/validate_p15_7_evidence.py" "${EVIDENCE}" \
@@ -813,7 +819,13 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "p15-7-workload-failure-diagnostics.json", "p15-7-orphan-repair-diagnostics-",
                  "p15-7-host-maintenance-evidence.json",
                  "p15-7-vm-lease-", "p15-7-transient-failures.jsonl",
+                 "p15-7-api-read-attempt-", "p15-7-api-read-failure-", "p15-7-capacity-diagnostics.json",
                  "record_lease_evidence", "record_transient",
+                 "capture-p15-7-maintenance-diagnostics.py", "p15-7-maintenance-reconnect-diagnostics.json",
+                 "maintenance-probe-meta.json", "daemon_log_local", "agent_ready_ssh",
+                 "timed_out",
+                 "secure_remove_credentials \"$WORK_ROOT/maintenance-api.body.raw\"",
+                 "--reboot-request-ms", "timeout --foreground --signal=TERM --kill-after=2 15",
                  "actions/ready",
                  'virsh -c qemu:///system reboot "$MAINT_UUID"',
                  "restart_o3kd_verified",
@@ -854,10 +866,13 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
     assert required in journey, required
 for required_upload in (
     "p15-7-failure-classification.json", "p15-7-transient-failures.jsonl",
+    "p15-7-api-read-attempt-*.json", "p15-7-api-read-failure-*.json",
+    "p15-7-capacity-diagnostics.json",
     "p15-7-crash-injection-evidence.json", "p15-7-crash-endpoint-before.json",
     "p15-7-drain-failure-context.json", "p15-7-drain-blocker-requery.json",
     "p15-7-scale-checkpoint-*.json", "p15-7-vm-lease-*.json",
     "p15-7-workload-failure-diagnostics.json", "p15-7-orphan-repair-diagnostics-*.json",
+    "p15-7-checkpoint-path-diagnostic.log", "p15-7-checkpoint-path-diagnostic.json",
     "p15-7-host-maintenance-evidence.json", "p15-7-araf-projection.json",
     "p15-7-server-c-endpoint-show.json",
 ):
@@ -902,9 +917,19 @@ for required in ("domifaddr \"$uuid\" --source lease", "net-dhcp-leases \"$netwo
     assert required in vm_address, required
 assert 'domifaddr "$d"' not in vm_address
 # The journey liveness-probes every emitted candidate instead of assuming a
-# single-address resolver result.
-for required in ("while IFS= read -r candidate", "ssh_vm \"$candidate\" true"):
+# single-address resolver result. Readiness probes (the `true` liveness check
+# and the boot-id read) must run under the dedicated readiness-only watchdog
+# so a guest that accepts SSH but never completes the read-only command cannot
+# stall the bounded readiness window; ssh_vm itself stays unbounded for longer
+# legitimate cloud-init/diagnostic commands.
+for required in ("while IFS= read -r candidate", "wait_vm_ssh() {",
+                 'readiness_probe "$id" "readiness-true" "$candidate" true',
+                 'readiness_probe "$id" "readiness-boot-id" "$candidate" cat /proc/sys/kernel/random/boot_id',
+                 "SSH_READINESS_TIMEOUT_SECONDS=\"${O3K_P15_7_SSH_READINESS_TIMEOUT:-15}\"",
+                 "timeout --foreground --signal=TERM --kill-after=2 \"$SSH_READINESS_TIMEOUT_SECONDS\" \\\n    ssh \"${SSH_VM_OPTS[@]}\" \"$VM_USER@$ip\"",
+                 "p15-7-readiness-probes.jsonl"):
     assert required in journey, required
+assert 'ssh_vm "$candidate" true' not in journey, "readiness liveness probe must use the bounded watchdog"
 # The project-token acquisition must survive transient control-plane
 # failures loudly (with the CLI's own error text) instead of exiting
 # silently under `set -e` (observed on run 990923002 as a silent journey
@@ -968,6 +993,38 @@ assert journey.index('record_scale_checkpoint post-replacement') < journey.index
 assert journey.index('# ── #1035 crash-injection leg') < journey.index('# ── #1033 host-maintenance leg')
 assert journey.index('restart_o3kd_verified\nwait_o3kd_readyz "readyz did not reconstruct after restart"') < journey.index('# ── #1035 crash-injection leg')
 assert journey.index('record_scale_checkpoint post-crash-repair') < journey.index('record_scale_checkpoint post-maintenance')
+# A successful SSH probe immediately after `virsh reboot` may still be served
+# by the pre-reboot guest. Require a boot-id transition within the same bounded
+# MAC-bound readiness window before restarting the maintenance agent.
+maintenance_reboot = journey.split('# Planned host reboot from the outer host', 1)[1].split(
+    '# Bounded wait for the control plane to observe the reconnected agent.', 1)[0]
+assert 'MAINT_BOOT_ID_BEFORE=' in maintenance_reboot
+assert 'cat /proc/sys/kernel/random/boot_id' in maintenance_reboot
+assert 'wait_vm_rebooted' in maintenance_reboot
+assert maintenance_reboot.index('MAINT_BOOT_ID_BEFORE=') < maintenance_reboot.index(
+    'virsh -c qemu:///system reboot "$MAINT_UUID"')
+assert maintenance_reboot.index('virsh -c qemu:///system reboot "$MAINT_UUID"') < maintenance_reboot.index(
+    'MAINT_IP_AFTER="$(wait_vm_rebooted')
+# Review finding H1 (HIGH): both maintenance boot-id reads are read-only probes
+# and must go through the bounded readiness watchdog. A guest that accepts SSH
+# but never completes the command would otherwise hang the journey forever.
+assert 'MAINT_BOOT_ID_BEFORE="$(readiness_probe block-e "maintenance-boot-id-before" "${IPS[4]}" cat /proc/sys/kernel/random/boot_id' in maintenance_reboot, \
+    "maintenance boot-id-before read must use the bounded readiness watchdog"
+assert 'MAINT_BOOT_ID_AFTER="$(readiness_probe block-e "maintenance-boot-id-after" "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id' in maintenance_reboot, \
+    "maintenance boot-id-after read must use the bounded readiness watchdog"
+assert 'ssh_vm "${IPS[4]}" cat /proc/sys/kernel/random/boot_id' not in journey, \
+    "unbounded boot-id read remains in the maintenance leg"
+assert 'ssh_vm "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id' not in journey, \
+    "unbounded boot-id read remains in the maintenance leg"
+# M1: the SQLite parity step must retain bounded sanitized output on failure
+# (attempt03 discarded stdout to /dev/null) and must scrub the environment to
+# the minimal toolchain set so journey credentials cannot reach cargo children.
+assert 'SQLITE_PARITY_ENV=(env -i PATH="$PATH" HOME="$HOME")' in journey, \
+    "parity environment must be scrubbed to the minimal toolchain set"
+assert 'if ! "${SQLITE_PARITY_ENV[@]}" cargo test --locked -p o3kd --all-features --test p15_1_topology_process --test p15_5_building_block_process -- --test-threads=1 >"$SQLITE_PARITY_LOG" 2>&1; then' in journey, \
+    "parity output must be retained on failure, not discarded"
+assert 'p15_1_topology_process >/dev/null' not in journey, \
+    "parity output must not be discarded to /dev/null"
 # External-mode PostgreSQL wiring: the restart helper is defined before the
 # wiring, the env rewrite immediately precedes the restart, the canonical
 # bootstrap identity is re-established before readiness is required, and the
@@ -1253,5 +1310,76 @@ for xml in (
         if e.tag.rsplit("}", 1)[-1] == "ip" and e.get("address")
     )
     assert gateway.startswith("192.0.2."), gateway
+PY
+# H2 (review HIGH): the phase-aware journey writer and the standalone
+# validator must agree fail-closed in both directions. Run the real validator
+# over synthetic artifacts for both phases: a host-maintenance artifact with
+# crash_injection_repair not_run must PASS; the same artifact claiming the
+# crash passed, omitting pp5_phase, or retaining crash-leg checkpoint blocks
+# must FAIL; an integrated-shape artifact must still enforce every crash check.
+python3 - "${PRISTINE}" "$WORK_DIR" "$ROOT_DIR" <<'PY'
+import copy, json, pathlib, subprocess, sys
+
+pristine = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+work = pathlib.Path(sys.argv[2])
+validator = pathlib.Path(sys.argv[3]) / "scripts/validate_p15_7_evidence.py"
+pristine_crash = pristine["journey"]["crash_injection_repair"]
+pristine_crash_checkpoint = next(
+    cp for cp in pristine["scale_composition"]["checkpoints"]
+    if cp.get("phase") == "post-crash-repair")
+NOT_RUN = {"status": "not_run",
+           "reason": "#1035 crash leg not selected by phase host-maintenance"}
+
+def to_maintenance(doc):
+    doc["journey"]["crash_injection_repair"] = dict(NOT_RUN)
+    for checkpoint in doc["scale_composition"]["checkpoints"]:
+        if checkpoint.get("phase") == "post-crash-repair":
+            checkpoint.clear()
+            checkpoint.update({"phase": "post-crash-repair", **NOT_RUN})
+
+def crash_claims_passed(doc):
+    to_maintenance(doc)
+    doc["journey"]["crash_injection_repair"] = pristine_crash
+
+def missing_phase(doc):
+    to_maintenance(doc)
+    del doc["pp5_phase"]
+
+def crash_checkpoint_blocks(doc):
+    to_maintenance(doc)
+    for checkpoint in doc["scale_composition"]["checkpoints"]:
+        if checkpoint.get("phase") == "post-crash-repair":
+            checkpoint.update(pristine_crash_checkpoint)
+
+def integrated_not_run(doc):
+    doc["journey"]["crash_injection_repair"] = dict(NOT_RUN)
+
+def run(phase, mutate, label):
+    doc = copy.deepcopy(pristine)
+    doc["pp5_phase"] = phase
+    mutate(doc)
+    path = work / f"phase-guard-{label}.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return subprocess.run([sys.executable, str(validator), str(path)],
+                          capture_output=True, text=True)
+
+def expect_ok(result, label):
+    assert result.returncode == 0, f"{label} rejected by validator: {result.stderr}"
+
+def expect_fail(result, label):
+    assert result.returncode != 0, f"{label} accepted by validator"
+
+expect_ok(run("host-maintenance", to_maintenance, "maintenance-clean"),
+          "host-maintenance artifact with crash leg not_run")
+expect_ok(run("integrated", lambda doc: None, "integrated-clean"),
+          "integrated artifact with full crash evidence")
+expect_fail(run("host-maintenance", crash_claims_passed, "maintenance-crash-passed"),
+            "host-maintenance artifact claiming crash passed")
+expect_fail(run("host-maintenance", missing_phase, "maintenance-missing-phase"),
+            "artifact without pp5_phase")
+expect_fail(run("host-maintenance", crash_checkpoint_blocks, "maintenance-crash-blocks"),
+            "host-maintenance artifact retaining crash checkpoint blocks")
+expect_fail(run("integrated", integrated_not_run, "integrated-not-run"),
+            "integrated artifact with crash leg not_run")
 PY
 echo "P15.7 validator guards passed"

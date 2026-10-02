@@ -41,7 +41,7 @@ case "${O3K_FAKE_CURL_MODE:-transient}" in
     printf '404'
     ;;
   persistent)
-    printf '{"error":"still-unavailable","secret":"must-not-be-stored"}\n' >"$output"
+    printf '{"code":"INTERNAL_ERROR","title":"Internal Server Error","request_id":"req-123","secret":"must-not-be-stored"}\n' >"$output"
     printf '503'
     ;;
   transport)
@@ -88,7 +88,8 @@ printf '0\n' >"$O3K_FAKE_CURL_COUNTER"
 [[ "$(api_get /operator/diagnostics/providers transient-read)" == '{"ok":true}' ]]
 [[ "$(<"$O3K_FAKE_CURL_COUNTER")" == 3 ]]
 [[ "$(wc -l <"$TRANSIENT_EVENTS_FILE")" == 2 ]]
-[[ ! -e "$ARTIFACT_DIR/p15-7-api-read-failure-transient-read-01.json" ]]
+[[ -f "$ARTIFACT_DIR/p15-7-api-read-attempt-transient-read-01.json" ]]
+[[ -f "$ARTIFACT_DIR/p15-7-api-read-attempt-transient-read-02.json" ]]
 
 export O3K_FAKE_CURL_MODE=client_error
 printf '0\n' >"$O3K_FAKE_CURL_COUNTER"
@@ -117,6 +118,15 @@ doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert doc["http_status"] == "503"
 assert doc["attempts"] == 3
 assert doc["response"]["bytes"] > 0
+assert "must-not-be-stored" not in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+PY
+python3 - "$ARTIFACT_DIR/p15-7-api-read-attempt-persistent-read-01.json" <<'PY'
+import json, pathlib, sys
+doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert doc["http_status"] == "503"
+assert doc["transport"]["kind"] == "http"
+assert doc["response"]["problem"]["request_id"] == "req-123"
+assert doc["sanitized_body"]["request_id"] == "req-123"
 assert "must-not-be-stored" not in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 PY
 

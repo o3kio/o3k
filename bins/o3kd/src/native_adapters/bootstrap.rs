@@ -848,4 +848,184 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Replays the protected P15.7 failure at the workflow layer: the first
+    /// init commits but its response is lost, so init runs twice with
+    /// identical logical parameters (the CLI's bounded transport retry).
+    /// The durable authority must show exactly one cloud profile and one
+    /// bootstrap state record — the profile must be reused, never rewritten
+    /// — while the designed side effect of a replayed init, a second
+    /// distinct agent-scoped one-time grant, is minted honestly.
+    #[tokio::test]
+    async fn init_retry_replay_preserves_single_profile_and_mints_distinct_grant()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        let adapter = BootstrapAdapter {
+            store: store.clone(),
+            placement: o3k_placement::PlacementLedger::open(
+                std::env::temp_dir().join(format!("o3k-bootstrap-retry-{}", Uuid::now_v7())),
+                store.clone(),
+            )
+            .await?,
+            agents: Arc::new(o3k_compute_agent::NodeRegistry::default()),
+            locations: o3k_kernel::LocationRegistry::default(),
+            bootstrap_secret: Some("secret".to_owned()),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            readiness: o3k_api::AppState::new(),
+        };
+
+        let request = || InitRequest {
+            profile_id: None,
+            request_id: Some("init-retry-replay".to_owned()),
+            agent_id: Some("node-retry".to_owned()),
+        };
+        let committed = adapter
+            .init(request(), Some("secret"))
+            .await
+            .map_err(|error| format!("first init failed: {error:?}"))?;
+        let profiles_after_first = store.list_cloud_profiles().await?;
+        assert_eq!(
+            profiles_after_first.len(),
+            1,
+            "exactly one cloud profile after the first init"
+        );
+
+        // The client's response was lost mid-read; it retries init with the
+        // identical logical parameters.
+        let recovered = adapter
+            .init(request(), Some("secret"))
+            .await
+            .map_err(|error| format!("retried init failed: {error:?}"))?;
+        let first_token = committed
+            .enrollment_token
+            .clone()
+            .ok_or("missing first grant")?;
+        let second_token = recovered
+            .enrollment_token
+            .clone()
+            .ok_or("missing second grant")?;
+        assert_ne!(first_token, second_token, "each init mints a fresh token");
+
+        // No duplicate or rewritten profile: still one row, same generation
+        // and payload, so the retry neither created nor updated the profile.
+        let profiles = store.list_cloud_profiles().await?;
+        assert_eq!(
+            profiles.len(),
+            1,
+            "retried init must not create a second profile"
+        );
+        assert_eq!(
+            profiles[0].generation, profiles_after_first[0].generation,
+            "retried init must not rewrite the profile (generation unchanged)"
+        );
+        assert_eq!(profiles[0].payload, profiles_after_first[0].payload);
+
+        // Exactly one bootstrap state record, initialized exactly once (the
+        // phase becomes "ready" only after the first enrollment below).
+        let state = store
+            .get_bootstrap_state(STATE_ID)
+            .await?
+            .ok_or("bootstrap state missing")?;
+        assert_eq!(state.state_id, STATE_ID);
+        assert_eq!(state.phase, "initialized");
+        assert_eq!(state.cloud_identity_id, "cloud-default");
+        assert_eq!(state.cloud_profile_id, "default");
+
+        // The designed, honest side effect: two distinct grant rows with
+        // distinct token digests, both agent-scoped and initially unused.
+        let first_grant_id = first_token.split('.').next().ok_or("malformed token")?;
+        let second_grant_id = second_token.split('.').next().ok_or("malformed token")?;
+        assert_ne!(first_grant_id, second_grant_id);
+        let first_grant = store
+            .get_enrollment_grant(first_grant_id)
+            .await?
+            .ok_or("first grant row missing")?;
+        let second_grant = store
+            .get_enrollment_grant(second_grant_id)
+            .await?
+            .ok_or("second grant row missing")?;
+        assert_ne!(
+            first_grant.token_digest, second_grant.token_digest,
+            "grant rows must carry distinct token digests"
+        );
+        assert_eq!(first_grant.token_digest, digest(&first_token));
+        assert_eq!(second_grant.token_digest, digest(&second_token));
+        for grant in [&first_grant, &second_grant] {
+            assert_eq!(grant.agent_id, "node-retry");
+            assert!(grant.used_at_unix_ms.is_none());
+            assert!(grant.expires_at_unix_ms > grant.issued_at_unix_ms);
+        }
+
+        // The recovered (second) token is usable: a join with it succeeds.
+        adapter
+            .join(JoinRequest {
+                enrollment_token: second_token.clone(),
+                agent_id: "node-retry".to_owned(),
+                agent_epoch: "epoch-retry".to_owned(),
+                certificate: String::from_utf8(
+                    include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem")
+                        .to_vec(),
+                )?,
+                region: None,
+                availability_domain: None,
+                failure_domain_id: None,
+                capabilities: serde_json::json!({"architecture":"x86_64","provider_name":"o3k-compute","provider_version":"test"}),
+                inventories: BTreeMap::from([
+                    (String::from("VCPU"), 2),
+                    (String::from("MEMORY_MB"), 1024),
+                ]),
+            })
+            .await
+            .map_err(|error| format!("join with the recovered token failed: {error:?}"))?;
+
+        // One-time use: the consumed token cannot enroll a different agent.
+        // (A replay for the ALREADY-enrolled same agent is intentionally
+        // accepted through the durable identity projection; grant
+        // single-use is enforced for new enrollments.)
+        let reuse = adapter
+            .join(JoinRequest {
+                enrollment_token: second_token.clone(),
+                agent_id: "node-other".to_owned(),
+                agent_epoch: "epoch-other".to_owned(),
+                certificate: String::from_utf8(
+                    include_bytes!(
+                        "../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem"
+                    )
+                    .to_vec(),
+                )?,
+                region: None,
+                availability_domain: None,
+                failure_domain_id: None,
+                capabilities: serde_json::json!({"architecture":"x86_64","provider_name":"o3k-compute","provider_version":"test"}),
+                inventories: BTreeMap::from([
+                    (String::from("VCPU"), 2),
+                    (String::from("MEMORY_MB"), 1024),
+                ]),
+            })
+            .await;
+        assert!(
+            matches!(reuse, Err(BootstrapFailure::Unauthorized)),
+            "a consumed grant must not enroll a new agent"
+        );
+
+        // Consumption is durable and row-scoped: the second grant is marked
+        // used, the first (never-presented) grant is untouched, and the
+        // single bootstrap state record moved to ready exactly once.
+        let state = store
+            .get_bootstrap_state(STATE_ID)
+            .await?
+            .ok_or("bootstrap state missing after join")?;
+        assert_eq!(state.phase, "ready");
+        let consumed = store
+            .get_enrollment_grant(second_grant_id)
+            .await?
+            .ok_or("consumed grant row missing")?;
+        assert!(consumed.used_at_unix_ms.is_some());
+        let untouched = store
+            .get_enrollment_grant(first_grant_id)
+            .await?
+            .ok_or("first grant row missing after join")?;
+        assert!(untouched.used_at_unix_ms.is_none());
+        Ok(())
+    }
 }

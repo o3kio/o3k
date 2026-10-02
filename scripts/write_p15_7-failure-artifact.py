@@ -39,12 +39,48 @@ def atomic_write(path: Path, document: dict) -> None:
             pass
 
 
+def merge_cleanup_result(path: Path, document: dict) -> dict:
+    """Preserve the first failure while recording the independent cleanup result."""
+    if document["cleanup_result"] not in {"passed", "failed"}:
+        return document
+    try:
+        previous = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return document
+    if not isinstance(previous, dict) or previous.get("status") != "failed":
+        return document
+    if previous.get("source_sha") != document["source_sha"] or previous.get("run_id") != document["run_id"]:
+        return document
+    # Cleanup is a secondary observation. Never let its synthetic journey
+    # classification replace the primary API/product failure.
+    if document["failure_class"] != "cleanup" and document["phase"] != "journey":
+        return document
+    for key in (
+        "phase",
+        "attempted_phase",
+        "failure_class",
+        "last_successful_checkpoint",
+        "expected",
+        "observed",
+        "target_resource_ids",
+        "message",
+    ):
+        if key in previous:
+            document[key] = previous[key]
+    document["cleanup_result"] = document["cleanup_result"]
+    document["cleanup_message"] = (
+        "cleanup completed" if document["cleanup_result"] == "passed" else "cleanup left owned residue"
+    )
+    return document
+
+
 def main() -> int:
-    if len(sys.argv) != 14:
+    if len(sys.argv) not in {14, 15}:
         return fail(
             "usage: write_p15_7-failure-artifact.py PATH SOURCE_SHA RUN_ID PHASE "
             "FAILURE_CLASS LAST_SUCCESSFUL_CHECKPOINT EXPECTED OBSERVED "
-            "SERVER_ID ENDPOINT_ID CLEANUP_RESULT FOREIGN_STATE_RESULT MESSAGE"
+            "SERVER_ID ENDPOINT_ID CLEANUP_RESULT FOREIGN_STATE_RESULT MESSAGE "
+            "[ATTEMPTED_PHASE]"
         )
     (
         path,
@@ -60,7 +96,9 @@ def main() -> int:
         cleanup_result,
         foreign_state_result,
         message,
+        *optional,
     ) = sys.argv[1:]
+    attempted_phase = optional[0] if optional else ""
     if len(source_sha) != 40 or any(char not in "0123456789abcdefABCDEF" for char in source_sha):
         return fail("failure artifact requires an exact source SHA")
     if not run_id or not failure_class or not phase:
@@ -96,6 +134,7 @@ def main() -> int:
         "source_sha": source_sha.lower(),
         "run_id": run_id,
         "phase": phase,
+        "attempted_phase": attempted_phase or None,
         "failure_class": failure_class,
         "last_successful_checkpoint": last_checkpoint or None,
         "expected": expected,
@@ -113,8 +152,12 @@ def main() -> int:
     }
     digest_input = json.dumps(document, sort_keys=True).encode("utf-8")
     document["classification_digest"] = hashlib.sha256(digest_input).hexdigest()
+    destination = Path(path)
     try:
-        atomic_write(Path(path), document)
+        document = merge_cleanup_result(destination, document)
+        digest_input = json.dumps(document, sort_keys=True).encode("utf-8")
+        document["classification_digest"] = hashlib.sha256(digest_input).hexdigest()
+        atomic_write(destination, document)
     except OSError as error:
         return fail(f"cannot persist failure classification atomically: {error}")
     return 0

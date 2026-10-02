@@ -156,6 +156,12 @@ PY
         # boundary.  The signed token and generated passwords stay 0600 below
         # the run state root.
         grep -E '^(O3K_P15_7_AUTHORITY_MODE|O3K_P15_7_KEYCLOAK_STATE_ROOT|O3K_P15_7_KEYCLOAK_CONTAINER|O3K_P15_7_KEYCLOAK_PORT|O3K_OIDC_TRUST_ID|O3K_OIDC_ISSUER|O3K_OIDC_AUDIENCE|O3K_OIDC_DISCOVERY_URL|O3K_OIDC_ALLOW_INSECURE_LOCAL|O3K_TESTLAB_FEDERATED_|O3K_TESTLAB_OPERATOR_ASSIGNMENT_ID=)' "$provider_env" >>"$GITHUB_ENV"
+        # The journey's final evidence writer fail-closes on the exact-head
+        # identity (checkout head, tree cleanliness, harness digest) in every
+        # authority mode.  These values are computed above and are not
+        # secrets; the external-oidc path already publishes them below.
+        printf 'O3K_P15_7_CHECKOUT_HEAD=%s\nO3K_P15_7_TREE_CLEAN=%s\nO3K_P15_7_HARNESS_DIGEST=%s\n' \
+          "$SOURCE_HEAD" "$TREE_CLEAN" "$HARNESS_DIGEST" >>"$GITHUB_ENV"
       fi
       issuer="${O3K_OIDC_ISSUER}"; audience="${O3K_OIDC_AUDIENCE}"; discovery="${O3K_OIDC_DISCOVERY_URL}"
       write_artifact passed provider_ready testlab-keycloak ready ready

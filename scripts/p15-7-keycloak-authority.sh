@@ -96,9 +96,13 @@ start() {
   [[ ! -e "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] \
     || die "run-owned Keycloak state already exists"
   mkdir -m 0700 -- "$STATE_ROOT" || die "cannot create run-owned Keycloak state root"
-  local port admin_password operator_password
+  local port management_port admin_password operator_password
   write_owner_marker
   port="$(pick_port)"
+  management_port="${O3K_P15_7_KEYCLOAK_MANAGEMENT_PORT:-$(pick_port)}"
+  [[ "$management_port" =~ ^[0-9]+$ && "$management_port" -gt 0 && "$management_port" -le 65535 ]] \
+    || die "invalid Keycloak management port"
+  [[ "$management_port" != "$port" ]] || management_port="$(pick_port)"
   admin_password="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   operator_password="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   umask 077
@@ -146,9 +150,10 @@ PY
     --label o3k.phase=p15-7 --label "o3k.run_id=$RUN_ID" \
     --label "o3k.source_sha=$SOURCE_SHA" \
     --env-file "$env_tmp" -e "KC_HTTP_PORT=$port" \
+    -e "KC_HTTP_MANAGEMENT_PORT=$management_port" \
     -e "KC_HOSTNAME=http://127.0.0.1:$port" -e KC_HOSTNAME_STRICT=false \
     -v "$REALM_FILE:/opt/keycloak/data/import/p15-7-realm.json:ro" \
-    "$IMAGE" start-dev --http-port="$port" --import-realm >/dev/null; then
+    "$IMAGE" start-dev --http-port="$port" --http-management-port="$management_port" --import-realm >/dev/null; then
     secure_remove "$env_tmp" "$realm_tmp"
     die "Keycloak container failed to start"
   fi
