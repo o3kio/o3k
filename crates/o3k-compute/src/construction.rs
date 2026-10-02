@@ -1374,6 +1374,9 @@ impl ComputeService {
                 event = "orphan_repair_checkpoint_failed_closed",
                 run_id = ?std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID").ok(),
                 failure_reason = %error,
+                failure_step = error.failure_step(),
+                failure_kind = error.failure_kind(),
+                failure_errno = ?error.failure_errno(),
                 "targeted orphan repair checkpoint configuration failed; repair pass preserved all endpoints"
             );
             return Ok(());
@@ -1513,6 +1516,9 @@ impl ComputeService {
                                     run_id = ?std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID").ok(),
                                     binding_state = ?info.binding_state,
                                     failure_reason = %error,
+                                    failure_step = error.failure_step(),
+                                    failure_kind = error.failure_kind(),
+                                    failure_errno = ?error.failure_errno(),
                                     "targeted orphan repair checkpoint failed; endpoint preserved"
                                 );
                                 continue;

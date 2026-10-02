@@ -2544,6 +2544,45 @@ mod reconciler_tests {
     }
 
     #[tokio::test]
+    async fn stale_create_is_fenced_after_terminal_delete() -> Result<(), ReconcileError> {
+        let (journal, store, provider) = journal("stale-create-after-delete", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        store
+            .update_resource(
+                resource.id,
+                resource.generation,
+                &resource.desired_state,
+                server_state_to_storage(ServerState::Deleted),
+                resource.generation,
+                None,
+            )
+            .await?;
+
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Failed
+        );
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.state, OperationState::Failed);
+        assert_eq!(operation.error_category.as_deref(), Some("terminal"));
+        assert_eq!(
+            operation.error_message.as_deref(),
+            Some("create superseded by terminal delete")
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            server_state_to_storage(ServerState::Deleted)
+        );
+        assert_eq!(provider.instance_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn unknown_delete_is_observed_without_repeating_mutation() -> Result<(), ReconcileError> {
         let (journal, store, provider) = journal("delete-unknown", 2).await?;
         let request = request();

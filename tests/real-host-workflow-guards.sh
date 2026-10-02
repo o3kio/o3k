@@ -622,6 +622,7 @@ PY
 
 python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
 import pathlib, re, sys
+import os, subprocess
 from pathlib import Path
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 preflight_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
@@ -632,7 +633,7 @@ assert not re.search(r"(?m)^  push:", dispatch_trigger), "protected full validat
 for needle in ("P15.7 protected preflight", "id-token: write",
                "scripts/p15-7-protected-preflight.sh", "target_sha:",
                "if-no-files-found: error",
-               '"${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts"'):
+               '"$workspace/target/lvm-real-guest-artifacts"'):
     assert needle in preflight_text, needle
 workflow_step = text.split("      - name: Run public real-host lifecycle\n", 1)[1]
 workflow_step = workflow_step.split("        run: bash tests/testlab-libvirt.sh\n", 1)[0]
@@ -640,6 +641,29 @@ assert "scripts/p15-7-campaign-lock.py acquire" in text
 assert "scripts/p15-7-harness-qualification.sh" in text
 assert "O3K_P15_7_CAMPAIGN_LOCK_PATH" in text
 assert "          OS_PASSWORD:" not in workflow_step
+
+# Exercise the exact shell predicate embedded in the workflow.  A listener
+# snapshot with no matching port must be considered free; a matching local or
+# wildcard listener must be considered occupied.
+port_free_match = re.search(
+    r"(?ms)^\s+port_free\(\) \{\n(?P<body>.*?)^\s+\}", text
+)
+assert port_free_match, "workflow must retain a testable port_free predicate"
+port_free_function = text[port_free_match.start():port_free_match.end()]
+port_free_script = f'listeners="$MOCK_LISTENERS"\n{port_free_function}\nport_free "$PORT"'
+for port, listeners, expected in (
+    ("28080", "", 0),
+    ("28080", "LISTEN 0 128 127.0.0.1:28080 0.0.0.0:*\n", 1),
+    ("28080", "LISTEN 0 128 0.0.0.0:28080 0.0.0.0:*\n", 1),
+    ("28080", "LISTEN 0 128 127.0.0.1:28081 0.0.0.0:*\n", 0),
+):
+    env = os.environ.copy()
+    env.update(PORT=port, MOCK_LISTENERS=listeners)
+    result = subprocess.run(["bash", "-c", port_free_script], env=env, check=False)
+    assert result.returncode == expected, (
+        f"port_free({port}) returned {result.returncode} for listeners {listeners!r}; "
+        f"expected {expected}"
+    )
 for needle in ("workflow_dispatch:",
                "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",
@@ -662,6 +686,8 @@ for needle in ("workflow_dispatch:",
                "if: always()", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
                "retention-days: 14",
                "target/real-host-workflow-artifacts/console-result.json",
+               "target/real-host-workflow-artifacts/p15-7-orphan-repair-checkpoint.json",
+               "target/real-host-workflow-artifacts/p15-7-contender-evidence.json",
                "Run compute-agent process-boundary evidence",
                "tests/real-compute-agent-process-mtls.sh",
                "compute-agent-process-mtls-result.json",
@@ -717,18 +743,15 @@ for needle in ("workflow_dispatch:",
                "steps.generic_guard.outputs.ready == 'true'"):
     assert needle in text, needle
 assert "Repair prior protected artifact ownership" in text
-assert 'sudo -n chown -R "$(id -u):$(id -g)"' in text
-assert '"${GITHUB_WORKSPACE}/target/real-host-workflow-artifacts"' in text
-assert 'target_root="${GITHUB_WORKSPACE}/target"' in text
-assert 'sudo -n test -L "${target_root}"' in text
-assert 'sudo -n test -L "${target_dir}"' in text
-assert 'cannot verify checkout target root safety' in text
-assert 'cannot verify checkout artifact root safety: ${target_dir}' in text
-assert 'cannot inspect checkout artifact root: ${target_dir}' in text
-assert 'sudo -n test -e "${target_dir}"' in text
-assert 'sudo -n chmod -R u+rwX "${target_dir}"' in text
-assert 'sudo -n -u "$(id -un)" find "${target_dir}" -xdev -print' in text
-assert 'checkout\'s clean step can' in text
+assert 'repair_tree()' in text
+assert 'runner_uid="${O3K_PREFLIGHT_RUNNER_UID:-$(id -u)}"' in text
+assert 'sudo -n test -L "$path"' in text
+assert 'sudo -n realpath -e -- "$path"' in text
+assert 'find -P "$path" -xdev' in text
+assert 'refusing symlink or special file under checkout path' in text
+assert 'sudo -n find -P "$path" -xdev -type d -exec chmod 0700' in text
+assert 'sudo -n find -P "$path" -xdev -type f -exec chmod 0600' in text
+assert 'sudo -n -u "#$runner_uid" find -P "$path" -xdev -print' in text
 assert "github.repository == 'o3kio/o3k'" in text
 assert "github.event_name == 'workflow_dispatch'" in text
 assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in text
@@ -763,6 +786,42 @@ assert "Restore local PP.5 PostgreSQL service state" in text
 assert "pp5-runner-prerequisite.py restore" in text
 assert "pp5-runner-postgres-service-state.json" in text
 assert text.index("Protected P15.7 authority and capacity preflight") < text.index("Bootstrap disposable TestLab")
+bootstrap_names = ("Bootstrap disposable TestLab", "Bootstrap fresh generic TestLab")
+source_binding = "O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}"
+target_sha = "1" * 40
+workflow_sha = "2" * 40
+assert target_sha != workflow_sha
+for bootstrap_name in bootstrap_names:
+    block = text.split(f"      - name: {bootstrap_name}\n", 1)[1].split("\n      - name:", 1)[0]
+    # Exercise the source-binding contract without provisioning VMs.  This
+    # models bootstrap-disposable-testlab.sh's explicit-env-first selection:
+    # the correct binding passes, omission falls back to workflow SHA and
+    # fails, and an incorrect explicit binding fails.
+    assert source_binding in block, bootstrap_name
+    correct = target_sha if source_binding in block else workflow_sha
+    assert correct == target_sha, bootstrap_name
+    omitted_block = block.replace(source_binding, "")
+    omitted = target_sha if source_binding in omitted_block else workflow_sha
+    assert omitted == workflow_sha and omitted != target_sha, bootstrap_name
+    incorrect_block = block.replace(source_binding, "O3K_P15_7_SOURCE_SHA: " + "3" * 40)
+    incorrect = target_sha if source_binding in incorrect_block else workflow_sha
+    assert incorrect == workflow_sha and incorrect != target_sha, bootstrap_name
+assert "O3K_P15_7_SOURCE_SHA: ${{ github.sha }}" not in text
+assert 'SOURCE_COMMIT="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-' in pathlib.Path("scripts/bootstrap-disposable-testlab.sh").read_text(encoding="utf-8")
+assert 'actual_source_commit="$(git -C "$ROOT_DIR" rev-parse HEAD' in pathlib.Path("scripts/bootstrap-disposable-testlab.sh").read_text(encoding="utf-8")
+assert '[[ "$actual_source_commit" == "$SOURCE_COMMIT" ]]' in pathlib.Path("scripts/bootstrap-disposable-testlab.sh").read_text(encoding="utf-8")
+assert 'WORKFLOW_REVISION_SHA: ${{ github.sha }}' in text
+assert 'test "${WORKFLOW_REVISION_SHA}" = "${TARGET_SHA}"' in text
+dispatcher = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-dispatch.yml").read_text(encoding="utf-8")
+preflight = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
+assert 'inputs[target_sha]=${TARGET_SHA}' in dispatcher
+assert 'inputs[lane]=${PP5_LANE}' in dispatcher
+assert '-f "ref=${WORKFLOW_REF}"' in dispatcher
+assert 'inputs[target_sha]:' in preflight or 'target_sha:' in preflight
+assert 'inputs[lane]=${PP5_LANE}' not in preflight  # lane is JSON-bound in the protected config
+assert '"ref": ref' in preflight
+assert '"lane": lane' in preflight
+assert 'WORKFLOW_REVISION_SHA: ${{ github.sha }}' in preflight
 assert "if: always() && steps.protected_preflight.outcome == 'success'" in text
 assert text.count("if: always() && steps.protected_preflight.outcome == 'success'") >= 5
 assert "id-token: write" in text

@@ -668,7 +668,8 @@ impl PlacementRepository for PostgresStore {
             "SELECT r.resource_class, r.amount
              FROM placement_allocation_resources r
              JOIN placement_allocations a ON a.id = r.allocation_id
-             WHERE r.allocation_id = $1 AND a.provider_id = $2",
+             WHERE r.allocation_id = $1 AND a.provider_id = $2
+             FOR UPDATE OF a",
         )
         .bind(allocation_id)
         .bind(provider_id)
@@ -814,13 +815,15 @@ impl PlacementRepository for PostgresStore {
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
 
         let alloc_rows = if durable_consumer_ids.is_empty() {
-            sqlx::query("SELECT id, provider_id, consumer_id FROM placement_allocations")
+            sqlx::query(
+                "SELECT id, provider_id, consumer_id FROM placement_allocations ORDER BY id FOR UPDATE",
+            )
                 .fetch_all(&mut *tx)
                 .await
                 .map_err(StoreError::Database)?
         } else {
             sqlx::query(
-                "SELECT id, provider_id, consumer_id FROM placement_allocations WHERE NOT (consumer_id = ANY($1))",
+                "SELECT id, provider_id, consumer_id FROM placement_allocations WHERE NOT (consumer_id = ANY($1)) ORDER BY id FOR UPDATE",
             )
             .bind(durable_consumer_ids)
             .fetch_all(&mut *tx)

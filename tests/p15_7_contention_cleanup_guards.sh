@@ -39,7 +39,21 @@ launch = next(i for i, line in enumerate(lines) if 'setsid --wait timeout --fore
 waiter = next(i for i in range(launch, len(lines)) if 'CONTENDING_CREATE_LOCK_WAIT_OBSERVED=true' in lines[i])
 release = next(i for i in range(waiter, len(lines)) if 'sudo -n touch -- "$CRASH_REPAIR_RELEASE_FILE"' in lines[i])
 assert waiter < release, "repair release occurs before waiter observation"
+stream_ready = next(i for i, line in enumerate(lines) if 'wait_for_agent_streams post-crash-restart' in line)
+released_check = next(i for i in range(release, len(lines)) if '[[ "$CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE" == true ]]' in lines[i])
+assert stream_ready < launch, "contender must wait for surviving placement streams after restart"
+source = '\n'.join(lines)
+terminal = source.index('persist_crash_checkpoint terminal_state_observed running')
+canary = source.index('openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN_ID-port-d"')
+kill = source.index('CRASH_KILLED_PID="$(kill9_o3kd_verified)"')
+assert terminal < canary < kill, "canary setup must occur during the orphan backlog, outside the post-restart repair window"
 assert any('stop_contending_create' in line for line in lines[:launch]), "exact-PID cleanup helper not defined before launch"
+source = '\n'.join(lines)
+cleanup = source.split('cleanup() {', 2)[2].split('\n}', 1)[0]
+assert cleanup.index('write_orphan_repair_diagnostics') < cleanup.index('stop_contending_create'), "checkpoint/timeline evidence must survive marker removal"
+assert source.index('cp -- "$WORK_ROOT/orphan-repair-checkpoint.json"') < source.index('CONTENDING_CREATE_REQUEST_START_MS="$(date +%s%3N)"'), "published checkpoint must be retained before contention"
+diagnostics = source.split('write_orphan_repair_diagnostics() {', 1)[1]
+assert 'head -c 8192 -- "$CRASH_REPAIR_CHECKPOINT_FILE"' in diagnostics, "failure checkpoint capture must remain bounded"
 PY
 
 # Exercise the exact-PID cleanup contract with a run-owned dummy child. The
@@ -62,6 +76,7 @@ if ! env WORK_DIR="$WORK_DIR" bash -c '
   '"$helper"'
   stop_contending_create
   [[ -z "$CONTENDING_CREATE_PID" ]]
+  [[ "$CONTENDING_CREATE_OBSERVED_PID" == "$child_pid" && "$CONTENDING_CREATE_OBSERVED_PGID" == "$child_pid" ]]
   ! kill -0 "$child_pid" 2>/dev/null
   [[ ! -e "$CRASH_REPAIR_WAITER_FILE" && ! -e "$CRASH_REPAIR_RELEASE_FILE" ]]
 '; then

@@ -1840,6 +1840,74 @@ pub async fn test_placement_repository<S: StoreUnderTest>(store: Arc<S>) {
         .await
         .expect("release_allocation");
 
+    // Concurrent release/reconciliation retries must apply the durable
+    // decrement once. PostgreSQL transactions may otherwise both read the
+    // same allocation resources before either deletes the allocation row.
+    let release_provider = store
+        .register_provider(
+            &format!("node-release-race-{}", Uuid::now_v7()),
+            &inventories,
+        )
+        .await
+        .expect("register concurrent release provider");
+    for round in 0..16 {
+        let allocation_id = format!("release-race-{round}-{}", Uuid::now_v7());
+        let current = store
+            .get_provider(&release_provider.id)
+            .await
+            .expect("read concurrent release provider")
+            .expect("concurrent release provider exists");
+        let allocation = PlacementAllocationRecord {
+            id: allocation_id.clone(),
+            provider_id: release_provider.id.clone(),
+            consumer_id: format!("release-race-consumer-{round}-{}", Uuid::now_v7()),
+            resources: vec![PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 1,
+            }],
+        };
+        store
+            .commit_allocation(&release_provider.id, current.generation, &allocation)
+            .await
+            .expect("commit concurrent release allocation");
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let mut releasers = tokio::task::JoinSet::new();
+        for worker in 0..8 {
+            let store = store.clone();
+            let provider_id = release_provider.id.clone();
+            let allocation_id = allocation_id.clone();
+            let barrier = barrier.clone();
+            releasers.spawn(async move {
+                barrier.wait().await;
+                if worker % 2 == 0 {
+                    store.release_allocation(&provider_id, &allocation_id).await
+                } else {
+                    store.reconcile_consumers(&[]).await.map(|_| ())
+                }
+            });
+        }
+        while let Some(result) = releasers.join_next().await {
+            result
+                .expect("concurrent release task")
+                .expect("concurrent release succeeds");
+        }
+        let after = store
+            .get_provider(&release_provider.id)
+            .await
+            .expect("read provider after concurrent release")
+            .expect("concurrent release provider remains");
+        let vcpu = after
+            .inventories
+            .iter()
+            .find(|inventory| inventory.resource_class == "VCPU")
+            .expect("VCPU inventory remains");
+        assert_eq!(
+            vcpu.used, 0,
+            "concurrent release round {round} decremented placement usage more than once"
+        );
+    }
+
     // Upsert and get intent
     let intent_id = format!("intent-{}", Uuid::now_v7());
     let intent = PlacementIntentRecord {

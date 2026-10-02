@@ -75,7 +75,9 @@ P15_PROVISION_DIAGNOSTICS_CAPTURED=false
 P15_WORKLOAD_DIAGNOSTICS_CAPTURED=false
 CRASH_STARTED=false
 CRASH_PHASE=""
+CRASH_ATTEMPTED_PHASE=""
 FAILURE_CLASS="unknown"
+FAILURE_PHASE=""
 LAST_SUCCESSFUL_CHECKPOINT="journey_start"
 LAST_FAILURE_MESSAGE=""
 FAILURE_ARTIFACT="$ARTIFACT_DIR/p15-7-failure-classification.json"
@@ -106,6 +108,17 @@ O3K_REPAIR_RUN_ENV_NAME="O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID"
 O3K_PP5_RUN_ENV_NAME="O3K_PP5_RUN_ID"
 O3K_REPLAY_SUPPRESS_RESOURCE_ENV_NAME="O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RESOURCE_ID"
 O3K_REPLAY_SUPPRESS_RUN_ENV_NAME="O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RUN_ID"
+CRASH_REPAIR_DIR=""
+# Initialize contention state before installing either EXIT trap.  A failure
+# during bootstrap/diagnostic setup must be able to run the same idempotent
+# cleanup helper before the contention phase has assigned any process ID.
+CONTENDING_CREATE_PID=""
+CONTENDING_CREATE_PGID=""
+CONTENDING_CREATE_STARTTIME=""
+CONTENDING_CREATE_REAPED=false
+CONTENDING_CREATE_WRAPPER_EXIT_STATUS=""
+CONTENDING_CREATE_REQUEST_END_MS=""
+CONTENDER_EVIDENCE_CAPTURED=false
 # The pause must be long enough for the journey to observe the durable
 # terminal delete and kill the control plane inside the window, and short
 # enough to keep the bounded delete request and the protected-run budget
@@ -146,12 +159,13 @@ write_failure_artifact() {
     false|changed) foreign_result=changed ;;
     *) foreign_result=unknown ;;
   esac
-  local phase="${CRASH_PHASE:-journey}" class="${O3K_P15_7_FAILURE_CLASS:-$FAILURE_CLASS}"
+  local phase="${FAILURE_PHASE:-${CRASH_PHASE:-journey}}" class="${O3K_P15_7_FAILURE_CLASS:-$FAILURE_CLASS}"
   [[ "$class" != unknown ]] || class="$(classify_failure "$message")"
   python3 "$ROOT_DIR/scripts/write_p15_7-failure-artifact.py" \
     "$FAILURE_ARTIFACT" "$SOURCE_SHA" "$RUN_ID" "$phase" "$class" \
     "${LAST_SUCCESSFUL_CHECKPOINT:-}" "expected successful phase transition" "$message" \
     "${WORKLOAD_C:-}" "${PORT_C_ID:-}" "$cleanup_result" "$foreign_result" "$message" \
+    "${CRASH_ATTEMPTED_PHASE:-}" \
     >/dev/null 2>&1 || echo "P15.7 failure classification could not be safely captured" >&2
 }
 die() {
@@ -161,6 +175,7 @@ die() {
   echo "P15.7 journey blocked: $*" >&2
   exit 1
 }
+source "$ROOT_DIR/scripts/p15-7-crash-evidence-state.sh"
 PP5_PHASE="${O3K_P15_7_PHASE:-integrated}"
 case "${PP5_PHASE}" in
   integrated|s5-scale|1035-crash-recovery|host-maintenance) ;;
@@ -189,7 +204,11 @@ fi
   || die "P15.7 API read delay is invalid or unbounded"
 [[ "$P15_7_API_READ_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ && "$P15_7_API_READ_TIMEOUT_SECONDS" -le 60 ]] \
   || die "P15.7 API read timeout is invalid or unbounded"
-for cmd in curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id setsid ps; do
+# Readiness watchdog bound: when overridden it must still be a positive integer
+# of seconds (fail closed; unset keeps the 15s default).
+[[ -z "${O3K_P15_7_SSH_READINESS_TIMEOUT:-}" || "${O3K_P15_7_SSH_READINESS_TIMEOUT}" =~ ^[1-9][0-9]*$ ]] \
+  || die "SSH readiness timeout is invalid"
+for cmd in cargo curl python3 realpath virsh virt-install qemu-img genisoimage ssh scp sha256sum ssh-keygen openssl openstack sudo id setsid ps; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command unavailable: $cmd"
 done
 [[ "$POSTGRES_MODE" == external || "$POSTGRES_MODE" == disposable ]] \
@@ -420,6 +439,54 @@ wait_o3kd_readyz() {
   for _ in $(seq 1 60); do curl --fail --silent "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
   curl --fail --silent "http://127.0.0.1:$AUTH_PORT/readyz" >/dev/null 2>&1 || die "$message"
 }
+wait_for_agent_streams() {
+  # A daemon restart creates a fresh in-memory execution registry while the
+  # agent-stream work leases intentionally outlive a lost controller for their
+  # bounded TTL.  /readyz therefore is not sufficient to prove that real
+  # execution is available: a freshly started daemon can be healthy while all
+  # agents are still fenced by the previous controller.  Require two
+  # consecutive diagnostics observations that prove every durable provider has
+  # a live, fresh agent snapshot before issuing the next real workload.
+  local phase="$1"
+  local required_providers="${2:-}"
+  local readiness_file="$WORK_ROOT/agent-stream-readiness-$phase.json"
+  local ready_streak=0
+  for _ in $(seq 1 60); do
+    if api_get "/operator/diagnostics/providers?limit=200" "agent-stream-readiness-$phase" >"$readiness_file" 2>/dev/null \
+      && python3 - "$readiness_file" "$required_providers" <<'PY'
+import json, sys, time
+
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+items = doc.get("items")
+if not isinstance(items, list) or not items:
+    raise SystemExit(1)
+required = [provider for provider in sys.argv[2].split(",") if provider]
+if required:
+    by_id = {item.get("provider_id"): item for item in items if item.get("provider_id")}
+    if len(by_id) != len(items) or any(provider not in by_id for provider in required):
+        raise SystemExit(1)
+    items = [by_id[provider] for provider in required]
+now = int(time.time() * 1000)
+for item in items:
+    if item.get("status") != "healthy" or item.get("availability") != "available":
+        raise SystemExit(1)
+    observed = item.get("observed_at_unix_ms")
+    if not isinstance(observed, int) or now - observed < 0 or now - observed > 15_000:
+        raise SystemExit(1)
+PY
+    then
+      ready_streak=$((ready_streak + 1))
+      if ((ready_streak >= 2)); then
+        return 0
+      fi
+    else
+      ready_streak=0
+    fi
+    sleep 1
+  done
+  cp -- "$readiness_file" "$ARTIFACT_DIR/p15-7-agent-stream-readiness-$phase.json" 2>/dev/null || true
+  die "real agent streams did not become live after daemon restart: phase=$phase"
+}
 read_o3kd_ledger() {
   # Read the run-owned o3kd ownership ledger and verify the recorded process
   # identity (owner uid, start ticks, executable path). No process-name lookup
@@ -471,21 +538,25 @@ start_o3kd_verified() {
       || { new_pid=""; sleep .25; continue; }
     [[ "$(sudo -n readlink -f "/proc/$new_pid/exe" 2>/dev/null || true)" == "$STATE_ROOT/bin/o3kd" ]] \
       || { new_pid=""; sleep .25; continue; }
-    # Record the strongly identified replacement before a later environment
-    # or listener check can reject it. Cleanup must not retain only the dead
-    # predecessor's ledger when a live replacement fails verification.
     new_ticks="$(sudo -n awk '{print $22}' "/proc/$new_pid/stat")"
     new_uid="$(sudo -n stat -c '%U' "/proc/$new_pid")"
     [[ "$new_uid" == "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" && "$(sudo -n readlink -f "/proc/$new_pid/exe")" == "$STATE_ROOT/bin/o3kd" ]] || die "restarted o3kd identity is not owned"
-    printf '%s|%s|%s|o3kd\n' "$new_pid" "$new_ticks" "$new_uid" >"${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-testlab-pids/$RUN_ID}/o3kd.pid"
-    # Consume the entire stream: grep -q can SIGPIPE tr under pipefail and
-    # falsely reject an exact match in a sufficiently large live environment.
-    if ! sudo -n cat "/proc/$new_pid/environ" 2>/dev/null | tr '\0' '\n' \
-      | grep -Fx "O3K_DATA_DIR=$STATE_ROOT/data" >/dev/null; then
+    # Drain the environment before matching.  A grep process in the same
+    # pipeline can exit as soon as it sees the expected entry, causing tr to
+    # receive SIGPIPE under `pipefail`; that used to discard a valid
+    # replacement PID after the external-PostgreSQL environment rewrite.
+    local env_dump
+    env_dump="$(sudo -n cat "/proc/$new_pid/environ" 2>/dev/null | tr '\0' '\n')" \
+      || { new_pid=""; sleep .25; continue; }
+    if ! grep -Fx "O3K_DATA_DIR=$STATE_ROOT/data" <<<"$env_dump" >/dev/null; then
       new_pid=""
       sleep .25
       continue
     fi
+    # Publish the ownership ledger only after the replacement has passed all
+    # identity and environment checks.  A transient launch-wrapper candidate
+    # must never overwrite the predecessor ledger with a foreign/root PID.
+    printf '%s|%s|%s|o3kd\n' "$new_pid" "$new_ticks" "$new_uid" >"${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-testlab-pids/$RUN_ID}/o3kd.pid"
     [[ "$new_pid" ]] && break
   done
   [[ "$new_pid" ]] || die "o3kd restart failed"
@@ -508,7 +579,18 @@ start_o3kd_verified() {
     fi
     sleep .25
   done
-  [[ "$http_up" ]] || die "run-owned o3kd listeners did not belong to the captured restart PID"
+  if [[ -z "$http_up" ]]; then
+    {
+      printf 'captured_restart_pid=%s\n' "$new_pid"
+      printf 'auth_listener_pids=%s\n' "$http_listener_pid"
+      printf 'control_listener_pids=%s\n' "$control_listener_pid"
+      printf 'auth_port=%s control_port=%s\n' "$AUTH_PORT" "$CONTROL_PORT"
+      printf '%s\n' 'ss_snapshot:'
+      sudo -n ss -H -ltnp "sport = :$AUTH_PORT or sport = :$CONTROL_PORT" 2>/dev/null \
+        | sed -n '1,20p' || true
+    } >"$ARTIFACT_DIR/p15-7-restart-listener-verification-failure.txt"
+    die "run-owned o3kd listeners did not belong to the captured restart PID"
+  fi
   O3KD_HTTP_LISTENER_PID="$http_listener_pid"
   O3KD_CONTROL_LISTENER_PID="$control_listener_pid"
 }
@@ -594,8 +676,15 @@ append_o3kd_repair_pause_env() {
   [[ "$CONTENDING_CREATE_REPAIR_PAUSE_MS" =~ ^[0-9]+$ ]] \
     || die "repair contention pause timeout is invalid"
   sudo -n test -r "$STATE_ROOT/o3kd.env" || die "o3kd environment is unreadable"
-  CRASH_REPAIR_RELEASE_FILE="$STATE_ROOT/orphan-repair-release-$RUN_ID"
-  CRASH_REPAIR_WAITER_FILE="$STATE_ROOT/orphan-create-waiter-$RUN_ID"
+  CRASH_REPAIR_DIR="$STATE_ROOT/data/p15-7-orphan-repair-$RUN_ID"
+  sudo -n install -d -o "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" \
+    -g "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}" -m 0700 "$CRASH_REPAIR_DIR" \
+    || die "cannot create daemon-owned orphan-repair handshake directory"
+  [[ "$(sudo -n stat -c '%U:%G:%a' "$CRASH_REPAIR_DIR" 2>/dev/null || true)" == \
+    "${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}:${O3K_REAL_HOST_DAEMON_ACCOUNT:-o3k}:700" ]] \
+    || die "orphan-repair handshake directory ownership or mode is invalid"
+  CRASH_REPAIR_RELEASE_FILE="$CRASH_REPAIR_DIR/release"
+  CRASH_REPAIR_WAITER_FILE="$CRASH_REPAIR_DIR/contention-waiter"
   sudo -n rm -f -- "$CRASH_REPAIR_RELEASE_FILE"
   sudo -n rm -f -- "$CRASH_REPAIR_WAITER_FILE"
   printf '%s=%s\n%s=%s\n%s=%s\n' \
@@ -604,7 +693,7 @@ append_o3kd_repair_pause_env() {
     "$O3K_CREATE_WAITER_ENV_NAME" "$CRASH_REPAIR_WAITER_FILE" \
     | sudo -n tee -a "$STATE_ROOT/o3kd.env" >/dev/null \
     || die "cannot append repair contention pause to o3kd environment"
-  CRASH_REPAIR_CHECKPOINT_FILE="$STATE_ROOT/orphan-repair-checkpoint-$RUN_ID.json"
+  CRASH_REPAIR_CHECKPOINT_FILE="$CRASH_REPAIR_DIR/checkpoint.json"
   sudo -n rm -f -- "$CRASH_REPAIR_CHECKPOINT_FILE"
   printf '%s=%s\n%s=%s\n%s=%s\n%s=%s\n' \
     "$O3K_REPAIR_CHECKPOINT_ENV_NAME" "$CRASH_REPAIR_CHECKPOINT_FILE" \
@@ -696,8 +785,160 @@ except OSError:
     pass
 PY
 }
+capture_contending_create_evidence() {
+  local phase="${1:-${CRASH_PHASE:-journey}}" end_ms="${CONTENDING_CREATE_REQUEST_END_MS:-$(date +%s%3N)}"
+  local server_http="${CONTENDING_CREATE_SERVER_HTTP_STATUS:-unknown}"
+  local operation_http="${CONTENDING_CREATE_OPERATION_HTTP_STATUS:-unknown}"
+  local server_state="${D_STATE:-}" operation_state="${CONTENDING_CREATE_OPERATION_STATE:-}"
+  local daemon_log="$WORK_ROOT/contender-daemon.log"
+  local agent_log="$WORK_ROOT/contender-agent.log"
+  local provider_log="$WORK_ROOT/contender-provider.log"
+  [[ -n "${CONTENDING_CREATE_WRAPPER_EXIT_STATUS:-}" ]] || return 0
+  # Capture only bounded, run-owned snapshots. The Python boundary redacts and
+  # bounds these before publication; raw snapshots remain in WORK_ROOT and are
+  # removed by the normal ownership-checked cleanup path.
+  if [[ -n "${STATE_ROOT:-}" ]] && sudo -n test -f "$STATE_ROOT/log/o3kd.log" 2>/dev/null; then
+    sudo -n tail -n 1200 "$STATE_ROOT/log/o3kd.log" | tail -c 262144 >"$daemon_log" 2>/dev/null || true
+  fi
+  if [[ -n "${STATE_ROOT:-}" ]] && sudo -n test -f "$STATE_ROOT/log/o3k-compute.log" 2>/dev/null; then
+    sudo -n tail -n 1200 "$STATE_ROOT/log/o3k-compute.log" | tail -c 262144 >"$agent_log" 2>/dev/null || true
+  fi
+  # The provider side is normally emitted by the same compute-agent log in a
+  # disposable TestLab. Keep a separate labelled projection so the artifact
+  # distinguishes daemon, agent, and provider evidence without claiming a
+  # provider log that was not present.
+  if [[ -s "$agent_log" ]]; then
+    cp -- "$agent_log" "$provider_log" 2>/dev/null || true
+  fi
+  python3 "$ROOT_DIR/scripts/capture-p15-7-contender-evidence.py" \
+    --artifact "$ARTIFACT_DIR/p15-7-contender-evidence.json" \
+    --work-root "$WORK_ROOT" --source-sha "$SOURCE_SHA" --run-id "$RUN_ID" \
+    --phase "$phase" --wrapper-exit-status "$CONTENDING_CREATE_WRAPPER_EXIT_STATUS" \
+    --pid "${CONTENDING_CREATE_OBSERVED_PID:-${CONTENDING_CREATE_PID:-}}" --pgid "${CONTENDING_CREATE_OBSERVED_PGID:-${CONTENDING_CREATE_PGID:-}}" \
+    --starttime "${CONTENDING_CREATE_STARTTIME:-}" \
+    --request-start-ms "${CONTENDING_CREATE_REQUEST_START_MS:-$end_ms}" --request-end-ms "$end_ms" \
+    --endpoint-id "${OS_PORT_D_ID:-}" --server-id "${WORKLOAD_D:-}" \
+    --operation-id "${CONTENDING_CREATE_OPERATION_ID:-}" \
+    --server-http-status "$server_http" --operation-http-status "$operation_http" \
+    --server-state "$server_state" --operation-state "$operation_state" \
+    >/dev/null 2>&1 || echo "P15.7 contender evidence could not be safely captured" >&2
+  [[ -f "$ARTIFACT_DIR/p15-7-contender-evidence.json" ]] && CONTENDER_EVIDENCE_CAPTURED=true
+}
 capture_failure_diagnostics() {
   local exit_status="$1"
+  if [[ "$exit_status" -ne 0 && "${RUN_MAINTENANCE:-false}" == true \
+    && -n "${MAINT_ID:-}" \
+    && ! -f "$ARTIFACT_DIR/p15-7-maintenance-reconnect-diagnostics.json" ]]; then
+    local capture_started_ms capture_finished_ms capture_http="000"
+    local api_started_ms api_finished_ms api_exit=0 daemon_started_ms daemon_finished_ms daemon_exit=0
+    local log_started_ms log_finished_ms log_exit=0
+    local provider_http="000" provider_exit=0
+    local ready_started_ms ready_finished_ms ready_exit=0
+    local probe_meta="$WORK_ROOT/maintenance-probe-meta.json"
+    capture_started_ms="$(date +%s%3N)"
+    api_started_ms="$(date +%s%3N)"
+    curl --silent --show-error --config "$OPERATOR_CURL_CONFIG" \
+      --connect-timeout 5 --max-time "$P15_7_API_READ_TIMEOUT_SECONDS" \
+      --dump-header "$WORK_ROOT/maintenance-api.headers.raw" \
+      --output "$WORK_ROOT/maintenance-api.body.raw" \
+      --write-out '%{http_code}' "$API/operator/building-blocks/$MAINT_ID" \
+      >"$WORK_ROOT/maintenance-api.status.raw" 2>"$WORK_ROOT/maintenance-api.stderr.raw" || api_exit=$?
+    api_finished_ms="$(date +%s%3N)"
+    capture_http="$(tr -cd '0-9' <"$WORK_ROOT/maintenance-api.status.raw" 2>/dev/null | head -c 3)"
+    [[ "$capture_http" =~ ^[0-9]{3}$ ]] || capture_http=000
+    curl --silent --show-error --config "$OPERATOR_CURL_CONFIG" \
+      --connect-timeout 5 --max-time "$P15_7_API_READ_TIMEOUT_SECONDS" \
+      --output "$WORK_ROOT/maintenance-provider-diagnostics.raw" \
+      --write-out '%{http_code}' "$API/operator/diagnostics/providers?limit=200" \
+      >"$WORK_ROOT/maintenance-provider-diagnostics.status.raw" \
+      2>"$WORK_ROOT/maintenance-provider-diagnostics.stderr.raw" || provider_exit=$?
+    provider_http="$(tr -cd '0-9' <"$WORK_ROOT/maintenance-provider-diagnostics.status.raw" 2>/dev/null | head -c 3)"
+    [[ "$provider_http" =~ ^[0-9]{3}$ ]] || provider_http=000
+    daemon_started_ms="$(date +%s%3N)"
+    timeout --foreground --signal=TERM --kill-after=2 8 sudo -n tail -c 65536 "$STATE_ROOT/log/o3kd.log" \
+      >"$WORK_ROOT/maintenance-daemon.log.raw" 2>"$WORK_ROOT/maintenance-daemon.log.stderr.raw" || daemon_exit=$?
+    daemon_finished_ms="$(date +%s%3N)"
+    # Logs and readiness are collected over the run-owned SSH identity before
+    # guest teardown. Retain exit status, stderr and bounded timing for each
+    # probe; the sanitizer is the only publisher of their output.
+    log_started_ms="$(date +%s%3N)"
+    if [[ "${MAINT_IP_AFTER:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      timeout --foreground --signal=TERM --kill-after=2 15 \
+        ssh -F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
+        "$VM_USER@$MAINT_IP_AFTER" "sudo tail -c 65536 /var/log/o3k-compute.log 2>/dev/null" \
+        >"$WORK_ROOT/maintenance-agent.log.raw" 2>"$WORK_ROOT/maintenance-agent.log.stderr.raw" || log_exit=$?
+    else
+      log_exit=125
+      printf 'agent address unavailable or invalid\n' >"$WORK_ROOT/maintenance-agent.log.stderr.raw"
+    fi
+    log_finished_ms="$(date +%s%3N)"
+    ready_started_ms="$(date +%s%3N)"
+    if [[ "${MAINT_IP_AFTER:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      timeout --foreground --signal=TERM --kill-after=2 15 \
+        ssh -F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
+        "$VM_USER@$MAINT_IP_AFTER" \
+        "curl --silent --show-error --max-time 5 -w '\\nhttp_status=%{http_code}\\n' http://127.0.0.1:19101/readyz 2>&1" \
+        >"$WORK_ROOT/maintenance-agent-ready.raw" 2>"$WORK_ROOT/maintenance-agent-ready.stderr.raw" || ready_exit=$?
+    else
+      ready_exit=125
+      printf 'agent address unavailable or invalid\n' >"$WORK_ROOT/maintenance-agent-ready.stderr.raw"
+    fi
+    ready_finished_ms="$(date +%s%3N)"
+    capture_finished_ms="$(date +%s%3N)"
+    python3 - "$probe_meta" "$capture_started_ms" "$capture_finished_ms" \
+      "$api_started_ms" "$api_finished_ms" "$api_exit" \
+      "$daemon_started_ms" "$daemon_finished_ms" "$daemon_exit" \
+      "$log_started_ms" "$log_finished_ms" "$log_exit" \
+      "$ready_started_ms" "$ready_finished_ms" "$ready_exit" <<'PY'
+import json,sys
+from pathlib import Path
+out=Path(sys.argv[1]); values=list(map(int,sys.argv[2:]))
+outer_start,outer_finish,api_start,api_finish,api_exit,daemon_start,daemon_finish,daemon_exit,log_start,log_finish,log_exit,ready_start,ready_finish,ready_exit=values
+doc={
+ "capture_start_ms":outer_start,"capture_finish_ms":outer_finish,
+ "api_get":{"start_ms":api_start,"finish_ms":api_finish,"exit_status":api_exit,"timed_out":api_exit in (28,124,137,143)},
+ "daemon_log_local":{"start_ms":daemon_start,"finish_ms":daemon_finish,"exit_status":daemon_exit,"timed_out":daemon_exit in (124,137,143)},
+ "agent_log_ssh":{"start_ms":log_start,"finish_ms":log_finish,"exit_status":log_exit,"timed_out":log_exit in (124,137,143)},
+ "agent_ready_ssh":{"start_ms":ready_start,"finish_ms":ready_finish,"exit_status":ready_exit,"timed_out":ready_exit in (124,137,143)},
+}
+out.write_text(json.dumps(doc,sort_keys=True)+'\n',encoding='utf-8'); out.chmod(0o600)
+PY
+    python3 "$ROOT_DIR/scripts/capture-p15-7-maintenance-diagnostics.py" \
+      --artifact "$ARTIFACT_DIR/p15-7-maintenance-reconnect-diagnostics.json" \
+      --api-body "$WORK_ROOT/maintenance-api.body.raw" \
+      --api-headers "$WORK_ROOT/maintenance-api.headers.raw" \
+      --provider-body "$WORK_ROOT/maintenance-provider-diagnostics.raw" \
+      --provider-http-status "$provider_http" \
+      --provider-exit-status "$provider_exit" \
+      --api-stderr "$WORK_ROOT/maintenance-api.stderr.raw" \
+      --daemon-log "$WORK_ROOT/maintenance-daemon.log.raw" \
+      --daemon-log-stderr "$WORK_ROOT/maintenance-daemon.log.stderr.raw" \
+      --agent-log "$WORK_ROOT/maintenance-agent.log.raw" \
+      --agent-ready "$WORK_ROOT/maintenance-agent-ready.raw" \
+      --agent-log-stderr "$WORK_ROOT/maintenance-agent.log.stderr.raw" \
+      --agent-ready-stderr "$WORK_ROOT/maintenance-agent-ready.stderr.raw" \
+      --probe-meta "$probe_meta" \
+      --source-sha "$SOURCE_SHA" --run-id "$RUN_ID" --block-id "$MAINT_ID" \
+      --execution-identity "${MAINT_EXEC_IDENTITY_BEFORE:-}" \
+      --http-status "$capture_http" --started-ms "$capture_started_ms" \
+      --finished-ms "$capture_finished_ms" --reboot-request-ms "${MAINT_REBOOT_REQUEST_MS:-0}" >/dev/null 2>&1 \
+      || echo "P15.7 maintenance reconnect evidence could not be safely captured" >&2
+    secure_remove_credentials "$WORK_ROOT/maintenance-api.body.raw" \
+      "$WORK_ROOT/maintenance-api.headers.raw" "$WORK_ROOT/maintenance-api.status.raw" \
+      "$WORK_ROOT/maintenance-api.stderr.raw" \
+      "$WORK_ROOT/maintenance-provider-diagnostics.raw" "$WORK_ROOT/maintenance-provider-diagnostics.status.raw" \
+      "$WORK_ROOT/maintenance-provider-diagnostics.stderr.raw" \
+      "$WORK_ROOT/maintenance-daemon.log.raw" "$WORK_ROOT/maintenance-daemon.log.stderr.raw" \
+      "$WORK_ROOT/maintenance-agent.log.raw" "$WORK_ROOT/maintenance-agent-ready.raw"
+    secure_remove_credentials "$WORK_ROOT/maintenance-agent.log.stderr.raw" \
+      "$WORK_ROOT/maintenance-agent-ready.stderr.raw" "$probe_meta"
+  fi
+  if [[ "$exit_status" -ne 0 && "${CONTENDING_CREATE_WRAPPER_EXIT_STATUS:-}" =~ ^[0-9]+$ ]] \
+    && [[ ! -f "$ARTIFACT_DIR/p15-7-contender-evidence.json" ]]; then
+    capture_contending_create_evidence "journey_failed"
+  fi
   [[ "$exit_status" -ne 0 && "$P15_PROVISION_DIAGNOSTICS_CAPTURED" == false ]] || return 0
   write_failure_artifact pending "${FOREIGN_PRESERVED:-unknown}" "${LAST_FAILURE_MESSAGE:-journey failed}"
   python3 "$ROOT_DIR/scripts/capture-p15-7-provision-diagnostics.py" \
@@ -708,10 +949,15 @@ capture_failure_diagnostics() {
   # (endpoint reachability vs control-plane pool recovery) instead of inference.
   [[ -f "$WORK_ROOT/pg-sever-rules.txt" ]] \
     && cp "$WORK_ROOT/pg-sever-rules.txt" "$ARTIFACT_DIR/pg-sever-rules.txt" 2>/dev/null || true
-  if [[ -n "${STATE_ROOT:-}" ]] && sudo -n test -f "$STATE_ROOT/log/o3kd.log" 2>/dev/null; then
-    sudo -n tail -n 2000 "$STATE_ROOT/log/o3kd.log" 2>/dev/null \
-      | tee "$ARTIFACT_DIR/o3kd.log.tail" >/dev/null || true
-    chmod 0600 "$ARTIFACT_DIR/pg-sever-rules.txt" "$ARTIFACT_DIR/o3kd.log.tail" 2>/dev/null || true
+  if [[ -n "${STATE_ROOT:-}" ]]; then
+    # Keep only capacity-related, redacted lines; raw daemon logs may contain
+    # connection strings or other privileged context.
+    if sudo -n test -f "$STATE_ROOT/log/o3kd.log" 2>/dev/null; then
+      sudo -n tail -n 2000 "$STATE_ROOT/log/o3kd.log" 2>/dev/null >"$WORK_ROOT/o3kd.log" || true
+    fi
+    python3 "$ROOT_DIR/scripts/capture-p15-7-capacity-diagnostics.py" \
+      "$WORK_ROOT/o3kd.log" "$ARTIFACT_DIR/p15-7-capacity-diagnostics.json" || true
+    rm -f -- "$WORK_ROOT/o3kd.log"
   fi
   # Hang forensics: two exact-head S5 runs (e0d690f7, 8fd6f828) hung o3kd
   # within ~60 s of the fault-hook-armed restart, with the API dead for
@@ -744,7 +990,11 @@ capture_failure_diagnostics() {
         -ex 'set pagination off' -ex 'thread apply all bt' \
         >"$ARTIFACT_DIR/o3kd-hang/gdb-backtrace.txt" 2>/dev/null || true
     fi
-    chmod -R 0600 "$ARTIFACT_DIR/o3kd-hang" 2>/dev/null || true
+    # Keep the diagnostic subtree private without removing directory
+    # traversal.  Applying 0600 recursively to directories leaves the
+    # evidence unreadable even to the runner during checkout cleanup.
+    find -P "$ARTIFACT_DIR/o3kd-hang" -type d -exec chmod 0700 -- {} + 2>/dev/null || true
+    find -P "$ARTIFACT_DIR/o3kd-hang" -type f -exec chmod 0600 -- {} + 2>/dev/null || true
   fi
 }
 capture_workload_failure_diagnostics() {
@@ -814,6 +1064,66 @@ capture_workload_failure_diagnostics() {
     "$server_http" "$operation_http" "$workload_label" || echo "P15.7 workload diagnostics could not be safely captured" >&2
   P15_WORKLOAD_DIAGNOSTICS_CAPTURED=true
 }
+stop_contending_create() {
+  # Address only the exact run-owned background child, reap it, and remove
+  # only this run's synchronization markers. Never kill by process name.
+  local pid="${CONTENDING_CREATE_PID:-}" pgid="${CONTENDING_CREATE_PGID:-}" marker failed=false current_starttime current_pgid wait_status=0
+  if [[ -n "$pid" ]]; then
+    if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+      echo "P15.7 cleanup: refusing non-numeric contending-create PID" >&2
+      failed=true
+    else
+      if kill -0 "$pid" 2>/dev/null; then
+        current_starttime="$(sudo -n awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+        current_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+        if [[ -z "${CONTENDING_CREATE_STARTTIME:-}" || "$current_starttime" != "$CONTENDING_CREATE_STARTTIME" \
+          || -z "$pgid" || ! "$pgid" =~ ^[0-9]+$ || "$current_pgid" != "$pgid" ]]; then
+          echo "P15.7 cleanup: contending-create PID identity changed before signal: $pid" >&2
+          failed=true
+        fi
+      fi
+      if [[ "$failed" == false ]] && kill -0 "$pid" 2>/dev/null; then
+        kill -TERM -- "-$pgid" 2>/dev/null || true
+        for _ in $(seq 1 50); do
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 0.1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -KILL -- "-$pgid" 2>/dev/null || true
+          for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+          done
+        fi
+      fi
+      wait "$pid" 2>/dev/null || wait_status=$?
+      CONTENDING_CREATE_WRAPPER_EXIT_STATUS="$wait_status"
+      CONTENDING_CREATE_REQUEST_END_MS="${CONTENDING_CREATE_REQUEST_END_MS:-$(date +%s%3N)}"
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "P15.7 cleanup: contending-create process remains after reap: $pid" >&2
+        failed=true
+      fi
+      if [[ "$failed" == false && -n "$pgid" ]] && ps -eo pid=,pgid= 2>/dev/null | awk -v pgid="$pgid" '$2 == pgid { found=1 } END { exit found ? 0 : 1 }'; then
+        echo "P15.7 cleanup: contending-create process group remains after reap: $pgid" >&2
+        failed=true
+      fi
+      [[ "$wait_status" -eq 0 || "$failed" == false ]] || failed=true
+    fi
+    if [[ "$failed" == false ]]; then
+      CONTENDING_CREATE_REAPED=true
+      CONTENDING_CREATE_OBSERVED_PID="$pid"
+      CONTENDING_CREATE_OBSERVED_PGID="$pgid"
+      CONTENDING_CREATE_PID=""
+      CONTENDING_CREATE_PGID=""
+    fi
+  fi
+  for marker in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}" "${CRASH_REPAIR_CHECKPOINT_FILE:-}"; do
+    [[ -n "$marker" ]] || continue
+    sudo -n rm -f -- "$marker" || failed=true
+  done
+  [[ "$failed" == false ]]
+}
+
 early_cleanup() {
   local exit_status=$?
   set +e
@@ -822,6 +1132,15 @@ early_cleanup() {
   clear_o3kd_fault_env >/dev/null 2>&1 || true
   if [[ -n "${CRASH_REPAIR_RELEASE_FILE:-}" ]]; then
     sudo -n rm -f -- "$CRASH_REPAIR_RELEASE_FILE" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${CRASH_REPAIR_WAITER_FILE:-}" ]]; then
+    sudo -n rm -f -- "$CRASH_REPAIR_WAITER_FILE" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${CRASH_REPAIR_CHECKPOINT_FILE:-}" ]]; then
+    sudo -n rm -f -- "$CRASH_REPAIR_CHECKPOINT_FILE" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${CRASH_REPAIR_DIR:-}" ]]; then
+    sudo -n rmdir -- "$CRASH_REPAIR_DIR" >/dev/null 2>&1 || true
   fi
   if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
     O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
@@ -1070,17 +1389,30 @@ cleanup() {
   local exit_status=$?
   set +e
   local cleanup_failed=false
+  # Preserve the resource checkpoint and structured timeline before the
+  # contender cleanup removes the run-owned synchronization markers.
+  if [[ "$exit_status" -ne 0 && "${CRASH_STARTED:-false}" == true ]]; then
+    write_orphan_repair_diagnostics || true
+  fi
   if ! stop_contending_create; then
     cleanup_failed=true
   fi
   if [[ "${CRASH_STARTED:-false}" == true && "${CRASH_PHASE:-}" != completed ]]; then
+    local evidence_failure_phase="${CRASH_ATTEMPTED_PHASE:-${CRASH_PHASE:-fault_armed}}"
     python3 "$ROOT_DIR/scripts/p15-7-crash-evidence.py" \
       "$ARTIFACT_DIR/p15-7-crash-injection-evidence.json" \
-      "${CRASH_PHASE:-fault_armed}" failed failure_phase "${CRASH_PHASE:-fault_armed}" \
+      "$evidence_failure_phase" failed failure_phase "$evidence_failure_phase" \
       >/dev/null 2>&1 || true
   fi
   capture_failure_diagnostics "$exit_status"
   clear_o3kd_fault_env >/dev/null 2>&1 || true
+  for marker in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}" "${CRASH_REPAIR_CHECKPOINT_FILE:-}"; do
+    [[ -n "$marker" ]] || continue
+    sudo -n rm -f -- "$marker" || cleanup_failed=true
+  done
+  if [[ -n "${CRASH_REPAIR_DIR:-}" ]]; then
+    sudo -n rmdir -- "$CRASH_REPAIR_DIR" >/dev/null 2>&1 || cleanup_failed=true
+  fi
   [[ "$CLEANUP_DONE" == true ]] && { set -e; return; }
   if [[ "$AUTHORITY_MODE" == testlab-keycloak && -x "$KEYCLOAK_AUTHORITY_SCRIPT" ]]; then
     O3K_P15_7_AUTHORITY_MODE=testlab-keycloak O3K_P15_7_KEYCLOAK_STATE_ROOT="${O3K_P15_7_KEYCLOAK_STATE_ROOT:-${RUNNER_TEMP:-/tmp}/o3k-p15-7-keycloak-${RUN_ID}}" \
@@ -1218,7 +1550,14 @@ cleanup() {
     rm -rf -- "$WORK_ROOT"
   fi
   if [[ "$cleanup_failed" == true ]]; then
-    echo "P15.7 cleanup blocked; owned VM records and backing files were retained" >&2
+    echo "P15.7 cleanup blocked; run-owned residue (run=$RUN_ID) was retained:" >&2
+    for residue in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}" \
+      "${CRASH_REPAIR_CHECKPOINT_FILE:-}" "$LIBVIRT_STORAGE_ROOT" "$WORK_ROOT"; do
+      [[ -n "$residue" && -e "$residue" ]] && echo "  residue=$residue" >&2 || true
+    done
+    for residue_domain in "${DOMAINS[@]:-}"; do
+      [[ -n "$residue_domain" ]] && echo "  owned_domain_candidate=$residue_domain" >&2 || true
+    done
     write_failure_artifact failed "${FOREIGN_PRESERVED:-unknown}" "cleanup left owned residue or an unproven deletion"
   else
     CLEANUP_DONE=true
@@ -1260,7 +1599,33 @@ for element in root.iter():
 [[ "$GATEWAY" =~ ^[0-9.]+$ ]] || die "libvirt gateway unavailable"
 ssh-keygen -q -t ed25519 -N '' -f "$SSH_KEY" -C "o3k-p15-7-$RUN_ID" || die "VM SSH key generation failed"
 touch "$KNOWN_HOSTS"
-ssh_vm() { ssh -F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" "$VM_USER@$1" "${@:2}"; }
+SSH_VM_OPTS=(-F /dev/null -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS")
+ssh_vm() { ssh "${SSH_VM_OPTS[@]}" "$VM_USER@$1" "${@:2}"; }
+
+# Readiness-only SSH watchdog. ssh_vm itself stays unbounded: cloud-init and
+# diagnostic commands can legitimately outlive 15s. Only the read-only
+# readiness probes (the `true` liveness check and the boot-id read inside
+# wait_vm_ssh) run under this dedicated watchdog, so a guest that accepts SSH
+# but never completes the read-only command cannot stall the bounded
+# readiness window. Every probe records start/finish ms, exact exit, timeout
+# classification, and VM/purpose identity to a bounded sanitized JSONL.
+SSH_READINESS_TIMEOUT_SECONDS="${O3K_P15_7_SSH_READINESS_TIMEOUT:-15}"
+SSH_READINESS_PROBE_LOG="${O3K_P15_7_SSH_READINESS_PROBE_LOG:-$ARTIFACT_DIR/p15-7-readiness-probes.jsonl}"
+readiness_probe() {
+  # Usage: readiness_probe <vm-id> <purpose> <ip> <command...>
+  local id="$1" purpose="$2" ip="$3"; shift 3
+  local started_ms finished_ms exit_code=0 timed_out=false
+  started_ms="$(date +%s%3N)"
+  # timeout(1) can only exec real binaries, so the watchdog inlines the shared
+  # SSH_VM_OPTS option set instead of calling the ssh_vm shell function.
+  timeout --foreground --signal=TERM --kill-after=2 "$SSH_READINESS_TIMEOUT_SECONDS" \
+    ssh "${SSH_VM_OPTS[@]}" "$VM_USER@$ip" "$@" || exit_code=$?
+  finished_ms="$(date +%s%3N)"
+  case "$exit_code" in 124|137|143) timed_out=true ;; esac
+  printf '{"vm_id":"%s","purpose":"%s","start_ms":%s,"finish_ms":%s,"exit_code":%s,"timed_out":%s}\n' \
+    "$id" "$purpose" "$started_ms" "$finished_ms" "$exit_code" "$timed_out" >>"$SSH_READINESS_PROBE_LOG" 2>/dev/null || true
+  return "$exit_code"
+}
 domain_name_for_resource() {
   python3 - "$1" <<'PY'
 import hashlib, sys
@@ -1447,7 +1812,7 @@ wait_vm_ssh() {
   # boots in parallel), leaving the remaining phases their documented share.
   # SSH itself remains the hard reachability proof. Returns only the IP that
   # answered over SSH.
-  local d="$1" uuid="$2" mac="$3" serial="$4" id="$5" candidate=""
+  local d="$1" uuid="$2" mac="$3" serial="$4" id="$5" expected_boot_id="${6:-}" candidate="" observed_boot_id=""
   for _ in $(seq 1 300); do
     # The resolver normally prints exactly one freshest MAC-bound address;
     # when freshness data is unavailable it prints every MAC-bound candidate
@@ -1455,15 +1820,28 @@ wait_vm_ssh() {
     # guesses and SSH remains the only reachability proof.
     while IFS= read -r candidate; do
       [[ "$candidate" =~ ^[0-9.]+$ ]] || continue
-      if ssh_vm "$candidate" true >/dev/null 2>&1; then
-        echo "$candidate"
-        return 0
+      if readiness_probe "$id" "readiness-true" "$candidate" true >/dev/null 2>&1; then
+        if [[ -z "$expected_boot_id" ]]; then
+          echo "$candidate"
+          return 0
+        fi
+        observed_boot_id="$(readiness_probe "$id" "readiness-boot-id" "$candidate" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
+        if [[ "$observed_boot_id" =~ ^[0-9a-fA-F-]{36}$ && "$observed_boot_id" != "$expected_boot_id" ]]; then
+          echo "$candidate"
+          return 0
+        fi
       fi
     done < <(bash "$ROOT_DIR/scripts/p15-7-vm-address.sh" resolve "$uuid" "$mac" "$NETWORK" "$GATEWAY" 2>/dev/null || true)
     sleep 2
   done
   vm_network_diagnostics "$d" "$uuid" "$serial" "$id"
   die "VM did not become SSH-reachable with a MAC-bound DHCP address: $id"
+}
+wait_vm_rebooted() {
+  local d="$1" uuid="$2" mac="$3" serial="$4" id="$5" prior_boot_id="$6"
+  [[ "$prior_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || die "invalid prior boot identity for reboot wait: $id"
+  local wait_args=("$d" "$uuid" "$mac" "$serial" "$id" "$prior_boot_id")
+  wait_vm_ssh "${wait_args[@]}"
 }
 provision_vm() {
   local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" seed_tmp="$WORK_ROOT/$1-seed.iso" serial="$LIBVIRT_STORAGE_ROOT/$1-serial.log" ip uuid mac
@@ -1658,9 +2036,17 @@ provision_vms_bounded() {
     UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/$id-uuid")"
   done
 }
+run_checkpoint_path_diagnostic() {
+  # The helper passes O3K_CHECKPOINT_BOUNDARY_ROOT= to the staged boundary
+  # executable; this diagnostic root is intentionally outside STATE_ROOT/data.
+  bash "$ROOT_DIR/scripts/p15-7-checkpoint-path-diagnostic.sh" \
+    "$ROOT_DIR" "$ARTIFACT_DIR" "$WORK_ROOT" "$RUN_ID" \
+    || die "checkpoint path diagnostic failed; inspect p15-7-checkpoint-path-diagnostic.log"
+}
 O3K_P15_7_LIBVIRT_IMAGE_ROOT="$LIBVIRT_IMAGE_ROOT" \
   bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT" \
   || die "cannot define run-owned libvirt storage pool"
+run_checkpoint_path_diagnostic
 provision_vms_bounded block-a block-b
 join_block block-a "${IPS[0]}"; join_block block-b "${IPS[1]}"
 install_agent block-a "${IPS[0]}"; install_agent block-b "${IPS[1]}"
@@ -1771,6 +2157,25 @@ def digest(name):
     data = path.read_bytes()
     return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
+body = pathlib.Path(body_file).read_bytes()[:16384] if pathlib.Path(body_file).is_file() else b""
+try:
+    problem = json.loads(body.decode("utf-8"))
+except (UnicodeDecodeError, json.JSONDecodeError):
+    problem = None
+problem_summary = {}
+if isinstance(problem, dict):
+    for key in ("code", "title", "status"):
+        value = problem.get(key)
+        if isinstance(value, (str, int)):
+            problem_summary[key] = str(value)[:128]
+    if isinstance(problem.get("request_id"), str):
+        problem_summary["request_id"] = re.sub(r"[^A-Za-z0-9._:-]", "", problem["request_id"])[:128]
+transport_text = pathlib.Path(error_file).read_text(encoding="utf-8", errors="replace") if pathlib.Path(error_file).is_file() else ""
+error_match = re.search(r"curl:\s*\((\d+)\)", transport_text)
+error_number = int(error_match.group(1)) if error_match else int(curl_exit)
+errno_match = re.search(r"\berrno\s*[=:]\s*(\d+)\b", transport_text, re.IGNORECASE)
+error_kind = {6: "dns", 7: "connection_refused", 28: "timeout", 35: "tls", 52: "empty_reply", 56: "connection_reset"}.get(error_number, "http" if str(http_status).startswith("5") else "transport")
+
 doc = {
     "artifact_type": "o3k-p15-7-api-read-failure",
     "schema_version": 1,
@@ -1784,6 +2189,11 @@ doc = {
     "http_status": http_status,
     "response": digest(body_file),
     "transport_diagnostics": digest(error_file),
+    "publication_step": "api_read",
+    "sanitized_body": problem_summary or None,
+    "response_summary": problem_summary,
+    "error_kind": error_kind,
+    "errno": int(errno_match.group(1)) if errno_match else None,
     "recorded_at_unix_ms": int(time.time() * 1000),
 }
 root_path = pathlib.Path(root)
@@ -1817,9 +2227,103 @@ else:
 PY
   echo "P15.7 API read failed: phase=$phase endpoint=$path http_status=$http_status curl_exit=$curl_exit attempts=$attempts (metadata artifact preserved)" >&2
 }
+write_api_read_attempt_evidence() {
+  # Keep per-attempt response identity and transport classification bounded;
+  # raw bodies/stderr are temporary and never enter protected artifacts.
+  local phase="$1" path="$2" attempt="$3" curl_exit="$4" http_status="$5" body_file="$6" error_file="$7"
+  python3 - "$ARTIFACT_DIR" "$phase" "$path" "$attempt" "$curl_exit" "$http_status" \
+    "$body_file" "$error_file" "$RUN_ID" "$SOURCE_SHA" <<'PY'
+import hashlib, json, os, pathlib, re, sys, tempfile, time
+
+root, phase, endpoint, attempt, curl_exit, http_status, body_file, error_file, run_id, source_sha = sys.argv[1:]
+safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", phase).strip("._-") or "read"
+
+def read_bytes(name):
+    path = pathlib.Path(name)
+    if not path.is_file():
+        return b""
+    with path.open("rb") as stream:
+        return stream.read(16384)
+
+body = read_bytes(body_file)
+transport = read_bytes(error_file)
+summary = {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest() if body else None}
+try:
+    parsed = json.loads(body.decode("utf-8"))
+except (UnicodeDecodeError, json.JSONDecodeError):
+    parsed = None
+if isinstance(parsed, dict):
+    safe_fields = {}
+    for key in ("code", "title", "status"):
+        value = parsed.get(key)
+        if isinstance(value, (str, int)):
+            safe_fields[key] = str(value)[:128]
+    request_id = parsed.get("request_id")
+    if isinstance(request_id, str):
+        safe_fields["request_id"] = re.sub(r"[^A-Za-z0-9._:-]", "", request_id)[:128]
+    if safe_fields:
+        summary["problem"] = safe_fields
+
+text = transport.decode("utf-8", "replace")
+match = re.search(r"curl:\s*\((\d+)\)", text)
+error_number = int(match.group(1)) if match else int(curl_exit)
+errno_match = re.search(r"\berrno\s*[=:]\s*(\d+)\b", text, re.IGNORECASE)
+error_kind = {
+    6: "dns",
+    7: "connection_refused",
+    28: "timeout",
+    35: "tls",
+    52: "empty_reply",
+    56: "connection_reset",
+}.get(error_number, "http" if str(http_status).startswith("5") else "transport")
+doc = {
+    "artifact_type": "o3k-p15-7-api-read-attempt",
+    "schema_version": 1,
+    "status": "failed",
+    "run_id": run_id,
+    "source_sha": source_sha,
+    "phase": phase,
+    "endpoint": endpoint,
+    "attempt": int(attempt),
+    "curl_exit": int(curl_exit),
+    "http_status": http_status,
+    "publication_step": "api_read",
+    "sanitized_body": summary.get("problem"),
+    "response": summary,
+    "transport": {
+        "kind": error_kind,
+        "errno": int(errno_match.group(1)) if errno_match else None,
+        "bytes": len(transport),
+        "sha256": hashlib.sha256(transport).hexdigest() if transport else None,
+    },
+    "recorded_at_unix_ms": int(time.time() * 1000),
+}
+root_path = pathlib.Path(root)
+root_path.mkdir(parents=True, exist_ok=True)
+destination = root_path / f"p15-7-api-read-attempt-{safe}-{int(attempt):02d}.json"
+fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=root)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
 api_get() {
-  local path="$1" phase="${2:-${1#/}}" attempt body_file error_file http_status curl_exit retry_kind
+  local path="$1" phase="${2:-${1#/}}" headers_file="${3:-}" attempt body_file error_file http_status curl_exit retry_kind
+  local -a header_args=()
+  [[ -z "$headers_file" ]] || header_args=(--dump-header "$headers_file")
   [[ "$path" == /* ]] || { echo "P15.7 API read path is not absolute: $path" >&2; return 1; }
+  API_GET_LAST_HTTP_STATUS=000
+  API_GET_LAST_CURL_EXIT=0
   for ((attempt = 1; attempt <= P15_7_API_READ_ATTEMPTS; attempt++)); do
     body_file="$(mktemp "$WORK_ROOT/api-read-body.XXXXXX")"
     error_file="$(mktemp "$WORK_ROOT/api-read-error.XXXXXX")"
@@ -1828,11 +2332,14 @@ api_get() {
     curl_exit=0
     if http_status="$(curl --silent --show-error --config "$OPERATOR_CURL_CONFIG" \
       --connect-timeout 5 --max-time "$P15_7_API_READ_TIMEOUT_SECONDS" \
+      "${header_args[@]}" \
       --output "$body_file" --write-out '%{http_code}' "$API$path" 2>"$error_file")"; then
       :
     else
       curl_exit=$?
     fi
+    API_GET_LAST_HTTP_STATUS="$http_status"
+    API_GET_LAST_CURL_EXIT="$curl_exit"
     if [[ "$curl_exit" -eq 0 && "$http_status" =~ ^2[0-9][0-9]$ ]]; then
       cat "$body_file"
       rm -f -- "$body_file" "$error_file"
@@ -1846,6 +2353,8 @@ api_get() {
       retry_kind=""
     fi
     if [[ -n "$retry_kind" && "$attempt" -lt "$P15_7_API_READ_ATTEMPTS" ]]; then
+      write_api_read_attempt_evidence "$phase" "$path" "$attempt" "$curl_exit" "$http_status" \
+        "$body_file" "$error_file" || true
       record_transient "$retry_kind" "GET $path" "phase=$phase attempt=$attempt" "$http_status"
       rm -f -- "$body_file" "$error_file"
       sleep "$P15_7_API_READ_DELAY_SECONDS"
@@ -1854,8 +2363,13 @@ api_get() {
     if [[ -n "$retry_kind" ]]; then
       record_transient "$retry_kind" "GET $path" "phase=$phase attempts=$attempt outcome=failed" "$http_status"
     fi
+    write_api_read_attempt_evidence "$phase" "$path" "$attempt" "$curl_exit" "$http_status" \
+      "$body_file" "$error_file" || true
     write_api_read_failure_evidence "$phase" "$path" "$attempt" "$curl_exit" "$http_status" \
       "$body_file" "$error_file"
+    FAILURE_PHASE="$phase"
+    FAILURE_CLASS="product_correctness"
+    LAST_FAILURE_MESSAGE="API read failed: phase=$phase endpoint=$path http_status=$http_status curl_exit=$curl_exit attempts=$attempt"
     rm -f -- "$body_file" "$error_file"
     return 1
   done
@@ -2549,6 +3063,12 @@ fi
 record_scale_checkpoint post-reboot 5 "$DRAIN_ID" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
   "$POST_REMOVE_BOOTSTRAP_EXPECT" \
   >/dev/null || die "post-reboot eligible Ready count is not exactly five"
+STREAM_REQUIRED_PROVIDERS=""
+for provider in compute-agent block-a block-b block-c block-d block-e; do
+  [[ "$provider" == "$DRAIN_AGENT" ]] && continue
+  STREAM_REQUIRED_PROVIDERS+="${STREAM_REQUIRED_PROVIDERS:+,}$provider"
+done
+wait_for_agent_streams post-reboot "$STREAM_REQUIRED_PROVIDERS"
 
 # Focused development lane: S5 ends at the restart checkpoint.  The normal
 # EXIT cleanup still tears down only this run's owned resources, while the
@@ -2605,17 +3125,6 @@ CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS=""
 CRASH_REPAIR_LOCK_WAIT_BOUND_MS=65000
 CRASH_REPAIR_LEASE_TAKEOVER="ttl_expiry"
 CRASH_OPERATION_ID=""
-persist_crash_checkpoint() {
-  local phase="$1" status="$2"
-  shift 2
-  CRASH_PHASE="$phase"
-  python3 "$ROOT_DIR/scripts/p15-7-crash-evidence.py" "$CRASH_EVIDENCE_FILE" \
-    "$phase" "$status" source_sha "$SOURCE_SHA" run_id "$RUN_ID" \
-    "$@" || die "could not persist #1035 crash evidence phase $phase"
-  if [[ "$status" != failed ]]; then
-    LAST_SUCCESSFUL_CHECKPOINT="$phase"
-  fi
-}
 write_orphan_repair_timeline() {
   local output="$ARTIFACT_DIR/p15-7-orphan-repair-timeline.json"
   local log_snapshot="$WORK_ROOT/orphan-repair-timeline-$RUN_ID.jsonl"
@@ -2635,7 +3144,8 @@ output, run_id, source_sha, log_path = sys.argv[1:]
 allowed = {
     "timestamp", "event", "work_key", "resource_id", "project_id", "port_id",
     "owner_controller_id", "owner_controller_epoch", "lease_created_at",
-    "lease_until", "fencing_token", "binding_state",
+    "lease_until", "fencing_token", "binding_state", "failure_reason",
+    "failure_step", "failure_kind", "failure_errno",
 }
 events = []
 try:
@@ -2680,6 +3190,14 @@ write_orphan_repair_diagnostics() {
   local endpoint_raw="$WORK_ROOT/orphan-repair-endpoint.raw.json"
   local log_snapshot="$WORK_ROOT/orphan-repair-log-$RUN_ID.jsonl"
   local server_status=000 endpoint_status=000 elapsed_ms expected_at
+  # This run-owned file is the canonical schema-v2 identity/boolean
+  # checkpoint, not a provider payload. Retain it before marker cleanup;
+  # publication failures must not manufacture a replacement checkpoint.
+  if sudo -n test -s "$CRASH_REPAIR_CHECKPOINT_FILE"; then
+    sudo -n head -c 8192 -- "$CRASH_REPAIR_CHECKPOINT_FILE" \
+      >"$ARTIFACT_DIR/p15-7-orphan-repair-checkpoint.json"
+    chmod 0600 "$ARTIFACT_DIR/p15-7-orphan-repair-checkpoint.json"
+  fi
   fetch_redacted_json() {
     local url="$1" output_path="$2" header_name="$3" header_file status header_value
     header_file="$(mktemp "$RUNNER_TEMP_ROOT/pp5-diagnostic-header.XXXXXX")"
@@ -2751,7 +3269,8 @@ structured_events = []
 allowed = {
     "timestamp", "event", "work_key", "resource_id", "project_id", "port_id",
     "owner_controller_id", "owner_controller_epoch", "lease_created_at",
-    "lease_until", "fencing_token", "binding_state",
+    "lease_until", "fencing_token", "binding_state", "failure_reason",
+    "failure_step", "failure_kind", "failure_errno",
 }
 try:
     for line in pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines():
@@ -2776,7 +3295,26 @@ except OSError:
     pass
 
 checkpoint = pathlib.Path(checkpoint_path)
-temp_matches = list(checkpoint.parent.glob(f".{checkpoint.name}.*.tmp")) if checkpoint.parent.exists() else []
+try:
+    temp_matches = list(checkpoint.parent.glob(f".{checkpoint.name}.*.tmp")) if checkpoint.parent.exists() else []
+except OSError:
+    # The checkpoint may live in a daemon-owned 0700 directory the runner
+    # user cannot stat; treat it as absent rather than crashing the
+    # failure-diagnostics writer (the checkpoint itself is read via sudo).
+    temp_matches = []
+publication_steps = {
+    "directory_parent", "directory_create", "temporary_create", "json_serialize",
+    "temporary_write", "file_fsync", "destination_link", "temporary_cleanup",
+    "directory_open", "directory_fsync", "destination_precheck",
+}
+checkpoint_failure_events = [
+    event for event in structured_events
+    if event.get("event") == "orphan_repair_checkpoint_failed_closed"
+]
+publication_failure_events = [
+    event for event in checkpoint_failure_events
+    if event.get("failure_step") in publication_steps
+]
 document = {
     "schema_version": 1,
     "run_id": run_id,
@@ -2810,7 +3348,9 @@ document = {
     },
     "checkpoint_file_exists": checkpoint.is_file(),
     "checkpoint_temp_file_exists": bool(temp_matches),
-    "checkpoint_publication_error_observed": any("checkpoint could not be published" in message.lower() for message in log_messages),
+    "checkpoint_publication_error_observed": bool(publication_failure_events),
+    "checkpoint_failure_events": checkpoint_failure_events[-20:],
+    "checkpoint_publication_failures": publication_failure_events[-20:],
     # Keep structured chronology in the bounded fallback as well. The
     # dedicated timeline artifact is the preferred evidence, but this copy
     # remains useful if artifact collection is interrupted before that file is
@@ -2842,61 +3382,6 @@ PY
   fi
   chmod 0600 "$output" "$server_raw" "$endpoint_raw" 2>/dev/null || true
   rm -f -- "$log_snapshot"
-}
-stop_contending_create() {
-  # Address only the exact run-owned background child, reap it, and remove
-  # only this run's synchronization markers. Never kill by process name.
-  local pid="${CONTENDING_CREATE_PID:-}" pgid="${CONTENDING_CREATE_PGID:-}" marker failed=false current_starttime current_pgid wait_status=0
-  if [[ -n "$pid" ]]; then
-    if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
-      echo "P15.7 cleanup: refusing non-numeric contending-create PID" >&2
-      failed=true
-    else
-      if kill -0 "$pid" 2>/dev/null; then
-        current_starttime="$(sudo -n awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
-        current_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
-        if [[ -z "${CONTENDING_CREATE_STARTTIME:-}" || "$current_starttime" != "$CONTENDING_CREATE_STARTTIME" \
-          || -z "$pgid" || ! "$pgid" =~ ^[0-9]+$ || "$current_pgid" != "$pgid" ]]; then
-          echo "P15.7 cleanup: contending-create PID identity changed before signal: $pid" >&2
-          failed=true
-        fi
-      fi
-      if [[ "$failed" == false ]] && kill -0 "$pid" 2>/dev/null; then
-        kill -TERM -- "-$pgid" 2>/dev/null || true
-        for _ in $(seq 1 50); do
-          kill -0 "$pid" 2>/dev/null || break
-          sleep 0.1
-        done
-        if kill -0 "$pid" 2>/dev/null; then
-          kill -KILL -- "-$pgid" 2>/dev/null || true
-          for _ in $(seq 1 20); do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 0.1
-          done
-        fi
-      fi
-      wait "$pid" 2>/dev/null || wait_status=$?
-      if kill -0 "$pid" 2>/dev/null; then
-        echo "P15.7 cleanup: contending-create PID remains after reap: $pid" >&2
-        failed=true
-      fi
-      if [[ "$failed" == false && -n "$pgid" ]] && ps -eo pid=,pgid= 2>/dev/null | awk -v pgid="$pgid" '$2 == pgid { found=1 } END { exit found ? 0 : 1 }'; then
-        echo "P15.7 cleanup: contending-create process group remains after reap: $pgid" >&2
-        failed=true
-      fi
-      [[ "$wait_status" -eq 0 || "$failed" == false ]] || failed=true
-    fi
-    if [[ "$failed" == false ]]; then
-      CONTENDING_CREATE_REAPED=true
-      CONTENDING_CREATE_PID=""
-      CONTENDING_CREATE_PGID=""
-    fi
-  fi
-  for marker in "${CRASH_REPAIR_WAITER_FILE:-}" "${CRASH_REPAIR_RELEASE_FILE:-}" "${CRASH_REPAIR_CHECKPOINT_FILE:-}"; do
-    [[ -n "$marker" ]] || continue
-    sudo -n rm -f -- "$marker" || failed=true
-  done
-  [[ "$failed" == false ]]
 }
 quota_usage() {
   curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
@@ -2976,6 +3461,7 @@ GEN_C="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metada
 append_o3kd_fault_env "$WORKLOAD_C"
 restart_o3kd_verified
 wait_o3kd_readyz "readyz did not reconstruct with the targeted fault hook armed"
+wait_for_agent_streams pre-crash-target-delete "$STREAM_REQUIRED_PROVIDERS"
 FAULT_TARGET_ENV_CONSUMED=false
 if sudo -n cat "/proc/$(read_o3kd_ledger)/environ" 2>/dev/null | tr '\0' '\n' \
   | grep -Fx "$O3K_FAULT_TARGET_ENV_NAME=$WORKLOAD_C" >/dev/null; then
@@ -2999,6 +3485,21 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 [[ "$BACKEND_LIVE" == true ]] || die "backend_liveness_gate_failed_after_fault_hook_restart"
+# Restart-time observation/reconciliation may legitimately advance the
+# resource generation after the pre-restart activation poll.  The delete is a
+# conditional mutation, so bind its If-Match value to the last authenticated
+# read immediately before issuing the request rather than replaying the stale
+# pre-restart generation.  Preserve this projection as part of the crash
+# checkpoint inputs so a conflict remains diagnosable without weakening the
+# optimistic-concurrency contract.
+code_c="$(curl --silent --output "$WORK_ROOT/workload-c-show-before-delete.json" \
+  --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" \
+  "$API/compute/servers/$WORKLOAD_C" || true)"
+[[ "$code_c" == 200 ]] || die "server C pre-delete generation read failed (http=$code_c)"
+C_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", {}).get("state", ""))' "$WORK_ROOT/workload-c-show-before-delete.json" 2>/dev/null || true)"
+[[ "$C_STATE" == "ACTIVE" ]] || die "server C was not ACTIVE before crash-leg delete (state=$C_STATE)"
+GEN_C="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["metadata"]["generation"])' "$WORK_ROOT/workload-c-show-before-delete.json" 2>/dev/null || true)"
+[[ "$GEN_C" =~ ^[0-9]+$ ]] || die "server C pre-delete generation was unavailable"
 api_get "/operator/diagnostics/providers?limit=200" >"$WORK_ROOT/providers-before-crash.json"
 ALLOC_BEFORE_CRASH="$(allocated_vcpu_total "$WORK_ROOT/providers-before-crash.json")"
 [[ "$ALLOC_BEFORE_CRASH" =~ ^[0-9]+$ ]] || die "Placement allocation baseline unavailable"
@@ -3096,6 +3597,46 @@ fi
 UNRELATED_DB_PROBE_LATENCY_MS="$(( $(date +%s%3N) - UNRELATED_DB_PROBE_START_MS ))"
 [[ "$UNRELATED_DB_PROBE_OK" == true ]] || die "unrelated_db_backed_probe_failed_during_endpoint_release_pause: curl_exit=$UNRELATED_DB_PROBE_CURL_EXIT http_status=$UNRELATED_DB_PROBE_HTTP_CODE"
 
+# Fixtures are created DURING the terminal-delete orphan backlog, before
+# SIGKILL. Preparing them here keeps setup out of the repair checkpoint's
+# fixed release window while preserving real caller/foreign canaries.
+# Foreign-project fixture: the sweep must
+# never touch it even though foreign endpoints exist in the same control
+# plane. Deleted at leg end (the fixture credentials are not retained). The
+# token is re-minted here: the leg runs long after the concealment-phase
+# token was issued and a bounded foreign fixture must not depend on it.
+FOREIGN_TOKEN="$(
+  OS_USERNAME="$FOREIGN_USER_NAME" OS_PASSWORD="${O3K_P15_7_FOREIGN_PASSWORD:-${O3K_EXTRA_TENANT_PASSWORD:-}}" \
+  OS_PROJECT_ID="$FOREIGN_PROJECT_ID" OS_PROJECT_NAME="$FOREIGN_PROJECT_NAME" \
+  OS_USER_DOMAIN_NAME=Default OS_PROJECT_DOMAIN_NAME=Default \
+    openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]' || true
+)"
+[[ -n "$FOREIGN_TOKEN" ]] || die "foreign-project token re-issue for the crash leg failed"
+FOREIGN_NET_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
+  "http://127.0.0.1:$AUTH_PORT/v2.0/networks" -d "{\"network\":{\"name\":\"o3k-p15-7-$RUN_ID-foreign-net\"}}" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("network") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
+[[ "$FOREIGN_NET_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project network fixture creation failed"
+FOREIGN_SUBNET_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
+  "http://127.0.0.1:$AUTH_PORT/v2.0/subnets" -d "{\"subnet\":{\"network_id\":\"$FOREIGN_NET_ID\",\"ip_version\":4,\"cidr\":\"198.19.0.0/29\",\"name\":\"o3k-p15-7-$RUN_ID-foreign-subnet\"}}" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("subnet") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
+[[ "$FOREIGN_SUBNET_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project subnet fixture creation failed"
+FOREIGN_PORT_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
+  "http://127.0.0.1:$AUTH_PORT/v2.0/ports" -d "{\"port\":{\"network_id\":\"$FOREIGN_NET_ID\",\"name\":\"o3k-p15-7-$RUN_ID-foreign-port\"}}" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("port") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
+[[ "$FOREIGN_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project endpoint fixture creation failed"
+
+# Contention/fairness probe: a Nova create with a caller-supplied existing
+# port contends on orphan_repair_lock by design. The repair-pass test seam is
+# armed to an absolute deadline and its log proves the real sweep owns the
+# lock before this request starts. Acceptance is bounded by the one 30s
+# network-operation critical section, configured 5s cadence/API margin, and
+# the 30s bounded fail-safe on the deterministic harness handshake;
+# ACTIVE convergence is measured separately and is not part of this bound.
+openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN_ID-port-d" -f value -c id >"$WORK_ROOT/port-d-create.txt" 2>"$WORK_ROOT/port-d-create.err" \
+  || die "caller-supplied probe port creation failed"
+OS_PORT_D_ID="$(tr -d '[:space:]' <"$WORK_ROOT/port-d-create.txt")"
+[[ "$OS_PORT_D_ID" =~ ^[0-9a-fA-F-]{36}$ && "$OS_PORT_D_ID" != "$OS_PORT_A_ID" && "$OS_PORT_D_ID" != "$OS_PORT_B_ID" ]] \
+  || die "caller-supplied probe port returned an invalid or reused id"
 # True process death of the run-owned control plane while the release is
 # parked, then clear the fault and restart through the normal boot path.
 OLD_O3KD_PID="$(read_o3kd_ledger)"
@@ -3186,6 +3727,7 @@ fi
   || die "restarted o3kd did not consume the run-owned repair synchronization environment"
 remove_o3kd_repair_pause_env || die "repair contention pause could not be removed from daemon environment"
 wait_o3kd_readyz "readyz did not reconstruct after the crash restart"
+wait_for_agent_streams post-crash-restart "$STREAM_REQUIRED_PROVIDERS"
 CRASH_RESTART_MS="$(date +%s%3N)"
 persist_crash_checkpoint process_restarted running \
   restart_path normal_boot readyz passed restart_unix_ms "$CRASH_RESTART_MS" restarted_pid "$RESTARTED_O3KD_PID" \
@@ -3204,43 +3746,6 @@ persist_crash_checkpoint process_restarted running \
   repair_interval_seconds 5 repair_lease_takeover "$CRASH_REPAIR_LEASE_TAKEOVER" \
   repair_lock_wait_bound_ms "$CRASH_REPAIR_LOCK_WAIT_BOUND_MS"
 
-# Foreign-project fixture created DURING the orphan backlog: the sweep must
-# never touch it even though foreign endpoints exist in the same control
-# plane. Deleted at leg end (the fixture credentials are not retained). The
-# token is re-minted here: the leg runs long after the concealment-phase
-# token was issued and a bounded foreign fixture must not depend on it.
-FOREIGN_TOKEN="$(
-  OS_USERNAME="$FOREIGN_USER_NAME" OS_PASSWORD="${O3K_P15_7_FOREIGN_PASSWORD:-${O3K_EXTRA_TENANT_PASSWORD:-}}" \
-  OS_PROJECT_ID="$FOREIGN_PROJECT_ID" OS_PROJECT_NAME="$FOREIGN_PROJECT_NAME" \
-  OS_USER_DOMAIN_NAME=Default OS_PROJECT_DOMAIN_NAME=Default \
-    openstack token issue -f value -c id 2>/dev/null | tr -d '[:space:]' || true
-)"
-[[ -n "$FOREIGN_TOKEN" ]] || die "foreign-project token re-issue for the crash leg failed"
-FOREIGN_NET_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
-  "http://127.0.0.1:$AUTH_PORT/v2.0/networks" -d "{\"network\":{\"name\":\"o3k-p15-7-$RUN_ID-foreign-net\"}}" \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("network") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
-[[ "$FOREIGN_NET_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project network fixture creation failed"
-FOREIGN_SUBNET_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
-  "http://127.0.0.1:$AUTH_PORT/v2.0/subnets" -d "{\"subnet\":{\"network_id\":\"$FOREIGN_NET_ID\",\"ip_version\":4,\"cidr\":\"198.19.0.0/29\",\"name\":\"o3k-p15-7-$RUN_ID-foreign-subnet\"}}" \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("subnet") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
-[[ "$FOREIGN_SUBNET_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project subnet fixture creation failed"
-FOREIGN_PORT_ID="$(curl --silent --show-error --max-time 15 -X POST -H "X-Auth-Token: $FOREIGN_TOKEN" -H 'Content-Type: application/json' \
-  "http://127.0.0.1:$AUTH_PORT/v2.0/ports" -d "{\"port\":{\"network_id\":\"$FOREIGN_NET_ID\",\"name\":\"o3k-p15-7-$RUN_ID-foreign-port\"}}" \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("port") or d).get("id", ""))' 2>/dev/null | tr -d '[:space:]')"
-[[ "$FOREIGN_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "foreign-project endpoint fixture creation failed"
-
-# Contention/fairness probe: a Nova create with a caller-supplied existing
-# port contends on orphan_repair_lock by design. The repair-pass test seam is
-# armed to an absolute deadline and its log proves the real sweep owns the
-# lock before this request starts. Acceptance is bounded by the one 30s
-# network-operation critical section, configured 5s cadence/API margin, and
-# the 30s bounded fail-safe on the deterministic harness handshake;
-# ACTIVE convergence is measured separately and is not part of this bound.
-openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN_ID-port-d" -f value -c id >"$WORK_ROOT/port-d-create.txt" 2>"$WORK_ROOT/port-d-create.err" \
-  || die "caller-supplied probe port creation failed"
-OS_PORT_D_ID="$(tr -d '[:space:]' <"$WORK_ROOT/port-d-create.txt")"
-[[ "$OS_PORT_D_ID" =~ ^[0-9a-fA-F-]{36}$ && "$OS_PORT_D_ID" != "$OS_PORT_A_ID" && "$OS_PORT_D_ID" != "$OS_PORT_B_ID" ]] \
-  || die "caller-supplied probe port returned an invalid or reused id"
 REPAIR_LOCK_HELD=false
 REPAIR_LOCK_WAIT_START_MS="$(date +%s%3N)"
 for _ in $(seq 1 650); do
@@ -3281,6 +3786,9 @@ if [[ "$REPAIR_LOCK_HELD" != true ]]; then
   fi
   die "orphan repair did not publish the resource-scoped checkpoint"
 fi
+cp -- "$WORK_ROOT/orphan-repair-checkpoint.json" "$ARTIFACT_DIR/p15-7-orphan-repair-checkpoint.json" \
+  || die "published orphan checkpoint could not be retained"
+chmod 0600 "$ARTIFACT_DIR/p15-7-orphan-repair-checkpoint.json"
 CRASH_REPAIR_LOCK_WAIT_MS="$(( $(date +%s%3N) - REPAIR_LOCK_WAIT_START_MS ))"
 (( CRASH_REPAIR_LOCK_WAIT_MS <= CRASH_REPAIR_LOCK_WAIT_BOUND_MS )) \
   || die "orphan repair exceeded the contract-derived 65s lease/cadence bound"
@@ -3314,6 +3822,14 @@ while :; do
   sleep 0.1
 done
 CONTENDING_CREATE_WAITER_WAIT_MS="$(( $(date +%s%3N) - CONTENDING_CREATE_WAITER_WAIT_START_MS ))"
+if [[ "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED" == true ]]; then
+  # Derive the recorded wait from the SAME observation instant the evidence
+  # cites: a post-loop date would drift a few milliseconds past
+  # LOCK_WAIT_OBSERVED_UNIX_MS and fail the exact
+  # observed - start == wait_ms validator identity (attempt10, run
+  # 1790859057, observed a 1302ms span against a 1305ms recorded wait).
+  CONTENDING_CREATE_WAITER_WAIT_MS="$(( CONTENDING_CREATE_LOCK_WAIT_OBSERVED_UNIX_MS - CONTENDING_CREATE_WAITER_WAIT_START_MS ))"
+fi
 [[ "$CONTENDING_CREATE_LOCK_WAIT_OBSERVED" == true ]] \
   || {
     stop_contending_create || true
@@ -3336,7 +3852,7 @@ persist_crash_checkpoint contending_create_waiting running \
 sudo -n touch -- "$CRASH_REPAIR_RELEASE_FILE" \
   || die "could not release the deterministic repair/create overlap seam"
 persist_crash_checkpoint contending_create_started running \
-  request_start_unix_ms "$CONTENDING_CREATE_REQUEST_START_MS" endpoint_id "$OS_PORT_D_ID" \
+  request_start_unix_ms "$CONTENDING_CREATE_REQUEST_START_MS" contending_endpoint_id "$OS_PORT_D_ID" \
   release_signal_sent_after_lock_wait_observed true
 for _ in $(seq 1 50); do
   current_lines="$(o3kd_log_line_count)"
@@ -3383,7 +3899,17 @@ if [[ "$SWEEP_CONVERGED" == true ]]; then
   write_orphan_repair_timeline \
     || die "structured orphan-repair timeline could not be persisted"
 fi
-wait "$CONTENDING_CREATE_PID" || die "contending existing-port create failed after orphan repair completed"
+set +e
+wait "$CONTENDING_CREATE_PID"
+CONTENDING_CREATE_WRAPPER_EXIT_STATUS=$?
+set -e
+CONTENDING_CREATE_REQUEST_END_MS="$(date +%s%3N)"
+if [[ "$CONTENDING_CREATE_WRAPPER_EXIT_STATUS" -ne 0 ]]; then
+  capture_contending_create_evidence "repair_completed"
+  die "contending existing-port create failed after orphan repair completed (wrapper_exit_status=$CONTENDING_CREATE_WRAPPER_EXIT_STATUS)"
+fi
+CONTENDING_CREATE_OBSERVED_PID="$CONTENDING_CREATE_PID"
+CONTENDING_CREATE_OBSERVED_PGID="$CONTENDING_CREATE_PGID"
 CONTENDING_CREATE_REAPED=true
 CONTENDING_CREATE_PID=""
 CONTENDING_CREATE_PGID=""
@@ -3399,8 +3925,9 @@ WORKLOAD_D="$(tr -d '[:space:]' <"$WORK_ROOT/workload-d-create.txt")"
 OS_WORKLOAD_D="$WORKLOAD_D"
 CONTENDING_CREATE_RESOURCE_ID="$WORKLOAD_D"
 for _ in $(seq 1 10); do
-  curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
-    "$API/operations?limit=100" >"$WORK_ROOT/operations-d.json" 2>/dev/null || true
+  CONTENDING_CREATE_OPERATION_HTTP_STATUS="$(curl --silent --show-error --output "$WORK_ROOT/operations-d.json" \
+    --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" \
+    "$API/operations?limit=100" 2>"$WORK_ROOT/operations-d.err" || true)"
   CONTENDING_CREATE_OPERATION_ID="$(python3 - "$WORK_ROOT/operations-d.json" "$WORKLOAD_D" <<'PY'
 import json,sys
 try:
@@ -3419,6 +3946,7 @@ PY
 done
 [[ "$CONTENDING_CREATE_OPERATION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] \
   || die "contending create operation id was not observable"
+capture_contending_create_evidence "contending_create_accepted"
 
 # Orphan-repair convergence: bounded wait (<=180s) for the sweep to release
 # the orphaned endpoint, counting the bounded observability lines the sweep
@@ -3439,6 +3967,13 @@ done
 [[ "$D_STATE" == "ACTIVE" ]] || die "contending create workload did not become ACTIVE"
 CONTENDING_CREATE_ACTIVE_MS="$(date +%s%3N)"
 CONTENDING_CREATE_ACTIVE_LATENCY_MS="$((CONTENDING_CREATE_ACTIVE_MS - CONTENDING_CREATE_REQUEST_ACCEPTED_MS))"
+CONTENDING_CREATE_SERVER_HTTP_STATUS="200"
+# Read the operation projection again after observing ACTIVE. Do not infer
+# operation success from resource state: its durable projection can lag.
+CONTENDING_CREATE_OPERATION_HTTP_STATUS="$(curl --silent --show-error --output "$WORK_ROOT/operations-d.json" \
+  --write-out '%{http_code}' -H "Authorization: Bearer $PROJECT_TOKEN" \
+  "$API/operations?limit=100" 2>"$WORK_ROOT/operations-d.err" || true)"
+capture_contending_create_evidence "contending_create_active"
 
 # Fail-closed tail: no die is permitted between here and the foreign-fixture
 # teardown below, so an assertion failure cannot strand foreign-owned state.
@@ -3457,7 +3992,7 @@ ALLOC_AFTER_CRASH="$(allocated_vcpu_total "$WORK_ROOT/providers-after-crash.json
 FIXED_IP_REUSABLE=false
 REUSE_FAILURE=""
 if [[ -z "$CRASH_FAILURE" ]]; then
-  if REUSE_PORT_ID="$(openstack port create --network "$OS_NETWORK_ID" --fixed-ip "ip-address=$PORT_C_FIXED_IP" "o3k-p15-7-$RUN_ID-reuse" -f value -c id 2>"$WORK_ROOT/reuse-port.err" | tr -d '[:space:]')" \
+  if REUSE_PORT_ID="$(openstack port create --network "$OS_NETWORK_ID" --fixed-ip "subnet=$OS_SUBNET_ID,ip-address=$PORT_C_FIXED_IP" "o3k-p15-7-$RUN_ID-reuse" -f value -c id 2>"$WORK_ROOT/reuse-port.err" | tr -d '[:space:]')" \
     && [[ "$REUSE_PORT_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
     FIXED_IP_REUSABLE=true
     delete_owned_openstack port "$REUSE_PORT_ID" || REUSE_FAILURE="reuse proof port could not be deleted"
@@ -3465,6 +4000,7 @@ if [[ -z "$CRASH_FAILURE" ]]; then
   else
     REUSE_FAILURE="orphan fixed IP was not reusable after repair"
   fi
+  capture_contending_create_evidence "fixed_ip_reuse_observed"
 fi
 # Delete the contending create workload and prove the caller-supplied port
 # survived (only server-owned endpoints may ever be released).
@@ -3605,6 +4141,7 @@ MAINT_AGENT_RECONNECTED=false
 MAINT_IDENTITY_PRESERVED=false
 MAINT_RETURNED_TO_READY=false
 MAINT_FINAL_ELIGIBLE=""
+MAINT_REBOOT_REQUEST_MS=0
 api_get "/operator/building-blocks/$MAINT_ID" >"$WORK_ROOT/maintenance-block-before.json"
 python3 - "$WORK_ROOT/maintenance-block-before.json" "$MAINT_ID" <<'PY' \
   || die "maintenance block is not eligible before the maintenance leg"
@@ -3648,9 +4185,21 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [[ -n "$HOST_M" && "$HOST_M" != "None" ]] || die "maintenance workload placement host did not converge"
-api_get /operator/building-blocks >"$WORK_ROOT/blocks-maintenance-placement.json"
-MAINT_PLACED_ID="$(python3 "$ROOT_DIR/scripts/resolve-p15-7-placement-block.py" \
-  "$WORK_ROOT/blocks-maintenance-placement.json" "$HOST_M" 2>/dev/null || true)"
+# The block's provider/identity projection can lag the Nova host attribute by
+# an agent report cadence (observed once as a one-shot resolve failure in
+# protected run 37044765005). Resolve with the same bounded convergence
+# discipline as the host lookup; every assertion below is unchanged.
+MAINT_PLACED_ID=""
+for _ in $(seq 1 60); do
+  api_get /operator/building-blocks >"$WORK_ROOT/blocks-maintenance-placement.json"
+  candidate="$(python3 "$ROOT_DIR/scripts/resolve-p15-7-placement-block.py" \
+    "$WORK_ROOT/blocks-maintenance-placement.json" "$HOST_M" 2>/dev/null || true)"
+  if [[ "$candidate" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    MAINT_PLACED_ID="$candidate"
+    break
+  fi
+  sleep 1
+done
 [[ "$MAINT_PLACED_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "maintenance workload has no canonical block mapping"
 [[ "$MAINT_PLACED_ID" != "$MAINT_ID" ]] || die "new placement selected the draining maintenance block"
 MAINT_PLACEMENT_REJECTED=true
@@ -3680,9 +4229,34 @@ OS_WORKLOAD_M=""
 # Planned host reboot from the outer host, then wait bounded for the child to
 # return. The address is re-resolved through the MAC-bound resolver on every
 # retry (a DHCP lease is not liveness proof).
+MAINT_BOOT_ID_BEFORE="$(readiness_probe block-e "maintenance-boot-id-before" "${IPS[4]}" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
+[[ "$MAINT_BOOT_ID_BEFORE" =~ ^[0-9a-fA-F-]{36}$ ]] || die "could not capture maintenance guest boot identity before reboot"
+MAINT_BOOT_ID_BEFORE_MS="$(date +%s%3N)"
+python3 - "$ARTIFACT_DIR/maintenance-boot-identity-before.json" "$RUN_ID" "$SOURCE_SHA" "$MAINT_ID" "$MAINT_EXEC_IDENTITY_BEFORE" "$MAINT_UUID" "$MAINT_BOOT_ID_BEFORE" "$MAINT_BOOT_ID_BEFORE_MS" <<'PY'
+import json, pathlib, sys
+out, run_id, source_sha, block_id, execution_identity, domain_uuid, boot_id, timestamp_ms = sys.argv[1:]
+pathlib.Path(out).write_text(json.dumps({"run_id": run_id, "source_sha": source_sha,
+    "block_id": block_id, "execution_identity": execution_identity,
+    "domain_uuid": domain_uuid, "boot_id": boot_id,
+    "captured_at_unix_ms": int(timestamp_ms)}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+MAINT_REBOOT_REQUEST_MS="$(date +%s%3N)"
 virsh -c qemu:///system reboot "$MAINT_UUID" >/dev/null || die "maintenance child reboot failed"
-MAINT_IP_AFTER="$(wait_vm_ssh "$MAINT_DOMAIN" "$MAINT_UUID" "$(<"$WORK_ROOT/block-e-mac")" "$MAINT_SERIAL" block-e)" \
+MAINT_IP_AFTER="$(wait_vm_rebooted "$MAINT_DOMAIN" "$MAINT_UUID" "$(<"$WORK_ROOT/block-e-mac")" "$MAINT_SERIAL" block-e "$MAINT_BOOT_ID_BEFORE")" \
   || die "maintenance child did not become SSH-reachable after reboot"
+MAINT_BOOT_ID_AFTER="$(readiness_probe block-e "maintenance-boot-id-after" "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
+[[ "$MAINT_BOOT_ID_AFTER" =~ ^[0-9a-fA-F-]{36}$ && "$MAINT_BOOT_ID_AFTER" != "$MAINT_BOOT_ID_BEFORE" ]] \
+  || die "maintenance guest boot identity did not change after reboot"
+MAINT_BOOT_ID_AFTER_MS="$(date +%s%3N)"
+python3 - "$ARTIFACT_DIR/maintenance-boot-identity-after.json" "$RUN_ID" "$SOURCE_SHA" "$MAINT_ID" "$MAINT_EXEC_IDENTITY_BEFORE" "$MAINT_UUID" "$MAINT_BOOT_ID_BEFORE" "$MAINT_BOOT_ID_AFTER" "$MAINT_BOOT_ID_AFTER_MS" <<'PY'
+import json, pathlib, sys
+out, run_id, source_sha, block_id, execution_identity, domain_uuid, before, after, timestamp_ms = sys.argv[1:]
+pathlib.Path(out).write_text(json.dumps({"run_id": run_id, "source_sha": source_sha,
+    "block_id": block_id, "execution_identity": execution_identity,
+    "domain_uuid": domain_uuid, "boot_id_before": before,
+    "boot_id_after": after, "boot_id_changed": before != after,
+    "captured_at_unix_ms": int(timestamp_ms)}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 ssh_vm "$MAINT_IP_AFTER" "sudo cloud-init status --wait" >/dev/null 2>&1 || true
 # Restart the compute agent from its durable guest identity. O3K packaging
 # deliberately installs no host-global service persistence (the operator owns
@@ -3694,8 +4268,34 @@ ssh_vm "$MAINT_IP_AFTER" "sudo pkill -x o3k-compute || true; sudo sh -c 'RUST_LO
 for _ in $(seq 1 90); do ssh_vm "$MAINT_IP_AFTER" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 && break; sleep 2; done
 ssh_vm "$MAINT_IP_AFTER" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 || die "maintenance agent did not become ready after reboot"
 # Bounded wait for the control plane to observe the reconnected agent.
+MAINT_OBSERVATIONS_FILE="$ARTIFACT_DIR/p15-7-maintenance-agent-observations.jsonl"
+: >"$MAINT_OBSERVATIONS_FILE"
+chmod 0600 "$MAINT_OBSERVATIONS_FILE"
 for _ in $(seq 1 120); do
-  AGENT_AVAILABLE="$(api_get "/operator/building-blocks/$MAINT_ID" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("agent_available", ""))' 2>/dev/null || true)"
+  observation_start_ms="$(date +%s%3N)"
+  observation_body="$WORK_ROOT/maintenance-observation.body.raw"
+  observation_headers="$WORK_ROOT/maintenance-observation.headers.raw"
+  observation_http=000
+  observation_exit=0
+  observation_curl_exit=0
+  if api_get "/operator/building-blocks/$MAINT_ID" maintenance-reconnect "$observation_headers" \
+    >"$observation_body" 2>/dev/null; then
+    observation_http="$API_GET_LAST_HTTP_STATUS"
+  else
+    observation_exit=$?
+    observation_http="$API_GET_LAST_HTTP_STATUS"
+    observation_curl_exit="$API_GET_LAST_CURL_EXIT"
+    : >"$observation_body"
+  fi
+  observation_finish_ms="$(date +%s%3N)"
+  AGENT_AVAILABLE="$(python3 "$ROOT_DIR/scripts/capture-p15-7-maintenance-observation.py" \
+    --artifact "$MAINT_OBSERVATIONS_FILE" --body "$observation_body" --headers "$observation_headers" \
+    --started-ms "$observation_start_ms" --finished-ms "$observation_finish_ms" \
+    --http-status "$observation_http" --exit-status "$observation_exit" --curl-exit-status "$observation_curl_exit" \
+    --block-id "$MAINT_ID" --execution-identity "$MAINT_EXEC_IDENTITY_BEFORE" \
+    --run-id "$RUN_ID" --source-sha "$SOURCE_SHA")" \
+    || die "maintenance observation evidence could not be safely published"
+  rm -f -- "$observation_body" "$observation_headers"
   [[ "$AGENT_AVAILABLE" == true ]] && break
   sleep 2
 done
@@ -3757,11 +4357,11 @@ MAINT_FINAL_ELIGIBLE="$(record_scale_checkpoint post-maintenance 5 "" "$SURVIVOR
 [[ "$MAINT_FINAL_ELIGIBLE" == 5 ]] || die "post-maintenance eligible Ready count is not exactly five"
 python3 - "$MAINT_EVIDENCE_FILE" "$MAINT_ID" "$MAINT_EXEC_IDENTITY_BEFORE" "$MAINT_PROVIDER_IDS_BEFORE" \
   "$MAINT_DRAIN_BLOCKERS_EMPTY" "$MAINT_PLACEMENT_REJECTED" "$MAINT_AGENT_RECONNECTED" "$MAINT_IDENTITY_PRESERVED" \
-  "$MAINT_RETURNED_TO_READY" "$MAINT_FINAL_ELIGIBLE" <<'PY'
+  "$MAINT_RETURNED_TO_READY" "$MAINT_FINAL_ELIGIBLE" "$MAINT_BOOT_ID_BEFORE" "$MAINT_BOOT_ID_AFTER" <<'PY'
 import json, pathlib, sys
 
 out, block_id, exec_identity, providers, blockers_empty, placement_rejected, \
-    agent_reconnected, identity_preserved, returned_to_ready, final_eligible = sys.argv[1:11]
+    agent_reconnected, identity_preserved, returned_to_ready, final_eligible, boot_id_before, boot_id_after = sys.argv[1:13]
 doc = {
     "status": "passed",
     "block_id": block_id,
@@ -3772,7 +4372,8 @@ doc = {
               "blockers": "no residents existed; the honest blocker projection is empty"},
     "placement_rejected_on_draining_block": placement_rejected == "true",
     "host_reboot": {"issued_from": "outer host via virsh reboot on the recorded domain UUID",
-                    "guest_returned_ssh": True},
+                    "guest_returned_ssh": True, "boot_id_before": boot_id_before,
+                    "boot_id_after": boot_id_after, "boot_id_changed": boot_id_before != boot_id_after},
     "agent_restart": {"modeled": "operator restarts the host service; O3K installs no host-global service persistence",
                       "reconnected": agent_reconnected == "true"},
     "identity_preserved": {
@@ -3797,17 +4398,58 @@ while IFS= read -r uuid; do [[ -z "$uuid" || "$FOREIGN_AFTER" == *"$uuid"* ]] ||
 [[ "$foreign_ok" == true ]] || die "foreign libvirt state changed"
 
 # SQLite parity remains an actual process boundary, not a boolean fixture.
-cargo test --locked -p o3kd --all-features --test p15_1_topology_process --test p15_5_building_block_process -- --test-threads=1 >/dev/null || die "SQLite parity process boundary failed"
+# Failure output is retained in a bounded sanitized artifact: attempt03
+# (run 1790852758) failed here with stdout discarded to /dev/null, leaving no
+# retained root cause. The redaction step is deliberately narrow: it strips
+# only postgres DSN userinfo (user:password@) from the retained tail. The
+# primary credential defense is the env scrub below (env -i with the minimal
+# toolchain set), which keeps journey exports — database bindings, bootstrap
+# secret, federated identity — from ever reaching the cargo children; the
+# redactor is a backstop, not the boundary.
+# Attempt04 (run 1790859057) exposed the retained root cause: the
+# p15_1_topology_process PostgreSQL half derives its disposable-database
+# admin connection from O3K_DATABASE_URL, but the journey env carries the
+# least-privilege campaign DSN (no CREATEDB by design, see
+# scripts/provision_pp5_postgres.py), so CREATE DATABASE is denied. This step
+# asserts the SQLite process boundary (validator key sqlite_parity); the
+# PostgreSQL half is covered in CI with a CREATEDB-capable o3k role.
+# Attempt06 (run 1790859057) exposed the next layer: the parity children
+# spawn real o3kd processes whose config ingests EVERY O3K_* export
+# (o3k_config::Config::from_sources(std::env::vars())), so journey exports --
+# the database bindings, the bootstrap secret, the federated identity -- all
+# change daemon behavior (backend without URL fails closed; bootstrap secret
+# plus federated identity never becomes ready). The parity environment must
+# therefore be deterministic: scrub it to a minimal toolchain environment
+# instead of playing whack-a-mole with individual variables. No assertion is
+# removed or weakened (the PostgreSQL half skips by design without a URL).
+SQLITE_PARITY_LOG="$WORK_ROOT/sqlite-parity-cargo-test.raw.log"
+SQLITE_PARITY_ENV=(env -i PATH="$PATH" HOME="$HOME")
+[[ -n "${CARGO_HOME:-}" ]] && SQLITE_PARITY_ENV+=("CARGO_HOME=$CARGO_HOME")
+[[ -n "${RUSTUP_HOME:-}" ]] && SQLITE_PARITY_ENV+=("RUSTUP_HOME=$RUSTUP_HOME")
+[[ -n "${CARGO_NET_OFFLINE:-}" ]] && SQLITE_PARITY_ENV+=("CARGO_NET_OFFLINE=$CARGO_NET_OFFLINE")
+if ! "${SQLITE_PARITY_ENV[@]}" cargo test --locked -p o3kd --all-features --test p15_1_topology_process --test p15_5_building_block_process -- --test-threads=1 >"$SQLITE_PARITY_LOG" 2>&1; then
+  python3 - "$SQLITE_PARITY_LOG" "$ARTIFACT_DIR/p15-7-sqlite-parity-cargo-test.log" <<'PY'
+import pathlib, re, sys
+raw = pathlib.Path(sys.argv[1])
+out = pathlib.Path(sys.argv[2])
+text = raw.read_text(encoding="utf-8", errors="replace") if raw.exists() else ""
+text = re.sub(r"(postgres(?:ql)?://[^:/\s]+:)[^@\s]+(@)", r"\1REDACTED\2", text)
+out.write_text(text[-65536:], encoding="utf-8")
+PY
+  rm -f "$SQLITE_PARITY_LOG"
+  die "SQLite parity process boundary failed (bounded sanitized output retained: p15-7-sqlite-parity-cargo-test.log)"
+fi
+rm -f "$SQLITE_PARITY_LOG"
 record_optional_araf
 cleanup
 assert_owned_domains_absent
 [[ ! -e "$SSH_KEY" && ! -e "$KNOWN_HOSTS" ]] || die "owned journey files remain after cleanup"
 JOURNEY_END_MS="$(date +%s%3N)"
 
-PYTHONPATH="$ROOT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 - "$EVIDENCE_FILE" "$ARTIFACT_DIR" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" "$POSTGRES_MODE" "$POSTGRES_SERVER_VERSION" "$POSTGRES_REDACTED_ENDPOINT" "$POSTGRES_SCHEMA_PREPARED" "$INITIAL_READY_COUNT" "$FINAL_READY_COUNT" "$PEAK_CONCURRENT_READY" "$DRAIN_AGENT" "$BOOTSTRAP_AGENT_ID" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" "$BACKEND_EFFECTIVE" "$BACKEND_PROOF_METHOD" "$BACKEND_PROOF_POOL_SESSIONS" "$BACKEND_PROOF_SEVER_OBSERVED" "$BACKEND_PROOF_RECOVERY_OBSERVED" "$PREFLIGHT_ARTIFACT" "$CHECKOUT_HEAD" "$TREE_CLEAN" "$HARNESS_DIGEST" <<'PY'
+PYTHONPATH="$ROOT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 - "$EVIDENCE_FILE" "$ARTIFACT_DIR" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" "$POSTGRES_MODE" "$POSTGRES_SERVER_VERSION" "$POSTGRES_REDACTED_ENDPOINT" "$POSTGRES_SCHEMA_PREPARED" "$INITIAL_READY_COUNT" "$FINAL_READY_COUNT" "$PEAK_CONCURRENT_READY" "$DRAIN_AGENT" "$BOOTSTRAP_AGENT_ID" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" "$BACKEND_EFFECTIVE" "$BACKEND_PROOF_METHOD" "$BACKEND_PROOF_POOL_SESSIONS" "$BACKEND_PROOF_SEVER_OBSERVED" "$BACKEND_PROOF_RECOVERY_OBSERVED" "$PREFLIGHT_ARTIFACT" "$CHECKOUT_HEAD" "$TREE_CLEAN" "$HARNESS_DIGEST" "$PP5_PHASE" <<'PY'
 from p15_7_scale_semantics import validate_bootstrap_scale_membership
 import json,pathlib,sys
-path=pathlib.Path(sys.argv[1]); artifact=pathlib.Path(sys.argv[2]); sha=sys.argv[3].lower(); profile=sys.argv[4]; blocks=int(sys.argv[5]); start=int(sys.argv[6]); end=int(sys.argv[7]); cross_tenant=sys.argv[8] == "true"; araf_status=sys.argv[9]; araf_reason=sys.argv[10]; diagnostic_only=sys.argv[11] == "true"; postgres_mode=sys.argv[12]; postgres_version=sys.argv[13]; postgres_endpoint=sys.argv[14]; postgres_schema=sys.argv[15] == "true"; initial_ready=int(sys.argv[16]); final_ready=int(sys.argv[17]); peak_ready=int(sys.argv[18]); drain_agent=sys.argv[19]; bootstrap_agent=sys.argv[20]; child_block_ids=sys.argv[21:26]; backend_effective=sys.argv[26]; backend_proof_method=sys.argv[27]; backend_proof={"status":"passed","method":backend_proof_method}; pool_sessions=sys.argv[28]; preflight_path=pathlib.Path(sys.argv[31]); checkout_head=sys.argv[32].lower(); tree_clean=sys.argv[33] == "true"; harness_digest=sys.argv[34]
+path=pathlib.Path(sys.argv[1]); artifact=pathlib.Path(sys.argv[2]); sha=sys.argv[3].lower(); profile=sys.argv[4]; blocks=int(sys.argv[5]); start=int(sys.argv[6]); end=int(sys.argv[7]); cross_tenant=sys.argv[8] == "true"; araf_status=sys.argv[9]; araf_reason=sys.argv[10]; diagnostic_only=sys.argv[11] == "true"; postgres_mode=sys.argv[12]; postgres_version=sys.argv[13]; postgres_endpoint=sys.argv[14]; postgres_schema=sys.argv[15] == "true"; initial_ready=int(sys.argv[16]); final_ready=int(sys.argv[17]); peak_ready=int(sys.argv[18]); drain_agent=sys.argv[19]; bootstrap_agent=sys.argv[20]; child_block_ids=sys.argv[21:26]; backend_effective=sys.argv[26]; backend_proof_method=sys.argv[27]; backend_proof={"status":"passed","method":backend_proof_method}; pool_sessions=sys.argv[28]; preflight_path=pathlib.Path(sys.argv[31]); checkout_head=sys.argv[32].lower(); tree_clean=sys.argv[33] == "true"; harness_digest=sys.argv[34]; pp5_phase=sys.argv[35]
 preflight=json.loads(preflight_path.read_text(encoding="utf-8"))
 if checkout_head != sha or preflight.get("checkout_head") != sha or tree_clean is not True or preflight.get("git_tree_clean") is not True or len(harness_digest) != 64 or preflight.get("harness_inputs_sha256") != harness_digest:
     raise SystemExit("preflight identity is missing or does not match the journey source")
@@ -3817,12 +4459,30 @@ if postgres_mode == "external":
     backend_proof["recovery_observed"]=sys.argv[30] == "true"
 
 CHECKPOINT_PHASES=["initial-scale-checkpoint","pre-drain","post-drain","post-remove","post-replacement","post-reboot","post-crash-repair","post-maintenance"]
+# The #1035 crash leg runs only in phases that select it (integrated and
+# 1035-crash-recovery). The crash checkpoint and crash evidence must exist
+# exactly when the leg ran and must be absent exactly when it did not;
+# silently tolerating either direction would let a skipped leg masquerade as
+# evidence or a failed leg vanish.
+crash_ran = pp5_phase in ("integrated", "1035-crash-recovery")
+crash_checkpoint_path = artifact / "p15-7-scale-checkpoint-post-crash-repair.json"
+crash_evidence_path = artifact / "p15-7-crash-injection-evidence.json"
+if crash_ran:
+    if not crash_checkpoint_path.is_file() or not crash_evidence_path.is_file():
+        raise SystemExit("crash leg ran but its checkpoint or evidence is missing")
+else:
+    if crash_checkpoint_path.exists() or crash_evidence_path.exists():
+        raise SystemExit("crash-leg evidence exists but the phase did not run the crash leg")
 ELIGIBILITY_RULE=("placement_eligible = state=='ready' AND >=1 resource_provider_id present in "
                   "/operator/diagnostics/providers with state 'Enabled' AND no recorded drain_blockers; "
                   "every BuildingBlock is enumerated, including the bootstrap block (identified by the "
                   "canonical TLS agent identity, never filtered by name or label)")
 checkpoints=[]
 for phase in CHECKPOINT_PHASES:
+    if phase == "post-crash-repair" and not crash_ran:
+        checkpoints.append({"phase": "post-crash-repair", "status": "not_run",
+                            "reason": f"#1035 crash leg not selected by phase {pp5_phase}"})
+        continue
     fragment_path=artifact / f"p15-7-scale-checkpoint-{phase}.json"
     checkpoints.append(json.loads(fragment_path.read_text(encoding="utf-8")))
 initial_checkpoint=checkpoints[0]
@@ -3851,7 +4511,7 @@ if len(set(enrolled_block_ids)) != 6 or len(set(enrolled_agents)) != 6:
 def load_fragment(name):
     return json.loads((artifact / name).read_text(encoding="utf-8"))
 drain_blocker_requery=load_fragment("p15-7-drain-blocker-requery.json")
-crash_repair=load_fragment("p15-7-crash-injection-evidence.json")
+crash_repair=load_fragment("p15-7-crash-injection-evidence.json") if crash_ran else {"status":"not_run","reason":f"#1035 crash leg not selected by phase {pp5_phase}"}
 host_maintenance=load_fragment("p15-7-host-maintenance-evidence.json")
 transient_path=artifact / "p15-7-transient-failures.jsonl"
 transient_failures=[]
@@ -3866,7 +4526,7 @@ if len(child_vms) != blocks or not all(vm.get("ssh_proof") for vm in child_vms):
 def passed():
     return {"status":"passed"}
 doc={
- "artifact_type":"o3k-p15-7-scale-composition-evidence","schema_version":1,"phase":"P15.7","status":"passed","evidence_tier":"protected-real-host","profile":profile,"tested_source_sha":sha,"checkout_head":checkout_head,"git_tree_clean":tree_clean,"harness_inputs_sha256":harness_digest,
+ "artifact_type":"o3k-p15-7-scale-composition-evidence","schema_version":1,"phase":"P15.7","status":"passed","evidence_tier":"protected-real-host","profile":profile,"tested_source_sha":sha,"checkout_head":checkout_head,"git_tree_clean":tree_clean,"harness_inputs_sha256":harness_digest,"pp5_phase":pp5_phase,
  "execution":{"real_o3kd":passed(),"real_auth":passed(),"real_execution_boundary":passed(),"multiple_real_hosts":passed(),"sqlite_parity":passed(),"provider":"agent","hypervisor":"libvirt","database_backend":"postgres","block_count":blocks,"provisioned_vms":blocks},
  "scale_composition":{
   "counting_rule":"eligible_ready",

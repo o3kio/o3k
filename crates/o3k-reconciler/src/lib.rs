@@ -1585,6 +1585,28 @@ where
             return Ok(operation.state);
         }
         let resource = self.store.get_resource(operation.resource_id).await?;
+        // A delete is authoritative for the public resource lifecycle.  A
+        // create operation can still be recoverable when the control plane
+        // crashes between dispatch and its terminal observation; once the
+        // same resource is durably DELETED, replaying that stale create would
+        // consume provider capacity (or recreate a guest) after the delete
+        // has already converged.  Fence the obsolete intent without touching
+        // the already-terminal resource projection.
+        if operation.kind == "create"
+            && resource.observed_state == server_state_to_storage(ServerState::Deleted)
+        {
+            self.store
+                .update_operation(
+                    operation.id,
+                    OperationState::Failed,
+                    operation.provider_operation_id.as_deref(),
+                    Some("terminal"),
+                    Some("create superseded by terminal delete"),
+                )
+                .await?;
+            self.event(operation.id, resource.id, JournalEventKind::Failed);
+            return Ok(OperationState::Failed);
+        }
         if operation.state == OperationState::UnknownOutcome {
             if operation.provider_operation_id.is_some() {
                 // Issue #611 (ASR-021 agent-control-plane-network-interruption):
