@@ -35,6 +35,10 @@ assert '--ambient-caps=+net_admin' in bootstrap
 assert '--init-groups' in bootstrap
 assert 'nohup bash -c' in bootstrap
 assert 'O3K_COMPUTE_BRIDGE_NAME' in bootstrap
+assert 'O3K_TESTLAB_AUTO_SELECT_PORTS' in bootstrap
+assert 'select_free_ports()' in bootstrap
+assert 'no free run-scoped TestLab port triplet is available' in bootstrap
+assert 'GitHub environment file path is unsafe' in bootstrap
 assert 'O3K_TESTLAB_ADDITIONAL_AGENT_IDS' in bootstrap
 assert 'extra_agent_ids_csv=' in bootstrap
 assert 'extra_agent_cert_args+=(--extra-agent-id "$extra_agent_id")' in bootstrap

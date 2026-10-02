@@ -10,6 +10,7 @@ use o3k_network::{
     NetworkService, PublicAddressAllocator, PublicAddressPool,
 };
 use o3k_provider::{FailureInjection, FakeComputeProvider};
+use o3k_store::DurableStore;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -2549,7 +2550,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let identity = test_service("http://127.0.0.1:8080").await?;
     let store = std::sync::Arc::new(o3k_store::testkit::open_file(&path).await?);
     let provider = std::sync::Arc::new(FakeComputeProvider::new());
-    let compute = ComputeService::new_for_test(store, provider.clone());
+    let compute = ComputeService::new_for_test(store.clone(), provider.clone());
     let network_root = std::path::PathBuf::from(format!(
         "/tmp/o3k-api-compute-network-{}",
         uuid::Uuid::now_v7()
@@ -2767,6 +2768,13 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let server_id = server_json["server"]["id"]
         .as_str()
         .ok_or_else(|| std::io::Error::other("server missing"))?;
+    let expected_operation_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        b"o3k:operation:eba29e2d-53de-461d-ae91-ede7402713cb:nova-test-request",
+    );
+    let canonical_operation = store.get_canonical_operation(expected_operation_id).await?;
+    assert_eq!(canonical_operation.resource_id.as_deref(), Some(server_id));
+    assert_eq!(canonical_operation.action, "compute:CreateServer");
     let server_uuid = server_id.parse::<uuid::Uuid>()?;
     console.write(server_uuid, b"0123456789abcdef")?;
     let console_response = o3k_api::router_with_state(state.clone())

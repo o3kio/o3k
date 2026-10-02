@@ -488,29 +488,57 @@ fn authority_header(host: &str, port: u16) -> String {
     }
 }
 
+/// Classified failure of a bounded HTTP exchange.
+///
+/// `Transport` covers every case where no complete HTTP status was received
+/// (connect/write/read errors, or the peer closed before answering), so the
+/// outcome of the request is unknown to the client. `Malformed` covers cases
+/// where the peer answered with bytes that cannot be parsed as HTTP, so a
+/// retry would hit the same persistent failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RequestError {
+    Transport(String),
+    Malformed(String),
+}
+
+impl RequestError {
+    /// The original, human-readable failure message.
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            RequestError::Transport(message) | RequestError::Malformed(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
 /// One bounded HTTP exchange.
-fn request_with_key(
+pub(crate) fn request_with_key(
     url: &str,
     method: &str,
     body: Option<&str>,
     key: Option<&str>,
     header: Option<(&str, &str)>,
-) -> Result<HttpResponse, String> {
-    let (host, port, path) = parse_http_url(url)?;
+) -> Result<HttpResponse, RequestError> {
+    let (host, port, path) = parse_http_url(url).map_err(RequestError::Transport)?;
     let address = format!("{host}:{port}");
     let mut stream = TcpStream::connect_timeout(
         &address
             .parse()
-            .map_err(|_| "URL address is invalid".to_owned())?,
+            .map_err(|_| RequestError::Transport("URL address is invalid".to_owned()))?,
         HTTP_TIMEOUT,
     )
-    .map_err(|error| format!("connection to {address} failed: {error}"))?;
+    .map_err(|error| RequestError::Transport(format!("connection to {address} failed: {error}")))?;
     stream
         .set_read_timeout(Some(HTTP_TIMEOUT))
-        .map_err(|error| format!("read timeout setup failed: {error}"))?;
+        .map_err(|error| RequestError::Transport(format!("read timeout setup failed: {error}")))?;
     stream
         .set_write_timeout(Some(HTTP_TIMEOUT))
-        .map_err(|error| format!("write timeout setup failed: {error}"))?;
+        .map_err(|error| RequestError::Transport(format!("write timeout setup failed: {error}")))?;
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
         authority_header(&host, port)
@@ -532,13 +560,13 @@ fn request_with_key(
     }
     stream
         .write_all(&payload)
-        .map_err(|error| format!("request write failed: {error}"))?;
+        .map_err(|error| RequestError::Transport(format!("request write failed: {error}")))?;
     let mut response = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
         let read = stream
             .read(&mut chunk)
-            .map_err(|error| format!("response read failed: {error}"))?;
+            .map_err(|error| RequestError::Transport(format!("response read failed: {error}")))?;
         if read == 0 {
             break;
         }
@@ -550,26 +578,45 @@ fn request_with_key(
         }
         response.extend_from_slice(&chunk[..read]);
     }
+    if response.is_empty() {
+        // The peer closed the connection without sending any bytes; no HTTP
+        // status was received, so the request outcome is unknown.
+        return Err(RequestError::Transport(
+            "connection closed before any complete HTTP response".to_owned(),
+        ));
+    }
     let response = String::from_utf8_lossy(&response);
     let (head, body) = match response.split_once("\r\n\r\n") {
         Some(parts) => parts,
-        None => return Err("response is not HTTP/1.1".to_owned()),
+        None => {
+            return Err(RequestError::Malformed(
+                "response is not HTTP/1.1".to_owned(),
+            ));
+        }
     };
     let mut lines = head.lines();
     let Some(status_line) = lines.next() else {
-        return Err("response has no status line".to_owned());
+        return Err(RequestError::Malformed(
+            "response has no status line".to_owned(),
+        ));
     };
     let mut status_parts = status_line.split_whitespace();
     match status_parts.next() {
         Some("HTTP/1.1") | Some("HTTP/1.0") => {}
-        _ => return Err("response has an unknown protocol".to_owned()),
+        _ => {
+            return Err(RequestError::Malformed(
+                "response has an unknown protocol".to_owned(),
+            ));
+        }
     }
     let Some(code) = status_parts.next() else {
-        return Err("response has no status code".to_owned());
+        return Err(RequestError::Malformed(
+            "response has no status code".to_owned(),
+        ));
     };
     let status: u16 = code
         .parse()
-        .map_err(|_| "response status is not a number".to_owned())?;
+        .map_err(|_| RequestError::Malformed("response status is not a number".to_owned()))?;
     let mut headers = Vec::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
@@ -584,7 +631,7 @@ fn request_with_key(
     })
 }
 fn request(url: &str, method: &str, body: Option<&str>) -> Result<HttpResponse, String> {
-    request_with_key(url, method, body, None, None)
+    request_with_key(url, method, body, None, None).map_err(|error| error.message().to_owned())
 }
 
 #[async_trait]
@@ -603,6 +650,7 @@ impl HttpClient for SystemHttpClient {
         header: Option<(&str, &str)>,
     ) -> Result<HttpResponse, String> {
         request_with_key(url, "POST", Some(body), None, header)
+            .map_err(|error| error.message().to_owned())
     }
     async fn delete(&self, url: &str) -> Result<HttpResponse, String> {
         request(url, "DELETE", None)
@@ -614,17 +662,19 @@ impl HttpClient for SystemHttpClient {
         key: Option<&str>,
     ) -> Result<HttpResponse, String> {
         request_with_key(url, "POST", Some(body), key, None)
+            .map_err(|error| error.message().to_owned())
     }
     async fn delete_with_idempotency(
         &self,
         url: &str,
         key: Option<&str>,
     ) -> Result<HttpResponse, String> {
-        request_with_key(url, "DELETE", None, key, None)
+        request_with_key(url, "DELETE", None, key, None).map_err(|error| error.message().to_owned())
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -655,5 +705,85 @@ mod tests {
         // No single -G may carry a comma-separated list: util-linux runuser
         // passes the whole optarg to getgrnam without splitting.
         assert!(argv.windows(2).all(|w| w[1] != "-G" || !w[0].contains(',')));
+    }
+
+    /// Reads one HTTP request (headers plus the declared Content-Length body)
+    /// from a stub-server connection and returns the raw request bytes.
+    fn read_stub_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).expect("stub read");
+            assert!(read > 0, "stub connection closed mid-headers");
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let head_end = buffer.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let content_length = String::from_utf8_lossy(&buffer[..head_end])
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                (name.eq_ignore_ascii_case("content-length"))
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        while buffer.len() < head_end + content_length {
+            let read = stream.read(&mut chunk).expect("stub read");
+            assert!(read > 0, "stub connection closed mid-body");
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        buffer
+    }
+
+    #[test]
+    fn read_timeout_mid_response_is_classified_transport() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("local_addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _request = read_stub_request(&mut stream);
+            // The server "commits" the request but never answers; the
+            // client's 2s read timeout must fire mid-response.
+            std::thread::sleep(Duration::from_secs(3));
+        });
+        let result = request_with_key(
+            &format!("http://{address}/bootstrap/init"),
+            "POST",
+            Some("{}"),
+            None,
+            None,
+        );
+        let Err(error) = result else {
+            panic!("expected a classified error, got a response");
+        };
+        assert!(
+            matches!(&error, RequestError::Transport(message)
+                if message.starts_with("response read failed:")),
+            "read timeout must classify as Transport, got: {}",
+            error.message()
+        );
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn stub_server_can_answer_next_attempt() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("local_addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _request = read_stub_request(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .expect("stub write");
+        });
+        let response = request(
+            &format!("http://{address}/bootstrap/init"),
+            "POST",
+            Some("{}"),
+        )
+        .expect("request should succeed against an answering stub");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, "{}");
+        server.join().expect("server thread");
     }
 }

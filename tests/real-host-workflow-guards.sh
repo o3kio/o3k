@@ -622,6 +622,8 @@ PY
 
 python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
 import pathlib, re, sys
+import os, subprocess
+from pathlib import Path
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 preflight_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
 dispatch_text = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-dispatch.yml").read_text(encoding="utf-8")
@@ -631,15 +633,43 @@ assert not re.search(r"(?m)^  push:", dispatch_trigger), "protected full validat
 for needle in ("P15.7 protected preflight", "id-token: write",
                "scripts/p15-7-protected-preflight.sh", "target_sha:",
                "if-no-files-found: error",
-               '"${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts"'):
+               '"$workspace/target/lvm-real-guest-artifacts"'):
     assert needle in preflight_text, needle
 workflow_step = text.split("      - name: Run public real-host lifecycle\n", 1)[1]
 workflow_step = workflow_step.split("        run: bash tests/testlab-libvirt.sh\n", 1)[0]
+assert "scripts/p15-7-campaign-lock.py acquire" in text
+assert "scripts/p15-7-harness-qualification.sh" in text
+assert "O3K_P15_7_CAMPAIGN_LOCK_PATH" in text
 assert "          OS_PASSWORD:" not in workflow_step
+
+# Exercise the exact shell predicate embedded in the workflow.  A listener
+# snapshot with no matching port must be considered free; a matching local or
+# wildcard listener must be considered occupied.
+port_free_match = re.search(
+    r"(?ms)^\s+port_free\(\) \{\n(?P<body>.*?)^\s+\}", text
+)
+assert port_free_match, "workflow must retain a testable port_free predicate"
+port_free_function = text[port_free_match.start():port_free_match.end()]
+port_free_script = f'listeners="$MOCK_LISTENERS"\n{port_free_function}\nport_free "$PORT"'
+for port, listeners, expected in (
+    ("28080", "", 0),
+    ("28080", "LISTEN 0 128 127.0.0.1:28080 0.0.0.0:*\n", 1),
+    ("28080", "LISTEN 0 128 0.0.0.0:28080 0.0.0.0:*\n", 1),
+    ("28080", "LISTEN 0 128 127.0.0.1:28081 0.0.0.0:*\n", 0),
+):
+    env = os.environ.copy()
+    env.update(PORT=port, MOCK_LISTENERS=listeners)
+    result = subprocess.run(["bash", "-c", port_free_script], env=env, check=False)
+    assert result.returncode == expected, (
+        f"port_free({port}) returned {result.returncode} for listeners {listeners!r}; "
+        f"expected {expected}"
+    )
 for needle in ("workflow_dispatch:",
                "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",
                "Allocate run-scoped TestLab ports", "O3K_TESTLAB_COMPUTE_HEALTH_PORT",
+               "listeners=\"$(ss -H -ltn", "port_free()", "no free run-scoped TestLab port triplet is available",
+               "O3K_TESTLAB_AUTO_SELECT_PORTS: \"true\"",
                "Bootstrap disposable TestLab",
                "scripts/bootstrap-disposable-testlab.sh",
                "O3K_PROVIDER: agent",
@@ -656,10 +686,12 @@ for needle in ("workflow_dispatch:",
                "if: always()", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
                "retention-days: 14",
                "target/real-host-workflow-artifacts/console-result.json",
+               "target/real-host-workflow-artifacts/p15-7-orphan-repair-checkpoint.json",
+               "target/real-host-workflow-artifacts/p15-7-contender-evidence.json",
                "Run compute-agent process-boundary evidence",
                "tests/real-compute-agent-process-mtls.sh",
                "compute-agent-process-mtls-result.json",
-               "Run P15.7 scale/composition convergence gate",
+               "Run selected PP.5 acceptance lane",
                "tests/p15_7_scale_composition.sh",
                "Protected P15.7 authority and capacity preflight",
                "scripts/p15-7-protected-preflight.sh",
@@ -673,6 +705,10 @@ for needle in ("workflow_dispatch:",
                "O3K_P15_7_JOURNEY_COMMAND:",
                "p15-7-scale-composition-evidence.json",
                "p15-7-gate-result.json",
+               "pp5-s5-scale-result.json",
+               "pp5-1035-crash-recovery-result.json",
+               "pp5-host-maintenance-result.json",
+               "pp5-overall-result.json",
                "O3K_REAL_HOST_P15_7_STEP_STATUS:",
                "Install pinned P13.4 provider tools and build runtime",
                "scripts/ci/apt-provision.sh install unzip",
@@ -687,8 +723,13 @@ for needle in ("workflow_dispatch:",
                "Run P13.4 VolumeAttachment provider gate",
                "tests/p13_4_provider_volume_attachment_smoke.sh",
                "Run P13.4 storage recovery and fencing tests",
-               "Start disposable P13.4 PostgreSQL",
+               "Provision isolated PP.5 PostgreSQL purpose databases",
+               "scripts/provision_pp5_postgres.py provision",
+               "o3k_p13_test_",
+               "Bind P13.4 to isolated PP.5 PostgreSQL",
                "-p o3k-store --test postgres_p13_4_storage",
+               "O3K_TEST_DATABASE_PURPOSE: p13",
+               "Verify PP.5 PostgreSQL isolation after P13.4",
                "Run P13.4 real LVM/libvirt guest gate",
                "scripts/real-lvm-guest-gate.sh",
                "p13-4-storage-evidence.json",
@@ -702,8 +743,15 @@ for needle in ("workflow_dispatch:",
                "steps.generic_guard.outputs.ready == 'true'"):
     assert needle in text, needle
 assert "Repair prior protected artifact ownership" in text
-assert 'sudo -n chown -R "$(id -u):$(id -g)"' in text
-assert '"${GITHUB_WORKSPACE}/target/debug"' in text
+assert 'repair_tree()' in text
+assert 'runner_uid="${O3K_PREFLIGHT_RUNNER_UID:-$(id -u)}"' in text
+assert 'sudo -n test -L "$path"' in text
+assert 'sudo -n realpath -e -- "$path"' in text
+assert 'find -P "$path" -xdev' in text
+assert 'refusing symlink or special file under checkout path' in text
+assert 'sudo -n find -P "$path" -xdev -type d -exec chmod 0700' in text
+assert 'sudo -n find -P "$path" -xdev -type f -exec chmod 0600' in text
+assert 'sudo -n -u "#$runner_uid" find -P "$path" -xdev -print' in text
 assert "github.repository == 'o3kio/o3k'" in text
 assert "github.event_name == 'workflow_dispatch'" in text
 assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in text
@@ -711,23 +759,83 @@ assert "ref: ${{ inputs.target_sha || github.sha }}" in text
 assert "persist-credentials: false" in text
 assert "Verify immutable source checkout" in text
 assert text.index("Verify immutable source checkout") < text.index("Protected P15.7 authority and capacity preflight")
+pg_preflight = "Run PP5 fast PostgreSQL prerequisite qualification"
+assert text.index("Verify immutable source checkout") < text.index(pg_preflight)
+assert text.index(pg_preflight) < text.index("Protected P15.7 authority and capacity preflight")
+pg_step = text.split(f"- name: {pg_preflight}", 1)[1].split("\n      - ", 1)[0]
+assert "continue-on-error:" not in pg_step
+assert "if:" not in pg_step
+assert "scripts/pp5-fast-gate.sh qualification" in text
+prepare_pg = "Prepare local PP.5 PostgreSQL for authoritative S5"
+assert prepare_pg in text
+assert text.index(pg_preflight) < text.index(prepare_pg)
+prepare_pg_step = text.split(f"- name: {prepare_pg}", 1)[1].split("\n      - ", 1)[0]
+assert "python3 scripts/pp5-runner-prerequisite.py" in prepare_pg_step
+assert "O3K_PP5_RUN_ID:" in prepare_pg_step
+assert "O3K_PP5_SOURCE_SHA:" in prepare_pg_step
+assert "O3K_PP5_POSTGRES_ADMIN_URL:" in prepare_pg_step
+assert text.index(prepare_pg) < text.index("Protected P15.7 authority and capacity preflight")
+assert text.index(prepare_pg) < text.index("Provision isolated PP.5 PostgreSQL purpose databases")
+fast_gate_text = pathlib.Path("scripts/pp5-fast-gate.sh").read_text(encoding="utf-8")
+assert "scripts/pp5-runner-prerequisite.py" in fast_gate_text
+assert Path("scripts/pp5-fast-gate.sh").is_file()
+assert Path("scripts/pp5-runner-prerequisite.py").is_file()
+assert "pp5-postgres-preflight*.json" in text
+assert "pp5-runner-prerequisite*.json" in text
+assert "Restore local PP.5 PostgreSQL service state" in text
+assert "pp5-runner-prerequisite.py restore" in text
+assert "pp5-runner-postgres-service-state.json" in text
 assert text.index("Protected P15.7 authority and capacity preflight") < text.index("Bootstrap disposable TestLab")
+bootstrap_names = ("Bootstrap disposable TestLab", "Bootstrap fresh generic TestLab")
+source_binding = "O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}"
+target_sha = "1" * 40
+workflow_sha = "2" * 40
+assert target_sha != workflow_sha
+for bootstrap_name in bootstrap_names:
+    block = text.split(f"      - name: {bootstrap_name}\n", 1)[1].split("\n      - name:", 1)[0]
+    # Exercise the source-binding contract without provisioning VMs.  This
+    # models bootstrap-disposable-testlab.sh's explicit-env-first selection:
+    # the correct binding passes, omission falls back to workflow SHA and
+    # fails, and an incorrect explicit binding fails.
+    assert source_binding in block, bootstrap_name
+    correct = target_sha if source_binding in block else workflow_sha
+    assert correct == target_sha, bootstrap_name
+    omitted_block = block.replace(source_binding, "")
+    omitted = target_sha if source_binding in omitted_block else workflow_sha
+    assert omitted == workflow_sha and omitted != target_sha, bootstrap_name
+    incorrect_block = block.replace(source_binding, "O3K_P15_7_SOURCE_SHA: " + "3" * 40)
+    incorrect = target_sha if source_binding in incorrect_block else workflow_sha
+    assert incorrect == workflow_sha and incorrect != target_sha, bootstrap_name
+assert "O3K_P15_7_SOURCE_SHA: ${{ github.sha }}" not in text
+assert 'SOURCE_COMMIT="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-' in pathlib.Path("scripts/bootstrap-disposable-testlab.sh").read_text(encoding="utf-8")
+assert 'actual_source_commit="$(git -C "$ROOT_DIR" rev-parse HEAD' in pathlib.Path("scripts/bootstrap-disposable-testlab.sh").read_text(encoding="utf-8")
+assert '[[ "$actual_source_commit" == "$SOURCE_COMMIT" ]]' in pathlib.Path("scripts/bootstrap-disposable-testlab.sh").read_text(encoding="utf-8")
+assert 'WORKFLOW_REVISION_SHA: ${{ github.sha }}' in text
+assert 'test "${WORKFLOW_REVISION_SHA}" = "${TARGET_SHA}"' in text
+dispatcher = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-dispatch.yml").read_text(encoding="utf-8")
+preflight = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
+assert 'inputs[target_sha]=${TARGET_SHA}' in dispatcher
+assert 'inputs[lane]=${PP5_LANE}' in dispatcher
+assert '-f "ref=${WORKFLOW_REF}"' in dispatcher
+assert 'inputs[target_sha]:' in preflight or 'target_sha:' in preflight
+assert 'inputs[lane]=${PP5_LANE}' not in preflight  # lane is JSON-bound in the protected config
+assert '"ref": ref' in preflight
+assert '"lane": lane' in preflight
+assert 'WORKFLOW_REVISION_SHA: ${{ github.sha }}' in preflight
 assert "if: always() && steps.protected_preflight.outcome == 'success'" in text
 assert text.count("if: always() && steps.protected_preflight.outcome == 'success'") >= 5
 assert "id-token: write" in text
 assert "O3K_P15_7_OPERATOR_TOKEN:" not in text
-assert "p15-7-postgres-ownership.json" in text
-# The embedded ownership JSON must start at column zero after YAML block
-# scalar dedentation; retaining the shell indentation makes Python fail before
-# the generic TestLab and falsely blocks the protected journey.
-assert re.search(r"p15-7-postgres-ownership\.json <<'PY'\n          import json, subprocess, sys", text)
-assert not re.search(r"p15-7-postgres-ownership\.json <<'PY'\n\s{12}import json, subprocess, sys", text)
-assert "--label o3k.owner=o3k" in text
-assert "container_id" in text
+assert "pp5-postgres-purpose-map.json" in text
+assert "O3K_P15_7_POSTGRES_MODE=external" in text
+assert "O3K_P15_7_EXTERNAL_PG_TARGET" in text
+assert "p15-7-postgres-ownership.json" not in text
+assert "p13-4-postgres-ownership.json" not in text
+assert "postgres:16.4" not in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
 p15_image_step = text.split("      - name: Prepare pinned P15.7 VM host image\n", 1)[1]
-p15_image_step = p15_image_step.split("      - name: Run P15.7 scale/composition convergence gate\n", 1)[0]
+p15_image_step = p15_image_step.split("      - name: Run selected PP.5 acceptance lane\n", 1)[0]
 # Large owned images are tracked by their marker and exact cleanup path. They
 # must not enter the protected-path inventory, whose bounded file-size policy
 # is intentionally fail-closed.

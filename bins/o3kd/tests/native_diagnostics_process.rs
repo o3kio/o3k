@@ -206,19 +206,31 @@ fn fresh_agents() -> Arc<FakeAgents> {
 async fn build_runtime(
     agents: Arc<FakeAgents>,
 ) -> Result<axum::Router, Box<dyn std::error::Error>> {
-    let store = Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?);
-    store
-        .register_provider(
-            "provider-a",
-            &[PlacementInventoryRecord {
-                resource_class: "VCPU".to_owned(),
-                total: 8,
-                reserved: 1,
-                allocation_ratio: 1.0,
-                used: 2,
-            }],
-        )
-        .await?;
+    let store = o3k_store::unified::O3kStore::connect_sqlite_memory().await?;
+    build_runtime_with_store_and_provider_count(agents, store, 1).await
+}
+
+async fn build_runtime_with_store_and_provider_count(
+    agents: Arc<FakeAgents>,
+    store: o3k_store::unified::O3kStore,
+    provider_count: usize,
+) -> Result<axum::Router, Box<dyn std::error::Error>> {
+    let store = Arc::new(store);
+    for index in 0..provider_count {
+        let provider_id = format!("provider-{}", (b'a' + index as u8) as char);
+        store
+            .register_provider(
+                &provider_id,
+                &[PlacementInventoryRecord {
+                    resource_class: "VCPU".to_owned(),
+                    total: 8,
+                    reserved: 1,
+                    allocation_ratio: 1.0,
+                    used: 2,
+                }],
+            )
+            .await?;
+    }
 
     // One shared registry is handed to both the adapter and the native state so
     // the diagnostics projection reads the same controller set the router sees.
@@ -256,6 +268,30 @@ async fn build_runtime(
     Ok(o3k_api::router_with_state(
         o3k_api::AppState::new().with_native_api(native),
     ))
+}
+
+/// Narrow PostgreSQL reproduction hook. It is ignored by ordinary CI and is
+/// run explicitly with a disposable, run-scoped database URL when incident
+/// evidence does not identify which capacity store operation failed.
+#[tokio::test]
+#[ignore = "requires an explicitly disposable PostgreSQL URL"]
+async fn diagnostics_http_postgres_capacity_narrow_reproduction() -> TestResult {
+    let url = std::env::var("O3K_P15_7_NARROW_PG_URL")?;
+    let store = o3k_store::unified::O3kStore::connect_postgres(&url).await?;
+    let app = build_runtime_with_store_and_provider_count(fresh_agents(), store, 5).await?;
+    let (status, body) = get(
+        &app,
+        "/o3k/v1/operator/diagnostics/capacity",
+        "operator-token",
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "narrow PostgreSQL capacity failed: {body}"
+    );
+    eprintln!("narrow PostgreSQL capacity status={status} body={body}");
+    Ok(())
 }
 
 async fn get(

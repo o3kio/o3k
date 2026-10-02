@@ -258,6 +258,21 @@ fn map_store_error(error: StoreError) -> DiagnosticsError {
     }
 }
 
+fn map_capacity_store_error(operation: &'static str, error: StoreError) -> DiagnosticsError {
+    let error_kind = if matches!(error, StoreError::Corrupt(_)) {
+        "corrupt"
+    } else {
+        "store"
+    };
+    tracing::error!(
+        event = "operator_diagnostics_capacity_store_failure",
+        operation,
+        error_kind,
+        "capacity diagnostics store operation failed"
+    );
+    map_store_error(error)
+}
+
 /// Worst-wins combination of two component-class aggregate statuses.
 fn worst_status(left: DiagnosticStatus, right: DiagnosticStatus) -> DiagnosticStatus {
     fn rank(status: DiagnosticStatus) -> u8 {
@@ -646,7 +661,7 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
             .store
             .capacity_summary(MAX_CAPACITY_CLASSES)
             .await
-            .map_err(map_store_error)?;
+            .map_err(|error| map_capacity_store_error("capacity_summary", error))?;
         let agents = self.agents.all().await;
         let now = now_unix_ms();
 
@@ -662,10 +677,17 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
             .store
             .list_provider_states(None, MAX_PROVIDERS + 1)
             .await
-            .map_err(map_store_error)?;
+            .map_err(|error| map_capacity_store_error("list_provider_states", error))?;
         if states.len() > MAX_PROVIDERS {
             // The capacity aggregate would exceed the fleet bound; fail closed
             // rather than silently truncate.
+            tracing::error!(
+                event = "operator_diagnostics_capacity_projection_failure",
+                operation = "provider_bound",
+                error_kind = "provider_bound_exceeded",
+                provider_count = states.len(),
+                "capacity diagnostics provider bound exceeded"
+            );
             return Err(DiagnosticsError::Corrupt);
         }
 

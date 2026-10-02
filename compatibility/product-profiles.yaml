@@ -125,7 +125,7 @@ profiles:
   - id: small-edge-cloud
     maturity: implemented-partial
     target_hypervisors:
-      minimum: 10
+      minimum: 1
       maximum: 20
     user_outcome: operate a lightweight multi-host O3K Cloud OS and integrate only explicitly selected external services or delegated clouds
     o3k_owned_capabilities:

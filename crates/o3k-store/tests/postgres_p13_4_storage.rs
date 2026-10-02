@@ -5,6 +5,7 @@ use o3k_domain::{
     VolumeAttachmentState, VolumeId, VolumeState,
 };
 use o3k_store::{PostgresStore, StorageRepository, VolumeAttachmentRecordV1, VolumeRecord};
+use sqlx::{Connection, postgres::PgConnection};
 use uuid::Uuid;
 
 fn database_url() -> String {
@@ -12,9 +13,27 @@ fn database_url() -> String {
         .expect("O3K_DATABASE_URL must be set for PostgreSQL P13.4 storage conformance")
 }
 
+/// Acquires a session-level advisory lock on the shared PostgreSQL test
+/// database, held by a dedicated connection for the caller's entire test
+/// (issue #1043). The shared `o3k-shared-test-database` key serializes every
+/// destructive shared-DB reset (here `clean_tables_for_testing`) against the
+/// other shared-DB test groups even across separate `cargo test` processes.
+/// Matches `o3k_store::conformance::prepare_shared_postgres_test_database`.
+async fn acquire_database_guard(url: &str) -> PgConnection {
+    let mut connection = PgConnection::connect(url)
+        .await
+        .expect("connect to the shared PostgreSQL test database");
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+        .execute(&mut connection)
+        .await
+        .expect("acquire the shared PostgreSQL test-database advisory lock");
+    connection
+}
+
 #[tokio::test]
 #[ignore = "requires the disposable PostgreSQL P13.4 conformance database"]
 async fn postgres_p13_4_native_volume_and_attachment_reopen() {
+    let _database_guard = acquire_database_guard(&database_url()).await;
     let store = PostgresStore::connect(&database_url())
         .await
         .expect("connect");

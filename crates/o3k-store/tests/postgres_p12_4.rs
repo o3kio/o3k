@@ -8,6 +8,7 @@ use o3k_store::{
 };
 use serde_json::json;
 use sqlx::Row;
+use sqlx::{Connection, postgres::PgConnection};
 use std::sync::Arc;
 use tokio::sync::Barrier;
 use uuid::Uuid;
@@ -19,10 +20,30 @@ fn url() -> String {
         .expect("O3K_DATABASE_URL must be set for PostgreSQL P12.4 conformance")
 }
 
+/// Acquires a session-level advisory lock on the shared PostgreSQL test
+/// database, held by a dedicated connection for the caller's entire test
+/// (issue #1043). The shared `o3k-shared-test-database` key serializes every
+/// destructive shared-DB reset (here `clean_tables_for_testing`) against the
+/// other shared-DB test groups even across separate `cargo test` processes.
+/// The in-process `TEST_DATABASE_LOCK` is kept to serialize intra-process
+/// ordering, but it cannot see other processes; this advisory lock can.
+/// Matches `o3k_store::conformance::prepare_shared_postgres_test_database`.
+async fn acquire_database_guard(url: &str) -> PgConnection {
+    let mut connection = PgConnection::connect(url)
+        .await
+        .expect("connect to the shared PostgreSQL test database");
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+        .execute(&mut connection)
+        .await
+        .expect("acquire the shared PostgreSQL test-database advisory lock");
+    connection
+}
+
 #[tokio::test]
 #[ignore = "requires the configured PostgreSQL conformance database"]
 async fn postgres_relationship_intent_is_replayable_bindable_and_recoverable() {
     let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let _advisory_guard = acquire_database_guard(&url()).await;
     let store = PostgresStore::connect(&url()).await.expect("connect");
     store.clean_tables_for_testing().await.expect("clean");
     let parent = Uuid::now_v7();
@@ -73,6 +94,7 @@ async fn postgres_relationship_intent_is_replayable_bindable_and_recoverable() {
 #[ignore = "requires the mandatory PostgreSQL P12.3/P12.4 CI job"]
 async fn postgres_p12_3_canonical_resource_and_lifecycle_acceptance() {
     let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let _advisory_guard = acquire_database_guard(&url()).await;
     let store = PostgresStore::connect(&url()).await.expect("connect");
     store.clean_tables_for_testing().await.expect("clean");
     let rid = Uuid::now_v7();
@@ -269,6 +291,7 @@ async fn race(
 #[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
 async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
     let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let _advisory_guard = acquire_database_guard(&url()).await;
     let database_url = url();
     let store = PostgresStore::connect(&database_url)
         .await
@@ -670,6 +693,7 @@ async fn race_resource_create(
 #[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
 async fn postgres_p12_4_canonical_resource_create_race() {
     let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let _advisory_guard = acquire_database_guard(&url()).await;
     let store = PostgresStore::connect(&url()).await.expect("connect");
     store.clean_tables_for_testing().await.expect("clean");
 
@@ -765,6 +789,7 @@ async fn postgres_p12_4_canonical_resource_create_race() {
 #[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
 async fn postgres_p12_4_canonical_resource_create_conflict_race() {
     let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let _advisory_guard = acquire_database_guard(&url()).await;
     let store = PostgresStore::connect(&url()).await.expect("connect");
     store.clean_tables_for_testing().await.expect("clean");
 
@@ -860,6 +885,7 @@ async fn race_lifecycle_delete(
 #[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
 async fn postgres_p12_4_canonical_lifecycle_delete_race() {
     let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let _advisory_guard = acquire_database_guard(&url()).await;
     let store = PostgresStore::connect(&url()).await.expect("connect");
     store.clean_tables_for_testing().await.expect("clean");
 

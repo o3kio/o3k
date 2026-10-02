@@ -114,6 +114,7 @@ pub enum LeaseAcquireOutcome {
         owner_controller_id: ControllerId,
         owner_controller_epoch: ControllerEpoch,
         fencing_token: FencingToken,
+        lease_created_at: String,
         lease_until: String,
     },
 }
@@ -309,7 +310,8 @@ impl CoordinationRepository for PostgresStore {
         let maybe_row = sqlx::query(
             r#"
             SELECT work_key, work_kind, owner_controller_id, owner_controller_epoch,
-                   fencing_token, lease_until, created_at, updated_at,
+                   fencing_token, lease_until::text AS lease_until,
+                   created_at::text AS created_at, updated_at::text AS updated_at,
                    (lease_until < NOW()) AS is_expired
             FROM work_leases
             WHERE work_key = $1
@@ -446,6 +448,7 @@ impl CoordinationRepository for PostgresStore {
                         owner_controller_id: ControllerId(owner_id),
                         owner_controller_epoch: ControllerEpoch(owner_epoch),
                         fencing_token: current_token as u64,
+                        lease_created_at: existing.get("created_at"),
                         lease_until,
                     })
                 }
@@ -846,6 +849,7 @@ impl CoordinationRepository for SqliteStore {
                         owner_controller_id: ControllerId(owner_id),
                         owner_controller_epoch: ControllerEpoch(owner_epoch),
                         fencing_token: current_token as u64,
+                        lease_created_at: existing.get("created_at"),
                         lease_until,
                     })
                 }

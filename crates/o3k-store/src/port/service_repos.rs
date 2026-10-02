@@ -814,5 +814,12 @@ pub trait PlacementRepository: Send + Sync {
 pub trait ComputeRepository:
     DurableStore + KeypairRepository + VolumeAttachmentRepository + QuotaRepository
 {
+    /// Lists every resource of `kind` across all projects, ordered by resource
+    /// id. `DELETED` is a retained tombstone (issue #89), not an absence, so
+    /// terminal records are included: callers that only want live resources
+    /// filter on `observed_state` themselves. Both adapters must return the
+    /// same set for the same durable state; a backend that filters terminal
+    /// records here hides them from repair scans that exist precisely to
+    /// reconcile tombstones.
     async fn list_resources_by_kind(&self, kind: &str) -> Result<Vec<ResourceRecord>, StoreError>;
 }

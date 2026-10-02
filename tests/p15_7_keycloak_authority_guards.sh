@@ -56,6 +56,18 @@ cat >"$FAKE_BIN/curl" <<'SH'
 exit 0
 SH
 chmod +x "$FAKE_BIN/virsh" "$FAKE_BIN/docker" "$FAKE_BIN/curl"
+# The production preflight must reject this developer checkout's intentional
+# repair edits. Model the clean checkout used by this isolated guard test while
+# delegating every other git operation (HEAD and harness identity) to real git.
+REAL_GIT="$(command -v git)"
+cat >"$FAKE_BIN/git" <<SH
+#!/usr/bin/env bash
+if [[ "\$1" == -C && "\$3" == status ]]; then
+  exit 0
+fi
+exec "$REAL_GIT" "\$@"
+SH
+chmod +x "$FAKE_BIN/git"
 FAKE_AUTHORITY="$WORK/fake-authority.sh"
 cat >"$FAKE_AUTHORITY" <<'SH'
 #!/usr/bin/env bash
@@ -84,6 +96,7 @@ PATH="$FAKE_BIN:$PATH" \
   O3K_REAL_HOST_KVM_PATH="$WORK/images/kvm" \
   O3K_P15_7_LIBVIRT_IMAGE_ROOT="$WORK/images" \
   O3K_REAL_HOST_ARTIFACT_DIR="$WORK/artifacts" \
+  O3K_P15_7_PREFLIGHT_ARTIFACT="$WORK/artifacts/p15-7-protected-preflight.json" \
   O3K_P15_7_SOURCE_SHA="$sha" \
   GITHUB_RUN_ID=authority-default \
   GITHUB_ENV="$WORK/github-env" \
@@ -98,6 +111,12 @@ for secret in secret-keycloak-admin-password secret-keycloak-operator-password \
 done
 test "$(stat -c '%a' "$run_root/o3k-p15-7-keycloak-authority-default/admin-password")" = 600
 test "$(stat -c '%a' "$run_root/o3k-p15-7-keycloak-authority-default/operator-password")" = 600
+# The testlab-keycloak preflight must publish the journey's identity inputs to
+# GITHUB_ENV so the final evidence writer can fail closed on exact-head
+# identity (checkout head, tree cleanliness, harness digest).
+grep -Fq "O3K_P15_7_CHECKOUT_HEAD=$sha" "$WORK/github-env"
+grep -Fq "O3K_P15_7_TREE_CLEAN=true" "$WORK/github-env"
+grep -Eq '^O3K_P15_7_HARNESS_DIGEST=[0-9a-f]{64}$' "$WORK/github-env"
 
 # A near-expiry native token must take the helper's canonical exchange path,
 # replace its curl credential config, and remain untouched while still fresh.

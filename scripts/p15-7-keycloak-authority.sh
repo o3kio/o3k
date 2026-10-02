@@ -96,9 +96,13 @@ start() {
   [[ ! -e "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] \
     || die "run-owned Keycloak state already exists"
   mkdir -m 0700 -- "$STATE_ROOT" || die "cannot create run-owned Keycloak state root"
-  local port admin_password operator_password
+  local port management_port admin_password operator_password
   write_owner_marker
   port="$(pick_port)"
+  management_port="${O3K_P15_7_KEYCLOAK_MANAGEMENT_PORT:-$(pick_port)}"
+  [[ "$management_port" =~ ^[0-9]+$ && "$management_port" -gt 0 && "$management_port" -le 65535 ]] \
+    || die "invalid Keycloak management port"
+  [[ "$management_port" != "$port" ]] || management_port="$(pick_port)"
   admin_password="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   operator_password="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   umask 077
@@ -146,9 +150,10 @@ PY
     --label o3k.phase=p15-7 --label "o3k.run_id=$RUN_ID" \
     --label "o3k.source_sha=$SOURCE_SHA" \
     --env-file "$env_tmp" -e "KC_HTTP_PORT=$port" \
+    -e "KC_HTTP_MANAGEMENT_PORT=$management_port" \
     -e "KC_HOSTNAME=http://127.0.0.1:$port" -e KC_HOSTNAME_STRICT=false \
     -v "$REALM_FILE:/opt/keycloak/data/import/p15-7-realm.json:ro" \
-    "$IMAGE" start-dev --http-port="$port" --import-realm >/dev/null; then
+    "$IMAGE" start-dev --http-port="$port" --http-management-port="$management_port" --import-realm >/dev/null; then
     secure_remove "$env_tmp" "$realm_tmp"
     die "Keycloak container failed to start"
   fi
@@ -278,9 +283,32 @@ exchange() {
   request="$(mktemp "$STATE_ROOT/exchange.XXXXXX")"; response="$(mktemp "$STATE_ROOT/native.XXXXXX")"
   chmod 0600 "$request" "$response"
   printf '{"auth":{"method":"federated","federated":{"access_token":"%s","scope":{"kind":"system"}}}}\n' "$token" >"$request"
-  curl --fail --silent --show-error --proto '=http,https' --max-time 20 \
-    -H 'Content-Type: application/json' --data-binary "@$request" \
-    "$api/identity/tokens" -o "$response" || die "native federated exchange failed"
+  # Bounded, loud retry: the exchange immediately follows the external-mode
+  # proxy sever/restore wiring proof, and the control plane's PostgreSQL pool
+  # can still be recycling severed connections when it runs (observed 503s on
+  # run 990924001 while readyz had already recovered). This is the same
+  # transient class the P15.7 journey already absorbs with bounded retries;
+  # a permanent failure still fails closed after the bounded attempts.
+  local attempt response_code
+  for attempt in 1 2 3 4 5 6; do
+    response_code="$(curl --silent --show-error --proto '=http,https' --max-time 20 \
+      -H 'Content-Type: application/json' --data-binary "@$request" \
+      -o "$response" --write-out '%{http_code}' \
+      "$api/identity/tokens" 2>"$STATE_ROOT/exchange.curl-$attempt.log" || true)"
+    [[ "$response_code" == 2* ]] && break
+    echo "P15.7 Keycloak authority: native federated exchange attempt $attempt returned HTTP $response_code; retrying" >&2
+    # Preserve a bounded response-body snippet and transport detail for
+    # post-mortem classification (expected fault-injection transient vs
+    # control-plane defect); the full files are run-scoped 0600 temporaries.
+    if [[ -s "$response" ]]; then
+      echo "P15.7 Keycloak authority: attempt $attempt response body: $(head -c 300 "$response")" >&2
+    fi
+    if [[ -s "$STATE_ROOT/exchange.curl-$attempt.log" ]]; then
+      echo "P15.7 Keycloak authority: attempt $attempt transport: $(head -c 300 "$STATE_ROOT/exchange.curl-$attempt.log")" >&2
+    fi
+    [[ "$attempt" == 6 ]] && die "native federated exchange failed"
+    sleep 5
+  done
   native="$(python3 - "$response" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding='utf-8'))['token']['id']
@@ -307,6 +335,7 @@ cleanup() {
     "$STATE_ROOT"/admin-response.* "$STATE_ROOT"/users-response.* \
     "$STATE_ROOT"/reset-curl.* "$STATE_ROOT"/reset-body.* \
     "$STATE_ROOT"/curl.* "$STATE_ROOT"/oauth-response.* \
+    "$STATE_ROOT"/exchange.curl-*.log \
     "$STATE_ROOT"/exchange.* "$STATE_ROOT"/native.*
   if [[ -f "$RUN_MARKER" && ! -L "$RUN_MARKER" ]]; then
     grep -Fqx 'o3k-p15-7-keycloak-container-v1' "$RUN_MARKER" || die "invalid Keycloak container ledger"

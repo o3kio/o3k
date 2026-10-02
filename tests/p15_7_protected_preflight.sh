@@ -4,10 +4,28 @@ set -Eeuo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d "${TMPDIR:-/var/tmp}/o3k-p15-7-preflight.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
+PREFLIGHT="$root_dir/scripts/p15-7-protected-preflight.sh"
+# Pin the fail-closed policy: clean trees are accepted, while tracked source,
+# campaign scripts, and untracked execution-affecting harness inputs reject.
+grep -Fq 'status --porcelain=v1 --untracked-files=all' "$PREFLIGHT"
+grep -Fq 'dirty_checkout' "$PREFLIGHT"
+grep -Fq 'dist\//' "$PREFLIGHT"
+grep -Fq 'harness_inputs_sha256' "$PREFLIGHT"
+grep -Fq "scripts/**" "$PREFLIGHT"
+grep -Fq "tests/p15_7_*" "$PREFLIGHT"
 fake="$work/bin"; mkdir -p "$fake"
 for cmd in virsh docker curl; do
   printf '#!/usr/bin/env bash\nexit 0\n' >"$fake/$cmd"; chmod +x "$fake/$cmd"
 done
+cat >"$fake/git" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-C" && "${3:-}" == status ]]; then
+  printf '%s\n' "${O3K_PREFLIGHT_TEST_STATUS:-}"
+  exit 0
+fi
+exec /usr/bin/git "$@"
+SH
+chmod +x "$fake/git"
 cat >"$fake/virsh" <<'SH'
 #!/usr/bin/env bash
 if [[ "$*" == "-c qemu:///system nodeinfo" ]]; then
@@ -28,17 +46,23 @@ export O3K_PREFLIGHT_TEST_WORK="$work" O3K_PREFLIGHT_TEST_FAKE="$fake" O3K_PREFL
 cat >"$work/run-case.sh" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-case_name="$1"; expected="$2"; shift 2
+case_name="$1"; expected="$2"; status="${3:-}"; shift 3
 work="${O3K_PREFLIGHT_TEST_WORK:?}"; fake="${O3K_PREFLIGHT_TEST_FAKE:?}"; sha="${O3K_PREFLIGHT_TEST_SHA:?}"
 root_dir="${O3K_PREFLIGHT_TEST_ROOT:?}"
 out="$work/$case_name"; mkdir -p "$out"
+# The qualification invokes the production preflight in-process with the
+# test runner. Isolate its workflow-step outputs so a successful fixture
+# cannot append O3K_P15_7_* values to the parent GitHub Actions environment.
 env \
   PATH="$fake:$PATH" \
+  O3K_PREFLIGHT_TEST_STATUS="$status" \
   O3K_REAL_HOST_KVM_PATH="$work/kvm" \
   O3K_P15_7_LIBVIRT_IMAGE_ROOT="$work/libvirt-images" \
   RUNNER_TEMP="$out" \
   O3K_REAL_HOST_ARTIFACT_DIR="$out" \
   O3K_P15_7_PREFLIGHT_ARTIFACT="$out/preflight.json" \
+  GITHUB_ENV="$out/github-env" \
+  GITHUB_OUTPUT="$out/github-output" \
   O3K_P15_7_SOURCE_SHA="$sha" GITHUB_SHA="$sha" GITHUB_RUN_ID="$case_name" \
   O3K_P15_7_OIDC_ISSUER=https://issuer.example.test \
   O3K_P15_7_OIDC_AUDIENCE=o3k \
@@ -57,6 +81,11 @@ assert d['redacted'] is True
 assert ('passed' if sys.argv[2]=='pass' else 'blocked') == d['status']
 assert 'secret-token' not in json.dumps(d)
 PY
+if [[ "$expected" == pass ]]; then
+  test -f "$out/github-env"
+  ! grep -Fq 'O3K_P15_7_PREFLIGHT_ARTIFACT=' "$out/github-env"
+  ! grep -Fq 'O3K_P15_7_OPERATOR_TOKEN_FILE=' "$out/github-env"
+fi
 if [[ "$expected" == pass ]]; then
   token="$out/o3k-p15-7-operator-${case_name}.token"
   marker="${token}.o3k-owned"
@@ -78,7 +107,7 @@ PY
 }
 future="$(( $(date +%s) + 3600 ))"
 make_envelope valid system operator https://issuer.example.test o3k "$future"
-"$work/run-case.sh" valid pass
+"$work/run-case.sh" valid pass ''
 for spec in \
   "project_scope project operator https://issuer.example.test o3k $future" \
   "non_operator system member https://issuer.example.test o3k $future" \
@@ -88,7 +117,7 @@ for spec in \
   "short_ttl system operator https://issuer.example.test o3k $(( $(date +%s) + 10 ))"; do
   read -r name scope role iss aud exp <<<"$spec"
   make_envelope "$name" "$scope" "$role" "$iss" "$aud" "$exp"
-  "$work/run-case.sh" "$name" fail
+  "$work/run-case.sh" "$name" fail ''
 done
 make_envelope unverified system operator https://issuer.example.test o3k "$future"
 python3 - "$work/unverified.json" <<'PY'
@@ -97,10 +126,23 @@ path=sys.argv[1]
 d=json.load(open(path, encoding='utf-8')); d['signature_verified']=False
 json.dump(d, open(path, 'w', encoding='utf-8'))
 PY
-"$work/run-case.sh" unverified fail
+"$work/run-case.sh" unverified fail ''
+
+# These cases exercise the gate before any provider, authority, or VM checks.
+for spec in \
+  "tracked_source M  scripts/o3kd.rs" \
+  "campaign_script M  scripts/p15-7-real-host-journey.sh" \
+  "untracked_harness ?? tests/p15_7-new-helper.sh"; do
+  read -r name state path <<<"$spec"
+  make_envelope "$name" system operator https://issuer.example.test o3k "$future"
+  "$work/run-case.sh" "$name" fail "$state $path"
+  grep -Fq 'dirty_checkout' "$work/$name/stderr"
+done
 rm -f "$work/missing.json"
 if env PATH="$fake:$PATH" O3K_REAL_HOST_KVM_PATH="$work/kvm" O3K_P15_7_LIBVIRT_IMAGE_ROOT="$work/libvirt-images" O3K_REAL_HOST_ARTIFACT_DIR="$work/missing" \
   O3K_P15_7_SOURCE_SHA="$sha" GITHUB_SHA="$sha" GITHUB_RUN_ID=missing \
+  GITHUB_ENV="$work/missing-github-env" GITHUB_OUTPUT="$work/missing-github-output" \
+  ACTIONS_ID_TOKEN_REQUEST_URL= ACTIONS_ID_TOKEN_REQUEST_TOKEN= \
   O3K_P15_7_OIDC_ISSUER=https://issuer.example.test O3K_P15_7_OIDC_AUDIENCE=o3k \
   O3K_P15_7_OIDC_DISCOVERY_URL=https://issuer.example.test/.well-known/openid-configuration \
   bash "$root_dir/scripts/p15-7-protected-preflight.sh"; then
@@ -117,6 +159,8 @@ relative_dir="target/p15-7-preflight-relative-$$"
 rm -rf -- "$root_dir/$relative_dir"
 if (cd "$root_dir" && env PATH="$fake:$PATH" O3K_REAL_HOST_KVM_PATH="$work/kvm" O3K_P15_7_LIBVIRT_IMAGE_ROOT="$work/libvirt-images" O3K_REAL_HOST_ARTIFACT_DIR="$relative_dir" \
   O3K_P15_7_SOURCE_SHA="$sha" GITHUB_SHA="$sha" GITHUB_RUN_ID=relative \
+  GITHUB_ENV="$work/relative-github-env" GITHUB_OUTPUT="$work/relative-github-output" \
+  ACTIONS_ID_TOKEN_REQUEST_URL= ACTIONS_ID_TOKEN_REQUEST_TOKEN= \
   O3K_P15_7_OIDC_ISSUER=https://issuer.example.test O3K_P15_7_OIDC_AUDIENCE=o3k \
   O3K_P15_7_OIDC_DISCOVERY_URL=https://issuer.example.test/.well-known/openid-configuration \
   bash scripts/p15-7-protected-preflight.sh); then

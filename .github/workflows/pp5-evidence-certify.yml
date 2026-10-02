@@ -1,0 +1,48 @@
+name: PP.5 Small Edge evidence certification
+
+# Fail-closed certification of a completed PP.5 Small Edge v1 campaign-evidence
+# artifact. This gate is deliberately separate from the validator-correctness
+# tests in ci.yml: it operates on a *real* campaign artifact supplied at
+# dispatch time (a repo-relative path to a committed evidence JSON), and every
+# binding in scripts/validate_pp5_evidence.py is mandatory. A missing, broken,
+# or incompletely-bound artifact fails the run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      evidence_path:
+        description: >-
+          Repo-relative path to a completed PP.5 campaign-evidence JSON artifact
+          (e.g. tests/pp5-small-edge-campaign/runs/<run>/campaign-evidence.json).
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: o3k-pp5-evidence-certify
+  cancel-in-progress: false
+
+jobs:
+  certify:
+    if: github.repository == 'o3kio/o3k'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Certify PP.5 campaign evidence (fail closed)
+        env:
+          PP5_EVIDENCE_PATH: ${{ inputs.evidence_path }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PP5_EVIDENCE_PATH}" ]]
+          # The validator fails closed on a missing/unreadable file, malformed
+          # JSON, any missing identity/provenance field, a missing required tier
+          # row, a non-empty owned-resource leak, a surviving 'o3k-server:%'
+          # endpoint, missing non-claims, or any secret-bearing field. Its exit
+          # status is the gate.
+          python3 scripts/validate_pp5_evidence.py "${PP5_EVIDENCE_PATH}"

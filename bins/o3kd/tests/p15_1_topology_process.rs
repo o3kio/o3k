@@ -207,7 +207,7 @@ fn spawn_o3kd(port: u16, data_dir: &Path, backend: &Backend, locations: Option<&
     command.spawn().expect("spawn o3kd")
 }
 
-async fn wait_healthy(base: &str) {
+async fn wait_healthy(base: &str, log_path: &Path) {
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -217,7 +217,13 @@ async fn wait_healthy(base: &str) {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("o3kd did not become healthy at {base}");
+            let tail = std::fs::read(log_path)
+                .map(|bytes| {
+                    let start = bytes.len().saturating_sub(8192);
+                    String::from_utf8_lossy(&bytes[start..]).into_owned()
+                })
+                .unwrap_or_else(|_| "<o3kd log unreadable>".to_owned());
+            panic!("o3kd did not become healthy at {base}; o3kd log tail:\n{tail}");
         }
         tokio::time::sleep(Duration::from_millis(250)).await
     }
@@ -227,12 +233,14 @@ async fn wait_healthy(base: &str) {
 /// orphan the real process (and its loopback socket): terminate + reap on drop.
 struct O3kdGuard {
     child: Option<Child>,
+    log_path: std::path::PathBuf,
 }
 
 impl O3kdGuard {
     fn spawn(port: u16, data_dir: &Path, backend: &Backend, locations: Option<&str>) -> Self {
         Self {
             child: Some(spawn_o3kd(port, data_dir, backend, locations)),
+            log_path: data_dir.join("o3kd.log"),
         }
     }
 }
@@ -563,7 +571,7 @@ async fn run_process_journey(backend: &Backend, data_dir: &Path) -> TestResult {
     let port = ephemeral_port();
     let base = format!("http://{LISTEN}:{port}");
     let mut guard_a = O3kdGuard::spawn(port, data_dir, backend, Some(LOCATIONS));
-    wait_healthy(&base).await;
+    wait_healthy(&base, &guard_a.log_path).await;
     let api = Api::new(base.clone());
 
     let (admin_token, token_meta) = api.admin_token("admin").await;
@@ -590,7 +598,7 @@ async fn run_process_journey(backend: &Backend, data_dir: &Path) -> TestResult {
     let fb_port = ephemeral_port();
     let fb_base = format!("http://{LISTEN}:{fb_port}");
     let mut fb_guard = O3kdGuard::spawn(fb_port, &fb_dir, &fb_backend, None);
-    wait_healthy(&fb_base).await;
+    wait_healthy(&fb_base, &fb_guard.log_path).await;
     let fb_api = Api::new(fb_base.clone());
     let (_, fb_meta) = fb_api.admin_token("admin").await;
     assert_catalog_region(&fb_api, &fb_meta, "RegionOne");
@@ -609,7 +617,7 @@ async fn run_process_journey(backend: &Backend, data_dir: &Path) -> TestResult {
     let port2 = ephemeral_port();
     let base2 = format!("http://{LISTEN}:{port2}");
     let mut guard_b = O3kdGuard::spawn(port2, data_dir, backend, Some(LOCATIONS));
-    wait_healthy(&base2).await;
+    wait_healthy(&base2, &guard_b.log_path).await;
     let api2 = Api::new(base2.clone());
     let (admin_token2, _) = api2.admin_token("admin").await;
 
@@ -678,7 +686,7 @@ async fn run_process_journey(backend: &Backend, data_dir: &Path) -> TestResult {
     let port3 = ephemeral_port();
     let base3 = format!("http://{LISTEN}:{port3}");
     let mut guard_c = O3kdGuard::spawn(port3, data_dir, backend, Some(LOCATIONS));
-    wait_healthy(&base3).await;
+    wait_healthy(&base3, &guard_c.log_path).await;
     let api3 = Api::new(base3.clone());
     let (admin_token3, _) = api3.admin_token("admin").await;
 

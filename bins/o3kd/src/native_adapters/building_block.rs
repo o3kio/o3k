@@ -64,7 +64,7 @@ impl BuildingBlockAdapter {
             .is_some_and(|provider_id| ids.contains(provider_id)))
     }
 
-    async fn view(&self, block: BuildingBlock) -> Result<BuildingBlockView, String> {
+    async fn view(&self, mut block: BuildingBlock) -> Result<BuildingBlockView, String> {
         // References are part of the durable BuildingBlock identity.  Validate
         // them on every projection as well as on enrollment so a provider,
         // topology, profile, or execution identity change cannot turn an
@@ -110,6 +110,15 @@ impl BuildingBlockAdapter {
                 available,
             })
             .collect();
+        // The durable drain_blockers are a drain-time snapshot. A Draining
+        // block's resident workloads may reach terminal DELETED after the
+        // transition stored its blockers, so the read projection re-derives
+        // current truth instead of serving that stale snapshot (issue #1042).
+        // The stored record is left untouched; Ready/Unavailable blocks have
+        // empty blockers by construction and need no re-derivation.
+        if block.state == BuildingBlockState::Draining {
+            block.drain_blockers = self.derived_blockers(&block).await?;
+        }
         Ok(BuildingBlockView {
             block,
             capabilities: capabilities.into_iter().collect(),
@@ -203,6 +212,14 @@ impl BuildingBlockAdapter {
                 .await
                 .map_err(|e| e.to_string())?
             {
+                // Retained terminal tombstones (issue #89) are audit state,
+                // not resident capacity: a terminally DELETED workload,
+                // volume, or attachment must not count as a drain blocker
+                // (issue #1042). The store deliberately returns tombstones;
+                // the terminal filter lives with the caller's semantics.
+                if resource.observed_state == "DELETED" {
+                    continue;
+                }
                 if Self::resource_matches_provider_ids(kind, &resource, &ids)? {
                     let index = if kind == "compute_instance" {
                         0
@@ -369,7 +386,7 @@ mod tests {
         AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentEpochLease,
         AgentEvent, AgentNodeRegistry, AgentNodeSnapshot,
     };
-    use o3k_store::ResourceRecord;
+    use o3k_store::{DurableStore, ResourceRecord};
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Arc;
     use uuid::Uuid;
@@ -436,6 +453,268 @@ mod tests {
             Uuid::now_v7().to_string(),
             None,
         )
+    }
+
+    async fn test_adapter() -> Result<
+        (std::sync::Arc<o3k_store::O3kStore>, BuildingBlockAdapter),
+        Box<dyn std::error::Error>,
+    > {
+        let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        let placement = o3k_placement::PlacementLedger::open(
+            std::env::temp_dir().join(format!("o3k-bb-drain-{}", Uuid::now_v7())),
+            store.clone(),
+        )
+        .await?;
+        placement
+            .register_provider(
+                "agent-a",
+                BTreeMap::from([(
+                    "VCPU".to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                )]),
+            )
+            .await?;
+        let adapter = BuildingBlockAdapter {
+            store: store.clone(),
+            placement,
+            agents: Arc::new(FakeAgents {
+                snapshots: HashMap::from([("agent-a".to_owned(), snapshot("agent-a"))]),
+            }),
+            locations: o3k_kernel::LocationRegistry::default(),
+        };
+        let auth = operator_context();
+        adapter
+            .enroll(
+                o3k_kernel::BuildingBlock::enrolling(
+                    "block-a",
+                    "agent-a",
+                    vec!["agent-a".to_owned()],
+                    None,
+                    None,
+                )?,
+                &auth,
+            )
+            .await?;
+        adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Ready,
+                1,
+                vec![],
+                &auth,
+            )
+            .await?;
+        Ok((store, adapter))
+    }
+
+    fn drain_workload_blockers(view: &o3k_native_api::building_block::BuildingBlockView) -> u64 {
+        view.block
+            .drain_blockers
+            .iter()
+            .filter(|blocker| blocker.kind == o3k_kernel::DrainBlockerKind::Workload)
+            .map(|blocker| blocker.count)
+            .sum()
+    }
+
+    #[tokio::test]
+    async fn deleted_tombstones_are_not_resident_drain_blockers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (store, adapter) = test_adapter().await?;
+        let auth = operator_context();
+        // Retained terminal tombstones naming this block's provider: a
+        // terminally DELETED server (create intent preserved), volume, and
+        // attachment must not read as resident capacity (issue #1042).
+        for (kind, desired_state, provider_id) in [
+            (
+                "compute_instance",
+                serde_json::json!({
+                    "operation_id": Uuid::new_v4(),
+                    "o3k_server_id": Uuid::new_v4(),
+                    "name": "workload-a",
+                    "vcpus": 1,
+                    "memory_mib": 512,
+                    "idempotency_key": "create-workload-a",
+                    "placement_provider_id": "agent-a",
+                })
+                .to_string(),
+                None,
+            ),
+            ("volume", "{}".to_owned(), Some("agent-a")),
+            ("attachment", "{}".to_owned(), Some("agent-a")),
+        ] {
+            store
+                .insert_resource(&ResourceRecord {
+                    id: Uuid::new_v4(),
+                    kind: kind.to_owned(),
+                    project_id: "project-a".to_owned(),
+                    generation: 2,
+                    observed_generation: 1,
+                    desired_state,
+                    observed_state: "DELETED".to_owned(),
+                    provider_id: provider_id.map(str::to_owned),
+                })
+                .await?;
+        }
+
+        let draining = adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Draining,
+                2,
+                vec![],
+                &auth,
+            )
+            .await?;
+        assert!(
+            draining.block.drain_blockers.is_empty(),
+            "terminal tombstones must not project drain blockers: {:?}",
+            draining.block.drain_blockers
+        );
+        // Removal after the workloads reached terminal DELETED must succeed;
+        // before the fix the tombstones falsely raised DrainBlocked.
+        adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Removed,
+                draining.block.generation,
+                vec![],
+                &auth,
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_resources_remain_honest_drain_blockers() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (store, adapter) = test_adapter().await?;
+        let auth = operator_context();
+        store
+            .insert_resource(&ResourceRecord {
+                id: Uuid::new_v4(),
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::json!({
+                    "operation_id": Uuid::new_v4(),
+                    "o3k_server_id": Uuid::new_v4(),
+                    "name": "workload-live",
+                    "vcpus": 1,
+                    "memory_mib": 512,
+                    "idempotency_key": "create-workload-live",
+                    "placement_provider_id": "agent-a",
+                })
+                .to_string(),
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        let draining = adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Draining,
+                2,
+                vec![],
+                &auth,
+            )
+            .await?;
+        assert_eq!(drain_workload_blockers(&draining), 1);
+        assert!(
+            adapter
+                .transition(
+                    "block-a",
+                    o3k_kernel::BuildingBlockState::Removed,
+                    draining.block.generation,
+                    vec![],
+                    &auth,
+                )
+                .await
+                .is_err(),
+            "a live resident workload must keep removal drain-blocked"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deleted_workload_leaves_draining_blocker_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (store, adapter) = test_adapter().await?;
+        let auth = operator_context();
+        let desired_state = serde_json::json!({
+            "operation_id": Uuid::new_v4(),
+            "o3k_server_id": Uuid::new_v4(),
+            "name": "workload-drain",
+            "vcpus": 1,
+            "memory_mib": 512,
+            "idempotency_key": "create-workload-drain",
+            "placement_provider_id": "agent-a",
+        })
+        .to_string();
+        let resource_id = Uuid::new_v4();
+        store
+            .insert_resource(&ResourceRecord {
+                id: resource_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: desired_state.clone(),
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        let draining = adapter
+            .transition(
+                "block-a",
+                o3k_kernel::BuildingBlockState::Draining,
+                2,
+                vec![],
+                &auth,
+            )
+            .await?;
+        assert_eq!(drain_workload_blockers(&draining), 1);
+        // The durable record legitimately captured the drain-time blocker...
+        let stored = store
+            .get_building_block("block-a")
+            .await?
+            .ok_or("block-a missing")?
+            .block()?;
+        assert_eq!(
+            stored
+                .drain_blockers
+                .iter()
+                .filter(|blocker| blocker.kind == o3k_kernel::DrainBlockerKind::Workload)
+                .map(|blocker| blocker.count)
+                .sum::<u64>(),
+            1
+        );
+
+        // ...but once the resident workload reaches terminal DELETED, the
+        // read projection must not keep serving that drain-time snapshot
+        // (issue #1042): GET must reflect current truth.
+        store
+            .update_resource(resource_id, 1, &desired_state, "DELETED", 1, None)
+            .await?;
+        let viewed = adapter
+            .get("block-a")
+            .await?
+            .ok_or("block-a view missing")?;
+        assert_eq!(
+            drain_workload_blockers(&viewed),
+            0,
+            "a DELETED workload must leave the Draining block's projected drain \
+             blockers: {:?}",
+            viewed.block.drain_blockers
+        );
+        Ok(())
     }
 
     #[tokio::test]

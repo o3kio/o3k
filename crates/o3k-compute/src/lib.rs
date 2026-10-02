@@ -48,6 +48,7 @@ use o3k_store::server_state_to_storage;
 use o3k_store::{ComputeRepository, StoreError, VolumeAttachmentRecord, server_state_from_storage};
 
 use std::{collections::BTreeSet, time::Duration};
+use thiserror::Error;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -63,11 +64,628 @@ pub use attachment::AttachmentOrchestrator;
 /// named env var is set. Absent, empty, non-numeric, or zero values are no-ops;
 /// production configuration never sets these variables.
 fn test_fault_pause_ms(name: &str, env_var: &str) {
-    let Some(ms) = test_fault_pause_ms_value(std::env::var(env_var).ok()) else {
+    test_fault_pause_ms_with(name, test_fault_pause_ms_value(std::env::var(env_var).ok()));
+}
+
+/// The unconditional half of `test_fault_pause_ms`, split out so a caller can
+/// inject the pause value and tests can exercise the failpoint seam without
+/// mutating the process environment.
+fn test_fault_pause_ms_with(name: &str, ms: Option<u64>) {
+    let Some(ms) = ms else {
         return;
     };
-    tracing::info!(pause_ms = ms, "test-only fault pause {} enabled", name);
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} engaged", name);
     std::thread::sleep(std::time::Duration::from_millis(ms));
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} released", name);
+}
+
+/// Async endpoint-release fault pause. Keeping the runtime schedulable lets
+/// concurrent repair/replay and unrelated DB-backed requests contend with the
+/// held serialization boundary while the crash window is open.
+async fn test_fault_pause_async_with(name: &str, ms: Option<u64>) {
+    let Some(ms) = ms else {
+        return;
+    };
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} engaged", name);
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    tracing::warn!(pause_ms = ms, "test-only fault pause {} released", name);
+}
+
+/// Apply the endpoint-release crash-window pause only to the explicitly
+/// targeted server when a target is configured.  The protected #1035 journey
+/// arms the daemon before a delete is dispatched, so unrelated terminal
+/// projections/replays must not consume the one crash window first.
+pub(crate) async fn test_fault_pause_async_for_resource(
+    name: &str,
+    ms: Option<u64>,
+    resource_id: Option<uuid::Uuid>,
+) {
+    let raw_target = std::env::var_os("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID");
+    if !test_fault_target_matches(raw_target.as_deref(), resource_id) {
+        if raw_target.is_some() {
+            tracing::debug!("test-only endpoint-release fault target did not match");
+        }
+        return;
+    }
+    test_fault_pause_async_with(name, ms).await;
+}
+
+fn test_fault_target_matches(
+    raw_target: Option<&std::ffi::OsStr>,
+    resource_id: Option<uuid::Uuid>,
+) -> bool {
+    let Some(raw_target) = raw_target else {
+        return true;
+    };
+    let Ok(target) = raw_target.to_string_lossy().parse::<uuid::Uuid>() else {
+        return false;
+    };
+    resource_id == Some(target)
+}
+
+/// Return whether the protected crash experiment must keep the terminal
+/// delete release seat parked for this exact resource.  The replacement
+/// process replays the already-terminal delete after a crash; without this
+/// test-only seam that replay can release the endpoint before the orphan
+/// repair sweep observes it.  The seam is deliberately inert unless all of
+/// the following hold:
+///
+/// * the target resource UUID matches;
+/// * the configured run identity matches the live process run identity; and
+/// * the run-owned orphan checkpoint does not exist yet.
+///
+/// The checkpoint path is the phase boundary.  Once the repair sweep publishes
+/// it, replay is allowed to resume and normal production behavior is restored
+/// even though the replacement process inherited its environment at startup.
+fn test_fault_suppress_terminal_delete_release_matches(
+    raw_target: Option<&std::ffi::OsStr>,
+    raw_run: Option<&std::ffi::OsStr>,
+    current_run: Option<&std::ffi::OsStr>,
+    checkpoint_exists: bool,
+    resource_id: uuid::Uuid,
+) -> bool {
+    if checkpoint_exists {
+        return false;
+    }
+    let Some(raw_target) = raw_target else {
+        return false;
+    };
+    let Ok(target) = raw_target.to_string_lossy().parse::<uuid::Uuid>() else {
+        return false;
+    };
+    if target != resource_id {
+        return false;
+    }
+    let Some(raw_run) = raw_run else {
+        return false;
+    };
+    let Some(current_run) = current_run else {
+        return false;
+    };
+    let configured_run = raw_run.to_string_lossy();
+    let live_run = current_run.to_string_lossy();
+    !configured_run.is_empty() && configured_run == live_run
+}
+
+/// Validate the checkpoint that ends the replay-suppression window.  Merely
+/// seeing a file at the expected path is not sufficient: a stale or foreign
+/// marker must not re-enable endpoint release for the current crash target.
+fn test_fault_checkpoint_matches_current_run(
+    path: &std::path::Path,
+    resource_id: uuid::Uuid,
+) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(checkpoint) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let configured_run = std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID");
+    let live_run = std::env::var_os("O3K_PP5_RUN_ID");
+    let target_endpoint = std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_ENDPOINT_ID");
+    let Some(configured_run) = configured_run else {
+        return false;
+    };
+    let Some(live_run) = live_run else {
+        return false;
+    };
+    let Some(target_endpoint) = target_endpoint else {
+        return false;
+    };
+    let configured_run = configured_run.to_string_lossy();
+    let live_run = live_run.to_string_lossy();
+    let target_endpoint = target_endpoint.to_string_lossy();
+    test_fault_checkpoint_document_matches(
+        &checkpoint,
+        resource_id,
+        configured_run.as_ref(),
+        live_run.as_ref(),
+        target_endpoint.as_ref(),
+    )
+}
+
+fn test_fault_checkpoint_document_matches(
+    checkpoint: &serde_json::Value,
+    resource_id: uuid::Uuid,
+    configured_run: &str,
+    live_run: &str,
+    target_endpoint: &str,
+) -> bool {
+    let binding_state_valid = checkpoint.get("binding_state").is_some_and(|value| {
+        value.is_null()
+            || value
+                .as_str()
+                .is_some_and(|state| matches!(state, "binding" | "bound" | "down" | "error"))
+    });
+    let Some(server_id) = checkpoint
+        .get("server_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(endpoint_id) = checkpoint
+        .get("endpoint_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    configured_run == live_run
+        && !configured_run.is_empty()
+        && checkpoint
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2)
+        && checkpoint.get("run_id").and_then(serde_json::Value::as_str) == Some(configured_run)
+        && server_id == resource_id.to_string()
+        && endpoint_id == target_endpoint
+        && checkpoint.get("phase").and_then(serde_json::Value::as_str)
+            == Some("orphan_confirmed_pre_mutation")
+        && checkpoint
+            .get("orphan_confirmed")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("orphan_repair_lock_held")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("server_terminal_deleted")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("server_owned")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("live_reference_absent")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && binding_state_valid
+        && checkpoint
+            .get("unbind_not_started")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && checkpoint
+            .get("endpoint_release_not_started")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+/// Runtime wrapper for [`test_fault_suppress_terminal_delete_release_matches`].
+/// This only reads test-only environment and never changes production behavior.
+pub(crate) fn test_fault_suppress_terminal_delete_release(resource_id: uuid::Uuid) -> bool {
+    let checkpoint_published = std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE")
+        .map(std::path::PathBuf::from)
+        .is_some_and(|path| test_fault_checkpoint_matches_current_run(&path, resource_id));
+    test_fault_suppress_terminal_delete_release_matches(
+        std::env::var_os("O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RESOURCE_ID").as_deref(),
+        std::env::var_os("O3K_TEST_FAULT_SUPPRESS_TERMINAL_DELETE_RELEASE_RUN_ID").as_deref(),
+        std::env::var_os("O3K_PP5_RUN_ID").as_deref(),
+        checkpoint_published,
+        resource_id,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestFaultCheckpointDisposition {
+    Inactive,
+    PublishedAndReleased,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TestFaultCheckpointPublicationFailure {
+    step: &'static str,
+    kind: &'static str,
+    errno: Option<i32>,
+}
+
+impl std::fmt::Display for TestFaultCheckpointPublicationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Keep the event's human-readable reason bounded and path-free.  The
+        // structured step/kind/errno fields carry the actionable diagnostic;
+        // filesystem error strings can contain run-local paths.
+        write!(formatter, "{} ({})", self.step, self.kind)
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub(crate) enum TestFaultCheckpointError {
+    #[error("targeted orphan checkpoint configuration is invalid: {0}")]
+    InvalidConfiguration(String),
+    #[error("targeted orphan checkpoint run identity does not match the live PP5 run")]
+    RunIdentityMismatch,
+    #[error("targeted orphan checkpoint publication failed: {0}")]
+    Publication(TestFaultCheckpointPublicationFailure),
+    #[error("targeted orphan checkpoint release wait timed out")]
+    ReleaseTimeout,
+    #[error("targeted orphan checkpoint authoritative precondition is missing")]
+    PreconditionMissing,
+}
+
+impl TestFaultCheckpointError {
+    pub(crate) fn failure_step(&self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration(_) => "configuration",
+            Self::RunIdentityMismatch => "run_identity",
+            Self::Publication(failure) => failure.step,
+            Self::ReleaseTimeout => "release_wait",
+            Self::PreconditionMissing => "precondition",
+        }
+    }
+
+    pub(crate) fn failure_kind(&self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration(_) => "invalid_configuration",
+            Self::RunIdentityMismatch => "run_identity_mismatch",
+            Self::Publication(failure) => failure.kind,
+            Self::ReleaseTimeout => "release_timeout",
+            Self::PreconditionMissing => "precondition_missing",
+        }
+    }
+
+    pub(crate) fn failure_errno(&self) -> Option<i32> {
+        match self {
+            Self::Publication(failure) => failure.errno,
+            Self::InvalidConfiguration(_)
+            | Self::RunIdentityMismatch
+            | Self::ReleaseTimeout
+            | Self::PreconditionMissing => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TestFaultCheckpointConfig {
+    checkpoint_path: std::path::PathBuf,
+    target_server_id: Uuid,
+    target_endpoint_id: String,
+    run_id: String,
+    live_run_id: String,
+    lock_release_path: std::path::PathBuf,
+    lock_timeout: Duration,
+}
+
+fn test_fault_checkpoint_config_from_values(
+    checkpoint_path: Option<&std::ffi::OsStr>,
+    target_server_id: Option<&str>,
+    target_endpoint_id: Option<&str>,
+    run_id: Option<&str>,
+    live_run_id: Option<&str>,
+    lock_release_path: Option<&std::ffi::OsStr>,
+    lock_timeout_ms: Option<&str>,
+) -> Result<Option<TestFaultCheckpointConfig>, TestFaultCheckpointError> {
+    let Some(checkpoint_path) = checkpoint_path else {
+        return Ok(None);
+    };
+    if checkpoint_path.is_empty() {
+        return Err(TestFaultCheckpointError::InvalidConfiguration(
+            "checkpoint path is empty".to_owned(),
+        ));
+    }
+    let target_server_id = target_server_id
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration("target server id is missing".to_owned())
+        })?
+        .parse::<Uuid>()
+        .map_err(|_| {
+            TestFaultCheckpointError::InvalidConfiguration(
+                "target server id is not a UUID".to_owned(),
+            )
+        })?;
+    let target_endpoint_id = target_endpoint_id
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration(
+                "target endpoint id is missing".to_owned(),
+            )
+        })?
+        .to_owned();
+    let run_id = run_id
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration("target run id is missing".to_owned())
+        })?
+        .to_owned();
+    let live_run_id = live_run_id
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration("live PP5 run id is missing".to_owned())
+        })?
+        .to_owned();
+    let lock_release_path = lock_release_path
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration(
+                "lock release path is missing".to_owned(),
+            )
+        })?;
+    let timeout_ms = lock_timeout_ms
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration("lock timeout is missing".to_owned())
+        })?
+        .parse::<u64>()
+        .ok()
+        .filter(|value| (1..=30_000).contains(value))
+        .ok_or_else(|| {
+            TestFaultCheckpointError::InvalidConfiguration(
+                "lock timeout is outside the bounded range".to_owned(),
+            )
+        })?;
+    Ok(Some(TestFaultCheckpointConfig {
+        checkpoint_path: std::path::PathBuf::from(checkpoint_path),
+        target_server_id,
+        target_endpoint_id,
+        run_id,
+        live_run_id,
+        lock_release_path,
+        lock_timeout: Duration::from_millis(timeout_ms),
+    }))
+}
+
+fn test_fault_checkpoint_config_from_env()
+-> Result<Option<TestFaultCheckpointConfig>, TestFaultCheckpointError> {
+    let target_server = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_SERVER_ID").ok();
+    let target_endpoint = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_TARGET_ENDPOINT_ID").ok();
+    let run_id = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_RUN_ID").ok();
+    let live_run_id = std::env::var("O3K_PP5_RUN_ID").ok();
+    let timeout = std::env::var("O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_TIMEOUT_MS").ok();
+    test_fault_checkpoint_config_from_values(
+        std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_CHECKPOINT_FILE").as_deref(),
+        target_server.as_deref(),
+        target_endpoint.as_deref(),
+        run_id.as_deref(),
+        live_run_id.as_deref(),
+        std::env::var_os("O3K_TEST_FAULT_ORPHAN_REPAIR_LOCK_RELEASE_FILE").as_deref(),
+        timeout.as_deref(),
+    )
+}
+
+fn test_fault_checkpoint_publication_failure(
+    step: &'static str,
+    error: std::io::Error,
+) -> TestFaultCheckpointError {
+    let kind = match error.kind() {
+        std::io::ErrorKind::AlreadyExists => "destination_exists",
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        std::io::ErrorKind::NotFound => "not_found",
+        std::io::ErrorKind::InvalidInput => "invalid_input",
+        std::io::ErrorKind::Unsupported => "unsupported",
+        std::io::ErrorKind::WouldBlock => "would_block",
+        _ => "io_error",
+    };
+    TestFaultCheckpointError::Publication(TestFaultCheckpointPublicationFailure {
+        step,
+        kind,
+        errno: error.raw_os_error(),
+    })
+}
+
+fn test_fault_checkpoint_publication_failure_text(
+    step: &'static str,
+    kind: &'static str,
+) -> TestFaultCheckpointError {
+    TestFaultCheckpointError::Publication(TestFaultCheckpointPublicationFailure {
+        step,
+        kind,
+        errno: None,
+    })
+}
+
+pub(crate) fn test_fault_orphan_checkpoint_validate_configuration()
+-> Result<(), TestFaultCheckpointError> {
+    let _ = test_fault_checkpoint_config_from_env()?;
+    Ok(())
+}
+
+fn test_fault_checkpoint_publish(
+    config: &TestFaultCheckpointConfig,
+    server_id: Uuid,
+    endpoint_id: &str,
+    binding_state: Option<&str>,
+) -> Result<(), TestFaultCheckpointError> {
+    if config.checkpoint_path.exists() {
+        let server_id_string = server_id.to_string();
+        let existing_is_this_checkpoint = std::fs::read_to_string(&config.checkpoint_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .is_some_and(|existing| {
+                existing
+                    .get("schema_version")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(2)
+                    && existing.get("run_id").and_then(serde_json::Value::as_str)
+                        == Some(config.run_id.as_str())
+                    && existing
+                        .get("server_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(server_id_string.as_str())
+                    && existing
+                        .get("endpoint_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(endpoint_id)
+                    && existing.get("phase").and_then(serde_json::Value::as_str)
+                        == Some("orphan_confirmed_pre_mutation")
+                    && existing
+                        .get("orphan_confirmed")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("server_terminal_deleted")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("server_owned")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("live_reference_absent")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("orphan_repair_lock_held")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("unbind_not_started")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && existing
+                        .get("endpoint_release_not_started")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+            });
+        if existing_is_this_checkpoint {
+            return Ok(());
+        }
+        return Err(test_fault_checkpoint_publication_failure_text(
+            "destination_precheck",
+            "destination_exists",
+        ));
+    }
+    let sweep_id = uuid::Uuid::new_v4().to_string();
+    let published_at = chrono::Utc::now().to_rfc3339();
+    let checkpoint = serde_json::json!({
+        "schema_version": 2,
+        "run_id": config.run_id,
+        "sweep_id": sweep_id,
+        "published_at": published_at,
+        "server_id": server_id,
+        "endpoint_id": endpoint_id,
+        "phase": "orphan_confirmed_pre_mutation",
+        "orphan_confirmed": true,
+        "server_terminal_deleted": true,
+        "server_owned": true,
+        "live_reference_absent": true,
+        "binding_state": binding_state,
+        "orphan_repair_lock_held": true,
+        "unbind_not_started": true,
+        "endpoint_release_not_started": true,
+    });
+    let Some(parent) = config.checkpoint_path.parent() else {
+        return Err(test_fault_checkpoint_publication_failure_text(
+            "directory_parent",
+            "invalid_path",
+        ));
+    };
+    std::fs::create_dir_all(parent)
+        .map_err(|error| test_fault_checkpoint_publication_failure("directory_create", error))?;
+    let temp = parent.join(format!(
+        ".{}.{}.tmp",
+        config
+            .checkpoint_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy(),
+        std::process::id()
+    ));
+    let result = (|| -> Result<(), TestFaultCheckpointError> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|error| {
+                test_fault_checkpoint_publication_failure("temporary_create", error)
+            })?;
+        serde_json::to_writer(&mut file, &checkpoint)
+            .map_err(std::io::Error::other)
+            .map_err(|error| test_fault_checkpoint_publication_failure("json_serialize", error))?;
+        file.write_all(b"\n")
+            .map_err(|error| test_fault_checkpoint_publication_failure("temporary_write", error))?;
+        file.sync_all()
+            .map_err(|error| test_fault_checkpoint_publication_failure("file_fsync", error))?;
+        std::fs::hard_link(&temp, &config.checkpoint_path).map_err(|error| {
+            test_fault_checkpoint_publication_failure("destination_link", error)
+        })?;
+        std::fs::remove_file(&temp).map_err(|error| {
+            test_fault_checkpoint_publication_failure("temporary_cleanup", error)
+        })?;
+        let dir = std::fs::File::open(parent)
+            .map_err(|error| test_fault_checkpoint_publication_failure("directory_open", error))?;
+        dir.sync_all()
+            .map_err(|error| test_fault_checkpoint_publication_failure("directory_fsync", error))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn test_fault_checkpoint_wait_for_release(
+    config: &TestFaultCheckpointConfig,
+) -> Result<(), TestFaultCheckpointError> {
+    let deadline = tokio::time::Instant::now() + config.lock_timeout;
+    loop {
+        if std::fs::metadata(&config.lock_release_path).is_ok_and(|metadata| metadata.is_file()) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(TestFaultCheckpointError::ReleaseTimeout);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+pub(crate) async fn test_fault_orphan_checkpoint_and_wait(
+    server_id: uuid::Uuid,
+    project_id: &str,
+    endpoint_id: &str,
+    binding_state: Option<&str>,
+    live_reference_absent: bool,
+) -> Result<TestFaultCheckpointDisposition, TestFaultCheckpointError> {
+    let Some(config) = test_fault_checkpoint_config_from_env()? else {
+        return Ok(TestFaultCheckpointDisposition::Inactive);
+    };
+    if config.target_server_id != server_id || config.target_endpoint_id != endpoint_id {
+        return Ok(TestFaultCheckpointDisposition::Inactive);
+    }
+    tracing::info!(event = "orphan_repair_checkpoint_targeted", resource_id = %server_id, project_id, port_id = endpoint_id, run_id = %config.run_id, binding_state = ?binding_state, "targeted orphan repair checkpoint engaged");
+    if config.run_id != config.live_run_id {
+        return Err(TestFaultCheckpointError::RunIdentityMismatch);
+    }
+    if !live_reference_absent {
+        return Err(TestFaultCheckpointError::PreconditionMissing);
+    }
+    test_fault_checkpoint_publish(&config, server_id, endpoint_id, binding_state)?;
+    tracing::info!(
+        event = "orphan_repair_pre_mutation_checkpoint",
+        resource_id = %server_id,
+        project_id,
+        port_id = endpoint_id,
+        server_id = %server_id,
+        endpoint_id,
+        binding_state = ?binding_state,
+        run_id = %config.run_id,
+        "test-only orphan pre-mutation checkpoint published"
+    );
+    test_fault_checkpoint_wait_for_release(&config).await?;
+    tracing::info!(event = "orphan_repair_checkpoint_released", resource_id = %server_id, project_id, port_id = endpoint_id, run_id = %config.run_id, binding_state = ?binding_state, "test-only fault pause orphan-repair-lock released; targeted orphan repair checkpoint release observed");
+    Ok(TestFaultCheckpointDisposition::PublishedAndReleased)
 }
 
 /// Parse/guard half of `test_fault_pause_ms`; split out so the no-op
@@ -97,6 +715,15 @@ pub struct ComputeService {
     cinder: Option<Arc<dyn VolumeAttachmentProvider>>,
     attachments: AttachmentOrchestrator,
     binding_projector: Option<Arc<dyn PortBindingProjector>>,
+    /// Serializes the orphan-endpoint repair sweep (#1035) against the create
+    /// paths that make a non-terminal server durably reference an existing
+    /// port. Both the repair pass and the create's durable-intent persist take
+    /// this lock before any store read and before any projector/network call,
+    /// so a sweep can never release a port while a create is persisting a
+    /// durable reference to it, and a create cannot durably reference a port
+    /// the sweep just released. `tokio::sync::Mutex` is fair and leaf-level
+    /// here, so there is no inversion with the layer's network-mutation locks.
+    orphan_repair_lock: Arc<tokio::sync::Mutex<()>>,
     config_drive_cleaner: Option<o3k_config_drive::ConfigDriveStore>,
     authorizer: Arc<dyn Authorizer>,
     audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
@@ -146,11 +773,63 @@ pub trait PortBindingProjector: Send + Sync {
     /// quota become reusable. An endpoint the caller supplied itself is left
     /// untouched — a server attaching an endpoint does not own it — and an
     /// already-absent endpoint is success, so replays converge.
+    ///
+    /// The ownership decision stays entirely inside the implementation, from
+    /// the durable endpoint row. The returned [`ServerEndpointRelease`] is the
+    /// observability contract for the #1035 orphan repair sweep; the request
+    /// path ignores it.
     async fn release_server_owned_endpoint(
         &self,
         project_id: &str,
         port_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Read-only snapshot of a port's durable binding and server-owned
+    /// identity, used by the orphan-repair sweep to decide whether an orphan
+    /// still bound to its dead owner needs an unbind (dispatch network Remove +
+    /// record `down`) before it can be released. `None` when the port does not
+    /// resolve in `project_id`.
+    ///
+    /// The repair must not unbind a caller-supplied or foreign endpoint, so the
+    /// server-owned discriminator is resolved here, from the durable endpoint
+    /// row, not guessed from the request.
+    async fn port_binding(
+        &self,
+        project_id: &str,
+        port_id: &str,
+    ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// A port's durable binding and ownership snapshot, resolved by the binding
+/// projector from the durable endpoint row (never from the request).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortBindingInfo {
+    /// Whether the port carries O3K's reserved server-owned name for this
+    /// project, so a terminally-deleted server may release it.
+    pub server_owned: bool,
+    /// The durable binding state when a host was selected: one of
+    /// `bound`/`binding`/`down`/`error`. `None` means no host was ever
+    /// selected and no observation exists.
+    pub binding_state: Option<String>,
+}
+
+/// Bounded, endpoint-counted outcome of releasing one terminally deleted
+/// server's O3K-owned endpoint.
+///
+/// Counts only, so the report is safe to log and to assert on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerEndpointRelease {
+    /// O3K server-owned endpoints observed present in the owning project.
+    pub discovered: usize,
+    /// Of those, the ones now gone. A concurrent equivalent cleanup that won
+    /// the race restores the same invariant, so it counts here too.
+    pub released: usize,
+    /// Present endpoints that are not O3K server-owned — a caller-supplied
+    /// endpoint, or another project's — preserved untouched.
+    pub preserved: usize,
+    /// Nothing present to repair: an already-released endpoint, or an
+    /// identifier that does not resolve inside the owning project.
+    pub absent: usize,
 }
 
 /// Projects one authenticated agent capability snapshot into the inventory
@@ -387,6 +1066,10 @@ fn keypair_from_record(record: o3k_store::KeypairRecord) -> Keypair {
 }
 
 #[cfg(test)]
+#[path = "checkpoint_tests.rs"]
+mod checkpoint_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use o3k_provider::{
@@ -396,6 +1079,281 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn endpoint_release_fault_target_is_fail_closed_and_resource_scoped() {
+        let resource = uuid::Uuid::new_v4();
+        assert!(test_fault_target_matches(None, Some(resource)));
+        assert!(test_fault_target_matches(
+            Some(std::ffi::OsStr::new(&resource.to_string())),
+            Some(resource)
+        ));
+        assert!(!test_fault_target_matches(
+            Some(std::ffi::OsStr::new(&uuid::Uuid::new_v4().to_string())),
+            Some(resource)
+        ));
+        assert!(!test_fault_target_matches(
+            Some(std::ffi::OsStr::new("not-a-uuid")),
+            Some(resource)
+        ));
+        assert!(!test_fault_target_matches(
+            Some(std::ffi::OsStr::new(&resource.to_string())),
+            None
+        ));
+    }
+
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn checkpoint_test_config(
+        checkpoint_path: &std::path::Path,
+        release_path: &std::path::Path,
+        server_id: Uuid,
+        run_id: &str,
+        timeout_ms: &str,
+    ) -> TestFaultCheckpointConfig {
+        test_fault_checkpoint_config_from_values(
+            Some(checkpoint_path.as_os_str()),
+            Some(&server_id.to_string()),
+            Some("endpoint-1"),
+            Some(run_id),
+            Some(run_id),
+            Some(release_path.as_os_str()),
+            Some(timeout_ms),
+        )
+        .expect("valid checkpoint test configuration")
+        .expect("checkpoint seam should be active")
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn targeted_checkpoint_configuration_is_inactive_only_when_absent() {
+        assert_eq!(
+            test_fault_checkpoint_config_from_values(None, None, None, None, None, None, None)
+                .expect("absent seam is valid"),
+            None
+        );
+        let server = Uuid::new_v4();
+        let error = test_fault_checkpoint_config_from_values(
+            Some(std::ffi::OsStr::new("/tmp/checkpoint")),
+            Some(&server.to_string()),
+            None,
+            Some("run"),
+            Some("run"),
+            Some(std::ffi::OsStr::new("/tmp/release")),
+            Some("100"),
+        )
+        .expect_err("incomplete targeted configuration must fail closed");
+        assert!(matches!(
+            error,
+            TestFaultCheckpointError::InvalidConfiguration(_)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn targeted_checkpoint_scope_and_run_mismatch_are_distinct() {
+        let server = Uuid::new_v4();
+        let config = checkpoint_test_config(
+            Path::new("/tmp/o3k-checkpoint-test.json"),
+            Path::new("/tmp/o3k-release-test"),
+            server,
+            "run-1",
+            "100",
+        );
+        assert_eq!(config.target_server_id, server);
+        assert_eq!(config.target_endpoint_id, "endpoint-1");
+        assert_ne!(config.run_id, "run-2");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn targeted_checkpoint_publication_rejects_existing_destination() {
+        let root = std::env::temp_dir().join(format!("o3k-checkpoint-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("test directory");
+        let checkpoint_path = root.join("checkpoint.json");
+        let release_path = root.join("release");
+        std::fs::write(&checkpoint_path, b"stale").expect("stale checkpoint");
+        let server = Uuid::new_v4();
+        let config =
+            checkpoint_test_config(&checkpoint_path, &release_path, server, "run-1", "100");
+        let error = test_fault_checkpoint_publish(&config, server, "endpoint-1", Some("bound"))
+            .expect_err("existing destination must fail closed");
+        assert!(matches!(error, TestFaultCheckpointError::Publication(_)));
+        assert_eq!(
+            std::fs::read(&checkpoint_path).expect("checkpoint"),
+            b"stale"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn targeted_checkpoint_release_wait_is_bounded_and_succeeds_only_on_file() {
+        let root = std::env::temp_dir().join(format!("o3k-checkpoint-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("test directory");
+        let checkpoint_path = root.join("checkpoint.json");
+        let release_path = root.join("release");
+        let server = Uuid::new_v4();
+        let timeout_config =
+            checkpoint_test_config(&checkpoint_path, &release_path, server, "run-1", "1");
+        assert_eq!(
+            test_fault_checkpoint_wait_for_release(&timeout_config)
+                .await
+                .expect_err("missing release must fail closed"),
+            TestFaultCheckpointError::ReleaseTimeout
+        );
+        std::fs::write(&release_path, b"release").expect("release marker");
+        let success_config =
+            checkpoint_test_config(&checkpoint_path, &release_path, server, "run-1", "100");
+        test_fault_checkpoint_wait_for_release(&success_config)
+            .await
+            .expect("release marker should allow mutation");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terminal_release_replay_suppression_is_run_and_phase_scoped() {
+        let resource = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let resource_text = resource.to_string();
+        let target = std::ffi::OsStr::new(&resource_text);
+        let run = std::ffi::OsStr::new("run-123");
+        let same_run = std::ffi::OsStr::new("run-123");
+        let different_run = std::ffi::OsStr::new("run-456");
+
+        assert!(test_fault_suppress_terminal_delete_release_matches(
+            Some(target),
+            Some(run),
+            Some(same_run),
+            false,
+            resource,
+        ));
+        assert!(!test_fault_suppress_terminal_delete_release_matches(
+            Some(target),
+            Some(run),
+            Some(different_run),
+            false,
+            resource,
+        ));
+        assert!(!test_fault_suppress_terminal_delete_release_matches(
+            Some(target),
+            Some(run),
+            Some(same_run),
+            false,
+            other,
+        ));
+        assert!(!test_fault_suppress_terminal_delete_release_matches(
+            Some(target),
+            Some(run),
+            Some(same_run),
+            true,
+            resource,
+        ));
+        assert!(!test_fault_suppress_terminal_delete_release_matches(
+            Some(target),
+            None,
+            Some(same_run),
+            false,
+            resource,
+        ));
+    }
+
+    #[test]
+    fn orphan_checkpoint_requires_pre_mutation_authoritative_snapshot() {
+        let resource = uuid::Uuid::new_v4();
+        let endpoint = "endpoint-1";
+        let mut checkpoint = serde_json::json!({
+            "schema_version": 2,
+            "run_id": "run-1",
+            "server_id": resource,
+            "endpoint_id": endpoint,
+            "phase": "orphan_confirmed_pre_mutation",
+            "orphan_confirmed": true,
+            "server_terminal_deleted": true,
+            "server_owned": true,
+            "live_reference_absent": true,
+            "binding_state": "bound",
+            "orphan_repair_lock_held": true,
+            "unbind_not_started": true,
+            "endpoint_release_not_started": true,
+        });
+        assert!(test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+
+        checkpoint["binding_state"] = serde_json::Value::Null;
+        assert!(test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+        assert!(
+            checkpoint
+                .as_object_mut()
+                .and_then(|object| object.remove("binding_state"))
+                .is_some()
+        );
+        assert!(!test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+        checkpoint["binding_state"] = serde_json::json!("unbound");
+        assert!(!test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+        checkpoint["binding_state"] = serde_json::json!("bound");
+
+        for field in [
+            "server_terminal_deleted",
+            "server_owned",
+            "live_reference_absent",
+            "orphan_repair_lock_held",
+            "unbind_not_started",
+            "endpoint_release_not_started",
+        ] {
+            checkpoint[field] = serde_json::json!(false);
+            assert!(
+                !test_fault_checkpoint_document_matches(
+                    &checkpoint,
+                    resource,
+                    "run-1",
+                    "run-1",
+                    endpoint,
+                ),
+                "checkpoint accepted without {field}"
+            );
+            checkpoint[field] = serde_json::json!(true);
+        }
+        checkpoint["phase"] = serde_json::json!("orphan_confirmed");
+        assert!(!test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+        checkpoint["phase"] = serde_json::json!("orphan_confirmed_pre_mutation");
+        checkpoint["schema_version"] = serde_json::json!(1);
+        assert!(!test_fault_checkpoint_document_matches(
+            &checkpoint,
+            resource,
+            "run-1",
+            "run-1",
+            endpoint,
+        ));
+    }
 
     /// Stateful in-memory agent registry used to test application scheduling
     /// and inventory behavior without wire types. The snapshots are
@@ -506,6 +1464,9 @@ mod tests {
             project: String,
             port: String,
         },
+        Binding {
+            port: String,
+        },
     }
 
     #[derive(Default)]
@@ -552,7 +1513,7 @@ mod tests {
             &self,
             project_id: &str,
             port_id: &str,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>> {
             self.calls
                 .lock()
                 .map_err(|_| "recording projector lock poisoned".to_owned())?
@@ -560,7 +1521,25 @@ mod tests {
                     project: project_id.to_owned(),
                     port: port_id.to_owned(),
                 });
-            Ok(())
+            Ok(ServerEndpointRelease {
+                discovered: 1,
+                released: 1,
+                ..ServerEndpointRelease::default()
+            })
+        }
+
+        async fn port_binding(
+            &self,
+            _project_id: &str,
+            port_id: &str,
+        ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>> {
+            self.calls
+                .lock()
+                .map_err(|_| "recording projector lock poisoned".to_owned())?
+                .push(ProjectorCall::Binding {
+                    port: port_id.to_owned(),
+                });
+            Ok(None)
         }
     }
 
@@ -570,6 +1549,74 @@ mod tests {
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default()
+    }
+
+    /// A projector that counts unbind dispatches and models a stale `bound`
+    /// orphan (an unbound port reports `down`). Used to assert the sweep's
+    /// one-unbind-per-pass availability cap (issue #1035).
+    #[derive(Default)]
+    struct CapCountingProjector {
+        unbound: std::sync::Mutex<std::collections::HashSet<String>>,
+        unbinds: std::sync::Mutex<usize>,
+        releases: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl PortBindingProjector for CapCountingProjector {
+        async fn project_create_outcome(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+            _succeeded: bool,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+        async fn unbind_port(
+            &self,
+            _project_id: &str,
+            port_id: &str,
+            _operation_id: uuid::Uuid,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.unbound
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?
+                .insert(port_id.to_owned());
+            *self
+                .unbinds
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")? += 1;
+            Ok(())
+        }
+        async fn release_server_owned_endpoint(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+        ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>> {
+            *self
+                .releases
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")? += 1;
+            Ok(ServerEndpointRelease {
+                discovered: 1,
+                released: 1,
+                ..ServerEndpointRelease::default()
+            })
+        }
+        async fn port_binding(
+            &self,
+            _project_id: &str,
+            port_id: &str,
+        ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>> {
+            let is_bound = !self
+                .unbound
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?
+                .contains(port_id);
+            Ok(Some(PortBindingInfo {
+                server_owned: true,
+                binding_state: Some(if is_bound { "bound" } else { "down" }.to_owned()),
+            }))
+        }
     }
 
     async fn service(label: &str) -> Result<ComputeService, ComputeError> {
@@ -2703,6 +3750,12 @@ mod tests {
         let task = service.spawn_create_convergence_reconciler(1);
         // The first drive(s) hit the empty registry; the operation must stay
         // re-drivable and never become terminal Failed.
+        // Each of the two waits below is an independent convergence property,
+        // so each gets its own freshly-armed budget. A single deadline shared
+        // across both sequential loops is wrong: a first wait deferred by
+        // external load consumes most of the shared deadline, leaving the
+        // second wait to fail its assertion even though convergence is
+        // genuinely occurring (issue #1040).
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while provider.create_attempts() == 0 {
             assert!(
@@ -2718,7 +3771,10 @@ mod tests {
         );
         // The agent re-registers (reconnect backoff completed); a later sweep
         // tick re-dispatches the create and the provider reports the running
-        // instance observation.
+        // instance observation. Re-arm a fresh budget: the first wait above
+        // already consumed part of its own deadline, and this second wait must
+        // not inherit that consumption.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         provider.register();
         loop {
             let operation = store.get_operation(request.operation_id).await?;
@@ -2731,14 +3787,30 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert_eq!(provider.instance_count(), 1);
-        assert_eq!(
-            store
+        // The terminal operation state and the ACTIVE projection are separate
+        // committed writes on the create-observation path (the atomic
+        // terminalization primitive covers lifecycle finishes, not create
+        // projections), so poll the projection with a bounded deadline instead
+        // of asserting it synchronously — under parallel load the gap between
+        // the two writes stretches and a synchronous assert flakes (issue
+        // #1040 family: test timing, not a production budget regression).
+        let projection_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if store
                 .get_resource(request.o3k_server_id)
                 .await?
-                .observed_state,
-            "ACTIVE"
-        );
+                .observed_state
+                == "ACTIVE"
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < projection_deadline,
+                "create convergence sweep did not project ACTIVE after the operation succeeded"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(provider.instance_count(), 1);
         task.abort();
         let _ = task.await;
         Ok(())
@@ -3022,6 +4094,71 @@ mod tests {
             o3k_store::OperationState::Succeeded,
             "the local delete must record a terminal Succeeded delete operation"
         );
+        Ok(())
+    }
+
+    /// Issue #1041: the local delete completion terminalizes the operation and
+    /// the resource projection in ONE durable transaction. After the delete,
+    /// both rows must be terminal with exactly one generation advance; a
+    /// replay through the already-Deleted seat converges without re-applying.
+    #[tokio::test]
+    async fn local_delete_completion_terminalizes_operation_and_resource_together()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, placement, request) =
+            stranded_failed_create_fixture("delete-atomic-terminal", provider.clone()).await?;
+        let generation_at_delete = store.get_resource(request.o3k_server_id).await?.generation;
+
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+
+        // Both halves terminal, applied exactly once.
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "DELETED");
+        assert_eq!(
+            resource.generation,
+            generation_at_delete + 1,
+            "the terminalization must apply exactly one generation advance"
+        );
+        let delete_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:delete:project-a:{}:{}",
+                request.o3k_server_id, generation_at_delete
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            store.get_operation(delete_operation_id).await?.state,
+            o3k_store::OperationState::Succeeded,
+            "the operation and the resource projection must be terminal together"
+        );
+        assert!(
+            store
+                .list_non_terminal_lifecycle_operations()
+                .await?
+                .iter()
+                .all(|operation| operation.resource_id != request.o3k_server_id),
+            "a terminalized delete must leave no non-terminal lifecycle operation"
+        );
+        assert!(
+            placement.provider("node-a").await?.allocations.is_empty(),
+            "the delete must release the placement allocation"
+        );
+
+        // Replay through the already-Deleted seat: converges without
+        // double-applying the projection.
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(
+            resource.generation,
+            generation_at_delete + 1,
+            "a replay must not double-apply the terminal projection"
+        );
+        assert_eq!(resource.observed_state, "DELETED");
         Ok(())
     }
 
@@ -3638,6 +4775,673 @@ mod tests {
                 .filter(|call| matches!(call, ProjectorCall::Release { .. }))
                 .count(),
             2
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// Issue #1035: a replayed/late terminal delete projection must skip a port
+    /// that a NEW live server now references. A's delete is durably terminal
+    /// (the projection seat) but the request-path release never ran; B then
+    /// re-attaches A's port and is still `ACTIVE`. `project_terminal_binding_outcome`'s
+    /// delete branch gates every port on the live reference set, so it must not
+    /// unbind or release B's port — B's own delete releases it.
+    #[tokio::test]
+    async fn delete_terminal_projection_preserves_a_live_reattached_port()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-replay-terminal-bind-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(RecordingProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+
+        let a_id = Uuid::now_v7();
+        let b_id = Uuid::now_v7();
+        let delete_op = Uuid::now_v7();
+        let project = "project-a".to_owned();
+        let desired = |server_id: Uuid, name: &str| -> Result<String, serde_json::Error> {
+            serde_json::to_string(&serde_json::json!({
+                "operation_id": Uuid::now_v7().to_string(),
+                "o3k_server_id": server_id.to_string(),
+                "project_id": project,
+                "name": name,
+                "vcpus": 1,
+                "memory_mib": 512,
+                "flavor_id": "flavor-1",
+                "disk_gib": 1,
+                "image_id": "image-1",
+                "key_name": null,
+                "keypair_id": null,
+                "network_ids": ["port-1"],
+                "placement_provider_id": null,
+                "placement_allocation_id": null,
+                "config_drive": null,
+                "idempotency_key": format!("idem-{name}"),
+            }))
+        };
+        // A: terminally deleted, delete operation terminal success, request-path
+        // release never ran (the crash window leaves port-1 present).
+        let desired_a = desired(a_id, "server-a")?;
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: a_id,
+                kind: "compute_instance".to_owned(),
+                project_id: project.clone(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired_a,
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: delete_op,
+                resource_id: a_id,
+                kind: "lifecycle:delete".to_owned(),
+                state: o3k_store::OperationState::Succeeded,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        // B: a NEW live server that explicitly re-attached A's port.
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: b_id,
+                kind: "compute_instance".to_owned(),
+                project_id: project.clone(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired(b_id, "server-b")?,
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        // Replay A's terminal delete through the projection seat.
+        service
+            .project_terminal_binding_outcome(
+                delete_op.to_string().as_str(),
+                o3k_store::OperationState::Succeeded,
+            )
+            .await?;
+
+        // B's live re-attached port must be preserved: the gate skips it, so
+        // the projector records neither an unbind nor a release.
+        assert!(
+            projector_calls(&projector).is_empty(),
+            "the replayed terminal delete must not strip a live re-attached port: {:?}",
+            projector_calls(&projector)
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// Issue #1035, availability bound: the repair sweep makes at most ONE
+    /// fabric unbind dispatch per pass, so a burst of stale-bound orphans cannot
+    /// hold the orphan-repair lock (and therefore block every port-attaching
+    /// create) for the sum of their dispatch deadlines. Two stale-bound orphans
+    /// therefore take two passes — one unbind each — and converge.
+    #[tokio::test]
+    async fn sweep_makes_at_most_one_unbind_dispatch_per_pass()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path =
+            PathBuf::from(format!("/tmp/o3k-sweep-cap-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(CapCountingProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+        let project = "project-a".to_owned();
+
+        // Two terminally-deleted servers, each leaving a stale-bound orphan port.
+        for (server_id, port_id) in [(Uuid::now_v7(), "port-1"), (Uuid::now_v7(), "port-2")] {
+            let desired = serde_json::to_string(&serde_json::json!({
+                "operation_id": Uuid::now_v7().to_string(),
+                "o3k_server_id": server_id.to_string(),
+                "project_id": project,
+                "name": "server",
+                "vcpus": 1,
+                "memory_mib": 512,
+                "flavor_id": "flavor-1",
+                "disk_gib": 1,
+                "image_id": "image-1",
+                "key_name": null,
+                "keypair_id": null,
+                "network_ids": [port_id],
+                "placement_provider_id": null,
+                "placement_allocation_id": null,
+                "config_drive": null,
+                "idempotency_key": format!("idem-{port_id}"),
+            }))?;
+            store
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: server_id,
+                    kind: "compute_instance".to_owned(),
+                    project_id: project.clone(),
+                    generation: 1,
+                    observed_generation: 0,
+                    desired_state: desired,
+                    observed_state: "DELETED".to_owned(),
+                    provider_id: None,
+                })
+                .await?;
+        }
+
+        // Pass 1: exactly one unbind dispatch, despite two bound orphans.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            1,
+            "a single sweep pass must dispatch at most one fabric unbind"
+        );
+
+        // Pass 2: the second stale-bound orphan is repaired; total converges.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            2,
+            "repair must converge one unbind per pass"
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// A waiting port-reference create receives the FIFO opportunity between
+    /// one-orphan repair passes. The Tokio mutex contract is FIFO: once these
+    /// three acquisitions are queued in order, a later periodic pass cannot
+    /// repeatedly jump ahead of the create. Combined with the one-dispatch
+    /// cap above, multiple repairable orphans cannot starve the create.
+    #[tokio::test]
+    async fn orphan_repair_lock_gives_waiting_create_fifo_turn_between_passes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-fairness-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let service = Arc::new(ComputeService::new_for_test(
+            store,
+            Arc::new(FakeComputeProvider::new()),
+        ));
+        let first_pass = service.orphan_repair_lock_guard().await;
+        let (queued_tx, mut queued_rx) = tokio::sync::mpsc::unbounded_channel();
+        let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        for label in ["waiting_create", "next_repair_pass"] {
+            let service = service.clone();
+            let queued_tx = queued_tx.clone();
+            let order = order.clone();
+            tokio::spawn(async move {
+                let _ = queued_tx.send(label);
+                let _guard = service.orphan_repair_lock_guard().await;
+                order.lock().await.push(label);
+            });
+            assert_eq!(queued_rx.recv().await, Some(label));
+            // This is a current-thread Tokio test. Yield once after the
+            // notification so the waiter polls lock() and enters its FIFO
+            // queue before the next waiter is spawned.
+            tokio::task::yield_now().await;
+        }
+        drop(first_pass);
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*order.lock().await, ["waiting_create", "next_repair_pass"]);
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_lock_wait_marker_is_written_only_after_mutex_waits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-wait-marker-{}.sqlite",
+            std::process::id()
+        ));
+        let marker_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-wait-marker-{}.observed",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_file(&marker_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let service = Arc::new(ComputeService::new_for_test(
+            store,
+            Arc::new(FakeComputeProvider::new()),
+        ));
+        let held = service.orphan_repair_lock_guard().await;
+        let waiting_service = service.clone();
+        let waiting_marker = marker_path.clone();
+        let waiter = tokio::spawn(async move {
+            let _guard = waiting_service
+                .orphan_repair_create_lock_guard(Some(&waiting_marker))
+                .await;
+        });
+        for _ in 0..32 {
+            if marker_path.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            marker_path.exists(),
+            "waiter marker must prove mutex Pending"
+        );
+        drop(held);
+        waiter.await?;
+        std::fs::remove_file(marker_path)?;
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct FailingUnbindProjector {
+        unbinds: std::sync::Mutex<usize>,
+        releases: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl PortBindingProjector for FailingUnbindProjector {
+        async fn project_create_outcome(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+            _succeeded: bool,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+        async fn unbind_port(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+            _operation_id: uuid::Uuid,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            *self
+                .unbinds
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")? += 1;
+            Err(std::io::Error::other("fabric unavailable").into())
+        }
+        async fn release_server_owned_endpoint(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+        ) -> Result<ServerEndpointRelease, Box<dyn std::error::Error + Send + Sync>> {
+            *self
+                .releases
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")? += 1;
+            Ok(ServerEndpointRelease::default())
+        }
+        async fn port_binding(
+            &self,
+            _project_id: &str,
+            _port_id: &str,
+        ) -> Result<Option<PortBindingInfo>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(Some(PortBindingInfo {
+                server_owned: true,
+                binding_state: Some("bound".to_owned()),
+            }))
+        }
+    }
+
+    /// The one-unbind-per-pass cap must count ATTEMPTS, not successes: under a
+    /// fabric outage a single pass must not dispatch a failing unbind per
+    /// stale-bound orphan (each up to the dispatch deadline) while holding the
+    /// orphan-repair lock. Before the cap moved ahead of the dispatch, a
+    /// failed unbind `continue`d to the next orphan and a pass could burn the
+    /// sum of the deadlines — contradicting the documented availability bound.
+    #[tokio::test]
+    async fn sweep_dispatches_at_most_one_unbind_attempt_per_pass_even_when_unbind_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-sweep-cap-failure-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(FailingUnbindProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+        let project = "project-a".to_owned();
+
+        for (server_id, port_id) in [(Uuid::now_v7(), "port-1"), (Uuid::now_v7(), "port-2")] {
+            let desired = serde_json::to_string(&serde_json::json!({
+                "operation_id": Uuid::now_v7().to_string(),
+                "o3k_server_id": server_id.to_string(),
+                "project_id": project,
+                "name": "server",
+                "vcpus": 1,
+                "memory_mib": 512,
+                "flavor_id": "flavor-1",
+                "disk_gib": 1,
+                "image_id": "image-1",
+                "key_name": null,
+                "keypair_id": null,
+                "network_ids": [port_id],
+                "placement_provider_id": null,
+                "placement_allocation_id": null,
+                "config_drive": null,
+                "idempotency_key": format!("idem-{port_id}"),
+            }))?;
+            store
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: server_id,
+                    kind: "compute_instance".to_owned(),
+                    project_id: project.clone(),
+                    generation: 1,
+                    observed_generation: 0,
+                    desired_state: desired,
+                    observed_state: "DELETED".to_owned(),
+                    provider_id: None,
+                })
+                .await?;
+        }
+
+        // Pass 1 under fabric outage: exactly one unbind ATTEMPT, and the
+        // bound orphan is never released while bound.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            1,
+            "a single sweep pass must dispatch at most one unbind attempt, even on failure"
+        );
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            0,
+            "a bound orphan must never be released while its unbind has not completed"
+        );
+
+        // Pass 2: the next bound orphan gets its single attempt; the pass
+        // stays bounded and retry-convergent across passes.
+        service.repair_orphaned_server_endpoints().await?;
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            2,
+            "repair must converge one unbind attempt per pass"
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// The periodic repair scheduler is an independent authority for timing:
+    /// a lifecycle convergence backlog cannot prevent a repair tick from
+    /// reaching the same durable, fenced repair pass.
+    #[tokio::test]
+    async fn orphan_repair_scheduler_runs_without_lifecycle_drive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-repair-scheduler-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(CapCountingProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+        let server_id = Uuid::now_v7();
+        let desired = serde_json::to_string(&serde_json::json!({
+            "operation_id": Uuid::now_v7().to_string(),
+            "o3k_server_id": server_id.to_string(),
+            "project_id": "project-a",
+            "name": "server",
+            "vcpus": 1,
+            "memory_mib": 512,
+            "flavor_id": "flavor-1",
+            "disk_gib": 1,
+            "image_id": "image-1",
+            "key_name": null,
+            "keypair_id": null,
+            "network_ids": ["port-1"],
+            "placement_provider_id": null,
+            "placement_allocation_id": null,
+            "config_drive": null,
+            "idempotency_key": "idem-port-1",
+        }))?;
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired,
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        let task = service.spawn_orphan_endpoint_reconciler(1);
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "scheduler projector lock poisoned")?,
+            1,
+            "a repair tick must run without a lifecycle convergence call"
+        );
+        task.abort();
+        let _ = task.await;
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// The orphan-repair pass must be fenced by the same coordination lease
+    /// that fences the re-drive arms: the orphan_repair_lock is process-local,
+    /// so a second controller on a shared PostgreSQL database must not sweep
+    /// concurrently. A Busy lease skips the pass (the orphan survives); once
+    /// the lease frees, one pass repairs it and releases the lease.
+    #[tokio::test]
+    async fn orphan_repair_pass_is_fenced_by_the_coordination_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::DurableStore;
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-sweep-lease-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store = Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let coord: Arc<dyn o3k_store::CoordinationRepository> = store.clone();
+        let projector = Arc::new(CapCountingProjector::default());
+        let ctrl_a = o3k_store::ControllerId::new("ctrl-a");
+        let epoch_a = o3k_store::ControllerEpoch::new("epoch-a");
+        let ctrl_b = o3k_store::ControllerId::new("ctrl-b");
+        let epoch_b = o3k_store::ControllerEpoch::new("epoch-b");
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone())
+                .with_coordination(coord.clone(), ctrl_a, epoch_a.clone());
+        let project = "project-a".to_owned();
+        let server_id = Uuid::now_v7();
+        let desired = serde_json::to_string(&serde_json::json!({
+            "operation_id": Uuid::now_v7().to_string(),
+            "o3k_server_id": server_id.to_string(),
+            "project_id": project,
+            "name": "server",
+            "vcpus": 1,
+            "memory_mib": 512,
+            "flavor_id": "flavor-1",
+            "disk_gib": 1,
+            "image_id": "image-1",
+            "key_name": null,
+            "keypair_id": null,
+            "network_ids": ["port-1"],
+            "placement_provider_id": null,
+            "placement_allocation_id": null,
+            "config_drive": null,
+            "idempotency_key": "idem-port-1",
+        }))?;
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: project.clone(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: desired,
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+
+        // Controller B holds the repair lease: controller A's dedicated repair pass
+        // must skip the sweep, leaving the orphan untouched.
+        let busy = coord
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_secs(60),
+            )
+            .await?;
+        let lease = match busy {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+            _ => return Err("expected controller B to acquire the repair lease".into()),
+        };
+        service.run_orphan_repair_pass().await?;
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            0,
+            "a Busy repair lease must skip the sweep on this controller"
+        );
+
+        // Once the lease frees, one pass repairs the orphan and releases the
+        // lease again (controller B can re-acquire immediately).
+        coord
+            .release_work_lease(
+                "server-endpoint-orphan-repair",
+                &ctrl_b,
+                &epoch_b,
+                lease.fencing_token,
+            )
+            .await?;
+        service.run_orphan_repair_pass().await?;
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "cap projector lock poisoned")?,
+            1,
+            "the sweep must run once the lease is free"
+        );
+        let stale = coord
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_millis(20),
+            )
+            .await?;
+        assert!(
+            matches!(stale, o3k_store::LeaseAcquireOutcome::Acquired { .. }),
+            "controller B must be able to acquire after controller A releases"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        service.run_orphan_repair_pass().await?;
+        let after_takeover = coord
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+        assert!(
+            matches!(
+                after_takeover,
+                o3k_store::LeaseAcquireOutcome::Acquired { .. }
+            ),
+            "an expired durable lease must eventually permit the repair pass"
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// A process-local delete/create critical section must be entered before
+    /// the controller claims the durable cross-controller repair lease. If a
+    /// controller is killed while merely waiting for this local lock, it must
+    /// not strand a 60-second lease that delays the replacement controller's
+    /// first legal repair opportunity.
+    #[tokio::test]
+    async fn orphan_repair_waiting_on_local_lock_does_not_claim_durable_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-sweep-lock-before-lease-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store = Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let coord: Arc<dyn o3k_store::CoordinationRepository> = store.clone();
+        let projector = Arc::new(CapCountingProjector::default());
+        let service = Arc::new(
+            ComputeService::new_for_test(store, Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector)
+                .with_coordination(
+                    coord.clone(),
+                    o3k_store::ControllerId::new("ctrl-a"),
+                    o3k_store::ControllerEpoch::new("epoch-a"),
+                ),
+        );
+
+        let held = service.orphan_repair_lock_guard().await;
+        let waiting_service = service.clone();
+        let pass = tokio::spawn(async move { waiting_service.run_orphan_repair_pass().await });
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert!(
+            coord
+                .inspect_work_lease("server-endpoint-orphan-repair")
+                .await?
+                .is_none(),
+            "a repair pass waiting on the local lock must not strand a durable lease"
+        );
+
+        drop(held);
+        pass.await??;
+        assert!(
+            coord
+                .inspect_work_lease("server-endpoint-orphan-repair")
+                .await?
+                .is_none(),
+            "a completed repair pass must release its durable lease"
         );
         std::fs::remove_file(database_path)?;
         Ok(())
