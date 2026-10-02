@@ -14,10 +14,9 @@
 //! gate (three independent KVM/libvirt hosts) remains SPEC-0049's
 //! promotion requirement.
 //!
-//! Phase 1 of the shared-provider migration: this test pins the tag on
-//! O3K's toolchain before any production code depends on it. The
-//! `linux_fabric` migration onto `LinuxFabricProvider` follows in bounded
-//! phases; until then this gate proves the pinned revision continuously.
+//! The O3K Linux executor keeps its realm/TAP anti-spoof boundary locally and
+//! uses the pinned provider contract as the shared WireGuard/VXLAN substrate
+//! reference. This gate proves that pinned substrate continuously.
 
 use fabric_conformance::run_suite;
 

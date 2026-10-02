@@ -9,16 +9,22 @@ impl super::LinuxFabricBackend {
             bridge: format!("o3k-b-{}", &suffix[..8]),
             host_veth: format!("o3k-h-{}", &suffix[..8]),
             realm_veth: format!("o3k-n-{}", &suffix[..8]),
-            fabric_veth: format!("o3k-f-{}", &suffix[..8]),
-            fabric_realm_veth: format!("o3k-x-{}", &suffix[..8]),
+            // The v3 VXLAN bridge uses its own per-realm root/fabric veth
+            // pair.  These legacy v2 fan-out fields remain in the durable
+            // shape only so old state can be rejected rather than adopted.
+            fabric_veth: String::new(),
+            fabric_realm_veth: String::new(),
             public_host_veth: format!("o3k-p-{}", &suffix[..8]),
             public_realm_veth: format!("o3k-q-{}", &suffix[..8]),
             geneve: BTreeMap::new(),
+            vxlan: None,
             attachments: BTreeMap::new(),
             endpoint_taps: BTreeMap::new(),
             pending_endpoint_taps: BTreeMap::new(),
             policy_generation: 0,
             policy_fingerprint: String::new(),
+            anti_spoof_generation: 0,
+            anti_spoof_fingerprint: String::new(),
             public_generation: 0,
             public_fingerprint: String::new(),
             public_mark: 0,
@@ -35,11 +41,14 @@ impl super::LinuxFabricBackend {
         let mut ownership = self.realm_ownership(plan);
         if let Some(existing) = self.state.realms.get(&plan.realm_id) {
             ownership.geneve = existing.geneve.clone();
+            ownership.vxlan = existing.vxlan.clone();
             ownership.attachments = existing.attachments.clone();
             ownership.endpoint_taps = existing.endpoint_taps.clone();
             ownership.pending_endpoint_taps = existing.pending_endpoint_taps.clone();
             ownership.policy_generation = existing.policy_generation;
             ownership.policy_fingerprint = existing.policy_fingerprint.clone();
+            ownership.anti_spoof_generation = existing.anti_spoof_generation;
+            ownership.anti_spoof_fingerprint = existing.anti_spoof_fingerprint.clone();
             if !existing.public_host_veth.is_empty() {
                 ownership.public_host_veth = existing.public_host_veth.clone();
             }
@@ -94,8 +103,6 @@ impl super::LinuxFabricBackend {
                 &ownership.bridge,
                 &ownership.host_veth,
                 &ownership.realm_veth,
-                &ownership.fabric_veth,
-                &ownership.fabric_realm_veth,
             ] {
                 let (interface_exists, _) = self
                     .command
@@ -123,34 +130,10 @@ impl super::LinuxFabricBackend {
                 ],
                 vec![
                     "link",
-                    "add",
-                    ownership.fabric_veth.as_str(),
-                    "type",
-                    "veth",
-                    "peer",
-                    "name",
-                    ownership.fabric_realm_veth.as_str(),
-                ],
-                vec![
-                    "link",
                     "set",
                     ownership.realm_veth.as_str(),
                     "netns",
                     ownership.namespace.as_str(),
-                ],
-                vec![
-                    "link",
-                    "set",
-                    ownership.fabric_veth.as_str(),
-                    "netns",
-                    ownership.namespace.as_str(),
-                ],
-                vec![
-                    "link",
-                    "set",
-                    ownership.fabric_realm_veth.as_str(),
-                    "netns",
-                    self.config.fabric_namespace.as_str(),
                 ],
                 vec![
                     "link",
@@ -189,23 +172,6 @@ impl super::LinuxFabricBackend {
             {
                 return Err(LinuxFabricError::CommandFailed);
             }
-            for (namespace, interface) in [
-                (&ownership.namespace, &ownership.fabric_veth),
-                (&self.config.fabric_namespace, &ownership.fabric_realm_veth),
-            ] {
-                if !self
-                    .command
-                    .run(
-                        "ip",
-                        &[
-                            "netns", "exec", namespace, "ip", "link", "set", interface, "up",
-                        ],
-                    )
-                    .map_err(LinuxFabricError::Storage)?
-                {
-                    return Err(LinuxFabricError::CommandFailed);
-                }
-            }
             if !self
                 .command
                 .run(
@@ -228,7 +194,6 @@ impl super::LinuxFabricBackend {
             store_state(&self.state_path, &self.state)?;
         }
         let tenant_mtu = plan.tenant_mtu.to_string();
-        let fabric_mtu = plan.local_fabric_mtu.to_string();
         let gateway = u32::from(plan.realm_prefix.network)
             .checked_add(1)
             .map(std::net::Ipv4Addr::from)
@@ -255,15 +220,6 @@ impl super::LinuxFabricBackend {
         {
             return Err(LinuxFabricError::CommandFailed);
         }
-        // Enable proxy ARP on the gateway so tenant VMs can reach remote realm
-        // endpoints (hosted on other physical hosts) through the gateway.
-        let _ = self.command.run(
-            "sysctl",
-            &[
-                "-w",
-                &format!("net.ipv4.conf.{}.proxy_arp=1", ownership.realm_veth),
-            ],
-        );
         for interface in [&ownership.bridge, &ownership.host_veth] {
             if !self
                 .command
@@ -273,23 +229,11 @@ impl super::LinuxFabricBackend {
                 return Err(LinuxFabricError::CommandFailed);
             }
         }
-        for (namespace, interface, mtu) in [
-            (
-                ownership.namespace.as_str(),
-                ownership.realm_veth.as_str(),
-                tenant_mtu.as_str(),
-            ),
-            (
-                ownership.namespace.as_str(),
-                ownership.fabric_veth.as_str(),
-                fabric_mtu.as_str(),
-            ),
-            (
-                self.config.fabric_namespace.as_str(),
-                ownership.fabric_realm_veth.as_str(),
-                fabric_mtu.as_str(),
-            ),
-        ] {
+        for (namespace, interface, mtu) in [(
+            ownership.namespace.as_str(),
+            ownership.realm_veth.as_str(),
+            tenant_mtu.as_str(),
+        )] {
             if !self
                 .command
                 .run(
@@ -311,6 +255,15 @@ impl super::LinuxFabricBackend {
         plan: &NamespacedRoutedFabricPlan,
         ownership: &RealmOwnership,
     ) -> Result<(), LinuxFabricError> {
+        // P11 v3 is a literal stretched L2 segment.  Remote endpoint
+        // reachability is provided by VXLAN learning/HER and real guest ARP;
+        // v2 per-peer /32 routes and synthetic neighbor entries must not be
+        // recreated.  The routed realm gateway remains available for the
+        // existing north/south provider path, but it is not used to steer
+        // same-realm traffic.
+        if ownership.vxlan.is_some() {
+            return Ok(());
+        }
         for route in &plan.routes {
             let attachment = ownership
                 .attachments

@@ -1,9 +1,8 @@
 //! Portable P11 fabric realization and conformance seam.
 //!
 //! This module deliberately models provider-owned state without invoking host
-//! commands. The Linux/WireGuard backend can implement [`FabricBackend`]
-//! later while retaining the same generation, route, peer, and neighbor
-//! invariants.
+//! commands. The Linux/WireGuard backend realizes the same generation, route,
+//! peer, and neighbor invariants with the accepted VXLAN/HER dataplane.
 
 use crate::{NodeNetworkPlan, execution::NetworkPlanRealizer};
 use o3k_domain::{NamespacedRoutedFabricPlan, NeighborResolution};
@@ -241,12 +240,12 @@ mod tests {
         let binding = RealmEncapsulationBinding {
             fabric_domain_id: Uuid::from_u128(100),
             realm_id: realm.id,
-            provider_kind: FabricProviderKind::Geneve,
+            provider_kind: FabricProviderKind::Vxlan,
             provider_segment_id: 101,
             binding_generation: directory_generation,
         };
         let fabric = directory
-            .compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding)
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1370, &binding)
             .expect("fabric plan");
         let operation_id = Uuid::from_u128(directory_generation as u128 + 10);
         let mut plan = NodeNetworkPlan {
@@ -280,7 +279,7 @@ mod tests {
             realizer
                 .backend()
                 .resolve_neighbor(Ipv4Addr::new(10, 40, 1, 12)),
-            NeighborResolution::RemoteRealmProxyMac(_)
+            NeighborResolution::RemoteActualMac(_)
         ));
         assert_eq!(
             realizer

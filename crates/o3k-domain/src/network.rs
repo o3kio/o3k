@@ -276,7 +276,10 @@ pub struct RealmEndpointDirectory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NeighborResolution {
     LocalActualMac(String),
-    RemoteRealmProxyMac(String),
+    /// The canonical MAC of a current endpoint on another enrolled host.
+    /// VXLAN stretches the realm L2 segment, so ARP is answered by the
+    /// endpoint itself and no realm proxy MAC is synthesized.
+    RemoteActualMac(String),
     Unknown,
 }
 
@@ -314,8 +317,9 @@ pub struct FabricEndpointRoute {
 
 /// Provider-derived public peer state for the shared host fabric. WireGuard
 /// routes only the unique provider transport address, never tenant endpoint
-/// prefixes. Realm and endpoint destinations are selected by Geneve-aware
-/// provider state above this transport.
+/// prefixes. Realm and endpoint destinations are selected by the realm VNI and
+/// canonical endpoint directory; the shared WireGuard peer routes only host
+/// transport addresses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FabricPeer {
     pub host_id: String,
@@ -328,6 +332,9 @@ pub struct FabricPeer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FabricProviderKind {
+    Vxlan,
+    /// Historical v2 value retained only for deserializing old plans.  New
+    /// plans must use `vxlan`; the Linux executor rejects Geneve state.
     Geneve,
 }
 
@@ -343,7 +350,8 @@ pub struct RealmEncapsulationBinding {
     pub binding_generation: u64,
 }
 
-/// Provider-independent metadata that a Geneve executor must authenticate and
+/// Legacy provider-independent metadata retained only to deserialize v2 plans;
+/// the v3 Linux executor does not use it. A v3 ingress path must authenticate and
 /// validate before accepting or emitting a known-unicast packet. The inner IP
 /// is deliberately accompanied by realm, endpoint, placement, and transport
 /// identity; it is never sufficient on its own.
@@ -409,7 +417,7 @@ impl RealmEncapsulationBinding {
 pub enum RealmBindingError {
     #[error("realm encapsulation binding has an invalid identity")]
     InvalidIdentity,
-    #[error("realm encapsulation provider segment is outside the Geneve VNI range")]
+    #[error("realm encapsulation provider segment is outside the VXLAN VNI range")]
     InvalidSegment,
     #[error("realm encapsulation binding generation must be non-zero")]
     InvalidGeneration,
@@ -425,7 +433,7 @@ pub enum RealmBindingError {
 
 /// Small, serializable semantic registry for the durable realm-to-provider
 /// mapping. A persistence adapter must store this state before mutating
-/// Geneve objects; the registry itself never observes kernel state.
+/// VXLAN objects; the registry itself never observes kernel state.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RealmEncapsulationRegistry {
     pub bindings: Vec<RealmEncapsulationBinding>,
@@ -721,7 +729,7 @@ impl RealmEncapsulationRegistry {
         let binding = RealmEncapsulationBinding {
             fabric_domain_id,
             realm_id,
-            provider_kind: FabricProviderKind::Geneve,
+            provider_kind: FabricProviderKind::Vxlan,
             provider_segment_id: segment,
             binding_generation,
         };
@@ -923,7 +931,7 @@ impl RealmEndpointDirectory {
         if entry.selected_host == local_host {
             NeighborResolution::LocalActualMac(entry.mac.clone())
         } else {
-            NeighborResolution::RemoteRealmProxyMac(self.proxy_mac.clone())
+            NeighborResolution::RemoteActualMac(entry.mac.clone())
         }
     }
 
@@ -1002,7 +1010,8 @@ impl RealmEndpointDirectory {
     /// Compiles the accepted directory and public host identities into one
     /// host/realm semantic plan. The local host is never emitted as a fabric
     /// peer; peer transport identity is the unique host-fabric address, while
-    /// endpoint /32 routes remain realm-scoped Geneve destinations.
+    /// endpoint /32 routes remain legacy metadata; v3 same-realm forwarding is
+    /// provided by VXLAN learning and HER.
     pub fn compile_fabric_plan(
         &self,
         local_identity: &FabricHostIdentity,
@@ -1013,13 +1022,21 @@ impl RealmEndpointDirectory {
         if local_identity.host_id.is_empty() {
             return Err(EndpointDirectoryError::MissingLocalFabricIdentity);
         }
-        if tenant_mtu == 0 || tenant_mtu > local_identity.fabric_mtu {
+        // The host transport is IPv4 WireGuard in the accepted edge profile:
+        // 60 bytes of WireGuard overhead followed by 50 bytes of VXLAN/L2
+        // encapsulation.  Keep the derivation explicit so a near-boundary
+        // packet cannot be admitted against an unverified conservative value.
+        let expected_local_fabric_mtu = local_identity.underlay_mtu.checked_sub(60);
+        let expected_tenant_mtu = expected_local_fabric_mtu.and_then(|mtu| mtu.checked_sub(50));
+        if expected_local_fabric_mtu != Some(local_identity.fabric_mtu)
+            || expected_tenant_mtu != Some(tenant_mtu)
+        {
             return Err(EndpointDirectoryError::InvalidMtu);
         }
-        if host_identities
-            .iter()
-            .any(|identity| tenant_mtu > identity.fabric_mtu)
-        {
+        if host_identities.iter().any(|identity| {
+            identity.fabric_mtu != identity.underlay_mtu.saturating_sub(60)
+                || identity.fabric_mtu != local_identity.fabric_mtu
+        }) {
             return Err(EndpointDirectoryError::InvalidMtu);
         }
         if host_identities
@@ -1166,7 +1183,7 @@ mod endpoint_directory_tests {
         );
         assert_eq!(
             directory.resolve_neighbor(Ipv4Addr::new(10, 40, 1, 12), "host-01"),
-            NeighborResolution::RemoteRealmProxyMac(directory.proxy_mac.clone())
+            NeighborResolution::RemoteActualMac("02:00:00:00:00:12".to_owned())
         );
         assert_eq!(
             directory.resolve_neighbor(Ipv4Addr::new(10, 40, 1, 99), "host-01"),
@@ -1279,7 +1296,7 @@ mod endpoint_directory_tests {
         let binding = RealmEncapsulationBinding {
             fabric_domain_id: Uuid::from_u128(100),
             realm_id: directory.realm_id,
-            provider_kind: FabricProviderKind::Geneve,
+            provider_kind: FabricProviderKind::Vxlan,
             provider_segment_id: 101,
             binding_generation: 1,
         };
@@ -1344,19 +1361,19 @@ mod endpoint_directory_tests {
         let binding = RealmEncapsulationBinding {
             fabric_domain_id: Uuid::from_u128(100),
             realm_id: directory.realm_id,
-            provider_kind: FabricProviderKind::Geneve,
+            provider_kind: FabricProviderKind::Vxlan,
             provider_segment_id: 101,
             binding_generation: 1,
         };
         let plan =
-            directory.compile_fabric_plan(&local, &[local.clone(), remote.clone()], 1400, &binding);
+            directory.compile_fabric_plan(&local, &[local.clone(), remote.clone()], 1370, &binding);
         assert!(plan.is_ok());
         let Some(plan) = plan.ok() else {
             return;
         };
         assert_eq!(plan.local_host, "host-01");
         assert_eq!(plan.local_fabric_generation, 8);
-        assert_eq!(plan.tenant_mtu, 1400);
+        assert_eq!(plan.tenant_mtu, 1370);
         assert_eq!(plan.routes.len(), 1);
         assert_eq!(plan.peers.len(), 1);
         assert_eq!(plan.peers[0].host_id, "host-07");
@@ -1387,7 +1404,7 @@ mod endpoint_directory_tests {
         assert_eq!(plan.routes[0].realm_id, directory.realm_id);
         assert_eq!(plan.routes[0].realm_binding_generation, 1);
         assert_eq!(
-            directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1400, &binding),
+            directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1370, &binding),
             Err(EndpointDirectoryError::MissingFabricIdentity)
         );
         assert_eq!(
@@ -1420,7 +1437,7 @@ mod endpoint_directory_tests {
         };
         assert_eq!(plan.validate_geneve_egress(&packet), Ok(()));
         let remote_plan = directory
-            .compile_fabric_plan(&remote, &[local, remote.clone()], 1400, &binding)
+            .compile_fabric_plan(&remote, &[local, remote.clone()], 1370, &binding)
             .expect("remote plan");
         assert_eq!(remote_plan.validate_geneve_ingress(&packet), Ok(()));
         let mut wrong_vni = packet.clone();
@@ -1607,20 +1624,20 @@ mod endpoint_directory_tests {
             public_key: "public-local".to_owned(),
             underlay_endpoint: "192.0.2.1:65001".to_owned(),
             fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
-            provider_version: "geneve-wireguard-v2".to_owned(),
+            provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 1,
             underlay_mtu: 1500,
-            fabric_mtu: 1400,
+            fabric_mtu: 1420,
         };
         let remote = FabricHostIdentity {
             host_id: "host-remote".to_owned(),
             public_key: "public-remote".to_owned(),
             underlay_endpoint: "192.0.2.2:65001".to_owned(),
             fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
-            provider_version: "geneve-wireguard-v2".to_owned(),
+            provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 1,
             underlay_mtu: 1500,
-            fabric_mtu: 1400,
+            fabric_mtu: 1420,
         };
         let mut registry = RealmEncapsulationRegistry::default();
         let binding_a = registry
@@ -1631,10 +1648,10 @@ mod endpoint_directory_tests {
             .expect("B binding");
         assert_ne!(binding_a.provider_segment_id, binding_b.provider_segment_id);
         let plan_a = directory_a
-            .compile_fabric_plan(&local, &[local.clone(), remote.clone()], 1300, &binding_a)
+            .compile_fabric_plan(&local, &[local.clone(), remote.clone()], 1370, &binding_a)
             .expect("A plan");
         let plan_b = directory_b
-            .compile_fabric_plan(&local, &[local.clone(), remote], 1300, &binding_b)
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1370, &binding_b)
             .expect("B plan");
         assert_eq!(plan_a.routes[0].destination, plan_b.routes[0].destination);
         assert_ne!(plan_a.routes[0].realm_id, plan_b.routes[0].realm_id);

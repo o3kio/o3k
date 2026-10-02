@@ -75,11 +75,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let binding = RealmEncapsulationBinding {
         fabric_domain_id: Uuid::from_u128(0x1300),
         realm_id: realm.id,
-        provider_kind: FabricProviderKind::Geneve,
+        provider_kind: FabricProviderKind::Vxlan,
         provider_segment_id: 101,
         binding_generation: 1,
     };
-    let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding)?;
+    let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1370, &binding)?;
     let mut provider = LinuxFabricBackend::open(LinuxFabricConfig::for_root(&root))?;
     provider.apply(&plan)?;
     if !provider.observe(&plan)? {

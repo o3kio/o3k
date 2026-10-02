@@ -1,6 +1,7 @@
 use o3k_kernel::{ActionId, LimitKey, ResourceType, ServiceNamespace};
 
 pub mod canonical_policy;
+pub mod anti_spoof;
 pub mod execution;
 pub mod fabric;
 pub mod gateway;
@@ -253,7 +254,7 @@ mod p9_plan_tests {
             encapsulation: RealmEncapsulationBinding {
                 fabric_domain_id: Uuid::from_u128(100),
                 realm_id: Uuid::from_u128(2),
-                provider_kind: FabricProviderKind::Geneve,
+                provider_kind: FabricProviderKind::Vxlan,
                 provider_segment_id: 101,
                 binding_generation: 1,
             },
@@ -275,7 +276,7 @@ mod p9_plan_tests {
                 }],
             },
             proxy_mac: "02:11:22:33:44:55".to_owned(),
-            tenant_mtu: 1400,
+            tenant_mtu: 1370,
             policy_generation: 1,
             policies: Vec::new(),
             policy_defaults: Vec::new(),

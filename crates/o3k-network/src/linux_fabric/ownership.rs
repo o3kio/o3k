@@ -8,6 +8,8 @@ pub(crate) struct FabricOwnership {
     pub(crate) fabric_transport_ip: std::net::Ipv4Addr,
     pub(crate) fabric_generation: u64,
     #[serde(default)]
+    pub(crate) fabric_mtu: u16,
+    #[serde(default)]
     pub(crate) managed_peers: BTreeSet<String>,
 }
 
@@ -18,6 +20,8 @@ pub(crate) struct RealmOwnership {
     pub(crate) bridge: String,
     pub(crate) host_veth: String,
     pub(crate) realm_veth: String,
+    /// Legacy v2 fan-out fields.  v3 leaves these empty and rejects any
+    /// populated value rather than adopting old Geneve state.
     pub(crate) fabric_veth: String,
     pub(crate) fabric_realm_veth: String,
     #[serde(default)]
@@ -26,6 +30,11 @@ pub(crate) struct RealmOwnership {
     pub(crate) public_realm_veth: String,
     #[serde(default)]
     pub(crate) geneve: BTreeMap<String, GeneveOwnership>,
+    /// One learning VXLAN and one fabric bridge per active realm.  The
+    /// bridge is connected to the realm L2 island through one veth pair;
+    /// HER membership is reconciled from the canonical endpoint directory.
+    #[serde(default)]
+    pub(crate) vxlan: Option<VxlanOwnership>,
     /// One isolated L2 attachment exists for every remote target host.  The
     /// shared fabric namespace therefore never needs a tenant-IP route table;
     /// overlapping realms are selected by their attachment and Geneve VNI.
@@ -39,6 +48,10 @@ pub(crate) struct RealmOwnership {
     pub(crate) policy_generation: u64,
     #[serde(default)]
     pub(crate) policy_fingerprint: String,
+    #[serde(default)]
+    pub(crate) anti_spoof_generation: u64,
+    #[serde(default)]
+    pub(crate) anti_spoof_fingerprint: String,
     #[serde(default)]
     pub(crate) public_generation: u64,
     #[serde(default)]
@@ -84,6 +97,20 @@ pub(crate) struct FabricAttachmentOwnership {
     pub(crate) fabric_veth: String,
     pub(crate) local_tunnel_mac: String,
     pub(crate) remote_tunnel_mac: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct VxlanOwnership {
+    pub(crate) interface: String,
+    pub(crate) bridge: String,
+    pub(crate) host_veth: String,
+    pub(crate) fabric_veth: String,
+    pub(crate) vni: u32,
+    pub(crate) binding_generation: u64,
+    pub(crate) local_transport_ip: std::net::Ipv4Addr,
+    pub(crate) tenant_mtu: u16,
+    #[serde(default)]
+    pub(crate) flood_peers: BTreeSet<std::net::Ipv4Addr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

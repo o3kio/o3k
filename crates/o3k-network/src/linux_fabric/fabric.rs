@@ -9,6 +9,9 @@ impl super::LinuxFabricBackend {
             if plan.local_fabric_generation != fabric.fabric_generation {
                 return Err(LinuxFabricError::OwnershipConflict);
             }
+            if plan.local_fabric_mtu != fabric.fabric_mtu {
+                return Err(LinuxFabricError::OwnershipConflict);
+            }
             if plan.local_fabric_transport_ip != fabric.fabric_transport_ip {
                 return Err(LinuxFabricError::OwnershipConflict);
             }
@@ -35,6 +38,28 @@ impl super::LinuxFabricBackend {
                     .run("ip", &["netns", "del", &self.config.fabric_namespace]);
                 self.state.fabric = None;
             } else {
+                let mtu = plan.local_fabric_mtu.to_string();
+                if !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            &self.config.fabric_namespace,
+                            "ip",
+                            "link",
+                            "set",
+                            "dev",
+                            &self.config.fabric_interface,
+                            "mtu",
+                            &mtu,
+                        ],
+                    )
+                    .map_err(LinuxFabricError::Storage)?
+                {
+                    return Err(LinuxFabricError::CommandFailed);
+                }
                 return Ok(());
             }
         }
@@ -106,6 +131,7 @@ impl super::LinuxFabricBackend {
             return Err(LinuxFabricError::CommandFailed);
         }
         let transport_ip = format!("{}/32", plan.local_fabric_transport_ip);
+        let fabric_mtu = plan.local_fabric_mtu.to_string();
         if !self
             .command
             .run(
@@ -153,9 +179,27 @@ impl super::LinuxFabricBackend {
                         "ip",
                         "addr",
                         "replace",
-                        &transport_ip,
+                    &transport_ip,
+                    "dev",
+                    &self.config.fabric_interface,
+                ],
+            )
+            .map_err(LinuxFabricError::Storage)?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "link",
+                        "set",
                         "dev",
                         &self.config.fabric_interface,
+                        "mtu",
+                        &fabric_mtu,
                     ],
                 )
                 .map_err(LinuxFabricError::Storage)?
@@ -309,6 +353,7 @@ impl super::LinuxFabricBackend {
             private_key_path: private_key_path.display().to_string(),
             fabric_transport_ip: plan.local_fabric_transport_ip,
             fabric_generation: plan.local_fabric_generation,
+            fabric_mtu: plan.local_fabric_mtu,
             managed_peers: BTreeSet::new(),
         });
         store_state(&self.state_path, &self.state)?;

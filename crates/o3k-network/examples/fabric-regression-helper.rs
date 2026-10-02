@@ -58,7 +58,7 @@ const LOCAL_ENDPOINT_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 10);
 /// Remote endpoint IPs (on reg-host-b).
 const REMOTE_ENDPOINT_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 20);
 
-const TENANT_MTU: u16 = 1400;
+const TENANT_MTU: u16 = 1370;
 const UNDERLAY_MTU: u16 = 1500;
 const FABRIC_MTU: u16 = 1420;
 const DIRECTORY_GENERATION: u64 = 1;
@@ -166,7 +166,7 @@ fn build_realm_plan(
     let binding = RealmEncapsulationBinding {
         fabric_domain_id: Uuid::from_u128(FABRIC_DOMAIN_ID),
         realm_id: realm.id,
-        provider_kind: FabricProviderKind::Geneve,
+        provider_kind: FabricProviderKind::Vxlan,
         provider_segment_id: vni,
         binding_generation: 1,
     };

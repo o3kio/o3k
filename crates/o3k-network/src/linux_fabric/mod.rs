@@ -6,8 +6,8 @@
 
 use crate::fabric::{FabricBackend, FabricError};
 use o3k_domain::{
-    FabricPeer, NamespacedRoutedFabricPlan, NetworkProtocol, PolicyAction, PolicyDirection,
-    PolicyStatefulMode,
+    FabricPeer, FabricProviderKind, NamespacedRoutedFabricPlan, NetworkProtocol, PolicyAction,
+    PolicyDirection, PolicyStatefulMode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,7 +29,8 @@ mod ownership;
 mod persistence;
 
 mod fabric;
-mod geneve;
+mod vxlan;
+mod anti_spoof;
 mod policy;
 mod public_;
 mod realm;
@@ -251,6 +252,11 @@ impl LinuxFabricBackend {
                 || fabric.fabric_transport_ip.is_unspecified()
                 || fabric.fabric_transport_ip.is_loopback()
                 || fabric.fabric_generation == 0
+                || fabric.fabric_mtu == 0
+                || self
+                    .plans
+                    .values()
+                    .any(|plan| plan.local_fabric_mtu != fabric.fabric_mtu)
                 || Path::new(&fabric.private_key_path).parent() != Some(self.config.root.as_path()))
         {
             return Err(LinuxFabricError::CorruptState);
@@ -268,6 +274,14 @@ impl LinuxFabricBackend {
                 || plan.local_fabric_generation != ownership.local_fabric_generation
             {
                 return Err(LinuxFabricError::CorruptState);
+            }
+            if matches!(
+                plan.encapsulation.provider_kind,
+                FabricProviderKind::Vxlan
+            ) && (!ownership.fabric_veth.is_empty()
+                || !ownership.fabric_realm_veth.is_empty())
+            {
+                return Err(LinuxFabricError::ForeignState);
             }
             for (target_host, geneve) in &ownership.geneve {
                 if target_host != &geneve.target_host
@@ -303,6 +317,44 @@ impl LinuxFabricBackend {
                 {
                     return Err(LinuxFabricError::CorruptState);
                 }
+            }
+            if let Some(vxlan) = &ownership.vxlan {
+                if !valid_name(&vxlan.interface)
+                    || !valid_name(&vxlan.bridge)
+                    || !valid_name(&vxlan.host_veth)
+                    || !valid_name(&vxlan.fabric_veth)
+                    || vxlan.vni == 0
+                    || vxlan.vni > 0x00ff_ffff
+                    || vxlan.binding_generation == 0
+                    || vxlan.vni != plan.encapsulation.provider_segment_id
+                    || vxlan.binding_generation != plan.encapsulation.binding_generation
+                    || vxlan.local_transport_ip != plan.local_fabric_transport_ip
+                    || vxlan.tenant_mtu != plan.tenant_mtu
+                    || vxlan.local_transport_ip.is_unspecified()
+                    || vxlan.local_transport_ip.is_loopback()
+                    || vxlan.tenant_mtu == 0
+                    || vxlan.flood_peers.contains(&vxlan.local_transport_ip)
+                    || vxlan
+                        .flood_peers
+                        .iter()
+                        .any(|peer| peer.is_unspecified() || peer.is_loopback())
+                    || vxlan.flood_peers
+                        != plan
+                            .peers
+                            .iter()
+                            .map(|peer| peer.fabric_transport_ip)
+                            .collect::<BTreeSet<_>>()
+                {
+                    return Err(LinuxFabricError::CorruptState);
+                }
+            }
+            if ownership.anti_spoof_generation == 0
+                && !ownership.anti_spoof_fingerprint.is_empty()
+                || ownership.anti_spoof_generation > plan.directory_generation
+                || (ownership.anti_spoof_generation > 0
+                    && ownership.anti_spoof_fingerprint.is_empty())
+            {
+                return Err(LinuxFabricError::CorruptState);
             }
             for (endpoint_id, tap) in &ownership.endpoint_taps {
                 if endpoint_id != &tap.endpoint_id
@@ -408,8 +460,9 @@ impl FabricBackend for LinuxFabricBackend {
         self.persist_plan(plan)?;
         self.ensure_realm(plan)?;
         self.configure_peers()?;
-        self.ensure_geneve(plan)?;
+        self.ensure_vxlan(plan)?;
         self.ensure_endpoint_taps(plan)?;
+        self.ensure_anti_spoof(plan)?;
         self.ensure_policy(plan)?;
         self.ensure_public(plan)?;
         let ownership = self
@@ -434,6 +487,7 @@ impl FabricBackend for LinuxFabricBackend {
         }
         self.remove_public(plan)?;
         self.remove_policy(plan)?;
+        self.remove_anti_spoof(plan, &ownership)?;
         for tap in ownership.endpoint_taps.values() {
             self.remove_endpoint_tap(tap, &ownership.bridge)?;
         }
@@ -442,53 +496,7 @@ impl FabricBackend for LinuxFabricBackend {
                 self.remove_endpoint_tap(tap, &ownership.bridge)?;
             }
         }
-        for geneve in ownership.geneve.values() {
-            self.remove_geneve_attachment(geneve, &ownership.namespace)?;
-            let (exists, output) = self
-                .command
-                .output(
-                    "ip",
-                    &[
-                        "netns",
-                        "exec",
-                        &self.config.fabric_namespace,
-                        "ip",
-                        "-d",
-                        "link",
-                        "show",
-                        "dev",
-                        &geneve.interface,
-                    ],
-                )
-                .map_err(LinuxFabricError::Storage)?;
-            if exists {
-                if !geneve_link_matches(&output, geneve, self.config.geneve_port) {
-                    return Err(FabricError::Backend(
-                        LinuxFabricError::ForeignState.to_string(),
-                    ));
-                }
-                if !self
-                    .command
-                    .run(
-                        "ip",
-                        &[
-                            "netns",
-                            "exec",
-                            &self.config.fabric_namespace,
-                            "ip",
-                            "link",
-                            "del",
-                            &geneve.interface,
-                        ],
-                    )
-                    .map_err(LinuxFabricError::Storage)?
-                {
-                    return Err(FabricError::Backend(
-                        LinuxFabricError::CommandFailed.to_string(),
-                    ));
-                }
-            }
-        }
+        self.remove_vxlan(plan, &ownership)?;
         let commands = [
             vec![
                 "netns",
@@ -648,12 +656,12 @@ mod tests {
         let binding = RealmEncapsulationBinding {
             fabric_domain_id: Uuid::from_u128(100),
             realm_id: realm.id,
-            provider_kind: FabricProviderKind::Geneve,
+            provider_kind: FabricProviderKind::Vxlan,
             provider_segment_id: 101,
             binding_generation: 3,
         };
         directory
-            .compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding)
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1370, &binding)
             .expect("plan")
     }
 
@@ -707,20 +715,18 @@ mod tests {
                 .iter()
                 .any(|(program, args)| program == "wg" && args == &["genkey"])
         );
-        let interface = geneve_name(plan().realm_id, "host-b");
+        let interface = vxlan_name(plan().realm_id);
         assert!(calls.iter().any(|(program, args)| {
             program == "ip"
-                && args.windows(8).any(|window| {
+                && args.windows(6).any(|window| {
                     window
                         == [
                             "type",
-                            "geneve",
+                            "vxlan",
                             "id",
                             "101",
-                            "remote",
-                            "198.18.0.2",
                             "dstport",
-                            "6081",
+                            "4789",
                         ]
                 })
                 && args.iter().any(|arg| arg == &interface)
@@ -735,35 +741,32 @@ mod tests {
             args.windows(2)
                 .any(|window| window == ["allowed-ips", "10.40.1.12/32"])
         }));
-        let remote_tunnel_mac = tunnel_mac(plan().realm_id, "host-b");
-        let attachment = provider
+        let vxlan = provider
             .state
             .realms
             .get(&plan().realm_id)
-            .and_then(|realm| realm.attachments.get("host-b"))
-            .expect("remote attachment");
+            .and_then(|realm| realm.vxlan.as_ref())
+            .expect("vxlan ownership");
+        assert_eq!(vxlan.vni, 101);
+        assert_eq!(
+            vxlan.flood_peers,
+            BTreeSet::from([Ipv4Addr::new(198, 18, 0, 2)])
+        );
         assert!(calls.iter().any(|(program, args)| {
             program == "ip"
-                && args.windows(4).any(|window| {
-                    window == ["lladdr", remote_tunnel_mac.as_str(), "nud", "permanent"]
-                })
-                && args.last() == Some(&attachment.realm_veth)
+                && args.contains(&"fdb".to_owned())
+                && args.contains(&"append".to_owned())
+                && args.contains(&"00:00:00:00:00:00".to_owned())
+                && args.contains(&"198.18.0.2".to_owned())
         }));
         assert!(calls.iter().any(|(program, args)| {
-            program == "ip"
-                && args.contains(&"bridge".to_owned())
-                && args
-                    .windows(2)
-                    .any(|window| window == ["replace", remote_tunnel_mac.as_str()])
-        }));
-        assert!(calls.iter().any(|(program, args)| {
-            program == "ip" && args.windows(2).any(|window| window == ["mtu", "1400"])
+            program == "ip" && args.windows(2).any(|window| window == ["mtu", "1370"])
         }));
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn provider_uses_static_fdb_entries_not_permanent() {
+    fn provider_reconciles_bounded_her_entries() {
         let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
@@ -775,29 +778,19 @@ mod tests {
                 .expect("provider");
         provider.apply(&plan()).expect("apply");
         let calls = command_for_assertion.calls.lock().expect("calls");
-        let remote_mac = tunnel_mac(plan().realm_id, "host-b");
-        let local_mac = tunnel_mac(plan().realm_id, "host-a");
-        // Every bridge FDB replace must use "static" not "permanent",
-        // because "permanent" on a bridge port's own MAC creates a local
-        // entry that consumes frames instead of forwarding them.
         let bridge_calls: Vec<_> = calls
             .iter()
             .filter(|(prog, args)| {
                 prog == "ip"
-                    && args.contains(&"bridge".to_owned())
                     && args.contains(&"fdb".to_owned())
-                    && args.contains(&"replace".to_owned())
-                    && (args.iter().any(|a| a == remote_mac.as_str())
-                        || args.iter().any(|a| a == local_mac.as_str()))
+                    && args.contains(&"append".to_owned())
+                    && args.contains(&"00:00:00:00:00:00".to_owned())
             })
             .collect();
         assert!(!bridge_calls.is_empty(), "no bridge fdb calls found");
-        for (_, args) in &bridge_calls {
-            assert!(
-                args.contains(&"static".to_owned()),
-                "bridge FDB uses permanent instead of static — run 45 regression"
-            );
-        }
+        assert!(bridge_calls.iter().all(|(_, args)| {
+            !args.contains(&"static".to_owned()) && !args.contains(&"permanent".to_owned())
+        }));
         let _ = fs::remove_dir_all(root);
     }
 
