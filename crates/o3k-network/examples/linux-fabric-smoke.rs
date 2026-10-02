@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider_version: "wireguard-v1".to_owned(),
         fabric_generation: 1,
         underlay_mtu: 1500,
-        fabric_mtu: 1420,
+        fabric_mtu: 1440,
     };
     let remote = FabricHostIdentity {
         host_id: "smoke-remote".to_owned(),
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider_version: "wireguard-v1".to_owned(),
         fabric_generation: 1,
         underlay_mtu: 1500,
-        fabric_mtu: 1420,
+        fabric_mtu: 1440,
     };
     let binding = RealmEncapsulationBinding {
         fabric_domain_id: Uuid::from_u128(0x1300),
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider_segment_id: 101,
         binding_generation: 1,
     };
-    let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1370, &binding)?;
+    let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1390, &binding)?;
     let mut provider = LinuxFabricBackend::open(LinuxFabricConfig::for_root(&root))?;
     provider.apply(&plan)?;
     if !provider.observe(&plan)? {

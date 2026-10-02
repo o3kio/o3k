@@ -225,7 +225,7 @@ mod tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: directory_generation,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         };
         let remote = FabricHostIdentity {
             host_id: "node-b".to_owned(),
@@ -235,7 +235,7 @@ mod tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: directory_generation,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         };
         let binding = RealmEncapsulationBinding {
             fabric_domain_id: Uuid::from_u128(100),
@@ -245,7 +245,7 @@ mod tests {
             binding_generation: directory_generation,
         };
         let fabric = directory
-            .compile_fabric_plan(&local, &[local.clone(), remote], 1370, &binding)
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1390, &binding)
             .expect("fabric plan");
         let operation_id = Uuid::from_u128(directory_generation as u128 + 10);
         let mut plan = NodeNetworkPlan {

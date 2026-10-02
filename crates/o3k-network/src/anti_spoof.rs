@@ -54,11 +54,13 @@ pub enum IngressRejection {
 /// The key includes the realm so overlapping tenant CIDRs remain isolated.
 /// Callers should treat every error as a drop and increment the corresponding
 /// bounded provider counter.
-pub fn validate_ingress(
-    endpoints: &BTreeMap<(String, Ipv4Addr), EndpointIdentity>,
+pub fn validate_ingress<'a>(
+    endpoints: &'a BTreeMap<(String, Ipv4Addr), EndpointIdentity>,
     ingress: &IngressIdentity,
-) -> Result<&EndpointIdentity, IngressRejection> {
-    let realm_exists = endpoints.keys().any(|(realm, _)| realm == &ingress.realm_id);
+) -> Result<&'a EndpointIdentity, IngressRejection> {
+    let realm_exists = endpoints
+        .keys()
+        .any(|(realm, _)| realm == &ingress.realm_id);
     if !realm_exists {
         return Err(IngressRejection::UnknownRealm);
     }
@@ -79,7 +81,10 @@ pub fn validate_ingress(
     {
         return Err(IngressRejection::WrongArpSenderMac);
     }
-    if ingress.arp_sender_ip.is_some_and(|ip| ip != endpoint.fixed_ip) {
+    if ingress
+        .arp_sender_ip
+        .is_some_and(|ip| ip != endpoint.fixed_ip)
+    {
         return Err(IngressRejection::WrongArpSenderIp);
     }
     if endpoint.placement_generation != ingress.placement_generation {
@@ -101,18 +106,31 @@ fn mac_equal(left: &str, right: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::type_complexity,
+    clippy::unwrap_used
+)]
 mod tests {
     use super::*;
 
     fn snapshot() -> BTreeMap<(String, Ipv4Addr), EndpointIdentity> {
         let mut map = BTreeMap::new();
-        for (realm, host, mac) in [("a", "h1", "02:00:00:00:00:0a"), ("b", "h2", "02:00:00:00:00:0b")] {
+        for (realm, host, mac) in [
+            ("a", "h1", "02:00:00:00:00:0a"),
+            ("b", "h2", "02:00:00:00:00:0b"),
+        ] {
             let ep = EndpointIdentity {
-                realm_id: realm.into(), endpoint_id: format!("{realm}-ep"),
-                fixed_ip: "10.0.0.10".parse().unwrap(), canonical_mac: mac.into(),
-                host_id: host.into(), placement_generation: 3,
-                source_host_generation: 4, binding_generation: 5, vni: if realm == "a" { 100 } else { 200 },
+                realm_id: realm.into(),
+                endpoint_id: format!("{realm}-ep"),
+                fixed_ip: "10.0.0.10".parse().unwrap(),
+                canonical_mac: mac.into(),
+                host_id: host.into(),
+                placement_generation: 3,
+                source_host_generation: 4,
+                binding_generation: 5,
+                vni: if realm == "a" { 100 } else { 200 },
             };
             map.insert((realm.into(), ep.fixed_ip), ep);
         }
@@ -120,11 +138,23 @@ mod tests {
     }
 
     fn ingress(realm: &str) -> IngressIdentity {
-        IngressIdentity { realm_id: realm.into(), source_host: if realm == "a" { "h1" } else { "h2" }.into(),
-            source_host_generation: 4, vni: if realm == "a" { 100 } else { 200 },
-            source_mac: if realm == "a" { "02:00:00:00:00:0a" } else { "02:00:00:00:00:0b" }.into(),
-            source_ip: "10.0.0.10".parse().unwrap(), arp_sender_mac: None, arp_sender_ip: None,
-            placement_generation: 3, binding_generation: 5 }
+        IngressIdentity {
+            realm_id: realm.into(),
+            source_host: if realm == "a" { "h1" } else { "h2" }.into(),
+            source_host_generation: 4,
+            vni: if realm == "a" { 100 } else { 200 },
+            source_mac: if realm == "a" {
+                "02:00:00:00:00:0a"
+            } else {
+                "02:00:00:00:00:0b"
+            }
+            .into(),
+            source_ip: "10.0.0.10".parse().unwrap(),
+            arp_sender_mac: None,
+            arp_sender_ip: None,
+            placement_generation: 3,
+            binding_generation: 5,
+        }
     }
 
     #[test]
@@ -132,25 +162,61 @@ mod tests {
         let s = snapshot();
         assert!(validate_ingress(&s, &ingress("a")).is_ok());
         assert!(validate_ingress(&s, &ingress("b")).is_ok());
-        let mut i = ingress("a"); i.source_mac = "02:00:00:00:00:0b".into();
-        assert_eq!(validate_ingress(&s, &i), Err(IngressRejection::WrongSourceMac));
+        let mut i = ingress("a");
+        i.source_mac = "02:00:00:00:00:0b".into();
+        assert_eq!(
+            validate_ingress(&s, &i),
+            Err(IngressRejection::WrongSourceMac)
+        );
     }
 
     #[test]
     fn rejects_mac_ip_arp_vni_host_and_generations() {
         let s = snapshot();
         let cases: [(fn(&mut IngressIdentity), IngressRejection); 8] = [
-            (|i: &mut IngressIdentity| i.source_mac = "02:00:00:00:00:ff".into(), IngressRejection::WrongSourceMac),
-            (|i: &mut IngressIdentity| i.source_ip = "10.0.0.11".parse().unwrap(), IngressRejection::UnknownEndpoint),
-            (|i: &mut IngressIdentity| i.arp_sender_mac = Some("02:00:00:00:00:ff".into()), IngressRejection::WrongArpSenderMac),
-            (|i: &mut IngressIdentity| i.vni = 999, IngressRejection::WrongVni),
-            (|i: &mut IngressIdentity| i.source_host = "h9".into(), IngressRejection::WrongSourceHost),
-            (|i: &mut IngressIdentity| i.placement_generation = 9, IngressRejection::StalePlacementGeneration),
-            (|i: &mut IngressIdentity| i.source_host_generation = 9, IngressRejection::StaleSourceHostGeneration),
-            (|i: &mut IngressIdentity| i.binding_generation = 9, IngressRejection::StaleBindingGeneration),
+            (
+                |i: &mut IngressIdentity| i.source_mac = "02:00:00:00:00:ff".into(),
+                IngressRejection::WrongSourceMac,
+            ),
+            (
+                |i: &mut IngressIdentity| i.source_ip = "10.0.0.11".parse().unwrap(),
+                IngressRejection::UnknownEndpoint,
+            ),
+            (
+                |i: &mut IngressIdentity| i.arp_sender_mac = Some("02:00:00:00:00:ff".into()),
+                IngressRejection::WrongArpSenderMac,
+            ),
+            (
+                |i: &mut IngressIdentity| i.vni = 999,
+                IngressRejection::WrongVni,
+            ),
+            (
+                |i: &mut IngressIdentity| i.source_host = "h9".into(),
+                IngressRejection::WrongSourceHost,
+            ),
+            (
+                |i: &mut IngressIdentity| i.placement_generation = 9,
+                IngressRejection::StalePlacementGeneration,
+            ),
+            (
+                |i: &mut IngressIdentity| i.source_host_generation = 9,
+                IngressRejection::StaleSourceHostGeneration,
+            ),
+            (
+                |i: &mut IngressIdentity| i.binding_generation = 9,
+                IngressRejection::StaleBindingGeneration,
+            ),
         ];
-        for (mutator, expected) in cases { let mut i = ingress("a"); mutator(&mut i); assert_eq!(validate_ingress(&s, &i), Err(expected)); }
-        let mut arp = ingress("a"); arp.arp_sender_ip = Some("10.0.0.11".parse().unwrap());
-        assert_eq!(validate_ingress(&s, &arp), Err(IngressRejection::WrongArpSenderIp));
+        for (mutator, expected) in cases {
+            let mut i = ingress("a");
+            mutator(&mut i);
+            assert_eq!(validate_ingress(&s, &i), Err(expected));
+        }
+        let mut arp = ingress("a");
+        arp.arp_sender_ip = Some("10.0.0.11".parse().unwrap());
+        assert_eq!(
+            validate_ingress(&s, &arp),
+            Err(IngressRejection::WrongArpSenderIp)
+        );
     }
 }

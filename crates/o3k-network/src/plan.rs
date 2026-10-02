@@ -125,7 +125,11 @@ impl NodeNetworkPlan {
         {
             return Err(NetworkPlanError::InvalidFabricPlan);
         }
-        if fabric.peers.iter().any(|peer| peer.host_id.is_empty() || peer.fabric_transport_ip.is_unspecified() || peer.fabric_transport_ip.is_loopback()) {
+        if fabric.peers.iter().any(|peer| {
+            peer.host_id.is_empty()
+                || peer.fabric_transport_ip.is_unspecified()
+                || peer.fabric_transport_ip.is_loopback()
+        }) {
             return Err(NetworkPlanError::InvalidFabricPlan);
         }
         if fabric

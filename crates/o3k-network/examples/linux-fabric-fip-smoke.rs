@@ -110,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider_version: "wireguard-v1".to_owned(),
         fabric_generation: 1,
         underlay_mtu: 1500,
-        fabric_mtu: 1420,
+        fabric_mtu: 1440,
     };
     let binding = RealmEncapsulationBinding {
         fabric_domain_id: Uuid::from_u128(0x5300),
@@ -120,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         binding_generation: 1,
     };
     let plan = directory
-        .compile_fabric_plan(&local, std::slice::from_ref(&local), 1370, &binding)?
+        .compile_fabric_plan(&local, std::slice::from_ref(&local), 1390, &binding)?
         .with_public_snapshot(vec![PublicAddressBindingIntent {
             id: Uuid::from_u128(0x5401),
             project_id: realm.project_id.clone(),

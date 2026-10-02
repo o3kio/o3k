@@ -42,7 +42,12 @@ impl LinuxFabricBackend {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        for entry in plan.directory.entries.iter().filter(|entry| entry.selected_host == plan.local_host) {
+        for entry in plan
+            .directory
+            .entries
+            .iter()
+            .filter(|entry| entry.selected_host == plan.local_host)
+        {
             validate_ingress(
                 &snapshot,
                 &IngressIdentity {
@@ -73,7 +78,13 @@ impl LinuxFabricBackend {
                         .entries
                         .iter()
                         .filter(|entry| entry.selected_host == plan.local_host)
-                        .map(|entry| (entry.endpoint_id, entry.fixed_ip, &entry.mac, entry.endpoint_generation, entry.placement_generation))
+                        .map(|entry| (
+                            entry.endpoint_id,
+                            entry.fixed_ip,
+                            &entry.mac,
+                            entry.endpoint_generation,
+                            entry.placement_generation
+                        ))
                         .collect::<Vec<_>>(),
                 ))
                 .map_err(|_| LinuxFabricError::CorruptState)?,
@@ -95,27 +106,50 @@ impl LinuxFabricBackend {
         if !listed.0
             && !self
                 .command
-                .run(
-                    "nft",
-                    &["add", "table", "bridge", table.as_str()],
-                )
+                .run("nft", &["add", "table", "bridge", table.as_str()])
                 .map_err(LinuxFabricError::Storage)?
         {
             return Err(LinuxFabricError::CommandFailed);
         }
 
         let chain = "forward";
-        if !listed.0 && !self.command.run(
-            "nft",
-            &["add", "chain", "bridge", table.as_str(), chain,
-              "{", "type", "filter", "hook", "forward", "priority", "0", ";", "policy", "accept", ";", "comment", MARKER, ";", "}"],
-        ).map_err(LinuxFabricError::Storage)? {
+        if !listed.0
+            && !self
+                .command
+                .run(
+                    "nft",
+                    &[
+                        "add",
+                        "chain",
+                        "bridge",
+                        table.as_str(),
+                        chain,
+                        "{",
+                        "type",
+                        "filter",
+                        "hook",
+                        "forward",
+                        "priority",
+                        "0",
+                        ";",
+                        "policy",
+                        "accept",
+                        ";",
+                        "comment",
+                        MARKER,
+                        ";",
+                        "}",
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
+        {
             return Err(LinuxFabricError::CommandFailed);
         }
-        if !self.command.run(
-            "nft",
-            &["flush", "chain", "bridge", table.as_str(), chain],
-        ).map_err(LinuxFabricError::Storage)? {
+        if !self
+            .command
+            .run("nft", &["flush", "chain", "bridge", table.as_str(), chain])
+            .map_err(LinuxFabricError::Storage)?
+        {
             return Err(LinuxFabricError::CommandFailed);
         }
         if let Some(vxlan) = realm.vxlan.as_ref() {
@@ -123,46 +157,158 @@ impl LinuxFabricBackend {
             // namespace.  Accept only canonical remote endpoint pairs (plus
             // DHCP discovery with the canonical source MAC), then fail closed
             // for every other frame arriving from that path.
-            for endpoint in plan.directory.entries.iter().filter(|entry| entry.selected_host != plan.local_host) {
+            for endpoint in plan
+                .directory
+                .entries
+                .iter()
+                .filter(|entry| entry.selected_host != plan.local_host)
+            {
                 let fixed_ip = endpoint.fixed_ip.to_string();
                 for rule in [
-                    vec!["iifname", vxlan.host_veth.as_str(), "ether", "saddr", endpoint.mac.as_str(), "ip", "saddr", fixed_ip.as_str(), "accept"],
-                    vec!["iifname", vxlan.host_veth.as_str(), "ether", "saddr", endpoint.mac.as_str(), "ip", "saddr", "0.0.0.0", "accept"],
-                    vec!["iifname", vxlan.host_veth.as_str(), "arp", "saddr", "ether", endpoint.mac.as_str(), "arp", "saddr", "ip", fixed_ip.as_str(), "accept"],
+                    vec![
+                        "iifname",
+                        vxlan.host_veth.as_str(),
+                        "ether",
+                        "saddr",
+                        endpoint.mac.as_str(),
+                        "ip",
+                        "saddr",
+                        fixed_ip.as_str(),
+                        "accept",
+                    ],
+                    vec![
+                        "iifname",
+                        vxlan.host_veth.as_str(),
+                        "ether",
+                        "saddr",
+                        endpoint.mac.as_str(),
+                        "ip",
+                        "saddr",
+                        "0.0.0.0",
+                        "accept",
+                    ],
+                    vec![
+                        "iifname",
+                        vxlan.host_veth.as_str(),
+                        "arp",
+                        "saddr",
+                        "ether",
+                        endpoint.mac.as_str(),
+                        "arp",
+                        "saddr",
+                        "ip",
+                        fixed_ip.as_str(),
+                        "accept",
+                    ],
                 ] {
                     let mut args = vec!["add", "rule", "bridge", table.as_str(), chain];
                     args.extend(rule);
-                    if !self.command.run("nft", &args).map_err(LinuxFabricError::Storage)? {
+                    if !self
+                        .command
+                        .run("nft", &args)
+                        .map_err(LinuxFabricError::Storage)?
+                    {
                         return Err(LinuxFabricError::CommandFailed);
                     }
                 }
             }
-            if !self.command.run(
-                "nft",
-                &["add", "rule", "bridge", table.as_str(), chain, "iifname", vxlan.host_veth.as_str(), "counter", "comment", MARKER, "drop"],
-            ).map_err(LinuxFabricError::Storage)? {
+            if !self
+                .command
+                .run(
+                    "nft",
+                    &[
+                        "add",
+                        "rule",
+                        "bridge",
+                        table.as_str(),
+                        chain,
+                        "iifname",
+                        vxlan.host_veth.as_str(),
+                        "counter",
+                        "comment",
+                        MARKER,
+                        "drop",
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
+            {
                 return Err(LinuxFabricError::CommandFailed);
             }
         }
-        for endpoint in plan.directory.entries.iter().filter(|entry| entry.selected_host == plan.local_host) {
+        for endpoint in plan
+            .directory
+            .entries
+            .iter()
+            .filter(|entry| entry.selected_host == plan.local_host)
+        {
             let Some(tap) = realm.endpoint_taps.get(&endpoint.endpoint_id) else {
                 return Err(LinuxFabricError::CorruptState);
             };
             let fixed_ip = endpoint.fixed_ip.to_string();
             for rule in [
-                vec!["iifname", tap.interface.as_str(), "ether", "saddr", "!=", endpoint.mac.as_str(), "counter", "comment", MARKER, "drop"],
-                vec!["iifname", tap.interface.as_str(), "ip", "saddr", "!=", fixed_ip.as_str(), "counter", "comment", MARKER, "drop"],
-                vec!["iifname", tap.interface.as_str(), "arp", "saddr", "ether", "!=", endpoint.mac.as_str(), "counter", "comment", MARKER, "drop"],
-                vec!["iifname", tap.interface.as_str(), "arp", "saddr", "ip", "!=", fixed_ip.as_str(), "counter", "comment", MARKER, "drop"],
+                vec![
+                    "iifname",
+                    tap.interface.as_str(),
+                    "ether",
+                    "saddr",
+                    "!=",
+                    endpoint.mac.as_str(),
+                    "counter",
+                    "comment",
+                    MARKER,
+                    "drop",
+                ],
+                vec![
+                    "iifname",
+                    tap.interface.as_str(),
+                    "ip",
+                    "saddr",
+                    "!=",
+                    fixed_ip.as_str(),
+                    "counter",
+                    "comment",
+                    MARKER,
+                    "drop",
+                ],
+                vec![
+                    "iifname",
+                    tap.interface.as_str(),
+                    "arp",
+                    "saddr",
+                    "ether",
+                    "!=",
+                    endpoint.mac.as_str(),
+                    "counter",
+                    "comment",
+                    MARKER,
+                    "drop",
+                ],
+                vec![
+                    "iifname",
+                    tap.interface.as_str(),
+                    "arp",
+                    "saddr",
+                    "ip",
+                    "!=",
+                    fixed_ip.as_str(),
+                    "counter",
+                    "comment",
+                    MARKER,
+                    "drop",
+                ],
             ] {
-                if !self.command.run(
-                    "nft",
-                    &["add", "rule", "bridge", table.as_str(), chain]
-                        .iter()
-                        .copied()
-                        .chain(rule.iter().copied())
-                        .collect::<Vec<_>>(),
-                ).map_err(LinuxFabricError::Storage)? {
+                if !self
+                    .command
+                    .run(
+                        "nft",
+                        &["add", "rule", "bridge", table.as_str(), chain]
+                            .iter()
+                            .copied()
+                            .chain(rule.iter().copied())
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(LinuxFabricError::Storage)?
+                {
                     return Err(LinuxFabricError::CommandFailed);
                 }
             }
@@ -180,18 +326,18 @@ impl LinuxFabricBackend {
         _ownership: &RealmOwnership,
     ) -> Result<(), LinuxFabricError> {
         let table = format!("{TABLE_PREFIX}{:08x}", public_mark(plan.realm_id));
-        let listed = self.command.output(
-            "nft",
-            &["list", "table", "bridge", table.as_str()],
-        ).map_err(LinuxFabricError::Storage)?;
+        let listed = self
+            .command
+            .output("nft", &["list", "table", "bridge", table.as_str()])
+            .map_err(LinuxFabricError::Storage)?;
         if listed.0 && !listed.1.contains(MARKER) {
             return Err(LinuxFabricError::ForeignState);
         }
         if listed.0
-            && !self.command.run(
-                "nft",
-                &["delete", "table", "bridge", table.as_str()],
-            ).map_err(LinuxFabricError::Storage)?
+            && !self
+                .command
+                .run("nft", &["delete", "table", "bridge", table.as_str()])
+                .map_err(LinuxFabricError::Storage)?
         {
             return Err(LinuxFabricError::CommandFailed);
         }

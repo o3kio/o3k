@@ -35,15 +35,10 @@ async fn prepare_test_database(database_url: &str) -> Option<PgConnection> {
 }
 
 async fn get_test_store() -> Option<(String, PostgresStore, PgConnection)> {
-    if let Ok(url) = env::var("O3K_DATABASE_URL") {
-        let database_guard = prepare_test_database(&url).await?;
-        let store = PostgresStore::connect(&url).await.ok()?;
-        return Some((url, store, database_guard));
-    }
-    let default_url = "postgres://o3k:password@127.0.0.1/o3k_test".to_owned();
-    let database_guard = prepare_test_database(&default_url).await?;
-    let store = PostgresStore::connect(&default_url).await.ok()?;
-    Some((default_url, store, database_guard))
+    let url = env::var("O3K_DATABASE_URL").ok()?;
+    let database_guard = prepare_test_database(&url).await?;
+    let store = PostgresStore::connect(&url).await.ok()?;
+    Some((url, store, database_guard))
 }
 
 #[tokio::test]

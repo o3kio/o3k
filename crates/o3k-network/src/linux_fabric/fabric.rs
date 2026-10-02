@@ -179,12 +179,12 @@ impl super::LinuxFabricBackend {
                         "ip",
                         "addr",
                         "replace",
-                    &transport_ip,
-                    "dev",
-                    &self.config.fabric_interface,
-                ],
-            )
-            .map_err(LinuxFabricError::Storage)?
+                        &transport_ip,
+                        "dev",
+                        &self.config.fabric_interface,
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run(

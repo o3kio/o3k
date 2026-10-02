@@ -58,9 +58,9 @@ const LOCAL_ENDPOINT_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 10);
 /// Remote endpoint IPs (on reg-host-b).
 const REMOTE_ENDPOINT_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 20);
 
-const TENANT_MTU: u16 = 1370;
+const TENANT_MTU: u16 = 1390;
 const UNDERLAY_MTU: u16 = 1500;
-const FABRIC_MTU: u16 = 1420;
+const FABRIC_MTU: u16 = 1440;
 const DIRECTORY_GENERATION: u64 = 1;
 const FABRIC_GENERATION: u64 = 1;
 const ENDPOINT_GENERATION: u64 = 1;

@@ -1291,7 +1291,7 @@ mod endpoint_directory_tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 9,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         }];
         let binding = RealmEncapsulationBinding {
             fabric_domain_id: Uuid::from_u128(100),
@@ -1346,7 +1346,7 @@ mod endpoint_directory_tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 8,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         };
         let remote = FabricHostIdentity {
             host_id: "host-07".to_owned(),
@@ -1356,7 +1356,7 @@ mod endpoint_directory_tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 9,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         };
         let binding = RealmEncapsulationBinding {
             fabric_domain_id: Uuid::from_u128(100),
@@ -1366,14 +1366,14 @@ mod endpoint_directory_tests {
             binding_generation: 1,
         };
         let plan =
-            directory.compile_fabric_plan(&local, &[local.clone(), remote.clone()], 1370, &binding);
+            directory.compile_fabric_plan(&local, &[local.clone(), remote.clone()], 1390, &binding);
         assert!(plan.is_ok());
         let Some(plan) = plan.ok() else {
             return;
         };
         assert_eq!(plan.local_host, "host-01");
         assert_eq!(plan.local_fabric_generation, 8);
-        assert_eq!(plan.tenant_mtu, 1370);
+        assert_eq!(plan.tenant_mtu, 1390);
         assert_eq!(plan.routes.len(), 1);
         assert_eq!(plan.peers.len(), 1);
         assert_eq!(plan.peers[0].host_id, "host-07");
@@ -1404,7 +1404,7 @@ mod endpoint_directory_tests {
         assert_eq!(plan.routes[0].realm_id, directory.realm_id);
         assert_eq!(plan.routes[0].realm_binding_generation, 1);
         assert_eq!(
-            directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1370, &binding),
+            directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1390, &binding),
             Err(EndpointDirectoryError::MissingFabricIdentity)
         );
         assert_eq!(
@@ -1437,7 +1437,7 @@ mod endpoint_directory_tests {
         };
         assert_eq!(plan.validate_geneve_egress(&packet), Ok(()));
         let remote_plan = directory
-            .compile_fabric_plan(&remote, &[local, remote.clone()], 1370, &binding)
+            .compile_fabric_plan(&remote, &[local, remote.clone()], 1390, &binding)
             .expect("remote plan");
         assert_eq!(remote_plan.validate_geneve_ingress(&packet), Ok(()));
         let mut wrong_vni = packet.clone();
@@ -1627,7 +1627,7 @@ mod endpoint_directory_tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 1,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         };
         let remote = FabricHostIdentity {
             host_id: "host-remote".to_owned(),
@@ -1637,7 +1637,7 @@ mod endpoint_directory_tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 1,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         };
         let mut registry = RealmEncapsulationRegistry::default();
         let binding_a = registry
@@ -1648,10 +1648,10 @@ mod endpoint_directory_tests {
             .expect("B binding");
         assert_ne!(binding_a.provider_segment_id, binding_b.provider_segment_id);
         let plan_a = directory_a
-            .compile_fabric_plan(&local, &[local.clone(), remote.clone()], 1370, &binding_a)
+            .compile_fabric_plan(&local, &[local.clone(), remote.clone()], 1390, &binding_a)
             .expect("A plan");
         let plan_b = directory_b
-            .compile_fabric_plan(&local, &[local.clone(), remote], 1370, &binding_b)
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1390, &binding_b)
             .expect("B plan");
         assert_eq!(plan_a.routes[0].destination, plan_b.routes[0].destination);
         assert_ne!(plan_a.routes[0].realm_id, plan_b.routes[0].realm_id);

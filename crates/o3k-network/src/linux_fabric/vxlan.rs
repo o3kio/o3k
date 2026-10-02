@@ -18,10 +18,8 @@ impl LinuxFabricBackend {
     ) -> Result<(), LinuxFabricError> {
         if self.plans.values().any(|other| {
             other.realm_id != plan.realm_id
-                && other.encapsulation.fabric_domain_id
-                    == plan.encapsulation.fabric_domain_id
-                && other.encapsulation.provider_segment_id
-                    == plan.encapsulation.provider_segment_id
+                && other.encapsulation.fabric_domain_id == plan.encapsulation.fabric_domain_id
+                && other.encapsulation.provider_segment_id == plan.encapsulation.provider_segment_id
         }) {
             return Err(LinuxFabricError::OwnershipConflict);
         }
@@ -87,38 +85,36 @@ impl LinuxFabricBackend {
             if !vxlan_link_matches(&show.1, wanted.vni, wanted.local_transport_ip) {
                 return Err(LinuxFabricError::ForeignState);
             }
-        } else if !self
-            .command
-            .run(
+        } else {
+            let vni = wanted.vni.to_string();
+            let dstport = VXLAN_PORT.to_string();
+            let local = wanted.local_transport_ip.to_string();
+            let args = vec![
+                "netns",
+                "exec",
+                fabric_ns,
                 "ip",
-                &{
-                    let vni = wanted.vni.to_string();
-                    let dstport = VXLAN_PORT.to_string();
-                    let local = wanted.local_transport_ip.to_string();
-                    vec![
-                        "netns",
-                        "exec",
-                        fabric_ns,
-                        "ip",
-                        "link",
-                        "add",
-                        wanted.interface.as_str(),
-                        "type",
-                        "vxlan",
-                        "id",
-                        vni.as_str(),
-                        "dstport",
-                        dstport.as_str(),
-                        "local",
-                        local.as_str(),
-                        "dev",
-                        self.config.fabric_interface.as_str(),
-                    ]
-                },
-            )
-            .map_err(LinuxFabricError::Storage)?
-        {
-            return Err(LinuxFabricError::CommandFailed);
+                "link",
+                "add",
+                wanted.interface.as_str(),
+                "type",
+                "vxlan",
+                "id",
+                vni.as_str(),
+                "dstport",
+                dstport.as_str(),
+                "local",
+                local.as_str(),
+                "dev",
+                self.config.fabric_interface.as_str(),
+            ];
+            if !self
+                .command
+                .run("ip", &args)
+                .map_err(LinuxFabricError::Storage)?
+            {
+                return Err(LinuxFabricError::CommandFailed);
+            }
         }
 
         self.ensure_fabric_bridge(&wanted, plan)?;
@@ -134,7 +130,19 @@ impl LinuxFabricBackend {
         let ns = self.config.fabric_namespace.as_str();
         let bridge = self
             .command
-            .output("ip", &["netns", "exec", ns, "ip", "link", "show", "dev", vxlan.bridge.as_str()])
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    ns,
+                    "ip",
+                    "link",
+                    "show",
+                    "dev",
+                    vxlan.bridge.as_str(),
+                ],
+            )
             .map_err(LinuxFabricError::Storage)?;
         if bridge.0 && !bridge.1.contains("bridge") {
             return Err(LinuxFabricError::ForeignState);
@@ -144,7 +152,17 @@ impl LinuxFabricBackend {
                 .command
                 .run(
                     "ip",
-                    &["netns", "exec", ns, "ip", "link", "add", vxlan.bridge.as_str(), "type", "bridge"],
+                    &[
+                        "netns",
+                        "exec",
+                        ns,
+                        "ip",
+                        "link",
+                        "add",
+                        vxlan.bridge.as_str(),
+                        "type",
+                        "bridge",
+                    ],
                 )
                 .map_err(LinuxFabricError::Storage)?
         {
@@ -184,7 +202,19 @@ impl LinuxFabricBackend {
         } else {
             let fabric_veth = self
                 .command
-                .output("ip", &["netns", "exec", ns, "ip", "link", "show", "dev", vxlan.fabric_veth.as_str()])
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        ns,
+                        "ip",
+                        "link",
+                        "show",
+                        "dev",
+                        vxlan.fabric_veth.as_str(),
+                    ],
+                )
                 .map_err(LinuxFabricError::Storage)?;
             let realm_bridge = self
                 .state
@@ -202,18 +232,115 @@ impl LinuxFabricBackend {
         }
         let tenant_mtu = plan.tenant_mtu.to_string();
         for args in [
-            vec!["netns", "exec", ns, "ip", "link", "set", "dev", vxlan.bridge.as_str(), "up"],
-            vec!["netns", "exec", ns, "ip", "link", "set", "dev", vxlan.interface.as_str(), "mtu", tenant_mtu.as_str()],
-            vec!["netns", "exec", ns, "ip", "link", "set", "dev", vxlan.interface.as_str(), "master", vxlan.bridge.as_str()],
-            vec!["netns", "exec", ns, "ip", "link", "set", "dev", vxlan.interface.as_str(), "up"],
-            vec!["netns", "exec", ns, "ip", "link", "set", "dev", vxlan.fabric_veth.as_str(), "mtu", tenant_mtu.as_str()],
-            vec!["netns", "exec", ns, "ip", "link", "set", "dev", vxlan.fabric_veth.as_str(), "master", vxlan.bridge.as_str()],
-            vec!["netns", "exec", ns, "ip", "link", "set", "dev", vxlan.fabric_veth.as_str(), "up"],
-            vec!["link", "set", "dev", vxlan.host_veth.as_str(), "mtu", tenant_mtu.as_str()],
-            vec!["link", "set", "dev", vxlan.host_veth.as_str(), "master", self.state.realms.get(&plan.realm_id).ok_or(LinuxFabricError::CorruptState)?.bridge.as_str()],
+            vec![
+                "netns",
+                "exec",
+                ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                vxlan.bridge.as_str(),
+                "up",
+            ],
+            vec![
+                "netns",
+                "exec",
+                ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                vxlan.interface.as_str(),
+                "mtu",
+                tenant_mtu.as_str(),
+            ],
+            vec![
+                "netns",
+                "exec",
+                ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                vxlan.interface.as_str(),
+                "master",
+                vxlan.bridge.as_str(),
+            ],
+            vec![
+                "netns",
+                "exec",
+                ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                vxlan.interface.as_str(),
+                "up",
+            ],
+            vec![
+                "netns",
+                "exec",
+                ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                vxlan.fabric_veth.as_str(),
+                "mtu",
+                tenant_mtu.as_str(),
+            ],
+            vec![
+                "netns",
+                "exec",
+                ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                vxlan.fabric_veth.as_str(),
+                "master",
+                vxlan.bridge.as_str(),
+            ],
+            vec![
+                "netns",
+                "exec",
+                ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                vxlan.fabric_veth.as_str(),
+                "up",
+            ],
+            vec![
+                "link",
+                "set",
+                "dev",
+                vxlan.host_veth.as_str(),
+                "mtu",
+                tenant_mtu.as_str(),
+            ],
+            vec![
+                "link",
+                "set",
+                "dev",
+                vxlan.host_veth.as_str(),
+                "master",
+                self.state
+                    .realms
+                    .get(&plan.realm_id)
+                    .ok_or(LinuxFabricError::CorruptState)?
+                    .bridge
+                    .as_str(),
+            ],
             vec!["link", "set", "dev", vxlan.host_veth.as_str(), "up"],
         ] {
-            if !self.command.run("ip", &args).map_err(LinuxFabricError::Storage)? {
+            if !self
+                .command
+                .run("ip", &args)
+                .map_err(LinuxFabricError::Storage)?
+            {
                 return Err(LinuxFabricError::CommandFailed);
             }
         }
@@ -228,7 +355,19 @@ impl LinuxFabricBackend {
         let ns = self.config.fabric_namespace.as_str();
         let observed = self
             .command
-            .output("ip", &["netns", "exec", ns, "bridge", "fdb", "show", "dev", vxlan.interface.as_str()])
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    ns,
+                    "bridge",
+                    "fdb",
+                    "show",
+                    "dev",
+                    vxlan.interface.as_str(),
+                ],
+            )
             .map_err(LinuxFabricError::Storage)?;
         if !observed.0 {
             return Err(LinuxFabricError::CommandFailed);
@@ -237,7 +376,9 @@ impl LinuxFabricBackend {
         for line in observed.1.lines() {
             let fields = line.split_whitespace().collect::<Vec<_>>();
             if fields.first() == Some(&FLOOD_MAC)
-                && let Some(dst) = fields.windows(2).find_map(|w| (w[0] == "dst").then_some(w[1]))
+                && let Some(dst) = fields
+                    .windows(2)
+                    .find_map(|w| (w[0] == "dst").then_some(w[1]))
                 && let Ok(ip) = dst.parse::<Ipv4Addr>()
             {
                 *seen.entry(ip).or_default() += 1;
@@ -246,7 +387,26 @@ impl LinuxFabricBackend {
         for peer in &vxlan.flood_peers {
             if !seen.contains_key(peer) {
                 let destination = peer.to_string();
-                if !self.command.run("ip", &["netns", "exec", ns, "bridge", "fdb", "append", FLOOD_MAC, "dev", vxlan.interface.as_str(), "dst", destination.as_str()]).map_err(LinuxFabricError::Storage)? {
+                if !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            ns,
+                            "bridge",
+                            "fdb",
+                            "append",
+                            FLOOD_MAC,
+                            "dev",
+                            vxlan.interface.as_str(),
+                            "dst",
+                            destination.as_str(),
+                        ],
+                    )
+                    .map_err(LinuxFabricError::Storage)?
+                {
                     return Err(LinuxFabricError::CommandFailed);
                 }
             }
@@ -255,7 +415,26 @@ impl LinuxFabricBackend {
             let keep = usize::from(vxlan.flood_peers.contains(&peer));
             for _ in keep..count {
                 let destination = peer.to_string();
-                if !self.command.run("ip", &["netns", "exec", ns, "bridge", "fdb", "del", FLOOD_MAC, "dev", vxlan.interface.as_str(), "dst", destination.as_str()]).map_err(LinuxFabricError::Storage)? {
+                if !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            ns,
+                            "bridge",
+                            "fdb",
+                            "del",
+                            FLOOD_MAC,
+                            "dev",
+                            vxlan.interface.as_str(),
+                            "dst",
+                            destination.as_str(),
+                        ],
+                    )
+                    .map_err(LinuxFabricError::Storage)?
+                {
                     return Err(LinuxFabricError::CommandFailed);
                 }
             }
@@ -269,18 +448,47 @@ impl LinuxFabricBackend {
         plan: &NamespacedRoutedFabricPlan,
         ownership: &RealmOwnership,
     ) -> Result<(), LinuxFabricError> {
-        let Some(vxlan) = ownership.vxlan.as_ref() else { return Ok(()); };
+        let Some(vxlan) = ownership.vxlan.as_ref() else {
+            return Ok(());
+        };
         let ns = self.config.fabric_namespace.as_str();
         let vxlan_observed = self
             .command
-            .output("ip", &["netns", "exec", ns, "ip", "-d", "link", "show", "dev", vxlan.interface.as_str()])
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    ns,
+                    "ip",
+                    "-d",
+                    "link",
+                    "show",
+                    "dev",
+                    vxlan.interface.as_str(),
+                ],
+            )
             .map_err(LinuxFabricError::Storage)?;
-        if vxlan_observed.0 && !vxlan_link_matches(&vxlan_observed.1, vxlan.vni, vxlan.local_transport_ip) {
+        if vxlan_observed.0
+            && !vxlan_link_matches(&vxlan_observed.1, vxlan.vni, vxlan.local_transport_ip)
+        {
             return Err(LinuxFabricError::ForeignState);
         }
         let bridge_observed = self
             .command
-            .output("ip", &["netns", "exec", ns, "ip", "link", "show", "dev", vxlan.bridge.as_str()])
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    ns,
+                    "ip",
+                    "link",
+                    "show",
+                    "dev",
+                    vxlan.bridge.as_str(),
+                ],
+            )
             .map_err(LinuxFabricError::Storage)?;
         if bridge_observed.0 && !bridge_observed.1.contains("bridge") {
             return Err(LinuxFabricError::ForeignState);
@@ -298,29 +506,85 @@ impl LinuxFabricBackend {
             .clone();
         if root_veth_observed.0
             && (!root_veth_observed.1.contains("veth")
-                || !root_veth_observed.1.contains(&format!("master {realm_bridge}")))
+                || !root_veth_observed
+                    .1
+                    .contains(&format!("master {realm_bridge}")))
         {
             return Err(LinuxFabricError::ForeignState);
         }
-        let _ = self.command.run("ip", &["netns", "exec", ns, "bridge", "fdb", "flush", "dev", vxlan.interface.as_str()]);
+        let _ = self.command.run(
+            "ip",
+            &[
+                "netns",
+                "exec",
+                ns,
+                "bridge",
+                "fdb",
+                "flush",
+                "dev",
+                vxlan.interface.as_str(),
+            ],
+        );
         for (program, args) in [
-            ("ip", vec!["netns", "exec", ns, "ip", "link", "del", vxlan.interface.as_str()]),
-            ("ip", vec!["netns", "exec", ns, "ip", "link", "del", vxlan.bridge.as_str()]),
+            (
+                "ip",
+                vec![
+                    "netns",
+                    "exec",
+                    ns,
+                    "ip",
+                    "link",
+                    "del",
+                    vxlan.interface.as_str(),
+                ],
+            ),
+            (
+                "ip",
+                vec![
+                    "netns",
+                    "exec",
+                    ns,
+                    "ip",
+                    "link",
+                    "del",
+                    vxlan.bridge.as_str(),
+                ],
+            ),
             ("ip", vec!["link", "del", vxlan.host_veth.as_str()]),
         ] {
             // Deletion is replay-safe: absence is already the desired state,
             // while an observed object must be successfully removed.
             let exists = if args.starts_with(&["netns", "exec"]) {
                 self.command
-                    .output("ip", &["netns", "exec", ns, "ip", "link", "show", "dev", args.last().copied().unwrap_or("")])
-                    .map_err(LinuxFabricError::Storage)?.0
+                    .output(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            ns,
+                            "ip",
+                            "link",
+                            "show",
+                            "dev",
+                            args.last().copied().unwrap_or(""),
+                        ],
+                    )
+                    .map_err(LinuxFabricError::Storage)?
+                    .0
             } else {
                 self.command
-                    .output("ip", &["link", "show", "dev", args.last().copied().unwrap_or("")])
-                    .map_err(LinuxFabricError::Storage)?.0
+                    .output(
+                        "ip",
+                        &["link", "show", "dev", args.last().copied().unwrap_or("")],
+                    )
+                    .map_err(LinuxFabricError::Storage)?
+                    .0
             };
             if exists
-                && !self.command.run(program, &args).map_err(LinuxFabricError::Storage)?
+                && !self
+                    .command
+                    .run(program, &args)
+                    .map_err(LinuxFabricError::Storage)?
             {
                 return Err(LinuxFabricError::CommandFailed);
             }

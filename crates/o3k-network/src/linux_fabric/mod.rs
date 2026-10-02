@@ -28,12 +28,12 @@ mod naming;
 mod ownership;
 mod persistence;
 
-mod fabric;
-mod vxlan;
 mod anti_spoof;
+mod fabric;
 mod policy;
 mod public_;
 mod realm;
+mod vxlan;
 
 pub(crate) mod gateway;
 pub(crate) mod gateway_execution;
@@ -275,11 +275,8 @@ impl LinuxFabricBackend {
             {
                 return Err(LinuxFabricError::CorruptState);
             }
-            if matches!(
-                plan.encapsulation.provider_kind,
-                FabricProviderKind::Vxlan
-            ) && (!ownership.fabric_veth.is_empty()
-                || !ownership.fabric_realm_veth.is_empty())
+            if matches!(plan.encapsulation.provider_kind, FabricProviderKind::Vxlan)
+                && (!ownership.fabric_veth.is_empty() || !ownership.fabric_realm_veth.is_empty())
             {
                 return Err(LinuxFabricError::ForeignState);
             }
@@ -318,8 +315,8 @@ impl LinuxFabricBackend {
                     return Err(LinuxFabricError::CorruptState);
                 }
             }
-            if let Some(vxlan) = &ownership.vxlan {
-                if !valid_name(&vxlan.interface)
+            if let Some(vxlan) = &ownership.vxlan
+                && (!valid_name(&vxlan.interface)
                     || !valid_name(&vxlan.bridge)
                     || !valid_name(&vxlan.host_veth)
                     || !valid_name(&vxlan.fabric_veth)
@@ -343,13 +340,11 @@ impl LinuxFabricBackend {
                             .peers
                             .iter()
                             .map(|peer| peer.fabric_transport_ip)
-                            .collect::<BTreeSet<_>>()
-                {
-                    return Err(LinuxFabricError::CorruptState);
-                }
+                            .collect::<BTreeSet<_>>())
+            {
+                return Err(LinuxFabricError::CorruptState);
             }
-            if ownership.anti_spoof_generation == 0
-                && !ownership.anti_spoof_fingerprint.is_empty()
+            if ownership.anti_spoof_generation == 0 && !ownership.anti_spoof_fingerprint.is_empty()
                 || ownership.anti_spoof_generation > plan.directory_generation
                 || (ownership.anti_spoof_generation > 0
                     && ownership.anti_spoof_fingerprint.is_empty())
@@ -591,6 +586,13 @@ mod tests {
                 program.to_owned(),
                 args.iter().map(|arg| (*arg).to_owned()).collect(),
             ));
+            if program == "ip"
+                && args
+                    .windows(4)
+                    .any(|window| window == ["bridge", "fdb", "show", "dev"])
+            {
+                return Ok((true, String::new()));
+            }
             if args.starts_with(&["netns", "exec"]) && self.namespace_exists {
                 return Ok((true, String::new()));
             }
@@ -641,7 +643,7 @@ mod tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 3,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         };
         let remote = FabricHostIdentity {
             host_id: "host-b".to_owned(),
@@ -651,7 +653,7 @@ mod tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 3,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         };
         let binding = RealmEncapsulationBinding {
             fabric_domain_id: Uuid::from_u128(100),
@@ -661,7 +663,7 @@ mod tests {
             binding_generation: 3,
         };
         directory
-            .compile_fabric_plan(&local, &[local.clone(), remote], 1370, &binding)
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1390, &binding)
             .expect("plan")
     }
 
@@ -718,17 +720,9 @@ mod tests {
         let interface = vxlan_name(plan().realm_id);
         assert!(calls.iter().any(|(program, args)| {
             program == "ip"
-                && args.windows(6).any(|window| {
-                    window
-                        == [
-                            "type",
-                            "vxlan",
-                            "id",
-                            "101",
-                            "dstport",
-                            "4789",
-                        ]
-                })
+                && args
+                    .windows(6)
+                    .any(|window| window == ["type", "vxlan", "id", "101", "dstport", "4789"])
                 && args.iter().any(|arg| arg == &interface)
         }));
         assert!(calls.iter().any(|(program, args)| {
@@ -760,7 +754,7 @@ mod tests {
                 && args.contains(&"198.18.0.2".to_owned())
         }));
         assert!(calls.iter().any(|(program, args)| {
-            program == "ip" && args.windows(2).any(|window| window == ["mtu", "1370"])
+            program == "ip" && args.windows(2).any(|window| window == ["mtu", "1390"])
         }));
         let _ = fs::remove_dir_all(root);
     }
