@@ -4185,9 +4185,21 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [[ -n "$HOST_M" && "$HOST_M" != "None" ]] || die "maintenance workload placement host did not converge"
-api_get /operator/building-blocks >"$WORK_ROOT/blocks-maintenance-placement.json"
-MAINT_PLACED_ID="$(python3 "$ROOT_DIR/scripts/resolve-p15-7-placement-block.py" \
-  "$WORK_ROOT/blocks-maintenance-placement.json" "$HOST_M" 2>/dev/null || true)"
+# The block's provider/identity projection can lag the Nova host attribute by
+# an agent report cadence (observed once as a one-shot resolve failure in
+# protected run 37044765005). Resolve with the same bounded convergence
+# discipline as the host lookup; every assertion below is unchanged.
+MAINT_PLACED_ID=""
+for _ in $(seq 1 60); do
+  api_get /operator/building-blocks >"$WORK_ROOT/blocks-maintenance-placement.json"
+  candidate="$(python3 "$ROOT_DIR/scripts/resolve-p15-7-placement-block.py" \
+    "$WORK_ROOT/blocks-maintenance-placement.json" "$HOST_M" 2>/dev/null || true)"
+  if [[ "$candidate" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    MAINT_PLACED_ID="$candidate"
+    break
+  fi
+  sleep 1
+done
 [[ "$MAINT_PLACED_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "maintenance workload has no canonical block mapping"
 [[ "$MAINT_PLACED_ID" != "$MAINT_ID" ]] || die "new placement selected the draining maintenance block"
 MAINT_PLACEMENT_REJECTED=true
