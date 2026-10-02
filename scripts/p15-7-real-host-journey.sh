@@ -3295,7 +3295,13 @@ except OSError:
     pass
 
 checkpoint = pathlib.Path(checkpoint_path)
-temp_matches = list(checkpoint.parent.glob(f".{checkpoint.name}.*.tmp")) if checkpoint.parent.exists() else []
+try:
+    temp_matches = list(checkpoint.parent.glob(f".{checkpoint.name}.*.tmp")) if checkpoint.parent.exists() else []
+except OSError:
+    # The checkpoint may live in a daemon-owned 0700 directory the runner
+    # user cannot stat; treat it as absent rather than crashing the
+    # failure-diagnostics writer (the checkpoint itself is read via sudo).
+    temp_matches = []
 publication_steps = {
     "directory_parent", "directory_create", "temporary_create", "json_serialize",
     "temporary_write", "file_fsync", "destination_link", "temporary_cleanup",

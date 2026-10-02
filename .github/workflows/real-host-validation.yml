@@ -932,6 +932,7 @@ jobs:
             target/real-host-workflow-artifacts/p15-7-orphan-repair-timeline.json
             target/real-host-workflow-artifacts/p15-7-orphan-repair-checkpoint.json
             target/real-host-workflow-artifacts/p15-7-contender-evidence.json
+            target/real-host-workflow-artifacts/p15-7-sqlite-parity-cargo-test.log
             target/real-host-workflow-artifacts/p15-7-checkpoint-path-diagnostic.log
             target/real-host-workflow-artifacts/p15-7-checkpoint-path-diagnostic.json
             target/real-host-workflow-artifacts/p15-7-host-maintenance-evidence.json
