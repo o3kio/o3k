@@ -23,6 +23,12 @@ Related decisions and specifications:
 - [SPEC-0049 — Stretched-L2 Edge Fabric v3](../specs/SPEC-0049-stretched-l2-edge-fabric-v3.md)
 - [P11 stretched-L2 fabric contract](../../contracts/edge-fabric-stretched-l2.md)
 - [Execution-boundary contract](../../contracts/execution-boundaries.md)
+- Shared implementation authority: [o3kio/fabric](https://github.com/o3kio/fabric) —
+  the hardened provider extracted from this design lineage (WireGuard host
+  fabric + per-realm VXLAN/HER), normative contract
+  [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/main/contracts/fabric-provider-v1.md)
+  and change control
+  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/main/docs/change-control.md)
 
 This is a privileged multi-host networking decision. The requester acceptance
 recorded in the introducing pull request activates this ADR and SPEC-0049 as the
@@ -37,6 +43,20 @@ decision in its ADR-021. The two projects now converge on one fabric design:
 **per-realm kernel VXLAN with head-end replication, carried inside the existing
 shared WireGuard host fabric**, so that every AddressRealm behaves as one literal
 L2 segment (one VLAN) across all participating hypervisors.
+
+The convergence is structural, not just documentary: the WireGuard
+host-fabric substrate (netns, WireGuard transport, per-network VXLAN/HER
+objects, ownership journaling, key hygiene) is implemented **once** in the
+shared repository [o3kio/fabric](https://github.com/o3kio/fabric) and
+consumed by both projects as git-tag dependencies
+(`fabric-plan` / `fabric-linux` / `fabric-conformance`), pinned to one tag
+fleet-wide. Its contract,
+[`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/main/contracts/fabric-provider-v1.md),
+is normative for that substrate, and
+[`docs/change-control.md`](https://github.com/o3kio/fabric/blob/main/docs/change-control.md)
+governs how both consumers request changes: the design changes rarely,
+deliberately, and for fabric-wide reasons — never per-project. Neither
+project forks, patches, or re-implements it.
 
 ## Context
 
@@ -219,5 +239,13 @@ Negative / accepted risks:
 This ADR changes the accepted architecture and its normative SPEC/contract. The
 privileged Linux provider implementation (currently Geneve-based in
 `crates/o3k-network/src/linux_fabric/`) is migrated in bounded follow-up work
-under SPEC-0049's migration and evidence requirements. No runtime, product, or
-real-host support claim is created by this acceptance alone.
+under SPEC-0049's migration and evidence requirements. The migration target
+for the WireGuard host-fabric substrate is the shared provider in
+[o3kio/fabric](https://github.com/o3kio/fabric) (already proven in
+production form by CHV): the workspace pins its git-tag dependencies and a
+CI conformance gate (`crates/o3k-network/tests/fabric_conformance.rs`)
+proves the pinned tag on O3K's toolchain continuously; the
+`linux_fabric` migration onto `LinuxFabricProvider` then proceeds in
+bounded phases, deleting the duplicated substrate while keeping the
+portable realm/policy/public layers. No runtime, product, or real-host
+support claim is created by this acceptance alone.

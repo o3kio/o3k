@@ -27,6 +27,11 @@ Related normative sources:
 - [SPEC-0029](SPEC-0029-addressrealm-encapsulated-edge-fabric-v2.md) (superseded)
 - [SPEC-0033](SPEC-0033-canonical-network-addressrealm-lifecycle-v1.md)
 - [execution-boundary contract](../../contracts/execution-boundaries.md)
+- Shared implementation authority: [o3kio/fabric](https://github.com/o3kio/fabric) —
+  provider contract
+  [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/main/contracts/fabric-provider-v1.md)
+  and change control
+  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/main/docs/change-control.md)
 
 ## Purpose and governance gate
 
@@ -358,6 +363,19 @@ Before privileged successor implementation:
 7. do not rewrite unrelated P9/P10 semantics.
 
 ## Provider conformance requirements
+
+The WireGuard host-fabric substrate is realized by the shared provider in
+[o3kio/fabric](https://github.com/o3kio/fabric) (ADR-0186); its
+provider-level conformance suite (`fabric-conformance`, 25 cases — plan
+validation, apply/idempotency, socket placement, NAT-free underlay,
+legacy-state cleanup, healing, flood-list scoping, teardown convergence,
+key hygiene) runs in this repository's CI at the pinned git tag
+(`crates/o3k-network/tests/fabric_conformance.rs`), so every build
+re-proves the pinned revision on O3K's toolchain. The requirements below
+remain the full P11 provider surface: the substrate-level subset is
+covered by that shared gate, and the realm/VNI/policy-level requirements
+by this repository's own portable tests as the `linux_fabric` migration
+proceeds.
 
 Before real-host promotion, portable/provider tests must cover:
 
