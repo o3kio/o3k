@@ -55,7 +55,7 @@ fn plan(
     local_host: &str,
     local_transport_ip: Ipv4Addr,
     peers: &[Peer],
-) -> Result<NamespacedRoutedFabricPlan, Box<dyn std::error::Error>> {
+) -> Result<Option<NamespacedRoutedFabricPlan>, Box<dyn std::error::Error>> {
     let prefix = Ipv4Prefix::new("10.0.0.0".parse()?, 24).ok_or("invalid prefix")?;
     let project_id = if realm_id == Uuid::from_u128(REALM_A_ID) {
         "project-a"
@@ -108,6 +108,12 @@ fn plan(
             )?,
         ]
     };
+    if !locations
+        .iter()
+        .any(|location| location.selected_host == local_host)
+    {
+        return Ok(None);
+    }
     let directory = RealmEndpointDirectory::build(&realm, locations, &[], 1)?;
     let local = FabricHostIdentity {
         host_id: local_host.to_owned(),
@@ -139,7 +145,9 @@ fn plan(
         provider_segment_id: vni,
         binding_generation: 1,
     };
-    Ok(directory.compile_fabric_plan(&local, &hosts, 1390, &binding)?)
+    Ok(Some(
+        directory.compile_fabric_plan(&local, &hosts, 1390, &binding)?,
+    ))
 }
 
 fn usage() -> ! {
@@ -222,17 +230,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &peers,
         )?,
     ];
-    for fabric_plan in &plans {
+    for fabric_plan in plans.into_iter().flatten() {
         match mode.as_str() {
             "apply" => {
-                backend.apply(fabric_plan)?;
-                if !backend.observe(fabric_plan)? {
+                backend.apply(&fabric_plan)?;
+                if !backend.observe(&fabric_plan)? {
                     return Err("provider observe after apply failed".into());
                 }
             }
             "remove" => {
-                backend.remove(fabric_plan)?;
-                if !backend.observe_removed(fabric_plan)? {
+                backend.remove(&fabric_plan)?;
+                if !backend.observe_removed(&fabric_plan)? {
                     return Err("provider observe after remove failed".into());
                 }
             }
