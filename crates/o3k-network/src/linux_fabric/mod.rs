@@ -601,9 +601,11 @@ mod tests {
                     .any(|(_, call)| call.windows(2).any(|window| window == ["fdb", "append"]));
                 return Ok((
                     true,
-                    reconciled
-                        .then_some("00:00:00:00:00:00 dst 198.18.0.2\n".to_owned())
-                        .unwrap_or_default(),
+                    if reconciled {
+                        "00:00:00:00:00:00 dst 198.18.0.2\n".to_owned()
+                    } else {
+                        String::new()
+                    },
                 ));
             }
             if args.starts_with(&["netns", "exec"]) && self.namespace_exists {
