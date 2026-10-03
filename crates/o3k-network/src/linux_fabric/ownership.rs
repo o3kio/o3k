@@ -9,6 +9,11 @@ pub(crate) struct FabricOwnership {
     pub(crate) fabric_generation: u64,
     #[serde(default)]
     pub(crate) fabric_mtu: u16,
+    /// Random durable ownership token installed on provider-owned nft chains
+    /// before mutation, so an interrupted fingerprint write can be replayed
+    /// without adopting similarly named foreign state.
+    #[serde(default)]
+    pub(crate) ingress_owner_token: String,
     /// Fingerprint of the provider-owned netdev ingress admission rules. The
     /// rules bind authenticated WireGuard transport addresses to peer marks;
     /// the marks are bound to current realm VNIs by the bridge admission

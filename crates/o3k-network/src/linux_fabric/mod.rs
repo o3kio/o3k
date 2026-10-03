@@ -156,6 +156,7 @@ impl From<LinuxFabricError> for FabricError {
 pub(crate) trait LinuxFabricCommand: Send + Sync {
     fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)>;
     fn run(&self, program: &str, args: &[&str]) -> io::Result<bool>;
+    fn run_with_input(&self, program: &str, args: &[&str], input: &[u8]) -> io::Result<bool>;
 }
 
 pub(crate) struct SystemLinuxFabricCommand;
@@ -171,6 +172,19 @@ impl LinuxFabricCommand for SystemLinuxFabricCommand {
 
     fn run(&self, program: &str, args: &[&str]) -> io::Result<bool> {
         Ok(Command::new(program).args(args).status()?.success())
+    }
+
+    fn run_with_input(&self, program: &str, args: &[&str], input: &[u8]) -> io::Result<bool> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input)?;
+        }
+        Ok(child.wait()?.success())
     }
 }
 pub struct LinuxFabricBackend {
@@ -542,6 +556,12 @@ impl FabricBackend for LinuxFabricBackend {
         } else {
             // Mirror only provider-derived host identity into O3K's execution
             // journal; canonical generations and VNI admission remain O3K-owned.
+            let ingress_owner_token = self
+                .state
+                .fabric
+                .as_ref()
+                .map(|owned| owned.ingress_owner_token.clone())
+                .unwrap_or_default();
             self.state.fabric = Some(FabricOwnership {
                 namespace: self.config.fabric_namespace.clone(),
                 interface: "o3k-wg".to_owned(),
@@ -554,6 +574,7 @@ impl FabricBackend for LinuxFabricBackend {
                 fabric_transport_ip: plan.local_fabric_transport_ip,
                 fabric_generation: plan.local_fabric_generation,
                 fabric_mtu: plan.local_fabric_mtu,
+                ingress_owner_token,
                 ingress_auth_fingerprint: String::new(),
                 ingress_vni_fingerprint: String::new(),
                 managed_peers: self
@@ -768,6 +789,12 @@ mod tests {
                     },
                 ));
             }
+            if args
+                .windows(3)
+                .any(|window| window == ["nft", "list", "table"])
+            {
+                return Ok((false, String::new()));
+            }
             if args.starts_with(&["netns", "exec"]) && self.namespace_exists {
                 return Ok((true, String::new()));
             }
@@ -782,6 +809,16 @@ mod tests {
                 program.to_owned(),
                 args.iter().map(|arg| (*arg).to_owned()).collect(),
             ));
+            Ok(true)
+        }
+
+        fn run_with_input(&self, program: &str, args: &[&str], input: &[u8]) -> io::Result<bool> {
+            let mut recorded: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            recorded.push(String::from_utf8_lossy(input).into_owned());
+            self.calls
+                .lock()
+                .expect("calls")
+                .push((program.to_owned(), recorded));
             Ok(true)
         }
     }
@@ -928,21 +965,29 @@ mod tests {
                 && args.contains(&"00:00:00:00:00:00".to_owned())
                 && args.contains(&"198.18.0.2".to_owned())
         }));
-        assert!(calls.iter().any(|(program, args)| {
-            program == "ip"
-                && args
-                    .windows(4)
-                    .any(|window| window == ["nft", "add", "table", "netdev"])
-                && args.contains(&"o3k-fabric-auth".to_owned())
-        }));
-        assert!(calls.iter().any(|(program, args)| {
-            program == "ip"
-                && args.contains(&"198.18.0.2".to_owned())
-                && args.contains(&"meta".to_owned())
-                && args.contains(&"mark".to_owned())
-                && args.contains(&"set".to_owned())
-                && args.contains(&"accept".to_owned())
-        }));
+        let ingress_batch = calls
+            .iter()
+            .find_map(|(program, args)| {
+                (program == "ip" && args.windows(2).any(|window| window == ["nft", "-f"]))
+                    .then(|| args.last().expect("nft batch"))
+            })
+            .expect("atomic nftables reconciliation batch");
+        assert!(ingress_batch.contains("add table netdev o3k-fabric-auth"));
+        assert!(ingress_batch.contains("policy drop"));
+        assert!(ingress_batch.contains("@th,96,24 101 ip saddr 198.18.0.2"));
+        assert!(ingress_batch.contains("counter drop comment \"o3k-fabric-auth\""));
+        assert!(ingress_batch.contains("add table bridge o3k-fabric-vni-auth"));
+        assert!(ingress_batch.contains("counter drop comment \"o3k-fabric-vni-auth\""));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(program, args)| {
+                    program == "ip" && args.windows(2).any(|window| window == ["nft", "-f"])
+                })
+                .count(),
+            1,
+            "both admission tables must change in a single kernel transaction"
+        );
         assert!(!calls.iter().any(|(program, args)| {
             program == "ip"
                 && args
@@ -951,11 +996,8 @@ mod tests {
                 && args.contains(&"vxlan".to_owned())
                 && args.contains(&"vni".to_owned())
         }));
-        assert!(calls.iter().any(|(program, args)| {
-            program == "ip"
-                && args.windows(2).any(|window| window == ["table", "bridge"])
-                && args.contains(&"o3k-fabric-vni-auth".to_owned())
-        }));
+        assert!(ingress_batch.contains("add table bridge o3k-fabric-vni-auth"));
+        assert!(ingress_batch.contains("counter drop comment \"o3k-fabric-vni-auth\""));
         assert!(calls.iter().any(|(program, args)| {
             program == "ip" && args.contains(&vxlan_name(plan().realm_id))
         }));
