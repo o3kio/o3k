@@ -3,7 +3,7 @@
 This record covers the runtime executor refactor on branch `fabric-v3-runtime`.
 It does not certify the final PP.5 campaign.
 
-Candidate implementation SHA: `0005fa2edc04883b588982bc9a957aa4f0933f6a`.
+Candidate implementation SHA: `cfcc1e6159514bbc030c5f6154381ad44b0c41c1`.
 Base protected `main`: `41fedbfdf982596f6932c5eb6b08e2c36f810067`.
 
 ## Authority and provenance
@@ -119,3 +119,27 @@ They therefore provide substrate and ownership evidence only; they do not
 prove the required independent three-compute-host packet gate (real remote
 ARP/MAC, DHCP broadcast, overlap isolation, authenticated WireGuard capture,
 anti-spoof injection, MTU boundary, restart, and zero-leak cleanup).
+
+## Disposable bridge gate tooling
+
+`tests/fabric-v3-bridge-gate.sh` creates two logical host namespaces with
+private provider mount namespaces, a veth underlay, the production provider
+WireGuard/VXLAN bridges, two overlapping realm bridges, endpoint namespaces,
+and a foreign canary. It is bounded to this development host and does not
+claim independent compute-host evidence. The provider-only setup/cleanup mode
+passed on this candidate:
+
+```text
+sudo FABRIC_V3_PROVIDER_ONLY=1 \
+  FABRIC_V3_HELPER_BIN=$PWD/target/debug/examples/fabric-regression-helper \
+  bash tests/fabric-v3-bridge-gate.sh
+```
+
+That run proved provider bridge/VXLAN/HER realization and cleanup while the
+foreign canary survived. The full endpoint mode was also run after correcting
+the helper's host-relative endpoint directory. WireGuard handshakes and
+VXLAN ingress counters were observed, but the remote ARP request did not reach
+the endpoint bridge, so the script failed closed at the A1-to-A2 packet gate.
+This retained failure is diagnostic evidence only; it is not a Fabric v3
+functional pass. `FABRIC_V3_KEEP=1` is available for bounded inspection and
+must be followed by explicit removal of the listed disposable namespaces.
