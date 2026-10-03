@@ -3,7 +3,7 @@
 This record covers the runtime executor refactor on branch `fabric-v3-runtime`.
 It does not certify the final PP.5 campaign.
 
-Candidate source SHA: `febd119168f1ba5530df4fb10fa0573121d02c64`.
+Candidate implementation SHA: `0005fa2edc04883b588982bc9a957aa4f0933f6a`.
 Base protected `main`: `41fedbfdf982596f6932c5eb6b08e2c36f810067`.
 
 ## Authority and provenance
@@ -71,3 +71,47 @@ The workspace run retained an unrelated focused PP.5 endpoint artifact at
 with SHA-256
 `8fd54f379ff494a3698e6c388fca75b5f9b211df77dc318e63a3635d9ae670bb`; it is
 not Fabric v3 evidence.
+
+## Nested development-host validation
+
+On 2026-10-03 the current development host provisioned three nested KVM
+guests with `tests/pp5-small-edge-campaign/provision-hosts.sh`:
+
+```text
+run: fabric-v3-20261003-nested
+host-a: 192.168.122.26
+host-b: 192.168.122.138
+host-c: 192.168.122.221
+kernel: 6.8.0-139-generic
+vCPU/memory: 2 / 1967 MiB per guest
+/dev/kvm in guest: usable on all three
+guest-to-guest reachability: passed
+```
+
+Provisioning evidence is retained at
+`tests/pp5-small-edge-campaign/runs/fabric-v3-20261003-nested/evidence.json`
+(SHA-256
+`e984a547e96e69234e71d3ecfc5b65cf518d93ca2034c790ca8892a0876fb970`) and the
+inventory at `.../inventory.txt` (SHA-256
+`8bc7d31376121623ccf86f9a521abd317dc7340bd886a400598eefab865d9e2a`).
+
+The provider smoke was executed on all three guests using the production
+`fabric_linux::LinuxFabricProvider<RealCommandRunner>` adapter. Each guest
+passed host transport address, per-realm VXLAN (`dstport 4789`, learning
+enabled), isolated VXLAN/consumer-veth attachment, and topology cleanup.
+The smoke used provider-generated names (`o3k-wg`, `o3k-x-*`, `o3k-b-*`, and
+`o3k-p-*`) and confirmed no residual provider objects after each run.
+
+The first host-b retry encountered the intended O3K fail-closed response after
+an interrupted prior smoke left the durable TAP record with MAC
+`02:29:48:24:12:14` while the kernel TAP reported a different MAC. No foreign
+object was deleted. The recorded ownership journal was checked, the owned TAP
+MAC was restored to the journal value, and the smoke was rerun successfully on
+host-b and then repeated successfully on all three guests. This is retained as
+a negative ownership-safety observation, not as a Fabric v3 pass claim.
+
+The nested guests share this development host's physical libvirt underlay.
+They therefore provide substrate and ownership evidence only; they do not
+prove the required independent three-compute-host packet gate (real remote
+ARP/MAC, DHCP broadcast, overlap isolation, authenticated WireGuard capture,
+anti-spoof injection, MTU boundary, restart, and zero-leak cleanup).
