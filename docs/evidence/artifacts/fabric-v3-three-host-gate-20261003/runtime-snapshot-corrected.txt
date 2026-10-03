@@ -1,0 +1,74 @@
+=== host-a ===
+--vxlan--
+2: o3k-x-77c2d768: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-77c2d768 state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether ba:df:c5:a2:74:60 brd ff:ff:ff:ff:ff:ff promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 
+    vxlan id 101 local 192.168.122.118 dev o3k-wg srcport 0 0 dstport 4789 ttl auto ageing 300 udpcsum noudp6zerocsumtx noudp6zerocsumrx 
+    bridge_slave state forwarding priority 32 cost 100 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.12:59:29:dd:e3:4c designated_root 8000.12:59:29:dd:e3:4c hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 
+--her--
+00:00:00:00:00:00 dev o3k-x-77c2d768 dst 192.168.122.134 self permanent
+--wg--
+interface: o3k-wg
+  public key: W2qJeF8ItM7Aa5GrfYdHJCGMLIuMkAchLlTAaTvfVEo=
+  private key: (hidden)
+  listening port: 65001
+
+peer: wx9D4yWr+KUqdFJjsJb0OVP79B6KoFQEcdsmoptuWj0=
+  endpoint: 192.168.122.134:65001
+  allowed ips: 192.168.122.134/32
+  latest handshake: 22 seconds ago
+  transfer: 10.21 KiB received, 9.65 KiB sent
+--antispoof-rule-count--
+6
+=== host-b ===
+--vxlan--
+6: o3k-x-77c2d768: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-77c2d768 state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether 42:b2:27:54:10:5d brd ff:ff:ff:ff:ff:ff promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 
+    vxlan id 101 local 192.168.122.134 dev o3k-wg srcport 0 0 dstport 4789 ttl auto ageing 300 udpcsum noudp6zerocsumtx noudp6zerocsumrx 
+    bridge_slave state forwarding priority 32 cost 100 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.42:b2:27:54:10:5d designated_root 8000.42:b2:27:54:10:5d hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 
+7: o3k-x-4ce51c6b: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-4ce51c6b state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether 76:ef:6a:d6:1e:ab brd ff:ff:ff:ff:ff:ff promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 
+    vxlan id 102 local 192.168.122.134 dev o3k-wg srcport 0 0 dstport 4789 ttl auto ageing 300 udpcsum noudp6zerocsumtx noudp6zerocsumrx 
+    bridge_slave state forwarding priority 32 cost 100 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.1e:e0:d4:81:36:f designated_root 8000.1e:e0:d4:81:36:f hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 
+--her--
+00:00:00:00:00:00 dev o3k-x-77c2d768 dst 192.168.122.118 self permanent
+00:00:00:00:00:00 dev o3k-x-4ce51c6b dst 192.168.122.196 self permanent
+--wg--
+interface: o3k-wg
+  public key: wx9D4yWr+KUqdFJjsJb0OVP79B6KoFQEcdsmoptuWj0=
+  private key: (hidden)
+  listening port: 65001
+
+peer: UNKHmjPEGY+Ey6T1y99T3V4MA3RcRtBvIUth8GECjh0=
+  endpoint: 192.168.122.196:65001
+  allowed ips: 192.168.122.196/32
+  latest handshake: 23 seconds ago
+  transfer: 988 B received, 1.89 KiB sent
+
+peer: W2qJeF8ItM7Aa5GrfYdHJCGMLIuMkAchLlTAaTvfVEo=
+  endpoint: 192.168.122.118:65001
+  allowed ips: 192.168.122.118/32
+  latest handshake: 23 seconds ago
+  transfer: 1.48 KiB received, 2.41 KiB sent
+--antispoof-rule-count--
+12
+=== host-c ===
+--vxlan--
+2: o3k-x-4ce51c6b: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-4ce51c6b state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether d2:e8:fa:0e:27:1d brd ff:ff:ff:ff:ff:ff promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 
+    vxlan id 102 local 192.168.122.196 dev o3k-wg srcport 0 0 dstport 4789 ttl auto ageing 300 udpcsum noudp6zerocsumtx noudp6zerocsumrx 
+    bridge_slave state forwarding priority 32 cost 100 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.96:3d:41:aa:b7:b5 designated_root 8000.96:3d:41:aa:b7:b5 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 
+--her--
+00:00:00:00:00:00 dev o3k-x-4ce51c6b dst 192.168.122.134 self permanent
+--wg--
+interface: o3k-wg
+  public key: UNKHmjPEGY+Ey6T1y99T3V4MA3RcRtBvIUth8GECjh0=
+  private key: (hidden)
+  listening port: 65001
+
+peer: wx9D4yWr+KUqdFJjsJb0OVP79B6KoFQEcdsmoptuWj0=
+  endpoint: 192.168.122.134:65001
+  allowed ips: 192.168.122.134/32
+  latest handshake: 23 seconds ago
+  transfer: 9.83 KiB received, 9.08 KiB sent
+--antispoof-rule-count--
+6

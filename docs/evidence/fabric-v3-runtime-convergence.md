@@ -3,7 +3,8 @@
 This record covers the runtime executor refactor on branch `fabric-v3-runtime`.
 It does not certify the final PP.5 campaign.
 
-Candidate implementation SHA: `b6a074bb54d5f499f46aaa1ebd024365416e79e6`.
+Candidate implementation SHA: `32b4fb61` (test-tooling follow-up is included in
+the final source SHA reported below).
 Base protected `main`: `41fedbfdf982596f6932c5eb6b08e2c36f810067`.
 
 ## Authority and provenance
@@ -151,13 +152,19 @@ DHCP-like broadcast delivery, and restart/reconciliation return. Cleanup
 removed provider VXLAN, bridge, namespace, WireGuard, nftables, and endpoint
 state while preserving the foreign `f3-foreign-can` bridge canary.
 
-The exact command output is retained in
-`docs/evidence/artifacts/fabric-v3-three-host-gate-20261003/gate-output.txt`
-(SHA-256 `77504240a1c739b0f3a4da18f973ba3430077aa69b816955e5260e0353d27913`).
-The runtime snapshot records per-realm VXLAN (`dstport 4789`, learning enabled),
-VNI 101/102, HER FDB membership, authenticated WireGuard peers with `/32`
-AllowedIPs, and endpoint anti-spoof rules; its SHA-256 is
-`6b8775994ffc73c86d5b513adcb7547e227bb4c4c6446007dca41027c2cc936c`.
+The exact corrected command output is retained in
+`docs/evidence/artifacts/fabric-v3-three-host-gate-20261003/gate-output-corrected.txt`
+(SHA-256 `2ba83ff4b4826a792a1aacf56b9625247ff9d807d14a1a94cdc148a9bb85dbab`).
+The earlier `gate-output.txt` and `runtime-snapshot.txt` are retained as
+diagnostic artifacts from the first helper revision; that revision over-created
+realm state on hosts without a local endpoint and is not used for the corrected
+result.
+The corrected runtime snapshot at
+`docs/evidence/artifacts/fabric-v3-three-host-gate-20261003/runtime-snapshot-corrected.txt`
+records per-realm VXLAN (`dstport 4789`, learning enabled), VNI 101/102, HER
+FDB membership, authenticated WireGuard peers with `/32` AllowedIPs, and
+endpoint anti-spoof rules; its SHA-256 is
+`857660f88943d3cd828f6af1c45855327e08eb938e4a05adf8902edd51e8a560`.
 The physical-underlay capture contains only UDP/65001 WireGuard packets and
 no decoded tenant IPv4 fields; its SHA-256 is
 `9c28f2a37b0d7c6d183fedb3d4586ca4458ebd97a7f090210559d8fe5df46e7f`.
