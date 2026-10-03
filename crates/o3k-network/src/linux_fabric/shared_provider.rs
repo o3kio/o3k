@@ -93,6 +93,7 @@ fn to_provider_plan(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use o3k_domain::{

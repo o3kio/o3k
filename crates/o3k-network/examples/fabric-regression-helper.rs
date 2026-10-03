@@ -193,7 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut peer_public_key = None;
     let mut underlay_endpoint = None;
     let mut wireguard_port = None;
-    let mut geneve_port = None;
+    let mut vxlan_port = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -234,9 +234,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 wireguard_port = Some(args[i].parse::<u16>()?);
             }
-            "--geneve-port" => {
+            "--vxlan-port" => {
                 i += 1;
-                geneve_port = Some(args[i].parse::<u16>()?);
+                vxlan_port = Some(args[i].parse::<u16>()?);
             }
             other => {
                 eprintln!("unknown argument: {other}");
@@ -288,8 +288,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(port) = wireguard_port {
         config = config.with_wireguard_port(port);
     }
-    if let Some(port) = geneve_port {
-        config = config.with_geneve_port(port);
+    if let Some(port) = vxlan_port {
+        config = config.with_vxlan_port(port);
     }
     let mut backend = LinuxFabricBackend::open(config)?;
 
