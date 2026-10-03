@@ -1,13 +1,13 @@
-//! Regression-test helper for the P11 dataplane.
+//! Regression-test helper for the P11 v3 dataplane.
 //!
 //! Each invocation applies or removes fabric plans for one host. The topology
 //! is hardcoded: two overlapping-prefix realms (A and B), each with two
-//! endpoints (one per host).  Run via the `p11-dataplane-regression.sh` script
-//! after building with `cargo build --example p11-regression-helper --all-features`.
+//! endpoints (one per host).  Run via the `fabric-v3-bridge-gate.sh` script
+//! after building with `cargo build --example fabric-regression-helper --all-features`.
 //!
 //! Usage:
 //! ```text
-//! p11-regression-helper \
+//! fabric-regression-helper \
 //!   --root /tmp/o3k-reg-a \
 //!   --mode apply|remove \
 //!   --host-id reg-host-a \
@@ -19,7 +19,7 @@
 //! ```
 //!
 //! The `--peer-*` and `--underlay-endpoint` describe the **remote** host that
-//! WireGuard and Geneve connect to.
+//! WireGuard and VXLAN connect to.
 
 use o3k_domain::{
     AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
@@ -34,7 +34,7 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 //
 // Realm A and B share the same tenant prefix (10.0.0.0/24) to exercise the
-// overlapping-prefix / Geneve-encapsulation path.  Each realm owns two
+// overlapping-prefix / VXLAN-encapsulation path.  Each realm owns two
 // endpoints, one placed on each host.
 
 const REALM_A_ID: u128 = 0xa100_0000_0000_0000_0000_0000_0000_0001;
@@ -78,7 +78,11 @@ fn build_realm_plan(
     peer_public_key: &str,
     peer_underlay_endpoint: &str,
 ) -> Result<NamespacedRoutedFabricPlan, Box<dyn std::error::Error>> {
-    let prefix = Ipv4Prefix::new(REALM_PREFIX_STR.parse()?, 24).ok_or("invalid realm prefix")?;
+    let (network, prefix_len) = REALM_PREFIX_STR
+        .split_once('/')
+        .ok_or("invalid realm prefix")?;
+    let prefix =
+        Ipv4Prefix::new(network.parse()?, prefix_len.parse()?).ok_or("invalid realm prefix")?;
 
     let realm = AddressRealm {
         id: realm_id,
@@ -88,30 +92,44 @@ fn build_realm_plan(
         overlapping_prefixes: true,
     };
 
-    // Determine which endpoint goes where based on host identity.
-    let local_ip = LOCAL_ENDPOINT_IP;
-    let remote_ip = REMOTE_ENDPOINT_IP;
-    let local_mac = if realm_id == Uuid::from_u128(REALM_A_ID) {
-        "02:00:00:00:a1:01"
+    // The fixture places .10 on host A and .20 on host B.  Build the
+    // directory from the actual local/peer host arguments so the anti-spoof
+    // rules and provider placement match the endpoint namespaces in the
+    // bridge harness on both sides.
+    let realm_a = realm_id == Uuid::from_u128(REALM_A_ID);
+    let (ip_a, mac_a, endpoint_a) = if realm_a {
+        (
+            LOCAL_ENDPOINT_IP,
+            "02:00:00:00:a1:01",
+            Uuid::from_u128(EP_A1_ID),
+        )
     } else {
-        "02:00:00:00:b1:01"
+        (
+            LOCAL_ENDPOINT_IP,
+            "02:00:00:00:b1:01",
+            Uuid::from_u128(EP_B1_ID),
+        )
     };
-    let remote_mac = if realm_id == Uuid::from_u128(REALM_A_ID) {
-        "02:00:00:00:a1:02"
+    let (ip_b, mac_b, endpoint_b) = if realm_a {
+        (
+            REMOTE_ENDPOINT_IP,
+            "02:00:00:00:a1:02",
+            Uuid::from_u128(EP_A2_ID),
+        )
     } else {
-        "02:00:00:00:b1:02"
+        (
+            REMOTE_ENDPOINT_IP,
+            "02:00:00:00:b1:02",
+            Uuid::from_u128(EP_B2_ID),
+        )
     };
-
-    let local_endpoint_id = if realm_id == Uuid::from_u128(REALM_A_ID) {
-        Uuid::from_u128(EP_A1_ID)
-    } else {
-        Uuid::from_u128(EP_B1_ID)
-    };
-    let remote_endpoint_id = if realm_id == Uuid::from_u128(REALM_A_ID) {
-        Uuid::from_u128(EP_A2_ID)
-    } else {
-        Uuid::from_u128(EP_B2_ID)
-    };
+    let local_is_a = local_host_id == "reg-host-a";
+    let (local_ip, local_mac, local_endpoint_id, remote_ip, remote_mac, remote_endpoint_id) =
+        if local_is_a {
+            (ip_a, mac_a, endpoint_a, ip_b, mac_b, endpoint_b)
+        } else {
+            (ip_b, mac_b, endpoint_b, ip_a, mac_a, endpoint_a)
+        };
 
     let directory = RealmEndpointDirectory::build(
         &realm,
