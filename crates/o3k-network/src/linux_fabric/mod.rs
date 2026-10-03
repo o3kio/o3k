@@ -33,6 +33,7 @@ mod fabric;
 mod policy;
 mod public_;
 mod realm;
+mod shared_provider;
 mod vxlan;
 
 pub(crate) mod gateway;
@@ -176,6 +177,7 @@ pub struct LinuxFabricBackend {
     pub(crate) command: Arc<dyn LinuxFabricCommand>,
     pub(crate) state: ProviderState,
     pub(crate) plans: BTreeMap<Uuid, NamespacedRoutedFabricPlan>,
+    pub(crate) shared: Option<shared_provider::SharedFabricAdapter>,
 }
 impl LinuxFabricBackend {
     pub fn open(config: LinuxFabricConfig) -> Result<Self, LinuxFabricError> {
@@ -183,6 +185,7 @@ impl LinuxFabricBackend {
         let state_path = config.root.join("ownership.json");
         let plans_path = config.root.join("plans");
         fs::create_dir_all(&plans_path)?;
+        let shared = shared_provider::SharedFabricAdapter::open(&config)?;
         let backend = Self {
             config,
             state_path: state_path.clone(),
@@ -190,6 +193,7 @@ impl LinuxFabricBackend {
             command: Arc::new(SystemLinuxFabricCommand),
             state: load_state(&state_path)?,
             plans: load_plans(&plans_path)?,
+            shared: Some(shared),
         };
         backend.validate_loaded_state()?;
         Ok(backend)
@@ -235,6 +239,7 @@ impl LinuxFabricBackend {
             command,
             state: load_state(&state_path)?,
             plans: load_plans(&plans_path)?,
+            shared: None,
         };
         backend.validate_loaded_state()?;
         Ok(backend)
@@ -451,12 +456,80 @@ impl FabricBackend for LinuxFabricBackend {
     fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), FabricError> {
         Self::validate_policy_plan(plan)?;
         Self::validate_public_plan(plan)?;
-        self.ensure_fabric(plan)?;
+        if self.shared.is_none() {
+            self.ensure_fabric(plan)?;
+        }
         self.persist_plan(plan)?;
         self.ensure_realm(plan)?;
-        self.configure_peers()?;
-        self.reconcile_ingress_auth()?;
-        self.ensure_vxlan(plan)?;
+        if let Some(shared) = self.shared.as_mut() {
+            shared.apply(plan)?;
+            let owned = shared
+                .ownership(plan.realm_id)
+                .ok_or(LinuxFabricError::CorruptState)?;
+            let bridge = {
+                let realm = self
+                    .state
+                    .realms
+                    .get_mut(&plan.realm_id)
+                    .ok_or(LinuxFabricError::CorruptState)?;
+                realm.vxlan = Some(VxlanOwnership {
+                    interface: owned.vxlan_name.clone(),
+                    bridge: owned.bridge_name.clone(),
+                    host_veth: owned.consumer_port_veth.clone(),
+                    fabric_veth: owned.fabric_port_veth.clone(),
+                    vni: owned.vni,
+                    binding_generation: plan.encapsulation.binding_generation,
+                    local_transport_ip: plan.local_fabric_transport_ip,
+                    tenant_mtu: plan.tenant_mtu,
+                    flood_peers: owned.flood_peers.iter().copied().collect(),
+                });
+                realm.bridge.clone()
+            };
+            store_state(&self.state_path, &self.state)?;
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "link",
+                        "set",
+                        owned.consumer_port_veth.as_str(),
+                        "master",
+                        bridge.as_str(),
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
+            {
+                return Err(LinuxFabricError::CommandFailed.into());
+            }
+        }
+        if self.shared.is_none() {
+            self.configure_peers()?;
+            self.reconcile_ingress_auth()?;
+            self.ensure_vxlan(plan)?;
+        } else {
+            // Mirror only provider-derived host identity into O3K's execution
+            // journal; canonical generations and VNI admission remain O3K-owned.
+            self.state.fabric = Some(FabricOwnership {
+                namespace: self.config.fabric_namespace.clone(),
+                interface: "o3k-wg".to_owned(),
+                private_key_path: self
+                    .config
+                    .root
+                    .join("fabric-provider/wireguard-private.key")
+                    .display()
+                    .to_string(),
+                fabric_transport_ip: plan.local_fabric_transport_ip,
+                fabric_generation: plan.local_fabric_generation,
+                fabric_mtu: plan.local_fabric_mtu,
+                ingress_auth_fingerprint: String::new(),
+                managed_peers: plan.peers.iter().map(|p| p.host_id.clone()).collect(),
+            });
+            store_state(&self.state_path, &self.state)?;
+            // The shared provider authenticates the host transport; O3K still
+            // owns the realm/VNI/source-host admission decision.
+            self.reconcile_ingress_auth()?;
+        }
         self.ensure_endpoint_taps(plan)?;
         self.ensure_anti_spoof(plan)?;
         self.ensure_policy(plan)?;
@@ -492,7 +565,11 @@ impl FabricBackend for LinuxFabricBackend {
                 self.remove_endpoint_tap(tap, &ownership.bridge)?;
             }
         }
-        self.remove_vxlan(plan, &ownership)?;
+        if let Some(shared) = self.shared.as_mut() {
+            shared.remove(plan.realm_id)?;
+        } else {
+            self.remove_vxlan(plan, &ownership)?;
+        }
         let commands = [
             vec![
                 "netns",
@@ -518,11 +595,19 @@ impl FabricBackend for LinuxFabricBackend {
             }
         }
         self.remove_plan(plan)?;
-        if !self.state.realms.is_empty() {
+        if self.shared.is_none() && !self.state.realms.is_empty() {
             self.configure_peers()?;
             self.reconcile_ingress_auth()?;
         }
-        self.remove_fabric_if_unused(plan.local_fabric_generation)?;
+        if let Some(shared) = self.shared.as_mut() {
+            shared.remove_fabric_if_unused()?;
+            if self.state.realms.is_empty() {
+                self.state.fabric = None;
+                store_state(&self.state_path, &self.state)?;
+            }
+        } else {
+            self.remove_fabric_if_unused(plan.local_fabric_generation)?;
+        }
         Ok(())
     }
 
