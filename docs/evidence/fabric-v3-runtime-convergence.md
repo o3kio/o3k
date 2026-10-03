@@ -120,6 +120,59 @@ prove the required independent three-compute-host packet gate (real remote
 ARP/MAC, DHCP broadcast, overlap isolation, authenticated WireGuard capture,
 anti-spoof injection, MTU boundary, restart, and zero-leak cleanup).
 
+## Nested three-host packet follow-up
+
+The retained nested-host run `fabric-v3-gate-20261003` used three freshly
+provisioned guests on the development host:
+
+```text
+host-a  192.168.122.118
+host-b  192.168.122.134
+host-c  192.168.122.196
+```
+
+The test-only helper
+`crates/o3k-network/examples/fabric-regression-3host-helper.rs` encoded the
+accepted fixture without changing canonical authority:
+
+```text
+Realm A: A1 10.0.0.10 / 02:00:00:00:a1:01 on host-a
+          A2 10.0.0.20 / 02:00:00:00:a1:02 on host-b   VNI 101
+Realm B: B1 10.0.0.10 / 02:00:00:00:b1:01 on host-c
+          B2 10.0.0.20 / 02:00:00:00:b1:02 on host-b   VNI 102
+```
+
+`tests/fabric-v3-three-host-gate.sh` applied the production Linux adapter on
+all three guests, attached disposable endpoint namespaces to the provider
+bridges, and then replayed the same plans after deleting host-b's provider
+WireGuard device. The run passed bidirectional A1↔A2 and B1↔B2 ICMP, with
+neighbour tables learning the actual remote endpoint MACs, realm-scoped
+DHCP-like broadcast delivery, and restart/reconciliation return. Cleanup
+removed provider VXLAN, bridge, namespace, WireGuard, nftables, and endpoint
+state while preserving the foreign `f3-foreign-can` bridge canary.
+
+The exact command output is retained in
+`docs/evidence/artifacts/fabric-v3-three-host-gate-20261003/gate-output.txt`
+(SHA-256 `77504240a1c739b0f3a4da18f973ba3430077aa69b816955e5260e0353d27913`).
+The runtime snapshot records per-realm VXLAN (`dstport 4789`, learning enabled),
+VNI 101/102, HER FDB membership, authenticated WireGuard peers with `/32`
+AllowedIPs, and endpoint anti-spoof rules; its SHA-256 is
+`6b8775994ffc73c86d5b513adcb7547e227bb4c4c6446007dca41027c2cc936c`.
+The physical-underlay capture contains only UDP/65001 WireGuard packets and
+no decoded tenant IPv4 fields; its SHA-256 is
+`9c28f2a37b0d7c6d183fedb3d4586ca4458ebd97a7f090210559d8fe5df46e7f`.
+Host tool/kernel inventory is retained at
+`docs/evidence/artifacts/fabric-v3-three-host-gate-20261003/host-inventory.txt`
+(SHA-256 `e80ab93274284234800dedf11e2754f907f33a6fad8658731518a358895591f8`).
+
+This is useful nested packet-path evidence, but all three guests still share
+one physical libvirt underlay. The run therefore does not satisfy the required
+independent three-compute-host gate. Direct injected wrong-MAC, wrong-IP, and
+ARP-sender packets through a live guest TAP were not claimed; the snapshot
+records the installed fail-closed nftables rules and counters. MTU boundary
+success/oversize behavior and full unknown/stale-VNI traffic injection remain
+portable/provider evidence rather than real-host claims.
+
 ## Disposable bridge gate tooling
 
 `tests/fabric-v3-bridge-gate.sh` creates two logical host namespaces with
