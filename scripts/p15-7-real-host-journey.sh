@@ -178,7 +178,7 @@ die() {
 source "$ROOT_DIR/scripts/p15-7-crash-evidence-state.sh"
 PP5_PHASE="${O3K_P15_7_PHASE:-integrated}"
 case "${PP5_PHASE}" in
-  integrated|s5-scale|1035-crash-recovery|host-maintenance) ;;
+  integrated|s5-scale|1035-crash-recovery|host-maintenance|s1-boundary|s2-boundary) ;;
   *) die "unsupported PP.5 phase: ${PP5_PHASE}" ;;
 esac
 RUN_CRASH=false
@@ -2047,9 +2047,24 @@ O3K_P15_7_LIBVIRT_IMAGE_ROOT="$LIBVIRT_IMAGE_ROOT" \
   bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT" \
   || die "cannot define run-owned libvirt storage pool"
 run_checkpoint_path_diagnostic
-provision_vms_bounded block-a block-b
-join_block block-a "${IPS[0]}"; join_block block-b "${IPS[1]}"
-install_agent block-a "${IPS[0]}"; install_agent block-b "${IPS[1]}"
+case "$PP5_PHASE" in
+  s1-boundary)
+    # The bootstrap compute-agent is the actual one-host profile floor.
+    # S1 provisions no child compute host.
+    ;;
+  s2-boundary)
+    # Add one independently booted compute guest to establish the first
+    # two-host topology transition.
+    provision_vms_bounded block-a
+    join_block block-a "${IPS[0]}"
+    install_agent block-a "${IPS[0]}"
+    ;;
+  *)
+    provision_vms_bounded block-a block-b
+    join_block block-a "${IPS[0]}"; join_block block-b "${IPS[1]}"
+    install_agent block-a "${IPS[0]}"; install_agent block-b "${IPS[1]}"
+    ;;
+esac
 # BuildingBlock lifecycle and operator diagnostics are deliberately
 # system-scoped and require the canonical operator authority.  A Keystone
 # password token is project-scoped by contract and must never be treated as an
@@ -2481,11 +2496,28 @@ api_get /operator/diagnostics/providers initial-provider-diagnostics >"$WORK_ROO
 api_get /operator/diagnostics/capacity initial-capacity-diagnostics >"$WORK_ROOT/capacity.json"
 api_get /services initial-services >"$WORK_ROOT/services.json"
 api_get /resource-types initial-resource-types >"$WORK_ROOT/resource-types.json"
+if [[ "$PP5_PHASE" == s1-boundary ]]; then
+  python3 - "$WORK_ROOT/blocks.json" "$BOOTSTRAP_AGENT_ID" <<'PY'
+import json,sys
+blocks=json.load(open(sys.argv[1], encoding="utf-8"))
+matches=[x.get("block",{}) for x in blocks if x.get("block",{}).get("execution_identity")==sys.argv[2]]
+assert len(matches)==1, "S1 must contain one canonical bootstrap BuildingBlock"
+PY
+elif [[ "$PP5_PHASE" == s2-boundary ]]; then
+  python3 - "$WORK_ROOT/blocks.json" "${BLOCK_IDS[block-a]}" "$BOOTSTRAP_AGENT_ID" <<'PY'
+import json,sys
+blocks=json.load(open(sys.argv[1], encoding="utf-8"))
+ids={x.get("block",{}).get("id") for x in blocks}
+agents=[x.get("block",{}).get("execution_identity") for x in blocks]
+assert sys.argv[2] in ids and sys.argv[3] in agents and len(agents)==len(set(agents))
+PY
+else
 python3 - "$WORK_ROOT/blocks.json" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" <<'PY'
 import json,sys
 ids={x.get('block',{}).get('id') for x in json.load(open(sys.argv[1]))}
 assert sys.argv[2] in ids and sys.argv[3] in ids and len(ids)>=2
 PY
+fi
 
 # Araf is an optional external consumer, never an O3K/TestLab dependency.  If
 # explicitly configured, record reachability as additional evidence without
@@ -2562,6 +2594,91 @@ OS_PORT_B_ID="$(openstack port create --network "$OS_NETWORK_ID" "o3k-p15-7-$RUN
   || die "owned workload B port creation returned an invalid or reused id"
 OS_FLAVOR_ID="$(openstack flavor create "o3k-p15-7-$RUN_ID-flavor" --ram 512 --disk 10 --vcpus 1 -f value -c id | tr -d '[:space:]')"
 [[ "$OS_FLAVOR_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "owned workload flavor creation returned an invalid id"
+
+run_boundary_smoke() {
+  local tier expected children phase checkpoint show state foreign_after
+  local required_ids=""
+  case "$PP5_PHASE" in
+    s1-boundary) tier=S1; expected=1; children=0; phase=boundary-s1 ;;
+    s2-boundary) tier=S2; expected=2; children=1; phase=boundary-s2; required_ids="${BLOCK_IDS[block-a]}" ;;
+    *) die "boundary smoke called from a non-boundary lane" ;;
+  esac
+  checkpoint=""
+  for _ in $(seq 1 60); do
+    checkpoint="$(record_scale_checkpoint "$phase" "$expected" "" "$required_ids" 2>/dev/null || true)"
+    [[ "$checkpoint" == "$expected" ]] && break
+    sleep 2
+  done
+  [[ "$checkpoint" == "$expected" ]] || die "$tier canonical eligible Ready BuildingBlock count changed"
+  curl --fail --silent --show-error -X POST -H "Authorization: Bearer $PROJECT_TOKEN" \
+    -H 'Content-Type: application/json' -H "Idempotency-Key: p15-7-$RUN_ID-boundary" \
+    "$API/compute/servers" \
+    -d "{\"kind\":\"compute:server\",\"spec\":{\"name\":\"p15-7-$RUN_ID-boundary\",\"image_id\":\"$OS_IMAGE_ID\",\"flavor_id\":\"$OS_FLAVOR_ID\",\"key_name\":\"$OS_KEYPAIR_NAME\",\"ssh_public_key\":\"$SSH_PUBLIC_KEY\",\"network_ids\":[\"$OS_PORT_A_ID\"]}}" \
+    >"$WORK_ROOT/boundary-workload.json" || die "$tier real workload create failed"
+  OS_WORKLOAD_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("resource_id", ""))' "$WORK_ROOT/boundary-workload.json")"
+  [[ "$OS_WORKLOAD_A" =~ ^[0-9a-fA-F-]{36}$ ]] || die "$tier workload has no canonical resource id"
+  show="$WORK_ROOT/boundary-workload-show.json"
+  state=""
+  for _ in $(seq 1 120); do
+    curl --fail --silent --show-error -H "Authorization: Bearer $PROJECT_TOKEN" \
+      "$API/compute/servers/$OS_WORKLOAD_A" >"$show" || die "$tier workload status read failed"
+    state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", {}).get("state", ""))' "$show")"
+    [[ "$state" == ACTIVE ]] && break
+    [[ "$state" != ERROR ]] || die "$tier workload entered ERROR"
+    sleep 1
+  done
+  [[ "$state" == ACTIVE ]] || die "$tier workload did not become ACTIVE"
+  LAST_SUCCESSFUL_CHECKPOINT="$tier guest lifecycle ACTIVE"
+  cleanup
+  [[ "$CLEANUP_DONE" == true ]] || die "$tier cleanup did not prove all owned resources absent"
+  assert_owned_domains_absent
+  foreign_after="$(virsh -c qemu:///system list --all --uuid 2>/dev/null | sed '/^$/d' | sort)"
+  [[ "$foreign_after" == "$FOREIGN_BEFORE" ]] || die "$tier cleanup changed the pre-existing libvirt domain set"
+  python3 - "$ARTIFACT_DIR/p15-7-boundary-smoke-evidence.json" \
+    "$ARTIFACT_DIR/p15-7-scale-checkpoint-$phase.json" "$SOURCE_SHA" "$tier" "$expected" "$children" \
+    "$BOOTSTRAP_AGENT_ID" <<'PY'
+import json, pathlib, sys
+out, checkpoint_path, source_sha, tier, expected, child_count, bootstrap_agent = sys.argv[1:]
+expected, child_count = int(expected), int(child_count)
+checkpoint = json.loads(pathlib.Path(checkpoint_path).read_text(encoding="utf-8"))
+eligible = [entry for entry in checkpoint.get("blocks", []) if entry.get("placement_eligible")]
+bootstrap = [entry for entry in eligible if entry.get("execution_identity") == bootstrap_agent]
+children = [entry for entry in eligible if entry.get("execution_identity") != bootstrap_agent]
+if checkpoint.get("eligible_ready_count") != expected or len(eligible) != expected:
+    raise SystemExit("boundary checkpoint cardinality mismatch")
+if len(bootstrap) != 1 or len(children) != child_count:
+    raise SystemExit("boundary membership does not match bootstrap/child topology")
+doc = {
+    "artifact_type": "o3k-pp5-boundary-smoke-evidence",
+    "schema_version": 1,
+    "phase": f"{tier.lower()}-boundary",
+    "status": "passed",
+    "tier": tier,
+    "profile": "small-edge-cloud",
+    "execution_environment": "nested-host-development",
+    "tested_source_sha": source_sha,
+    "eligible_ready_count": expected,
+    "eligible_blocks": [{"block_id": entry["block_id"],
+                          "execution_identity": entry["execution_identity"]}
+                         for entry in eligible],
+    "bootstrap_block_id": bootstrap[0]["block_id"],
+    "additional_block_ids": [entry["block_id"] for entry in children],
+    "guest_lifecycle": {"status": "passed", "created": True, "active": True, "deleted": True},
+    "cleanup": {"status": "passed", "owned_domains_remaining": 0,
+                "owned_resources_remaining": 0, "foreign_state_unchanged": True},
+    "multi_host_transition": tier == "S2" and len({entry["execution_identity"] for entry in eligible}) == 2,
+    "evidence": [pathlib.Path(checkpoint_path).name],
+    "redacted": True,
+}
+pathlib.Path(out).write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  echo "$tier boundary smoke completed: $ARTIFACT_DIR/p15-7-boundary-smoke-evidence.json"
+}
+
+if [[ "$PP5_PHASE" == s1-boundary || "$PP5_PHASE" == s2-boundary ]]; then
+  run_boundary_smoke
+  exit 0
+fi
 
 # Add a third genuine VM/block before any drain. Capacity must grow in the
 # canonical diagnostics projection; a second logical object on one host is not

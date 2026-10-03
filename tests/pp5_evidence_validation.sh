@@ -52,10 +52,12 @@ def base():
         "campaign": {
             "declared_scale_tier": "S10",
             "declared_soak_tier": "K-min",
-            "scale_tiers": [
+            "boundary_smokes": [
                 {"name": "S1", "hypervisors": 1, "verdict": "pass"},
                 {"name": "S2", "hypervisors": 2, "verdict": "pass"},
-                {"name": "S5", "hypervisors": 5, "verdict": "pass"},
+            ],
+            "foundation_tier": {"name": "S5", "hypervisors": 5, "verdict": "pass"},
+            "scale_tiers": [
                 {"name": "S3", "hypervisors": 3, "verdict": "pass"},
                 {"name": "S10", "hypervisors": 10, "verdict": "pass"},
                 {"name": "S20", "hypervisors": 20, "verdict": "pass"},
@@ -141,10 +143,18 @@ elif mutation == "drop_server_version":
     drop(doc, "database.server_version")
 elif mutation == "missing_scale_tier":
     doc["campaign"]["scale_tiers"] = [
-        t for t in doc["campaign"]["scale_tiers"] if t["name"] != "S5"
+        t for t in doc["campaign"]["scale_tiers"] if t["name"] != "S3"
     ]
 elif mutation == "wrong_scale_cardinality":
     doc["campaign"]["scale_tiers"][2]["hypervisors"] = 4
+elif mutation == "missing_boundary_smoke":
+    doc["campaign"]["boundary_smokes"] = [
+        smoke for smoke in doc["campaign"]["boundary_smokes"] if smoke["name"] != "S2"
+    ]
+elif mutation == "wrong_boundary_cardinality":
+    doc["campaign"]["boundary_smokes"][1]["hypervisors"] = 1
+elif mutation == "missing_foundation_tier":
+    drop(doc, "campaign.foundation_tier")
 elif mutation == "missing_soak_tier":
     doc["campaign"]["soak_tiers"] = [
         t for t in doc["campaign"]["soak_tiers"] if t["name"] != "K-full"
@@ -187,8 +197,11 @@ cases=(
     "drop_signature_verified|1|release.signature_verified must be true"
     "false_signature_verified|1|release.signature_verified must be true"
     "drop_server_version|1|database.server_version must be a non-empty string"
-    "missing_scale_tier|1|missing required tier(s): S5"
-    "wrong_scale_cardinality|1|campaign.scale_tiers[2] S5 must declare 5 hypervisors"
+    "missing_scale_tier|1|missing required tier(s): S3"
+    "wrong_scale_cardinality|1|campaign.scale_tiers[2] S20 must declare 20 hypervisors"
+    "missing_boundary_smoke|1|campaign.boundary_smokes missing required smoke(s): S2"
+    "wrong_boundary_cardinality|1|campaign.boundary_smokes[1] S2 must declare 2 hypervisors"
+    "missing_foundation_tier|1|campaign.foundation_tier must be an object"
     "missing_soak_tier|1|missing required tier(s): K-full"
     "short_soak|1|K-min must declare duration 2h"
     "wrong_soak_scale|1|K-full must declare scale S20"
