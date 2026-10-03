@@ -537,8 +537,8 @@ impl FabricBackend for LinuxFabricBackend {
         }
         if self.shared.is_none() {
             self.configure_peers()?;
-            self.reconcile_ingress_auth()?;
             self.ensure_vxlan(plan)?;
+            self.reconcile_ingress_auth()?;
         } else {
             // Mirror only provider-derived host identity into O3K's execution
             // journal; canonical generations and VNI admission remain O3K-owned.
@@ -555,6 +555,7 @@ impl FabricBackend for LinuxFabricBackend {
                 fabric_generation: plan.local_fabric_generation,
                 fabric_mtu: plan.local_fabric_mtu,
                 ingress_auth_fingerprint: String::new(),
+                ingress_vni_fingerprint: String::new(),
                 managed_peers: self
                     .plans
                     .values()
@@ -936,11 +937,27 @@ mod tests {
         }));
         assert!(calls.iter().any(|(program, args)| {
             program == "ip"
+                && args.contains(&"198.18.0.2".to_owned())
+                && args.contains(&"meta".to_owned())
+                && args.contains(&"mark".to_owned())
+                && args.contains(&"set".to_owned())
+                && args.contains(&"accept".to_owned())
+        }));
+        assert!(!calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args
+                    .windows(4)
+                    .any(|window| window == ["add", "rule", "netdev", "o3k-fabric-auth"])
                 && args.contains(&"vxlan".to_owned())
                 && args.contains(&"vni".to_owned())
-                && args.contains(&"101".to_owned())
-                && args.contains(&"198.18.0.2".to_owned())
-                && args.contains(&"accept".to_owned())
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.windows(2).any(|window| window == ["table", "bridge"])
+                && args.contains(&"o3k-fabric-vni-auth".to_owned())
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip" && args.contains(&vxlan_name(plan().realm_id))
         }));
         assert!(calls.iter().any(|(program, args)| {
             program == "ip" && args.windows(2).any(|window| window == ["mtu", "1390"])

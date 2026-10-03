@@ -376,6 +376,7 @@ impl super::LinuxFabricBackend {
             fabric_generation: plan.local_fabric_generation,
             fabric_mtu: plan.local_fabric_mtu,
             ingress_auth_fingerprint: String::new(),
+            ingress_vni_fingerprint: String::new(),
             managed_peers: BTreeSet::new(),
         });
         store_state(&self.state_path, &self.state)?;
@@ -501,65 +502,125 @@ impl super::LinuxFabricBackend {
         Ok(())
     }
 
-    /// Admit only VXLAN datagrams whose authenticated WireGuard source
-    /// transport address participates in the datagram's current realm VNI.
-    /// WireGuard supplies the peer authentication and /32 source binding;
-    /// this netdev hook supplies the realm/VNI admission boundary before the
-    /// packet reaches a learning VXLAN device.  The rule set is derived from
-    /// the durable plans and is therefore not a second placement authority.
+    /// Admit only VXLAN datagrams from authenticated, enrolled WireGuard
+    /// peers, then bind the resulting peer mark to the one current VXLAN
+    /// device for each realm.  The source-only netdev rule is deliberate:
+    /// matching the inner VXLAN VNI at a pre-decap WireGuard ingress hook
+    /// prevents Linux from forwarding broadcast/unknown-unicast frames into
+    /// the VXLAN bridge.  VNI admission therefore happens after decapsulation
+    /// on the fabric bridge, where the VXLAN device itself is the structural
+    /// realm discriminator.  Both rule sets are derived from durable plans
+    /// and are not a second placement authority.
     pub(crate) fn reconcile_ingress_auth(&mut self) -> Result<(), LinuxFabricError> {
         let Some(fabric) = self.state.fabric.clone() else {
             return Err(LinuxFabricError::CorruptState);
         };
         let mut admissions = BTreeSet::<(Ipv4Addr, u32, u64)>::new();
+        let mut vni_admissions = BTreeSet::<(String, Ipv4Addr, u32)>::new();
         for plan in self
             .plans
             .values()
             .filter(|plan| self.state.realms.contains_key(&plan.realm_id))
         {
+            let Some(vxlan) = self
+                .state
+                .realms
+                .get(&plan.realm_id)
+                .and_then(|realm| realm.vxlan.as_ref())
+            else {
+                return Err(LinuxFabricError::CorruptState);
+            };
             for peer in &plan.peers {
                 admissions.insert((
                     peer.fabric_transport_ip,
                     plan.encapsulation.provider_segment_id,
                     peer.fabric_generation,
                 ));
+                vni_admissions.insert((
+                    vxlan.interface.clone(),
+                    peer.fabric_transport_ip,
+                    vxlan.vni,
+                ));
             }
         }
-        let fingerprint = format!(
+        let auth_fingerprint = format!(
             "{:x}",
             Sha256::digest(
                 serde_json::to_vec(&admissions).map_err(|_| LinuxFabricError::CorruptState)?,
             )
         );
-        const TABLE: &str = "o3k-fabric-auth";
+        let vni_fingerprint = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&vni_admissions).map_err(|_| LinuxFabricError::CorruptState)?,
+            )
+        );
+        const AUTH_TABLE: &str = "o3k-fabric-auth";
+        const VNI_TABLE: &str = "o3k-fabric-vni-auth";
         const CHAIN: &str = "ingress";
-        const MARKER: &str = "o3k-fabric-auth";
-        let marker = format!("{MARKER}:{fingerprint}");
-        let quoted_marker = format!("\"{marker}\"");
+        const FORWARD_CHAIN: &str = "forward";
+        const AUTH_MARKER: &str = "o3k-fabric-auth";
+        const VNI_MARKER: &str = "o3k-fabric-vni-auth";
+        let auth_marker = format!("{AUTH_MARKER}:{auth_fingerprint}");
+        let vni_marker = format!("{VNI_MARKER}:{vni_fingerprint}");
+        let quoted_auth_marker = format!("\"{auth_marker}\"");
+        let quoted_vni_marker = format!("\"{vni_marker}\"");
         let ns = fabric.namespace.as_str();
-        let listed = self
+        let listed_auth = self
             .command
             .output(
                 "ip",
-                &["netns", "exec", ns, "nft", "list", "table", "netdev", TABLE],
+                &[
+                    "netns", "exec", ns, "nft", "list", "table", "netdev", AUTH_TABLE,
+                ],
             )
             .map_err(LinuxFabricError::Storage)?;
-        if listed.0 && !listed.1.contains(MARKER) {
+        let listed_vni = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns", "exec", ns, "nft", "list", "table", "bridge", VNI_TABLE,
+                ],
+            )
+            .map_err(LinuxFabricError::Storage)?;
+        if listed_auth.0 && !listed_auth.1.contains(AUTH_MARKER) {
             return Err(LinuxFabricError::ForeignState);
         }
-        if listed.0 && listed.1.contains(&marker) {
+        if listed_vni.0 && !listed_vni.1.contains(VNI_MARKER) {
+            return Err(LinuxFabricError::ForeignState);
+        }
+        if listed_auth.0
+            && listed_auth.1.contains(&auth_marker)
+            && listed_vni.0
+            && listed_vni.1.contains(&vni_marker)
+        {
             if let Some(stored) = self.state.fabric.as_mut() {
-                stored.ingress_auth_fingerprint = fingerprint;
+                stored.ingress_auth_fingerprint = auth_fingerprint;
+                stored.ingress_vni_fingerprint = vni_fingerprint;
             }
             return Ok(());
         }
-        if listed.0
+        if listed_auth.0
             && !self
                 .command
                 .run(
                     "ip",
                     &[
-                        "netns", "exec", ns, "nft", "delete", "table", "netdev", TABLE,
+                        "netns", "exec", ns, "nft", "delete", "table", "netdev", AUTH_TABLE,
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
+        {
+            return Err(LinuxFabricError::CommandFailed);
+        }
+        if listed_vni.0
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns", "exec", ns, "nft", "delete", "table", "bridge", VNI_TABLE,
                     ],
                 )
                 .map_err(LinuxFabricError::Storage)?
@@ -570,7 +631,9 @@ impl super::LinuxFabricBackend {
             .command
             .run(
                 "ip",
-                &["netns", "exec", ns, "nft", "add", "table", "netdev", TABLE],
+                &[
+                    "netns", "exec", ns, "nft", "add", "table", "netdev", AUTH_TABLE,
+                ],
             )
             .map_err(LinuxFabricError::Storage)?
             || !self
@@ -585,7 +648,7 @@ impl super::LinuxFabricBackend {
                         "add",
                         "chain",
                         "netdev",
-                        TABLE,
+                        AUTH_TABLE,
                         CHAIN,
                         "{",
                         "type",
@@ -601,7 +664,7 @@ impl super::LinuxFabricBackend {
                         "drop",
                         ";",
                         "comment",
-                        quoted_marker.as_str(),
+                        quoted_auth_marker.as_str(),
                         ";",
                         "}",
                     ],
@@ -610,9 +673,9 @@ impl super::LinuxFabricBackend {
         {
             return Err(LinuxFabricError::CommandFailed);
         }
-        for (peer_ip, vni, _) in admissions {
+        for (peer_ip, _vni, _) in admissions {
             let source = peer_ip.to_string();
-            let vni = vni.to_string();
+            let mark = u32::from(peer_ip).max(1).to_string();
             if !self
                 .command
                 .run(
@@ -625,7 +688,7 @@ impl super::LinuxFabricBackend {
                         "add",
                         "rule",
                         "netdev",
-                        TABLE,
+                        AUTH_TABLE,
                         CHAIN,
                         "iifname",
                         fabric.interface.as_str(),
@@ -635,13 +698,14 @@ impl super::LinuxFabricBackend {
                         "ip",
                         "saddr",
                         source.as_str(),
-                        "vxlan",
-                        "vni",
-                        vni.as_str(),
+                        "meta",
+                        "mark",
+                        "set",
+                        mark.as_str(),
                         "counter",
                         "accept",
                         "comment",
-                        MARKER,
+                        AUTH_MARKER,
                     ],
                 )
                 .map_err(LinuxFabricError::Storage)?
@@ -649,8 +713,120 @@ impl super::LinuxFabricBackend {
                 return Err(LinuxFabricError::CommandFailed);
             }
         }
+        if !self
+            .command
+            .run(
+                "ip",
+                &[
+                    "netns", "exec", ns, "nft", "add", "table", "bridge", VNI_TABLE,
+                ],
+            )
+            .map_err(LinuxFabricError::Storage)?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        ns,
+                        "nft",
+                        "add",
+                        "chain",
+                        "bridge",
+                        VNI_TABLE,
+                        FORWARD_CHAIN,
+                        "{",
+                        "type",
+                        "filter",
+                        "hook",
+                        "forward",
+                        "priority",
+                        "-500",
+                        ";",
+                        "policy",
+                        "drop",
+                        ";",
+                        "comment",
+                        quoted_vni_marker.as_str(),
+                        ";",
+                        "}",
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
+        {
+            return Err(LinuxFabricError::CommandFailed);
+        }
+        for (realm_id, realm) in &self.state.realms {
+            let Some(vxlan) = realm.vxlan.as_ref() else {
+                return Err(LinuxFabricError::CorruptState);
+            };
+            let Some(plan) = self.plans.get(realm_id) else {
+                return Err(LinuxFabricError::CorruptState);
+            };
+            let fabric_port = vxlan.fabric_veth.as_str();
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        ns,
+                        "nft",
+                        "add",
+                        "rule",
+                        "bridge",
+                        VNI_TABLE,
+                        FORWARD_CHAIN,
+                        "iifname",
+                        fabric_port,
+                        "counter",
+                        "accept",
+                        "comment",
+                        VNI_MARKER,
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
+            {
+                return Err(LinuxFabricError::CommandFailed);
+            }
+            for peer in &plan.peers {
+                let mark = u32::from(peer.fabric_transport_ip).max(1).to_string();
+                if !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            ns,
+                            "nft",
+                            "add",
+                            "rule",
+                            "bridge",
+                            VNI_TABLE,
+                            FORWARD_CHAIN,
+                            "iifname",
+                            vxlan.interface.as_str(),
+                            "meta",
+                            "mark",
+                            mark.as_str(),
+                            "counter",
+                            "accept",
+                            "comment",
+                            VNI_MARKER,
+                        ],
+                    )
+                    .map_err(LinuxFabricError::Storage)?
+                {
+                    return Err(LinuxFabricError::CommandFailed);
+                }
+            }
+        }
         if let Some(stored) = self.state.fabric.as_mut() {
-            stored.ingress_auth_fingerprint = fingerprint;
+            stored.ingress_auth_fingerprint = auth_fingerprint;
+            stored.ingress_vni_fingerprint = vni_fingerprint;
         }
         store_state(&self.state_path, &self.state)
     }
@@ -701,6 +877,47 @@ impl super::LinuxFabricBackend {
                             "table",
                             "netdev",
                             "o3k-fabric-auth",
+                        ],
+                    )
+                    .map_err(LinuxFabricError::Storage)?
+            {
+                return Err(LinuxFabricError::CommandFailed);
+            }
+        }
+        if !fabric.ingress_vni_fingerprint.is_empty() {
+            let listed = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        fabric.namespace.as_str(),
+                        "nft",
+                        "list",
+                        "table",
+                        "bridge",
+                        "o3k-fabric-vni-auth",
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            if listed.0 && !listed.1.contains("o3k-fabric-vni-auth") {
+                return Err(LinuxFabricError::ForeignState);
+            }
+            if listed.0
+                && !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            fabric.namespace.as_str(),
+                            "nft",
+                            "delete",
+                            "table",
+                            "bridge",
+                            "o3k-fabric-vni-auth",
                         ],
                     )
                     .map_err(LinuxFabricError::Storage)?

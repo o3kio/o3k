@@ -10,10 +10,17 @@ pub(crate) struct FabricOwnership {
     #[serde(default)]
     pub(crate) fabric_mtu: u16,
     /// Fingerprint of the provider-owned netdev ingress admission rules. The
-    /// rules bind authenticated WireGuard transport addresses to current
-    /// realm VNIs and are reconstructed from durable plans after restart.
+    /// rules bind authenticated WireGuard transport addresses to peer marks;
+    /// the marks are bound to current realm VNIs by the bridge admission
+    /// fingerprint below and both are reconstructed from durable plans after
+    /// restart.
     #[serde(default)]
     pub(crate) ingress_auth_fingerprint: String,
+    /// Fingerprint of the provider-namespace bridge admission rules. These
+    /// bind the authenticated peer mark to the one VXLAN device for each
+    /// current realm and are reconstructed from durable plans after restart.
+    #[serde(default)]
+    pub(crate) ingress_vni_fingerprint: String,
     #[serde(default)]
     pub(crate) managed_peers: BTreeSet<String>,
 }
