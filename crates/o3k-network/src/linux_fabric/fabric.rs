@@ -375,6 +375,7 @@ impl super::LinuxFabricBackend {
             fabric_transport_ip: plan.local_fabric_transport_ip,
             fabric_generation: plan.local_fabric_generation,
             fabric_mtu: plan.local_fabric_mtu,
+            ingress_auth_fingerprint: String::new(),
             managed_peers: BTreeSet::new(),
         });
         store_state(&self.state_path, &self.state)?;
@@ -499,6 +500,160 @@ impl super::LinuxFabricBackend {
         }
         Ok(())
     }
+
+    /// Admit only VXLAN datagrams whose authenticated WireGuard source
+    /// transport address participates in the datagram's current realm VNI.
+    /// WireGuard supplies the peer authentication and /32 source binding;
+    /// this netdev hook supplies the realm/VNI admission boundary before the
+    /// packet reaches a learning VXLAN device.  The rule set is derived from
+    /// the durable plans and is therefore not a second placement authority.
+    pub(crate) fn reconcile_ingress_auth(&mut self) -> Result<(), LinuxFabricError> {
+        let Some(fabric) = self.state.fabric.clone() else {
+            return Err(LinuxFabricError::CorruptState);
+        };
+        let mut admissions = BTreeSet::<(Ipv4Addr, u32, u64)>::new();
+        for plan in self
+            .plans
+            .values()
+            .filter(|plan| self.state.realms.contains_key(&plan.realm_id))
+        {
+            for peer in &plan.peers {
+                admissions.insert((
+                    peer.fabric_transport_ip,
+                    plan.encapsulation.provider_segment_id,
+                    peer.fabric_generation,
+                ));
+            }
+        }
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&admissions).map_err(|_| LinuxFabricError::CorruptState)?,
+            )
+        );
+        const TABLE: &str = "o3k-fabric-auth";
+        const CHAIN: &str = "ingress";
+        const MARKER: &str = "o3k-fabric-auth";
+        let marker = format!("{MARKER}:{fingerprint}");
+        let quoted_marker = format!("\"{marker}\"");
+        let ns = fabric.namespace.as_str();
+        let listed = self
+            .command
+            .output(
+                "ip",
+                &["netns", "exec", ns, "nft", "list", "table", "netdev", TABLE],
+            )
+            .map_err(LinuxFabricError::Storage)?;
+        if listed.0 && !listed.1.contains(MARKER) {
+            return Err(LinuxFabricError::ForeignState);
+        }
+        if listed.0 && listed.1.contains(&marker) {
+            if let Some(stored) = self.state.fabric.as_mut() {
+                stored.ingress_auth_fingerprint = fingerprint;
+            }
+            return Ok(());
+        }
+        if listed.0
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns", "exec", ns, "nft", "delete", "table", "netdev", TABLE,
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
+        {
+            return Err(LinuxFabricError::CommandFailed);
+        }
+        if !self
+            .command
+            .run(
+                "ip",
+                &["netns", "exec", ns, "nft", "add", "table", "netdev", TABLE],
+            )
+            .map_err(LinuxFabricError::Storage)?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        ns,
+                        "nft",
+                        "add",
+                        "chain",
+                        "netdev",
+                        TABLE,
+                        CHAIN,
+                        "{",
+                        "type",
+                        "filter",
+                        "hook",
+                        "ingress",
+                        "device",
+                        fabric.interface.as_str(),
+                        "priority",
+                        "-500",
+                        ";",
+                        "policy",
+                        "drop",
+                        ";",
+                        "comment",
+                        quoted_marker.as_str(),
+                        ";",
+                        "}",
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
+        {
+            return Err(LinuxFabricError::CommandFailed);
+        }
+        for (peer_ip, vni, _) in admissions {
+            let source = peer_ip.to_string();
+            let vni = vni.to_string();
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        ns,
+                        "nft",
+                        "add",
+                        "rule",
+                        "netdev",
+                        TABLE,
+                        CHAIN,
+                        "iifname",
+                        fabric.interface.as_str(),
+                        "udp",
+                        "dport",
+                        "4789",
+                        "ip",
+                        "saddr",
+                        source.as_str(),
+                        "vxlan",
+                        "vni",
+                        vni.as_str(),
+                        "counter",
+                        "accept",
+                        "comment",
+                        MARKER,
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
+            {
+                return Err(LinuxFabricError::CommandFailed);
+            }
+        }
+        if let Some(stored) = self.state.fabric.as_mut() {
+            stored.ingress_auth_fingerprint = fingerprint;
+        }
+        store_state(&self.state_path, &self.state)
+    }
     pub(crate) fn remove_fabric_if_unused(
         &mut self,
         generation: u64,
@@ -511,6 +666,47 @@ impl super::LinuxFabricBackend {
         };
         if generation < fabric.fabric_generation {
             return Err(LinuxFabricError::OwnershipConflict);
+        }
+        if !fabric.ingress_auth_fingerprint.is_empty() {
+            let listed = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        fabric.namespace.as_str(),
+                        "nft",
+                        "list",
+                        "table",
+                        "netdev",
+                        "o3k-fabric-auth",
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            if listed.0 && !listed.1.contains("o3k-fabric-auth") {
+                return Err(LinuxFabricError::ForeignState);
+            }
+            if listed.0
+                && !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            fabric.namespace.as_str(),
+                            "nft",
+                            "delete",
+                            "table",
+                            "netdev",
+                            "o3k-fabric-auth",
+                        ],
+                    )
+                    .map_err(LinuxFabricError::Storage)?
+            {
+                return Err(LinuxFabricError::CommandFailed);
+            }
         }
         // wg-o3k is in the fabric namespace.
         let (ns_exists, _) = self

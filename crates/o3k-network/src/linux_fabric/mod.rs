@@ -455,6 +455,7 @@ impl FabricBackend for LinuxFabricBackend {
         self.persist_plan(plan)?;
         self.ensure_realm(plan)?;
         self.configure_peers()?;
+        self.reconcile_ingress_auth()?;
         self.ensure_vxlan(plan)?;
         self.ensure_endpoint_taps(plan)?;
         self.ensure_anti_spoof(plan)?;
@@ -519,6 +520,7 @@ impl FabricBackend for LinuxFabricBackend {
         self.remove_plan(plan)?;
         if !self.state.realms.is_empty() {
             self.configure_peers()?;
+            self.reconcile_ingress_auth()?;
         }
         self.remove_fabric_if_unused(plan.local_fabric_generation)?;
         Ok(())
@@ -752,6 +754,21 @@ mod tests {
                 && args.contains(&"append".to_owned())
                 && args.contains(&"00:00:00:00:00:00".to_owned())
                 && args.contains(&"198.18.0.2".to_owned())
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args
+                    .windows(4)
+                    .any(|window| window == ["nft", "add", "table", "netdev"])
+                && args.contains(&"o3k-fabric-auth".to_owned())
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.contains(&"vxlan".to_owned())
+                && args.contains(&"vni".to_owned())
+                && args.contains(&"101".to_owned())
+                && args.contains(&"198.18.0.2".to_owned())
+                && args.contains(&"accept".to_owned())
         }));
         assert!(calls.iter().any(|(program, args)| {
             program == "ip" && args.windows(2).any(|window| window == ["mtu", "1390"])

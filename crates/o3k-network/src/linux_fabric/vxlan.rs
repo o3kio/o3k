@@ -148,6 +148,51 @@ impl LinuxFabricBackend {
         if bridge.0 && !bridge.1.contains("bridge") {
             return Err(LinuxFabricError::ForeignState);
         }
+        if bridge.0 {
+            let vxlan_link = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        ns,
+                        "ip",
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        vxlan.interface.as_str(),
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            let fabric_link = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        ns,
+                        "ip",
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        vxlan.fabric_veth.as_str(),
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            if !vxlan_link.0
+                || !vxlan_link.1.contains("vxlan")
+                || !vxlan_link.1.contains(&format!("master {}", vxlan.bridge))
+                || !fabric_link.0
+                || !fabric_link.1.contains("veth")
+                || !fabric_link.1.contains(&format!("master {}", vxlan.bridge))
+            {
+                return Err(LinuxFabricError::ForeignState);
+            }
+        }
         if !bridge.0
             && !self
                 .command
@@ -230,6 +275,8 @@ impl LinuxFabricBackend {
             if !fabric_veth.0
                 || !root_veth.1.contains("veth")
                 || !root_veth.1.contains(&format!("master {realm_bridge}"))
+                || !fabric_veth.1.contains("veth")
+                || !fabric_veth.1.contains(&format!("master {}", vxlan.bridge))
             {
                 return Err(LinuxFabricError::ForeignState);
             }
@@ -401,6 +448,11 @@ impl LinuxFabricBackend {
                             ns,
                             "bridge",
                             "fdb",
+                            // Multicast/broadcast FDB entries deliberately
+                            // use append: one all-zero entry is required per
+                            // participating VTEP, whereas replace would
+                            // collapse the set on kernels that key the entry
+                            // by LLADDR and device.
                             "append",
                             FLOOD_MAC,
                             "dev",
@@ -497,6 +549,51 @@ impl LinuxFabricBackend {
             .map_err(LinuxFabricError::Storage)?;
         if bridge_observed.0 && !bridge_observed.1.contains("bridge") {
             return Err(LinuxFabricError::ForeignState);
+        }
+        if bridge_observed.0 {
+            let vxlan_link = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        ns,
+                        "ip",
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        vxlan.interface.as_str(),
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            let fabric_link = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        ns,
+                        "ip",
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        vxlan.fabric_veth.as_str(),
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            if !vxlan_link.0
+                || !vxlan_link.1.contains("vxlan")
+                || !vxlan_link.1.contains(&format!("master {}", vxlan.bridge))
+                || !fabric_link.0
+                || !fabric_link.1.contains("veth")
+                || !fabric_link.1.contains(&format!("master {}", vxlan.bridge))
+            {
+                return Err(LinuxFabricError::ForeignState);
+            }
         }
         let root_veth_observed = self
             .command
