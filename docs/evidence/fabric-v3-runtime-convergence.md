@@ -3,7 +3,7 @@
 This record covers the runtime executor refactor on branch `fabric-v3-runtime`.
 It does not certify the final PP.5 campaign.
 
-Candidate implementation SHA: `93b271540b5398e12e2b8b1378aec299bcb9814c4`.
+Candidate implementation SHA: `b6a074bb54d5f499f46aaa1ebd024365416e79e6`.
 Base protected `main`: `41fedbfdf982596f6932c5eb6b08e2c36f810067`.
 
 ## Authority and provenance
