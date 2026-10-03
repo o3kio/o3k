@@ -11,8 +11,13 @@ attachments and VNI collisions, and removes only observed owned objects. The
 realm directory resolves remote neighbors to their canonical endpoint MACs.
 Root-side TAP rules enforce canonical MAC/IP and ARP sender identity with nft
 counters; fabric-side ingress accepts only current remote endpoint identities
-and drops the remainder. MTU admission derives IPv4 `fabric_mtu` as
-`underlay_mtu - 60` and tenant MTU as `fabric_mtu - 50`.
+and drops the remainder. A provider-owned netdev ingress chain additionally
+admits UDP/4789 only when the authenticated WireGuard transport `/32` and
+current realm VNI pair are present in the durable plans, so unknown peers,
+wrong VNIs, and stale realm membership are dropped before VXLAN delivery.
+Existing bridge/veth objects are reused only after their expected VXLAN,
+namespace, and bridge-port topology is observed. MTU admission derives IPv4
+`fabric_mtu` as `underlay_mtu - 60` and tenant MTU as `fabric_mtu - 50`.
 
 The portable conformance and three-host evidence gates remain required before
 this runtime can be used as PP.5 S5 evidence. This document records the
