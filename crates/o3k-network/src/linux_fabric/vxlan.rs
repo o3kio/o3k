@@ -11,6 +11,16 @@ use super::*;
 const VXLAN_PORT: u16 = 4789;
 const FLOOD_MAC: &str = "00:00:00:00:00:00";
 
+/// `ip link` prints a veth peer as `name@peer`.  The peer name is the
+/// kernel-owned identity that binds the two halves of this provider topology;
+/// checking only `veth` plus bridge membership would allow a foreign same-name
+/// topology to be adopted.
+fn veth_link_matches(output: &str, peer: &str, master: &str) -> bool {
+    output.contains("veth")
+        && output.contains(&format!("@{peer}"))
+        && output.contains(&format!("master {master}"))
+}
+
 impl LinuxFabricBackend {
     pub(crate) fn ensure_vxlan(
         &mut self,
@@ -187,8 +197,7 @@ impl LinuxFabricBackend {
                 || !vxlan_link.1.contains("vxlan")
                 || !vxlan_link.1.contains(&format!("master {}", vxlan.bridge))
                 || !fabric_link.0
-                || !fabric_link.1.contains("veth")
-                || !fabric_link.1.contains(&format!("master {}", vxlan.bridge))
+                || !veth_link_matches(&fabric_link.1, &vxlan.host_veth, &vxlan.bridge)
             {
                 return Err(LinuxFabricError::ForeignState);
             }
@@ -273,10 +282,8 @@ impl LinuxFabricBackend {
                 .bridge
                 .clone();
             if !fabric_veth.0
-                || !root_veth.1.contains("veth")
-                || !root_veth.1.contains(&format!("master {realm_bridge}"))
-                || !fabric_veth.1.contains("veth")
-                || !fabric_veth.1.contains(&format!("master {}", vxlan.bridge))
+                || !veth_link_matches(&root_veth.1, &vxlan.fabric_veth, &realm_bridge)
+                || !veth_link_matches(&fabric_veth.1, &vxlan.host_veth, &vxlan.bridge)
             {
                 return Err(LinuxFabricError::ForeignState);
             }
@@ -589,8 +596,7 @@ impl LinuxFabricBackend {
                 || !vxlan_link.1.contains("vxlan")
                 || !vxlan_link.1.contains(&format!("master {}", vxlan.bridge))
                 || !fabric_link.0
-                || !fabric_link.1.contains("veth")
-                || !fabric_link.1.contains(&format!("master {}", vxlan.bridge))
+                || !veth_link_matches(&fabric_link.1, &vxlan.host_veth, &vxlan.bridge)
             {
                 return Err(LinuxFabricError::ForeignState);
             }
@@ -610,10 +616,7 @@ impl LinuxFabricBackend {
             .bridge
             .clone();
         if root_veth_observed.0
-            && (!root_veth_observed.1.contains("veth")
-                || !root_veth_observed
-                    .1
-                    .contains(&format!("master {realm_bridge}")))
+            && !veth_link_matches(&root_veth_observed.1, &vxlan.fabric_veth, &realm_bridge)
         {
             return Err(LinuxFabricError::ForeignState);
         }
@@ -696,5 +699,22 @@ impl LinuxFabricBackend {
         }
         let _ = plan;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::veth_link_matches;
+
+    #[test]
+    fn veth_ownership_requires_the_kernel_peer_identity() {
+        let output = "12: o3k-h@o3k-f: <BROADCAST> veth master o3k-b-12345678";
+        assert!(veth_link_matches(output, "o3k-f", "o3k-b-12345678"));
+        assert!(!veth_link_matches(output, "foreign-f", "o3k-b-12345678"));
+        assert!(!veth_link_matches(
+            "12: o3k-h@foreign-f: <BROADCAST> veth master o3k-b-12345678",
+            "o3k-f",
+            "o3k-b-12345678"
+        ));
     }
 }
