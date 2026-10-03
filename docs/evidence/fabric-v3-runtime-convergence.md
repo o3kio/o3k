@@ -3,7 +3,7 @@
 This record covers the runtime executor refactor on branch `fabric-v3-runtime`.
 It does not certify the final PP.5 campaign.
 
-Candidate implementation SHA: `cfcc1e6159514bbc030c5f6154381ad44b0c41c1`.
+Candidate implementation SHA: `93b271540b5398e12e2b8b1378aec299bcb9814c4`.
 Base protected `main`: `41fedbfdf982596f6932c5eb6b08e2c36f810067`.
 
 ## Authority and provenance
@@ -143,3 +143,44 @@ the endpoint bridge, so the script failed closed at the A1-to-A2 packet gate.
 This retained failure is diagnostic evidence only; it is not a Fabric v3
 functional pass. `FABRIC_V3_KEEP=1` is available for bounded inspection and
 must be followed by explicit removal of the listed disposable namespaces.
+
+### Ingress admission correction and follow-up run
+
+The first full bridge-gate run retained a real packet-path failure. The
+provider and WireGuard transport were healthy, but an nftables `vxlan vni`
+expression was evaluated at the WireGuard netdev ingress hook, before the
+kernel had decapsulated the VXLAN frame. That rejected BUM and unknown-unicast
+frames, so a remote ARP request never reached the endpoint bridge. A standalone
+VXLAN-over-WireGuard reproduction isolated the failure to that pre-decap
+match.
+
+Commit `93b271540b5398e12e2b8b1378aec299bcb9814c4` changes admission to two
+bounded stages. The WireGuard netdev rule authenticates the enrolled peer
+source and assigns a deterministic mark. A bridge-forward rule then binds
+that mark to the current realm VXLAN device and VNI after decapsulation. The
+reconciliation fingerprints and owns both tables, rejects foreign markers,
+and removes them only after ownership is proven. The netdev hook no longer
+matches `vxlan vni` before decapsulation.
+
+The corrected development-host runs were:
+
+```text
+provider-realization=passed
+endpoint-bridges=not-run
+provider-cleanup-and-foreign-canary=passed
+
+provider-realization=passed
+endpoint-bridges=passed
+remote-arp-mac-and-icmp=passed
+bounded-her-fdb=passed
+provider-cleanup-and-foreign-canary=passed
+```
+
+The full run observed actual endpoint MAC learning for both overlapping
+realms, bidirectional A1/A2 and B1/B2 ICMP with 0% loss, bounded HER entries,
+and cleanup with the foreign canary preserved. This is a one-physical-host,
+two-logical-host development gate. It is retained as focused packet-path
+evidence and does not satisfy the independent three-compute-host requirement.
+It does not claim DHCP broadcast, underlay capture, injected anti-spoof
+rejections, MTU boundary behavior, restart/reconciliation return, or a
+three-host zero-leak inventory.
