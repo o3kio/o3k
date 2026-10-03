@@ -1901,6 +1901,8 @@ version = "0.4.0-rc.5"
 dependencies = [
  "async-trait",
  "fabric-conformance",
+ "fabric-linux",
+ "fabric-plan",
  "o3k-dhcp",
  "o3k-domain",
  "o3k-kernel",
