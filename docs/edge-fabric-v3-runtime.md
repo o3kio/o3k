@@ -22,3 +22,6 @@ namespace, and bridge-port topology is observed. MTU admission derives IPv4
 The portable conformance and three-host evidence gates remain required before
 this runtime can be used as PP.5 S5 evidence. This document records the
 implementation boundary only; it does not claim those gates have passed.
+
+The bounded privileged provider witness is retained in
+[`docs/evidence/fabric-v3-single-host-smoke-20261003.md`](evidence/fabric-v3-single-host-smoke-20261003.md).
