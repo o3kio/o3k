@@ -552,6 +552,48 @@ impl LinuxFabricBackend {
                 }
             }
         }
+        // Observe after every mutation as well.  `append` is required for
+        // multiple all-zero FDB destinations, so an interrupted/duplicated
+        // command must never be reported as converged until the kernel shows
+        // exactly one current entry per accepted peer and no stale entries.
+        let verified = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    ns,
+                    "bridge",
+                    "fdb",
+                    "show",
+                    "dev",
+                    vxlan.interface.as_str(),
+                ],
+            )
+            .map_err(LinuxFabricError::Storage)?;
+        if !verified.0 {
+            return Err(LinuxFabricError::CommandFailed);
+        }
+        let mut verified_peers = BTreeMap::<Ipv4Addr, usize>::new();
+        for line in verified.1.lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.first() == Some(&FLOOD_MAC)
+                && let Some(dst) = fields
+                    .windows(2)
+                    .find_map(|w| (w[0] == "dst").then_some(w[1]))
+                && let Ok(ip) = dst.parse::<Ipv4Addr>()
+            {
+                *verified_peers.entry(ip).or_default() += 1;
+            }
+        }
+        if verified_peers
+            .iter()
+            .any(|(peer, count)| *count != 1 || !vxlan.flood_peers.contains(peer))
+            || verified_peers.len() != vxlan.flood_peers.len()
+        {
+            return Err(LinuxFabricError::CommandFailed);
+        }
         let _ = plan;
         Ok(())
     }

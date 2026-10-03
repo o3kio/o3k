@@ -593,7 +593,18 @@ mod tests {
                     .windows(4)
                     .any(|window| window == ["bridge", "fdb", "show", "dev"])
             {
-                return Ok((true, String::new()));
+                let reconciled = self
+                    .calls
+                    .lock()
+                    .expect("calls")
+                    .iter()
+                    .any(|(_, call)| call.windows(2).any(|window| window == ["fdb", "append"]));
+                return Ok((
+                    true,
+                    reconciled
+                        .then_some("00:00:00:00:00:00 dst 198.18.0.2\n".to_owned())
+                        .unwrap_or_default(),
+                ));
             }
             if args.starts_with(&["netns", "exec"]) && self.namespace_exists {
                 return Ok((true, String::new()));
