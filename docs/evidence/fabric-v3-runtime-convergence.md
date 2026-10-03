@@ -78,10 +78,10 @@ On 2026-10-03 the current development host provisioned three nested KVM
 guests with `tests/pp5-small-edge-campaign/provision-hosts.sh`:
 
 ```text
-run: fabric-v3-20261003-nested
-host-a: 192.168.122.26
-host-b: 192.168.122.138
-host-c: 192.168.122.221
+run: fabric-v3-20261003-evidence2
+host-a: 192.168.122.18
+host-b: 192.168.122.4
+host-c: 192.168.122.241
 kernel: 6.8.0-139-generic
 vCPU/memory: 2 / 1967 MiB per guest
 /dev/kvm in guest: usable on all three
@@ -89,11 +89,11 @@ guest-to-guest reachability: passed
 ```
 
 Provisioning evidence is retained at
-`tests/pp5-small-edge-campaign/runs/fabric-v3-20261003-nested/evidence.json`
-(SHA-256
-`e984a547e96e69234e71d3ecfc5b65cf518d93ca2034c790ca8892a0876fb970`) and the
-inventory at `.../inventory.txt` (SHA-256
-`8bc7d31376121623ccf86f9a521abd317dc7340bd886a400598eefab865d9e2a`).
+`docs/evidence/artifacts/fabric-v3-20261003-evidence2/evidence.json` (SHA-256
+`58bec87347d9a60eadf219ff643fb39471cc5d2a13ec3c77f1be38cbe5f3d90f`) and the
+sanitized inventory at
+`docs/evidence/artifacts/fabric-v3-20261003-evidence2/inventory.txt` (SHA-256
+`5c30893fb2992bfa3bd91fee3304525def14eb202c0e36525d28109324878370`).
 
 The provider smoke was executed on all three guests using the production
 `fabric_linux::LinuxFabricProvider<RealCommandRunner>` adapter. Each guest
@@ -101,6 +101,10 @@ passed host transport address, per-realm VXLAN (`dstport 4789`, learning
 enabled), isolated VXLAN/consumer-veth attachment, and topology cleanup.
 The smoke used provider-generated names (`o3k-wg`, `o3k-x-*`, `o3k-b-*`, and
 `o3k-p-*`) and confirmed no residual provider objects after each run.
+The sanitized command output is retained at
+`docs/evidence/artifacts/fabric-v3-20261003-evidence2/provider-smoke.txt`
+(SHA-256
+`ecbfa4ce0fc6d5d066c60a2d1ffdd80eb9a5fbad21a4067988b75400c463b0b6`).
 
 The first host-b retry encountered the intended O3K fail-closed response after
 an interrupted prior smoke left the durable TAP record with MAC

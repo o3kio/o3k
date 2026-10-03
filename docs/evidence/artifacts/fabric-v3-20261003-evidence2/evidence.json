@@ -1,0 +1,45 @@
+{
+  "artifact_type": "pp5-small-edge-provision",
+  "failed": 0,
+  "finished_at": "2026-10-03T10:31:49Z",
+  "gateway": "192.168.122.1",
+  "host_count": 3,
+  "hosts": [
+    {
+      "ip": "192.168.122.18",
+      "kernel": "6.8.0-139-generic",
+      "kvm_usable": true,
+      "mem_mb_total": 1967,
+      "name": "o3k-pp5-fabric-v3-20261003-evidence2-host-a",
+      "nproc": 2,
+      "uuid": "4d4dcb91-f0fb-4ce4-87dd-bdf15fa2468e",
+      "wait_seconds": 31
+    },
+    {
+      "ip": "192.168.122.4",
+      "kernel": "6.8.0-139-generic",
+      "kvm_usable": true,
+      "mem_mb_total": 1967,
+      "name": "o3k-pp5-fabric-v3-20261003-evidence2-host-b",
+      "nproc": 2,
+      "uuid": "45f2e067-1f33-4f01-973b-7273d565b1b5",
+      "wait_seconds": 2
+    },
+    {
+      "ip": "192.168.122.241",
+      "kernel": "6.8.0-139-generic",
+      "kvm_usable": true,
+      "mem_mb_total": 1967,
+      "name": "o3k-pp5-fabric-v3-20261003-evidence2-host-c",
+      "nproc": 2,
+      "uuid": "6c2233ca-4172-4b7b-a475-7499688a59b5",
+      "wait_seconds": 2
+    }
+  ],
+  "network": "default",
+  "outcome": "PASS",
+  "passed": 3,
+  "prefix": "o3k-pp5-fabric-v3-20261003-evidence2",
+  "run": "fabric-v3-20261003-evidence2",
+  "started_at": "2026-10-03T10:31:09Z"
+}
