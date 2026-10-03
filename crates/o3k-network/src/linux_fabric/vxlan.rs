@@ -137,6 +137,7 @@ impl LinuxFabricBackend {
                     "exec",
                     ns,
                     "ip",
+                    "-d",
                     "link",
                     "show",
                     "dev",
@@ -170,7 +171,10 @@ impl LinuxFabricBackend {
         }
         let root_veth = self
             .command
-            .output("ip", &["link", "show", "dev", vxlan.host_veth.as_str()])
+            .output(
+                "ip",
+                &["-d", "link", "show", "dev", vxlan.host_veth.as_str()],
+            )
             .map_err(LinuxFabricError::Storage)?;
         if !root_veth.0 {
             if !self
@@ -483,6 +487,7 @@ impl LinuxFabricBackend {
                     "exec",
                     ns,
                     "ip",
+                    "-d",
                     "link",
                     "show",
                     "dev",
@@ -495,7 +500,10 @@ impl LinuxFabricBackend {
         }
         let root_veth_observed = self
             .command
-            .output("ip", &["link", "show", "dev", vxlan.host_veth.as_str()])
+            .output(
+                "ip",
+                &["-d", "link", "show", "dev", vxlan.host_veth.as_str()],
+            )
             .map_err(LinuxFabricError::Storage)?;
         let realm_bridge = self
             .state

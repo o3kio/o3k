@@ -9,6 +9,7 @@ use crate::anti_spoof::{EndpointIdentity, IngressIdentity, validate_ingress};
 
 const TABLE_PREFIX: &str = "o3k-as-";
 const MARKER: &str = "o3k-p11-antispoof";
+const NFT_MARKER: &str = "\"o3k-p11-antispoof\"";
 
 impl LinuxFabricBackend {
     pub(crate) fn ensure_anti_spoof(
@@ -225,9 +226,9 @@ impl LinuxFabricBackend {
                         "iifname",
                         vxlan.host_veth.as_str(),
                         "counter",
-                        "comment",
-                        MARKER,
                         "drop",
+                        "comment",
+                        NFT_MARKER,
                     ],
                 )
                 .map_err(LinuxFabricError::Storage)?
@@ -254,9 +255,9 @@ impl LinuxFabricBackend {
                     "!=",
                     endpoint.mac.as_str(),
                     "counter",
-                    "comment",
-                    MARKER,
                     "drop",
+                    "comment",
+                    NFT_MARKER,
                 ],
                 vec![
                     "iifname",
@@ -266,9 +267,9 @@ impl LinuxFabricBackend {
                     "!=",
                     fixed_ip.as_str(),
                     "counter",
-                    "comment",
-                    MARKER,
                     "drop",
+                    "comment",
+                    NFT_MARKER,
                 ],
                 vec![
                     "iifname",
@@ -279,9 +280,9 @@ impl LinuxFabricBackend {
                     "!=",
                     endpoint.mac.as_str(),
                     "counter",
-                    "comment",
-                    MARKER,
                     "drop",
+                    "comment",
+                    NFT_MARKER,
                 ],
                 vec![
                     "iifname",
@@ -292,9 +293,9 @@ impl LinuxFabricBackend {
                     "!=",
                     fixed_ip.as_str(),
                     "counter",
-                    "comment",
-                    MARKER,
                     "drop",
+                    "comment",
+                    NFT_MARKER,
                 ],
             ] {
                 if !self

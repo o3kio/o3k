@@ -1,6 +1,45 @@
 use super::*;
 
 impl super::LinuxFabricBackend {
+    fn iptables_rule_present(&self, rule: &[&str]) -> Result<bool, LinuxFabricError> {
+        let mut args = vec!["-t", "nat", "-C"];
+        args.extend_from_slice(rule);
+        self.command
+            .output("iptables", &args)
+            .map(|(present, _)| present)
+            .map_err(LinuxFabricError::Storage)
+    }
+
+    fn ensure_iptables_rule(&self, rule: &[&str]) -> Result<(), LinuxFabricError> {
+        if !self.iptables_rule_present(rule)? {
+            let mut args = vec!["-t", "nat", "-A"];
+            args.extend_from_slice(rule);
+            if !self
+                .command
+                .run("iptables", &args)
+                .map_err(LinuxFabricError::Storage)?
+            {
+                return Err(LinuxFabricError::CommandFailed);
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_iptables_rule(&self, rule: &[&str]) -> Result<(), LinuxFabricError> {
+        while self.iptables_rule_present(rule)? {
+            let mut args = vec!["-t", "nat", "-D"];
+            args.extend_from_slice(rule);
+            if !self
+                .command
+                .run("iptables", &args)
+                .map_err(LinuxFabricError::Storage)?
+            {
+                return Err(LinuxFabricError::CommandFailed);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn ensure_fabric(
         &mut self,
         plan: &NamespacedRoutedFabricPlan,
@@ -208,7 +247,7 @@ impl super::LinuxFabricBackend {
         }
         // Veth pair to connect fabric namespace to the host default namespace
         // so WireGuard encrypted traffic can traverse to/from the underlay.
-        let _ = self.command.run("ip", &["link", "del", "o3k-u"]);
+        let _ = self.command.output("ip", &["link", "del", "o3k-u"]);
         if !self
             .command
             .run(
@@ -312,41 +351,23 @@ impl super::LinuxFabricBackend {
             ],
         );
         // SNAT fabric namespace traffic to the host IP.
-        let _ = self.command.run(
-            "iptables",
-            &[
-                "-t",
-                "nat",
-                "-A",
-                "POSTROUTING",
-                "-s",
-                "169.254.253.0/30",
-                "-j",
-                "MASQUERADE",
-            ],
-        );
+        self.ensure_iptables_rule(&["POSTROUTING", "-s", "169.254.253.0/30", "-j", "MASQUERADE"])?;
         // DNAT incoming WireGuard UDP to the fabric namespace.
         let wg_port = self.config.wireguard_port.to_string();
-        let _ = self.command.run(
-            "iptables",
-            &[
-                "-t",
-                "nat",
-                "-A",
-                "PREROUTING",
-                "!",
-                "-i",
-                "o3k-u",
-                "-p",
-                "udp",
-                "--dport",
-                &wg_port,
-                "-j",
-                "DNAT",
-                "--to-destination",
-                "169.254.253.2",
-            ],
-        );
+        self.ensure_iptables_rule(&[
+            "PREROUTING",
+            "!",
+            "-i",
+            "o3k-u",
+            "-p",
+            "udp",
+            "--dport",
+            &wg_port,
+            "-j",
+            "DNAT",
+            "--to-destination",
+            "169.254.253.2",
+        ])?;
         self.state.fabric = Some(FabricOwnership {
             namespace: self.config.fabric_namespace.clone(),
             interface: self.config.fabric_interface.clone(),
@@ -533,56 +554,23 @@ impl super::LinuxFabricBackend {
                 return Err(LinuxFabricError::CommandFailed);
             }
         }
-        let _ = self.command.run("ip", &["link", "del", "o3k-u"]);
-        let _ = self.command.run(
-            "iptables",
-            &[
-                "-t",
-                "nat",
-                "-D",
-                "POSTROUTING",
-                "-s",
-                "169.254.253.0/30",
-                "-j",
-                "MASQUERADE",
-            ],
-        );
+        let _ = self.command.output("ip", &["link", "del", "o3k-u"]);
+        self.remove_iptables_rule(&["POSTROUTING", "-s", "169.254.253.0/30", "-j", "MASQUERADE"])?;
         let wg_port = self.config.wireguard_port.to_string();
-        for rule in [
-            vec![
-                "-t",
-                "nat",
-                "-D",
-                "PREROUTING",
-                "!",
-                "-i",
-                "o3k-u",
-                "-p",
-                "udp",
-                "--dport",
-                &wg_port,
-                "-j",
-                "DNAT",
-                "--to-destination",
-                "169.254.253.2",
-            ],
-            vec![
-                "-t",
-                "nat",
-                "-D",
-                "PREROUTING",
-                "-p",
-                "udp",
-                "--dport",
-                &wg_port,
-                "-j",
-                "DNAT",
-                "--to-destination",
-                "169.254.253.2",
-            ],
-        ] {
-            let _ = self.command.run("iptables", &rule);
-        }
+        self.remove_iptables_rule(&[
+            "PREROUTING",
+            "!",
+            "-i",
+            "o3k-u",
+            "-p",
+            "udp",
+            "--dport",
+            &wg_port,
+            "-j",
+            "DNAT",
+            "--to-destination",
+            "169.254.253.2",
+        ])?;
         let _ = self.command.run("ip", &["netns", "del", &fabric.namespace]);
         // The WireGuard private key is provisioned host identity material
         // and intentionally survives fabric removal so planned peer public

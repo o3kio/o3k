@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !provider.observe(&plan)? {
         return Err("provider did not observe its applied state".into());
     }
-    let geneve = Command::new("ip")
+    let vxlan = Command::new("ip")
         .args([
             "netns",
             "exec",
@@ -95,16 +95,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "link",
             "show",
             "type",
-            "geneve",
+            "vxlan",
         ])
         .output()?;
-    let geneve_output = String::from_utf8_lossy(&geneve.stdout);
-    if !geneve.status.success()
-        || !geneve_output.contains("geneve")
-        || !geneve_output.contains("id 101")
-        || !geneve_output.contains("remote 198.18.0.2")
+    let vxlan_output = String::from_utf8_lossy(&vxlan.stdout);
+    if !vxlan.status.success()
+        || !vxlan_output.contains("vxlan")
+        || !vxlan_output.contains("id 101")
+        || !vxlan_output.contains("dstport 4789")
+        || vxlan_output.contains("nolearning")
     {
-        return Err("provider did not realize the expected Geneve object".into());
+        return Err("provider did not realize the expected VXLAN object".into());
     }
     let transport = Command::new("ip")
         .args([
@@ -140,15 +141,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !attachments.status.success()
         || !String::from_utf8_lossy(&attachments.stdout).contains("o3k-c-")
     {
-        return Err("provider did not realize the isolated Geneve attachment bridge".into());
+        return Err("provider did not realize the isolated VXLAN attachment bridge".into());
     }
-    let realm_attachment = Command::new("ip")
+    let realm_bridge = Command::new("ip")
         .args(["netns", "exec", "o3k-r-00000000", "ip", "link", "show"])
         .output()?;
-    if !realm_attachment.status.success()
-        || !String::from_utf8_lossy(&realm_attachment.stdout).contains("o3k-e-")
+    if !realm_bridge.status.success()
+        || !String::from_utf8_lossy(&realm_bridge.stdout).contains("o3k-n-00000000")
     {
-        return Err("provider did not realize the realm-side Geneve attachment".into());
+        return Err("provider did not realize the realm bridge".into());
     }
     let local_tap = Command::new("ip")
         .args(["-d", "link", "show", "type", "tun"])
@@ -176,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("provider did not realize the realm-local gateway".into());
     }
     println!("linux-fabric-smoke: host-transport-address=passed");
-    println!("linux-fabric-smoke: geneve-realization=passed");
+    println!("linux-fabric-smoke: vxlan-realization=passed");
     println!("linux-fabric-smoke: isolated-attachment=passed");
     provider.remove(&plan)?;
     if !provider.observe_removed(&plan)? {
