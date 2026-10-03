@@ -34,9 +34,9 @@ const FABRIC_STATE_DIR: &str = "/var/lib/o3k-fabric-lab/fabric-state";
 const VNI_REGISTRY: &str = "vni-registry.json";
 const AGENT_GRPC_PORT: u16 = 50_052;
 const WG_PORT: u16 = 51_820;
-const TENANT_MTU: u16 = 1_370;
+const TENANT_MTU: u16 = 1_390;
 const UNDERLAY_MTU: u16 = 1_500;
-const FABRIC_MTU: u16 = 1_420;
+const FABRIC_MTU: u16 = 1_440;
 const FABRIC_DOMAIN_ID: u128 = 0x0102030405060708090a0b0c0d0e0f10;
 
 #[derive(Debug, thiserror::Error)]
