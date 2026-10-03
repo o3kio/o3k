@@ -1,0 +1,39 @@
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+three-host-provider=apply-passed
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+three-host-provider=apply-passed
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+three-host-provider=apply-passed
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+10.0.0.20 dev eth0 lladdr 02:00:00:00:a1:02 REACHABLE 
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+10.0.0.10 dev eth0 lladdr 02:00:00:00:a1:01 DELAY 
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+10.0.0.20 dev eth0 lladdr 02:00:00:00:b1:02 REACHABLE 
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+10.0.0.10 dev eth0 lladdr 02:00:00:00:b1:01 DELAY 
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: tenant-mtu-boundary=passed
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+wrong-mac was not observed by its owned drop rule

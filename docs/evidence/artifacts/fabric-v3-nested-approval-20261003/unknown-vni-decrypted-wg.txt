@@ -1,0 +1,20 @@
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on o3k-wg, link-type RAW (Raw IP), snapshot length 262144 bytes
+15:42:51.127976 IP 192.168.122.118.33224 > 192.168.122.134.4789: VXLAN, flags [I] (0x08), vni 101
+IP6 fe80::ff:fe00:a101 > ff02::2: ICMP6, router solicitation, length 16
+15:42:51.639996 IP 192.168.122.118.34644 > 192.168.122.134.4789: VXLAN, flags [I] (0x08), vni 101
+IP6 fe80::90c5:f5ff:fee4:5a00 > ff02::2: ICMP6, router solicitation, length 16
+15:42:52.049999 IP 192.168.122.134.60075 > 192.168.122.196.4789: VXLAN, flags [I] (0x08), vni 102
+IP6 fe80::c07c:93ff:fe28:c26 > ff02::2: ICMP6, router solicitation, length 16
+15:42:52.561867 IP 192.168.122.134.37218 > 192.168.122.196.4789: VXLAN, flags [I] (0x08), vni 102
+IP6 fe80::ff:fe00:b102 > ff02::2: ICMP6, router solicitation, length 16
+15:42:52.731763 IP 192.168.122.118.44389 > 192.168.122.134.4789: VXLAN, flags [I] (0x08), vni 999
+ARP, Request who-has 10.0.0.20 tell 10.0.0.10, length 28
+15:42:53.074004 IP 192.168.122.134.44095 > 192.168.122.118.4789: VXLAN, flags [I] (0x08), vni 101
+IP6 fe80::e2:adff:fe26:c568 > ff02::2: ICMP6, router solicitation, length 16
+15:42:53.670184 IP 192.168.122.196.34276 > 192.168.122.134.4789: VXLAN, flags [I] (0x08), vni 102
+IP6 fe80::14b6:a6ff:fe6a:d913 > ff02::2: ICMP6, router solicitation, length 16
+
+7 packets captured
+7 packets received by filter
+0 packets dropped by kernel

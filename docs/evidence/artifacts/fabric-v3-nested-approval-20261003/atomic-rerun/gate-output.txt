@@ -1,0 +1,30 @@
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+net.ipv4.ip_forward = 1
+three-host-provider=apply-passed
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+net.ipv4.ip_forward = 1
+net.ipv4.ip_forward = 1
+three-host-provider=apply-passed
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+net.ipv4.ip_forward = 1
+three-host-provider=apply-passed
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.

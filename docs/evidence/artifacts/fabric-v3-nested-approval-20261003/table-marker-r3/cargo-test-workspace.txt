@@ -1,0 +1,2602 @@
+   Compiling o3k-network v0.4.0-rc.5 (/home/ubuntu/o3k/crates/o3k-network)
+   Compiling o3k-api v0.4.0-rc.5 (/home/ubuntu/o3k/crates/o3k-api)
+   Compiling o3k-network-bin v0.4.0-rc.5 (/home/ubuntu/o3k/bins/o3k-network)
+   Compiling o3k-compute-bin v0.4.0-rc.5 (/home/ubuntu/o3k/bins/o3k-compute)
+   Compiling o3kd v0.4.0-rc.5 (/home/ubuntu/o3k/bins/o3kd)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.48s
+     Running unittests src/lib.rs (target/debug/deps/o3k-c6b47e1c497af9c1)
+
+running 191 tests
+test checks::cloud::tests::api_discovery_fails_when_unreachable ... ok
+test checks::cloud::tests::testvm_status_warns_when_not_active ... ok
+test checks::compute::tests::agent_capabilities_fails_when_class_missing ... ok
+test checks::cloud::tests::api_discovery_passes_when_both_endpoints_200 ... ok
+test checks::compute::tests::agent_capabilities_not_applicable_without_profile ... ok
+test checks::compute::tests::agent_epoch_passes_on_superseded_history ... ok
+test checks::cloud::tests::testvm_status_passes_when_active ... ok
+test checks::compute::tests::agent_registered_fails_when_agent_not_ready ... ok
+test checks::compute::tests::agent_registered_fails_when_agent_unreachable ... ok
+test checks::cloud::tests::testvm_status_not_applicable_without_test_vms ... ok
+test checks::compute::tests::agent_epoch_not_applicable_without_profile ... ok
+test checks::compute::tests::agent_registered_not_applicable_without_profile ... ok
+test checks::compute::tests::agent_epoch_warns_without_self_report ... ok
+test checks::compute::tests::placement_consistent_fails_on_mismatch ... ok
+test checks::compute::tests::agent_registered_passes_when_agent_ready ... ok
+test checks::control::tests::healthz_fails_when_unreachable ... ok
+test checks::database::tests::accessible_fails_when_database_missing ... ok
+test checks::compute::tests::agent_epoch_fails_when_stale ... ok
+test checks::database::tests::permissions_fail_when_data_dir_is_world_writable ... ok
+test checks::compute::tests::agent_registered_fails_without_agent_identity ... ok
+test checks::control::tests::readyz_fails_on_503 ... ok
+test checks::control::tests::healthz_passes_on_200_ok ... ok
+test checks::database::tests::wal_mode_warns_on_delete ... ok
+test checks::database::tests::integrity_fails_when_corrupt ... ok
+test checks::host::tests::disk_space_fails_below_one_gib ... ok
+test checks::host::tests::disk_space_fails_when_df_errors ... ok
+test checks::database::tests::permissions_fail_when_database_is_0644 ... ok
+test checks::host::tests::disk_space_warns_between_one_and_five_gib ... ok
+test checks::database::tests::postgres_backend_doctor_checks ... ok
+test checks::host::tests::kvm_device_fails_without_kvm ... ok
+test checks::control::tests::readyz_passes_on_200_ready ... ok
+test checks::host::tests::os_supported_passes_on_ubuntu_2404 ... ok
+test checks::identity::tests::authenticated_fails_when_unreachable ... ok
+test checks::identity::tests::configured_fails_when_mode_too_open ... ok
+test checks::identity::tests::configured_fails_when_openrc_missing ... ok
+test checks::host::tests::os_supported_warns_on_other_version ... ok
+test checks::identity::tests::configured_passes_on_complete_openrc ... ok
+test checks::host::tests::os_supported_fails_on_unknown_os ... ok
+test checks::identity::tests::configured_fails_when_password_missing ... ok
+test checks::libvirt::tests::control_isolation_not_applicable_without_profile ... ok
+test checks::libvirt::tests::compute_access_fails_when_libvirt_unavailable ... ok
+test checks::identity::tests::authenticated_passes_on_201_with_token ... ok
+test checks::libvirt::tests::domains_consistent_fails_when_domain_missing ... ok
+test checks::libvirt::tests::domains_consistent_not_applicable_without_profile ... ok
+test checks::identity::tests::authenticated_fails_on_401 ... ok
+test checks::libvirt::tests::compute_access_not_applicable_without_root ... ok
+test checks::libvirt::tests::compute_access_passes_for_compute_identity ... ok
+test checks::libvirt::tests::control_isolation_fails_when_control_can_access ... ok
+test checks::libvirt::tests::domains_consistent_warns_on_foreign_same_name_domain ... ok
+test checks::network::tests::bridge_state_not_applicable_without_profile ... ok
+test checks::network::tests::bridge_state_fails_when_bridge_missing ... ok
+test checks::network::tests::dhcp_state_fails_on_dead_pidfile ... ok
+test checks::network::tests::dhcp_state_not_applicable_without_profile ... ok
+test checks::network::tests::dhcp_state_warns_on_mismatched_identity ... ok
+test checks::network::tests::dhcp_state_warns_on_bindings_without_dnsmasq ... ok
+test checks::network::tests::ownership_records_not_applicable_without_profile ... ok
+test checks::network::tests::ownership_records_fails_on_stale_instance ... ok
+test checks::network::tests::tap_state_not_applicable_without_profile ... ok
+test checks::release::tests::backup_available_warns_on_invalid_chain ... ok
+test checks::network::tests::ownership_records_warns_on_adopted_bridge ... ok
+test checks::release::tests::all_three_checks_pass_on_the_healthy_fixture ... ok
+test checks::network::tests::tap_state_fails_when_recorded_tap_missing ... ok
+test checks::release::tests::backup_available_warns_without_chain ... ok
+test checks::network::tests::tap_state_warns_on_stale_tap ... ok
+test checks::release::tests::binary_hashes_fails_on_modified_binary ... ok
+test checks::release::tests::binary_hashes_warns_on_missing_reference ... ok
+test checks::release::tests::binary_set_consistent_warns_without_reference ... ok
+test checks::release::tests::ownership_manifest_fails_when_missing ... ok
+test checks::release::tests::upgrade_state_passes_on_committed_state ... ok
+test checks::release::tests::binary_set_consistent_fails_on_mixed_versions ... ok
+test checks::release::tests::binary_set_consistent_fails_on_modified_binary ... ok
+test checks::release::tests::upgrade_state_warns_on_failed_state ... ok
+test checks::release::tests::version_fails_when_manifest_has_no_version ... ok
+test checks::release::tests::upgrade_state_warns_on_in_progress_state ... ok
+test checks::security::tests::config_permissions_fails_on_open_env_file ... ok
+test checks::security::tests::tls_identity_fails_on_fingerprint_mismatch ... ok
+test checks::security::tests::tls_identity_not_applicable_without_profile ... ok
+test checks::security::tests::tls_identity_fails_when_file_missing ... ok
+test checks::release::tests::version_fails_when_manifest_missing ... ok
+test checks::security::tests::tls_identity_passes_when_complete ... ok
+test checks::security::tests::config_permissions_fails_on_world_writable_config_dir ... ok
+test checks::release::tests::ownership_manifest_fails_on_missing_entry ... ok
+test context::tests::deployment_mode_default_is_systemd ... ok
+test checks::services::tests::compute_unit_fails_when_stopped ... ok
+test checks::services::tests::compute_unit_not_applicable_without_profile ... ok
+test checks::security::tests::tls_identity_fails_on_agent_id_mismatch ... ok
+test engine::tests::overall_status_derivation ... ok
+test engine::tests::report_carries_workspace_version ... ok
+test checks::services::tests::o3kd_unit_fails_when_stopped ... ok
+test checks::services::tests::o3kd_unit_passes_when_active ... ok
+test checks::services::tests::o3kd_unit_fails_when_unit_not_found ... ok
+test native_cli::tests::empty_secret_file_errors ... ok
+test engine::tests::kubernetes_mode_healthy_run_produces_healthy_verdict ... ok
+test context::tests::sanitize_error_truncates_long_strings_and_strips_newlines ... ok
+test context::tests::parse_env_contents_handles_exports_quotes_comments ... ok
+test native_cli::tests::env_value_wins_over_file ... ok
+test engine::tests::healthy_run_produces_only_passes ... ok
+test native_cli::tests::missing_everything_errors ... ok
+test native_cli::tests::secret_file_is_trimmed ... ok
+test output::tests::human_renderer_groups_sections_and_ends_with_overall ... ok
+test sys::tests::compute_probe_argv_uses_repeated_supp_group_flags ... ok
+test native_cli::tests::init_does_not_retry_http_status_failures ... ok
+test native_cli::tests::init_does_not_retry_malformed_responses ... ok
+test upgrade::backup::tests::chain_load_missing_and_corrupt ... ok
+test upgrade::backup::tests::invalid_records_cannot_be_appended ... ok
+test upgrade::backup::tests::latest_eligible_backup_skips_rollback_records ... ok
+test engine::tests::json_output_matches_the_schema_contract ... ok
+test output::tests::rfc3339_matches_known_epoch_instants ... ok
+test engine::tests::sentinels_never_reach_the_output ... ok
+test upgrade::backup::tests::invalid_version_strings_fail ... ok
+test upgrade::backup::tests::empty_backup_id_fails ... ok
+test upgrade::backup::tests::valid_manifest_parses ... ok
+test sys::tests::stub_server_can_answer_next_attempt ... ok
+test upgrade::backup::tests::missing_required_fields_fail ... ok
+test upgrade::backup::tests::malformed_sha256_fails ... ok
+test upgrade::engine::tests::check_blocks_on_preflight_failure ... ok
+test upgrade::engine::tests::check_passes_without_mutation ... ok
+test upgrade::engine::tests::failed_state_parses_back ... ok
+test upgrade::engine::tests::fence_refuses_channel_mismatch ... ok
+test upgrade::engine::tests::fence_refuses_same_version ... ok
+test upgrade::engine::tests::fence_refuses_downgrade ... ok
+test upgrade::engine::tests::corrupt_state_file_fails_closed ... ok
+test upgrade::engine::tests::lock_contention_blocks_both_modes ... ok
+test upgrade::engine::tests::resumability_classification ... ok
+test upgrade::engine::tests::download_failure_clears_state_without_rollback ... ok
+test upgrade::backup::tests::chain_append_persists_and_deduplicates ... ok
+test upgrade::engine::tests::preflight_failure_clears_state_without_rollback ... ok
+test upgrade::engine::tests::resume_requires_a_valid_backup ... ok
+test upgrade::engine::tests::failed_rollback_persists_failed_state ... ok
+test upgrade::engine::tests::rollback_without_backup_is_a_notice ... ok
+test upgrade::engine::tests::backup_failure_clears_state_without_rollback ... ok
+test upgrade::engine::tests::second_rollback_is_a_noop_notice ... ok
+test upgrade::engine::tests::second_upgrade_while_failed_state_is_refused ... ok
+test upgrade::engine::tests::rollback_uses_failed_state_backup_id ... ok
+test upgrade::engine::tests::rollback_restores_and_records ... ok
+test upgrade::engine::tests::migration_failure_rolls_back_once ... ok
+test upgrade::engine::tests::upgrade_while_rolled_back_state_is_refused ... ok
+test upgrade::fence::tests::absent_min_version_is_no_floor ... ok
+test upgrade::fence::tests::allows_a_newer_same_channel_release ... ok
+test upgrade::fence::tests::downgrade_check_precedes_channel_check ... ok
+test upgrade::fence::tests::refuses_channel_mismatch ... ok
+test upgrade::fence::tests::refuses_downgrades ... ok
+test upgrade::fence::tests::refuses_profile_mismatch ... ok
+test upgrade::fence::tests::refuses_same_version ... ok
+test upgrade::fence::tests::refuses_sources_below_the_minimum ... ok
+test upgrade::fence::tests::unparsable_min_version_is_bad_version ... ok
+test upgrade::output::tests::json_shape_matches_the_contract ... ok
+test upgrade::output::tests::optional_fields_are_omitted ... ok
+test upgrade::runner::tests::asset_names_parse_versions ... ok
+test upgrade::runner::tests::canonical_assets_follow_the_release_naming_contract ... ok
+test upgrade::runner::tests::disk_floor_formula ... ok
+test upgrade::runner::tests::entry_names_must_be_relative_and_safe ... ok
+test upgrade::runner::tests::entry_types_must_be_regular ... ok
+test upgrade::runner::tests::lock_path_derives_from_state_file ... ok
+test upgrade::runner::tests::sha256_matches_the_empty_digest ... ok
+test upgrade::runner::tests::sums_parser_extracts_binary_hashes ... ok
+test upgrade::state::tests::clear_is_idempotent ... ok
+test upgrade::state::tests::corrupt_state_is_an_error ... ok
+test upgrade::state::tests::missing_state_loads_as_none ... ok
+test upgrade::engine::tests::failed_rollback_persists_failed_state_without_looping ... ok
+test upgrade::state::tests::persist_and_load_round_trip ... ok
+test upgrade::engine::tests::api_smoke_failure_rolls_back ... ok
+test upgrade::state::tests::phase_ordering_places_backup_after_preflight ... ok
+test upgrade::state::tests::terminal_phases_are_classified ... ok
+test version::tests::alpha_identifiers_compare_numerically ... ok
+test version::tests::alpha_orders_below_beta ... ok
+test version::tests::channel_classification ... ok
+test version::tests::core_version_dominates_prerelease ... ok
+test version::tests::display_round_trips ... ok
+test version::tests::mixed_identifier_kinds_compare_by_semver_rules ... ok
+test version::tests::ordering_is_total_over_a_spread ... ok
+test version::tests::parses_plain_and_v_prefixed_versions ... ok
+test version::tests::parses_prerelease_versions ... ok
+test version::tests::prefix_prerelease_sorts_first ... ok
+test version::tests::prerelease_orders_below_stable ... ok
+test version::tests::rejects_malformed_versions ... ok
+test version::tests::serde_round_trips_through_strings ... ok
+test upgrade::state::tests::persisted_state_is_mode_0600 ... ok
+test upgrade::engine::tests::stop_failure_keeps_state_without_rollback ... ok
+test upgrade::engine::tests::resume_reruns_create_backup_when_no_id_recorded ... ok
+test upgrade::engine::tests::switch_failure_rolls_back_once ... ok
+test upgrade::engine::tests::commit_failure_keeps_state_for_retry ... ok
+test upgrade::engine::tests::happy_path_commits_and_clears_state ... ok
+test upgrade::engine::tests::start_compute_failure_rolls_back_once ... ok
+test upgrade::engine::tests::leftover_pre_backup_state_is_discarded ... ok
+test native_cli::tests::init_retries_after_lost_response_with_identical_body ... ok
+test sys::tests::read_timeout_mid_response_is_classified_transport ... ok
+test upgrade::engine::tests::unhealthy_doctor_rolls_back ... ok
+test native_cli::tests::init_total_deadline_bounds_silent_stub ... ok
+test native_cli::tests::init_total_deadline_bounds_repeated_mid_response_stalls ... ok
+test upgrade::engine::tests::resume_after_each_phase_completes ... ok
+
+test result: ok. 191 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.94s
+
+     Running unittests src/main.rs (target/debug/deps/o3k-b991e579edcffa75)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (target/debug/deps/cli-be502f57420124cb)
+
+running 8 tests
+test version_prints_version_and_exits_zero ... ok
+test doctor_help_exits_zero ... ok
+test help_exits_zero ... ok
+test help_subcommand_exits_zero ... ok
+test unknown_command_exits_two ... ok
+test no_arguments_exits_two_with_usage ... ok
+test doctor_human_output_ends_with_overall ... ok
+test doctor_json_emits_contract_json_without_an_install ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_api-e0080f8fcae67d9d)
+
+running 23 tests
+test compute::tests::absent_config_drive_is_materialized_like_the_native_create_path ... ok
+test compute::tests::canonical_server_states_project_to_the_nova_response_shape ... ok
+test compute::tests::live_console_agent_budget_matches_public_request_budget ... ok
+test compute::tests::config_drive_key_name_falls_back_to_the_project_keypair ... ok
+test compute::tests::live_console_queries_are_limited_to_the_snapshot_offset ... ok
+test compute::tests::nova_server_reference_aliases_accept_standard_cli_wire_fields ... ok
+test compute::tests::server_response_projects_the_canonical_state_as_status ... ok
+test compute::tests::stale_generation_terminalization_conflict_maps_to_conflict_not_500 ... ok
+test compute::tests::server_response_reports_the_durable_placement_host ... ok
+test compute::tests::unsupported_config_drive_requests_are_explicitly_recognized ... ok
+test compute::tests::server_response_reports_requested_config_drive_without_exposing_payload ... ok
+test network::tests::active_external_realm_selection_fails_closed_without_active_realm ... ok
+test network::tests::active_external_realm_selection_fails_closed_on_ambiguity ... ok
+test network::tests::active_external_realm_selection_ignores_retired_realms ... ok
+test network::tests::gateway_realization_defaults_to_enabled_on_app_state ... ok
+test network::tests::routed_egress_realm_is_coherent_divergent_realm_fails_closed ... ok
+test network::tests::routed_egress_realm_is_coherent_flat_only_accepts_any_external_identity ... ok
+test network::tests::routed_egress_realm_is_coherent_matching_realm_is_accepted ... ok
+test network::tests::routed_egress_realm_is_coherent_multiple_gateways_require_single_realm ... ok
+test network::tests::routed_egress_realm_is_coherent_unconfigured_external_is_accepted ... ok
+test network::tests::routed_egress_realm_is_coherent_unresolvable_realm_fails_closed ... ok
+test network::tests::gateway_realization_enabled_attaches_snapshot_and_keeps_routed_intents ... ok
+test network::tests::gateway_realization_disabled_keeps_routed_intents_without_gateway_snapshot ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/attachment_isolation.rs (target/debug/deps/attachment_isolation-1f6bbdcc35e40f78)
+
+running 4 tests
+test foreign_token_cannot_list_show_or_detach_foreign_attachment ... ok
+test same_project_second_server_attach_conflicts_but_foreign_stays_404 ... ok
+test foreign_volume_attach_is_concealed_with_zero_side_effects ... ok
+test second_tenant_positive_lifecycle_and_first_tenant_controls ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.20s
+
+     Running tests/collection_pagination.rs (target/debug/deps/collection_pagination-feb8321fa44b550a)
+
+running 11 tests
+test networks_without_limit_keep_the_unchanged_response_shape ... ok
+test networks_empty_collection_with_limit_has_no_next_link ... ok
+test networks_single_resource_with_larger_limit_has_no_next_link ... ok
+test networks_pagination_traversal_visits_every_network_exactly_once ... ok
+test malformed_limit_and_marker_are_bounded_rejections ... ok
+test horizon_pagination_ball_marker_follow_up_returns_empty_networks ... ok
+test networks_collection_below_page_limit_is_returned_without_next_link ... ok
+test unknown_but_well_formed_marker_is_a_cursor_not_an_existence_oracle ... ok
+test servers_collection_pagination_traversal_is_stable_and_complete ... ok
+test servers_detail_pagination_pages_and_terminates ... ok
+test server_collection_pagination_is_project_scoped ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+
+     Running tests/gate_c_nova_callback.rs (target/debug/deps/gate_c_nova_callback-7addc93f663c1825)
+
+running 9 tests
+test native_profile_does_not_expose_attachment_routes ... ok
+test project_isolation_is_preserved_at_289 ... ok
+test non_get_289_attachment_requests_are_rejected_with_406 ... ok
+test unrelated_289_requests_are_rejected_with_406 ... ok
+test list_at_289_emits_exact_fields_without_legacy_id ... ok
+test discovery_document_stays_at_21 ... ok
+test show_at_289_resolves_volume_id_like_cinder_does ... ok
+test attachment_routes_require_authentication_and_project_scope ... ok
+test list_and_show_at_21_keep_the_legacy_id ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.44s
+
+     Running tests/health.rs (target/debug/deps/health-2b0516769dd57aa0)
+
+running 51 tests
+test default_state_preserves_no_secret_readiness_behavior ... ok
+test health_endpoint_is_machine_readable ... ok
+test keystone_discovery_exposes_v3_without_fallback_warning ... ok
+test identity_image_network_services_have_no_microversion_headers ... ok
+test keystone_password_scope_returns_signed_subject_token ... ok
+test keystone_get_and_head_token_validation_and_cinder_catalog ... ok
+test keystone_auth_projects_rejects_expired_token ... ok
+test keystone_project_scoped_password_auth_still_returns_project_roles_and_catalog ... ok
+test keystone_catalog_contains_all_testlab_services_and_consistent_urls ... ok
+test keystone_projects_accepts_unscoped_token_with_the_bounded_contract ... ok
+test keystone_auth_projects_rejects_invalid_and_missing_tokens ... ok
+test keystone_invalid_password_is_generic_unauthorized ... ok
+test keystone_auth_projects_accepts_project_scoped_token ... ok
+test keystone_auth_projects_lists_authorized_projects_for_unscoped_token ... ok
+test keystone_auth_projects_never_returns_unrelated_projects ... ok
+test glance_upload_rejects_corrupt_qcow2_with_terminal_bad_request ... ok
+test keystone_horizon_login_sequence_establishes_a_usable_scoped_session ... ok
+test keystone_projects_lists_only_projects_authorized_for_the_caller ... ok
+test glance_image_lifecycle_is_project_scoped_and_immutable_after_upload ... ok
+test floating_ip_lifecycle_is_project_scoped_and_idempotent ... ok
+test keystone_projects_rejects_invalid_missing_and_expired_tokens ... ok
+test keystone_token_reauthentication_exchanges_a_valid_token ... ok
+test keystone_unscoped_auth_accepts_the_canonical_horizon_user_domain_form ... ok
+test keystone_unscoped_invalid_password_is_generic_unauthorized ... ok
+test keystone_projects_never_returns_unrelated_projects ... ok
+test keystone_unscoped_password_auth_without_scope_issues_token ... ok
+test microversion_nova_discovery_and_negotiation ... ok
+test microversion_placement_discovery_and_negotiation ... ok
+test floating_ip_api_dispatches_a_public_binding_plan_to_the_selected_agent ... ok
+test keystone_unscoped_token_validation_returns_unscoped_shape ... ok
+test keystone_unscoped_scope_keyword_issues_token ... ok
+test keystone_projects_returns_empty_list_for_identity_without_assignment ... ok
+test readiness_projects_independent_runtime_and_bootstrap_gates ... ok
+test readiness_reports_startup_failure ... ok
+test keystone_unsupported_identity_method_is_bounded_rejection ... ok
+test keystone_unsupported_scope_keyword_is_bounded_rejection ... ok
+test keystone_user_projects_accepts_project_scoped_token ... ok
+test nova_volume_attachment_lifecycle_list_create_show_delete ... ok
+test keystone_unscoped_token_cannot_authorize_compatibility_or_native_routes ... ok
+test keystone_user_projects_lists_own_authorized_projects ... ok
+test keystone_user_projects_rejects_invalid_and_missing_tokens ... ok
+test keystone_user_projects_never_leaks_another_subject ... ok
+test keystone_wrong_project_and_malformed_scope_fail_closed_without_leaking_credentials ... ok
+test keystone_user_projects_returns_empty_without_assignments ... ok
+test keystone_user_projects_rejects_expired_token ... ok
+test neutron_network_projection_reports_zero_and_multiple_realms ... ok
+test network_policy_api_persists_updates_and_deletes_canonical_intent ... ok
+test registered_agent_console_reads_fall_back_to_durable_cache ... ok
+test neutron_network_subnet_port_lifecycle_is_deterministic ... ok
+test router_detach_dispatches_only_the_requested_gateway_and_finalizes_after_dispatch ... ok
+test nova_server_lifecycle_uses_project_scoped_envelopes ... ok
+
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.93s
+
+     Running tests/native_compute_update_route.rs (target/debug/deps/native_compute_update_route-51eb09c1fdfa670b)
+
+running 3 tests
+test production_router_compute_update_reaches_generic_update_application ... ok
+test production_router_update_rejects_mismatched_resource_kind ... ok
+test production_discovery_advertises_compute_update_lifecycle_operation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/native_diagnostics_routes.rs (target/debug/deps/native_diagnostics_routes-30ca39a8173ff15b)
+
+running 2 tests
+test native_diagnostics_routes_system_operator_reaches_all_endpoints_without_secret_leak ... ok
+test native_diagnostics_routes_deny_project_scoped_callers_even_with_operator_role ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/native_identity_routes.rs (target/debug/deps/native_identity_routes-103413f844c45c47)
+
+running 3 tests
+test production_router_mounts_building_block_collection_route ... ok
+test federated_scope_route_reaches_native_identity_handler ... ok
+test production_router_mounts_operator_profile_with_canonical_auth ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/native_location_routes.rs (target/debug/deps/native_location_routes-fb0833a42eec776f)
+
+running 3 tests
+test production_router_exposes_region_location_discovery ... ok
+test production_router_exposes_regional_placement_on_resource_types ... ok
+test production_router_without_locations_reports_none ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/native_metering_routes.rs (target/debug/deps/native_metering_routes-1d0010375b077f60)
+
+running 16 tests
+test definitions_version_constant_is_exposed ... ok
+test cross_scope_read_capability_is_discoverable_in_the_authorization_inventory ... ok
+test native_metering_routes_require_authentication ... ok
+test omitted_meter_defaults_to_the_producible_set_in_order ... ok
+test tenant_reads_its_own_scope_without_a_scope_parameter ... ok
+test system_scope_without_operator_role_cannot_select_scope ... ok
+test definitions_limit_is_bounded ... ok
+test multiple_meter_values_return_one_response_per_meter_in_request_order ... ok
+test any_authenticated_tenant_can_read_the_public_definitions ... ok
+test unknown_query_parameter_is_rejected ... ok
+test system_operator_can_select_another_scope ... ok
+test explicit_scope_equal_to_the_callers_own_scope_is_allowed ... ok
+test resource_id_narrowing_is_scoped_and_does_not_reveal_foreign_resources ... ok
+test too_many_meters_are_rejected ... ok
+test project_scoped_caller_cannot_select_another_scope ... ok
+test usage_rejects_bad_alignment_and_unknown_meters ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/native_storage.rs (target/debug/deps/native_storage-4bb2e7f25b1a885c)
+
+running 4 tests
+test native_volume_transitional_states_recover_from_provider_observation ... ok
+test native_volume_recovery_rejects_foreign_provider_observation ... ok
+test delete_missing_volume_is_404_not_an_existence_oracle ... ok
+test native_volume_projection_requires_durable_attachment_workflow ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+     Running tests/native_volume_metering_repair.rs (target/debug/deps/native_volume_metering_repair-db9930cf97d18bba)
+
+running 4 tests
+test volume_state_consumes_matches_the_canonical_mapping ... ok
+test caller_side_replay_only_opens_consuming_rows ... ok
+test lost_open_observation_is_repaired_by_the_next_volume_read ... ok
+test deleting_volume_read_does_not_close_the_open_interval ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests/two_tenant_isolation.rs (target/debug/deps/two_tenant_isolation-a4eb8786b0f46005)
+
+running 4 tests
+test two_tenant_security_group_binding_cross_scope_denial_is_concealed ... ok
+test foreign_security_group_port_create_is_fail_closed ... ok
+test two_tenant_path_and_resource_isolation ... ok
+test two_tenant_floating_ip_cross_scope_denial_is_concealed ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_cellhv-f3ff795dcd210361)
+
+running 3 tests
+test tests::capability_mismatch_is_rejected_before_mutation ... ok
+test tests::config_debug_redacts_client_key_path ... ok
+test tests::https_connection_requires_mtls_material ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_cinder-4813777f4c90b438)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/client.rs (target/debug/deps/client-6d3614de477d3212)
+
+running 7 tests
+test fake_rejects_unvalidated_token ... ok
+test volume_lifecycle_is_typed ... ok
+test connection_info_is_redacted_and_digested ... ok
+test attachment_lifecycle_validates_token_through_keystone ... ok
+test service_unavailable_and_not_found_mapping ... ok
+test invalid_service_credentials_are_rejected ... ok
+test timeout_is_unknown_outcome ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/gate_a_identity.rs (target/debug/deps/gate_a_identity-7c3c74e16a8a95b2)
+
+running 8 tests
+test token_reauthentication_exchanges_a_valid_token ... ok
+test wrong_service_password_is_rejected ... ok
+test password_authentication_issues_and_public_validation_succeeds ... ok
+test invalid_token_is_rejected_by_public_validation ... ok
+test head_token_existence_check_validates_and_rejects ... ok
+test delete_without_service_token_is_rejected_with_conflict ... ok
+test cinder_service_token_carries_the_service_role ... ok
+test delete_sends_and_validates_x_service_token_through_public_identity ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s
+
+     Running tests/gate_b_protocol.rs (target/debug/deps/gate_b_protocol-055782b8610e31ce)
+
+running 7 tests
+test successful_update_response_is_parsed_from_the_actual_cinder_detail_view ... ok
+test malformed_connection_info_is_classified_distinctly ... ok
+test missing_connection_info_is_classified_distinctly ... ok
+test null_connection_info_is_classified_distinctly ... ok
+test full_lifecycle_reproduces_exact_cinder_28_shapes ... ok
+test detail_view_fields_are_emitted_exactly ... ok
+test timeout_on_update_is_an_unknown_outcome ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.79s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_compute-10ac3b045d1d65b4)
+
+running 110 tests
+test attachment::replay_tests::put_null_connection_info_observes_then_compensates ... ok
+test attachment::replay_tests::crash_mid_detach_resumes_detach_not_reattach ... ok
+test attachment::tests::validate_target_accepts_chap_and_rejects_inconsistent_auth ... ok
+test attachment::tests::connector_failure_compensates_by_terminating_cinder_attachment ... ok
+
+running 1 test
+test checkpoint_tests::targeted_checkpoint_unprivileged_boundary_publishes_and_releases ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 109 filtered out; finished in 0.00s
+
+
+running 1 test
+test attachment::replay_tests::put_missing_connection_info_observes_then_compensates ... ok
+test checkpoint_tests::targeted_checkpoint_unprivileged_boundary_publishes_and_releases ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 109 filtered out; finished in 0.03s
+
+test checkpoint_tests::targeted_checkpoint_unprivileged_boundary_publishes_and_releases ... ok
+test attachment::replay_tests::duplicate_attach_never_creates_a_second_cinder_attachment ... ok
+test attachment::tests::compute_attach_success_with_cinder_completion_failure_is_not_prematurely_compensated ... ok
+test tests::agent_inventory_requires_explicit_disk_capacity ... ok
+test attachment::tests::cinder_unavailable_before_create_is_observed_not_compensated ... ok
+test attachment::restart_tests::unknown_outcome_attachment_reconciles_by_observation ... ok
+test attachment::replay_tests::detach_terminate_unknown_outcome_resumes_after_observation ... ok
+test attachment::replay_tests::restart_at_connection_prepared_resumes_without_duplicate_attachment ... ok
+test attachment::tests::repeated_detach_is_idempotent ... ok
+test attachment::replay_tests::put_malformed_connection_info_observes_then_compensates ... ok
+test attachment::restart_tests::restart_with_attached_device_reconciles_to_attached ... ok
+test attachment::tests::attach_happy_path_persists_terminal_attached_state ... ok
+test attachment::replay_tests::create_timeout_is_unknown_and_reconcile_observes_before_retry ... ok
+test attachment::replay_tests::put_timeout_is_unknown_then_reconcile_resumes_and_attaches ... ok
+test tests::canonical_native_create_context_actor_mismatch_rejected ... ok
+test tests::canonical_native_create_action_mismatch_rejected ... ok
+test tests::agent_inventory_is_published_and_state_fenced ... ok
+test tests::attachment_reconciler_starts_and_shuts_down_cleanly ... ok
+test tests::canonical_native_create_delete_new_key_creates ... ok
+test tests::accepted_create_is_never_redriven_and_delete_guard_unchanged ... ok
+test tests::agent_observation_forwarding_projects_stopped_server ... ok
+test tests::canonical_native_create_replays_one_compute_operation ... ok
+test tests::canonical_native_create_delete_same_key_no_revive ... ok
+test tests::action_waits_for_asynchronous_provider_completion ... ok
+test tests::agent_update_forwarding_uses_durable_journal ... ok
+test tests::canonical_native_delete_action_mismatch_rejected ... ok
+test tests::agent_failed_create_update_marks_error_and_compensates_idempotently ... ok
+test tests::canonical_native_delete_returns_state_not_conflict ... ok
+test tests::canonical_operation_attempt_synchronization ... ok
+test attachment::tests::unsupported_connection_info_is_rejected_and_compensated ... ok
+test tests::compute_quota_denial_records_audit_event ... ok
+test tests::capacity_classified_agent_failure_persists_capacity_category ... ok
+test tests::canonical_native_create_replay_preserves_in_flight_and_failed_operations ... ok
+test tests::compute_quota_enforcement_and_isolation ... ok
+test tests::corrupt_persisted_server_state_fails_closed ... ok
+test tests::compute_service_authorization_enforcement ... ok
+test tests::create_after_completed_delete_reuses_identity_and_converges ... ok
+test tests::create_convergence_re_drives_retryable_operations ... ok
+test tests::create_and_delete_project_binding_outcomes_through_fake_provider ... ok
+test tests::concurrent_scheduler_attempts_do_not_over_allocate ... ok
+test tests::endpoint_release_fault_target_is_fail_closed_and_resource_scoped ... ok
+test tests::compute_unknown_outcome_retains_quota_until_convergence ... ok
+test tests::create_convergence_sweep_expires_transfers_of_terminalized_operations ... ok
+test tests::create_convergence_sweep_recovers_crash_before_dispatch_without_api_call ... ok
+test tests::create_lock_wait_marker_is_written_only_after_mutex_waits ... ok
+test tests::create_dependency_disposition_follows_durable_state ... ok
+test tests::delete_definitive_pre_libvirt_failed_create_with_provider_operation_succeeds ... ok
+test tests::delete_stranded_failed_create_without_provider_reference_succeeds ... ok
+test tests::delete_projects_deleted_state_to_metering_observer ... ok
+test tests::delete_proven_absent_failed_create_with_provider_operation_succeeds ... ok
+test tests::delete_terminal_projection_preserves_a_live_reattached_port ... ok
+test tests::create_race_releases_placement_not_owned_by_winner ... ok
+test tests::custom_flavors_are_project_scoped_durable_and_delete_safely ... ok
+test tests::failed_create_releases_quota_reservation ... ok
+test tests::create_convergence_sweep_survives_empty_registry_until_agent_registers ... ok
+test tests::deleted_server_retries_failed_placement_release ... ok
+test tests::duplicate_server_names_release_each_new_placement_allocation ... ok
+test tests::failed_create_with_provider_operation_and_terminal_category_still_conflicts ... ok
+test tests::failing_metering_observer_does_not_fail_convergence_read_path ... ok
+test tests::orphan_checkpoint_requires_pre_mutation_authoritative_snapshot ... ok
+test tests::failing_metering_observer_surfaces_compute_error ... ok
+test tests::legacy_operation_retry_no_canonical_metadata ... ok
+test tests::foreign_project_show_cannot_trigger_presence_dispatch ... ok
+test tests::inspect_probe_project_isolation_rejects_foreign_project ... ok
+test tests::existing_resource_conflict_does_not_acquire_placement_allocation ... ok
+test tests::lifecycle_convergence_sweep_leaves_terminal_operations_untouched ... ok
+test tests::lifecycle_convergence_sweep_re_drives_retryable_operations ... ok
+test tests::lifecycle_convergence_sweep_terminalizes_unknown_outcome_delete ... ok
+test tests::lifecycle_convergence_sweep_skips_running_operations_with_provider_operation ... ok
+test tests::inspect_probe_requires_project_id_not_project_name ... ok
+test tests::keypair_crud_is_user_scoped_and_server_validation_precedes_provider ... ok
+test tests::inspect_server_validates_existing_placement_without_reallocation ... ok
+test tests::local_delete_completion_terminalizes_operation_and_resource_together ... ok
+test tests::multi_controller_reconciler_leases_mutating_work_and_skips_busy ... ok
+test tests::server_create_identity_is_stable_and_scope_bound ... ok
+test tests::locally_completed_delete_dispatches_best_effort_reap ... ok
+test tests::orphan_repair_lock_gives_waiting_create_fifo_turn_between_passes ... ok
+test tests::read_path_repair_skips_idle_and_projects_consuming ... ok
+test tests::orphan_repair_pass_is_fenced_by_the_coordination_lease ... ok
+test tests::registration_notify_publishes_inventory_before_the_next_tick ... ok
+test tests::targeted_checkpoint_configuration_is_inactive_only_when_absent ... ok
+test tests::targeted_checkpoint_publication_rejects_existing_destination ... ok
+test tests::targeted_checkpoint_release_wait_is_bounded_and_succeeds_only_on_file ... ok
+test tests::targeted_checkpoint_scope_and_run_mismatch_are_distinct ... ok
+test tests::running_create_with_pending_agent_command_is_redriven_on_show ... ok
+test tests::running_create_with_provider_operation_is_not_redriven_on_show ... ok
+test tests::terminal_release_replay_suppression_is_run_and_phase_scoped ... ok
+test tests::orphan_repair_waiting_on_local_lock_does_not_claim_durable_lease ... ok
+test tests::recreated_server_retry_converges_on_the_persisted_revive ... ok
+test tests::repeated_show_polls_do_not_duplicate_presence_inspection ... ok
+test tests::running_create_without_provider_operation_is_redriven_on_show ... ok
+test tests::registry_gate_excludes_unavailable_draining_and_disabled_agents ... ok
+test tests::real_finite_server_quota_full_scenario_acceptance ... ok
+test tests::scheduler_binding_is_persisted_idempotently_and_released_on_delete ... ok
+test tests::server_lifecycle_and_actions_are_project_scoped ... ok
+test tests::store_not_found_does_not_dispatch_provider_mutation ... ok
+test tests::succeeded_create_without_instance_does_not_project_active_on_show ... ok
+test tests::sweep_makes_at_most_one_unbind_dispatch_per_pass ... ok
+test tests::sweep_dispatches_at_most_one_unbind_attempt_per_pass_even_when_unbind_fails ... ok
+test tests::orphan_repair_scheduler_runs_without_lifecycle_drive ... ok
+test tests::terminal_agent_updates_project_create_binding_outcomes ... ok
+test tests::unknown_outcome_create_converges_to_active_on_show ... ok
+test tests::terminal_delete_reaps_owned_config_drive_media ... ok
+test tests::unknown_outcome_create_converges_to_error_and_compensates_on_show ... ok
+test tests::unknown_outcome_create_terminal_failure_projects_error_on_show ... ok
+
+test result: ok. 110 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.09s
+
+     Running tests/multi_controller_acceptance.rs (target/debug/deps/multi_controller_acceptance-dc76d9bd826ab9b5)
+
+running 5 tests
+test test_mutating_work_inventory_matrix_consistency ... ok
+test test_cross_controller_command_handoff_and_single_owner_dispatch ... ok
+test test_operation_ownership_takeover_and_replay_idempotence ... ok
+test test_database_partition_split_brain_zero_commands_sent ... ok
+test test_stale_fence_write_matrix_fails_closed ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.64s
+
+     Running tests/placement_crash_window.rs (target/debug/deps/placement_crash_window-c33609b014d65e42)
+
+running 3 tests
+test restart_reconciliation_retains_live_consumer_allocation ... ok
+test crash_after_placement_commit_reconciles_orphan_and_retry_succeeds ... ok
+test concurrent_reconcile_and_persistence_never_lose_allocations ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.87s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_compute_agent-ae5026f7a2524f0c)
+
+running 120 tests
+test artifact::tests::expired_offer_is_rejected_at_store_boundary ... ok
+test artifact::tests::chunk_verification_failure_leaves_no_replayable_residue ... ok
+test artifact::tests::reconnect_statuses_are_manifest_bound_and_deterministically_ordered ... ok
+test artifact::tests::duplicate_chunk_is_idempotent_but_conflict_is_rejected ... ok
+test block_device_tests::block_device_tests::attach_disk_requires_a_supported_driver_volume_type ... ok
+test block_device_tests::block_device_tests::block_device_commands_are_bounded_and_deterministic ... ok
+test block_device_tests::block_device_tests::detach_and_observe_commands_are_validated ... ok
+test block_device_tests::block_device_tests::fake_executor_rejects_unsupported_driver_before_dispatch ... ok
+test block_device_tests::block_device_tests::fake_executor_attach_detach_observe_is_idempotent ... ok
+test config_drive::tests::request_requires_command_bound_iso_transfer ... ok
+test durable_server_states_project_to_the_provider_vocabulary ... ok
+test events::tests::artifact_status_and_ack_convert_identity_and_state ... ok
+test events::tests::failed_update_preserves_the_classified_category_and_reason ... ok
+test events::tests::invalid_identity_is_rejected_at_the_boundary ... ok
+test events::tests::observation_requires_succeeded_operation_state_and_valid_identities ... ok
+test events::tests::protocol_error_preserves_optional_identity_and_category ... ok
+test events::tests::unspecified_error_category_is_preserved_as_absence ... ok
+test events::tests::unspecified_operation_state_is_rejected_at_the_boundary ... ok
+test artifact::tests::committed_image_lookup_survives_store_restart ... ok
+test artifact::tests::committed_image_lookup_rejects_symlinked_and_foreign_state ... ok
+test artifact::tests::committed_image_lookup_rejects_identity_mismatch ... ok
+test artifact::tests::committed_image_lookup_rejects_tampering ... ok
+test image::tests::image_request_requires_command_bound_transfer_identity ... ok
+test artifact::tests::renamed_final_with_missing_part_replays_and_rebegins ... ok
+test artifact::tests::resolves_committed_image_by_exact_identity ... ok
+test artifact::tests::committed_transfer_with_expired_offer_still_resolves ... ok
+test artifact::tests::config_drive_cleanup_is_owned_idempotent_and_preserves_foreign_resources ... ok
+test artifact::tests::commits_and_reopens ... ok
+test provider::tests::delete_falls_back_to_binding_by_resource_id ... ok
+test artifact::tests::whole_file_verification_failure_at_finish_cleans_residue ... ok
+test provider::tests::delete_of_defined_binding_still_fences_stale_epochs ... ok
+test provider::tests::delete_of_never_defined_binding_dispatches_with_registry_epoch ... ok
+test image::tests::expired_materialization_request_is_rejected_before_artifact_or_cache_access ... ok
+test artifact::tests::statuses_skip_invalid_committed_content_without_aborting ... ok
+test artifact::tests::config_drive_cleanup_succeeds_after_the_offer_expiry ... ok
+test image::tests::lifecycle_delete_removes_overlay_from_owned_manifest ... ok
+test provider::tests::inspect_after_agent_reregistration_dispatches_against_current_epoch ... ok
+test provider::tests::inspect_for_a_different_agent_is_still_rejected ... ok
+test image::tests::committed_raw_image_becomes_owned_overlay_and_deletes_idempotently ... ok
+test image::tests::distinct_instances_share_base_but_own_independent_overlays ... ok
+test artifact::tests::expired_incomplete_transfer_is_skipped_on_reconnect ... ok
+test artifact::tests::committed_transfer_with_expired_offer_replays_on_reconnect ... ok
+test provider::tests::dispatch_recorded_reuse_semantics_are_preserved ... ok
+test provider::tests::create_redrive_after_agent_re_registration_dispatches_fresh_command ... ok
+test provider::tests::unknown_artifact_transfer_outcome_is_never_terminal ... ok
+test tests::administrative_state_defaults_and_round_trips_atomically ... ok
+test tests::administrative_state_rejects_corrupt_and_unspecified_values ... ok
+test tests::administrative_state_transition_is_durable_and_acknowledged ... ok
+test provider::tests::delete_never_accepted_fallback_noops_without_durable_evidence ... ok
+test tests::agent_provider_create_with_empty_registry_reports_not_found ... ok
+test provider::tests::backup_command_projection_fences_queued_replaced_epoch ... ok
+test tests::agent_provider_projects_observations_and_agent_errors ... ok
+test tests::agent_provider_reads_capabilities_from_selected_registered_agent ... ok
+test tests::agent_provider_rejects_config_drive_without_backend_capability ... ok
+test tests::agent_provider_rejects_create_without_verified_artifacts ... ok
+test tests::agent_provider_requires_placement_and_never_invents_resolved_inputs ... ok
+test provider::tests::backup_command_projection_rejects_agent_reference_identity_drift ... ok
+test tests::artifact_dispatch_rejects_payload_and_fenced_offer ... ok
+test tests::artifact_dispatch_resume_skips_authenticated_prefix ... ok
+test tests::artifact_dispatch_sends_bounded_sequential_messages ... ok
+test tests::artifact_dispatch_waits_for_matching_commit_ack ... ok
+test tests::artifact_identity_or_chunk_errors_reject_and_fail_closed ... ok
+test provider::tests::absence_observation_does_not_project_a_provider_reference ... ok
+test tests::artifact_messages_acknowledge_offer_progress_and_commit ... ok
+test tests::artifact_transfer_requires_negotiated_capability ... ok
+test tests::authorized_agent_fingerprint_is_strictly_parsed ... ok
+test tests::bootstrap_certificate_is_normalized_to_one_der_leaf ... ok
+test tests::certificate_uri_san_binding_is_exact ... ok
+test tests::command_action_names_are_stable_for_diagnostics ... ok
+test tests::command_dispatch_is_fenced_and_stream_bound ... ok
+test tests::command_journal_deduplicates_and_marks_inflight_unknown ... ok
+test tests::command_journal_round_trips_block_device_observations ... ok
+test tests::command_observation_wait_accepts_current_epoch_replay_after_reconnect ... ok
+test tests::command_observation_wait_returns_the_matching_observation ... ok
+test provider::tests::create_dispatch_race_adopts_existing_durable_command ... ok
+test tests::console_commands_with_distinct_operations_do_not_conflict ... ok
+test tests::console_query_command_is_bounded_and_fenced ... ok
+test tests::create_command_accepts_scoped_idempotency_keys_with_resource_paths ... ok
+test tests::create_command_carries_deterministic_artifact_transfer_identities ... ok
+test tests::create_command_identity_and_fingerprint_are_deterministic ... ok
+test tests::artifact_dispatch_allows_two_transfers_but_admits_no_third ... ok
+test tests::duplicate_or_fenced_heartbeat_is_rejected ... ok
+test tests::fake_create_failure_cleans_each_owned_stage ... ok
+test tests::fake_create_is_idempotent_and_delete_is_absent_safe ... ok
+test tests::fake_executor_reads_bounded_console_output ... ok
+test tests::fake_executor_rejects_unresolved_create_commands ... ok
+test tests::identity_bearing_stream_messages_are_fenced_to_registration ... ok
+test tests::identity_is_stable_and_temporary_file_is_not_exposed ... ok
+test tests::command_observation_wait_times_out_without_agent_progress ... ok
+test tests::journal_decode_ignores_transfer_expiry_for_admitted_create ... ok
+test tests::journal_decode_keeps_committed_create_past_its_deadline ... ok
+test tests::lifecycle_commands_are_fenced_and_deterministic ... ok
+test tests::malformed_tls_material_is_rejected_before_transport_start ... ok
+test tests::current_epoch_lease_blocks_replacement_registration ... ok
+test tests::proto_create_rejects_missing_or_expired_transfer_references ... ok
+test tests::protocol_version_is_wire_stable ... ok
+test tests::reconnect_reuses_stable_node_and_retains_inventory_on_timeout ... ok
+test tests::registration_rejects_protocol_version_without_matching_wire_revision ... ok
+test tests::registration_requires_capabilities_and_identity ... ok
+test tests::registration_wakes_the_inventory_publisher_notify ... ok
+test tests::replacing_a_connection_fences_the_old_event_stream ... ok
+test tests::resolved_create_inputs_reject_paths_digests_and_duplicate_ports ... ok
+test tests::retried_artifact_offer_may_refresh_expiry_but_not_identity ... ok
+test tests::successful_command_results_become_complete_observations ... ok
+test tests::terminal_failed_result_is_reported_as_failed_not_unknown ... ok
+test tests::journal_last_lifecycle_states_prefer_latest_terminal_mutation ... ok
+test provider::tests::foreground_artifact_commit_adopts_only_equivalent_terminal_row ... ok
+test provider::tests::lifecycle_redispatch_past_command_deadline_is_unknown_outcome ... ok
+test provider::tests::delete_reaps_never_accepted_create_via_durable_command ... ok
+test provider::tests::delete_with_binding_takes_precedence_over_durable_fallback ... ok
+test provider::tests::lifecycle_redispatch_with_corrupt_payload_is_still_invalid_request ... ok
+test provider::tests::succeeded_observation_projects_the_provider_reference ... ok
+test tests::agent_provider_rehydrates_instance_binding_from_durable_store ... ok
+test tests::artifact_status_rebinds_epoch_and_rejects_identity_conflicts ... ok
+test provider::tests::two_concurrent_create_dispatches_converge_on_one_command ... ok
+test provider::tests::concurrent_dispatch_recorded_insert_conflict_reuses_existing_command ... ok
+test provider::tests::stalled_artifact_transfer_send_is_bounded_and_retryable ... ok
+test provider::tests::rehydrate_preserves_never_defined_binding_for_reap_delete ... ok
+test tests::agent_lifecycle_commands_use_the_o3k_server_id_as_resource_identity ... ok
+test tests::multi_controller_agent_stream_busy_rejection_and_dispatch_fencing ... ok
+
+test result: ok. 120 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.28s
+
+     Running tests/agent_mtls.rs (target/debug/deps/agent_mtls-862208b8db311302)
+
+running 1 test
+test agent_provider_command_crosses_mutual_tls_and_observes_completion ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/registration_tls.rs (target/debug/deps/registration_tls-ecf54b0e8948f9ca)
+
+running 2 tests
+test mutual_tls_registration_and_heartbeat_are_black_box_observable ... ok
+test untrusted_client_ca_is_rejected_before_registration ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running unittests src/main.rs (target/debug/deps/o3k_compute_bin-fd4fd8270a3bdf0a)
+
+running 43 tests
+test tests::tests::absent_domain_inspection_is_a_redacted_not_found_failure ... ok
+test tests::tests::console_observation_requires_matching_owned_metadata ... ok
+test tests::tests::create_fails_closed_when_transfer_and_tap_ownership_are_not_resolvable ... ok
+test tests::tests::cleanup_of_a_never_configured_instance_reaches_zero_residue ... ok
+test tests::tests::create_rejects_missing_resolved_artifacts_before_any_host_lookup ... ok
+test tests::tests::definitive_pre_libvirt_failure_reports_absence_proven_category ... ok
+test tests::tests::hostname_normalization_discards_nul_padding_and_bounds_identity ... ok
+test tests::tests::lifecycle_mutations_require_matching_owned_metadata ... ok
+test tests::tests::readyz_body_reports_live_agent_identity_additively ... ok
+test tests::tests::dhcp_runtime_rejects_mixed_flat_networks_before_mutation ... ok
+test tests::tests::over_capacity_create_is_rejected_with_capacity_classification ... ok
+test tests::tests::remove_ports_without_configuration_is_absent_state ... ok
+test tests::tests::failed_dhcp_start_rolls_back_durable_bindings ... ok
+test tests::tests::delete_cleanup_removes_only_the_ports_durable_binding ... ok
+test tests::tests::reap_skips_argv_spoof_without_recorded_identity ... ok
+test tests::tests::restore_pass_recreates_recorded_taps_before_starting_domains ... ok
+test tests::tests::dhcp_binding_rollback_is_idempotent ... ok
+test tests::tests::reap_owned_dnsmasq_removes_dead_and_skips_foreign_pidfiles ... ok
+test tests::tests::restore_pass_starts_only_last_known_running_domains ... ok
+test tests::tests::reap_skips_process_with_mismatched_spawn_identity ... ok
+test tests::tests::restore_pass_with_no_running_domains_is_a_no_op ... ok
+test tests::tests::startup_dhcp_failure_is_non_fatal_and_preserves_state ... ok
+test tests::tests::config_drive_delete_cleanup_is_best_effort_when_the_store_fails_closed ... ok
+test tests::tests::restore_pass_drops_a_resource_whose_fresh_journal_state_is_stopped ... ok
+test tests::tests::definitive_create_failure_reaps_owned_config_drive_manifests ... ok
+test tests::tests::test_fault_pause_guard_accepts_only_positive_numeric_durations ... ok
+test tests::tests::typed_contract_rejects_artifact_identity_mismatch ... ok
+test tests::tests::typed_contract_rejects_unowned_tap_even_with_matching_port_data ... ok
+test tests::tests::config_drive_delete_cleanup_removes_owned_manifests_and_finals ... ok
+test tests::tests::restore_pass_holds_back_a_foreign_tap_domain_and_reports_other_unconverged_instances ... ok
+test tests::tests::restore_pass_holds_back_domain_start_when_tap_restoration_fails_closed ... ok
+test tests::tests::restore_pass_holds_back_mutations_when_the_journal_cannot_be_re_read ... ok
+test tests::tests::restore_pass_reports_unconverged_failures_without_aborting ... ok
+test tests::tests::stale_pidfd_never_retargets_a_reused_numeric_pid ... ok
+test tests::tests::restore_pass_retries_tap_restoration_without_duplicate_domain_starts ... ok
+test tests::tests::reap_owned_dnsmasq_kills_owned_process_while_bindings_exist ... ok
+test tests::tests::reap_owned_dnsmasq_kills_owned_zero_binding_process ... ok
+test tests::tests::startup_residue_reaps_dnsmasq_of_live_bound_instance ... ok
+test tests::tests::startup_residue_reaps_dnsmasq_of_stale_bound_absent_instance ... ok
+test tests::tests::delete_scoped_part_reap_removes_only_the_resources_orphans ... ok
+test tests::tests::startup_reap_removes_only_unresumable_transfer_parts ... ok
+test tests::tests::restore_pass_retries_failed_attempts_inside_the_window ... ok
+test tests::tests::reap_stress_never_signals_unowned_processes ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.50s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_config-5eb9e55e82418731)
+
+running 18 tests
+test tests::agent_provider_requires_authorized_compute_tls ... ok
+test tests::compute_tls_configuration_cannot_be_partial ... ok
+test tests::bootstrap_password_requires_a_strong_separate_signing_key ... ok
+test tests::cellhv_requires_endpoint_and_version ... ok
+test tests::default_database_backend_is_sqlite ... ok
+test tests::invalid_configuration_fails_before_runtime_use ... ok
+test tests::kubernetes_deployment_profile_accepts_postgres ... ok
+test tests::kubernetes_deployment_profile_rejects_sqlite ... ok
+test tests::libvirt_mode_rejects_unsafe_direct_provider_path ... ok
+test tests::network_gateway_realization_empty_value_means_enabled ... ok
+test tests::network_gateway_realization_disabled_value_deactivates_realization ... ok
+test tests::network_gateway_realization_enabled_value_activates_realization ... ok
+test tests::network_gateway_realization_rejects_unknown_values ... ok
+test tests::postgres_database_backend_requires_url ... ok
+test tests::postgres_database_backend_configured_from_env ... ok
+test tests::unset_network_gateway_realization_defaults_to_enabled ... ok
+test tests::secret_is_redacted_from_debug_and_displayed_errors ... ok
+test tests::precedence_is_defaults_then_file_then_environment_then_cli ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_config_drive-be57cb3b110ef5ec)
+
+running 16 tests
+test tests::open_rejects_symlinked_root ... ok
+test tests::altered_or_extra_published_content_is_not_owned ... ok
+test tests::cleanup_and_replacement_fail_closed_for_unowned_paths ... ok
+test tests::open_restricts_only_created_root_directories ... ok
+test tests::cleanup_removes_directory_and_published_iso_pair_for_owned_instance ... ok
+test tests::cleanup_rejects_iso_whose_ownership_manifest_does_not_match_the_instance ... ok
+test tests::restart_reaps_only_fenced_publication_residue ... ok
+test tests::cleanup_fails_closed_for_symlinked_iso ... ok
+test tests::failed_generation_removes_unpublished_temporary_directory ... ok
+test tests::iso_tampering_and_unowned_output_fail_closed ... ok
+test tests::generation_is_deterministic_and_layout_is_openstack_compatible ... ok
+test tests::iso_tool_failure_removes_temporary_files ... ok
+test tests::iso_uses_fixed_arguments_and_is_restart_idempotent ... ok
+test tests::unsafe_and_oversized_inputs_are_rejected ... ok
+test tests::cleanup_fails_closed_for_iso_without_manifest_and_oversized_iso ... ok
+test tests::verified_artifact_rejects_foreign_root_and_oversized_output ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.48s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_console-a2ec19532898f8bf)
+
+running 5 tests
+test tests::oversized_artifacts_are_rejected_before_read_allocation ... ok
+test tests::root_and_console_files_are_private_and_symlink_roots_are_rejected ... ok
+test tests::concurrent_appends_are_serialized ... ok
+test tests::observation_chunks_are_sequential_and_replay_safe ... ok
+test tests::output_is_bounded_durable_and_cleanup_is_idempotent ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_controller_protocol-7b3a1f203e9df8c2)
+
+running 4 tests
+test conversion::tests::malformed_wire_values_fail_closed ... ok
+test tests::composition_wire_service_is_versioned_and_generic ... ok
+test tests::v1_wire_service_is_present ... ok
+test tests::payload_limits_fail_closed ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_database_example-292038d303584451)
+
+running 10 tests
+test tests::instance_spec_and_status_serialization ... ok
+test tests::controller_reconciles_and_health ... ok
+test tests::composition_uses_generic_deterministic_child_slots ... ok
+test tests::compute_failure_compensates_network_and_volume_in_reverse_order ... ok
+test tests::conformance_does_not_require_kernel_changes ... ok
+test tests::network_failure_stops_before_later_child_side_effects ... ok
+test tests::partial_child_failure_compensates_exclusive_children_in_reverse_order ... ok
+test tests::manifest_registers_and_displays ... ok
+test tests::registry_reports_resource_type_and_action ... ok
+test tests::unresolved_relationships_fail_closed_per_slot ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/database-controller.rs (target/debug/deps/database_controller-e05fdd1b97c5eb56)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_dhcp-a564290143418076)
+
+running 11 tests
+test tests::foreign_paths_are_not_used ... ok
+test tests::configuration_survives_reopen ... ok
+test tests::rendered_config_excludes_loopback ... ok
+test tests::renders_fixed_bindings_and_rejects_collisions ... ok
+test tests::gateway_reconfiguration_rejects_existing_binding ... ok
+test tests::clearing_configuration_after_last_binding_allows_new_subnet ... ok
+test tests::start_fails_closed_when_config_probe_rejects ... ok
+test tests::start_fails_closed_when_child_dies_after_spawn ... ok
+test tests::spawn_uses_equals_form_for_path_options ... ok
+test tests::supervisor_can_be_adopted_after_agent_restart ... ok
+test tests::supervisor_is_nonblocking_restartable_and_owned ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.03s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_domain-c496717af26d0957)
+
+running 18 tests
+test network::endpoint_directory_tests::canonical_network_is_valid_without_address_realms ... ok
+test network::endpoint_directory_tests::directory_sorts_entries_and_resolves_local_or_remote_neighbors ... ok
+test network::endpoint_directory_tests::overlapping_realms_keep_route_identity_and_transport_identity_distinct ... ok
+test network::endpoint_directory_tests::fabric_plan_derives_shared_peers_and_rejects_unsafe_mtu ... ok
+test network::endpoint_directory_tests::directory_rejects_scope_generation_address_and_identity_conflicts ... ok
+test network::endpoint_directory_tests::proxy_mac_is_stable_local_unicast_and_collision_checked ... ok
+test network::endpoint_directory_tests::realm_binding_replay_and_release_are_fenced ... ok
+test network::endpoint_directory_tests::remote_routes_require_current_host_identity_and_use_endpoint_32s ... ok
+test storage::tests::attachment_and_snapshot_transitions_are_validated ... ok
+test storage::tests::command_and_observation_validation_is_bounded ... ok
+test storage::tests::shared_backend_scope_is_valid_without_local_device_fields ... ok
+test storage::tests::volume_lifecycle_requires_observation_for_unknown_outcomes ... ok
+test tests::complete_canonical_transition_table ... ok
+test storage::tests::attachment_has_no_provider_device_identity ... ok
+test tests::deleted_is_the_only_terminal_state ... ok
+test tests::invalid_server_transition_is_rejected ... ok
+test tests::every_other_pair_is_an_invalid_transition ... ok
+test tests::server_id_round_trips_its_uuid_identity ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_identity-c228edcd463c3e3d)
+
+running 40 tests
+test oidc::tests::errors_are_not_token_bearing ... ok
+test oidc::tests::local_test_configuration_is_explicit ... ok
+test oidc::tests::production_configuration_rejects_http ... ok
+test tests::disabled_user_cannot_authenticate ... ok
+test oidc::tests::validates_claims_and_signature_against_explicit_jwks ... ok
+test tests::federated_exchange_issues_native_context_with_external_lifetime ... ok
+test tests::federated_rescoping_rechecks_disabled_and_removed_assignments ... ok
+test tests::authorized_projects_follow_role_assignments ... ok
+test tests::pbkdf2_sha256_matches_rfc6070_vector ... ok
+test tests::federated_system_exchange_requires_explicit_operator_assignment ... ok
+test oidc::tests::fetches_discovery_and_refreshes_on_key_rotation ... ok
+test tests::catalog_is_generated_from_durable_endpoint_records ... ok
+test tests::scope_wire_shapes_parse_bounded ... ok
+test tests::expired_token_is_rejected ... ok
+test tests::invalid_password_is_not_accepted ... ok
+test tests::canonical_catalog_enumerates_projections_and_gates_unavailable_cinder ... ok
+test tests::cross_project_scoping_fails_closed ... ok
+test tests::federated_scope_discovery_is_principal_specific_and_id_based ... ok
+test tests::keystone_token_mapping_to_kernel_auth_context ... ok
+test tests::malformed_and_tampered_tokens_are_rejected ... ok
+test tests::token_reauthentication_rejects_invalid_tokens ... ok
+test tests::scoped_claims_still_carry_project_key ... ok
+test tests::password_scope_issues_and_verifies_token ... ok
+test tests::service_user_authentication_and_separation ... ok
+test tests::weak_signing_key_is_rejected ... ok
+test tests::token_reauthentication_issues_a_fresh_token ... ok
+test tests::unscoped_claims_omit_project_key ... ok
+test tests::unscoped_password_auth_requires_no_role_assignment ... ok
+test tests::unscoped_password_issue_and_verify_round_trip ... ok
+test tests::unscoped_token_auth_context_is_unauthorized ... ok
+test tests::unscoped_token_requires_an_enabled_user ... ok
+test tests::user_token_is_not_a_service_token ... ok
+test tests::endpoint_records_survive_reload_from_store ... ok
+test tests::catalog_advertises_identity_under_all_interfaces ... ok
+test tests::extra_project_seed_assigns_the_cinder_service_identity ... ok
+test tests::reload_picks_up_new_role_assignment ... ok
+test tests::reload_picks_up_removed_operator_assignment ... ok
+test tests::reload_preserves_existing_token_verification ... ok
+test tests::secret_and_password_hash_display_are_redacted ... ok
+test tests::password_hash_round_trip_and_wrong_password ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.61s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_image-15f4ff239d61a1d4)
+
+running 37 tests
+test tests::cache_rejects_symlinked_managed_directories ... ok
+test tests::cached_base_resolution_rejects_tampering_and_wrong_identity ... ok
+test tests::content_addressed_cache_is_atomic_and_rejects_bad_inputs ... ok
+test tests::cache_rejects_symlinked_base_and_overlay_escape ... ok
+test tests::managed_cache_directories_allow_libvirt_traversal_only ... ok
+test tests::qcow2_header_dependencies_are_rejected_before_helper_invocation ... ok
+test tests::qcow2_corrupt_headers_are_rejected ... ok
+test tests::qcow2_truncated_payloads_are_rejected ... ok
+test tests::qcow2_tables_referencing_beyond_eof_are_rejected ... ok
+test tests::qemu_img_failpoint_env_armed_asserts_injected_failure ... ok
+test tests::qcow2_valid_fixture_passes_structural_validation ... ok
+test tests::qemu_img_helper_receives_resource_limits ... ok
+
+running 1 test
+test tests::qemu_img_failpoint_env_armed_asserts_injected_failure ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
+
+test tests::qemu_img_output_is_bounded_and_hostile_output_fails_closed ... ok
+test tests::real_cirros_truncation_is_rejected_when_fixture_present ... ok
+test tests::restart_cleans_overlay_temporaries_without_touching_published_files ... ok
+test tests::qemu_img_test_failpoint_env_var_fails_closed ... ok
+test tests::qcow2_cache_requires_qemu_img_format_evidence ... ok
+test tests::qcow2_base_failing_qemu_img_check_is_rejected_before_overlay ... ok
+test tests::overlay_requires_verified_qcow2_backing_and_cleans_failures ... ok
+test tests::uploaded_qcow2_with_any_backing_relationship_is_rejected ... ok
+test tests::verified_path_publication_is_streamed_and_content_addressed ... ok
+test tests::concurrent_uploads_serialize_and_keep_one_published_artifact ... ok
+test tests::artifact_resolution_bounds_tampered_content ... ok
+test tests::image_quota_enforcement_and_isolation ... ok
+test tests::image_service_restart_cleans_only_upload_temporaries ... ok
+test tests::active_metadata_with_corrupt_artifact_fails_closed ... ok
+test tests::active_metadata_with_missing_artifact_fails_closed ... ok
+test tests::artifact_resolution_rechecks_content_and_scope ... ok
+test tests::upload_accepts_valid_qcow2_and_rejects_garbage ... ok
+test tests::upload_rejects_truncated_qcow2_without_activating_the_record ... ok
+test tests::upload_limit_and_project_isolation_are_enforced ... ok
+test tests::image_byte_quota_enforcement_and_failure_release ... ok
+test tests::verified_service_artifact_publishes_to_cache_idempotently ... ok
+test tests::production_like_durable_audit_publisher_persists_image_mutation ... ok
+test tests::upload_is_atomic_and_restartable ... ok
+test tests::metadata_survives_restart_from_durable_store ... ok
+test tests::image_bytes_remain_outside_sqlite ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.77s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_kernel-95e589a3afcb616c)
+
+running 176 tests
+test bootstrap::tests::grants_are_single_use_and_bound ... ok
+test bootstrap::tests::init_and_join_are_idempotent ... ok
+test building_block::tests::lifecycle_rejects_invalid_transitions_and_blocks_remove ... ok
+test composition::tests::observation_is_separate_and_deterministic ... ok
+test building_block::tests::transitions_are_fenced_and_deterministic ... ok
+test audit::tests::durable_sink_propagates_required_failure ... ok
+test audit::tests::durable_sink_waits_for_repository_commit ... ok
+test controller::tests::protocol_version_compatibility ... ok
+test composition::tests::validates_dependencies_and_rejects_cycles_and_inline_secrets ... ok
+test controller::tests::diagnostic_bound_never_splits_utf8 ... ok
+test controller::tests::reconcile_outcome_serialization ... ok
+test controller::tests::controller_registration_declared ... ok
+test location::tests::failure_domain_class_ranks_and_wire_names ... ok
+test location::tests::binding_replay_is_idempotent ... ok
+test location::tests::binding_validates_failure_domain_and_target_id ... ok
+test location::tests::failure_domain_create_lists_sorted_and_starts_at_generation_one ... ok
+test location::tests::failure_domain_create_rejects_malformed_and_duplicate_ids ... ok
+test location::tests::failure_domain_create_rejects_bad_names ... ok
+test location::tests::failure_domain_create_rejects_self_parent_and_missing_parent ... ok
+test location::tests::failure_domain_create_rejects_cross_availability_domain_parent ... ok
+test location::tests::failure_domain_update_bumps_generation_and_rejects_stale ... ok
+test location::tests::failure_domain_update_rejects_invalid_name_and_metadata ... ok
+test location::tests::failure_domain_delete_protection ... ok
+test location::tests::failure_domain_metadata_bounds ... ok
+test location::tests::mutations_and_replays_thread_the_audit_event_through_the_store ... ok
+test location::tests::failure_domain_nesting_respects_class_rank ... ok
+test location::tests::region_with_multiple_availability_domains ... ok
+test location::tests::region_and_az_delete_protection ... ok
+test location::tests::rejects_az_across_two_regions ... ok
+test location::tests::failure_domain_create_rejects_unknown_availability_domain ... ok
+test location::tests::region_identity_is_provider_independent_and_structurally_closed ... ok
+test location::tests::manifest_validation_passes_with_failure_domains_present ... ok
+test location::tests::rejects_duplicate_az_in_region ... ok
+test location::tests::rejects_duplicate_region_ids ... ok
+test location::tests::rejects_malformed_region_id ... ok
+test location::tests::rejects_empty_availability_domain_id ... ok
+test location::tests::rejects_malformed_az_id_with_uppercase ... ok
+test location::tests::sorted_deterministically ... ok
+test location::tests::rejects_region_id_with_leading_punctuation ... ok
+test location::tests::rejects_empty_region_id ... ok
+test location::tests::store_failure_leaves_memory_untouched ... ok
+test location::tests::validate_manifest_rejects_az_outside_declared_regions ... ok
+test location::tests::validate_manifest_rejects_unknown_availability_domain ... ok
+test location::tests::validate_manifest_registry_rejects_unknown_region_across_manifests ... ok
+test location::tests::validate_manifest_rejects_unknown_region ... ok
+test location::tests::restart_reconstruction_round_trips_through_snapshot ... ok
+test location::tests::region_and_az_declare_replay_and_uniqueness ... ok
+test manifest::external_loader_tests::external_manifest_directory_loader_fails_closed_on_bad_json ... ok
+test manifest::tests::conversion_preserves_dependency_semantics ... ok
+test manifest::tests::conversion_preserves_external_controller_semantics ... ok
+test manifest::tests::conversion_preserves_quota_dimensions ... ok
+test manifest::tests::conversion_rejects_empty_schema_version ... ok
+test manifest::external_loader_tests::external_manifest_loader_accepts_synthetic_service_without_dispatch_code ... ok
+test manifest::tests::conversion_preserves_mixed_resource_scope ... ok
+test manifest::tests::conversion_rejects_external_controller_without_service_principal ... ok
+test manifest::tests::conversion_preserves_multiple_regions_and_availability_domains ... ok
+test manifest::tests::conversion_rejects_invalid_controller_protocol ... ok
+test manifest::tests::conversion_rejects_invalid_dependency_kind ... ok
+test manifest::tests::conversion_rejects_empty_region_entry ... ok
+test manifest::tests::conversion_rejects_invalid_controller_mode ... ok
+test manifest::tests::conversion_rejects_invalid_ownership_mode ... ok
+test manifest::tests::conversion_preserves_resource_schema_version ... ok
+test manifest::tests::conversion_rejects_invalid_resource_scope ... ok
+test manifest::tests::conversion_rejects_invalid_quota_scope ... ok
+test manifest::tests::direct_rust_rejects_257_actions ... ok
+test manifest::tests::direct_rust_rejects_129_resource_types ... ok
+test manifest::tests::direct_rust_rejects_duplicate_capability ... ok
+test manifest::tests::direct_rust_rejects_empty_controller_protocol_version ... ok
+test manifest::tests::direct_rust_rejects_duplicate_region ... ok
+test manifest::tests::direct_rust_rejects_external_controller_with_in_process_protocol ... ok
+test manifest::tests::direct_rust_rejects_external_hosted_ownership ... ok
+test manifest::tests::direct_rust_rejects_invalid_action_format ... ok
+test manifest::tests::direct_rust_rejects_invalid_capability ... ok
+test manifest::tests::direct_rust_rejects_invalid_collection ... ok
+test location::tests::from_snapshot_rejects_corrupt_topology ... ok
+test manifest::tests::direct_rust_rejects_invalid_quota_key ... ok
+test manifest::tests::direct_rust_rejects_invalid_service_id ... ok
+test manifest::tests::direct_rust_rejects_invalid_namespace ... ok
+test manifest::tests::direct_rust_rejects_o3k_implemented_with_grpc ... ok
+test manifest::tests::direct_rust_rejects_missing_controller ... ok
+test manifest::tests::external_compatibility_identity_is_canonical_but_not_native_manifest ... ok
+test manifest::tests::in_process_controller_registration_rejects_external_service ... ok
+test manifest::tests::in_process_controller_health_reports_manifest_protocol_version ... ok
+test manifest::tests::manifest_registry_accepts_distinct_services ... ok
+test manifest::tests::manifest_registry_has_resource_type_and_action ... ok
+test manifest::tests::manifest_rejects_action_outside_namespace ... ok
+test manifest::tests::manifest_registry_rejects_duplicate_namespace ... ok
+test manifest::tests::manifest_rejects_missing_service_id ... ok
+test manifest::tests::projection_accepts_non_http_url_template ... ok
+test manifest::tests::projection_conversion_rejects_wrong_projection_version ... ok
+test manifest::tests::projection_preserves_all_wire_fields ... ok
+test manifest::tests::manifest_rejects_resource_type_outside_namespace ... ok
+test manifest::tests::native_only_service_has_no_implicit_openstack_projection ... ok
+test manifest::tests::projection_conversion_rejects_invalid_endpoint_interface ... ok
+test manifest::tests::projection_rejects_empty_region ... ok
+test manifest::tests::projection_rejects_33_surfaces ... ok
+test manifest::tests::projection_rejects_empty_surface_version ... ok
+test manifest::tests::compatibility_projection_must_link_to_one_canonical_service ... ok
+test location::tests::failure_domain_hierarchy_depth_cap ... ok
+test manifest::tests::projection_rejects_duplicate_capability ... ok
+test manifest::tests::projection_rejects_oversized_microversion ... ok
+test manifest::tests::projection_rejects_oversized_service_type ... ok
+test manifest::tests::register_rejects_action_outside_manifest_namespace ... ok
+test manifest::tests::register_rejects_duplicate_action_in_one_manifest ... ok
+test manifest::tests::projection_rejects_oversized_evidence_profile ... ok
+test manifest::tests::register_rejects_duplicate_resource_type_in_one_manifest ... ok
+test manifest::tests::register_rejects_empty_namespace ... ok
+test manifest::tests::register_rejects_duplicate_service_id ... ok
+test manifest::tests::register_rejects_empty_resource_types ... ok
+test manifest::tests::register_rejects_malformed_action_format ... ok
+test manifest::tests::register_rejects_empty_actions ... ok
+test manifest::tests::register_rejects_malformed_resource_type_format ... ok
+test manifest::tests::register_rejects_overly_long_namespace ... ok
+test manifest::tests::in_process_controller_readiness_uses_shared_lifecycle_state ... ok
+test manifest::tests::register_rejects_resource_type_outside_manifest_namespace ... ok
+test manifest::tests::register_validation_atomic_no_partial_state ... ok
+test manifest::tests::register_rejects_same_namespace_second_service ... ok
+test manifest::tests::register_rejects_resource_type_claiming_owned_namespace ... ok
+test manifest::tests::lifecycle_state_is_canonical_and_fail_closed ... ok
+test manifest::tests::seed_core_does_not_overwrite_explicit_registrations ... ok
+test manifest::tests::wire_manifest_v1_converts_to_internal_service_manifest ... ok
+test manifest::tests::seed_core_compute_server_declares_update_lifecycle_operation ... ok
+test manifest::tests::valid_manifest_passes_validation ... ok
+test manifest::tests::seed_core_registers_accepted_services ... ok
+test manifest::tests::seed_core_declares_update_only_where_the_application_supports_it ... ok
+test manifest::tests::seed_core_by_namespace_index_consistent ... ok
+test manifest::tests::seed_core_fails_on_modified_ownership ... ok
+test metering::tests::accumulator_merges_ingest_buckets_into_daily_buckets ... ok
+test metering::tests::accumulator_rejects_negative_quantities ... ok
+test manifest::tests::seed_core_idempotent_on_exact_match ... ok
+test manifest::tests::wire_manifest_v1_rejects_wrong_version_string ... ok
+test metering::tests::bucket_contributions_exclude_the_end_instant ... ok
+test metering::tests::bucket_contributions_fail_closed_on_bucket_end_overflow ... ok
+test metering::tests::bucket_contributions_fail_closed_on_overflow ... ok
+test metering::tests::bucket_contributions_split_across_boundaries_without_double_counting ... ok
+test manifest::tests::seed_core_invalid_manifest_fails_closed ... ok
+test metering::tests::definitions_do_not_carry_pricing_or_formulas ... ok
+test metering::tests::observations_validate_quantity_consistency ... ok
+test metering::tests::quantity_formatting_keeps_millisecond_precision ... ok
+test metering::tests::usage_bounds_admit_a_full_range_single_series ... ok
+test manifest::tests::seed_core_duplicate_namespace_fails ... ok
+test metering::tests::catalog_keys_are_unique_and_namespaced ... ok
+test manifest::tests::service_authority_cannot_be_forgotten_by_registry_removal ... ok
+test metering::tests::usage_query_bounds_bucket_count ... ok
+test metering::tests::usage_query_rejects_unbounded_or_misaligned_requests ... ok
+test quota::tests::all_known_dimensions_parse_and_validate ... ok
+test quota::tests::limit_key_parsing_and_display ... ok
+test quota::tests::quota_decision_evaluation ... ok
+test quota::tests::reservation_lifecycle ... ok
+test quota::tests::numeric_bounds_enforcement ... ok
+test tests::audit_event_lifecycle_and_sink ... ok
+test tests::authorizer_deny_unsupported_principal ... ok
+test tests::auth_context_contains_no_raw_tokens_or_secrets ... ok
+test tests::configured_but_unavailable_external_cinder_is_not_advertised ... ok
+test tests::authorizer_deny_unknown_resource_type ... ok
+test tests::authorizer_standard_deny_cross_project ... ok
+test tests::authorizer_deny_unknown_action ... ok
+test tests::authorizer_standard_allow_owner ... ok
+test tests::governance_actions_require_system_scope_and_operator_role ... ok
+test tests::registry_keystone_catalog_projection ... ok
+test manifest::tests::seed_core_fails_on_modified_capabilities ... ok
+test tests::governance_capabilities_expose_canonical_policies ... ok
+test tests::registry_standard_contains_expected_services ... ok
+test tests::governance_namespace_is_system_gated_for_any_action ... ok
+test manifest::tests::seed_core_no_openstack_capabilities ... ok
+test tests::operator_action_requires_system_user_scope_and_operator_role ... ok
+test tests::topology_manage_requires_system_scope_and_operator_role ... ok
+test tests::topology_namespace_is_system_gated_for_future_mutation_actions ... ok
+test tests::topology_read_is_open_to_any_authenticated_principal ... ok
+test tests::bound_registry_catalog_follows_canonical_readiness ... ok
+test metering::tests::bucket_contributions_reject_more_than_the_ingest_bucket_bound ... ok
+test manifest::tests::wire_projection_v1_conforms_to_schema ... ok
+test manifest::tests::wire_resource_envelope_v1_conforms_to_schema ... ok
+test manifest::tests::wire_manifest_v1_conforms_to_schema ... ok
+test manifest::tests::wire_manifest_v1_rejects_invalid_ownership_mode ... ok
+test manifest::tests::wire_manifest_v1_rejects_missing_version ... ok
+
+test result: ok. 176 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_libvirt-2996fdbf34a4cc16)
+
+running 27 tests
+test block_device_tests::attach_disk_xml_rejects_invalid_targets ... ok
+test block_device_tests::attach_disk_xml_binds_durable_volume_identity ... ok
+test tests::capability_projection_reports_capacity_and_kvm_support ... ok
+test block_device_tests::owned_disk_volume_ids_extracts_only_o3k_disks ... ok
+test tests::console_file_path_from_xml_rejects_missing_and_unsafe_paths ... ok
+test block_device_tests::owned_disk_xml_for_volume_finds_whole_element ... ok
+test tests::console_file_path_from_xml_rejects_missing_source ... ok
+test block_device_tests::free_pci_bridge_slot_skips_used_slots_and_slot_zero ... ok
+test tests::console_reads_require_exact_owned_server_metadata ... ok
+test tests::domain_state_projection_fails_closed_for_non_running_states ... ok
+test tests::default_build_reports_missing_libvirt_without_blocking ... ok
+test tests::create_preserves_image_source_validation_after_network_validation ... ok
+test tests::create_rejects_network_ids_before_libvirt_definition ... ok
+test tests::domain_xml_attaches_owned_tap_with_mac ... ok
+test tests::domain_xml_has_deterministic_durable_console_path ... ok
+test tests::domain_xml_rejects_unsafe_image_sources ... ok
+test tests::domain_xml_is_deterministic_escaped_and_recoverable ... ok
+test tests::only_local_system_uri_is_accepted ... ok
+test tests::malformed_or_duplicate_metadata_is_quarantined ... ok
+test tests::domain_xml_attaches_config_drive_read_only ... ok
+test tests::managed_domain_listing_requires_valid_unique_ownership_metadata ... ok
+test tests::read_console_file_tail_rejects_unreadable_paths ... ok
+test tests::provider_ownership_guard_rejects_foreign_or_malformed_domains ... ok
+test tests::read_console_file_tail_bounds_sparse_file_reads ... ok
+test tests::read_console_file_tail_returns_only_the_requested_tail ... ok
+test tests::read_console_file_tail_rejects_symlink_components ... ok
+test tests::read_console_file_tail_reports_missing_file_as_empty_snapshot ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_migration-0b2c05b239981ac0)
+
+running 30 tests
+test acceptance_process::tests::destination_smoke_requires_all_real_capabilities ... ok
+test acceptance::tests::readiness_failure_is_blocked_before_gate_one ... ok
+test acceptance::tests::every_gate_runs_and_cleanup_is_required_for_pass ... ok
+test acceptance::tests::failure_stops_later_unsafe_gates_and_marks_them_not_run ... ok
+test manifest::tests::blocked_resource_has_no_destination_mapping ... ok
+test tests::router_interface_dependencies_include_router_and_fixed_ip_subnet ... ok
+test tests::secret_debug_is_redacted ... ok
+test tests::configuration_rejects_unallowlisted_or_insecure_endpoint ... ok
+test runner::tests::dependent_source_references_are_rewritten_only_to_known_destinations ... ok
+test tests::discovery_is_deterministic_and_scope_safe ... ok
+test tests::port_dependencies_include_fixed_ip_subnets ... ok
+test manifest::tests::mapping_is_deterministic_and_dependency_ordered ... ok
+test tests::unsupported_semantics_fail_closed_without_mutation ... ok
+test transfer::tests::metadata_rejects_secret_properties ... ok
+test transfer::tests::public_key_validation_rejects_private_material_and_accepts_public ... ok
+test volume::tests::checkpoint_keeps_integrity_and_source_identity ... ok
+test transfer::tests::transfer_streams_and_replays_existing_owned_state ... ok
+test volume::tests::validation_rejects_unsafe_volume_capabilities ... ok
+test runner::tests::unknown_outcome_is_fenced_before_replay_or_rollback ... ok
+test acceptance::tests::every_gate_failure_position_stops_the_journey_at_that_gate ... ok
+test manifest::tests::tampering_and_secret_fields_fail_closed ... ok
+test translation::tests::translates_to_canonical_kinds_and_reverse_rollback ... ok
+test translation::tests::blocked_provider_extension_fails_closed ... ok
+test tofu::tests::subprocess_exit_code_defines_noop ... ok
+test runner::tests::conflicting_replay_is_fenced ... ok
+test manifest::tests::file_store_reconstructs_after_restart ... ok
+test runner::tests::rollback_deletes_only_owned_resources_in_reverse_order ... ok
+test runner::tests::cutover_requires_authorization_and_keeps_source_deletion_separate ... ok
+test runner::tests::restart_resumes_owned_nodes_without_duplicate_create ... ok
+test runner::tests::native_http_adapter_composes_observe_create_and_verify_without_db_access ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running unittests src/bin/p14-acceptance.rs (target/debug/deps/p14_acceptance-29674b29abaeb00c)
+
+running 1 test
+test tests::compatibility_observation_uses_openstack_token_header ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_native_api-6d075f94f4da3878)
+
+running 110 tests
+test auth::tests::federated_credentials_require_explicit_scope_and_method ... ok
+test auth::tests::credentials_are_strictly_discriminated ... ok
+test auth::tests::request_id_is_generated_once_and_reused ... ok
+test auth::tests::request_id_accepts_bounded_safe_value_and_rejects_unsafe ... ok
+test diagnostics::tests::aggregate_all_healthy_is_healthy ... ok
+test diagnostics::tests::aggregate_all_unavailable_is_unavailable ... ok
+test diagnostics::tests::aggregate_partially_observed_is_degraded_not_unknown ... ok
+test diagnostics::tests::aggregate_never_collapses_unknown_into_healthy ... ok
+test diagnostics::tests::aggregate_partial_failure_is_degraded_not_healthy ... ok
+test diagnostics::tests::capacity_available_is_saturating ... ok
+test diagnostics::tests::aggregate_stale_is_degraded_not_healthy ... ok
+test diagnostics::tests::page_size_is_bounded ... ok
+test diagnostics::tests::cursor_round_trips_and_rejects_invalid ... ok
+test error::tests::error_code_status_mapping ... ok
+test error::tests::problem_details_not_found ... ok
+test error::tests::problem_details_into_response_content_type ... ok
+test diagnostics::tests::public_dtos_never_carry_credentials_or_node_identity ... ok
+test error::tests::problem_details_internal_has_no_detail ... ok
+test error::tests::problem_details_serialization_matches_rfc9457 ... ok
+test error::tests::problem_details_unauthorized ... ok
+test error::tests::error_code_strings_are_explicit_contract_values ... ok
+test diagnostics::tests::status_vocabulary_is_stable_and_distinct ... ok
+test bootstrap::tests::init_requires_bootstrap_secret ... ok
+test governance::tests::governance_rejects_unknown_body_fields ... ok
+test metering::tests::align_helpers_reject_unaligned_instants ... ok
+test metering::tests::definition_json_keys_are_exactly_the_contract ... ok
+test metering::tests::definition_view_carries_no_secret_and_matches_the_catalog ... ok
+test metering::tests::definitions_page_size_is_bounded_and_cursor_round_trips ... ok
+test metering::tests::definitions_page_serializes_without_secrets ... ok
+test bootstrap::tests::init_does_not_expose_secret_or_accept_malformed_json ... ok
+test metering::tests::meter_usage_error_maps_to_stable_http_statuses ... ok
+test metering::tests::metering_reader_fake_reports_each_status ... ok
+test metering::tests::usage_query_params_decode_known_keys_and_reject_unknown_keys ... ok
+test governance::tests::governance_cursor_is_bound_to_effective_filter ... ok
+test metering::tests::usage_response_json_keys_are_exactly_the_contract ... ok
+test metering::tests::usage_statuses_are_never_ambiguous ... ok
+test metering::tests::usage_response_renders_every_instant_as_rfc3339_utc ... ok
+test pagination::tests::a0_bounded_page_rejects_more_than_requested_items ... ok
+test pagination::tests::a0_cursor_length_is_rejected_before_decode ... ok
+test pagination::tests::a0_mutation_between_pages_uses_weak_keyset_semantics ... ok
+test pagination::tests::a0_cursor_is_bound_to_scope_resource_and_query_identity ... ok
+test pagination::tests::a0_page_invariants_are_explicit ... ok
+test pagination::tests::a0_strict_limit_validation ... ok
+test pagination::tests::a0_unconfigured_cursor_service_fails_closed ... ok
+test pagination::tests::a0_tampered_and_malformed_cursors_fail_closed ... ok
+test resource::tests::lifecycle_actions_are_descriptor_authoritative ... ok
+test resource::tests::different_resource_types_share_one_registry_resolution_path ... ok
+test resource::tests::registry_allows_partial_lifecycle_actions ... ok
+test resource::tests::registry_rejects_reserved_and_ambiguous_collections ... ok
+test resource::tests::mutation_readiness_tracks_shared_lifecycle_transition ... ok
+test resource_contract::tests::resolution_fails_closed_for_unknown_versions_and_resources ... ok
+test tests::api_root_returns_version ... ok
+test governance::tests::diagnostics_endpoints_require_system_operator_scope ... ok
+test tests::create_action_input_reference_targets_the_typed_spec_fragment ... ok
+test tests::discover_regions_empty_when_none_configured ... ok
+test tests::audit_api_b0_contract_matrix ... ok
+test tests::discover_regions_order_is_deterministic ... ok
+test resource_contract::tests::generated_contracts_are_resource_specific_and_validate_the_same_input ... ok
+test diagnostics::tests::page_validates_against_diagnostics_contract_schema ... ok
+test diagnostics::tests::capacity_validates_against_diagnostics_contract_schema ... ok
+test compute::envelope_tests::compute_envelope_conforms_to_schema ... ok
+test diagnostics::tests::provider_validates_against_diagnostics_contract_schema ... ok
+test diagnostics::tests::summary_validates_against_diagnostics_contract_schema ... ok
+test tests::discover_regions_exposes_multiple_configured_regions ... ok
+test network::envelope_tests::network_envelope_conforms_to_schema ... ok
+test diagnostics::tests::service_validates_against_diagnostics_contract_schema ... ok
+test governance::tests::governance_mutation_requires_manage_action_and_valid_reference ... ok
+test tests::discover_regions_region_has_multiple_availability_domains ... ok
+test metering::tests::malformed_instants_fail_the_metering_contract_schema ... ok
+test governance::tests::governance_capabilities_expose_canonical_actions ... ok
+test governance::tests::governance_reads_require_system_operator_scope ... ok
+test tests::endpoint_without_bearer_returns_401 ... ok
+test tests::resource_type_az_aware_exposes_capability_without_provider_leakage ... ok
+test tests::resource_type_az_required_when_only_az_declared ... ok
+test tests::operator_profile_route_is_server_authorized_and_system_scoped ... ok
+test tests::discover_services_uses_manifest_registry ... ok
+test tests::federated_scope_discovery_rejects_empty_external_credentials ... ok
+test tests::resource_type_regional_exposes_only_authoritative_regions ... ok
+test tests::resource_type_global_does_not_advertise_regional_placement ... ok
+test tests::resource_type_regional_exposes_only_declared_canonical_subset ... ok
+test topology::tests::binding_kind_and_target_are_validated ... ok
+test metering::tests::dtos_validate_against_the_metering_contract_schema ... ok
+test topology::tests::list_reads_fail_closed_on_malformed_stored_rows ... ok
+test topology::tests::duplicate_create_with_identical_body_replays_to_200 ... ok
+test topology::tests::missing_token_is_401 ... ok
+test topology::tests::bindings_are_replay_idempotent ... ok
+test topology::tests::nesting_rules_are_enforced ... ok
+test topology::tests::create_validation_failures_are_400 ... ok
+test topology::tests::missing_authorizer_fails_closed ... ok
+test topology::tests::provider_class_principal_cannot_manage_topology ... ok
+test topology::tests::absent_topology_is_not_found ... ok
+test topology::tests::rejected_mutation_writes_no_durable_audit_row ... ok
+test topology::tests::reads_require_no_audit_sink ... ok
+test topology::tests::successful_mutations_write_exactly_one_durable_audit_row_each ... ok
+test tests::discover_services_stable_wire_values ... ok
+test topology::tests::failure_domain_crud_happy_path ... ok
+test topology::tests::region_and_az_delete_protections_surface_conflicts ... ok
+test topology::tests::topology_responses_expose_no_internal_fields ... ok
+test tests::discover_resource_types_from_manifest_registry ... ok
+test topology::tests::failure_domain_listing_is_bounded_and_keyset_paged ... ok
+test volume::envelope_tests::volume_envelope_conforms_to_schema ... ok
+test topology::tests::delete_protections_surface_conflicts ... ok
+test topology::tests::binding_listing_is_bounded_and_bound_to_its_failure_domain ... ok
+test governance::tests::governance_collections_match_contract ... ok
+test topology::tests::update_and_delete_require_valid_if_match ... ok
+test topology::tests::region_and_az_declares_are_replay_idempotent ... ok
+test tests::discovery_advertises_only_reachable_lifecycle_operations ... ok
+test tests::resource_discovery_tracks_shared_readiness_transition ... ok
+test topology::tests::tenant_tokens_read_but_never_mutate ... ok
+test tests::resource_types_order_is_deterministic ... ok
+
+test result: ok. 110 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_network-5578bbf5bf83f3d3)
+
+running 157 tests
+test anti_spoof::tests::accepts_each_overlapping_realm_only_with_its_identity ... ok
+test canonical_policy::tests::linux_realizer_observes_exact_fingerprint_after_fresh_instances ... ignored, requires CAP_NET_ADMIN; run in the privileged Linux provider gate
+test canonical_policy::tests::active_rules_are_compiled_with_stable_rule_identity ... ok
+test canonical_policy::tests::linux_realizer_rebuilds_one_endpoint_without_removing_another ... ignored, requires CAP_NET_ADMIN; run in the privileged Linux provider gate
+test anti_spoof::tests::rejects_mac_ip_arp_vni_host_and_generations ... ok
+test canonical_policy::tests::compatible_policies_compile_as_one_endpoint_snapshot ... ok
+test canonical_policy::tests::mixed_defaults_are_rejected ... ok
+test canonical_policy::tests::no_policy_preserves_baseline ... ok
+test canonical_policy::tests::fingerprint_ignores_unrelated_policy_and_is_order_independent ... ok
+test canonical_policy::tests::zero_rule_policy_emits_default ... ok
+test canonical_policy::tests::same_summary_generation_does_not_collapse_distinct_graphs ... ok
+test fabric::tests::portable_backend_resolves_local_actual_mac_and_remote_proxy ... ok
+test fabric::tests::portable_backend_rejects_stale_generation_and_removes_current_state ... ok
+test execution::tests::deadline_is_checked_before_journaling ... ok
+test host::host_network_tests::cleanup_preserves_same_name_foreign_bridge_replacement ... ok
+test host::host_network_tests::discovery_only_returns_taps_attached_to_the_configured_bridge ... ok
+test execution::tests::semantic_payload_change_with_reused_fingerprint_is_rejected ... ok
+test host::host_network_tests::existing_link_must_be_a_bridge_before_it_is_reused ... ok
+test host::host_network_tests::existing_uplink_must_be_up_and_attached_to_the_managed_bridge ... ok
+test host::host_network_tests::ensure_tap_fails_closed_on_a_foreign_link_at_the_recorded_name ... ok
+test host::host_network_tests::foreign_existing_tap_is_never_deleted ... ok
+test host::host_network_tests::gateway_does_not_mutate_an_unowned_existing_bridge ... ok
+test host::host_network_tests::managed_bridge_mac_is_stable_and_locally_administered ... ok
+test host::host_network_tests::manifest_accepts_multiple_taps_for_one_instance ... ok
+test host::host_network_tests::ownership_tokens_are_matched_without_prefix_collisions ... ok
+test host::host_network_tests::provisional_bridge_failure_removes_only_the_provisional_link ... ok
+test host::host_network_tests::provisional_bridge_residue_is_reaped_without_a_manifest_proof ... ok
+test host::host_network_tests::provisional_tap_residue_is_reaped_without_a_manifest_proof ... ok
+test host::host_network_tests::crash_between_record_and_rename_is_fully_reaped ... ok
+test host::host_network_tests::bridge_creation_failure_removes_only_the_new_bridge ... ok
+test host::host_network_tests::ensure_tap_recreates_a_recorded_but_absent_tap_and_reuses_a_present_one ... ok
+test host::host_network_tests::reaping_a_never_prepared_instance_is_a_noop ... ok
+test host::host_network_tests::crash_residue_is_enumerated_and_reaped_across_restart ... ok
+test host::host_network_tests::gateway_and_bridge_lifecycle_requires_owned_reverse_order ... ok
+test host::host_network_tests::tap_setup_failure_removes_new_tap_and_bridge ... ok
+test host::host_network_tests::validates_names_and_generates_stable_interface_identity ... ok
+test linux_fabric::fabric::nft_ownership_tests::nft_ownership_requires_the_exact_expected_chain_comment ... ok
+test linux_fabric::fabric::nft_ownership_tests::nft_recovery_requires_durable_random_token_and_fail_closed_expected_hook ... ok
+test linux_fabric::fabric::nft_ownership_tests::nft_table_ownership_survives_device_bound_chain_removal ... ok
+test host::host_network_tests::tap_address_is_reapplied_after_external_replacement ... ok
+test host::host_network_tests::tap_address_reapply_failure_rolls_back_owned_resources ... ok
+test linux_fabric::gateway::tests::fingerprint_is_stable_for_attachment_order ... ok
+test linux_fabric::gateway::tests::linux_provider_preserves_unaffected_realms_after_fresh_reopen ... ignored, requires CAP_NET_ADMIN; run in the privileged Linux provider gate
+test host::host_network_tests::tap_ownership_binds_instance_across_manager_restart ... ok
+test linux_fabric::gateway::tests::gateway_is_independent_realization_unit ... ok
+test linux_fabric::gateway::tests::provider_link_addresses_are_not_taken_from_tenant_prefix ... ok
+test linux_fabric::gateway::tests::gateway_provider_uses_kernel_lock_for_live_writer_exclusion ... ok
+test linux_fabric::gateway::tests::provider_link_names_bind_gateway_and_attachment_identity ... ok
+test linux_fabric::gateway::tests::stale_gateway_generation_is_rejected ... ok
+test linux_fabric::policy_realization::tests::empty_endpoint_snapshot_preserves_no_policy_baseline ... ok
+test host::host_network_tests::reaping_one_instance_keeps_the_shared_bridge_until_the_last_tap_is_gone ... ok
+test linux_fabric::policy_realization::tests::cleanup_reaps_durable_policy_state_when_table_is_already_absent ... ok
+test linux_fabric::policy_realization::tests::deny_default_realizes_endpoint_scoped_terminal_drops ... ok
+test linux_fabric::policy_realization::tests::foreign_table_is_never_adopted ... ok
+test execution::tests::conflicting_payload_and_stale_identity_fail_closed ... ok
+test linux_fabric::policy_realization::tests::invalid_port_rule_is_rejected_before_host_mutation ... ok
+test linux_fabric::policy_realization::tests::isolated_namespace_proves_native_policy_traffic_allow_and_deny ... ignored, requires CAP_NET_ADMIN; run in the privileged Linux provider gate
+test linux_fabric::policy_realization::tests::ingress_and_egress_ports_target_destination ... ok
+test linux_fabric::policy_realization::tests::endpoint_fingerprint_observation_survives_provider_restart ... ok
+test linux_fabric::policy_realization::tests::unknown_endpoint_is_rejected_before_host_mutation ... ok
+test execution::tests::equivalent_command_replays_after_controller_takeover ... ok
+test linux_fabric::public_realization::tests::allocation_is_idempotent_and_restartable ... ok
+test linux_fabric::policy_realization::tests::endpoint_evidence_is_rejected_when_aggregate_realization_changes ... ok
+test execution::tests::remove_action_calls_cleanup_and_reconciles_absence ... ok
+test linux_fabric::policy_realization::tests::policy_realization_preserves_unrelated_endpoint_rules ... ok
+test execution::tests::equivalent_command_replays_after_executor_restart ... ok
+test linux_fabric::public_realization::tests::public_realization_never_adopts_foreign_table ... ok
+test linux_fabric::gateway::tests::linux_provider_reopens_exact_gateway_snapshot ... ok
+test linux_fabric::public_realization::tests::public_realization_never_adopts_foreign_uplink_address ... ok
+test linux_fabric::gateway::tests::external_realm_is_realized_as_a_provider_attachment_with_snat ... ok
+test linux_fabric::public_realization::tests::cross_project_association_and_release_are_concealed ... ok
+test linux_fabric::public_realization::tests::public_realization_cleanup_removes_only_durable_owned_addresses ... ok
+test linux_fabric::public_realization::tests::public_realization_rejects_missing_endpoint_before_mutation ... ok
+test linux_fabric::public_realization::tests::public_realization_rejects_missing_realm_before_mutation ... ok
+test linux_fabric::routed::tests::disabled_egress_fails_before_any_host_command ... ok
+test linux_fabric::routed::tests::foreign_existing_table_is_never_adopted_or_mutated ... ok
+test linux_fabric::routed::tests::internal_gateway_routes_fail_closed_before_external_mutation ... ok
+test linux_fabric::public_realization::tests::association_is_idempotent_and_release_requires_disassociation ... ok
+test linux_fabric::public_realization::tests::public_realization_fails_when_nat_chain_creation_fails ... ok
+test execution::tests::failed_realization_is_unknown_until_observation_resolves_it ... ok
+test linux_fabric::policy_realization::tests::stale_provider_instance_cannot_replace_newer_aggregate ... ok
+test linux_fabric::shared_provider::tests::rejects_geneve_binding_before_provider_mutation ... ok
+test linux_fabric::shared_provider::tests::converts_vxlan_plan_without_losing_fencing_or_peers ... ok
+test execution::tests::restarted_executor_reconciles_pending_state_after_lease_takeover ... ok
+test linux_fabric::tests::provider_observation_extracts_exact_owned_fingerprint ... ok
+test linux_fabric::routed::tests::tenant_cannot_select_an_unconfigured_external_realm ... ok
+test linux_fabric::routed::tests::snat_chain_is_a_postrouting_nat_hook ... ok
+test linux_fabric::routed::tests::route_delete_failure_keeps_owned_state_retryable ... ok
+test linux_fabric::routed::tests::forwarding_is_enabled_and_restored_as_owned_state ... ok
+test linux_fabric::tests::provider_refuses_foreign_fabric_namespace ... ok
+test linux_fabric::tests::provider_rejects_invalid_policy_before_host_mutation ... ok
+test linux_fabric::public_realization::tests::public_realization_rebuilds_owned_table_after_restart ... ok
+test linux_fabric::vxlan::tests::veth_ownership_requires_the_kernel_peer_identity ... ok
+test p9_plan_tests::canonical_l3_gateway_compiles_connected_realm_intents ... ok
+test linux_fabric::tests::provider_rejects_invalid_preprovisioned_host_key ... ok
+test p9_plan_tests::equivalent_plan_replay_is_allowed_but_payload_conflict_is_rejected ... ok
+test p9_plan_tests::geneve_capability_allows_overlap_only_when_realm_and_provider_opt_in ... ok
+test p9_plan_tests::fabric_payload_is_fingerprinted_and_admission_validated ... ok
+test p9_plan_tests::plan_carries_gateway_egress_public_binding_and_deadline ... ok
+test p9_plan_tests::equivalent_retry_with_new_deadline_keeps_plan_fingerprint ... ok
+test linux_fabric::public_realization::tests::overlapping_private_addresses_remain_realm_scoped ... ok
+test p9_plan_tests::plan_rejects_cross_project_endpoint ... ok
+test p9_plan_tests::plan_rejects_cross_project_bindings_and_invalid_policies ... ok
+test p9_plan_tests::plan_rejects_duplicate_endpoint_addresses_and_macs ... ok
+test p9_plan_tests::plan_rejects_nat_without_provider_capability ... ok
+test p9_plan_tests::plan_rejects_foreign_realm_and_pool ... ok
+test p9_plan_tests::plan_rejects_overlap_before_provider_mutation ... ok
+test p9_plan_tests::plan_rejects_pool_gateway_from_the_allocatable_range ... ok
+test p9_plan_tests::plan_rejects_unsupported_capability_before_mutation ... ok
+test p9_plan_tests::prefixes_are_canonical_and_overlap_is_explicit ... ok
+test p9_plan_tests::plan_fingerprint_is_deterministic_and_semantic ... ok
+test linux_fabric::policy_realization::tests::endpoint_replacement_preserves_unaffected_endpoint_evidence ... ok
+test service::tests::attachment_plan_can_carry_operator_owned_routed_egress ... ok
+test linux_fabric::public_realization::tests::public_realization_preserves_unrelated_bindings_during_apply_and_remove ... ok
+test service::tests::binding_state_strings_round_trip_through_canonical_parsing ... ok
+test linux_fabric::tests::provider_adopts_preprovisioned_host_key ... ok
+test linux_fabric::tests::provider_reconciles_bounded_her_entries ... ok
+test linux_fabric::tests::provider_realizes_realm_scoped_policy_with_owned_marker ... ok
+test linux_fabric::tests::provider_realizes_realm_scoped_public_binding_without_bare_ip_nat ... ok
+test linux_fabric::tests::provider_fences_generation_changes_and_retains_host_key ... ok
+test linux_fabric::tests::provider_records_key_path_but_never_plan_key_material ... ok
+test canonical_policy::tests::one_policy_reconciles_each_attached_endpoint_independently ... ok
+test canonical_policy::tests::applying_recovery_observes_before_retrying ... ok
+test service::tests::authenticated_canonical_entry_points_enforce_scope_and_audit ... ok
+test service::tests::attachment_detach_reservation_is_gateway_scoped_and_not_finalized_implicitly ... ok
+test service::tests::caller_supplied_port_identity_is_stable_and_conflicts_on_replay ... ok
+test service::tests::canonical_reads_do_not_require_projection_metadata ... ok
+test service::tests::authenticated_parent_actions_use_canonical_owner_and_audit_outcomes ... ok
+test service::tests::allocation_is_deterministic_collision_safe_and_restartable ... ok
+test service::tests::binding_intent_and_observation_projection_are_durable ... ok
+test service::tests::canonical_service_reconstructs_zero_and_multiple_realms ... ok
+test service::tests::concurrent_explicit_fixed_ip_creation_has_one_winner ... ok
+test service::tests::concurrent_stable_native_ports_keep_identity_and_address_unique ... ok
+test service::tests::concurrent_port_creation_never_allocates_duplicate_ips_or_macs ... ok
+test canonical_policy::tests::unknown_observation_never_blindly_applies_and_stale_observation_retries ... ok
+test canonical_policy::tests::reconciliation_failure_retry_and_unknown_recovery_are_durable ... ok
+test service::tests::gateway_delete_reservation_reconstructs_a_generation_fenced_snapshot ... ok
+test service::tests::gateway_delete_with_active_attachments_is_conflict_not_concealed ... ok
+test service::tests::gateway_delete_with_stale_generation_is_conflict_not_concealed ... ok
+test service::tests::create_outcome_projection_and_unbind_are_durable_and_idempotent ... ok
+test service::tests::server_owned_endpoint_identity_requires_the_owning_project_and_a_context ... ok
+test vocabulary_tests::p9_vocabulary_is_typed_and_stable ... ok
+test service::tests::delete_cleanup_and_ip_reuse_after_restart ... ok
+test service::tests::invalid_cidr_exhaustion_and_project_isolation_are_enforced ... ok
+test service::tests::independent_services_preserve_canonical_endpoint_and_realm_races ... ok
+test service::tests::independent_services_preserve_network_realm_races ... ok
+test service::tests::network_quota_enforcement_and_isolation ... ok
+test service::tests::concurrent_cross_instance_writers_conflict_deterministically_without_duplicates ... ok
+test service::tests::network_subnet_and_port_quota_enforcement ... ok
+test service::tests::network_rename_updates_projection_and_reopens_with_new_name ... ok
+test service::tests::policy_intent_is_durable_generation_fenced_and_compiled ... ok
+test service::tests::realm_deletion_is_fenced_when_provider_binding_remains ... ok
+test service::tests::security_group_rules_project_to_endpoint_policy_and_enforce_scope ... ok
+test service::tests::server_owned_endpoint_cleanup_preserves_a_bound_endpoint_until_unbound ... ok
+test service::tests::server_owned_endpoint_cleanup_is_ownership_filtered_and_frees_the_address ... ok
+test service::tests::realm_cleanup_unknown_outcome_replays_and_finalizes_after_observation ... ok
+test service::tests::legacy_metadata_file_is_imported_once_and_never_read_again ... ok
+
+test result: ok. 153 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 6.92s
+
+     Running tests/fabric_conformance.rs (target/debug/deps/fabric_conformance-9a190231939528dd)
+
+running 1 test
+test fabric_provider_conformance_suite_passes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests/p13_f3_runtime_acceptance.rs (target/debug/deps/p13_f3_runtime_acceptance-e66df259cdd7787b)
+
+running 1 test
+test fresh_runtime_reconstructs_canonical_hierarchy_without_network_intent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/p13_r2a_fingerprint_parity.rs (target/debug/deps/p13_r2a_fingerprint_parity-8ec6a27d7d2e42d8)
+
+running 2 tests
+test postgres_insertion_order_does_not_change_fingerprint ... ignored, requires a disposable PostgreSQL conformance database
+test sqlite_insertion_order_does_not_change_fingerprint ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/postgres_p13_f2_r1.rs (target/debug/deps/postgres_p13_f2_r1-c77dbfc85b5724c5)
+
+running 2 tests
+test postgres_p13_f2_r1_reconstructs_and_recovers_realm_cleanup ... ignored, requires the configured PostgreSQL conformance database
+test postgres_p13_f3_fresh_runtime_reconstructs_policy_and_zero_realm_network ... ignored, requires the configured PostgreSQL conformance database
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/o3k_network_bin-2106e2a77c990ec2)
+
+running 5 tests
+test agent::tests::network_command_wire_round_trip_preserves_fencing_identity ... ok
+test public_removal_tests::only_remove_reconciles_routed_snapshot_without_public_binding ... ok
+test agent::tests::registration_rejects_a_stale_agent_epoch ... ok
+test agent::tests::replayed_accepted_command_observes_and_recovers_without_mutation ... ok
+test transport_tests::m_tls_client_dispatches_a_fenced_plan_to_the_executor ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_network_protocol-f6ede69da0c14dd1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_placement-f38e9332bff6d47b)
+
+running 11 tests
+test tests::stale_and_unschedulable_updates_are_rejected ... ok
+test tests::failed_store_write_propagates_and_leaves_durable_state_unchanged ... ok
+test tests::sync_does_not_reopen_a_draining_provider ... ok
+test tests::reregister_reconciles_usage_and_preserves_capacity_after_reopen ... ok
+test tests::refresh_inventory_preserves_durable_allocation_usage ... ok
+test tests::sync_preserves_allocations_across_capacity_refresh_and_unavailability ... ok
+test tests::hierarchical_capability_and_failure_domain_candidates_are_deterministic ... ok
+test tests::allocation_is_atomic_idempotent_and_restartable ... ok
+test tests::allocation_intent_is_restart_safe_and_commit_is_idempotent ... ok
+test tests::reconciliation_releases_orphans_and_abandons_pending_intents_after_restart ... ok
+test tests::legacy_placement_files_are_imported_once_and_never_read_again ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.32s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_provider-874a6c85f451528e)
+
+running 16 tests
+test block_device_tests::missing_device_observation_returns_none ... ok
+test block_device_tests::attach_detach_observe_is_idempotent_and_clean ... ok
+test block_device_tests::unsupported_connector_is_rejected_explicitly ... ok
+test tests::committed_delete_response_loss_replays_to_absence ... ok
+test tests::conformance_suite_runs_against_fake ... ok
+test tests::provider_observations_project_to_canonical_server_states ... ok
+test tests::read_retry_is_side_effect_free ... ok
+test tests::duplicate_create_is_idempotent_and_delete_is_absent_safe ... ok
+test tests::config_drive_changes_idempotency_fingerprint ... ok
+test tests::rejected_update_can_be_retried_once ... ok
+test tests::committed_update_response_loss_replays_same_operation ... ok
+test tests::same_client_key_across_projects_does_not_alias ... ok
+test tests::disabled_config_drive_is_omitted_and_legacy_json_defaults_to_none ... ok
+test tests::timeout_is_observable_after_unknown_result ... ok
+test tests::partial_create_is_running_and_converges_without_duplicate_instance ... ok
+test tests::timeout_action_replays_same_operation_without_repeating_mutation ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_provider_contract-de70420168b4b5bb)
+
+running 4 tests
+test tests::artifact_reference_round_trips_as_an_additive_create_field ... ok
+test tests::create_dto_round_trips_and_maps_to_internal_request ... ok
+test tests::mapping_rejects_missing_identity_fields ... ok
+test tests::unknown_enum_value_is_preserved_by_protobuf_wire_round_trip ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_reconciler-7e66dc5b9027de13)
+
+running 71 tests
+test tests::reconciler_tests::agent_failure_reason_is_sanitized_bounded_and_fallback_safe ... ok
+test storage_workflow::tests::attach_persists_before_side_effect_and_replays_equivalent_request ... ok
+test storage_workflow::tests::recovery_takes_over_original_command_epoch_under_current_fence ... ok
+test storage_workflow::tests::unknown_provider_outcome_requires_observe_before_retry ... ok
+test tests::reconciler_tests::agent_observation_rejects_non_succeeded_operation_state ... ok
+test tests::reconciler_tests::agent_evidence_from_dead_epoch_is_rejected_after_reregistration ... ok
+test tests::reconciler_tests::adopted_create_with_stopped_instance_converges_to_succeeded_shutoff ... ok
+test tests::reconciler_tests::agent_evidence_epoch_change_is_rejected_without_registry ... ok
+test tests::reconciler_tests::accepted_create_without_provider_resource_is_redriven_not_parked ... ok
+test tests::reconciler_tests::agent_failure_persists_the_contract_redacted_provider_reason ... ok
+test tests::reconciler_tests::agent_observation_rejects_agent_not_bound_to_durable_command ... ok
+test tests::reconciler_tests::agent_observation_projects_nova_state_and_replays_without_mutation ... ok
+test tests::reconciler_tests::agent_failed_update_persists_the_bounded_agent_reason ... ok
+test tests::reconciler_tests::agent_evidence_rejects_foreign_and_stale_updates ... ok
+test tests::reconciler_tests::agent_failed_create_update_marks_resource_error_and_replays_safely ... ok
+test tests::reconciler_tests::agent_event_stream_delete_terminalization_failure_commits_nothing ... ok
+test tests::reconciler_tests::agent_event_stream_delete_terminalizes_both_halves_together ... ok
+test tests::reconciler_tests::agent_replay_after_reregistration_applies_unknown_outcome ... ok
+test tests::reconciler_tests::agent_update_rejects_agent_namespace_provider_identity_drift ... ok
+test tests::reconciler_tests::agent_success_is_durable_and_idempotent ... ok
+test tests::reconciler_tests::current_epoch_lease_serializes_projection_with_reregistration ... ok
+test tests::reconciler_tests::create_dispatch_against_empty_registry_is_redriven_not_terminal ... ok
+test tests::reconciler_tests::command_acceptance_is_durable_and_idempotent ... ok
+test tests::reconciler_tests::create_rejects_provider_operation_owned_by_another_request ... ok
+test tests::reconciler_tests::delete_retry_exhaustion_stays_unknown_and_presence_converges ... ok
+test tests::reconciler_tests::duplicate_observation_repairs_a_lost_projection ... ok
+test tests::reconciler_tests::failing_metering_observer_does_not_fail_agent_observation ... ok
+test tests::reconciler_tests::finish_converges_when_provider_reference_already_attached ... ok
+test tests::reconciler_tests::exhausted_create_with_pending_command_redrives_after_recovery ... ok
+test tests::reconciler_tests::finish_is_idempotent_when_operation_already_succeeded ... ok
+test tests::reconciler_tests::failing_metering_observer_surfaces_reconcile_error ... ok
+test tests::reconciler_tests::finish_rejects_provider_reference_identity_drift ... ok
+test tests::reconciler_tests::dispatch_rejected_create_accrues_no_compute_metering ... ok
+test tests::reconciler_tests::intent_and_provider_success_are_durable ... ok
+test tests::reconciler_tests::lifecycle_terminalization_commits_both_halves_together ... ok
+test tests::reconciler_tests::lifecycle_terminalization_failure_commits_nothing_and_recovers ... ok
+test tests::reconciler_tests::metering_observation_precedes_durable_writes ... ok
+test tests::reconciler_tests::rejected_lifecycle_action_still_terminalizes_as_invalid_request ... ok
+test tests::reconciler_tests::test_fault_pause_guard_accepts_only_positive_numeric_durations ... ok
+test tests::reconciler_tests::metering_observer_receives_lifecycle_projection_sequence ... ok
+test tests::reconciler_tests::partial_create_waits_for_observed_running_without_duplicate_create ... ok
+test tests::reconciler_tests::observation_close_failure_is_healed_by_surfaced_lifecycle_close ... ok
+test tests::reconciler_tests::retry_budget_exhaustion_leaves_unknown_outcome_and_recovers ... ok
+test tests::reconciler_tests::stale_accepted_delete_gets_one_fresh_idempotent_redrive ... ok
+test tests::reconciler_tests::stale_accepted_delete_converges_under_async_agent_contract ... ok
+test tests::reconciler_tests::stale_create_is_fenced_after_terminal_delete ... ok
+test tests::reconciler_tests::stale_agent_observation_cannot_regress_projected_state ... ok
+test tests::reconciler_tests::retried_create_terminal_failure_accrues_no_compute_metering ... ok
+test tests::reconciler_tests::retry_exhaustion_accrues_no_compute_metering ... ok
+test tests::reconciler_tests::stale_generation_observation_records_no_metering ... ok
+test tests::reconciler_tests::stale_unknown_outcome_delete_redrives_and_converges ... ok
+test tests::reconciler_tests::stop_lifecycle_terminalization_commits_both_halves_together ... ok
+test tests::reconciler_tests::unknown_create_converges_from_terminal_agent_command_without_redispatch ... ok
+test tests::reconciler_tests::unknown_action_is_observed_before_finishing_converged_state ... ok
+test tests::reconciler_tests::terminal_replay_after_reregistration_converges_command_when_operation_is_terminal ... ok
+test tests::reconciler_tests::unknown_create_converges_from_stored_failed_inspection_without_dispatch ... ok
+test tests::reconciler_tests::unknown_create_converges_to_absent_from_terminal_failed_agent_command ... ok
+test tests::reconciler_tests::surfaced_lifecycle_close_retries_until_the_interval_closes ... ok
+test tests::reconciler_tests::unknown_create_converges_when_presence_inspection_finds_instance ... ok
+test tests::reconciler_tests::unknown_create_redispatches_stored_unknown_inspection ... ok
+test tests::reconciler_tests::unknown_create_records_observed_provider_failure ... ok
+test tests::reconciler_tests::unknown_create_converges_to_failed_when_instance_is_absent ... ok
+test tests::reconciler_tests::unknown_create_does_not_redispatch_accepted_inspection_record ... ok
+test tests::reconciler_tests::unknown_create_redispatches_pending_inspection_record ... ok
+test tests::reconciler_tests::unknown_create_remains_unknown_when_presence_inspection_is_unknown ... ok
+test tests::reconciler_tests::unknown_create_uses_known_provider_reference_for_presence_inspection ... ok
+test tests::reconciler_tests::unknown_create_without_agent_preserves_unknown_outcome ... ok
+test tests::reconciler_tests::unknown_delete_is_observed_without_repeating_mutation ... ok
+test tests::reconciler_tests::unknown_recovery_rejects_foreign_provider_operation ... ok
+test tests::reconciler_tests::unknown_outcome_is_observed_without_duplicate_create ... ok
+test tests::reconciler_tests::unknown_lifecycle_adopts_late_terminal_observation ... ok
+
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.95s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_scheduler-3c15de4a2dae397a)
+
+running 7 tests
+test tests::existing_allocation_validation_is_read_only_and_fenced ... ok
+test tests::unavailable_and_insufficient_hosts_are_skipped ... ok
+test tests::eligible_agent_set_is_fail_closed_and_deterministic ... ok
+test tests::deterministic_selection_and_terminal_release ... ok
+test tests::scheduler_concurrent_attempts_never_over_allocate ... ok
+test tests::agent_targeted_schedule_never_falls_back_to_another_provider ... ok
+test tests::constrained_schedule_uses_generic_traits_and_fenced_commit ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_service_sdk-dc28b9d14e7ebc41)
+
+running 4 tests
+test tests::composition_transport_preserves_mutation_uncertainty ... ok
+test tests::replacement_fences_old_session ... ok
+test tests::equivalent_replay_is_allowed_and_conflict_is_rejected ... ok
+test tests::delegation_tampering_and_expiry_fail_closed ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/mtls.rs (target/debug/deps/mtls-93bf8974fb43041a)
+
+running 1 test
+test real_tonic_mtls_registration_and_observe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_storage-555bf10ec04acd42)
+
+running 10 tests
+test ceph::tests::config_debug_redacts_auth_paths_and_identifiers ... ok
+test ceph::tests::create_proves_owner_marker_before_reporting_owned ... ok
+test tests::config_rejects_unsafe_or_ambiguous_scope ... ok
+test ceph::tests::existing_owned_image_with_different_size_conflicts ... ok
+test ceph::tests::snapshot_create_verifies_and_replays_observable_snapshot ... ok
+test ceph::tests::timeout_is_unknown_outcome ... ok
+test ceph::tests::foreign_image_is_rejected_before_mutation ... ok
+test tests::parsers_accept_bounded_lvm_json ... ok
+test tests::provider_markers_bind_the_right_identity ... ok
+test tests::create_command_uses_thin_pool_and_ownership_marker ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/o3k_store-fea03125c982d372)
+
+running 124 tests
+test conformance::tests::test_postgres_lifecycle_terminalization_regression ... ignored, requires O3K_DATABASE_URL (PostgreSQL)
+test conformance::tests::destructive_database_guard_rejects_campaign_and_accepts_distinct_test_purposes ... ok
+test conformance::tests::test_postgres_conformance ... ok
+test port::durable::bounded_query_tests::invalid_limits_are_rejected_without_query_execution ... ok
+test port::durable::bounded_query_tests::lookahead_is_exactly_requested_limit_plus_one ... ok
+test governance::tests::governance_collections_page_without_overlap ... ok
+test governance::tests::governance_principal_projection_hides_credentials ... ok
+test governance::tests::governance_delete_rolls_back_when_required_audit_fails ... ok
+test governance::tests::governance_create_rolls_back_when_required_audit_fails ... ok
+test artifact_transfer::tests::sweep_expires_non_terminal_transfers_of_terminal_operations ... ok
+test governance::tests::governance_references_report_missing_and_disabled ... ok
+test governance::tests::governance_operator_assignment_is_mutually_audited ... ok
+test governance::tests::governance_role_assignment_create_is_idempotent_with_required_audit ... ok
+test artifact_transfer::tests::completion_is_idempotent_and_not_recoverable ... ok
+test artifact_transfer::tests::insert_is_idempotent_and_updates_are_epoch_fenced ... ok
+test governance::tests::governance_assignment_filter_and_role_grants ... ok
+test governance::tests::governance_concurrent_identical_assignments_converge ... ok
+test conformance::tests::test_sqlite_lifecycle_terminalization_survives_store_reopen ... ok
+test artifact_transfer::tests::transfer_metadata_and_progress_survive_reopen ... ok
+test quota::tests::quota_repository_lifecycle_and_enforcement ... ok
+test quota::tests::unknown_keys_and_duplicate_amounts_fail_closed ... ok
+test quota::tests::released_reservation_cannot_be_reused_for_same_op ... ok
+test quota::tests::signed_sqlite_numeric_bounds_fail_closed ... ok
+test quota::tests::two_tenant_finite_quota_isolation ... ok
+test quota::tests::quota_and_required_audit_roll_back_as_one_transaction ... ok
+test server_state::tests::corrupt_or_unknown_stored_state_fails_closed ... ok
+test server_state::tests::every_canonical_state_round_trips_its_storage_encoding ... ok
+test server_state::tests::legacy_storage_spellings_are_accepted ... ok
+test reusable_policy::tests::active_semantic_duplicates_and_mixed_defaults_are_rejected ... ok
+test conformance::tests::test_sqlite_conformance ... ok
+test quota::tests::existing_db_migration_defaults_to_unlimited ... ok
+test reusable_policy::tests::deleting_policy_children_are_restart_inventory ... ok
+test quota::tests::durable_generation_compare_and_set_rejects_stale_writers ... ok
+test reusable_policy::tests::deleting_policy_fences_new_children ... ok
+test reusable_policy::tests::child_deletion_is_generation_fenced_and_survives_reopen ... ok
+test reusable_policy::tests::detached_policy_rules_and_attachment_survive_reopen ... ok
+test sqlite::topology::tests::cas_update_bumps_generation_and_stale_generation_conflicts ... ok
+test reusable_policy::tests::realization_outcome_is_fenced_by_attempt_id ... ok
+test reusable_policy::tests::policy_state_changes_use_the_lifecycle_transition_path ... ok
+test reusable_policy::tests::endpoint_realization_truth_round_trips_and_is_overwritable ... ok
+test sqlite::metering::tests::dropped_write_transaction_rolls_back_and_keeps_the_pool_usable ... ok
+test sqlite::topology::tests::audit_conflict_aborts_the_whole_mutation_atomically ... ok
+test sqlite::metering::tests::replay_or_corrupt_is_idempotent_for_any_closed_end_instant ... ok
+test reusable_policy::tests::durable_uniqueness_wins_for_concurrent_rule_and_attachment_creates ... ok
+test sqlite::topology::tests::delete_protections_surface_foreign_key_conflicts ... ok
+test tests::a0_requested_limit_uses_exactly_one_lookahead ... ok
+test sqlite::topology::tests::crud_round_trip_and_snapshot_assembly ... ok
+test sqlite::topology::tests::duplicate_failure_domain_insert_conflicts ... ok
+test sqlite::topology::tests::dropped_store_reconstructs_the_same_snapshot ... ok
+test sqlite::topology::tests::replay_inserts_are_idempotent_noops ... ok
+test tests::tests::canonical_idempotency_rejects_resource_type_mismatch ... ok
+test storage::tests::sqlite_attachment_and_snapshot_have_typed_state ... ok
+test sqlite::topology::tests::store_failure_leaves_neither_the_mutation_nor_its_audit ... ok
+test sqlite::topology::tests::unknown_availability_domain_or_parent_conflicts ... ok
+test sqlite::topology::tests::successful_mutation_writes_both_the_mutation_and_its_audit_tag ... ok
+test sqlite::topology::tests::shared_conformance_suite_passes_on_sqlite ... ok
+test storage::tests::sqlite_round_trip_preserves_canonical_volume_and_generation_fence ... ok
+test sqlite::topology::tests::two_file_backed_writers_race_with_exactly_one_winner ... ok
+test tests::tests::corrupt_database_is_rejected_without_repair ... ok
+test tests::tests::agent_command_identity_is_idempotent_and_survives_restart ... ok
+test tests::tests::building_block_round_trip_and_generation_fence ... ok
+test sqlite::topology::tests::pre_topology_schema_upgrades_with_usable_topology_tables ... ok
+test tests::tests::empty_database_path_returns_error ... ok
+test tests::tests::canonical_backfill_preserves_legacy_ids_and_rejects_ownership_conflicts ... ok
+test tests::tests::backup_and_restore_produces_consistent_database ... ok
+test tests::tests::canonical_l3_gateway_is_detached_and_generation_fenced ... ok
+test tests::tests::canonical_network_relations_support_zero_realms_and_realm_removal ... ok
+test tests::tests::cloud_profile_round_trip_and_generation_fencing ... ok
+test tests::tests::concurrent_writers_and_wal_lock_contention ... ok
+test tests::tests::create_intent_guard_fails_closed_and_rolls_back_atomically ... ok
+test tests::tests::canonical_l3_gateway_attachments_are_project_scoped_and_restartable ... ok
+test tests::tests::connect_file_restricts_only_created_parent_directories ... ok
+test tests::tests::create_intent_guard_respects_resource_already_exists_precedence ... ok
+test tests::tests::concurrent_placement_commits_never_double_allocate ... ok
+test tests::tests::duplicate_resource_is_rejected ... ok
+test tests::tests::image_metadata_survives_store_reopen ... ok
+test tests::tests::file_database_survives_restart ... ok
+test tests::tests::image_overlay_ownership_is_fenced_restart_safe_and_reference_counted ... ok
+test tests::tests::in_memory_database_uses_memory_journal_mode ... ok
+test tests::tests::public_key_validation_is_canonical_and_rejects_mismatches ... ok
+test tests::tests::list_non_terminal_lifecycle_operations_returns_exactly_the_lifecycle_residue ... ok
+test tests::tests::network_address_allocation_rejects_unsafe_prefix_and_empty_identity ... ok
+test tests::tests::independent_store_connections_preserve_terminal_operation_under_race ... ok
+test tests::tests::keypair_delete_waits_out_a_concurrent_writer ... ok
+test tests::tests::operation_terminal_conflicts_and_provider_identity_drift_fail_closed ... ok
+test tests::tests::keypairs_are_scoped_unique_and_survive_restart ... ok
+test tests::tests::network_address_allocation_survives_restart ... ok
+test tests::tests::observation_update_waits_out_a_concurrent_writer ... ok
+test tests::tests::network_metadata_survives_store_reopen ... ok
+test tests::tests::operation_terminal_state_rejects_stale_in_flight_projection ... ok
+test tests::tests::placement_metadata_survives_store_reopen ... ok
+test tests::tests::placement_tables_fault_isolates_other_repositories ... ok
+test tests::tests::revive_resource_and_operation_enforces_the_placement_fence ... ok
+test tests::tests::revive_resource_and_operation_persists_atomically_and_fences_generation ... ok
+test tests::tests::sqlite_bootstrap_state_and_grants_are_durable_and_single_use ... ok
+test tests::tests::sqlite_canonical_idempotency_rejects_reservation_for_legacy_operation ... ok
+test tests::tests::sqlite_canonical_idempotency_reopens_and_replays_complete_operation ... ok
+test tests::tests::sqlite_canonical_lifecycle_acceptance_replays_and_conflicts ... ok
+test tests::tests::sqlite_canonical_read_fails_closed_on_cross_record_corruption ... ok
+test tests::tests::sqlite_canonical_resource_acceptance_is_atomic_and_replayable ... ok
+test tests::tests::sqlite_canonical_idempotency_rolls_back_every_insert_on_failure ... ok
+test tests::tests::sqlite_canonical_replay_fails_closed_on_winning_owner_corruption ... ok
+test tests::tests::sqlite_canonical_replay_precedes_proposed_resource_lookup ... ok
+test tests::tests::sqlite_canonical_scoped_operation_uses_authoritative_network_row ... ok
+test tests::tests::sqlite_federated_binding_survives_restart ... ok
+test tests::tests::sqlite_generation_cas_allows_only_one_concurrent_writer ... ok
+test tests::tests::sqlite_idempotency_concurrent_equivalent_requests_have_one_winner ... ok
+test tests::tests::sqlite_idempotency_concurrent_conflict_leaves_one_operation ... ok
+test tests::tests::sqlite_idempotency_reservation_is_scoped_and_atomic ... ok
+test tests::tests::sqlite_idempotency_concurrent_scopes_and_actions_are_isolated ... ok
+test tests::tests::sqlite_list_provider_states_pagination_and_narrow_read ... ok
+test tests::tests::sqlite_placement_diagnostics_capacity_and_bounded_providers ... ok
+test tests::tests::sqlite_relationship_intent_is_unique_replayable_and_reopenable ... ok
+test tests::tests::sqlite_store_passes_conformance ... ok
+test tests::tests::sqlite_scoped_operation_migration_upgrades_legacy_checksum_with_resource_fk ... ok
+test tests::tests::sqlite_scoped_operation_migration_preserves_populated_database ... ok
+test tests::tests::transaction_rolls_back_when_operation_insert_fails ... ok
+test tests::tests::unified_relationship_page_dispatch_is_bounded_and_non_recursive ... ok
+test tests::tests::wal_mode_and_foreign_keys_enabled_for_persistent_database ... ok
+test tests::tests::sqlite_store_passes_extracted_repository_port_conformance ... ok
+test tests::tests::sqlite_scoped_operation_migration_normalizes_only_approved_legacy_checksum ... ok
+test quota::tests::concurrent_image_bytes_reservations_cannot_over_allocate ... ok
+test quota::tests::concurrent_port_reservations_cannot_over_allocate ... ok
+test quota::tests::concurrent_reservations_cannot_over_allocate ... ok
+
+test result: ok. 123 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 29.14s
+
+     Running tests/audit_migration_upgrade.rs (target/debug/deps/audit_migration_upgrade-96ec261116a58b03)
+
+running 1 test
+test sqlite_pre_audit_schema_upgrades_without_losing_existing_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running tests/audit_repository.rs (target/debug/deps/audit_repository-7648502f9a0359ac)
+
+running 5 tests
+test unified_audit_query_pushes_supported_filters_and_scope ... ok
+test sqlite_same_id_concurrent_replay_converges ... ok
+test durable_sink_production_like_sqlite_composition_persists_event ... ok
+test sqlite_audit_identity_paging_and_restart_are_durable ... ok
+test durable_audit_b0_runtime_matrix_covers_mandatory_paths_and_recovery ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+
+     Running tests/kernel_operation_mapping.rs (target/debug/deps/kernel_operation_mapping-4b6237199ec6bff4)
+
+running 2 tests
+test durable_and_kernel_operation_states_map_one_to_one ... ok
+test legacy_operation_without_canonical_metadata_remains_internal ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/metering_migration_upgrade.rs (target/debug/deps/metering_migration_upgrade-509ec9e6a59d3d42)
+
+running 1 test
+test sqlite_pre_metering_schema_upgrades_with_usable_metering_tables ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+     Running tests/metering_repository.rs (target/debug/deps/metering_repository-9b600a7bc2dbeacf)
+
+running 33 tests
+test interval_crossing_hour_boundary_splits_without_gap ... ok
+test clock_regression_on_release_fails_closed ... ok
+test future_end_is_partial_and_buckets_stop_at_evaluated_at ... ok
+test aggregate_overflow_fails_closed ... ok
+test duplicate_consume_while_open_does_not_open_a_second_interval ... ok
+test ensure_authority_never_backdates_and_watermark_is_monotonic ... ok
+test close_without_open_is_a_noop ... ok
+test colon_separated_series_ids_do_not_collide ... ok
+test idempotent_replay_does_not_double_count ... ok
+test day_granularity_splits_a_multi_day_interval ... ok
+test deferred_read_snapshot_mechanism_prevents_usage_gap ... ok
+test mid_fold_rollback_keeps_interval_open_and_converges ... ok
+test concurrent_usage_reads_never_gap_or_double_count ... ok
+test open_close_interval_arithmetic_reports_exact_duration ... ok
+test quantity_change_within_open_interval_fails_closed ... ok
+test open_interval_live_contribution_advances_without_folding ... ok
+test overlapping_out_of_order_open_is_rejected ... ok
+test replay_close_at_any_instant_is_idempotent ... ok
+test long_interval_crosses_many_buckets_and_excludes_the_end_instant ... ok
+test replay_open_after_close_is_idempotent ... ok
+test replayed_open_with_different_quantity_or_authority_fails_closed ... ok
+test stopped_intervals_do_not_accrue ... ok
+test scope_isolation_hides_foreign_usage ... ok
+test usage_status_reflects_metering_authority ... ok
+test zero_duration_close_accrues_nothing ... ok
+test unrelated_resource_filter_returns_nothing ... ok
+test full_range_single_series_day_query_is_served ... ok
+test two_writers_fold_a_release_exactly_once ... ok
+test restart_durability_matches_single_process ... ok
+test aborted_write_observation_leaves_the_pool_usable ... ok
+test oversized_series_result_is_rejected_not_truncated ... ok
+test oversized_aggregate_rows_result_is_rejected ... ok
+test oversized_open_intervals_result_is_rejected ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.36s
+
+     Running tests/postgres_audit_repository.rs (target/debug/deps/postgres_audit_repository-8d1338f0fb2455d2)
+
+running 4 tests
+test postgres_audit_same_id_concurrent_replay_converges ... ok
+test postgres_audit_repository_conformance ... ok
+test postgres_pre_audit_schema_upgrades_without_losing_existing_state ... ok
+test postgres_unified_audit_query_pushes_all_supported_filters ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/postgres_governance.rs (target/debug/deps/postgres_governance-2cb1f136723c3695)
+
+running 1 test
+test postgres_governance_repository_parity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/postgres_metering.rs (target/debug/deps/postgres_metering-f3cc343abd1418cf)
+
+running 22 tests
+test postgres_colon_separated_series_ids_do_not_collide ... ok
+test postgres_concurrent_reads_never_gap_or_double_count ... ok
+test postgres_aggregate_overflow_fails_closed ... ok
+test postgres_concurrent_release_folds_exactly_once ... ok
+test postgres_ensure_authority_never_backdates_and_watermark_is_monotonic ... ok
+test postgres_day_granularity_splits_a_multi_day_interval ... ok
+test postgres_mid_fold_rollback_keeps_interval_open_and_converges ... ok
+test postgres_interval_folding_matches_kernel_semantics ... ok
+test postgres_overlapping_out_of_order_open_is_rejected ... ok
+test postgres_full_range_single_series_day_query_is_served ... ok
+test postgres_oversized_aggregate_rows_result_is_rejected ... ok
+test postgres_oversized_open_intervals_result_is_rejected ... ok
+test postgres_oversized_series_result_is_rejected ... ok
+test postgres_pre_metering_schema_upgrades_with_usable_metering_tables ... ok
+test postgres_repeatable_read_snapshot_mechanism_prevents_usage_gap ... ok
+test postgres_replay_close_at_any_instant_is_idempotent ... ok
+test postgres_replay_is_idempotent ... ok
+test postgres_replay_open_after_close_is_idempotent ... ok
+test postgres_scope_isolation_hides_foreign_usage ... ok
+test postgres_replayed_open_with_different_quantity_or_authority_fails_closed ... ok
+test postgres_zero_duration_close_accrues_nothing ... ok
+test postgres_restart_preserves_authority_and_aggregates ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/postgres_ops.rs (target/debug/deps/postgres_ops-eb455593e8242407)
+
+running 4 tests
+test test_postgres_error_mapping_and_no_leakage ... ok
+test test_postgres_placement_hierarchy_conformance ... ok
+test test_postgres_backup_and_restore ... ok
+test test_postgres_provider_metadata_is_atomic_with_inventory_publication ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/postgres_p12_4.rs (target/debug/deps/postgres_p12_4-7a929de18bbeb44a)
+
+running 6 tests
+test postgres_p12_3_canonical_resource_and_lifecycle_acceptance ... ignored, requires the mandatory PostgreSQL P12.3/P12.4 CI job
+test postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas ... ignored, requires the mandatory PostgreSQL P12.4 CI job
+test postgres_p12_4_canonical_lifecycle_delete_race ... ignored, requires the mandatory PostgreSQL P12.4 CI job
+test postgres_p12_4_canonical_resource_create_conflict_race ... ignored, requires the mandatory PostgreSQL P12.4 CI job
+test postgres_p12_4_canonical_resource_create_race ... ignored, requires the mandatory PostgreSQL P12.4 CI job
+test postgres_relationship_intent_is_replayable_bindable_and_recoverable ... ignored, requires the configured PostgreSQL conformance database
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/postgres_p13_4_storage.rs (target/debug/deps/postgres_p13_4_storage-4a355bcbc00cfd42)
+
+running 1 test
+test postgres_p13_4_native_volume_and_attachment_reopen ... ignored, requires the disposable PostgreSQL P13.4 conformance database
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/postgres_p13_b1.rs (target/debug/deps/postgres_p13_b1-c7e726364cd8772d)
+
+running 4 tests
+test postgres_p13_b1_attachment_lifecycle_and_races ... ignored, requires a disposable PostgreSQL instance
+test postgres_p13_b1_l3_gateway_attachment_reopens_and_fences ... ignored, requires a disposable PostgreSQL instance
+test postgres_p13_b1_policy_identity_and_rule_persist_across_reopen ... ignored, requires a disposable PostgreSQL instance
+test postgres_p13_policy_child_deletion_inventory_survives_reopen ... ignored, requires a disposable PostgreSQL instance
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/postgres_p13_f1.rs (target/debug/deps/postgres_p13_f1-579371e195c68b39)
+
+running 5 tests
+test postgres_p13_2a_network_rename_updates_projection_and_reopens ... ignored, requires the configured PostgreSQL conformance database
+test postgres_p13_2b_subnet_bundle_cardinality_and_delete_reopen ... ignored, requires the configured PostgreSQL conformance database
+test postgres_p13_2c_endpoint_port_atomic_lifecycle_and_reopen ... ignored, requires the configured PostgreSQL conformance database
+test postgres_p13_f1_invalid_legacy_state_fails_closed ... ignored, requires the configured PostgreSQL conformance database
+test postgres_p13_f1_migrates_and_reopens_canonical_network_state ... ignored, requires the configured PostgreSQL conformance database
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/postgres_quota.rs (target/debug/deps/postgres_quota-0a41a9db4386a602)
+
+running 1 test
+test postgres_quota_generation_is_durable_and_cas_safe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/postgres_topology.rs (target/debug/deps/postgres_topology-5799c4b0d3db8983)
+
+running 5 tests
+test postgres_topology_cas_and_referential_protections ... ok
+test postgres_topology_concurrent_writers_serialize_on_the_advisory_lock ... ok
+test postgres_topology_audit_is_atomic_with_the_mutation ... ok
+test postgres_pre_topology_schema_upgrades_with_usable_topology_tables ... ok
+test postgres_topology_crud_restart_parity_and_conformance ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sqlite_p12_4_lifecycle.rs (target/debug/deps/sqlite_p12_4_lifecycle-fc9022b2d44403bc)
+
+running 1 test
+test sqlite_p12_4_canonical_lifecycle_updates_and_reopens ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running unittests src/lib.rs (target/debug/deps/o3kd-aa5021f8df65beaf)
+
+running 123 tests
+test composition::compute::operation_tests::stale_or_mismatched_create_operations_are_rejected ... ok
+test composition::compute::tests::external_realm_selection_fails_closed_on_ambiguity ... ok
+test composition::compute::tests::external_realm_selection_fails_closed_without_active_realm ... ok
+test composition::network::tests::external_realm_selection_fails_closed_on_ambiguity ... ok
+test composition::compute::tests::external_realm_selection_ignores_retired_realms ... ok
+test composition::network::tests::external_realm_selection_fails_closed_without_active_realm ... ok
+test composition::network::tests::external_realm_selection_requires_exactly_one_active_realm ... ok
+test composition::pp4_endpoint_lifecycle::postgres_bound_orphan_is_unbound_and_released_by_the_shipped_sweep ... ignored, requires O3K_DATABASE_URL (PostgreSQL)
+test composition::pp4_endpoint_lifecycle::postgres_concurrent_sweeps_and_delete_replay_converge_once ... ignored, requires O3K_DATABASE_URL (PostgreSQL)
+test composition::pp4_endpoint_lifecycle::postgres_interrupted_delete_orphan_is_repaired_and_reuse_is_restored ... ignored, requires O3K_DATABASE_URL (PostgreSQL)
+test composition::pp4_endpoint_lifecycle::postgres_orphan_endpoint_re_attached_by_live_server_is_skipped_and_released_on_delete ... ignored, requires O3K_DATABASE_URL (PostgreSQL)
+test composition::pp4_endpoint_lifecycle::postgres_orphan_repair_is_serialized_with_a_port_attaching_create ... ignored, requires O3K_DATABASE_URL (PostgreSQL)
+test composition::pp4_endpoint_lifecycle::foreign_endpoint_can_neither_be_attached_nor_released ... ok
+test composition::pp4_endpoint_lifecycle::in_flight_create_outcome_preserves_the_endpoint ... ok
+test composition::pp4_endpoint_lifecycle::replayed_delete_of_terminally_deleted_owner_preserves_live_servers_attached_endpoint ... ok
+test composition::pp4_endpoint_lifecycle::delete_replay_keeps_the_endpoint_absent ... ok
+test composition::pp4_endpoint_lifecycle::concurrent_equivalent_deletes_converge_once ... ok
+test composition::tests::agent_inspect_probe_rejects_invalid_relative_traversal_or_symlinked_paths ... ok
+test composition::pp4_endpoint_lifecycle::subnet_becomes_deletable_once_server_endpoints_are_released ... ok
+test composition::tests::config_drive_iso_is_published_beside_owned_instance_directory ... ok
+test composition::pp4_endpoint_lifecycle::live_create_outcome_preserves_the_endpoint ... ok
+test composition::pp4_endpoint_lifecycle::caller_supplied_endpoints_are_preserved_on_delete ... ok
+test composition::tests::location_config_parses_region_topology_deterministically ... ok
+test composition::tests::location_config_rejects_ambiguous_availability_domain ... ok
+test composition::tests::location_config_rejects_duplicate_region ... ok
+test composition::tests::lvm_config_all_values_set_resolves_to_config ... ok
+test composition::tests::lvm_config_complete_but_invalid_values_are_rejected ... ok
+test composition::tests::lvm_config_partial_env_fails_closed ... ok
+test composition::tests::lvm_config_unset_and_empty_env_means_provider_not_configured ... ok
+test composition::pp4_endpoint_lifecycle::server_owned_endpoints_converge_for_every_interface_pair ... ok
+test composition::tests::placement_startup_consumer_set_is_live_sorted_and_deduplicated ... ok
+test composition::tests::console_observation_rejects_stale_replay_for_deleted_or_absent_resource ... ok
+test composition::tests::configured_network_agent_owns_binding_target_separately_from_compute_host ... ok
+test composition::tests::binding_intent_is_recorded_only_after_attachment_resolution_succeeds ... ok
+test native_adapters::building_block::tests::compute_blocker_matches_before_provider_identity_projection ... ok
+test composition::tests::network_binding_projector_reflects_outcomes_on_recorded_intent ... ok
+test composition::tests::terminal_fake_provider_outcome_dispatches_unbound_network_once ... ok
+test composition::pp4_endpoint_lifecycle::orphan_endpoint_re_attached_by_live_server_is_skipped_and_released_on_delete ... ok
+test native_adapters::building_block::tests::malformed_compute_intent_fails_closed_for_drain_blockers ... ok
+test native_adapters::building_block::tests::deleted_workload_leaves_draining_blocker_projection ... ok
+test native_adapters::compute::tests::native_compute_state_uses_public_uppercase_projection ... ok
+test native_adapters::bootstrap::tests::init_retry_replay_preserves_single_profile_and_mints_distinct_grant ... ok
+test native_adapters::building_block::tests::deleted_tombstones_are_not_resident_drain_blockers ... ok
+test native_adapters::building_block::tests::live_resources_remain_honest_drain_blockers ... ok
+test native_adapters::bootstrap::tests::init_join_projects_live_and_restart_readiness ... ok
+test composition::pp4_endpoint_lifecycle::terminal_create_failure_releases_the_endpoint_and_keeps_the_evidence ... ok
+test composition::pp4_endpoint_lifecycle::transient_release_failure_is_reported_and_repaired_by_replay ... ok
+test native_adapters::building_block::tests::removed_block_leaves_operator_list_but_stays_durable ... ok
+test native_adapters::diagnostics::tests::external_controller_with_stale_observation_is_not_healthy ... ok
+test native_adapters::diagnostics::tests::in_process_service_readiness_is_configuration_not_observation ... ok
+test native_adapters::diagnostics::tests::parse_timestamp_accepts_rfc3339_and_sqlite_datetime ... ok
+test native_adapters::diagnostics::tests::capacity_masked_provider_over_allocation_is_degraded ... ok
+test native_adapters::diagnostics::tests::capacity_arithmetic_is_saturating ... ok
+test native_adapters::diagnostics::tests::capacity_only_advertises_canonical_classes_but_non_canonical_over_allocation_still_degrades ... ok
+test native_adapters::diagnostics::tests::capacity_over_allocated_is_degraded_not_healthy ... ok
+test native_adapters::diagnostics::tests::capacity_stale_when_providers_exist_but_no_fresh_observation ... ok
+test native_adapters::diagnostics::tests::capacity_with_never_observed_provider_is_not_healthy ... ok
+test native_adapters::diagnostics::tests::capacity_unknown_when_no_providers ... ok
+test native_adapters::diagnostics::tests::provider_status_live_snapshot_without_observation_time_is_never_healthy ... ok
+test native_adapters::diagnostics::tests::provider_status_unknown_when_no_snapshot_despite_enabled_durable_state ... ok
+test native_adapters::diagnostics::tests::provider_status_unrecognized_durable_state_is_never_healthy ... ok
+test native_adapters::diagnostics::tests::service_declared_is_unknown_ready_is_healthy ... ok
+test native_adapters::diagnostics::tests::service_lifecycle_tracks_controller_health_transitions ... ok
+test composition::pp4_endpoint_lifecycle::terminal_release_seat_honours_the_endpoint_release_failpoint ... ok
+test native_adapters::diagnostics::tests::provider_disabled_is_unavailable ... ok
+test native_adapters::diagnostics::tests::provider_lifecycle_never_observed_stale_recovery_never_fabricates ... ok
+test native_adapters::diagnostics::tests::provider_draining_is_degraded ... ok
+test native_adapters::diagnostics::tests::provider_durably_unavailable_is_not_healthy_even_with_live_agent ... ok
+test native_adapters::diagnostics::tests::provider_healthy_when_agent_observed_fresh ... ok
+test native_adapters::metering::tests::producible_meters_track_composition_capabilities ... ok
+test native_adapters::metering::tests::state_mapping_consumes_only_running_lifecycle_states ... ok
+test native_adapters::diagnostics::tests::provider_never_observed_is_unknown_even_when_durable_state_enabled ... ok
+test native_adapters::network::network_reader_tests::denied_canonical_network_action_blocks_matching_scope ... ok
+test native_adapters::network::network_reader_tests::network_intent_state_is_serialized_from_canonical_state ... ok
+test native_adapters::diagnostics::tests::provider_stale_when_heartbeat_older_than_lease ... ok
+test native_adapters::diagnostics::tests::summary_and_capacity_reflect_durable_draining ... ok
+test composition::pp4_endpoint_lifecycle::terminal_projection_honours_the_endpoint_release_failpoint ... ok
+test native_adapters::metering::tests::allocation_observation_closes_with_zero_quantity ... ok
+test native_adapters::metering::tests::definitions_are_paged_in_stable_key_order ... ok
+test native_adapters::metering::tests::unknown_state_is_corrupt_and_never_silently_idle ... ok
+test native_adapters::metering::tests::non_metered_kind_is_a_no_op ... ok
+test native_adapters::metering::tests::lifecycle_sequence_accrues_exact_instance_seconds_without_double_counting ... ok
+test native_adapters::metering::tests::non_producible_meter_is_hidden_and_rejected ... ok
+test native_adapters::operation::operation_visibility_tests::operation_route_is_store_backed_owner_scoped_and_redacts_provider_fields ... ok
+test native_adapters::tests::native_compute_tests::native_compute_canonical_network_resolves_one_deterministic_port ... ok
+test native_adapters::tests::native_compute_tests::native_compute_create_after_delete_new_key_succeeds ... ok
+test native_adapters::tests::native_compute_tests::native_compute_manifest_exposes_no_generation_precondition_mutation ... ok
+test native_adapters::tests::native_compute_tests::native_compute_create_after_delete_same_key_fails ... ok
+test native_adapters::tests::native_compute_tests::native_compute_create_and_read_operation ... ok
+test composition::pp4_endpoint_lifecycle::orphan_repair_is_serialized_with_a_port_attaching_create ... ok
+test native_adapters::tests::native_compute_tests::native_compute_create_changed_body_conflict ... ok
+test native_adapters::tests::native_compute_tests::native_compute_create_replay_equivalent ... ok
+test native_adapters::tests::native_compute_tests::native_compute_delete_returns_operation ... ok
+test native_adapters::tests::native_compute_tests::native_compute_failed_create_compensates_endpoint_and_keeps_canonical_error ... ok
+test native_adapters::tests::native_compute_tests::native_compute_declared_action_is_canonical_and_scoped ... ok
+test native_adapters::tests::native_compute_tests::native_compute_idempotency_isolated_between_owner_scopes ... ok
+test native_adapters::tests::native_compute_tests::native_compute_keypair_is_project_scoped_and_missing_key_fails_cleanly ... ok
+test native_adapters::tests::native_compute_tests::native_compute_quota_exceeded_is_forbidden_without_provider_side_effect ... ok
+test native_adapters::tests::native_compute_tests::native_compute_rejects_foreign_network_before_provider_mutation ... ok
+test native_adapters::tests::native_compute_tests::native_http_cursor_continues_deterministically_after_anchor_deletion ... ok
+test native_adapters::tests::native_compute_tests::native_http_cursor_is_bound_to_owner_and_rejects_tampering ... ok
+test native_adapters::tests::native_compute_tests::native_http_oversized_body_is_rejected_before_provider_mutation ... ok
+test native_adapters::tests::native_compute_tests::native_http_route_shapes_fail_closed_without_descriptor_dispatch ... ok
+test native_adapters::tests::native_compute_tests::native_network_create_is_listed_and_deletable_through_generic_collection ... ok
+test native_adapters::tests::native_compute_tests::native_network_create_compensates_canonical_on_ledger_conflict ... ok
+test native_adapters::tests::native_compute_tests::native_network_create_replay_returns_same_resource ... ok
+test native_adapters::tests::native_compute_tests::native_network_quota_denial_is_forbidden_not_a_replay_conflict ... ok
+test native_adapters::volume::volume_reader_tests::denied_canonical_volume_action_blocks_matching_scope ... ok
+test native_adapters::tests::native_compute_tests::native_network_replay_after_delete_is_not_a_replay ... ok
+test native_adapters::tests::native_compute_tests::native_network_replay_with_changed_name_conflicts ... ok
+test native_adapters::tests::native_compute_tests::native_network_show_conceals_deleted_resource ... ok
+test native_adapters::tests::native_compute_tests::native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation ... ok
+test native_adapters::tests::native_compute_tests::native_update_stale_if_match_leaves_no_pending_operation ... ok
+test native_adapters::tests::native_compute_tests::native_update_with_non_object_desired_state_fails_closed_without_panic ... ok
+test native_adapters::tests::native_compute_tests::native_volume_create_replay_with_changed_semantics_conflicts ... ok
+test native_adapters::tests::native_governance_tests::native_governance_operator_lifecycle_with_durable_audit ... ok
+test native_adapters::tests::native_governance_tests::native_governance_grant_and_revoke_converge_in_identity_snapshot ... ok
+test native_adapters::tests::native_governance_tests::native_governance_rejects_privilege_escalation ... ok
+test composition::pp4_endpoint_lifecycle::interrupted_terminal_delete_orphan_is_repaired_by_the_shipped_sweep ... ok
+test composition::pp4_endpoint_lifecycle::concurrent_orphan_repairs_converge_once ... ok
+test composition::pp4_endpoint_lifecycle::orphaned_bound_endpoint_is_unbound_then_released_by_the_shipped_sweep ... ok
+test composition::pp4_endpoint_lifecycle::orphan_repair_is_a_no_op_for_live_in_flight_caller_supplied_and_foreign_state ... ok
+test composition::pp4_endpoint_lifecycle::orphan_repair_survives_a_control_plane_restart ... ok
+
+test result: ok. 118 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 27.78s
+
+     Running unittests src/main.rs (target/debug/deps/o3kd-bf3f27c0af3fd0c6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/araf_p2_convergence.rs (target/debug/deps/araf_p2_convergence-970bf918ab3b9a84)
+
+running 2 tests
+test araf_p2_northbound_convergence ... ignored, requires the Keycloak testbed + durable store started by tests/araf-p2-convergence.sh
+test production_router_exposes_audit_show_route ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/native_diagnostics_process.rs (target/debug/deps/native_diagnostics_process-a53e4d7ad8ca3f04)
+
+running 4 tests
+test diagnostics_http_postgres_capacity_narrow_reproduction ... ignored, requires an explicitly disposable PostgreSQL URL
+test diagnostics_http_denies_project_scoped_callers_even_with_operator_role ... ok
+test diagnostics_http_provider_failure_degrades_then_recovers ... ok
+test diagnostics_http_system_operator_healthy_journey_with_secret_safety ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+     Running tests/native_metering_lifecycle_process.rs (target/debug/deps/native_metering_lifecycle_process-ceddb53d352db22e)
+
+running 6 tests
+test recovery_defers_mutation_when_metering_projection_fails ... ok
+test volume_allocation_meter_is_exact_and_replay_safe ... ok
+test recovery_closes_interrupted_volume_delete ... ok
+test meter_capability_hiding_filters_definitions_and_rejects_usage ... ok
+test lifecycle_driven_compute_metering_is_exact_and_restart_stable ... ok
+test cinder_volume_lifecycle_opens_and_closes_the_allocation_meter ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+
+     Running tests/native_metering_process.rs (target/debug/deps/native_metering_process-5e97cfb92e04c8ba)
+
+running 3 tests
+test metering_http_definitions_and_scope_authority ... ok
+test metering_http_adapter_refuses_undecodable_states ... ok
+test metering_http_usage_journey_is_exact_and_replay_safe ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests/p12_6_process.rs (target/debug/deps/p12_6_process-72236f4a7535d680)
+
+running 5 tests
+test unavailable_external_controller_and_composition_endpoints_fail_closed ... ok
+test p12_6_relationship_recovery_reopens_store_and_serializes_process_race ... ok
+test p12_6_independent_application_instances_converge_durable_slots ... ok
+test p12_6_reconstructs_two_independent_control_plane_runtimes ... ok
+test database_controller_and_composition_cross_real_mtls_boundaries ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.92s
+
+     Running tests/p12_7_convergence.rs (target/debug/deps/p12_7_convergence-bbd2da4fb5df9936)
+
+running 8 tests
+test native_and_openstack_http_surfaces_reconstruct_over_durable_postgres ... ignored, requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database
+test native_and_openstack_http_surfaces_share_compute_and_network_authority_postgres ... ignored, requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database
+test native_http_same_key_replay_does_not_reschedule_or_return_internal_error_postgres ... ignored, requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database
+test native_quota_operator_http_uses_real_iam_and_durable_cas ... ignored, requires the real OIDC testbed started by tests/p12-iam-7-real-idp.sh
+test native_http_scope_like_request_fields_cannot_select_foreign_owner ... ok
+test native_http_same_key_replay_does_not_reschedule_or_return_internal_error ... ok
+test native_and_openstack_http_surfaces_share_compute_and_network_authority ... ok
+test native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite ... ok
+
+test result: ok. 4 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 1.41s
+
+     Running tests/p12_7_cross_process_replay.rs (target/debug/deps/p12_7_cross_process_replay-da3ce4579bd46d43)
+
+running 8 tests
+test cross_process_concurrent_replay_postgres ... ignored, requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database
+test cross_process_in_flight_replay_postgres ... ignored, requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database
+test cross_process_restart_replay_postgres ... ignored, requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database
+test cross_process_sequential_replay_postgres ... ignored, requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database
+test cross_process_terminal_replay_and_conflict_postgres ... ignored, requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database
+test p12_7_cross_process_runtime_child ... ok
+test cross_process_sequential_replay_sqlite ... ok
+test cross_process_restart_replay_sqlite ... ok
+
+test result: ok. 3 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.74s
+
+     Running tests/p12_iam_7_real_oidc.rs (target/debug/deps/p12_iam_7_real_oidc-f703b22e5daeb414)
+
+running 1 test
+test p12_iam_7_real_federation_evidence ... ignored, requires the real Keycloak testbed started by tests/p12-iam-7-real-idp.sh
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/p15_1_topology_operator.rs (target/debug/deps/p15_1_topology_operator-a9500d1b06d7bc75)
+
+running 1 test
+test p15_1_topology_operator_crud_over_production_router ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/p15_1_topology_process.rs (target/debug/deps/p15_1_topology_process-7503d0ab3a193225)
+
+running 2 tests
+test p15_1_topology_process_postgres ... ok
+test p15_1_topology_process_sqlite ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.90s
+
+     Running tests/p15_2_service_registry_process.rs (target/debug/deps/p15_2_service_registry_process-6f8e6b02922a1974)
+
+running 2 tests
+test configured_but_unavailable_cinder_is_not_advertised ... ok
+test p15_2_real_process_views_converge_and_reconstruct ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.53s
+
+     Running tests/p15_3_placement_process.rs (target/debug/deps/p15_3_placement_process-13d9798e80578279)
+
+running 1 test
+test real_o3kd_placement_hierarchy_survives_restart ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+     Running tests/p15_4_cloud_profile_process.rs (target/debug/deps/p15_4_cloud_profile_process-4720b661b04cf991)
+
+running 1 test
+test cloud_profile_survives_real_daemon_restart ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/p15_5_building_block_process.rs (target/debug/deps/p15_5_building_block_process-37e14e737af7ceaf)
+
+running 1 test
+test building_block_survives_real_daemon_restart ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/pp5_1035_evidence_process.rs (target/debug/deps/pp5_1035_evidence_process-914125a6592b458d)
+
+running 2 tests
+test pp5_1035_postgres_restart_takes_over_lease_and_reconstructs_endpoint ... ok
+test pp5_1035_restart_writes_fail_closed_evidence has been running for over 60 seconds
+test pp5_1035_restart_writes_fail_closed_evidence ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 77.31s
+
+     Running tests/pp5_interrupted_delete_process.rs (target/debug/deps/pp5_interrupted_delete_process-e22431d89e10207d)
+
+running 1 test
+test fault_pause_interrupted_delete_orphan_is_repaired_and_reuse_is_restored ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.24s
+
+     Running tests/shutdown.rs (target/debug/deps/shutdown-c8e456e12610c4f8)
+
+running 2 tests
+test sigterm_shuts_down_cleanly ... ok
+test sigint_shuts_down_cleanly ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+   Doc-tests o3k
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_api
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_cellhv
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_cinder
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_compute
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_compute_agent
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_config
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_config_drive
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_console
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_controller_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_database_example
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_dhcp
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_domain
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_identity
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_image
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_kernel
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_libvirt
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_migration
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_native_api
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_network
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_network_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_placement
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_provider
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_provider_contract
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_reconciler
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_scheduler
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_service_sdk
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_storage
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3kd
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

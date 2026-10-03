@@ -3,8 +3,7 @@
 This record covers the runtime executor refactor on branch `fabric-v3-runtime`.
 It does not certify the final PP.5 campaign.
 
-Candidate implementation SHA: `32b4fb61` (test-tooling follow-up is included in
-the final source SHA reported below).
+Runtime candidate SHA exercised by the final validation: `5eaf8da224c60798671c3c3c42a1ff6729feaa34`.
 Base protected `main`: `41fedbfdf982596f6932c5eb6b08e2c36f810067`.
 
 ## Authority and provenance
@@ -12,9 +11,11 @@ Base protected `main`: `41fedbfdf982596f6932c5eb6b08e2c36f810067`.
 - O3K authority: ADR-0186, SPEC-0049, and `contracts/edge-fabric-stretched-l2.md`.
 - Shared executor: `o3kio/fabric` tag `v0.1.5`, resolved at commit
   `bf99a9f2134ae44b5f485fa2efcb37b103c298a2`.
-- Open PR #1054 was inspected. Its phase 0/1 dependency and conformance changes
-  are already present in this branch; this implementation adds the production
-  adapter and does not fork or patch the shared repository.
+- The current PR #1054 head was fetched at
+  `1cac7fee3cfc64c2d18b8f1187cdb17ed2a5f8e9`; it contains the phase 0/1
+  dependency/conformance prerequisite. This implementation branch was kept
+  separate from that PR, carries the pinned dependency and prerequisite
+  behavior, and adds the production adapter. No PR was merged or rewritten.
 
 The shared provider owns WireGuard, per-realm VXLAN, learning bridges, bounded
 HER, provider ownership journaling, and substrate cleanup. O3K continues to own
@@ -52,20 +53,21 @@ generation, ownership, HER, MTU, cleanup, and foreign-state behavior. Adapter
 tests cover V3 plan conversion, VNI and Geneve admission, peer preservation,
 fencing generation, and MTU propagation.
 
-## Real-host gate
+## Host-independence scope
 
-The required independent three-compute-host KVM/libvirt gate is **not green**.
-This development host has KVM/libvirt and can provision nested guests, but all
-guests share one physical underlay. No independent three-host ARP/MAC, DHCP,
-overlap-isolation, encryption-capture, anti-spoof, MTU, restart, and zero-leak
-evidence was manufactured or treated as equivalent.
+The strict independent-physical-host gate remains unperformed: these nested
+compute guests share one physical underlay. On 2026-10-03 the user explicitly
+authorized the nested environment as the approval environment and waived the
+physical-independence blocker for this development validation. The nested gate
+below is therefore reported as nested functional evidence under that waiver;
+it is not represented as independent physical-host evidence.
 
-Therefore this record is a focused implementation/conformance record only.
-The development host recorded for the attempted gate has Linux
-`6.8.0-139-generic`, libvirt `10.0.0`, QEMU `8.2.2`, iproute2 `6.1.0`, and
-WireGuard tools `1.0.20210914`. It has one physical underlay; nested guests
-would share it and therefore cannot satisfy the independent three-compute-host
-requirement. No packet captures or three-host artifacts are claimed here.
+The exercised profile is the accepted P11 v3 stretched-L2 fabric behavior
+described below. It does not certify the full OpenStack Neutron networking
+compatibility surface, production readiness, or PP.5. No such broader claim is
+made. The compute guests ran Linux `6.8.0-139-generic`, libvirt `10.0.0`,
+QEMU `8.2.2`, iproute2 `6.1.0`, and WireGuard tools `1.0.20210914`; QEMU
+`8.2.2` was also installed on host-a for the guest-originated spoof probes.
 
 The workspace run retained an unrelated focused PP.5 endpoint artifact at
 `bins/o3kd/target/pp5/01a10135-abe5-77d1-9e8f-d8fba0e3fce4/pp5-1035-restart-evidence.json`
@@ -244,3 +246,170 @@ evidence and does not satisfy the independent three-compute-host requirement.
 It does not claim DHCP broadcast, underlay capture, injected anti-spoof
 rejections, MTU boundary behavior, restart/reconciliation return, or a
 three-host zero-leak inventory.
+
+## Nested three-compute functional gate rerun
+
+Following the user's 2026-10-03 direction, physical-host approval is treated as
+out of scope for this development approval and the nested environment is the
+approved validation environment. Three nested compute hosts still share one
+physical hypervisor/underlay; this waiver changes the approval scope and does
+not change that evidence fact.
+
+The rerun used Realm A (`a1000000-0000-0000-0000-000000000001`, VNI 101) with
+A1 `10.0.0.10` on host-a and A2 `10.0.0.20` on host-b, and Realm B
+(`b1000000-0000-0000-0000-000000000001`, VNI 102) with B1 `10.0.0.10` on
+host-c and B2 `10.0.0.20` on host-b. Hosts were `192.168.122.118`,
+`192.168.122.134`, and `192.168.122.196`. The test-only helper submits the
+accepted canonical fixture through the production O3K Linux adapter; it does
+not start the full O3K control-plane/agent process path.
+
+The passing run output is retained in
+`docs/evidence/artifacts/fabric-v3-nested-approval-20261003/gate-output-vni-counter-rerun.txt`.
+It shows both directions of remote same-realm ARP resolving to the actual
+endpoint MAC, A1↔A2 and B1↔B2 ping, DHCPDISCOVER broadcast reaching A2,
+overlapping-address isolation (zero ARP frames at B2 during Realm A traffic),
+and restart/reconcile returning connectivity. A valid unknown VNI 999 from an
+enrolled peer reached the decrypted WireGuard boundary, incremented the
+bounded pre-decap nftables rejection counter (`0→1`), and was absent at the
+endpoint. A VNI 101 packet from authenticated host-c, which did not participate
+in Realm A, incremented the same peer/VNI admission-drop counter (`1→2`) and
+was absent at the endpoint. The test retained the generated nftables netdev
+and bridge rules in the gate output. It also asserted that each injector's
+peer `/32` route selected `o3k-wg`, while simultaneous physical-interface
+captures saw UDP/65001 only and no cleartext UDP/4789.
+
+For anti-spoof evidence, the gate boots a small disposable KVM guest on host-a
+and attaches it to A1's actual provider TAP. Four guest-originated frames were
+rejected by the matching O3K-owned nftables rules, with counter deltas:
+wrong Ethernet source MAC `0→4`, wrong IPv4 source `0→1`, wrong ARP sender MAC
+`0→3`, and wrong ARP sender IP `0→3`. The guest serial logs are retained in
+the same artifact directory. The first two failed attempts are also preserved
+there: those wrote to a TAP with no guest attached, and correctly failed to
+produce a security counter delta. They are harness diagnostics, not product
+regressions, and the passing evidence uses the actual QEMU guest path.
+
+The MTU probe passed a 1390-byte IP packet (`ping -M do -s 1362`) and the next
+byte produced an explicit local `message too long`/`mtu=1390` result. The
+WireGuard underlay capture from the existing run records only host transport
+addresses and UDP/65001, without decoded tenant addresses. During both
+negative VNI probes, the same physical captures showed WireGuard UDP/65001 and
+no cleartext UDP/4789. After provider and endpoint cleanup, inventory queries found no O3K-named VXLAN, bridge, provider
+namespace, nftables table, route, or rule on the three guests; the foreign
+`f3-foreign-can` bridge remained on host-a. The retained command output and
+serial files have hashes listed in
+`docs/evidence/artifacts/fabric-v3-nested-approval-20261003/SHA256SUMS`.
+
+The final harness revision retains two earlier failed security-capture attempts
+without treating them as evidence: one selected the remote IP string as a
+capture interface, and the next did not fail closed when tcpdump could not
+open that interface. The final passing rerun derives the underlay interface
+from `ip route get`, requires tcpdump success and a captured WireGuard packet,
+and asserts no UDP/4789 underlay frame. Its output, decrypted VXLAN capture,
+empty endpoint capture, per-probe physical captures, and current QEMU serial
+logs are retained and independently hashed. The independent source review
+initially questioned bridge rule direction and injector routing, then withdrew
+both findings after confirming the fabric-side veth versus VXLAN ingress
+interfaces and the peer `/32` WireGuard route. No BLOCKER, HIGH, or MEDIUM
+finding remains from that bounded review.
+
+This is a pass for the user-approved nested functional gate. It is not an
+independent physical-host result, full OpenStack Neutron network compatibility
+certification, production-readiness claim, or PP.5 certification. The nested
+test proves only the exercised P11 v3 fabric scenarios; broader OpenStack
+network operations require their own accepted compatibility profile and
+evidence.
+
+## Final nested approval rerun and restart ownership correction
+
+The user explicitly authorized nested development-host validation in place of
+physical-host approval. On that basis, the three nested compute guests are the
+approval environment for this implementation candidate. This waiver does not
+make the guests physically independent: all three run on the same development
+host and share its libvirt underlay. The latest pass is therefore a nested
+functional approval, not a physically independent host result.
+
+The final run used the same realm/endpoint/VNI matrix above. Host-a
+(`192.168.122.118`) hosted A1, host-b (`192.168.122.134`) hosted A2 and B2,
+and host-c (`192.168.122.196`) hosted B1. Realm A used VNI 101 and Realm B
+used VNI 102. The helper installed plans through the production O3K Linux
+adapter using a test-only canonical fixture; it did not start the full O3K
+controller and network-agent service path. A disposable QEMU guest on host-a
+transmitted the spoof probes through the actual provider TAP.
+
+The restart test deleted host-b's provider WireGuard device. Linux also
+removed its device-bound nftables ingress chain, while the durable provider
+record still identified O3K ownership. The old replay path treated the now
+empty named table as foreign and stopped. The fix records a random ownership
+marker at the nftables table level and will rebuild a missing chain only when
+that marker proves ownership; a table or object name alone is still
+insufficient. Table-level markers are parsed only at table scope. The
+regression test `nft_table_ownership_survives_device_bound_chain_removal` and
+the nested process-death/replay scenario both pass. The source review found no
+BLOCKER, HIGH, or MEDIUM finding for this correction. Retained command output
+has random ownership marker values redacted; raw private keys, credentials,
+and tokens are not retained.
+
+The final gate output is
+`docs/evidence/artifacts/fabric-v3-nested-approval-20261003/table-marker-r3/gate-output.txt`.
+It records actual-MAC ARP in both directions for both realms, bidirectional
+same-realm ping, DHCPDISCOVER broadcast to the remote endpoint, zero observed
+cross-realm delivery for identical IPv4 addresses, and connectivity recovery
+after replay. Spoof-counter deltas were wrong MAC `0→4`, wrong IPv4 source
+`0→1`, ARP sender MAC `0→3`, and ARP sender IP `0→3`. Unknown VNI 999 from an
+enrolled peer was dropped before VXLAN delivery (`0→1`); VNI 101 from the
+enrolled but nonparticipating host-c was also dropped (`1→2`). Peer routes for
+the injectors selected WireGuard, and physical-interface captures during
+negative probes contained WireGuard UDP/65001, with no clear UDP/4789 tenant
+datapath. A 1390-byte IP packet succeeded; a 1391-byte packet failed
+explicitly with local `message too long` at MTU 1390. The provider cleanup
+assertion reported that its foreign bridge canary survived. A later inventory
+found no O3K-owned resources; the canary was no longer present then, so the
+retained gate assertion is the evidence for survival during the cleanup
+operation, not for persistence after the subsequent environment teardown.
+
+Post-cleanup inventory on each nested host found no O3K provider namespace,
+link, FDB entry, WireGuard device, nftables table, route/rule, TAP, or durable
+configured network. The three inventories are retained beside the gate output.
+They are scoped to the O3K provider's guest-kernel state and do not establish
+absence of unrelated host state outside that inventory.
+
+The candidate ran with Rust/Cargo 1.97.1, PostgreSQL 16.15 installed, host
+Linux 6.8.0-139-generic, libvirt 10.0.0, QEMU 8.2.2, nested guest Linux
+6.8.0-139-generic, iproute2 6.1.0, WireGuard tools 1.0.20210914, and
+nftables 1.0.9. Exact environment and tool output are retained in
+`table-marker-r3/candidate-environment.txt` and `atomic-rerun/host-*-versions.txt`.
+Workspace tests completed successfully against the configured environment;
+PostgreSQL-backed workspace tests passed. In addition, both relevant ignored
+network lifecycle tests were run separately on fresh purpose-scoped disposable
+PostgreSQL databases: `postgres_p13_f2_r1_reconstructs_and_recovers_realm_cleanup`
+and `postgres_p13_f3_fresh_runtime_reconstructs_policy_and_zero_realm_network`.
+Their outputs are retained as `table-marker-r3/postgres-network-realm-cleanup-retry.txt`
+and `table-marker-r3/postgres-network-reconcile.txt`; the databases were
+dropped after the tests. An initial malformed local socket URL attempt is
+retained separately as diagnostic evidence and was corrected before these
+passes. This task did not run the final PP.5 matrix.
+
+The retained validation commands passed:
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo test -p o3k-network --all-features
+cargo test -p o3k-network --test fabric_conformance --all-features
+bash tests/adr-governance.sh
+bash tests/architecture-boundaries.sh
+bash tests/traceability.sh
+bash tests/maintainability-guards.sh
+```
+
+The gate and validation artifacts have a SHA-256 manifest at
+`docs/evidence/artifacts/fabric-v3-nested-approval-20261003/SHA256SUMS`.
+That manifest covers sanitized evidence; it deliberately excludes ephemeral
+WireGuard private keys and redacts random nftables ownership markers.
+
+The demonstrated profile remains the SPEC-0049 stretched-L2 fabric path. No
+claim is made that the entire OpenStack Neutron networking surface works on
+this fabric: the nested gate exercises the listed O3K fabric flows, not every
+Neutron API, service extension, client behavior, or interoperability profile.
+PP.5 final certification remains unclaimed.

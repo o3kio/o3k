@@ -1,0 +1,6 @@
+PING 10.0.0.20 (10.0.0.20) 1363(1391) bytes of data.
+ping: local error: message too long, mtu=1390
+
+--- 10.0.0.20 ping statistics ---
+1 packets transmitted, 0 received, +1 errors, 100% packet loss, time 0ms
+

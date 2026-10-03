@@ -1,0 +1,7 @@
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on eth0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+16:03:27.369837 IP 0.0.0.0.68 > 255.255.255.255.67: BOOTP/DHCP, Request from 02:00:00:00:a1:01, length 249
+
+1 packet captured
+1 packet received by filter
+0 packets dropped by kernel

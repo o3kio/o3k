@@ -1,0 +1,13 @@
+host=o3k-pp5-fabric-v3-gate-20261003-host-c
+netns:
+links:
+FDB:
+wg:
+nft:
+routes/rules:
+taps:
+owned-provider-state:
+{
+  "fabric_configured": false,
+  "networks": []
+}
