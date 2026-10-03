@@ -56,7 +56,7 @@ pub struct LinuxFabricConfig {
     pub fabric_namespace: String,
     pub fabric_interface: String,
     pub wireguard_port: u16,
-    pub geneve_port: u16,
+    pub vxlan_port: u16,
     pub public_uplink: Option<String>,
 }
 
@@ -66,9 +66,9 @@ impl LinuxFabricConfig {
         Self {
             root: root.into(),
             fabric_namespace: "o3k-fabric".to_owned(),
-            fabric_interface: "wg-o3k".to_owned(),
+            fabric_interface: "o3k-wg".to_owned(),
             wireguard_port: 65_001,
-            geneve_port: 6_081,
+            vxlan_port: 4_789,
             public_uplink: None,
         }
     }
@@ -86,18 +86,19 @@ impl LinuxFabricConfig {
     }
 
     #[must_use]
-    pub fn with_geneve_port(mut self, port: u16) -> Self {
-        self.geneve_port = port;
+    pub fn with_vxlan_port(mut self, port: u16) -> Self {
+        self.vxlan_port = port;
         self
     }
 
     fn validate(&self) -> Result<(), LinuxFabricError> {
-        if self.root == Path::new("/")
+        if !self.root.is_absolute()
+            || self.root == Path::new("/")
             || self.root.as_os_str().is_empty()
             || !valid_name(&self.fabric_namespace)
             || !valid_name(&self.fabric_interface)
             || self.wireguard_port == 0
-            || self.geneve_port == 0
+            || self.vxlan_port != 4_789
             || self
                 .public_uplink
                 .as_deref()
@@ -112,7 +113,7 @@ impl LinuxFabricConfig {
     /// WireGuard port falls inside the host's ephemeral range, without
     /// mutating the OS range. Returns an error if the port is already bound.
     pub fn validate_ports(&self) -> Result<(), LinuxFabricError> {
-        if self.wireguard_port < 1 || self.geneve_port < 1 {
+        if self.wireguard_port < 1 || self.vxlan_port != 4_789 {
             return Err(LinuxFabricError::InvalidConfiguration);
         }
         if is_port_bound(self.wireguard_port) {
@@ -251,6 +252,11 @@ impl LinuxFabricBackend {
         if self.state.version != STATE_VERSION {
             return Err(LinuxFabricError::CorruptState);
         }
+        let expected_key_parent = if self.shared.is_some() {
+            self.config.root.join("fabric-provider")
+        } else {
+            self.config.root.clone()
+        };
         if let Some(fabric) = &self.state.fabric
             && (fabric.namespace != self.config.fabric_namespace
                 || fabric.interface != self.config.fabric_interface
@@ -262,7 +268,8 @@ impl LinuxFabricBackend {
                     .plans
                     .values()
                     .any(|plan| plan.local_fabric_mtu != fabric.fabric_mtu)
-                || Path::new(&fabric.private_key_path).parent() != Some(self.config.root.as_path()))
+                || Path::new(&fabric.private_key_path).parent()
+                    != Some(expected_key_parent.as_path()))
         {
             return Err(LinuxFabricError::CorruptState);
         }
@@ -486,6 +493,29 @@ impl FabricBackend for LinuxFabricBackend {
                 realm.bridge.clone()
             };
             store_state(&self.state_path, &self.state)?;
+            let consumer = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        owned.consumer_port_veth.as_str(),
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            let bridge_observed = self
+                .command
+                .output("ip", &["-d", "link", "show", "dev", bridge.as_str()])
+                .map_err(LinuxFabricError::Storage)?;
+            if !consumer.0 || !consumer.1.contains("veth") {
+                return Err(LinuxFabricError::ForeignState.into());
+            }
+            if !bridge_observed.0 || !bridge_observed.1.contains("bridge") {
+                return Err(LinuxFabricError::ForeignState.into());
+            }
             if !self
                 .command
                 .run(
@@ -523,7 +553,12 @@ impl FabricBackend for LinuxFabricBackend {
                 fabric_generation: plan.local_fabric_generation,
                 fabric_mtu: plan.local_fabric_mtu,
                 ingress_auth_fingerprint: String::new(),
-                managed_peers: plan.peers.iter().map(|p| p.host_id.clone()).collect(),
+                managed_peers: self
+                    .plans
+                    .values()
+                    .filter(|p| self.state.realms.contains_key(&p.realm_id))
+                    .flat_map(|p| p.peers.iter().map(|peer| peer.public_key.clone()))
+                    .collect(),
             });
             store_state(&self.state_path, &self.state)?;
             // The shared provider authenticates the host transport; O3K still
@@ -566,6 +601,31 @@ impl FabricBackend for LinuxFabricBackend {
             }
         }
         if let Some(shared) = self.shared.as_mut() {
+            // The consumer veth is owned by the shared provider but enslaved
+            // to the O3K realm bridge. Detach it before provider teardown and
+            // refuse a same-name foreign link.
+            let Some(vxlan) = ownership.vxlan.as_ref() else {
+                return Err(LinuxFabricError::CorruptState.into());
+            };
+            let consumer = self
+                .command
+                .output(
+                    "ip",
+                    &["-d", "link", "show", "dev", vxlan.host_veth.as_str()],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            if consumer.0 {
+                if !consumer.1.contains("veth") {
+                    return Err(LinuxFabricError::ForeignState.into());
+                }
+                if !self
+                    .command
+                    .run("ip", &["link", "set", vxlan.host_veth.as_str(), "nomaster"])
+                    .map_err(LinuxFabricError::Storage)?
+                {
+                    return Err(LinuxFabricError::CommandFailed.into());
+                }
+            }
             shared.remove(plan.realm_id)?;
         } else {
             self.remove_vxlan(plan, &ownership)?;
@@ -597,6 +657,18 @@ impl FabricBackend for LinuxFabricBackend {
         self.remove_plan(plan)?;
         if self.shared.is_none() && !self.state.realms.is_empty() {
             self.configure_peers()?;
+            self.reconcile_ingress_auth()?;
+        }
+        if self.shared.is_some() && !self.state.realms.is_empty() {
+            if let Some(fabric) = self.state.fabric.as_mut() {
+                fabric.managed_peers = self
+                    .plans
+                    .values()
+                    .filter(|p| self.state.realms.contains_key(&p.realm_id))
+                    .flat_map(|p| p.peers.iter().map(|peer| peer.public_key.clone()))
+                    .collect();
+            }
+            store_state(&self.state_path, &self.state)?;
             self.reconcile_ingress_auth()?;
         }
         if let Some(shared) = self.shared.as_mut() {

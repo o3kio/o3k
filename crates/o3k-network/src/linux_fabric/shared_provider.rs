@@ -16,7 +16,7 @@ impl SharedFabricAdapter {
         let provider_config = FabricLinuxConfig::new(root)
             .with_name_prefix("o3k")
             .with_wireguard_port(config.wireguard_port)
-            .with_vxlan_port(4789);
+            .with_vxlan_port(fabric_linux::config::DEFAULT_VXLAN_PORT);
         let provider = LinuxFabricProvider::open(provider_config, RealCommandRunner)
             .map_err(|_| LinuxFabricError::CommandFailed)?;
         Ok(Self { provider })
@@ -95,9 +95,79 @@ fn to_provider_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use o3k_domain::{
+        AddressRealm, FabricPeer as O3kFabricPeer, Ipv4Prefix, RealmEncapsulationBinding,
+        RealmEndpointDirectory,
+    };
+    use std::net::Ipv4Addr;
+    use uuid::Uuid;
+
+    fn plan(kind: FabricProviderKind) -> NamespacedRoutedFabricPlan {
+        let realm_id = Uuid::from_u128(0x11);
+        let realm = AddressRealm {
+            id: realm_id,
+            network_id: Uuid::from_u128(0x12),
+            project_id: "project-a".to_owned(),
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect("prefix"),
+            overlapping_prefixes: false,
+        };
+        let directory =
+            RealmEndpointDirectory::build(&realm, Vec::new(), &[], 7).expect("directory");
+        NamespacedRoutedFabricPlan {
+            local_host: "host-a".to_owned(),
+            local_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
+            local_fabric_generation: 9,
+            local_underlay_mtu: 1500,
+            local_fabric_mtu: 1440,
+            realm_id,
+            realm_prefix: realm.prefix,
+            encapsulation: RealmEncapsulationBinding {
+                fabric_domain_id: Uuid::from_u128(0x13),
+                realm_id,
+                provider_kind: kind,
+                provider_segment_id: 101,
+                binding_generation: 3,
+            },
+            directory_generation: 7,
+            proxy_mac: directory.proxy_mac.clone(),
+            directory,
+            tenant_mtu: 1390,
+            policy_generation: 1,
+            policies: Vec::new(),
+            policy_defaults: Vec::new(),
+            public_bindings: Vec::new(),
+            routes: Vec::new(),
+            peers: vec![O3kFabricPeer {
+                host_id: "host-b".to_owned(),
+                public_key: "B".repeat(43) + "=",
+                underlay_endpoint: "192.0.2.2:65001".to_owned(),
+                fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
+                fabric_generation: 9,
+            }],
+        }
+    }
+
     #[test]
-    fn rejects_geneve_binding() {
-        // Conversion is deliberately private and exercised through production plans.
-        assert_eq!(FabricProviderKind::Vxlan, FabricProviderKind::Vxlan);
+    fn converts_vxlan_plan_without_losing_fencing_or_peers() {
+        let converted = to_provider_plan(&plan(FabricProviderKind::Vxlan)).expect("conversion");
+        assert_eq!(converted.network_id, Uuid::from_u128(0x11).to_string());
+        assert_eq!(converted.vni.get(), 101);
+        assert_eq!(converted.binding_generation, 3);
+        assert_eq!(converted.plan_generation, 9);
+        assert_eq!(converted.tenant_mtu, 1390);
+        assert_eq!(converted.fabric_mtu, 1440);
+        assert_eq!(converted.peers.len(), 1);
+        assert_eq!(
+            converted.peers[0].fabric_transport_ip,
+            Ipv4Addr::new(198, 18, 0, 2)
+        );
+    }
+
+    #[test]
+    fn rejects_geneve_binding_before_provider_mutation() {
+        assert!(matches!(
+            to_provider_plan(&plan(FabricProviderKind::Geneve)),
+            Err(LinuxFabricError::OwnershipConflict)
+        ));
     }
 }
