@@ -29,21 +29,21 @@ impl SharedFabricAdapter {
         let provider_plan = to_provider_plan(plan)?;
         self.provider
             .apply_plan(&provider_plan)
-            .map_err(|_| LinuxFabricError::CommandFailed)?;
+            .map_err(|error| LinuxFabricError::Provider(error.to_string()))?;
         Ok(())
     }
 
     pub(crate) fn remove(&mut self, realm_id: uuid::Uuid) -> Result<(), LinuxFabricError> {
         self.provider
             .remove_network(&realm_id.to_string())
-            .map_err(|_| LinuxFabricError::CommandFailed)
+            .map_err(|error| LinuxFabricError::Provider(error.to_string()))
     }
 
     pub(crate) fn remove_fabric_if_unused(&mut self) -> Result<(), LinuxFabricError> {
         self.provider
             .remove_fabric_if_unused()
             .map(|_| ())
-            .map_err(|_| LinuxFabricError::CommandFailed)
+            .map_err(|error| LinuxFabricError::Provider(error.to_string()))
     }
 
     pub(crate) fn ownership(&self, realm_id: uuid::Uuid) -> Option<fabric_linux::NetworkOwnership> {

@@ -80,9 +80,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         binding_generation: 1,
     };
     let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1390, &binding)?;
-    let mut provider = LinuxFabricBackend::open(LinuxFabricConfig::for_root(&root))?;
-    provider.apply(&plan)?;
-    if !provider.observe(&plan)? {
+    let config = LinuxFabricConfig::for_root(&root);
+    let fabric_interface = config.fabric_interface.clone();
+    let mut provider = LinuxFabricBackend::open(config)
+        .map_err(|error| format!("provider open failed: {error}"))?;
+    provider
+        .apply(&plan)
+        .map_err(|error| format!("provider apply failed: {error}"))?;
+    if !provider
+        .observe(&plan)
+        .map_err(|error| format!("provider observe failed: {error}"))?
+    {
         return Err("provider did not observe its applied state".into());
     }
     let vxlan = Command::new("ip")
@@ -117,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "addr",
             "show",
             "dev",
-            "wg-o3k",
+            fabric_interface.as_str(),
         ])
         .output()?;
     if !transport.status.success()
@@ -126,20 +134,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("provider did not assign the local fabric transport address".into());
     }
     let attachments = Command::new("ip")
-        .args([
-            "netns",
-            "exec",
-            "o3k-fabric",
-            "ip",
-            "-d",
-            "link",
-            "show",
-            "type",
-            "bridge",
-        ])
+        .args(["netns", "exec", "o3k-fabric", "bridge", "link", "show"])
         .output()?;
     if !attachments.status.success()
-        || !String::from_utf8_lossy(&attachments.stdout).contains("o3k-c-")
+        || !String::from_utf8_lossy(&attachments.stdout).contains("o3k-x-")
+        || !String::from_utf8_lossy(&attachments.stdout).contains("o3k-p-")
     {
         return Err("provider did not realize the isolated VXLAN attachment bridge".into());
     }
@@ -179,8 +178,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("linux-fabric-smoke: host-transport-address=passed");
     println!("linux-fabric-smoke: vxlan-realization=passed");
     println!("linux-fabric-smoke: isolated-attachment=passed");
-    provider.remove(&plan)?;
-    if !provider.observe_removed(&plan)? {
+    provider
+        .remove(&plan)
+        .map_err(|error| format!("provider remove failed: {error}"))?;
+    if !provider
+        .observe_removed(&plan)
+        .map_err(|error| format!("provider remove observation failed: {error}"))?
+    {
         return Err("provider did not observe cleanup".into());
     }
     fs::remove_dir_all(root)?;

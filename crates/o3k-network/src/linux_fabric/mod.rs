@@ -142,6 +142,8 @@ pub enum LinuxFabricError {
     OwnershipConflict,
     #[error("Linux fabric provider command failed")]
     CommandFailed,
+    #[error("shared Linux fabric provider rejected the operation: {0}")]
+    Provider(String),
     #[error("Linux fabric provider state storage failed: {0}")]
     Storage(#[from] io::Error),
 }
