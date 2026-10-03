@@ -3,6 +3,9 @@
 This record covers the runtime executor refactor on branch `fabric-v3-runtime`.
 It does not certify the final PP.5 campaign.
 
+Candidate source SHA: `febd119168f1ba5530df4fb10fa0573121d02c64`.
+Base protected `main`: `41fedbfdf982596f6932c5eb6b08e2c36f810067`.
+
 ## Authority and provenance
 
 - O3K authority: ADR-0186, SPEC-0049, and `contracts/edge-fabric-stretched-l2.md`.
@@ -38,6 +41,9 @@ The following focused checks pass on the candidate:
 cargo check -p o3k-network --all-features
 cargo test -p o3k-network --all-features
 cargo test -p o3k-network --test fabric_conformance --all-features
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 ```
 
 The provider conformance suite exercises the pinned executor's replay,
@@ -54,5 +60,14 @@ overlap-isolation, encryption-capture, anti-spoof, MTU, restart, and zero-leak
 evidence was manufactured or treated as equivalent.
 
 Therefore this record is a focused implementation/conformance record only.
-The exact candidate source SHA, host identities, packet captures, and retained
-three-host artifacts must be appended when that independent gate is run.
+The development host recorded for the attempted gate has Linux
+`6.8.0-139-generic`, libvirt `10.0.0`, QEMU `8.2.2`, iproute2 `6.1.0`, and
+WireGuard tools `1.0.20210914`. It has one physical underlay; nested guests
+would share it and therefore cannot satisfy the independent three-compute-host
+requirement. No packet captures or three-host artifacts are claimed here.
+
+The workspace run retained an unrelated focused PP.5 endpoint artifact at
+`bins/o3kd/target/pp5/01a10135-abe5-77d1-9e8f-d8fba0e3fce4/pp5-1035-restart-evidence.json`
+with SHA-256
+`8fd54f379ff494a3698e6c388fca75b5f9b211df77dc318e63a3635d9ae670bb`; it is
+not Fabric v3 evidence.
