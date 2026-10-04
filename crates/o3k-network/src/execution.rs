@@ -143,7 +143,7 @@ pub enum NetworkExecutionError {
 pub struct NetworkPlanExecutor {
     root: PathBuf,
     agent: NetworkAgentIdentity,
-    lease: NetworkControllerLease,
+    lease: Mutex<NetworkControllerLease>,
     journal_lock: Mutex<()>,
 }
 
@@ -158,7 +158,7 @@ impl NetworkPlanExecutor {
         let executor = Self {
             root,
             agent,
-            lease,
+            lease: Mutex::new(lease),
             journal_lock: Mutex::new(()),
         };
         let _ = executor.load()?;
@@ -233,6 +233,30 @@ impl NetworkPlanExecutor {
 
     pub fn agent_epoch(&self) -> &str {
         &self.agent.agent_epoch
+    }
+
+    /// Replace the controller authority used for new mutations. The caller
+    /// is responsible for validating the takeover lease and its expiry.
+    pub fn set_controller_lease(
+        &self,
+        lease: NetworkControllerLease,
+    ) -> Result<(), NetworkExecutionError> {
+        *self
+            .lease
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)? = lease;
+        Ok(())
+    }
+
+    pub fn controller_lease(&self) -> Result<NetworkControllerLease, NetworkExecutionError> {
+        self.lease
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)
+            .map(|lease| lease.clone())
+    }
+
+    pub fn state_root(&self) -> &Path {
+        &self.root
     }
 
     pub fn accepted(&self, command_id: Uuid) -> Result<bool, NetworkExecutionError> {
@@ -402,7 +426,11 @@ impl NetworkPlanExecutor {
         if command.target != self.agent {
             return Err(NetworkExecutionError::StaleAgentEpoch);
         }
-        if command.controller != self.lease {
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)?;
+        if command.controller != *lease {
             return Err(NetworkExecutionError::StaleControllerLease);
         }
         Ok(())

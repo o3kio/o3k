@@ -5,6 +5,7 @@ use o3k_network::{
     NetworkPlanCommand, NetworkPlanExecutor, NetworkPlanRealizer, PlanAdmission,
 };
 use std::{
+    fs,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -16,9 +17,9 @@ use uuid::Uuid;
 pub use o3k_network_protocol::proto;
 
 use proto::{
-    CommandResult, ControlRequest, ControlResponse, ProtocolError, RegisterAck,
-    control_request::Body as RequestBody, control_response::Body as ResponseBody,
-    network_agent_server::NetworkAgent,
+    CommandResult, ControlRequest, ControlResponse, ControllerLease, ControllerLeaseAck,
+    ObserveCommand, ProtocolError, RegisterAck, control_request::Body as RequestBody,
+    control_response::Body as ResponseBody, network_agent_server::NetworkAgent,
 };
 
 const PROTOCOL_MAJOR: u32 = 1;
@@ -40,6 +41,15 @@ struct Runtime<R> {
     executor: NetworkPlanExecutor,
     realizer: R,
     registered: bool,
+    lease_expiry_unix_ms: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedLease {
+    controller_id: String,
+    controller_epoch: String,
+    fencing_token: u64,
+    lease_expiry_unix_ms: u64,
 }
 
 pub struct NetworkAgentService<R> {
@@ -59,11 +69,23 @@ where
     R: NetworkPlanRealizer + Send + 'static,
 {
     pub fn new(executor: NetworkPlanExecutor, realizer: R) -> Self {
+        let persisted = load_lease(&executor).ok().flatten();
+        if let Some(lease) = &persisted {
+            let _ = executor.set_controller_lease(NetworkControllerLease {
+                controller_id: lease.controller_id.clone(),
+                controller_epoch: lease.controller_epoch.clone(),
+                fencing_token: lease.fencing_token,
+            });
+        }
+        let lease_expiry_unix_ms = persisted
+            .map(|lease| lease.lease_expiry_unix_ms)
+            .unwrap_or(0);
         Self {
             runtime: Arc::new(Mutex::new(Runtime {
                 executor,
                 realizer,
                 registered: false,
+                lease_expiry_unix_ms,
             })),
         }
     }
@@ -79,6 +101,83 @@ where
             executor, realizer, ..
         } = &mut *runtime;
         executor.reconcile_pending(realizer)
+    }
+
+    fn accept_lease(
+        &self,
+        lease: &ControllerLease,
+    ) -> Result<ControllerLeaseAck, NetworkAgentError> {
+        if lease.controller_id.trim().is_empty()
+            || lease.controller_epoch.trim().is_empty()
+            || lease.fencing_token == 0
+            || lease.lease_expiry_unix_ms <= now_ms()?
+        {
+            return Err(NetworkAgentError::Malformed("invalid controller lease"));
+        }
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| NetworkAgentError::Poisoned)?;
+        let current = runtime
+            .executor
+            .controller_lease()
+            .map_err(|_| NetworkAgentError::Poisoned)?;
+        let same = lease.fencing_token == current.fencing_token
+            && lease.controller_id == current.controller_id
+            && lease.controller_epoch == current.controller_epoch;
+        if lease.fencing_token < current.fencing_token
+            || (lease.fencing_token == current.fencing_token && !same)
+        {
+            return Err(NetworkAgentError::Malformed("stale controller lease"));
+        }
+        runtime
+            .executor
+            .set_controller_lease(NetworkControllerLease {
+                controller_id: lease.controller_id.clone(),
+                controller_epoch: lease.controller_epoch.clone(),
+                fencing_token: lease.fencing_token,
+            })
+            .map_err(|_| NetworkAgentError::Poisoned)?;
+        runtime.lease_expiry_unix_ms = lease.lease_expiry_unix_ms;
+        store_lease(
+            &runtime.executor,
+            &PersistedLease {
+                controller_id: lease.controller_id.clone(),
+                controller_epoch: lease.controller_epoch.clone(),
+                fencing_token: lease.fencing_token,
+                lease_expiry_unix_ms: lease.lease_expiry_unix_ms,
+            },
+        )
+        .map_err(|_| NetworkAgentError::Poisoned)?;
+        Ok(ControllerLeaseAck {
+            fencing_token: lease.fencing_token,
+            lease_expiry_unix_ms: lease.lease_expiry_unix_ms,
+        })
+    }
+
+    fn observe(&self, request: &ObserveCommand) -> Result<CommandResult, NetworkAgentError> {
+        let command_id = parse_uuid(&request.command_id, "command_id")?;
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| NetworkAgentError::Poisoned)?;
+        let Runtime {
+            executor, realizer, ..
+        } = &mut *runtime;
+        let status = executor
+            .reconcile(command_id, realizer)
+            .map_err(|error| NetworkAgentError::Execution(execution_error_code(&error)))?;
+        Ok(CommandResult {
+            command_id: request.command_id.clone(),
+            status: if status == o3k_network::NetworkPlanStatus::Succeeded {
+                "succeeded"
+            } else {
+                "unknown"
+            }
+            .to_owned(),
+            replayed: true,
+            error_code: String::new(),
+        })
     }
 
     fn register(&self, request: &proto::Register) -> Result<RegisterAck, NetworkAgentError> {
@@ -146,7 +245,11 @@ where
             executor,
             realizer,
             registered,
+            lease_expiry_unix_ms,
         } = &mut *runtime;
+        if *lease_expiry_unix_ms != 0 && now_ms()? >= *lease_expiry_unix_ms {
+            return Err(NetworkAgentError::Malformed("controller lease expired"));
+        }
         if !*registered {
             return Err(NetworkAgentError::Malformed("register is required first"));
         }
@@ -248,7 +351,29 @@ where
                         Err(error) => error_response(error_code(&error)),
                     },
                     Ok(ControlRequest {
+                        body: Some(RequestBody::Lease(lease)),
+                    }) if registered => match service.accept_lease(&lease) {
+                        Ok(ack) => ControlResponse {
+                            body: Some(ResponseBody::Lease(ack)),
+                        },
+                        Err(error) => error_response(error_code(&error)),
+                    },
+                    Ok(ControlRequest {
+                        body: Some(RequestBody::Observe(observe)),
+                    }) if registered => match service.observe(&observe) {
+                        Ok(result) => ControlResponse {
+                            body: Some(ResponseBody::Result(result)),
+                        },
+                        Err(error) => error_response(error_code(&error)),
+                    },
+                    Ok(ControlRequest {
                         body: Some(RequestBody::Command(_)),
+                    }) => error_response("register_required"),
+                    Ok(ControlRequest {
+                        body: Some(RequestBody::Lease(_)),
+                    })
+                    | Ok(ControlRequest {
+                        body: Some(RequestBody::Observe(_)),
                     }) => error_response("register_required"),
                     Ok(ControlRequest { body: None }) => error_response("empty_request"),
                     Err(_) => error_response("malformed_request"),
@@ -264,6 +389,39 @@ where
 
 fn parse_uuid(value: &str, field: &'static str) -> Result<Uuid, NetworkAgentError> {
     Uuid::parse_str(value).map_err(|_| NetworkAgentError::Malformed(field))
+}
+
+fn now_ms() -> Result<u64, NetworkAgentError> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| NetworkAgentError::Malformed("system clock before epoch"))?
+        .as_millis() as u64)
+}
+
+fn lease_path(executor: &NetworkPlanExecutor) -> std::path::PathBuf {
+    executor.state_root().join("controller-lease.json")
+}
+
+fn load_lease(executor: &NetworkPlanExecutor) -> Result<Option<PersistedLease>, std::io::Error> {
+    match fs::read(lease_path(executor)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt controller lease")
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn store_lease(
+    executor: &NetworkPlanExecutor,
+    lease: &PersistedLease,
+) -> Result<(), std::io::Error> {
+    let path = lease_path(executor);
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(lease)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "lease serialization"))?;
+    fs::write(&tmp, bytes)?;
+    fs::rename(tmp, path)
 }
 
 fn error_response(code: &str) -> ControlResponse {

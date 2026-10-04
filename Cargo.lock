@@ -1927,6 +1927,7 @@ dependencies = [
  "o3k-network-protocol",
  "prost",
  "rustls",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
