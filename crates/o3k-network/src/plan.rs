@@ -108,8 +108,13 @@ impl NodeNetworkPlan {
             || fabric.local_underlay_mtu == 0
             || fabric.local_fabric_mtu == 0
             || fabric.local_fabric_mtu > fabric.local_underlay_mtu
-            || fabric.local_fabric_mtu != fabric.local_underlay_mtu.saturating_sub(60)
-            || fabric.tenant_mtu != fabric.local_fabric_mtu.saturating_sub(50)
+            || !matches!(
+                fabric
+                    .local_underlay_mtu
+                    .saturating_sub(fabric.local_fabric_mtu),
+                60 | 80
+            )
+            || fabric.tenant_mtu > fabric.local_fabric_mtu.saturating_sub(50)
             || fabric.directory_generation == 0
             || fabric.tenant_mtu == 0
             || fabric.tenant_mtu > fabric.local_fabric_mtu

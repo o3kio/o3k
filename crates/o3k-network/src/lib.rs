@@ -25,7 +25,10 @@ pub use execution::{
     NetworkPlanDispatcher, NetworkPlanExecutor, NetworkPlanRealizer, NetworkPlanStatus,
     PlanAdmission, journal_path,
 };
-pub use fabric::{FabricBackend, FabricError, FabricRealizer, InMemoryFabricBackend};
+pub use fabric::{
+    FabricBackend, FabricError, FabricRealizer, FabricRealmPlanError, FabricRealmPlanSet,
+    InMemoryFabricBackend, compile_fabric_realm_plans,
+};
 pub use gateway::{
     InMemoryL3GatewayBackend, L3GatewayBackend, L3GatewayError, L3GatewayRealizer,
     LinuxL3GatewayProvider, RealmExecutionContext, compile_l3_gateway_execution_plan,

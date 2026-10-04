@@ -187,6 +187,7 @@ impl Harness {
             },
             network_external_realm_id: None,
             network_agent: None,
+            fabric_reconciler: None,
             public_allocator: None,
             unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
         });

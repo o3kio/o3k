@@ -299,6 +299,10 @@ pub struct FabricHostIdentity {
     pub fabric_mtu: u16,
 }
 
+/// Canonical public Fabric host identity named by SPEC-0049. Kept as an alias
+/// for source compatibility with the P11 planning types introduced earlier.
+pub type FabricHostTransportIdentity = FabricHostIdentity;
+
 /// Semantic route intent for a remote endpoint. The provider may realize this
 /// as a host-local IPv4 /32 route, but the route never becomes endpoint
 /// authority by itself.
@@ -1022,20 +1026,39 @@ impl RealmEndpointDirectory {
         if local_identity.host_id.is_empty() {
             return Err(EndpointDirectoryError::MissingLocalFabricIdentity);
         }
-        // The host transport is IPv4 WireGuard in the accepted edge profile:
-        // 60 bytes of WireGuard overhead followed by 50 bytes of VXLAN/L2
-        // encapsulation.  Keep the derivation explicit so a near-boundary
-        // packet cannot be admitted against an unverified conservative value.
-        let expected_local_fabric_mtu = local_identity.underlay_mtu.checked_sub(60);
+        // WireGuard overhead depends on the underlay endpoint address family.
+        // A realm uses the smallest advertised fabric MTU across participants
+        // so a lower-MTU peer cannot silently black-hole supported packets.
+        let local_endpoint = local_identity
+            .underlay_endpoint
+            .parse::<std::net::SocketAddr>()
+            .ok();
+        let overhead = |identity: &FabricHostIdentity| {
+            identity
+                .underlay_endpoint
+                .parse::<std::net::SocketAddr>()
+                .ok()
+                .map(|endpoint| if endpoint.is_ipv4() { 60 } else { 80 })
+        };
+        let expected_local_fabric_mtu = local_endpoint.and_then(|endpoint| {
+            local_identity
+                .underlay_mtu
+                .checked_sub(if endpoint.is_ipv4() { 60 } else { 80 })
+        });
         let expected_tenant_mtu = expected_local_fabric_mtu.and_then(|mtu| mtu.checked_sub(50));
         if expected_local_fabric_mtu != Some(local_identity.fabric_mtu)
-            || expected_tenant_mtu != Some(tenant_mtu)
+            || expected_tenant_mtu.is_none_or(|maximum| tenant_mtu > maximum)
+            || tenant_mtu < 576
         {
             return Err(EndpointDirectoryError::InvalidMtu);
         }
         if host_identities.iter().any(|identity| {
-            identity.fabric_mtu != identity.underlay_mtu.saturating_sub(60)
-                || identity.fabric_mtu != local_identity.fabric_mtu
+            overhead(identity).is_none_or(|overhead| {
+                identity.underlay_mtu.checked_sub(overhead) != Some(identity.fabric_mtu)
+            }) || identity
+                .fabric_mtu
+                .checked_sub(50)
+                .is_none_or(|maximum| tenant_mtu > maximum)
         }) {
             return Err(EndpointDirectoryError::InvalidMtu);
         }

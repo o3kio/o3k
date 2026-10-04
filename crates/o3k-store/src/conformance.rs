@@ -63,13 +63,14 @@ use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
     ArtifactTransferUpdate, CanonicalOperationRecord, ComputeRepository, ControllerEpoch,
     ControllerId, ControllerSession, ControllerState, CoordinationRepository, DurableStore,
-    IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity,
-    ImageOverlayOwnershipRecord, ImageOverlayState, ImageOverlayUpdate, ImageRepository,
-    KeypairRecord, KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord,
-    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
-    KeystoneServiceRecord, KeystoneUserRecord, LeaseAcquireOutcome, LifecycleTerminalization,
-    NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
-    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    FabricHostTransportIdentityRecord, IdempotencyReservationRequest, IdentityRepository,
+    ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayState,
+    ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
+    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
+    LeaseAcquireOutcome, LifecycleTerminalization, NetworkIntentRecord, NetworkRecord,
+    NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
+    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementRepository, PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
     StoreError, SubnetRecord, VolumeAttachmentRecord, VolumeAttachmentRepository,
     quota::QuotaRepository,
@@ -1548,6 +1549,49 @@ pub async fn test_image_repository<S: StoreUnderTest>(store: Arc<S>) {
 }
 
 pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
+    let fabric_host = FabricHostTransportIdentityRecord {
+        host_id: format!("fabric-host-{}", Uuid::now_v7()),
+        agent_id: format!("fabric-agent-{}", Uuid::now_v7()),
+        public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
+        underlay_endpoint: "198.18.0.1:65001".to_owned(),
+        fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
+        provider_version: "0.1.5".to_owned(),
+        fabric_generation: 1,
+        underlay_mtu: 1500,
+        fabric_mtu: 1440,
+        administrative_state: "enabled".to_owned(),
+    };
+    assert_eq!(
+        store
+            .upsert_fabric_host_identity(&fabric_host, None)
+            .await
+            .expect("enroll Fabric host"),
+        fabric_host
+    );
+    assert_eq!(
+        store
+            .get_fabric_host_identity(&fabric_host.host_id)
+            .await
+            .expect("read Fabric host identity"),
+        Some(fabric_host.clone())
+    );
+    assert_eq!(
+        store
+            .upsert_fabric_host_identity(&fabric_host, Some(1))
+            .await
+            .expect("idempotent Fabric host enrollment"),
+        fabric_host
+    );
+    let mut duplicate_transport = fabric_host.clone();
+    duplicate_transport.host_id.push_str("-duplicate");
+    duplicate_transport.agent_id.push_str("-duplicate");
+    assert!(matches!(
+        store
+            .upsert_fabric_host_identity(&duplicate_transport, None)
+            .await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+
     let proj = format!("proj-{}", Uuid::now_v7());
     let other_proj = format!("proj-{}", Uuid::now_v7());
 
@@ -1721,6 +1765,7 @@ pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
         status: "DOWN".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
     };
     store.insert_port(&port).await.expect("insert_port");
 
@@ -2209,6 +2254,7 @@ pub async fn test_duplicate_port_ip_mac_conflict<S: StoreUnderTest>(store: Arc<S
         mac_address: "fa:16:3e:00:11:22".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
         status: "ACTIVE".to_owned(),
     };
     store.insert_port(&port1).await.expect("insert port 1");
@@ -2225,6 +2271,7 @@ pub async fn test_duplicate_port_ip_mac_conflict<S: StoreUnderTest>(store: Arc<S
         mac_address: "fa:16:3e:00:11:33".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
         status: "ACTIVE".to_owned(),
     };
     let dup_ip_err = store.insert_port(&port2_dup_ip).await;
@@ -2245,6 +2292,7 @@ pub async fn test_duplicate_port_ip_mac_conflict<S: StoreUnderTest>(store: Arc<S
         mac_address: "fa:16:3e:00:11:22".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
         status: "ACTIVE".to_owned(),
     };
     let dup_mac_err = store.insert_port(&port3_dup_mac).await;

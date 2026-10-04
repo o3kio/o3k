@@ -714,6 +714,7 @@ async fn postgres_p13_2c_endpoint_port_atomic_lifecycle_and_reopen() {
         status: "ACTIVE".into(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
     };
     store
         .insert_canonical_endpoint_and_port(&endpoint, &port)

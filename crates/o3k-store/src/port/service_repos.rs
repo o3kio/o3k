@@ -7,15 +7,15 @@ use crate::domain::records::{
     AuditEventRecord, BootstrapStateRecord, BuildingBlockRecord, CanonicalAddressPoolRecord,
     CanonicalAddressRealmRecord, CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord,
     CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord, CanonicalNetworkRecord,
-    CanonicalRealmBindingRecord, CloudProfileRecord, EnrollmentGrantRecord, FederatedBindingRecord,
-    ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord, KeystoneEndpointRecord,
-    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
-    KeystoneServiceRecord, KeystoneUserRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
-    NetworkRecord, OperatorAssignmentRecord, PlacementAllocationRecord, PlacementCapacitySummary,
-    PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
-    PlacementProviderStateRecord, PlacementReconcileRecord, PortRecord, ResourceRecord,
-    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
-    VolumeAttachmentRecord,
+    CanonicalRealmBindingRecord, CloudProfileRecord, EnrollmentGrantRecord,
+    FabricHostTransportIdentityRecord, FederatedBindingRecord, ImageMetadataRecord, KeypairRecord,
+    KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
+    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, OperatorAssignmentRecord,
+    PlacementAllocationRecord, PlacementCapacitySummary, PlacementIntentRecord,
+    PlacementInventoryRecord, PlacementProviderRecord, PlacementProviderStateRecord,
+    PlacementReconcileRecord, PortRecord, ResourceRecord, SecurityGroupBindingRecord,
+    SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord, VolumeAttachmentRecord,
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
@@ -336,6 +336,21 @@ pub trait ImageRepository: Send + Sync + QuotaRepository {
 pub trait NetworkRepository:
     Send + Sync + DurableStore + QuotaRepository + crate::CanonicalPolicyRepository
 {
+    async fn get_fabric_host_identity(
+        &self,
+        host_id: &str,
+    ) -> Result<Option<FabricHostTransportIdentityRecord>, StoreError>;
+    async fn list_fabric_host_identities(
+        &self,
+    ) -> Result<Vec<FabricHostTransportIdentityRecord>, StoreError>;
+    /// Inserts a new accepted host identity when `expected_generation` is
+    /// absent, or replaces the current generation with exactly its successor.
+    /// Exact same-generation replay is idempotent; conflicting replay fails.
+    async fn upsert_fabric_host_identity(
+        &self,
+        identity: &FabricHostTransportIdentityRecord,
+        expected_generation: Option<u64>,
+    ) -> Result<FabricHostTransportIdentityRecord, StoreError>;
     /// Resolves canonical ownership for authorization without exposing an
     /// unscoped public read API. The network service uses this only to build
     /// an authorization target before applying project non-disclosure.
@@ -529,6 +544,12 @@ pub trait NetworkRepository:
         realm_id: &Uuid,
         expected_generation: u64,
     ) -> Result<CanonicalAddressRealmRecord, StoreError>;
+    async fn advance_canonical_realm_generation(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalAddressRealmRecord, StoreError>;
     async fn finalize_canonical_realm_deletion(
         &self,
         project_id: &str,
@@ -539,6 +560,15 @@ pub trait NetworkRepository:
         &self,
         realm_id: &Uuid,
     ) -> Result<Vec<CanonicalRealmBindingRecord>, StoreError>;
+    async fn insert_canonical_realm_binding(
+        &self,
+        binding: &CanonicalRealmBindingRecord,
+    ) -> Result<(), StoreError>;
+    async fn get_canonical_realm_binding(
+        &self,
+        fabric_domain_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Option<CanonicalRealmBindingRecord>, StoreError>;
     async fn delete_canonical_realm_binding(
         &self,
         binding: &CanonicalRealmBindingRecord,

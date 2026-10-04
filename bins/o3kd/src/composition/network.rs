@@ -1,15 +1,32 @@
 use async_trait::async_trait;
 use o3k_network;
 use o3k_network_protocol;
+use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetworkAgentControlTarget {
+    host_id: String,
+    agent_id: String,
+    endpoint: String,
+    tls_server_name: String,
+}
+
+#[derive(Clone)]
+struct NetworkAgentTransport {
+    endpoint: String,
+    server_name: String,
+}
+
 #[derive(Clone)]
 pub(crate) struct NetworkAgentDispatcher {
-    pub(crate) endpoint: String,
-    pub(crate) server_name: String,
+    legacy_target: Option<NetworkAgentTransport>,
+    fabric_targets: BTreeMap<String, NetworkAgentControlTarget>,
     pub(crate) ca_certificate: PathBuf,
     pub(crate) client_certificate: PathBuf,
     pub(crate) client_key: PathBuf,
@@ -28,30 +45,648 @@ pub(crate) fn network_dispatcher_from_env()
         .iter()
         .map(|name| std::env::var(name).ok())
         .collect::<Vec<_>>();
-    if values.iter().all(Option::is_none) {
+    let directory_json = std::env::var("O3K_NETWORK_AGENT_DIRECTORY").ok();
+    if values.iter().all(Option::is_none) && directory_json.is_none() {
         return Ok(None);
     }
-    if values.iter().any(Option::is_none) {
-        return Err("all O3K_NETWORK_AGENT_* transport variables are required".into());
+    let credentials_configured = values[2..].iter().all(Option::is_some);
+    if !credentials_configured {
+        return Err("O3K network agent CA, client certificate, and client key are required".into());
     }
-    let [
-        endpoint,
-        server_name,
-        ca_certificate,
-        client_certificate,
-        client_key,
-    ] = values
-        .try_into()
-        .map_err(|_| "invalid network agent transport configuration")?;
-    Ok(Some(Arc::new(NetworkAgentDispatcher {
-        endpoint: endpoint.ok_or("missing network agent endpoint")?,
-        server_name: server_name.ok_or("missing network agent server name")?,
-        ca_certificate: PathBuf::from(ca_certificate.ok_or("missing network agent CA")?),
-        client_certificate: PathBuf::from(
-            client_certificate.ok_or("missing network agent client certificate")?,
+    let (legacy_target, fabric_targets) = match (values[0].as_ref(), values[1].as_ref(), directory_json) {
+        (Some(endpoint), Some(server_name), None) => (
+            Some(NetworkAgentTransport { endpoint: endpoint.clone(), server_name: server_name.clone() }),
+            BTreeMap::new(),
         ),
-        client_key: PathBuf::from(client_key.ok_or("missing network agent client key")?),
+        (None, None, Some(json)) => {
+            let configured: Vec<NetworkAgentControlTarget> = serde_json::from_str(&json)?;
+            let mut targets = BTreeMap::new();
+            let mut host_ids = std::collections::BTreeSet::new();
+            for target in configured {
+                if target.host_id.trim().is_empty()
+                    || target.agent_id.trim().is_empty()
+                    || !target.endpoint.starts_with("https://")
+                    || target.tls_server_name.trim().is_empty()
+                    || !host_ids.insert(target.host_id.clone())
+                    || targets.insert(target.agent_id.clone(), target).is_some()
+                {
+                    return Err("O3K_NETWORK_AGENT_DIRECTORY contains an invalid or duplicate target".into());
+                }
+            }
+            if targets.is_empty() {
+                return Err("O3K_NETWORK_AGENT_DIRECTORY must contain at least one target".into());
+            }
+            (None, targets)
+        }
+        _ => return Err("configure either the legacy single-agent endpoint or O3K_NETWORK_AGENT_DIRECTORY, not both".into()),
+    };
+    Ok(Some(Arc::new(NetworkAgentDispatcher {
+        legacy_target,
+        fabric_targets,
+        ca_certificate: PathBuf::from(values[2].as_ref().ok_or("missing network agent CA")?),
+        client_certificate: PathBuf::from(
+            values[3]
+                .as_ref()
+                .ok_or("missing network agent client certificate")?,
+        ),
+        client_key: PathBuf::from(
+            values[4]
+                .as_ref()
+                .ok_or("missing network agent client key")?,
+        ),
     })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FabricHostEnrollmentConfig {
+    host_id: String,
+    agent_id: String,
+    public_key: String,
+    underlay_endpoint: String,
+    fabric_transport_ip: String,
+    provider_version: String,
+    fabric_generation: u64,
+    underlay_mtu: u16,
+    fabric_mtu: u16,
+    administrative_state: String,
+}
+
+/// Loads operator-enrolled, non-secret host identities into canonical durable
+/// state. A conflicting current identity is rejected; rotating one requires
+/// an explicit successor generation in configuration.
+pub(crate) async fn enroll_fabric_hosts_from_env(
+    network: &o3k_network::NetworkService,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(json) = std::env::var("O3K_FABRIC_HOST_IDENTITIES").ok() else {
+        return Ok(());
+    };
+    let configured: Vec<FabricHostEnrollmentConfig> = serde_json::from_str(&json)?;
+    if configured.is_empty() {
+        return Err("O3K_FABRIC_HOST_IDENTITIES must not be an empty list".into());
+    }
+    let mut host_ids = std::collections::BTreeSet::new();
+    for host in configured {
+        if !host_ids.insert(host.host_id.clone()) {
+            return Err("O3K_FABRIC_HOST_IDENTITIES has duplicate stable host IDs".into());
+        }
+        let identity = o3k_store::FabricHostTransportIdentityRecord {
+            host_id: host.host_id,
+            agent_id: host.agent_id,
+            public_key: host.public_key,
+            underlay_endpoint: host.underlay_endpoint,
+            fabric_transport_ip: host.fabric_transport_ip.parse()?,
+            provider_version: host.provider_version,
+            fabric_generation: host.fabric_generation,
+            underlay_mtu: host.underlay_mtu,
+            fabric_mtu: host.fabric_mtu,
+            administrative_state: host.administrative_state,
+        };
+        let current = network
+            .list_fabric_host_transport_identities()
+            .await?
+            .into_iter()
+            .find(|current| current.host_id == identity.host_id);
+        let expected_generation = match current {
+            None => None,
+            Some(current) if current == identity => Some(identity.fabric_generation),
+            Some(current) if identity.fabric_generation == current.fabric_generation + 1 => {
+                Some(current.fabric_generation)
+            }
+            Some(_) => return Err("Fabric host identity conflicts with durable generation".into()),
+        };
+        network
+            .enroll_fabric_host_transport_identity(&identity, expected_generation)
+            .await?;
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+pub(crate) struct FabricRealmReconciler {
+    pub(crate) network: o3k_network::NetworkService,
+    pub(crate) registry: Arc<dyn o3k_provider::AgentNodeRegistry>,
+    pub(crate) dispatcher: Arc<dyn o3k_network::NetworkPlanDispatcher>,
+    pub(crate) controller: o3k_network::NetworkControllerLease,
+    pub(crate) fabric_domain_id: Uuid,
+    pub(crate) network_external_realm_id: Option<Uuid>,
+    pub(crate) public_allocator: Option<Arc<o3k_network::PublicAddressAllocator>>,
+}
+
+fn fabric_identity(
+    identity: &o3k_store::FabricHostTransportIdentityRecord,
+) -> o3k_domain::FabricHostIdentity {
+    o3k_domain::FabricHostIdentity {
+        host_id: identity.host_id.clone(),
+        public_key: identity.public_key.clone(),
+        underlay_endpoint: identity.underlay_endpoint.clone(),
+        fabric_transport_ip: identity.fabric_transport_ip,
+        provider_version: identity.provider_version.clone(),
+        fabric_generation: identity.fabric_generation,
+        underlay_mtu: identity.underlay_mtu,
+        fabric_mtu: identity.fabric_mtu,
+    }
+}
+
+impl FabricRealmReconciler {
+    pub(crate) async fn reconcile_realm(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        operation_id: Uuid,
+        deadline_unix_ms: u64,
+    ) -> Result<(), String> {
+        self.reconcile_realm_internal(project_id, network_id, operation_id, deadline_unix_ms, None)
+            .await
+    }
+
+    pub(crate) async fn reconcile_realm_after_unbind(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        operation_id: Uuid,
+        deadline_unix_ms: u64,
+        departing_agent_id: &str,
+    ) -> Result<(), String> {
+        self.reconcile_realm_internal(
+            project_id,
+            network_id,
+            operation_id,
+            deadline_unix_ms,
+            Some(departing_agent_id),
+        )
+        .await
+    }
+
+    /// Reconstructs the complete desired realm directory from canonical
+    /// endpoints plus accepted port bindings, then sends one host-local v3
+    /// plan to each current participating agent.
+    async fn reconcile_realm_internal(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        operation_id: Uuid,
+        deadline_unix_ms: u64,
+        departing_agent_id: Option<&str>,
+    ) -> Result<(), String> {
+        let realms = self
+            .network
+            .list_canonical_realms_for_project(project_id, network_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|realm| realm.state == "active")
+            .collect::<Vec<_>>();
+        let [realm_record] = realms.as_slice() else {
+            return Err(
+                "Fabric v3 requires exactly one active AddressRealm per network".to_owned(),
+            );
+        };
+        let (prefix_address, prefix_len) = realm_record
+            .prefix
+            .split_once('/')
+            .ok_or_else(|| "canonical AddressRealm prefix is malformed".to_owned())?;
+        let prefix = o3k_domain::Ipv4Prefix::new(
+            prefix_address
+                .parse()
+                .map_err(|_| "canonical AddressRealm IPv4 prefix is malformed")?,
+            prefix_len
+                .parse()
+                .map_err(|_| "canonical AddressRealm prefix length is malformed")?,
+        )
+        .ok_or_else(|| "canonical AddressRealm prefix is invalid".to_owned())?;
+        let realm = o3k_domain::AddressRealm {
+            id: realm_record.id,
+            network_id,
+            project_id: project_id.to_owned(),
+            prefix,
+            overlapping_prefixes: realm_record.overlapping_prefixes,
+        };
+        let endpoints = self
+            .network
+            .list_canonical_endpoints_for_project(project_id, realm.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let identities = self
+            .network
+            .list_fabric_host_transport_identities()
+            .await
+            .map_err(|error| error.to_string())?;
+        let identities_by_agent = identities
+            .into_iter()
+            .map(|identity| (identity.agent_id.clone(), identity))
+            .collect::<BTreeMap<_, _>>();
+        let departing_identity = departing_agent_id
+            .map(|agent_id| {
+                identities_by_agent
+                    .get(agent_id)
+                    .cloned()
+                    .ok_or_else(|| "departing endpoint host lacks Fabric enrollment".to_owned())
+            })
+            .transpose()?;
+        let mut locations = Vec::new();
+        let mut identities_by_host = BTreeMap::new();
+        let mut selected_ports = BTreeMap::new();
+        for endpoint in endpoints
+            .into_iter()
+            .filter(|endpoint| endpoint.state == "active")
+        {
+            let port = self
+                .network
+                .get_port_for_project(project_id, endpoint.id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let Some(agent_id) = port.binding_host.as_deref() else {
+                continue;
+            };
+            if port.binding_state.as_deref() == Some("down") {
+                continue;
+            }
+            if port.binding_generation == 0 {
+                return Err("selected Fabric endpoint lacks placement generation".to_owned());
+            }
+            let identity = identities_by_agent
+                .get(agent_id)
+                .ok_or_else(|| "selected endpoint host lacks Fabric enrollment".to_owned())?;
+            if identity.administrative_state != "enabled" {
+                return Err("selected endpoint host is disabled or draining for Fabric".to_owned());
+            }
+            let snapshot = self
+                .registry
+                .snapshot(agent_id)
+                .await
+                .ok_or_else(|| "selected endpoint compute agent is not enrolled".to_owned())?;
+            if snapshot.agent_id != agent_id
+                || snapshot.availability != o3k_provider::AgentAvailability::Available
+                || snapshot.administrative_state != o3k_provider::AgentAdministrativeState::Enabled
+            {
+                return Err("selected endpoint compute agent is stale or ineligible".to_owned());
+            }
+            let fabric_identity = fabric_identity(identity);
+            match identities_by_host.get(&fabric_identity.host_id) {
+                Some(existing) if existing != &fabric_identity => {
+                    return Err("conflicting Fabric identities resolve to one host".to_owned());
+                }
+                Some(_) => {}
+                None => {
+                    identities_by_host.insert(fabric_identity.host_id.clone(), fabric_identity);
+                }
+            }
+            locations.push(o3k_domain::EndpointLocation {
+                endpoint_id: endpoint.id,
+                project_id: endpoint.project_id,
+                realm_id: endpoint.realm_id,
+                fixed_ip: endpoint.fixed_ip,
+                mac: endpoint.mac,
+                selected_host: identity.host_id.clone(),
+                endpoint_generation: endpoint.generation,
+                placement_generation: port.binding_generation,
+            });
+            selected_ports.insert(endpoint.id, port);
+        }
+        let participants = identities_by_host.values().cloned().collect::<Vec<_>>();
+        let binding = self
+            .network
+            .ensure_vxlan_realm_binding(self.fabric_domain_id, realm_record)
+            .await
+            .map_err(|error| error.to_string())?;
+        if participants.is_empty() {
+            let Some(identity_record) = departing_identity.as_ref() else {
+                return Err("Fabric realm has no current participating endpoint".to_owned());
+            };
+            let identity = fabric_identity(identity_record);
+            let directory = o3k_domain::RealmEndpointDirectory::build(
+                &realm,
+                Vec::new(),
+                &[],
+                realm_record.generation,
+            )
+            .map_err(|error| error.to_string())?;
+            let tenant_mtu = identity.fabric_mtu.checked_sub(50).ok_or_else(|| {
+                "departing Fabric host MTU is below the tenant minimum".to_owned()
+            })?;
+            let fabric = directory
+                .compile_fabric_plan(
+                    &identity,
+                    std::slice::from_ref(&identity),
+                    tenant_mtu,
+                    &binding,
+                )
+                .map_err(|error| error.to_string())?;
+            let plan = o3k_network::NodeNetworkPlan {
+                schema_version: o3k_network::NODE_NETWORK_PLAN_SCHEMA_VERSION,
+                plan_id: Uuid::new_v5(
+                    &operation_id,
+                    format!("fabric-realm-remove:{}:{}", realm.id, identity.host_id).as_bytes(),
+                ),
+                node_id: identity.host_id.clone(),
+                operation_id,
+                deadline_unix_ms,
+                resource_generations: BTreeMap::from([(realm.id, realm_record.generation)]),
+                intents: Vec::new(),
+                fabric: None,
+                gateway: None,
+                fingerprint_sha256: String::new(),
+            }
+            .with_fabric(fabric)
+            .map_err(|error| error.to_string())?;
+            return self
+                .dispatch_realm_plan(
+                    &identity_record.agent_id,
+                    &identity.host_id,
+                    plan,
+                    o3k_network::NetworkPlanAction::Remove,
+                    operation_id,
+                    deadline_unix_ms,
+                )
+                .await;
+        }
+        let plan_set = o3k_network::compile_fabric_realm_plans(
+            &realm,
+            locations,
+            &participants,
+            &binding,
+            realm_record.generation,
+            operation_id,
+            deadline_unix_ms,
+        )
+        .map_err(|error| error.to_string())?;
+        let all_policies = self
+            .network
+            .list_policies_for_project(project_id, network_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let realm_generations = plan_set
+            .plans
+            .values()
+            .next()
+            .map(|plan| plan.resource_generations.clone())
+            .unwrap_or_else(|| BTreeMap::from([(realm.id, realm_record.generation)]));
+        let external_realm = if let Some(external_network_id) = self.network_external_realm_id {
+            let external_realms = self
+                .network
+                .list_canonical_realms_for_project(project_id, external_network_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|realm| realm.state == "active")
+                .collect::<Vec<_>>();
+            match external_realms.as_slice() {
+                [realm] => Some(realm.id),
+                _ => {
+                    return Err(
+                        "configured external AddressRealm is missing or ambiguous".to_owned()
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        for (host_id, mut plan) in plan_set.plans {
+            let local_endpoints = plan_set
+                .directory
+                .entries
+                .iter()
+                .filter(|entry| entry.selected_host == host_id)
+                .collect::<Vec<_>>();
+            for endpoint in local_endpoints {
+                let port = selected_ports
+                    .get(&endpoint.endpoint_id)
+                    .ok_or_else(|| "local Fabric endpoint lost its placement record".to_owned())?;
+                let subnet_id = port
+                    .subnet_id
+                    .ok_or_else(|| "Fabric endpoint has no subnet".to_owned())?;
+                let subnet = self
+                    .network
+                    .get_subnet_for_project(project_id, subnet_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let policies = all_policies
+                    .iter()
+                    .filter(|policy| policy.endpoint_id == endpoint.endpoint_id)
+                    .cloned()
+                    .collect();
+                let defaults = self
+                    .network
+                    .policy_defaults_for_endpoint(project_id, endpoint.endpoint_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let public_address = self
+                    .public_allocator
+                    .as_ref()
+                    .map(|allocator| {
+                        allocator
+                            .list(project_id)
+                            .map_err(|error| error.to_string())
+                    })
+                    .transpose()?
+                    .and_then(|bindings| {
+                        bindings
+                            .into_iter()
+                            .find(|allocation| allocation.endpoint_id == Some(endpoint.endpoint_id))
+                            .map(|allocation| allocation.public_address)
+                    });
+                let attachment = o3k_network::compile_attachment_plan_with_defaults(
+                    o3k_network::AttachmentPlanInput {
+                        endpoint_id: endpoint.endpoint_id,
+                        realm_id: realm.id,
+                        project_id,
+                        mac: &endpoint.mac,
+                        fixed_ip: endpoint.fixed_ip,
+                        subnet_cidr: &subnet.cidr,
+                        node_id: &host_id,
+                        operation_id,
+                        deadline_unix_ms,
+                        public_address,
+                        external_realm_id: external_realm,
+                        policies,
+                    },
+                    defaults,
+                )
+                .map_err(|error| error.to_string())?;
+                plan.intents.extend(attachment.intents);
+            }
+            let fabric = plan
+                .fabric
+                .take()
+                .ok_or_else(|| "compiled realm plan has no Fabric payload".to_owned())?;
+            plan = plan
+                .with_fabric(fabric)
+                .map_err(|error| error.to_string())?;
+            let target_agent_id = identities_by_agent
+                .values()
+                .find(|identity| identity.host_id == host_id)
+                .map(|identity| identity.agent_id.as_str())
+                .ok_or_else(|| "Fabric plan target has no compute agent mapping".to_owned())?;
+            let snapshot = self
+                .registry
+                .snapshot(target_agent_id)
+                .await
+                .ok_or_else(|| "Fabric plan target compute agent is not enrolled".to_owned())?;
+            if snapshot.agent_id != target_agent_id
+                || snapshot.availability != o3k_provider::AgentAvailability::Available
+                || snapshot.administrative_state != o3k_provider::AgentAdministrativeState::Enabled
+            {
+                return Err("Fabric plan target compute agent is stale or ineligible".to_owned());
+            }
+            let lease = self
+                .registry
+                .lease_current_epoch(target_agent_id, &snapshot.agent_epoch)
+                .await
+                .ok_or_else(|| "Fabric plan target agent epoch is stale".to_owned())?;
+            let command_id = Uuid::new_v5(
+                &operation_id,
+                format!(
+                    "fabric-realm-command:{}:{}:{}",
+                    realm.id, host_id, realm_record.generation
+                )
+                .as_bytes(),
+            );
+            let result = self
+                .dispatcher
+                .dispatch(o3k_network::NetworkPlanCommand {
+                    command_id,
+                    operation_id,
+                    idempotency_key: format!(
+                        "fabric-realm:{}:{}:{}",
+                        realm.id, host_id, realm_record.generation
+                    ),
+                    action: o3k_network::NetworkPlanAction::Apply,
+                    target: o3k_network::NetworkAgentIdentity {
+                        agent_id: target_agent_id.to_owned(),
+                        agent_epoch: snapshot.agent_epoch.clone(),
+                    },
+                    controller: self.controller.clone(),
+                    deadline_unix_ms,
+                    plan,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            drop(lease);
+            if result != o3k_network::NetworkPlanStatus::Succeeded {
+                return Err("Fabric realm plan outcome is not observed successful".to_owned());
+            }
+        }
+        if let Some(identity_record) = departing_identity
+            && !identities_by_host.contains_key(&identity_record.host_id)
+        {
+            let identity = fabric_identity(&identity_record);
+            let mut all_identities = participants.clone();
+            all_identities.push(identity.clone());
+            let tenant_mtu = identity.fabric_mtu.checked_sub(50).ok_or_else(|| {
+                "departing Fabric host MTU is below the tenant minimum".to_owned()
+            })?;
+            let fabric = plan_set
+                .directory
+                .compile_fabric_plan(&identity, &all_identities, tenant_mtu, &binding)
+                .map_err(|error| error.to_string())?;
+            let plan = o3k_network::NodeNetworkPlan {
+                schema_version: o3k_network::NODE_NETWORK_PLAN_SCHEMA_VERSION,
+                plan_id: Uuid::new_v5(
+                    &operation_id,
+                    format!("fabric-realm-remove:{}:{}", realm.id, identity.host_id).as_bytes(),
+                ),
+                node_id: identity.host_id.clone(),
+                operation_id,
+                deadline_unix_ms,
+                resource_generations: realm_generations,
+                intents: Vec::new(),
+                fabric: None,
+                gateway: None,
+                fingerprint_sha256: String::new(),
+            }
+            .with_fabric(fabric)
+            .map_err(|error| error.to_string())?;
+            self.dispatch_realm_plan(
+                &identity_record.agent_id,
+                &identity.host_id,
+                plan,
+                o3k_network::NetworkPlanAction::Remove,
+                operation_id,
+                deadline_unix_ms,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn dispatch_realm_plan(
+        &self,
+        agent_id: &str,
+        host_id: &str,
+        plan: o3k_network::NodeNetworkPlan,
+        action: o3k_network::NetworkPlanAction,
+        operation_id: Uuid,
+        deadline_unix_ms: u64,
+    ) -> Result<(), String> {
+        if plan.node_id != host_id
+            || plan
+                .fabric
+                .as_ref()
+                .is_none_or(|fabric| fabric.local_host != host_id)
+        {
+            return Err("Fabric plan host does not match its dispatch target".to_owned());
+        }
+        let snapshot = self
+            .registry
+            .snapshot(agent_id)
+            .await
+            .ok_or_else(|| "Fabric plan target compute agent is not enrolled".to_owned())?;
+        if snapshot.agent_id != agent_id
+            || snapshot.availability != o3k_provider::AgentAvailability::Available
+            || snapshot.administrative_state != o3k_provider::AgentAdministrativeState::Enabled
+        {
+            return Err("Fabric plan target compute agent is stale or ineligible".to_owned());
+        }
+        let lease = self
+            .registry
+            .lease_current_epoch(agent_id, &snapshot.agent_epoch)
+            .await
+            .ok_or_else(|| "Fabric plan target agent epoch is stale".to_owned())?;
+        let realm_id = plan
+            .fabric
+            .as_ref()
+            .map(|fabric| fabric.realm_id)
+            .ok_or_else(|| "missing Fabric plan".to_owned())?;
+        let generation = plan
+            .fabric
+            .as_ref()
+            .map(|fabric| fabric.directory_generation)
+            .unwrap_or_default();
+        let action_key = match action {
+            o3k_network::NetworkPlanAction::Apply => "apply",
+            o3k_network::NetworkPlanAction::Remove => "remove",
+        };
+        let command_id = Uuid::new_v5(
+            &operation_id,
+            format!("fabric-realm-command:{action_key}:{realm_id}:{host_id}:{generation}")
+                .as_bytes(),
+        );
+        let status = self
+            .dispatcher
+            .dispatch(o3k_network::NetworkPlanCommand {
+                command_id,
+                operation_id,
+                idempotency_key: format!(
+                    "fabric-realm:{action_key}:{realm_id}:{host_id}:{generation}"
+                ),
+                action,
+                target: o3k_network::NetworkAgentIdentity {
+                    agent_id: agent_id.to_owned(),
+                    agent_epoch: snapshot.agent_epoch,
+                },
+                controller: self.controller.clone(),
+                deadline_unix_ms,
+                plan,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        drop(lease);
+        if status != o3k_network::NetworkPlanStatus::Succeeded {
+            return Err("Fabric realm plan outcome is not observed successful".to_owned());
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -60,9 +695,10 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
         &self,
         command: o3k_network::NetworkPlanCommand,
     ) -> Result<o3k_network::NetworkPlanStatus, o3k_network::NetworkDispatchError> {
+        let transport = self.transport_for(&command)?;
         let client = o3k_network_protocol::NetworkAgentClient::connect(
-            &self.endpoint,
-            &self.server_name,
+            &transport.endpoint,
+            &transport.server_name,
             &self.ca_certificate,
             &self.client_certificate,
             &self.client_key,
@@ -124,6 +760,41 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
     }
 }
 
+impl NetworkAgentDispatcher {
+    fn transport_for(
+        &self,
+        command: &o3k_network::NetworkPlanCommand,
+    ) -> Result<NetworkAgentTransport, o3k_network::NetworkDispatchError> {
+        let target = self.fabric_targets.get(&command.target.agent_id);
+        let target_host = command
+            .plan
+            .fabric
+            .as_ref()
+            .map_or(command.plan.node_id.as_str(), |fabric| {
+                fabric.local_host.as_str()
+            });
+        if let Some(target) = target.filter(|target| {
+            target.agent_id == command.target.agent_id && target.host_id == target_host
+        }) {
+            return Ok(NetworkAgentTransport {
+                endpoint: target.endpoint.clone(),
+                server_name: target.tls_server_name.clone(),
+            });
+        }
+        if command.plan.fabric.is_some() || !self.fabric_targets.is_empty() {
+            return Err(o3k_network::NetworkDispatchError::Rejected(
+                "network plan target does not resolve to its enrolled host control endpoint"
+                    .to_owned(),
+            ));
+        }
+        self.legacy_target.clone().ok_or_else(|| {
+            o3k_network::NetworkDispatchError::Rejected(
+                "legacy network agent endpoint is not configured".to_owned(),
+            )
+        })
+    }
+}
+
 pub(crate) fn public_allocator_from_env(
     data_dir: &std::path::Path,
 ) -> Result<Option<o3k_network::PublicAddressAllocator>, Box<dyn std::error::Error>> {
@@ -162,6 +833,7 @@ pub(crate) struct NetworkBindingProjector {
     pub(crate) network_controller: o3k_network::NetworkControllerLease,
     pub(crate) network_external_realm_id: Option<Uuid>,
     pub(crate) network_agent: Option<o3k_network::NetworkAgentIdentity>,
+    pub(crate) fabric_reconciler: Option<Arc<FabricRealmReconciler>>,
     pub(crate) public_allocator: Option<Arc<o3k_network::PublicAddressAllocator>>,
     /// Terminal compute observations can be delivered more than once. Keep
     /// the read/dispatch/unbind sequence single-flight so a concurrent
@@ -333,6 +1005,369 @@ fn select_active_external_realm(
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod dispatcher_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    fn dispatcher() -> NetworkAgentDispatcher {
+        NetworkAgentDispatcher {
+            legacy_target: None,
+            fabric_targets: BTreeMap::from([
+                (
+                    "agent-a".to_owned(),
+                    NetworkAgentControlTarget {
+                        host_id: "compute-a".to_owned(),
+                        agent_id: "agent-a".to_owned(),
+                        endpoint: "https://10.0.0.1:7443".to_owned(),
+                        tls_server_name: "compute-a.internal".to_owned(),
+                    },
+                ),
+                (
+                    "agent-b".to_owned(),
+                    NetworkAgentControlTarget {
+                        host_id: "compute-b".to_owned(),
+                        agent_id: "agent-b".to_owned(),
+                        endpoint: "https://10.0.0.2:7443".to_owned(),
+                        tls_server_name: "compute-b.internal".to_owned(),
+                    },
+                ),
+            ]),
+            ca_certificate: PathBuf::new(),
+            client_certificate: PathBuf::new(),
+            client_key: PathBuf::new(),
+        }
+    }
+
+    fn command(agent_id: &str, host_id: &str) -> o3k_network::NetworkPlanCommand {
+        o3k_network::NetworkPlanCommand {
+            command_id: Uuid::now_v7(),
+            operation_id: Uuid::now_v7(),
+            idempotency_key: "dispatch-test".to_owned(),
+            action: o3k_network::NetworkPlanAction::Apply,
+            target: o3k_network::NetworkAgentIdentity {
+                agent_id: agent_id.to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+            },
+            controller: o3k_network::NetworkControllerLease {
+                controller_id: "controller".to_owned(),
+                controller_epoch: "epoch-1".to_owned(),
+                fencing_token: 1,
+            },
+            deadline_unix_ms: u64::MAX,
+            plan: o3k_network::NodeNetworkPlan {
+                schema_version: o3k_network::NODE_NETWORK_PLAN_SCHEMA_VERSION,
+                plan_id: Uuid::now_v7(),
+                node_id: host_id.to_owned(),
+                operation_id: Uuid::now_v7(),
+                deadline_unix_ms: u64::MAX,
+                resource_generations: BTreeMap::new(),
+                intents: Vec::new(),
+                fabric: None,
+                gateway: None,
+                fingerprint_sha256: String::new(),
+            },
+        }
+    }
+
+    fn fabric_command(agent_id: &str, host_id: &str) -> o3k_network::NetworkPlanCommand {
+        let mut command = command(agent_id, host_id);
+        let realm = o3k_domain::AddressRealm {
+            id: Uuid::from_u128(800),
+            network_id: Uuid::from_u128(801),
+            project_id: "project-a".to_owned(),
+            prefix: o3k_domain::Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 80, 0, 0), 24)
+                .expect("realm prefix"),
+            overlapping_prefixes: false,
+        };
+        let directory = o3k_domain::RealmEndpointDirectory::build(
+            &realm,
+            vec![o3k_domain::EndpointLocation {
+                endpoint_id: Uuid::from_u128(802),
+                project_id: "project-a".to_owned(),
+                realm_id: realm.id,
+                fixed_ip: std::net::Ipv4Addr::new(10, 80, 0, 10),
+                mac: "02:00:00:00:00:10".to_owned(),
+                selected_host: host_id.to_owned(),
+                endpoint_generation: 1,
+                placement_generation: 1,
+            }],
+            &[],
+            1,
+        )
+        .expect("directory");
+        let identity = o3k_domain::FabricHostIdentity {
+            host_id: host_id.to_owned(),
+            public_key: "public-key".to_owned(),
+            underlay_endpoint: "198.18.0.1:65001".to_owned(),
+            fabric_transport_ip: std::net::Ipv4Addr::new(198, 18, 0, 1),
+            provider_version: "0.1.5".to_owned(),
+            fabric_generation: 1,
+            underlay_mtu: 1500,
+            fabric_mtu: 1440,
+        };
+        let binding = o3k_domain::RealmEncapsulationBinding {
+            fabric_domain_id: Uuid::from_u128(803),
+            realm_id: realm.id,
+            provider_kind: o3k_domain::FabricProviderKind::Vxlan,
+            provider_segment_id: 1001,
+            binding_generation: 1,
+        };
+        command.plan.fabric = Some(
+            directory
+                .compile_fabric_plan(&identity, std::slice::from_ref(&identity), 1390, &binding)
+                .expect("Fabric plan"),
+        );
+        command
+    }
+
+    #[test]
+    fn target_aware_dispatch_resolves_each_host_independently() {
+        let dispatcher = dispatcher();
+        let a = dispatcher
+            .transport_for(&fabric_command("agent-a", "compute-a"))
+            .expect("host A target");
+        let b = dispatcher
+            .transport_for(&fabric_command("agent-b", "compute-b"))
+            .expect("host B target");
+        assert_eq!(a.endpoint, "https://10.0.0.1:7443");
+        assert_eq!(b.endpoint, "https://10.0.0.2:7443");
+        assert_ne!(a.server_name, b.server_name);
+    }
+
+    #[test]
+    fn target_aware_dispatch_rejects_unknown_or_mismatched_hosts() {
+        let dispatcher = dispatcher();
+        assert!(
+            dispatcher
+                .transport_for(&fabric_command("agent-b", "compute-a"))
+                .is_err()
+        );
+        assert!(
+            dispatcher
+                .transport_for(&fabric_command("unregistered", "compute-c"))
+                .is_err()
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingDispatcher {
+        commands: Mutex<Vec<o3k_network::NetworkPlanCommand>>,
+    }
+
+    #[async_trait]
+    impl o3k_network::NetworkPlanDispatcher for RecordingDispatcher {
+        async fn dispatch(
+            &self,
+            command: o3k_network::NetworkPlanCommand,
+        ) -> Result<o3k_network::NetworkPlanStatus, o3k_network::NetworkDispatchError> {
+            self.commands
+                .lock()
+                .map_err(|_| o3k_network::NetworkDispatchError::Rejected("poisoned".to_owned()))?
+                .push(command);
+            Ok(o3k_network::NetworkPlanStatus::Succeeded)
+        }
+    }
+
+    fn host_identity(
+        host_id: &str,
+        agent_id: &str,
+        public_key: &str,
+        octet: u8,
+    ) -> o3k_store::FabricHostTransportIdentityRecord {
+        o3k_store::FabricHostTransportIdentityRecord {
+            host_id: host_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+            public_key: public_key.to_owned(),
+            underlay_endpoint: format!("192.0.2.{octet}:65001"),
+            fabric_transport_ip: std::net::Ipv4Addr::new(198, 18, 0, octet),
+            provider_version: "0.1.5".to_owned(),
+            fabric_generation: 1,
+            underlay_mtu: 1500,
+            fabric_mtu: 1440,
+            administrative_state: "enabled".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_network_lifecycle_derives_and_dispatches_three_host_her()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3kd-fabric-reconcile-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root)?;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
+        let network =
+            o3k_network::NetworkService::open_for_test(root.join("network"), repository).await?;
+        let network_record = network
+            .create_network_for_project("project-a", "tenant-a".to_owned())
+            .await?;
+        let subnet = network
+            .create_subnet_for_project(
+                "project-a",
+                network_record.id,
+                "tenant-a-subnet".to_owned(),
+                "10.90.0.0/24".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let endpoints = [
+            (
+                "compute-a",
+                "agent-a",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                1_u8,
+            ),
+            (
+                "compute-b",
+                "agent-b",
+                "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+                2_u8,
+            ),
+            (
+                "compute-c",
+                "agent-c",
+                "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+                3_u8,
+            ),
+        ];
+        let registry = Arc::new(o3k_compute_agent::NodeRegistry::default());
+        for (host_id, agent_id, public_key, octet) in endpoints.iter().copied() {
+            network
+                .enroll_fabric_host_transport_identity(
+                    &host_identity(host_id, agent_id, public_key, octet),
+                    None,
+                )
+                .await?;
+            registry
+                .register(&o3k_compute_agent::proto::RegisterRequest {
+                    agent_id: agent_id.to_owned(),
+                    agent_epoch: "epoch-1".to_owned(),
+                    software_version: "test".to_owned(),
+                    host_label: host_id.to_owned(),
+                    supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+                    capabilities: Some(o3k_compute_agent::proto::Capabilities::default()),
+                })
+                .await?;
+        }
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let reconciler = FabricRealmReconciler {
+            network: network.clone(),
+            registry,
+            dispatcher: dispatcher.clone(),
+            controller: o3k_network::NetworkControllerLease {
+                controller_id: "controller".to_owned(),
+                controller_epoch: "epoch-1".to_owned(),
+                fencing_token: 1,
+            },
+            fabric_domain_id: Uuid::from_u128(990),
+            network_external_realm_id: None,
+            public_allocator: None,
+        };
+        let mut port_by_host = BTreeMap::new();
+        for (index, (host_id, agent_id, _, _)) in endpoints.iter().copied().enumerate() {
+            let port = network
+                .create_port_for_project("project-a", network_record.id, format!("port-{host_id}"))
+                .await?;
+            assert_eq!(port.subnet_id, Some(subnet.id));
+            network
+                .record_fabric_binding_intent("project-a", port.id, agent_id)
+                .await?;
+            port_by_host.insert(host_id.to_owned(), port.id);
+            reconciler
+                .reconcile_realm(
+                    "project-a",
+                    network_record.id,
+                    Uuid::from_u128(991 + index as u128),
+                    u64::MAX,
+                )
+                .await?;
+        }
+        {
+            let commands = dispatcher
+                .commands
+                .lock()
+                .map_err(|_| "recording dispatcher poisoned")?;
+            assert_eq!(commands.len(), 6);
+            for (expected_entries, commands_for_addition) in [
+                (1, &commands[0..1]),
+                (2, &commands[1..3]),
+                (3, &commands[3..6]),
+            ] {
+                let mut addition_hosts = std::collections::BTreeSet::new();
+                for command in commands_for_addition {
+                    let fabric = command
+                        .plan
+                        .fabric
+                        .as_ref()
+                        .ok_or("missing Fabric v3 plan")?;
+                    assert_eq!(command.plan.node_id, fabric.local_host);
+                    assert_eq!(fabric.directory.entries.len(), expected_entries);
+                    assert_eq!(fabric.peers.len(), expected_entries - 1);
+                    addition_hosts.insert(fabric.local_host.clone());
+                }
+                let expected = endpoints[..expected_entries]
+                    .iter()
+                    .map(|(host_id, _, _, _)| (*host_id).to_owned())
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(addition_hosts, expected);
+            }
+        }
+
+        // Unbinding the final endpoint on C keeps the binding tombstone until
+        // the full directory has withdrawn C from A/B HER and C has received
+        // an owned realm removal plan.
+        let departing_port = port_by_host["compute-c"];
+        network
+            .advance_fabric_realm_generation("project-a", network_record.id)
+            .await?;
+        network
+            .project_binding_observation("project-a", departing_port, "agent-c", "down")
+            .await?;
+        reconciler
+            .reconcile_realm_after_unbind(
+                "project-a",
+                network_record.id,
+                Uuid::from_u128(992),
+                u64::MAX,
+                "agent-c",
+            )
+            .await?;
+        network.unbind_port("project-a", departing_port).await?;
+        {
+            let commands = dispatcher
+                .commands
+                .lock()
+                .map_err(|_| "recording dispatcher poisoned")?;
+            assert_eq!(commands.len(), 9);
+            let withdrawn = commands[6..8]
+                .iter()
+                .map(|command| {
+                    let fabric = command.plan.fabric.as_ref().expect("Fabric plan");
+                    assert_eq!(command.action, o3k_network::NetworkPlanAction::Apply);
+                    assert_eq!(fabric.directory.entries.len(), 2);
+                    assert_eq!(fabric.peers.len(), 1);
+                    fabric.local_host.clone()
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                withdrawn,
+                ["compute-a", "compute-b"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            );
+            assert_eq!(commands[8].target.agent_id, "agent-c");
+            assert_eq!(commands[8].action, o3k_network::NetworkPlanAction::Remove);
+        }
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
     async fn project_create_outcome(
@@ -386,10 +1421,13 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
             .get_port_for_project(project_id, port_id)
             .await
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        if let (Some(dispatcher), Some(host)) = (
-            self.network_dispatcher.as_ref(),
-            port.binding_host.as_deref(),
-        ) {
+        let v3_reconciler = self.fabric_reconciler.as_ref();
+        if v3_reconciler.is_none()
+            && let (Some(dispatcher), Some(host)) = (
+                self.network_dispatcher.as_ref(),
+                port.binding_host.as_deref(),
+            )
+        {
             let agent = if let Some(configured) = self.network_agent.as_ref() {
                 if configured.agent_id != host {
                     return Err(
@@ -462,6 +1500,32 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 )
                 .into());
             }
+        }
+        if let (Some(host), Some(reconciler)) = (port.binding_host.as_deref(), v3_reconciler) {
+            // Keep the selected host durable as a down tombstone until every
+            // affected realm plan has converged. A retry can therefore still
+            // identify and withdraw the departing host after an unknown
+            // dispatch outcome or controller restart.
+            if port.binding_state.as_deref() != Some("down") {
+                self.network
+                    .advance_fabric_realm_generation(project_id, port.network_id)
+                    .await
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                self.network
+                    .project_binding_observation(project_id, port_id, host, "down")
+                    .await
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+            }
+            reconciler
+                .reconcile_realm_after_unbind(
+                    project_id,
+                    port.network_id,
+                    operation_id,
+                    super::unix_time_millis().saturating_add(30_000),
+                    host,
+                )
+                .await
+                .map_err(std::io::Error::other)?;
         }
         self.network
             .unbind_port(project_id, port_id)

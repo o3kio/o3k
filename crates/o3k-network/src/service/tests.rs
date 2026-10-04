@@ -1692,6 +1692,18 @@ async fn create_outcome_projection_and_unbind_are_durable_and_idempotent()
             .await,
         Err(NetworkError::NotFound)
     ));
+    // During Fabric v3 withdrawal, the selected host is retained with a down
+    // tombstone until all peer plans converge. A delayed create callback may
+    // not resurrect that endpoint, including after controller restart.
+    service
+        .project_binding_observation("project-a", port.id, "compute-1", "down")
+        .await?;
+    assert!(matches!(
+        service
+            .project_create_outcome("project-a", port.id, PortBindingState::Bound)
+            .await,
+        Err(NetworkError::Conflict)
+    ));
     // Unbind clears the binding idempotently and is durable.
     let unbound = service.unbind_port("project-a", port.id).await?;
     assert_eq!(unbound.binding_host, None);

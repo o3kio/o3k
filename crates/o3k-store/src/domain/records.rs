@@ -357,6 +357,24 @@ pub struct CanonicalRealmBindingRecord {
     pub state: String,
 }
 
+/// Durable, non-secret host Fabric enrollment. The agent relationship is
+/// explicit: `agent_id` is the enrolled compute control-plane identity and
+/// `host_id` is the stable host identity used by Fabric plans. WireGuard
+/// private keys are intentionally absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricHostTransportIdentityRecord {
+    pub host_id: String,
+    pub agent_id: String,
+    pub public_key: String,
+    pub underlay_endpoint: String,
+    pub fabric_transport_ip: Ipv4Addr,
+    pub provider_version: String,
+    pub fabric_generation: u64,
+    pub underlay_mtu: u16,
+    pub fabric_mtu: u16,
+    pub administrative_state: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubnetRecord {
     pub id: Uuid,
@@ -383,6 +401,9 @@ pub struct PortRecord {
     pub status: String,
     pub binding_host: Option<String>,
     pub binding_state: Option<String>,
+    /// Generation of the accepted compute-host placement represented by
+    /// `binding_host`. It advances only when that selected host changes.
+    pub binding_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

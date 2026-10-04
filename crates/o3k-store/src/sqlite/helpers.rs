@@ -422,6 +422,8 @@ pub(super) fn port_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<PortRecord,
         status: row.get("status"),
         binding_host: row.get("binding_host"),
         binding_state: row.get("binding_state"),
+        binding_generation: u64::try_from(row.get::<i64, _>("binding_generation"))
+            .map_err(|_| StoreError::Corrupt("negative port binding generation".to_owned()))?,
     })
 }
 

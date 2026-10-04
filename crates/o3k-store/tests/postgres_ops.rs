@@ -117,6 +117,7 @@ async fn test_postgres_backup_and_restore() {
         mac_address: "fa:16:3e:aa:bb:cc".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
         status: "ACTIVE".to_owned(),
     };
     store.insert_port(&port).await.expect("insert_port");

@@ -56,17 +56,17 @@ pub use domain::records::{
     CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord, CanonicalOperationLifecycleUpdate,
     CanonicalOperationRecord, CanonicalPolicyAttachmentRecord, CanonicalPolicyRealizationRecord,
     CanonicalRealmBindingRecord, CanonicalReusableNetworkPolicyRecord, CloudProfileRecord,
-    DatabaseHealth, EnrollmentGrantRecord, FederatedBindingRecord, IdempotencyReservationRequest,
-    ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate,
-    KeypairRecord, KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord,
-    KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord,
-    KeystoneUserRecord, LifecycleTerminalization, NetworkAddressAllocationRecord,
-    NetworkIntentRecord, NetworkRecord, ObservationUpdate, OperationRecord,
-    OperatorAssignmentRecord, PlacementAllocationRecord, PlacementCapacityClassRecord,
-    PlacementCapacitySummary, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementProviderRecord, PlacementProviderStateRecord, PlacementReconcileRecord,
-    PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
-    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
+    DatabaseHealth, EnrollmentGrantRecord, FabricHostTransportIdentityRecord,
+    FederatedBindingRecord, IdempotencyReservationRequest, ImageMetadataRecord,
+    ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate, KeypairRecord,
+    KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
+    LifecycleTerminalization, NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord,
+    ObservationUpdate, OperationRecord, OperatorAssignmentRecord, PlacementAllocationRecord,
+    PlacementCapacityClassRecord, PlacementCapacitySummary, PlacementIntentRecord,
+    PlacementInventoryRecord, PlacementProviderRecord, PlacementProviderStateRecord,
+    PlacementReconcileRecord, PlacementResourceRecord, PortRecord, ProviderReference,
+    ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
     StoredIdempotencyReservation, SubnetRecord, VolumeAttachmentRecord,
 };
 pub(crate) use domain::records::{legacy_policy_records, validate_canonical_lifecycle_update};
@@ -91,6 +91,43 @@ pub use port::service_repos::{
 /// retries only absorb contention bursts that outlast it; the update is
 /// idempotent, so a retry never double-applies.
 const SQLITE_BUSY_MAX_ATTEMPTS: u32 = 5;
+
+pub(crate) fn validate_fabric_host_identity(
+    identity: &FabricHostTransportIdentityRecord,
+) -> Result<(), StoreError> {
+    let public_key = BASE64
+        .decode(identity.public_key.as_bytes())
+        .map_err(|_| StoreError::Corrupt("invalid Fabric host public key".to_owned()))?;
+    let endpoint = identity
+        .underlay_endpoint
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| StoreError::Corrupt("invalid Fabric underlay endpoint".to_owned()))?;
+    if identity.host_id.trim().is_empty()
+        || identity.agent_id.trim().is_empty()
+        || public_key.len() != 32
+        || endpoint.ip().is_unspecified()
+        || endpoint.port() == 0
+        || identity.fabric_transport_ip.is_unspecified()
+        || identity.fabric_transport_ip.is_loopback()
+        || identity.fabric_transport_ip.is_multicast()
+        || identity.provider_version.trim().is_empty()
+        || identity.fabric_generation == 0
+        || identity.underlay_mtu < if endpoint.is_ipv4() { 1110 } else { 1130 }
+        || identity.fabric_mtu
+            != identity
+                .underlay_mtu
+                .saturating_sub(if endpoint.is_ipv4() { 60 } else { 80 })
+        || !matches!(
+            identity.administrative_state.as_str(),
+            "enabled" | "disabled" | "draining"
+        )
+    {
+        return Err(StoreError::Corrupt(
+            "invalid Fabric host transport identity".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 /// Reports whether a sqlx error is a SQLite lock-contention failure:
 /// SQLITE_BUSY (extended code 5) or SQLITE_BUSY_SNAPSHOT (517). sqlx preserves
@@ -1200,6 +1237,7 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
         status: "DOWN".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
     };
     repository.insert_port(&port).await?;
     let restored = repository
@@ -1230,6 +1268,7 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
         status: "DOWN".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
     };
     assert!(matches!(
         repository.insert_port(&duplicate_ip).await,
@@ -1246,6 +1285,7 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
         status: "DOWN".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
     };
     assert!(matches!(
         repository.insert_port(&duplicate_mac).await,
@@ -1266,6 +1306,7 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
         status: "DOWN".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
     };
     // A port without a subnet is allowed; the store does not enforce
     // subnet presence.
@@ -1345,6 +1386,7 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
         status: "DOWN".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
     };
     repository.insert_port(&port_only_port).await?;
 
