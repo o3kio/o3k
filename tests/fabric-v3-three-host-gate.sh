@@ -108,7 +108,7 @@ fi
 ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
     "sudo ip link add '$FOREIGN_CANARY' type bridge && sudo ip link set '$FOREIGN_CANARY' up"
 foreign_canary_before="$(ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
-    "sudo ip -j -d link show dev '$FOREIGN_CANARY'")"
+    "sudo ip -j -d link show dev '$FOREIGN_CANARY' | python3 -c 'import json,sys; x=json.load(sys.stdin)[0]; print(json.dumps({\"ifname\":x.get(\"ifname\"),\"flags\":x.get(\"flags\"),\"mtu\":x.get(\"mtu\"),\"address\":x.get(\"address\"),\"broadcast\":x.get(\"broadcast\"),\"kind\":x.get(\"linkinfo\",{}).get(\"info_kind\")},sort_keys=True))'")"
 apply_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" host-b "$FABRIC_V3_3H_HOST_B_IP" "$BK" host-c "$FABRIC_V3_3H_HOST_C_IP" "$CK"
 apply_host host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" host-a "$FABRIC_V3_3H_HOST_A_IP" "$AK" host-c "$FABRIC_V3_3H_HOST_C_IP" "$CK"
 apply_host host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" host-a "$FABRIC_V3_3H_HOST_A_IP" "$AK" host-b "$FABRIC_V3_3H_HOST_B_IP" "$BK"
@@ -301,7 +301,7 @@ if [[ "${FABRIC_V3_3H_KEEP:-0}" != 1 ]]; then
     ssh_host host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" \
         "sudo /tmp/fabric-regression-3host-helper --root '$RUN_ROOT' --mode remove --host-id host-c --transport-ip 192.168.122.196 --peer host-a,192.168.122.118,192.168.122.118:65001,$AK --peer host-b,192.168.122.134,192.168.122.134:65001,$BK" >/dev/null
     foreign_canary_after="$(ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
-        "sudo ip -j -d link show dev '$FOREIGN_CANARY'")"
+        "sudo ip -j -d link show dev '$FOREIGN_CANARY' | python3 -c 'import json,sys; x=json.load(sys.stdin)[0]; print(json.dumps({\"ifname\":x.get(\"ifname\"),\"flags\":x.get(\"flags\"),\"mtu\":x.get(\"mtu\"),\"address\":x.get(\"address\"),\"broadcast\":x.get(\"broadcast\"),\"kind\":x.get(\"linkinfo\",{}).get(\"info_kind\")},sort_keys=True))'")"
     [[ "$foreign_canary_after" == "$foreign_canary_before" ]]
     echo 'fabric-v3-three-host-gate: provider-cleanup-and-foreign-canary=passed'
 fi
