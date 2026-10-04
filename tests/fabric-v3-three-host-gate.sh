@@ -17,6 +17,7 @@ set -Eeuo pipefail
 RUN_ROOT="${FABRIC_V3_3H_REMOTE_ROOT:-/tmp/o3k-fabric-v3-three-host}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 REMOTE_USER="${FABRIC_V3_3H_REMOTE_USER:-o3k}"
+FOREIGN_CANARY="f3c${BASHPID}"
 
 ssh_host() {
     local host="$1" ip="$2" key="$3"
@@ -96,8 +97,15 @@ copy_helper
 AK="$(cat /tmp/fabric-v3-host-a.pub)"
 BK="$(cat /tmp/fabric-v3-host-b.pub)"
 CK="$(cat /tmp/fabric-v3-host-c.pub)"
+existing_host_a_links="$(ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" 'sudo ip -o link show')"
+if grep -Eq "^[0-9]+: ${FOREIGN_CANARY}:" <<<"$existing_host_a_links"; then
+    echo "fabric-v3-three-host-gate: foreign canary name collision: $FOREIGN_CANARY" >&2
+    exit 1
+fi
 ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
-    'sudo ip link add f3-foreign-can type bridge 2>/dev/null || true; sudo ip link set f3-foreign-can up'
+    "sudo ip link add '$FOREIGN_CANARY' type bridge && sudo ip link set '$FOREIGN_CANARY' up"
+foreign_canary_before="$(ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
+    "sudo ip -j -d link show dev '$FOREIGN_CANARY'")"
 apply_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" host-b "$FABRIC_V3_3H_HOST_B_IP" "$BK" host-c "$FABRIC_V3_3H_HOST_C_IP" "$CK"
 apply_host host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" host-a "$FABRIC_V3_3H_HOST_A_IP" "$AK" host-c "$FABRIC_V3_3H_HOST_C_IP" "$CK"
 apply_host host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" host-a "$FABRIC_V3_3H_HOST_A_IP" "$AK" host-b "$FABRIC_V3_3H_HOST_B_IP" "$BK"
@@ -289,7 +297,8 @@ if [[ "${FABRIC_V3_3H_KEEP:-0}" != 1 ]]; then
         "sudo /tmp/fabric-regression-3host-helper --root '$RUN_ROOT' --mode remove --host-id host-b --transport-ip 192.168.122.134 --peer host-a,192.168.122.118,192.168.122.118:65001,$AK --peer host-c,192.168.122.196,192.168.122.196:65001,$CK" >/dev/null
     ssh_host host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" \
         "sudo /tmp/fabric-regression-3host-helper --root '$RUN_ROOT' --mode remove --host-id host-c --transport-ip 192.168.122.196 --peer host-a,192.168.122.118,192.168.122.118:65001,$AK --peer host-b,192.168.122.134,192.168.122.134:65001,$BK" >/dev/null
-    ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
-        'sudo ip link show f3-foreign-can >/dev/null'
+    foreign_canary_after="$(ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
+        "sudo ip -j -d link show dev '$FOREIGN_CANARY'")"
+    [[ "$foreign_canary_after" == "$foreign_canary_before" ]]
     echo 'fabric-v3-three-host-gate: provider-cleanup-and-foreign-canary=passed'
 fi
