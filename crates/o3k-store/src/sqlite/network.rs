@@ -597,6 +597,18 @@ impl SqliteStore {
         rows.iter().map(canonical_realm_from_row).collect()
     }
 
+    pub async fn list_active_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, project_id, prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE state = 'active' ORDER BY project_id, network_id, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_realm_from_row).collect()
+    }
+
     pub async fn insert_canonical_pool(
         &self,
         pool: &CanonicalAddressPoolRecord,
@@ -2558,6 +2570,12 @@ impl NetworkRepository for SqliteStore {
         network_id: &Uuid,
     ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
         self.list_canonical_realms(project_id, network_id).await
+    }
+
+    async fn list_active_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.list_active_canonical_realms().await
     }
     async fn insert_canonical_pool(
         &self,

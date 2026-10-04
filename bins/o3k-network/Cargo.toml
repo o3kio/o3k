@@ -24,3 +24,6 @@ tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+o3k-store = { path = "../../crates/o3k-store" }

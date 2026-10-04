@@ -596,6 +596,18 @@ impl PostgresStore {
         rows.iter().map(canonical_realm_from_pg_row).collect()
     }
 
+    pub async fn list_active_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, project_id, prefix::text AS prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE state = 'active' ORDER BY project_id, network_id, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_realm_from_pg_row).collect()
+    }
+
     pub async fn get_canonical_realm(
         &self,
         project_id: &str,
@@ -1566,6 +1578,11 @@ impl NetworkRepository for PostgresStore {
         network_id: &Uuid,
     ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
         self.list_canonical_realms(project_id, network_id).await
+    }
+    async fn list_active_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.list_active_canonical_realms().await
     }
     async fn insert_canonical_pool(
         &self,

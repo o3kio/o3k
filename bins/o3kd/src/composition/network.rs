@@ -27,13 +27,33 @@ struct NetworkAgentTransport {
 pub(crate) struct NetworkAgentDispatcher {
     legacy_target: Option<NetworkAgentTransport>,
     fabric_targets: BTreeMap<String, NetworkAgentControlTarget>,
+    control: Option<NetworkAgentControlLease>,
+    control_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) ca_certificate: PathBuf,
     pub(crate) client_certificate: PathBuf,
     pub(crate) client_key: PathBuf,
 }
 
-pub(crate) fn network_dispatcher_from_env()
--> Result<Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>, Box<dyn std::error::Error>> {
+#[derive(Clone)]
+struct NetworkAgentControlLease {
+    coordination: Arc<dyn o3k_store::CoordinationRepository>,
+    durable: Arc<dyn o3k_store::DurableStore>,
+    controller_id: o3k_store::ControllerId,
+    controller_epoch: o3k_store::ControllerEpoch,
+}
+
+const NETWORK_AGENT_CONTROL_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+// Deliberately shorter than the coordination lease. The agent independently
+// stops accepting mutations if renewal is lost, even while a stale controller
+// still believes its database lease is current.
+const NETWORK_AGENT_REMOTE_LEASE: std::time::Duration = std::time::Duration::from_secs(8);
+
+pub(crate) fn network_dispatcher_from_env(
+    coordination: Arc<dyn o3k_store::CoordinationRepository>,
+    durable: Arc<dyn o3k_store::DurableStore>,
+    controller_id: o3k_store::ControllerId,
+    controller_epoch: o3k_store::ControllerEpoch,
+) -> Result<Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>, Box<dyn std::error::Error>> {
     let names = [
         "O3K_NETWORK_AGENT_ENDPOINT",
         "O3K_NETWORK_AGENT_SERVER_NAME",
@@ -83,6 +103,13 @@ pub(crate) fn network_dispatcher_from_env()
     Ok(Some(Arc::new(NetworkAgentDispatcher {
         legacy_target,
         fabric_targets,
+        control: Some(NetworkAgentControlLease {
+            coordination,
+            durable,
+            controller_id,
+            controller_epoch,
+        }),
+        control_lock: Arc::new(tokio::sync::Mutex::new(())),
         ca_certificate: PathBuf::from(values[2].as_ref().ok_or("missing network agent CA")?),
         client_certificate: PathBuf::from(
             values[3]
@@ -668,7 +695,7 @@ impl FabricRealmReconciler {
                 command_id,
                 operation_id,
                 idempotency_key: format!(
-                    "fabric-realm:{action_key}:{realm_id}:{host_id}:{generation}"
+                    "fabric-realm:{action_key}:{realm_id}:{host_id}:{generation}:{operation_id}"
                 ),
                 action,
                 target: o3k_network::NetworkAgentIdentity {
@@ -689,13 +716,302 @@ impl FabricRealmReconciler {
     }
 }
 
+/// Replays durable history as observation only, then rediscovers active
+/// canonical realms through the same reconciler used by endpoint lifecycle.
+/// Registration notifications wake the scan; the bounded interval also
+/// retries transiently unavailable agents and observes enrollment generation
+/// changes that arrive through durable configuration reload.
+pub(crate) fn spawn_fabric_recovery(
+    reconciler: Arc<FabricRealmReconciler>,
+    durable: Arc<dyn o3k_store::DurableStore>,
+    registration_notify: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut retry = tokio::time::interval(std::time::Duration::from_secs(15));
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Consume the interval's immediate first tick; scans below run now,
+        // then on either a wake event or the bounded retry cadence.
+        retry.tick().await;
+        loop {
+            recover_fabric_state(&reconciler, durable.as_ref()).await;
+            tokio::select! {
+                _ = registration_notify.notified() => {},
+                _ = retry.tick() => {},
+            }
+        }
+    })
+}
+
+async fn recover_fabric_state(
+    reconciler: &FabricRealmReconciler,
+    durable: &dyn o3k_store::DurableStore,
+) {
+    let mut blocked_realms = std::collections::BTreeSet::new();
+    match durable.list_unresolved_network_plan_work().await {
+        Ok(work) => {
+            for record in work {
+                let Ok(command) =
+                    serde_json::from_slice::<o3k_network::NetworkPlanCommand>(&record.snapshot)
+                else {
+                    tracing::error!(command_id = %record.command_id, "unresolved Fabric command snapshot is corrupt; preserving fail-closed state");
+                    // The realm identity is not trustworthy without its
+                    // immutable command snapshot. Do not mutate any realm
+                    // until this historical work is repaired/observed.
+                    return;
+                };
+                let Some(fabric) = command.plan.fabric.as_ref() else {
+                    continue;
+                };
+                let realm_id = fabric.realm_id;
+                let Ok(command_id) = Uuid::parse_str(&record.command_id) else {
+                    blocked_realms.insert(realm_id);
+                    tracing::error!(realm_id = %realm_id, "unresolved Fabric command ID is malformed; preserving fail-closed state");
+                    continue;
+                };
+                let Some(snapshot) = reconciler.registry.snapshot(&record.target_agent_id).await
+                else {
+                    blocked_realms.insert(realm_id);
+                    tracing::warn!(realm_id = %realm_id, target_agent_id = %record.target_agent_id, "cannot observe historical network command while target agent is unavailable");
+                    continue;
+                };
+                if snapshot.availability != o3k_provider::AgentAvailability::Available
+                    || snapshot.administrative_state
+                        != o3k_provider::AgentAdministrativeState::Enabled
+                {
+                    blocked_realms.insert(realm_id);
+                    continue;
+                }
+                match reconciler
+                    .dispatcher
+                    .observe_command(
+                        &record.target_host_id,
+                        o3k_network::NetworkAgentIdentity {
+                            agent_id: record.target_agent_id.clone(),
+                            agent_epoch: snapshot.agent_epoch,
+                        },
+                        command_id,
+                    )
+                    .await
+                {
+                    Ok(Some(o3k_network::NetworkPlanStatus::Succeeded)) | Ok(None) => {}
+                    Ok(Some(o3k_network::NetworkPlanStatus::Unknown)) => {
+                        blocked_realms.insert(realm_id);
+                    }
+                    Ok(Some(_)) | Err(_) => {
+                        blocked_realms.insert(realm_id);
+                        tracing::warn!(realm_id = %realm_id, command_id = %record.command_id, "historical Fabric command was not conclusively observed");
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(%error, "cannot list unresolved Fabric work; skipping realm mutation this cycle");
+            return;
+        }
+    }
+
+    let realms = match reconciler
+        .network
+        .list_active_realms_for_reconciliation()
+        .await
+    {
+        Ok(realms) => realms,
+        Err(error) => {
+            tracing::error!(%error, "cannot discover canonical active AddressRealms");
+            return;
+        }
+    };
+    for realm in realms {
+        let realm_id = realm.id;
+        if blocked_realms.contains(&realm_id) {
+            continue;
+        }
+        let endpoints = match reconciler
+            .network
+            .list_canonical_endpoints_for_project(&realm.project_id, realm.id)
+            .await
+        {
+            Ok(endpoints) => endpoints,
+            Err(error) => {
+                tracing::warn!(realm_id = %realm_id, %error, "cannot read canonical realm endpoints");
+                continue;
+            }
+        };
+        if !endpoints.iter().any(|endpoint| endpoint.state == "active") {
+            continue;
+        }
+        if let Err(error) = reconciler
+            .reconcile_realm(
+                &realm.project_id,
+                realm.network_id,
+                Uuid::new_v4(),
+                super::unix_time_millis().saturating_add(30_000),
+            )
+            .await
+        {
+            tracing::warn!(realm_id = %realm_id, %error, "Fabric realm startup reconciliation did not converge");
+        }
+    }
+}
+
 #[async_trait]
 impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
     async fn dispatch(
         &self,
-        command: o3k_network::NetworkPlanCommand,
+        mut command: o3k_network::NetworkPlanCommand,
     ) -> Result<o3k_network::NetworkPlanStatus, o3k_network::NetworkDispatchError> {
         let transport = self.transport_for(&command)?;
+        let dynamic_fabric = command.plan.fabric.is_some();
+        let _control_guard = if dynamic_fabric {
+            Some(self.control_lock.lock().await)
+        } else {
+            None
+        };
+        let (controller_lease, work): (
+            Option<o3k_network_protocol::proto::ControllerLease>,
+            Option<(
+                Arc<dyn o3k_store::DurableStore>,
+                o3k_store::NetworkPlanWorkRecord,
+            )>,
+        ) = if dynamic_fabric {
+            let control = self.control.as_ref().ok_or_else(|| {
+                o3k_network::NetworkDispatchError::Rejected(
+                    "Fabric v3 requires coordination-backed network-agent control ownership"
+                        .to_owned(),
+                )
+            })?;
+            let realm_id = command
+                .plan
+                .fabric
+                .as_ref()
+                .map(|fabric| fabric.realm_id)
+                .ok_or_else(|| {
+                    o3k_network::NetworkDispatchError::Rejected("missing Fabric realm".to_owned())
+                })?;
+            for unresolved in control
+                .durable
+                .list_unresolved_network_plan_work()
+                .await
+                .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?
+            {
+                let prior: o3k_network::NetworkPlanCommand =
+                    serde_json::from_slice(&unresolved.snapshot)
+                        .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?;
+                if prior
+                    .plan
+                    .fabric
+                    .as_ref()
+                    .is_some_and(|fabric| fabric.realm_id == realm_id)
+                {
+                    return Err(o3k_network::NetworkDispatchError::Unavailable);
+                }
+            }
+            let work_key = format!("network-agent:{}", command.target.agent_id);
+            let acquired = control
+                .coordination
+                .acquire_work_lease(
+                    &work_key,
+                    "network_agent_control",
+                    &control.controller_id,
+                    &control.controller_epoch,
+                    NETWORK_AGENT_CONTROL_TTL,
+                )
+                .await
+                .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?;
+            let lease = match acquired {
+                o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+                o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                    return Err(o3k_network::NetworkDispatchError::Unavailable);
+                }
+            };
+            let still_owner = control
+                .coordination
+                .inspect_work_lease(&work_key)
+                .await
+                .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?
+                .is_some_and(|current| {
+                    current.owner_controller_id == control.controller_id
+                        && current.owner_controller_epoch == control.controller_epoch
+                        && current.fencing_token == lease.fencing_token
+                });
+            if !still_owner {
+                return Err(o3k_network::NetworkDispatchError::Unavailable);
+            }
+            command.controller = o3k_network::NetworkControllerLease {
+                controller_id: control.controller_id.to_string(),
+                controller_epoch: control.controller_epoch.to_string(),
+                fencing_token: lease.fencing_token,
+            };
+            let now = super::unix_time_millis();
+            if command.deadline_unix_ms <= now {
+                return Err(o3k_network::NetworkDispatchError::Rejected(
+                    "network plan deadline has expired".to_owned(),
+                ));
+            }
+            let work_record = o3k_store::NetworkPlanWorkRecord {
+                command_id: command.command_id.to_string(),
+                operation_id: command.operation_id,
+                idempotency_key: command.idempotency_key.clone(),
+                target_host_id: command.plan.node_id.clone(),
+                target_agent_id: command.target.agent_id.clone(),
+                target_agent_epoch: command.target.agent_epoch.clone(),
+                controller_id: command.controller.controller_id.clone(),
+                controller_epoch: command.controller.controller_epoch.clone(),
+                fencing_token: command.controller.fencing_token,
+                deadline_unix_ms: command.deadline_unix_ms,
+                fingerprint_sha256: command.plan.fingerprint_sha256.clone(),
+                snapshot: serde_json::to_vec(&command).map_err(|error| {
+                    o3k_network::NetworkDispatchError::Rejected(error.to_string())
+                })?,
+                state: o3k_store::NetworkPlanWorkState::Pending,
+                revision: 0,
+                outcome: None,
+            };
+            let persisted = control
+                .durable
+                .insert_network_plan_work(&work_record)
+                .await
+                .map_err(|error| o3k_network::NetworkDispatchError::Rejected(error.to_string()))?;
+            if !persisted.same_command_identity(&work_record) {
+                return Err(o3k_network::NetworkDispatchError::Rejected(
+                    "network plan work command identity conflict".to_owned(),
+                ));
+            }
+            if persisted.state == o3k_store::NetworkPlanWorkState::Succeeded {
+                return Ok(o3k_network::NetworkPlanStatus::Succeeded);
+            }
+            if persisted.state != o3k_store::NetworkPlanWorkState::Pending {
+                return Err(o3k_network::NetworkDispatchError::Rejected(
+                    "network plan command is unresolved and requires observation before retry"
+                        .to_owned(),
+                ));
+            }
+            let running = control
+                .durable
+                .update_network_plan_work(
+                    &persisted.command_id,
+                    persisted.revision,
+                    o3k_store::NetworkPlanWorkState::Running,
+                    None,
+                )
+                .await
+                .map_err(|error| o3k_network::NetworkDispatchError::Rejected(error.to_string()))?;
+            let remote_expiry =
+                now.saturating_add(
+                    NETWORK_AGENT_REMOTE_LEASE.as_millis().min(u64::MAX as u128) as u64
+                );
+            (
+                Some(o3k_network_protocol::proto::ControllerLease {
+                    controller_id: command.controller.controller_id.clone(),
+                    controller_epoch: command.controller.controller_epoch.clone(),
+                    fencing_token: command.controller.fencing_token,
+                    lease_expiry_unix_ms: remote_expiry,
+                }),
+                Some((control.durable.clone(), running)),
+            )
+        } else {
+            (None, None)
+        };
         let client = o3k_network_protocol::NetworkAgentClient::connect(
             &transport.endpoint,
             &transport.server_name,
@@ -707,7 +1023,7 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
         .map_err(|error| o3k_network::NetworkDispatchError::Transport(error.to_string()))?;
         let command_id = command.command_id.to_string();
         let result = client
-            .execute(
+            .execute_with_lease(
                 o3k_network_protocol::proto::Register {
                     agent_id: command.target.agent_id.clone(),
                     agent_epoch: command.target.agent_epoch.clone(),
@@ -727,6 +1043,7 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
                     })?,
                     remove: matches!(command.action, o3k_network::NetworkPlanAction::Remove),
                 },
+                controller_lease,
             )
             .await
             .map_err(|error| {
@@ -737,7 +1054,24 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
                     "network agent dispatch failed"
                 );
                 o3k_network::NetworkDispatchError::Transport(error.to_string())
-            })?;
+            });
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some((durable, current)) = work {
+                    let outcome = error.to_string();
+                    let _ = durable
+                        .update_network_plan_work(
+                            &current.command_id,
+                            current.revision,
+                            o3k_store::NetworkPlanWorkState::UnknownOutcome,
+                            Some(outcome.as_bytes()),
+                        )
+                        .await;
+                }
+                return Err(error);
+            }
+        };
         tracing::debug!(
             command_id = %command_id,
             operation_id = %command.operation_id,
@@ -746,17 +1080,192 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
             error_code = %result.error_code,
             "network agent dispatch completed"
         );
-        match result.status.as_str() {
-            "succeeded" | "replayed" | "recovered" => Ok(o3k_network::NetworkPlanStatus::Succeeded),
-            "unknown" | "requires_observation" => Ok(o3k_network::NetworkPlanStatus::Unknown),
-            other => Err(o3k_network::NetworkDispatchError::Rejected(
-                if result.error_code.is_empty() {
-                    other.to_owned()
-                } else {
-                    result.error_code
-                },
-            )),
+        let status = match result.status.as_str() {
+            "succeeded" | "replayed" | "recovered" => o3k_network::NetworkPlanStatus::Succeeded,
+            "unknown" | "requires_observation" => o3k_network::NetworkPlanStatus::Unknown,
+            other => {
+                if let Some((durable, current)) = work {
+                    let outcome = if result.error_code.is_empty() {
+                        other.to_owned()
+                    } else {
+                        result.error_code.clone()
+                    };
+                    let _ = durable
+                        .update_network_plan_work(
+                            &current.command_id,
+                            current.revision,
+                            o3k_store::NetworkPlanWorkState::Failed,
+                            Some(outcome.as_bytes()),
+                        )
+                        .await;
+                }
+                return Err(o3k_network::NetworkDispatchError::Rejected(
+                    if result.error_code.is_empty() {
+                        other.to_owned()
+                    } else {
+                        result.error_code
+                    },
+                ));
+            }
+        };
+        if let Some((durable, current)) = work {
+            let next = if status == o3k_network::NetworkPlanStatus::Succeeded {
+                o3k_store::NetworkPlanWorkState::Succeeded
+            } else {
+                o3k_store::NetworkPlanWorkState::UnknownOutcome
+            };
+            durable
+                .update_network_plan_work(
+                    &current.command_id,
+                    current.revision,
+                    next,
+                    Some(result.status.as_bytes()),
+                )
+                .await
+                .map_err(|error| o3k_network::NetworkDispatchError::Rejected(error.to_string()))?;
         }
+        Ok(status)
+    }
+
+    async fn observe_command(
+        &self,
+        target_host_id: &str,
+        target: o3k_network::NetworkAgentIdentity,
+        command_id: Uuid,
+    ) -> Result<Option<o3k_network::NetworkPlanStatus>, o3k_network::NetworkDispatchError> {
+        let _control_guard = self.control_lock.lock().await;
+        let control = self.control.as_ref().ok_or_else(|| {
+            o3k_network::NetworkDispatchError::Rejected(
+                "historical Fabric command observation requires coordination ownership".to_owned(),
+            )
+        })?;
+        let configured = self.fabric_targets.get(&target.agent_id).ok_or_else(|| {
+            o3k_network::NetworkDispatchError::Rejected(
+                "historical target agent is not enrolled".to_owned(),
+            )
+        })?;
+        if configured.host_id != target_host_id || configured.agent_id != target.agent_id {
+            return Err(o3k_network::NetworkDispatchError::Rejected(
+                "historical target does not match enrolled host identity".to_owned(),
+            ));
+        }
+        let key = format!("network-agent:{}", target.agent_id);
+        let lease = match control
+            .coordination
+            .acquire_work_lease(
+                &key,
+                "network_agent_control",
+                &control.controller_id,
+                &control.controller_epoch,
+                NETWORK_AGENT_CONTROL_TTL,
+            )
+            .await
+            .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?
+        {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                return Err(o3k_network::NetworkDispatchError::Unavailable);
+            }
+        };
+        let current = control
+            .coordination
+            .inspect_work_lease(&key)
+            .await
+            .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?;
+        if !current.is_some_and(|current| {
+            current.owner_controller_id == control.controller_id
+                && current.owner_controller_epoch == control.controller_epoch
+                && current.fencing_token == lease.fencing_token
+        }) {
+            return Err(o3k_network::NetworkDispatchError::Unavailable);
+        }
+        let now = super::unix_time_millis();
+        let client = o3k_network_protocol::NetworkAgentClient::connect(
+            &configured.endpoint,
+            &configured.tls_server_name,
+            &self.ca_certificate,
+            &self.client_certificate,
+            &self.client_key,
+        )
+        .await
+        .map_err(|error| o3k_network::NetworkDispatchError::Transport(error.to_string()))?;
+        let result = client
+            .observe_with_lease(
+                o3k_network_protocol::proto::Register {
+                    agent_id: target.agent_id.clone(),
+                    agent_epoch: target.agent_epoch,
+                },
+                o3k_network_protocol::proto::ControllerLease {
+                    controller_id: control.controller_id.to_string(),
+                    controller_epoch: control.controller_epoch.to_string(),
+                    fencing_token: lease.fencing_token,
+                    lease_expiry_unix_ms: now.saturating_add(
+                        NETWORK_AGENT_REMOTE_LEASE.as_millis().min(u64::MAX as u128) as u64,
+                    ),
+                },
+                command_id.to_string(),
+            )
+            .await
+            .map_err(|error| o3k_network::NetworkDispatchError::Transport(error.to_string()))?;
+        let status = match result.status.as_str() {
+            "succeeded" => Some(o3k_network::NetworkPlanStatus::Succeeded),
+            "unknown" => Some(o3k_network::NetworkPlanStatus::Unknown),
+            "not_found" => None,
+            other => {
+                return Err(o3k_network::NetworkDispatchError::Rejected(
+                    if result.error_code.is_empty() {
+                        other.to_owned()
+                    } else {
+                        result.error_code
+                    },
+                ));
+            }
+        };
+        let historical = control
+            .durable
+            .get_network_plan_work(&command_id.to_string())
+            .await
+            .map_err(|error| o3k_network::NetworkDispatchError::Rejected(error.to_string()))?;
+        if historical.target_agent_id != target.agent_id
+            || historical.target_host_id != target_host_id
+        {
+            return Err(o3k_network::NetworkDispatchError::Rejected(
+                "historical work target identity does not match observation target".to_owned(),
+            ));
+        }
+        let next = match status {
+            Some(o3k_network::NetworkPlanStatus::Succeeded) => {
+                o3k_store::NetworkPlanWorkState::Succeeded
+            }
+            Some(o3k_network::NetworkPlanStatus::Unknown) => {
+                o3k_store::NetworkPlanWorkState::UnknownOutcome
+            }
+            Some(_) => {
+                return Err(o3k_network::NetworkDispatchError::Rejected(
+                    "invalid historical observation status".to_owned(),
+                ));
+            }
+            None => o3k_store::NetworkPlanWorkState::Failed,
+        };
+        let outcome = match status {
+            Some(o3k_network::NetworkPlanStatus::Succeeded) => b"observed_succeeded".as_slice(),
+            Some(o3k_network::NetworkPlanStatus::Unknown) => b"observation_unknown".as_slice(),
+            None => b"not_admitted_superseded_by_canonical_reconciliation".as_slice(),
+            Some(_) => unreachable!(),
+        };
+        if historical.state != next {
+            control
+                .durable
+                .update_network_plan_work(
+                    &historical.command_id,
+                    historical.revision,
+                    next,
+                    Some(outcome),
+                )
+                .await
+                .map_err(|error| o3k_network::NetworkDispatchError::Rejected(error.to_string()))?;
+        }
+        Ok(status)
     }
 }
 
@@ -1015,6 +1524,8 @@ mod dispatcher_tests {
     fn dispatcher() -> NetworkAgentDispatcher {
         NetworkAgentDispatcher {
             legacy_target: None,
+            control: None,
+            control_lock: Arc::new(tokio::sync::Mutex::new(())),
             fabric_targets: BTreeMap::from([
                 (
                     "agent-a".to_owned(),
@@ -1362,6 +1873,42 @@ mod dispatcher_tests {
             );
             assert_eq!(commands[8].target.agent_id, "agent-c");
             assert_eq!(commands[8].action, o3k_network::NetworkPlanAction::Remove);
+        }
+
+        // A controller restart must recover from durable canonical state
+        // without another endpoint mutation. After C's supported unbind, a
+        // startup scan should recreate the current A/B realm plan set.
+        dispatcher
+            .commands
+            .lock()
+            .map_err(|_| "recording dispatcher poisoned")?
+            .clear();
+        let durable_realms = network.list_active_realms_for_reconciliation().await?;
+        assert_eq!(durable_realms.len(), 1, "canonical realm missing");
+        assert_eq!(durable_realms[0].id, subnet.id);
+        recover_fabric_state(&reconciler, store.as_ref()).await;
+        {
+            let commands = dispatcher
+                .commands
+                .lock()
+                .map_err(|_| "recording dispatcher poisoned")?;
+            assert_eq!(commands.len(), 2);
+            let hosts = commands
+                .iter()
+                .map(|command| {
+                    let fabric = command.plan.fabric.as_ref().expect("Fabric plan");
+                    assert_eq!(fabric.directory.entries.len(), 2);
+                    assert_eq!(fabric.peers.len(), 1);
+                    fabric.local_host.clone()
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                hosts,
+                ["compute-a", "compute-b"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            );
         }
         let _ = std::fs::remove_dir_all(root);
         Ok(())

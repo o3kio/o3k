@@ -3965,6 +3965,13 @@ mod reconciler_tests {
             self.inner.list_unresolved_network_plan_work().await
         }
 
+        async fn list_resources_for_reconciliation(
+            &self,
+            kind: &str,
+        ) -> Result<Vec<ResourceRecord>, StoreError> {
+            self.inner.list_resources_for_reconciliation(kind).await
+        }
+
         async fn get_idempotency_reservation(
             &self,
             owner_scope: &str,
@@ -4499,6 +4506,13 @@ mod reconciler_tests {
             &self,
         ) -> Result<Vec<o3k_store::NetworkPlanWorkRecord>, StoreError> {
             self.inner.list_unresolved_network_plan_work().await
+        }
+
+        async fn list_resources_for_reconciliation(
+            &self,
+            kind: &str,
+        ) -> Result<Vec<ResourceRecord>, StoreError> {
+            self.inner.list_resources_for_reconciliation(kind).await
         }
 
         async fn get_idempotency_reservation(

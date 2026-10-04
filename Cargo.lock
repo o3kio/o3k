@@ -1925,6 +1925,7 @@ dependencies = [
  "o3k-domain",
  "o3k-network",
  "o3k-network-protocol",
+ "o3k-store",
  "prost",
  "rustls",
  "serde",

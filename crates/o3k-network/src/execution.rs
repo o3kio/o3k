@@ -29,6 +29,20 @@ pub trait NetworkPlanDispatcher: Send + Sync {
         &self,
         command: NetworkPlanCommand,
     ) -> Result<NetworkPlanStatus, NetworkDispatchError>;
+
+    /// Observe a historical command using current control ownership. This
+    /// operation is read-only with respect to the provider and must never
+    /// resubmit the stored command as a mutation.
+    async fn observe_command(
+        &self,
+        _target_host_id: &str,
+        _target: NetworkAgentIdentity,
+        _command_id: Uuid,
+    ) -> Result<Option<NetworkPlanStatus>, NetworkDispatchError> {
+        Err(NetworkDispatchError::Rejected(
+            "historical command observation is unsupported by this dispatcher".to_owned(),
+        ))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -400,7 +414,11 @@ impl NetworkPlanExecutor {
             || command.controller.controller_epoch.trim().is_empty()
             || command.controller.fencing_token == 0
             || command.plan.node_id.trim().is_empty()
-            || command.plan.node_id != command.target.agent_id
+            || if let Some(fabric) = command.plan.fabric.as_ref() {
+                fabric.local_host != command.plan.node_id
+            } else {
+                command.plan.node_id != command.target.agent_id
+            }
             || command.plan.fingerprint_sha256.len() != 64
             || !command
                 .plan
@@ -761,6 +779,80 @@ mod tests {
         }
     }
 
+    fn fabric_for_other_agent(mut value: NodeNetworkPlan) -> NetworkPlanCommand {
+        use o3k_domain::{
+            EndpointLocation, FabricEndpointRoute, FabricPeer, FabricProviderKind,
+            NamespacedRoutedFabricPlan, RealmEncapsulationBinding, RealmEndpointDirectory,
+        };
+        let prefix =
+            |ip: &str, length| Ipv4Prefix::new(ip.parse().expect("ip"), length).expect("prefix");
+        value.node_id = "host-a".to_owned();
+        let fabric = NamespacedRoutedFabricPlan {
+            local_host: "host-a".to_owned(),
+            local_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
+            local_fabric_generation: 2,
+            local_underlay_mtu: 1500,
+            local_fabric_mtu: 1440,
+            realm_id: Uuid::from_u128(22),
+            realm_prefix: prefix("10.0.0.0", 24),
+            encapsulation: RealmEncapsulationBinding {
+                fabric_domain_id: Uuid::from_u128(100),
+                realm_id: Uuid::from_u128(22),
+                provider_kind: FabricProviderKind::Vxlan,
+                provider_segment_id: 101,
+                binding_generation: 1,
+            },
+            directory_generation: 3,
+            directory: RealmEndpointDirectory {
+                realm_id: Uuid::from_u128(22),
+                prefix: prefix("10.0.0.0", 24),
+                directory_generation: 3,
+                proxy_mac: "02:11:22:33:44:55".to_owned(),
+                entries: vec![EndpointLocation {
+                    endpoint_id: Uuid::from_u128(33),
+                    project_id: "project-a".to_owned(),
+                    realm_id: Uuid::from_u128(22),
+                    fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
+                    mac: "02:00:00:00:00:03".to_owned(),
+                    selected_host: "host-b".to_owned(),
+                    endpoint_generation: 4,
+                    placement_generation: 5,
+                }],
+            },
+            proxy_mac: "02:11:22:33:44:55".to_owned(),
+            tenant_mtu: 1390,
+            policy_generation: 1,
+            policies: Vec::new(),
+            policy_defaults: Vec::new(),
+            public_bindings: Vec::new(),
+            routes: vec![FabricEndpointRoute {
+                realm_id: Uuid::from_u128(22),
+                destination: prefix("10.0.0.3", 32),
+                endpoint_id: Uuid::from_u128(33),
+                target_host: "host-b".to_owned(),
+                target_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
+                endpoint_generation: 4,
+                placement_generation: 5,
+                realm_binding_generation: 1,
+                fabric_generation: 6,
+            }],
+            peers: vec![FabricPeer {
+                host_id: "host-b".to_owned(),
+                public_key: "public-key".to_owned(),
+                underlay_endpoint: "192.0.2.2:65001".to_owned(),
+                fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
+                fabric_generation: 6,
+            }],
+        };
+        value = value
+            .with_fabric(fabric)
+            .expect("valid host-bound fabric plan");
+        let mut result = command();
+        result.target.agent_id = "network-agent-a".to_owned();
+        result.plan = value;
+        result
+    }
+
     #[derive(Default)]
     struct RecordingRealizer {
         calls: usize,
@@ -806,6 +898,23 @@ mod tests {
             NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
         assert_eq!(restarted.admit(&command, 2)?, PlanAdmission::Replayed);
         assert!(restarted.accepted(command.command_id)?);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn fabric_plan_host_identity_is_distinct_from_agent_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile_path("fabric-host-agent-identity");
+        let command = fabric_for_other_agent(plan());
+        let executor =
+            NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
+        let mut realizer = RecordingRealizer::default();
+        assert_eq!(
+            executor.execute(&command, 1, &mut realizer)?,
+            PlanAdmission::Accepted
+        );
+        assert_eq!(realizer.calls, 1);
         let _ = fs::remove_dir_all(root);
         Ok(())
     }

@@ -381,7 +381,7 @@ impl CoordinationRepository for PostgresStore {
                 let current_token: i64 = existing.get("fencing_token");
                 let is_expired: bool = existing.get("is_expired");
 
-                if owner_id == controller_id.0 && owner_epoch == controller_epoch.0 {
+                if owner_id == controller_id.0 && owner_epoch == controller_epoch.0 && !is_expired {
                     // Same owner session re-acquiring -> renew lease without bumping fencing token
                     let row = sqlx::query(
                         r#"
@@ -786,7 +786,10 @@ impl CoordinationRepository for SqliteStore {
                 let current_token: i64 = existing.get("fencing_token");
                 let is_expired: i64 = existing.get("is_expired");
 
-                if owner_id == controller_id.0 && owner_epoch == controller_epoch.0 {
+                if owner_id == controller_id.0
+                    && owner_epoch == controller_epoch.0
+                    && is_expired == 0
+                {
                     sqlx::query(
                         r#"
                         UPDATE work_leases

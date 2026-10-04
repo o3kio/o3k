@@ -281,6 +281,7 @@ pub struct Composition {
     create_convergence_reconciler: tokio::task::JoinHandle<()>,
     lifecycle_convergence_reconciler: tokio::task::JoinHandle<()>,
     orphan_endpoint_reconciler: tokio::task::JoinHandle<()>,
+    fabric_recovery_task: Option<tokio::task::JoinHandle<()>>,
     inventory_task: Option<tokio::task::JoinHandle<()>>,
     composition_task: Option<tokio::task::JoinHandle<()>>,
     native_storage_recovery_task: Option<tokio::task::JoinHandle<()>>,
@@ -326,6 +327,10 @@ impl Composition {
         let _ = self.create_convergence_reconciler.await;
         self.lifecycle_convergence_reconciler.abort();
         self.orphan_endpoint_reconciler.abort();
+        if let Some(task) = self.fabric_recovery_task {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = self.native_storage_recovery_task {
             task.abort();
             let _ = task.await;
@@ -536,20 +541,39 @@ pub async fn build_composition(
         );
     }
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
-    let network_dispatcher = network_dispatcher_from_env()?;
+    let durable_store: Arc<dyn o3k_store::DurableStore> = store.clone();
+    let network_dispatcher = network_dispatcher_from_env(
+        coordination_store.clone(),
+        durable_store.clone(),
+        controller_id.clone(),
+        controller_epoch.clone(),
+    )?;
     let public_allocator = public_allocator_from_env(&config.data_dir)?;
     let public_allocator_for_binding = public_allocator_from_env(&config.data_dir)?.map(Arc::new);
     let network_external_realm_id = std::env::var("O3K_NETWORK_EXTERNAL_REALM_ID")
         .ok()
         .map(|value| Uuid::parse_str(&value))
         .transpose()?;
+    if fabric_domain_id.is_some() && std::env::var_os("O3K_NETWORK_FENCING_TOKEN").is_some() {
+        return Err(
+            "O3K_NETWORK_FENCING_TOKEN is legacy-only and cannot be configured with Fabric v3"
+                .into(),
+        );
+    }
     let network_controller = o3k_network::NetworkControllerLease {
         controller_id: controller_id.to_string(),
         controller_epoch: controller_epoch.to_string(),
-        fencing_token: std::env::var("O3K_NETWORK_FENCING_TOKEN")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(1),
+        // Fabric v3 commands receive their authority only after the
+        // target-aware dispatcher acquires the per-agent coordination lease.
+        // Zero is an inert placeholder and can never authorize provider work.
+        fencing_token: if fabric_domain_id.is_some() {
+            0
+        } else {
+            std::env::var("O3K_NETWORK_FENCING_TOKEN")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1)
+        },
     };
     let fabric_reconciler = match (fabric_domain_id, network_dispatcher.as_ref()) {
         (Some(fabric_domain_id), Some(dispatcher)) => {
@@ -1426,6 +1450,13 @@ pub async fn build_composition(
         }
     };
     let inspect_probe_task = agent_inspect_probe_from_env(inspect_compute_service);
+    let fabric_recovery_task = fabric_reconciler.as_ref().map(|reconciler| {
+        network::spawn_fabric_recovery(
+            Arc::clone(reconciler),
+            durable_store,
+            registry.registration_notify(),
+        )
+    });
 
     Ok(Composition {
         state,
@@ -1439,6 +1470,7 @@ pub async fn build_composition(
         create_convergence_reconciler,
         lifecycle_convergence_reconciler,
         orphan_endpoint_reconciler,
+        fabric_recovery_task,
         inventory_task,
         composition_task,
         native_storage_recovery_task,

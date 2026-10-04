@@ -1328,6 +1328,19 @@ impl NetworkService {
         result
     }
 
+    /// Lists canonical active AddressRealms for controller recovery. The
+    /// recovery path must not depend on generic resource mirrors populated by
+    /// only some API creation paths.
+    pub async fn list_active_realms_for_reconciliation(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalAddressRealmRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_active_canonical_realms()
+            .await
+            .map_err(map_store_error)
+    }
+
     pub async fn list_canonical_realms_for_project(
         &self,
         project_id: &str,

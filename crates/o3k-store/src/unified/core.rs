@@ -83,6 +83,16 @@ impl DurableStore for O3kStore {
         }
     }
 
+    async fn list_resources_for_reconciliation(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<ResourceRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => crate::ComputeRepository::list_resources_by_kind(s, kind).await,
+            Self::Postgres(s) => crate::ComputeRepository::list_resources_by_kind(s, kind).await,
+        }
+    }
+
     async fn list_resources_page(
         &self,
         project_id: &str,

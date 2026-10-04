@@ -468,6 +468,12 @@ pub trait NetworkRepository:
         project_id: &str,
         network_id: &Uuid,
     ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError>;
+    /// Enumerates canonical active realms for controller recovery. This is
+    /// derived from the canonical realm table, never from resource mirrors or
+    /// provider observations.
+    async fn list_active_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError>;
     async fn insert_canonical_pool(
         &self,
         pool: &CanonicalAddressPoolRecord,

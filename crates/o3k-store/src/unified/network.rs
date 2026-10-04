@@ -311,6 +311,14 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.list_canonical_realms(project_id, network_id).await,
         }
     }
+    async fn list_active_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_active_canonical_realms().await,
+            Self::Postgres(s) => s.list_active_canonical_realms().await,
+        }
+    }
     async fn insert_canonical_pool(
         &self,
         pool: &CanonicalAddressPoolRecord,

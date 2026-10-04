@@ -196,6 +196,13 @@ pub trait DurableStore: Send + Sync {
         project_id: &str,
         kind: &str,
     ) -> Result<Vec<ResourceRecord>, StoreError>;
+    /// Lists resources of one canonical kind across projects for bounded
+    /// controller repair scans. Callers must still validate desired state,
+    /// ownership, and service-specific lifecycle before reconciliation.
+    async fn list_resources_for_reconciliation(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<ResourceRecord>, StoreError>;
     async fn list_resources_page(
         &self,
         project_id: &str,

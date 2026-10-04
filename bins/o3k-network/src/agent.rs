@@ -5,7 +5,8 @@ use o3k_network::{
     NetworkPlanCommand, NetworkPlanExecutor, NetworkPlanRealizer, PlanAdmission,
 };
 use std::{
-    fs,
+    fs::{self, File},
+    io::Write,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -71,7 +72,15 @@ where
 {
     #[cfg(test)]
     pub fn new(executor: NetworkPlanExecutor, realizer: R) -> Self {
-        Self::build(executor, realizer, false).expect("legacy network agent state")
+        Self {
+            runtime: Arc::new(Mutex::new(Runtime {
+                executor,
+                realizer,
+                registered: false,
+                lease_expiry_unix_ms: 0,
+                dynamic_lease: false,
+            })),
+        }
     }
 
     pub fn new_dynamic(executor: NetworkPlanExecutor, realizer: R) -> Result<Self, std::io::Error> {
@@ -142,6 +151,9 @@ where
             && lease.controller_epoch == current.controller_epoch;
         if lease.fencing_token < current.fencing_token
             || (lease.fencing_token == current.fencing_token && !same)
+            || (same
+                && runtime.lease_expiry_unix_ms != 0
+                && now_ms()? >= runtime.lease_expiry_unix_ms)
         {
             return Err(NetworkAgentError::Malformed("stale controller lease"));
         }
@@ -455,8 +467,15 @@ fn store_lease(
     let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec(lease)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "lease serialization"))?;
-    fs::write(&tmp, bytes)?;
-    fs::rename(tmp, path)
+    let mut file = File::create(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(tmp, &path)?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn error_response(code: &str) -> ControlResponse {
@@ -510,6 +529,22 @@ mod tests {
         }
 
         fn remove(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    struct CountingRealizer(Arc<AtomicUsize>);
+
+    impl NetworkPlanRealizer for CountingRealizer {
+        type Error = std::convert::Infallible;
+
+        fn realize(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn remove(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -689,7 +724,7 @@ mod tests {
                 NetworkControllerLease {
                     controller_id: "bootstrap".into(),
                     controller_epoch: "bootstrap".into(),
-                    fencing_token: 1,
+                    fencing_token: 0,
                 },
             )
             .expect("executor"),
@@ -710,7 +745,24 @@ mod tests {
     #[test]
     fn live_takeover_rejects_stale_controller_and_preserves_higher_token() {
         let root = std::env::temp_dir().join(format!("o3k-network-lease-{}", Uuid::now_v7()));
-        let service = dynamic_service(&root);
+        let mutation_count = Arc::new(AtomicUsize::new(0));
+        let service = NetworkAgentService::new_dynamic(
+            NetworkPlanExecutor::open(
+                &root,
+                NetworkAgentIdentity {
+                    agent_id: "agent-a".into(),
+                    agent_epoch: "epoch-1".into(),
+                },
+                NetworkControllerLease {
+                    controller_id: "bootstrap".into(),
+                    controller_epoch: "bootstrap".into(),
+                    fencing_token: 0,
+                },
+            )
+            .expect("executor"),
+            CountingRealizer(Arc::clone(&mutation_count)),
+        )
+        .expect("dynamic service");
         let expiry = now_ms().expect("clock") + 60_000;
         service
             .accept_lease(&lease("controller-a", "epoch-a", 2, expiry))
@@ -733,6 +785,227 @@ mod tests {
                 .fencing_token,
             3
         );
+
+        service
+            .register(&proto::Register {
+                agent_id: "agent-a".into(),
+                agent_epoch: "epoch-1".into(),
+            })
+            .expect("register");
+        let operation_id = Uuid::now_v7();
+        let deadline_unix_ms = now_ms().expect("clock") + 60_000;
+        let mut plan = o3k_network::NodeNetworkPlan {
+            schema_version: 1,
+            plan_id: Uuid::now_v7(),
+            node_id: "agent-a".into(),
+            operation_id,
+            deadline_unix_ms,
+            resource_generations: BTreeMap::new(),
+            intents: Vec::new(),
+            fabric: None,
+            gateway: None,
+            fingerprint_sha256: String::new(),
+        };
+        plan.fingerprint_sha256 =
+            o3k_network::canonical_plan_fingerprint(&plan).expect("fingerprint");
+        let run_command = |controller_id: &str, epoch: &str, token: u64| proto::NetworkCommand {
+            command_id: Uuid::now_v7().to_string(),
+            operation_id: operation_id.to_string(),
+            idempotency_key: format!("controller-{token}"),
+            agent_id: "agent-a".into(),
+            agent_epoch: "epoch-1".into(),
+            controller_id: controller_id.into(),
+            controller_epoch: epoch.into(),
+            fencing_token: token,
+            deadline_unix_ms,
+            plan_json: serde_json::to_string(&plan).expect("plan json"),
+            remove: false,
+        };
+        assert!(matches!(
+            service.execute(&run_command("controller-a", "epoch-a", 2)),
+            Err(NetworkAgentError::Execution("stale_controller_lease"))
+        ));
+        assert_eq!(mutation_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            service
+                .execute(&run_command("controller-b", "epoch-b", 3))
+                .expect("current controller command")
+                .status,
+            "succeeded"
+        );
+        assert_eq!(mutation_count.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn coordination_takeover_fences_same_running_network_agent() {
+        use o3k_store::{
+            ControllerEpoch, ControllerId, CoordinationRepository, LeaseAcquireOutcome,
+        };
+        use std::time::Duration;
+
+        let store = o3k_store::testkit::open_memory()
+            .await
+            .expect("memory store");
+        let work_key = "network-agent:agent-a";
+        let controller_a = ControllerId::new("controller-a");
+        let epoch_a = ControllerEpoch::new("epoch-a");
+        let lease_a = match store
+            .acquire_work_lease(
+                work_key,
+                "network_agent_control",
+                &controller_a,
+                &epoch_a,
+                Duration::from_millis(500),
+            )
+            .await
+            .expect("controller A lease")
+        {
+            LeaseAcquireOutcome::Acquired { lease } => Some(lease),
+            LeaseAcquireOutcome::Busy { .. } => None,
+        }
+        .expect("controller A should acquire lease");
+
+        let root =
+            std::env::temp_dir().join(format!("o3k-coordination-takeover-{}", Uuid::now_v7()));
+        let mutation_count = Arc::new(AtomicUsize::new(0));
+        let service = NetworkAgentService::new_dynamic(
+            NetworkPlanExecutor::open(
+                &root,
+                NetworkAgentIdentity {
+                    agent_id: "agent-a".into(),
+                    agent_epoch: "epoch-1".into(),
+                },
+                NetworkControllerLease {
+                    controller_id: "bootstrap".into(),
+                    controller_epoch: "bootstrap".into(),
+                    fencing_token: 0,
+                },
+            )
+            .expect("executor"),
+            CountingRealizer(Arc::clone(&mutation_count)),
+        )
+        .expect("dynamic service");
+        service
+            .register(&proto::Register {
+                agent_id: "agent-a".into(),
+                agent_epoch: "epoch-1".into(),
+            })
+            .expect("register agent");
+
+        let make_command = |controller_id: &str, epoch: &str, token: u64| {
+            let operation_id = Uuid::now_v7();
+            let deadline_unix_ms = now_ms().expect("clock") + 60_000;
+            let mut plan = o3k_network::NodeNetworkPlan {
+                schema_version: 1,
+                plan_id: Uuid::now_v7(),
+                node_id: "agent-a".into(),
+                operation_id,
+                deadline_unix_ms,
+                resource_generations: BTreeMap::new(),
+                intents: Vec::new(),
+                fabric: None,
+                gateway: None,
+                fingerprint_sha256: String::new(),
+            };
+            plan.fingerprint_sha256 =
+                o3k_network::canonical_plan_fingerprint(&plan).expect("fingerprint");
+            proto::NetworkCommand {
+                command_id: Uuid::now_v7().to_string(),
+                operation_id: operation_id.to_string(),
+                idempotency_key: Uuid::now_v7().to_string(),
+                agent_id: "agent-a".into(),
+                agent_epoch: "epoch-1".into(),
+                controller_id: controller_id.into(),
+                controller_epoch: epoch.into(),
+                fencing_token: token,
+                deadline_unix_ms,
+                plan_json: serde_json::to_string(&plan).expect("plan json"),
+                remove: false,
+            }
+        };
+        let remote_expiry = now_ms().expect("clock") + 500;
+        service
+            .accept_lease(&lease(
+                &controller_a.to_string(),
+                &epoch_a.to_string(),
+                lease_a.fencing_token,
+                remote_expiry,
+            ))
+            .expect("agent accepts A coordination lease");
+        assert!(
+            store
+                .renew_work_lease(
+                    work_key,
+                    &controller_a,
+                    &epoch_a,
+                    lease_a.fencing_token,
+                    Duration::from_millis(500),
+                )
+                .await
+                .expect("renew coordination lease")
+        );
+        service
+            .accept_lease(&lease(
+                &controller_a.to_string(),
+                &epoch_a.to_string(),
+                lease_a.fencing_token,
+                now_ms().expect("clock") + 500,
+            ))
+            .expect("renew agent-side controller lease");
+        service
+            .execute(&make_command(
+                &controller_a.to_string(),
+                &epoch_a.to_string(),
+                lease_a.fencing_token,
+            ))
+            .expect("A mutation");
+        assert_eq!(mutation_count.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let controller_b = ControllerId::new("controller-b");
+        let epoch_b = ControllerEpoch::new("epoch-b");
+        let lease_b = match store
+            .acquire_work_lease(
+                work_key,
+                "network_agent_control",
+                &controller_b,
+                &epoch_b,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("controller B takeover")
+        {
+            LeaseAcquireOutcome::Acquired { lease } => Some(lease),
+            LeaseAcquireOutcome::Busy { .. } => None,
+        }
+        .expect("controller B should take over expired lease");
+        assert!(lease_b.fencing_token > lease_a.fencing_token);
+        service
+            .accept_lease(&lease(
+                &controller_b.to_string(),
+                &epoch_b.to_string(),
+                lease_b.fencing_token,
+                now_ms().expect("clock") + 60_000,
+            ))
+            .expect("agent accepts B takeover without restart");
+        assert!(matches!(
+            service.execute(&make_command(
+                &controller_a.to_string(),
+                &epoch_a.to_string(),
+                lease_a.fencing_token,
+            )),
+            Err(NetworkAgentError::Execution("stale_controller_lease"))
+        ));
+        assert_eq!(mutation_count.load(Ordering::SeqCst), 1);
+        service
+            .execute(&make_command(
+                &controller_b.to_string(),
+                &epoch_b.to_string(),
+                lease_b.fencing_token,
+            ))
+            .expect("B mutation");
+        assert_eq!(mutation_count.load(Ordering::SeqCst), 2);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -748,6 +1021,62 @@ mod tests {
                 now_ms().expect("clock") - 1
             )),
             Err(NetworkAgentError::Malformed("invalid controller lease"))
+        ));
+        service
+            .accept_lease(&lease(
+                "controller",
+                "epoch",
+                2,
+                now_ms().expect("clock") + 80,
+            ))
+            .expect("short valid lease");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(matches!(
+            service.accept_lease(&lease(
+                "controller",
+                "epoch",
+                2,
+                now_ms().expect("clock") + 60_000,
+            )),
+            Err(NetworkAgentError::Malformed("stale controller lease"))
+        ));
+        service
+            .register(&proto::Register {
+                agent_id: "agent-a".into(),
+                agent_epoch: "epoch-1".into(),
+            })
+            .expect("register");
+        let operation_id = Uuid::now_v7();
+        let deadline_unix_ms = now_ms().expect("clock") + 60_000;
+        let mut plan = o3k_network::NodeNetworkPlan {
+            schema_version: 1,
+            plan_id: Uuid::now_v7(),
+            node_id: "agent-a".into(),
+            operation_id,
+            deadline_unix_ms,
+            resource_generations: BTreeMap::new(),
+            intents: Vec::new(),
+            fabric: None,
+            gateway: None,
+            fingerprint_sha256: String::new(),
+        };
+        plan.fingerprint_sha256 =
+            o3k_network::canonical_plan_fingerprint(&plan).expect("fingerprint");
+        assert!(matches!(
+            service.execute(&proto::NetworkCommand {
+                command_id: Uuid::now_v7().to_string(),
+                operation_id: operation_id.to_string(),
+                idempotency_key: "expired-authority".into(),
+                agent_id: "agent-a".into(),
+                agent_epoch: "epoch-1".into(),
+                controller_id: "controller".into(),
+                controller_epoch: "epoch".into(),
+                fencing_token: 2,
+                deadline_unix_ms,
+                plan_json: serde_json::to_string(&plan).expect("plan json"),
+                remove: false,
+            }),
+            Err(NetworkAgentError::Malformed("controller lease expired"))
         ));
         fs::write(root.join("controller-lease.json"), b"corrupt").expect("corrupt sidecar");
         assert!(

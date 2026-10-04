@@ -1110,6 +1110,13 @@ impl DurableStore for SqliteStore {
         rows.iter().map(resource_from_row).collect()
     }
 
+    async fn list_resources_for_reconciliation(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<ResourceRecord>, StoreError> {
+        crate::ComputeRepository::list_resources_by_kind(self, kind).await
+    }
+
     async fn list_resources_page(
         &self,
         project_id: &str,

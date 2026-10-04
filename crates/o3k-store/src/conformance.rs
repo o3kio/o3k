@@ -61,14 +61,15 @@ pub fn assert_destructive_postgres_test_database_name(
 
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, CanonicalOperationRecord, ComputeRepository, ControllerEpoch,
-    ControllerId, ControllerSession, ControllerState, CoordinationRepository, DurableStore,
-    FabricHostTransportIdentityRecord, IdempotencyReservationRequest, IdentityRepository,
-    ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayState,
-    ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
-    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
-    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    LeaseAcquireOutcome, LifecycleTerminalization, NetworkIntentRecord, NetworkRecord,
+    ArtifactTransferUpdate, CanonicalAddressRealmRecord, CanonicalNetworkRecord,
+    CanonicalOperationRecord, ComputeRepository, ControllerEpoch, ControllerId, ControllerSession,
+    ControllerState, CoordinationRepository, DurableStore, FabricHostTransportIdentityRecord,
+    IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity,
+    ImageOverlayOwnershipRecord, ImageOverlayState, ImageOverlayUpdate, ImageRepository,
+    KeypairRecord, KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord,
+    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
+    KeystoneServiceRecord, KeystoneUserRecord, LeaseAcquireOutcome, LifecycleTerminalization,
+    NetworkIntentRecord, NetworkPlanWorkRecord, NetworkPlanWorkState, NetworkRecord,
     NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
     PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementRepository, PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
@@ -115,6 +116,7 @@ impl<T> StoreUnderTest for T where
 
 pub async fn run_all_conformance_tests<S: StoreUnderTest>(store: Arc<S>) {
     test_durable_store_resources(store.clone()).await;
+    test_network_plan_work_durability(store.clone()).await;
     test_list_resources_by_kind_includes_deleted_tombstones(store.clone()).await;
     test_durable_store_operations(store.clone()).await;
     test_durable_store_lifecycle_terminalization(store.clone()).await;
@@ -134,6 +136,66 @@ pub async fn run_all_conformance_tests<S: StoreUnderTest>(store: Arc<S>) {
     test_concurrent_placement_allocation_fencing(store.clone()).await;
     test_duplicate_port_ip_mac_conflict(store.clone()).await;
     test_operation_state_monotonicity(store.clone()).await;
+}
+
+pub async fn test_network_plan_work_durability<S: StoreUnderTest>(store: Arc<S>) {
+    let command_id = Uuid::now_v7().to_string();
+    let work = NetworkPlanWorkRecord {
+        command_id: command_id.clone(),
+        operation_id: Uuid::now_v7(),
+        idempotency_key: format!("network-plan:{command_id}"),
+        target_host_id: "host-a".to_owned(),
+        target_agent_id: "agent-a".to_owned(),
+        target_agent_epoch: "epoch-a".to_owned(),
+        controller_id: "controller-a".to_owned(),
+        controller_epoch: "epoch-a".to_owned(),
+        fencing_token: 4,
+        deadline_unix_ms: 1,
+        fingerprint_sha256: "test-fingerprint".to_owned(),
+        snapshot: b"historical-command".to_vec(),
+        state: NetworkPlanWorkState::Pending,
+        revision: 0,
+        outcome: None,
+    };
+    assert_eq!(store.insert_network_plan_work(&work).await.unwrap(), work);
+    assert_eq!(store.insert_network_plan_work(&work).await.unwrap(), work);
+    let running = store
+        .update_network_plan_work(&command_id, 0, NetworkPlanWorkState::Running, None)
+        .await
+        .unwrap();
+    let unresolved = store.list_unresolved_network_plan_work().await.unwrap();
+    assert!(unresolved.iter().any(|item| item == &running));
+    let unknown = store
+        .update_network_plan_work(
+            &command_id,
+            running.revision,
+            NetworkPlanWorkState::UnknownOutcome,
+            Some(b"observation_required"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_network_plan_work(&command_id).await.unwrap(),
+        unknown
+    );
+    let terminal = store
+        .update_network_plan_work(
+            &command_id,
+            unknown.revision,
+            NetworkPlanWorkState::Succeeded,
+            Some(b"observed_succeeded"),
+        )
+        .await
+        .unwrap();
+    assert!(terminal.state.terminal());
+    assert!(
+        store
+            .list_unresolved_network_plan_work()
+            .await
+            .unwrap()
+            .iter()
+            .all(|item| item.command_id != command_id)
+    );
 }
 
 pub async fn test_durable_store_resources<S: StoreUnderTest>(store: Arc<S>) {
@@ -1595,6 +1657,61 @@ pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
     let proj = format!("proj-{}", Uuid::now_v7());
     let other_proj = format!("proj-{}", Uuid::now_v7());
 
+    // Startup recovery must enumerate canonical active realms independently
+    // of generic ResourceRecord mirrors.
+    let canonical_network_id = Uuid::now_v7();
+    store
+        .insert_canonical_network(&CanonicalNetworkRecord {
+            id: canonical_network_id,
+            project_id: proj.clone(),
+            name: "fabric-recovery-network".to_owned(),
+            admin_state_up: true,
+            generation: 1,
+            state: "active".to_owned(),
+        })
+        .await
+        .expect("insert canonical recovery network");
+    let active_realm_id = Uuid::now_v7();
+    store
+        .insert_canonical_realm(&CanonicalAddressRealmRecord {
+            id: active_realm_id,
+            network_id: canonical_network_id,
+            project_id: proj.clone(),
+            prefix: "203.0.113.0/24".to_owned(),
+            overlapping_prefixes: false,
+            generation: 1,
+            state: "active".to_owned(),
+        })
+        .await
+        .expect("insert canonical recovery realm");
+    let inactive_realm_id = Uuid::now_v7();
+    store
+        .insert_canonical_realm(&CanonicalAddressRealmRecord {
+            id: inactive_realm_id,
+            network_id: canonical_network_id,
+            project_id: proj.clone(),
+            prefix: "203.0.114.0/24".to_owned(),
+            overlapping_prefixes: false,
+            generation: 1,
+            state: "deleted".to_owned(),
+        })
+        .await
+        .expect("insert inactive canonical recovery realm");
+    let recovery_realms = store
+        .list_active_canonical_realms()
+        .await
+        .expect("enumerate canonical recovery realms");
+    assert!(
+        recovery_realms
+            .iter()
+            .any(|realm| realm.id == active_realm_id)
+    );
+    assert!(
+        !recovery_realms
+            .iter()
+            .any(|realm| realm.id == inactive_realm_id)
+    );
+
     let realm_id = Uuid::now_v7();
     let endpoint_id = Uuid::now_v7();
     let operation_id = format!("p9-address-op-{}", Uuid::now_v7());
@@ -2609,6 +2726,37 @@ pub async fn test_coordination_repository<S: StoreUnderTest>(store: Arc<S>) {
         }
         LeaseAcquireOutcome::Busy { .. } => panic!("reacquire must succeed"),
     }
+
+    // Expiry also fences the same controller identity. An owner cannot renew
+    // an already-expired generation merely by reusing its ID and epoch.
+    let expired_same_owner_key = format!("op-expired-same-owner:{}", Uuid::now_v7());
+    let first_same_owner = store
+        .acquire_work_lease(
+            &expired_same_owner_key,
+            "operation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .expect("acquire short same-owner lease");
+    assert!(
+        matches!(first_same_owner, LeaseAcquireOutcome::Acquired { lease } if lease.fencing_token == 1)
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let same_owner_after_expiry = store
+        .acquire_work_lease(
+            &expired_same_owner_key,
+            "operation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("same owner reacquires only with a new fence");
+    assert!(
+        matches!(same_owner_after_expiry, LeaseAcquireOutcome::Acquired { lease } if lease.fencing_token == 2)
+    );
 
     // 7. Drain controller session
     let drain_res = store
