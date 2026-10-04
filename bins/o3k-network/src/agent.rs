@@ -42,6 +42,7 @@ struct Runtime<R> {
     realizer: R,
     registered: bool,
     lease_expiry_unix_ms: u64,
+    dynamic_lease: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -69,7 +70,19 @@ where
     R: NetworkPlanRealizer + Send + 'static,
 {
     pub fn new(executor: NetworkPlanExecutor, realizer: R) -> Self {
-        let persisted = load_lease(&executor).ok().flatten();
+        Self::build(executor, realizer, false).expect("legacy network agent state")
+    }
+
+    pub fn new_dynamic(executor: NetworkPlanExecutor, realizer: R) -> Result<Self, std::io::Error> {
+        Self::build(executor, realizer, true)
+    }
+
+    fn build(
+        executor: NetworkPlanExecutor,
+        realizer: R,
+        dynamic_lease: bool,
+    ) -> Result<Self, std::io::Error> {
+        let persisted = load_lease(&executor)?;
         if let Some(lease) = &persisted {
             let _ = executor.set_controller_lease(NetworkControllerLease {
                 controller_id: lease.controller_id.clone(),
@@ -80,14 +93,15 @@ where
         let lease_expiry_unix_ms = persisted
             .map(|lease| lease.lease_expiry_unix_ms)
             .unwrap_or(0);
-        Self {
+        Ok(Self {
             runtime: Arc::new(Mutex::new(Runtime {
                 executor,
                 realizer,
                 registered: false,
                 lease_expiry_unix_ms,
+                dynamic_lease,
             })),
-        }
+        })
     }
 
     pub fn reconcile_pending(
@@ -130,15 +144,6 @@ where
         {
             return Err(NetworkAgentError::Malformed("stale controller lease"));
         }
-        runtime
-            .executor
-            .set_controller_lease(NetworkControllerLease {
-                controller_id: lease.controller_id.clone(),
-                controller_epoch: lease.controller_epoch.clone(),
-                fencing_token: lease.fencing_token,
-            })
-            .map_err(|_| NetworkAgentError::Poisoned)?;
-        runtime.lease_expiry_unix_ms = lease.lease_expiry_unix_ms;
         store_lease(
             &runtime.executor,
             &PersistedLease {
@@ -149,6 +154,15 @@ where
             },
         )
         .map_err(|_| NetworkAgentError::Poisoned)?;
+        runtime
+            .executor
+            .set_controller_lease(NetworkControllerLease {
+                controller_id: lease.controller_id.clone(),
+                controller_epoch: lease.controller_epoch.clone(),
+                fencing_token: lease.fencing_token,
+            })
+            .map_err(|_| NetworkAgentError::Poisoned)?;
+        runtime.lease_expiry_unix_ms = lease.lease_expiry_unix_ms;
         Ok(ControllerLeaseAck {
             fencing_token: lease.fencing_token,
             lease_expiry_unix_ms: lease.lease_expiry_unix_ms,
@@ -161,12 +175,26 @@ where
             .runtime
             .lock()
             .map_err(|_| NetworkAgentError::Poisoned)?;
+        if runtime.dynamic_lease
+            && (runtime.lease_expiry_unix_ms == 0 || now_ms()? >= runtime.lease_expiry_unix_ms)
+        {
+            return Err(NetworkAgentError::Malformed("controller lease expired"));
+        }
         let Runtime {
             executor, realizer, ..
         } = &mut *runtime;
-        let status = executor
-            .reconcile(command_id, realizer)
-            .map_err(|error| NetworkAgentError::Execution(execution_error_code(&error)))?;
+        let status = match executor.reconcile(command_id, realizer) {
+            Ok(status) => status,
+            Err(o3k_network::NetworkExecutionError::UnknownCommand) => {
+                return Ok(CommandResult {
+                    command_id: request.command_id.clone(),
+                    status: "not_found".to_owned(),
+                    replayed: true,
+                    error_code: String::new(),
+                });
+            }
+            Err(error) => return Err(NetworkAgentError::Execution(execution_error_code(&error))),
+        };
         Ok(CommandResult {
             command_id: request.command_id.clone(),
             status: if status == o3k_network::NetworkPlanStatus::Succeeded {
@@ -246,7 +274,13 @@ where
             realizer,
             registered,
             lease_expiry_unix_ms,
+            dynamic_lease,
         } = &mut *runtime;
+        if *dynamic_lease && *lease_expiry_unix_ms == 0 {
+            return Err(NetworkAgentError::Malformed(
+                "dynamic controller lease required",
+            ));
+        }
         if *lease_expiry_unix_ms != 0 && now_ms()? >= *lease_expiry_unix_ms {
             return Err(NetworkAgentError::Malformed("controller lease expired"));
         }

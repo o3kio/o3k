@@ -63,9 +63,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let agent_id = required("O3K_NETWORK_AGENT_ID")?;
     let agent_epoch = required("O3K_NETWORK_AGENT_EPOCH")?;
-    let controller_id = required("O3K_NETWORK_CONTROLLER_ID")?;
-    let controller_epoch = required("O3K_NETWORK_CONTROLLER_EPOCH")?;
-    let fencing_token = required("O3K_NETWORK_FENCING_TOKEN")?.parse::<u64>()?;
     let root = PathBuf::from(required("O3K_NETWORK_ROOT")?);
     let bridge_name = required("O3K_NETWORK_BRIDGE")?;
     let uplink = env::var("O3K_NETWORK_UPLINK").ok();
@@ -97,9 +94,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent_epoch,
         },
         NetworkControllerLease {
-            controller_id,
-            controller_epoch,
-            fencing_token,
+            controller_id: String::new(),
+            controller_epoch: String::new(),
+            fencing_token: 0,
         },
     )?;
     let tap_access = match (
@@ -180,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fabric,
         gateway,
     };
-    let service = agent::NetworkAgentService::new(executor, realizer);
+    let service = agent::NetworkAgentService::new_dynamic(executor, realizer)?;
     let recovered = service.reconcile_pending()?;
     info!(
         pending = recovered.len(),
