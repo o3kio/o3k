@@ -69,6 +69,7 @@ impl<R> NetworkAgentService<R>
 where
     R: NetworkPlanRealizer + Send + 'static,
 {
+    #[cfg(test)]
     pub fn new(executor: NetworkPlanExecutor, realizer: R) -> Self {
         Self::build(executor, realizer, false).expect("legacy network agent state")
     }
@@ -675,5 +676,135 @@ mod tests {
         assert!(result.replayed);
         assert_eq!(observations.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn dynamic_service(root: &std::path::Path) -> NetworkAgentService<NoopRealizer> {
+        NetworkAgentService::new_dynamic(
+            NetworkPlanExecutor::open(
+                root,
+                NetworkAgentIdentity {
+                    agent_id: "agent-a".into(),
+                    agent_epoch: "epoch-1".into(),
+                },
+                NetworkControllerLease {
+                    controller_id: "bootstrap".into(),
+                    controller_epoch: "bootstrap".into(),
+                    fencing_token: 1,
+                },
+            )
+            .expect("executor"),
+            NoopRealizer,
+        )
+        .expect("dynamic service")
+    }
+
+    fn lease(id: &str, epoch: &str, token: u64, expiry: u64) -> ControllerLease {
+        ControllerLease {
+            controller_id: id.into(),
+            controller_epoch: epoch.into(),
+            fencing_token: token,
+            lease_expiry_unix_ms: expiry,
+        }
+    }
+
+    #[test]
+    fn live_takeover_rejects_stale_controller_and_preserves_higher_token() {
+        let root = std::env::temp_dir().join(format!("o3k-network-lease-{}", Uuid::now_v7()));
+        let service = dynamic_service(&root);
+        let expiry = now_ms().expect("clock") + 60_000;
+        service
+            .accept_lease(&lease("controller-a", "epoch-a", 2, expiry))
+            .expect("A lease");
+        service
+            .accept_lease(&lease("controller-b", "epoch-b", 3, expiry))
+            .expect("B takeover");
+        assert!(matches!(
+            service.accept_lease(&lease("controller-a", "epoch-a", 2, expiry)),
+            Err(NetworkAgentError::Malformed("stale controller lease"))
+        ));
+        assert_eq!(
+            service
+                .runtime
+                .lock()
+                .expect("runtime")
+                .executor
+                .controller_lease()
+                .expect("lease")
+                .fencing_token,
+            3
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn expired_lease_and_corrupt_state_fail_closed() {
+        let root = std::env::temp_dir().join(format!("o3k-network-lease-{}", Uuid::now_v7()));
+        let service = dynamic_service(&root);
+        assert!(matches!(
+            service.accept_lease(&lease(
+                "controller",
+                "epoch",
+                2,
+                now_ms().expect("clock") - 1
+            )),
+            Err(NetworkAgentError::Malformed("invalid controller lease"))
+        ));
+        fs::write(root.join("controller-lease.json"), b"corrupt").expect("corrupt sidecar");
+        assert!(
+            NetworkAgentService::new_dynamic(
+                NetworkPlanExecutor::open(
+                    &root,
+                    NetworkAgentIdentity {
+                        agent_id: "agent-a".into(),
+                        agent_epoch: "epoch-1".into()
+                    },
+                    NetworkControllerLease {
+                        controller_id: "bootstrap".into(),
+                        controller_epoch: "bootstrap".into(),
+                        fencing_token: 1
+                    }
+                )
+                .expect("executor"),
+                NoopRealizer
+            )
+            .is_err()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restart_preserves_fencing_and_observe_reports_not_found_without_mutation() {
+        let root = std::env::temp_dir().join(format!("o3k-network-lease-{}", Uuid::now_v7()));
+        let service = dynamic_service(&root);
+        let expiry = now_ms().expect("clock") + 60_000;
+        service
+            .accept_lease(&lease("controller-b", "epoch-b", 9, expiry))
+            .expect("lease");
+        drop(service);
+        let restarted = dynamic_service(&root);
+        assert_eq!(
+            restarted
+                .runtime
+                .lock()
+                .expect("runtime")
+                .executor
+                .controller_lease()
+                .expect("lease")
+                .fencing_token,
+            9
+        );
+        restarted
+            .register(&proto::Register {
+                agent_id: "agent-a".into(),
+                agent_epoch: "epoch-1".into(),
+            })
+            .expect("register");
+        let result = restarted
+            .observe(&ObserveCommand {
+                command_id: Uuid::now_v7().to_string(),
+            })
+            .expect("observation");
+        assert_eq!(result.status, "not_found");
+        let _ = fs::remove_dir_all(root);
     }
 }
