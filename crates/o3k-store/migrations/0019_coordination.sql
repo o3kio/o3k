@@ -24,5 +24,12 @@ CREATE TABLE IF NOT EXISTS work_leases (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Fencing generations survive release of the currently active lease.  The
+-- active row is intentionally removable, but its authority generation is not.
+CREATE TABLE IF NOT EXISTS work_lease_fence_counters (
+    work_key TEXT PRIMARY KEY,
+    fencing_token INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_work_leases_owner ON work_leases(owner_controller_id, owner_controller_epoch);
 CREATE INDEX IF NOT EXISTS idx_work_leases_expiry ON work_leases(lease_until);

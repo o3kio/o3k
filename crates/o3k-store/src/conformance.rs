@@ -2569,6 +2569,47 @@ pub async fn test_coordination_repository<S: StoreUnderTest>(store: Arc<S>) {
         .expect("inspect after release");
     assert!(after_release.is_none(), "released lease must be removed");
 
+    // Reacquisition after release must not reset the fencing generation. The
+    // active lease row is removable, but its authority history is durable.
+    let released_key = format!("op-release-reacquire:{}", Uuid::now_v7());
+    let first = store
+        .acquire_work_lease(
+            &released_key,
+            "operation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("initial release/reacquire lease");
+    let first_token = match first {
+        LeaseAcquireOutcome::Acquired { lease } => lease.fencing_token,
+        LeaseAcquireOutcome::Busy { .. } => panic!("initial lease must succeed"),
+    };
+    assert_eq!(first_token, 1);
+    assert!(
+        store
+            .release_work_lease(&released_key, &ctrl1, &epoch1, first_token)
+            .await
+            .expect("release lease")
+    );
+    let second = store
+        .acquire_work_lease(
+            &released_key,
+            "operation",
+            &ctrl2,
+            &epoch2,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("reacquire released lease");
+    match second {
+        LeaseAcquireOutcome::Acquired { lease } => {
+            assert_eq!(lease.fencing_token, 2);
+        }
+        LeaseAcquireOutcome::Busy { .. } => panic!("reacquire must succeed"),
+    }
+
     // 7. Drain controller session
     let drain_res = store
         .drain_controller_session(&ctrl1, &epoch1)

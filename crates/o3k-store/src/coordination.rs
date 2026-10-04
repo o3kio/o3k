@@ -325,14 +325,28 @@ impl CoordinationRepository for PostgresStore {
 
         match maybe_row {
             None => {
-                // New lease -> initialize fencing token to 1
+                let token_row = sqlx::query(
+                    r#"
+                    INSERT INTO work_lease_fence_counters (work_key, fencing_token)
+                    VALUES ($1, 1)
+                    ON CONFLICT (work_key) DO UPDATE
+                    SET fencing_token = work_lease_fence_counters.fencing_token + 1
+                    RETURNING fencing_token;
+                    "#,
+                )
+                .bind(work_key)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+                let fencing_token: i64 = token_row.get("fencing_token");
+
                 let row = sqlx::query(
                     r#"
                     INSERT INTO work_leases (
                         work_key, work_kind, owner_controller_id, owner_controller_epoch,
                         fencing_token, lease_until, created_at, updated_at
                     )
-                    VALUES ($1, $2, $3, $4, 1, NOW() + $5::interval, NOW(), NOW())
+                    VALUES ($1, $2, $3, $4, $5, NOW() + $6::interval, NOW(), NOW())
                     RETURNING work_key, work_kind, owner_controller_id, owner_controller_epoch,
                               fencing_token, lease_until::text, created_at::text, updated_at::text;
                     "#,
@@ -341,6 +355,7 @@ impl CoordinationRepository for PostgresStore {
                 .bind(work_kind)
                 .bind(&controller_id.0)
                 .bind(&controller_epoch.0)
+                .bind(fencing_token)
                 .bind(&interval_str)
                 .fetch_one(&mut *tx)
                 .await
@@ -704,19 +719,35 @@ impl CoordinationRepository for SqliteStore {
 
         match maybe_row {
             None => {
+                let token_row = sqlx::query(
+                    r#"
+                    INSERT INTO work_lease_fence_counters (work_key, fencing_token)
+                    VALUES (?1, 1)
+                    ON CONFLICT(work_key) DO UPDATE SET
+                        fencing_token = fencing_token + 1
+                    RETURNING fencing_token;
+                    "#,
+                )
+                .bind(work_key)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+                let fencing_token: i64 = token_row.get("fencing_token");
+
                 sqlx::query(
                     r#"
                     INSERT INTO work_leases (
                         work_key, work_kind, owner_controller_id, owner_controller_epoch,
                         fencing_token, lease_until, created_at, updated_at
                     )
-                    VALUES (?1, ?2, ?3, ?4, 1, datetime('now', ?5), datetime('now'), datetime('now'));
+                    VALUES (?1, ?2, ?3, ?4, ?5, datetime('now', ?6), datetime('now'), datetime('now'));
                     "#,
                 )
                 .bind(work_key)
                 .bind(work_kind)
                 .bind(&controller_id.0)
                 .bind(&controller_epoch.0)
+                .bind(fencing_token)
                 .bind(&ttl_mod)
                 .execute(&mut *tx)
                 .await
