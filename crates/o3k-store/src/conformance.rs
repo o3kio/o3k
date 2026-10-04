@@ -2775,4 +2775,107 @@ mod tests {
             .expect("clean the PostgreSQL conformance tables at test start");
         test_durable_store_lifecycle_terminalization(Arc::new(store)).await;
     }
+
+    #[tokio::test]
+    async fn sqlite_network_plan_work_is_idempotent_cas_and_reopenable() {
+        use crate::{NetworkPlanWorkRecord, NetworkPlanWorkState};
+        let path =
+            std::env::temp_dir().join(format!("o3k-network-plan-work-{}.db", Uuid::new_v4()));
+        let work = NetworkPlanWorkRecord {
+            command_id: Uuid::new_v4().to_string(),
+            operation_id: Uuid::new_v4(),
+            idempotency_key: "work-key".into(),
+            target_host_id: "host-a".into(),
+            target_agent_id: "agent-a".into(),
+            target_agent_epoch: "epoch-1".into(),
+            controller_id: "controller".into(),
+            controller_epoch: "epoch-c".into(),
+            fencing_token: 7,
+            deadline_unix_ms: 9_000,
+            fingerprint_sha256: "fp".into(),
+            snapshot: br#"{"command":"opaque"}"#.to_vec(),
+            state: NetworkPlanWorkState::Pending,
+            revision: 0,
+            outcome: None,
+        };
+        let store = SqliteStore::connect_file(&path).await.unwrap();
+        let mut invalid_initial = work.clone();
+        invalid_initial.revision = 1;
+        assert!(invalid_initial.validate().is_err());
+        assert!(
+            store
+                .insert_network_plan_work(&invalid_initial)
+                .await
+                .is_err()
+        );
+        assert_eq!(store.insert_network_plan_work(&work).await.unwrap(), work);
+        assert_eq!(store.insert_network_plan_work(&work).await.unwrap(), work);
+        let mut conflicting_replay = work.clone();
+        conflicting_replay.snapshot.push(b'!');
+        assert!(matches!(
+            store.insert_network_plan_work(&conflicting_replay).await,
+            Err(crate::StoreError::Corrupt(_))
+        ));
+        assert!(!NetworkPlanWorkState::Succeeded.can_transition_to(NetworkPlanWorkState::Running));
+        assert!(NetworkPlanWorkState::Pending.can_transition_to(NetworkPlanWorkState::Pending));
+        let updated = store
+            .update_network_plan_work(
+                &work.command_id,
+                0,
+                NetworkPlanWorkState::UnknownOutcome,
+                Some(b"observed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.revision, 1);
+        assert!(
+            store
+                .update_network_plan_work(
+                    &work.command_id,
+                    0,
+                    NetworkPlanWorkState::Succeeded,
+                    None
+                )
+                .await
+                .is_err()
+        );
+        let terminal = store
+            .update_network_plan_work(
+                &work.command_id,
+                1,
+                NetworkPlanWorkState::Succeeded,
+                Some(b"done"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .update_network_plan_work(
+                    &work.command_id,
+                    terminal.revision,
+                    NetworkPlanWorkState::Retryable,
+                    None,
+                )
+                .await
+                .is_err()
+        );
+        drop(store);
+        let reopened = SqliteStore::connect_file(&path).await.unwrap();
+        assert_eq!(
+            reopened
+                .get_network_plan_work(&work.command_id)
+                .await
+                .unwrap(),
+            terminal
+        );
+        assert_eq!(
+            reopened
+                .list_unresolved_network_plan_work()
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        let _ = std::fs::remove_file(path);
+    }
 }

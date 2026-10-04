@@ -5,7 +5,8 @@ use std::net::Ipv4Addr;
 
 use o3k_store::{
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
-    CanonicalNetworkRecord, CanonicalRealmBindingRecord, FabricHostTransportIdentityRecord,
+    CanonicalNetworkRecord, CanonicalRealmBindingRecord, DurableStore,
+    FabricHostTransportIdentityRecord, NetworkPlanWorkRecord, NetworkPlanWorkState,
     NetworkRepository, PortRecord, PostgresStore, StoreError, SubnetRecord,
 };
 use sqlx::{
@@ -875,6 +876,16 @@ async fn postgres_fabric_identity_binding_and_network_queries_reopen() {
         store.upsert_fabric_host_identity(&duplicate, None).await,
         Err(StoreError::ResourceAlreadyExists)
     ));
+    let mut conflicting = updated.clone();
+    conflicting.public_key = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=".into();
+    conflicting.agent_id = "fabric-pg-agent-conflict".into();
+    let conflicting_result = store
+        .upsert_fabric_host_identity(&conflicting, Some(2))
+        .await;
+    assert!(
+        matches!(conflicting_result, Err(StoreError::StaleGeneration)),
+        "same-generation identity conflict was not rejected as stale: {conflicting_result:?}"
+    );
     store
         .insert_canonical_realm_binding(&CanonicalRealmBindingRecord {
             fabric_domain_id: "fabric-pg".into(),
@@ -934,5 +945,98 @@ async fn postgres_fabric_identity_binding_and_network_queries_reopen() {
             .expect("realms after reopen")
             .len(),
         1
+    );
+
+    let work = NetworkPlanWorkRecord {
+        command_id: Uuid::from_u128(0xfef0).to_string(),
+        operation_id: Uuid::from_u128(0xfef1),
+        idempotency_key: "fabric-pg-work-key".into(),
+        target_host_id: "fabric-pg-host-a".into(),
+        target_agent_id: "fabric-pg-agent-a".into(),
+        target_agent_epoch: "agent-epoch-1".into(),
+        controller_id: "controller-a".into(),
+        controller_epoch: "controller-epoch-1".into(),
+        fencing_token: 9,
+        deadline_unix_ms: 1_900_000_000_000,
+        fingerprint_sha256: "f".repeat(64),
+        snapshot: br#"{"bounded":"command-snapshot"}"#.to_vec(),
+        state: NetworkPlanWorkState::Pending,
+        revision: 0,
+        outcome: None,
+    };
+    assert_eq!(
+        reopened
+            .insert_network_plan_work(&work)
+            .await
+            .expect("insert network plan work"),
+        work
+    );
+    assert_eq!(
+        reopened
+            .insert_network_plan_work(&work)
+            .await
+            .expect("idempotent network plan work"),
+        work
+    );
+    let mut conflicting_replay = work.clone();
+    conflicting_replay.snapshot.push(b'!');
+    assert!(matches!(
+        reopened.insert_network_plan_work(&conflicting_replay).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    let mut command_collision = work.clone();
+    command_collision.idempotency_key = "different-key".into();
+    assert!(matches!(
+        reopened.insert_network_plan_work(&command_collision).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    let running = reopened
+        .update_network_plan_work(&work.command_id, 0, NetworkPlanWorkState::Running, None)
+        .await
+        .expect("CAS transition to running");
+    assert!(matches!(
+        reopened
+            .update_network_plan_work(&work.command_id, 0, NetworkPlanWorkState::Succeeded, None)
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    let failed = reopened
+        .update_network_plan_work(
+            &work.command_id,
+            running.revision,
+            NetworkPlanWorkState::Failed,
+            Some(b"known rejection"),
+        )
+        .await
+        .expect("terminal failure transition");
+    assert_eq!(failed.revision, 2);
+    assert!(matches!(
+        reopened
+            .update_network_plan_work(
+                &work.command_id,
+                failed.revision,
+                NetworkPlanWorkState::Pending,
+                None
+            )
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    drop(reopened);
+    let after_work_restart = PostgresStore::connect(&url)
+        .await
+        .expect("reopen store after work persistence");
+    assert_eq!(
+        after_work_restart
+            .get_network_plan_work(&work.command_id)
+            .await
+            .expect("network plan work after reopen"),
+        failed
+    );
+    assert!(
+        after_work_restart
+            .list_unresolved_network_plan_work()
+            .await
+            .expect("unresolved network plan work")
+            .is_empty()
     );
 }

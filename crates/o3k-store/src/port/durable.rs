@@ -7,8 +7,8 @@ use crate::domain::error::StoreError;
 use crate::domain::records::{
     AgentCommandRecord, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
     IdempotencyReservationRequest, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
-    ImageOverlayUpdate, LifecycleTerminalization, ObservationUpdate, OperationRecord,
-    ProviderReference, ResourceRecord,
+    ImageOverlayUpdate, LifecycleTerminalization, NetworkPlanWorkRecord, NetworkPlanWorkState,
+    ObservationUpdate, OperationRecord, ProviderReference, ResourceRecord,
 };
 use crate::domain::state::{
     AgentCommandState, CanonicalAcceptanceOutcome, IdempotencyReservation, OperationState,
@@ -168,6 +168,24 @@ pub(crate) fn bounded_fetch_limit(limit: usize) -> Result<i64, StoreError> {
 
 #[async_trait]
 pub trait DurableStore: Send + Sync {
+    async fn insert_network_plan_work(
+        &self,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    async fn get_network_plan_work(
+        &self,
+        command_id: &str,
+    ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    async fn update_network_plan_work(
+        &self,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    async fn list_unresolved_network_plan_work(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError>;
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError>;
     async fn get_resource(&self, id: Uuid) -> Result<ResourceRecord, StoreError>;
     /// Internal compatibility/domain reader. Native northbound collection

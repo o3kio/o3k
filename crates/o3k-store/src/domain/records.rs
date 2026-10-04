@@ -31,6 +31,84 @@ pub struct BuildingBlockRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkPlanWorkState {
+    Pending,
+    Accepted,
+    Running,
+    Retryable,
+    UnknownOutcome,
+    Succeeded,
+    Failed,
+}
+impl NetworkPlanWorkState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Accepted => "accepted",
+            Self::Running => "running",
+            Self::Retryable => "retryable",
+            Self::UnknownOutcome => "unknown_outcome",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+    pub fn parse(v: &str) -> Result<Self, crate::StoreError> {
+        match v {
+            "pending" => Ok(Self::Pending),
+            "accepted" => Ok(Self::Accepted),
+            "running" => Ok(Self::Running),
+            "retryable" => Ok(Self::Retryable),
+            "unknown_outcome" => Ok(Self::UnknownOutcome),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            _ => Err(crate::StoreError::Corrupt(format!(
+                "invalid network plan work state `{v}`"
+            ))),
+        }
+    }
+    pub fn terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed)
+    }
+    pub fn can_transition_to(self, next: Self) -> bool {
+        if self == next {
+            return true;
+        }
+        match self {
+            Self::Pending => matches!(
+                next,
+                Self::Accepted
+                    | Self::Running
+                    | Self::Retryable
+                    | Self::UnknownOutcome
+                    | Self::Succeeded
+                    | Self::Failed
+            ),
+            Self::Accepted => matches!(
+                next,
+                Self::Running
+                    | Self::Retryable
+                    | Self::UnknownOutcome
+                    | Self::Succeeded
+                    | Self::Failed
+            ),
+            Self::Running => matches!(
+                next,
+                Self::Retryable | Self::UnknownOutcome | Self::Succeeded | Self::Failed
+            ),
+            Self::Retryable => matches!(
+                next,
+                Self::Running | Self::UnknownOutcome | Self::Succeeded | Self::Failed
+            ),
+            Self::UnknownOutcome => matches!(
+                next,
+                Self::Running | Self::Retryable | Self::Succeeded | Self::Failed
+            ),
+            Self::Succeeded | Self::Failed => false,
+        }
+    }
+}
+
 /// Durable Cloud Kernel bootstrap state. The enrolled-agent map is a
 /// certificate-fingerprint projection; Placement and the agent registry remain
 /// authoritative for capacity and live execution state.
@@ -1255,4 +1333,72 @@ pub struct AgentCommandRecord {
     pub last_sequence: u64,
     pub provider_operation_id: Option<String>,
     pub provider_resource_id: Option<String>,
+}
+
+/// Opaque, durable execution snapshot for a network plan. Canonical network
+/// state remains authoritative; this row only supports replay and recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkPlanWorkRecord {
+    pub command_id: String,
+    pub operation_id: Uuid,
+    pub idempotency_key: String,
+    pub target_host_id: String,
+    pub target_agent_id: String,
+    pub target_agent_epoch: String,
+    pub controller_id: String,
+    pub controller_epoch: String,
+    pub fencing_token: u64,
+    pub deadline_unix_ms: u64,
+    pub fingerprint_sha256: String,
+    pub snapshot: Vec<u8>,
+    pub state: NetworkPlanWorkState,
+    pub revision: u64,
+    pub outcome: Option<Vec<u8>>,
+}
+
+impl NetworkPlanWorkRecord {
+    /// The persisted state/revision/outcome evolve, while these fields define
+    /// the exact command admitted for replay. A retry is idempotent only when
+    /// every immutable command field and serialized snapshot matches.
+    pub fn same_command_identity(&self, other: &Self) -> bool {
+        self.command_id == other.command_id
+            && self.operation_id == other.operation_id
+            && self.idempotency_key == other.idempotency_key
+            && self.target_host_id == other.target_host_id
+            && self.target_agent_id == other.target_agent_id
+            && self.target_agent_epoch == other.target_agent_epoch
+            && self.controller_id == other.controller_id
+            && self.controller_epoch == other.controller_epoch
+            && self.fencing_token == other.fencing_token
+            && self.deadline_unix_ms == other.deadline_unix_ms
+            && self.fingerprint_sha256 == other.fingerprint_sha256
+            && self.snapshot == other.snapshot
+    }
+
+    pub fn validate(&self) -> Result<(), crate::StoreError> {
+        if self.command_id.is_empty()
+            || self.idempotency_key.is_empty()
+            || self.target_host_id.is_empty()
+            || self.target_agent_id.is_empty()
+            || self.target_agent_epoch.is_empty()
+            || self.controller_id.is_empty()
+            || self.controller_epoch.is_empty()
+            || self.fingerprint_sha256.is_empty()
+            || self.snapshot.is_empty()
+            || self.deadline_unix_ms == 0
+        {
+            return Err(crate::StoreError::Corrupt(
+                "network plan work has an empty identity or invalid deadline/snapshot".into(),
+            ));
+        }
+        if self.revision != 0
+            || self.state != NetworkPlanWorkState::Pending
+            || self.outcome.is_some()
+        {
+            return Err(crate::StoreError::Corrupt(
+                "new network plan work must begin pending at revision zero without outcome".into(),
+            ));
+        }
+        Ok(())
+    }
 }

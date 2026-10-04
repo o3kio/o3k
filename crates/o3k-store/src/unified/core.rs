@@ -5,14 +5,59 @@ use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
     CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, DurableStore,
     IdempotencyReservation, IdempotencyReservationRequest, ImageOverlayIdentity,
-    ImageOverlayOwnershipRecord, ImageOverlayUpdate, LifecycleTerminalization, ObservationUpdate,
-    OperationRecord, OperationState, ProviderReference, RepositoryPage, ResourceRecord, StoreError,
+    ImageOverlayOwnershipRecord, ImageOverlayUpdate, LifecycleTerminalization,
+    NetworkPlanWorkRecord, NetworkPlanWorkState, ObservationUpdate, OperationRecord,
+    OperationState, ProviderReference, RepositoryPage, ResourceRecord, StoreError,
     StoredIdempotencyReservation,
 };
 
 use super::O3kStore;
 #[async_trait]
 impl DurableStore for O3kStore {
+    async fn insert_network_plan_work(
+        &self,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_network_plan_work(work).await,
+            Self::Postgres(s) => s.insert_network_plan_work(work).await,
+        }
+    }
+    async fn get_network_plan_work(
+        &self,
+        command_id: &str,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_network_plan_work(command_id).await,
+            Self::Postgres(s) => s.get_network_plan_work(command_id).await,
+        }
+    }
+    async fn update_network_plan_work(
+        &self,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_network_plan_work(command_id, expected_revision, state, outcome)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.update_network_plan_work(command_id, expected_revision, state, outcome)
+                    .await
+            }
+        }
+    }
+    async fn list_unresolved_network_plan_work(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_unresolved_network_plan_work().await,
+            Self::Postgres(s) => s.list_unresolved_network_plan_work().await,
+        }
+    }
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
         match self {
             Self::Sqlite(s) => s.insert_resource(resource).await,

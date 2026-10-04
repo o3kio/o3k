@@ -26,12 +26,13 @@ use crate::{
     CanonicalAcceptanceOutcome, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
     ComputeRepository, DatabaseHealth, DurableStore, IdempotencyReservation,
     IdempotencyReservationRequest, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
-    ImageOverlayState, ImageOverlayUpdate, LifecycleTerminalization, ObservationUpdate,
-    OperationRecord, OperationState, ProviderReference, RepositoryPage, ResourceRecord,
-    SQLITE_BUSY_MAX_ATTEMPTS, StoreError, VolumeAttachmentRecord, WalCheckpointMode,
-    is_sqlite_busy, restrict_sqlite_sidecars, validate_canonical_idempotent_operation_identity,
-    validate_canonical_lifecycle_update, validate_canonical_operation_read,
-    validate_canonical_resource_acceptance, validate_canonical_scoped_operation_read,
+    ImageOverlayState, ImageOverlayUpdate, LifecycleTerminalization, NetworkPlanWorkRecord,
+    NetworkPlanWorkState, ObservationUpdate, OperationRecord, OperationState, ProviderReference,
+    RepositoryPage, ResourceRecord, SQLITE_BUSY_MAX_ATTEMPTS, StoreError, VolumeAttachmentRecord,
+    WalCheckpointMode, is_sqlite_busy, restrict_sqlite_sidecars,
+    validate_canonical_idempotent_operation_identity, validate_canonical_lifecycle_update,
+    validate_canonical_operation_read, validate_canonical_resource_acceptance,
+    validate_canonical_scoped_operation_read,
 };
 
 pub(super) async fn insert_sqlite_canonical_acceptance(
@@ -954,6 +955,114 @@ impl SqliteStore {
 
 #[async_trait]
 impl DurableStore for SqliteStore {
+    async fn insert_network_plan_work(
+        &self,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        work.validate()?;
+        let result = sqlx::query("INSERT INTO network_plan_work (command_id,operation_id,idempotency_key,target_host_id,target_agent_id,target_agent_epoch,controller_id,controller_epoch,fencing_token,deadline_unix_ms,fingerprint_sha256,snapshot,state,revision,outcome) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&work.command_id).bind(work.operation_id.to_string()).bind(&work.idempotency_key)
+            .bind(&work.target_host_id).bind(&work.target_agent_id).bind(&work.target_agent_epoch)
+            .bind(&work.controller_id).bind(&work.controller_epoch).bind(i64::try_from(work.fencing_token).map_err(|_| StoreError::Corrupt("fencing token overflow".into()))?)
+            .bind(i64::try_from(work.deadline_unix_ms).map_err(|_| StoreError::Corrupt("deadline overflow".into()))?)
+            .bind(&work.fingerprint_sha256).bind(&work.snapshot).bind(work.state.as_str()).bind(i64::try_from(work.revision).map_err(|_| StoreError::Corrupt("revision overflow".into()))?).bind(&work.outcome)
+            .execute(&self.pool).await;
+        match result {
+            Ok(_) => self.get_network_plan_work(&work.command_id).await,
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                let existing_id =
+                    sqlx::query("SELECT command_id FROM network_plan_work WHERE idempotency_key=?")
+                        .bind(&work.idempotency_key)
+                        .fetch_optional(&self.pool)
+                        .await
+                        .map_err(StoreError::Database)?
+                        .map(|r| r.get::<String, _>("command_id"));
+                let old = self
+                    .get_network_plan_work(existing_id.as_deref().unwrap_or(&work.command_id))
+                    .await?;
+                if old.same_command_identity(work) {
+                    Ok(old)
+                } else {
+                    Err(StoreError::Corrupt(
+                        "network plan work idempotency conflict".into(),
+                    ))
+                }
+            }
+            Err(e) => Err(StoreError::Database(e)),
+        }
+    }
+
+    async fn get_network_plan_work(
+        &self,
+        command_id: &str,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        let row = sqlx::query("SELECT * FROM network_plan_work WHERE command_id=?")
+            .bind(command_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+        let u = |name: &str| -> Result<u64, StoreError> {
+            u64::try_from(row.get::<i64, _>(name))
+                .map_err(|_| StoreError::Corrupt(format!("negative {name}")))
+        };
+        Ok(NetworkPlanWorkRecord {
+            command_id: row.get("command_id"),
+            operation_id: Uuid::parse_str(&row.get::<String, _>("operation_id"))
+                .map_err(StoreError::InvalidUuid)?,
+            idempotency_key: row.get("idempotency_key"),
+            target_host_id: row.get("target_host_id"),
+            target_agent_id: row.get("target_agent_id"),
+            target_agent_epoch: row.get("target_agent_epoch"),
+            controller_id: row.get("controller_id"),
+            controller_epoch: row.get("controller_epoch"),
+            fencing_token: u("fencing_token")?,
+            deadline_unix_ms: u("deadline_unix_ms")?,
+            fingerprint_sha256: row.get("fingerprint_sha256"),
+            snapshot: row.get("snapshot"),
+            state: NetworkPlanWorkState::parse(&row.get::<String, _>("state"))?,
+            revision: u("revision")?,
+            outcome: row.get("outcome"),
+        })
+    }
+
+    async fn update_network_plan_work(
+        &self,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        let expected = i64::try_from(expected_revision)
+            .map_err(|_| StoreError::Corrupt("revision overflow".into()))?;
+        let current = self.get_network_plan_work(command_id).await?;
+        if !current.state.can_transition_to(state) {
+            return Err(StoreError::Corrupt(
+                "invalid network plan work transition".into(),
+            ));
+        }
+        let result = sqlx::query("UPDATE network_plan_work SET state=?, outcome=?, revision=revision+1, updated_at=CURRENT_TIMESTAMP WHERE command_id=? AND revision=?").bind(state.as_str()).bind(outcome).bind(command_id).bind(expected).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::Corrupt(
+                "network plan work fencing conflict".into(),
+            ));
+        }
+        self.get_network_plan_work(command_id).await
+    }
+
+    async fn list_unresolved_network_plan_work(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError> {
+        let rows = sqlx::query("SELECT command_id FROM network_plan_work WHERE state NOT IN ('succeeded','failed') ORDER BY created_at, command_id").fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(
+                self.get_network_plan_work(&row.get::<String, _>("command_id"))
+                    .await?,
+            );
+        }
+        Ok(out)
+    }
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
         let result = sqlx::query(
             "INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
