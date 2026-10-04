@@ -29,7 +29,7 @@ impl PostgresStore {
         &self,
         host_id: &str,
     ) -> Result<Option<FabricHostTransportIdentityRecord>, StoreError> {
-        let row = sqlx::query("SELECT host_id,agent_id,public_key,underlay_endpoint,fabric_transport_ip::text AS fabric_transport_ip,provider_version,fabric_generation,underlay_mtu,fabric_mtu,administrative_state FROM canonical_fabric_host_transport_identities WHERE host_id=$1")
+        let row = sqlx::query("SELECT host_id,agent_id,public_key,underlay_endpoint,host(fabric_transport_ip) AS fabric_transport_ip,provider_version,fabric_generation,underlay_mtu,fabric_mtu,administrative_state FROM canonical_fabric_host_transport_identities WHERE host_id=$1")
             .bind(host_id).fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
         row.map(|row| {
             let generation: i64 = row
