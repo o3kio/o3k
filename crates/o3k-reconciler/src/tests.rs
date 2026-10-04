@@ -3933,6 +3933,38 @@ mod reconciler_tests {
 
     #[async_trait::async_trait]
     impl DurableStore for StaleObservationStore {
+        async fn insert_network_plan_work(
+            &self,
+            work: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner.insert_network_plan_work(work).await
+        }
+
+        async fn get_network_plan_work(
+            &self,
+            command_id: &str,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner.get_network_plan_work(command_id).await
+        }
+
+        async fn update_network_plan_work(
+            &self,
+            command_id: &str,
+            expected_revision: u64,
+            state: o3k_store::NetworkPlanWorkState,
+            outcome: Option<&[u8]>,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .update_network_plan_work(command_id, expected_revision, state, outcome)
+                .await
+        }
+
+        async fn list_unresolved_network_plan_work(
+            &self,
+        ) -> Result<Vec<o3k_store::NetworkPlanWorkRecord>, StoreError> {
+            self.inner.list_unresolved_network_plan_work().await
+        }
+
         async fn get_idempotency_reservation(
             &self,
             owner_scope: &str,
@@ -4437,6 +4469,38 @@ mod reconciler_tests {
 
     #[async_trait::async_trait]
     impl DurableStore for TerminalizationFaultStore {
+        async fn insert_network_plan_work(
+            &self,
+            work: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner.insert_network_plan_work(work).await
+        }
+
+        async fn get_network_plan_work(
+            &self,
+            command_id: &str,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner.get_network_plan_work(command_id).await
+        }
+
+        async fn update_network_plan_work(
+            &self,
+            command_id: &str,
+            expected_revision: u64,
+            state: o3k_store::NetworkPlanWorkState,
+            outcome: Option<&[u8]>,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .update_network_plan_work(command_id, expected_revision, state, outcome)
+                .await
+        }
+
+        async fn list_unresolved_network_plan_work(
+            &self,
+        ) -> Result<Vec<o3k_store::NetworkPlanWorkRecord>, StoreError> {
+            self.inner.list_unresolved_network_plan_work().await
+        }
+
         async fn get_idempotency_reservation(
             &self,
             owner_scope: &str,
