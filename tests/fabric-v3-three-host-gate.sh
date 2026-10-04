@@ -18,6 +18,9 @@ RUN_ROOT="${FABRIC_V3_3H_REMOTE_ROOT:-/tmp/o3k-fabric-v3-three-host}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 REMOTE_USER="${FABRIC_V3_3H_REMOTE_USER:-o3k}"
 FOREIGN_CANARY="f3c${BASHPID}"
+HOST_A_PUBLIC_KEY_FILE="${FABRIC_V3_3H_HOST_A_PUBLIC_KEY_FILE:-/tmp/fabric-v3-host-a.pub}"
+HOST_B_PUBLIC_KEY_FILE="${FABRIC_V3_3H_HOST_B_PUBLIC_KEY_FILE:-/tmp/fabric-v3-host-b.pub}"
+HOST_C_PUBLIC_KEY_FILE="${FABRIC_V3_3H_HOST_C_PUBLIC_KEY_FILE:-/tmp/fabric-v3-host-c.pub}"
 
 ssh_host() {
     local host="$1" ip="$2" key="$3"
@@ -94,9 +97,9 @@ finish_wireguard_underlay_capture() {
 }
 
 copy_helper
-AK="$(cat /tmp/fabric-v3-host-a.pub)"
-BK="$(cat /tmp/fabric-v3-host-b.pub)"
-CK="$(cat /tmp/fabric-v3-host-c.pub)"
+AK="$(cat "$HOST_A_PUBLIC_KEY_FILE")"
+BK="$(cat "$HOST_B_PUBLIC_KEY_FILE")"
+CK="$(cat "$HOST_C_PUBLIC_KEY_FILE")"
 existing_host_a_links="$(ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" 'sudo ip -o link show')"
 if grep -Eq "^[0-9]+: ${FOREIGN_CANARY}:" <<<"$existing_host_a_links"; then
     echo "fabric-v3-three-host-gate: foreign canary name collision: $FOREIGN_CANARY" >&2
