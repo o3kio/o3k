@@ -1,0 +1,162 @@
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+net.ipv4.ip_forward = 1
+three-host-provider=apply-passed
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+net.ipv4.ip_forward = 1
+net.ipv4.ip_forward = 1
+three-host-provider=apply-passed
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+net.ipv4.ip_forward = 1
+three-host-provider=apply-passed
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+10.0.0.20 dev eth0 lladdr 02:00:00:00:a1:02 REACHABLE
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+10.0.0.10 dev eth0 lladdr 02:00:00:00:a1:01 DELAY
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+10.0.0.20 dev eth0 lladdr 02:00:00:00:b1:02 REACHABLE
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+10.0.0.10 dev eth0 lladdr 02:00:00:00:b1:01 DELAY
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: underlay-wireguard-only=passed interface=enp1s0
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: tenant-mtu-boundary=passed
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: antispoof-wrong-mac=passed counter=0->7
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: antispoof-wrong-ip=passed counter=0->1
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: antispoof-arp-mac=passed counter=0->3
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: antispoof-arp-ip=passed counter=0->3
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: overlapping-realm-isolation=passed
+fabric-v3-three-host-gate: authenticated-peer-vni-ingress-rules
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+table netdev o3k-fabric-auth { # handle 3
+	comment "o3k-fabric-auth-table:40046e842a0f440caed082da9f4b1067"
+	chain ingress { # handle 1
+		comment "o3k-fabric-auth:40046e842a0f440caed082da9f4b1067:ce12e09a74cb4981dd23128d79fea7cbe617f75d1d861c529ee77807ebf68c3e"
+		type filter hook ingress device "o3k-wg" priority -500; policy drop;
+		iifname "o3k-wg" udp dport 4789 @th,96,24 0x65 ip saddr 192.168.122.118 meta mark set 0xc0a87a76 counter packets 56 bytes 10386 accept comment "o3k-fabric-auth" # handle 2
+		iifname "o3k-wg" udp dport 4789 @th,96,24 0x66 ip saddr 192.168.122.196 meta mark set 0xc0a87ac4 counter packets 59 bytes 6930 accept comment "o3k-fabric-auth" # handle 3
+		counter packets 0 bytes 0 drop comment "o3k-fabric-auth" # handle 4
+	}
+}
+fabric-v3-three-host-gate: per-realm-bridge-vni-admission-rules
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+table bridge o3k-fabric-vni-auth { # handle 4
+	comment "o3k-fabric-vni-auth-table:40046e842a0f440caed082da9f4b1067"
+	chain forward { # handle 1
+		comment "o3k-fabric-vni-auth:40046e842a0f440caed082da9f4b1067:d19cbb846b7681b63421a628128623c34e258092316f1ab410d401fb8f8e47f4"
+		type filter hook forward priority -500; policy drop;
+		iifname "o3k-p-77c2d768" counter packets 45 bytes 6946 accept comment "o3k-fabric-vni-auth" # handle 2
+		iifname "o3k-x-77c2d768" meta mark 0xc0a87a76 counter packets 56 bytes 7586 accept comment "o3k-fabric-vni-auth" # handle 3
+		iifname "o3k-p-4ce51c6b" counter packets 41 bytes 2792 accept comment "o3k-fabric-vni-auth" # handle 4
+		iifname "o3k-x-4ce51c6b" meta mark 0xc0a87ac4 counter packets 60 bytes 4036 accept comment "o3k-fabric-vni-auth" # handle 5
+		counter packets 0 bytes 0 drop comment "o3k-fabric-vni-auth" # handle 6
+	}
+}
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: authenticated-inject-route host=host-a route=192.168.122.134 dev o3k-wg src 192.168.122.118 uid 0
+    cache
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+sent enrolled WG peer VXLAN VNI=999 bytes=50
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on enp1s0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+09:06:30.636516 IP 192.168.122.118.65001 > 192.168.122.134.65001: UDP, length 112
+09:06:30.909438 IP 192.168.122.118.65001 > 192.168.122.134.65001: UDP, length 144
+
+2 packets captured
+2 packets received by filter
+0 packets dropped by kernel
+fabric-v3-three-host-gate: negative-probe-encrypted-underlay host=host-a interface=enp1s0 passed
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: unknown-vni-dropped-before-vxlan counter=0->1
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: authenticated-inject-route host=host-c route=192.168.122.134 dev o3k-wg src 192.168.122.196 uid 0
+    cache
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+sent enrolled WG peer VXLAN VNI=101 bytes=50
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on enp1s0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+09:06:38.025031 IP 192.168.122.196.65001 > 192.168.122.134.65001: UDP, length 112
+
+1 packet captured
+1 packet received by filter
+0 packets dropped by kernel
+fabric-v3-three-host-gate: negative-probe-encrypted-underlay host=host-c interface=enp1s0 passed
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: nonparticipant-peer-vni-rejected counter=1->2
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+sent DHCPDISCOVER xid=4f334b31 bytes=291
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: dhcp-discover-broadcast=passed
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+three-host-provider=apply-passed
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: nested-three-host-packet-path=passed
+fabric-v3-three-host-gate: nested-realm-broadcast=passed
+fabric-v3-three-host-gate: nested-restart-reconcile=passed
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.196' (ED25519) to the list of known hosts.
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+fabric-v3-three-host-gate: provider-cleanup-and-foreign-canary=passed

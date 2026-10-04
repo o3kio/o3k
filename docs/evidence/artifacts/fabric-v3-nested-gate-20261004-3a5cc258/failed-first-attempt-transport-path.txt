@@ -1,0 +1,155 @@
+=== a addr/routes/firewall ===
+Warning: Permanently added '192.168.122.118' (ED25519) to the list of known hosts.
+2: enp1s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default qlen 1000
+    link/ether 52:54:00:11:24:3a brd ff:ff:ff:ff:ff:ff
+    inet 192.168.122.118/24 metric 100 brd 192.168.122.255 scope global dynamic enp1s0
+       valid_lft 3171sec preferred_lft 3171sec
+    inet6 fe80::5054:ff:fe11:243a/64 scope link
+       valid_lft forever preferred_lft forever
+default via 192.168.122.1 dev enp1s0 proto dhcp src 192.168.122.118 metric 100
+192.168.122.0/24 dev enp1s0 proto kernel scope link src 192.168.122.118 metric 100
+192.168.122.1 dev enp1s0 proto dhcp scope link src 192.168.122.118 metric 100
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+2: o3k-x-77c2d768: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-77c2d768 state UNKNOWN group default qlen 1000
+    link/ether 76:6e:57:aa:5b:43 brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::746e:57ff:feaa:5b43/64 scope link
+       valid_lft forever preferred_lft forever
+3: o3k-b-77c2d768: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue state UP group default qlen 1000
+    link/ether 12:59:29:dd:e3:4c brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::c0f0:e8ff:febd:4ef0/64 scope link
+       valid_lft forever preferred_lft forever
+7: o3k-wg: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1440 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/none
+    inet 192.168.122.118/32 scope global o3k-wg
+       valid_lft forever preferred_lft forever
+8: o3k-p-77c2d768@if9: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-77c2d768 state UP group default qlen 1000
+    link/ether 12:59:29:dd:e3:4c brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    inet6 fe80::1059:29ff:fedd:e34c/64 scope link
+       valid_lft forever preferred_lft forever
+192.168.122.134 dev o3k-wg scope link
+Chain PREROUTING (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain INPUT (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain OUTPUT (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain POSTROUTING (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+Chain INPUT (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain FORWARD (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain OUTPUT (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+Status: inactive
+table bridge o3k-as-1e8d056b {
+	chain forward {
+		comment "o3k-p11-antispoof"
+		type filter hook forward priority 0; policy accept;
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:02 ip saddr 10.0.0.20 accept
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:02 ip saddr 0.0.0.0 accept
+		iifname "o3k-c-77c2d768" arp saddr ether 02:00:00:00:a1:02 arp saddr ip 10.0.0.20 accept
+		iifname "o3k-c-77c2d768" counter packets 26 bytes 1636 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-489bfd8c" ether saddr != 02:00:00:00:a1:01 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-489bfd8c" ip saddr != 10.0.0.10 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-489bfd8c" arp saddr ether != 02:00:00:00:a1:01 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-489bfd8c" arp saddr ip != 10.0.0.10 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+	}
+}
+=== b addr/routes/firewall ===
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+2: enp1s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default qlen 1000
+    link/ether 52:54:00:1a:4b:a8 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.122.134/24 metric 100 brd 192.168.122.255 scope global dynamic enp1s0
+       valid_lft 3172sec preferred_lft 3172sec
+    inet6 fe80::5054:ff:fe1a:4ba8/64 scope link
+       valid_lft forever preferred_lft forever
+default via 192.168.122.1 dev enp1s0 proto dhcp src 192.168.122.134 metric 100
+192.168.122.0/24 dev enp1s0 proto kernel scope link src 192.168.122.134 metric 100
+192.168.122.1 dev enp1s0 proto dhcp scope link src 192.168.122.134 metric 100
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+2: o3k-x-77c2d768: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-77c2d768 state UNKNOWN group default qlen 1000
+    link/ether de:5e:91:d3:56:50 brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::dc5e:91ff:fed3:5650/64 scope link
+       valid_lft forever preferred_lft forever
+3: o3k-b-77c2d768: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue state UP group default qlen 1000
+    link/ether 76:f5:6d:d4:5e:43 brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::440:5aff:fea1:d620/64 scope link
+       valid_lft forever preferred_lft forever
+4: o3k-x-4ce51c6b: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-4ce51c6b state UNKNOWN group default qlen 1000
+    link/ether 72:7f:6a:55:1a:18 brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::707f:6aff:fe55:1a18/64 scope link
+       valid_lft forever preferred_lft forever
+5: o3k-b-4ce51c6b: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue state UP group default qlen 1000
+    link/ether 72:7f:6a:55:1a:18 brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::30f8:e7ff:fe64:7848/64 scope link
+       valid_lft forever preferred_lft forever
+6: o3k-wg: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1440 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/none
+    inet 192.168.122.134/32 scope global o3k-wg
+       valid_lft forever preferred_lft forever
+7: o3k-p-77c2d768@if8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-77c2d768 state UP group default qlen 1000
+    link/ether 76:f5:6d:d4:5e:43 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    inet6 fe80::74f5:6dff:fed4:5e43/64 scope link
+       valid_lft forever preferred_lft forever
+13: o3k-p-4ce51c6b@if14: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-4ce51c6b state UP group default qlen 1000
+    link/ether 8a:9b:5f:c6:2a:50 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    inet6 fe80::889b:5fff:fec6:2a50/64 scope link
+       valid_lft forever preferred_lft forever
+192.168.122.118 dev o3k-wg scope link
+192.168.122.196 dev o3k-wg scope link
+Chain PREROUTING (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain INPUT (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain OUTPUT (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain POSTROUTING (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+Chain INPUT (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain FORWARD (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain OUTPUT (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+Status: inactive
+table bridge o3k-as-1e8d056b {
+	chain forward {
+		comment "o3k-p11-antispoof"
+		type filter hook forward priority 0; policy accept;
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:01 ip saddr 10.0.0.10 accept
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:01 ip saddr 0.0.0.0 accept
+		iifname "o3k-c-77c2d768" arp saddr ether 02:00:00:00:a1:01 arp saddr ip 10.0.0.10 accept
+		iifname "o3k-c-77c2d768" counter packets 26 bytes 1636 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-489c02a5" ether saddr != 02:00:00:00:a1:02 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-489c02a5" ip saddr != 10.0.0.20 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-489c02a5" arp saddr ether != 02:00:00:00:a1:02 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-489c02a5" arp saddr ip != 10.0.0.20 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+	}
+}
+table bridge o3k-as-b5b0bfff {
+	chain forward {
+		comment "o3k-p11-antispoof"
+		type filter hook forward priority 0; policy accept;
+		iifname "o3k-c-4ce51c6b" ether saddr 02:00:00:00:b1:01 ip saddr 10.0.0.10 accept
+		iifname "o3k-c-4ce51c6b" ether saddr 02:00:00:00:b1:01 ip saddr 0.0.0.0 accept
+		iifname "o3k-c-4ce51c6b" arp saddr ether 02:00:00:00:b1:01 arp saddr ip 10.0.0.10 accept
+		iifname "o3k-c-4ce51c6b" counter packets 25 bytes 1572 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-6e979f05" ether saddr != 02:00:00:00:b1:02 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-6e979f05" ip saddr != 10.0.0.20 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-6e979f05" arp saddr ether != 02:00:00:00:b1:02 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+		iifname "o3k-t-6e979f05" arp saddr ip != 10.0.0.20 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof"
+	}
+}

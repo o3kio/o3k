@@ -1,0 +1,11 @@
+source_sha=3a5cc25856c1e1a13ef41b721871c52ed2841fac
+branch=fabric-v3-runtime
+working_tree=## fabric-v3-runtime...origin/main [ahead 38];?? PP5-HANDOFF.md;?? bins/o3kd/target/;?? diagnostic-prompt-1053.md;?? tests/pp5-small-edge-campaign/runs/;
+host_kernel=Linux 6.8.0-139-generic #139-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 03:52:05 UTC 2026 GNU/Linux
+libvirt=10.0.0
+qemu=QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)
+rustc=rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo=cargo 1.97.1 (c980f4866 2026-06-30)
+postgres_client=psql (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
+postgres_cluster=16 main 5432 online postgres /var/lib/postgresql/16/main /var/log/postgresql/postgresql-16-main.log;
+postgres_server_version=PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit

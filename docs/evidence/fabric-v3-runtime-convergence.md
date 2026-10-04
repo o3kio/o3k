@@ -413,3 +413,44 @@ claim is made that the entire OpenStack Neutron networking surface works on
 this fabric: the nested gate exercises the listed O3K fabric flows, not every
 Neutron API, service extension, client behavior, or interoperability profile.
 PP.5 final certification remains unclaimed.
+
+## Candidate rerun on 2026-10-04
+
+A final nested rerun completed successfully on source
+`3a5cc25856c1e1a13ef41b721871c52ed2841fac` (`fabric-v3-runtime`, based on
+`41fedbfdf982596f6932c5eb6b08e2c36f810067`). The successful gate exited 0.
+The retained bundle is
+`docs/evidence/artifacts/fabric-v3-nested-gate-20261004-3a5cc258/`; its
+`SHA256SUMS` covers the sanitized command output, workspace logs, run metadata,
+and post-cleanup inventories. The run used the same three nested guest identities
+and topology described above, on one physical development host.
+
+The rerun confirmed cross-host actual-MAC ARP and ping in both overlapping
+realms, DHCPDISCOVER delivery, realm isolation, exact participating-peer HER,
+WireGuard transport capture with no clear UDP/4789, the derived 1390-byte tenant
+MTU boundary (1362-byte ICMP payload succeeds and 1363-byte payload is rejected
+explicitly), TAP anti-spoof rejection counters, unknown/nonparticipating VNI
+drops, connectivity recovery after deleting host-b's WireGuard device and
+replaying, provider cleanup, and the foreign bridge canary assertion. The
+production Linux adapter was exercised through a regression helper with a
+test-only canonical fixture; the full `o3kd`/network-agent and OpenStack API
+path were not part of this gate.
+
+Two failed attempts remain retained alongside the pass. The first failed
+because the test fixture placed the WireGuard key outside the provider's actual
+`fabric-provider/` key path. After correcting that fixture, a second attempt
+completed dataplane checks but its foreign-bridge comparison failed on dynamic
+bridge timers. The harness now compares stable bridge identity fields, and the
+candidate rerun passed. These were harness/evidence corrections; no production
+network behavior was changed to turn either run green. Harness canaries were
+removed by explicit test teardown after provider cleanup had verified their
+survival. The guest disks are restored from pretest copies after evidence
+capture; exact pretest disk hashes and final guest inventories are retained.
+
+On this exact candidate, `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`, and
+`cargo test --workspace --all-features` all exited 0. This was workspace
+validation only, not the final PP.5 campaign. The result supports the
+user-approved nested functional gate; it does not prove physical host
+independence, the full O3K process/API path, all OpenStack Neutron behavior,
+production readiness, HA/SLA, or PP.5 final certification.

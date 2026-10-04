@@ -1,0 +1,12 @@
+Warning: Permanently added '192.168.122.134' (ED25519) to the list of known hosts.
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on enp1s0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+08:55:08.439580 IP 192.168.122.196.65001 > 192.168.122.134.65001: UDP, length 148
+08:55:09.526295 IP 192.168.122.118.65001 > 192.168.122.134.65001: UDP, length 148
+08:55:09.719572 IP 192.168.122.134.65001 > 192.168.122.196.65001: UDP, length 148
+08:55:11.767700 IP 192.168.122.134.65001 > 192.168.122.118.65001: UDP, length 148
+08:55:14.071572 IP 192.168.122.196.65001 > 192.168.122.134.65001: UDP, length 148
+
+5 packets captured
+7 packets received by filter
+0 packets dropped by kernel
