@@ -3902,6 +3902,172 @@ mod dispatcher_tests {
     }
 
     #[tokio::test]
+    async fn production_mtls_not_found_crash_before_supersession_retries_safely()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3kd-mtls-precommit-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root)?;
+        let store = if let Ok(database_url) = std::env::var("O3K_DATABASE_URL") {
+            o3k_store::conformance::assert_destructive_postgres_test_database(&database_url)
+                .map_err(|error| format!("unsafe recovery test database: {error}"))?;
+            let postgres = o3k_store::PostgresStore::connect(&database_url).await?;
+            postgres.clean_tables_for_testing().await?;
+            Arc::new(o3k_store::unified::O3kStore::Postgres(postgres))
+        } else {
+            Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?)
+        };
+        let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
+        let network =
+            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
+                .await?;
+        let historical = durable_removal_command(store.as_ref()).await?;
+        let registry = Arc::new(o3k_compute_agent::NodeRegistry::default());
+        registry
+            .register(&o3k_compute_agent::proto::RegisterRequest {
+                agent_id: "agent-c".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                software_version: "test".to_owned(),
+                host_label: "compute-c".to_owned(),
+                supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+                capabilities: Some(o3k_compute_agent::proto::Capabilities::default()),
+            })
+            .await?;
+
+        let realizer = MtlSRecoveryRealizer::default();
+        let removals = realizer.removals.clone();
+        let executor = o3k_network::NetworkPlanExecutor::open(
+            root.join("agent-journal"),
+            o3k_network::NetworkAgentIdentity {
+                agent_id: "agent-c".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+            },
+            o3k_network::NetworkControllerLease {
+                controller_id: String::new(),
+                controller_epoch: String::new(),
+                fencing_token: 0,
+            },
+        )?;
+        let service = o3k_network_bin::agent::NetworkAgentService::new_dynamic(executor, realizer)?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = start_mtls_network_agent(listener, service).await?;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let proceed = Arc::new(tokio::sync::Notify::new());
+        let mut first_dispatcher =
+            mtls_dispatcher_as(address, store.clone(), "controller-a", "epoch-a", None);
+        first_dispatcher.pre_supersession_gate = Some((reached.clone(), proceed));
+        let first_dispatcher: Arc<dyn o3k_network::NetworkPlanDispatcher> =
+            Arc::new(first_dispatcher);
+        let first_reconciler = Arc::new(FabricRealmReconciler {
+            network: network.clone(),
+            coordination: store.clone(),
+            durable: store.clone(),
+            registry: registry.clone(),
+            dispatcher: first_dispatcher,
+            controller: o3k_network::NetworkControllerLease {
+                controller_id: "controller-a".to_owned(),
+                controller_epoch: "epoch-a".to_owned(),
+                fencing_token: 0,
+            },
+            fabric_domain_id: Uuid::from_u128(990),
+            network_external_realm_id: None,
+            public_allocator: None,
+        });
+        let first_store = store.clone();
+        let first = tokio::spawn(async move {
+            recover_fabric_state(&first_reconciler, first_store.as_ref()).await;
+        });
+
+        // The production reconciler has observed not_found over mTLS and is
+        // paused immediately before its fenced atomic supersession call.
+        tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified()).await?;
+        first.abort();
+        let _ = first.await;
+        assert_eq!(
+            store
+                .get_network_plan_work(&historical.command_id)
+                .await?
+                .state,
+            o3k_store::NetworkPlanWorkState::Running
+        );
+        assert_eq!(store.list_unresolved_network_plan_work().await?.len(), 1);
+        assert_eq!(removals.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        // A cancelled controller task may leave its realm lease to expire.
+        // Relinquish that exact owned lease to model a clean process handoff;
+        // the preserved token makes B's successor fence strictly higher.
+        let realm_key = format!("fabric-realm:{}", Uuid::from_u128(800));
+        let lease_a = store
+            .inspect_work_lease(&realm_key)
+            .await?
+            .ok_or("controller A realm lease missing after interruption")?;
+        assert_eq!(lease_a.owner_controller_id.0, "controller-a");
+        assert!(
+            store
+                .relinquish_work_lease_preserving_fence(
+                    &realm_key,
+                    &lease_a.owner_controller_id,
+                    &lease_a.owner_controller_epoch,
+                    lease_a.fencing_token,
+                )
+                .await?
+        );
+
+        let second_dispatcher: Arc<dyn o3k_network::NetworkPlanDispatcher> = Arc::new(
+            mtls_dispatcher_as(address, store.clone(), "controller-b", "epoch-b", None),
+        );
+        let second_reconciler = FabricRealmReconciler {
+            network,
+            coordination: store.clone(),
+            durable: store.clone(),
+            registry,
+            dispatcher: second_dispatcher,
+            controller: o3k_network::NetworkControllerLease {
+                controller_id: "controller-b".to_owned(),
+                controller_epoch: "epoch-b".to_owned(),
+                fencing_token: 0,
+            },
+            fabric_domain_id: Uuid::from_u128(990),
+            network_external_realm_id: None,
+            public_allocator: None,
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                recover_fabric_state(&second_reconciler, store.as_ref()).await;
+                if store.list_unresolved_network_plan_work().await?.is_empty() {
+                    break Ok::<(), o3k_store::StoreError>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await??;
+        let terminal = store.get_network_plan_work(&historical.command_id).await?;
+        assert_eq!(terminal.state, o3k_store::NetworkPlanWorkState::Failed);
+        let outcome: serde_json::Value = serde_json::from_slice(
+            terminal
+                .outcome
+                .as_deref()
+                .ok_or("recovery did not persist supersession outcome")?,
+        )?;
+        let successor_id = outcome["successor_command_id"]
+            .as_str()
+            .ok_or("recovery did not create a successor")?;
+        assert_eq!(
+            store.get_network_plan_work(successor_id).await?.state,
+            o3k_store::NetworkPlanWorkState::Succeeded
+        );
+        assert_eq!(store.list_unresolved_network_plan_work().await?.len(), 0);
+        assert_eq!(
+            removals.load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "pre-commit crash recovery must produce one provider mutation"
+        );
+        server.abort();
+        let _ = server.await;
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn production_mtls_unknown_final_removal_is_not_superseded()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!("o3kd-mtls-unknown-{}", Uuid::now_v7()));
