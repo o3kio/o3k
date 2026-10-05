@@ -1375,6 +1375,21 @@ impl NetworkPlanWorkRecord {
             && self.snapshot == other.snapshot
     }
 
+    /// Compares canonical desired work while ignoring its controller execution
+    /// envelope, deadline, and serialized attempt snapshot. This is used only
+    /// to make a completed reconciliation idempotent across controller
+    /// takeovers; it is not sufficient to authorize replay of an unresolved
+    /// command.
+    pub fn same_desired_identity(&self, other: &Self) -> bool {
+        self.command_id == other.command_id
+            && self.operation_id == other.operation_id
+            && self.idempotency_key == other.idempotency_key
+            && self.target_host_id == other.target_host_id
+            && self.target_agent_id == other.target_agent_id
+            && self.target_agent_epoch == other.target_agent_epoch
+            && self.fingerprint_sha256 == other.fingerprint_sha256
+    }
+
     pub fn validate(&self) -> Result<(), crate::StoreError> {
         if self.command_id.is_empty()
             || self.idempotency_key.is_empty()

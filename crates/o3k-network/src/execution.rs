@@ -30,6 +30,37 @@ pub trait NetworkPlanDispatcher: Send + Sync {
         command: NetworkPlanCommand,
     ) -> Result<NetworkPlanStatus, NetworkDispatchError>;
 
+    /// Dispatch a fresh execution attempt after the authoritative agent has
+    /// proved that the historical command was never admitted. Implementations
+    /// must atomically supersede the historical durable work before sending
+    /// the successor to the agent.
+    async fn dispatch_superseding(
+        &self,
+        command: NetworkPlanCommand,
+        _historical_command_id: String,
+        _historical_revision: u64,
+    ) -> Result<NetworkPlanStatus, NetworkDispatchError> {
+        let _ = command;
+        Err(NetworkDispatchError::Rejected(
+            "atomic historical work supersession is unsupported by this dispatcher".to_owned(),
+        ))
+    }
+
+    /// Replays an already-durable successor that was committed before a
+    /// controller crash but had not yet reached the agent. The command ID is
+    /// retained while its execution envelope is refreshed under current
+    /// authority.
+    async fn dispatch_existing_successor(
+        &self,
+        command: NetworkPlanCommand,
+        _successor_command_id: String,
+    ) -> Result<NetworkPlanStatus, NetworkDispatchError> {
+        let _ = command;
+        Err(NetworkDispatchError::Rejected(
+            "durable recovery successor replay is unsupported by this dispatcher".to_owned(),
+        ))
+    }
+
     /// Observe a historical command using current control ownership. This
     /// operation is read-only with respect to the provider and must never
     /// resubmit the stored command as a mutation.
@@ -184,7 +215,21 @@ impl NetworkPlanExecutor {
         command: &NetworkPlanCommand,
         now_unix_ms: u64,
     ) -> Result<PlanAdmission, NetworkExecutionError> {
-        self.validate(command, now_unix_ms)?;
+        let lease = self.controller_lease()?;
+        self.admit_with_authority(command, now_unix_ms, &lease)
+    }
+
+    /// Durably admits a command against the authority snapshot held by the
+    /// authenticated agent control path. Dynamic-lease agents call this while
+    /// synchronizing with authority updates; provider execution happens only
+    /// after this durable journal boundary and does not revalidate the lease.
+    pub fn admit_with_authority(
+        &self,
+        command: &NetworkPlanCommand,
+        now_unix_ms: u64,
+        authority: &NetworkControllerLease,
+    ) -> Result<PlanAdmission, NetworkExecutionError> {
+        self.validate(command, now_unix_ms, authority)?;
         let _guard = self
             .journal_lock
             .lock()
@@ -327,10 +372,26 @@ impl NetworkPlanExecutor {
     where
         R::Error: std::fmt::Display,
     {
-        let admission = self.admit(command, now_unix_ms)?;
+        let lease = self.controller_lease()?;
+        let admission = self.admit_with_authority(command, now_unix_ms, &lease)?;
         if admission != PlanAdmission::Accepted {
             return Ok(admission);
         }
+        self.execute_admitted(command, realizer)?;
+        Ok(PlanAdmission::Accepted)
+    }
+
+    /// Executes a command whose immutable identity has already crossed the
+    /// durable admission boundary. Authority expiry or takeover after that
+    /// point prevents further admissions but does not cancel this operation.
+    pub fn execute_admitted<R: NetworkPlanRealizer>(
+        &self,
+        command: &NetworkPlanCommand,
+        realizer: &mut R,
+    ) -> Result<(), NetworkExecutionError>
+    where
+        R::Error: std::fmt::Display,
+    {
         self.set_status(command.command_id, NetworkPlanStatus::Applying)?;
         let result = match command.action {
             NetworkPlanAction::Apply => realizer.realize(&command.plan),
@@ -339,7 +400,7 @@ impl NetworkPlanExecutor {
         match result {
             Ok(()) => {
                 self.set_status(command.command_id, NetworkPlanStatus::Succeeded)?;
-                Ok(PlanAdmission::Accepted)
+                Ok(())
             }
             Err(error) => {
                 self.set_status(command.command_id, NetworkPlanStatus::Unknown)?;
@@ -402,10 +463,24 @@ impl NetworkPlanExecutor {
         self.store(&journal)
     }
 
+    pub fn status(&self, command_id: Uuid) -> Result<NetworkPlanStatus, NetworkExecutionError> {
+        let _guard = self
+            .journal_lock
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)?;
+        self.load()?
+            .plans
+            .into_iter()
+            .find(|plan| plan.command_id == command_id)
+            .map(|plan| plan.status)
+            .ok_or(NetworkExecutionError::UnknownCommand)
+    }
+
     fn validate(
         &self,
         command: &NetworkPlanCommand,
         _now_unix_ms: u64,
+        authority: &NetworkControllerLease,
     ) -> Result<(), NetworkExecutionError> {
         if command.idempotency_key.trim().is_empty()
             || command.target.agent_id.trim().is_empty()
@@ -444,11 +519,7 @@ impl NetworkPlanExecutor {
         if command.target != self.agent {
             return Err(NetworkExecutionError::StaleAgentEpoch);
         }
-        let lease = self
-            .lease
-            .lock()
-            .map_err(|_| NetworkExecutionError::CorruptJournal)?;
-        if command.controller != *lease {
+        if command.controller != *authority {
             return Err(NetworkExecutionError::StaleControllerLease);
         }
         Ok(())

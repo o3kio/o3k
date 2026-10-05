@@ -579,6 +579,8 @@ pub async fn build_composition(
         (Some(fabric_domain_id), Some(dispatcher)) => {
             Some(Arc::new(network::FabricRealmReconciler {
                 network: network_service.clone(),
+                coordination: coordination_store.clone(),
+                durable: durable_store.clone(),
                 registry: Arc::new(registry.clone()),
                 dispatcher: dispatcher.clone(),
                 controller: network_controller.clone(),
@@ -2135,6 +2137,8 @@ mod tests {
         let commands = dispatched.commands.clone();
         let fabric_reconciler = Arc::new(super::network::FabricRealmReconciler {
             network: network.clone(),
+            coordination: store.clone(),
+            durable: store.clone(),
             registry,
             dispatcher: Arc::new(dispatched),
             controller: o3k_network::NetworkControllerLease {

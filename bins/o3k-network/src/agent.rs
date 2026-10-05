@@ -5,8 +5,10 @@ use o3k_network::{
     NetworkPlanCommand, NetworkPlanExecutor, NetworkPlanRealizer, PlanAdmission,
 };
 use std::{
+    collections::HashSet,
     fs::{self, File},
     io::Write,
+    path::Path,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -39,11 +41,7 @@ enum NetworkAgentError {
 }
 
 struct Runtime<R> {
-    executor: NetworkPlanExecutor,
     realizer: R,
-    registered: bool,
-    lease_expiry_unix_ms: u64,
-    dynamic_lease: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -55,13 +53,25 @@ struct PersistedLease {
 }
 
 pub struct NetworkAgentService<R> {
+    executor: Arc<NetworkPlanExecutor>,
     runtime: Arc<Mutex<Runtime<R>>>,
+    authority: Arc<Mutex<Option<PersistedLease>>>,
+    running: Arc<Mutex<HashSet<Uuid>>>,
+    registered: Arc<std::sync::atomic::AtomicBool>,
+    state_root: std::path::PathBuf,
+    dynamic_lease: bool,
 }
 
 impl<R> Clone for NetworkAgentService<R> {
     fn clone(&self) -> Self {
         Self {
+            executor: Arc::clone(&self.executor),
             runtime: Arc::clone(&self.runtime),
+            authority: Arc::clone(&self.authority),
+            running: Arc::clone(&self.running),
+            registered: Arc::clone(&self.registered),
+            state_root: self.state_root.clone(),
+            dynamic_lease: self.dynamic_lease,
         }
     }
 }
@@ -70,17 +80,24 @@ impl<R> NetworkAgentService<R>
 where
     R: NetworkPlanRealizer + Send + 'static,
 {
-    #[cfg(test)]
-    pub fn new(executor: NetworkPlanExecutor, realizer: R) -> Self {
+    /// Constructs the explicit legacy static-controller mode. Fabric v3
+    /// production callers must use `new_dynamic` so mutation authority comes
+    /// from the durable controller lease protocol.
+    pub fn new_legacy(executor: NetworkPlanExecutor, realizer: R) -> Self {
         Self {
-            runtime: Arc::new(Mutex::new(Runtime {
-                executor,
-                realizer,
-                registered: false,
-                lease_expiry_unix_ms: 0,
-                dynamic_lease: false,
-            })),
+            state_root: executor.state_root().to_path_buf(),
+            executor: Arc::new(executor),
+            runtime: Arc::new(Mutex::new(Runtime { realizer })),
+            authority: Arc::new(Mutex::new(None)),
+            running: Arc::new(Mutex::new(HashSet::new())),
+            registered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            dynamic_lease: false,
         }
+    }
+
+    #[cfg(test)]
+    fn new(executor: NetworkPlanExecutor, realizer: R) -> Self {
+        Self::new_legacy(executor, realizer)
     }
 
     pub fn new_dynamic(executor: NetworkPlanExecutor, realizer: R) -> Result<Self, std::io::Error> {
@@ -92,6 +109,7 @@ where
         realizer: R,
         dynamic_lease: bool,
     ) -> Result<Self, std::io::Error> {
+        let state_root = executor.state_root().to_path_buf();
         let persisted = load_lease(&executor)?;
         if let Some(lease) = &persisted {
             let _ = executor.set_controller_lease(NetworkControllerLease {
@@ -100,17 +118,14 @@ where
                 fencing_token: lease.fencing_token,
             });
         }
-        let lease_expiry_unix_ms = persisted
-            .map(|lease| lease.lease_expiry_unix_ms)
-            .unwrap_or(0);
         Ok(Self {
-            runtime: Arc::new(Mutex::new(Runtime {
-                executor,
-                realizer,
-                registered: false,
-                lease_expiry_unix_ms,
-                dynamic_lease,
-            })),
+            state_root,
+            executor: Arc::new(executor),
+            runtime: Arc::new(Mutex::new(Runtime { realizer })),
+            authority: Arc::new(Mutex::new(persisted)),
+            running: Arc::new(Mutex::new(HashSet::new())),
+            registered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            dynamic_lease,
         })
     }
 
@@ -121,10 +136,7 @@ where
             .runtime
             .lock()
             .map_err(|_| NetworkExecutionError::CorruptJournal)?;
-        let Runtime {
-            executor, realizer, ..
-        } = &mut *runtime;
-        executor.reconcile_pending(realizer)
+        self.executor.reconcile_pending(&mut runtime.realizer)
     }
 
     fn accept_lease(
@@ -138,44 +150,34 @@ where
         {
             return Err(NetworkAgentError::Malformed("invalid controller lease"));
         }
-        let mut runtime = self
-            .runtime
+        let mut authority = self
+            .authority
             .lock()
             .map_err(|_| NetworkAgentError::Poisoned)?;
-        let current = runtime
-            .executor
-            .controller_lease()
-            .map_err(|_| NetworkAgentError::Poisoned)?;
-        let same = lease.fencing_token == current.fencing_token
-            && lease.controller_id == current.controller_id
-            && lease.controller_epoch == current.controller_epoch;
-        if lease.fencing_token < current.fencing_token
-            || (lease.fencing_token == current.fencing_token && !same)
+        let current = authority.as_ref();
+        let same = current.is_some_and(|current| {
+            lease.fencing_token == current.fencing_token
+                && lease.controller_id == current.controller_id
+                && lease.controller_epoch == current.controller_epoch
+        });
+        if current.is_some_and(|current| lease.fencing_token < current.fencing_token)
+            || (current.is_some_and(|current| lease.fencing_token == current.fencing_token)
+                && !same)
             || (same
-                && runtime.lease_expiry_unix_ms != 0
-                && now_ms()? >= runtime.lease_expiry_unix_ms)
+                && current.is_some_and(|current| {
+                    now_ms().unwrap_or(u64::MAX) >= current.lease_expiry_unix_ms
+                }))
         {
             return Err(NetworkAgentError::Malformed("stale controller lease"));
         }
-        store_lease(
-            &runtime.executor,
-            &PersistedLease {
-                controller_id: lease.controller_id.clone(),
-                controller_epoch: lease.controller_epoch.clone(),
-                fencing_token: lease.fencing_token,
-                lease_expiry_unix_ms: lease.lease_expiry_unix_ms,
-            },
-        )
-        .map_err(|_| NetworkAgentError::Poisoned)?;
-        runtime
-            .executor
-            .set_controller_lease(NetworkControllerLease {
-                controller_id: lease.controller_id.clone(),
-                controller_epoch: lease.controller_epoch.clone(),
-                fencing_token: lease.fencing_token,
-            })
-            .map_err(|_| NetworkAgentError::Poisoned)?;
-        runtime.lease_expiry_unix_ms = lease.lease_expiry_unix_ms;
+        let persisted = PersistedLease {
+            controller_id: lease.controller_id.clone(),
+            controller_epoch: lease.controller_epoch.clone(),
+            fencing_token: lease.fencing_token,
+            lease_expiry_unix_ms: lease.lease_expiry_unix_ms,
+        };
+        store_lease(&self.state_root, &persisted).map_err(|_| NetworkAgentError::Poisoned)?;
+        *authority = Some(persisted);
         Ok(ControllerLeaseAck {
             fencing_token: lease.fencing_token,
             lease_expiry_unix_ms: lease.lease_expiry_unix_ms,
@@ -184,19 +186,37 @@ where
 
     fn observe(&self, request: &ObserveCommand) -> Result<CommandResult, NetworkAgentError> {
         let command_id = parse_uuid(&request.command_id, "command_id")?;
+        if self
+            .running
+            .lock()
+            .map_err(|_| NetworkAgentError::Poisoned)?
+            .contains(&command_id)
+        {
+            return Ok(CommandResult {
+                command_id: request.command_id.clone(),
+                status: "running".to_owned(),
+                replayed: true,
+                error_code: String::new(),
+            });
+        }
+        if self.dynamic_lease {
+            let authority = self
+                .authority
+                .lock()
+                .map_err(|_| NetworkAgentError::Poisoned)?;
+            if !authority
+                .as_ref()
+                .is_some_and(|lease| now_ms().is_ok_and(|now| now < lease.lease_expiry_unix_ms))
+            {
+                return Err(NetworkAgentError::Malformed("controller lease expired"));
+            }
+            drop(authority);
+        }
         let mut runtime = self
             .runtime
             .lock()
             .map_err(|_| NetworkAgentError::Poisoned)?;
-        if runtime.dynamic_lease
-            && (runtime.lease_expiry_unix_ms == 0 || now_ms()? >= runtime.lease_expiry_unix_ms)
-        {
-            return Err(NetworkAgentError::Malformed("controller lease expired"));
-        }
-        let Runtime {
-            executor, realizer, ..
-        } = &mut *runtime;
-        let status = match executor.reconcile(command_id, realizer) {
+        let status = match self.executor.reconcile(command_id, &mut runtime.realizer) {
             Ok(status) => status,
             Err(o3k_network::NetworkExecutionError::UnknownCommand) => {
                 return Ok(CommandResult {
@@ -210,10 +230,11 @@ where
         };
         Ok(CommandResult {
             command_id: request.command_id.clone(),
-            status: if status == o3k_network::NetworkPlanStatus::Succeeded {
-                "succeeded"
-            } else {
-                "unknown"
+            status: match status {
+                o3k_network::NetworkPlanStatus::Succeeded => "succeeded",
+                o3k_network::NetworkPlanStatus::Accepted
+                | o3k_network::NetworkPlanStatus::Applying => "running",
+                o3k_network::NetworkPlanStatus::Unknown => "unknown",
             }
             .to_owned(),
             replayed: true,
@@ -221,22 +242,42 @@ where
         })
     }
 
-    fn register(&self, request: &proto::Register) -> Result<RegisterAck, NetworkAgentError> {
-        let runtime = self
-            .runtime
+    fn current_authority(
+        &self,
+        command: &NetworkPlanCommand,
+        now: u64,
+    ) -> Result<NetworkControllerLease, NetworkAgentError> {
+        let authority = self
+            .authority
             .lock()
             .map_err(|_| NetworkAgentError::Poisoned)?;
-        if request.agent_id != runtime.executor.agent_id()
-            || request.agent_epoch != runtime.executor.agent_epoch()
+        let accepted = authority.as_ref().ok_or(NetworkAgentError::Malformed(
+            "dynamic controller lease required",
+        ))?;
+        if now >= accepted.lease_expiry_unix_ms {
+            return Err(NetworkAgentError::Malformed("controller lease expired"));
+        }
+        if command.controller.controller_id != accepted.controller_id
+            || command.controller.controller_epoch != accepted.controller_epoch
+            || command.controller.fencing_token != accepted.fencing_token
+        {
+            return Err(NetworkAgentError::Execution("stale_controller_lease"));
+        }
+        Ok(NetworkControllerLease {
+            controller_id: accepted.controller_id.clone(),
+            controller_epoch: accepted.controller_epoch.clone(),
+            fencing_token: accepted.fencing_token,
+        })
+    }
+
+    fn register(&self, request: &proto::Register) -> Result<RegisterAck, NetworkAgentError> {
+        if request.agent_id != self.executor.agent_id()
+            || request.agent_epoch != self.executor.agent_epoch()
         {
             return Err(NetworkAgentError::Malformed("stale agent identity"));
         }
-        drop(runtime);
-        let mut runtime = self
-            .runtime
-            .lock()
-            .map_err(|_| NetworkAgentError::Poisoned)?;
-        runtime.registered = true;
+        self.registered
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(RegisterAck {
             agent_id: request.agent_id.clone(),
             agent_epoch: request.agent_epoch.clone(),
@@ -278,29 +319,68 @@ where
             .duration_since(UNIX_EPOCH)
             .map_err(|_| NetworkAgentError::Malformed("system clock before epoch"))?
             .as_millis() as u64;
+        // Reject stale authority before waiting behind a running mutation.
+        // The authority is checked again after the lane is acquired, so a
+        // command queued before takeover cannot cross admission afterward.
+        if self.dynamic_lease {
+            let _ = self.current_authority(&internal, now)?;
+        }
+        // Serialize command admission with provider execution. Waiting for this
+        // lane does not hold controller authority, so lease renewals and a
+        // higher-fence takeover remain responsive while an earlier provider
+        // operation is running. A queued command is not admitted until it
+        // owns the lane and revalidates the then-current authority.
         let mut runtime = self
             .runtime
             .lock()
             .map_err(|_| NetworkAgentError::Poisoned)?;
-        let Runtime {
-            executor,
-            realizer,
-            registered,
-            lease_expiry_unix_ms,
-            dynamic_lease,
-        } = &mut *runtime;
-        if *dynamic_lease && *lease_expiry_unix_ms == 0 {
-            return Err(NetworkAgentError::Malformed(
-                "dynamic controller lease required",
-            ));
-        }
-        if *lease_expiry_unix_ms != 0 && now_ms()? >= *lease_expiry_unix_ms {
-            return Err(NetworkAgentError::Malformed("controller lease expired"));
-        }
-        if !*registered {
+        let authority = if self.dynamic_lease {
+            Some(self.current_authority(&internal, now)?)
+        } else {
+            None
+        };
+        if !self.registered.load(std::sync::atomic::Ordering::Acquire) {
             return Err(NetworkAgentError::Malformed("register is required first"));
         }
-        let admission = match executor.execute(&internal, now, realizer) {
+        let admission = if let Some(authority) = authority.as_ref() {
+            self.executor
+                .admit_with_authority(&internal, now, authority)
+        } else {
+            self.executor.admit(&internal, now)
+        };
+        let admission = match admission {
+            Ok(admission) => admission,
+            Err(error) => return Err(NetworkAgentError::Execution(execution_error_code(&error))),
+        };
+        // Durable admission has transferred this command to the agent. No
+        // authority lock is held while provider mutation runs, so takeover is
+        // accepted while this serialized execution lane remains occupied.
+        if admission == PlanAdmission::Accepted {
+            self.running
+                .lock()
+                .map_err(|_| NetworkAgentError::Poisoned)?
+                .insert(command_id);
+        }
+        let execution = match admission {
+            PlanAdmission::Accepted => self
+                .executor
+                .execute_admitted(&internal, &mut runtime.realizer)
+                .map(|_| admission),
+            PlanAdmission::Replayed
+            | PlanAdmission::ReplayedUnknown
+            | PlanAdmission::RequiresObservation => {
+                match self.executor.reconcile(command_id, &mut runtime.realizer) {
+                    Ok(o3k_network::NetworkPlanStatus::Succeeded) => Ok(PlanAdmission::Replayed),
+                    Ok(_) => Ok(PlanAdmission::ReplayedUnknown),
+                    Err(error) => Err(error),
+                }
+            }
+        };
+        self.running
+            .lock()
+            .map_err(|_| NetworkAgentError::Poisoned)?
+            .remove(&command_id);
+        let admission = match execution {
             Ok(admission) => admission,
             Err(NetworkExecutionError::MutationOutcomeUnknown(reason)) => {
                 tracing::warn!(
@@ -341,14 +421,8 @@ where
         let (status, replayed) = match admission {
             PlanAdmission::Accepted => ("succeeded", false),
             PlanAdmission::Replayed => ("replayed", true),
-            PlanAdmission::ReplayedUnknown | PlanAdmission::RequiresObservation => {
-                match executor.reconcile(command_id, realizer) {
-                    Ok(o3k_network::NetworkPlanStatus::Succeeded) => ("recovered", true),
-                    Ok(o3k_network::NetworkPlanStatus::Unknown) | Err(_) => ("unknown", true),
-                    Ok(o3k_network::NetworkPlanStatus::Accepted)
-                    | Ok(o3k_network::NetworkPlanStatus::Applying) => ("unknown", true),
-                }
-            }
+            PlanAdmission::ReplayedUnknown => ("unknown", true),
+            PlanAdmission::RequiresObservation => ("unknown", true),
         };
         Ok(CommandResult {
             command_id: command.command_id.clone(),
@@ -391,12 +465,25 @@ where
                     },
                     Ok(ControlRequest {
                         body: Some(RequestBody::Command(command)),
-                    }) if registered => match service.execute(&command) {
-                        Ok(result) => ControlResponse {
-                            body: Some(ResponseBody::Result(result)),
-                        },
-                        Err(error) => error_response(error_code(&error)),
-                    },
+                    }) if registered => {
+                        let service = service.clone();
+                        let response_tx = tx.clone();
+                        tokio::spawn(async move {
+                            let response = match tokio::task::spawn_blocking(move || {
+                                service.execute(&command)
+                            })
+                            .await
+                            {
+                                Ok(Ok(result)) => ControlResponse {
+                                    body: Some(ResponseBody::Result(result)),
+                                },
+                                Ok(Err(error)) => error_response(error_code(&error)),
+                                Err(_) => error_response("execution_worker_failed"),
+                            };
+                            let _ = response_tx.send(Ok(response)).await;
+                        });
+                        continue;
+                    }
                     Ok(ControlRequest {
                         body: Some(RequestBody::Lease(lease)),
                     }) if registered => match service.accept_lease(&lease) {
@@ -407,12 +494,25 @@ where
                     },
                     Ok(ControlRequest {
                         body: Some(RequestBody::Observe(observe)),
-                    }) if registered => match service.observe(&observe) {
-                        Ok(result) => ControlResponse {
-                            body: Some(ResponseBody::Result(result)),
-                        },
-                        Err(error) => error_response(error_code(&error)),
-                    },
+                    }) if registered => {
+                        let service = service.clone();
+                        let response_tx = tx.clone();
+                        tokio::spawn(async move {
+                            let response = match tokio::task::spawn_blocking(move || {
+                                service.observe(&observe)
+                            })
+                            .await
+                            {
+                                Ok(Ok(result)) => ControlResponse {
+                                    body: Some(ResponseBody::Result(result)),
+                                },
+                                Ok(Err(error)) => error_response(error_code(&error)),
+                                Err(_) => error_response("observation_worker_failed"),
+                            };
+                            let _ = response_tx.send(Ok(response)).await;
+                        });
+                        continue;
+                    }
                     Ok(ControlRequest {
                         body: Some(RequestBody::Command(_)),
                     }) => error_response("register_required"),
@@ -445,12 +545,12 @@ fn now_ms() -> Result<u64, NetworkAgentError> {
         .as_millis() as u64)
 }
 
-fn lease_path(executor: &NetworkPlanExecutor) -> std::path::PathBuf {
-    executor.state_root().join("controller-lease.json")
+fn lease_path(root: &Path) -> std::path::PathBuf {
+    root.join("controller-lease.json")
 }
 
 fn load_lease(executor: &NetworkPlanExecutor) -> Result<Option<PersistedLease>, std::io::Error> {
-    match fs::read(lease_path(executor)) {
+    match fs::read(lease_path(executor.state_root())) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt controller lease")
         }),
@@ -459,11 +559,8 @@ fn load_lease(executor: &NetworkPlanExecutor) -> Result<Option<PersistedLease>, 
     }
 }
 
-fn store_lease(
-    executor: &NetworkPlanExecutor,
-    lease: &PersistedLease,
-) -> Result<(), std::io::Error> {
-    let path = lease_path(executor);
+fn store_lease(root: &Path, lease: &PersistedLease) -> Result<(), std::io::Error> {
+    let path = lease_path(root);
     let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec(lease)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "lease serialization"))?;
@@ -546,6 +643,27 @@ mod tests {
         fn remove(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    struct BlockingRealizer {
+        entered: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+        mutations: Arc<AtomicUsize>,
+    }
+
+    impl NetworkPlanRealizer for BlockingRealizer {
+        type Error = std::convert::Infallible;
+
+        fn realize(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            self.mutations.fetch_add(1, Ordering::SeqCst);
+            self.entered.wait();
+            self.release.wait();
+            Ok(())
+        }
+
+        fn remove(&mut self, plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            self.realize(plan)
         }
     }
 
@@ -776,11 +894,10 @@ mod tests {
         ));
         assert_eq!(
             service
-                .runtime
+                .authority
                 .lock()
-                .expect("runtime")
-                .executor
-                .controller_lease()
+                .expect("authority")
+                .as_ref()
                 .expect("lease")
                 .fencing_token,
             3
@@ -834,6 +951,117 @@ mod tests {
             "succeeded"
         );
         assert_eq!(mutation_count.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn admitted_mutation_survives_takeover_and_control_lane_stays_responsive() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-network-agent-blocking-{}", Uuid::now_v7()));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let mutations = Arc::new(AtomicUsize::new(0));
+        let service = NetworkAgentService::new_dynamic(
+            NetworkPlanExecutor::open(
+                &root,
+                NetworkAgentIdentity {
+                    agent_id: "agent-a".into(),
+                    agent_epoch: "epoch-1".into(),
+                },
+                NetworkControllerLease {
+                    controller_id: "bootstrap".into(),
+                    controller_epoch: "bootstrap".into(),
+                    fencing_token: 0,
+                },
+            )
+            .expect("executor"),
+            BlockingRealizer {
+                entered: entered.clone(),
+                release: release.clone(),
+                mutations: mutations.clone(),
+            },
+        )
+        .expect("service");
+        let expiry = now_ms().expect("clock") + 60_000;
+        service
+            .accept_lease(&lease("controller-a", "epoch-a", 2, expiry))
+            .expect("A lease");
+        service
+            .register(&proto::Register {
+                agent_id: "agent-a".into(),
+                agent_epoch: "epoch-1".into(),
+            })
+            .expect("registration");
+        let operation_id = Uuid::now_v7();
+        let deadline_unix_ms = now_ms().expect("clock") + 60_000;
+        let mut plan = o3k_network::NodeNetworkPlan {
+            schema_version: 1,
+            plan_id: Uuid::now_v7(),
+            node_id: "agent-a".into(),
+            operation_id,
+            deadline_unix_ms,
+            resource_generations: BTreeMap::new(),
+            intents: Vec::new(),
+            fabric: None,
+            gateway: None,
+            fingerprint_sha256: String::new(),
+        };
+        plan.fingerprint_sha256 =
+            o3k_network::canonical_plan_fingerprint(&plan).expect("fingerprint");
+        let command = proto::NetworkCommand {
+            command_id: Uuid::now_v7().to_string(),
+            operation_id: operation_id.to_string(),
+            idempotency_key: "admitted-before-takeover".into(),
+            agent_id: "agent-a".into(),
+            agent_epoch: "epoch-1".into(),
+            controller_id: "controller-a".into(),
+            controller_epoch: "epoch-a".into(),
+            fencing_token: 2,
+            deadline_unix_ms,
+            plan_json: serde_json::to_string(&plan).expect("plan"),
+            remove: false,
+        };
+        let service_thread = service.clone();
+        let command_thread = command.clone();
+        let operation = std::thread::spawn(move || service_thread.execute(&command_thread));
+        entered.wait();
+
+        service
+            .accept_lease(&lease(
+                "controller-b",
+                "epoch-b",
+                3,
+                now_ms().expect("clock") + 60_000,
+            ))
+            .expect("B takeover while provider is blocked");
+        let stale = proto::NetworkCommand {
+            command_id: Uuid::now_v7().to_string(),
+            controller_id: "controller-a".into(),
+            controller_epoch: "epoch-a".into(),
+            fencing_token: 2,
+            ..command.clone()
+        };
+        assert!(matches!(
+            service.execute(&stale),
+            Err(NetworkAgentError::Execution("stale_controller_lease"))
+        ));
+        let observation = service
+            .observe(&ObserveCommand {
+                command_id: command.command_id.clone(),
+            })
+            .expect("running observation");
+        assert_eq!(observation.status, "running");
+
+        release.wait();
+        assert_eq!(
+            operation
+                .join()
+                .expect("provider worker")
+                .expect("admitted command")
+                .status,
+            "succeeded"
+        );
+        assert_eq!(mutations.load(Ordering::SeqCst), 1);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1113,11 +1341,10 @@ mod tests {
         let restarted = dynamic_service(&root);
         assert_eq!(
             restarted
-                .runtime
+                .authority
                 .lock()
-                .expect("runtime")
-                .executor
-                .controller_lease()
+                .expect("authority")
+                .as_ref()
                 .expect("lease")
                 .fencing_token,
             9

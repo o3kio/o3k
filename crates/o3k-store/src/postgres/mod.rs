@@ -118,7 +118,7 @@ impl PostgresStore {
                 quota_limits, quota_reservations, quota_reservation_amounts,
                 metering_authority, metering_intervals, metering_aggregates,
                 topology_regions, topology_availability_domains, failure_domains, topology_bindings,
-                controller_sessions, work_leases
+                controller_sessions, work_leases, network_plan_work
             CASCADE",
         )
         .execute(&self.pool)

@@ -2099,6 +2099,7 @@ dependencies = [
  "o3k-kernel",
  "o3k-native-api",
  "o3k-network",
+ "o3k-network-bin",
  "o3k-network-protocol",
  "o3k-placement",
  "o3k-provider",

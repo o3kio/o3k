@@ -191,6 +191,17 @@ pub trait CoordinationRepository: Send + Sync {
         fencing_token: FencingToken,
     ) -> Result<bool, StoreError>;
 
+    /// Relinquishes the active owner while retaining the durable lease row and
+    /// its fencing generation. The next successful acquisition must advance
+    /// this token, including across a graceful controller handoff.
+    async fn relinquish_work_lease_preserving_fence(
+        &self,
+        work_key: &str,
+        controller_id: &ControllerId,
+        controller_epoch: &ControllerEpoch,
+        fencing_token: FencingToken,
+    ) -> Result<bool, StoreError>;
+
     async fn inspect_work_lease(&self, work_key: &str) -> Result<Option<WorkLease>, StoreError>;
 
     async fn list_active_controller_sessions(&self) -> Result<Vec<ControllerSession>, StoreError>;
@@ -530,6 +541,33 @@ impl CoordinationRepository for PostgresStore {
         .await
         .map_err(StoreError::Database)?;
 
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn relinquish_work_lease_preserving_fence(
+        &self,
+        work_key: &str,
+        controller_id: &ControllerId,
+        controller_epoch: &ControllerEpoch,
+        fencing_token: FencingToken,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE work_leases
+            SET lease_until = NOW() - INTERVAL '1 second', updated_at = NOW()
+            WHERE work_key = $1
+              AND owner_controller_id = $2
+              AND owner_controller_epoch = $3
+              AND fencing_token = $4;
+            "#,
+        )
+        .bind(work_key)
+        .bind(&controller_id.0)
+        .bind(&controller_epoch.0)
+        .bind(fencing_token as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -950,6 +988,33 @@ impl CoordinationRepository for SqliteStore {
         .await
         .map_err(StoreError::Database)?;
 
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn relinquish_work_lease_preserving_fence(
+        &self,
+        work_key: &str,
+        controller_id: &ControllerId,
+        controller_epoch: &ControllerEpoch,
+        fencing_token: FencingToken,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE work_leases
+            SET lease_until = datetime('now', '-1 second'), updated_at = datetime('now')
+            WHERE work_key = ?1
+              AND owner_controller_id = ?2
+              AND owner_controller_epoch = ?3
+              AND fencing_token = ?4;
+            "#,
+        )
+        .bind(work_key)
+        .bind(&controller_id.0)
+        .bind(&controller_epoch.0)
+        .bind(fencing_token as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
         Ok(result.rows_affected() > 0)
     }
 

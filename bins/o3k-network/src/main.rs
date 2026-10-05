@@ -1,4 +1,4 @@
-mod agent;
+use o3k_network_bin::agent;
 
 use agent::proto::network_agent_server::NetworkAgentServer;
 use o3k_domain::NetworkPlanIntent;
@@ -588,7 +588,7 @@ mod transport_tests {
                 fencing_token: 1,
             },
         )?;
-        let service = agent::NetworkAgentService::new(executor, NoopRealizer);
+        let service = agent::NetworkAgentService::new_legacy(executor, NoopRealizer);
         let tls = ServerTlsConfig::new()
             .identity(Identity::from_pem(
                 fs::read(fixture("server-chain.pem"))?,

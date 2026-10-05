@@ -117,6 +117,7 @@ impl<T> StoreUnderTest for T where
 pub async fn run_all_conformance_tests<S: StoreUnderTest>(store: Arc<S>) {
     test_durable_store_resources(store.clone()).await;
     test_network_plan_work_durability(store.clone()).await;
+    test_network_plan_work_realm_fencing(store.clone()).await;
     test_list_resources_by_kind_includes_deleted_tombstones(store.clone()).await;
     test_durable_store_operations(store.clone()).await;
     test_durable_store_lifecycle_terminalization(store.clone()).await;
@@ -196,6 +197,227 @@ pub async fn test_network_plan_work_durability<S: StoreUnderTest>(store: Arc<S>)
             .iter()
             .all(|item| item.command_id != command_id)
     );
+}
+
+pub async fn test_network_plan_work_realm_fencing<S: StoreUnderTest>(store: Arc<S>) {
+    use std::time::Duration;
+    let realm_key = format!("fabric-realm:{}", Uuid::now_v7());
+    let owner = ControllerId::new(format!("controller-{}", Uuid::now_v7()));
+    let epoch = ControllerEpoch::new("epoch-a");
+    let lease = match store
+        .acquire_work_lease(
+            &realm_key,
+            "fabric_reconciliation",
+            &owner,
+            &epoch,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+    {
+        LeaseAcquireOutcome::Acquired { lease } => lease,
+        LeaseAcquireOutcome::Busy { .. } => panic!("fresh realm lease must be acquirable"),
+    };
+    let work = |command_id: String, idempotency_key: String| NetworkPlanWorkRecord {
+        command_id,
+        operation_id: Uuid::now_v7(),
+        idempotency_key,
+        target_host_id: "host-a".into(),
+        target_agent_id: "agent-a".into(),
+        target_agent_epoch: "agent-epoch-a".into(),
+        controller_id: owner.0.clone(),
+        controller_epoch: epoch.0.clone(),
+        fencing_token: 4,
+        deadline_unix_ms: 100,
+        fingerprint_sha256: "e".repeat(64),
+        snapshot: b"opaque-command".to_vec(),
+        state: NetworkPlanWorkState::Pending,
+        revision: 0,
+        outcome: None,
+    };
+    let old = work(
+        Uuid::now_v7().to_string(),
+        format!("old:{}", Uuid::now_v7()),
+    );
+    let successor = work(
+        Uuid::now_v7().to_string(),
+        format!("next:{}", Uuid::now_v7()),
+    );
+    store.insert_network_plan_work(&old).await.unwrap();
+
+    let mut controller_takeover_replay = old.clone();
+    controller_takeover_replay.controller_id = "controller-successor".into();
+    controller_takeover_replay.controller_epoch = "epoch-successor".into();
+    controller_takeover_replay.fencing_token = lease.fencing_token;
+    controller_takeover_replay.deadline_unix_ms += 60_000;
+    controller_takeover_replay.snapshot = b"fresh execution envelope".to_vec();
+    let replayed = store
+        .insert_network_plan_work_under_lease(
+            &realm_key,
+            &owner.0,
+            &epoch.0,
+            lease.fencing_token,
+            &controller_takeover_replay,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replayed, old,
+        "equivalent desired work reuses its durable row across controller takeover"
+    );
+
+    assert!(matches!(
+        store
+            .update_network_plan_work_under_lease(
+                &realm_key,
+                &owner.0,
+                &epoch.0,
+                lease.fencing_token + 1,
+                &old.command_id,
+                0,
+                NetworkPlanWorkState::Failed,
+                Some(b"stale"),
+            )
+            .await,
+        Err(StoreError::Fenced)
+    ));
+
+    // A conflicting successor identity must roll back the whole transaction:
+    // the historical row remains unresolved and no partial supersession is
+    // visible after the failed insert.
+    store.insert_network_plan_work(&successor).await.unwrap();
+    let conflicting = work(
+        successor.command_id.clone(),
+        format!("conflict:{}", Uuid::now_v7()),
+    );
+    assert!(
+        store
+            .supersede_network_plan_work_under_lease(
+                &realm_key,
+                &owner.0,
+                &epoch.0,
+                lease.fencing_token,
+                &old.command_id,
+                0,
+                &conflicting,
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .get_network_plan_work(&old.command_id)
+            .await
+            .unwrap()
+            .state,
+        NetworkPlanWorkState::Pending
+    );
+
+    let successor = work(
+        Uuid::now_v7().to_string(),
+        format!("next:{}", Uuid::now_v7()),
+    );
+    let (historical, current) = store
+        .supersede_network_plan_work_under_lease(
+            &realm_key,
+            &owner.0,
+            &epoch.0,
+            lease.fencing_token,
+            &old.command_id,
+            0,
+            &successor,
+        )
+        .await
+        .unwrap();
+    assert_eq!(historical.state, NetworkPlanWorkState::Failed);
+    assert_eq!(current.state, NetworkPlanWorkState::Pending);
+    let outcome: serde_json::Value =
+        serde_json::from_slice(historical.outcome.as_deref().unwrap()).unwrap();
+    assert_eq!(outcome["classification"], "superseded_not_admitted");
+    assert_eq!(outcome["successor_command_id"], successor.command_id);
+    let running = store
+        .update_network_plan_work_under_lease(
+            &realm_key,
+            &owner.0,
+            &epoch.0,
+            lease.fencing_token,
+            &successor.command_id,
+            0,
+            NetworkPlanWorkState::Running,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.state, NetworkPlanWorkState::Running);
+
+    let other = ControllerId::new(format!("controller-{}", Uuid::now_v7()));
+    assert!(
+        store
+            .relinquish_work_lease_preserving_fence(&realm_key, &owner, &epoch, lease.fencing_token)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        store
+            .update_network_plan_work_under_lease(
+                &realm_key,
+                &owner.0,
+                &epoch.0,
+                lease.fencing_token,
+                &successor.command_id,
+                running.revision,
+                NetworkPlanWorkState::Succeeded,
+                Some(b"stale-owner"),
+            )
+            .await,
+        Err(StoreError::Fenced)
+    ));
+    let takeover = match store
+        .acquire_work_lease(
+            &realm_key,
+            "fabric_reconciliation",
+            &other,
+            &ControllerEpoch::new("epoch-b"),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+    {
+        LeaseAcquireOutcome::Acquired { lease } => lease,
+        LeaseAcquireOutcome::Busy { .. } => panic!("relinquished realm lease must be acquirable"),
+    };
+    assert!(takeover.fencing_token > lease.fencing_token);
+    let succeeded = store
+        .update_network_plan_work_under_lease(
+            &realm_key,
+            &other.0,
+            "epoch-b",
+            takeover.fencing_token,
+            &successor.command_id,
+            running.revision,
+            NetworkPlanWorkState::Succeeded,
+            Some(b"current-owner"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(succeeded.state, NetworkPlanWorkState::Succeeded);
+    let mut restarted_replay = successor.clone();
+    restarted_replay.controller_id = other.0.clone();
+    restarted_replay.controller_epoch = "epoch-b".into();
+    restarted_replay.fencing_token = takeover.fencing_token;
+    restarted_replay.deadline_unix_ms += 60_000;
+    restarted_replay.snapshot = b"fresh controller envelope".to_vec();
+    let replayed = store
+        .insert_network_plan_work_under_lease(
+            &realm_key,
+            &other.0,
+            "epoch-b",
+            takeover.fencing_token,
+            &restarted_replay,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed.state, NetworkPlanWorkState::Succeeded);
 }
 
 pub async fn test_durable_store_resources<S: StoreUnderTest>(store: Arc<S>) {
@@ -2726,6 +2948,77 @@ pub async fn test_coordination_repository<S: StoreUnderTest>(store: Arc<S>) {
         }
         LeaseAcquireOutcome::Busy { .. } => panic!("reacquire must succeed"),
     }
+
+    // Graceful relinquish keeps the active row's fencing generation, so a
+    // clean A -> B -> C handoff is strictly monotonic too.
+    let handoff_key = format!("op-clean-handoff:{}", Uuid::now_v7());
+    let handoff_a = match store
+        .acquire_work_lease(
+            &handoff_key,
+            "fabric_reconciliation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("acquire clean handoff A")
+    {
+        LeaseAcquireOutcome::Acquired { lease } => lease,
+        LeaseAcquireOutcome::Busy { .. } => panic!("first handoff lease must succeed"),
+    };
+    assert_eq!(handoff_a.fencing_token, 1);
+    assert!(
+        store
+            .relinquish_work_lease_preserving_fence(
+                &handoff_key,
+                &ctrl1,
+                &epoch1,
+                handoff_a.fencing_token,
+            )
+            .await
+            .expect("relinquish A")
+    );
+    let handoff_b = match store
+        .acquire_work_lease(
+            &handoff_key,
+            "fabric_reconciliation",
+            &ctrl2,
+            &epoch2,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("acquire clean handoff B")
+    {
+        LeaseAcquireOutcome::Acquired { lease } => lease,
+        LeaseAcquireOutcome::Busy { .. } => panic!("relinquished B lease must be acquirable"),
+    };
+    assert_eq!(handoff_b.fencing_token, 2);
+    assert!(
+        store
+            .relinquish_work_lease_preserving_fence(
+                &handoff_key,
+                &ctrl2,
+                &epoch2,
+                handoff_b.fencing_token,
+            )
+            .await
+            .expect("relinquish B")
+    );
+    let handoff_c = match store
+        .acquire_work_lease(
+            &handoff_key,
+            "fabric_reconciliation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("acquire clean handoff C")
+    {
+        LeaseAcquireOutcome::Acquired { lease } => lease,
+        LeaseAcquireOutcome::Busy { .. } => panic!("relinquished C lease must be acquirable"),
+    };
+    assert_eq!(handoff_c.fencing_token, 3);
 
     // Expiry also fences the same controller identity. An owner cannot renew
     // an already-expired generation merely by reusing its ID and epoch.

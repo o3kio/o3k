@@ -23,6 +23,38 @@ impl DurableStore for O3kStore {
             Self::Postgres(s) => s.insert_network_plan_work(work).await,
         }
     }
+
+    async fn insert_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.insert_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    work,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.insert_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    work,
+                )
+                .await
+            }
+        }
+    }
     async fn get_network_plan_work(
         &self,
         command_id: &str,
@@ -47,6 +79,85 @@ impl DurableStore for O3kStore {
             Self::Postgres(s) => {
                 s.update_network_plan_work(command_id, expected_revision, state, outcome)
                     .await
+            }
+        }
+    }
+
+    async fn update_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    command_id,
+                    expected_revision,
+                    state,
+                    outcome,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.update_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    command_id,
+                    expected_revision,
+                    state,
+                    outcome,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn supersede_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        old_command_id: &str,
+        expected_old_revision: u64,
+        successor: &NetworkPlanWorkRecord,
+    ) -> Result<(NetworkPlanWorkRecord, NetworkPlanWorkRecord), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.supersede_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    old_command_id,
+                    expected_old_revision,
+                    successor,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.supersede_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    old_command_id,
+                    expected_old_revision,
+                    successor,
+                )
+                .await
             }
         }
     }

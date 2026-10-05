@@ -172,6 +172,14 @@ pub trait DurableStore: Send + Sync {
         &self,
         work: &NetworkPlanWorkRecord,
     ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    async fn insert_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError>;
     async fn get_network_plan_work(
         &self,
         command_id: &str,
@@ -183,6 +191,33 @@ pub trait DurableStore: Send + Sync {
         state: NetworkPlanWorkState,
         outcome: Option<&[u8]>,
     ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    /// Atomically verifies the current realm reconciliation lease and applies
+    /// a revision-fenced transition to its network-plan work record.
+    #[allow(clippy::too_many_arguments)]
+    async fn update_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    /// Atomically terminalizes a never-admitted historical command and inserts
+    /// its current-authority successor while holding the realm lease fence.
+    #[allow(clippy::too_many_arguments)]
+    async fn supersede_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        old_command_id: &str,
+        expected_old_revision: u64,
+        successor: &NetworkPlanWorkRecord,
+    ) -> Result<(NetworkPlanWorkRecord, NetworkPlanWorkRecord), StoreError>;
     async fn list_unresolved_network_plan_work(
         &self,
     ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError>;

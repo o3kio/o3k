@@ -3940,6 +3940,25 @@ mod reconciler_tests {
             self.inner.insert_network_plan_work(work).await
         }
 
+        async fn insert_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            work: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .insert_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    work,
+                )
+                .await
+        }
+
         async fn get_network_plan_work(
             &self,
             command_id: &str,
@@ -3956,6 +3975,60 @@ mod reconciler_tests {
         ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
             self.inner
                 .update_network_plan_work(command_id, expected_revision, state, outcome)
+                .await
+        }
+
+        async fn update_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            command_id: &str,
+            expected_revision: u64,
+            state: o3k_store::NetworkPlanWorkState,
+            outcome: Option<&[u8]>,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .update_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    command_id,
+                    expected_revision,
+                    state,
+                    outcome,
+                )
+                .await
+        }
+
+        async fn supersede_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            old_command_id: &str,
+            expected_old_revision: u64,
+            successor: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<
+            (
+                o3k_store::NetworkPlanWorkRecord,
+                o3k_store::NetworkPlanWorkRecord,
+            ),
+            StoreError,
+        > {
+            self.inner
+                .supersede_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    old_command_id,
+                    expected_old_revision,
+                    successor,
+                )
                 .await
         }
 
@@ -4483,6 +4556,25 @@ mod reconciler_tests {
             self.inner.insert_network_plan_work(work).await
         }
 
+        async fn insert_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            work: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .insert_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    work,
+                )
+                .await
+        }
+
         async fn get_network_plan_work(
             &self,
             command_id: &str,
@@ -4499,6 +4591,60 @@ mod reconciler_tests {
         ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
             self.inner
                 .update_network_plan_work(command_id, expected_revision, state, outcome)
+                .await
+        }
+
+        async fn update_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            command_id: &str,
+            expected_revision: u64,
+            state: o3k_store::NetworkPlanWorkState,
+            outcome: Option<&[u8]>,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .update_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    command_id,
+                    expected_revision,
+                    state,
+                    outcome,
+                )
+                .await
+        }
+
+        async fn supersede_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            old_command_id: &str,
+            expected_old_revision: u64,
+            successor: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<
+            (
+                o3k_store::NetworkPlanWorkRecord,
+                o3k_store::NetworkPlanWorkRecord,
+            ),
+            StoreError,
+        > {
+            self.inner
+                .supersede_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    old_command_id,
+                    expected_old_revision,
+                    successor,
+                )
                 .await
         }
 

@@ -126,6 +126,35 @@ impl CoordinationRepository for O3kStore {
         }
     }
 
+    async fn relinquish_work_lease_preserving_fence(
+        &self,
+        work_key: &str,
+        controller_id: &ControllerId,
+        controller_epoch: &ControllerEpoch,
+        fencing_token: FencingToken,
+    ) -> Result<bool, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.relinquish_work_lease_preserving_fence(
+                    work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.relinquish_work_lease_preserving_fence(
+                    work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                )
+                .await
+            }
+        }
+    }
+
     async fn inspect_work_lease(&self, work_key: &str) -> Result<Option<WorkLease>, StoreError> {
         match self {
             Self::Sqlite(s) => s.inspect_work_lease(work_key).await,
