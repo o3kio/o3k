@@ -219,6 +219,7 @@ impl Harness {
                 compute: compute.clone(),
                 image: None,
                 network_service: network.clone(),
+                realm_deletion: None,
                 store: store.clone(),
                 storage_provider: Some(Arc::new(
                     o3k_storage::testkit::InMemoryStorageProvider::default(),

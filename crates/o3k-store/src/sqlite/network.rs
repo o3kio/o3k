@@ -609,6 +609,18 @@ impl SqliteStore {
         rows.iter().map(canonical_realm_from_row).collect()
     }
 
+    pub async fn list_deleting_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, project_id, prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE state = 'deleting' ORDER BY project_id, network_id, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_realm_from_row).collect()
+    }
+
     pub async fn insert_canonical_pool(
         &self,
         pool: &CanonicalAddressPoolRecord,
@@ -1023,7 +1035,7 @@ impl SqliteStore {
         expected_generation: u64,
     ) -> Result<CanonicalAddressRealmRecord, StoreError> {
         let result = sqlx::query(
-            "UPDATE canonical_address_realms SET state = 'deleting', generation = generation + 1 WHERE id = ? AND project_id = ? AND generation = ? AND state = 'active' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id)",
+            "UPDATE canonical_address_realms SET state = 'deleting', generation = generation + 1 WHERE id = ? AND project_id = ? AND generation = ? AND state = 'active' AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE realm_id = canonical_address_realms.id)",
         )
         .bind(realm_id.to_string())
         .bind(project_id)
@@ -1071,7 +1083,7 @@ impl SqliteStore {
         expected_generation: u64,
     ) -> Result<(), StoreError> {
         let result = sqlx::query(
-            "DELETE FROM canonical_address_realms WHERE id = ? AND project_id = ? AND generation = ? AND state = 'deleting' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_network_policies p JOIN canonical_endpoints e ON e.id = p.endpoint_id WHERE e.realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_realm_encapsulation_bindings WHERE realm_id = canonical_address_realms.id)",
+            "DELETE FROM canonical_address_realms WHERE id = ? AND project_id = ? AND generation = ? AND state = 'deleting' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_network_policies p JOIN canonical_endpoints e ON e.id = p.endpoint_id WHERE e.realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_realm_encapsulation_bindings WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE realm_id = canonical_address_realms.id)",
         )
         .bind(realm_id.to_string())
         .bind(project_id)
@@ -2234,7 +2246,22 @@ impl SqliteStore {
     ) -> Result<(), StoreError> {
         validate_canonical_state(&a.state)?;
         checked_generation(a.generation)?;
-        sqlx::query("INSERT INTO canonical_l3_gateway_attachments (id,gateway_id,realm_id,project_id,generation,state) VALUES (?,?,?,?,?,?)").bind(a.id.to_string()).bind(a.gateway_id.to_string()).bind(a.realm_id.to_string()).bind(&a.project_id).bind(a.generation as i64).bind(&a.state).execute(&self.pool).await.map_err(map_canonical_insert_error).map(|_|())
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let realm_state = sqlx::query_scalar::<_, String>(
+            "SELECT state FROM canonical_address_realms WHERE id = ? AND project_id = ?",
+        )
+        .bind(a.realm_id.to_string())
+        .bind(&a.project_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ResourceNotFound)?;
+        if realm_state != "active" {
+            return Err(StoreError::NetworkInUse);
+        }
+        sqlx::query("INSERT INTO canonical_l3_gateway_attachments (id,gateway_id,realm_id,project_id,generation,state) VALUES (?,?,?,?,?,?)").bind(a.id.to_string()).bind(a.gateway_id.to_string()).bind(a.realm_id.to_string()).bind(&a.project_id).bind(a.generation as i64).bind(&a.state).execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(())
     }
     pub async fn get_canonical_l3_gateway_attachment(
         &self,
@@ -2576,6 +2603,12 @@ impl NetworkRepository for SqliteStore {
         &self,
     ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
         self.list_active_canonical_realms().await
+    }
+
+    async fn list_deleting_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.list_deleting_canonical_realms().await
     }
     async fn insert_canonical_pool(
         &self,

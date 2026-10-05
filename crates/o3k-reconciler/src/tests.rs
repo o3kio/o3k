@@ -4038,6 +4038,12 @@ mod reconciler_tests {
             self.inner.list_unresolved_network_plan_work().await
         }
 
+        async fn list_network_plan_work_history(
+            &self,
+        ) -> Result<Vec<o3k_store::NetworkPlanWorkRecord>, StoreError> {
+            self.inner.list_network_plan_work_history().await
+        }
+
         async fn list_resources_for_reconciliation(
             &self,
             kind: &str,
@@ -4652,6 +4658,12 @@ mod reconciler_tests {
             &self,
         ) -> Result<Vec<o3k_store::NetworkPlanWorkRecord>, StoreError> {
             self.inner.list_unresolved_network_plan_work().await
+        }
+
+        async fn list_network_plan_work_history(
+            &self,
+        ) -> Result<Vec<o3k_store::NetworkPlanWorkRecord>, StoreError> {
+            self.inner.list_network_plan_work_history().await
         }
 
         async fn list_resources_for_reconciliation(

@@ -313,7 +313,22 @@ impl PostgresStore {
     ) -> Result<(), StoreError> {
         crate::validate_canonical_state(&a.state)?;
         crate::checked_generation(a.generation)?;
-        sqlx::query("INSERT INTO canonical_l3_gateway_attachments (id,gateway_id,realm_id,project_id,generation,state) VALUES ($1,$2,$3,$4,$5,$6)").bind(a.id).bind(a.gateway_id).bind(a.realm_id.to_string()).bind(&a.project_id).bind(a.generation as i64).bind(&a.state).execute(&self.pool).await.map_err(crate::map_canonical_insert_error).map(|_|())
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let realm_state = sqlx::query_scalar::<_, String>(
+            "SELECT state FROM canonical_address_realms WHERE id = $1 AND project_id = $2 FOR UPDATE",
+        )
+        .bind(a.realm_id.to_string())
+        .bind(&a.project_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ResourceNotFound)?;
+        if realm_state != "active" {
+            return Err(StoreError::NetworkInUse);
+        }
+        sqlx::query("INSERT INTO canonical_l3_gateway_attachments (id,gateway_id,realm_id,project_id,generation,state) VALUES ($1,$2,$3,$4,$5,$6)").bind(a.id).bind(a.gateway_id).bind(a.realm_id.to_string()).bind(&a.project_id).bind(a.generation as i64).bind(&a.state).execute(&mut *tx).await.map_err(crate::map_canonical_insert_error)?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(())
     }
     pub async fn get_canonical_l3_gateway_attachment(
         &self,
@@ -384,7 +399,7 @@ impl PostgresStore {
         p: &str,
         r: &Uuid,
     ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
-        let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM canonical_l3_gateway_attachments WHERE project_id=$1 AND realm_id=$2 ORDER BY id").bind(p).bind(r).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM canonical_l3_gateway_attachments WHERE project_id=$1 AND realm_id=$2 ORDER BY id").bind(p).bind(r.to_string()).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         let mut out = Vec::new();
         for id in ids {
             out.push(
@@ -601,6 +616,18 @@ impl PostgresStore {
     ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, network_id, project_id, prefix::text AS prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE state = 'active' ORDER BY project_id, network_id, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_realm_from_pg_row).collect()
+    }
+
+    pub async fn list_deleting_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, project_id, prefix::text AS prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE state = 'deleting' ORDER BY project_id, network_id, id",
         )
         .fetch_all(&self.pool)
         .await
@@ -1025,7 +1052,7 @@ impl PostgresStore {
         expected_generation: u64,
     ) -> Result<CanonicalAddressRealmRecord, StoreError> {
         let result = sqlx::query(
-            "UPDATE canonical_address_realms SET state = 'deleting', generation = generation + 1 WHERE id = $1 AND project_id = $2 AND generation = $3 AND state = 'active' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id)",
+            "UPDATE canonical_address_realms SET state = 'deleting', generation = generation + 1 WHERE id = $1 AND project_id = $2 AND generation = $3 AND state = 'active' AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE realm_id = canonical_address_realms.id)",
         )
         .bind(realm_id.to_string())
         .bind(project_id)
@@ -1073,7 +1100,7 @@ impl PostgresStore {
         expected_generation: u64,
     ) -> Result<(), StoreError> {
         let result = sqlx::query(
-            "DELETE FROM canonical_address_realms WHERE id = $1 AND project_id = $2 AND generation = $3 AND state = 'deleting' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_network_policies p JOIN canonical_endpoints e ON e.id = p.endpoint_id WHERE e.realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_realm_encapsulation_bindings WHERE realm_id = canonical_address_realms.id)",
+            "DELETE FROM canonical_address_realms WHERE id = $1 AND project_id = $2 AND generation = $3 AND state = 'deleting' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_network_policies p JOIN canonical_endpoints e ON e.id = p.endpoint_id WHERE e.realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_realm_encapsulation_bindings WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE realm_id = canonical_address_realms.id)",
         )
         .bind(realm_id.to_string())
         .bind(project_id)
@@ -1583,6 +1610,12 @@ impl NetworkRepository for PostgresStore {
         &self,
     ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
         self.list_active_canonical_realms().await
+    }
+
+    async fn list_deleting_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.list_deleting_canonical_realms().await
     }
     async fn insert_canonical_pool(
         &self,

@@ -1627,28 +1627,23 @@ where
                 // operation identity existed (every dispatch was rejected as
                 // retryable), so there is no provider operation to poll.
                 //
-                // Issue #610 (ASR-021 agent-control-plane-network-interruption):
-                // when the create's durable agent command row is still
-                // `pending`, the create was provably never accepted and never
-                // executed — the budget only exhausts on pre-acceptance
-                // rejections, and the agent journal carries no entry. Presence
-                // inspection would then terminalize the absent create as
-                // failed; the interruption contract requires the create to
-                // converge ACTIVE after the agent returns, so the create falls
-                // through to the re-drive below. `create_instance` rebuilds
-                // the command with the current epoch and a fresh deadline, and
-                // the deterministic command identity keeps the agent journal
-                // idempotent — a journal entry that already exists rejects the
-                // rebuilt fingerprint instead of re-executing, and its
-                // terminal observation (replayed on reconnect) converges the
-                // operation. Transport loss is never projected as absence.
-                let create_pending = self
+                // When an agent command is durably Pending, the command was
+                // never admitted and may be safely rebuilt with the current
+                // agent epoch. The same is true when no compute-agent command
+                // row exists at all: a staged resolver (for example Fabric
+                // realm convergence) failed before compute dispatch began.
+                // Re-running create re-enters that resolver first. Existing
+                // rows in every other state, and store errors, remain
+                // observation-only because mutation may have been admitted.
+                match self
                     .store
                     .get_agent_command_by_operation(operation_id)
                     .await
-                    .is_ok_and(|command| command.state == o3k_store::AgentCommandState::Pending);
-                if !create_pending {
-                    return self.observe_create_presence(operation, resource).await;
+                {
+                    Ok(command) if command.state == o3k_store::AgentCommandState::Pending => {}
+                    Ok(_) => return self.observe_create_presence(operation, resource).await,
+                    Err(StoreError::OperationNotFound) => {}
+                    Err(error) => return Err(error.into()),
                 }
             }
         }

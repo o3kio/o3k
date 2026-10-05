@@ -1255,6 +1255,23 @@ impl DurableStore for SqliteStore {
         }
         Ok(out)
     }
+    async fn list_network_plan_work_history(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError> {
+        let rows =
+            sqlx::query("SELECT command_id FROM network_plan_work ORDER BY created_at, command_id")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            records.push(
+                self.get_network_plan_work(&row.get::<String, _>("command_id"))
+                    .await?,
+            );
+        }
+        Ok(records)
+    }
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
         let result = sqlx::query(
             "INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

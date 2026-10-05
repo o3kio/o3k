@@ -474,6 +474,10 @@ pub trait NetworkRepository:
     async fn list_active_canonical_realms(
         &self,
     ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError>;
+    /// Enumerates realms durably waiting for provider-aware deletion recovery.
+    async fn list_deleting_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError>;
     async fn insert_canonical_pool(
         &self,
         pool: &CanonicalAddressPoolRecord,

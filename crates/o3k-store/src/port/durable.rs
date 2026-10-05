@@ -221,6 +221,11 @@ pub trait DurableStore: Send + Sync {
     async fn list_unresolved_network_plan_work(
         &self,
     ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError>;
+    /// Lists persisted plan snapshots, including terminal history, for
+    /// ownership-proven provider cleanup and forensic recovery.
+    async fn list_network_plan_work_history(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError>;
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError>;
     async fn get_resource(&self, id: Uuid) -> Result<ResourceRecord, StoreError>;
     /// Internal compatibility/domain reader. Native northbound collection

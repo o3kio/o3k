@@ -587,6 +587,9 @@ pub async fn build_composition(
                 fabric_domain_id,
                 network_external_realm_id,
                 public_allocator: public_allocator_for_binding.clone(),
+                reconciliation_locks: Arc::new(std::sync::Mutex::new(
+                    std::collections::BTreeMap::new(),
+                )),
             }))
         }
         (Some(_), None) => {
@@ -1134,6 +1137,10 @@ pub async fn build_composition(
             compute: std::sync::Arc::new(compute_service.clone()),
             image: Some(std::sync::Arc::new(image_service.clone())),
             network_service: std::sync::Arc::new(network_service.clone()),
+            realm_deletion: fabric_reconciler.as_ref().map(|reconciler| {
+                reconciler.clone()
+                    as Arc<dyn crate::native_adapters::resource::RealmDeletionWorkflow>
+            }),
             store: native_api_store.clone(),
             storage_provider: native_storage_provider.clone(),
             server: server_reader
@@ -1247,6 +1254,11 @@ pub async fn build_composition(
             .with_volume_attachments_enabled(volume_attachments_enabled)
             .with_compute(compute_service)
     };
+    if let Some(reconciler) = &fabric_reconciler {
+        state = state.with_realm_deletion_workflow(
+            reconciler.clone() as Arc<dyn o3k_api::RealmDeletionWorkflow>
+        );
+    }
     // Native pagination is reachable only when IAM is configured.  In the
     // IAM-disabled health/operational profile, keep the API unavailable and
     // avoid requiring production secrets solely to start healthz.
@@ -2149,6 +2161,9 @@ mod tests {
             fabric_domain_id: Uuid::from_u128(991),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(
+                std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            ),
         });
         let resolver = DaemonCreateResolver {
             store: store.clone(),

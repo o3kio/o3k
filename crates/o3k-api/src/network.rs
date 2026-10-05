@@ -3538,6 +3538,24 @@ pub(crate) async fn delete_subnet(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if let Some(workflow) = &state.realm_deletion_workflow {
+        if let Err(error) = service.authorize_subnet_deletion(&auth, id).await {
+            return network_error(error);
+        }
+        let project_id = auth.effective_scope().id().as_str();
+        let result = workflow.delete_subnet(project_id, id).await;
+        let error = result.as_ref().err().map(|_| NetworkError::Conflict);
+        if let Err(audit_error) = service
+            .record_subnet_deletion_result(&auth, id, error.as_ref())
+            .await
+        {
+            return network_error(audit_error);
+        }
+        return match result {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(_) => network_error(NetworkError::Conflict),
+        };
+    }
     match service.delete_subnet(&auth, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),

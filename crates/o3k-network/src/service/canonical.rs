@@ -511,15 +511,15 @@ impl NetworkService {
         if gateway.state != "active" {
             return Err(NetworkError::Conflict);
         }
-        if self
+        let realm = self
             .inner
             .repository
             .get_canonical_realm(project_id, realm_id)
             .await
             .map_err(map_store_error)?
-            .is_none()
-        {
-            return Err(NetworkError::NotFound);
+            .ok_or(NetworkError::NotFound)?;
+        if realm.state != "active" {
+            return Err(NetworkError::Conflict);
         }
         if self
             .inner
@@ -1341,6 +1341,30 @@ impl NetworkService {
             .map_err(map_store_error)
     }
 
+    /// Lists realms whose provider-aware deletion was durably accepted but
+    /// not yet finalized. Startup recovery uses this canonical state instead
+    /// of relying on a later tenant request to resume cleanup.
+    pub async fn list_deleting_realms_for_reconciliation(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalAddressRealmRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_deleting_canonical_realms()
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_realm_bindings_for_reconciliation(
+        &self,
+        realm_id: Uuid,
+    ) -> Result<Vec<o3k_store::CanonicalRealmBindingRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_realm_bindings(&realm_id)
+            .await
+            .map_err(map_store_error)
+    }
+
     pub async fn list_canonical_realms_for_project(
         &self,
         project_id: &str,
@@ -1512,6 +1536,17 @@ impl NetworkService {
             .await
             .map_err(map_store_error)?
             .ok_or(NetworkError::NotFound)?;
+        if self
+            .inner
+            .repository
+            .list_canonical_realm_l3_gateway_attachments(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .iter()
+            .any(|attachment| attachment.state == "active" || attachment.state == "deleting")
+        {
+            return Err(NetworkError::Conflict);
+        }
         let (operation, canonical, request) = realm_delete_operation(project_id, realm_id)?;
         let accepted = self
             .inner
@@ -1571,18 +1606,30 @@ impl NetworkService {
                 return Err(map_store_error(error));
             }
         };
-        self.inner
-            .repository
-            .update_resource(
-                realm_id,
-                i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
-                "deleting",
-                "deleting",
-                i64::try_from(deleting.generation).map_err(|_| NetworkError::InvalidRequest)?,
-                None,
-            )
-            .await
-            .map_err(map_store_error)?;
+        // Neutron-compatible Subnets are represented directly by the
+        // canonical AddressRealm plus subnet metadata and do not have a
+        // generic ResourceRecord. Native AddressRealms do, so keep that
+        // projection fenced when it exists without making it a prerequisite
+        // for the canonical deletion state machine.
+        let has_resource_projection = match self.inner.repository.get_resource(realm_id).await {
+            Ok(_) => true,
+            Err(o3k_store::StoreError::ResourceNotFound) => false,
+            Err(error) => return Err(map_store_error(error)),
+        };
+        if has_resource_projection {
+            self.inner
+                .repository
+                .update_resource(
+                    realm_id,
+                    i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                    "deleting",
+                    "deleting",
+                    i64::try_from(deleting.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                    None,
+                )
+                .await
+                .map_err(map_store_error)?;
+        }
         let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
             o3k_kernel::OperationState::Running,
             1,
@@ -1715,6 +1762,19 @@ impl NetworkService {
             self.inner
                 .repository
                 .delete_canonical_realm_binding(&binding, realm.generation)
+                .await
+                .map_err(map_store_error)?;
+        }
+        for pool in self
+            .inner
+            .repository
+            .list_canonical_pools(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+        {
+            self.inner
+                .repository
+                .delete_canonical_pool(project_id, &pool.id)
                 .await
                 .map_err(map_store_error)?;
         }

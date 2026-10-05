@@ -69,6 +69,13 @@ fn recovery_successor_parent(record: &o3k_store::NetworkPlanWorkRecord) -> Optio
         .map(|(_, suffix)| suffix.split(":agent-epoch:").next().unwrap_or(suffix))
 }
 
+fn execution_command_id_for_agent_epoch(command_id: Uuid, agent_epoch: &str) -> Uuid {
+    Uuid::new_v5(
+        &command_id,
+        format!("execution-agent-epoch:{agent_epoch}").as_bytes(),
+    )
+}
+
 const NETWORK_AGENT_CONTROL_TTL: std::time::Duration = std::time::Duration::from_secs(15);
 // Deliberately shorter than the coordination lease. The agent independently
 // stops accepting mutations if renewal is lost, even while a stale controller
@@ -233,6 +240,8 @@ pub(crate) struct FabricRealmReconciler {
     pub(crate) fabric_domain_id: Uuid,
     pub(crate) network_external_realm_id: Option<Uuid>,
     pub(crate) public_allocator: Option<Arc<o3k_network::PublicAddressAllocator>>,
+    pub(crate) reconciliation_locks:
+        Arc<std::sync::Mutex<BTreeMap<Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
 }
 
 const FABRIC_REALM_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -510,10 +519,156 @@ fn fabric_identity(
 }
 
 impl FabricRealmReconciler {
+    fn local_realm_lock(&self, realm_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .reconciliation_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&realm_id).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(realm_id, Arc::downgrade(&lock));
+        lock
+    }
+
     /// Recovers durable command history independently of active endpoint
     /// discovery. This is required for remove commands belonging to a realm
     /// whose final endpoint has already been deleted canonically.
     async fn observe_realm_history(&self, realm_id: Uuid) -> Result<(), String> {
+        let local_lock = self.local_realm_lock(realm_id);
+        let _local_guard = local_lock.lock().await;
+        let lease = RealmReconciliationLease::acquire(
+            self.coordination.clone(),
+            &self.controller,
+            realm_id,
+        )
+        .await?;
+        let result = self
+            .observe_realm_history_under_lease(realm_id, &lease)
+            .await;
+        let release = lease.relinquish().await;
+        match (result, release) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    async fn observe_realm_history_under_lease(
+        &self,
+        realm_id: Uuid,
+        lease: &RealmReconciliationLease,
+    ) -> Result<(), String> {
+        let not_found = self.observe_unresolved_realm_work(realm_id, lease).await?;
+        for record in not_found {
+            let historical: o3k_network::NetworkPlanCommand =
+                serde_json::from_slice(&record.snapshot).map_err(|_| {
+                    format!(
+                        "historical command {} has a corrupt snapshot",
+                        record.command_id
+                    )
+                })?;
+            if historical.action != o3k_network::NetworkPlanAction::Remove {
+                return Err(format!(
+                    "historical apply {} awaits current canonical realm derivation",
+                    record.command_id
+                ));
+            }
+            let realms = self
+                .network
+                .list_active_realms_for_reconciliation()
+                .await
+                .map_err(|error| error.to_string())?;
+            let still_populated = if let Some(realm) = realms.iter().find(|r| r.id == realm_id) {
+                self.network
+                    .list_canonical_endpoints_for_project(&realm.project_id, realm_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .iter()
+                    .any(|endpoint| endpoint.state == "active")
+            } else {
+                false
+            };
+            if still_populated {
+                return Err(format!(
+                    "historical remove {} conflicts with current populated realm state",
+                    record.command_id
+                ));
+            }
+            let snapshot = self
+                .registry
+                .snapshot(&record.target_agent_id)
+                .await
+                .ok_or_else(|| format!("target agent {} is unavailable", record.target_agent_id))?;
+            if snapshot.availability != o3k_provider::AgentAvailability::Available
+                || snapshot.administrative_state != o3k_provider::AgentAdministrativeState::Enabled
+            {
+                return Err(format!(
+                    "target agent {} is ineligible",
+                    record.target_agent_id
+                ));
+            }
+            let deadline = super::unix_time_millis().saturating_add(30_000);
+            let status = if recovery_successor_parent(&record).is_some() {
+                let mut successor = historical;
+                successor.target.agent_epoch = snapshot.agent_epoch;
+                successor.deadline_unix_ms = deadline;
+                successor.plan.deadline_unix_ms = deadline;
+                self.dispatcher
+                    .dispatch_existing_successor(successor, record.command_id.clone())
+                    .await
+            } else {
+                let mut successor = historical;
+                successor.target.agent_epoch = snapshot.agent_epoch;
+                successor.controller = self.controller.clone();
+                successor.operation_id = Uuid::new_v5(
+                    &successor.operation_id,
+                    format!("recovery-remove:{}", successor.plan.fingerprint_sha256).as_bytes(),
+                );
+                successor.command_id = Uuid::new_v5(
+                    &Uuid::parse_str(&record.command_id)
+                        .map_err(|_| "bad historical command ID")?,
+                    b"superseding-removal",
+                );
+                successor.idempotency_key = format!("{}:recovery", successor.idempotency_key);
+                successor.deadline_unix_ms = deadline;
+                successor.plan.operation_id = successor.operation_id;
+                successor.plan.deadline_unix_ms = deadline;
+                if let Some(fabric) = successor.plan.fabric.take() {
+                    successor.plan = successor
+                        .plan
+                        .with_fabric(fabric)
+                        .map_err(|error| error.to_string())?;
+                }
+                self.dispatcher
+                    .dispatch_superseding(successor, record.command_id.clone(), record.revision)
+                    .await
+            }
+            .map_err(|error| error.to_string())?;
+            lease.assert_current().await?;
+            if status != o3k_network::NetworkPlanStatus::Succeeded {
+                return Err(format!(
+                    "successor cleanup for historical command {} is not observed successful",
+                    record.command_id
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Completes the supported subnet deletion workflow. Durable plan
+    /// snapshots identify every host that may still own this Realm; provider
+    /// observations prove absence before the canonical VNI binding is
+    /// released. Runtime observations never expand the cleanup target set.
+    pub(crate) async fn delete_subnet_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+    ) -> Result<(), String> {
+        let local_lock = self.local_realm_lock(realm_id);
+        let _local_guard = local_lock.lock().await;
         let lease = RealmReconciliationLease::acquire(
             self.coordination.clone(),
             &self.controller,
@@ -521,104 +676,276 @@ impl FabricRealmReconciler {
         )
         .await?;
         let result = async {
-            let not_found = self.observe_unresolved_realm_work(realm_id, &lease).await?;
-            for record in not_found {
-                let historical: o3k_network::NetworkPlanCommand =
+            // Atomically reject remaining canonical dependents and fence the
+            // Realm before inspecting/removing provider state. If historical
+            // endpoint cleanup is still running or ambiguous, the durable
+            // deleting state blocks new attachments and startup recovery can
+            // resume this same operation.
+            self.network
+                .begin_canonical_realm_deletion_for_project(project_id, realm_id)
+                .await
+                .map_err(|error| format!("cannot begin AddressRealm deletion: {error}"))?;
+            lease.assert_current().await?;
+            self.observe_realm_history_under_lease(realm_id, &lease)
+                .await?;
+
+            let realm = self
+                .network
+                .get_canonical_realm_for_project(project_id, realm_id)
+                .await
+                .map_err(|error| format!("cannot read deleting AddressRealm: {error}"))?;
+            if realm.state != "deleting" {
+                return Err("AddressRealm did not enter deleting state".to_owned());
+            }
+            let bindings = self
+                .network
+                .list_realm_bindings_for_reconciliation(realm_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let history = self
+                .durable
+                .list_network_plan_work_history()
+                .await
+                .map_err(|error| format!("cannot load durable Fabric cleanup history: {error}"))?;
+            let mut by_host = BTreeMap::<String, Vec<o3k_store::NetworkPlanWorkRecord>>::new();
+            for record in history {
+                let command: o3k_network::NetworkPlanCommand =
                     serde_json::from_slice(&record.snapshot).map_err(|_| {
-                        format!(
-                            "historical command {} has a corrupt snapshot",
-                            record.command_id
-                        )
+                        format!("durable network plan {} is corrupt", record.command_id)
                     })?;
-                if historical.action != o3k_network::NetworkPlanAction::Remove {
+                let Some(fabric) = command.plan.fabric.as_ref() else {
+                    continue;
+                };
+                if fabric.realm_id != realm_id {
+                    continue;
+                }
+                if command.command_id.to_string() != record.command_id
+                    || command.plan.node_id != record.target_host_id
+                    || command.target.agent_id != record.target_agent_id
+                    || fabric.local_host != record.target_host_id
+                {
                     return Err(format!(
-                        "historical apply {} awaits current canonical realm derivation",
+                        "durable Fabric plan {} has conflicting cleanup ownership",
                         record.command_id
                     ));
                 }
-                let realms = self
-                    .network
-                    .list_active_realms_for_reconciliation()
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let still_populated = if let Some(realm) = realms.iter().find(|r| r.id == realm_id)
+                by_host
+                    .entry(record.target_host_id.clone())
+                    .or_default()
+                    .push(record);
+            }
+
+            // A bound v3 Realm must have durable host plan history. With no
+            // binding there is no current VNI to release, but any retained
+            // host snapshots are still observed before finalization.
+            if !bindings.is_empty() && by_host.is_empty() {
+                return Err("bound AddressRealm has no durable provider cleanup targets".to_owned());
+            }
+            for binding in &bindings {
+                if binding.state != "active" && binding.state != "deleting" {
+                    return Err("AddressRealm encapsulation binding is not current".to_owned());
+                }
+            }
+
+            let enrolled = self
+                .network
+                .list_fabric_host_transport_identities()
+                .await
+                .map_err(|error| error.to_string())?;
+            for (host_id, records) in by_host {
+                lease.assert_current().await?;
+                // Prefer an already-issued removal command; otherwise use a
+                // durable Apply snapshot as the exact ownership identity from
+                // which to derive a new idempotent Remove command.
+                // Store history is ordered by creation time and command ID.
+                // The latest plan is the only one that can describe current
+                // provider state: an older successful Remove may have been
+                // followed by a later Apply on this host.
+                let selected = records
+                    .last()
+                    .ok_or_else(|| "empty durable Realm plan history".to_owned())?;
+                let mut historical: o3k_network::NetworkPlanCommand =
+                    serde_json::from_slice(&selected.snapshot)
+                        .map_err(|_| "durable cleanup plan is corrupt")?;
+                let fabric = historical
+                    .plan
+                    .fabric
+                    .as_ref()
+                    .ok_or_else(|| "durable cleanup plan lacks Fabric identity".to_owned())?;
+                if fabric.realm_id != realm_id || fabric.local_host != host_id {
+                    return Err("durable cleanup plan does not match its host target".to_owned());
+                }
+                if !bindings.is_empty()
+                    && !bindings.iter().any(|binding| {
+                        fabric.encapsulation.fabric_domain_id.to_string()
+                            == binding.fabric_domain_id
+                            && fabric.encapsulation.realm_id == binding.realm_id
+                            && fabric.encapsulation.provider_segment_id
+                                == u32::try_from(binding.provider_segment_id).unwrap_or_default()
+                            && fabric.encapsulation.binding_generation == binding.binding_generation
+                    })
                 {
-                    self.network
-                        .list_canonical_endpoints_for_project(&realm.project_id, realm_id)
-                        .await
-                        .map_err(|error| error.to_string())?
-                        .iter()
-                        .any(|endpoint| endpoint.state == "active")
-                } else {
-                    false
-                };
-                if still_populated {
+                    return Err("durable plan does not match the current VNI binding".to_owned());
+                }
+                let identity = enrolled
+                    .iter()
+                    .find(|identity| {
+                        identity.host_id == host_id && identity.agent_id == selected.target_agent_id
+                    })
+                    .ok_or_else(|| {
+                        format!("cleanup target {host_id} has no current Fabric identity")
+                    })?;
+                if identity.administrative_state != "enabled"
+                    || identity.fabric_generation != fabric.local_fabric_generation
+                {
                     return Err(format!(
-                        "historical remove {} conflicts with current populated realm state",
-                        record.command_id
+                        "cleanup target {host_id} has stale or disabled Fabric identity"
                     ));
                 }
                 let snapshot = self
                     .registry
-                    .snapshot(&record.target_agent_id)
+                    .snapshot(&identity.agent_id)
                     .await
-                    .ok_or_else(|| {
-                        format!("target agent {} is unavailable", record.target_agent_id)
-                    })?;
+                    .ok_or_else(|| format!("cleanup agent {} is unavailable", identity.agent_id))?;
                 if snapshot.availability != o3k_provider::AgentAvailability::Available
                     || snapshot.administrative_state
                         != o3k_provider::AgentAdministrativeState::Enabled
                 {
                     return Err(format!(
-                        "target agent {} is ineligible",
-                        record.target_agent_id
+                        "cleanup agent {} is unavailable or disabled",
+                        identity.agent_id
                     ));
                 }
-                let deadline = super::unix_time_millis().saturating_add(30_000);
-                let status = if recovery_successor_parent(&record).is_some() {
-                    let mut successor = historical;
-                    successor.target.agent_epoch = snapshot.agent_epoch;
-                    successor.deadline_unix_ms = deadline;
-                    successor.plan.deadline_unix_ms = deadline;
-                    self.dispatcher
-                        .dispatch_existing_successor(successor, record.command_id.clone())
+                let target = o3k_network::NetworkAgentIdentity {
+                    agent_id: identity.agent_id.clone(),
+                    agent_epoch: snapshot.agent_epoch,
+                };
+
+                let realm_delete_key = format!(
+                    "fabric-realm-delete:{realm_id}:{host_id}:{}",
+                    realm.generation
+                );
+                // The dispatcher scopes execution identity to the enrolled
+                // agent epoch. Compare the durable command identity, rather
+                // than its pre-dispatch semantic key, so a completed Realm
+                // REMOVE is observed and reused after retry/restart.
+                let execution_realm_delete_key = format!(
+                    "{realm_delete_key}:agent-epoch:{}",
+                    selected.target_agent_epoch
+                );
+                let is_current_realm_remove = historical.action
+                    == o3k_network::NetworkPlanAction::Remove
+                    && historical.idempotency_key == execution_realm_delete_key;
+                if historical.action == o3k_network::NetworkPlanAction::Remove {
+                    let command_id = Uuid::parse_str(&selected.command_id)
+                        .map_err(|_| "durable cleanup command ID is malformed")?;
+                    let history_status = self
+                        .dispatcher
+                        .observe_command(&host_id, target.clone(), command_id)
                         .await
-                } else {
-                    let mut successor = historical;
-                    successor.target.agent_epoch = snapshot.agent_epoch;
-                    successor.controller = self.controller.clone();
-                    successor.operation_id = Uuid::new_v5(
-                        &successor.operation_id,
-                        format!("recovery-remove:{}", successor.plan.fingerprint_sha256).as_bytes(),
-                    );
-                    successor.command_id = Uuid::new_v5(
-                        &Uuid::parse_str(&record.command_id)
-                            .map_err(|_| "bad historical command ID")?,
-                        b"superseding-removal",
-                    );
-                    successor.idempotency_key = format!("{}:recovery", successor.idempotency_key);
-                    successor.deadline_unix_ms = deadline;
-                    successor.plan.operation_id = successor.operation_id;
-                    successor.plan.deadline_unix_ms = deadline;
-                    if let Some(fabric) = successor.plan.fabric.take() {
-                        successor.plan = successor
-                            .plan
-                            .with_fabric(fabric)
-                            .map_err(|error| error.to_string())?;
+                        .map_err(|error| format!("provider removal observation failed: {error}"))?;
+                    match history_status {
+                        Some(o3k_network::NetworkPlanStatus::Succeeded)
+                            if is_current_realm_remove =>
+                        {
+                            continue;
+                        }
+                        Some(o3k_network::NetworkPlanStatus::Succeeded) => {
+                            // This may be an endpoint-level REMOVE from the
+                            // final port deletion. Its successful observation
+                            // does not prove the host's realm bridge/VXLAN and
+                            // shared provider state are absent; issue the
+                            // generation-specific Realm removal below.
+                        }
+                        Some(o3k_network::NetworkPlanStatus::Applying)
+                        | Some(o3k_network::NetworkPlanStatus::Unknown) => {
+                            return Err(format!(
+                                "provider removal on {host_id} is not proven absent"
+                            ));
+                        }
+                        None => {
+                            // not_found proves only that this historical
+                            // command was not admitted. A fresh Remove below
+                            // is safe and uses the same accepted plan identity.
+                        }
+                        Some(o3k_network::NetworkPlanStatus::Accepted) => {
+                            return Err(format!("provider removal on {host_id} is still running"));
+                        }
                     }
-                    self.dispatcher
-                        .dispatch_superseding(successor, record.command_id.clone(), record.revision)
-                        .await
                 }
-                .map_err(|error| error.to_string())?;
+
+                let deadline = super::unix_time_millis().saturating_add(30_000);
+                let operation_id = Uuid::new_v5(
+                    &realm_id,
+                    format!("realm-delete:{}:{}", realm.generation, host_id).as_bytes(),
+                );
+                historical.action = o3k_network::NetworkPlanAction::Remove;
+                historical.target = target;
+                historical.controller = self.controller.clone();
+                historical.operation_id = operation_id;
+                historical.command_id = Uuid::new_v5(
+                    &operation_id,
+                    format!("remove:{}:{}", host_id, historical.plan.fingerprint_sha256).as_bytes(),
+                );
+                historical.idempotency_key = realm_delete_key;
+                historical.deadline_unix_ms = deadline;
+                historical.plan.operation_id = operation_id;
+                historical.plan.plan_id = operation_id;
+                historical.plan.deadline_unix_ms = deadline;
+                if let Some(fabric) = historical.plan.fabric.take() {
+                    historical.plan = historical
+                        .plan
+                        .with_fabric(fabric)
+                        .map_err(|error| error.to_string())?;
+                }
                 lease.assert_current().await?;
+                let status = self
+                    .dispatcher
+                    .dispatch(historical.clone())
+                    .await
+                    .map_err(|error| format!("provider Remove dispatch failed: {error}"))?;
                 if status != o3k_network::NetworkPlanStatus::Succeeded {
-                    return Err(format!(
-                        "successor cleanup for historical command {} is not observed successful",
-                        record.command_id
-                    ));
+                    return Err(format!("provider Remove on {host_id} is not successful"));
+                }
+                lease.assert_current().await?;
+                let execution_command_id = execution_command_id_for_agent_epoch(
+                    historical.command_id,
+                    &historical.target.agent_epoch,
+                );
+                let final_observation = self
+                    .dispatcher
+                    .observe_command(&host_id, historical.target, execution_command_id)
+                    .await
+                    .map_err(|error| format!("provider absence observation failed: {error}"))?;
+                match final_observation {
+                    Some(o3k_network::NetworkPlanStatus::Succeeded) => {}
+                    _ => return Err(format!("provider absence on {host_id} is not proven")),
                 }
             }
+
+            let observations = bindings
+                .into_iter()
+                .map(o3k_network::RealmCleanupObservation::Absent)
+                .collect();
+            match self
+                .network
+                .observe_canonical_realm_cleanup_for_project(project_id, realm_id, observations)
+                .await
+                .map_err(|error| format!("cannot finalize AddressRealm cleanup: {error}"))?
+            {
+                o3k_network::RealmCleanupProgress::Removed { .. } => {}
+                o3k_network::RealmCleanupProgress::Deleting { .. }
+                | o3k_network::RealmCleanupProgress::AwaitingObservation { .. } => {
+                    return Err(
+                        "provider absence was not accepted for AddressRealm cleanup".to_owned()
+                    );
+                }
+            }
+            self.network
+                .delete_subnet_for_project(project_id, realm_id)
+                .await
+                .map_err(|error| format!("cannot remove compatibility subnet metadata: {error}"))?;
+            lease.assert_current().await?;
             Ok(())
         }
         .await;
@@ -683,6 +1010,8 @@ impl FabricRealmReconciler {
                 "Fabric v3 requires exactly one active AddressRealm per network".to_owned(),
             );
         };
+        let local_lock = self.local_realm_lock(realm_record.id);
+        let _local_guard = local_lock.lock().await;
         let _realm_lease = RealmReconciliationLease::acquire(
             self.coordination.clone(),
             &self.controller,
@@ -1382,6 +1711,20 @@ impl FabricRealmReconciler {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::native_adapters::resource::RealmDeletionWorkflow for FabricRealmReconciler {
+    async fn delete_subnet(&self, project_id: &str, realm_id: Uuid) -> Result<(), String> {
+        self.delete_subnet_for_project(project_id, realm_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl o3k_api::RealmDeletionWorkflow for FabricRealmReconciler {
+    async fn delete_subnet(&self, project_id: &str, realm_id: Uuid) -> Result<(), String> {
+        self.delete_subnet_for_project(project_id, realm_id).await
+    }
+}
+
 /// Replays durable history as observation only, then rediscovers active
 /// canonical realms through the same reconciler used by endpoint lifecycle.
 /// Registration notifications wake the scan; the bounded interval also
@@ -1444,6 +1787,26 @@ async fn recover_fabric_state(
     for realm_id in unresolved {
         if let Err(error) = reconciler.observe_realm_history(realm_id).await {
             tracing::warn!(realm_id = %realm_id, %error, "historical Fabric work remains unresolved");
+        }
+    }
+
+    let deleting_realms = match reconciler
+        .network
+        .list_deleting_realms_for_reconciliation()
+        .await
+    {
+        Ok(realms) => realms,
+        Err(error) => {
+            tracing::error!(%error, "cannot discover AddressRealms awaiting provider cleanup");
+            return;
+        }
+    };
+    for realm in deleting_realms {
+        if let Err(error) = reconciler
+            .delete_subnet_for_project(&realm.project_id, realm.id)
+            .await
+        {
+            tracing::warn!(realm_id = %realm.id, %error, "AddressRealm deletion remains pending provider observation");
         }
     }
 
@@ -1638,9 +2001,9 @@ impl NetworkAgentDispatcher {
             };
             match &dispatch_work {
                 FabricWorkDispatch::New => {
-                    command.command_id = Uuid::new_v5(
-                        &semantic_command_id,
-                        format!("execution-agent-epoch:{}", command.target.agent_epoch).as_bytes(),
+                    command.command_id = execution_command_id_for_agent_epoch(
+                        semantic_command_id,
+                        &command.target.agent_epoch,
                     );
                     command.idempotency_key = format!(
                         "{semantic_idempotency_key}:agent-epoch:{}",
@@ -1721,6 +2084,61 @@ impl NetworkAgentDispatcher {
                 return Err(o3k_network::NetworkDispatchError::Rejected(
                     "network plan work command identity conflict".to_owned(),
                 ));
+            }
+            // A prior attempt may have been rejected before admission and
+            // atomically superseded after an authoritative `not_found`
+            // observation. If that durable successor already converged the
+            // exact same desired plan, this fresh lifecycle entry can reuse
+            // that proof rather than trying to reopen the immutable terminal
+            // historical command (which would remain failed forever).
+            if persisted.state == o3k_store::NetworkPlanWorkState::Failed
+                && let Some(outcome) = persisted.outcome.as_deref()
+                && let Ok(outcome) = serde_json::from_slice::<serde_json::Value>(outcome)
+                && outcome["classification"] == "superseded_not_admitted"
+                && let Some(successor_id) = outcome["successor_command_id"].as_str()
+            {
+                let successor = control
+                    .durable
+                    .get_network_plan_work(successor_id)
+                    .await
+                    .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?;
+                let successor_command: o3k_network::NetworkPlanCommand =
+                    serde_json::from_slice(&successor.snapshot).map_err(|_| {
+                        o3k_network::NetworkDispatchError::Rejected(
+                            "superseding network plan snapshot is corrupt".to_owned(),
+                        )
+                    })?;
+                let same_plan = successor.target_host_id == work_record.target_host_id
+                    && successor.target_agent_id == work_record.target_agent_id
+                    && successor.target_agent_epoch == work_record.target_agent_epoch
+                    && successor.fingerprint_sha256 == work_record.fingerprint_sha256
+                    && successor_command.action == command.action
+                    && successor_command.target == command.target
+                    && successor_command
+                        .plan
+                        .fabric
+                        .as_ref()
+                        .zip(command.plan.fabric.as_ref())
+                        .is_some_and(|(accepted, desired)| {
+                            accepted.realm_id == desired.realm_id
+                                && accepted.local_host == desired.local_host
+                        })
+                    && successor_command.plan.fingerprint_sha256 == command.plan.fingerprint_sha256;
+                if same_plan && successor.state == o3k_store::NetworkPlanWorkState::Succeeded {
+                    return Ok(o3k_network::NetworkPlanStatus::Succeeded);
+                }
+                if same_plan
+                    && matches!(
+                        successor.state,
+                        o3k_store::NetworkPlanWorkState::Pending
+                            | o3k_store::NetworkPlanWorkState::Accepted
+                            | o3k_store::NetworkPlanWorkState::Running
+                            | o3k_store::NetworkPlanWorkState::Retryable
+                            | o3k_store::NetworkPlanWorkState::UnknownOutcome
+                    )
+                {
+                    return Err(o3k_network::NetworkDispatchError::Unavailable);
+                }
             }
             #[cfg(test)]
             if matches!(&dispatch_work, FabricWorkDispatch::Supersede { .. })
@@ -2466,6 +2884,1530 @@ mod dispatcher_tests {
     use std::sync::Mutex;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Server;
+    use tower::ServiceExt;
+
+    /// A test compute execution boundary that asks the same production
+    /// `DaemonCreateResolver` used by the agent provider to resolve the
+    /// request before delegating the synthetic VM operation to the fake.
+    /// The HTTP router, ComputeService lifecycle, placement and Fabric path
+    /// remain production; only hypervisor execution is controlled here.
+    #[derive(Clone)]
+    struct HttpResolvedComputeProvider {
+        inner: o3k_provider::FakeComputeProvider,
+        resolver: Arc<super::super::compute::DaemonCreateResolver>,
+        registry: o3k_compute_agent::NodeRegistry,
+        resolver_errors: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl o3k_provider::ComputeProvider for HttpResolvedComputeProvider {
+        async fn capabilities(
+            &self,
+        ) -> Result<o3k_provider::Capabilities, o3k_provider::ProviderError> {
+            self.inner.capabilities().await
+        }
+
+        async fn create_instance(
+            &self,
+            request: o3k_provider::CreateInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            let target = request
+                .placement_provider_id
+                .as_deref()
+                .ok_or(o3k_provider::ProviderError::InvalidRequest)?;
+            let node = o3k_provider::AgentNodeRegistry::snapshot(&self.registry, target)
+                .await
+                .ok_or(o3k_provider::ProviderError::NotFound)?;
+            if let Err(error) = self
+                .resolver
+                .resolve_network(&request, &node.agent_id, &node.agent_epoch)
+                .await
+            {
+                self.resolver_errors
+                    .lock()
+                    .map_err(|_| o3k_provider::ProviderError::StaleState)?
+                    .push(error.to_string());
+                return Err(error);
+            }
+            self.inner.create_instance(request).await
+        }
+
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<o3k_provider::Instance, o3k_provider::ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+
+        async fn delete_instance(
+            &self,
+            request: o3k_provider::DeleteInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.delete_instance(request).await
+        }
+
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: o3k_provider::InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+        }
+
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.get_operation(provider_operation_id).await
+        }
+    }
+
+    #[derive(Clone)]
+    struct HttpFabricRealizer {
+        plans: Arc<Mutex<Vec<o3k_network::NodeNetworkPlan>>>,
+        removes: Arc<Mutex<Vec<o3k_network::NodeNetworkPlan>>>,
+        removed_is_proven: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Default for HttpFabricRealizer {
+        fn default() -> Self {
+            Self {
+                plans: Arc::default(),
+                removes: Arc::default(),
+                removed_is_proven: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            }
+        }
+    }
+
+    impl o3k_network::NetworkPlanRealizer for HttpFabricRealizer {
+        type Error = String;
+
+        fn realize(&mut self, plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            self.plans
+                .lock()
+                .map_err(|_| "realizer plan log poisoned".to_owned())?
+                .push(plan.clone());
+            Ok(())
+        }
+
+        fn remove(&mut self, plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            self.removes
+                .lock()
+                .map_err(|_| "realizer removal log poisoned".to_owned())?
+                .push(plan.clone());
+            Ok(())
+        }
+
+        fn observe(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+
+        fn observe_removed(
+            &mut self,
+            _plan: &o3k_network::NodeNetworkPlan,
+        ) -> Result<bool, Self::Error> {
+            Ok(self
+                .removed_is_proven
+                .load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    async fn http_json(
+        app: &axum::Router,
+        method: axum::http::Method,
+        uri: &str,
+        token: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<(axum::http::StatusCode, serde_json::Value), Box<dyn std::error::Error>> {
+        use axum::body::Body;
+        use axum::http::{Request, header};
+        use tower::ServiceExt;
+
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-auth-token", token)
+            .header("authorization", format!("Bearer {token}"));
+        let body = if let Some(body) = body {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+            Body::from(serde_json::to_vec(&body)?)
+        } else {
+            Body::empty()
+        };
+        let response = app.clone().oneshot(request.body(body)?).await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024).await?;
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or_else(
+                |_| serde_json::json!({"body": String::from_utf8_lossy(&bytes).to_string()}),
+            )
+        };
+        Ok((status, value))
+    }
+
+    async fn wait_for_http_fabric_plan(
+        logs: &BTreeMap<String, Arc<std::sync::Mutex<Vec<o3k_network::NodeNetworkPlan>>>>,
+        agent_id: &str,
+        host_id: &str,
+        expected_peers: &BTreeSet<String>,
+    ) -> Result<o3k_network::NodeNetworkPlan, Box<dyn std::error::Error>> {
+        let wait = async {
+            loop {
+                let plan = logs
+                    .get(agent_id)
+                    .ok_or_else(|| std::io::Error::other("missing agent plan log"))?
+                    .lock()
+                    .map_err(|_| std::io::Error::other("agent plan log poisoned"))?
+                    .last()
+                    .cloned();
+                if let Some(plan) = plan {
+                    let fabric = plan.fabric.as_ref();
+                    let peers = fabric.map(|fabric| {
+                        fabric
+                            .peers
+                            .iter()
+                            .map(|peer| peer.host_id.clone())
+                            .collect::<BTreeSet<_>>()
+                    });
+                    if fabric.is_some_and(|fabric| fabric.local_host == host_id)
+                        && peers.as_ref() == Some(expected_peers)
+                    {
+                        return Ok::<_, std::io::Error>(plan);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(10), wait).await {
+            Ok(result) => Ok(result?),
+            Err(_) => {
+                let latest = logs
+                    .iter()
+                    .map(|(id, entries)| {
+                        let state = entries
+                            .lock()
+                            .map(|plans| {
+                                plans.last().map(|plan| {
+                                    let peers = plan.fabric.as_ref().map(|fabric| {
+                                        fabric
+                                            .peers
+                                            .iter()
+                                            .map(|peer| peer.host_id.clone())
+                                            .collect::<Vec<_>>()
+                                    });
+                                    (
+                                        plan.fabric
+                                            .as_ref()
+                                            .map(|fabric| fabric.local_host.clone()),
+                                        peers,
+                                    )
+                                })
+                            })
+                            .ok()
+                            .flatten();
+                        (id.clone(), state)
+                    })
+                    .collect::<Vec<_>>();
+                Err(std::io::Error::other(format!(
+                    "timed out waiting for {agent_id} on {host_id} with HER peers {expected_peers:?}; latest plans: {latest:?}"
+                ))
+                .into())
+            }
+        }
+    }
+
+    fn test_inventory() -> BTreeMap<String, o3k_placement::Inventory> {
+        BTreeMap::from([
+            (
+                o3k_placement::VCPU.to_owned(),
+                o3k_placement::Inventory {
+                    total: 1,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                },
+            ),
+            (
+                o3k_placement::MEMORY_MB.to_owned(),
+                o3k_placement::Inventory {
+                    total: 512,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                },
+            ),
+            (
+                o3k_placement::DISK_GB.to_owned(),
+                o3k_placement::Inventory {
+                    total: 10,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                },
+            ),
+        ])
+    }
+
+    #[tokio::test]
+    async fn fabric_reconcile_and_delete_share_realm_single_flight_without_global_serialization()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3kd-realm-lock-{}", Uuid::now_v7()));
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let network = o3k_network::NetworkService::open_for_test(&root, store.clone()).await?;
+        let durable: Arc<dyn DurableStore> = store.clone();
+        let coordination: Arc<dyn CoordinationRepository> = store;
+        let reconciler = FabricRealmReconciler {
+            network,
+            coordination,
+            durable,
+            registry: Arc::new(o3k_compute_agent::NodeRegistry::default()),
+            dispatcher: Arc::new(dispatcher()),
+            controller: o3k_network::NetworkControllerLease {
+                controller_id: "single-flight-controller".to_owned(),
+                controller_epoch: "epoch-1".to_owned(),
+                fencing_token: 1,
+            },
+            fabric_domain_id: Uuid::from_u128(991),
+            network_external_realm_id: None,
+            public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+        };
+
+        let realm_a = Uuid::from_u128(101);
+        let realm_b = Uuid::from_u128(202);
+        // Both endpoint reconciliation and subnet deletion call this same
+        // per-realm lock factory, so they cannot interleave for Realm A.
+        let reconcile_lock = reconciler.local_realm_lock(realm_a);
+        let delete_lock = reconciler.local_realm_lock(realm_a);
+        assert!(Arc::ptr_eq(&reconcile_lock, &delete_lock));
+        let held = reconcile_lock.lock().await;
+        assert!(delete_lock.try_lock().is_err());
+
+        // An unrelated Realm must remain runnable while Realm A is held.
+        let other_realm_lock = reconciler.local_realm_lock(realm_b);
+        assert!(other_realm_lock.try_lock().is_ok());
+        drop(held);
+        assert!(delete_lock.try_lock().is_ok());
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn supported_http_server_lifecycle_dispatches_incremental_fabric_plans_over_mtls()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::http::{Method, StatusCode};
+        use o3k_store::{DurableStore as _, NetworkRepository as _};
+
+        let root = std::env::temp_dir().join(format!("o3kd-http-fabric-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root)?;
+        // This exact HTTP-to-mTLS lifecycle can be run against either the
+        // default isolated SQLite store or a caller-provisioned pristine
+        // PostgreSQL database. The explicit variable avoids accidentally
+        // directing ordinary unit runs at a shared development database.
+        let sqlite_path = root.join("control.sqlite");
+        let store = Arc::new(match std::env::var("O3K_TEST_FABRIC_HTTP_POSTGRES_URL") {
+            Ok(url) => o3k_store::unified::O3kStore::connect_postgres(&url).await?,
+            Err(_) => o3k_store::unified::O3kStore::connect_sqlite_file(&sqlite_path).await?,
+        });
+        let identity = o3k_identity::testkit::test_service_with_projects(
+            "http://127.0.0.1:8080",
+            vec![o3k_identity::ExtraProjectSeed {
+                project_id: "project-a".to_owned(),
+                project_name: "project-a".to_owned(),
+                user_id: "user-a".to_owned(),
+                user_name: "user-a".to_owned(),
+                password: o3k_identity::Secret::new("password-a".to_owned()),
+            }],
+        )
+        .await?;
+        let network =
+            o3k_network::NetworkService::open_for_test(root.join("network"), store.clone()).await?;
+        let registry = Arc::new(o3k_compute_agent::NodeRegistry::default());
+        let hosts = [
+            (
+                "compute-a",
+                "agent-a",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                11_u8,
+            ),
+            (
+                "compute-b",
+                "agent-b",
+                "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+                12_u8,
+            ),
+            (
+                "compute-c",
+                "agent-c",
+                "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+                13_u8,
+            ),
+        ];
+        let mut server_tasks = Vec::new();
+        let mut target_map = BTreeMap::new();
+        let mut realizer_logs = BTreeMap::new();
+        let mut removal_logs = BTreeMap::new();
+        let mut absence_flags = BTreeMap::new();
+        let agent_d_realizer = HttpFabricRealizer::default();
+        let agent_d_plans = agent_d_realizer.plans.clone();
+        let agent_d_removes = agent_d_realizer.removes.clone();
+        let agent_d_absence = agent_d_realizer.removed_is_proven.clone();
+        let agent_d_journal = root.join("agent-agent-d");
+        let agent_d_executor = o3k_network::NetworkPlanExecutor::open(
+            &agent_d_journal,
+            o3k_network::NetworkAgentIdentity {
+                agent_id: "agent-d".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+            },
+            o3k_network::NetworkControllerLease {
+                controller_id: String::new(),
+                controller_epoch: String::new(),
+                fencing_token: 0,
+            },
+        )?;
+        let agent_d_service = o3k_network_bin::agent::NetworkAgentService::new_dynamic(
+            agent_d_executor,
+            agent_d_realizer.clone(),
+        )?;
+        let agent_d_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let agent_d_address = agent_d_listener.local_addr()?;
+        let mut agent_d_server_task =
+            Some(start_mtls_network_agent(agent_d_listener, agent_d_service).await?);
+        target_map.insert(
+            "agent-d".to_owned(),
+            NetworkAgentControlTarget {
+                host_id: "compute-d".to_owned(),
+                agent_id: "agent-d".to_owned(),
+                endpoint: format!("https://{agent_d_address}"),
+                tls_server_name: "o3k-control-plane".to_owned(),
+            },
+        );
+        for (host_id, agent_id, public_key, octet) in hosts {
+            network
+                .enroll_fabric_host_transport_identity(
+                    &o3k_store::FabricHostTransportIdentityRecord {
+                        host_id: host_id.to_owned(),
+                        agent_id: agent_id.to_owned(),
+                        public_key: public_key.to_owned(),
+                        underlay_endpoint: format!("192.0.2.{octet}:65001"),
+                        fabric_transport_ip: std::net::Ipv4Addr::new(198, 18, 1, octet),
+                        provider_version: "0.1.5".to_owned(),
+                        fabric_generation: 1,
+                        underlay_mtu: 1500,
+                        fabric_mtu: 1440,
+                        administrative_state: "enabled".to_owned(),
+                    },
+                    None,
+                )
+                .await?;
+            registry
+                .register(&o3k_compute_agent::proto::RegisterRequest {
+                    agent_id: agent_id.to_owned(),
+                    agent_epoch: "epoch-1".to_owned(),
+                    software_version: "http-fabric-test".to_owned(),
+                    host_label: host_id.to_owned(),
+                    supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+                    capabilities: Some(o3k_compute_agent::proto::Capabilities::default()),
+                })
+                .await?;
+
+            let realizer = HttpFabricRealizer::default();
+            realizer_logs.insert(agent_id.to_owned(), realizer.plans.clone());
+            removal_logs.insert(agent_id.to_owned(), realizer.removes.clone());
+            absence_flags.insert(agent_id.to_owned(), realizer.removed_is_proven.clone());
+            let executor = o3k_network::NetworkPlanExecutor::open(
+                root.join(format!("agent-{agent_id}")),
+                o3k_network::NetworkAgentIdentity {
+                    agent_id: agent_id.to_owned(),
+                    agent_epoch: "epoch-1".to_owned(),
+                },
+                o3k_network::NetworkControllerLease {
+                    controller_id: String::new(),
+                    controller_epoch: String::new(),
+                    fencing_token: 0,
+                },
+            )?;
+            let service =
+                o3k_network_bin::agent::NetworkAgentService::new_dynamic(executor, realizer)?;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            server_tasks.push(start_mtls_network_agent(listener, service).await?);
+            target_map.insert(
+                agent_id.to_owned(),
+                NetworkAgentControlTarget {
+                    host_id: host_id.to_owned(),
+                    agent_id: agent_id.to_owned(),
+                    endpoint: format!("https://{address}"),
+                    tls_server_name: "o3k-control-plane".to_owned(),
+                },
+            );
+        }
+        let durable: Arc<dyn DurableStore> = store.clone();
+        let coordination: Arc<dyn CoordinationRepository> = store.clone();
+        let controller_id = "http-fabric-controller";
+        let controller_epoch = "epoch-1";
+        let dispatcher = Arc::new(NetworkAgentDispatcher {
+            legacy_target: None,
+            fabric_targets: target_map,
+            control: Some(NetworkAgentControlLease {
+                coordination: coordination.clone(),
+                durable: durable.clone(),
+                controller_id: o3k_store::ControllerId::new(controller_id),
+                controller_epoch: o3k_store::ControllerEpoch::new(controller_epoch),
+            }),
+            control_lock: Arc::new(tokio::sync::Mutex::new(())),
+            ca_certificate: network_fixture("ca.pem"),
+            client_certificate: network_fixture("agent-chain.pem"),
+            client_key: network_fixture("agent-key-pkcs8.pem"),
+            pre_supersession_gate: None,
+            supersession_gate: None,
+            result_persistence_gate: None,
+        });
+        let fabric_reconciler = Arc::new(FabricRealmReconciler {
+            network: network.clone(),
+            coordination: coordination.clone(),
+            durable: durable.clone(),
+            registry: registry.clone(),
+            dispatcher: dispatcher.clone(),
+            controller: o3k_network::NetworkControllerLease {
+                controller_id: controller_id.to_owned(),
+                controller_epoch: controller_epoch.to_owned(),
+                fencing_token: 1,
+            },
+            fabric_domain_id: Uuid::from_u128(991),
+            network_external_realm_id: None,
+            public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+        });
+        let image = o3k_image::ImageService::open_for_test(
+            root.join("images"),
+            o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
+            store.clone(),
+        )
+        .await?;
+        let config_drive = o3k_config_drive::ConfigDriveStore::open(root.join("config-drive"))?;
+        let resolver = Arc::new(super::super::compute::DaemonCreateResolver {
+            store: store.clone(),
+            image,
+            network: network.clone(),
+            config_drive,
+            network_dispatcher: None,
+            fabric_reconciler: Some(fabric_reconciler.clone()),
+            network_controller: o3k_network::NetworkControllerLease {
+                controller_id: controller_id.to_owned(),
+                controller_epoch: controller_epoch.to_owned(),
+                fencing_token: 1,
+            },
+            network_external_realm_id: None,
+            network_agent: None,
+            public_allocator: None,
+        });
+        let placement =
+            o3k_placement::PlacementLedger::open(root.join("placement"), store.clone()).await?;
+        let placement_for_negative_tests = placement.clone();
+        for (_, agent_id, _, _) in hosts {
+            placement
+                .register_provider(agent_id, test_inventory())
+                .await?;
+        }
+        let resolver_errors = Arc::new(Mutex::new(Vec::new()));
+        let compute_provider = HttpResolvedComputeProvider {
+            inner: o3k_provider::FakeComputeProvider::new(),
+            resolver,
+            registry: (*registry).clone(),
+            resolver_errors: resolver_errors.clone(),
+        };
+        let projector: Arc<dyn o3k_compute::PortBindingProjector> =
+            Arc::new(NetworkBindingProjector {
+                network: network.clone(),
+                registry: registry.clone(),
+                network_dispatcher: None,
+                network_controller: o3k_network::NetworkControllerLease {
+                    controller_id: controller_id.to_owned(),
+                    controller_epoch: controller_epoch.to_owned(),
+                    fencing_token: 1,
+                },
+                network_external_realm_id: None,
+                network_agent: None,
+                fabric_reconciler: Some(fabric_reconciler.clone()),
+                public_allocator: None,
+                unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
+            });
+        let compute =
+            o3k_compute::ComputeService::new_for_test(store.clone(), Arc::new(compute_provider))
+                .with_scheduler(o3k_scheduler::Scheduler::new(placement))
+                .with_agent_registry(registry.clone())
+                .with_binding_projector(projector);
+        let create_reconciler = compute.spawn_create_convergence_reconciler(1);
+        let lifecycle_reconciler = compute.spawn_lifecycle_convergence_reconciler(1);
+        let orphan_reconciler = compute.spawn_orphan_endpoint_reconciler(1);
+        let app = o3k_api::router_with_state(
+            o3k_api::AppState::new()
+                .with_identity(identity)
+                .with_compute(compute)
+                .with_network(network.clone())
+                .with_realm_deletion_workflow(
+                    fabric_reconciler.clone() as Arc<dyn o3k_api::RealmDeletionWorkflow>
+                ),
+        );
+        // Keystone's token is deliberately only held in process memory.
+        let response = app.clone().oneshot(
+            axum::http::Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(serde_json::json!({
+                    "auth": {"identity":{"methods":["password"],"password":{"user":{"name":"user-a","password":"password-a"}}},"scope":{"project":{"name":"project-a"}}}
+                }).to_string()))?
+        ).await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let token = response
+            .headers()
+            .get("x-subject-token")
+            .ok_or("missing token")?
+            .to_str()?
+            .to_owned();
+
+        let run = Uuid::now_v7().simple().to_string();
+        let (status, network_json) = http_json(
+            &app,
+            Method::POST,
+            "/v2.0/networks",
+            &token,
+            Some(serde_json::json!({"network":{"name":format!("fabric-http-{run}")}})),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CREATED, "{network_json}");
+        let network_id = network_json["network"]["id"]
+            .as_str()
+            .ok_or("network id")?
+            .to_owned();
+        let (status, subnet_json) = http_json(&app, Method::POST, "/v2.0/subnets", &token,
+            Some(serde_json::json!({"subnet":{"network_id":network_id,"name":format!("fabric-subnet-{run}"),"cidr":"10.77.0.0/24","gateway_ip":"10.77.0.1"}}))).await?;
+        assert_eq!(status, StatusCode::CREATED, "{subnet_json}");
+        let mut port_ids = Vec::new();
+        for n in 0..3 {
+            let (status, port_json) = http_json(&app, Method::POST, "/v2.0/ports", &token,
+                Some(serde_json::json!({"port":{"network_id":network_id,"name":format!("fabric-port-{run}-{n}")}}))).await?;
+            assert_eq!(status, StatusCode::CREATED, "{port_json}");
+            port_ids.push(
+                port_json["port"]["id"]
+                    .as_str()
+                    .ok_or("port id")?
+                    .to_owned(),
+            );
+        }
+        let mut server_ids = Vec::new();
+        for (n, port_id) in port_ids.iter().enumerate() {
+            let body = serde_json::json!({"server":{"name":format!("fabric-server-{run}-{n}"),"image":{"id":"image-a"},"flavor":{"id":"00000000-0000-0000-0000-000000000001"},"networks":[{"port":port_id}]}});
+            let (status, response) = http_json(
+                &app,
+                Method::POST,
+                "/v2.1/project-a/servers",
+                &token,
+                Some(body),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::ACCEPTED, "server {n}: {response}");
+            server_ids.push(
+                response["server"]["id"]
+                    .as_str()
+                    .ok_or("server id")?
+                    .to_owned(),
+            );
+            for agent in ["agent-a", "agent-b", "agent-c"] {
+                let expected_min = match (n, agent) {
+                    (0, "agent-a") => 1,
+                    (1, "agent-a") => 2,
+                    (1, "agent-b") => 1,
+                    (2, "agent-a") => 3,
+                    (2, "agent-b") => 2,
+                    (2, "agent-c") => 1,
+                    _ => 0,
+                };
+                if expected_min != 0 {
+                    let host = format!("compute-{}", &agent[6..]);
+                    let expected_peers: BTreeSet<_> = (0..=n)
+                        .map(|index| format!("compute-{}", ['a', 'b', 'c'][index]))
+                        .filter(|participant| participant != &host)
+                        .collect();
+                    let plan =
+                        wait_for_http_fabric_plan(&realizer_logs, agent, &host, &expected_peers)
+                            .await
+                            .map_err(|error| {
+                                let details = resolver_errors
+                                    .lock()
+                                    .map(|errors| errors.clone())
+                                    .unwrap_or_default();
+                                std::io::Error::other(format!(
+                                    "{error}; resolver errors: {details:?}"
+                                ))
+                            })?;
+                    let fabric = plan.fabric.as_ref().ok_or("missing Fabric plan")?;
+                    assert_eq!(fabric.local_host, host, "host-specific API-derived plan");
+                    let peers: BTreeSet<_> = fabric
+                        .peers
+                        .iter()
+                        .map(|peer| peer.host_id.clone())
+                        .collect();
+                    assert_eq!(
+                        peers, expected_peers,
+                        "incremental HER for {agent} after endpoint {n}"
+                    );
+                }
+            }
+        }
+        let realm = store
+            .list_canonical_realms("project-a", &Uuid::parse_str(&network_id)?)
+            .await?;
+        assert_eq!(realm.len(), 1);
+        let realm_id = realm[0].id;
+        assert_eq!(
+            store
+                .list_canonical_endpoints("project-a", &realm_id)
+                .await?
+                .len(),
+            3
+        );
+        let binding = store
+            .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
+            .await?
+            .ok_or("VNI binding")?;
+        for (agent, logs) in &realizer_logs {
+            let plans = logs.lock().map_err(|_| "plan log poisoned")?;
+            let plan = plans.last().ok_or("missing dispatched plan")?;
+            let fabric = plan.fabric.as_ref().ok_or("missing fabric plan")?;
+            assert_eq!(fabric.realm_id, realm_id);
+            assert_eq!(
+                fabric.encapsulation.provider_segment_id,
+                binding.provider_segment_id as u32
+            );
+            assert_eq!(fabric.local_host, format!("compute-{}", &agent[6..]));
+            let peer_ids: BTreeSet<_> = fabric
+                .peers
+                .iter()
+                .map(|peer| peer.host_id.clone())
+                .collect();
+            let own = fabric.local_host.as_str();
+            let expected: BTreeSet<String> = ["compute-a", "compute-b", "compute-c"]
+                .into_iter()
+                .filter(|host| *host != own)
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(peer_ids, expected);
+        }
+        let observed_hosts: BTreeSet<_> = realizer_logs
+            .values()
+            .filter_map(|logs| logs.lock().ok().and_then(|plans| plans.last().cloned()))
+            .filter_map(|plan| plan.fabric.map(|fabric| fabric.local_host))
+            .collect();
+        assert_eq!(
+            observed_hosts,
+            BTreeSet::from([
+                "compute-a".to_owned(),
+                "compute-b".to_owned(),
+                "compute-c".to_owned(),
+            ])
+        );
+        assert!(
+            dispatcher
+                .transport_for(&fabric_command("agent-b", "compute-a"))
+                .is_err(),
+            "a Fabric plan for compute-a must not route to agent-b or fall back to a legacy target"
+        );
+
+        // Simulate a controller context restart without another tenant write.
+        // Startup recovery must consume the durable HTTP-created state and
+        // regenerate host plans through the same concrete target transports.
+        let restarted_reconciler = (*fabric_reconciler).clone();
+        recover_fabric_state(&restarted_reconciler, store.as_ref()).await;
+        for (agent, logs) in &realizer_logs {
+            let plans = logs.lock().map_err(|_| "plan log poisoned")?;
+            let fabric = plans
+                .last()
+                .and_then(|plan| plan.fabric.as_ref())
+                .ok_or("recovered plan")?;
+            assert_eq!(fabric.local_host, format!("compute-{}", &agent[6..]));
+        }
+
+        // Public readback stays on the compatibility API surface.
+        for uri in [
+            format!("/v2.0/networks/{network_id}"),
+            format!(
+                "/v2.0/subnets/{}",
+                subnet_json["subnet"]["id"].as_str().ok_or("subnet id")?
+            ),
+        ] {
+            let (status, body) = http_json(&app, Method::GET, &uri, &token, None).await?;
+            assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        }
+        for port in &port_ids {
+            let (status, body) = http_json(
+                &app,
+                Method::GET,
+                &format!("/v2.0/ports/{port}"),
+                &token,
+                None,
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        for server in &server_ids {
+            let (status, body) = http_json(
+                &app,
+                Method::GET,
+                &format!("/v2.1/project-a/servers/{server}"),
+                &token,
+                None,
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+
+        let (status, body) = http_json(
+            &app,
+            Method::DELETE,
+            &format!("/v2.1/project-a/servers/{}", server_ids[2]),
+            &token,
+            None,
+        )
+        .await?;
+        assert!(
+            status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT,
+            "delete server C: {status} {body}"
+        );
+        let (status, detached_port) = http_json(
+            &app,
+            Method::GET,
+            &format!("/v2.0/ports/{}", port_ids[2]),
+            &token,
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{detached_port}");
+        assert!(
+            detached_port["port"]["binding:host_id"].is_null(),
+            "server deletion must detach the caller-owned port"
+        );
+        for agent in ["agent-a", "agent-b"] {
+            let plans = realizer_logs[agent]
+                .lock()
+                .map_err(|_| "plan log poisoned")?;
+            let fabric = plans
+                .last()
+                .and_then(|plan| plan.fabric.as_ref())
+                .ok_or("withdrawal plan")?;
+            let peers: BTreeSet<_> = fabric
+                .peers
+                .iter()
+                .map(|peer| peer.host_id.clone())
+                .collect();
+            let expected = if agent == "agent-a" {
+                BTreeSet::from(["compute-b".to_owned()])
+            } else {
+                BTreeSet::from(["compute-a".to_owned()])
+            };
+            assert_eq!(peers, expected, "C must be withdrawn from {agent} HER");
+        }
+        assert!(
+            !removal_logs["agent-c"]
+                .lock()
+                .map_err(|_| "remove log poisoned")?
+                .is_empty(),
+            "server C removal must remove its local endpoint realization"
+        );
+
+        // These are caller-created Neutron ports, so deleting their server
+        // detaches them but preserves the ports. Remove C through the
+        // supported Neutron API to retire the canonical endpoint itself.
+        let (status, body) = http_json(
+            &app,
+            Method::DELETE,
+            &format!("/v2.0/ports/{}", port_ids[2]),
+            &token,
+            None,
+        )
+        .await?;
+        assert!(
+            status == StatusCode::NO_CONTENT || status == StatusCode::ACCEPTED,
+            "delete detached port C: {status} {body}"
+        );
+        let active_endpoints = store
+            .list_canonical_endpoints("project-a", &realm_id)
+            .await?
+            .into_iter()
+            .filter(|endpoint| endpoint.state == "active")
+            .count();
+        assert_eq!(
+            active_endpoints, 2,
+            "HTTP port deletion retires C from canonical Fabric membership"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let active = store
+                    .list_canonical_endpoints("project-a", &realm_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|endpoint| endpoint.state == "active")
+                    .count();
+                if active == 2 {
+                    return Ok::<(), String>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .map_err(|_| "port C canonical endpoint did not retire after HTTP deletion")??;
+
+        for server in &server_ids[..2] {
+            let (status, body) = http_json(
+                &app,
+                Method::DELETE,
+                &format!("/v2.1/project-a/servers/{server}"),
+                &token,
+                None,
+            )
+            .await?;
+            assert!(
+                status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT,
+                "delete server: {status} {body}"
+            );
+        }
+        for port in &port_ids[..2] {
+            let (status, body) = http_json(
+                &app,
+                Method::DELETE,
+                &format!("/v2.0/ports/{port}"),
+                &token,
+                None,
+            )
+            .await?;
+            assert!(
+                status == StatusCode::NO_CONTENT || status == StatusCode::ACCEPTED,
+                "delete port: {status} {body}"
+            );
+        }
+        assert!(
+            store
+                .list_canonical_endpoints("project-a", &realm_id)
+                .await?
+                .is_empty(),
+            "supported server/port deletion must remove every canonical endpoint"
+        );
+        for agent in ["agent-a", "agent-b", "agent-c"] {
+            assert!(
+                !removal_logs[agent]
+                    .lock()
+                    .map_err(|_| "remove log poisoned")?
+                    .is_empty(),
+                "final endpoint teardown must dispatch provider removal to {agent}"
+            );
+        }
+        assert!(
+            store
+                .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
+                .await?
+                .is_some(),
+            "active subnet retains its durable VNI binding until realm teardown"
+        );
+
+        // Exercise two failure-closed HTTP attachment cases against a fourth
+        // independently routed mTLS agent. This target is deliberately not
+        // Fabric-enrolled for the first request. After observing that
+        // rejection, enroll it to permit supported cleanup and then advance
+        // only the compute-agent epoch to prove the network agent rejects a
+        // stale target epoch over the real protocol.
+        for agent in ["agent-a", "agent-b", "agent-c"] {
+            placement_for_negative_tests
+                .set_state(agent, o3k_placement::ProviderState::Unavailable)
+                .await?;
+        }
+        placement_for_negative_tests
+            .register_provider("agent-d", test_inventory())
+            .await?;
+        registry
+            .register(&o3k_compute_agent::proto::RegisterRequest {
+                agent_id: "agent-d".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                software_version: "http-fabric-test".to_owned(),
+                host_label: "compute-d".to_owned(),
+                supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+                capabilities: Some(o3k_compute_agent::proto::Capabilities::default()),
+            })
+            .await?;
+        realizer_logs.insert("agent-d".to_owned(), agent_d_plans.clone());
+        removal_logs.insert("agent-d".to_owned(), agent_d_removes.clone());
+        absence_flags.insert("agent-d".to_owned(), agent_d_absence.clone());
+        let d_identity = o3k_store::FabricHostTransportIdentityRecord {
+            host_id: "compute-d".to_owned(),
+            agent_id: "agent-d".to_owned(),
+            public_key: "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=".to_owned(),
+            underlay_endpoint: "192.0.2.14:65001".to_owned(),
+            fabric_transport_ip: std::net::Ipv4Addr::new(198, 18, 1, 14),
+            provider_version: "0.1.5".to_owned(),
+            fabric_generation: 1,
+            underlay_mtu: 1500,
+            fabric_mtu: 1440,
+            administrative_state: "enabled".to_owned(),
+        };
+        let create_port =
+            |name: String| serde_json::json!({"port":{"network_id":network_id,"name":name}});
+        let resolver_error_start = resolver_errors
+            .lock()
+            .map_err(|_| "resolver errors poisoned")?
+            .len();
+        let (status, missing_port) = http_json(
+            &app,
+            Method::POST,
+            "/v2.0/ports",
+            &token,
+            Some(create_port(format!("fabric-missing-identity-{run}"))),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CREATED, "{missing_port}");
+        let missing_port_id = missing_port["port"]["id"]
+            .as_str()
+            .ok_or("missing-identity port id")?
+            .to_owned();
+        let (status, missing_server) = http_json(
+            &app,
+            Method::POST,
+            "/v2.1/project-a/servers",
+            &token,
+            Some(serde_json::json!({"server":{"name":format!("fabric-missing-identity-server-{run}"),"image":{"id":"image-a"},"flavor":{"id":"00000000-0000-0000-0000-000000000001"},"networks":[{"port":missing_port_id}]}})),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{missing_server}");
+        assert!(
+            resolver_errors
+                .lock()
+                .map_err(|_| "resolver errors poisoned")?
+                .len()
+                > resolver_error_start,
+            "supported server attachment must reach Fabric identity validation"
+        );
+        assert!(
+            network
+                .list_fabric_host_transport_identities()
+                .await?
+                .iter()
+                .all(|identity| identity.host_id != "compute-d"),
+            "O3K must not invent a missing Fabric identity"
+        );
+        assert!(
+            agent_d_plans
+                .lock()
+                .map_err(|_| "agent-d plan log poisoned")?
+                .is_empty(),
+            "missing Fabric identity must fail before provider mutation"
+        );
+        let (status, unbound_port) = http_json(
+            &app,
+            Method::GET,
+            &format!("/v2.0/ports/{missing_port_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{unbound_port}");
+        assert!(
+            unbound_port["port"]["binding:host_id"].is_null(),
+            "missing Fabric identity must be rejected before port binding"
+        );
+        let (status, body) = http_json(
+            &app,
+            Method::DELETE,
+            &format!("/v2.0/ports/{missing_port_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        network
+            .enroll_fabric_host_transport_identity(&d_identity, None)
+            .await?;
+
+        // The compute registry now advertises epoch 2 while the real mTLS
+        // network agent still executes epoch 1. The request must reach the
+        // independently targeted agent and be rejected before the realizer.
+        registry
+            .register(&o3k_compute_agent::proto::RegisterRequest {
+                agent_id: "agent-d".to_owned(),
+                agent_epoch: "epoch-2".to_owned(),
+                software_version: "http-fabric-test".to_owned(),
+                host_label: "compute-d".to_owned(),
+                supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+                capabilities: Some(o3k_compute_agent::proto::Capabilities::default()),
+            })
+            .await?;
+        let stale_error_start = resolver_errors
+            .lock()
+            .map_err(|_| "resolver errors poisoned")?
+            .len();
+        let plans_before_stale = agent_d_plans
+            .lock()
+            .map_err(|_| "agent-d plan log poisoned")?
+            .len();
+        let (status, stale_port) = http_json(
+            &app,
+            Method::POST,
+            "/v2.0/ports",
+            &token,
+            Some(create_port(format!("fabric-stale-epoch-{run}"))),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CREATED, "{stale_port}");
+        let stale_port_id = stale_port["port"]["id"]
+            .as_str()
+            .ok_or("stale-epoch port id")?
+            .to_owned();
+        let (status, stale_server) = http_json(
+            &app,
+            Method::POST,
+            "/v2.1/project-a/servers",
+            &token,
+            Some(serde_json::json!({"server":{"name":format!("fabric-stale-epoch-server-{run}"),"image":{"id":"image-a"},"flavor":{"id":"00000000-0000-0000-0000-000000000001"},"networks":[{"port":stale_port_id}]}})),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::ACCEPTED, "{stale_server}");
+        let stale_server_id = stale_server["server"]["id"]
+            .as_str()
+            .ok_or("stale-epoch server id")?
+            .to_owned();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if resolver_errors
+                    .lock()
+                    .map_err(|_| "resolver errors poisoned")?
+                    .len()
+                    > stale_error_start
+                {
+                    break Ok::<(), Box<dyn std::error::Error>>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| "stale network-agent epoch did not fail through the HTTP/mTLS path")??;
+        assert_eq!(
+            agent_d_plans
+                .lock()
+                .map_err(|_| "agent-d plan log poisoned")?
+                .len(),
+            plans_before_stale,
+            "stale agent epoch must be rejected before Fabric realization"
+        );
+
+        // Advance the network agent process to the current compute epoch while
+        // preserving its durable journal and the same endpoint identity, then
+        // let production recovery settle the previously rejected work.
+        if let Some(task) = agent_d_server_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        let agent_d_executor = o3k_network::NetworkPlanExecutor::open(
+            &agent_d_journal,
+            o3k_network::NetworkAgentIdentity {
+                agent_id: "agent-d".to_owned(),
+                agent_epoch: "epoch-2".to_owned(),
+            },
+            o3k_network::NetworkControllerLease {
+                controller_id: String::new(),
+                controller_epoch: String::new(),
+                fencing_token: 0,
+            },
+        )?;
+        let agent_d_service = o3k_network_bin::agent::NetworkAgentService::new_dynamic(
+            agent_d_executor,
+            agent_d_realizer.clone(),
+        )?;
+        let agent_d_listener = tokio::net::TcpListener::bind(agent_d_address).await?;
+        let _agent_d_restarted_server_task =
+            start_mtls_network_agent(agent_d_listener, agent_d_service).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                recover_fabric_state(&fabric_reconciler, store.as_ref()).await;
+                if agent_d_plans
+                    .lock()
+                    .map_err(|_| "agent-d plan log poisoned")?
+                    .len()
+                    > plans_before_stale
+                {
+                    break Ok::<(), Box<dyn std::error::Error>>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .map_err(|_| "current network-agent epoch did not recover Fabric work")??;
+        let stale_server_convergence =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let (status, body) = http_json(
+                        &app,
+                        Method::GET,
+                        &format!("/v2.1/project-a/servers/{stale_server_id}"),
+                        &token,
+                        None,
+                    )
+                    .await?;
+                    if status == StatusCode::OK && body["server"]["status"] == "ACTIVE" {
+                        break Ok::<(), Box<dyn std::error::Error>>(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+            .await;
+        if stale_server_convergence.is_err() {
+            let (_, latest) = http_json(
+                &app,
+                Method::GET,
+                &format!("/v2.1/project-a/servers/{stale_server_id}"),
+                &token,
+                None,
+            )
+            .await?;
+            let errors = resolver_errors
+                .lock()
+                .map(|errors| errors[stale_error_start..].to_vec())
+                .unwrap_or_default();
+            let resource = store
+                .get_resource(Uuid::parse_str(&stale_server_id)?)
+                .await?;
+            let intent: o3k_provider::CreateInstanceRequest =
+                serde_json::from_str(&resource.desired_state)?;
+            let operation = store.get_operation(intent.operation_id).await?;
+            return Err(std::io::Error::other(format!(
+                "server did not finish after current network-agent epoch recovered: {latest}; resolver errors: {errors:?}; operation state={:?} provider_operation_id={:?} error_category={:?}",
+                operation.state, operation.provider_operation_id, operation.error_category
+            ))
+            .into());
+        }
+        stale_server_convergence??;
+        let (status, body) = http_json(
+            &app,
+            Method::DELETE,
+            &format!("/v2.1/project-a/servers/{stale_server_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert!(
+            status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT,
+            "{body}"
+        );
+        let (status, body) = http_json(
+            &app,
+            Method::DELETE,
+            &format!("/v2.0/ports/{stale_port_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert!(
+            status == StatusCode::NO_CONTENT || status == StatusCode::ACCEPTED,
+            "{body}"
+        );
+        for agent in ["agent-a", "agent-b", "agent-c"] {
+            placement_for_negative_tests
+                .set_state(agent, o3k_placement::ProviderState::Enabled)
+                .await?;
+        }
+        let subnet_id = subnet_json["subnet"]["id"].as_str().ok_or("subnet id")?;
+        // A successful REMOVE command is not sufficient evidence to release
+        // the Realm's VNI. Make one provider report that absence is not yet
+        // proven, then let startup recovery retry observation without another
+        // tenant mutation.
+        let remove_counts_before_delete: BTreeMap<_, _> = removal_logs
+            .iter()
+            .map(|(agent, logs)| {
+                Ok::<_, Box<dyn std::error::Error>>((
+                    agent.clone(),
+                    logs.lock().map_err(|_| "remove log poisoned")?.len(),
+                ))
+            })
+            .collect::<Result<_, _>>()?;
+        absence_flags["agent-c"].store(false, std::sync::atomic::Ordering::SeqCst);
+        let (status, body) = http_json(
+            &app,
+            Method::DELETE,
+            &format!("/v2.0/subnets/{subnet_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "subnet DELETE must fail closed until provider absence is proven: {body}"
+        );
+        let deleting_realm = network
+            .get_canonical_realm_for_project("project-a", realm_id)
+            .await?;
+        assert_eq!(
+            deleting_realm.state, "deleting",
+            "subnet DELETE conflict response did not leave the canonical Realm deleting: {body}"
+        );
+        assert!(
+            store
+                .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
+                .await?
+                .is_some(),
+            "VNI binding must remain while provider absence is unresolved"
+        );
+        assert_eq!(
+            store
+                .list_canonical_pools("project-a", &realm_id)
+                .await?
+                .len(),
+            1,
+            "Realm pools must remain while provider absence is unresolved"
+        );
+        let deleting_generation = deleting_realm.generation;
+        let (retry_status, retry_body) = http_json(
+            &app,
+            Method::DELETE,
+            &format!("/v2.0/subnets/{subnet_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert_eq!(
+            retry_status,
+            StatusCode::CONFLICT,
+            "repeated DELETE must remain pending when absence is still unproven: {retry_body}"
+        );
+        assert_eq!(
+            network
+                .get_canonical_realm_for_project("project-a", realm_id)
+                .await?
+                .generation,
+            deleting_generation,
+            "retry must not reset the deleting generation"
+        );
+        absence_flags["agent-c"].store(true, std::sync::atomic::Ordering::SeqCst);
+        // Fault after provider absence but before VNI binding removal. The
+        // supported DELETE must leave the durable Realm/binding intact and a
+        // retry must resume without issuing another provider mutation.
+        set_realm_delete_failpoint(
+            store.as_ref(),
+            &sqlite_path,
+            realm_id,
+            RealmDeleteFailpoint::Binding,
+            true,
+        )
+        .await?;
+        let (binding_failure_status, binding_failure_body) = http_json(
+            &app,
+            Method::DELETE,
+            &format!("/v2.0/subnets/{subnet_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert_eq!(
+            binding_failure_status,
+            StatusCode::CONFLICT,
+            "injected pre-binding crash must not return DELETE success: {binding_failure_body}"
+        );
+        assert!(
+            store
+                .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
+                .await?
+                .is_some(),
+            "binding must remain when its deletion transaction fails"
+        );
+        set_realm_delete_failpoint(
+            store.as_ref(),
+            &sqlite_path,
+            realm_id,
+            RealmDeleteFailpoint::Binding,
+            false,
+        )
+        .await?;
+
+        // Fault after the binding and pools have been removed but before the
+        // canonical Realm row is finalized. Restart recovery must finish from
+        // that durable intermediate state without recreating the VNI or
+        // repeating provider Remove.
+        set_realm_delete_failpoint(
+            store.as_ref(),
+            &sqlite_path,
+            realm_id,
+            RealmDeleteFailpoint::Finalize,
+            true,
+        )
+        .await?;
+        let (finalize_failure_status, finalize_failure_body) = http_json(
+            &app,
+            Method::DELETE,
+            &format!("/v2.0/subnets/{subnet_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert_eq!(
+            finalize_failure_status,
+            StatusCode::CONFLICT,
+            "injected post-binding crash must not return DELETE success: {finalize_failure_body}"
+        );
+        assert!(
+            store
+                .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
+                .await?
+                .is_none(),
+            "binding deletion must remain committed before interrupted Realm finalization"
+        );
+        assert!(
+            store
+                .list_canonical_pools("project-a", &realm_id)
+                .await?
+                .is_empty(),
+            "pool cleanup must remain committed before interrupted Realm finalization"
+        );
+        assert_eq!(
+            network
+                .get_canonical_realm_for_project("project-a", realm_id)
+                .await?
+                .state,
+            "deleting",
+            "interrupted Realm finalization must preserve deleting state"
+        );
+        set_realm_delete_failpoint(
+            store.as_ref(),
+            &sqlite_path,
+            realm_id,
+            RealmDeleteFailpoint::Finalize,
+            false,
+        )
+        .await?;
+        // Recreate the controller-side reconciler with a successor epoch while
+        // keeping all three mTLS agents and their durable journals running.
+        // No tenant mutation is issued to trigger deletion recovery.
+        let mut restarted_dispatcher = (*dispatcher).clone();
+        if let Some(control) = restarted_dispatcher.control.as_mut() {
+            control.controller_id = o3k_store::ControllerId::new("http-fabric-controller-b");
+            control.controller_epoch = o3k_store::ControllerEpoch::new("epoch-2");
+        }
+        let restarted_controller = o3k_network::NetworkControllerLease {
+            controller_id: "http-fabric-controller-b".to_owned(),
+            controller_epoch: "epoch-2".to_owned(),
+            fencing_token: 2,
+        };
+        let restarted_reconciler = FabricRealmReconciler {
+            network: network.clone(),
+            coordination: coordination.clone(),
+            durable: durable.clone(),
+            registry: registry.clone(),
+            dispatcher: Arc::new(restarted_dispatcher),
+            controller: restarted_controller,
+            fabric_domain_id: Uuid::from_u128(991),
+            network_external_realm_id: None,
+            public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                recover_fabric_state(&restarted_reconciler, store.as_ref()).await;
+                if store
+                    .list_canonical_realms("project-a", &Uuid::parse_str(&network_id)?)
+                    .await?
+                    .is_empty()
+                {
+                    break Ok::<(), Box<dyn std::error::Error>>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .map_err(|_| "deleting AddressRealm did not finalize within 30 seconds")??;
+        for (agent, logs) in &removal_logs {
+            assert_eq!(
+                logs.lock().map_err(|_| "remove log poisoned")?.len(),
+                remove_counts_before_delete[agent] + 1,
+                "provider Remove must run once per host; recovery observes rather than redispatches ({agent}); before={}",
+                remove_counts_before_delete[agent]
+            );
+        }
+        let (status, body) = http_json(
+            &app,
+            Method::GET,
+            &format!("/v2.0/subnets/{subnet_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "recovery should finalize deleted subnet: {body}"
+        );
+        let (status, body) = http_json(
+            &app,
+            Method::GET,
+            &format!("/v2.0/networks/{network_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "network survives subnet deletion: {body}"
+        );
+        assert!(
+            store
+                .list_canonical_realms("project-a", &Uuid::parse_str(&network_id)?)
+                .await?
+                .is_empty(),
+            "AddressRealm must be absent after supported subnet deletion"
+        );
+        assert!(
+            store
+                .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
+                .await?
+                .is_none(),
+            "VNI binding must be released only after provider absence"
+        );
+        assert!(
+            store
+                .list_canonical_pools("project-a", &realm_id)
+                .await?
+                .is_empty(),
+            "AddressRealm pools must be removed after provider absence"
+        );
+        assert!(
+            store.list_unresolved_network_plan_work().await?.is_empty(),
+            "successful Realm deletion must leave no unresolved Fabric cleanup work"
+        );
+        let (status, body) = http_json(
+            &app,
+            Method::DELETE,
+            &format!("/v2.0/networks/{network_id}"),
+            &token,
+            None,
+        )
+        .await?;
+        assert!(
+            status == StatusCode::NO_CONTENT || status == StatusCode::ACCEPTED,
+            "delete network: {status} {body}"
+        );
+        for task in server_tasks {
+            task.abort();
+        }
+        for task in [create_reconciler, lifecycle_reconciler, orphan_reconciler] {
+            task.abort();
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
 
     fn dispatcher() -> NetworkAgentDispatcher {
         NetworkAgentDispatcher {
@@ -2663,6 +4605,80 @@ mod dispatcher_tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/o3k-compute-agent/tests/fixtures")
             .join(name)
+    }
+
+    #[derive(Clone, Copy)]
+    enum RealmDeleteFailpoint {
+        Binding,
+        Finalize,
+    }
+
+    async fn set_realm_delete_failpoint(
+        store: &o3k_store::unified::O3kStore,
+        sqlite_path: &std::path::Path,
+        realm_id: Uuid,
+        failpoint: RealmDeleteFailpoint,
+        enabled: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (trigger, table, column, function) = match failpoint {
+            RealmDeleteFailpoint::Binding => (
+                "o3k_test_block_realm_binding_delete",
+                "canonical_realm_encapsulation_bindings",
+                "realm_id",
+                "o3k_test_block_realm_binding_delete_fn",
+            ),
+            RealmDeleteFailpoint::Finalize => (
+                "o3k_test_block_realm_finalize",
+                "canonical_address_realms",
+                "id",
+                "o3k_test_block_realm_finalize_fn",
+            ),
+        };
+        let realm_id = realm_id.to_string();
+        match store {
+            o3k_store::unified::O3kStore::Postgres(postgres) => {
+                let pool = postgres.pool();
+                if enabled {
+                    sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+                        .execute(pool)
+                        .await?;
+                    sqlx::query(&format!(
+                        "CREATE OR REPLACE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.{column} = TG_ARGV[0] THEN RAISE EXCEPTION 'injected AddressRealm deletion interruption'; END IF; RETURN OLD; END $$"
+                    ))
+                    .execute(pool)
+                    .await?;
+                    sqlx::query(&format!(
+                        "CREATE TRIGGER {trigger} BEFORE DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION {function}('{realm_id}')"
+                    ))
+                    .execute(pool)
+                    .await?;
+                } else {
+                    sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+                        .execute(pool)
+                        .await?;
+                    sqlx::query(&format!("DROP FUNCTION IF EXISTS {function}()"))
+                        .execute(pool)
+                        .await?;
+                }
+            }
+            o3k_store::unified::O3kStore::Sqlite(_) => {
+                let sqlite_url = format!("sqlite://{}", sqlite_path.display());
+                let pool = sqlx::SqlitePool::connect(&sqlite_url).await?;
+                if enabled {
+                    sqlx::query(&format!(
+                        "CREATE TRIGGER {trigger} BEFORE DELETE ON {table} WHEN OLD.{column} = '{realm_id}' BEGIN SELECT RAISE(ABORT, 'injected AddressRealm deletion interruption'); END"
+                    ))
+                    .execute(&pool)
+                    .await?;
+                } else {
+                    sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
+                        .execute(&pool)
+                        .await?;
+                }
+                pool.close().await;
+            }
+        }
+        Ok(())
     }
 
     async fn start_mtls_network_agent<R>(
@@ -3207,6 +5223,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         };
         let mut port_by_host = BTreeMap::new();
         for (index, (host_id, agent_id, _, _)) in endpoints.iter().copied().enumerate() {
@@ -3633,6 +5650,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         });
 
         // Startup recovery observes historical X over mTLS. The agent journal
@@ -3699,6 +5717,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         };
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -3797,6 +5816,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         });
 
         let recovery_a = {
@@ -3868,6 +5888,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         };
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -3971,6 +5992,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         });
         let first_store = store.clone();
         let first = tokio::spawn(async move {
@@ -4029,6 +6051,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         };
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -4180,6 +6203,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         };
         recover_fabric_state(&reconciler, store.as_ref()).await;
         let after_recovery = store.get_network_plan_work(&historical.command_id).await?;
@@ -4351,6 +6375,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         };
         // Production recovery observes X while it is still executing. It must
         // leave the durable row unresolved and must not supersede it.
@@ -4459,6 +6484,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         });
 
         // Recovery sees X as not_found, atomically creates Y, sends Y through
@@ -4523,6 +6549,7 @@ mod dispatcher_tests {
             fabric_domain_id: Uuid::from_u128(990),
             network_external_realm_id: None,
             public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         };
         recover_fabric_state(&restarted_reconciler, store.as_ref()).await;
         assert_eq!(

@@ -427,7 +427,13 @@ impl NetworkPlanExecutor {
                 .iter_mut()
                 .find(|plan| plan.command_id == command_id)
                 .ok_or(NetworkExecutionError::UnknownCommand)?;
-            if record.status == NetworkPlanStatus::Succeeded {
+            // A terminal REMOVE is only historical execution evidence. Realm
+            // deletion requires fresh provider evidence that owned state is
+            // still absent, so deliberately re-run the read-only removal
+            // observation even when the journal previously recorded success.
+            if record.status == NetworkPlanStatus::Succeeded
+                && record.action == NetworkPlanAction::Apply
+            {
                 return Ok(record.status);
             }
             let observed = match record.action {

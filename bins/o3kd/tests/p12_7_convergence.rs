@@ -219,6 +219,7 @@ async fn build_http_runtime_with_identity_and_scheduler(
             image: None,
             public_address_workflow: None,
             network_service: network.clone(),
+            realm_deletion: None,
             store: store.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),
@@ -342,6 +343,7 @@ async fn run_native_openstack_http_conformance(
             image: None,
             public_address_workflow: None,
             network_service: network.clone(),
+            realm_deletion: None,
             store: store.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),

@@ -148,6 +148,27 @@ impl DaemonCreateResolver {
                 (Vec::new(), Vec::new())
             };
             if let Some(fabric_reconciler) = &self.fabric_reconciler {
+                // A selected host without an accepted Fabric identity is a
+                // known pre-dispatch configuration failure. Reject it before
+                // recording placement intent or entering the collective
+                // reconciler so Compute can terminalize the create as failed
+                // (and safely release its resources). Errors after realm
+                // reconciliation starts remain UnknownOutcome because a
+                // provider command may already have crossed the mutation
+                // boundary.
+                let selected_host_enrolled = self
+                    .network
+                    .list_fabric_host_transport_identities()
+                    .await
+                    .map_err(|_| ProviderError::InvalidRequest)?
+                    .into_iter()
+                    .any(|identity| {
+                        identity.agent_id == network_agent_id
+                            && identity.administrative_state == "enabled"
+                    });
+                if !selected_host_enrolled {
+                    return Err(ProviderError::InvalidRequest);
+                }
                 self.network
                     .record_fabric_binding_intent(&request.project_id, port_id, network_agent_id)
                     .await
@@ -163,8 +184,19 @@ impl DaemonCreateResolver {
                         super::unix_time_millis().saturating_add(30_000),
                     )
                     .await
-                    .map_err(|_| ProviderError::UnknownOutcome {
-                        operation_id: request.operation_id,
+                    // Fabric keeps its own durable command journal and
+                    // observation-first recovery. The compute-agent command
+                    // has not been admitted yet, so surface a bounded retry
+                    // to the compute lifecycle; the next pass re-enters the
+                    // Fabric reconciler before it can dispatch VM creation.
+                    .map_err(|error| {
+                        tracing::warn!(
+                            realm_id = %port.network_id,
+                            operation_id = %request.operation_id,
+                            error = %error,
+                            "Fabric realm reconciliation did not complete before compute admission"
+                        );
+                        ProviderError::Retryable
                     })?;
             } else {
                 self.network

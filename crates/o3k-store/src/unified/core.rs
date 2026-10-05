@@ -169,6 +169,14 @@ impl DurableStore for O3kStore {
             Self::Postgres(s) => s.list_unresolved_network_plan_work().await,
         }
     }
+    async fn list_network_plan_work_history(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_network_plan_work_history().await,
+            Self::Postgres(s) => s.list_network_plan_work_history().await,
+        }
+    }
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
         match self {
             Self::Sqlite(s) => s.insert_resource(resource).await,
