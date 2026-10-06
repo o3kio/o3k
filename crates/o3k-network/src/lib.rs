@@ -38,7 +38,10 @@ pub use host::{
     BridgeOwnership, GatewayOwnership, GatewaySpec, HostNetworkConfig, HostNetworkError,
     HostNetworkManager, NetworkOwnershipManifest, TapAccess, TapOwnership, TapSpec,
 };
-pub use linux_fabric::{LinuxFabricBackend, LinuxFabricConfig, LinuxFabricError};
+pub use linux_fabric::{
+    FabricAttachmentError, FabricEndpointAttachmentEvidence, LinuxFabricAttachmentResolver,
+    LinuxFabricBackend, LinuxFabricConfig, LinuxFabricError,
+};
 pub use o3k_store::{NetworkRecord, PortRecord, SubnetRecord};
 pub use plan::{
     AttachmentPlanInput, NODE_NETWORK_PLAN_SCHEMA_VERSION, NetworkPlanError, NodeNetworkPlan,

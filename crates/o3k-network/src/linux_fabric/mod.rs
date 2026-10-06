@@ -29,12 +29,17 @@ mod ownership;
 mod persistence;
 
 mod anti_spoof;
+mod attachment;
 mod fabric;
 mod policy;
 mod public_;
 mod realm;
 mod shared_provider;
 mod vxlan;
+
+pub use attachment::{
+    FabricAttachmentError, FabricEndpointAttachmentEvidence, LinuxFabricAttachmentResolver,
+};
 
 pub(crate) mod gateway;
 pub(crate) mod gateway_execution;

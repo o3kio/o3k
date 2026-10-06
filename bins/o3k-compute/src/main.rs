@@ -150,6 +150,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("O3K_COMPUTE_NETWORK_EXTERNAL").as_deref(),
         Ok("1" | "true" | "yes")
     );
+    let local_host = if network_owned_by_external_agent {
+        env::var("O3K_COMPUTE_FABRIC_HOST_ID").map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "O3K_COMPUTE_FABRIC_HOST_ID is required when external networking is enabled",
+            )
+        })?
+    } else {
+        String::new()
+    };
+    let fabric_attachments = if network_owned_by_external_agent {
+        let root = env::var_os("O3K_COMPUTE_FABRIC_STATE_ROOT")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "O3K_COMPUTE_FABRIC_STATE_ROOT is required when external networking is enabled",
+                )
+            })?;
+        Some(Arc::new(o3k_network::LinuxFabricAttachmentResolver::open(
+            root,
+            local_host.clone(),
+        )?))
+    } else {
+        None
+    };
     let bridge_name = env::var("O3K_COMPUTE_BRIDGE_NAME").unwrap_or_else(|_| "o3k-br0".to_owned());
     let service_root = agent
         .identity_file()
@@ -225,13 +251,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         identity_path: agent.identity_file().to_path_buf(),
         agent_id: agent_id.clone(),
     };
+    let restore_identity_path = agent.identity_file().to_path_buf();
+    let restore_agent_id = agent_id.clone();
+    let restore_fabric_attachments = fabric_attachments.clone();
+    let restore_local_host = local_host.clone();
     let restore_task = tokio::spawn({
         let adapter = libvirt.clone();
         let network = Arc::clone(&network);
         async move {
             let tap_restorer = NetworkStartupTapRestore {
                 network,
+                fabric_attachments: restore_fabric_attachments,
                 external_owner: network_owned_by_external_agent,
+                local_host: restore_local_host,
+                identity_path: restore_identity_path,
+                agent_id: restore_agent_id,
             };
             // The unconverged outcome is logged once inside the restore pass
             // (with the pending count); the returned error needs no second
@@ -257,6 +291,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             2 * 1024 * 1024 * 1024,
         )?,
         network,
+        fabric_attachments,
+        local_host,
         dhcp,
         max_disk_gb: config.capabilities.max_disk_gb,
         network_owned_by_external_agent,

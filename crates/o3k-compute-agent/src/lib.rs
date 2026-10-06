@@ -2973,6 +2973,62 @@ pub fn load_journal_lifecycle_resource_states(
     Ok(journal.last_lifecycle_resource_states())
 }
 
+/// Reads the last successfully created guest network attachments from the
+/// durable command journal. This is a read-only startup projection used to
+/// re-attest external Fabric TAPs before restoring a domain; it does not
+/// create a second attachment or ownership database.
+pub fn load_journal_successful_create_network_attachments(
+    identity_file: &Path,
+    agent_id: &str,
+) -> Result<HashMap<String, Vec<NetworkAttachmentSpec>>, AgentError> {
+    let journal = open_command_journal_read_only(identity_file, agent_id)?;
+    let mut latest: HashMap<String, (u64, Vec<NetworkAttachmentSpec>)> = HashMap::new();
+    for entry in journal.entries.values() {
+        let Some(proto::command::Action::Create(create)) = entry.command.action.as_ref() else {
+            continue;
+        };
+        let Some(result) = entry.result.as_ref() else {
+            continue;
+        };
+        if entry.state != JournalState::Terminal
+            || proto::OperationState::try_from(result.state) != Ok(proto::OperationState::Succeeded)
+            || proto::ResourceState::try_from(result.resource_state)
+                != Ok(proto::ResourceState::Running)
+        {
+            continue;
+        }
+        let Some(resolved) = create.resolved.as_ref() else {
+            continue;
+        };
+        let attachments = resolved
+            .network_attachments
+            .iter()
+            .map(|attachment| NetworkAttachmentSpec {
+                port_id: attachment.port_id.clone(),
+                mac: attachment.mac.clone(),
+                fixed_ipv4: attachment.fixed_ipv4.clone(),
+                subnet_cidr: attachment.subnet_cidr.clone(),
+                gateway_ipv4: attachment.gateway_ipv4.clone(),
+            })
+            .collect::<Vec<_>>();
+        match latest.entry(entry.command.resource_id.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut slot)
+                if entry.accepted_sequence > slot.get().0 =>
+            {
+                slot.insert((entry.accepted_sequence, attachments));
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert((entry.accepted_sequence, attachments));
+            }
+            _ => {}
+        }
+    }
+    Ok(latest
+        .into_iter()
+        .map(|(resource_id, (_, attachments))| (resource_id, attachments))
+        .collect())
+}
+
 fn command_journal_file(identity_path: &Path) -> PathBuf {
     identity_path.with_extension(COMMAND_JOURNAL_FILE_EXTENSION)
 }
@@ -5887,6 +5943,22 @@ mod tests {
         assert!(
             !states.contains_key("server-c"),
             "an unfinished mutation has no provable outcome and must be excluded"
+        );
+        let attachments = load_journal_successful_create_network_attachments(&identity, "node")?;
+        assert_eq!(
+            attachments.get("server-a"),
+            Some(&vec![NetworkAttachmentSpec {
+                port_id: "port-1".to_owned(),
+                mac: "02:00:00:00:00:01".to_owned(),
+                fixed_ipv4: "192.0.2.10".to_owned(),
+                subnet_cidr: "192.0.2.0/24".to_owned(),
+                gateway_ipv4: "192.0.2.1".to_owned(),
+            }]),
+            "startup projection retains the last accepted guest attachment identity"
+        );
+        assert!(
+            !attachments.contains_key("server-c"),
+            "an unfinished create cannot authorize external TAP attachment"
         );
         fs::remove_file(path).map_err(AgentError::IdentityStore)?;
         Ok(())

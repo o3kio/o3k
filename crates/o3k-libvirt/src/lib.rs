@@ -452,7 +452,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn validate_tap_name(value: &str) -> Result<(), ()> {
     if value.is_empty()
         || value.len() > 15
-        || !value.starts_with("o3ktap-")
+        || !(value.starts_with("o3ktap-") || value.starts_with("o3k-t-"))
         || value
             .bytes()
             .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
@@ -1896,6 +1896,31 @@ mod tests {
         assert!(xml.contains("<interface type=\"ethernet\">"));
         assert!(xml.contains("mac address=\"02:00:00:00:00:01\""));
         assert!(xml.contains("target dev=\"o3ktap-a1b2c3d4\""));
+        Ok(())
+    }
+
+    #[test]
+    fn domain_xml_accepts_fabric_realm_tap_name() -> Result<(), LibvirtError> {
+        let spec = DomainSpec {
+            metadata: DomainMetadata {
+                server_id: "server-fabric-network".to_owned(),
+                project_id: "project".to_owned(),
+                generation: 1,
+                operation_id: "operation".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+            vcpus: 1,
+            memory_mib: 128,
+            image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+            config_drive_image: None,
+            network_interfaces: vec![DomainNetworkInterface {
+                tap_name: "o3k-t-a1b2c3d4".to_owned(),
+                mac_address: "fa:16:3e:12:34:56".to_owned(),
+            }],
+        };
+        let xml = build_domain_xml(&spec)?.xml;
+        assert!(xml.contains("mac address=\"fa:16:3e:12:34:56\""));
+        assert!(xml.contains("target dev=\"o3k-t-a1b2c3d4\""));
         Ok(())
     }
 
