@@ -266,18 +266,26 @@ fn observe_live_tap(
     else {
         return Err(FabricAttachmentError::LiveTapAbsent);
     };
-    let tap_info = &tap["linkinfo"];
-    let mode = tap_info["info_data"]["mode"].as_str();
     let tap_name = tap["ifname"].as_str();
     let tap_mac = tap["address"].as_str();
-    if tap_name != Some(expected.name) || tap_info["info_kind"].as_str() != Some("tun") {
+    let linkinfo = tap
+        .get("linkinfo")
+        .and_then(Value::as_object)
+        .ok_or(FabricAttachmentError::WrongLinkType)?;
+    if tap_name != Some(expected.name)
+        || linkinfo.get("info_kind").and_then(Value::as_str) != Some("tun")
+    {
+        return Err(FabricAttachmentError::WrongLinkType);
+    }
+    let info_data = linkinfo
+        .get("info_data")
+        .and_then(Value::as_object)
+        .ok_or(FabricAttachmentError::WrongLinkType)?;
+    if info_data.get("type").and_then(Value::as_str) != Some("tap") {
         return Err(FabricAttachmentError::WrongLinkType);
     }
     if tap_mac.is_none_or(|mac| !mac.eq_ignore_ascii_case(expected.mac)) {
         return Err(FabricAttachmentError::TapMacMismatch);
-    }
-    if !matches!(mode, Some("tap") | Some("2")) {
-        return Err(FabricAttachmentError::WrongLinkType);
     }
     let (bridge_exists, bridge_output) = command
         .output("ip", &["-j", "-d", "link", "show", "dev", expected.bridge])
@@ -384,12 +392,14 @@ mod tests {
         AddressRealm, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
         RealmEncapsulationBinding, RealmEndpointDirectory,
     };
+    use serde_json::{Value, json};
     use std::{io, sync::Mutex};
 
     struct LinkCommand {
         tap_mac: Mutex<String>,
         bridge: Mutex<String>,
-        tap_mode: Mutex<String>,
+        tap_linkinfo: Mutex<Value>,
+        extra_tap_links: Mutex<Vec<Value>>,
         tap_present: Mutex<bool>,
         bridge_present: Mutex<bool>,
         calls: Mutex<Vec<Vec<String>>>,
@@ -414,15 +424,22 @@ mod tests {
             let tap_name = name;
             let tap_mac = self.tap_mac.lock().expect("tap MAC").clone();
             let bridge = self.bridge.lock().expect("bridge name").clone();
-            let tap_mode = self.tap_mode.lock().expect("tap mode").clone();
             let tap_present = *self.tap_present.lock().expect("tap state");
-            Ok((
-                tap_present,
-                format!(
-                    "[{{\"ifname\":\"{tap_name}\",\"ifindex\":44,\"address\":\"{}\",\"master\":\"{}\",\"linkinfo\":{{\"info_kind\":\"tun\",\"info_data\":{{\"mode\":\"{}\"}}}}}}]",
-                    tap_mac, bridge, tap_mode
-                ),
-            ))
+            let mut links = vec![json!({
+                "ifname": tap_name,
+                "ifindex": 44,
+                "address": tap_mac,
+                "master": bridge,
+                "linkinfo": self.tap_linkinfo.lock().expect("TAP linkinfo").clone()
+            })];
+            links.extend(
+                self.extra_tap_links
+                    .lock()
+                    .expect("extra TAP links")
+                    .iter()
+                    .cloned(),
+            );
+            Ok((tap_present, Value::Array(links).to_string()))
         }
 
         fn run(&self, _program: &str, _args: &[&str]) -> io::Result<bool> {
@@ -596,7 +613,11 @@ mod tests {
         Arc::new(LinkCommand {
             tap_mac: Mutex::new(tap_mac),
             bridge: Mutex::new(bridge),
-            tap_mode: Mutex::new("tap".to_owned()),
+            tap_linkinfo: Mutex::new(json!({
+                "info_kind": "tun",
+                "info_data": { "type": "tap" }
+            })),
+            extra_tap_links: Mutex::new(Vec::new()),
             tap_present: Mutex::new(true),
             bridge_present: Mutex::new(true),
             calls: Mutex::new(Vec::new()),
@@ -687,10 +708,78 @@ mod tests {
         );
         *link_command.tap_mac.lock().expect("tap MAC") =
             endpoint_tap_mac(plan.realm_id, endpoint_id);
-        *link_command.tap_mode.lock().expect("tap mode") = "tun".to_owned();
+        *link_command.tap_linkinfo.lock().expect("TAP linkinfo") = json!({
+            "info_kind": "tun",
+            "info_data": { "type": "tun" }
+        });
         assert_eq!(
             current.resolve(endpoint_id, "fa:16:3e:12:34:56", "compute-a"),
             Err(FabricAttachmentError::WrongLinkType)
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn real_iproute2_tap_shape_is_accepted_and_subtype_variants_fail_closed() {
+        let plan = plan();
+        let endpoint_id = Uuid::from_u128(12);
+        let root = std::env::temp_dir().join(format!("o3k-fabric-attest-{}", Uuid::now_v7()));
+        let link_command = command(
+            endpoint_tap_mac(plan.realm_id, endpoint_id),
+            expected_realm_bridge(plan.realm_id),
+        );
+        let current = resolver(&root, &plan, link_command.clone());
+
+        // This is the observed `ip -j -d link show dev <tap>` shape on the
+        // supported iproute2 6.1 host: TUN/TAP subtype is `info_data.type`.
+        assert_eq!(
+            *link_command.tap_linkinfo.lock().expect("TAP linkinfo"),
+            json!({"info_kind":"tun", "info_data":{"type":"tap"}})
+        );
+        assert!(
+            current
+                .resolve(endpoint_id, "fa:16:3e:12:34:56", "compute-a")
+                .is_ok()
+        );
+
+        for linkinfo in [
+            json!({"info_kind":"tun", "info_data":{"type":"tun"}}),
+            json!({"info_kind":"tun", "info_data":{}}),
+            json!({"info_kind":"tun"}),
+            json!({"info_kind":"tun", "info_data":{"type":"unknown"}}),
+            json!({"info_kind":"tun", "info_data":{"type":2}}),
+            json!({"info_kind":"veth", "info_data":{"type":"tap"}}),
+            json!({"info_kind":"bridge", "info_data":{"type":"tap"}}),
+            json!("malformed linkinfo"),
+            json!({"info_kind":"tun", "info_data":[]} ),
+        ] {
+            *link_command.tap_linkinfo.lock().expect("TAP linkinfo") = linkinfo;
+            assert_eq!(
+                current.resolve(endpoint_id, "fa:16:3e:12:34:56", "compute-a"),
+                Err(FabricAttachmentError::WrongLinkType)
+            );
+        }
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn multiple_returned_links_fail_closed() {
+        let plan = plan();
+        let endpoint_id = Uuid::from_u128(12);
+        let root = std::env::temp_dir().join(format!("o3k-fabric-attest-{}", Uuid::now_v7()));
+        let link_command = command(
+            endpoint_tap_mac(plan.realm_id, endpoint_id),
+            expected_realm_bridge(plan.realm_id),
+        );
+        let current = resolver(&root, &plan, link_command.clone());
+        link_command
+            .extra_tap_links
+            .lock()
+            .expect("extra TAP links")
+            .push(json!({"ifname":"unexpected"}));
+        assert_eq!(
+            current.resolve(endpoint_id, "fa:16:3e:12:34:56", "compute-a"),
+            Err(FabricAttachmentError::LiveTapAbsent)
         );
         fs::remove_dir_all(root).expect("remove fixture");
     }
