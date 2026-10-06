@@ -113,6 +113,13 @@ PY
 }
 trap cleanup_on_success EXIT
 
+if ! command -v cargo >/dev/null 2>&1; then
+  cargo_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+  if [[ -n "$cargo_home" && -x "$cargo_home/.cargo/bin/cargo" ]]; then
+    PATH="$cargo_home/.cargo/bin:$PATH"
+    export PATH
+  fi
+fi
 for tool in cargo curl openssl python3 virsh virt-install qemu-img genisoimage ssh ssh-keygen ssh-keyscan scp ip wg sha256sum tar timeout bridge hostnamectl; do need "$tool"; done
 [[ $EUID -eq 0 ]] || fail "campaign must run as root to provision nested libvirt guests" "ENVIRONMENT_GAP"
 [[ -c /dev/kvm ]] || fail "/dev/kvm unavailable" "ENVIRONMENT_GAP"
