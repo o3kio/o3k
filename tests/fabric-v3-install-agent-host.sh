@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 
 host="$1"; octet="$2"; run="$3"; stage="$4"
-[[ "$host" =~ ^[abc]$ && "$octet" =~ ^(20[1-3]|21[1-3])$ ]] || { echo "invalid host identity" >&2; exit 2; }
+[[ "$host" =~ ^[abc]$ && "$octet" =~ ^(20[1-3]|21[1-3]|22[1-9]|23[0-9])$ ]] || { echo "invalid host identity" >&2; exit 2; }
 [[ "$run" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "invalid run id" >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 2; }
 [[ -d "$stage" && ! -L "$stage" ]] || { echo "invalid staging directory" >&2; exit 2; }

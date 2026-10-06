@@ -36,6 +36,8 @@ PORT_IDS=()
 NETWORK_ID=""
 SUBNET_ID=""
 IMAGE_ID=""
+declare -A MGMT_IP=() MGMT_OCTET=()
+HOSTS=(a b c)
 
 fail() {
   CAMPAIGN_FAILURE="$*"
@@ -181,11 +183,28 @@ chmod 0600 "$SSH_KEY"; chmod 0644 "$SSH_KEY.pub"
 
 gateway="$(virsh -c qemu:///system net-dumpxml "$NETWORK" | sed -n "s/.*ip address='\([0-9.]*\)'.*/\1/p" | head -1)"
 [[ -n "$gateway" ]] || fail "cannot identify management gateway" "ENVIRONMENT_GAP"
-for spec in a:211 b:212 c:213; do
-  host="${spec%%:*}"; octet="${spec##*:}"; domain="$PREFIX-compute-$host"; address="192.168.122.$octet"
+available_octets=()
+for octet in $(seq 221 239); do
+  address="192.168.122.$octet"
+  ip neigh show dev "$BRIDGE" | grep -Fq "$address" && continue
+  virsh -c qemu:///system net-dhcp-leases "$NETWORK" | grep -Fq "$address" && continue
+  timeout 2 bash -c "</dev/tcp/$address/$SSH_PORT" >/dev/null 2>&1 && continue
+  available_octets+=("$octet")
+  ((${#available_octets[@]} == 3)) && break
+done
+((${#available_octets[@]} == 3)) || fail "fewer than three unused management addresses in 192.168.122.221-239" "ENVIRONMENT_GAP"
+for index in 0 1 2; do
+  host="${HOSTS[$index]}"
+  octet="${available_octets[$index]}"
+  address="192.168.122.$octet"
+  MGMT_OCTET[$host]="$octet"
+  MGMT_IP[$host]="$address"
+done
+printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_IP[a]}" "${MGMT_IP[b]}" "${MGMT_IP[c]}" >"$EVIDENCE/environment/management-addresses.txt"
+
+for host in a b c; do
+  octet="${MGMT_OCTET[$host]}"; domain="$PREFIX-compute-$host"; address="${MGMT_IP[$host]}"
   if virsh -c qemu:///system dominfo "$domain" >/dev/null 2>&1; then fail "fresh domain name collision: $domain" "ENVIRONMENT_GAP"; fi
-  if ip neigh show dev "$BRIDGE" | grep -Fq "$address"; then fail "management address is already present: $address" "ENVIRONMENT_GAP"; fi
-  if virsh -c qemu:///system net-dhcp-leases "$NETWORK" | grep -Fq "$address"; then fail "management address has an existing DHCP lease: $address" "ENVIRONMENT_GAP"; fi
   disk="$IMAGE_STORE/$PREFIX-compute-$host.qcow2"; seed="$IMAGE_STORE/$PREFIX-compute-$host-seed.iso"; ws="$EVIDENCE/environment/seed-$host"
   [[ ! -e "$disk" && ! -e "$seed" ]] || fail "fresh guest disk/seed collision for $host" "ENVIRONMENT_GAP"
   mkdir -m 0700 "$ws"
@@ -236,8 +255,8 @@ EOF
   printf '%s\t%s\t%s\t%s\t%s\n' "compute-$host" "$domain" "$address" "$mac" "$(virsh -c qemu:///system domuuid "$domain")" >>"$EVIDENCE/environment/inventory.tsv"
 done
 
-for spec in a:211 b:212 c:213; do
-  host="${spec%%:*}"; octet="${spec##*:}"; address="192.168.122.$octet"; domain="$PREFIX-compute-$host"
+for host in a b c; do
+  address="${MGMT_IP[$host]}"; domain="$PREFIX-compute-$host"
   ready=0
   for _ in $(seq 1 240); do
     if timeout 4 bash -c "</dev/tcp/$address/$SSH_PORT" >/dev/null 2>&1; then
@@ -248,6 +267,15 @@ for spec in a:211 b:212 c:213; do
     sleep 5
   done
   (( ready == 1 )) || fail "authenticated SSH readiness timed out for compute-$host" "ENVIRONMENT_GAP"
+  packages_ready=0
+  for _ in $(seq 1 240); do
+    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && sudo systemctl is-active --quiet libvirtd' >/dev/null 2>&1; then
+      packages_ready=1
+      break
+    fi
+    sleep 5
+  done
+  (( packages_ready == 1 )) || fail "guest $host did not finish installing the required nested compute tools" "ENVIRONMENT_GAP"
   # The remote $PRETTY_NAME expansion is required for guest OS identification.
   # shellcheck disable=SC2016
   ssh_vm "$address" 'printf "boot_id="; cat /proc/sys/kernel/random/boot_id; printf "kernel="; uname -r; printf "os="; . /etc/os-release; echo "$PRETTY_NAME"; ip -j link; ip -j route; bridge -j link; bridge -j fdb; (wg show || true); (sudo nft list ruleset || true); (sudo find /var/lib/o3k-fabric-v3 -maxdepth 5 -type f -print 2>/dev/null || true); sudo virsh list --all --name' >"$EVIDENCE/environment/baseline-compute-$host.txt" || fail "baseline collection failed for compute-$host" "ENVIRONMENT_GAP"
@@ -271,8 +299,8 @@ done
 cp "$TLS_DIR/certs/agents/controller-network/agent.pem" "$STAGE/controller-network.pem"
 cp "$TLS_DIR/certs/agents/controller-network/agent-key.pem" "$STAGE/controller-network-key.pem"
 
-for spec in a:211 b:212 c:213; do
-  host="${spec%%:*}"; octet="${spec##*:}"; address="192.168.122.$octet"
+for host in a b c; do
+  octet="${MGMT_OCTET[$host]}"; address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo install -d -o o3k -g o3k -m 0700 /tmp/$RUN_ID-stage"
   scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$STAGE"/* "$SSH_USER@$address:/tmp/$RUN_ID-stage/"
   ssh_vm "$address" "sudo bash /tmp/$RUN_ID-stage/install-agent-host.sh $host $octet $RUN_ID /tmp/$RUN_ID-stage" >"$EVIDENCE/management/install-$host.log" 2>&1 || fail "network agent installation failed on compute-$host" "ENVIRONMENT_GAP"
@@ -280,8 +308,8 @@ for spec in a:211 b:212 c:213; do
   ssh_vm "$address" "sudo install -m 0755 /tmp/$RUN_ID-stage/o3k-compute /usr/local/bin/o3k-compute-bin; sudo install -d -m 0700 /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls; sudo install -m 0644 /tmp/$RUN_ID-stage/compute-agent-$host.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/agent.pem; sudo install -m 0600 /tmp/$RUN_ID-stage/compute-agent-$host-key.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/agent-key.pem; sudo install -m 0644 /tmp/$RUN_ID-stage/ca.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/ca.pem; sudo chown -R root:root /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls; sudo bash -c 'umask 077; printf compute-agent-$host > /var/lib/o3k-fabric-v3/$RUN_ID/compute/agent-id'; sudo nohup env O3K_COMPUTE_DATA_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute O3K_COMPUTE_CONTROL_ENDPOINT=https://$HOST_MGMT_IP:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_HOST_LABEL=host-$host O3K_COMPUTE_TLS_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute/tls O3K_COMPUTE_HEALTH_ADDR=0.0.0.0:$health_port O3K_COMPUTE_MAX_DISK_GB=30 O3K_COMPUTE_NETWORK_EXTERNAL=1 O3K_COMPUTE_NETWORK_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/ownership O3K_COMPUTE_BRIDGE_NAME=o3k-br0 O3K_COMPUTE_DHCP_BINARY=/usr/sbin/dnsmasq O3K_COMPUTE_FABRIC_HOST_ID=host-$host O3K_COMPUTE_FABRIC_STATE_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric RUST_LOG=info /usr/local/bin/o3k-compute-bin >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.log 2>&1 </dev/null & echo \$! | sudo tee /var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.pid >/dev/null"
 done
 
-for spec in a:211 b:212 c:213; do
-  host="${spec%%:*}"; octet="${spec##*:}"; address="192.168.122.$octet"; ready=0
+for host in a b c; do
+  address="${MGMT_IP[$host]}"; ready=0
   case "$host" in a) health_port=19101;; b) health_port=19102;; c) health_port=19103;; esac
   for _ in $(seq 1 60); do
     if ssh_vm "$address" "sudo curl -fsS http://127.0.0.1:$health_port/readyz" >/dev/null 2>&1; then ready=1; break; fi
@@ -291,20 +319,19 @@ for spec in a:211 b:212 c:213; do
   ssh_vm "$address" "sudo ip -j -d link show dev mgmt0; sudo wg show; sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key" >"$EVIDENCE/management/compute-$host.txt" || fail "host-$host runtime observation failed" "ENVIRONMENT_GAP"
 done
 
-WG_A="$(ssh_vm 192.168.122.211 "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key")"
-WG_B="$(ssh_vm 192.168.122.212 "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key")"
-WG_C="$(ssh_vm 192.168.122.213 "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key")"
+WG_A="$(ssh_vm "${MGMT_IP[a]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key")"
+WG_B="$(ssh_vm "${MGMT_IP[b]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key")"
+WG_C="$(ssh_vm "${MGMT_IP[c]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key")"
 cat >"$EVIDENCE/environment/fabric-identities.json" <<JSON
 [
- {"host_id":"host-a","agent_id":"network-agent-a","public_key":"$WG_A","underlay_endpoint":"192.168.122.211:65001","fabric_transport_ip":"100.64.3.1","provider_version":"wireguard-v1","fabric_generation":1,"underlay_mtu":1500,"fabric_mtu":1440,"administrative_state":"enabled"},
- {"host_id":"host-b","agent_id":"network-agent-b","public_key":"$WG_B","underlay_endpoint":"192.168.122.212:65001","fabric_transport_ip":"100.64.3.2","provider_version":"wireguard-v1","fabric_generation":1,"underlay_mtu":1500,"fabric_mtu":1440,"administrative_state":"enabled"},
- {"host_id":"host-c","agent_id":"network-agent-c","public_key":"$WG_C","underlay_endpoint":"192.168.122.213:65001","fabric_transport_ip":"100.64.3.3","provider_version":"wireguard-v1","fabric_generation":1,"underlay_mtu":1500,"fabric_mtu":1440,"administrative_state":"enabled"}
+ {"host_id":"host-a","agent_id":"network-agent-a","public_key":"$WG_A","underlay_endpoint":"${MGMT_IP[a]}:65001","fabric_transport_ip":"100.64.3.1","provider_version":"wireguard-v1","fabric_generation":1,"underlay_mtu":1500,"fabric_mtu":1440,"administrative_state":"enabled"},
+ {"host_id":"host-b","agent_id":"network-agent-b","public_key":"$WG_B","underlay_endpoint":"${MGMT_IP[b]}:65001","fabric_transport_ip":"100.64.3.2","provider_version":"wireguard-v1","fabric_generation":1,"underlay_mtu":1500,"fabric_mtu":1440,"administrative_state":"enabled"},
+ {"host_id":"host-c","agent_id":"network-agent-c","public_key":"$WG_C","underlay_endpoint":"${MGMT_IP[c]}:65001","fabric_transport_ip":"100.64.3.3","provider_version":"wireguard-v1","fabric_generation":1,"underlay_mtu":1500,"fabric_mtu":1440,"administrative_state":"enabled"}
 ]
 JSON
-DIRECTORY="$(python3 - "$TLS_DIR/certs" <<'PY'
+DIRECTORY="$(python3 "${MGMT_IP[a]}" "${MGMT_IP[b]}" "${MGMT_IP[c]}" <<'PY'
 import json,sys
-c=sys.argv[1]
-print(json.dumps([{"host_id":f"host-{x}","agent_id":f"network-agent-{x}","agent_epoch":f"network-epoch-{x}-1","endpoint":f"https://192.168.122.{octet}:50061","tls_server_name":"o3k-control-plane"} for x,octet in zip("abc",(211,212,213))],separators=(",",":")))
+print(json.dumps([{"host_id":f"host-{x}","agent_id":f"network-agent-{x}","agent_epoch":f"network-epoch-{x}-1","endpoint":f"https://{ip}:50061","tls_server_name":"o3k-control-plane"} for x,ip in zip("abc",sys.argv[1:])],separators=(",",":")))
 PY
 )"
 AUTHORIZED=""
@@ -379,7 +406,7 @@ PY
   expected_host="compute-agent-$host"
   response_host="$(api "$BASE/v2.1/$PROJECT_ID/servers/$server_id" | tee "$EVIDENCE/api/server-$host-placement.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["server"].get("OS-EXT-SRV-ATTR:host", ""))')"
   [[ "$response_host" == "$expected_host" ]] || fail "server $host placed on $response_host, expected $expected_host" "DISPATCH_DEFECT"
-  address="192.168.122.$((210 + ( $(printf '%d' "'${host}") - 96 )))"
+  address="${MGMT_IP[$host]}"
   for _ in $(seq 1 60); do
     domain="$(ssh_vm "$address" "sudo virsh -c qemu:///system list --all --name | while read -r n; do [ -n \"\$n\" ] || continue; x=\$(sudo virsh -c qemu:///system dumpxml \"\$n\" 2>/dev/null || true); if printf '%s' \"\$x\" | grep -Fq 'server_id=\"$server_id\"' && printf '%s' \"\$x\" | grep -Fq 'managed_by=\"o3k-compute\"'; then printf '%s\\n' \"\$n\"; fi; done" | head -1)"
     [[ -n "$domain" ]] && break
@@ -442,8 +469,7 @@ create_server b
 create_server c
 
 console_command() {
-  local host="$1" command="$2" label="$3" address="" domain
-  case "$host" in a) address=192.168.122.211;; b) address=192.168.122.212;; c) address=192.168.122.213;; esac
+  local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" domain
   domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
   python3 - "$SSH_KEY" "$KNOWN_HOSTS" "$SSH_USER" "$address" "$domain" "$command" "$EVIDENCE/$label" <<'PY'
 import pexpect,sys
@@ -508,13 +534,13 @@ sleep 1
 console_command a "echo o3k-udp-$RUN_ID | busybox nc -u -w 3 ${TENANT_IP[c]} 18082" udp/sender.txt || fail "UDP A->C failed" "DATAPLANE_DEFECT"
 console_command c 'sleep 1; grep -F o3k-udp- /tmp/o3k-udp-data' udp/receiver.txt || fail "UDP payload did not arrive at C" "DATAPLANE_DEFECT"
 
-for spec in a:211 b:212 c:213; do
-  host="${spec%%:*}"; address="192.168.122.${spec##*:}"
+for host in a b c; do
+  address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo ip -j -d link; sudo bridge -j link; sudo bridge -j fdb; sudo wg show; sudo nft list ruleset" >"$EVIDENCE/$([ "$host" = a ] && echo compute-a || ([ "$host" = b ] && echo compute-b || echo compute-c))/runtime-state.txt" || fail "runtime evidence failed for host-$host" "ENVIRONMENT_GAP"
 done
 
-for spec in a:211 b:212 c:213; do
-  host="${spec%%:*}"; address="192.168.122.${spec##*:}"
+for host in a b c; do
+  address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" >"$EVIDENCE/plans/host-$host-ownership.json" || fail "Fabric ownership snapshot failed on $host" "OWNERSHIP_DEFECT"
   ssh_vm "$address" 'sudo wg show all transfer; sudo ip -d -j link' >"$EVIDENCE/wireguard/host-$host-before-traffic.txt" || fail "WireGuard/VXLAN snapshot failed on $host" "ENVIRONMENT_GAP"
 done
@@ -532,14 +558,14 @@ PY
 
 for host in a b c; do
   domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
-  address="192.168.122.$((210 + ( $(printf '%d' "'${host}") - 96 )))"
+  address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo virsh -c qemu:///system domiflist '$domain'" >"$EVIDENCE/compute-$host/interfaces.txt"
 done
 
 # WireGuard counters must grow over the real tenant packet tests. Private keys
 # never enter the evidence bundle.
-for spec in a:211 b:212 c:213; do
-  host="${spec%%:*}"; address="192.168.122.${spec##*:}"
+for host in a b c; do
+  address="${MGMT_IP[$host]}"
   ssh_vm "$address" 'sudo wg show all transfer' >"$EVIDENCE/wireguard/host-$host-after-traffic.txt" || fail "WireGuard counters unavailable on $host" "DATAPLANE_DEFECT"
 done
 python3 - "$EVIDENCE/wireguard" <<'PY' || fail "WireGuard traffic counters did not grow" "DATAPLANE_DEFECT"
@@ -585,8 +611,8 @@ for _ in $(seq 1 120); do
   if ! curl -fsS "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" >"$EVIDENCE/endpoint-removal/server-c-final.json" 2>/dev/null; then break; fi
   sleep 1
 done
-for spec in a:211 b:212 c:213; do
-  host="${spec%%:*}"; address="192.168.122.${spec##*:}"
+for host in a b c; do
+  address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" >"$EVIDENCE/endpoint-removal/host-$host-ownership.json" || fail "post-C-removal state unavailable on $host" "OWNERSHIP_DEFECT"
 done
 python3 - "$EVIDENCE/endpoint-removal" "${PORT_IDS[2]}" <<'PY' || fail "C endpoint/HER did not withdraw" "CLEANUP_DEFECT"
@@ -613,8 +639,8 @@ for id in "${PORT_IDS[@]}"; do curl --fail --silent --show-error --max-time 30 -
 curl --fail --silent --show-error --max-time 30 -X DELETE "$BASE/v2.0/subnets/$SUBNET_ID" -H "x-auth-token: $TOKEN" >"$EVIDENCE/teardown/subnet-delete.txt" || fail "supported subnet delete failed" "CLEANUP_DEFECT"
 curl --fail --silent --show-error --max-time 30 -X DELETE "$BASE/v2.0/networks/$NETWORK_ID" -H "x-auth-token: $TOKEN" >"$EVIDENCE/teardown/network-delete.txt" || fail "supported network delete failed" "CLEANUP_DEFECT"
 curl --fail --silent --show-error --max-time 30 -X DELETE "$BASE/v2/images/$IMAGE_ID" -H "x-auth-token: $TOKEN" >"$EVIDENCE/teardown/image-delete.txt" || fail "supported image delete failed" "CLEANUP_DEFECT"
-for spec in a:211 b:212 c:213; do
-  host="${spec%%:*}"; address="192.168.122.${spec##*:}"
+for host in a b c; do
+  address="${MGMT_IP[$host]}"
   ssh_vm "$address" 'sudo virsh -c qemu:///system list --all --name' >"$EVIDENCE/teardown/host-$host-domains.txt"
   for server_host in a b c; do
     domain="$(cat "$EVIDENCE/compute-$server_host/domain.txt")"
