@@ -60,6 +60,20 @@ import socket,sys
 s=socket.socket(); s.bind(("0.0.0.0", int(sys.argv[1]))); s.close()
 PY
 }
+find_free_port() {
+  local preferred="$1" port
+  for port in $(seq "$preferred" "$((preferred + 100))"); do
+    if url_port "$port" >/dev/null 2>&1; then printf '%s\n' "$port"; return 0; fi
+  done
+  return 1
+}
+
+if [[ -z "${O3K_FABRIC_V3_API_PORT:-}" ]]; then
+  API_PORT="$(find_free_port "$API_PORT")" || fail "no free API port in configured range" "ENVIRONMENT_GAP"
+fi
+if [[ -z "${O3K_FABRIC_V3_CONTROL_PORT:-}" ]]; then
+  CONTROL_PORT="$(find_free_port "$CONTROL_PORT")" || fail "no free compute-control port in configured range" "ENVIRONMENT_GAP"
+fi
 
 mkdir -p "$EVIDENCE"/{environment,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown}
 chmod 0700 "$EVIDENCE"
