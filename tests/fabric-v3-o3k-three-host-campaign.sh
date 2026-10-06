@@ -315,12 +315,6 @@ done
 
 for host in a b c; do
   address="${MGMT_IP[$host]}"; ready=0
-  case "$host" in a) health_port=19101;; b) health_port=19102;; c) health_port=19103;; esac
-  for _ in $(seq 1 60); do
-    if ssh_vm "$address" "sudo curl -fsS http://127.0.0.1:$health_port/readyz" >/dev/null 2>&1; then ready=1; break; fi
-    sleep 2
-  done
-  (( ready == 1 )) || fail "compute agent health failed on host-$host" "HARNESS_GAP"
   ssh_vm "$address" "sudo ip -j -d link show dev mgmt0; sudo wg show; sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key" >"$EVIDENCE/management/compute-$host.txt" || fail "host-$host runtime observation failed" "ENVIRONMENT_GAP"
 done
 
@@ -361,6 +355,19 @@ export O3K_COMPUTE_CONTROL_ADDR="0.0.0.0:$CONTROL_PORT" O3K_COMPUTE_SERVER_CERTI
 O3KD_PID=$!
 for _ in $(seq 1 120); do curl -fsS "$BASE/healthz" >/dev/null 2>&1 && break; kill -0 "$O3KD_PID" 2>/dev/null || fail "o3kd exited during startup" "ENVIRONMENT_GAP"; sleep 1; done
 curl -fsS "$BASE/readyz" >"$EVIDENCE/management/o3kd-ready.json" || fail "o3kd failed readiness" "ENVIRONMENT_GAP"
+
+# Compute /readyz includes the authenticated controller registration state, so
+# defer this check until o3kd is listening and ready. Checking it before the
+# controller starts would make a healthy agent report 503 by design.
+for host in a b c; do
+  address="${MGMT_IP[$host]}"; ready=0
+  case "$host" in a) health_port=19101;; b) health_port=19102;; c) health_port=19103;; esac
+  for _ in $(seq 1 60); do
+    if ssh_vm "$address" "sudo curl -fsS http://127.0.0.1:$health_port/readyz" >/dev/null 2>&1; then ready=1; break; fi
+    sleep 2
+  done
+  (( ready == 1 )) || fail "compute agent did not register with the ready controller on host-$host" "HARNESS_GAP"
+done
 
 curl -fsS -X POST "$BASE/v3/auth/tokens" -H 'content-type: application/json' -D "$EVIDENCE/api/auth.headers" -o "$EVIDENCE/api/auth.body" --data "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"admin\",\"password\":\"campaign-$RUN_ID\"}}},\"scope\":{\"project\":{\"name\":\"admin\"}}}}" || fail "supported HTTP authentication failed" "SUPPORTED_API_GAP"
 TOKEN="$(awk 'tolower($1)=="x-subject-token:"{print $2}' "$EVIDENCE/api/auth.headers" | tr -d '\r')"
