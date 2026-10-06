@@ -23,7 +23,6 @@ cleanup() {
   set +e
   if (( probe_created )); then
     virsh -c qemu:///system destroy "$probe" >/dev/null 2>&1
-    virsh -c qemu:///system undefine "$probe" >/dev/null 2>&1
   fi
   rm -f -- "$probe_xml"
 }
@@ -54,7 +53,6 @@ qemu_group="$(getent group "$qemu_gid" | cut -d: -f1)"
 [[ -n "$qemu_user" && -n "$qemu_group" ]] || { echo "QEMU UID/GID missing from NSS" >&2; exit 1; }
 
 virsh -c qemu:///system destroy "$probe" >/dev/null
-virsh -c qemu:///system undefine "$probe" >/dev/null
 rm -f -- "$probe_xml"
 trap - EXIT
 
