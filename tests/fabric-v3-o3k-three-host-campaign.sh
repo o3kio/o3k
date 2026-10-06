@@ -75,6 +75,7 @@ if [[ -z "${O3K_FABRIC_V3_CONTROL_PORT:-}" ]]; then
   CONTROL_PORT="$(find_free_port "$CONTROL_PORT")" || fail "no free compute-control port in configured range" "ENVIRONMENT_GAP"
 fi
 
+[[ ! -e "$EVIDENCE" && ! -L "$EVIDENCE" ]] || fail "evidence path already exists: $EVIDENCE" "HARNESS_GAP"
 mkdir -p "$EVIDENCE"/{environment,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown}
 chmod 0700 "$EVIDENCE"
 [[ ! -e "$EVIDENCE/.o3k-fabric-v3-owned" ]] || fail "evidence path collision"
@@ -142,8 +143,6 @@ for tool in cargo curl openssl python3 virsh virt-install qemu-img genisoimage s
 [[ -z "$(git -C "$ROOT_DIR" diff --name-only "$PRODUCT_SHA" -- bins crates Cargo.toml Cargo.lock)" ]] || fail "product source differs from frozen candidate" "PRODUCT_DEFECT"
 url_port "$API_PORT" || fail "API port is occupied: $API_PORT" "ENVIRONMENT_GAP"
 url_port "$CONTROL_PORT" || fail "compute control port is occupied: $CONTROL_PORT" "ENVIRONMENT_GAP"
-[[ ! -e "$EVIDENCE" || -z "$(find "$EVIDENCE" -mindepth 1 -maxdepth 1 -print -quit)" ]] || fail "evidence directory is not fresh" "HARNESS_GAP"
-
 git -C "$ROOT_DIR" rev-parse HEAD >"$EVIDENCE/environment/harness_sha.txt"
 git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}' >"$EVIDENCE/environment/harness_tree.txt"
 git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA" >"$EVIDENCE/environment/product_sha.txt"
