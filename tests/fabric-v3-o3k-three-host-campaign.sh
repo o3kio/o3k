@@ -293,8 +293,13 @@ cp "$TLS_DIR/certs/ca.pem" "$STAGE/ca.pem"
 for host in a b c; do
   cp "$TLS_DIR/certs/server.pem" "$STAGE/network-agent-$host.pem"
   cp "$TLS_DIR/certs/server-key.pem" "$STAGE/network-agent-$host-key.pem"
-  cp "$TLS_DIR/certs/agents/compute-agent-$host/agent.pem" "$STAGE/compute-agent-$host.pem"
-  cp "$TLS_DIR/certs/agents/compute-agent-$host/agent-key.pem" "$STAGE/compute-agent-$host-key.pem"
+  if [[ "$host" == a ]]; then
+    compute_cert_dir="$TLS_DIR/certs"
+  else
+    compute_cert_dir="$TLS_DIR/certs/agents/compute-agent-$host"
+  fi
+  cp "$compute_cert_dir/agent.pem" "$STAGE/compute-agent-$host.pem"
+  cp "$compute_cert_dir/agent-key.pem" "$STAGE/compute-agent-$host-key.pem"
 done
 cp "$TLS_DIR/certs/agents/controller-network/agent.pem" "$STAGE/controller-network.pem"
 cp "$TLS_DIR/certs/agents/controller-network/agent-key.pem" "$STAGE/controller-network-key.pem"
@@ -336,7 +341,12 @@ PY
 )"
 AUTHORIZED=""
 for host in a b c; do
-  fp="$(openssl x509 -in "$TLS_DIR/certs/agents/compute-agent-$host/agent.pem" -outform DER | sha256sum | awk '{print $1}')"
+  if [[ "$host" == a ]]; then
+    compute_cert="$TLS_DIR/certs/agent.pem"
+  else
+    compute_cert="$TLS_DIR/certs/agents/compute-agent-$host/agent.pem"
+  fi
+  fp="$(openssl x509 -in "$compute_cert" -outform DER | sha256sum | awk '{print $1}')"
   [[ -z "$AUTHORIZED" ]] || AUTHORIZED+=,
   AUTHORIZED+="compute-agent-$host=$fp"
 done
