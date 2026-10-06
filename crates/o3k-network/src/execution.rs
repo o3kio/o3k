@@ -25,6 +25,22 @@ use uuid::Uuid;
 /// authenticated wire delivery.
 #[async_trait::async_trait]
 pub trait NetworkPlanDispatcher: Send + Sync {
+    /// Resolve the current network execution identity for a stable host.
+    /// Fabric plans use this host-scoped directory; it is deliberately
+    /// separate from the compute-agent registry.
+    async fn target_for_host(
+        &self,
+        _host_id: &str,
+    ) -> Result<Option<NetworkAgentIdentity>, NetworkDispatchError> {
+        Ok(None)
+    }
+
+    /// Stable host IDs covered by the configured target-aware network-agent
+    /// directory. Legacy single-agent dispatchers return an empty list.
+    fn configured_target_hosts(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     async fn dispatch(
         &self,
         command: NetworkPlanCommand,

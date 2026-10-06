@@ -1118,6 +1118,7 @@ pub fn agent_snapshot(node: &NodeSnapshot) -> o3k_provider::AgentNodeSnapshot {
     o3k_provider::AgentNodeSnapshot {
         agent_id: node.agent_id.clone(),
         agent_epoch: node.agent_epoch.clone(),
+        host_id: node.host_label.clone(),
         availability: if node.availability == Availability::Available {
             AgentAvailability::Available
         } else {
@@ -2077,6 +2078,7 @@ fn validate_register(request: &proto::RegisterRequest) -> Result<(), Box<Status>
         || request.agent_id.len() > MAX_AGENT_ID
         || request.agent_epoch.trim().is_empty()
         || request.host_label.len() > crate::types::MAX_HOST_LABEL
+        || !o3k_provider::is_valid_host_id(&request.host_label)
         || request.capabilities.is_none()
     {
         return Err(Box::new(Status::invalid_argument(
@@ -4777,6 +4779,13 @@ mod tests {
         ));
 
         let request = register("", "epoch");
+        assert!(matches!(
+            validate_register(&request),
+            Err(ref error) if error.code() == tonic::Code::InvalidArgument
+        ));
+
+        let mut request = register("node", "epoch");
+        request.host_label = "host identity with spaces".to_owned();
         assert!(matches!(
             validate_register(&request),
             Err(ref error) if error.code() == tonic::Code::InvalidArgument

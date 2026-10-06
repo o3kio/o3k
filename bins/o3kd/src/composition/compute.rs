@@ -75,8 +75,7 @@ impl DaemonCreateResolver {
     pub(crate) async fn resolve_network(
         &self,
         request: &CreateInstanceRequest,
-        agent_id: &str,
-        agent_epoch: &str,
+        compute_agent: &AgentNodeSnapshot,
     ) -> Result<
         (
             Vec<o3k_compute_agent::NetworkAttachmentSpec>,
@@ -85,6 +84,13 @@ impl DaemonCreateResolver {
         ProviderError,
     > {
         let external_realm_id = self.resolve_external_realm_id(&request.project_id).await?;
+        let legacy_network_agent_id = self
+            .network_agent
+            .as_ref()
+            .map_or(compute_agent.agent_id.as_str(), |agent| {
+                agent.agent_id.as_str()
+            })
+            .to_owned();
         let mut attachments = Vec::with_capacity(request.network_ids.len());
         let mut network_data = BTreeMap::new();
         for network_id in &request.network_ids {
@@ -107,12 +113,19 @@ impl DaemonCreateResolver {
             // Record the selected-host intent only after the full attachment
             // resolved; a port whose subnet cannot be resolved is never
             // dispatched and must not carry a binding intent.
-            let network_agent_id = if self.fabric_reconciler.is_some() {
-                agent_id
+            let binding_host = if let Some(reconciler) = &self.fabric_reconciler {
+                reconciler
+                    .validate_compute_placement(compute_agent)
+                    .await
+                    .map_err(|_| ProviderError::InvalidRequest)?;
+                compute_agent.host_id.clone()
             } else {
                 self.network_agent
                     .as_ref()
-                    .map_or(agent_id, |agent| agent.agent_id.as_str())
+                    .map_or(compute_agent.agent_id.as_str(), |agent| {
+                        agent.agent_id.as_str()
+                    })
+                    .to_owned()
             };
             let public_address = self
                 .public_allocator
@@ -163,14 +176,14 @@ impl DaemonCreateResolver {
                     .map_err(|_| ProviderError::InvalidRequest)?
                     .into_iter()
                     .any(|identity| {
-                        identity.agent_id == network_agent_id
+                        identity.host_id == binding_host
                             && identity.administrative_state == "enabled"
                     });
                 if !selected_host_enrolled {
                     return Err(ProviderError::InvalidRequest);
                 }
                 self.network
-                    .record_fabric_binding_intent(&request.project_id, port_id, network_agent_id)
+                    .record_fabric_binding_intent(&request.project_id, port_id, &binding_host)
                     .await
                     .map_err(|error| match error {
                         o3k_network::NetworkError::Conflict => ProviderError::Conflict,
@@ -200,7 +213,7 @@ impl DaemonCreateResolver {
                     })?;
             } else {
                 self.network
-                    .record_binding_intent(&request.project_id, port_id, network_agent_id)
+                    .record_binding_intent(&request.project_id, port_id, &legacy_network_agent_id)
                     .await
                     .map_err(|error| match error {
                         o3k_network::NetworkError::Conflict => ProviderError::Conflict,
@@ -224,7 +237,7 @@ impl DaemonCreateResolver {
                         // plan node bound to the network agent lets the executor
                         // reject cross-agent replay without conflating compute
                         // placement with network mutation authority.
-                        node_id: network_agent_id,
+                        node_id: &legacy_network_agent_id,
                         operation_id: request.operation_id,
                         deadline_unix_ms,
                         public_address,
@@ -250,8 +263,8 @@ impl DaemonCreateResolver {
                         action: o3k_network::NetworkPlanAction::Apply,
                         target: self.network_agent.clone().unwrap_or_else(|| {
                             o3k_network::NetworkAgentIdentity {
-                                agent_id: agent_id.to_owned(),
-                                agent_epoch: agent_epoch.to_owned(),
+                                agent_id: legacy_network_agent_id.clone(),
+                                agent_epoch: compute_agent.agent_epoch.clone(),
                             }
                         }),
                         controller: self.network_controller.clone(),
@@ -480,7 +493,7 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
             error
         })?;
         let (network_attachments, network_data) = self
-            .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
+            .resolve_network(request, agent)
             .await
             .map_err(|error| {
                 tracing::warn!(resource_id = %request.o3k_server_id, error = %error, "compute create network resolution rejected");

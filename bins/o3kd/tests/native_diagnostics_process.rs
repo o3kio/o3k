@@ -186,6 +186,7 @@ fn capabilities() -> AgentCapabilities {
 fn snapshot(availability: AgentAvailability) -> AgentNodeSnapshot {
     AgentNodeSnapshot {
         agent_id: "provider-a".to_owned(),
+        host_id: "host-a".to_owned(),
         agent_epoch: "epoch-1".to_owned(),
         availability,
         administrative_state: AgentAdministrativeState::Enabled,

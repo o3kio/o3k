@@ -548,6 +548,12 @@ pub async fn build_composition(
         controller_id.clone(),
         controller_epoch.clone(),
     )?;
+    if fabric_domain_id.is_some() {
+        let dispatcher = network_dispatcher
+            .as_deref()
+            .ok_or("O3K_FABRIC_DOMAIN_ID requires network-agent target dispatch")?;
+        network::validate_fabric_control_targets(&network_service, dispatcher).await?;
+    }
     let public_allocator = public_allocator_from_env(&config.data_dir)?;
     let public_allocator_for_binding = public_allocator_from_env(&config.data_dir)?.map(Arc::new);
     let network_external_realm_id = std::env::var("O3K_NETWORK_EXTERNAL_REALM_ID")
@@ -1609,8 +1615,53 @@ mod tests {
         commands: Arc<std::sync::Mutex<Vec<o3k_network::NetworkPlanCommand>>>,
     }
 
+    fn compute_snapshot(
+        agent_id: &str,
+        host_id: &str,
+        epoch: &str,
+    ) -> o3k_provider::AgentNodeSnapshot {
+        o3k_provider::AgentNodeSnapshot {
+            agent_id: agent_id.to_owned(),
+            host_id: host_id.to_owned(),
+            agent_epoch: epoch.to_owned(),
+            availability: o3k_provider::AgentAvailability::Available,
+            administrative_state: o3k_provider::AgentAdministrativeState::Enabled,
+            capabilities: o3k_provider::AgentCapabilities {
+                agent_provider_name: "test".to_owned(),
+                agent_provider_version: "1".to_owned(),
+                max_vcpus: 8,
+                max_memory_mib: 8192,
+                max_disk_gb: 100,
+                lifecycle_actions: vec!["create".to_owned()],
+                console_log: false,
+                flags: Vec::new(),
+            },
+        }
+    }
+
     #[async_trait::async_trait]
     impl o3k_network::NetworkPlanDispatcher for RecordingNetworkDispatcher {
+        async fn target_for_host(
+            &self,
+            host_id: &str,
+        ) -> Result<Option<o3k_network::NetworkAgentIdentity>, o3k_network::NetworkDispatchError>
+        {
+            let suffix = host_id.strip_prefix("host-").ok_or_else(|| {
+                o3k_network::NetworkDispatchError::Rejected("unknown test host".to_owned())
+            })?;
+            Ok(Some(o3k_network::NetworkAgentIdentity {
+                agent_id: format!("network-agent-{suffix}"),
+                agent_epoch: "network-epoch-1".to_owned(),
+            }))
+        }
+
+        fn configured_target_hosts(&self) -> Vec<String> {
+            ["host-a", "host-b", "host-c"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        }
+
         async fn dispatch(
             &self,
             command: o3k_network::NetworkPlanCommand,
@@ -1987,7 +2038,10 @@ mod tests {
             idempotency_key: "test".to_owned(),
         };
         let (attachments, _) = resolver
-            .resolve_network(&request, "compute-1", "epoch-1")
+            .resolve_network(
+                &request,
+                &compute_snapshot("compute-1", "compute-1", "epoch-1"),
+            )
             .await?;
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].port_id, port.id.to_string());
@@ -2044,7 +2098,10 @@ mod tests {
             idempotency_key: "test".to_owned(),
         };
         let failed = resolver
-            .resolve_network(&unresolved, "compute-1", "epoch-1")
+            .resolve_network(
+                &unresolved,
+                &compute_snapshot("compute-1", "compute-1", "epoch-1"),
+            )
             .await;
         assert!(failed.is_err());
         let after = store
@@ -2097,20 +2154,20 @@ mod tests {
 
         let hosts = [
             (
-                "compute-a",
-                "agent-a",
+                "host-a",
+                "network-agent-a",
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 11_u8,
             ),
             (
-                "compute-b",
-                "agent-b",
+                "host-b",
+                "network-agent-b",
                 "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
                 12_u8,
             ),
             (
-                "compute-c",
-                "agent-c",
+                "host-c",
+                "network-agent-c",
                 "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
                 13_u8,
             ),
@@ -2136,7 +2193,7 @@ mod tests {
                 .await?;
             registry
                 .register(&o3k_compute_agent::proto::RegisterRequest {
-                    agent_id: agent_id.to_owned(),
+                    agent_id: format!("compute-agent-{}", &host_id[5..]),
                     agent_epoch: "epoch-1".to_owned(),
                     software_version: "test".to_owned(),
                     host_label: host_id.to_owned(),
@@ -2171,7 +2228,7 @@ mod tests {
             network: network.clone(),
             config_drive,
             network_dispatcher: None,
-            fabric_reconciler: Some(fabric_reconciler),
+            fabric_reconciler: Some(fabric_reconciler.clone()),
             network_controller: o3k_network::NetworkControllerLease {
                 controller_id: "test-controller".to_owned(),
                 controller_epoch: "epoch-1".to_owned(),
@@ -2196,13 +2253,25 @@ mod tests {
                 .await?,
         ];
 
-        let placement_agents = ["agent-a", "agent-b", "agent-c", "agent-a"];
-        for (index, (agent_id, port)) in placement_agents.iter().zip(&ports).enumerate() {
+        let placements = [
+            ("compute-agent-a", "host-a"),
+            ("compute-agent-b", "host-b"),
+            ("compute-agent-c", "host-c"),
+            ("compute-agent-a", "host-a"),
+        ];
+        for (index, ((compute_agent_id, host_id), port)) in
+            placements.iter().zip(&ports).enumerate()
+        {
+            let selected = compute_snapshot(compute_agent_id, host_id, "epoch-1");
+            fabric_reconciler
+                .validate_compute_placement(&selected)
+                .await
+                .map_err(|error| format!("placement validation failed: {error}"))?;
             let request = o3k_provider::CreateInstanceRequest {
                 operation_id: Uuid::from_u128(10_000 + index as u128),
                 o3k_server_id: Uuid::now_v7(),
                 project_id: "project-a".to_owned(),
-                name: format!("server-{agent_id}"),
+                name: format!("server-{compute_agent_id}"),
                 vcpus: 1,
                 memory_mib: 512,
                 flavor_id: String::new(),
@@ -2214,11 +2283,16 @@ mod tests {
                 placement_provider_id: None,
                 placement_allocation_id: None,
                 config_drive: None,
-                idempotency_key: format!("attach-{agent_id}"),
+                idempotency_key: format!("attach-{compute_agent_id}"),
             };
             let (attachments, _) = resolver
-                .resolve_network(&request, agent_id, "epoch-1")
-                .await?;
+                .resolve_network(&request, &selected)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "resolve index {index} agent {compute_agent_id} host {host_id}: {error:?}"
+                    )
+                })?;
             assert_eq!(attachments.len(), 1);
             assert_eq!(attachments[0].port_id, port.id.to_string());
         }
@@ -2230,10 +2304,10 @@ mod tests {
                 9,
                 "each addition reconciles all participants"
             );
-            for (host_index, (host_id, agent_id, _, _)) in hosts.into_iter().enumerate() {
+            for (host_index, (host_id, network_agent_id, _, _)) in hosts.into_iter().enumerate() {
                 let host_commands = dispatched
                     .iter()
-                    .filter(|command| command.target.agent_id == agent_id)
+                    .filter(|command| command.target.agent_id == network_agent_id)
                     .collect::<Vec<_>>();
                 assert_eq!(
                     host_commands.len(),
@@ -2262,7 +2336,7 @@ mod tests {
                         .iter()
                         .filter(|entry| entry.selected_host == host_id)
                         .count(),
-                    if host_id == "compute-a" { 2 } else { 1 }
+                    if host_id == "host-a" { 2 } else { 1 }
                 );
             }
         }
@@ -2353,7 +2427,10 @@ mod tests {
             idempotency_key: "test-network-agent-target".to_owned(),
         };
         let (attachments, _) = resolver
-            .resolve_network(&request, "compute-agent-1", "compute-epoch-1")
+            .resolve_network(
+                &request,
+                &compute_snapshot("compute-agent-1", "compute-agent-1", "compute-epoch-1"),
+            )
             .await?;
         assert_eq!(attachments[0].port_id, port.id.to_string());
         let bound = network.get_port_for_project("project-a", port.id).await?;

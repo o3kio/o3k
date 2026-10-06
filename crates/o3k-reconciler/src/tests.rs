@@ -167,6 +167,7 @@ mod reconciler_tests {
                 agent_id.to_owned(),
                 o3k_provider::AgentNodeSnapshot {
                     agent_id: agent_id.to_owned(),
+                    host_id: agent_id.to_owned(),
                     agent_epoch: agent_epoch.to_owned(),
                     availability: o3k_provider::AgentAvailability::Available,
                     administrative_state: o3k_provider::AgentAdministrativeState::Enabled,

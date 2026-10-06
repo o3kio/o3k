@@ -435,10 +435,11 @@ pub struct CanonicalRealmBindingRecord {
     pub state: String,
 }
 
-/// Durable, non-secret host Fabric enrollment. The agent relationship is
-/// explicit: `agent_id` is the enrolled compute control-plane identity and
-/// `host_id` is the stable host identity used by Fabric plans. WireGuard
-/// private keys are intentionally absent.
+/// Durable, non-secret host Fabric enrollment. `host_id` is the only join to
+/// placement and execution directories. `agent_id` is retained as deprecated
+/// enrollment metadata for stored-record compatibility; it is not a compute
+/// identity, network-agent identity, or source of an execution epoch.
+/// WireGuard private keys are intentionally absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FabricHostTransportIdentityRecord {
     pub host_id: String,

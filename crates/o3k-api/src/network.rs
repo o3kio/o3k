@@ -24,6 +24,36 @@ use crate::{
     pagination::{CollectionLink, CollectionPage},
 };
 
+/// Resolve Fabric v3 execution identity through the stable host directory.
+/// The compute registry is only a compatibility fallback for legacy network
+/// profiles that do not expose host-targeted dispatch.
+async fn resolve_network_target(
+    state: &AppState,
+    host_id: &str,
+) -> Result<o3k_network::NetworkAgentIdentity, ()> {
+    if let Some(dispatcher) = state.network_dispatcher.as_ref() {
+        match dispatcher.target_for_host(host_id).await {
+            Ok(Some(target)) => return Ok(target),
+            Ok(None) => {}
+            Err(_) => return Err(()),
+        }
+    }
+    if let Some(registry) = state.agent_registry.as_ref()
+        && let Some(agent) = registry.snapshot(host_id).await
+    {
+        return Ok(o3k_network::NetworkAgentIdentity {
+            agent_id: agent.agent_id,
+            agent_epoch: agent.agent_epoch,
+        });
+    }
+    if let Some(agent) = state.network_agent.as_ref()
+        && agent.agent_id == host_id
+    {
+        return Ok(agent.clone());
+    }
+    Err(())
+}
+
 #[derive(serde::Deserialize)]
 pub(crate) struct RouterRequestBody {
     router: RouterRequest,
@@ -2267,24 +2297,13 @@ async fn dispatch_policy_network_with_gateway(
     let Some(host) = port.binding_host.clone() else {
         return Ok(false);
     };
-    let agent = if let Some(registry) = state.agent_registry.as_ref()
-        && let Some(agent) = registry.snapshot(&host).await
-    {
-        o3k_network::NetworkAgentIdentity {
-            agent_id: agent.agent_id,
-            agent_epoch: agent.agent_epoch,
-        }
-    } else if let Some(agent) = state.network_agent.as_ref()
-        && agent.agent_id == host
-    {
-        agent.clone()
-    } else {
-        return Err(keystone_error(
+    let agent = resolve_network_target(state, &host).await.map_err(|_| {
+        keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",
-            "selected network agent is unavailable",
-        ));
-    };
+            "selected network agent is unavailable or not enrolled for the selected host",
+        )
+    })?;
     let subnet_id = port.subnet_id.ok_or_else(|| {
         keystone_error(
             StatusCode::BAD_REQUEST,
@@ -2844,24 +2863,13 @@ async fn dispatch_public_binding(
     let Some(host) = port.binding_host.as_deref() else {
         return Ok(());
     };
-    let agent = if let Some(registry) = state.agent_registry.as_ref()
-        && let Some(agent) = registry.snapshot(host).await
-    {
-        o3k_network::NetworkAgentIdentity {
-            agent_id: agent.agent_id,
-            agent_epoch: agent.agent_epoch,
-        }
-    } else if let Some(agent) = state.network_agent.as_ref()
-        && agent.agent_id == host
-    {
-        agent.clone()
-    } else {
-        return Err(keystone_error(
+    let agent = resolve_network_target(state, host).await.map_err(|_| {
+        keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",
-            "selected network agent is unavailable",
-        ));
-    };
+            "selected network agent is unavailable or not enrolled for the selected host",
+        )
+    })?;
     let subnet_id = port.subnet_id.ok_or_else(|| {
         keystone_error(
             StatusCode::BAD_REQUEST,
