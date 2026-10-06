@@ -6,8 +6,8 @@ use o3k_identity;
 use o3k_image;
 use o3k_provider::{
     AgentNodeSnapshot, ArtifactKind, ConfigDriveRequest, CreateArtifactResolver,
-    CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
-    ResolvedCreateInputs, ResolvedCreateResolver,
+    CreateInstanceRequest, OperationState, ProviderError, ResolvedConfigDrive,
+    ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -499,7 +499,16 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
                 tracing::warn!(resource_id = %request.o3k_server_id, error = %error, "compute create network resolution rejected");
                 error
             })?;
-        let (iso, _) = self.materialize_config_drive(request, network_data).map_err(|error| {
+        let config_drive = request.config_drive.as_ref().map(|_| {
+            self.materialize_config_drive(request, network_data.clone())
+                .map(|(iso, _)| {
+                    let artifact_id = Uuid::new_v5(
+                        &Uuid::NAMESPACE_URL,
+                        format!("o3k:config-drive:{}:{}", request.o3k_server_id, iso.fingerprint_sha256).as_bytes(),
+                    ).to_string();
+                    ResolvedConfigDrive { artifact_id, sha256: iso.fingerprint_sha256 }
+                })
+        }).transpose().map_err(|error| {
             tracing::warn!(resource_id = %request.o3k_server_id, error = %error, "compute create config-drive resolution rejected");
             error
         })?;
@@ -509,23 +518,13 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
         let disk_gib = (request.disk_gib > 0)
             .then_some(request.disk_gib)
             .ok_or(ProviderError::InvalidRequest)?;
-        let config_artifact_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!(
-                "o3k:config-drive:{}:{}",
-                request.o3k_server_id, iso.fingerprint_sha256
-            )
-            .as_bytes(),
-        )
-        .to_string();
         Ok(ResolvedCreateInputs {
             flavor_id,
             image_artifact_id: image.id.to_string(),
             image_sha256: image.checksum,
             image_format: image.format,
             disk_gib,
-            config_drive_artifact_id: config_artifact_id,
-            config_drive_sha256: iso.fingerprint_sha256,
+            config_drive,
             network_attachments,
         })
     }
@@ -549,26 +548,31 @@ impl CreateArtifactResolver for DaemonCreateResolver {
         // would repeat provider mutations while preparing an artifact and can
         // replay the same Fabric command identity with a different deadline.
         let network_data = Self::network_data_from_attachments(&inputs.network_attachments);
-        let (iso, iso_bytes) = self.materialize_config_drive(request, network_data)?;
-        if iso.fingerprint_sha256 != inputs.config_drive_sha256 {
-            return Err(ProviderError::Conflict);
+        let mut artifacts = vec![ResolvedCreateArtifact {
+            artifact_id: inputs.image_artifact_id.clone(),
+            kind: ArtifactKind::ImageBase,
+            sha256: image.checksum,
+            format: image.format,
+            bytes: image.content,
+        }];
+        match (&request.config_drive, &inputs.config_drive) {
+            (None, None) => {}
+            (Some(_), Some(config_drive)) => {
+                let (iso, iso_bytes) = self.materialize_config_drive(request, network_data)?;
+                if iso.fingerprint_sha256 != config_drive.sha256 {
+                    return Err(ProviderError::Conflict);
+                }
+                artifacts.push(ResolvedCreateArtifact {
+                    artifact_id: config_drive.artifact_id.clone(),
+                    kind: ArtifactKind::ConfigDriveIso,
+                    sha256: iso.fingerprint_sha256,
+                    format: "iso".to_owned(),
+                    bytes: iso_bytes,
+                });
+            }
+            _ => return Err(ProviderError::Conflict),
         }
-        Ok(vec![
-            ResolvedCreateArtifact {
-                artifact_id: inputs.image_artifact_id.clone(),
-                kind: ArtifactKind::ImageBase,
-                sha256: image.checksum,
-                format: image.format,
-                bytes: image.content,
-            },
-            ResolvedCreateArtifact {
-                artifact_id: inputs.config_drive_artifact_id.clone(),
-                kind: ArtifactKind::ConfigDriveIso,
-                sha256: iso.fingerprint_sha256,
-                format: "iso".to_owned(),
-                bytes: iso_bytes,
-            },
-        ])
+        Ok(artifacts)
     }
 }
 

@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use o3k_compute_agent::{
@@ -20,8 +24,8 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-#[derive(Debug, Default)]
-struct TestResolver;
+#[derive(Debug)]
+struct TestResolver(bool);
 
 #[async_trait]
 impl ResolvedCreateResolver for TestResolver {
@@ -37,9 +41,11 @@ impl ResolvedCreateResolver for TestResolver {
                 .to_owned(),
             image_format: "qcow2".to_owned(),
             disk_gib: 10,
-            config_drive_artifact_id: "config-drive.test".to_owned(),
-            config_drive_sha256: "300ff2a3635c8ab1608e2ea2d00859be4535efd5949e3b149437b66de80bbef4"
-                .to_owned(),
+            config_drive: self.0.then(|| o3k_provider::ResolvedConfigDrive {
+                artifact_id: "config-drive.test".to_owned(),
+                sha256: "300ff2a3635c8ab1608e2ea2d00859be4535efd5949e3b149437b66de80bbef4"
+                    .to_owned(),
+            }),
             network_attachments: vec![NetworkAttachmentSpec {
                 port_id: "port.test".to_owned(),
                 mac: "52:54:00:12:34:56".to_owned(),
@@ -51,8 +57,8 @@ impl ResolvedCreateResolver for TestResolver {
     }
 }
 
-#[derive(Debug, Default)]
-struct TestArtifactResolver;
+#[derive(Debug, Default, Clone)]
+struct TestArtifactResolver(Arc<Mutex<Vec<Vec<ArtifactKind>>>>);
 
 #[async_trait]
 impl CreateArtifactResolver for TestArtifactResolver {
@@ -62,22 +68,27 @@ impl CreateArtifactResolver for TestArtifactResolver {
         _agent: &AgentNodeSnapshot,
         inputs: &ResolvedCreateInputs,
     ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
-        Ok(vec![
-            ResolvedCreateArtifact {
-                artifact_id: inputs.image_artifact_id.clone(),
-                kind: ArtifactKind::ImageBase,
-                sha256: inputs.image_sha256.clone(),
-                format: inputs.image_format.clone(),
-                bytes: b"image-artifact".to_vec(),
-            },
-            ResolvedCreateArtifact {
-                artifact_id: inputs.config_drive_artifact_id.clone(),
+        let mut artifacts = vec![ResolvedCreateArtifact {
+            artifact_id: inputs.image_artifact_id.clone(),
+            kind: ArtifactKind::ImageBase,
+            sha256: inputs.image_sha256.clone(),
+            format: inputs.image_format.clone(),
+            bytes: b"image-artifact".to_vec(),
+        }];
+        if let Some(config_drive) = inputs.config_drive.as_ref() {
+            artifacts.push(ResolvedCreateArtifact {
+                artifact_id: config_drive.artifact_id.clone(),
                 kind: ArtifactKind::ConfigDriveIso,
-                sha256: inputs.config_drive_sha256.clone(),
+                sha256: config_drive.sha256.clone(),
                 format: "iso".to_owned(),
                 bytes: b"config-drive-artifact".to_vec(),
-            },
-        ])
+            });
+        }
+        self.0
+            .lock()
+            .map_err(|_| ProviderError::Storage)?
+            .push(artifacts.iter().map(|artifact| artifact.kind).collect());
+        Ok(artifacts)
     }
 }
 
@@ -168,8 +179,9 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
     }
     assert!(registry.snapshot("node-test").await.is_some());
 
-    let provider = AgentComputeProvider::new(registry, Arc::new(TestResolver))
-        .with_artifact_resolver(Arc::new(TestArtifactResolver));
+    let artifact_observations = TestArtifactResolver::default();
+    let provider = AgentComputeProvider::new(registry.clone(), Arc::new(TestResolver(true)))
+        .with_artifact_resolver(Arc::new(artifact_observations.clone()));
     let operation_id = Uuid::now_v7();
     let server_id = Uuid::now_v7();
     let request = CreateInstanceRequest {
@@ -190,7 +202,10 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
         config_drive: None,
         idempotency_key: "mtls-request".to_owned(),
     };
-    let accepted = provider.create_instance(request).await?;
+    let accepted = provider
+        .create_instance(request)
+        .await
+        .map_err(|error| format!("config-drive mTLS create failed: {error:?}"))?;
     assert_eq!(accepted.state, OperationState::Accepted);
 
     let mut observed = None;
@@ -204,6 +219,70 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
     }
     let provider_resource_id = observed.ok_or("agent completion was not observed")?;
     assert_eq!(executor.resource_count(), 1);
+
+    // Exercise the real artifact-transfer protocol with an explicit no-media
+    // resolved create. Only the image artifact is offered for this command.
+    let no_drive_provider = AgentComputeProvider::new(registry, Arc::new(TestResolver(false)))
+        .with_artifact_resolver(Arc::new(artifact_observations.clone()));
+    let no_drive_operation_id = Uuid::now_v7();
+    let no_drive_server_id = Uuid::now_v7();
+    let no_drive_request = CreateInstanceRequest {
+        operation_id: no_drive_operation_id,
+        o3k_server_id: no_drive_server_id,
+        project_id: "project-a".to_owned(),
+        name: "mtls-server-no-config-drive".to_owned(),
+        vcpus: 1,
+        memory_mib: 512,
+        flavor_id: String::new(),
+        disk_gib: 0,
+        image_id: Some("image-a".to_owned()),
+        key_name: None,
+        keypair_id: None,
+        network_ids: vec!["port.test".to_owned()],
+        placement_provider_id: Some("node-test".to_owned()),
+        placement_allocation_id: Some("allocation-no-drive".to_owned()),
+        config_drive: None,
+        idempotency_key: "mtls-request-no-config-drive".to_owned(),
+    };
+    let no_drive_accepted = no_drive_provider
+        .create_instance(no_drive_request)
+        .await
+        .map_err(|error| format!("no-config-drive mTLS create failed: {error:?}"))?;
+    assert_eq!(no_drive_accepted.state, OperationState::Accepted);
+    let mut no_drive_succeeded = false;
+    for _ in 0..80 {
+        if no_drive_provider
+            .get_operation(no_drive_operation_id)
+            .await?
+            .state
+            == OperationState::Succeeded
+        {
+            no_drive_succeeded = true;
+            break;
+        }
+        time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        no_drive_succeeded,
+        "no-config-drive create did not complete over mTLS"
+    );
+    assert_eq!(executor.resource_count(), 2);
+    assert_eq!(executor.artifact_count(), 6);
+    let artifact_observations = {
+        let observations = artifact_observations
+            .0
+            .lock()
+            .map_err(|_| std::io::Error::other("artifact observation lock poisoned"))?;
+        observations.clone()
+    };
+    assert_eq!(
+        artifact_observations.as_slice(),
+        [
+            vec![ArtifactKind::ImageBase, ArtifactKind::ConfigDriveIso],
+            vec![ArtifactKind::ImageBase],
+        ],
+        "the no-config-drive create resolves only the image for mTLS transfer"
+    );
     let inspect_operation_id = Uuid::now_v7();
     let accepted_inspect = provider
         .inspect_instance(

@@ -21,7 +21,7 @@ use std::{
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use hyper_util::rt::TokioIo;
-use o3k_provider::AgentEvent as ProviderAgentEvent;
+use o3k_provider::{AgentEvent as ProviderAgentEvent, ResolvedConfigDrive};
 pub use o3k_provider_contract::compute_proto as proto;
 pub use prost::Message;
 use rustls::{
@@ -63,7 +63,7 @@ pub use artifact::{
 };
 pub use config_drive::{
     ConfigDriveMaterializationError, ConfigDriveMaterializationRequest,
-    config_drive_materialization_request,
+    config_drive_materialization_request, config_drive_requested,
 };
 pub use image::{
     ImageMaterialization, ImageMaterializationRequest, ImageMaterializer, ImageMaterializerError,
@@ -1267,11 +1267,11 @@ fn validate_command_action(
     require_live_transfers: bool,
 ) -> Result<(), AgentError> {
     match command.action.as_ref() {
-        Some(proto::command::Action::Create(create)) => {
+        Some(proto::command::Action::Create(_)) => {
             if require_live_transfers {
-                validate_proto_create(create)
+                validate_proto_create(command)
             } else {
-                validate_proto_create_identity(create)
+                validate_proto_create_identity(command)
             }
         }
         Some(proto::command::Action::ConsoleLog(console))
@@ -1396,8 +1396,7 @@ pub struct CreateCommandSpec {
     pub vcpus: u32,
     pub memory_mib: u64,
     pub disk_gib: u64,
-    pub config_drive_artifact_id: String,
-    pub config_drive_sha256: String,
+    pub config_drive: Option<ResolvedConfigDrive>,
     pub network_attachments: Vec<NetworkAttachmentSpec>,
 }
 
@@ -1422,8 +1421,7 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         vcpus,
         memory_mib,
         disk_gib,
-        config_drive_artifact_id,
-        config_drive_sha256,
+        config_drive,
         network_attachments,
     } = spec;
     if agent_id.trim().is_empty()
@@ -1443,8 +1441,9 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         || !(1..=256).contains(&vcpus)
         || !(1..=1_048_576).contains(&memory_mib)
         || !(1..=1_048_576).contains(&disk_gib)
-        || !valid_reference(&config_drive_artifact_id)
-        || !valid_sha256(&config_drive_sha256)
+        || config_drive.as_ref().is_some_and(|drive| {
+            !valid_reference(&drive.artifact_id) || !valid_sha256(&drive.sha256)
+        })
         || network_attachments.is_empty()
         || network_attachments
             .iter()
@@ -1465,11 +1464,15 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         proto::ArtifactKind::ImageBase,
         &image_artifact_id,
     );
-    let config_drive_transfer_id = deterministic_artifact_transfer_id(
-        &command_id,
-        proto::ArtifactKind::ConfigDriveIso,
-        &config_drive_artifact_id,
-    );
+    let config_drive_transfer = config_drive.as_ref().map(|drive| proto::ArtifactReference {
+        transfer_id: deterministic_artifact_transfer_id(
+            &command_id,
+            proto::ArtifactKind::ConfigDriveIso,
+            &drive.artifact_id,
+        ),
+        size_bytes: 0,
+        expires_at_unix_ms: deadline_unix_ms,
+    });
     let network_port_ids = network_attachments
         .iter()
         .map(|attachment| attachment.port_id.clone())
@@ -1485,18 +1488,18 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
             vcpus,
             memory_mib,
             disk_gib,
-            config_drive_artifact_id,
-            config_drive_sha256,
+            config_drive_artifact_id: config_drive
+                .as_ref()
+                .map_or_else(String::new, |drive| drive.artifact_id.clone()),
+            config_drive_sha256: config_drive
+                .as_ref()
+                .map_or_else(String::new, |drive| drive.sha256.clone()),
             image_transfer: Some(proto::ArtifactReference {
                 transfer_id: image_transfer_id,
                 size_bytes: 0,
                 expires_at_unix_ms: deadline_unix_ms,
             }),
-            config_drive_transfer: Some(proto::ArtifactReference {
-                transfer_id: config_drive_transfer_id,
-                size_bytes: 0,
-                expires_at_unix_ms: deadline_unix_ms,
-            }),
+            config_drive_transfer,
             network_attachments: network_attachments
                 .into_iter()
                 .map(|attachment| proto::NetworkAttachment {
@@ -1508,6 +1511,7 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
                 })
                 .collect(),
             project_id,
+            config_drive_enabled: Some(config_drive.is_some()),
         }),
     };
     let canonical = proto::CanonicalCommandPayload {
@@ -1925,7 +1929,10 @@ fn has_duplicate_network_ports(attachments: &[NetworkAttachmentSpec]) -> bool {
 /// journaled create (real-host failure at commit 4421013, issue #87: every
 /// restart exits "create command resolved inputs are invalid" before any
 /// network connect).
-fn validate_proto_create_identity(create: &proto::CreateCommand) -> Result<(), AgentError> {
+fn validate_proto_create_identity(command: &proto::Command) -> Result<(), AgentError> {
+    let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
+        return Err(AgentError::Protocol("create command is invalid".to_owned()));
+    };
     let Some(resolved) = create.resolved.as_ref() else {
         return Err(AgentError::Protocol(
             "create command resolved inputs are required".to_owned(),
@@ -1939,18 +1946,10 @@ fn validate_proto_create_identity(create: &proto::CreateCommand) -> Result<(), A
         || !(1..=256).contains(&resolved.vcpus)
         || !(1..=1_048_576).contains(&resolved.memory_mib)
         || !(1..=1_048_576).contains(&resolved.disk_gib)
-        || !valid_reference(&resolved.config_drive_artifact_id)
-        || !valid_sha256(&resolved.config_drive_sha256)
+        || config_drive::validate_config_drive_identity(command).is_err()
         || resolved.image_transfer.as_ref().is_none_or(|reference| {
             !valid_reference(&reference.transfer_id) || reference.size_bytes > MAX_ARTIFACT_BYTES
         })
-        || resolved
-            .config_drive_transfer
-            .as_ref()
-            .is_none_or(|reference| {
-                !valid_reference(&reference.transfer_id)
-                    || reference.size_bytes > MAX_ARTIFACT_BYTES
-            })
         || resolved.network_attachments.iter().any(|attachment| {
             !valid_network_attachment(&NetworkAttachmentSpec {
                 port_id: attachment.port_id.clone(),
@@ -1991,22 +1990,20 @@ fn validate_proto_create_identity(create: &proto::CreateCommand) -> Result<(), A
 /// Admission-time validation of a create: identity and shape plus the
 /// transfer admission expiry fence. The fence must never run on the journal
 /// decode/replay path — use `validate_proto_create_identity` there.
-fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError> {
-    validate_proto_create_identity(create)?;
-    if let Some(reference) = create
-        .resolved
-        .as_ref()
-        .and_then(|resolved| resolved.image_transfer.as_ref())
+fn validate_proto_create(command: &proto::Command) -> Result<(), AgentError> {
+    validate_proto_create_identity(command)?;
+    let resolved = command.action.as_ref().and_then(|action| match action {
+        proto::command::Action::Create(create) => create.resolved.as_ref(),
+        _ => None,
+    });
+    if let Some(reference) = resolved.and_then(|resolved| resolved.image_transfer.as_ref())
         && reference.expires_at_unix_ms <= unix_ms()
     {
         return Err(AgentError::Protocol(
             "create command resolved inputs are invalid".to_owned(),
         ));
     }
-    if let Some(reference) = create
-        .resolved
-        .as_ref()
-        .and_then(|resolved| resolved.config_drive_transfer.as_ref())
+    if let Some(reference) = resolved.and_then(|resolved| resolved.config_drive_transfer.as_ref())
         && reference.expires_at_unix_ms <= unix_ms()
     {
         return Err(AgentError::Protocol(
@@ -3522,7 +3519,7 @@ impl CommandExecutor for FakeCommandExecutor {
         let provider_resource_id = format!("fake-{}", stable_fake_resource_id(&resource_key));
         match command.action.as_ref() {
             Some(proto::command::Action::Create(create)) => {
-                validate_proto_create(create)?;
+                validate_proto_create(command)?;
                 let mut resources = self
                     .resources
                     .lock()
@@ -5400,8 +5397,10 @@ mod tests {
             vcpus: 1,
             memory_mib: 512,
             disk_gib: 10,
-            config_drive_artifact_id: "config-drive-1".to_owned(),
-            config_drive_sha256: "b".repeat(64),
+            config_drive: Some(o3k_provider::ResolvedConfigDrive {
+                artifact_id: "config-drive-1".to_owned(),
+                sha256: "b".repeat(64),
+            }),
             network_attachments: vec![NetworkAttachmentSpec {
                 port_id: "port-1".to_owned(),
                 mac: "02:00:00:00:00:01".to_owned(),
@@ -5499,7 +5498,8 @@ mod tests {
             return Err(AgentError::Protocol("expected resolved inputs".to_owned()));
         };
         resolved.image_transfer = None;
-        assert!(validate_proto_create(create).is_err());
+        let _ = create;
+        assert!(validate_command_action(&command, true).is_err());
 
         let mut command = fake_create_command()?;
         let Some(proto::command::Action::Create(create)) = command.action.as_mut() else {
@@ -5511,7 +5511,8 @@ mod tests {
         if let Some(reference) = resolved.image_transfer.as_mut() {
             reference.expires_at_unix_ms = unix_ms().saturating_sub(1);
         }
-        assert!(validate_proto_create(create).is_err());
+        let _ = create;
+        assert!(validate_command_action(&command, true).is_err());
         Ok(())
     }
 
@@ -5714,8 +5715,10 @@ mod tests {
             vcpus: 1,
             memory_mib: 512,
             disk_gib: 10,
-            config_drive_artifact_id: "config-drive-1".to_owned(),
-            config_drive_sha256: "b".repeat(64),
+            config_drive: Some(o3k_provider::ResolvedConfigDrive {
+                artifact_id: "config-drive-1".to_owned(),
+                sha256: "b".repeat(64),
+            }),
             network_attachments: vec![NetworkAttachmentSpec {
                 port_id: "port-1".to_owned(),
                 mac: "02:00:00:00:00:01".to_owned(),
@@ -5740,8 +5743,10 @@ mod tests {
             vcpus: 1,
             memory_mib: 512,
             disk_gib: 10,
-            config_drive_artifact_id: "config-drive-1".to_owned(),
-            config_drive_sha256: "b".repeat(64),
+            config_drive: Some(o3k_provider::ResolvedConfigDrive {
+                artifact_id: "config-drive-1".to_owned(),
+                sha256: "b".repeat(64),
+            }),
             network_attachments: vec![NetworkAttachmentSpec {
                 port_id: "port-1".to_owned(),
                 mac: "02:00:00:00:00:01".to_owned(),
@@ -5767,8 +5772,10 @@ mod tests {
             vcpus: 1,
             memory_mib: 512,
             disk_gib: 10,
-            config_drive_artifact_id: "config-drive-1".to_owned(),
-            config_drive_sha256: "b".repeat(64),
+            config_drive: Some(o3k_provider::ResolvedConfigDrive {
+                artifact_id: "config-drive-1".to_owned(),
+                sha256: "b".repeat(64),
+            }),
             network_attachments: vec![NetworkAttachmentSpec {
                 port_id: "port-2".to_owned(),
                 mac: "02:00:00:00:00:02".to_owned(),
@@ -5782,6 +5789,96 @@ mod tests {
             first.payload_fingerprint_sha256,
             changed.payload_fingerprint_sha256
         );
+        Ok(())
+    }
+
+    #[test]
+    fn config_drive_absence_is_explicit_and_fingerprinted() -> Result<(), AgentError> {
+        let deadline = unix_ms().saturating_add(10_000);
+        let mut no_drive_spec = valid_create_spec();
+        no_drive_spec.operation_id = "config-drive-optional-operation".to_owned();
+        no_drive_spec.resource_id = "config-drive-optional-resource".to_owned();
+        no_drive_spec.idempotency_key = "config-drive-optional".to_owned();
+        no_drive_spec.config_drive = None;
+        no_drive_spec.deadline_unix_ms = deadline;
+
+        let no_drive = build_create_command(no_drive_spec.clone())?;
+        let repeated_no_drive = build_create_command(no_drive_spec)?;
+        assert_eq!(no_drive, repeated_no_drive);
+        validate_proto_create_identity(&no_drive)?;
+        let Some(proto::command::Action::Create(no_drive_create)) = no_drive.action.as_ref() else {
+            return Err(AgentError::Protocol("expected create action".to_owned()));
+        };
+        let Some(no_drive_resolved) = no_drive_create.resolved.as_ref() else {
+            return Err(AgentError::Protocol("expected resolved inputs".to_owned()));
+        };
+        assert_eq!(no_drive_resolved.config_drive_enabled, Some(false));
+        assert!(no_drive_resolved.config_drive_artifact_id.is_empty());
+        assert!(no_drive_resolved.config_drive_sha256.is_empty());
+        assert!(no_drive_resolved.config_drive_transfer.is_none());
+
+        let identity = PathBuf::from(format!(
+            "/tmp/o3k-config-drive-optional-journal-{}",
+            std::process::id()
+        ));
+        let path = command_journal_file(&identity);
+        let _ = fs::remove_file(&path);
+        let mut journal = CommandJournal::open(&identity, "node")?;
+        if !matches!(journal.accept(&no_drive)?, JournalDecision::New { .. }) {
+            return Err(AgentError::Protocol(
+                "no-config-drive command unexpectedly replayed".to_owned(),
+            ));
+        }
+        drop(journal);
+        let reopened = CommandJournal::open(&identity, "node")?;
+        assert!(matches!(
+            reopened.entries.values().next().map(|entry| entry.state),
+            Some(JournalState::Unknown)
+        ));
+        assert_eq!(
+            reopened
+                .entries
+                .values()
+                .next()
+                .map(|entry| entry.command.payload_fingerprint_sha256.as_str()),
+            Some(no_drive.payload_fingerprint_sha256.as_str())
+        );
+        fs::remove_file(path).map_err(AgentError::IdentityStore)?;
+
+        let mut with_drive_spec = valid_create_spec();
+        with_drive_spec.operation_id = "config-drive-optional-operation".to_owned();
+        with_drive_spec.resource_id = "config-drive-optional-resource".to_owned();
+        with_drive_spec.idempotency_key = "config-drive-optional".to_owned();
+        with_drive_spec.deadline_unix_ms = deadline;
+        let with_drive = build_create_command(with_drive_spec)?;
+        assert_ne!(
+            no_drive.payload_fingerprint_sha256,
+            with_drive.payload_fingerprint_sha256
+        );
+
+        let mut malformed = no_drive.clone();
+        if let Some(proto::command::Action::Create(create)) = malformed.action.as_mut()
+            && let Some(resolved) = create.resolved.as_mut()
+        {
+            resolved.config_drive_artifact_id = "config-drive-1".to_owned();
+        }
+        assert!(validate_proto_create_identity(&malformed).is_err());
+
+        let mut legacy_complete = with_drive.clone();
+        if let Some(proto::command::Action::Create(create)) = legacy_complete.action.as_mut()
+            && let Some(resolved) = create.resolved.as_mut()
+        {
+            resolved.config_drive_enabled = None;
+        }
+        assert!(validate_proto_create_identity(&legacy_complete).is_ok());
+
+        let mut legacy_absent = no_drive;
+        if let Some(proto::command::Action::Create(create)) = legacy_absent.action.as_mut()
+            && let Some(resolved) = create.resolved.as_mut()
+        {
+            resolved.config_drive_enabled = None;
+        }
+        assert!(validate_proto_create_identity(&legacy_absent).is_err());
         Ok(())
     }
 
@@ -5871,8 +5968,10 @@ mod tests {
             vcpus: 1,
             memory_mib: 512,
             disk_gib: 10,
-            config_drive_artifact_id: "config-drive-1".to_owned(),
-            config_drive_sha256: "b".repeat(64),
+            config_drive: Some(o3k_provider::ResolvedConfigDrive {
+                artifact_id: "config-drive-1".to_owned(),
+                sha256: "b".repeat(64),
+            }),
             network_attachments: vec![NetworkAttachmentSpec {
                 port_id: "port-1".to_owned(),
                 mac: "02:00:00:00:00:01".to_owned(),
@@ -5923,8 +6022,10 @@ mod tests {
             vcpus: 1,
             memory_mib: 512,
             disk_gib: 10,
-            config_drive_artifact_id: "config-drive-1".to_owned(),
-            config_drive_sha256: "b".repeat(64),
+            config_drive: Some(o3k_provider::ResolvedConfigDrive {
+                artifact_id: "config-drive-1".to_owned(),
+                sha256: "b".repeat(64),
+            }),
             network_attachments: vec![NetworkAttachmentSpec {
                 port_id: "port-2".to_owned(),
                 mac: "02:00:00:00:00:02".to_owned(),
@@ -6617,9 +6718,11 @@ mod tests {
                     .to_owned(),
                 image_format: "qcow2".to_owned(),
                 disk_gib: 10,
-                config_drive_artifact_id: "config-drive.test".to_owned(),
-                config_drive_sha256:
-                    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+                config_drive: Some(o3k_provider::ResolvedConfigDrive {
+                    artifact_id: "config-drive.test".to_owned(),
+                    sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                        .to_owned(),
+                }),
                 network_attachments: vec![NetworkAttachmentSpec {
                     port_id: "port.test".to_owned(),
                     mac: "52:54:00:12:34:56".to_owned(),

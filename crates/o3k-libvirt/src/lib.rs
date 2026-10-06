@@ -1893,6 +1893,10 @@ mod tests {
             }],
         };
         let xml = build_domain_xml(&spec)?.xml;
+        assert!(
+            !xml.contains("device=\"cdrom\""),
+            "a create without config-drive media must not attach an empty CD-ROM"
+        );
         assert!(xml.contains("<interface type=\"ethernet\">"));
         assert!(xml.contains("mac address=\"02:00:00:00:00:01\""));
         assert!(xml.contains("target dev=\"o3ktap-a1b2c3d4\""));

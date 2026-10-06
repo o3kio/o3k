@@ -133,6 +133,15 @@ pub struct NetworkAttachmentSpec {
     pub gateway_ipv4: String,
 }
 
+/// Verified config-drive identity when a create explicitly requests media.
+/// Absence is represented as `None`; placeholder artifact identifiers and
+/// digests are never used for a disabled config drive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConfigDrive {
+    pub artifact_id: String,
+    pub sha256: String,
+}
+
 /// Fully resolved, immutable inputs required by the agent create command.
 /// The control plane constructs this value from its image, network, and
 /// config-drive services; the agent provider never guesses paths, checksums,
@@ -144,8 +153,7 @@ pub struct ResolvedCreateInputs {
     pub image_sha256: String,
     pub image_format: String,
     pub disk_gib: u64,
-    pub config_drive_artifact_id: String,
-    pub config_drive_sha256: String,
+    pub config_drive: Option<ResolvedConfigDrive>,
     pub network_attachments: Vec<NetworkAttachmentSpec>,
 }
 

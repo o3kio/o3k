@@ -72,7 +72,7 @@ pub(crate) struct CreateDomainIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommittedCreateInputs {
     pub(crate) image: CommittedArtifact,
-    pub(crate) config_drive: CommittedArtifact,
+    pub(crate) config_drive: Option<CommittedArtifact>,
     pub(crate) network_attachments: Vec<VerifiedNetworkAttachment>,
     pub(crate) identity: CreateDomainIdentity,
 }
@@ -106,11 +106,11 @@ pub(crate) fn resolve_create_domain_spec(
             "create command resolved inputs are missing".to_owned(),
         ));
     };
+    let config_drive_requested = o3k_compute_agent::config_drive_requested(command)
+        .map_err(|_| AgentError::Protocol("config-drive command state is invalid".to_owned()))?;
     if resolved.image_artifact_id.trim().is_empty()
         || resolved.image_sha256.trim().is_empty()
         || resolved.image_format.trim().is_empty()
-        || resolved.config_drive_artifact_id.trim().is_empty()
-        || resolved.config_drive_sha256.trim().is_empty()
     {
         return Err(AgentError::Protocol(
             "create command artifact references are incomplete".to_owned(),
@@ -128,10 +128,15 @@ pub(crate) fn resolve_create_domain_spec(
         || committed.image.kind != proto::ArtifactKind::ImageBase
         || committed.image.sha256 != resolved.image_sha256
         || committed.image.format != resolved.image_format
-        || committed.config_drive.artifact_id != resolved.config_drive_artifact_id
-        || committed.config_drive.kind != proto::ArtifactKind::ConfigDriveIso
-        || committed.config_drive.sha256 != resolved.config_drive_sha256
-        || committed.config_drive.format != "iso"
+        || committed.config_drive.as_ref().is_some_and(|artifact| {
+            artifact.kind != proto::ArtifactKind::ConfigDriveIso || artifact.format != "iso"
+        })
+        || (config_drive_requested
+            && committed.config_drive.as_ref().is_none_or(|artifact| {
+                artifact.artifact_id != resolved.config_drive_artifact_id
+                    || artifact.sha256 != resolved.config_drive_sha256
+            }))
+        || (!config_drive_requested && committed.config_drive.is_some())
     {
         return Err(AgentError::Protocol(
             "committed artifact evidence does not match create references".to_owned(),
@@ -148,8 +153,9 @@ pub(crate) fn resolve_create_domain_spec(
     }
     if committed.image.path.as_os_str().is_empty()
         || !committed.image.path.is_absolute()
-        || committed.config_drive.path.as_os_str().is_empty()
-        || !committed.config_drive.path.is_absolute()
+        || committed.config_drive.as_ref().is_some_and(|artifact| {
+            artifact.path.as_os_str().is_empty() || !artifact.path.is_absolute()
+        })
     {
         return Err(AgentError::Protocol(
             "committed artifact paths must be absolute host-local paths".to_owned(),
@@ -212,9 +218,11 @@ pub(crate) fn resolve_create_domain_spec(
         vcpus: resolved.vcpus,
         memory_mib: resolved.memory_mib,
         image_id: committed.image.path.to_string_lossy().into_owned(),
-        config_drive_image: Some(o3k_libvirt::ConfigDriveImage {
-            path: committed.config_drive.path.to_string_lossy().into_owned(),
-            sha256: committed.config_drive.sha256.clone(),
+        config_drive_image: committed.config_drive.as_ref().map(|artifact| {
+            o3k_libvirt::ConfigDriveImage {
+                path: artifact.path.to_string_lossy().into_owned(),
+                sha256: artifact.sha256.clone(),
+            }
         }),
         network_interfaces,
     };
@@ -265,19 +273,32 @@ pub(crate) fn resolve_committed_create_inputs(
             AgentError::Protocol("instance image overlay could not be realized".to_owned())
         })?
         .overlay_path;
-    let config_path = store
-        .resolve_committed_artifact(&o3k_compute_agent::CommittedArtifactQuery {
-            command_id: command.command_id.clone(),
-            operation_id: command.operation_id.clone(),
-            resource_id: command.resource_id.clone(),
+    let config_drive = if o3k_compute_agent::config_drive_requested(command)
+        .map_err(|_| AgentError::Protocol("config-drive command state is invalid".to_owned()))?
+    {
+        let path = store
+            .resolve_committed_artifact(&o3k_compute_agent::CommittedArtifactQuery {
+                command_id: command.command_id.clone(),
+                operation_id: command.operation_id.clone(),
+                resource_id: command.resource_id.clone(),
+                artifact_id: resolved.config_drive_artifact_id.clone(),
+                kind: proto::ArtifactKind::ConfigDriveIso,
+                sha256: resolved.config_drive_sha256.clone(),
+                format: "iso".to_owned(),
+            })
+            .map_err(|_| {
+                AgentError::Protocol("committed config-drive artifact is unavailable".to_owned())
+            })?;
+        Some(CommittedArtifact {
             artifact_id: resolved.config_drive_artifact_id.clone(),
             kind: proto::ArtifactKind::ConfigDriveIso,
-            sha256: resolved.config_drive_sha256.clone(),
             format: "iso".to_owned(),
+            sha256: resolved.config_drive_sha256.clone(),
+            path,
         })
-        .map_err(|_| {
-            AgentError::Protocol("committed config-drive artifact is unavailable".to_owned())
-        })?;
+    } else {
+        None
+    };
     let mut network_attachments = Vec::with_capacity(resolved.network_attachments.len());
     for attachment in &resolved.network_attachments {
         let (tap_name, ownership) = if network_owned_by_external_agent {
@@ -330,13 +351,7 @@ pub(crate) fn resolve_committed_create_inputs(
             sha256: resolved.image_sha256.clone(),
             path: image_path,
         },
-        config_drive: CommittedArtifact {
-            artifact_id: resolved.config_drive_artifact_id.clone(),
-            kind: proto::ArtifactKind::ConfigDriveIso,
-            format: "iso".to_owned(),
-            sha256: resolved.config_drive_sha256.clone(),
-            path: config_path,
-        },
+        config_drive,
         network_attachments,
         identity: CreateDomainIdentity {
             server_id: command.resource_id.clone(),
@@ -762,7 +777,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     memory_mib = spec.memory_mib,
                     network_attachment_count = spec.network_interfaces.len(),
                     image_artifact_id = %committed.image.artifact_id,
-                    config_drive_artifact_id = %committed.config_drive.artifact_id,
+                    config_drive_artifact_id = ?committed.config_drive.as_ref().map(|drive| &drive.artifact_id),
                     xml_bytes = definition.xml.len(),
                     "libvirt create request"
                 );

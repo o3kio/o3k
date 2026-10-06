@@ -1109,8 +1109,17 @@ mod tests {
                     disk_gib: 1,
                     config_drive_artifact_id: "config-artifact".to_owned(),
                     config_drive_sha256: "b".repeat(64),
+                    config_drive_enabled: Some(true),
                     image_transfer: None,
-                    config_drive_transfer: None,
+                    config_drive_transfer: Some(proto::ArtifactReference {
+                        transfer_id: o3k_compute_agent::deterministic_artifact_transfer_id(
+                            "",
+                            proto::ArtifactKind::ConfigDriveIso,
+                            "config-artifact",
+                        ),
+                        size_bytes: 1,
+                        expires_at_unix_ms: i64::MAX,
+                    }),
                     project_id: "project-1".to_owned(),
                     network_attachments: vec![proto::NetworkAttachment {
                         port_id: "port-1".to_owned(),
@@ -1138,6 +1147,7 @@ mod tests {
             action: Some(proto::command::Action::Create(proto::CreateCommand {
                 resolved: Some(proto::ResolvedCreateInputs {
                     image_artifact_id: String::new(),
+                    config_drive_enabled: Some(false),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1237,8 +1247,18 @@ mod tests {
                     image_format: "qcow2".to_owned(),
                     vcpus: 1,
                     memory_mib: 512,
+                    config_drive_enabled: Some(true),
                     config_drive_artifact_id: "config-artifact".to_owned(),
                     config_drive_sha256: "b".repeat(64),
+                    config_drive_transfer: Some(proto::ArtifactReference {
+                        transfer_id: o3k_compute_agent::deterministic_artifact_transfer_id(
+                            "command-1",
+                            proto::ArtifactKind::ConfigDriveIso,
+                            "config-artifact",
+                        ),
+                        size_bytes: 1,
+                        expires_at_unix_ms: i64::MAX,
+                    }),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1253,13 +1273,13 @@ mod tests {
                 sha256: "a".repeat(64),
                 path: PathBuf::from("/var/lib/o3k/artifacts/image.qcow2"),
             },
-            config_drive: CommittedArtifact {
+            config_drive: Some(CommittedArtifact {
                 artifact_id: "config-artifact".to_owned(),
                 kind: proto::ArtifactKind::ConfigDriveIso,
                 format: "iso".to_owned(),
                 sha256: "b".repeat(64),
                 path: PathBuf::from("/var/lib/o3k/artifacts/config.iso"),
-            },
+            }),
             network_attachments: Vec::new(),
             identity: CreateDomainIdentity {
                 server_id: "server-1".to_owned(),
@@ -1290,8 +1310,18 @@ mod tests {
                     image_format: "qcow2".to_owned(),
                     vcpus: 1,
                     memory_mib: 512,
+                    config_drive_enabled: Some(true),
                     config_drive_artifact_id: "config-artifact".to_owned(),
                     config_drive_sha256: "b".repeat(64),
+                    config_drive_transfer: Some(proto::ArtifactReference {
+                        transfer_id: o3k_compute_agent::deterministic_artifact_transfer_id(
+                            "command-1",
+                            proto::ArtifactKind::ConfigDriveIso,
+                            "config-artifact",
+                        ),
+                        size_bytes: 1,
+                        expires_at_unix_ms: i64::MAX,
+                    }),
                     network_attachments: vec![proto::NetworkAttachment {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
@@ -1313,13 +1343,13 @@ mod tests {
                 sha256: "a".repeat(64),
                 path: PathBuf::from("/var/lib/o3k/artifacts/image.qcow2"),
             },
-            config_drive: CommittedArtifact {
+            config_drive: Some(CommittedArtifact {
                 artifact_id: "config-artifact".to_owned(),
                 kind: proto::ArtifactKind::ConfigDriveIso,
                 format: "iso".to_owned(),
                 sha256: "b".repeat(64),
                 path: PathBuf::from("/var/lib/o3k/artifacts/config.iso"),
-            },
+            }),
             network_attachments: vec![VerifiedNetworkAttachment {
                 port_id: "port-1".to_owned(),
                 tap_name: "eth0".to_owned(),
@@ -1365,8 +1395,18 @@ mod tests {
                     image_format: "qcow2".to_owned(),
                     vcpus: 1,
                     memory_mib: 512,
+                    config_drive_enabled: Some(true),
                     config_drive_artifact_id: "config-artifact".to_owned(),
                     config_drive_sha256: config_drive_sha256.to_owned(),
+                    config_drive_transfer: Some(proto::ArtifactReference {
+                        transfer_id: o3k_compute_agent::deterministic_artifact_transfer_id(
+                            "command-1",
+                            proto::ArtifactKind::ConfigDriveIso,
+                            "config-artifact",
+                        ),
+                        size_bytes: 3,
+                        expires_at_unix_ms: i64::MAX,
+                    }),
                     network_attachments: vec![proto::NetworkAttachment {
                         port_id: endpoint_id.to_string(),
                         mac: guest_mac.to_owned(),
@@ -1388,13 +1428,13 @@ mod tests {
                 sha256: "a".repeat(64),
                 path: PathBuf::from("/var/lib/o3k/artifacts/image.qcow2"),
             },
-            config_drive: CommittedArtifact {
+            config_drive: Some(CommittedArtifact {
                 artifact_id: "config-artifact".to_owned(),
                 kind: proto::ArtifactKind::ConfigDriveIso,
                 format: "iso".to_owned(),
                 sha256: config_drive_sha256.to_owned(),
                 path: config_drive_path.clone(),
-            },
+            }),
             network_attachments: vec![VerifiedNetworkAttachment {
                 port_id: endpoint_id.to_string(),
                 tap_name: "o3k-t-a1b2c3d4".to_owned(),
@@ -1437,6 +1477,26 @@ mod tests {
         assert!(xml.contains(&format!("mac address=\"{guest_mac}\"")));
         assert!(xml.contains("target dev=\"o3k-t-a1b2c3d4\""));
         assert!(!xml.contains(tap_mac));
+
+        let mut no_drive_command = command.clone();
+        if let Some(proto::command::Action::Create(create)) = no_drive_command.action.as_mut()
+            && let Some(resolved) = create.resolved.as_mut()
+        {
+            resolved.config_drive_enabled = Some(false);
+            resolved.config_drive_artifact_id.clear();
+            resolved.config_drive_sha256.clear();
+            resolved.config_drive_transfer = None;
+        }
+        let mut no_drive_committed = committed.clone();
+        no_drive_committed.config_drive = None;
+        let no_drive_spec =
+            resolve_create_domain_spec(&no_drive_command, Some(&no_drive_committed))
+                .expect("explicitly disabled config drive should resolve without media");
+        assert!(no_drive_spec.config_drive_image.is_none());
+        let no_drive_xml = o3k_libvirt::build_domain_xml(&no_drive_spec)
+            .expect("no-config-drive domain XML")
+            .xml;
+        assert!(!no_drive_xml.contains("device=\"cdrom\""));
         std::fs::remove_file(config_drive_path).expect("remove config drive fixture");
     }
 
