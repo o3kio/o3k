@@ -1,3 +1,7 @@
+use super::tap_observation::{
+    ExpectedEndpointTap, TapObservationError, attest_endpoint_tap, is_same_created_tap,
+    observe_endpoint_tap,
+};
 use super::*;
 
 impl super::LinuxFabricBackend {
@@ -376,22 +380,45 @@ impl super::LinuxFabricBackend {
             {
                 return Err(LinuxFabricError::OwnershipConflict);
             }
-            let (exists, output) = self
-                .command
-                .output("ip", &["-d", "link", "show", "dev", &wanted.interface])
-                .map_err(LinuxFabricError::Storage)?;
-            if exists && !tap_link_matches(&output, wanted, &current.bridge) {
-                return Err(LinuxFabricError::ForeignState);
-            }
-            if exists
-                && !current.endpoint_taps.contains_key(&wanted.endpoint_id)
-                && !current
+            let expected = ExpectedEndpointTap {
+                interface: wanted.interface.clone(),
+                provider_mac: wanted.mac.clone(),
+                realm_bridge: current.bridge.clone(),
+            };
+            let was_owned = current.endpoint_taps.contains_key(&wanted.endpoint_id)
+                || current
                     .pending_endpoint_taps
-                    .contains_key(&wanted.endpoint_id)
-            {
-                return Err(LinuxFabricError::ForeignState);
+                    .contains_key(&wanted.endpoint_id);
+            let existing = match observe_endpoint_tap(self.command.as_ref(), &wanted.interface) {
+                Ok(existing) => existing,
+                Err(error) => {
+                    if was_owned {
+                        self.demote_endpoint_tap(plan.realm_id, wanted.endpoint_id)?;
+                    }
+                    return Err(endpoint_tap_provider_error(error));
+                }
+            };
+            if let Some(observed) = existing.as_ref() {
+                if !was_owned {
+                    return Err(LinuxFabricError::ForeignState);
+                }
+                if attest_endpoint_tap(self.command.as_ref(), &expected, observed).is_err() {
+                    self.demote_endpoint_tap(plan.realm_id, wanted.endpoint_id)?;
+                    return Err(LinuxFabricError::ForeignState);
+                }
+                continue;
             }
-            if !exists {
+
+            if current.endpoint_taps.contains_key(&wanted.endpoint_id) {
+                // A previously committed TAP is now absent. Reclassify it as
+                // pending before recreating the kernel object so a crash in
+                // the creation window cannot leave committed ownership for
+                // an unattested live link.
+                self.demote_endpoint_tap(plan.realm_id, wanted.endpoint_id)?;
+            }
+
+            let mut created_ifindex = None;
+            if existing.is_none() {
                 for args in [
                     vec![
                         "tuntap",
@@ -419,14 +446,68 @@ impl super::LinuxFabricBackend {
                     ],
                     vec!["link", "set", "dev", wanted.interface.as_str(), "up"],
                 ] {
-                    if !self
-                        .command
-                        .run("ip", &args)
-                        .map_err(LinuxFabricError::Storage)?
-                    {
+                    let command_succeeded = match self.command.run("ip", &args) {
+                        Ok(succeeded) => succeeded,
+                        Err(error) => {
+                            if let Some(ifindex) = created_ifindex {
+                                self.rollback_created_endpoint_tap(&expected, ifindex)?;
+                            }
+                            return Err(LinuxFabricError::Storage(error));
+                        }
+                    };
+                    if !command_succeeded {
+                        if let Some(ifindex) = created_ifindex {
+                            self.rollback_created_endpoint_tap(&expected, ifindex)?;
+                        }
                         return Err(LinuxFabricError::CommandFailed);
                     }
+                    if args.first() == Some(&"tuntap") {
+                        let created =
+                            observe_endpoint_tap(self.command.as_ref(), &wanted.interface)
+                                .map_err(endpoint_tap_provider_error)?
+                                .ok_or(LinuxFabricError::CommandFailed)?;
+                        created_ifindex = Some(created.ifindex);
+                        if created.interface != wanted.interface
+                            || created.kind.as_deref() != Some("tun")
+                            || created.subtype.as_deref() != Some("tap")
+                        {
+                            self.rollback_created_endpoint_tap(&expected, created.ifindex)?;
+                            return Err(LinuxFabricError::ForeignState);
+                        }
+                    }
                 }
+            }
+            let postcondition = match observe_endpoint_tap(self.command.as_ref(), &wanted.interface)
+            {
+                Ok(Some(observed)) => observed,
+                Ok(None) => {
+                    if let Some(ifindex) = created_ifindex {
+                        self.rollback_created_endpoint_tap(&expected, ifindex)?;
+                    }
+                    return Err(LinuxFabricError::ForeignState);
+                }
+                Err(error) => {
+                    if let Some(ifindex) = created_ifindex {
+                        self.rollback_created_endpoint_tap(&expected, ifindex)?;
+                    }
+                    return Err(endpoint_tap_provider_error(error));
+                }
+            };
+            if let Err(error) =
+                attest_endpoint_tap(self.command.as_ref(), &expected, &postcondition)
+            {
+                if let Some(ifindex) = created_ifindex {
+                    self.rollback_created_endpoint_tap(&expected, ifindex)?;
+                }
+                return Err(match error {
+                    TapObservationError::Absent
+                    | TapObservationError::MultipleLinks
+                    | TapObservationError::Malformed
+                    | TapObservationError::WrongInterface
+                    | TapObservationError::WrongLinkType
+                    | TapObservationError::WrongMac
+                    | TapObservationError::WrongBridge => LinuxFabricError::ForeignState,
+                });
             }
         }
         if current.endpoint_taps != desired || !current.pending_endpoint_taps.is_empty() {
@@ -448,14 +529,18 @@ impl super::LinuxFabricBackend {
         tap: &EndpointTapOwnership,
         bridge: &str,
     ) -> Result<(), LinuxFabricError> {
-        let (exists, output) = self
-            .command
-            .output("ip", &["-d", "link", "show", "dev", &tap.interface])
-            .map_err(LinuxFabricError::Storage)?;
-        if exists && !tap_link_matches(&output, tap, bridge) {
-            return Err(LinuxFabricError::ForeignState);
+        let expected = ExpectedEndpointTap {
+            interface: tap.interface.clone(),
+            provider_mac: tap.mac.clone(),
+            realm_bridge: bridge.to_owned(),
+        };
+        let observed = observe_endpoint_tap(self.command.as_ref(), &tap.interface)
+            .map_err(endpoint_tap_provider_error)?;
+        if let Some(observed) = &observed {
+            attest_endpoint_tap(self.command.as_ref(), &expected, observed)
+                .map_err(|_| LinuxFabricError::ForeignState)?;
         }
-        if exists
+        if observed.is_some()
             && !self
                 .command
                 .run("ip", &["link", "del", "dev", &tap.interface])
@@ -464,5 +549,88 @@ impl super::LinuxFabricBackend {
             return Err(LinuxFabricError::CommandFailed);
         }
         Ok(())
+    }
+
+    fn rollback_created_endpoint_tap(
+        &self,
+        expected: &ExpectedEndpointTap,
+        created_ifindex: u32,
+    ) -> Result<(), LinuxFabricError> {
+        let observed = observe_endpoint_tap(self.command.as_ref(), &expected.interface)
+            .map_err(endpoint_tap_provider_error)?;
+        let Some(observed) = observed else {
+            return Ok(());
+        };
+        if !is_same_created_tap(&observed, expected, created_ifindex) {
+            return Ok(());
+        }
+        if !self
+            .command
+            .run("ip", &["link", "del", "dev", &expected.interface])
+            .map_err(LinuxFabricError::Storage)?
+        {
+            return Err(LinuxFabricError::CommandFailed);
+        }
+        Ok(())
+    }
+
+    fn demote_endpoint_tap(
+        &mut self,
+        realm_id: Uuid,
+        endpoint_id: Uuid,
+    ) -> Result<(), LinuxFabricError> {
+        let realm = self
+            .state
+            .realms
+            .get_mut(&realm_id)
+            .ok_or(LinuxFabricError::CorruptState)?;
+        if let Some(tap) = realm.endpoint_taps.remove(&endpoint_id) {
+            realm.pending_endpoint_taps.insert(endpoint_id, tap);
+            store_state(&self.state_path, &self.state)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn attest_committed_endpoint_taps(
+        &mut self,
+        realm_id: Uuid,
+    ) -> Result<(), LinuxFabricError> {
+        let realm = self
+            .state
+            .realms
+            .get(&realm_id)
+            .cloned()
+            .ok_or(LinuxFabricError::CorruptState)?;
+        for tap in realm.endpoint_taps.values() {
+            let expected = ExpectedEndpointTap {
+                interface: tap.interface.clone(),
+                provider_mac: tap.mac.clone(),
+                realm_bridge: realm.bridge.clone(),
+            };
+            let valid = observe_endpoint_tap(self.command.as_ref(), &tap.interface)
+                .ok()
+                .flatten()
+                .as_ref()
+                .is_some_and(|observed| {
+                    attest_endpoint_tap(self.command.as_ref(), &expected, observed).is_ok()
+                });
+            if !valid {
+                self.demote_endpoint_tap(realm_id, tap.endpoint_id)?;
+                return Err(LinuxFabricError::ForeignState);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn endpoint_tap_provider_error(error: TapObservationError) -> LinuxFabricError {
+    match error {
+        TapObservationError::Absent => LinuxFabricError::CommandFailed,
+        TapObservationError::MultipleLinks
+        | TapObservationError::Malformed
+        | TapObservationError::WrongInterface
+        | TapObservationError::WrongLinkType
+        | TapObservationError::WrongMac
+        | TapObservationError::WrongBridge => LinuxFabricError::ForeignState,
     }
 }

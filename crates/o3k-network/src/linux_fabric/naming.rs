@@ -140,15 +140,6 @@ pub(crate) fn endpoint_tap_mac(realm_id: Uuid, endpoint_id: Uuid) -> String {
     )
 }
 
-pub(crate) fn tap_link_matches(
-    output: &str,
-    ownership: &EndpointTapOwnership,
-    bridge: &str,
-) -> bool {
-    output.contains("tun")
-        && output.contains(&format!("link/ether {}", ownership.mac))
-        && output.contains(&format!("master {}", bridge))
-}
 pub(crate) fn valid_wireguard_key(value: &str) -> bool {
     value.len() == 44
         && value.ends_with('=')

@@ -1,8 +1,10 @@
 use super::{
     LinuxFabricCommand, ProviderState, STATE_VERSION, SystemLinuxFabricCommand, endpoint_tap_mac,
+    tap_observation::{
+        ExpectedEndpointTap, TapObservationError, attest_endpoint_tap, observe_endpoint_tap,
+    },
 };
 use o3k_domain::NamespacedRoutedFabricPlan;
-use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs,
@@ -95,7 +97,7 @@ impl LinuxFabricAttachmentResolver {
         )
     }
 
-    fn with_command(
+    pub(crate) fn with_command(
         root: PathBuf,
         local_host: String,
         command: Arc<dyn LinuxFabricCommand>,
@@ -217,12 +219,16 @@ impl LinuxFabricAttachmentResolver {
         {
             return Err(FabricAttachmentError::OwnershipMismatch);
         }
-        let expected = LiveTapExpectation {
-            name: &tap.interface,
-            mac: &tap.mac,
-            bridge: &realm.bridge,
+        let expected = ExpectedEndpointTap {
+            interface: tap.interface.clone(),
+            provider_mac: tap.mac.clone(),
+            realm_bridge: realm.bridge.clone(),
         };
-        observe_live_tap(self.command.as_ref(), expected)?;
+        let observed = observe_endpoint_tap(self.command.as_ref(), &expected.interface)
+            .map_err(map_tap_observation_error)?
+            .ok_or(FabricAttachmentError::LiveTapAbsent)?;
+        attest_endpoint_tap(self.command.as_ref(), &expected, &observed)
+            .map_err(map_tap_observation_error)?;
         Ok(FabricEndpointAttachmentEvidence {
             endpoint_id,
             realm_id: plan.realm_id,
@@ -242,79 +248,16 @@ impl LinuxFabricAttachmentResolver {
     }
 }
 
-struct LiveTapExpectation<'a> {
-    name: &'a str,
-    mac: &'a str,
-    bridge: &'a str,
-}
-
-fn observe_live_tap(
-    command: &dyn LinuxFabricCommand,
-    expected: LiveTapExpectation<'_>,
-) -> Result<(), FabricAttachmentError> {
-    let (tap_exists, tap_output) = command
-        .output("ip", &["-j", "-d", "link", "show", "dev", expected.name])
-        .map_err(|_| FabricAttachmentError::ObservationFailed)?;
-    if !tap_exists {
-        return Err(FabricAttachmentError::LiveTapAbsent);
+fn map_tap_observation_error(error: TapObservationError) -> FabricAttachmentError {
+    match error {
+        TapObservationError::Absent => FabricAttachmentError::LiveTapAbsent,
+        TapObservationError::WrongLinkType
+        | TapObservationError::WrongInterface
+        | TapObservationError::MultipleLinks => FabricAttachmentError::WrongLinkType,
+        TapObservationError::WrongMac => FabricAttachmentError::TapMacMismatch,
+        TapObservationError::WrongBridge => FabricAttachmentError::RealmBridgeMismatch,
+        TapObservationError::Malformed => FabricAttachmentError::ObservationFailed,
     }
-    let tap: Value =
-        serde_json::from_str(&tap_output).map_err(|_| FabricAttachmentError::ObservationFailed)?;
-    let Some(tap) = tap
-        .as_array()
-        .and_then(|links| (links.len() == 1).then(|| &links[0]))
-    else {
-        return Err(FabricAttachmentError::LiveTapAbsent);
-    };
-    let tap_name = tap["ifname"].as_str();
-    let tap_mac = tap["address"].as_str();
-    let linkinfo = tap
-        .get("linkinfo")
-        .and_then(Value::as_object)
-        .ok_or(FabricAttachmentError::WrongLinkType)?;
-    if tap_name != Some(expected.name)
-        || linkinfo.get("info_kind").and_then(Value::as_str) != Some("tun")
-    {
-        return Err(FabricAttachmentError::WrongLinkType);
-    }
-    let info_data = linkinfo
-        .get("info_data")
-        .and_then(Value::as_object)
-        .ok_or(FabricAttachmentError::WrongLinkType)?;
-    if info_data.get("type").and_then(Value::as_str) != Some("tap") {
-        return Err(FabricAttachmentError::WrongLinkType);
-    }
-    if tap_mac.is_none_or(|mac| !mac.eq_ignore_ascii_case(expected.mac)) {
-        return Err(FabricAttachmentError::TapMacMismatch);
-    }
-    let (bridge_exists, bridge_output) = command
-        .output("ip", &["-j", "-d", "link", "show", "dev", expected.bridge])
-        .map_err(|_| FabricAttachmentError::ObservationFailed)?;
-    if !bridge_exists {
-        return Err(FabricAttachmentError::RealmBridgeMismatch);
-    }
-    let bridge: Value = serde_json::from_str(&bridge_output)
-        .map_err(|_| FabricAttachmentError::ObservationFailed)?;
-    let Some(bridge) = bridge
-        .as_array()
-        .and_then(|links| (links.len() == 1).then(|| &links[0]))
-    else {
-        return Err(FabricAttachmentError::RealmBridgeMismatch);
-    };
-    if bridge["ifname"].as_str() != Some(expected.bridge)
-        || bridge["linkinfo"]["info_kind"].as_str() != Some("bridge")
-    {
-        return Err(FabricAttachmentError::RealmBridgeMismatch);
-    }
-    let tap_master = tap["master"].as_str().or_else(|| {
-        tap["master"].as_u64().and_then(|index| {
-            (bridge["ifindex"].as_u64() == Some(index)).then_some(expected.bridge)
-        })
-    });
-    if tap_master != Some(expected.bridge) {
-        return Err(FabricAttachmentError::RealmBridgeMismatch);
-    }
-    Ok(())
 }
 
 fn read_state(path: &Path) -> Result<ProviderState, FabricAttachmentError> {
@@ -779,7 +722,7 @@ mod tests {
             .push(json!({"ifname":"unexpected"}));
         assert_eq!(
             current.resolve(endpoint_id, "fa:16:3e:12:34:56", "compute-a"),
-            Err(FabricAttachmentError::LiveTapAbsent)
+            Err(FabricAttachmentError::WrongLinkType)
         );
         fs::remove_dir_all(root).expect("remove fixture");
     }
