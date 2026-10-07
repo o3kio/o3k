@@ -36,7 +36,7 @@ PORT_IDS=()
 NETWORK_ID=""
 SUBNET_ID=""
 IMAGE_ID=""
-declare -A MGMT_IP=() MGMT_OCTET=() MGMT_MAC=()
+declare -A MGMT_IP=() MGMT_OCTET=() MGMT_MAC=() REALM_BRIDGE=() GUEST_IPV6=()
 HOSTS=(a b c)
 
 fail() {
@@ -501,6 +501,7 @@ print('\t'.join((tap,record['mac'],realm_id,realm['bridge'],mac)))
 PY
 )" || fail "domain TAP target or durable provider ownership did not match" "ATTACHMENT_DEFECT"
   IFS=$'\t' read -r tap tap_mac realm_id bridge guest_domain_mac <<<"$tap_contract"
+  REALM_BRIDGE[$host]="$bridge"
   ssh_vm "$address" "sudo ip -j -d link show dev '$tap'" >"$EVIDENCE/attachments/server-$host-live-tap.json" || fail "real Fabric TAP disappeared for $host" "ATTACHMENT_DEFECT"
   ssh_vm "$address" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json'" >"$EVIDENCE/attachments/server-$host-fabric-plan.json" || fail "current Fabric plan observation failed for $host" "ATTACHMENT_DEFECT"
   ssh_vm "$address" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json'" >"$EVIDENCE/attachments/server-$host-execution-plans.json" || fail "network execution plan observation failed for $host" "ATTACHMENT_DEFECT"
@@ -552,52 +553,117 @@ create_server a
 create_server b
 create_server c
 
-console_command() {
-  local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" domain
+guest_boot_proof() {
+  local host="$1" address="${MGMT_IP[$1]}" domain xml serial_path serial_dir
   domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
-  python3 - "$SSH_KEY" "$KNOWN_HOSTS" "$SSH_USER" "$address" "$domain" "$command" "$EVIDENCE/$label" <<'PY'
-import pexpect,sys
-key,known,user,address,domain,command,output=sys.argv[1:]
-args=["-tt","-i",key,"-o","BatchMode=yes","-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=yes", "-o",f"UserKnownHostsFile={known}",f"{user}@{address}",f"sudo virsh -c qemu:///system console --force --safe {domain}"]
-p=pexpect.spawn("ssh",args,encoding="utf-8",timeout=45)
-p.logfile=open(output,"w",encoding="utf-8")
-try:
-    i=p.expect([r"(?i)login:",r"(?m)[^\r\n]*[#$] ?$",pexpect.EOF])
-    if i==0:
-        p.sendline("cirros")
-        p.expect(r"(?i)password:")
-        p.sendline("gocubsgo")
-        p.expect(r"(?m)[^\r\n]*[#$] ?$")
-    elif i==2:
-        raise RuntimeError("serial console ended before shell readiness")
-    p.sendline(command+"; rc=$?; echo __O3K_RC_$rc__")
-    p.expect(r"__O3K_RC_([0-9]+)__")
-    rc=int(p.match.group(1))
-    p.send("\x1d")
-    p.expect(pexpect.EOF,timeout=8)
-    if rc:
-        raise SystemExit(rc)
-finally:
-    if p.isalive(): p.close(force=True)
+  xml="$EVIDENCE/compute-$host/domain.xml"
+  serial_path="$(python3 - "$xml" "$RUN_ID" <<'PY'
+import sys,xml.etree.ElementTree as ET
+root=ET.parse(sys.argv[1]).getroot(); run=sys.argv[2]
+devices=root.find('devices'); matches=[]
+for node in devices.findall('serial') if devices is not None else []:
+    source=node.find('source')
+    path=source.get('path','') if source is not None else ''
+    if node.get('type')=='file' and path.startswith(f'/var/lib/o3k-fabric-v3/{run}/compute/console/'):
+        matches.append(path)
+assert len(matches)==1, matches
+print(matches[0])
 PY
-  local rc=$?
-  return "$rc"
+)" || return 1
+  serial_dir="/var/lib/o3k-fabric-v3/$RUN_ID/compute/console/"
+  [[ "$serial_path" == "$serial_dir"* && "$serial_path" != *$'\n'* ]] || return 1
+  for _ in $(seq 1 240); do
+    if ssh_vm "$address" "sudo test -f '$serial_path' && sudo cat '$serial_path'" >"$EVIDENCE/compute-$host/serial.log" 2>/dev/null; then
+      if grep -Eqi "CirrOS.*login:|login as 'cirros' user|cirros login:" "$EVIDENCE/compute-$host/serial.log"; then
+        printf 'domain=%s\nserial_file=%s\nboot_login_prompt=PASS\n' "$domain" "$serial_path" >"$EVIDENCE/compute-$host/guest-serial-login.txt"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  return 1
 }
 
-wait_guest_shell() {
-  local host="$1" output="compute-$1/guest-serial-login.txt"
-  console_command "$host" 'echo GUEST_SHELL_READY' "$output" || return 1
-  grep -Fq GUEST_SHELL_READY "$EVIDENCE/$output"
+mac_link_local() {
+  python3 - "$1" <<'PY'
+import sys
+b=bytes.fromhex(sys.argv[1].replace(':',''))
+assert len(b)==6
+b=bytes([b[0]^2,b[1],b[2],0xff,0xfe,b[3],b[4],b[5]])
+print('fe80::'+':'.join(f'{int.from_bytes(b[i:i+2],"big"):x}' for i in range(0,8,2)))
+PY
 }
-for host in a b c; do wait_guest_shell "$host" || fail "guest $host serial boot/login proof failed" "ENVIRONMENT_GAP"; done
+
+for host in a b c; do
+  guest_boot_proof "$host" || fail "guest $host file-backed serial did not prove boot/login readiness" "ENVIRONMENT_GAP"
+done
 
 declare -A TENANT_IP=() TENANT_MAC=()
 for host in a b c; do
   TENANT_IP[$host]="$(field port.fixed_ips.0.ip_address <"$EVIDENCE/api/port-$host.response.json")"
   TENANT_MAC[$host]="$(field port.mac_address <"$EVIDENCE/api/port-$host.response.json")"
+  GUEST_IPV6[$host]="$(mac_link_local "${TENANT_MAC[$host]}")"
 done
 printf 'server,host,tenant_ip,guest_mac\n' >"$EVIDENCE/canonical/endpoints.csv"
 for host in a b c; do printf '%s,host-%s,%s,%s\n' "$host" "$host" "${TENANT_IP[$host]}" "${TENANT_MAC[$host]}" >>"$EVIDENCE/canonical/endpoints.csv"; done
+
+guest_tunnel_command() {
+  local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" bridge="${REALM_BRIDGE[$1]}" ipv6="${GUEST_IPV6[$1]}"
+  local port tunnel_pid known_alias keyscan_file rc
+  port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+  known_alias="o3k-guest-$host"
+  tunnel_log="$EVIDENCE/compute-$host/guest-ssh-tunnel.log"
+  ssh "${ssh_opts[@]}" -o ExitOnForwardFailure=yes -N -L "127.0.0.1:$port:[$ipv6%$bridge]:22" "$SSH_USER@$address" >"$tunnel_log" 2>&1 &
+  tunnel_pid=$!
+  cleanup_tunnel() { kill "$tunnel_pid" 2>/dev/null || true; wait "$tunnel_pid" 2>/dev/null || true; }
+  for _ in $(seq 1 40); do
+    if timeout 1 bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1; then break; fi
+    if ! kill -0 "$tunnel_pid" 2>/dev/null; then cat "$tunnel_log" >&2; cleanup_tunnel; return 1; fi
+    sleep 0.25
+  done
+  if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1; then cleanup_tunnel; return 1; fi
+  keyscan_file="$EVIDENCE/compute-$host/guest-keyscan.tmp"
+  ssh-keyscan -T 4 -p "$port" 127.0.0.1 2>/dev/null >"$keyscan_file" || { cleanup_tunnel; return 1; }
+  python3 - "$keyscan_file" "$KNOWN_HOSTS" "$known_alias" "$port" <<'PY'
+import sys
+src,dst,alias,port=sys.argv[1:]
+lines=[]
+for line in open(src):
+    fields=line.split()
+    if len(fields)>=3: lines.append(f'[{alias}]:{port} {fields[1]} {fields[2]}\n')
+assert lines
+with open(dst,'a') as out: out.writelines(lines)
+PY
+  rm -f "$keyscan_file"
+  python3 - "$KNOWN_HOSTS" "$SSH_KEY" "$known_alias" "$port" "$command" "$EVIDENCE/$label" <<'PY'
+import pexpect,shlex,sys
+known,key,alias,port,command,output=sys.argv[1:]
+wrapped=f'{command}; rc=$?; printf "\\n__O3K_RC_%s__\\n" "$rc"'
+args=['-tt','-i',key,'-p',port,'-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes','-o',f'HostKeyAlias={alias}','-o',f'UserKnownHostsFile={known}','-o','PreferredAuthentications=password','-o','PubkeyAuthentication=no',f'cirros@127.0.0.1',wrapped]
+p=pexpect.spawn('ssh',args,encoding='utf-8',timeout=45)
+with open(output,'w',encoding='utf-8') as f:
+    p.logfile_read=f
+    try:
+        for _ in range(3):
+            i=p.expect([r"(?i)password:",r'__O3K_RC_([0-9]+)__',pexpect.EOF])
+            if i==0:
+                p.sendline('gocubsgo')
+                continue
+            if i==1:
+                rc=int(p.match.group(1)); p.expect(pexpect.EOF,timeout=8)
+                if rc: raise SystemExit(rc)
+                break
+            raise RuntimeError('guest SSH closed before command completed')
+        else: raise RuntimeError('guest SSH authentication prompt repeated')
+    finally:
+        if p.isalive(): p.close(force=True)
+PY
+  rc=$?
+  cleanup_tunnel
+  return "$rc"
+}
+
+console_command() { guest_tunnel_command "$@"; }
 
 # Cold neighbor resolution and the six required tenant-address ICMP flows.
 for pair in a:b b:a a:c c:a b:c c:b; do
