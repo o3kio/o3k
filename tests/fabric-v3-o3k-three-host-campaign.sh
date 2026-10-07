@@ -93,7 +93,7 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/env
 
 cleanup_on_success() {
   local rc=$?
-  stop_dhcp_capture || true
+  if declare -F stop_dhcp_capture >/dev/null 2>&1; then stop_dhcp_capture || true; fi
   if (( rc == 0 )) && [[ "${CAMPAIGN_TEARDOWN_PASS:-0}" == 1 ]]; then
     # Teardown is API-led; guests are deleted only if their exact run prefix
     # and UUID markers still match the inventory recorded by this process.
@@ -169,6 +169,17 @@ O3K_QEMU_PREFLIGHT_RUN_ID="$RUN_ID" bash "$ROOT_DIR/tests/fabric-v3-qemu-storage
 
 virsh -c qemu:///system net-info "$NETWORK" >"$EVIDENCE/environment/libvirt-network.txt" 2>&1 || fail "libvirt management network unavailable" "ENVIRONMENT_GAP"
 virsh -c qemu:///system list --all --name | sed '/^$/d' | sort >"$EVIDENCE/environment/libvirt-domains-before.txt"
+USED_MACS="$EVIDENCE/environment/libvirt-macs-before.txt"
+: >"$USED_MACS"
+while IFS= read -r existing_domain; do
+  [[ -n "$existing_domain" ]] || continue
+  virsh -c qemu:///system domiflist "$existing_domain" 2>/dev/null \
+    | awk 'tolower($0) ~ /([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}/ {for (i=1;i<=NF;i++) if ($i ~ /^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$/) print tolower($i)}' \
+    >>"$USED_MACS"
+done <"$EVIDENCE/environment/libvirt-domains-before.txt"
+virsh -c qemu:///system net-dhcp-leases "$NETWORK" 2>/dev/null \
+  | awk 'tolower($0) ~ /([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}/ {for (i=1;i<=NF;i++) if ($i ~ /^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$/) print tolower($i)}' \
+  >>"$USED_MACS"
 net_active="$(awk -F': *' '/^Active:/{print $2}' "$EVIDENCE/environment/libvirt-network.txt")"
 [[ "$net_active" == yes ]] || fail "libvirt management network is inactive" "ENVIRONMENT_GAP"
 BRIDGE="$(virsh -c qemu:///system net-dumpxml "$NETWORK" | sed -n "s/.*bridge name='\([^']*\)'.*/\1/p" | head -1)"
@@ -205,13 +216,32 @@ for index in 0 1 2; do
 done
 printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_IP[a]}" "${MGMT_IP[b]}" "${MGMT_IP[c]}" >"$EVIDENCE/environment/management-addresses.txt"
 
+fresh_mgmt_mac() {
+  local host="$1" attempt=0 candidate
+  while (( attempt < 256 )); do
+    candidate="$(python3 - "$RUN_ID:$host:$attempt" <<'PY'
+import hashlib,sys
+tail=hashlib.sha256(sys.argv[1].encode()).digest()[:5]
+print("02:"+":".join(f"{byte:02x}" for byte in tail))
+PY
+    )"
+    if ! grep -Fxqi "$candidate" "$USED_MACS"; then
+      printf '%s\n' "$candidate" >>"$USED_MACS"
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    ((attempt+=1))
+  done
+  return 1
+}
+
 for host in a b c; do
   octet="${MGMT_OCTET[$host]}"; domain="$PREFIX-compute-$host"; address="${MGMT_IP[$host]}"
   if virsh -c qemu:///system dominfo "$domain" >/dev/null 2>&1; then fail "fresh domain name collision: $domain" "ENVIRONMENT_GAP"; fi
   disk="$IMAGE_STORE/$PREFIX-compute-$host.qcow2"; seed="$IMAGE_STORE/$PREFIX-compute-$host-seed.iso"; ws="$EVIDENCE/environment/seed-$host"
   [[ ! -e "$disk" && ! -e "$seed" ]] || fail "fresh guest disk/seed collision for $host" "ENVIRONMENT_GAP"
   mkdir -m 0700 "$ws"
-  mac="52:54:00:fa:32:$(printf '%02x' "$((octet-210))")"
+  mac="$(fresh_mgmt_mac "$host")" || fail "could not allocate an unused management MAC for compute-$host" "ENVIRONMENT_GAP"
   cat >"$ws/user-data" <<EOF
 #cloud-config
 hostname: compute-$host
