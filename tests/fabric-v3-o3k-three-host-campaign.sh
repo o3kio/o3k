@@ -444,7 +444,7 @@ FLAVOR_ID="$(api "$BASE/v2.1/$PROJECT_ID/flavors" | python3 -c 'import json,sys;
 start_dhcp_capture() {
   local port_id="$1" address="${MGMT_IP[a]}" remote_capture
   remote_capture="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp-capture"
-  ssh_vm "$address" "sudo install -d -m 0700 '$remote_capture' && sudo bash -c 'nohup tcpdump -i any -nn -e -U -w \"$remote_capture/dora.pcap\" \"udp and (port 67 or port 68)\" >\"$remote_capture/tcpdump.log\" 2>&1 </dev/null & echo \\$! >\"$remote_capture/tcpdump.pid\"'"
+  ssh_vm "$address" "sudo install -d -m 0700 '$remote_capture' && sudo bash -c 'nohup tcpdump -i any -nn -e -U -w \"$remote_capture/dora.pcap\" \"udp and (port 67 or port 68)\" >\"$remote_capture/tcpdump.log\" 2>&1 </dev/null & echo \$! >\"$remote_capture/tcpdump.pid\"'"
   DHCP_CAPTURE_PID="$(ssh_vm "$address" "sudo cat '$remote_capture/tcpdump.pid'")"
   [[ "$DHCP_CAPTURE_PID" =~ ^[0-9]+$ ]] || fail "run-owned DHCP packet capture did not start" "HARNESS_GAP"
   DHCP_CAPTURE_HOST=a
