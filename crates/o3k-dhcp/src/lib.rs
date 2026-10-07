@@ -411,6 +411,7 @@ impl DhcpService {
         validate_config(config)?;
         let (network, _) = subnet_bounds(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
         let dhcp_start = Ipv4Addr::from(u32::from(network) + 1);
+        let subnet_mask = subnet_mask(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
         let mut lines = vec![
             "# Managed by o3k-dhcp; do not edit.".to_owned(),
             format!("interface={}", config.interface),
@@ -431,6 +432,10 @@ impl DhcpService {
             // only hosts with a dhcp-host binding, preserving the static-only
             // intent for fixed IPs.
             format!("dhcp-range={},static,{}", dhcp_start, config.lease_seconds),
+            // Fabric gives its DHCP gateway a /32 on the Realm bridge to
+            // avoid installing overlapping tenant routes. Keep the client
+            // mask sourced from the canonical tenant subnet instead.
+            format!("dhcp-option=1,{subnet_mask}"),
             format!("dhcp-option=3,{}", config.gateway),
         ];
         if !config.dns.is_empty() {
@@ -535,6 +540,20 @@ fn subnet_bounds(cidr: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
     Some((Ipv4Addr::from(network), Ipv4Addr::from(network | !mask)))
 }
 
+fn subnet_mask(cidr: &str) -> Option<Ipv4Addr> {
+    let (_, prefix) = cidr.split_once('/')?;
+    let prefix = prefix.parse::<u8>().ok()?;
+    if prefix > 30 {
+        return None;
+    }
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Some(Ipv4Addr::from(mask))
+}
+
 fn valid_mac(mac: &str) -> bool {
     mac.len() == 17
         && mac.split(':').count() == 6
@@ -597,6 +616,7 @@ mod tests {
         // `start,end,static` is rejected ("bad dhcp-range"); the static-only
         // intent is `start,static[,lease]`, which spans the interface subnet.
         assert!(rendered.contains("dhcp-range=192.0.2.1,static,3600"));
+        assert!(rendered.contains("dhcp-option=1,255.255.255.0"));
         assert!(rendered.contains("dhcp-leasefile="));
         assert!(service.managed_lease_path().ends_with("dnsmasq.leases"));
         Ok(())
