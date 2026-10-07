@@ -253,7 +253,7 @@ packages:
   - curl
 runcmd:
   - [systemctl, enable, --now, libvirtd]
-  - [usermod, -aG, libvirt,kvm, o3k]
+  - [usermod, -aG, "libvirt,kvm", o3k]
 EOF
   cat >"$ws/network-config" <<EOF
 version: 2
@@ -288,7 +288,10 @@ for host in a b c; do
   (( ready == 1 )) || fail "authenticated SSH readiness timed out for compute-$host" "ENVIRONMENT_GAP"
   packages_ready=0
   for _ in $(seq 1 240); do
-    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && sudo systemctl is-active --quiet libvirtd' >/dev/null 2>&1; then
+    # Ubuntu may run libvirtd on demand through systemd sockets and let the
+    # daemon exit while idle. Exercise the actual qemu:///system API instead
+    # of requiring the monolithic service process to remain active.
+    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && test -c /dev/kvm && sudo virsh -c qemu:///system list --all >/dev/null 2>&1' >/dev/null 2>&1; then
       packages_ready=1
       break
     fi
