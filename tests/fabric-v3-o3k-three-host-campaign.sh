@@ -4,8 +4,8 @@ set -Eeuo pipefail
 # Supported-HTTP Fabric v3 three-host nested campaign. This script is test
 # harness only and refuses to run against a different product source tree.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRODUCT_SHA=fa51ef1fb1affc8f35553a1072ca5c434da8bf4b
-PRODUCT_TREE=e27ea22b3a473a5300bfaf320c79892a5d07d142
+PRODUCT_SHA=94048f93c66e583c2f7ae53e02be08852cc4ab34
+PRODUCT_TREE=91a0b79c1dbc56fe0b2e518a2489913ac6507c33
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 CIRROS_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
 CIRROS_SHA=7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
@@ -28,6 +28,8 @@ STAGE="$EVIDENCE/environment/stage"
 BASE=""
 TOKEN=""
 O3KD_PID=""
+DHCP_CAPTURE_PID=""
+DHCP_CAPTURE_HOST=""
 CAMPAIGN_FAILURE=""
 CLASSIFICATION=""
 FRESH_DOMAINS=()
@@ -92,6 +94,7 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/env
 
 cleanup_on_success() {
   local rc=$?
+  if declare -F stop_dhcp_capture >/dev/null 2>&1; then stop_dhcp_capture || true; fi
   if (( rc == 0 )) && [[ "${CAMPAIGN_TEARDOWN_PASS:-0}" == 1 ]]; then
     # Teardown is API-led; guests are deleted only if their exact run prefix
     # and UUID markers still match the inventory recorded by this process.
@@ -138,7 +141,7 @@ if ! command -v cargo >/dev/null 2>&1; then
     export PATH
   fi
 fi
-for tool in cargo curl openssl python3 virsh virt-install qemu-img genisoimage ssh ssh-keygen ssh-keyscan scp ip wg sha256sum tar timeout bridge hostnamectl; do need "$tool"; done
+for tool in cargo curl openssl python3 virsh virt-install qemu-img genisoimage ssh ssh-keygen ssh-keyscan scp ip wg tcpdump sha256sum tar timeout bridge hostnamectl; do need "$tool"; done
 [[ $EUID -eq 0 ]] || fail "campaign must run as root to provision nested libvirt guests" "ENVIRONMENT_GAP"
 [[ -c /dev/kvm ]] || fail "/dev/kvm unavailable" "ENVIRONMENT_GAP"
 [[ -r "$BASE_IMAGE" ]] || fail "base image unreadable: $BASE_IMAGE" "ENVIRONMENT_GAP"
@@ -256,6 +259,7 @@ packages:
   - qemu-utils
   - wireguard-tools
   - dnsmasq
+  - tcpdump
   - nftables
   - curl
 runcmd:
@@ -298,7 +302,7 @@ for host in a b c; do
     # Ubuntu may run libvirtd on demand through systemd sockets and let the
     # daemon exit while idle. Exercise the actual qemu:///system API instead
     # of requiring the monolithic service process to remain active.
-    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && test -c /dev/kvm && sudo virsh -c qemu:///system list --all >/dev/null 2>&1' >/dev/null 2>&1; then
+    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && command -v tcpdump >/dev/null && test -c /dev/kvm && sudo virsh -c qemu:///system list --all >/dev/null 2>&1' >/dev/null 2>&1; then
       packages_ready=1
       break
     fi
@@ -437,10 +441,47 @@ SUBNET_ID="$(field subnet.id <"$EVIDENCE/api/subnet-create.response.json")"
 FLAVOR_ID="$(api "$BASE/v2.1/$PROJECT_ID/flavors" | python3 -c 'import json,sys; print(json.load(sys.stdin)["flavors"][0]["id"])')"
 [[ -n "$FLAVOR_ID" ]] || fail "supported flavor listing returned no flavor" "SUPPORTED_API_GAP"
 
+start_dhcp_capture() {
+  local port_id="$1" address="${MGMT_IP[a]}" remote_capture
+  remote_capture="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp-capture"
+  ssh_vm "$address" "sudo install -d -m 0700 '$remote_capture' && sudo bash -c 'nohup tcpdump -i any -nn -e -U -w \"$remote_capture/dora.pcap\" \"udp and (port 67 or port 68)\" >\"$remote_capture/tcpdump.log\" 2>&1 </dev/null & echo \\$! >\"$remote_capture/tcpdump.pid\"'"
+  DHCP_CAPTURE_PID="$(ssh_vm "$address" "sudo cat '$remote_capture/tcpdump.pid'")"
+  [[ "$DHCP_CAPTURE_PID" =~ ^[0-9]+$ ]] || fail "run-owned DHCP packet capture did not start" "HARNESS_GAP"
+  DHCP_CAPTURE_HOST=a
+  ssh_vm "$address" "sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline && sudo cat /proc/$DHCP_CAPTURE_PID/cmdline | tr '\\0' ' '" >"$EVIDENCE/attachments/dhcp-capture-command.txt" \
+    || fail "DHCP capture process identity could not be observed" "HARNESS_GAP"
+  grep -Fq "$remote_capture/dora.pcap" "$EVIDENCE/attachments/dhcp-capture-command.txt" \
+    || fail "DHCP capture PID is not bound to the run-owned evidence path" "OWNERSHIP_DEFECT"
+  printf 'authority_host=host-a\ninterface=any\nport_id=%s\npid=%s\n' \
+    "$port_id" "$DHCP_CAPTURE_PID" >"$EVIDENCE/attachments/dhcp-capture-identity.txt"
+}
+
+stop_dhcp_capture() {
+  [[ -n "$DHCP_CAPTURE_PID" && "$DHCP_CAPTURE_HOST" == a ]] || return 0
+  local address="${MGMT_IP[a]:-}" remote_capture local_capture
+  [[ -n "$address" ]] || return 0
+  remote_capture="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp-capture"
+  local_capture="$EVIDENCE/attachments/dhcp-dora.pcap"
+  ssh_vm "$address" "if sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline && sudo cat /proc/$DHCP_CAPTURE_PID/cmdline | tr '\\0' ' ' | grep -Fq '$remote_capture/dora.pcap' && sudo test \"\$(sudo cat /proc/$DHCP_CAPTURE_PID/comm)\" = tcpdump; then sudo kill -INT '$DHCP_CAPTURE_PID'; fi" >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    ssh_vm "$address" "sudo test -e /proc/$DHCP_CAPTURE_PID" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  if ssh_vm "$address" "sudo test -f '$remote_capture/dora.pcap'" >/dev/null 2>&1; then
+    ssh_vm "$address" "sudo cp '$remote_capture/dora.pcap' /tmp/$RUN_ID-dhcp-dora.pcap && sudo chown '$SSH_USER:$SSH_USER' /tmp/$RUN_ID-dhcp-dora.pcap && sudo chmod 0600 /tmp/$RUN_ID-dhcp-dora.pcap" >/dev/null 2>&1 || true
+    scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+      -o "UserKnownHostsFile=$KNOWN_HOSTS" "$SSH_USER@$address:/tmp/$RUN_ID-dhcp-dora.pcap" \
+      "$local_capture" >/dev/null 2>&1 || true
+    ssh_vm "$address" "sudo rm -f /tmp/$RUN_ID-dhcp-dora.pcap; sudo cat '$remote_capture/tcpdump.log'" >"$EVIDENCE/attachments/dhcp-tcpdump.log" 2>/dev/null || true
+  fi
+  DHCP_CAPTURE_PID=""
+}
+
 create_server() {
   local host="$1" port_id response server_id status request
   port_id="$(api -X POST "$BASE/v2.0/ports" -H 'content-type: application/json' -d "{\"port\":{\"name\":\"$PREFIX-port-$host\",\"network_id\":\"$NETWORK_ID\"}}" | tee "$EVIDENCE/api/port-$host.response.json" | field port.id)"
   PORT_IDS+=("$port_id")
+  if [[ "$host" == a ]]; then start_dhcp_capture "$port_id"; fi
   request="$EVIDENCE/api/server-$host.create.json"
   python3 - "$request" "$PREFIX" "$host" "$IMAGE_ID" "$FLAVOR_ID" "$port_id" <<'PY'
 import json,sys
@@ -670,7 +711,134 @@ PY
   return "$rc"
 }
 
-console_command() { guest_tunnel_command "$@"; }
+console_command() {
+  local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" domain
+  domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
+  LAST_GUEST_CHANNEL_ERROR=0
+  if ! python3 - "$SSH_KEY" "$KNOWN_HOSTS" "$SSH_USER" "$address" "$domain" "$command" "$EVIDENCE/$label" <<'PY'
+import pexpect,sys
+key,known,user,address,domain,command,output=sys.argv[1:]
+args=['-i',key,'-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes',
+      '-o',f'UserKnownHostsFile={known}',f'{user}@{address}',
+      f'sudo virsh -c qemu:///system console --force --safe {domain}']
+p=pexpect.spawn('ssh',args,encoding='utf-8',timeout=45)
+with open(output,'w',encoding='utf-8') as f:
+    p.logfile_read=f
+    try:
+        i=p.expect([r'(?i)login:',r'(?m)[^\r\n]*[#$] ?$',pexpect.EOF])
+        if i==0:
+            p.sendline('cirros')
+            p.expect(r'(?i)password:')
+            p.sendline('gocubsgo')
+            p.expect(r'(?m)[^\r\n]*[#$] ?$')
+        elif i==2:
+            raise RuntimeError('serial console ended before shell readiness')
+        p.sendline(command+'; rc=$?; echo __O3K_RC_$rc__')
+        p.expect(r'__O3K_RC_([0-9]+)__')
+        rc=int(p.match.group(1))
+        p.send('\x1d')
+        p.expect(pexpect.EOF,timeout=8)
+        if rc: raise SystemExit(rc)
+    finally:
+        if p.isalive(): p.close(force=True)
+PY
+  then
+    LAST_GUEST_CHANNEL_ERROR=1
+    return 1
+  fi
+}
+
+# Read-only serial commands prove guest addressing without configuring an IP.
+for host in a b c; do
+  console_command "$host" 'ip -4 addr show' "compute-$host/guest-ip.txt" \
+    || fail "guest $host IPv4 observation failed" "DATAPLANE_DEFECT"
+  grep -Fq "${TENANT_IP[$host]}" "$EVIDENCE/compute-$host/guest-ip.txt" \
+    || fail "guest $host did not receive its canonical fixed IP through DHCP" "DATAPLANE_DEFECT"
+done
+
+stop_dhcp_capture
+[[ -s "$EVIDENCE/attachments/dhcp-dora.pcap" ]] \
+  || fail "DHCP capture is empty" "DATAPLANE_DEFECT"
+REALM_ID="$(python3 - "$EVIDENCE/attachments/server-a-provider-ownership.json" "${PORT_IDS[0]}" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1])); endpoint=sys.argv[2]
+matches=[rid for rid,r in x.get('realms',{}).items() if endpoint in r.get('endpoint_taps',{})]
+assert len(matches)==1,matches
+print(matches[0])
+PY
+)" || fail "canonical DHCP Realm could not be resolved" "OWNERSHIP_DEFECT"
+for host in a b c; do
+  address="${MGMT_IP[$host]}"
+  dhcp_root="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$REALM_ID"
+  ssh_vm "$address" "sudo cat '$dhcp_root/fabric-dhcp-ownership.json'" \
+    >"$EVIDENCE/attachments/dhcp-host-$host-ownership.json" \
+    || fail "host-$host has no durable Fabric DHCP observation" "DATAPLANE_DEFECT"
+  ssh_vm "$address" "sudo cat '$dhcp_root/state.json'" \
+    >"$EVIDENCE/attachments/dhcp-host-$host-state.json" \
+    || fail "host-$host has no Fabric DHCP state snapshot" "DATAPLANE_DEFECT"
+  ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print 2>/dev/null || true" \
+    >"$EVIDENCE/attachments/dhcp-host-$host-owned-pids.txt"
+done
+ssh_vm "${MGMT_IP[a]}" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$REALM_ID/dnsmasq.conf'" \
+  >"$EVIDENCE/attachments/dhcp-authority.conf" \
+  || fail "authority DHCP configuration is absent" "DATAPLANE_DEFECT"
+ssh_vm "${MGMT_IP[a]}" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$REALM_ID/dnsmasq.leases' 2>/dev/null || true" \
+  >"$EVIDENCE/attachments/dhcp-authority.leases"
+python3 - "$EVIDENCE/attachments" "$EVIDENCE/api" "${REALM_BRIDGE[a]}" <<'PY' \
+  || fail "single DHCP authority, remote bindings, or MTU evidence failed" "DATAPLANE_DEFECT"
+import json,pathlib,sys
+root,api=map(pathlib.Path,sys.argv[1:3]); bridge=sys.argv[3]
+expected={}
+for host in 'abc':
+    port=json.load(open(api/f'port-{host}.response.json'))['port']
+    expected[port['id']]={'mac':port['mac_address'].lower(),'ip':port['fixed_ips'][0]['ip_address']}
+    owner=json.load(open(root/f'dhcp-host-{host}-ownership.json'))
+    assert owner['local_host']==f'host-{host}' and owner['authority_host']=='host-a', owner
+    assert owner['dhcp_enabled'] and not owner['pending'] and not owner['withdrawn'], owner
+    pids=[line for line in (root/f'dhcp-host-{host}-owned-pids.txt').read_text().splitlines() if line.strip()]
+    assert len(pids)==(1 if host=='a' else 0),(host,pids)
+state=json.load(open(root/'dhcp-host-a-state.json'))
+assert state['config']['interface']==bridge,state['config']
+assert state['config']['mtu']==1390,state['config']
+bindings=state['bindings']
+assert set(bindings)==set(expected),(bindings,expected)
+for endpoint,want in expected.items():
+    got=bindings[endpoint]
+    assert got['mac'].lower()==want['mac'] and got['address']==want['ip'],(endpoint,got,want)
+conf=(root/'dhcp-authority.conf').read_text()
+assert f'interface={bridge}' in conf and 'dhcp-option=26,1390' in conf,conf
+for value in expected.values():
+    assert f"dhcp-host={value['mac']},{value['ip']}" in conf,(value,conf)
+PY
+tcpdump -nn -e -tt -vvv -r "$EVIDENCE/attachments/dhcp-dora.pcap" 'udp and (port 67 or port 68)' \
+  >"$EVIDENCE/attachments/dhcp-dora-decoded.txt" 2>&1 \
+  || fail "captured DHCP DORA pcap could not be decoded" "HARNESS_GAP"
+python3 - "$EVIDENCE/attachments/dhcp-dora-decoded.txt" "$EVIDENCE/api" <<'PY' \
+  || fail "DHCP DORA/cross-host broadcast/single-offer proof failed" "DATAPLANE_DEFECT"
+import json,pathlib,re,sys
+text=pathlib.Path(sys.argv[1]).read_text(errors='replace')
+api=pathlib.Path(sys.argv[2]); expected={}
+for host in 'abc':
+    p=json.load(open(api/f'port-{host}.response.json'))['port']
+    expected[p['mac_address'].lower()]=p['fixed_ips'][0]['ip_address']
+assert all(mac in text.lower() for mac in expected),(expected,text[:5000])
+labels={'DISCOVER':r'DHCP-Message[^\n]*Discover','OFFER':r'DHCP-Message[^\n]*Offer',
+        'REQUEST':r'DHCP-Message[^\n]*Request','ACK':r'DHCP-Message[^\n]*(?:ACK|Ack)'}
+for name,pattern in labels.items(): assert re.search(pattern,text,re.I),(name,text[:5000])
+blocks=re.split(r'(?m)(?=^\d+\.\d+\s+.*\bIP\s)',text); offers=[]
+for block in blocks:
+    if not re.search(r'DHCP-Message[^\n]*Offer',block,re.I): continue
+    xid=re.search(r' xid 0x([0-9a-f]+)',block,re.I)
+    client=re.search(r'Client-Ethernet-Address:?\s+([0-9a-f:]{17})',block,re.I)
+    server=re.search(r'Server-ID[^\n]*?([0-9]+(?:\.[0-9]+){3})',block,re.I)
+    if xid and client and server: offers.append((xid.group(1).lower(),client.group(1).lower(),server.group(1)))
+assert {client for _,client,_ in offers}==set(expected),offers
+assert len({(xid,client,server) for xid,client,server in offers})==3,offers
+assert len({server for _,_,server in offers})==1,offers
+PY
+echo 'FABRIC DHCP DORA: PASS (one authority; endpoint bindings A/B/C)' \
+  >"$EVIDENCE/attachments/dhcp-dora-result.txt"
+
 guest_failure_class() {
   local phase_class="$1"
   if (( LAST_GUEST_CHANNEL_ERROR )); then printf 'HARNESS_GAP\n'; else printf '%s\n' "$phase_class"; fi
