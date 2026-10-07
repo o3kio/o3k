@@ -281,6 +281,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse()?],
             interface: "o3k-br0".to_owned(),
             lease_seconds: 3600,
+            mtu: None,
         })?;
         for (port_id, address, mac) in [
             ("port-1", "192.0.2.10", "02:00:00:00:00:01"),
@@ -320,6 +321,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse()?],
             interface: "o3k-br0".to_owned(),
             lease_seconds: 3600,
+            mtu: None,
         })?;
         runtime.service.upsert_binding(o3k_dhcp::Binding {
             port_id: "port-1".to_owned(),
@@ -449,6 +451,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse()?],
             interface: "o3k-br0".to_owned(),
             lease_seconds: 3600,
+            mtu: None,
         })?;
         runtime.service.upsert_binding(o3k_dhcp::Binding {
             port_id: "port-1".to_owned(),
@@ -634,6 +637,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse()?],
             interface: "o3k-br0".to_owned(),
             lease_seconds: 3600,
+            mtu: None,
         })?;
         runtime.service.upsert_binding(o3k_dhcp::Binding {
             port_id: "port-1".to_owned(),
@@ -965,6 +969,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse()?],
             interface: "o3k-br0".to_owned(),
             lease_seconds: 3600,
+            mtu: None,
         })?;
         runtime.service.upsert_binding(o3k_dhcp::Binding {
             port_id: port_id.to_owned(),

@@ -699,6 +699,7 @@ impl NetworkPlanRealizer for FlatNetworkRealizer {
                 .bridge_name()
                 .ok_or(FlatNetworkError::MissingRealm)?,
             lease_seconds: 3600,
+            mtu: None,
         })?;
         for intent in &plan.intents {
             if let NetworkPlanIntent::EndpointAttachment {
@@ -881,6 +882,7 @@ mod tests {
             |ip: &str, length| Ipv4Prefix::new(ip.parse().expect("ip"), length).expect("prefix");
         value.node_id = "host-a".to_owned();
         let fabric = NamespacedRoutedFabricPlan {
+            dhcp: None,
             local_host: "host-a".to_owned(),
             local_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
             local_fabric_generation: 2,

@@ -121,8 +121,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             uplink: flat_uplink,
         },
         ownership_root,
-        dhcp_root,
-        dnsmasq,
+        dhcp_root.clone(),
+        dnsmasq.clone(),
         tap_access,
     )?;
     let routed = match external_realm {
@@ -154,6 +154,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?)),
         Err(_) => None,
     };
+    let fabric_dhcp = if fabric.is_some() {
+        Some(o3k_network::FabricDhcpRealizer::open(
+            dhcp_root.join("fabric"),
+            dnsmasq,
+        )?)
+    } else {
+        None
+    };
     let gateway = match env::var("O3K_NETWORK_GATEWAY_ROOT") {
         Ok(root) => {
             let contexts = match env::var("O3K_NETWORK_REALM_CONTEXTS") {
@@ -175,6 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         policy,
         public,
         fabric,
+        fabric_dhcp,
         gateway,
     };
     let service = agent::NetworkAgentService::new_dynamic(executor, realizer)?;
@@ -202,6 +211,7 @@ struct CompositeRealizer {
     policy: Option<StatefulPolicyProvider>,
     public: Option<PublicAddressRealizer>,
     fabric: Option<FabricRealizer<o3k_network::LinuxFabricBackend>>,
+    fabric_dhcp: Option<o3k_network::FabricDhcpRealizer>,
     gateway: Option<L3GatewayRealizer<LinuxL3GatewayProvider>>,
 }
 
@@ -225,6 +235,10 @@ enum CompositeRealizerError {
     FabricNotConfigured,
     #[error("Edge fabric realization failed: {0}")]
     Fabric(String),
+    #[error("Fabric DHCP realization failed: {0}")]
+    FabricDhcp(#[from] o3k_network::FabricDhcpError),
+    #[error("Fabric plan has no current provider-owned Realm bridge")]
+    FabricBridgeMissing,
     #[error("Edge fabric plan contains an intent not yet activated by the Fabric provider")]
     FabricUnsupportedIntent,
     #[error("L3 gateway realization failed: {0}")]
@@ -270,11 +284,36 @@ impl NetworkPlanRealizer for CompositeRealizer {
             }) {
                 return Err(CompositeRealizerError::FabricUnsupportedIntent);
             }
-            self.fabric
+            let fabric = self
+                .fabric
                 .as_mut()
-                .ok_or(CompositeRealizerError::FabricNotConfigured)?
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            fabric
                 .realize(plan)
                 .map_err(|error| CompositeRealizerError::Fabric(error.to_string()))?;
+            let fabric_plan = plan
+                .fabric
+                .as_ref()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            let bridge = fabric
+                .backend()
+                .realm_bridge_name(fabric_plan.realm_id)
+                .ok_or(CompositeRealizerError::FabricBridgeMissing)?;
+            let realm_generation = plan
+                .resource_generations
+                .get(&fabric_plan.realm_id)
+                .copied()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            let dhcp = self
+                .fabric_dhcp
+                .as_mut()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            dhcp.apply(fabric_plan, realm_generation, bridge)?;
+            if !dhcp.observe(fabric_plan, realm_generation, bridge)? {
+                return Err(CompositeRealizerError::FabricDhcp(
+                    o3k_network::FabricDhcpError::StaleGeneration,
+                ));
+            }
             return Ok(());
         }
         let mut flat_plan = plan.clone();
@@ -341,9 +380,24 @@ impl NetworkPlanRealizer for CompositeRealizer {
             }) {
                 return Err(CompositeRealizerError::FabricUnsupportedIntent);
             }
-            self.fabric
+            let fabric = self
+                .fabric
+                .as_mut()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            let fabric_plan = plan
+                .fabric
+                .as_ref()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            let realm_generation = plan
+                .resource_generations
+                .get(&fabric_plan.realm_id)
+                .copied()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            self.fabric_dhcp
                 .as_mut()
                 .ok_or(CompositeRealizerError::FabricNotConfigured)?
+                .remove(fabric_plan, realm_generation)?;
+            fabric
                 .remove(plan)
                 .map_err(|error| CompositeRealizerError::Fabric(error.to_string()))?;
             return Ok(());
@@ -405,12 +459,34 @@ impl NetworkPlanRealizer for CompositeRealizer {
             }
         }
         if plan.fabric.is_some() {
-            return self
+            let fabric = self
                 .fabric
                 .as_mut()
                 .ok_or(CompositeRealizerError::FabricNotConfigured)?
                 .observe(plan)
-                .map_err(|error| CompositeRealizerError::Fabric(error.to_string()));
+                .map_err(|error| CompositeRealizerError::Fabric(error.to_string()))?;
+            if !fabric {
+                return Ok(false);
+            }
+            let fabric_plan = plan
+                .fabric
+                .as_ref()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            let bridge = self
+                .fabric
+                .as_ref()
+                .and_then(|provider| provider.backend().realm_bridge_name(fabric_plan.realm_id))
+                .ok_or(CompositeRealizerError::FabricBridgeMissing)?;
+            let realm_generation = plan
+                .resource_generations
+                .get(&fabric_plan.realm_id)
+                .copied()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            return Ok(self
+                .fabric_dhcp
+                .as_mut()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?
+                .observe(fabric_plan, realm_generation, bridge)?);
         }
         let mut flat_plan = plan.clone();
         flat_plan.intents.retain(is_flat_intent);
@@ -440,6 +516,31 @@ impl NetworkPlanRealizer for CompositeRealizer {
                 .and_then(|provider| provider.observe().map_err(Into::into))?;
         }
         Ok(healthy)
+    }
+
+    fn observe_removed(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+        let Some(fabric_plan) = plan.fabric.as_ref() else {
+            return self.observe(plan).map(|present| !present);
+        };
+        let realm_generation = plan
+            .resource_generations
+            .get(&fabric_plan.realm_id)
+            .copied()
+            .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+        let fabric_removed = self
+            .fabric
+            .as_mut()
+            .ok_or(CompositeRealizerError::FabricNotConfigured)?
+            .observe_removed(plan)
+            .map_err(|error| CompositeRealizerError::Fabric(error.to_string()))?;
+        if !fabric_removed {
+            return Ok(false);
+        }
+        Ok(self
+            .fabric_dhcp
+            .as_mut()
+            .ok_or(CompositeRealizerError::FabricNotConfigured)?
+            .observe_removed(fabric_plan, realm_generation)?)
     }
 }
 

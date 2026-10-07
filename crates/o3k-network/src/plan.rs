@@ -145,6 +145,14 @@ impl NodeNetworkPlan {
         {
             return Err(NetworkPlanError::InvalidFabricPlan);
         }
+        if fabric.dhcp.is_some_and(|dhcp| {
+            !fabric.realm_prefix.contains(dhcp.gateway)
+                || dhcp.gateway == fabric.realm_prefix.network
+                || dhcp.gateway == Ipv4Addr::BROADCAST
+                || broadcast_address(fabric.realm_prefix) == Some(dhcp.gateway)
+        }) {
+            return Err(NetworkPlanError::InvalidFabricPlan);
+        }
         let mut policy_ids = BTreeSet::new();
         for policy in &fabric.policies {
             if policy.id == Uuid::nil()

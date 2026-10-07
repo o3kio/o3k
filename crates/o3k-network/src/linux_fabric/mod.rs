@@ -246,6 +246,16 @@ impl LinuxFabricBackend {
             .collect()
     }
 
+    /// Returns the bridge name recorded by the current Fabric ownership state
+    /// for one Realm. DHCP may bind to this interface, but never creates or
+    /// mutates it.
+    pub fn realm_bridge_name(&self, realm_id: Uuid) -> Option<&str> {
+        self.state
+            .realms
+            .get(&realm_id)
+            .map(|realm| realm.bridge.as_str())
+    }
+
     #[cfg(test)]
     fn with_command(
         config: LinuxFabricConfig,

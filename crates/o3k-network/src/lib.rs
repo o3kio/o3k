@@ -4,6 +4,7 @@ pub mod anti_spoof;
 pub mod canonical_policy;
 pub mod execution;
 pub mod fabric;
+pub mod fabric_dhcp;
 pub mod gateway;
 mod host;
 pub mod linux_fabric;
@@ -29,6 +30,7 @@ pub use fabric::{
     FabricBackend, FabricError, FabricRealizer, FabricRealmPlanError, FabricRealmPlanSet,
     InMemoryFabricBackend, compile_fabric_realm_plans,
 };
+pub use fabric_dhcp::{FabricDhcpError, FabricDhcpRealizer};
 pub use gateway::{
     InMemoryL3GatewayBackend, L3GatewayBackend, L3GatewayError, L3GatewayRealizer,
     LinuxL3GatewayProvider, RealmExecutionContext, compile_l3_gateway_execution_plan,
@@ -250,6 +252,7 @@ mod p9_plan_tests {
         .expect("plan");
         let destination = prefix("10.0.0.3", 32);
         let fabric = NamespacedRoutedFabricPlan {
+            dhcp: None,
             local_host: "node-a".to_owned(),
             local_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
             local_fabric_generation: 2,

@@ -3,9 +3,9 @@ mod storage;
 
 pub use network::{
     AddressPool, AddressRealm, EgressIntent, EndpointDirectoryError, EndpointIntent,
-    EndpointLocation, FabricEndpointRoute, FabricHostIdentity, FabricHostTransportIdentity,
-    FabricPeer, FabricProviderKind, GatewayIntent, GenevePacketMetadata,
-    GenevePacketValidationError, Ipv4Prefix, L3Gateway, L3GatewayAttachment,
+    EndpointLocation, FabricDhcpIntent, FabricEndpointRoute, FabricHostIdentity,
+    FabricHostTransportIdentity, FabricPeer, FabricProviderKind, GatewayIntent,
+    GenevePacketMetadata, GenevePacketValidationError, Ipv4Prefix, L3Gateway, L3GatewayAttachment,
     L3GatewayAttachmentState, L3GatewayExecutionAttachment, L3GatewayExecutionPlan, L3GatewayState,
     NamespacedRoutedFabricPlan, NeighborResolution, Network, NetworkCapability, NetworkIntent,
     NetworkIntentState, NetworkPlanIntent, NetworkPolicy, NetworkPolicyRule, NetworkProtocol,

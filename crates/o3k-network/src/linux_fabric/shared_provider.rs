@@ -115,6 +115,7 @@ mod tests {
         let directory =
             RealmEndpointDirectory::build(&realm, Vec::new(), &[], 7).expect("directory");
         NamespacedRoutedFabricPlan {
+            dhcp: None,
             local_host: "host-a".to_owned(),
             local_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
             local_fabric_generation: 9,

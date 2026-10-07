@@ -794,8 +794,21 @@ pub struct NamespacedRoutedFabricPlan {
     /// never keys tenant ownership by private IP alone.
     #[serde(default)]
     pub public_bindings: Vec<PublicAddressBindingIntent>,
+    /// Canonical DHCP settings for this AddressRealm. `None` is retained for
+    /// older serialized plans; new control-plane plans set this explicitly.
+    #[serde(default)]
+    pub dhcp: Option<FabricDhcpIntent>,
     pub routes: Vec<FabricEndpointRoute>,
     pub peers: Vec<FabricPeer>,
+}
+
+/// Canonical DHCP enablement and gateway projected into every current
+/// host-local Fabric plan. Endpoint bindings come from the plan's complete
+/// realm directory, not from provider observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FabricDhcpIntent {
+    pub enabled: bool,
+    pub gateway: Ipv4Addr,
 }
 
 fn default_policy_generation() -> u64 {
@@ -1106,6 +1119,7 @@ impl RealmEndpointDirectory {
             policies: Vec::new(),
             policy_defaults: Vec::new(),
             public_bindings: Vec::new(),
+            dhcp: None,
             routes,
             peers,
         })
