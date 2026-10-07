@@ -441,7 +441,7 @@ PY
   done
   [[ "$status" == ACTIVE ]] || fail "server $host did not reach ACTIVE (last=$status)" "ATTACHMENT_DEFECT"
   echo "server $host ACTIVE id=$server_id"
-  local response_host expected_host address domain="" tap ownership tap_mac guest_mac current_mac bridge
+  local response_host expected_host address domain="" tap ownership tap_mac guest_mac current_mac bridge realm_id
   expected_host="compute-agent-$host"
   response_host="$(api "$BASE/v2.1/$PROJECT_ID/servers/$server_id" | tee "$EVIDENCE/api/server-$host-placement.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["server"].get("OS-EXT-SRV-ATTR:host", ""))')"
   [[ "$response_host" == "$expected_host" ]] || fail "server $host placed on $response_host, expected $expected_host" "DISPATCH_DEFECT"
@@ -456,36 +456,60 @@ PY
   ssh_vm "$address" "sudo virsh -c qemu:///system dumpxml '$domain'" >"$EVIDENCE/compute-$host/domain.xml"
   ssh_vm "$address" "sudo virsh -c qemu:///system domstate '$domain'" >"$EVIDENCE/compute-$host/domain-state.txt"
   [[ "$(tr -d '\r' <"$EVIDENCE/compute-$host/domain-state.txt")" == running ]] || fail "server $host domain is not running" "PRODUCT_DEFECT"
-  tap="$(python3 - "$EVIDENCE/compute-$host/domain.xml" <<'PY'
-import sys,xml.etree.ElementTree as E
-r=E.parse(sys.argv[1]).getroot()
-for i in r.findall('./devices/interface'):
- t=i.find('target')
- if t is not None and t.get('dev','').startswith('o3ktap-'): print(t.get('dev')); break
-PY
-)"
-  [[ -n "$tap" ]] || fail "server $host domain XML has no Fabric TAP" "ATTACHMENT_DEFECT"
-  ssh_vm "$address" "sudo ip -j -d link show dev '$tap'" >"$EVIDENCE/attachments/server-$host-live-tap.json" || fail "real Fabric TAP disappeared for $host" "ATTACHMENT_DEFECT"
   ownership="/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json"
   ssh_vm "$address" "sudo cat '$ownership'" >"$EVIDENCE/attachments/server-$host-provider-ownership.json" || fail "Fabric ownership observation failed for $host" "OWNERSHIP_DEFECT"
-  tap_mac="$(python3 - "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$port_id" <<'PY'
-import json,sys
-x=json.load(open(sys.argv[1])); taps=x.get("realm",{}).get("endpoint_taps",{})
-assert sys.argv[2] in taps
-assert sys.argv[2] not in x.get("realm",{}).get("pending_endpoint_taps",{})
-print(taps[sys.argv[2]]["mac"])
-PY
-)" || fail "durable committed TAP ownership was absent for $host" "OWNERSHIP_DEFECT"
   guest_mac="$(field port.mac_address <"$EVIDENCE/api/port-$host.response.json")"
-  python3 - "$EVIDENCE/attachments/server-$host-live-tap.json" "$tap" "$tap_mac" "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$server_id" "$host" <<'PY' || fail "live TAP identity/type/owner/bridge attestation failed for $host" "ATTACHMENT_DEFECT"
+  tap_contract="$(python3 - "$EVIDENCE/compute-$host/domain.xml" "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$port_id" "$guest_mac" <<'PY'
+import json,sys,xml.etree.ElementTree as ET
+domain=ET.parse(sys.argv[1]).getroot()
+ownership=json.load(open(sys.argv[2])); endpoint,guest_mac=sys.argv[3:]
+matches=[(rid,r) for rid,r in ownership.get('realms',{}).items() if endpoint in r.get('endpoint_taps',{})]
+assert len(matches)==1, matches
+realm_id,realm=matches[0]
+record=realm['endpoint_taps'][endpoint]
+assert endpoint not in realm.get('pending_endpoint_taps',{})
+tap=record['interface']; assert tap
+interfaces=[]
+for interface in domain.findall('./devices/interface'):
+    target=interface.find('target')
+    if target is not None and target.get('dev')==tap: interfaces.append(interface)
+assert len(interfaces)==1, (tap,len(interfaces))
+mac=interfaces[0].find('mac').get('address','').lower()
+assert mac==guest_mac.lower(), (mac,guest_mac)
+print('\t'.join((tap,record['mac'],realm_id,realm['bridge'],mac)))
+PY
+)" || fail "domain TAP target or durable provider ownership did not match" "ATTACHMENT_DEFECT"
+  IFS=$'\t' read -r tap tap_mac realm_id bridge guest_domain_mac <<<"$tap_contract"
+  ssh_vm "$address" "sudo ip -j -d link show dev '$tap'" >"$EVIDENCE/attachments/server-$host-live-tap.json" || fail "real Fabric TAP disappeared for $host" "ATTACHMENT_DEFECT"
+  ssh_vm "$address" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json'" >"$EVIDENCE/attachments/server-$host-fabric-plan.json" || fail "current Fabric plan observation failed for $host" "ATTACHMENT_DEFECT"
+  ssh_vm "$address" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json'" >"$EVIDENCE/attachments/server-$host-execution-plans.json" || fail "network execution plan observation failed for $host" "ATTACHMENT_DEFECT"
+  python3 - "$EVIDENCE/attachments/server-$host-live-tap.json" "$tap" "$tap_mac" "$bridge" "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$EVIDENCE/attachments/server-$host-fabric-plan.json" "$EVIDENCE/attachments/server-$host-execution-plans.json" "$port_id" "$guest_mac" "$expected_host" "$realm_id" <<'PY' || fail "live TAP, plan, or committed ownership attestation failed for $host" "ATTACHMENT_DEFECT"
 import json,sys
-x=json.load(open(sys.argv[1])); name,mac=sys.argv[2:4]
-assert len(x)==1 and x[0].get('ifname')==name and x[0].get('address','').lower()==mac.lower()
-i=x[0]['linkinfo']; assert i.get('info_kind')=='tun' and i.get('info_data',{}).get('type')=='tap'
-o=json.load(open(sys.argv[4])); plan=o['plan']; assert plan['local_host']=='host-'+sys.argv[6]
-assert plan['directory']['directory_generation']==o['directory_generation']
-tap=o['realm']['endpoint_taps']; assert sys.argv[5] in tap and sys.argv[5] not in o['realm']['pending_endpoint_taps']
-assert x[0].get('master')==o['realm']['bridge']
+live=json.load(open(sys.argv[1])); name,provider_mac,bridge=sys.argv[2:5]
+ownership=json.load(open(sys.argv[5])); plan=json.load(open(sys.argv[6])); accepted=json.load(open(sys.argv[7]))
+endpoint,guest_mac,agent,realm_id=sys.argv[8:]
+realms=ownership.get('realms',{}); assert realm_id in realms
+realm=realms[realm_id]; record=realm.get('endpoint_taps',{}).get(endpoint)
+assert record and endpoint not in realm.get('pending_endpoint_taps',{})
+assert record.get('interface')==name and record.get('mac','').lower()==provider_mac.lower()
+assert len(live)==1 and live[0].get('ifname')==name and int(live[0].get('ifindex',0))>0
+assert live[0].get('address','').lower()==provider_mac.lower()
+linkinfo=live[0].get('linkinfo',{}); assert linkinfo.get('info_kind')=='tun' and linkinfo.get('info_data',{}).get('type')=='tap'
+assert live[0].get('master')==bridge==realm.get('bridge')
+assert plan.get('realm_id')==realm_id and plan.get('local_host')=='host-'+agent[-1]
+assert plan.get('directory_generation')==realm.get('directory_generation')
+entries=[e for e in plan.get('directory',{}).get('entries',[]) if e.get('endpoint_id')==endpoint]
+assert len(entries)==1 and entries[0].get('selected_host')=='host-'+agent[-1]
+assert entries[0].get('mac','').lower()==guest_mac.lower()
+success=[]
+for item in accepted.get('plans',[]):
+    command=item.get('plan',{}); fabric=command.get('fabric',{})
+    intents=command.get('intents',[])
+    has_endpoint=any('EndpointAttachment' in intent and intent['EndpointAttachment'].get('endpoint_id')==endpoint for intent in intents)
+    if item.get('status')=='Succeeded' and item.get('target',{}).get('agent_id')=='network-agent-'+agent[-1] and fabric.get('realm_id')==realm_id and has_endpoint:
+        success.append(item)
+assert success, 'no succeeded endpoint apply plan for target agent'
+assert live[0].get('address','').lower()!=guest_mac.lower()
 PY
   bridge="$(python3 - "$EVIDENCE/attachments/server-$host-live-tap.json" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))[0].get('master',''))
@@ -495,7 +519,7 @@ PY
 import json,sys; print(json.load(open(sys.argv[1]))[0].get('address',''))
 PY
 )"
-  [[ "$current_mac" != "$guest_mac" ]] || fail "provider TAP and canonical guest MAC unexpectedly match" "SECURITY_DEFECT"
+  [[ "$current_mac" == "$tap_mac" && "$current_mac" != "$guest_mac" && "$guest_domain_mac" == "$guest_mac" ]] || fail "provider TAP and canonical guest MAC identities were not preserved" "SECURITY_DEFECT"
   printf 'provider_tap_mac=%s\ncanonical_guest_mac=%s\n' "$current_mac" "$guest_mac" >"$EVIDENCE/attachments/server-$host-mac-separation.txt"
   # The accepted compute attachment resolver ran during API create. Its PASS is
   # evidenced by successful VM realization; preserve the live observation too.
@@ -581,6 +605,17 @@ done
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" >"$EVIDENCE/plans/host-$host-ownership.json" || fail "Fabric ownership snapshot failed on $host" "OWNERSHIP_DEFECT"
+  realm_id="$(python3 - "$EVIDENCE/plans/host-$host-ownership.json" "${PORT_IDS[@]}" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1])); endpoints=set(sys.argv[2:])
+matches=[rid for rid,r in x.get('realms',{}).items() if endpoints.intersection(r.get('endpoint_taps',{}))]
+assert len(matches)==1, matches
+print(matches[0])
+PY
+)" || fail "current Realm ownership could not be resolved on $host" "OWNERSHIP_DEFECT"
+  echo "$realm_id" >"$EVIDENCE/plans/host-$host-realm-id.txt"
+  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json" >"$EVIDENCE/plans/host-$host-fabric-plan.json" || fail "current Fabric plan snapshot failed on $host" "OWNERSHIP_DEFECT"
+  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json" >"$EVIDENCE/plans/host-$host-execution-plans.json" || fail "network execution plan snapshot failed on $host" "OWNERSHIP_DEFECT"
   ssh_vm "$address" 'sudo wg show all transfer; sudo ip -d -j link' >"$EVIDENCE/wireguard/host-$host-before-traffic.txt" || fail "WireGuard/VXLAN snapshot failed on $host" "ENVIRONMENT_GAP"
 done
 
@@ -588,10 +623,10 @@ done
 # provider plan. Runtime link/FDB/WireGuard records above are retained beside it.
 python3 - "$EVIDENCE/plans" <<'PY' || fail "HER participant convergence failed" "DATAPLANE_DEFECT"
 import glob,json,sys
-files=glob.glob(sys.argv[1]+"/host-*-ownership.json")
+files=glob.glob(sys.argv[1]+"/host-*-fabric-plan.json")
 assert len(files)==3
 for path in files:
-    x=json.load(open(path)); hosts={e["selected_host"] for e in x["plan"]["directory"]["entries"]}
+    x=json.load(open(path)); hosts={e["selected_host"] for e in x["directory"]["entries"]}
     assert hosts=={"host-a","host-b","host-c"}, (path,hosts)
 PY
 
@@ -620,9 +655,9 @@ PY
 python3 - "$EVIDENCE/plans" "$EVIDENCE/wireguard" <<'PY' || fail "VXLAN VNI/link realization did not match Fabric plan" "DATAPLANE_DEFECT"
 import glob,json,sys
 vnis=set()
-for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
+for path in glob.glob(sys.argv[1]+"/host-*-fabric-plan.json"):
     host=path.rsplit("/",1)[-1].split("-")[1]
-    plan=json.load(open(path)); expected=plan["plan"]["encapsulation"]["provider_segment_id"]
+    plan=json.load(open(path)); expected=plan["encapsulation"]["provider_segment_id"]
     vnis.add(expected)
     observation=open(sys.argv[2]+f"/host-{host}-before-traffic.txt").read()
     links=json.loads(observation[observation.index("["):])
@@ -653,12 +688,23 @@ done
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" >"$EVIDENCE/endpoint-removal/host-$host-ownership.json" || fail "post-C-removal state unavailable on $host" "OWNERSHIP_DEFECT"
+  realm_id="$(python3 - "$EVIDENCE/endpoint-removal/host-$host-ownership.json" "${PORT_IDS[0]}" "${PORT_IDS[1]}" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1])); endpoints=set(sys.argv[2:])
+matches=[rid for rid,r in x.get('realms',{}).items() if endpoints.intersection(r.get('endpoint_taps',{}))]
+assert len(matches)==1, matches
+print(matches[0])
+PY
+)" || fail "A/B Realm ownership could not be resolved on $host" "OWNERSHIP_DEFECT"
+  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json" >"$EVIDENCE/endpoint-removal/host-$host-fabric-plan.json" || fail "post-C-removal Fabric plan unavailable on $host" "OWNERSHIP_DEFECT"
 done
 python3 - "$EVIDENCE/endpoint-removal" "${PORT_IDS[2]}" <<'PY' || fail "C endpoint/HER did not withdraw" "CLEANUP_DEFECT"
 import glob,json,sys
 for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
-    x=json.load(open(path)); assert sys.argv[2] not in x.get("realm",{}).get("endpoint_taps",{}), path
-    hosts={e["selected_host"] for e in x.get("plan",{}).get("directory",{}).get("entries",[])}
+    x=json.load(open(path)); assert all(sys.argv[2] not in r.get("endpoint_taps",{}) for r in x.get("realms",{}).values()), path
+    host=path.rsplit("/",1)[-1].split("-")[1]
+    plan=json.load(open(sys.argv[1]+f"/host-{host}-fabric-plan.json"))
+    hosts={e["selected_host"] for e in plan.get("directory",{}).get("entries",[])}
     assert hosts=={"host-a","host-b"}, (path,hosts)
 PY
 console_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "DATAPLANE_DEFECT"
@@ -692,8 +738,9 @@ done
 python3 - "$EVIDENCE/teardown" <<'PY' || fail "run-owned endpoint TAP/HER state leaked after teardown" "CLEANUP_DEFECT"
 import glob,json,sys
 for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
-  if not open(path).read().strip(): continue
-    x=json.load(open(path)); assert not x.get("realm",{}).get("endpoint_taps",{}), path
+    if not open(path).read().strip(): continue
+    x=json.load(open(path))
+    assert all(not r.get("endpoint_taps",{}) and not r.get("pending_endpoint_taps",{}) for r in x.get("realms",{}).values()), path
 PY
 # Remove only the three exact fresh compute guests after proving their API
 # resources and server domains are gone. Then compare the physical libvirt
