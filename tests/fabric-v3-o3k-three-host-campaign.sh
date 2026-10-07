@@ -36,7 +36,7 @@ PORT_IDS=()
 NETWORK_ID=""
 SUBNET_ID=""
 IMAGE_ID=""
-declare -A MGMT_IP=() MGMT_OCTET=()
+declare -A MGMT_IP=() MGMT_OCTET=() MGMT_MAC=()
 HOSTS=(a b c)
 
 fail() {
@@ -183,9 +183,26 @@ chmod 0600 "$SSH_KEY"; chmod 0644 "$SSH_KEY.pub"
 
 gateway="$(virsh -c qemu:///system net-dumpxml "$NETWORK" | sed -n "s/.*ip address='\([0-9.]*\)'.*/\1/p" | head -1)"
 [[ -n "$gateway" ]] || fail "cannot identify management gateway" "ENVIRONMENT_GAP"
+declare -A reserved_addresses=() defined_macs=()
+for address_file in "$EVIDENCE_ROOT"/fabric-v3-minimal-three-host-*/environment/management-addresses.txt; do
+  [[ -f "$address_file" ]] || continue
+  while IFS='=' read -r _ address; do
+    [[ "$address" =~ ^192\.168\.122\.[0-9]+$ ]] && reserved_addresses[$address]=1
+  done <"$address_file"
+done
+while IFS= read -r domain; do
+  [[ -n "$domain" ]] || continue
+  while IFS= read -r mac; do
+    [[ "$mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] && defined_macs["${mac,,}"]=1
+  done < <(virsh -c qemu:///system domiflist "$domain" 2>/dev/null | awk 'NR > 2 {print tolower($5)}')
+done < <(virsh -c qemu:///system list --all --name)
 available_octets=()
-for octet in $(seq 221 239); do
+for octet in $(seq 211 250); do
   address="192.168.122.$octet"
+  suffix="$(printf '%02x' "$((octet-210))")"
+  mac="52:54:00:fa:32:$suffix"
+  [[ -n "${reserved_addresses[$address]:-}" ]] && continue
+  [[ -n "${defined_macs[$mac]:-}" ]] && continue
   ip neigh show dev "$BRIDGE" | grep -Fq "$address" && continue
   virsh -c qemu:///system net-dhcp-leases "$NETWORK" | grep -Fq "$address" && continue
   timeout 2 bash -c "</dev/tcp/$address/$SSH_PORT" >/dev/null 2>&1 && continue
@@ -199,8 +216,10 @@ for index in 0 1 2; do
   address="192.168.122.$octet"
   MGMT_OCTET[$host]="$octet"
   MGMT_IP[$host]="$address"
+  MGMT_MAC[$host]="52:54:00:fa:32:$(printf '%02x' "$((octet-210))")"
 done
 printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_IP[a]}" "${MGMT_IP[b]}" "${MGMT_IP[c]}" >"$EVIDENCE/environment/management-addresses.txt"
+printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_MAC[a]}" "${MGMT_MAC[b]}" "${MGMT_MAC[c]}" >"$EVIDENCE/environment/management-macs.txt"
 
 for host in a b c; do
   octet="${MGMT_OCTET[$host]}"; domain="$PREFIX-compute-$host"; address="${MGMT_IP[$host]}"
@@ -208,7 +227,7 @@ for host in a b c; do
   disk="$IMAGE_STORE/$PREFIX-compute-$host.qcow2"; seed="$IMAGE_STORE/$PREFIX-compute-$host-seed.iso"; ws="$EVIDENCE/environment/seed-$host"
   [[ ! -e "$disk" && ! -e "$seed" ]] || fail "fresh guest disk/seed collision for $host" "ENVIRONMENT_GAP"
   mkdir -m 0700 "$ws"
-  mac="52:54:00:fa:32:$(printf '%02x' "$((octet-210))")"
+  mac="${MGMT_MAC[$host]}"
   cat >"$ws/user-data" <<EOF
 #cloud-config
 hostname: compute-$host
