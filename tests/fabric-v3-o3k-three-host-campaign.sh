@@ -223,6 +223,13 @@ printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_MAC[a]}" "${MGMT_MAC
 
 for host in a b c; do
   octet="${MGMT_OCTET[$host]}"; domain="$PREFIX-compute-$host"; address="${MGMT_IP[$host]}"
+  ram_mib=4096; vcpus=2
+  # The public create API has no per-host placement selector. Give host A one
+  # extra schedulable vCPU so the supported scheduler's deterministic free-
+  # inventory ranking selects A first; after A's allocation, equal B/C
+  # capacity and provider-ID order select B, then C. The live capability
+  # preflight below verifies this assumption before tenant creation.
+  [[ "$host" != a ]] || vcpus=3
   if virsh -c qemu:///system dominfo "$domain" >/dev/null 2>&1; then fail "fresh domain name collision: $domain" "ENVIRONMENT_GAP"; fi
   disk="$IMAGE_STORE/$PREFIX-compute-$host.qcow2"; seed="$IMAGE_STORE/$PREFIX-compute-$host-seed.iso"; ws="$EVIDENCE/environment/seed-$host"
   [[ ! -e "$disk" && ! -e "$seed" ]] || fail "fresh guest disk/seed collision for $host" "ENVIRONMENT_GAP"
@@ -269,7 +276,7 @@ EOF
   genisoimage -quiet -output "$seed" -volid cidata -joliet -rock "$ws/user-data" "$ws/meta-data" "$ws/network-config" || fail "seed ISO creation failed for $host" "HARNESS_GAP"
   qemu-img create -q -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$disk" 16G || fail "overlay creation failed for $host" "ENVIRONMENT_GAP"
   chgrp kvm "$disk" "$seed"; chmod 0640 "$disk" "$seed"
-  virt-install --connect qemu:///system --name "$domain" --uuid "$(python3 -c 'import uuid; print(uuid.uuid4())')" --import --ram 4096 --vcpus 2 --cpu host-passthrough --disk "path=$disk,format=qcow2,bus=virtio" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --graphics none --noautoconsole --quiet || fail "libvirt failed to create fresh compute guest $host" "ENVIRONMENT_GAP"
+  virt-install --connect qemu:///system --name "$domain" --uuid "$(python3 -c 'import uuid; print(uuid.uuid4())')" --import --ram "$ram_mib" --vcpus "$vcpus" --cpu host-passthrough --disk "path=$disk,format=qcow2,bus=virtio" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --graphics none --noautoconsole --quiet || fail "libvirt failed to create fresh compute guest $host" "ENVIRONMENT_GAP"
   FRESH_DOMAINS+=("$domain")
   printf '%s\t%s\t%s\t%s\t%s\n' "compute-$host" "$domain" "$address" "$mac" "$(virsh -c qemu:///system domuuid "$domain")" >>"$EVIDENCE/environment/inventory.tsv"
 done
@@ -389,7 +396,22 @@ for host in a b c; do
     sleep 2
   done
   (( ready == 1 )) || fail "compute agent did not register with the ready controller on host-$host" "HARNESS_GAP"
+  ssh_vm "$address" "sudo curl -fsS http://127.0.0.1:$health_port/readyz" \
+    >"$EVIDENCE/management/compute-$host-ready.json" \
+    || fail "could not capture registered compute capacity for host-$host" "HARNESS_GAP"
 done
+python3 - "$EVIDENCE/management" <<'PY' || fail "live compute capacities do not produce deterministic A/B/C scheduler order" "HARNESS_GAP"
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+capacity={}
+for host in "abc":
+    body=json.loads((root/f"compute-{host}-ready.json").read_text())
+    assert body["agent_id"]==f"compute-agent-{host}", body
+    c=body["capabilities"]
+    capacity[host]=sum(int(c[k]) for k in ("max_vcpus","max_memory_mib","max_disk_gb"))
+assert capacity["a"]==capacity["b"]+1 and capacity["b"]==capacity["c"], capacity
+print(json.dumps({"scheduler_capacity_score":capacity},sort_keys=True))
+PY
 
 curl -fsS -X POST "$BASE/v3/auth/tokens" -H 'content-type: application/json' -D "$EVIDENCE/api/auth.headers" -o "$EVIDENCE/api/auth.body" --data "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"admin\",\"password\":\"campaign-$RUN_ID\"}}},\"scope\":{\"project\":{\"name\":\"admin\"}}}}" || fail "supported HTTP authentication failed" "SUPPORTED_API_GAP"
 TOKEN="$(awk 'tolower($1)=="x-subject-token:"{print $2}' "$EVIDENCE/api/auth.headers" | tr -d '\r')"
