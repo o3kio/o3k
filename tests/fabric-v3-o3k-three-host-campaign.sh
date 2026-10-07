@@ -434,14 +434,14 @@ start_dhcp_capture() {
   # the API request begins. The packet proof deduplicates by DHCP transaction
   # ID, so Linux cooked captures on several bridge ports do not look like
   # competing offers.
-  ssh_vm "$address" "sudo install -d -m 0700 '$remote_capture' && sudo bash -c 'nohup tcpdump -i any -nn -e -U -w \"$remote_capture/dora.pcap\" \"udp and (port 67 or port 68)\" >\"$remote_capture/tcpdump.log\" 2>&1 </dev/null & echo \\$! >\"$remote_capture/tcpdump.pid\"'"
+  ssh_vm "$address" "sudo install -d -m 0700 '$remote_capture' && sudo bash -c 'nohup tcpdump -i any -nn -e -U -w \"$remote_capture/dora.pcap\" \"udp and (port 67 or port 68)\" >\"$remote_capture/tcpdump.log\" 2>&1 </dev/null & echo \$! >\"$remote_capture/tcpdump.pid\"'"
   DHCP_CAPTURE_PID="$(ssh_vm "$address" "sudo cat '$remote_capture/tcpdump.pid'")"
   [[ "$DHCP_CAPTURE_PID" =~ ^[0-9]+$ ]] || fail "run-owned DHCP packet capture did not start" "HARNESS_GAP"
-  ssh_vm "$address" "sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline && sudo tr '\\0' ' ' </proc/$DHCP_CAPTURE_PID/cmdline" >"$EVIDENCE/attachments/server-a-dhcp-capture-command.txt" \
+  DHCP_CAPTURE_HOST=a
+  ssh_vm "$address" "sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline && sudo cat /proc/$DHCP_CAPTURE_PID/cmdline | tr '\\0' ' '" >"$EVIDENCE/attachments/server-a-dhcp-capture-command.txt" \
     || fail "DHCP capture process identity could not be observed" "HARNESS_GAP"
   grep -Fq "$remote_capture/dora.pcap" "$EVIDENCE/attachments/server-a-dhcp-capture-command.txt" \
     || fail "DHCP capture PID is not bound to the run-owned evidence path" "OWNERSHIP_DEFECT"
-  DHCP_CAPTURE_HOST=a
   printf 'authority_host=host-a\ninterface=any\nport_id=%s\npid=%s\n' \
     "$port_id" "$DHCP_CAPTURE_PID" >"$EVIDENCE/attachments/dhcp-capture-identity.txt"
 }
@@ -452,7 +452,7 @@ stop_dhcp_capture() {
   [[ -n "$address" ]] || return 0
   remote_capture="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp-capture"
   local_capture="$EVIDENCE/attachments/dhcp-dora.pcap"
-  ssh_vm "$address" "if sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline && sudo tr '\\0' ' ' </proc/$DHCP_CAPTURE_PID/cmdline | grep -Fq '$remote_capture/dora.pcap' && sudo test \"\$(sudo cat /proc/$DHCP_CAPTURE_PID/comm)\" = tcpdump; then sudo kill -INT '$DHCP_CAPTURE_PID'; fi" >/dev/null 2>&1 || true
+  ssh_vm "$address" "if sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline && sudo cat /proc/$DHCP_CAPTURE_PID/cmdline | tr '\\0' ' ' | grep -Fq '$remote_capture/dora.pcap' && sudo test \"\$(sudo cat /proc/$DHCP_CAPTURE_PID/comm)\" = tcpdump; then sudo kill -INT '$DHCP_CAPTURE_PID'; fi" >/dev/null 2>&1 || true
   for _ in $(seq 1 20); do
     if ! ssh_vm "$address" "sudo test -e /proc/$DHCP_CAPTURE_PID" >/dev/null 2>&1; then break; fi
     sleep 1
