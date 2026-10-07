@@ -197,10 +197,9 @@ while IFS= read -r domain; do
   done < <(virsh -c qemu:///system domiflist "$domain" 2>/dev/null | awk 'NR > 2 {print tolower($5)}')
 done < <(virsh -c qemu:///system list --all --name)
 available_octets=()
-for octet in $(seq 221 250); do
+for octet in $(seq 100 250); do
   address="192.168.122.$octet"
-  suffix="$(printf '%02x' "$((octet-210))")"
-  mac="52:54:00:fa:32:$suffix"
+  mac="52:54:00:fa:$(printf '%02x' "$((octet / 256))"):$(printf '%02x' "$((octet % 256))")"
   [[ -n "${reserved_addresses[$address]:-}" ]] && continue
   [[ -n "${defined_macs[$mac]:-}" ]] && continue
   ip neigh show dev "$BRIDGE" | grep -Fq "$address" && continue
@@ -209,14 +208,14 @@ for octet in $(seq 221 250); do
   available_octets+=("$octet")
   ((${#available_octets[@]} == 3)) && break
 done
-((${#available_octets[@]} == 3)) || fail "fewer than three unused management addresses in 192.168.122.221-239" "ENVIRONMENT_GAP"
+((${#available_octets[@]} == 3)) || fail "fewer than three unused management addresses in 192.168.122.100-250" "ENVIRONMENT_GAP"
 for index in 0 1 2; do
   host="${HOSTS[$index]}"
   octet="${available_octets[$index]}"
   address="192.168.122.$octet"
   MGMT_OCTET[$host]="$octet"
   MGMT_IP[$host]="$address"
-  MGMT_MAC[$host]="52:54:00:fa:32:$(printf '%02x' "$((octet-210))")"
+  MGMT_MAC[$host]="52:54:00:fa:$(printf '%02x' "$((octet / 256))"):$(printf '%02x' "$((octet % 256))")"
 done
 printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_IP[a]}" "${MGMT_IP[b]}" "${MGMT_IP[c]}" >"$EVIDENCE/environment/management-addresses.txt"
 printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_MAC[a]}" "${MGMT_MAC[b]}" "${MGMT_MAC[c]}" >"$EVIDENCE/environment/management-macs.txt"
