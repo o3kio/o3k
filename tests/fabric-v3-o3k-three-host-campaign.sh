@@ -197,7 +197,7 @@ while IFS= read -r domain; do
   done < <(virsh -c qemu:///system domiflist "$domain" 2>/dev/null | awk 'NR > 2 {print tolower($5)}')
 done < <(virsh -c qemu:///system list --all --name)
 available_octets=()
-for octet in $(seq 211 250); do
+for octet in $(seq 221 250); do
   address="192.168.122.$octet"
   suffix="$(printf '%02x' "$((octet-210))")"
   mac="52:54:00:fa:32:$suffix"
