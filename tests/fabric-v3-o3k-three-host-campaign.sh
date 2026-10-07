@@ -4,8 +4,8 @@ set -Eeuo pipefail
 # Supported-HTTP Fabric v3 three-host nested campaign. This script is test
 # harness only and refuses to run against a different product source tree.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRODUCT_SHA=ba23a65e312ae8755673e2af131937760b4fb248
-PRODUCT_TREE=b7a71360fac7e6cf8ba931018e5b4f9ff40a055c
+PRODUCT_SHA=5e1829e6ee880654c7ff6b68e1073050b1706c48
+PRODUCT_TREE=9066e8e555120698694a0df48eb4508a2085098e
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 CIRROS_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
 CIRROS_SHA=7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
@@ -28,6 +28,8 @@ STAGE="$EVIDENCE/environment/stage"
 BASE=""
 TOKEN=""
 O3KD_PID=""
+DHCP_CAPTURE_PID=""
+DHCP_CAPTURE_HOST=""
 CAMPAIGN_FAILURE=""
 CLASSIFICATION=""
 FRESH_DOMAINS=()
@@ -36,8 +38,9 @@ PORT_IDS=()
 NETWORK_ID=""
 SUBNET_ID=""
 IMAGE_ID=""
-declare -A MGMT_IP=() MGMT_OCTET=()
+declare -A MGMT_IP=() MGMT_OCTET=() MGMT_MAC=() REALM_BRIDGE=() GUEST_IPV6=()
 HOSTS=(a b c)
+LAST_GUEST_CHANNEL_ERROR=0
 
 fail() {
   CAMPAIGN_FAILURE="$*"
@@ -91,6 +94,7 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/env
 
 cleanup_on_success() {
   local rc=$?
+  if declare -F stop_dhcp_capture >/dev/null 2>&1; then stop_dhcp_capture || true; fi
   if (( rc == 0 )) && [[ "${CAMPAIGN_TEARDOWN_PASS:-0}" == 1 ]]; then
     # Teardown is API-led; guests are deleted only if their exact run prefix
     # and UUID markers still match the inventory recorded by this process.
@@ -137,7 +141,7 @@ if ! command -v cargo >/dev/null 2>&1; then
     export PATH
   fi
 fi
-for tool in cargo curl openssl python3 virsh virt-install qemu-img genisoimage ssh ssh-keygen ssh-keyscan scp ip wg sha256sum tar timeout bridge hostnamectl; do need "$tool"; done
+for tool in cargo curl openssl python3 virsh virt-install qemu-img genisoimage ssh ssh-keygen ssh-keyscan scp ip wg tcpdump sha256sum tar timeout bridge hostnamectl; do need "$tool"; done
 [[ $EUID -eq 0 ]] || fail "campaign must run as root to provision nested libvirt guests" "ENVIRONMENT_GAP"
 [[ -c /dev/kvm ]] || fail "/dev/kvm unavailable" "ENVIRONMENT_GAP"
 [[ -r "$BASE_IMAGE" ]] || fail "base image unreadable: $BASE_IMAGE" "ENVIRONMENT_GAP"
@@ -183,32 +187,57 @@ chmod 0600 "$SSH_KEY"; chmod 0644 "$SSH_KEY.pub"
 
 gateway="$(virsh -c qemu:///system net-dumpxml "$NETWORK" | sed -n "s/.*ip address='\([0-9.]*\)'.*/\1/p" | head -1)"
 [[ -n "$gateway" ]] || fail "cannot identify management gateway" "ENVIRONMENT_GAP"
+declare -A reserved_addresses=() defined_macs=()
+for address_file in "$EVIDENCE_ROOT"/fabric-v3-minimal-three-host-*/environment/management-addresses.txt; do
+  [[ -f "$address_file" ]] || continue
+  while IFS='=' read -r _ address; do
+    [[ "$address" =~ ^192\.168\.122\.[0-9]+$ ]] && reserved_addresses[$address]=1
+  done <"$address_file"
+done
+while IFS= read -r domain; do
+  [[ -n "$domain" ]] || continue
+  while IFS= read -r mac; do
+    [[ "$mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] && defined_macs["${mac,,}"]=1
+  done < <(virsh -c qemu:///system domiflist "$domain" 2>/dev/null | awk 'NR > 2 {print tolower($5)}')
+done < <(virsh -c qemu:///system list --all --name)
 available_octets=()
-for octet in $(seq 221 239); do
+for octet in $(seq 100 250); do
   address="192.168.122.$octet"
+  mac="52:54:00:fa:$(printf '%02x' "$((octet / 256))"):$(printf '%02x' "$((octet % 256))")"
+  [[ -n "${reserved_addresses[$address]:-}" ]] && continue
+  [[ -n "${defined_macs[$mac]:-}" ]] && continue
   ip neigh show dev "$BRIDGE" | grep -Fq "$address" && continue
   virsh -c qemu:///system net-dhcp-leases "$NETWORK" | grep -Fq "$address" && continue
   timeout 2 bash -c "</dev/tcp/$address/$SSH_PORT" >/dev/null 2>&1 && continue
   available_octets+=("$octet")
   ((${#available_octets[@]} == 3)) && break
 done
-((${#available_octets[@]} == 3)) || fail "fewer than three unused management addresses in 192.168.122.221-239" "ENVIRONMENT_GAP"
+((${#available_octets[@]} == 3)) || fail "fewer than three unused management addresses in 192.168.122.100-250" "ENVIRONMENT_GAP"
 for index in 0 1 2; do
   host="${HOSTS[$index]}"
   octet="${available_octets[$index]}"
   address="192.168.122.$octet"
   MGMT_OCTET[$host]="$octet"
   MGMT_IP[$host]="$address"
+  MGMT_MAC[$host]="52:54:00:fa:$(printf '%02x' "$((octet / 256))"):$(printf '%02x' "$((octet % 256))")"
 done
 printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_IP[a]}" "${MGMT_IP[b]}" "${MGMT_IP[c]}" >"$EVIDENCE/environment/management-addresses.txt"
+printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_MAC[a]}" "${MGMT_MAC[b]}" "${MGMT_MAC[c]}" >"$EVIDENCE/environment/management-macs.txt"
 
 for host in a b c; do
   octet="${MGMT_OCTET[$host]}"; domain="$PREFIX-compute-$host"; address="${MGMT_IP[$host]}"
+  ram_mib=4096; vcpus=2
+  # The public create API has no per-host placement selector. Give host A one
+  # extra schedulable vCPU so the supported scheduler's deterministic free-
+  # inventory ranking selects A first; after A's allocation, equal B/C
+  # capacity and provider-ID order select B, then C. The live capability
+  # preflight below verifies this assumption before tenant creation.
+  [[ "$host" != a ]] || vcpus=3
   if virsh -c qemu:///system dominfo "$domain" >/dev/null 2>&1; then fail "fresh domain name collision: $domain" "ENVIRONMENT_GAP"; fi
   disk="$IMAGE_STORE/$PREFIX-compute-$host.qcow2"; seed="$IMAGE_STORE/$PREFIX-compute-$host-seed.iso"; ws="$EVIDENCE/environment/seed-$host"
   [[ ! -e "$disk" && ! -e "$seed" ]] || fail "fresh guest disk/seed collision for $host" "ENVIRONMENT_GAP"
   mkdir -m 0700 "$ws"
-  mac="52:54:00:fa:32:$(printf '%02x' "$((octet-210))")"
+  mac="${MGMT_MAC[$host]}"
   cat >"$ws/user-data" <<EOF
 #cloud-config
 hostname: compute-$host
@@ -230,11 +259,12 @@ packages:
   - qemu-utils
   - wireguard-tools
   - dnsmasq
+  - tcpdump
   - nftables
   - curl
 runcmd:
   - [systemctl, enable, --now, libvirtd]
-  - [usermod, -aG, libvirt,kvm, o3k]
+  - [usermod, -aG, "libvirt,kvm", o3k]
 EOF
   cat >"$ws/network-config" <<EOF
 version: 2
@@ -250,7 +280,7 @@ EOF
   genisoimage -quiet -output "$seed" -volid cidata -joliet -rock "$ws/user-data" "$ws/meta-data" "$ws/network-config" || fail "seed ISO creation failed for $host" "HARNESS_GAP"
   qemu-img create -q -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$disk" 16G || fail "overlay creation failed for $host" "ENVIRONMENT_GAP"
   chgrp kvm "$disk" "$seed"; chmod 0640 "$disk" "$seed"
-  virt-install --connect qemu:///system --name "$domain" --uuid "$(python3 -c 'import uuid; print(uuid.uuid4())')" --import --ram 4096 --vcpus 2 --cpu host-passthrough --disk "path=$disk,format=qcow2,bus=virtio" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --graphics none --noautoconsole --quiet || fail "libvirt failed to create fresh compute guest $host" "ENVIRONMENT_GAP"
+  virt-install --connect qemu:///system --name "$domain" --uuid "$(python3 -c 'import uuid; print(uuid.uuid4())')" --import --ram "$ram_mib" --vcpus "$vcpus" --cpu host-passthrough --disk "path=$disk,format=qcow2,bus=virtio" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --graphics none --noautoconsole --quiet || fail "libvirt failed to create fresh compute guest $host" "ENVIRONMENT_GAP"
   FRESH_DOMAINS+=("$domain")
   printf '%s\t%s\t%s\t%s\t%s\n' "compute-$host" "$domain" "$address" "$mac" "$(virsh -c qemu:///system domuuid "$domain")" >>"$EVIDENCE/environment/inventory.tsv"
 done
@@ -269,7 +299,10 @@ for host in a b c; do
   (( ready == 1 )) || fail "authenticated SSH readiness timed out for compute-$host" "ENVIRONMENT_GAP"
   packages_ready=0
   for _ in $(seq 1 240); do
-    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && sudo systemctl is-active --quiet libvirtd' >/dev/null 2>&1; then
+    # Ubuntu may run libvirtd on demand through systemd sockets and let the
+    # daemon exit while idle. Exercise the actual qemu:///system API instead
+    # of requiring the monolithic service process to remain active.
+    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && command -v tcpdump >/dev/null && test -c /dev/kvm && sudo virsh -c qemu:///system list --all >/dev/null 2>&1' >/dev/null 2>&1; then
       packages_ready=1
       break
     fi
@@ -367,7 +400,22 @@ for host in a b c; do
     sleep 2
   done
   (( ready == 1 )) || fail "compute agent did not register with the ready controller on host-$host" "HARNESS_GAP"
+  ssh_vm "$address" "sudo curl -fsS http://127.0.0.1:$health_port/readyz" \
+    >"$EVIDENCE/management/compute-$host-ready.json" \
+    || fail "could not capture registered compute capacity for host-$host" "HARNESS_GAP"
 done
+python3 - "$EVIDENCE/management" <<'PY' || fail "live compute capacities do not produce deterministic A/B/C scheduler order" "HARNESS_GAP"
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+capacity={}
+for host in "abc":
+    body=json.loads((root/f"compute-{host}-ready.json").read_text())
+    assert body["agent_id"]==f"compute-agent-{host}", body
+    c=body["capabilities"]
+    capacity[host]=sum(int(c[k]) for k in ("max_vcpus","max_memory_mib","max_disk_gb"))
+assert capacity["a"]==capacity["b"]+1 and capacity["b"]==capacity["c"], capacity
+print(json.dumps({"scheduler_capacity_score":capacity},sort_keys=True))
+PY
 
 curl -fsS -X POST "$BASE/v3/auth/tokens" -H 'content-type: application/json' -D "$EVIDENCE/api/auth.headers" -o "$EVIDENCE/api/auth.body" --data "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"admin\",\"password\":\"campaign-$RUN_ID\"}}},\"scope\":{\"project\":{\"name\":\"admin\"}}}}" || fail "supported HTTP authentication failed" "SUPPORTED_API_GAP"
 TOKEN="$(awk 'tolower($1)=="x-subject-token:"{print $2}' "$EVIDENCE/api/auth.headers" | tr -d '\r')"
@@ -393,10 +441,47 @@ SUBNET_ID="$(field subnet.id <"$EVIDENCE/api/subnet-create.response.json")"
 FLAVOR_ID="$(api "$BASE/v2.1/$PROJECT_ID/flavors" | python3 -c 'import json,sys; print(json.load(sys.stdin)["flavors"][0]["id"])')"
 [[ -n "$FLAVOR_ID" ]] || fail "supported flavor listing returned no flavor" "SUPPORTED_API_GAP"
 
+start_dhcp_capture() {
+  local port_id="$1" address="${MGMT_IP[a]}" remote_capture
+  remote_capture="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp-capture"
+  ssh_vm "$address" "sudo install -d -m 0700 '$remote_capture' && sudo bash -c 'nohup tcpdump -i any -nn -e -U -w \"$remote_capture/dora.pcap\" \"udp and (port 67 or port 68)\" >\"$remote_capture/tcpdump.log\" 2>&1 </dev/null & echo \$! >\"$remote_capture/tcpdump.pid\"'"
+  DHCP_CAPTURE_PID="$(ssh_vm "$address" "sudo cat '$remote_capture/tcpdump.pid'")"
+  [[ "$DHCP_CAPTURE_PID" =~ ^[0-9]+$ ]] || fail "run-owned DHCP packet capture did not start" "HARNESS_GAP"
+  DHCP_CAPTURE_HOST=a
+  ssh_vm "$address" "sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline && sudo cat /proc/$DHCP_CAPTURE_PID/cmdline | tr '\\0' ' '" >"$EVIDENCE/attachments/dhcp-capture-command.txt" \
+    || fail "DHCP capture process identity could not be observed" "HARNESS_GAP"
+  grep -Fq "$remote_capture/dora.pcap" "$EVIDENCE/attachments/dhcp-capture-command.txt" \
+    || fail "DHCP capture PID is not bound to the run-owned evidence path" "OWNERSHIP_DEFECT"
+  printf 'authority_host=host-a\ninterface=any\nport_id=%s\npid=%s\n' \
+    "$port_id" "$DHCP_CAPTURE_PID" >"$EVIDENCE/attachments/dhcp-capture-identity.txt"
+}
+
+stop_dhcp_capture() {
+  [[ -n "$DHCP_CAPTURE_PID" && "$DHCP_CAPTURE_HOST" == a ]] || return 0
+  local address="${MGMT_IP[a]:-}" remote_capture local_capture
+  [[ -n "$address" ]] || return 0
+  remote_capture="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp-capture"
+  local_capture="$EVIDENCE/attachments/dhcp-dora.pcap"
+  ssh_vm "$address" "if sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline && sudo cat /proc/$DHCP_CAPTURE_PID/cmdline | tr '\\0' ' ' | grep -Fq '$remote_capture/dora.pcap' && sudo test \"\$(sudo cat /proc/$DHCP_CAPTURE_PID/comm)\" = tcpdump; then sudo kill -INT '$DHCP_CAPTURE_PID'; fi" >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    ssh_vm "$address" "sudo test -e /proc/$DHCP_CAPTURE_PID" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  if ssh_vm "$address" "sudo test -f '$remote_capture/dora.pcap'" >/dev/null 2>&1; then
+    ssh_vm "$address" "sudo cp '$remote_capture/dora.pcap' /tmp/$RUN_ID-dhcp-dora.pcap && sudo chown '$SSH_USER:$SSH_USER' /tmp/$RUN_ID-dhcp-dora.pcap && sudo chmod 0600 /tmp/$RUN_ID-dhcp-dora.pcap" >/dev/null 2>&1 || true
+    scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+      -o "UserKnownHostsFile=$KNOWN_HOSTS" "$SSH_USER@$address:/tmp/$RUN_ID-dhcp-dora.pcap" \
+      "$local_capture" >/dev/null 2>&1 || true
+    ssh_vm "$address" "sudo rm -f /tmp/$RUN_ID-dhcp-dora.pcap; sudo cat '$remote_capture/tcpdump.log'" >"$EVIDENCE/attachments/dhcp-tcpdump.log" 2>/dev/null || true
+  fi
+  DHCP_CAPTURE_PID=""
+}
+
 create_server() {
   local host="$1" port_id response server_id status request
   port_id="$(api -X POST "$BASE/v2.0/ports" -H 'content-type: application/json' -d "{\"port\":{\"name\":\"$PREFIX-port-$host\",\"network_id\":\"$NETWORK_ID\"}}" | tee "$EVIDENCE/api/port-$host.response.json" | field port.id)"
   PORT_IDS+=("$port_id")
+  if [[ "$host" == a ]]; then start_dhcp_capture "$port_id"; fi
   request="$EVIDENCE/api/server-$host.create.json"
   python3 - "$request" "$PREFIX" "$host" "$IMAGE_ID" "$FLAVOR_ID" "$port_id" <<'PY'
 import json,sys
@@ -419,7 +504,7 @@ PY
   done
   [[ "$status" == ACTIVE ]] || fail "server $host did not reach ACTIVE (last=$status)" "ATTACHMENT_DEFECT"
   echo "server $host ACTIVE id=$server_id"
-  local response_host expected_host address domain="" tap ownership tap_mac guest_mac current_mac bridge
+  local response_host expected_host address domain="" tap ownership tap_mac guest_mac current_mac bridge realm_id
   expected_host="compute-agent-$host"
   response_host="$(api "$BASE/v2.1/$PROJECT_ID/servers/$server_id" | tee "$EVIDENCE/api/server-$host-placement.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["server"].get("OS-EXT-SRV-ATTR:host", ""))')"
   [[ "$response_host" == "$expected_host" ]] || fail "server $host placed on $response_host, expected $expected_host" "DISPATCH_DEFECT"
@@ -434,36 +519,61 @@ PY
   ssh_vm "$address" "sudo virsh -c qemu:///system dumpxml '$domain'" >"$EVIDENCE/compute-$host/domain.xml"
   ssh_vm "$address" "sudo virsh -c qemu:///system domstate '$domain'" >"$EVIDENCE/compute-$host/domain-state.txt"
   [[ "$(tr -d '\r' <"$EVIDENCE/compute-$host/domain-state.txt")" == running ]] || fail "server $host domain is not running" "PRODUCT_DEFECT"
-  tap="$(python3 - "$EVIDENCE/compute-$host/domain.xml" <<'PY'
-import sys,xml.etree.ElementTree as E
-r=E.parse(sys.argv[1]).getroot()
-for i in r.findall('./devices/interface'):
- t=i.find('target')
- if t is not None and t.get('dev','').startswith('o3ktap-'): print(t.get('dev')); break
-PY
-)"
-  [[ -n "$tap" ]] || fail "server $host domain XML has no Fabric TAP" "ATTACHMENT_DEFECT"
-  ssh_vm "$address" "sudo ip -j -d link show dev '$tap'" >"$EVIDENCE/attachments/server-$host-live-tap.json" || fail "real Fabric TAP disappeared for $host" "ATTACHMENT_DEFECT"
   ownership="/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json"
   ssh_vm "$address" "sudo cat '$ownership'" >"$EVIDENCE/attachments/server-$host-provider-ownership.json" || fail "Fabric ownership observation failed for $host" "OWNERSHIP_DEFECT"
-  tap_mac="$(python3 - "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$port_id" <<'PY'
-import json,sys
-x=json.load(open(sys.argv[1])); taps=x.get("realm",{}).get("endpoint_taps",{})
-assert sys.argv[2] in taps
-assert sys.argv[2] not in x.get("realm",{}).get("pending_endpoint_taps",{})
-print(taps[sys.argv[2]]["mac"])
-PY
-)" || fail "durable committed TAP ownership was absent for $host" "OWNERSHIP_DEFECT"
   guest_mac="$(field port.mac_address <"$EVIDENCE/api/port-$host.response.json")"
-  python3 - "$EVIDENCE/attachments/server-$host-live-tap.json" "$tap" "$tap_mac" "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$server_id" "$host" <<'PY' || fail "live TAP identity/type/owner/bridge attestation failed for $host" "ATTACHMENT_DEFECT"
+  tap_contract="$(python3 - "$EVIDENCE/compute-$host/domain.xml" "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$port_id" "$guest_mac" <<'PY'
+import json,sys,xml.etree.ElementTree as ET
+domain=ET.parse(sys.argv[1]).getroot()
+ownership=json.load(open(sys.argv[2])); endpoint,guest_mac=sys.argv[3:]
+matches=[(rid,r) for rid,r in ownership.get('realms',{}).items() if endpoint in r.get('endpoint_taps',{})]
+assert len(matches)==1, matches
+realm_id,realm=matches[0]
+record=realm['endpoint_taps'][endpoint]
+assert endpoint not in realm.get('pending_endpoint_taps',{})
+tap=record['interface']; assert tap
+interfaces=[]
+for interface in domain.findall('./devices/interface'):
+    target=interface.find('target')
+    if target is not None and target.get('dev')==tap: interfaces.append(interface)
+assert len(interfaces)==1, (tap,len(interfaces))
+mac=interfaces[0].find('mac').get('address','').lower()
+assert mac==guest_mac.lower(), (mac,guest_mac)
+print('\t'.join((tap,record['mac'],realm_id,realm['bridge'],mac)))
+PY
+)" || fail "domain TAP target or durable provider ownership did not match" "ATTACHMENT_DEFECT"
+  IFS=$'\t' read -r tap tap_mac realm_id bridge guest_domain_mac <<<"$tap_contract"
+  REALM_BRIDGE[$host]="$bridge"
+  ssh_vm "$address" "sudo ip -j -d link show dev '$tap'" >"$EVIDENCE/attachments/server-$host-live-tap.json" || fail "real Fabric TAP disappeared for $host" "ATTACHMENT_DEFECT"
+  ssh_vm "$address" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json'" >"$EVIDENCE/attachments/server-$host-fabric-plan.json" || fail "current Fabric plan observation failed for $host" "ATTACHMENT_DEFECT"
+  ssh_vm "$address" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json'" >"$EVIDENCE/attachments/server-$host-execution-plans.json" || fail "network execution plan observation failed for $host" "ATTACHMENT_DEFECT"
+  python3 - "$EVIDENCE/attachments/server-$host-live-tap.json" "$tap" "$tap_mac" "$bridge" "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$EVIDENCE/attachments/server-$host-fabric-plan.json" "$EVIDENCE/attachments/server-$host-execution-plans.json" "$port_id" "$guest_mac" "$expected_host" "$realm_id" <<'PY' || fail "live TAP, plan, or committed ownership attestation failed for $host" "ATTACHMENT_DEFECT"
 import json,sys
-x=json.load(open(sys.argv[1])); name,mac=sys.argv[2:4]
-assert len(x)==1 and x[0].get('ifname')==name and x[0].get('address','').lower()==mac.lower()
-i=x[0]['linkinfo']; assert i.get('info_kind')=='tun' and i.get('info_data',{}).get('type')=='tap'
-o=json.load(open(sys.argv[4])); plan=o['plan']; assert plan['local_host']=='host-'+sys.argv[6]
-assert plan['directory']['directory_generation']==o['directory_generation']
-tap=o['realm']['endpoint_taps']; assert sys.argv[5] in tap and sys.argv[5] not in o['realm']['pending_endpoint_taps']
-assert x[0].get('master')==o['realm']['bridge']
+live=json.load(open(sys.argv[1])); name,provider_mac,bridge=sys.argv[2:5]
+ownership=json.load(open(sys.argv[5])); plan=json.load(open(sys.argv[6])); accepted=json.load(open(sys.argv[7]))
+endpoint,guest_mac,agent,realm_id=sys.argv[8:]
+realms=ownership.get('realms',{}); assert realm_id in realms
+realm=realms[realm_id]; record=realm.get('endpoint_taps',{}).get(endpoint)
+assert record and endpoint not in realm.get('pending_endpoint_taps',{})
+assert record.get('interface')==name and record.get('mac','').lower()==provider_mac.lower()
+assert len(live)==1 and live[0].get('ifname')==name and int(live[0].get('ifindex',0))>0
+assert live[0].get('address','').lower()==provider_mac.lower()
+linkinfo=live[0].get('linkinfo',{}); assert linkinfo.get('info_kind')=='tun' and linkinfo.get('info_data',{}).get('type')=='tap'
+assert live[0].get('master')==bridge==realm.get('bridge')
+assert plan.get('realm_id')==realm_id and plan.get('local_host')=='host-'+agent[-1]
+assert plan.get('directory_generation')==realm.get('directory_generation')
+entries=[e for e in plan.get('directory',{}).get('entries',[]) if e.get('endpoint_id')==endpoint]
+assert len(entries)==1 and entries[0].get('selected_host')=='host-'+agent[-1]
+assert entries[0].get('mac','').lower()==guest_mac.lower()
+success=[]
+for item in accepted.get('plans',[]):
+    command=item.get('plan',{}); fabric=command.get('fabric',{})
+    intents=command.get('intents',[])
+    has_endpoint=any('EndpointAttachment' in intent and intent['EndpointAttachment'].get('endpoint_id')==endpoint for intent in intents)
+    if item.get('status')=='Succeeded' and item.get('target',{}).get('agent_id')=='network-agent-'+agent[-1] and fabric.get('realm_id')==realm_id and has_endpoint:
+        success.append(item)
+assert success, 'no succeeded endpoint apply plan for target agent'
+assert live[0].get('address','').lower()!=guest_mac.lower()
 PY
   bridge="$(python3 - "$EVIDENCE/attachments/server-$host-live-tap.json" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))[0].get('master',''))
@@ -473,7 +583,7 @@ PY
 import json,sys; print(json.load(open(sys.argv[1]))[0].get('address',''))
 PY
 )"
-  [[ "$current_mac" != "$guest_mac" ]] || fail "provider TAP and canonical guest MAC unexpectedly match" "SECURITY_DEFECT"
+  [[ "$current_mac" == "$tap_mac" && "$current_mac" != "$guest_mac" && "$guest_domain_mac" == "$guest_mac" ]] || fail "provider TAP and canonical guest MAC identities were not preserved" "SECURITY_DEFECT"
   printf 'provider_tap_mac=%s\ncanonical_guest_mac=%s\n' "$current_mac" "$guest_mac" >"$EVIDENCE/attachments/server-$host-mac-separation.txt"
   # The accepted compute attachment resolver ran during API create. Its PASS is
   # evidenced by successful VM realization; preserve the live observation too.
@@ -485,71 +595,273 @@ create_server a
 create_server b
 create_server c
 
-console_command() {
-  local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" domain
+guest_boot_proof() {
+  local host="$1" address="${MGMT_IP[$1]}" domain xml serial_path serial_dir
   domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
-  python3 - "$SSH_KEY" "$KNOWN_HOSTS" "$SSH_USER" "$address" "$domain" "$command" "$EVIDENCE/$label" <<'PY'
-import pexpect,sys
-key,known,user,address,domain,command,output=sys.argv[1:]
-args=["-i",key,"-o","BatchMode=yes","-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=yes", "-o",f"UserKnownHostsFile={known}",f"{user}@{address}",f"sudo virsh -c qemu:///system console --force --safe {domain}"]
-p=pexpect.spawn("ssh",args,encoding="utf-8",timeout=45)
-p.logfile=open(output,"w",encoding="utf-8")
-try:
-    i=p.expect([r"(?i)login:",r"(?m)[^\r\n]*[#$] ?$",pexpect.EOF])
-    if i==0:
-        p.sendline("cirros")
-        p.expect(r"(?i)password:")
-        p.sendline("gocubsgo")
-        p.expect(r"(?m)[^\r\n]*[#$] ?$")
-    elif i==2:
-        raise RuntimeError("serial console ended before shell readiness")
-    p.sendline(command+"; rc=$?; echo __O3K_RC_$rc__")
-    p.expect(r"__O3K_RC_([0-9]+)__")
-    rc=int(p.match.group(1))
-    p.send("\x1d")
-    p.expect(pexpect.EOF,timeout=8)
-    if rc:
-        raise SystemExit(rc)
-finally:
-    if p.isalive(): p.close(force=True)
+  xml="$EVIDENCE/compute-$host/domain.xml"
+  serial_path="$(python3 - "$xml" "$RUN_ID" <<'PY'
+import sys,xml.etree.ElementTree as ET
+root=ET.parse(sys.argv[1]).getroot(); run=sys.argv[2]
+devices=root.find('devices'); matches=[]
+for node in devices.findall('serial') if devices is not None else []:
+    source=node.find('source')
+    path=source.get('path','') if source is not None else ''
+    if node.get('type')=='file' and path.startswith(f'/var/lib/o3k-fabric-v3/{run}/compute/console/'):
+        matches.append(path)
+assert len(matches)==1, matches
+print(matches[0])
 PY
-  local rc=$?
-  (( rc == 0 )) || fail "guest $host command failed ($label)" "DATAPLANE_DEFECT"
+)" || return 1
+  serial_dir="/var/lib/o3k-fabric-v3/$RUN_ID/compute/console/"
+  [[ "$serial_path" == "$serial_dir"* && "$serial_path" != *$'\n'* ]] || return 1
+  for _ in $(seq 1 240); do
+    if ssh_vm "$address" "sudo test -f '$serial_path' && sudo cat '$serial_path'" >"$EVIDENCE/compute-$host/serial.log" 2>/dev/null; then
+      if grep -Eqi "CirrOS.*login:|login as 'cirros' user|cirros login:" "$EVIDENCE/compute-$host/serial.log"; then
+        printf 'domain=%s\nserial_file=%s\nboot_login_prompt=PASS\n' "$domain" "$serial_path" >"$EVIDENCE/compute-$host/guest-serial-login.txt"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  return 1
 }
 
-wait_guest_shell() {
-  local host="$1" output="compute-$1/guest-serial-login.txt"
-  console_command "$host" 'echo GUEST_SHELL_READY' "$output" || return 1
-  grep -Fq GUEST_SHELL_READY "$EVIDENCE/$output"
+mac_link_local() {
+  python3 - "$1" <<'PY'
+import sys
+b=bytes.fromhex(sys.argv[1].replace(':',''))
+assert len(b)==6
+b=bytes([b[0]^2,b[1],b[2],0xff,0xfe,b[3],b[4],b[5]])
+print('fe80::'+':'.join(f'{int.from_bytes(b[i:i+2],"big"):x}' for i in range(0,8,2)))
+PY
 }
-for host in a b c; do wait_guest_shell "$host" || fail "guest $host serial boot/login proof failed" "ENVIRONMENT_GAP"; done
+
+for host in a b c; do
+  guest_boot_proof "$host" || fail "guest $host file-backed serial did not prove boot/login readiness" "ENVIRONMENT_GAP"
+done
 
 declare -A TENANT_IP=() TENANT_MAC=()
 for host in a b c; do
   TENANT_IP[$host]="$(field port.fixed_ips.0.ip_address <"$EVIDENCE/api/port-$host.response.json")"
   TENANT_MAC[$host]="$(field port.mac_address <"$EVIDENCE/api/port-$host.response.json")"
+  GUEST_IPV6[$host]="$(mac_link_local "${TENANT_MAC[$host]}")"
 done
 printf 'server,host,tenant_ip,guest_mac\n' >"$EVIDENCE/canonical/endpoints.csv"
 for host in a b c; do printf '%s,host-%s,%s,%s\n' "$host" "$host" "${TENANT_IP[$host]}" "${TENANT_MAC[$host]}" >>"$EVIDENCE/canonical/endpoints.csv"; done
 
+guest_tunnel_command() {
+  local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" bridge="${REALM_BRIDGE[$1]}" ipv6="${GUEST_IPV6[$1]}"
+  local port tunnel_pid known_alias keyscan_file rc
+  LAST_GUEST_CHANNEL_ERROR=0
+  port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+  known_alias="o3k-guest-$host"
+  tunnel_log="$EVIDENCE/compute-$host/guest-ssh-tunnel.log"
+  ssh "${ssh_opts[@]}" -o ExitOnForwardFailure=yes -N -L "127.0.0.1:$port:[$ipv6%$bridge]:22" "$SSH_USER@$address" >"$tunnel_log" 2>&1 &
+  tunnel_pid=$!
+  cleanup_tunnel() { kill "$tunnel_pid" 2>/dev/null || true; wait "$tunnel_pid" 2>/dev/null || true; }
+  for _ in $(seq 1 40); do
+    if timeout 1 bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1; then break; fi
+    if ! kill -0 "$tunnel_pid" 2>/dev/null; then cat "$tunnel_log" >&2; cleanup_tunnel; LAST_GUEST_CHANNEL_ERROR=1; return 1; fi
+    sleep 0.25
+  done
+  if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1; then cleanup_tunnel; LAST_GUEST_CHANNEL_ERROR=1; return 1; fi
+  keyscan_file="$EVIDENCE/compute-$host/guest-keyscan.tmp"
+  ssh-keyscan -T 4 -p "$port" 127.0.0.1 2>/dev/null >"$keyscan_file" || { cleanup_tunnel; LAST_GUEST_CHANNEL_ERROR=1; return 1; }
+  if ! python3 - "$keyscan_file" "$KNOWN_HOSTS" "$known_alias" "$port" <<'PY'
+import sys
+src,dst,alias,port=sys.argv[1:]
+lines=[]
+for line in open(src):
+    fields=line.split()
+    if len(fields)>=3: lines.append(f'{alias} {fields[1]} {fields[2]}\n')
+assert lines
+with open(dst,'a') as out: out.writelines(lines)
+PY
+  then cleanup_tunnel; LAST_GUEST_CHANNEL_ERROR=1; return 1; fi
+  rm -f "$keyscan_file"
+  python3 - "$KNOWN_HOSTS" "$SSH_KEY" "$known_alias" "$port" "$command" "$EVIDENCE/$label" <<'PY'
+import pexpect,sys
+known,key,alias,port,command,output=sys.argv[1:]
+wrapped=f'{command}; rc=$?; printf "\\n__O3K_RC_%s__\\n" "$rc"'
+args=['-tt','-i',key,'-p',port,'-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes','-o',f'HostKeyAlias={alias}','-o',f'UserKnownHostsFile={known}','-o','PreferredAuthentications=password','-o','PubkeyAuthentication=no',f'cirros@127.0.0.1',wrapped]
+p=pexpect.spawn('ssh',args,encoding='utf-8',timeout=45)
+with open(output,'w',encoding='utf-8') as f:
+    p.logfile_read=f
+    try:
+        for _ in range(3):
+            i=p.expect([r"(?i)password:",r'__O3K_RC_([0-9]+)__',pexpect.EOF])
+            if i==0:
+                p.sendline('gocubsgo')
+                continue
+            if i==1:
+                rc=int(p.match.group(1)); p.expect(pexpect.EOF,timeout=8)
+                if rc: raise SystemExit(rc)
+                break
+            raise RuntimeError('guest SSH closed before command completed')
+        else: raise RuntimeError('guest SSH authentication prompt repeated')
+    except (pexpect.EOF,pexpect.TIMEOUT,OSError) as exc:
+        f.write(f'\nGUEST_CHANNEL_ERROR: {type(exc).__name__}\n')
+        raise SystemExit(254)
+    finally:
+        if p.isalive(): p.close(force=True)
+PY
+  rc=$?
+  cleanup_tunnel
+  if (( rc == 254 )); then LAST_GUEST_CHANNEL_ERROR=1; fi
+  return "$rc"
+}
+
+console_command() {
+  local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" domain
+  domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
+  LAST_GUEST_CHANNEL_ERROR=0
+  if ! python3 - "$SSH_KEY" "$KNOWN_HOSTS" "$SSH_USER" "$address" "$domain" "$command" "$EVIDENCE/$label" <<'PY'
+import pexpect,sys
+key,known,user,address,domain,command,output=sys.argv[1:]
+args=['-i',key,'-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes',
+      '-o',f'UserKnownHostsFile={known}',f'{user}@{address}',
+      f'sudo virsh -c qemu:///system console --force --safe {domain}']
+p=pexpect.spawn('ssh',args,encoding='utf-8',timeout=45)
+with open(output,'w',encoding='utf-8') as f:
+    p.logfile_read=f
+    try:
+        i=p.expect([r'(?i)login:',r'(?m)[^\r\n]*[#$] ?$',pexpect.EOF])
+        if i==0:
+            p.sendline('cirros')
+            p.expect(r'(?i)password:')
+            p.sendline('gocubsgo')
+            p.expect(r'(?m)[^\r\n]*[#$] ?$')
+        elif i==2:
+            raise RuntimeError('serial console ended before shell readiness')
+        p.sendline(command+'; rc=$?; echo __O3K_RC_$rc__')
+        p.expect(r'__O3K_RC_([0-9]+)__')
+        rc=int(p.match.group(1))
+        p.send('\x1d')
+        p.expect(pexpect.EOF,timeout=8)
+        if rc: raise SystemExit(rc)
+    finally:
+        if p.isalive(): p.close(force=True)
+PY
+  then
+    LAST_GUEST_CHANNEL_ERROR=1
+    return 1
+  fi
+}
+
+# Read-only serial commands prove guest addressing without configuring an IP.
+for host in a b c; do
+  console_command "$host" 'ip -4 addr show' "compute-$host/guest-ip.txt" \
+    || fail "guest $host IPv4 observation failed" "DATAPLANE_DEFECT"
+  grep -Fq "${TENANT_IP[$host]}" "$EVIDENCE/compute-$host/guest-ip.txt" \
+    || fail "guest $host did not receive its canonical fixed IP through DHCP" "DATAPLANE_DEFECT"
+done
+
+stop_dhcp_capture
+[[ -s "$EVIDENCE/attachments/dhcp-dora.pcap" ]] \
+  || fail "DHCP capture is empty" "DATAPLANE_DEFECT"
+REALM_ID="$(python3 - "$EVIDENCE/attachments/server-a-provider-ownership.json" "${PORT_IDS[0]}" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1])); endpoint=sys.argv[2]
+matches=[rid for rid,r in x.get('realms',{}).items() if endpoint in r.get('endpoint_taps',{})]
+assert len(matches)==1,matches
+print(matches[0])
+PY
+)" || fail "canonical DHCP Realm could not be resolved" "OWNERSHIP_DEFECT"
+for host in a b c; do
+  address="${MGMT_IP[$host]}"
+  dhcp_root="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$REALM_ID"
+  ssh_vm "$address" "sudo cat '$dhcp_root/fabric-dhcp-ownership.json'" \
+    >"$EVIDENCE/attachments/dhcp-host-$host-ownership.json" \
+    || fail "host-$host has no durable Fabric DHCP observation" "DATAPLANE_DEFECT"
+  ssh_vm "$address" "sudo cat '$dhcp_root/state.json'" \
+    >"$EVIDENCE/attachments/dhcp-host-$host-state.json" \
+    || fail "host-$host has no Fabric DHCP state snapshot" "DATAPLANE_DEFECT"
+  ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print 2>/dev/null || true" \
+    >"$EVIDENCE/attachments/dhcp-host-$host-owned-pids.txt"
+done
+ssh_vm "${MGMT_IP[a]}" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$REALM_ID/dnsmasq.conf'" \
+  >"$EVIDENCE/attachments/dhcp-authority.conf" \
+  || fail "authority DHCP configuration is absent" "DATAPLANE_DEFECT"
+ssh_vm "${MGMT_IP[a]}" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$REALM_ID/dnsmasq.leases' 2>/dev/null || true" \
+  >"$EVIDENCE/attachments/dhcp-authority.leases"
+python3 - "$EVIDENCE/attachments" "$EVIDENCE/api" "${REALM_BRIDGE[a]}" <<'PY' \
+  || fail "single DHCP authority, remote bindings, or MTU evidence failed" "DATAPLANE_DEFECT"
+import json,pathlib,sys
+root,api=map(pathlib.Path,sys.argv[1:3]); bridge=sys.argv[3]
+expected={}
+for host in 'abc':
+    port=json.load(open(api/f'port-{host}.response.json'))['port']
+    expected[port['id']]={'mac':port['mac_address'].lower(),'ip':port['fixed_ips'][0]['ip_address']}
+    owner=json.load(open(root/f'dhcp-host-{host}-ownership.json'))
+    assert owner['local_host']==f'host-{host}' and owner['authority_host']=='host-a', owner
+    assert owner['dhcp_enabled'] and not owner['pending'] and not owner['withdrawn'], owner
+    pids=[line for line in (root/f'dhcp-host-{host}-owned-pids.txt').read_text().splitlines() if line.strip()]
+    assert len(pids)==(1 if host=='a' else 0),(host,pids)
+state=json.load(open(root/'dhcp-host-a-state.json'))
+assert state['config']['interface']==bridge,state['config']
+assert state['config']['mtu']==1390,state['config']
+bindings=state['bindings']
+assert set(bindings)==set(expected),(bindings,expected)
+for endpoint,want in expected.items():
+    got=bindings[endpoint]
+    assert got['mac'].lower()==want['mac'] and got['address']==want['ip'],(endpoint,got,want)
+conf=(root/'dhcp-authority.conf').read_text()
+assert f'interface={bridge}' in conf and 'dhcp-option=26,1390' in conf,conf
+for value in expected.values():
+    assert f"dhcp-host={value['mac']},{value['ip']}" in conf,(value,conf)
+PY
+tcpdump -nn -e -tt -vvv -r "$EVIDENCE/attachments/dhcp-dora.pcap" 'udp and (port 67 or port 68)' \
+  >"$EVIDENCE/attachments/dhcp-dora-decoded.txt" 2>&1 \
+  || fail "captured DHCP DORA pcap could not be decoded" "HARNESS_GAP"
+python3 - "$EVIDENCE/attachments/dhcp-dora-decoded.txt" "$EVIDENCE/api" <<'PY' \
+  || fail "DHCP DORA/cross-host broadcast/single-offer proof failed" "DATAPLANE_DEFECT"
+import json,pathlib,re,sys
+text=pathlib.Path(sys.argv[1]).read_text(errors='replace')
+api=pathlib.Path(sys.argv[2]); expected={}
+for host in 'abc':
+    p=json.load(open(api/f'port-{host}.response.json'))['port']
+    expected[p['mac_address'].lower()]=p['fixed_ips'][0]['ip_address']
+assert all(mac in text.lower() for mac in expected),(expected,text[:5000])
+labels={'DISCOVER':r'DHCP-Message[^\n]*Discover','OFFER':r'DHCP-Message[^\n]*Offer',
+        'REQUEST':r'DHCP-Message[^\n]*Request','ACK':r'DHCP-Message[^\n]*(?:ACK|Ack)'}
+for name,pattern in labels.items(): assert re.search(pattern,text,re.I),(name,text[:5000])
+blocks=re.split(r'(?m)(?=^\d+\.\d+\s+.*\bIP\s)',text); offers=[]
+for block in blocks:
+    if not re.search(r'DHCP-Message[^\n]*Offer',block,re.I): continue
+    xid=re.search(r' xid 0x([0-9a-f]+)',block,re.I)
+    client=re.search(r'Client-Ethernet-Address:?\s+([0-9a-f:]{17})',block,re.I)
+    server=re.search(r'Server-ID[^\n]*?([0-9]+(?:\.[0-9]+){3})',block,re.I)
+    if xid and client and server: offers.append((xid.group(1).lower(),client.group(1).lower(),server.group(1)))
+assert {client for _,client,_ in offers}==set(expected),offers
+assert len({(xid,client,server) for xid,client,server in offers})==3,offers
+assert len({server for _,_,server in offers})==1,offers
+PY
+echo 'FABRIC DHCP DORA: PASS (one authority; endpoint bindings A/B/C)' \
+  >"$EVIDENCE/attachments/dhcp-dora-result.txt"
+
+guest_failure_class() {
+  local phase_class="$1"
+  if (( LAST_GUEST_CHANNEL_ERROR )); then printf 'HARNESS_GAP\n'; else printf '%s\n' "$phase_class"; fi
+}
+
 # Cold neighbor resolution and the six required tenant-address ICMP flows.
 for pair in a:b b:a a:c c:a b:c c:b; do
   from="${pair%%:*}"; to="${pair##*:}"
-  console_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "icmp/$from-to-$to.txt" || fail "ICMP $from->$to failed" "DATAPLANE_DEFECT"
-  console_command "$from" "ip neigh show ${TENANT_IP[$to]}" "arp/$from-to-$to.txt" || fail "ARP observation $from->$to failed" "DATAPLANE_DEFECT"
+  console_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "icmp/$from-to-$to.txt" || fail "ICMP $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+  console_command "$from" "ip neigh show ${TENANT_IP[$to]}" "arp/$from-to-$to.txt" || fail "ARP observation $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
   grep -Fqi "${TENANT_MAC[$to]}" "$EVIDENCE/arp/$from-to-$to.txt" || fail "ARP $from->$to resolved to wrong MAC" "DATAPLANE_DEFECT"
 done
 
 # Bounded TCP and UDP listeners run inside B/C CirrOS guests; sender commands
 # originate inside A over tenant addresses.
-console_command b 'rm -f /tmp/o3k-tcp-data; nohup busybox nc -l -p 18081 >/tmp/o3k-tcp-data 2>&1 </dev/null &' tcp-listener.txt || fail "TCP listener setup failed" "DATAPLANE_DEFECT"
+console_command b 'rm -f /tmp/o3k-tcp-data; nohup busybox nc -l -p 18081 >/tmp/o3k-tcp-data 2>&1 </dev/null &' tcp-listener.txt || fail "TCP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
 sleep 1
-console_command a "echo o3k-tcp-$RUN_ID | busybox nc -w 5 ${TENANT_IP[b]} 18081" tcp/sender.txt || fail "TCP A->B failed" "DATAPLANE_DEFECT"
-console_command b 'grep -F o3k-tcp- /tmp/o3k-tcp-data' tcp/receiver.txt || fail "TCP payload did not arrive at B" "DATAPLANE_DEFECT"
-console_command c 'rm -f /tmp/o3k-udp-data; nohup busybox nc -u -l -p 18082 >/tmp/o3k-udp-data 2>&1 </dev/null &' udp-listener.txt || fail "UDP listener setup failed" "DATAPLANE_DEFECT"
+console_command a "echo o3k-tcp-$RUN_ID | busybox nc -w 5 ${TENANT_IP[b]} 18081" tcp/sender.txt || fail "TCP A->B failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command b 'grep -F o3k-tcp- /tmp/o3k-tcp-data' tcp/receiver.txt || fail "TCP payload did not arrive at B" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command c 'rm -f /tmp/o3k-udp-data; nohup busybox nc -u -l -p 18082 >/tmp/o3k-udp-data 2>&1 </dev/null &' udp-listener.txt || fail "UDP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
 sleep 1
-console_command a "echo o3k-udp-$RUN_ID | busybox nc -u -w 3 ${TENANT_IP[c]} 18082" udp/sender.txt || fail "UDP A->C failed" "DATAPLANE_DEFECT"
-console_command c 'sleep 1; grep -F o3k-udp- /tmp/o3k-udp-data' udp/receiver.txt || fail "UDP payload did not arrive at C" "DATAPLANE_DEFECT"
+console_command a "echo o3k-udp-$RUN_ID | busybox nc -u -w 3 ${TENANT_IP[c]} 18082" udp/sender.txt || fail "UDP A->C failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command c 'sleep 1; grep -F o3k-udp- /tmp/o3k-udp-data' udp/receiver.txt || fail "UDP payload did not arrive at C" "$(guest_failure_class DATAPLANE_DEFECT)"
 
 for host in a b c; do
   address="${MGMT_IP[$host]}"
@@ -559,6 +871,17 @@ done
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" >"$EVIDENCE/plans/host-$host-ownership.json" || fail "Fabric ownership snapshot failed on $host" "OWNERSHIP_DEFECT"
+  realm_id="$(python3 - "$EVIDENCE/plans/host-$host-ownership.json" "${PORT_IDS[@]}" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1])); endpoints=set(sys.argv[2:])
+matches=[rid for rid,r in x.get('realms',{}).items() if endpoints.intersection(r.get('endpoint_taps',{}))]
+assert len(matches)==1, matches
+print(matches[0])
+PY
+)" || fail "current Realm ownership could not be resolved on $host" "OWNERSHIP_DEFECT"
+  echo "$realm_id" >"$EVIDENCE/plans/host-$host-realm-id.txt"
+  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json" >"$EVIDENCE/plans/host-$host-fabric-plan.json" || fail "current Fabric plan snapshot failed on $host" "OWNERSHIP_DEFECT"
+  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json" >"$EVIDENCE/plans/host-$host-execution-plans.json" || fail "network execution plan snapshot failed on $host" "OWNERSHIP_DEFECT"
   ssh_vm "$address" 'sudo wg show all transfer; sudo ip -d -j link' >"$EVIDENCE/wireguard/host-$host-before-traffic.txt" || fail "WireGuard/VXLAN snapshot failed on $host" "ENVIRONMENT_GAP"
 done
 
@@ -566,10 +889,10 @@ done
 # provider plan. Runtime link/FDB/WireGuard records above are retained beside it.
 python3 - "$EVIDENCE/plans" <<'PY' || fail "HER participant convergence failed" "DATAPLANE_DEFECT"
 import glob,json,sys
-files=glob.glob(sys.argv[1]+"/host-*-ownership.json")
+files=glob.glob(sys.argv[1]+"/host-*-fabric-plan.json")
 assert len(files)==3
 for path in files:
-    x=json.load(open(path)); hosts={e["selected_host"] for e in x["plan"]["directory"]["entries"]}
+    x=json.load(open(path)); hosts={e["selected_host"] for e in x["directory"]["entries"]}
     assert hosts=={"host-a","host-b","host-c"}, (path,hosts)
 PY
 
@@ -598,9 +921,9 @@ PY
 python3 - "$EVIDENCE/plans" "$EVIDENCE/wireguard" <<'PY' || fail "VXLAN VNI/link realization did not match Fabric plan" "DATAPLANE_DEFECT"
 import glob,json,sys
 vnis=set()
-for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
+for path in glob.glob(sys.argv[1]+"/host-*-fabric-plan.json"):
     host=path.rsplit("/",1)[-1].split("-")[1]
-    plan=json.load(open(path)); expected=plan["plan"]["encapsulation"]["provider_segment_id"]
+    plan=json.load(open(path)); expected=plan["encapsulation"]["provider_segment_id"]
     vnis.add(expected)
     observation=open(sys.argv[2]+f"/host-{host}-before-traffic.txt").read()
     links=json.loads(observation[observation.index("["):])
@@ -616,7 +939,7 @@ for _ in $(seq 1 120); do curl -fsS "$BASE/healthz" >/dev/null 2>&1 && break; ki
 curl -fsS "$BASE/readyz" >"$EVIDENCE/restart/ready.json" || fail "controller did not become ready after restart" "DURABLE_RECONCILIATION_GAP"
 for pair in a:b b:a a:c c:a b:c c:b; do
   from="${pair%%:*}"; to="${pair##*:}"
-  console_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "restart/$from-to-$to.txt" || fail "post-controller-restart ICMP $from->$to failed" "DURABLE_RECONCILIATION_GAP"
+  console_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "restart/$from-to-$to.txt" || fail "post-controller-restart ICMP $from->$to failed" "$(guest_failure_class DURABLE_RECONCILIATION_GAP)"
 done
 api "$BASE/v2.1/$PROJECT_ID/servers" >"$EVIDENCE/restart/servers.json" || fail "API unavailable after controller restart" "DURABLE_RECONCILIATION_GAP"
 for host in a b c; do grep -Fq "$PREFIX-server-$host" "$EVIDENCE/restart/servers.json" || fail "server $host missing after controller recovery" "DURABLE_RECONCILIATION_GAP"; done
@@ -631,16 +954,27 @@ done
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" >"$EVIDENCE/endpoint-removal/host-$host-ownership.json" || fail "post-C-removal state unavailable on $host" "OWNERSHIP_DEFECT"
+  realm_id="$(python3 - "$EVIDENCE/endpoint-removal/host-$host-ownership.json" "${PORT_IDS[0]}" "${PORT_IDS[1]}" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1])); endpoints=set(sys.argv[2:])
+matches=[rid for rid,r in x.get('realms',{}).items() if endpoints.intersection(r.get('endpoint_taps',{}))]
+assert len(matches)==1, matches
+print(matches[0])
+PY
+)" || fail "A/B Realm ownership could not be resolved on $host" "OWNERSHIP_DEFECT"
+  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json" >"$EVIDENCE/endpoint-removal/host-$host-fabric-plan.json" || fail "post-C-removal Fabric plan unavailable on $host" "OWNERSHIP_DEFECT"
 done
 python3 - "$EVIDENCE/endpoint-removal" "${PORT_IDS[2]}" <<'PY' || fail "C endpoint/HER did not withdraw" "CLEANUP_DEFECT"
 import glob,json,sys
 for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
-    x=json.load(open(path)); assert sys.argv[2] not in x.get("realm",{}).get("endpoint_taps",{}), path
-    hosts={e["selected_host"] for e in x.get("plan",{}).get("directory",{}).get("entries",[])}
+    x=json.load(open(path)); assert all(sys.argv[2] not in r.get("endpoint_taps",{}) for r in x.get("realms",{}).values()), path
+    host=path.rsplit("/",1)[-1].split("-")[1]
+    plan=json.load(open(sys.argv[1]+f"/host-{host}-fabric-plan.json"))
+    hosts={e["selected_host"] for e in plan.get("directory",{}).get("entries",[])}
     assert hosts=={"host-a","host-b"}, (path,hosts)
 PY
-console_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "DATAPLANE_DEFECT"
-console_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" endpoint-removal/b-to-a.txt || fail "B/A failed after C removal" "DATAPLANE_DEFECT"
+console_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" endpoint-removal/b-to-a.txt || fail "B/A failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
 
 # Supported API teardown; provider state is never manually repaired/deleted.
 for index in 1 0; do
@@ -670,8 +1004,9 @@ done
 python3 - "$EVIDENCE/teardown" <<'PY' || fail "run-owned endpoint TAP/HER state leaked after teardown" "CLEANUP_DEFECT"
 import glob,json,sys
 for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
-  if not open(path).read().strip(): continue
-    x=json.load(open(path)); assert not x.get("realm",{}).get("endpoint_taps",{}), path
+    if not open(path).read().strip(): continue
+    x=json.load(open(path))
+    assert all(not r.get("endpoint_taps",{}) and not r.get("pending_endpoint_taps",{}) for r in x.get("realms",{}).values()), path
 PY
 # Remove only the three exact fresh compute guests after proving their API
 # resources and server domains are gone. Then compare the physical libvirt
