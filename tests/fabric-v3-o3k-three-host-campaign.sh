@@ -559,7 +559,7 @@ console_command() {
   python3 - "$SSH_KEY" "$KNOWN_HOSTS" "$SSH_USER" "$address" "$domain" "$command" "$EVIDENCE/$label" <<'PY'
 import pexpect,sys
 key,known,user,address,domain,command,output=sys.argv[1:]
-args=["-i",key,"-o","BatchMode=yes","-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=yes", "-o",f"UserKnownHostsFile={known}",f"{user}@{address}",f"sudo virsh -c qemu:///system console --force --safe {domain}"]
+args=["-tt","-i",key,"-o","BatchMode=yes","-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=yes", "-o",f"UserKnownHostsFile={known}",f"{user}@{address}",f"sudo virsh -c qemu:///system console --force --safe {domain}"]
 p=pexpect.spawn("ssh",args,encoding="utf-8",timeout=45)
 p.logfile=open(output,"w",encoding="utf-8")
 try:
@@ -582,7 +582,7 @@ finally:
     if p.isalive(): p.close(force=True)
 PY
   local rc=$?
-  (( rc == 0 )) || fail "guest $host command failed ($label)" "DATAPLANE_DEFECT"
+  return "$rc"
 }
 
 wait_guest_shell() {
