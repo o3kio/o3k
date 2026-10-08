@@ -54,8 +54,17 @@ EOF
   || { echo "CirrOS networking test tools missing" >&2; exit 1; }
 grep -q '^cirros:x:1000:1000:' "$WORK_DIR/rootfs/etc/passwd" \
   || { echo "expected acceptance account cirros (uid 1000) missing" >&2; exit 1; }
-[[ -e "$WORK_DIR/rootfs/etc/rc3.d/S50-dropbear" ]] \
-  || { echo "CirrOS Dropbear boot service missing" >&2; exit 1; }
+[[ -L "$WORK_DIR/rootfs/etc/rc3.d/S40-network" \
+   && -L "$WORK_DIR/rootfs/etc/rc3.d/S50-dropbear" \
+   && -e "$WORK_DIR/rootfs/etc/rc3.d/S45-cirros-net-ds" ]] \
+  || { echo "expected CirrOS network data-source and Dropbear boot entries missing" >&2; exit 1; }
+# CirrOS can wait for metadata in S45-cirros-net-ds. Start the existing
+# Dropbear service after S40 network setup and before that optional lookup so
+# host-local IPv6 link-local control does not depend on a metadata endpoint.
+mv "$WORK_DIR/rootfs/etc/rc3.d/S50-dropbear" "$WORK_DIR/rootfs/etc/rc3.d/S42-dropbear"
+[[ -L "$WORK_DIR/rootfs/etc/rc3.d/S42-dropbear" \
+   && ! -e "$WORK_DIR/rootfs/etc/rc3.d/S50-dropbear" ]] \
+  || { echo "could not position Dropbear before the CirrOS metadata probe" >&2; exit 1; }
 
 install -d -o 1000 -g 1000 -m 0700 "$WORK_DIR/rootfs/home/cirros/.ssh"
 install -o 1000 -g 1000 -m 0600 "$PROBE_PUBLIC_KEY" "$WORK_DIR/rootfs/home/cirros/.ssh/authorized_keys"
@@ -102,6 +111,7 @@ grep -Fxq 'usr/sbin/dropbear' "$EVIDENCE_DIR/probe-image-files.txt"
   printf 'source=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img\n'
   printf 'source_sha256=%s\n' "$EXPECTED_BASE_SHA"
   printf 'source_date_epoch=%s\n' "$SOURCE_DATE_EPOCH"
+  printf 'dropbear_start_order=S42-after-S40-network-before-S45-cirros-net-ds\n'
   printf 'max_public_upload_bytes=%s\n' "$MAX_PUBLIC_UPLOAD_BYTES"
   stat -c 'probe_image_bytes=%s' "$OUTPUT_IMAGE"
   sha256sum "$BASE_IMAGE" "$OUTPUT_IMAGE" "$PROBE_PUBLIC_KEY"

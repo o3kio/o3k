@@ -90,9 +90,11 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("test -s '$capture_root/local-control.pcap'", preflight)
 
     def test_file_serial_is_captured_read_only_for_control_failure_diagnosis(self):
-        self.assertIn('"os-getConsoleOutput":{"length":65536}', DRIVER)
+        self.assertIn("capture_guest_serial_output()", DRIVER)
+        self.assertIn('sudo cat \'$serial_path\'', DRIVER)
         self.assertIn("serial-console-output.txt", DRIVER)
-        self.assertIn("serial-console-http-status.txt", DRIVER)
+        self.assertIn("run-owned file-backed serial path", DRIVER)
+        self.assertNotIn("virsh console", DRIVER)
 
     def test_probe_image_is_pinned_deterministic_and_within_product_upload_limit(self):
         builder = (ROOT / "fabric-v3-build-probe-image.sh").read_text()
@@ -100,6 +102,12 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("64 * 1024 * 1024", builder)
         self.assertIn("home/cirros/.ssh/authorized_keys", builder)
         self.assertIn('DROPBEAR_ARGS="-s -w -p [::]:22"', builder)
+        self.assertIn('S40-network', builder)
+        self.assertIn('S42-dropbear', builder)
+        self.assertIn('S45-cirros-net-ds', builder)
+        self.assertIn('before that optional lookup', builder)
+        self.assertIn('mv "$WORK_DIR/rootfs/etc/rc3.d/S50-dropbear" "$WORK_DIR/rootfs/etc/rc3.d/S42-dropbear"', builder)
+        self.assertIn('[[ -L "$WORK_DIR/rootfs/etc/rc3.d/S42-dropbear"', builder)
         self.assertIn("--reproducible", builder)
         self.assertNotIn("ip addr add", builder)
         self.assertIn("cirros@", (ROOT / "fabric-v3-guest-control.py").read_text())

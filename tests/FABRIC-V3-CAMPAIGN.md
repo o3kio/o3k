@@ -15,11 +15,17 @@ The guest command path is a deterministic probe image built by
 tests/fabric-v3-build-probe-image.sh from the pinned CirrOS 0.6.3 image
 (`7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b`). The
 recipe installs the campaign public key and an explicit key-only, IPv6-only
-Dropbear policy into the CirrOS initramfs. It uses SSH to the guest's IPv6
+Dropbear policy into the CirrOS initramfs. The recipe schedules the existing
+Dropbear service at `S42`, after network setup and before the optional
+`S45-cirros-net-ds` metadata lookup; that lookup may wait indefinitely when no
+metadata endpoint exists. It uses SSH to the guest's IPv6
 link-local address, scoped to that guest's local Realm bridge on its compute
 host. The command path does not use tenant IPv4, VXLAN, or WireGuard. The
 harness captures the local bridge and Fabric namespace paths to prove that the
-control exchange remains local before packet testing.
+control exchange remains local before packet testing. On control failure, the
+harness reads the exact run-owned file-backed serial log through compute-host
+SSH as read-only boot evidence; it never treats that device as an interactive
+shell.
 
 The probe obtains its tenant IPv4 address through the normal O3K DHCP path. It
 uses normal guest-generated IPv6 link-local addressing. The recipe does not

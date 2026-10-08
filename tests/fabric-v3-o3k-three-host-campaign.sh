@@ -647,24 +647,6 @@ PY
   done
   [[ "$status" == ACTIVE ]] || fail "server $host did not reach ACTIVE (last=$status)" "ATTACHMENT_DEFECT"
   echo "server $host ACTIVE id=$server_id"
-  # File-backed serial is a read-only observation path. Preserve bounded
-  # public-API output so control-channel failures can be diagnosed without
-  # treating the file-backed device as an interactive console.
-  console_http_status="$(curl --silent --show-error --max-time 30 \
-    --output "$EVIDENCE/compute-$host/serial-console-output.json" \
-    --write-out '%{http_code}' -X POST \
-    "$BASE/v2.1/$PROJECT_ID/servers/$server_id/action" \
-    -H "x-auth-token: $TOKEN" -H 'content-type: application/json' \
-    --data '{"os-getConsoleOutput":{"length":65536}}' || true)"
-  printf '%s\n' "$console_http_status" >"$EVIDENCE/compute-$host/serial-console-http-status.txt"
-  if [[ "$console_http_status" == 200 ]]; then
-    python3 - "$EVIDENCE/compute-$host/serial-console-output.json" \
-      "$EVIDENCE/compute-$host/serial-console-output.txt" <<'PYCONSOLE'
-import json,pathlib,sys
-response=json.loads(pathlib.Path(sys.argv[1]).read_text())
-pathlib.Path(sys.argv[2]).write_text(response.get('output',''))
-PYCONSOLE
-  fi
   local response_host expected_host address domain="" tap ownership tap_mac guest_mac current_mac bridge realm_id
   expected_host="compute-agent-$host"
   response_host="$(api "$BASE/v2.1/$PROJECT_ID/servers/$server_id" | tee "$EVIDENCE/api/server-$host-placement.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["server"].get("OS-EXT-SRV-ATTR:host", ""))')"
@@ -678,6 +660,7 @@ PYCONSOLE
   [[ -n "$domain" ]] || fail "server $host ACTIVE but no matching owned VM domain found on $expected_host" "PRODUCT_DEFECT"
   printf '%s\n' "$domain" >"$EVIDENCE/compute-$host/domain.txt"
   ssh_vm "$address" "sudo virsh -c qemu:///system dumpxml '$domain'" >"$EVIDENCE/compute-$host/domain.xml"
+  capture_guest_serial_output "$host" || fail "file-backed guest serial observation unavailable for $host" "HARNESS_GAP"
   ssh_vm "$address" "sudo virsh -c qemu:///system domstate '$domain'" >"$EVIDENCE/compute-$host/domain-state.txt"
   [[ "$(tr -d '\r' <"$EVIDENCE/compute-$host/domain-state.txt")" == running ]] || fail "server $host domain is not running" "PRODUCT_DEFECT"
   ownership="/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json"
@@ -754,6 +737,26 @@ PY
 
 mac_link_local() {
   python3 "$ROOT_DIR/tests/fabric-v3-guest-control.py" link-local "$1"
+}
+
+capture_guest_serial_output() {
+  local host="$1" address="${MGMT_IP[$1]}" serial_path
+  serial_path="$(python3 - "$EVIDENCE/compute-$host/domain.xml" "$RUN_ID" <<'PYSERIAL'
+import sys,xml.etree.ElementTree as ET
+root=ET.parse(sys.argv[1]).getroot()
+serial=root.find("./devices/serial")
+source=serial.find("source") if serial is not None else None
+path=source.get("path") if source is not None else ""
+prefix=f"/var/lib/o3k-fabric-v3/{sys.argv[2]}/compute/console/"
+if serial is None or serial.get("type") != "file" or not path.startswith(prefix):
+    raise SystemExit("live domain has no run-owned file-backed serial path")
+print(path)
+PYSERIAL
+)" || return 1
+  printf '%s\n' "$serial_path" >"$EVIDENCE/compute-$host/serial-console-path.txt"
+  ssh_vm "$address" "sudo cat '$serial_path'" \
+    >"$EVIDENCE/compute-$host/serial-console-output.txt" \
+    2>"$EVIDENCE/compute-$host/serial-console-output.stderr"
 }
 
 collect_guest_control_diagnostics() {
@@ -877,7 +880,10 @@ import json,sys
 print(json.load(open(sys.argv[1]))['fabric']['namespace'])
 PYNS
 )"
-  prepare_guest_control "$host" || fail "host-local IPv6 link-local SSH unavailable for guest $host" "HARNESS_GAP"
+  if ! prepare_guest_control "$host"; then
+    capture_guest_serial_output "$host" || true
+    fail "host-local IPv6 link-local SSH unavailable for guest $host" "HARNESS_GAP"
+  fi
   guest_control_command "$host" true "compute-$host/control-true.txt" || fail "guest $host control true failed" "HARNESS_GAP"
   guest_control_command "$host" 'ip link show dev eth0' "compute-$host/control-ip-link.txt" || fail "guest $host ip link preflight failed" "HARNESS_GAP"
   guest_control_command "$host" 'ip addr show dev eth0' "compute-$host/control-ip-address.txt" || fail "guest $host interface address preflight failed" "HARNESS_GAP"
