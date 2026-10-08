@@ -85,6 +85,9 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("seq 1 20", preflight)
         self.assertIn('2>>"$errors"', preflight)
         self.assertNotIn('2>/dev/null | awk', preflight)
+        self.assertIn("sudo bash -c 'nohup timeout 60", preflight)
+        self.assertIn("capture-readiness.txt", preflight)
+        self.assertIn("test -s '$capture_root/local-control.pcap'", preflight)
 
     def test_file_serial_is_captured_read_only_for_control_failure_diagnosis(self):
         self.assertIn('"os-getConsoleOutput":{"length":65536}', DRIVER)

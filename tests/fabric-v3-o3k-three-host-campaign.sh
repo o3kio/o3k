@@ -776,7 +776,7 @@ PYNS
 
 prepare_guest_control() {
   local host="$1" address="${MGMT_IP[$1]}" bridge="${REALM_BRIDGE[$1]}" ll="${GUEST_IPV6[$1]}"
-  local ownership="$EVIDENCE/attachments/server-$1-provider-ownership.json" fabric_ns alias remote_known route capture_root tap scan_error endpoint_id host_index
+  local ownership="$EVIDENCE/attachments/server-$1-provider-ownership.json" fabric_ns alias remote_known route capture_root tap scan_error endpoint_id host_index fabric_capture_pid bridge_capture_pid
   alias="o3k-probe-$host"
   fabric_ns="$(python3 - "$ownership" <<'PYNS'
 import json,sys
@@ -802,11 +802,16 @@ PYTAP
     >"$EVIDENCE/management/guest-$host-host-local-ipv6-state.txt" 2>&1 || true
   route="$(ssh_vm "$address" "sudo ip -6 route get '$ll' oif '$bridge'" 2>&1 || true)"
   printf '%s\n' "$route" >"$EVIDENCE/management/guest-$host-local-route.txt"
-  ssh_vm "$address" "sudo timeout 60 ip netns exec '$fabric_ns' tcpdump -nn -i any -U -w '$capture_root/fabric-control.pcap' 'ip6 and host $ll and tcp port 22' >'$capture_root/fabric-control-tcpdump.log' 2>&1 & echo \$!" \
-    >"$EVIDENCE/management/guest-$host-fabric-capture.pid" || return 1
-  ssh_vm "$address" "sudo timeout 60 tcpdump -nn -i '$bridge' -U -w '$capture_root/local-control.pcap' 'ip6 and host $ll and tcp port 22' >'$capture_root/local-control-tcpdump.log' 2>&1 & echo \$!" \
-    >"$EVIDENCE/management/guest-$host-bridge-capture.pid" || return 1
+  fabric_capture_pid="$(ssh_vm "$address" "sudo bash -c 'nohup timeout 60 ip netns exec $fabric_ns tcpdump -nn -i any -U -w $capture_root/fabric-control.pcap ip6 and host $ll and tcp port 22 >$capture_root/fabric-control-tcpdump.log 2>&1 </dev/null & echo \$!'")" \
+    || return 1
+  printf '%s\n' "$fabric_capture_pid" >"$EVIDENCE/management/guest-$host-fabric-capture.pid"
+  bridge_capture_pid="$(ssh_vm "$address" "sudo bash -c 'nohup timeout 60 tcpdump -nn -i $bridge -U -w $capture_root/local-control.pcap ip6 and host $ll and tcp port 22 >$capture_root/local-control-tcpdump.log 2>&1 </dev/null & echo \$!'")" \
+    || return 1
+  printf '%s\n' "$bridge_capture_pid" >"$EVIDENCE/management/guest-$host-bridge-capture.pid"
   sleep 1
+  [[ "$fabric_capture_pid" =~ ^[0-9]+$ && "$bridge_capture_pid" =~ ^[0-9]+$ ]] || return 1
+  ssh_vm "$address" "sudo kill -0 '$fabric_capture_pid' && sudo test -s '$capture_root/fabric-control.pcap' && sudo kill -0 '$bridge_capture_pid' && sudo test -s '$capture_root/local-control.pcap'" \
+    >"$EVIDENCE/management/guest-$host-capture-readiness.txt" 2>&1 || return 1
   if ! ssh_vm "$address" "sudo bash -s -- '$ll' '$bridge' '$alias' '$remote_known' '$scan_error'" \
     >"$EVIDENCE/management/guest-$host-keyscan.txt" 2>&1 <<'REMOTE_SCAN'
 set -o pipefail
