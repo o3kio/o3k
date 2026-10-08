@@ -1052,9 +1052,10 @@ for host in 'abc':
     owner=json.load(open(root/f'dhcp-host-{host}-ownership.json'))
     assert owner['local_host']==f'host-{host}',owner
     assert owner['authority_host']=='host-a' and owner['dhcp_enabled'] and not owner['pending'] and not owner['withdrawn'],owner
+    assert owner['tenant_mtu']==1390,owner
 state=json.load(open(root/'dhcp-host-a-state.json'))
 assert state['config']['interface']==bridge,state['config']
-assert state['tenant_mtu']==1390,state
+assert state['config']['mtu']==1390,state['config']
 bindings=state['bindings']
 assert set(bindings)==set(expected),(bindings,expected)
 for endpoint,want in expected.items():
