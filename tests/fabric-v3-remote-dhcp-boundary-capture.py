@@ -181,7 +181,7 @@ def save_snapshot(args: argparse.Namespace, ev: pathlib.Path, h: str, topo: dict
 def fdb_check(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> tuple[bool, str]:
     for h in "abc":
         t = maps[h]
-        remote = f"ip netns exec {shlex.quote(t['namespace'])} bridge fdb show dev {shlex.quote(t['vxlan'])}"
+        remote = f"sudo ip netns exec {shlex.quote(t['namespace'])} bridge fdb show dev {shlex.quote(t['vxlan'])}"
         out = ssh(args, h, remote)
         (ev / "topology" / "fdb" / f"host-{h}-vxlan.txt").write_text(out)
         expected = {p["fabric_transport_ip"] for peer, p in t["peers"].items()
@@ -201,7 +201,7 @@ def fdb_check(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> tuple[b
 def wg_check(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> tuple[bool, str]:
     for h in "abc":
         t = maps[h]
-        out = ssh(args, h, f"ip netns exec {shlex.quote(t['namespace'])} wg show {shlex.quote(t['wireguard'])}")
+        out = ssh(args, h, f"sudo ip netns exec {shlex.quote(t['namespace'])} wg show {shlex.quote(t['wireguard'])}")
         (ev / "topology" / "wireguard" / f"host-{h}-wg-show.txt").write_text(out)
         for peer_host, peer in t["peers"].items():
             pub = peer["public_key"]
