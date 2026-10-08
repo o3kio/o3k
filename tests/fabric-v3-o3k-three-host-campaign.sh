@@ -881,9 +881,17 @@ data=json.load(open(manifest)); data.update({
 })
 json.dump(data,open(manifest,'w'),sort_keys=True,indent=2); open(manifest,'a').write('\n')
 PY
-  # Capture one bounded interval of B's already-running DHCP client. The packet
-  # itself and its transaction ID identify the request; no guest IP is assigned.
-  sleep 18
+  # Start one explicit, bounded DHCPv4 client transaction after all captures
+  # are live. CirrOS in this profile uses dhcpcd (not udhcpc); stop its
+  # background client and run dhcpcd in the foreground with a timeout so the
+  # packet window is deterministic and no address is assigned manually.
+  # The single-quoted command is evaluated by the guest shell over serial.
+  # shellcheck disable=SC2016
+  console_command b \
+    'sudo dhcpcd -k eth0 >/dev/null 2>&1 || true; sudo dhcpcd -4 -d -t 5 -B eth0; rc=$?; echo __O3K_DHCP_ATTEMPT_RC_$rc__; exit 0' \
+    compute-b/dhcp-attempt.log \
+    || fail "could not trigger one bounded DHCPv4 attempt from guest B" "HARNESS_GAP"
+  sleep 8
   set +e
   run_dhcp_boundary_tool finish >"$EVIDENCE/topology/finish-result.json"
   finish_rc=$?
