@@ -751,12 +751,30 @@ PY
   fi
 }
 
-# Read-only serial commands prove guest addressing without configuring an IP.
+# The nested domains expose file-backed serial devices, so `virsh console`
+# cannot provide an interactive PTY. Their already captured boot logs contain
+# the DHCP client's OFFER/lease observations; use those read-only observations
+# to prove the canonical fixed address was acquired from DHCP.
 for host in a b c; do
-  console_command "$host" 'ip -4 addr show' "compute-$host/guest-ip.txt" \
-    || fail "guest $host IPv4 observation failed" "DATAPLANE_DEFECT"
-  grep -Fq "${TENANT_IP[$host]}" "$EVIDENCE/compute-$host/guest-ip.txt" \
+  python3 - "${TENANT_IP[$host]}" "${TENANT_MAC[$host]}" \
+    "$EVIDENCE/compute-$host/serial.log" "$EVIDENCE/compute-$host/guest-ip.txt" <<'PY' \
     || fail "guest $host did not receive its canonical fixed IP through DHCP" "DATAPLANE_DEFECT"
+import re,sys
+address,mac,serial_path,output=sys.argv[1:]
+text=open(serial_path,encoding='utf-8',errors='replace').read()
+lines=[line.strip() for line in text.splitlines()
+       if re.search(rf'eth0: leased {re.escape(address)}(?:/\d+)?(?:\s|$)',line)]
+if not lines:
+    raise SystemExit(1)
+offer=[line.strip() for line in text.splitlines()
+       if re.search(rf'eth0: offered {re.escape(address)} from 10\.77\.0\.1(?:\s|$)',line)]
+if not offer:
+    raise SystemExit(1)
+with open(output,'w',encoding='utf-8') as f:
+    f.write(f'guest_mac={mac}\ncanonical_fixed_ip={address}\n')
+    f.write('dhcp_server=10.77.0.1\noffer=PASS\nlease=PASS\n')
+    f.write(f'lease_observation={lines[-1]}\n')
+PY
 done
 
 stop_dhcp_capture
