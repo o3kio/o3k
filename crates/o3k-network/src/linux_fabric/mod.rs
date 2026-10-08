@@ -892,9 +892,7 @@ mod tests {
     }
 
     fn local_endpoint_plan() -> NamespacedRoutedFabricPlan {
-        let mut plan = plan();
-        plan.directory.entries[0].selected_host = plan.local_host.clone();
-        plan
+        plan_with_endpoint_host(Uuid::from_u128(11), "host-a")
     }
 
     fn endpoint_tap_backend(
@@ -981,6 +979,10 @@ mod tests {
     }
 
     fn plan_with_realm(realm_id: Uuid) -> NamespacedRoutedFabricPlan {
+        plan_with_endpoint_host(realm_id, "host-b")
+    }
+
+    fn plan_with_endpoint_host(realm_id: Uuid, endpoint_host: &str) -> NamespacedRoutedFabricPlan {
         let realm = AddressRealm {
             id: realm_id,
             network_id: Uuid::from_u128(12),
@@ -996,7 +998,7 @@ mod tests {
                 realm_id: realm.id,
                 fixed_ip: "10.40.1.12".parse().expect("ip"),
                 mac: "02:00:00:00:00:12".to_owned(),
-                selected_host: "host-b".to_owned(),
+                selected_host: endpoint_host.to_owned(),
                 endpoint_generation: 1,
                 placement_generation: 1,
             }],
@@ -1112,9 +1114,9 @@ mod tests {
     }
 
     #[test]
-    fn remote_dhcp_reply_is_narrowly_admitted_before_fail_closed_rule() {
+    fn local_dhcp_reply_is_narrowly_admitted_before_fail_closed_rule() {
         let root = std::env::temp_dir().join(format!("o3k-p11-dhcp-reply-{}", Uuid::now_v7()));
-        let mut plan = plan();
+        let mut plan = plan_with_endpoint_host(Uuid::from_u128(11), "host-a");
         plan.dhcp = Some(FabricDhcpIntent {
             enabled: true,
             gateway: "10.40.1.1".parse().expect("gateway"),
@@ -1142,11 +1144,19 @@ mod tests {
             tenant_mtu: plan.tenant_mtu,
             flood_peers: BTreeSet::new(),
         });
+        realm.endpoint_taps.insert(
+            endpoint.endpoint_id,
+            EndpointTapOwnership {
+                endpoint_id: endpoint.endpoint_id,
+                interface: endpoint_tap_name(plan.realm_id, endpoint.endpoint_id),
+                mac: endpoint_tap_mac(plan.realm_id, endpoint.endpoint_id),
+            },
+        );
         backend.state.realms.insert(plan.realm_id, realm);
 
         backend
             .ensure_anti_spoof(&plan)
-            .expect("install remote DHCP response exception");
+            .expect("install local DHCP response exception");
 
         let table = format!("o3k-as-{:08x}", public_mark(plan.realm_id));
         let calls = command_for_assertion.calls.lock().expect("calls");
@@ -1252,6 +1262,51 @@ mod tests {
             .expect("final fail-closed rule");
         assert!(unicast_index < fail_closed_index);
         assert!(broadcast_index < fail_closed_index);
+        drop(calls);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn remote_endpoint_does_not_get_a_local_dhcp_reply_exception() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-dhcp-remote-{}", Uuid::now_v7()));
+        let mut plan = plan();
+        plan.dhcp = Some(FabricDhcpIntent {
+            enabled: true,
+            gateway: "10.40.1.1".parse().expect("gateway"),
+        });
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
+                .expect("backend");
+        let mut realm = backend.realm_ownership(&plan);
+        realm.vxlan = Some(VxlanOwnership {
+            interface: "o3k-x-vxlan".to_owned(),
+            bridge: "o3k-b-fabric".to_owned(),
+            host_veth: "o3k-c-root".to_owned(),
+            fabric_veth: "o3k-i-fabric".to_owned(),
+            vni: plan.encapsulation.provider_segment_id,
+            binding_generation: plan.encapsulation.binding_generation,
+            local_transport_ip: plan.local_fabric_transport_ip,
+            tenant_mtu: plan.tenant_mtu,
+            flood_peers: BTreeSet::new(),
+        });
+        backend.state.realms.insert(plan.realm_id, realm);
+
+        backend
+            .ensure_anti_spoof(&plan)
+            .expect("install remote endpoint anti-spoof rules");
+
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(!calls.iter().any(|(program, args)| {
+            program == "nft"
+                && args.windows(2).any(|window| window == ["sport", "67"])
+                && args.windows(2).any(|window| window == ["dport", "68"])
+                && args.iter().any(|arg| arg == "10.40.1.12")
+        }));
         drop(calls);
         fs::remove_dir_all(root).expect("remove fixture");
     }

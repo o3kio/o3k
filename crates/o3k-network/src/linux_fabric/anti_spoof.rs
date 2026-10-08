@@ -257,8 +257,19 @@ impl LinuxFabricBackend {
                         return Err(LinuxFabricError::CommandFailed);
                     }
                 }
-                if let Some(dhcp) = plan.dhcp.filter(|dhcp| dhcp.enabled) {
-                    let gateway_ip = dhcp.gateway.to_string();
+            }
+            // Replies enter through the Fabric host veth for the endpoint
+            // local to this host. Do not install a reply exception for a
+            // remote endpoint: its owning host applies this destination-side
+            // rule when the packet reaches that endpoint.
+            if let Some(dhcp) = plan.dhcp.filter(|dhcp| dhcp.enabled) {
+                let gateway_ip = dhcp.gateway.to_string();
+                for endpoint in plan
+                    .directory
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.selected_host == plan.local_host)
+                {
                     let fixed_ip = endpoint.fixed_ip.to_string();
                     let mut args = vec!["add", "rule", "bridge", table.as_str(), chain];
                     args.extend(dhcp_offer_rule(
