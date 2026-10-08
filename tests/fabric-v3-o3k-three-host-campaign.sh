@@ -935,6 +935,30 @@ PY
     >"$EVIDENCE/dhcp/generated-config-and-state.txt" 2>&1 || true
   ssh_vm "${MGMT_IP[a]}" "sudo cat '$dhcp_root/dnsmasq.leases' 2>/dev/null || true; sudo pgrep -a dnsmasq || true; sudo ss -lunp | grep -E ':(67|68)\\b' || true" \
     >"$EVIDENCE/dhcp/binding-process-state.txt" 2>&1 || true
+  if ssh_vm "${MGMT_IP[b]}" "ip -j -4 address show dev eth0" \
+      >"$EVIDENCE/compute-b/dhcp-after-trigger-network.json"; then
+    printf 'PASS\n' >"$EVIDENCE/compute-b/dhcp-after-trigger-network-status.txt"
+  else
+    printf '[]\n' >"$EVIDENCE/compute-b/dhcp-after-trigger-network.json"
+    printf 'UNAVAILABLE\n' >"$EVIDENCE/compute-b/dhcp-after-trigger-network-status.txt"
+  fi
+  python3 - "$EVIDENCE/compute-b/dhcp-after-trigger-network.json" "${TENANT_IP[b]}" "$EVIDENCE/topology/finish-result.json" <<'PY'
+import json,pathlib,sys
+path,address,result_path=sys.argv[1:]
+data=json.load(open(path))
+addresses=[item.get('local') for iface in data for item in iface.get('addr_info',[])
+           if item.get('family')=='inet']
+leased=address in addresses
+result=json.load(open(result_path))
+result['b_guest_fixed_ip_after_trigger']=address
+result['b_guest_ipv4_addresses_after_trigger']=addresses
+result['b_guest_dhcp_address_confirmed']=leased
+if result.get('reply_path_pass') and not leased:
+    result['result']='BOUNDARY_ESTABLISHED'
+    result['classification']='GUEST_DHCP_LEASE_NOT_CONFIRMED'
+    result['first_absent_boundary']='B guest DHCP lease/address after reply delivery'
+json.dump(result,open(result_path,'w'),sort_keys=True,indent=2); open(result_path,'a').write('\n')
+PY
   if (( finish_rc != 0 )); then
     CAMPAIGN_TEARDOWN_PASS=1
     exit 0

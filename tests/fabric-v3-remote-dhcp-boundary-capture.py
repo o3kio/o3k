@@ -505,7 +505,10 @@ def capture_specs(maps: dict) -> list[dict]:
         if not peer:
             raise RuntimeError(f"host-{h} plan has no peer for {route_peer}")
         underlay = peer["underlay_endpoint"].rsplit(":", 1)[0]
-        inner_filter = f"udp and (port 67 or port 68) and ether src {bmac}"
+        # Capture both client-originated DHCP and replies addressed to the
+        # client. The return-path regression is specifically a server reply
+        # whose Ethernet destination is the guest MAC.
+        inner_filter = f"udp and (port 67 or port 68) and ether host {bmac}"
         wg_filter = f"udp port 4789 and src host {b_transport}"
         underlay_direction = "dst" if h == "b" else "src"
         underlay_filter = f"udp port 65001 and {underlay_direction} host {underlay}"
@@ -796,6 +799,21 @@ def packet_seen(path: pathlib.Path, mac: str, message: str = "Discover",
     return bool(valid), text[:300]
 
 
+def dhcp_reply_seen(path: pathlib.Path, client_mac: str, xid: str,
+                    expected_message: str) -> tuple[bool, list[str]]:
+    """Require a same-XID server reply addressed to the client at its TAP."""
+    if not path.exists() or path.stat().st_size == 0:
+        return False, []
+    text = call(["tcpdump", "-nn", "-e", "-tt", "-vvv", "-r", str(path)], check=False)
+    (path.parent / "tap-replies.decoded.txt").write_text(text)
+    found = []
+    for block in tcpdump_packet_blocks(text):
+        if (client_mac.lower() in block.lower() and xid.lower() in block.lower()
+                and re.search(r"DHCP-Message[^\n]*" + re.escape(expected_message), block, re.I)):
+            found.append(block.splitlines()[0])
+    return bool(found), found
+
+
 def tcpdump_packet_blocks(text: str) -> list[str]:
     """Group tcpdump's multiline packet details under their timestamp header."""
     starts = list(re.finditer(r"(?m)^\d+(?:\.\d+)?\s", text))
@@ -805,15 +823,15 @@ def tcpdump_packet_blocks(text: str) -> list[str]:
             for index, start in enumerate(starts)]
 
 
-def correlated_discover_xids(captures: dict[str, str], source_mac: str) -> dict[str, set[str]]:
-    """Return XIDs only where MAC and DHCP option 53 share one packet block."""
+def correlated_client_xids(captures: dict[str, str], source_mac: str) -> dict[str, set[str]]:
+    """Return DHCP client XIDs where MAC and message type share one packet."""
     result: dict[str, set[str]] = {}
     for label, text in captures.items():
         xids = set()
         for block in tcpdump_packet_blocks(text):
             if source_mac.lower() not in block.lower():
                 continue
-            if not re.search(r"DHCP-Message[^\n]*Discover", block, re.I):
+            if not re.search(r"DHCP-Message[^\n]*(?:Discover|Request)", block, re.I):
                 continue
             match = re.search(r"\bxid\s+(0x[0-9a-f]+)", block, re.I)
             if match:
@@ -1005,15 +1023,25 @@ def action_finish(args: argparse.Namespace) -> int:
             pcap = ev / "b" / f"{label}.pcap"
             decoded = call(["tcpdump", "-nn", "-e", "-tt", "-vvv", "-r", str(pcap)], check=False)
             decoded_sources[label] = decoded
-        discover_by_source = correlated_discover_xids(decoded_sources, maps["b"]["guest_mac"])
-        discover_xids = set().union(*discover_by_source.values())
-        if len(discover_xids) != 1:
-            raise RuntimeError(f"bounded B window did not contain exactly one canonical-MAC DHCP transaction ID across observed capture points: {sorted(discover_xids)}")
-        xid = next(iter(discover_xids))
-        source = next((label for label in packet_sources if xid in discover_by_source[label]), None)
+        client_xids_by_source = correlated_client_xids(decoded_sources, maps["b"]["guest_mac"])
+        client_xids = set().union(*client_xids_by_source.values())
+        if len(client_xids) != 1:
+            raise RuntimeError(f"bounded B window did not contain exactly one canonical-MAC DHCP DISCOVER/REQUEST transaction ID across observed capture points: {sorted(client_xids)}")
+        xid = next(iter(client_xids))
+        source = next((label for label in packet_sources if xid in client_xids_by_source[label]), None)
+        client_message = next((message for label in packet_sources
+                               for block in tcpdump_packet_blocks(decoded_sources[label])
+                               if maps["b"]["guest_mac"].lower() in block.lower()
+                               and xid in block.lower()
+                               for message in ("Discover", "Request")
+                               if re.search(r"DHCP-Message[^\n]*" + message, block, re.I)), None)
+        if client_message is None:
+            raise RuntimeError("correlated B transaction has no supported DHCP client message type")
+        expected_reply_message = "Offer" if client_message == "Discover" else "ACK"
         (ev / "b" / "tap.decoded.txt").write_text(decoded_sources["tap"])
         write_json(ev / "topology" / "dhcp-packet-source.json", {
-            "transaction_id": xid, "canonical_mac": maps["b"]["guest_mac"],
+            "transaction_id": xid, "client_message": client_message,
+            "canonical_mac": maps["b"]["guest_mac"],
             "capture_source": source, "tap_capture_valid": xid in decoded_sources["tap"].lower(),
             "capture_sources_checked": list(packet_sources),
         })
@@ -1022,7 +1050,7 @@ def action_finish(args: argparse.Namespace) -> int:
             mac = maps["b"]["guest_mac"]
             transport = label in {"wireguard", "underlay"}
             seen, excerpt = packet_seen(ev / h / f"{label}.pcap", mac,
-                                        "4789" if transport else "Discover", None if transport else xid)
+                                        "4789" if transport else client_message, None if transport else xid)
             observations.append({"host": h, "boundary": label, "packet_seen": seen, "excerpt": excerpt})
             # Transport captures contain the outer UDP payload, so correlate by
             # transaction source MAC in the VXLAN layer is unavailable there.
@@ -1068,6 +1096,8 @@ def action_finish(args: argparse.Namespace) -> int:
                 item["observation_source"] = "run-owned nft trace; source MAC, DHCP UDP tuple, interface, and bounded solicitation window matched"
             else:
                 item["observation_source"] = "pcap"
+        b_tap_reply_seen, b_tap_reply_packets = dhcp_reply_seen(
+            b_tap, maps["b"]["guest_mac"], xid, expected_reply_message)
         present_index = next((i for i, item in enumerate(observations) if not item["packet_seen"]), len(observations))
         present = sequence[present_index - 1] if present_index > 0 else None
         absent = sequence[present_index] if present_index < len(sequence) else None
@@ -1113,19 +1143,44 @@ def action_finish(args: argparse.Namespace) -> int:
                                            if vni else ("REMOTE_REALM_BRIDGE_DEFECT", "A VXLAN -> A fabric veth (no VNI-auth drop counter increase)"))
         else:
             classification, absent_name = classes.get(absent, ("DHCP_INTERFACE_BINDING_DEFECT", "A Realm bridge -> dnsmasq"))
-        has_b_reply = syscall_summary["positive_udp67_send_to_client_count"] > 0
-        result = {"result": "RETURN_PATH_DIAGNOSTIC_REQUIRED" if has_b_reply else "BOUNDARY_ESTABLISHED",
-                  "classification": "RETURN_PATH_DIAGNOSTIC_REQUIRED" if has_b_reply else classification,
-                  "first_present_boundary": ("host-a dnsmasq received B DHCP and positive UDP/67 send targeted B fixed IP"
-                                             if has_b_reply else
-                                             (f"{present[0]}:{present[1]}" if present else "guest B solicitation transcript")),
-                  "first_absent_boundary": ("DHCP OFFER return path after dnsmasq sendmsg; inspect reply trace"
-                                            if has_b_reply else absent_name),
+        reply_path_pass = b_tap_reply_seen and absent is None
+        has_b_reply = (syscall_summary["positive_udp67_send_to_client_count"] > 0
+                       or b_tap_reply_seen)
+        if absent is not None:
+            result_name = "BOUNDARY_ESTABLISHED"
+            result_classification = classification
+            first_present = f"{present[0]}:{present[1]}" if present else "guest B solicitation transcript"
+            first_absent = absent_name
+        elif reply_path_pass:
+            result_name = "DHCP_REPLY_PATH_PASS"
+            result_classification = "PASS"
+            first_present = "B DHCP reply with matching XID observed on guest TAP"
+            first_absent = "none"
+        elif has_b_reply:
+            result_name = "RETURN_PATH_DIAGNOSTIC_REQUIRED"
+            result_classification = "RETURN_PATH_DIAGNOSTIC_REQUIRED"
+            first_present = "host-a dnsmasq received B DHCP and positive UDP/67 send targeted B fixed IP"
+            first_absent = "DHCP reply delivery after authority send; inspect bounded reply trace"
+        else:
+            result_name = "BOUNDARY_ESTABLISHED"
+            result_classification = classification
+            first_present = f"{present[0]}:{present[1]}" if present else "guest B solicitation transcript"
+            first_absent = absent_name
+        result = {"result": result_name,
+                  "classification": result_classification,
+                  "first_present_boundary": first_present,
+                  "first_absent_boundary": first_absent,
                   "observations": observations,
                   "link_counter_deltas": link_deltas, "nft_drop_counter_deltas": drop_deltas,
                   "counter_summary": counter_summary,
                   "wireguard_transfer_deltas": wireguard_deltas,
                   "dhcp_transaction_id": xid,
+                  "dhcp_client_message": client_message,
+                  "expected_server_reply": expected_reply_message,
+                  "b_tap_reply_seen": b_tap_reply_seen,
+                  "outbound_path_complete": absent is None,
+                  "reply_path_pass": reply_path_pass,
+                  "b_tap_reply_packets": b_tap_reply_packets,
                   "dhcp_packet_capture_source": source,
                   "trace_observations": {f"{h}:{label}": value for (h, label), value in trace_checks.items()},
                   "authority_syscalls": syscall_summary,
