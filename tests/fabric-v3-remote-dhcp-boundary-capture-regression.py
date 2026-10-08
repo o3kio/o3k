@@ -120,6 +120,7 @@ class AuthoritySyscallTests(unittest.TestCase):
             self.assertIn("/var/lib/o3k-fabric-v3/diagnostic-owned/network/dhcp/fabric/realm-owned", script)
             self.assertIn("strace -f -tt -yy -s 0", script)
             self.assertIn("dnsmasq-*.pid", script)
+            self.assertIn("tr '\\0' ' '", script)
             self.assertNotIn("pkill", script)
             subprocess.run(["bash", "-n"], input=script, text=True, check=True)
 

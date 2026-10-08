@@ -437,7 +437,7 @@ test "${#pidfiles[@]}" -eq 1
 dnsmasq_pid=$(cat "${pidfiles[0]}")
 case "$dnsmasq_pid" in *[!0-9]*|'') exit 31;; esac
 test -r "/proc/$dnsmasq_pid/cmdline"
-cmdline=$(tr '\0' ' ' <"/proc/$dnsmasq_pid/cmdline")
+cmdline=$(tr '\\0' ' ' <"/proc/$dnsmasq_pid/cmdline")
 case "$cmdline" in *dnsmasq*@DHCP_ROOT@*) ;; *) echo "unexpected authority process: $cmdline" >&2; exit 32;; esac
 command -v strace >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y --no-install-recommends strace; }
 strace --version >@REMOTE@/strace-version.txt 2>&1
@@ -481,7 +481,7 @@ tracer=$(cat @TRACER_PID_FILE@ 2>/dev/null || true)
 target=$(cat @DNSMASQ_PID_FILE@ 2>/dev/null || true)
 case "$tracer:$target" in *[!0-9:]*|:*) exit 41;; esac
 if test -r "/proc/$tracer/cmdline"; then
-  tracer_cmd=$(tr '\0' ' ' <"/proc/$tracer/cmdline")
+  tracer_cmd=$(tr '\\0' ' ' <"/proc/$tracer/cmdline")
   case "$tracer_cmd" in *strace*"-p $target"*) ;; *) echo "refusing to stop unverified tracer: $tracer_cmd" >&2; exit 42;; esac
   kill -INT "$tracer"
   stopped=0
