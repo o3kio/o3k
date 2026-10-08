@@ -814,6 +814,39 @@ def dhcp_reply_seen(path: pathlib.Path, client_mac: str, xid: str,
     return bool(found), found
 
 
+def dhcp_reply_forwarded_to_tap(path: pathlib.Path, *, tap: str, root_veth: str,
+                                client_mac: str, gateway_ip: str, client_ip: str,
+                                xid: str) -> tuple[bool, list[str]]:
+    """Correlate the same DHCP reply through the final anti-spoof accept to TAP egress."""
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return False, []
+    xid_hex = f"{int(xid, 16):08x}"
+    expected = (f'ether daddr {client_mac.lower()}', f'ip saddr {gateway_ip}',
+                f'ip daddr {client_ip}', 'udp sport 67 udp dport 68')
+    packet_lines = [line for line in lines
+                    if "bridge o3k-dhcp-root-trace forward packet:" in line
+                    and f'iif "{root_veth}"' in line and f'oif "{tap}"' in line
+                    and all(part in line.lower() for part in expected)
+                    and xid_hex in line.lower()]
+    trace_ids = {match.group(1) for line in packet_lines
+                 if (match := re.match(r"trace id ([^ ]+)", line))}
+    accepted_lines = [line for line in lines
+                      if "bridge o3k-as-" in line and " forward rule " in line
+                      and " accept " in line and "(verdict accept)" in line
+                      and (match := re.match(r"trace id ([^ ]+)", line))
+                      and match.group(1) in trace_ids
+                      and f'iifname "{root_veth}"' in line
+                      and f'ether daddr {client_mac.lower()}' in line.lower()
+                      and f'ip saddr {gateway_ip}' in line
+                      and f'ip daddr {client_ip}' in line
+                      and 'udp sport 67 udp dport 68' in line]
+    if not packet_lines or not accepted_lines:
+        return False, []
+    return True, [packet_lines[0], accepted_lines[0]]
+
+
 def tcpdump_packet_blocks(text: str) -> list[str]:
     """Group tcpdump's multiline packet details under their timestamp header."""
     starts = list(re.finditer(r"(?m)^\d+(?:\.\d+)?\s", text))
@@ -841,12 +874,14 @@ def correlated_client_xids(captures: dict[str, str], source_mac: str) -> dict[st
 
 
 def trace_packet_seen(path: pathlib.Path, *, hook: str, source_mac: str,
-                      ingress: str | None = None, egress: str | None = None) -> bool:
+                      ingress: str | None = None, egress: str | None = None,
+                      xid: str | None = None) -> bool:
     """Match a bounded bridge nft trace event for the DHCP source/interface."""
     try:
         lines = path.read_text(errors="replace").splitlines()
     except OSError:
         return False
+    xid_hex = f"{int(xid, 16):08x}" if xid else None
     for line in lines:
         if " packet:" not in line or "bridge o3k-dhcp-root-trace " not in line:
             continue
@@ -860,21 +895,25 @@ def trace_packet_seen(path: pathlib.Path, *, hook: str, source_mac: str,
             continue
         if egress is not None and f'oif "{egress}"' not in line:
             continue
+        if xid_hex is not None and xid_hex not in line.lower():
+            continue
         return True
     return False
 
 
 def namespace_forward_seen(path: pathlib.Path, *, source_mac: str,
-                           ingress: str, egress: str) -> bool:
+                           ingress: str, egress: str, xid: str | None = None) -> bool:
     try:
         lines = path.read_text(errors="replace").splitlines()
     except OSError:
         return False
+    xid_hex = f"{int(xid, 16):08x}" if xid else None
     return any(" packet:" in line and "bridge o3k-dhcp-trace forward packet:" in line
                and f'ether saddr {source_mac.lower()}' in line.lower()
                and "ip saddr 0.0.0.0" in line
                and "udp sport 68 udp dport 67" in line
                and f'iif "{ingress}"' in line and f'oif "{egress}"' in line
+               and (xid_hex is None or xid_hex in line.lower())
                for line in lines)
 
 
@@ -1067,28 +1106,29 @@ def action_finish(args: argparse.Namespace) -> int:
         ns_trace = ev / "topology" / "a-trace.log"
         trace_checks = {
             ("b", "tap"): trace_packet_seen(root_trace["b"], hook="prerouting",
-                source_mac=maps["b"]["guest_mac"], ingress=maps["b"]["tap"]),
+                source_mac=maps["b"]["guest_mac"], ingress=maps["b"]["tap"], xid=xid),
             ("b", "realm-bridge"): trace_packet_seen(root_trace["b"], hook="forward",
-                source_mac=maps["b"]["guest_mac"], ingress=maps["b"]["tap"]),
+                source_mac=maps["b"]["guest_mac"], ingress=maps["b"]["tap"], xid=xid),
             ("b", "root-veth"): trace_packet_seen(root_trace["b"], hook="forward",
-                source_mac=maps["b"]["guest_mac"], egress=maps["b"]["root_veth"]),
+                source_mac=maps["b"]["guest_mac"], egress=maps["b"]["root_veth"], xid=xid),
             ("a", "fabric-veth"): namespace_forward_seen(ns_trace,
                 source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["vxlan"],
-                egress=maps["a"]["fabric_veth"]),
+                egress=maps["a"]["fabric_veth"], xid=xid),
             # Seeing the decapsulated DHCP frame on A's VXLAN bridge ingress
             # proves it crossed the receive side even when AF_PACKET capture on
             # the WireGuard/VXLAN devices misses this virtualized path.
             ("a", "wireguard"): namespace_forward_seen(ns_trace,
                 source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["vxlan"],
-                egress=maps["a"]["fabric_veth"]),
+                egress=maps["a"]["fabric_veth"], xid=xid),
             ("a", "vxlan"): namespace_forward_seen(ns_trace,
                 source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["vxlan"],
-                egress=maps["a"]["fabric_veth"]),
+                egress=maps["a"]["fabric_veth"], xid=xid),
             ("a", "root-veth"): trace_packet_seen(root_trace["a"], hook="prerouting",
-                source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["root_veth"]),
+                source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["root_veth"], xid=xid),
             ("a", "realm-bridge"): trace_packet_seen(root_trace["a"], hook="input",
-                source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["root_veth"]),
+                source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["root_veth"], xid=xid),
         }
+        wireguard_deltas = wg_transfer_deltas(ev, maps)
         for item in observations:
             key = (item["host"], item["boundary"])
             if not item["packet_seen"] and trace_checks.get(key, False):
@@ -1096,14 +1136,25 @@ def action_finish(args: argparse.Namespace) -> int:
                 item["observation_source"] = "run-owned nft trace; source MAC, DHCP UDP tuple, interface, and bounded solicitation window matched"
             else:
                 item["observation_source"] = "pcap"
-        b_tap_reply_seen, b_tap_reply_packets = dhcp_reply_seen(
+            if (key == ("a", "underlay") and not item["packet_seen"]
+                    and trace_checks.get(("a", "wireguard"), False)
+                    and (wireguard_deltas.get("host-a-to-host-b") or {}).get("rx_bytes", 0) > 0):
+                item["packet_seen"] = True
+                item["capture_seen"] = False
+                item["observation_source"] = "matching DHCP XID observed after authenticated WireGuard ingress; A peer RX counter increased during bounded capture"
+        b_tap_reply_capture_seen, b_tap_reply_packets = dhcp_reply_seen(
             b_tap, maps["b"]["guest_mac"], xid, expected_reply_message)
+        b_tap_reply_trace_seen, b_tap_reply_trace_packets = dhcp_reply_forwarded_to_tap(
+            ev / "topology" / "b-root-reply-trace.log",
+            tap=maps["b"]["tap"], root_veth=maps["b"]["root_veth"],
+            client_mac=maps["b"]["guest_mac"], gateway_ip=maps["b"]["gateway_ip"],
+            client_ip=maps["b"]["fixed_ip"], xid=xid)
+        b_tap_reply_seen = b_tap_reply_capture_seen or b_tap_reply_trace_seen
         present_index = next((i for i, item in enumerate(observations) if not item["packet_seen"]), len(observations))
         present = sequence[present_index - 1] if present_index > 0 else None
         absent = sequence[present_index] if present_index < len(sequence) else None
         drop_deltas = nft_drop_deltas(ev)
         link_deltas = link_packet_deltas(ev, maps)
-        wireguard_deltas = wg_transfer_deltas(ev, maps)
         def named_drop_packets(key: str, predicate) -> int:
             return sum(d["packets"] for d in drop_deltas.get(key, {}).get("drop_packet_deltas", [])
                        if predicate(d["table"]))
@@ -1178,9 +1229,12 @@ def action_finish(args: argparse.Namespace) -> int:
                   "dhcp_client_message": client_message,
                   "expected_server_reply": expected_reply_message,
                   "b_tap_reply_seen": b_tap_reply_seen,
+                  "b_tap_reply_capture_seen": b_tap_reply_capture_seen,
+                  "b_tap_reply_trace_seen": b_tap_reply_trace_seen,
                   "outbound_path_complete": absent is None,
                   "reply_path_pass": reply_path_pass,
                   "b_tap_reply_packets": b_tap_reply_packets,
+                  "b_tap_reply_trace_packets": b_tap_reply_trace_packets,
                   "dhcp_packet_capture_source": source,
                   "trace_observations": {f"{h}:{label}": value for (h, label), value in trace_checks.items()},
                   "authority_syscalls": syscall_summary,

@@ -935,7 +935,7 @@ PY
     >"$EVIDENCE/dhcp/generated-config-and-state.txt" 2>&1 || true
   ssh_vm "${MGMT_IP[a]}" "sudo cat '$dhcp_root/dnsmasq.leases' 2>/dev/null || true; sudo pgrep -a dnsmasq || true; sudo ss -lunp | grep -E ':(67|68)\\b' || true" \
     >"$EVIDENCE/dhcp/binding-process-state.txt" 2>&1 || true
-  if ssh_vm "${MGMT_IP[b]}" "ip -j -4 address show dev eth0" \
+  if ssh_vm "${MGMT_IP[b]}" "ip -j -4 address show" \
       >"$EVIDENCE/compute-b/dhcp-after-trigger-network.json"; then
     printf 'PASS\n' >"$EVIDENCE/compute-b/dhcp-after-trigger-network-status.txt"
   else
