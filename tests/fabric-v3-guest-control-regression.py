@@ -75,6 +75,22 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("guest_control_preflight \"$host\"", DRIVER)
         self.assertIn("ip addr show dev eth0", DRIVER)
 
+    def test_link_local_readiness_collects_local_evidence_before_bounded_probe(self):
+        start = DRIVER.index("prepare_guest_control() {")
+        end = DRIVER.index("\n}\n\nguest_control_command()", start)
+        preflight = DRIVER[start:end]
+        self.assertLess(preflight.index("host-local-ipv6-state.txt"), preflight.index("ssh-keyscan"))
+        self.assertLess(preflight.index("fabric-control.pcap"), preflight.index("ssh-keyscan"))
+        self.assertIn("ip -6 route get '$ll' oif '$bridge'", preflight)
+        self.assertIn("seq 1 20", preflight)
+        self.assertIn('2>>"$errors"', preflight)
+        self.assertNotIn('2>/dev/null | awk', preflight)
+
+    def test_file_serial_is_captured_read_only_for_control_failure_diagnosis(self):
+        self.assertIn('"os-getConsoleOutput":{"length":65536}', DRIVER)
+        self.assertIn("serial-console-output.txt", DRIVER)
+        self.assertIn("serial-console-http-status.txt", DRIVER)
+
     def test_probe_image_is_pinned_deterministic_and_within_product_upload_limit(self):
         builder = (ROOT / "fabric-v3-build-probe-image.sh").read_text()
         self.assertIn("7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b", builder)

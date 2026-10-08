@@ -647,6 +647,24 @@ PY
   done
   [[ "$status" == ACTIVE ]] || fail "server $host did not reach ACTIVE (last=$status)" "ATTACHMENT_DEFECT"
   echo "server $host ACTIVE id=$server_id"
+  # File-backed serial is a read-only observation path. Preserve bounded
+  # public-API output so control-channel failures can be diagnosed without
+  # treating the file-backed device as an interactive console.
+  console_http_status="$(curl --silent --show-error --max-time 30 \
+    --output "$EVIDENCE/compute-$host/serial-console-output.json" \
+    --write-out '%{http_code}' -X POST \
+    "$BASE/v2.1/$PROJECT_ID/servers/$server_id/action" \
+    -H "x-auth-token: $TOKEN" -H 'content-type: application/json' \
+    --data '{"os-getConsoleOutput":{"length":65536}}' || true)"
+  printf '%s\n' "$console_http_status" >"$EVIDENCE/compute-$host/serial-console-http-status.txt"
+  if [[ "$console_http_status" == 200 ]]; then
+    python3 - "$EVIDENCE/compute-$host/serial-console-output.json" \
+      "$EVIDENCE/compute-$host/serial-console-output.txt" <<'PYCONSOLE'
+import json,pathlib,sys
+response=json.loads(pathlib.Path(sys.argv[1]).read_text())
+pathlib.Path(sys.argv[2]).write_text(response.get('output',''))
+PYCONSOLE
+  fi
   local response_host expected_host address domain="" tap ownership tap_mac guest_mac current_mac bridge realm_id
   expected_host="compute-agent-$host"
   response_host="$(api "$BASE/v2.1/$PROJECT_ID/servers/$server_id" | tee "$EVIDENCE/api/server-$host-placement.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["server"].get("OS-EXT-SRV-ATTR:host", ""))')"
@@ -738,29 +756,83 @@ mac_link_local() {
   python3 "$ROOT_DIR/tests/fabric-v3-guest-control.py" link-local "$1"
 }
 
+collect_guest_control_diagnostics() {
+  local host="$1" address="${MGMT_IP[$1]}" bridge="${REALM_BRIDGE[$1]}" ll="${GUEST_IPV6[$1]}"
+  local capture_root="/var/lib/o3k-fabric-v3/$RUN_ID/control/$host" fabric_ns
+  fabric_ns="$(python3 - "$EVIDENCE/attachments/server-$host-provider-ownership.json" <<'PYNS'
+import json,sys
+print(json.load(open(sys.argv[1]))['fabric']['namespace'])
+PYNS
+)" || return 1
+  ssh_vm "$address" "sudo timeout 3 tcpdump -nn -r '$capture_root/local-control.pcap'; sudo timeout 3 ip netns exec '$fabric_ns' tcpdump -nn -r '$capture_root/fabric-control.pcap'; sudo cat '$capture_root/local-control-tcpdump.log' '$capture_root/fabric-control-tcpdump.log' '$capture_root/keyscan.stderr' 2>/dev/null || true; sudo cp '$capture_root/local-control.pcap' /tmp/$RUN_ID-$host-local-control.pcap; sudo cp '$capture_root/fabric-control.pcap' /tmp/$RUN_ID-$host-fabric-control.pcap; sudo chown '$SSH_USER:$SSH_USER' /tmp/$RUN_ID-$host-local-control.pcap /tmp/$RUN_ID-$host-fabric-control.pcap" \
+    >"$EVIDENCE/management/guest-$host-local-control-capture.txt" 2>&1 || true
+  scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" \
+    "$SSH_USER@$address:/tmp/$RUN_ID-$host-local-control.pcap" "$EVIDENCE/management/guest-$host-local-control.pcap" \
+    || return 1
+  scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" \
+    "$SSH_USER@$address:/tmp/$RUN_ID-$host-fabric-control.pcap" "$EVIDENCE/management/guest-$host-fabric-control.pcap" \
+    || return 1
+}
+
 prepare_guest_control() {
   local host="$1" address="${MGMT_IP[$1]}" bridge="${REALM_BRIDGE[$1]}" ll="${GUEST_IPV6[$1]}"
-  local ownership="$EVIDENCE/attachments/server-$1-provider-ownership.json" fabric_ns alias remote_known route capture_root
+  local ownership="$EVIDENCE/attachments/server-$1-provider-ownership.json" fabric_ns alias remote_known route capture_root tap scan_error endpoint_id host_index
   alias="o3k-probe-$host"
   fabric_ns="$(python3 - "$ownership" <<'PYNS'
 import json,sys
 print(json.load(open(sys.argv[1]))['fabric']['namespace'])
 PYNS
 )" || return 1
-  [[ "$bridge" =~ ^[a-zA-Z0-9_.-]{1,15}$ && "$fabric_ns" =~ ^[a-zA-Z0-9_.-]{1,15}$ && "$ll" == fe80::* ]] || return 1
+  case "$host" in a) host_index=0 ;; b) host_index=1 ;; c) host_index=2 ;; *) return 1 ;; esac
+  endpoint_id="${PORT_IDS[$host_index]}"
+  tap="$(python3 - "$ownership" "$endpoint_id" <<'PYTAP'
+import json,sys
+ownership=json.load(open(sys.argv[1])); endpoint=sys.argv[2]
+matches=[record['interface'] for realm in ownership.get('realms',{}).values()
+         for candidate,record in realm.get('endpoint_taps',{}).items() if candidate == endpoint]
+assert len(matches)==1, matches
+print(matches[0])
+PYTAP
+)" || return 1
+  [[ "$bridge" =~ ^[a-zA-Z0-9_.-]{1,15}$ && "$fabric_ns" =~ ^[a-zA-Z0-9_.-]{1,15}$ && "$tap" =~ ^[a-zA-Z0-9_.-]{1,15}$ && "$ll" == fe80::* ]] || return 1
   remote_known="/var/lib/o3k-fabric-v3/$RUN_ID/control/known_hosts-$host"
-  ssh_vm "$address" "sudo ssh-keyscan -6 -T 5 -t ed25519 '$ll%$bridge' 2>/dev/null | awk -v alias='$alias' '{\$1=alias; print}' | sudo tee '$remote_known' >/dev/null && sudo chmod 0600 '$remote_known' && sudo test -s '$remote_known'" \
-    >"$EVIDENCE/management/guest-$host-keyscan.txt" 2>&1 || return 1
-  ssh_vm "$address" "sudo ssh-keygen -lf '$remote_known'" >"$EVIDENCE/management/guest-$host-hostkey-fingerprint.txt" || return 1
-  route="$(ssh_vm "$address" "sudo ip -6 route get '$ll' oif '$bridge'")" || return 1
-  printf '%s\n' "$route" >"$EVIDENCE/management/guest-$host-local-route.txt"
-  grep -Fq "dev $bridge" <<<"$route" || return 1
   capture_root="/var/lib/o3k-fabric-v3/$RUN_ID/control/$host"
-  ssh_vm "$address" "sudo install -d -m 0700 '$capture_root'; sudo timeout 10 ip netns exec '$fabric_ns' tcpdump -nn -i any -U -w '$capture_root/fabric-control.pcap' 'ip6 and host $ll and tcp port 22' >'$capture_root/fabric-control-tcpdump.log' 2>&1 & echo \$!" \
+  scan_error="$capture_root/keyscan.stderr"
+  ssh_vm "$address" "sudo install -d -m 0700 '$capture_root'; { sudo ip -j -6 address show dev '$bridge'; sudo ip -6 route show table all; sudo bridge -j link show dev '$tap'; sudo ip -6 route get '$ll' oif '$bridge'; sudo sysctl net.ipv6.conf.$bridge.disable_ipv6; }" \
+    >"$EVIDENCE/management/guest-$host-host-local-ipv6-state.txt" 2>&1 || true
+  route="$(ssh_vm "$address" "sudo ip -6 route get '$ll' oif '$bridge'" 2>&1 || true)"
+  printf '%s\n' "$route" >"$EVIDENCE/management/guest-$host-local-route.txt"
+  ssh_vm "$address" "sudo timeout 60 ip netns exec '$fabric_ns' tcpdump -nn -i any -U -w '$capture_root/fabric-control.pcap' 'ip6 and host $ll and tcp port 22' >'$capture_root/fabric-control-tcpdump.log' 2>&1 & echo \$!" \
     >"$EVIDENCE/management/guest-$host-fabric-capture.pid" || return 1
-  ssh_vm "$address" "sudo timeout 10 tcpdump -nn -i '$bridge' -U -w '$capture_root/local-control.pcap' 'ip6 and host $ll and tcp port 22' >'$capture_root/local-control-tcpdump.log' 2>&1 & echo \$!" \
+  ssh_vm "$address" "sudo timeout 60 tcpdump -nn -i '$bridge' -U -w '$capture_root/local-control.pcap' 'ip6 and host $ll and tcp port 22' >'$capture_root/local-control-tcpdump.log' 2>&1 & echo \$!" \
     >"$EVIDENCE/management/guest-$host-bridge-capture.pid" || return 1
   sleep 1
+  if ! ssh_vm "$address" "sudo bash -s -- '$ll' '$bridge' '$alias' '$remote_known' '$scan_error'" \
+    >"$EVIDENCE/management/guest-$host-keyscan.txt" 2>&1 <<'REMOTE_SCAN'
+set -o pipefail
+ll="$1"; bridge="$2"; alias="$3"; known="$4"; errors="$5"
+tmp="${known}.tmp"
+rm -f "$tmp" "$known" "$errors"
+for attempt in $(seq 1 20); do
+  if ssh-keyscan -6 -T 2 -t ed25519 "$ll%$bridge" 2>>"$errors" \
+      | awk -v alias="$alias" '{$1=alias; print}' >"$tmp" && [[ -s "$tmp" ]]; then
+    install -m 0600 "$tmp" "$known"
+    rm -f "$tmp"
+    printf 'listener_ready=yes\nattempt=%s\n' "$attempt"
+    exit 0
+  fi
+  sleep 2
+done
+printf 'listener_ready=no\nattempts=20\n'
+cat "$errors" 2>/dev/null || true
+exit 1
+REMOTE_SCAN
+  then
+    collect_guest_control_diagnostics "$host" || true
+    return 1
+  fi
+  ssh_vm "$address" "sudo ssh-keygen -lf '$remote_known'" >"$EVIDENCE/management/guest-$host-hostkey-fingerprint.txt" 2>&1 || return 1
+  grep -Fq "dev $bridge" <<<"$route" || return 1
 }
 
 guest_control_command() {
