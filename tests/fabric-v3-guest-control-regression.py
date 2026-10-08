@@ -75,6 +75,15 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("guest_control_preflight \"$host\"", DRIVER)
         self.assertIn("ip addr show dev eth0", DRIVER)
 
+    def test_guest_command_wrapper_uses_probe_supported_posix_shell(self):
+        start = DRIVER.index("guest_control_command() {")
+        end = DRIVER.index("\n\n" + "guest_control_preflight() {", start)
+        command = DRIVER[start:end]
+        self.assertIn("; sh %q; rc=$?;", command)
+        self.assertIn("rm -f %q; exit 0", command)
+        self.assertNotIn("bash %q", command)
+        self.assertNotIn("python3 -c", command)
+
     def test_link_local_readiness_collects_local_evidence_before_bounded_probe(self):
         start = DRIVER.index("prepare_guest_control() {")
         end = DRIVER.index("\n}\n\nguest_control_command()", start)

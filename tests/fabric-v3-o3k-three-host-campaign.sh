@@ -852,8 +852,8 @@ guest_control_command() {
   tmp="/tmp/o3k-$RUN_ID-guest-command"
   target="$(python3 "$ROOT_DIR/tests/fabric-v3-guest-control.py" target "$ll" "$bridge")"
   # shellcheck disable=SC2016
-  printf -v remote_script 'printf %%s %q | base64 -d >%q; bash %q; rc=$?; printf "\\n__O3K_GUEST_RC=%%d__\\n" "$rc"; python3 -c %q; exit 0' \
-    "$encoded" "$tmp" "$tmp" "import pathlib; pathlib.Path('$tmp').unlink(missing_ok=True)"
+  printf -v remote_script 'printf %%s %q | base64 -d >%q; sh %q; rc=$?; printf "\\n__O3K_GUEST_RC=%%d__\\n" "$rc"; rm -f %q; exit 0' \
+    "$encoded" "$tmp" "$tmp" "$tmp"
   printf -v remote_cmd 'sudo timeout 60 ssh -6 -i %q -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%q -o HostKeyAlias=%q -o BindInterface=%q -o ConnectTimeout=8 %q %q' \
     "$control_root/probe_ed25519" "$remote_known" "o3k-probe-$host" "$bridge" "$target" "bash -lc $(printf '%q' "$remote_script")"
   if ! ssh_vm "$address" "$remote_cmd" >"$EVIDENCE/$label" 2>"$EVIDENCE/$label.stderr"; then
@@ -884,7 +884,10 @@ PYNS
     capture_guest_serial_output "$host" || true
     fail "host-local IPv6 link-local SSH unavailable for guest $host" "HARNESS_GAP"
   fi
-  guest_control_command "$host" true "compute-$host/control-true.txt" || fail "guest $host control true failed" "HARNESS_GAP"
+  if ! guest_control_command "$host" true "compute-$host/control-true.txt"; then
+    collect_guest_control_diagnostics "$host" || true
+    fail "guest $host control true failed" "HARNESS_GAP"
+  fi
   guest_control_command "$host" 'ip link show dev eth0' "compute-$host/control-ip-link.txt" || fail "guest $host ip link preflight failed" "HARNESS_GAP"
   guest_control_command "$host" 'ip addr show dev eth0' "compute-$host/control-ip-address.txt" || fail "guest $host interface address preflight failed" "HARNESS_GAP"
   guest_control_command "$host" 'ip -o -4 addr show dev eth0' "compute-$host/control-ipv4.txt" || fail "guest $host IPv4 preflight failed" "HARNESS_GAP"
