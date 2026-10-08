@@ -117,6 +117,11 @@ struct LinkAddressObservation {
 }
 
 #[derive(Debug, Deserialize)]
+struct LinkIdentityObservation {
+    ifname: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct AddressInfoObservation {
     local: Ipv4Addr,
     prefixlen: u8,
@@ -205,6 +210,22 @@ impl RealmRuntime {
     }
 
     fn observe_ipv4(&self, interface: &str) -> Result<Vec<(Ipv4Addr, u8)>, FabricDhcpError> {
+        // `ip -j -4 addr show dev <link>` emits `[]` for an existing link
+        // that has no IPv4 address. Verify the link separately so that this
+        // valid no-address state is distinguishable from a missing bridge.
+        let link_output = Command::new(&self.ip_binary)
+            .args(["-j", "link", "show", "dev", interface])
+            .output()
+            .map_err(|_| FabricDhcpError::BridgeAddressCommand)?;
+        if !link_output.status.success() {
+            return Err(FabricDhcpError::BridgeAddressCommand);
+        }
+        let links: Vec<LinkIdentityObservation> = serde_json::from_slice(&link_output.stdout)
+            .map_err(|_| FabricDhcpError::BridgeAddressObservation)?;
+        if links.len() != 1 || links[0].ifname != interface {
+            return Err(FabricDhcpError::BridgeAddressObservation);
+        }
+
         let output = Command::new(&self.ip_binary)
             .args(["-j", "-4", "addr", "show", "dev", interface])
             .output()
@@ -214,6 +235,9 @@ impl RealmRuntime {
         }
         let links: Vec<LinkAddressObservation> = serde_json::from_slice(&output.stdout)
             .map_err(|_| FabricDhcpError::BridgeAddressObservation)?;
+        if links.is_empty() {
+            return Ok(Vec::new());
+        }
         if links.len() != 1 || links[0].ifname != interface {
             return Err(FabricDhcpError::BridgeAddressObservation);
         }
@@ -787,7 +811,7 @@ mod tests {
         }
         let path = root.join("fake-ip");
         let script = format!(
-            "#!/usr/bin/env python3\nimport json, pathlib, sys\nstate=pathlib.Path({:?})\nlog=pathlib.Path({:?})\nargs=sys.argv[1:]\nwith log.open('a') as f: f.write(' '.join(args)+'\\n')\ndata=json.loads(state.read_text())\nif len(args)==6 and args[:5]==['-j','-4','addr','show','dev']:\n    dev=args[5]\n    print(json.dumps([{{'ifname':dev,'addr_info':[{{'local':x.split('/')[0],'prefixlen':int(x.split('/')[1])}} for x in data.get(dev,[])]}}]))\nelif len(args)==5 and args[:2]==['addr','add'] and args[3]=='dev':\n    address,dev=args[2],args[4]\n    values=data.setdefault(dev,[])\n    if address in values: sys.exit(2)\n    values.append(address); state.write_text(json.dumps(data))\nelif len(args)==5 and args[:2]==['addr','del'] and args[3]=='dev':\n    address,dev=args[2],args[4]\n    values=data.get(dev,[])\n    if address not in values: sys.exit(2)\n    values.remove(address); state.write_text(json.dumps(data))\nelse: sys.exit(2)\n",
+            "#!/usr/bin/env python3\nimport json, pathlib, sys\nstate=pathlib.Path({:?})\nlog=pathlib.Path({:?})\nargs=sys.argv[1:]\nwith log.open('a') as f: f.write(' '.join(args)+'\\n')\ndata=json.loads(state.read_text())\nif len(args)==5 and args[:4]==['-j','link','show','dev']:\n    dev=args[4]\n    print(json.dumps([] if dev in data.get('__missing__',[]) else [{{'ifname':dev}}]))\nelif len(args)==6 and args[:5]==['-j','-4','addr','show','dev']:\n    dev=args[5]\n    if dev in data.get('__missing__',[]): sys.exit(1)\n    values=data.get(dev,[])\n    print(json.dumps([] if not values else [{{'ifname':dev,'addr_info':[{{'local':x.split('/')[0],'prefixlen':int(x.split('/')[1])}} for x in values]}}]))\nelif len(args)==5 and args[:2]==['addr','add'] and args[3]=='dev':\n    address,dev=args[2],args[4]\n    if dev in data.get('__missing__',[]): sys.exit(1)\n    values=data.setdefault(dev,[])\n    if address in values: sys.exit(2)\n    values.append(address); state.write_text(json.dumps(data))\nelif len(args)==5 and args[:2]==['addr','del'] and args[3]=='dev':\n    address,dev=args[2],args[4]\n    values=data.get(dev,[])\n    if address not in values: sys.exit(2)\n    values.remove(address); state.write_text(json.dumps(data))\nelse: sys.exit(2)\n",
             state.display().to_string(),
             log.display().to_string(),
         );
@@ -960,6 +984,33 @@ mod tests {
             serde_json::from_slice(&fs::read(state).expect("read foreign address state"))
                 .expect("parse foreign address state");
         assert_eq!(addresses["o3k-realm"][0], "192.0.2.9/24");
+        assert!(realizer.realms[&plan.realm_id].supervisor.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_realm_bridge_is_distinct_from_an_existing_bridge_without_ipv4() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-fabric-dhcp-missing-link-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("create test root");
+        let dnsmasq = dnsmasq_stub(&root);
+        fs::create_dir_all(root.join("a")).expect("create host A DHCP root");
+        let state = root.join("a/fake-ip-state.json");
+        fs::write(&state, r#"{"__missing__":["o3k-realm"]}"#).expect("write missing bridge state");
+        let ip = fake_ip(&root.join("a"));
+        let plan = plan(&["host-a"], "host-a", true);
+        let mut realizer = FabricDhcpRealizer::open_with_ip(root.join("a"), &dnsmasq, ip.clone())
+            .expect("open DHCP");
+        assert!(matches!(
+            realizer.apply(&plan, 1, "o3k-realm"),
+            Err(FabricDhcpError::BridgeAddressObservation)
+        ));
+        let commands = fs::read_to_string(root.join("a/fake-ip.log")).expect("read command log");
+        assert!(
+            !commands
+                .lines()
+                .any(|command| command.starts_with("addr add "))
+        );
         assert!(realizer.realms[&plan.realm_id].supervisor.is_none());
         let _ = fs::remove_dir_all(root);
     }
