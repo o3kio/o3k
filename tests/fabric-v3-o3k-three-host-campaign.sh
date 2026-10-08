@@ -4,8 +4,8 @@ set -Eeuo pipefail
 # Supported-HTTP Fabric v3 three-host nested campaign. This script is test
 # harness only and refuses to run against a different product source tree.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRODUCT_SHA=e4ca1805dc16839b855e969e7e17928a54cc211f
-PRODUCT_TREE=d00fecc537d8106b0f1ff73ccd3d3e0be8e0d963
+PRODUCT_SHA=432a4320ff13e8e0b1741478ef97bafe12535f54
+PRODUCT_TREE=8569f49e645981ff66d622111dc2cb2216b9d7a1
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 CIRROS_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
 CIRROS_SHA=7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
