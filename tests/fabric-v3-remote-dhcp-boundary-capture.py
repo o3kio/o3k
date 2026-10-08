@@ -198,30 +198,42 @@ def save_snapshot(args: argparse.Namespace, ev: pathlib.Path, h: str, topo: dict
 
 
 def configure_forward_trace(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> None:
-    """Trace only B DHCP through A's bridge; the rule sets metadata, no verdict."""
+    """Trace B DHCP through A's Fabric and root bridges; rules set metadata only."""
     topo = maps["a"]
-    owner = f"o3k-dhcp-boundary-trace:{args.run_id}"
-    exists = ssh(args, "a", f"sudo ip netns exec {shlex.quote(topo['namespace'])} nft list table bridge o3k-dhcp-trace >/dev/null 2>&1; echo $?", check=False).strip()
-    if exists == "0":
-        raise RuntimeError("refusing to reuse pre-existing bridge trace table")
+    owner_ns = f"o3k-dhcp-boundary-trace:{args.run_id}:namespace"
+    owner_root = f"o3k-dhcp-boundary-trace:{args.run_id}:root"
+    ns_exists = ssh(args, "a", f"sudo ip netns exec {shlex.quote(topo['namespace'])} nft list table bridge o3k-dhcp-trace >/dev/null 2>&1; echo $?", check=False).strip()
+    root_exists = ssh(args, "a", "sudo nft list table bridge o3k-dhcp-root-trace >/dev/null 2>&1; echo $?", check=False).strip()
+    if ns_exists == "0" or root_exists == "0":
+        raise RuntimeError("refusing to reuse a pre-existing bridge trace table")
     remote_dir = f"/var/lib/o3k-fabric-v3/{args.run_id}/network/dhcp-boundary/a/trace"
-    batch = (
-        f'add table bridge o3k-dhcp-trace {{ comment "{owner}"; }}\n'
-        f'add chain bridge o3k-dhcp-trace forward {{ type filter hook forward priority -600; policy accept; comment "{owner}"; }}\n'
-        f'add rule bridge o3k-dhcp-trace forward iifname "{topo["vxlan"]}" ether saddr {maps["b"]["guest_mac"]} ip saddr 0.0.0.0 udp sport 68 udp dport 67 meta nftrace set 1 comment "{owner}"\n'
+    ns_batch = (
+        f'add table bridge o3k-dhcp-trace {{ comment "{owner_ns}"; }}\n'
+        f'add chain bridge o3k-dhcp-trace forward {{ type filter hook forward priority -600; policy accept; comment "{owner_ns}"; }}\n'
+        f'add rule bridge o3k-dhcp-trace forward iifname "{topo["vxlan"]}" ether saddr {maps["b"]["guest_mac"]} ip saddr 0.0.0.0 udp sport 68 udp dport 67 meta nftrace set 1 comment "{owner_ns}"\n'
     )
+    root_batch = (
+        f'add table bridge o3k-dhcp-root-trace {{ comment "{owner_root}"; }}\n'
+        f'add chain bridge o3k-dhcp-root-trace forward {{ type filter hook forward priority -600; policy accept; comment "{owner_root}"; }}\n'
+        f'add rule bridge o3k-dhcp-root-trace forward iifname "{topo["root_veth"]}" ether saddr {maps["b"]["guest_mac"]} ip saddr 0.0.0.0 udp sport 68 udp dport 67 meta nftrace set 1 comment "{owner_root}"\n'
+    )
+    write_json(ev / "topology" / "trace-manifest.json", {
+        "host": "a", "namespace": topo["namespace"], "vxlan": topo["vxlan"],
+        "root_veth": topo["root_veth"], "source_mac": maps["b"]["guest_mac"],
+        "table": "o3k-dhcp-trace", "root_table": "o3k-dhcp-root-trace",
+        "owner_comment": owner_ns, "root_owner_comment": owner_root, "remote_dir": remote_dir,
+    })
     remote_script(args, "a", f"""set -e
 install -d -m 0700 {shlex.quote(remote_dir)}
 ip netns exec {shlex.quote(topo['namespace'])} nft -f - <<'NFT'
-{batch}NFT
+{ns_batch}NFT
+nft -f - <<'NFT'
+{root_batch}NFT
 nohup ip netns exec {shlex.quote(topo['namespace'])} nft monitor trace >{shlex.quote(remote_dir + '/trace.log')} 2>&1 </dev/null &
 echo $! >{shlex.quote(remote_dir + '/trace.pid')}
+nohup nft monitor trace >{shlex.quote(remote_dir + '/root-trace.log')} 2>&1 </dev/null &
+echo $! >{shlex.quote(remote_dir + '/root-trace.pid')}
 """)
-    write_json(ev / "topology" / "trace-manifest.json", {
-        "host": "a", "namespace": topo["namespace"], "vxlan": topo["vxlan"],
-        "source_mac": maps["b"]["guest_mac"], "table": "o3k-dhcp-trace",
-        "owner_comment": owner, "remote_dir": remote_dir,
-    })
 
 
 def stop_forward_trace(args: argparse.Namespace, ev: pathlib.Path) -> None:
@@ -231,17 +243,31 @@ def stop_forward_trace(args: argparse.Namespace, ev: pathlib.Path) -> None:
     info = json.loads(manifest.read_text())
     remote_dir = info["remote_dir"]
     script = f"""set +e
-pid=$(cat {shlex.quote(remote_dir + '/trace.pid')} 2>/dev/null)
-case "$pid" in *[!0-9]*|'') pid=;; esac
-if test -n "$pid" && test -r "/proc/$pid/cmdline" && tr '\\0' ' ' <"/proc/$pid/cmdline" | grep -Fq 'nft monitor trace'; then kill "$pid"; fi
-sleep 0.2
+stop_monitor() {{
+  pid_file="$1"
+  pid=$(cat "$pid_file" 2>/dev/null || true)
+  case "$pid" in *[!0-9]*|'') return 0;; esac
+  if test -r "/proc/$pid/cmdline" && tr '\\0' ' ' <"/proc/$pid/cmdline" | grep -Fq 'nft monitor trace'; then
+    kill -INT "$pid"
+    for _ in $(seq 1 50); do test ! -e "/proc/$pid" && return 0; sleep 0.1; done
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do test ! -e "/proc/$pid" && return 0; sleep 0.1; done
+    return 1
+  fi
+}}
+stop_monitor {shlex.quote(remote_dir + '/trace.pid')}
+stop_monitor {shlex.quote(remote_dir + '/root-trace.pid')}
 ip netns exec {shlex.quote(info['namespace'])} nft list table bridge o3k-dhcp-trace >{shlex.quote(remote_dir + '/table.txt')} 2>&1
 if grep -Fq {shlex.quote(info['owner_comment'])} {shlex.quote(remote_dir + '/table.txt')}; then
   ip netns exec {shlex.quote(info['namespace'])} nft delete table bridge o3k-dhcp-trace
 fi
+nft list table bridge o3k-dhcp-root-trace >{shlex.quote(remote_dir + '/root-table.txt')} 2>&1
+if grep -Fq {shlex.quote(info['root_owner_comment'])} {shlex.quote(remote_dir + '/root-table.txt')}; then
+  nft delete table bridge o3k-dhcp-root-trace
+fi
 """
     remote_script(args, "a", script)
-    for name in ("trace.log", "table.txt"):
+    for name in ("trace.log", "table.txt", "root-trace.log", "root-table.txt"):
         content = ssh(args, "a", f"sudo cat {shlex.quote(remote_dir + '/' + name)}", check=False)
         (ev / "topology" / f"a-{name}").write_text(content)
 
@@ -434,10 +460,13 @@ def action_prepare(args: argparse.Namespace) -> int:
             # truncate those options on valid 342-byte CirrOS DHCP frames and
             # make an actual DISCOVER indistinguishable from a generic BOOTP
             # request. Keep capture bounded while retaining the full DHCP frame.
-            cmd = (f"{iface_cmd}timeout --signal=INT 45s tcpdump -c 20000 -i {shlex.quote(spec['iface'])} "
+            # Keep the PID file bound to tcpdump itself. A shell/timeout wrapper
+            # can survive SIGINT while tcpdump keeps the pcap open, producing a
+            # header-only copy that looks like packet loss at that interface.
+            cmd = (f"{iface_cmd}tcpdump -c 20000 -i {shlex.quote(spec['iface'])} "
                    f"-nn -e -s 512 -U -w {shlex.quote(pcap)} {shlex.quote(spec['filter'])}")
             script = (f"install -d -m 0700 {shlex.quote(remote_dir)}\n"
-                      f"nohup bash -c {shlex.quote(cmd + ' >' + shlex.quote(log) + ' 2>&1')} </dev/null >/dev/null 2>&1 &\n"
+                      f"nohup {cmd} >{shlex.quote(log)} 2>&1 </dev/null &\n"
                       f"echo $! > {shlex.quote(pid)}\n"
                       f"ready=0\n"
                       f"for _ in $(seq 1 25); do\n"
@@ -465,10 +494,15 @@ def action_prepare(args: argparse.Namespace) -> int:
         for spec in specs:
             if not all(k in spec for k in ("pid", "pcap", "host")):
                 continue
-            script = (f"pid=$(cat {shlex.quote(spec['pid'])} 2>/dev/null || true); "
-                      f"if test -n \"$pid\" && test -r /proc/$pid/cmdline && "
-                      f"tr '\\0' ' ' </proc/$pid/cmdline | grep -Fq -- {shlex.quote(spec['pcap'])}; "
-                      f"then kill -INT \"$pid\"; fi")
+            script = (f"set -e; pid=$(cat {shlex.quote(spec['pid'])} 2>/dev/null || true); "
+                      f"case \"$pid\" in *[!0-9]*|'') exit 0;; esac; "
+                      f"if test -r /proc/$pid/cmdline && tr '\\0' ' ' </proc/$pid/cmdline | "
+                      f"grep -Fq -- {shlex.quote(spec['pcap'])}; then "
+                      f"kill -INT \"$pid\"; done=0; "
+                      f"for _ in $(seq 1 50); do if test ! -e /proc/$pid; then done=1; break; fi; sleep 0.1; done; "
+                      f"if test \"$done\" != 1; then kill -TERM \"$pid\" 2>/dev/null || true; "
+                      f"for _ in $(seq 1 20); do if test ! -e /proc/$pid; then done=1; break; fi; sleep 0.1; done; fi; "
+                      f"test \"$done\" = 1; fi")
             try:
                 remote_script(args, spec["host"], script)
             except Exception:
@@ -486,8 +520,16 @@ def stop_and_copy(args: argparse.Namespace, ev: pathlib.Path, spec: dict) -> Non
     script = f"""set -e
 pid=$(cat {shlex.quote(pid)})
 case "$pid" in *[!0-9]*|'') exit 21;; esac
-if test -r "/proc/$pid/cmdline" && tr '\\0' ' ' <"/proc/$pid/cmdline" | grep -Fq -- {shlex.quote(pcap)}; then kill -INT "$pid"; fi
-sleep 1
+if test -r "/proc/$pid/cmdline" && tr '\\0' ' ' <"/proc/$pid/cmdline" | grep -Fq -- {shlex.quote(pcap)}; then
+  kill -INT "$pid"
+  stopped=0
+  for _ in $(seq 1 50); do if test ! -e "/proc/$pid"; then stopped=1; break; fi; sleep 0.1; done
+  if test "$stopped" != 1; then
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do if test ! -e "/proc/$pid"; then stopped=1; break; fi; sleep 0.1; done
+  fi
+  test "$stopped" = 1
+fi
 test -f {shlex.quote(pcap)}
 cp {shlex.quote(pcap)} {shlex.quote('/tmp/' + args.run_id + '-' + h + '-' + spec['label'] + '.pcap')}
 chown o3k:o3k {shlex.quote('/tmp/' + args.run_id + '-' + h + '-' + spec['label'] + '.pcap')}
