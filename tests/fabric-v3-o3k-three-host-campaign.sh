@@ -12,7 +12,12 @@ CIRROS_SHA=7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
 RUN_ID="${O3K_FABRIC_V3_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="o3k-fabric-v3-${RUN_ID}"
 EVIDENCE_ROOT="${O3K_FABRIC_V3_EVIDENCE_ROOT:-/var/tmp}"
-EVIDENCE="$EVIDENCE_ROOT/fabric-v3-minimal-three-host-$RUN_ID"
+DHCP_BOUNDARY_DIAGNOSTIC="${O3K_FABRIC_V3_DHCP_BOUNDARY_DIAGNOSTIC:-0}"
+if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" == 1 ]]; then
+  EVIDENCE="$EVIDENCE_ROOT/fabric-v3-remote-dhcp-boundary-$RUN_ID"
+else
+  EVIDENCE="$EVIDENCE_ROOT/fabric-v3-minimal-three-host-$RUN_ID"
+fi
 IMAGE_STORE="${O3K_FABRIC_V3_IMAGE_STORE:-/var/lib/libvirt/images}"
 NETWORK="${O3K_FABRIC_V3_LIBVIRT_NETWORK:-default}"
 SSH_USER=o3k
@@ -81,7 +86,7 @@ if [[ -z "${O3K_FABRIC_V3_CONTROL_PORT:-}" ]]; then
 fi
 
 [[ ! -e "$EVIDENCE" && ! -L "$EVIDENCE" ]] || fail "evidence path already exists: $EVIDENCE" "HARNESS_GAP"
-mkdir -p "$EVIDENCE"/{environment,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown}
+mkdir -p "$EVIDENCE"/{environment,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown,topology/{plans,ownership,fdb,wireguard,links,nft-before,nft-after},a,b,dhcp}
 chmod 0700 "$EVIDENCE"
 [[ ! -e "$EVIDENCE/.o3k-fabric-v3-owned" ]] || fail "evidence path collision"
 printf 'o3k-fabric-v3-campaign-v1\nrun=%s\nprefix=%s\n' "$RUN_ID" "$PREFIX" >"$EVIDENCE/.o3k-fabric-v3-owned"
@@ -90,7 +95,9 @@ git -C "$ROOT_DIR" rev-parse HEAD >"$EVIDENCE/environment/harness_sha.txt"
 git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}' >"$EVIDENCE/environment/harness_tree.txt"
 cp "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" "$EVIDENCE/environment/campaign-driver.sh"
 cp "$ROOT_DIR/tests/fabric-v3-install-agent-host.sh" "$EVIDENCE/environment/install-agent-host.sh"
+cp "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" "$EVIDENCE/environment/boundary-capture-helper.py"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" >"$EVIDENCE/environment/boundary-capture-helper.sha256"
 
 cleanup_on_success() {
   local rc=$?
@@ -750,6 +757,118 @@ PY
     return 1
   fi
 }
+
+run_dhcp_boundary_tool() {
+  local action="$1" harness_sha
+  harness_sha="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  python3 "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" "$action" \
+    --evidence "$EVIDENCE" --run-id "$RUN_ID" --key "$SSH_KEY" --known-hosts "$KNOWN_HOSTS" \
+    --address-a "${MGMT_IP[a]}" --address-b "${MGMT_IP[b]}" --address-c "${MGMT_IP[c]}" \
+    --endpoint-a "${PORT_IDS[0]}" --endpoint-b "${PORT_IDS[1]}" --endpoint-c "${PORT_IDS[2]}" \
+    --mac-a "${TENANT_MAC[a]}" --mac-b "${TENANT_MAC[b]}" --mac-c "${TENANT_MAC[c]}" \
+    --product-sha "$PRODUCT_SHA" --product-tree "$PRODUCT_TREE" --harness-sha "$harness_sha"
+}
+
+if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" == 1 ]]; then
+  # All three public creates have reached ACTIVE. Preserve the initial authority
+  # capture, then take fresh ownership/plan-derived topology and verify HER and
+  # WireGuard before a single bounded B retransmission is generated.
+  stop_dhcp_capture
+  [[ -s "$EVIDENCE/attachments/dhcp-dora.pcap" ]] \
+    || fail "server A DHCP packet capture is absent before the B boundary run" "HARNESS_GAP"
+  tcpdump -nn -e -tt -vvv -r "$EVIDENCE/attachments/dhcp-dora.pcap" 'udp and (port 67 or port 68)' \
+    >"$EVIDENCE/dhcp/a-dora-before-b.txt" 2>&1 \
+    || fail "server A DORA capture could not be decoded" "HARNESS_GAP"
+  python3 - "$EVIDENCE/dhcp/a-dora-before-b.txt" "${TENANT_MAC[a]}" <<'PY' \
+    || fail "A did not complete DHCP DORA before B packet tracing" "DATAPLANE_DEFECT"
+import pathlib,re,sys
+text=pathlib.Path(sys.argv[1]).read_text(errors='replace').lower(); mac=sys.argv[2].lower()
+assert mac in text
+for label in ('discover','offer','request','ack'):
+    assert re.search(r'dhcp-message[^\n]*'+label,text,re.I),label
+PY
+  console_command b 'killall udhcpc 2>/dev/null || true; echo __O3K_DHCP_CLIENT_PAUSED__' \
+    'b/guest-dhcp-client-paused.txt' \
+    || fail "could not pause B background DHCP retries before synchronized capture" "HARNESS_GAP"
+  console_command c 'killall udhcpc 2>/dev/null || true; echo __O3K_DHCP_CLIENT_PAUSED__' \
+    'c/guest-dhcp-client-paused.txt' \
+    || fail "could not pause C background DHCP retries before synchronized capture" "HARNESS_GAP"
+  set +e
+  run_dhcp_boundary_tool prepare >"$EVIDENCE/topology/prepare-result.json"
+  prepare_rc=$?
+  set -e
+  cat "$EVIDENCE/topology/prepare-result.json"
+  if (( prepare_rc != 0 )); then
+    CAMPAIGN_TEARDOWN_PASS=1
+    exit 0
+  fi
+  python3 - "$EVIDENCE/manifest.json" "$EVIDENCE/environment/inventory.tsv" "$EVIDENCE/environment" \
+    "$EVIDENCE/compute-a/domain.txt" "$EVIDENCE/compute-b/domain.txt" "$EVIDENCE/compute-c/domain.txt" \
+    "${MGMT_IP[a]}" "${MGMT_IP[b]}" "${MGMT_IP[c]}" <<'PY'
+import json,pathlib,re,sys
+manifest,inventory,environment,*rest=sys.argv[1:]
+domains=[pathlib.Path(p).read_text().strip() for p in rest[:3]]
+addresses=rest[3:]
+outer={}
+for line in pathlib.Path(inventory).read_text().splitlines():
+    host,domain,address,mac,uuid=line.split('\t')
+    outer[host[-1]]={"domain":domain,"domain_uuid":uuid,"management_ip":address,"management_mac":mac}
+for i,h in enumerate('abc'):
+    baseline=(pathlib.Path(environment)/f'baseline-compute-{h}.txt').read_text(errors='replace')
+    def value(name):
+        m=re.search(rf'(?m)^{re.escape(name)}=(.*)$',baseline)
+        return m.group(1) if m else None
+    outer[h].update({"boot_id":value('boot_id'),"kernel":value('kernel'),"os_release":value('os')})
+canonical={}
+for h in 'abc':
+    port=json.load(open(pathlib.Path(manifest).parent/'api'/f'port-{h}.response.json'))['port']
+    server=json.load(open(pathlib.Path(manifest).parent/'api'/f'server-{h}.create.response.json'))['server']
+    canonical[h]={"server_id":server['id'],"endpoint_id":port['id'],"canonical_guest_mac":port['mac_address'],
+                  "fixed_ip":port['fixed_ips'][0]['ip_address'],"status":"ACTIVE"}
+data=json.load(open(manifest)); data.update({
+    "started_at_utc":(pathlib.Path(environment)/'../started_at_utc.txt').resolve().read_text().strip(),
+    "physical_host_identity":(pathlib.Path(environment)/'physical-host.txt').read_text(errors='replace').strip(),
+    "canonical_endpoints":canonical,
+    "fresh_nested_hosts":outer,
+    "nested_compute_domains":{"a":domains[0],"b":domains[1],"c":domains[2]},
+    "server_status":{"a":"ACTIVE","b":"ACTIVE","c":"ACTIVE"},
+    "management_addresses":{"a":addresses[0],"b":addresses[1],"c":addresses[2]},
+    "compute_agent_ids":{"a":"compute-agent-a","b":"compute-agent-b","c":"compute-agent-c"},
+    "network_agent_ids":{"a":"network-agent-a","b":"network-agent-b","c":"network-agent-c"},
+    "stable_host_ids":{"a":"host-a","b":"host-b","c":"host-c"},
+    "database_backend":"SQLite (campaign controller data directory)",
+})
+json.dump(data,open(manifest,'w'),sort_keys=True,indent=2); open(manifest,'a').write('\n')
+PY
+  # Retire CirrOS's background DHCP client and request one bounded transaction.
+  # No static address is installed; nonzero is expected when the OFFER is lost.
+  console_command b 'udhcpc -f -v -n -q -t 1 -T 2 -i eth0' \
+    'b/guest-dhcp-retry.txt' || true
+  set +e
+  run_dhcp_boundary_tool finish >"$EVIDENCE/topology/finish-result.json"
+  finish_rc=$?
+  set -e
+  cat "$EVIDENCE/topology/finish-result.json"
+  # Preserve the exact authority configuration/process/lease state at the
+  # packet boundary, without treating it as the cause unless its bridge capture
+  # is the first present boundary.
+  realm_id="$(python3 - "$EVIDENCE/topology/topology-map.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['a']['realm_id'])
+PY
+)"
+  dhcp_root="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$realm_id"
+  ssh_vm "${MGMT_IP[a]}" "sudo cat '$dhcp_root/dnsmasq.conf'; sudo cat '$dhcp_root/state.json'" \
+    >"$EVIDENCE/dhcp/generated-config-and-state.txt" 2>&1 || true
+  ssh_vm "${MGMT_IP[a]}" "sudo cat '$dhcp_root/dnsmasq.leases' 2>/dev/null || true; sudo pgrep -a dnsmasq || true; sudo ss -lunp | grep -E ':(67|68)\\b' || true" \
+    >"$EVIDENCE/dhcp/binding-process-state.txt" 2>&1 || true
+  if (( finish_rc != 0 )); then
+    CAMPAIGN_TEARDOWN_PASS=1
+    exit 0
+  fi
+  CAMPAIGN_TEARDOWN_PASS=1
+  exit 0
+fi
 
 # The nested domains expose file-backed serial devices, so `virsh console`
 # cannot provide an interactive PTY. Their already captured boot logs contain
