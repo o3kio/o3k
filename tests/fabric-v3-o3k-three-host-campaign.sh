@@ -1081,7 +1081,7 @@ assert all(mac in text.lower() for mac in expected),(expected,text[:5000])
 labels={'DISCOVER':r'DHCP-Message[^\n]*Discover','OFFER':r'DHCP-Message[^\n]*Offer',
         'REQUEST':r'DHCP-Message[^\n]*Request','ACK':r'DHCP-Message[^\n]*(?:ACK|Ack)'}
 for name,pattern in labels.items(): assert re.search(pattern,text,re.I),(name,text[:5000])
-blocks=re.split(r'(?m)(?=^\d+\.\d+\s+.*\bIP\s)',text); offers=[]
+blocks=re.split(r'(?m)(?=^\d+\.\d+\s)',text); offers=[]
 for block in blocks:
     if not re.search(r'DHCP-Message[^\n]*Offer',block,re.I): continue
     xid=re.search(r' xid 0x([0-9a-f]+)',block,re.I)
