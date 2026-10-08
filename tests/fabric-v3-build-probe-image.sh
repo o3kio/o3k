@@ -82,7 +82,7 @@ find "$WORK_DIR/rootfs" -depth -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 (
   cd "$WORK_DIR/rootfs"
   find . -print0 | LC_ALL=C sort -z \
-    | cpio --null --create --format=newc --owner=0:0 --reproducible \
+    | cpio --null --create --format=newc --reproducible \
     | gzip -n -9 >"$WORK_DIR/initrd.probe.img"
 )
 guestfish --rw -a "$OUTPUT_IMAGE" <<EOF >"$EVIDENCE_DIR/probe-image-install.log"
@@ -95,9 +95,13 @@ EOF
 # Validate the generated archive and the exact policy/key material before it
 # enters the supported image API. Image service upload limit is 64 MiB.
 gzip -dc "$WORK_DIR/initrd.probe.img" | cpio --list --quiet >"$EVIDENCE_DIR/probe-image-files.txt"
+gzip -dc "$WORK_DIR/initrd.probe.img" | cpio --list --verbose --numeric-uid-gid >"$EVIDENCE_DIR/probe-image-metadata.txt"
 grep -Fxq 'etc/default/dropbear' "$EVIDENCE_DIR/probe-image-files.txt"
 grep -Fxq 'home/cirros/.ssh/authorized_keys' "$EVIDENCE_DIR/probe-image-files.txt"
 grep -Fxq 'usr/sbin/dropbear' "$EVIDENCE_DIR/probe-image-files.txt"
+awk '$NF == "home/cirros/.ssh/authorized_keys" { if ($3 != "1000" || $4 != "1000") exit 1; found=1 } END { exit !found }' \
+  "$EVIDENCE_DIR/probe-image-metadata.txt" \
+  || { echo "probe authorized_keys must remain owned by cirros uid/gid 1000" >&2; exit 1; }
 [[ "$(stat -c %s "$OUTPUT_IMAGE")" -lt "$MAX_PUBLIC_UPLOAD_BYTES" ]] \
   || { echo "probe image exceeds supported 64 MiB public image upload limit" >&2; exit 1; }
 
