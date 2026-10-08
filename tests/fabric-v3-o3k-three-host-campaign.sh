@@ -4,8 +4,8 @@ set -Eeuo pipefail
 # Supported-HTTP Fabric v3 three-host nested campaign. This script is test
 # harness only and refuses to run against a different product source tree.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRODUCT_SHA=e4ca1805dc16839b855e969e7e17928a54cc211f
-PRODUCT_TREE=d00fecc537d8106b0f1ff73ccd3d3e0be8e0d963
+PRODUCT_SHA=9f5d2a9eae1e83430185b1677553d09a27810111
+PRODUCT_TREE=7ccdd3ad981c3f6796c8b9903370f334fbd24146
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 CIRROS_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
 CIRROS_SHA=7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
@@ -30,6 +30,7 @@ SSH_KEY="$EVIDENCE/management/campaign_ed25519"
 KNOWN_HOSTS="$EVIDENCE/management/known_hosts"
 TLS_DIR="$EVIDENCE/management/tls"
 STAGE="$EVIDENCE/environment/stage"
+PRODUCT_SOURCE_DIR="$EVIDENCE/environment/product-source"
 BASE=""
 TOKEN=""
 O3KD_PID=""
@@ -132,11 +133,15 @@ PY
     tar --exclude="$(basename "$EVIDENCE")/management/campaign_ed25519" \
       --exclude="$(basename "$EVIDENCE")/management/tls/certs" \
       --exclude="$(basename "$EVIDENCE")/environment/stage" \
+      --exclude="$(basename "$EVIDENCE")/environment/product-source" \
       --exclude="$(basename "$EVIDENCE")/controller-data" \
       -C "$EVIDENCE_ROOT" -czf "$EVIDENCE.tar.gz" "$(basename "$EVIDENCE")"
     sha256sum "$EVIDENCE.tar.gz" >"$EVIDENCE.tar.gz.sha256"
     echo "EVIDENCE_ARCHIVE=$EVIDENCE.tar.gz"
     cat "$EVIDENCE.tar.gz.sha256"
+  fi
+  if [[ -d "$PRODUCT_SOURCE_DIR" && -e "$PRODUCT_SOURCE_DIR/.git" ]]; then
+    git -C "$ROOT_DIR" worktree remove --force "$PRODUCT_SOURCE_DIR" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup_on_success EXIT
@@ -153,7 +158,6 @@ for tool in cargo curl openssl python3 virsh virt-install qemu-img genisoimage s
 [[ -c /dev/kvm ]] || fail "/dev/kvm unavailable" "ENVIRONMENT_GAP"
 [[ -r "$BASE_IMAGE" ]] || fail "base image unreadable: $BASE_IMAGE" "ENVIRONMENT_GAP"
 [[ "$(git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}")" == "$PRODUCT_TREE" ]] || fail "frozen product source tree mismatch" "HARNESS_GAP"
-[[ -z "$(git -C "$ROOT_DIR" diff --name-only "$PRODUCT_SHA" -- bins crates Cargo.toml Cargo.lock)" ]] || fail "product source differs from frozen candidate" "PRODUCT_DEFECT"
 url_port "$API_PORT" || fail "API port is occupied: $API_PORT" "ENVIRONMENT_GAP"
 url_port "$CONTROL_PORT" || fail "compute control port is occupied: $CONTROL_PORT" "ENVIRONMENT_GAP"
 git -C "$ROOT_DIR" rev-parse HEAD >"$EVIDENCE/environment/harness_sha.txt"
@@ -166,10 +170,24 @@ sha256sum "$BASE_IMAGE" >"$EVIDENCE/environment/base-image.sha256"
 [[ "$(awk '{print $1}' "$EVIDENCE/environment/base-image.sha256")" == 612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354 ]] || fail "base image checksum mismatch" "ENVIRONMENT_GAP"
 
 echo "Building frozen binaries from $PRODUCT_SHA"
- CARGO_TARGET_DIR="$ROOT_DIR/target" cargo build --release --all-features -p o3kd -p o3k-compute-bin -p o3k-network-bin >"$EVIDENCE/environment/build.log" 2>&1 || fail "frozen product binaries failed to build" "HARNESS_GAP"
+git -C "$ROOT_DIR" worktree add --detach "$PRODUCT_SOURCE_DIR" "$PRODUCT_SHA" \
+  >"$EVIDENCE/environment/product-worktree.log" 2>&1 \
+  || fail "could not materialize the exact frozen product source" "HARNESS_GAP"
+[[ "$(git -C "$PRODUCT_SOURCE_DIR" rev-parse HEAD)" == "$PRODUCT_SHA" \
+  && "$(git -C "$PRODUCT_SOURCE_DIR" rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]] \
+  || fail "detached product worktree identity differs from the manifest" "HARNESS_GAP"
+git -C "$PRODUCT_SOURCE_DIR" status --porcelain -- bins crates Cargo.toml Cargo.lock \
+  >"$EVIDENCE/environment/product-source-status.txt"
+[[ ! -s "$EVIDENCE/environment/product-source-status.txt" ]] \
+  || fail "frozen product source worktree is dirty" "PRODUCT_DEFECT"
+CARGO_TARGET_DIR="$PRODUCT_SOURCE_DIR/target" cargo build --release --all-features \
+  --manifest-path "$PRODUCT_SOURCE_DIR/Cargo.toml" \
+  -p o3kd -p o3k-compute-bin -p o3k-network-bin \
+  >"$EVIDENCE/environment/build.log" 2>&1 \
+  || fail "frozen product binaries failed to build" "HARNESS_GAP"
 for binary in o3kd o3k-compute-bin o3k-network-bin; do
-  [[ -x "$ROOT_DIR/target/release/$binary" ]] || fail "missing frozen binary $binary" "HARNESS_GAP"
-  sha256sum "$ROOT_DIR/target/release/$binary" >>"$EVIDENCE/environment/runtime-assets.sha256"
+  [[ -x "$PRODUCT_SOURCE_DIR/target/release/$binary" ]] || fail "missing frozen binary $binary" "HARNESS_GAP"
+  sha256sum "$PRODUCT_SOURCE_DIR/target/release/$binary" >>"$EVIDENCE/environment/runtime-assets.sha256"
 done
 
 echo "Running accepted QEMU storage preflight"
@@ -326,8 +344,8 @@ ssh-keygen -lf "$KNOWN_HOSTS" >"$EVIDENCE/management/known-hosts-fingerprints.tx
 install -d -m 0700 "$TLS_DIR" "$STAGE"
 extra_ids=(--agent-id compute-agent-a --extra-agent-id compute-agent-b --extra-agent-id compute-agent-c --extra-agent-id network-agent-a --extra-agent-id network-agent-b --extra-agent-id network-agent-c --extra-agent-id controller-network)
 bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$TLS_DIR/certs" --server-name o3k-control-plane "${extra_ids[@]}" >"$EVIDENCE/management/cert-generation.txt" 2>&1 || fail "campaign TLS identity generation failed" "HARNESS_GAP"
-cp "$ROOT_DIR/target/release/o3k-network-bin" "$STAGE/o3k-network"
-cp "$ROOT_DIR/target/release/o3k-compute-bin" "$STAGE/o3k-compute"
+cp "$PRODUCT_SOURCE_DIR/target/release/o3k-network-bin" "$STAGE/o3k-network"
+cp "$PRODUCT_SOURCE_DIR/target/release/o3k-compute-bin" "$STAGE/o3k-compute"
 cp "$ROOT_DIR/tests/fabric-v3-install-agent-host.sh" "$STAGE/install-agent-host.sh"
 cp "$TLS_DIR/certs/ca.pem" "$STAGE/ca.pem"
 for host in a b c; do
@@ -391,7 +409,7 @@ export O3K_PROVIDER=agent O3K_DATA_DIR="$EVIDENCE/controller-data" O3K_CONTROLLE
 export O3K_FABRIC_DOMAIN_ID="$FABRIC_DOMAIN_ID" O3K_FABRIC_HOST_IDENTITIES="$FABRIC_HOST_IDENTITIES" O3K_NETWORK_AGENT_DIRECTORY="$DIRECTORY"
 export O3K_NETWORK_AGENT_CA="$TLS_DIR/certs/ca.pem" O3K_NETWORK_AGENT_CLIENT_CERT="$TLS_DIR/certs/agents/controller-network/agent.pem" O3K_NETWORK_AGENT_CLIENT_KEY="$TLS_DIR/certs/agents/controller-network/agent-key.pem"
 export O3K_COMPUTE_CONTROL_ADDR="0.0.0.0:$CONTROL_PORT" O3K_COMPUTE_SERVER_CERTIFICATE="$TLS_DIR/certs/server.pem" O3K_COMPUTE_SERVER_PRIVATE_KEY="$TLS_DIR/certs/server-key.pem" O3K_COMPUTE_CLIENT_CA="$TLS_DIR/certs/ca.pem" O3K_COMPUTE_AUTHORIZED_AGENTS="$AUTHORIZED"
-"$ROOT_DIR/target/release/o3kd" --listen-addr "$HOST_MGMT_IP:$API_PORT" --data-dir "$EVIDENCE/controller-data" --log-filter info >"$EVIDENCE/management/o3kd.log" 2>&1 &
+"$PRODUCT_SOURCE_DIR/target/release/o3kd" --listen-addr "$HOST_MGMT_IP:$API_PORT" --data-dir "$EVIDENCE/controller-data" --log-filter info >"$EVIDENCE/management/o3kd.log" 2>&1 &
 O3KD_PID=$!
 for _ in $(seq 1 120); do curl -fsS "$BASE/healthz" >/dev/null 2>&1 && break; kill -0 "$O3KD_PID" 2>/dev/null || fail "o3kd exited during startup" "ENVIRONMENT_GAP"; sleep 1; done
 curl -fsS "$BASE/readyz" >"$EVIDENCE/management/o3kd-ready.json" || fail "o3kd failed readiness" "ENVIRONMENT_GAP"
@@ -927,12 +945,18 @@ PY
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   dhcp_root="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$REALM_ID"
-  ssh_vm "$address" "sudo cat '$dhcp_root/fabric-dhcp-ownership.json'" \
-    >"$EVIDENCE/attachments/dhcp-host-$host-ownership.json" \
-    || fail "host-$host has no durable Fabric DHCP observation" "DATAPLANE_DEFECT"
-  ssh_vm "$address" "sudo cat '$dhcp_root/state.json'" \
-    >"$EVIDENCE/attachments/dhcp-host-$host-state.json" \
-    || fail "host-$host has no Fabric DHCP state snapshot" "DATAPLANE_DEFECT"
+  if [[ "$host" == a ]]; then
+    ssh_vm "$address" "sudo cat '$dhcp_root/owner.json'" \
+      >"$EVIDENCE/attachments/dhcp-host-$host-ownership.json" \
+      || fail "selected authority has no durable Fabric DHCP ownership" "DATAPLANE_DEFECT"
+    ssh_vm "$address" "sudo cat '$dhcp_root/state.json'" \
+      >"$EVIDENCE/attachments/dhcp-host-$host-state.json" \
+      || fail "selected authority has no Fabric DHCP state snapshot" "DATAPLANE_DEFECT"
+  else
+    ssh_vm "$address" "sudo test ! -e '$dhcp_root/owner.json' && ! sudo find '$dhcp_root' -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print -quit 2>/dev/null | grep -q ." \
+      >"$EVIDENCE/attachments/dhcp-host-$host-no-authority.txt" \
+      || fail "non-authority host retained Fabric DHCP ownership or process" "SECURITY_DEFECT"
+  fi
   ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print 2>/dev/null || true" \
     >"$EVIDENCE/attachments/dhcp-host-$host-owned-pids.txt"
 done
@@ -949,14 +973,13 @@ expected={}
 for host in 'abc':
     port=json.load(open(api/f'port-{host}.response.json'))['port']
     expected[port['id']]={'mac':port['mac_address'].lower(),'ip':port['fixed_ips'][0]['ip_address']}
-    owner=json.load(open(root/f'dhcp-host-{host}-ownership.json'))
-    assert owner['local_host']==f'host-{host}' and owner['authority_host']=='host-a', owner
-    assert owner['dhcp_enabled'] and not owner['pending'] and not owner['withdrawn'], owner
     pids=[line for line in (root/f'dhcp-host-{host}-owned-pids.txt').read_text().splitlines() if line.strip()]
     assert len(pids)==(1 if host=='a' else 0),(host,pids)
+owner=json.load(open(root/'dhcp-host-a-ownership.json'))
+assert owner['authority_host']=='host-a' and owner['enabled'] and not owner['pending'], owner
 state=json.load(open(root/'dhcp-host-a-state.json'))
 assert state['config']['interface']==bridge,state['config']
-assert state['config']['mtu']==1390,state['config']
+assert state['tenant_mtu']==1390,state
 bindings=state['bindings']
 assert set(bindings)==set(expected),(bindings,expected)
 for endpoint,want in expected.items():

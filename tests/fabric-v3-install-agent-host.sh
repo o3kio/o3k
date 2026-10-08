@@ -109,6 +109,7 @@ if ! pgrep -x o3k-network >/dev/null; then
     O3K_NETWORK_DHCP_ROOT="$base/network/dhcp" \
     O3K_NETWORK_DNSMASQ=/usr/sbin/dnsmasq \
     O3K_NETWORK_FABRIC_ROOT="$base/network/fabric" \
+    O3K_NETWORK_FABRIC_HOST_ID="host-$host" \
     O3K_NETWORK_TAP_USER="$qemu_user" \
     O3K_NETWORK_TAP_GROUP="$qemu_group" \
     O3K_NETWORK_LISTEN=0.0.0.0:50061 \
