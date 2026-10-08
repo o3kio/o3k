@@ -1037,6 +1037,81 @@ mod tests {
     }
 
     #[test]
+    fn local_endpoint_allows_only_canonical_dhcp_bootstrap_before_ip_filter() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-dhcp-bootstrap-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
+                .expect("backend");
+        let mut realm = backend.realm_ownership(&plan);
+        let endpoint = &plan.directory.entries[0];
+        let tap = endpoint_tap_name(plan.realm_id, endpoint.endpoint_id);
+        let fixed_ip = endpoint.fixed_ip.to_string();
+        realm.endpoint_taps.insert(
+            endpoint.endpoint_id,
+            EndpointTapOwnership {
+                endpoint_id: endpoint.endpoint_id,
+                interface: tap.clone(),
+                mac: endpoint_tap_mac(plan.realm_id, endpoint.endpoint_id),
+            },
+        );
+        backend.state.realms.insert(plan.realm_id, realm);
+
+        backend
+            .ensure_anti_spoof(&plan)
+            .expect("DHCP bootstrap anti-spoof rules");
+
+        let table = format!("o3k-as-{:08x}", public_mark(plan.realm_id));
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        let rules = calls
+            .iter()
+            .filter(|(program, _)| program == "nft")
+            .map(|(_, args)| args.as_slice())
+            .collect::<Vec<_>>();
+        let dhcp_rule = vec![
+            "add",
+            "rule",
+            "bridge",
+            table.as_str(),
+            "forward",
+            "iifname",
+            tap.as_str(),
+            "ether",
+            "saddr",
+            endpoint.mac.as_str(),
+            "ip",
+            "saddr",
+            "0.0.0.0",
+            "udp",
+            "sport",
+            "68",
+            "udp",
+            "dport",
+            "67",
+            "accept",
+            "comment",
+            "\"o3k-p11-antispoof\"",
+        ];
+        assert!(rules.iter().any(|rule| {
+            rule.iter()
+                .map(String::as_str)
+                .eq(dhcp_rule.iter().copied())
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule.windows(4)
+                .any(|window| window == ["ip", "saddr", "!=", fixed_ip.as_str()])
+                && rule.windows(2).any(|window| window == ["drop", "comment"])
+        }));
+        drop(calls);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
     fn provider_refuses_foreign_fabric_namespace() {
         let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {

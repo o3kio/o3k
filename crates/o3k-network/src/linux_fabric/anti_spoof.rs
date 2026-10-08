@@ -11,6 +11,20 @@ const TABLE_PREFIX: &str = "o3k-as-";
 const MARKER: &str = "o3k-p11-antispoof";
 const NFT_MARKER: &str = "\"o3k-p11-antispoof\"";
 
+fn dhcp_bootstrap_rule<'a>(interface: &'a str, mac: &'a str) -> Vec<&'a str> {
+    vec![
+        "iifname", interface, "ether", "saddr", mac, "ip", "saddr", "0.0.0.0", "udp", "sport",
+        "68", "udp", "dport", "67", "accept",
+    ]
+}
+
+fn arp_probe_rule<'a>(interface: &'a str, mac: &'a str, fixed_ip: &'a str) -> Vec<&'a str> {
+    vec![
+        "iifname", interface, "ether", "saddr", mac, "arp", "saddr", "ether", mac, "arp", "saddr",
+        "ip", "0.0.0.0", "arp", "daddr", "ip", fixed_ip, "accept",
+    ]
+}
+
 impl LinuxFabricBackend {
     pub(crate) fn ensure_anti_spoof(
         &mut self,
@@ -177,17 +191,12 @@ impl LinuxFabricBackend {
                         fixed_ip.as_str(),
                         "accept",
                     ],
-                    vec![
-                        "iifname",
+                    dhcp_bootstrap_rule(vxlan.host_veth.as_str(), endpoint.mac.as_str()),
+                    arp_probe_rule(
                         vxlan.host_veth.as_str(),
-                        "ether",
-                        "saddr",
                         endpoint.mac.as_str(),
-                        "ip",
-                        "saddr",
-                        "0.0.0.0",
-                        "accept",
-                    ],
+                        fixed_ip.as_str(),
+                    ),
                     vec![
                         "iifname",
                         vxlan.host_veth.as_str(),
@@ -246,6 +255,30 @@ impl LinuxFabricBackend {
                 return Err(LinuxFabricError::CorruptState);
             };
             let fixed_ip = endpoint.fixed_ip.to_string();
+            for rule in [
+                dhcp_bootstrap_rule(tap.interface.as_str(), endpoint.mac.as_str()),
+                arp_probe_rule(
+                    tap.interface.as_str(),
+                    endpoint.mac.as_str(),
+                    fixed_ip.as_str(),
+                ),
+            ] {
+                if !self
+                    .command
+                    .run(
+                        "nft",
+                        &["add", "rule", "bridge", table.as_str(), chain]
+                            .iter()
+                            .copied()
+                            .chain(rule.iter().copied())
+                            .chain(["comment", NFT_MARKER])
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(LinuxFabricError::Storage)?
+                {
+                    return Err(LinuxFabricError::CommandFailed);
+                }
+            }
             for rule in [
                 vec![
                     "iifname",
@@ -343,5 +376,64 @@ impl LinuxFabricBackend {
             return Err(LinuxFabricError::CommandFailed);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{arp_probe_rule, dhcp_bootstrap_rule};
+
+    #[test]
+    fn dhcp_bootstrap_accepts_only_canonical_mac_and_dhcp_ports() {
+        let rule = dhcp_bootstrap_rule("o3k-vxlan", "02:00:00:00:00:0a");
+        assert_eq!(
+            rule,
+            vec![
+                "iifname",
+                "o3k-vxlan",
+                "ether",
+                "saddr",
+                "02:00:00:00:00:0a",
+                "ip",
+                "saddr",
+                "0.0.0.0",
+                "udp",
+                "sport",
+                "68",
+                "udp",
+                "dport",
+                "67",
+                "accept",
+            ]
+        );
+        assert!(!rule.contains(&"tcp"));
+        assert!(!rule.contains(&"02:00:00:00:00:0b"));
+    }
+
+    #[test]
+    fn arp_probe_exception_is_bound_to_the_endpoint_and_requested_fixed_ip() {
+        assert_eq!(
+            arp_probe_rule("o3k-tap", "02:00:00:00:00:0a", "10.0.0.10"),
+            vec![
+                "iifname",
+                "o3k-tap",
+                "ether",
+                "saddr",
+                "02:00:00:00:00:0a",
+                "arp",
+                "saddr",
+                "ether",
+                "02:00:00:00:00:0a",
+                "arp",
+                "saddr",
+                "ip",
+                "0.0.0.0",
+                "arp",
+                "daddr",
+                "ip",
+                "10.0.0.10",
+                "accept",
+            ]
+        );
     }
 }
