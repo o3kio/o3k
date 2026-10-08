@@ -166,6 +166,8 @@ def save_snapshot(args: argparse.Namespace, ev: pathlib.Path, h: str, topo: dict
         "namespace-links.json": f"ip netns exec {ns} ip -s -j link",
         "namespace-routes.json": f"ip netns exec {ns} ip -j route show table all",
         "namespace-bridge-links.json": f"ip netns exec {ns} bridge -j link",
+        "namespace-bridge-link-detail.txt": f"ip netns exec {ns} bridge -d link show",
+        "namespace-bridge-vlan.txt": f"ip netns exec {ns} bridge vlan show",
         "namespace-bridge-fdb.json": f"ip netns exec {ns} bridge -j fdb",
         "namespace-wireguard.txt": f"ip netns exec {ns} wg show {wg}",
         "namespace-wireguard-transfer.txt": f"ip netns exec {ns} wg show {wg} transfer",
@@ -173,6 +175,14 @@ def save_snapshot(args: argparse.Namespace, ev: pathlib.Path, h: str, topo: dict
         "namespace-fabric-veth-detail.json": f"ip netns exec {ns} ip -j -d link show dev {shlex.quote(topo['fabric_veth'])}",
         "namespace-fabric-bridge-detail.json": f"ip netns exec {ns} ip -j -d link show dev {shlex.quote(topo['fabric_bridge'])}",
         "namespace-vxlan-detail.json": f"ip netns exec {ns} ip -j -d link show dev {shlex.quote(topo['vxlan'])}",
+        "namespace-tc-fabric-veth.txt": f"ip netns exec {ns} tc -s filter show dev {shlex.quote(topo['fabric_veth'])}",
+        "namespace-tc-vxlan.txt": f"ip netns exec {ns} tc -s filter show dev {shlex.quote(topo['vxlan'])}",
+        "namespace-tc-bridge.txt": f"ip netns exec {ns} tc -s filter show dev {shlex.quote(topo['fabric_bridge'])}",
+        "root-tc-root-veth.txt": f"tc -s filter show dev {shlex.quote(topo['root_veth'])}",
+        "namespace-qdisc-fabric-veth.txt": f"ip netns exec {ns} tc -s qdisc show dev {shlex.quote(topo['fabric_veth'])}",
+        "namespace-qdisc-vxlan.txt": f"ip netns exec {ns} tc -s qdisc show dev {shlex.quote(topo['vxlan'])}",
+        "namespace-qdisc-bridge.txt": f"ip netns exec {ns} tc -s qdisc show dev {shlex.quote(topo['fabric_bridge'])}",
+        "root-qdisc-root-veth.txt": f"tc -s qdisc show dev {shlex.quote(topo['root_veth'])}",
     }
     script = "set +e\n" + "\n".join(
         f"{{ {cmd}; }} >{shlex.quote(str(local / name))} 2>&1" for name, cmd in commands.items()
@@ -185,6 +195,55 @@ def save_snapshot(args: argparse.Namespace, ev: pathlib.Path, h: str, topo: dict
     for name in commands:
         content = ssh(args, h, f"sudo cat {shlex.quote(remote + '/' + name)}", check=False)
         (local / name).write_text(content)
+
+
+def configure_forward_trace(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> None:
+    """Trace only B DHCP through A's bridge; the rule sets metadata, no verdict."""
+    topo = maps["a"]
+    owner = f"o3k-dhcp-boundary-trace:{args.run_id}"
+    exists = ssh(args, "a", f"sudo ip netns exec {shlex.quote(topo['namespace'])} nft list table bridge o3k-dhcp-trace >/dev/null 2>&1; echo $?", check=False).strip()
+    if exists == "0":
+        raise RuntimeError("refusing to reuse pre-existing bridge trace table")
+    remote_dir = f"/var/lib/o3k-fabric-v3/{args.run_id}/network/dhcp-boundary/a/trace"
+    batch = (
+        f'add table bridge o3k-dhcp-trace {{ comment "{owner}"; }}\n'
+        f'add chain bridge o3k-dhcp-trace forward {{ type filter hook forward priority -600; policy accept; comment "{owner}"; }}\n'
+        f'add rule bridge o3k-dhcp-trace forward iifname "{topo["vxlan"]}" ether saddr {maps["b"]["guest_mac"]} ip saddr 0.0.0.0 udp sport 68 udp dport 67 meta nftrace set 1 comment "{owner}"\n'
+    )
+    remote_script(args, "a", f"""set -e
+install -d -m 0700 {shlex.quote(remote_dir)}
+ip netns exec {shlex.quote(topo['namespace'])} nft -f - <<'NFT'
+{batch}NFT
+nohup ip netns exec {shlex.quote(topo['namespace'])} nft monitor trace >{shlex.quote(remote_dir + '/trace.log')} 2>&1 </dev/null &
+echo $! >{shlex.quote(remote_dir + '/trace.pid')}
+""")
+    write_json(ev / "topology" / "trace-manifest.json", {
+        "host": "a", "namespace": topo["namespace"], "vxlan": topo["vxlan"],
+        "source_mac": maps["b"]["guest_mac"], "table": "o3k-dhcp-trace",
+        "owner_comment": owner, "remote_dir": remote_dir,
+    })
+
+
+def stop_forward_trace(args: argparse.Namespace, ev: pathlib.Path) -> None:
+    manifest = ev / "topology" / "trace-manifest.json"
+    if not manifest.exists():
+        return
+    info = json.loads(manifest.read_text())
+    remote_dir = info["remote_dir"]
+    script = f"""set +e
+pid=$(cat {shlex.quote(remote_dir + '/trace.pid')} 2>/dev/null)
+case "$pid" in *[!0-9]*|'') pid=;; esac
+if test -n "$pid" && test -r "/proc/$pid/cmdline" && tr '\\0' ' ' <"/proc/$pid/cmdline" | grep -Fq 'nft monitor trace'; then kill "$pid"; fi
+sleep 0.2
+ip netns exec {shlex.quote(info['namespace'])} nft list table bridge o3k-dhcp-trace >{shlex.quote(remote_dir + '/table.txt')} 2>&1
+if grep -Fq {shlex.quote(info['owner_comment'])} {shlex.quote(remote_dir + '/table.txt')}; then
+  ip netns exec {shlex.quote(info['namespace'])} nft delete table bridge o3k-dhcp-trace
+fi
+"""
+    remote_script(args, "a", script)
+    for name in ("trace.log", "table.txt"):
+        content = ssh(args, "a", f"sudo cat {shlex.quote(remote_dir + '/' + name)}", check=False)
+        (ev / "topology" / f"a-{name}").write_text(content)
 
 
 def fdb_check(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> tuple[bool, str]:
@@ -352,6 +411,7 @@ def action_prepare(args: argparse.Namespace) -> int:
         # the DHCP-only capture window begins.
         for h in "abc":
             save_snapshot(args, ev, h, maps[h], "before")
+        configure_forward_trace(args, ev, maps)
         specs = capture_specs(maps)
         for spec in specs:
             h = spec["host"]
@@ -398,6 +458,10 @@ def action_prepare(args: argparse.Namespace) -> int:
         print(json.dumps({"state": "ready", "captures": len(specs), "her": "PASS", "wireguard": "PASS"}))
         return 0
     except Exception as exc:
+        try:
+            stop_forward_trace(args, ev)
+        except Exception:
+            pass
         for spec in specs:
             if not all(k in spec for k in ("pid", "pcap", "host")):
                 continue
@@ -446,10 +510,24 @@ def packet_seen(path: pathlib.Path, mac: str, message: str = "Discover",
     text = call(["tcpdump", "-nn", "-e", "-tt", "-vvv", "-r", str(path)], check=False)
     decoded = path.with_suffix(".decoded.txt")
     decoded.write_text(text)
-    valid = mac.lower() in text.lower() and re.search(r"DHCP-Message[^\n]*" + re.escape(message), text, re.I) is not None
+    blocks = tcpdump_packet_blocks(text)
+    valid = any(mac.lower() in block.lower()
+                and re.search(r"DHCP-Message[^\n]*" + re.escape(message), block, re.I)
+                for block in blocks)
     if xid:
-        valid = valid and xid.lower() in text.lower()
+        valid = valid and any(mac.lower() in block.lower() and xid.lower() in block.lower()
+                              and re.search(r"DHCP-Message[^\n]*" + re.escape(message), block, re.I)
+                              for block in blocks)
     return bool(valid), text[:300]
+
+
+def tcpdump_packet_blocks(text: str) -> list[str]:
+    """Group tcpdump's multiline packet details under their timestamp header."""
+    starts = list(re.finditer(r"(?m)^\d+(?:\.\d+)?\s", text))
+    if not starts:
+        return [text] if text else []
+    return [text[start.start():starts[index + 1].start() if index + 1 < len(starts) else len(text)]
+            for index, start in enumerate(starts)]
 
 
 def nft_drop_deltas(ev: pathlib.Path) -> dict:
@@ -552,6 +630,7 @@ def action_finish(args: argparse.Namespace) -> int:
         specs = json.loads((ev / "topology" / "capture-manifest.json").read_text())
         for spec in specs:
             stop_and_copy(args, ev, spec)
+        stop_forward_trace(args, ev)
         maps = json.loads((ev / "topology" / "topology-map.json").read_text())
         for h in "abc":
             save_snapshot(args, ev, h, maps[h], "after")
@@ -567,11 +646,11 @@ def action_finish(args: argparse.Namespace) -> int:
         xid_matches = set(re.findall(r"\bxid\s+(0x[0-9a-f]+)", b_tap_text, re.I))
         if maps["b"]["guest_mac"].lower() not in b_tap_text.lower() or not xid_matches:
             raise RuntimeError("B TAP capture did not prove a canonical-MAC DHCPDISCOVER with a transaction ID")
-        discover_lines = [line for line in b_tap_text.splitlines()
-                          if maps["b"]["guest_mac"].lower() in line.lower()
-                          and re.search(r"DHCP-Message[^\n]*Discover", line, re.I)]
-        discover_xids = {m.group(1).lower() for line in discover_lines
-                         if (m := re.search(r"\bxid\s+(0x[0-9a-f]+)", line, re.I))}
+        discover_blocks = [block for block in tcpdump_packet_blocks(b_tap_text)
+                           if maps["b"]["guest_mac"].lower() in block.lower()
+                           and re.search(r"DHCP-Message[^\n]*Discover", block, re.I)]
+        discover_xids = {m.group(1).lower() for block in discover_blocks
+                         if (m := re.search(r"\bxid\s+(0x[0-9a-f]+)", block, re.I))}
         if len(discover_xids) != 1:
             raise RuntimeError(f"bounded B window did not contain exactly one DHCP transaction ID: {sorted(discover_xids)}")
         xid = next(iter(discover_xids))
@@ -669,6 +748,10 @@ def action_finish(args: argparse.Namespace) -> int:
         print(json.dumps(result))
         return 0
     except Exception as exc:
+        try:
+            stop_forward_trace(args, ev)
+        except Exception:
+            pass
         manifest = ev / "topology" / "capture-manifest.json"
         if manifest.exists():
             for spec in json.loads(manifest.read_text()):
