@@ -103,12 +103,8 @@ def topology(args: argparse.Namespace, ev: pathlib.Path) -> dict:
     for h in "abc":
         dhcp_root = f"/var/lib/o3k-fabric-v3/{args.run_id}/network/dhcp/fabric/{realm_id}"
         owner = read_remote_json(args, h, f"{dhcp_root}/fabric-dhcp-ownership.json")
-        state = read_remote_json(args, h, f"{dhcp_root}/state.json")
-        conf = ssh(args, h, f"sudo cat {shlex.quote(dhcp_root + '/dnsmasq.conf')}")
         pids = ssh(args, h, f"sudo find {shlex.quote(dhcp_root)} -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print")
         write_json(ev / "dhcp" / f"host-{h}-ownership.json", owner)
-        write_json(ev / "dhcp" / f"host-{h}-state.json", state)
-        (ev / "dhcp" / f"host-{h}-dnsmasq.conf").write_text(conf)
         (ev / "dhcp" / f"host-{h}-owned-pids.txt").write_text(pids)
         if (owner.get("local_host") != f"host-{h}" or owner.get("authority_host") != "host-a"
                 or not owner.get("dhcp_enabled") or owner.get("pending") or owner.get("withdrawn")):
@@ -116,13 +112,21 @@ def topology(args: argparse.Namespace, ev: pathlib.Path) -> dict:
         pid_lines = [line for line in pids.splitlines() if line.strip()]
         if len(pid_lines) != (1 if h == "a" else 0):
             raise RuntimeError(f"host-{h}: expected exactly one authority dnsmasq process across A/B/C")
-        bindings = state.get("bindings", {})
-        if set(bindings) != set(expected_endpoints):
-            raise RuntimeError(f"host-{h}: DHCP binding state is missing canonical A/B/C endpoints")
-        for endpoint, (mac, ip, _) in expected_endpoints.items():
-            binding = bindings[endpoint]
-            if binding.get("mac", "").lower() != mac or binding.get("address") != ip:
-                raise RuntimeError(f"host-{h}: DHCP binding differs from canonical endpoint {endpoint}")
+        if h == "a":
+            # Durable bindings and dnsmasq config belong to the selected
+            # authority only. Non-authority participants intentionally have
+            # ownership records but do not run competing DHCP services.
+            state = read_remote_json(args, h, f"{dhcp_root}/state.json")
+            conf = ssh(args, h, f"sudo cat {shlex.quote(dhcp_root + '/dnsmasq.conf')}")
+            write_json(ev / "dhcp" / f"host-{h}-state.json", state)
+            (ev / "dhcp" / f"host-{h}-dnsmasq.conf").write_text(conf)
+            bindings = state.get("bindings", {})
+            if set(bindings) != set(expected_endpoints):
+                raise RuntimeError("host-a DHCP binding state is missing canonical A/B/C endpoints")
+            for endpoint, (mac, ip, _) in expected_endpoints.items():
+                binding = bindings[endpoint]
+                if binding.get("mac", "").lower() != mac or binding.get("address") != ip:
+                    raise RuntimeError(f"host-a DHCP binding differs from canonical endpoint {endpoint}")
         if h == "a":
             if state.get("config", {}).get("interface") != maps[h]["realm_bridge"]:
                 raise RuntimeError("authority dnsmasq is not bound to the A Realm bridge")
