@@ -369,8 +369,13 @@ def action_prepare(args: argparse.Namespace) -> int:
             base = f"{remote_dir}/{spec['label']}"
             pcap, log, pid = base + ".pcap", base + ".log", base + ".pid"
             iface_cmd = (f"ip netns exec {shlex.quote(spec['ns'])} " if spec["ns"] else "")
+            # DHCP options, including Option 53 (DISCOVER/OFFER/REQUEST/ACK),
+            # occur after the Ethernet/IP/UDP/BOOTP headers. 256 bytes can
+            # truncate those options on valid 342-byte CirrOS DHCP frames and
+            # make an actual DISCOVER indistinguishable from a generic BOOTP
+            # request. Keep capture bounded while retaining the full DHCP frame.
             cmd = (f"{iface_cmd}timeout --signal=INT 45s tcpdump -c 20000 -i {shlex.quote(spec['iface'])} "
-                   f"-nn -e -s 256 -U -w {shlex.quote(pcap)} {shlex.quote(spec['filter'])}")
+                   f"-nn -e -s 512 -U -w {shlex.quote(pcap)} {shlex.quote(spec['filter'])}")
             script = (f"install -d -m 0700 {shlex.quote(remote_dir)}\n"
                       f"nohup bash -c {shlex.quote(cmd + ' >' + shlex.quote(log) + ' 2>&1')} </dev/null >/dev/null 2>&1 &\n"
                       f"echo $! > {shlex.quote(pid)}\n"
