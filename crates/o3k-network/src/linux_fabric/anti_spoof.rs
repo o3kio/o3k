@@ -18,6 +18,41 @@ fn dhcp_bootstrap_rule<'a>(interface: &'a str, mac: &'a str) -> Vec<&'a str> {
     ]
 }
 
+fn dhcp_offer_rule<'a>(
+    interface: &'a str,
+    gateway_ip: &'a str,
+    fixed_ip: &'a str,
+    mac: &'a str,
+) -> Vec<&'a str> {
+    vec![
+        "iifname", interface, "ether", "daddr", mac, "ip", "saddr", gateway_ip, "ip", "daddr",
+        fixed_ip, "udp", "sport", "67", "udp", "dport", "68", "accept",
+    ]
+}
+
+fn dhcp_broadcast_offer_rule<'a>(interface: &'a str, gateway_ip: &'a str) -> Vec<&'a str> {
+    vec![
+        "iifname",
+        interface,
+        "ether",
+        "daddr",
+        "ff:ff:ff:ff:ff:ff",
+        "ip",
+        "saddr",
+        gateway_ip,
+        "ip",
+        "daddr",
+        "255.255.255.255",
+        "udp",
+        "sport",
+        "67",
+        "udp",
+        "dport",
+        "68",
+        "accept",
+    ]
+}
+
 fn arp_probe_rule<'a>(interface: &'a str, mac: &'a str, fixed_ip: &'a str) -> Vec<&'a str> {
     vec![
         "iifname", interface, "ether", "saddr", mac, "arp", "saddr", "ether", mac, "arp", "saddr",
@@ -89,6 +124,7 @@ impl LinuxFabricBackend {
                     plan.local_fabric_generation,
                     plan.encapsulation.binding_generation,
                     plan.encapsulation.provider_segment_id,
+                    plan.dhcp,
                     plan.directory
                         .entries
                         .iter()
@@ -220,6 +256,41 @@ impl LinuxFabricBackend {
                     {
                         return Err(LinuxFabricError::CommandFailed);
                     }
+                }
+                if let Some(dhcp) = plan.dhcp.filter(|dhcp| dhcp.enabled) {
+                    let gateway_ip = dhcp.gateway.to_string();
+                    let fixed_ip = endpoint.fixed_ip.to_string();
+                    let mut args = vec!["add", "rule", "bridge", table.as_str(), chain];
+                    args.extend(dhcp_offer_rule(
+                        vxlan.host_veth.as_str(),
+                        gateway_ip.as_str(),
+                        fixed_ip.as_str(),
+                        endpoint.mac.as_str(),
+                    ));
+                    args.extend(["comment", NFT_MARKER]);
+                    if !self
+                        .command
+                        .run("nft", &args)
+                        .map_err(LinuxFabricError::Storage)?
+                    {
+                        return Err(LinuxFabricError::CommandFailed);
+                    }
+                }
+            }
+            if let Some(dhcp) = plan.dhcp.filter(|dhcp| dhcp.enabled) {
+                let gateway_ip = dhcp.gateway.to_string();
+                let mut args = vec!["add", "rule", "bridge", table.as_str(), chain];
+                args.extend(dhcp_broadcast_offer_rule(
+                    vxlan.host_veth.as_str(),
+                    gateway_ip.as_str(),
+                ));
+                args.extend(["comment", NFT_MARKER]);
+                if !self
+                    .command
+                    .run("nft", &args)
+                    .map_err(LinuxFabricError::Storage)?
+                {
+                    return Err(LinuxFabricError::CommandFailed);
                 }
             }
             if !self
@@ -381,7 +452,7 @@ impl LinuxFabricBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{arp_probe_rule, dhcp_bootstrap_rule};
+    use super::{arp_probe_rule, dhcp_bootstrap_rule, dhcp_broadcast_offer_rule, dhcp_offer_rule};
 
     #[test]
     fn dhcp_bootstrap_accepts_only_canonical_mac_and_dhcp_ports() {
@@ -432,6 +503,56 @@ mod tests {
                 "daddr",
                 "ip",
                 "10.0.0.10",
+                "accept",
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_dhcp_offer_exception_is_bound_to_gateway_and_endpoint_identity() {
+        assert_eq!(
+            dhcp_offer_rule("o3k-vxlan", "10.0.0.1", "10.0.0.12", "02:00:00:00:00:0c"),
+            vec![
+                "iifname",
+                "o3k-vxlan",
+                "ether",
+                "daddr",
+                "02:00:00:00:00:0c",
+                "ip",
+                "saddr",
+                "10.0.0.1",
+                "ip",
+                "daddr",
+                "10.0.0.12",
+                "udp",
+                "sport",
+                "67",
+                "udp",
+                "dport",
+                "68",
+                "accept",
+            ]
+        );
+        assert_eq!(
+            dhcp_broadcast_offer_rule("o3k-vxlan", "10.0.0.1"),
+            vec![
+                "iifname",
+                "o3k-vxlan",
+                "ether",
+                "daddr",
+                "ff:ff:ff:ff:ff:ff",
+                "ip",
+                "saddr",
+                "10.0.0.1",
+                "ip",
+                "daddr",
+                "255.255.255.255",
+                "udp",
+                "sport",
+                "67",
+                "udp",
+                "dport",
+                "68",
                 "accept",
             ]
         );

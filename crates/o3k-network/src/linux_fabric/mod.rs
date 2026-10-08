@@ -773,8 +773,8 @@ pub(crate) fn ephemeral_port_low() -> Option<u16> {
 mod tests {
     use super::*;
     use o3k_domain::{
-        AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
-        NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
+        AddressRealm, EndpointLocation, FabricDhcpIntent, FabricHostIdentity, FabricProviderKind,
+        Ipv4Prefix, NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
         PublicAddressBindingIntent, RealmEncapsulationBinding, RealmEndpointDirectory,
     };
     use serde_json::{Value, json};
@@ -1106,6 +1106,195 @@ mod tests {
             rule.windows(4)
                 .any(|window| window == ["ip", "saddr", "!=", fixed_ip.as_str()])
                 && rule.windows(2).any(|window| window == ["drop", "comment"])
+        }));
+        drop(calls);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn remote_dhcp_reply_is_narrowly_admitted_before_fail_closed_rule() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-dhcp-reply-{}", Uuid::now_v7()));
+        let mut plan = plan();
+        plan.dhcp = Some(FabricDhcpIntent {
+            enabled: true,
+            gateway: "10.40.1.1".parse().expect("gateway"),
+        });
+        let endpoint = &plan.directory.entries[0];
+        let endpoint_ip = endpoint.fixed_ip.to_string();
+        let endpoint_mac = endpoint.mac.clone();
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
+                .expect("backend");
+        let mut realm = backend.realm_ownership(&plan);
+        realm.vxlan = Some(VxlanOwnership {
+            interface: "o3k-x-vxlan".to_owned(),
+            bridge: "o3k-b-fabric".to_owned(),
+            host_veth: "o3k-c-root".to_owned(),
+            fabric_veth: "o3k-i-fabric".to_owned(),
+            vni: plan.encapsulation.provider_segment_id,
+            binding_generation: plan.encapsulation.binding_generation,
+            local_transport_ip: plan.local_fabric_transport_ip,
+            tenant_mtu: plan.tenant_mtu,
+            flood_peers: BTreeSet::new(),
+        });
+        backend.state.realms.insert(plan.realm_id, realm);
+
+        backend
+            .ensure_anti_spoof(&plan)
+            .expect("install remote DHCP response exception");
+
+        let table = format!("o3k-as-{:08x}", public_mark(plan.realm_id));
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        let rules = calls
+            .iter()
+            .filter(|(program, args)| {
+                program == "nft"
+                    && args.first().is_some_and(|arg| arg == "add")
+                    && args.get(1).is_some_and(|arg| arg == "rule")
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        let unicast_offer = vec![
+            "add",
+            "rule",
+            "bridge",
+            table.as_str(),
+            "forward",
+            "iifname",
+            "o3k-c-root",
+            "ether",
+            "daddr",
+            endpoint_mac.as_str(),
+            "ip",
+            "saddr",
+            "10.40.1.1",
+            "ip",
+            "daddr",
+            endpoint_ip.as_str(),
+            "udp",
+            "sport",
+            "67",
+            "udp",
+            "dport",
+            "68",
+            "accept",
+            "comment",
+            "\"o3k-p11-antispoof\"",
+        ];
+        let broadcast_offer = vec![
+            "add",
+            "rule",
+            "bridge",
+            table.as_str(),
+            "forward",
+            "iifname",
+            "o3k-c-root",
+            "ether",
+            "daddr",
+            "ff:ff:ff:ff:ff:ff",
+            "ip",
+            "saddr",
+            "10.40.1.1",
+            "ip",
+            "daddr",
+            "255.255.255.255",
+            "udp",
+            "sport",
+            "67",
+            "udp",
+            "dport",
+            "68",
+            "accept",
+            "comment",
+            "\"o3k-p11-antispoof\"",
+        ];
+        let fail_closed = vec![
+            "add",
+            "rule",
+            "bridge",
+            table.as_str(),
+            "forward",
+            "iifname",
+            "o3k-c-root",
+            "counter",
+            "drop",
+            "comment",
+            "\"o3k-p11-antispoof\"",
+        ];
+        let unicast_index = rules
+            .iter()
+            .position(|args| {
+                args.iter()
+                    .map(String::as_str)
+                    .eq(unicast_offer.iter().copied())
+            })
+            .expect("endpoint-scoped DHCP unicast offer rule");
+        let broadcast_index = rules
+            .iter()
+            .position(|args| {
+                args.iter()
+                    .map(String::as_str)
+                    .eq(broadcast_offer.iter().copied())
+            })
+            .expect("gateway-scoped DHCP broadcast offer rule");
+        let fail_closed_index = rules
+            .iter()
+            .position(|args| {
+                args.iter()
+                    .map(String::as_str)
+                    .eq(fail_closed.iter().copied())
+            })
+            .expect("final fail-closed rule");
+        assert!(unicast_index < fail_closed_index);
+        assert!(broadcast_index < fail_closed_index);
+        drop(calls);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn disabled_fabric_dhcp_does_not_install_remote_offer_exceptions() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-dhcp-off-{}", Uuid::now_v7()));
+        let mut plan = plan();
+        plan.dhcp = Some(FabricDhcpIntent {
+            enabled: false,
+            gateway: "10.40.1.1".parse().expect("gateway"),
+        });
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
+                .expect("backend");
+        let mut realm = backend.realm_ownership(&plan);
+        realm.vxlan = Some(VxlanOwnership {
+            interface: "o3k-x-vxlan".to_owned(),
+            bridge: "o3k-b-fabric".to_owned(),
+            host_veth: "o3k-c-root".to_owned(),
+            fabric_veth: "o3k-i-fabric".to_owned(),
+            vni: plan.encapsulation.provider_segment_id,
+            binding_generation: plan.encapsulation.binding_generation,
+            local_transport_ip: plan.local_fabric_transport_ip,
+            tenant_mtu: plan.tenant_mtu,
+            flood_peers: BTreeSet::new(),
+        });
+        backend.state.realms.insert(plan.realm_id, realm);
+
+        backend
+            .ensure_anti_spoof(&plan)
+            .expect("install disabled-DHCP anti-spoof rules");
+
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(!calls.iter().any(|(program, args)| {
+            program == "nft"
+                && args.windows(2).any(|window| window == ["sport", "67"])
+                && args.windows(2).any(|window| window == ["dport", "68"])
         }));
         drop(calls);
         fs::remove_dir_all(root).expect("remove fixture");
