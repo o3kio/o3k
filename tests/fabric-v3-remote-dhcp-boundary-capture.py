@@ -420,6 +420,98 @@ def capture_specs(maps: dict) -> list[dict]:
     return result
 
 
+def start_dnsmasq_syscall_trace(args: argparse.Namespace, ev: pathlib.Path,
+                                maps: dict) -> None:
+    """Attach bounded network-syscall tracing to this run's DHCP authority."""
+    realm_id = maps["a"]["realm_id"]
+    dhcp_root = f"/var/lib/o3k-fabric-v3/{args.run_id}/network/dhcp/fabric/{realm_id}"
+    remote = f"/var/lib/o3k-fabric-v3/{args.run_id}/network/dhcp-boundary/a/dnsmasq-trace"
+    trace_file = remote + "/network-syscalls.log"
+    tracer_log = remote + "/strace.log"
+    tracer_pid_file = remote + "/strace.pid"
+    dnsmasq_pid_file = remote + "/dnsmasq.pid"
+    script = """set -euo pipefail
+install -d -m 0700 @REMOTE@
+mapfile -t pidfiles < <(find @DHCP_ROOT@ -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print)
+test "${#pidfiles[@]}" -eq 1
+dnsmasq_pid=$(cat "${pidfiles[0]}")
+case "$dnsmasq_pid" in *[!0-9]*|'') exit 31;; esac
+test -r "/proc/$dnsmasq_pid/cmdline"
+cmdline=$(tr '\0' ' ' <"/proc/$dnsmasq_pid/cmdline")
+case "$cmdline" in *dnsmasq*@DHCP_ROOT@*) ;; *) echo "unexpected authority process: $cmdline" >&2; exit 32;; esac
+command -v strace >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y --no-install-recommends strace; }
+strace --version >@REMOTE@/strace-version.txt 2>&1
+printf '%s\n' "$dnsmasq_pid" >@DNSMASQ_PID_FILE@
+nohup strace -f -tt -yy -s 0 -e trace=recvfrom,recvmsg,recvmmsg,sendto,sendmsg,sendmmsg -p "$dnsmasq_pid" -o @TRACE_FILE@ >@TRACER_LOG@ 2>&1 </dev/null &
+tracer_pid=$!
+printf '%s\n' "$tracer_pid" >@TRACER_PID_FILE@
+attached=0
+for _ in $(seq 1 50); do
+  if grep -Fq "Process $dnsmasq_pid attached" @TRACER_LOG@; then attached=1; break; fi
+  if ! kill -0 "$tracer_pid" 2>/dev/null; then cat @TRACER_LOG@ >&2; exit 33; fi
+  sleep 0.1
+done
+test "$attached" -eq 1 || { cat @TRACER_LOG@ >&2; exit 34; }
+"""
+    replacements = {
+        "@REMOTE@": shlex.quote(remote), "@DHCP_ROOT@": shlex.quote(dhcp_root),
+        "@DNSMASQ_PID_FILE@": shlex.quote(dnsmasq_pid_file),
+        "@TRACER_PID_FILE@": shlex.quote(tracer_pid_file),
+        "@TRACE_FILE@": shlex.quote(trace_file), "@TRACER_LOG@": shlex.quote(tracer_log),
+    }
+    for marker, value in replacements.items():
+        script = script.replace(marker, value)
+    write_json(ev / "topology" / "dnsmasq-trace-manifest.json", {
+        "host": "a", "remote_dir": remote, "dnsmasq_pid_file": dnsmasq_pid_file,
+        "tracer_pid_file": tracer_pid_file, "trace_file": trace_file,
+        "tracer_log": tracer_log,
+    })
+    remote_script(args, "a", script)
+    version = ssh(args, "a", f"sudo cat {shlex.quote(remote + '/strace-version.txt')}")
+    (ev / "dhcp" / "strace-version.txt").write_text(version)
+
+
+def stop_dnsmasq_syscall_trace(args: argparse.Namespace, ev: pathlib.Path) -> None:
+    manifest_path = ev / "topology" / "dnsmasq-trace-manifest.json"
+    if not manifest_path.exists():
+        return
+    manifest = json.loads(manifest_path.read_text())
+    script = """set -e
+tracer=$(cat @TRACER_PID_FILE@ 2>/dev/null || true)
+target=$(cat @DNSMASQ_PID_FILE@ 2>/dev/null || true)
+case "$tracer:$target" in *[!0-9:]*|:*) exit 41;; esac
+if test -r "/proc/$tracer/cmdline"; then
+  tracer_cmd=$(tr '\0' ' ' <"/proc/$tracer/cmdline")
+  case "$tracer_cmd" in *strace*"-p $target"*) ;; *) echo "refusing to stop unverified tracer: $tracer_cmd" >&2; exit 42;; esac
+  kill -INT "$tracer"
+  stopped=0
+  for _ in $(seq 1 50); do if test ! -e "/proc/$tracer"; then stopped=1; break; fi; sleep 0.1; done
+  if test "$stopped" -ne 1; then kill -TERM "$tracer" 2>/dev/null || true; fi
+fi
+test -f @TRACE_FILE@ || touch @TRACE_FILE@
+cp @TRACE_FILE@ /tmp/@RUN_ID@-dnsmasq-network-syscalls.log
+cp @TRACER_LOG@ /tmp/@RUN_ID@-dnsmasq-strace.log
+chown o3k:o3k /tmp/@RUN_ID@-dnsmasq-network-syscalls.log /tmp/@RUN_ID@-dnsmasq-strace.log
+chmod 0600 /tmp/@RUN_ID@-dnsmasq-network-syscalls.log /tmp/@RUN_ID@-dnsmasq-strace.log
+"""
+    replacements = {
+        "@TRACER_PID_FILE@": shlex.quote(manifest["tracer_pid_file"]),
+        "@DNSMASQ_PID_FILE@": shlex.quote(manifest["dnsmasq_pid_file"]),
+        "@TRACE_FILE@": shlex.quote(manifest["trace_file"]),
+        "@TRACER_LOG@": shlex.quote(manifest["tracer_log"]), "@RUN_ID@": args.run_id,
+    }
+    for marker, value in replacements.items():
+        script = script.replace(marker, value)
+    remote_script(args, "a", script)
+    for filename in ("dnsmasq-network-syscalls.log", "dnsmasq-strace.log"):
+        remote_path = f"/tmp/{args.run_id}-{filename}"
+        local_path = ev / "dhcp" / filename
+        call(["scp", "-i", args.key, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+              "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={args.known_hosts}",
+              f"o3k@{args.addresses['a']}:{remote_path}", str(local_path)])
+        ssh(args, "a", f"sudo rm -f {shlex.quote(remote_path)}", check=False)
+
+
 def action_prepare(args: argparse.Namespace) -> int:
     ev = pathlib.Path(args.evidence)
     specs: list[dict] = []
@@ -465,6 +557,7 @@ def action_prepare(args: argparse.Namespace) -> int:
         for h in "abc":
             save_snapshot(args, ev, h, maps[h], "before")
         configure_forward_trace(args, ev, maps)
+        start_dnsmasq_syscall_trace(args, ev, maps)
         specs = capture_specs(maps)
         for spec in specs:
             h = spec["host"]
@@ -514,6 +607,10 @@ def action_prepare(args: argparse.Namespace) -> int:
         print(json.dumps({"state": "ready", "captures": len(specs), "her": "PASS", "wireguard": "PASS"}))
         return 0
     except Exception as exc:
+        try:
+            stop_dnsmasq_syscall_trace(args, ev)
+        except Exception:
+            pass
         try:
             stop_forward_trace(args, ev)
         except Exception:
@@ -654,6 +751,24 @@ def namespace_forward_seen(path: pathlib.Path, *, source_mac: str,
                for line in lines)
 
 
+def dhcp_syscall_summary(path: pathlib.Path) -> dict:
+    """Summarize successful datagram syscalls without recording payload data."""
+    if not path.exists():
+        return {"trace_present": False, "receive_count": 0, "send_count": 0,
+                "receive_lines": [], "send_lines": []}
+    lines = path.read_text(errors="replace").splitlines()
+    recv = [line for line in lines if re.search(r"\b(?:recvfrom|recvmsg|recvmmsg)\(", line)
+            and re.search(r"\)\s*=\s*[1-9]\d*\b", line)]
+    send = [line for line in lines if re.search(r"\b(?:sendto|sendmsg|sendmmsg)\(", line)
+            and re.search(r"\)\s*=\s*[1-9]\d*\b", line)]
+    dhcp_socket = [line for line in recv + send if re.search(r"UDP:\[[^]]*:67\]", line)
+                   or "sin_port=htons(67)" in line]
+    # strace is invoked with -s 0, so payload bytes are omitted from these lines.
+    return {"trace_present": True, "receive_count": len(recv), "send_count": len(send),
+            "dhcp_port_67_count": len(dhcp_socket), "dhcp_port_67_lines": dhcp_socket,
+            "receive_lines": recv, "send_lines": send}
+
+
 def nft_drop_deltas(ev: pathlib.Path) -> dict:
     result = {}
     for h in "abc":
@@ -754,6 +869,8 @@ def action_finish(args: argparse.Namespace) -> int:
         specs = json.loads((ev / "topology" / "capture-manifest.json").read_text())
         for spec in specs:
             stop_and_copy(args, ev, spec)
+        stop_dnsmasq_syscall_trace(args, ev)
+        syscall_summary = dhcp_syscall_summary(ev / "dhcp" / "dnsmasq-network-syscalls.log")
         stop_forward_trace(args, ev)
         maps = json.loads((ev / "topology" / "topology-map.json").read_text())
         for h in "abc":
@@ -813,6 +930,15 @@ def action_finish(args: argparse.Namespace) -> int:
             ("b", "root-veth"): trace_packet_seen(root_trace["b"], hook="forward",
                 source_mac=maps["b"]["guest_mac"], egress=maps["b"]["root_veth"]),
             ("a", "fabric-veth"): namespace_forward_seen(ns_trace,
+                source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["vxlan"],
+                egress=maps["a"]["fabric_veth"]),
+            # Seeing the decapsulated DHCP frame on A's VXLAN bridge ingress
+            # proves it crossed the receive side even when AF_PACKET capture on
+            # the WireGuard/VXLAN devices misses this virtualized path.
+            ("a", "wireguard"): namespace_forward_seen(ns_trace,
+                source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["vxlan"],
+                egress=maps["a"]["fabric_veth"]),
+            ("a", "vxlan"): namespace_forward_seen(ns_trace,
                 source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["vxlan"],
                 egress=maps["a"]["fabric_veth"]),
             ("a", "root-veth"): trace_packet_seen(root_trace["a"], hook="prerouting",
@@ -882,6 +1008,7 @@ def action_finish(args: argparse.Namespace) -> int:
                   "dhcp_transaction_id": xid,
                   "dhcp_packet_capture_source": source,
                   "trace_observations": {f"{h}:{label}": value for (h, label), value in trace_checks.items()},
+                  "authority_syscalls": syscall_summary,
                   "transport_capture_correlation": "B peer IP/port filtered; same bounded DHCP retry window and WireGuard transfer-counter deltas",
                   "b_her_entry_for_a": True, "b_wireguard_peer_for_a": True,
                   "stop_at_first_failure": True}
@@ -890,6 +1017,10 @@ def action_finish(args: argparse.Namespace) -> int:
         print(json.dumps(result))
         return 0
     except Exception as exc:
+        try:
+            stop_dnsmasq_syscall_trace(args, ev)
+        except Exception:
+            pass
         try:
             stop_forward_trace(args, ev)
         except Exception:

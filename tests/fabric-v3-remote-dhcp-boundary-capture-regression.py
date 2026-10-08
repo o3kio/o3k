@@ -2,6 +2,7 @@
 """Regression for multiline tcpdump DHCP packet correlation."""
 import importlib.util
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from argparse import Namespace
@@ -98,6 +99,47 @@ trace id 123 bridge o3k-dhcp-root-trace forward packet: iif \"o3k-c-12345678\" o
             self.assertNotIn(' drop', b_script)
             manifest = __import__("json").loads((evidence / "topology/trace-manifest.json").read_text())
             self.assertEqual(manifest["root_trace_hosts"], ["a", "b"])
+
+
+class AuthoritySyscallTests(unittest.TestCase):
+    def test_tracer_setup_is_run_scoped_and_shell_valid(self) -> None:
+        args = Namespace(run_id="diagnostic-owned", addresses={"a": "192.0.2.1"},
+                         key="/tmp/key", known_hosts="/tmp/known")
+        maps = {"a": {"realm_id": "realm-owned"}}
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence = pathlib.Path(tmp)
+            (evidence / "dhcp").mkdir()
+            with patch.object(MODULE, "remote_script",
+                              side_effect=lambda _args, host, script: calls.append((host, script))), \
+                 patch.object(MODULE, "ssh", return_value="strace 6.8"):
+                MODULE.start_dnsmasq_syscall_trace(args, evidence, maps)
+            self.assertEqual(len(calls), 1)
+            host, script = calls[0]
+            self.assertEqual(host, "a")
+            self.assertIn("/var/lib/o3k-fabric-v3/diagnostic-owned/network/dhcp/fabric/realm-owned", script)
+            self.assertIn("strace -f -tt -yy -s 0", script)
+            self.assertIn("dnsmasq-*.pid", script)
+            self.assertNotIn("pkill", script)
+            subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+
+    def test_bounded_summary_detects_udp_receive_and_send_without_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "syscalls.log"
+            path.write_text("""recvmsg(3<UDP:[0.0.0.0:67]>, {msg_name={sa_family=AF_INET, sin_port=htons(68)}, ...}, 0) = 342
+sendto(4<UDP:[0.0.0.0:67]>, ..., 548, 0, {sa_family=AF_INET, sin_port=htons(68)}, 16) = 548
+recvfrom(5<UDP:[127.0.0.1:53]>, ..., 512, 0, NULL, NULL) = 64
+""")
+            summary = MODULE.dhcp_syscall_summary(path)
+            self.assertEqual(summary["receive_count"], 2)
+            self.assertEqual(summary["send_count"], 1)
+            self.assertEqual(summary["dhcp_port_67_count"], 2)
+            self.assertNotIn("DHCP-Message", "\n".join(summary["receive_lines"] + summary["send_lines"]))
+
+    def test_missing_syscall_trace_is_not_misreported_as_no_receive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = MODULE.dhcp_syscall_summary(pathlib.Path(tmp) / "missing.log")
+            self.assertFalse(summary["trace_present"])
 
 
 if __name__ == "__main__":
