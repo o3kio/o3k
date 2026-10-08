@@ -146,6 +146,27 @@ class GuestControlRegression(unittest.TestCase):
         self.assertNotIn('host-c-fabric-plan.json', removal)
         self.assertIn('C deletion did not converge to A/B-only Fabric ownership within 120 seconds', removal)
 
+    def test_wireguard_counter_baseline_precedes_packet_generation(self):
+        baseline = DRIVER.index('>"$EVIDENCE/wireguard/host-$host-before-traffic.txt"')
+        packet_matrix = DRIVER.index('# Cold neighbor resolution and the six required tenant-address ICMP flows.')
+        post = DRIVER.index('>"$EVIDENCE/wireguard/host-$host-after-traffic.txt"')
+        growth_check = DRIVER.index('WireGuard traffic counters did not grow')
+        self.assertLess(baseline, packet_matrix)
+        self.assertLess(packet_matrix, post)
+        self.assertLess(post, growth_check)
+        self.assertIn('assert new>old, (host,old,new)', DRIVER)
+
+    def test_compute_agent_restart_reuses_local_guest_control_and_proves_new_epoch(self):
+        start = DRIVER.index('# Restart only compute-agent-b')
+        end = DRIVER.index('# Remove C only through the supported API', start)
+        restart = DRIVER[start:end]
+        self.assertIn('O3K_COMPUTE_DATA_DIR=', DRIVER[DRIVER.index('start_compute_agent() {'):DRIVER.index('\n}', DRIVER.index('start_compute_agent() {'))])
+        self.assertIn(r'test "\$host" = host-b', restart)
+        self.assertIn("old['agent_epoch']!=new['agent_epoch']", restart)
+        self.assertIn('guest_control_command b true', restart)
+        self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}"', restart)
+        self.assertIn('guest_control_command b "ping -c 1 -W 4 ${TENANT_IP[a]}"', restart)
+
     def test_failure_cleanup_retries_only_run_owned_api_ids(self):
         start = DRIVER.index('cleanup_owned_api_resource() {')
         end = DRIVER.index('\n    # Always clean run-created compute guests', start)
@@ -157,6 +178,16 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('"/v2.0/ports/${PORT_IDS[i]}"', cleanup)
         self.assertIn('"/v2.0/subnets/$SUBNET_ID"', cleanup)
         self.assertIn('"/v2.0/networks/$NETWORK_ID"', cleanup)
+
+    def test_wireguard_counter_baseline_precedes_packet_generation(self):
+        baseline = DRIVER.index('>"$EVIDENCE/wireguard/host-$host-before-traffic.txt"')
+        packet_matrix = DRIVER.index('# Cold neighbor resolution and the six required tenant-address ICMP flows.')
+        post = DRIVER.index('>"$EVIDENCE/wireguard/host-$host-after-traffic.txt"')
+        growth_check = DRIVER.index('WireGuard traffic counters did not grow')
+        self.assertLess(baseline, packet_matrix)
+        self.assertLess(packet_matrix, post)
+        self.assertLess(post, growth_check)
+        self.assertIn('assert new>old, (host,old,new)', DRIVER)
 
     def test_link_local_readiness_collects_local_evidence_before_bounded_probe(self):
         start = DRIVER.index("prepare_guest_control() {")

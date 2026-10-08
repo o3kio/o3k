@@ -63,6 +63,10 @@ ssh_opts=(-i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyC
 # shellcheck disable=SC2029
 ssh_vm() { local address="$1"; shift; ssh "${ssh_opts[@]}" "$SSH_USER@$address" "$@"; }
 scp_vm() { local address="$1"; shift; scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$@" "$SSH_USER@$address:"; }
+start_compute_agent() {
+  local host="$1" health_port="$2" address="${MGMT_IP[$1]}"
+  ssh_vm "$address" "sudo bash -c 'nohup env O3K_COMPUTE_DATA_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute O3K_COMPUTE_CONTROL_ENDPOINT=https://$HOST_MGMT_IP:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_HOST_LABEL=host-$host O3K_COMPUTE_TLS_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute/tls O3K_COMPUTE_HEALTH_ADDR=0.0.0.0:$health_port O3K_COMPUTE_MAX_DISK_GB=30 O3K_COMPUTE_NETWORK_EXTERNAL=1 O3K_COMPUTE_NETWORK_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/ownership O3K_COMPUTE_BRIDGE_NAME=o3k-br0 O3K_COMPUTE_DHCP_BINARY=/usr/sbin/dnsmasq O3K_COMPUTE_FABRIC_HOST_ID=host-$host O3K_COMPUTE_FABRIC_STATE_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric RUST_LOG=info /usr/local/bin/o3k-compute-bin >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.log 2>&1 </dev/null & echo \$! >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.pid'"
+}
 api() { curl --silent --show-error --fail-with-body --max-time 30 -H "x-auth-token: $TOKEN" "$@"; }
 field() { python3 -c 'import json,sys
 v=json.load(sys.stdin)
@@ -464,7 +468,9 @@ for host in a b c; do
   scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$PROBE_KEY" "$SSH_USER@$address:/tmp/$RUN_ID-probe-key"
   ssh_vm "$address" "sudo install -d -o root -g root -m 0700 /var/lib/o3k-fabric-v3/$RUN_ID/control && sudo install -o root -g root -m 0600 /tmp/$RUN_ID-probe-key /var/lib/o3k-fabric-v3/$RUN_ID/control/probe_ed25519 && sudo python3 -c 'import pathlib; pathlib.Path(\"/tmp/$RUN_ID-probe-key\").unlink()'"
   case "$host" in a) health_port=19101;; b) health_port=19102;; c) health_port=19103;; esac
-  ssh_vm "$address" "sudo install -m 0755 /tmp/$RUN_ID-stage/o3k-compute /usr/local/bin/o3k-compute-bin; sudo install -d -m 0700 /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls; sudo install -m 0644 /tmp/$RUN_ID-stage/compute-agent-$host.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/agent.pem; sudo install -m 0600 /tmp/$RUN_ID-stage/compute-agent-$host-key.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/agent-key.pem; sudo install -m 0644 /tmp/$RUN_ID-stage/ca.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/ca.pem; sudo chown -R root:root /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls; sudo bash -c 'umask 077; printf compute-agent-$host > /var/lib/o3k-fabric-v3/$RUN_ID/compute/agent-id'; sudo bash -c 'nohup env O3K_COMPUTE_DATA_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute O3K_COMPUTE_CONTROL_ENDPOINT=https://$HOST_MGMT_IP:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_HOST_LABEL=host-$host O3K_COMPUTE_TLS_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute/tls O3K_COMPUTE_HEALTH_ADDR=0.0.0.0:$health_port O3K_COMPUTE_MAX_DISK_GB=30 O3K_COMPUTE_NETWORK_EXTERNAL=1 O3K_COMPUTE_NETWORK_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/ownership O3K_COMPUTE_BRIDGE_NAME=o3k-br0 O3K_COMPUTE_DHCP_BINARY=/usr/sbin/dnsmasq O3K_COMPUTE_FABRIC_HOST_ID=host-$host O3K_COMPUTE_FABRIC_STATE_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric RUST_LOG=info /usr/local/bin/o3k-compute-bin >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.log 2>&1 </dev/null & echo \$! >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.pid'"
+  ssh_vm "$address" "sudo install -m 0755 /tmp/$RUN_ID-stage/o3k-compute /usr/local/bin/o3k-compute-bin; sudo install -d -m 0700 /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls; sudo install -m 0644 /tmp/$RUN_ID-stage/compute-agent-$host.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/agent.pem; sudo install -m 0600 /tmp/$RUN_ID-stage/compute-agent-$host-key.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/agent-key.pem; sudo install -m 0644 /tmp/$RUN_ID-stage/ca.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/ca.pem; sudo chown -R root:root /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls; sudo bash -c 'umask 077; printf compute-agent-$host > /var/lib/o3k-fabric-v3/$RUN_ID/compute/agent-id'"
+  case "$host" in a) health_port=19101;; b) health_port=19102;; c) health_port=19103;; esac
+  start_compute_agent "$host" "$health_port"
 done
 
 for host in a b c; do
@@ -1258,25 +1264,6 @@ guest_failure_class() {
   python3 "$ROOT_DIR/tests/fabric-v3-guest-control.py" failure-class "$transport_error" "$phase_class"
 }
 
-# Cold neighbor resolution and the six required tenant-address ICMP flows.
-for pair in a:b b:a a:c c:a b:c c:b; do
-  from="${pair%%:*}"; to="${pair##*:}"
-  guest_control_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "icmp/$from-to-$to.txt" || fail "ICMP $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-  guest_control_command "$from" "ip neigh show ${TENANT_IP[$to]}" "arp/$from-to-$to.txt" || fail "ARP observation $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-  grep -Fqi "${TENANT_MAC[$to]}" "$EVIDENCE/arp/$from-to-$to.txt" || fail "ARP $from->$to resolved to wrong MAC" "DATAPLANE_DEFECT"
-done
-
-# Bounded TCP and UDP listeners run inside B/C probe guests; sender commands
-# originate inside A over tenant addresses.
-guest_control_command b 'rm -f /tmp/o3k-tcp-data; nohup nc -l -p 18081 >/tmp/o3k-tcp-data 2>&1 </dev/null &' tcp-listener.txt || fail "TCP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-sleep 1
-guest_control_command a "echo o3k-tcp-$RUN_ID | nc -w 5 ${TENANT_IP[b]} 18081" tcp/sender.txt || fail "TCP A->B failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-guest_control_command b 'grep -F o3k-tcp- /tmp/o3k-tcp-data' tcp/receiver.txt || fail "TCP payload did not arrive at B" "$(guest_failure_class DATAPLANE_DEFECT)"
-guest_control_command c 'rm -f /tmp/o3k-udp-data; nohup nc -u -l -p 18082 >/tmp/o3k-udp-data 2>&1 </dev/null &' udp-listener.txt || fail "UDP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-sleep 1
-guest_control_command a "echo o3k-udp-$RUN_ID | nc -u -w 3 ${TENANT_IP[c]} 18082" udp/sender.txt || fail "UDP A->C failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-guest_control_command c 'sleep 1; grep -F o3k-udp- /tmp/o3k-udp-data' udp/receiver.txt || fail "UDP payload did not arrive at C" "$(guest_failure_class DATAPLANE_DEFECT)"
-
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo ip -j -d link; sudo bridge -j link; sudo bridge -j fdb; sudo wg show; sudo nft list ruleset" >"$EVIDENCE/$([ "$host" = a ] && echo compute-a || ([ "$host" = b ] && echo compute-b || echo compute-c))/runtime-state.txt" || fail "runtime evidence failed for host-$host" "ENVIRONMENT_GAP"
@@ -1327,13 +1314,32 @@ for host in a b c; do
   ssh_vm "$address" "sudo virsh -c qemu:///system domiflist '$domain'" >"$EVIDENCE/compute-$host/interfaces.txt"
 done
 
-# WireGuard counters must grow over the real tenant packet tests. Private keys
-# never enter the evidence bundle.
+# Cold neighbor resolution and the six required tenant-address ICMP flows.
+for pair in a:b b:a a:c c:a b:c c:b; do
+  from="${pair%%:*}"; to="${pair##*:}"
+  guest_control_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "icmp/$from-to-$to.txt" || fail "ICMP $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+  guest_control_command "$from" "ip neigh show ${TENANT_IP[$to]}" "arp/$from-to-$to.txt" || fail "ARP observation $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+  grep -Fqi "${TENANT_MAC[$to]}" "$EVIDENCE/arp/$from-to-$to.txt" || fail "ARP $from->$to resolved to wrong MAC" "DATAPLANE_DEFECT"
+done
+
+# Bounded TCP and UDP listeners run inside B/C probe guests; sender commands
+# originate inside A over tenant addresses.
+guest_control_command b 'rm -f /tmp/o3k-tcp-data; nohup nc -l -p 18081 >/tmp/o3k-tcp-data 2>&1 </dev/null &' tcp-listener.txt || fail "TCP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+sleep 1
+guest_control_command a "echo o3k-tcp-$RUN_ID | nc -w 5 ${TENANT_IP[b]} 18081" tcp/sender.txt || fail "TCP A->B failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command b 'grep -F o3k-tcp- /tmp/o3k-tcp-data' tcp/receiver.txt || fail "TCP payload did not arrive at B" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command c 'rm -f /tmp/o3k-udp-data; nohup nc -u -l -p 18082 >/tmp/o3k-udp-data 2>&1 </dev/null &' udp-listener.txt || fail "UDP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+sleep 1
+guest_control_command a "echo o3k-udp-$RUN_ID | nc -u -w 3 ${TENANT_IP[c]} 18082" udp/sender.txt || fail "UDP A->C failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command c 'sleep 1; grep -F o3k-udp- /tmp/o3k-udp-data' udp/receiver.txt || fail "UDP payload did not arrive at C" "$(guest_failure_class DATAPLANE_DEFECT)"
+
+# Compare against the pre-traffic WireGuard snapshot. Private keys never enter
+# the evidence bundle.
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   fabric_ns="$(cat "$EVIDENCE/wireguard/host-$host-namespace.txt")"
   ssh_vm "$address" "sudo ip netns exec '$fabric_ns' wg show all transfer" >"$EVIDENCE/wireguard/host-$host-after-traffic.txt" \
-    || fail "Fabric namespace WireGuard counters unavailable on host-$host" "DATAPLANE_DEFECT"
+    || fail "Fabric namespace WireGuard counters unavailable on host-$host" "ENVIRONMENT_GAP"
 done
 python3 - "$EVIDENCE/wireguard" <<'PY' || fail "WireGuard traffic counters did not grow" "DATAPLANE_DEFECT"
 import glob,sys
@@ -1370,6 +1376,65 @@ for pair in a:b b:a a:c c:a b:c c:b; do
 done
 api "$BASE/v2.1/$PROJECT_ID/servers" >"$EVIDENCE/restart/servers.json" || fail "API unavailable after controller restart" "DURABLE_RECONCILIATION_GAP"
 for host in a b c; do grep -Fq "$PREFIX-server-$host" "$EVIDENCE/restart/servers.json" || fail "server $host missing after controller recovery" "DURABLE_RECONCILIATION_GAP"; done
+
+# Restart only compute-agent-b, preserving its run-owned domain. Prove process
+# ownership before signaling it, then verify a new current epoch and tenant
+# traffic through the same local guest-control abstraction.
+old_ready="$EVIDENCE/compute-agent-restart/before-ready.json"
+new_ready="$EVIDENCE/compute-agent-restart/after-ready.json"
+ssh_vm "${MGMT_IP[b]}" 'sudo curl -fsS http://127.0.0.1:19102/readyz' >"$old_ready" \
+  || fail "compute-agent-b pre-restart readiness unavailable" "HARNESS_GAP"
+ssh_vm "${MGMT_IP[b]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.log" \
+  >"$EVIDENCE/compute-agent-restart/agent-before.log" || fail "compute-agent-b log unavailable before restart" "HARNESS_GAP"
+ssh_vm "${MGMT_IP[b]}" 'sudo bash -s' >"$EVIDENCE/compute-agent-restart/owned-process-stop.txt" <<EOF \
+  || fail "compute-agent-b process ownership or bounded stop check failed" "OWNERSHIP_DEFECT"
+pid=\$(cat /var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.pid)
+exe=\$(readlink -f /proc/\$pid/exe)
+data=\$(tr '\0' '\n' </proc/\$pid/environ | sed -n 's/^O3K_COMPUTE_DATA_DIR=//p')
+host=\$(tr '\0' '\n' </proc/\$pid/environ | sed -n 's/^O3K_COMPUTE_HOST_LABEL=//p')
+test "\$exe" = /usr/local/bin/o3k-compute-bin
+test "\$data" = /var/lib/o3k-fabric-v3/$RUN_ID/compute
+test "\$host" = host-b
+printf 'pid=%s\\nexe=%s\\ndata=%s\\nhost=%s\\n' "\$pid" "\$exe" "\$data" "\$host"
+kill -TERM "\$pid"
+for n in \$(seq 1 30); do curl -fsS http://127.0.0.1:19102/readyz >/dev/null 2>&1 || exit 0; sleep 1; done
+exit 42
+EOF
+sleep 2
+start_compute_agent b 19102 || fail "compute-agent-b restart launch failed" "HARNESS_GAP"
+agent_ready=0
+for _ in $(seq 1 120); do
+  if ssh_vm "${MGMT_IP[b]}" 'sudo curl -fsS http://127.0.0.1:19102/readyz' >"$new_ready.tmp" 2>/dev/null; then
+    mv "$new_ready.tmp" "$new_ready"
+    agent_ready=1
+    break
+  fi
+  sleep 1
+done
+(( agent_ready )) || fail "compute-agent-b did not re-register after restart" "DURABLE_RECONCILIATION_GAP"
+python3 - "$old_ready" "$new_ready" <<'PY' || fail "compute-agent-b epoch did not advance while stable identity remained" "DURABLE_RECONCILIATION_GAP"
+import json,sys
+old,new=(json.load(open(p)) for p in sys.argv[1:])
+assert old['agent_id']==new['agent_id']=='compute-agent-b', (old,new)
+assert old.get('agent_epoch') and new.get('agent_epoch') and old['agent_epoch']!=new['agent_epoch'], (old,new)
+PY
+api "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[1]}" >"$EVIDENCE/compute-agent-restart/server-b.json" \
+  || fail "server B unavailable after compute-agent restart" "DURABLE_RECONCILIATION_GAP"
+python3 - "$EVIDENCE/compute-agent-restart/server-b.json" <<'PY' || fail "server B placement changed after compute-agent restart" "DURABLE_RECONCILIATION_GAP"
+import json,sys
+s=json.load(open(sys.argv[1]))['server']
+assert s['status']=='ACTIVE' and s.get('OS-EXT-SRV-ATTR:host')=='compute-agent-b', s
+PY
+ssh_vm "${MGMT_IP[b]}" "sudo virsh -c qemu:///system domstate '$(cat "$EVIDENCE/compute-b/domain.txt")'" \
+  >"$EVIDENCE/compute-agent-restart/domain-state.txt" || fail "server B domain observation failed after compute-agent restart" "ENVIRONMENT_GAP"
+[[ "$(tr -d '\r' <"$EVIDENCE/compute-agent-restart/domain-state.txt")" == running ]] \
+  || fail "server B domain stopped during compute-agent restart" "DURABLE_RECONCILIATION_GAP"
+guest_control_command b true compute-agent-restart/b-control-true.txt \
+  || fail "guest control B failed after compute-agent restart" "$(guest_failure_class HARNESS_GAP)"
+guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" compute-agent-restart/a-to-b.txt \
+  || fail "A->B failed after compute-agent restart" "$(guest_failure_class DURABLE_RECONCILIATION_GAP)"
+guest_control_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" compute-agent-restart/b-to-a.txt \
+  || fail "B->A failed after compute-agent restart" "$(guest_failure_class DURABLE_RECONCILIATION_GAP)"
 
 # Remove C only through the supported API and prove HER/local endpoint
 # withdrawal, then exercise A/B before final API teardown.
