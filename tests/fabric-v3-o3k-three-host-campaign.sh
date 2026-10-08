@@ -614,7 +614,10 @@ PY
 )" || return 1
   serial_dir="/var/lib/o3k-fabric-v3/$RUN_ID/compute/console/"
   [[ "$serial_path" == "$serial_dir"* && "$serial_path" != *$'\n'* ]] || return 1
-  for _ in $(seq 1 240); do
+  # CirrOS 0.6.3 retries its unavailable metadata URL about every 49 seconds
+  # even after DHCP succeeds. Leave a bounded 20-minute window for its serial
+  # login prompt (the observed 20 retries take about 16 minutes).
+  for _ in $(seq 1 600); do
     if ssh_vm "$address" "sudo test -f '$serial_path' && sudo cat '$serial_path'" >"$EVIDENCE/compute-$host/serial.log" 2>/dev/null; then
       if grep -Eqi "CirrOS.*login:|login as 'cirros' user|cirros login:" "$EVIDENCE/compute-$host/serial.log"; then
         printf 'domain=%s\nserial_file=%s\nboot_login_prompt=PASS\n' "$domain" "$serial_path" >"$EVIDENCE/compute-$host/guest-serial-login.txt"
