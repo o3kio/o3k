@@ -44,7 +44,7 @@ PORT_IDS=()
 NETWORK_ID=""
 SUBNET_ID=""
 IMAGE_ID=""
-declare -A MGMT_IP=() MGMT_OCTET=() MGMT_MAC=() REALM_BRIDGE=() GUEST_IPV6=()
+declare -A MGMT_IP=() MGMT_OCTET=() MGMT_MAC=() REALM_BRIDGE=() GUEST_IPV6=() TENANT_IP=() TENANT_MAC=()
 HOSTS=(a b c)
 LAST_GUEST_CHANNEL_ERROR=0
 
@@ -510,6 +510,8 @@ stop_dhcp_capture() {
 create_server() {
   local host="$1" port_id response server_id status request
   port_id="$(api -X POST "$BASE/v2.0/ports" -H 'content-type: application/json' -d "{\"port\":{\"name\":\"$PREFIX-port-$host\",\"network_id\":\"$NETWORK_ID\"}}" | tee "$EVIDENCE/api/port-$host.response.json" | field port.id)"
+  TENANT_IP[$host]="$(field port.fixed_ips.0.ip_address <"$EVIDENCE/api/port-$host.response.json")"
+  TENANT_MAC[$host]="$(field port.mac_address <"$EVIDENCE/api/port-$host.response.json")"
   PORT_IDS+=("$port_id")
   if [[ "$host" == a ]]; then start_dhcp_capture "$port_id"; fi
   request="$EVIDENCE/api/server-$host.create.json"
@@ -621,10 +623,6 @@ PY
   echo "tap=$tap info_kind=tun info_data.type=tap master=$bridge" >>"$EVIDENCE/attachments/server-$host-attestation.txt"
 }
 
-create_server a
-create_server b
-create_server c
-
 guest_boot_proof() {
   local host="$1" address="${MGMT_IP[$1]}" domain xml serial_path serial_dir expected_ip
   expected_ip="${TENANT_IP[$host]}"
@@ -665,6 +663,19 @@ PY
   return 1
 }
 
+create_server a
+if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then
+  guest_boot_proof a || fail "guest a file-backed serial did not prove its canonical DHCP boot lease" "ENVIRONMENT_GAP"
+fi
+create_server b
+if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then
+  guest_boot_proof b || fail "guest b file-backed serial did not prove its canonical DHCP boot lease" "ENVIRONMENT_GAP"
+fi
+create_server c
+if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then
+  guest_boot_proof c || fail "guest c file-backed serial did not prove its canonical DHCP boot lease" "ENVIRONMENT_GAP"
+fi
+
 mac_link_local() {
   python3 - "$1" <<'PY'
 import sys
@@ -675,16 +686,7 @@ print('fe80::'+':'.join(f'{int.from_bytes(b[i:i+2],"big"):x}' for i in range(0,8
 PY
 }
 
-if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then
-  for host in a b c; do
-    guest_boot_proof "$host" || fail "guest $host file-backed serial did not prove its canonical DHCP boot lease" "ENVIRONMENT_GAP"
-  done
-fi
-
-declare -A TENANT_IP=() TENANT_MAC=()
 for host in a b c; do
-  TENANT_IP[$host]="$(field port.fixed_ips.0.ip_address <"$EVIDENCE/api/port-$host.response.json")"
-  TENANT_MAC[$host]="$(field port.mac_address <"$EVIDENCE/api/port-$host.response.json")"
   GUEST_IPV6[$host]="$(mac_link_local "${TENANT_MAC[$host]}")"
 done
 printf 'server,host,tenant_ip,guest_mac\n' >"$EVIDENCE/canonical/endpoints.csv"
