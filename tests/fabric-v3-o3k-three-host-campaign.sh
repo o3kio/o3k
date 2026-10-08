@@ -626,7 +626,8 @@ create_server b
 create_server c
 
 guest_boot_proof() {
-  local host="$1" address="${MGMT_IP[$1]}" domain xml serial_path serial_dir
+  local host="$1" address="${MGMT_IP[$1]}" domain xml serial_path serial_dir expected_ip
+  expected_ip="${TENANT_IP[$host]}"
   domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
   xml="$EVIDENCE/compute-$host/domain.xml"
   serial_path="$(python3 - "$xml" "$RUN_ID" <<'PY'
@@ -644,13 +645,18 @@ PY
 )" || return 1
   serial_dir="/var/lib/o3k-fabric-v3/$RUN_ID/compute/console/"
   [[ "$serial_path" == "$serial_dir"* && "$serial_path" != *$'\n'* ]] || return 1
-  # CirrOS 0.6.3 retries its unavailable metadata URL about every 49 seconds
-  # even after DHCP succeeds. Leave a bounded 20-minute window for its serial
-  # login prompt (the observed 20 retries take about 16 minutes).
-  for _ in $(seq 1 600); do
+  # The run-owned serial device is bound to this exact server domain. Its
+  # canonical DHCP offer and lease prove that this guest booted and installed
+  # the expected endpoint address. Do not wait for CirrOS's optional metadata
+  # retry loop: with config_drive=false it can delay the login prompt for many
+  # minutes after the guest has already completed the required network boot.
+  for _ in $(seq 1 120); do
     if ssh_vm "$address" "sudo test -f '$serial_path' && sudo cat '$serial_path'" >"$EVIDENCE/compute-$host/serial.log" 2>/dev/null; then
-      if grep -Eqi "CirrOS.*login:|login as 'cirros' user|cirros login:" "$EVIDENCE/compute-$host/serial.log"; then
-        printf 'domain=%s\nserial_file=%s\nboot_login_prompt=PASS\n' "$domain" "$serial_path" >"$EVIDENCE/compute-$host/guest-serial-login.txt"
+      if grep -Fq "eth0: offered $expected_ip from 10.77.0.1" "$EVIDENCE/compute-$host/serial.log" \
+        && grep -Fq "eth0: leased $expected_ip" "$EVIDENCE/compute-$host/serial.log"; then
+        printf 'domain=%s\nserial_file=%s\ncanonical_guest_mac=%s\ncanonical_fixed_ip=%s\nboot_dhcp_lease=PASS\n' \
+          "$domain" "$serial_path" "${TENANT_MAC[$host]}" "$expected_ip" \
+          >"$EVIDENCE/compute-$host/guest-serial-readiness.txt"
         return 0
       fi
     fi
@@ -671,7 +677,7 @@ PY
 
 if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then
   for host in a b c; do
-    guest_boot_proof "$host" || fail "guest $host file-backed serial did not prove boot/login readiness" "ENVIRONMENT_GAP"
+    guest_boot_proof "$host" || fail "guest $host file-backed serial did not prove its canonical DHCP boot lease" "ENVIRONMENT_GAP"
   done
 fi
 

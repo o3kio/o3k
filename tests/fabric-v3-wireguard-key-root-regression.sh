@@ -41,6 +41,9 @@ assert "owner['dhcp_enabled']" in campaign
 assert 'config.get("mtu") != 1390' in capture
 assert 'else {"config": None, "bindings": {}}' in capture
 assert 'server-b-dhcp-trigger.request.json' in campaign
+assert 'eth0: offered $expected_ip from 10.77.0.1' in campaign
+assert 'eth0: leased $expected_ip' in campaign
+assert 'guest-serial-readiness.txt' in campaign and 'guest-serial-login.txt' not in campaign
 assert '"reboot":{"type":"HARD"}' in campaign
 assert '/servers/${SERVER_IDS[1]}/action' in campaign
 assert "reboot_http_status\" == 202" in campaign
