@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import shlex
+import subprocess
 import tempfile
 import unittest
 
@@ -79,12 +81,42 @@ class GuestControlRegression(unittest.TestCase):
         start = DRIVER.index("guest_control_command() {")
         end = DRIVER.index("\n\n" + "guest_control_preflight() {", start)
         command = DRIVER[start:end]
-        self.assertIn("%q sh -c %q", command)
+        self.assertIn('guest_remote_cmd="sh -c $(printf \'%q\' "$remote_script")"', command)
+        self.assertIn("ConnectTimeout=8 %q %q'", command)
         self.assertIn("; sh %q; rc=$?;", command)
         self.assertIn("rm -f %q; exit 0", command)
         self.assertNotIn("bash %q", command)
         self.assertNotIn("bash -lc", command)
         self.assertNotIn("python3 -c", command)
+
+    def test_nested_ssh_preserves_guest_script_as_one_remote_command(self):
+        start = DRIVER.index("guest_control_command() {")
+        end = DRIVER.index("\n\n" + "guest_control_preflight() {", start)
+        command = DRIVER[start:end]
+        self.assertIn('guest_remote_cmd="sh -c $(printf \'%q\' "$remote_script")"', command)
+        self.assertIn("ConnectTimeout=8 %q %q'", command)
+
+        formatted = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'remote_script=$1; guest_remote_cmd="sh -c $(printf \'%q\' "$remote_script")"; '
+                "printf -v remote_cmd 'ssh %q %q' probe \"$guest_remote_cmd\"; printf %s \"$remote_cmd\"",
+                "bash",
+                "printf guest-command-ok; false",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        outer_argv = shlex.split(formatted)
+        self.assertEqual(outer_argv[:2], ["ssh", "probe"])
+        guest_command = " ".join(outer_argv[2:])
+        guest_argv = shlex.split(guest_command)
+        self.assertEqual(guest_argv[:2], ["sh", "-c"])
+        result = subprocess.run(["sh", "-c", guest_argv[2]], capture_output=True, text=True)
+        self.assertEqual(result.stdout, "guest-command-ok")
+        self.assertEqual(result.returncode, 1)
 
     def test_link_local_readiness_collects_local_evidence_before_bounded_probe(self):
         start = DRIVER.index("prepare_guest_control() {")

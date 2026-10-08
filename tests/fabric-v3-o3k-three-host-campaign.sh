@@ -846,7 +846,7 @@ REMOTE_SCAN
 guest_control_command() {
   local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" bridge="${REALM_BRIDGE[$1]}" ll="${GUEST_IPV6[$1]}"
   local control_root="/var/lib/o3k-fabric-v3/$RUN_ID/control" remote_known="/var/lib/o3k-fabric-v3/$RUN_ID/control/known_hosts-$1"
-  local encoded tmp remote_script remote_cmd rc marker target
+  local encoded tmp remote_script remote_cmd guest_remote_cmd rc marker target
   LAST_GUEST_CHANNEL_ERROR=0
   encoded="$(printf '%s' "$command" | base64 -w0)"
   tmp="/tmp/o3k-$RUN_ID-guest-command"
@@ -854,8 +854,9 @@ guest_control_command() {
   # shellcheck disable=SC2016
   printf -v remote_script 'printf %%s %q | base64 -d >%q; sh %q; rc=$?; printf "\\n__O3K_GUEST_RC=%%d__\\n" "$rc"; rm -f %q; exit 0' \
     "$encoded" "$tmp" "$tmp" "$tmp"
-  printf -v remote_cmd 'sudo timeout 60 ssh -6 -i %q -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%q -o HostKeyAlias=%q -o BindInterface=%q -o ConnectTimeout=8 %q sh -c %q' \
-    "$control_root/probe_ed25519" "$remote_known" "o3k-probe-$host" "$bridge" "$target" "$remote_script"
+  guest_remote_cmd="sh -c $(printf '%q' "$remote_script")"
+  printf -v remote_cmd 'sudo timeout 60 ssh -6 -i %q -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%q -o HostKeyAlias=%q -o BindInterface=%q -o ConnectTimeout=8 %q %q' \
+    "$control_root/probe_ed25519" "$remote_known" "o3k-probe-$host" "$bridge" "$target" "$guest_remote_cmd"
   if ! ssh_vm "$address" "$remote_cmd" >"$EVIDENCE/$label" 2>"$EVIDENCE/$label.stderr"; then
     LAST_GUEST_CHANNEL_ERROR=1
     printf 'transport=FAIL\n' >"$EVIDENCE/$label.status"
