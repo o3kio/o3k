@@ -129,6 +129,7 @@ def topology(args: argparse.Namespace, ev: pathlib.Path) -> dict:
                     raise RuntimeError(f"host-a DHCP binding differs from canonical endpoint {endpoint}")
         if h == "a":
             config = state.get("config") or {}
+            maps[h]["gateway_ip"] = config.get("gateway")
             if config.get("interface") != maps[h]["realm_bridge"]:
                 raise RuntimeError("authority dnsmasq is not bound to the A Realm bridge")
             if config.get("mtu") != 1390 or "dhcp-option=26,1390" not in conf:
@@ -141,6 +142,10 @@ def topology(args: argparse.Namespace, ev: pathlib.Path) -> dict:
             write_json(ev / "dhcp" / f"host-{h}-state.json", state)
             if state.get("config") is not None or state.get("bindings"):
                 raise RuntimeError(f"host-{h}: non-authority carries DHCP service configuration or bindings")
+    for h in "abc":
+        maps[h]["fixed_ip"] = expected_endpoints[args.endpoints[h]][1]
+        if not maps[h]["fixed_ip"] or not maps["a"].get("gateway_ip"):
+            raise RuntimeError("canonical DHCP fixed/gateway address is absent from current plan/state")
     (ev / "dhcp" / "preconditions.txt").write_text(
         "A/B/C canonical bindings present; host-a is the sole committed DHCP authority; "
         "A DHCP Realm bridge and MTU match are proved.\n")
@@ -297,6 +302,105 @@ fi
     for name in ("trace.log", "table.txt"):
         content = ssh(args, "a", f"sudo cat {shlex.quote(remote_dirs['a'] + '/' + name)}", check=False)
         (ev / "topology" / f"a-{name}").write_text(content)
+
+
+def configure_dhcp_reply_trace(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> None:
+    """Trace a dnsmasq OFFER from A through B without changing forwarding."""
+    gateway, fixed = maps["a"]["gateway_ip"], maps["b"]["fixed_ip"]
+    records = []
+    for h in "ab":
+        root_table = "o3k-dhcp-reply-root"
+        ns_table = "o3k-dhcp-reply-trace"
+        ns = maps[h]["namespace"]
+        checks = [
+            ssh(args, h, f"sudo nft list table bridge {root_table} >/dev/null 2>&1; echo $?", check=False).strip(),
+            ssh(args, h, f"sudo ip netns exec {shlex.quote(ns)} nft list table bridge {ns_table} >/dev/null 2>&1; echo $?", check=False).strip(),
+        ]
+        if any(value == "0" for value in checks):
+            raise RuntimeError(f"host-{h}: refusing to reuse an existing DHCP reply trace table")
+        remote = f"/var/lib/o3k-fabric-v3/{args.run_id}/network/dhcp-boundary/{h}/reply-trace"
+        root_owner = f"o3k-dhcp-reply:{args.run_id}:root-{h}"
+        ns_owner = f"o3k-dhcp-reply:{args.run_id}:namespace-{h}"
+        if h == "a":
+            root_rules = (
+                f'add chain bridge {root_table} output {{ type filter hook output priority -600; policy accept; comment "{root_owner}"; }}\n'
+                f'add chain bridge {root_table} forward {{ type filter hook forward priority -600; policy accept; comment "{root_owner}"; }}\n'
+                f'add chain bridge {root_table} postrouting {{ type filter hook postrouting priority -600; policy accept; comment "{root_owner}"; }}\n'
+                f'add rule bridge {root_table} output ip saddr {gateway} ip daddr {fixed} udp sport 67 udp dport 68 meta nftrace set 1 comment "{root_owner}:output"\n'
+                f'add rule bridge {root_table} forward iifname "{maps[h]["realm_bridge"]}" oifname "{maps[h]["root_veth"]}" ip saddr {gateway} ip daddr {fixed} udp sport 67 udp dport 68 meta nftrace set 1 comment "{root_owner}:forward"\n'
+                f'add rule bridge {root_table} postrouting oifname "{maps[h]["root_veth"]}" ip saddr {gateway} ip daddr {fixed} udp sport 67 udp dport 68 meta nftrace set 1 comment "{root_owner}:postrouting"\n'
+            )
+            ns_rule = (f'add rule bridge {ns_table} forward iifname "{maps[h]["fabric_veth"]}" oifname "{maps[h]["vxlan"]}" '
+                       f'ip saddr {gateway} ip daddr {fixed} udp sport 67 udp dport 68 meta nftrace set 1 comment "{ns_owner}:forward"\n')
+        else:
+            root_rules = (
+                f'add chain bridge {root_table} prerouting {{ type filter hook prerouting priority -600; policy accept; comment "{root_owner}"; }}\n'
+                f'add chain bridge {root_table} input {{ type filter hook input priority -600; policy accept; comment "{root_owner}"; }}\n'
+                f'add chain bridge {root_table} forward {{ type filter hook forward priority -600; policy accept; comment "{root_owner}"; }}\n'
+                f'add rule bridge {root_table} prerouting iifname "{maps[h]["root_veth"]}" ip saddr {gateway} ip daddr {fixed} udp sport 67 udp dport 68 meta nftrace set 1 comment "{root_owner}:prerouting"\n'
+                f'add rule bridge {root_table} input iifname "{maps[h]["root_veth"]}" ip saddr {gateway} ip daddr {fixed} udp sport 67 udp dport 68 meta nftrace set 1 comment "{root_owner}:input"\n'
+                f'add rule bridge {root_table} forward iifname "{maps[h]["root_veth"]}" oifname "{maps[h]["tap"]}" ip saddr {gateway} ip daddr {fixed} udp sport 67 udp dport 68 meta nftrace set 1 comment "{root_owner}:forward"\n'
+            )
+            ns_rule = (f'add rule bridge {ns_table} prerouting iifname "{maps[h]["vxlan"]}" ip saddr {gateway} ip daddr {fixed} udp sport 67 udp dport 68 meta nftrace set 1 comment "{ns_owner}:prerouting"\n'
+                       f'add rule bridge {ns_table} forward iifname "{maps[h]["vxlan"]}" oifname "{maps[h]["fabric_veth"]}" '
+                       f'ip saddr {gateway} ip daddr {fixed} udp sport 67 udp dport 68 meta nftrace set 1 comment "{ns_owner}:forward"\n')
+        root_batch = f'add table bridge {root_table} {{ comment "{root_owner}"; }}\n' + root_rules
+        ns_batch = (f'add table bridge {ns_table} {{ comment "{ns_owner}"; }}\n'
+                    f'add chain bridge {ns_table} prerouting {{ type filter hook prerouting priority -600; policy accept; comment "{ns_owner}"; }}\n'
+                    f'add chain bridge {ns_table} forward {{ type filter hook forward priority -600; policy accept; comment "{ns_owner}"; }}\n'
+                    + ns_rule)
+        paths = {"root_log": remote + "/root-trace.log", "root_pid": remote + "/root-trace.pid",
+                 "ns_log": remote + "/namespace-trace.log", "ns_pid": remote + "/namespace-trace.pid",
+                 "root_table_file": remote + "/root-table.txt", "ns_table_file": remote + "/namespace-table.txt"}
+        records.append({"host": h, "namespace": ns, "remote_dir": remote,
+                        "root_table": root_table, "ns_table": ns_table,
+                        "root_owner": root_owner, "ns_owner": ns_owner, **paths})
+        write_json(ev / "topology" / "reply-trace-manifest.json", {
+            "gateway_ip": gateway, "destination_ip": fixed, "records": records,
+        })
+        remote_script(args, h, f"""set -e
+install -d -m 0700 {shlex.quote(remote)}
+nft -f - <<'NFT'
+{root_batch}NFT
+ip netns exec {shlex.quote(ns)} nft -f - <<'NFT'
+{ns_batch}NFT
+nohup nft monitor trace >{shlex.quote(paths['root_log'])} 2>&1 </dev/null & echo $! >{shlex.quote(paths['root_pid'])}
+nohup ip netns exec {shlex.quote(ns)} nft monitor trace >{shlex.quote(paths['ns_log'])} 2>&1 </dev/null & echo $! >{shlex.quote(paths['ns_pid'])}
+""")
+
+
+def stop_dhcp_reply_trace(args: argparse.Namespace, ev: pathlib.Path) -> None:
+    manifest_path = ev / "topology" / "reply-trace-manifest.json"
+    if not manifest_path.exists():
+        return
+    manifest = json.loads(manifest_path.read_text())
+    for record in manifest["records"]:
+        script = r"""set +e
+stop_monitor() {
+  pid_file="$1"; pid=$(cat "$pid_file" 2>/dev/null || true)
+  case "$pid" in *[!0-9]*|'') return 0;; esac
+  if test -r "/proc/$pid/cmdline" && tr '\\0' ' ' <"/proc/$pid/cmdline" | grep -Fq 'nft monitor trace'; then
+    kill -INT "$pid"
+    for _ in $(seq 1 50); do test ! -e "/proc/$pid" && return 0; sleep 0.1; done
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+}
+"""
+        script += f"stop_monitor {shlex.quote(record['root_pid'])}\nstop_monitor {shlex.quote(record['ns_pid'])}\n"
+        for scope, table, owner, table_file, prefix in (
+            ("root", record["root_table"], record["root_owner"], record["root_table_file"], "nft"),
+            ("ns", record["ns_table"], record["ns_owner"], record["ns_table_file"],
+             f"ip netns exec {shlex.quote(record['namespace'])} nft"),
+        ):
+            script += (f"{prefix} list table bridge {table} >{shlex.quote(table_file)} 2>&1\n"
+                       f"if grep -Fq {shlex.quote(owner)} {shlex.quote(table_file)}; then {prefix} delete table bridge {table}; fi\n")
+        remote_script(args, record["host"], script)
+        for filename, evidence_name in (("root-trace.log", f"{record['host']}-root-reply-trace.log"),
+                                        ("root-table.txt", f"{record['host']}-root-reply-table.txt"),
+                                        ("namespace-trace.log", f"{record['host']}-namespace-reply-trace.log"),
+                                        ("namespace-table.txt", f"{record['host']}-namespace-reply-table.txt")):
+            content = ssh(args, record["host"], f"sudo cat {shlex.quote(record['remote_dir'] + '/' + filename)}", check=False)
+            (ev / "topology" / evidence_name).write_text(content)
 
 
 def fdb_check(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> tuple[bool, str]:
@@ -557,6 +661,7 @@ def action_prepare(args: argparse.Namespace) -> int:
         for h in "abc":
             save_snapshot(args, ev, h, maps[h], "before")
         configure_forward_trace(args, ev, maps)
+        configure_dhcp_reply_trace(args, ev, maps)
         start_dnsmasq_syscall_trace(args, ev, maps)
         specs = capture_specs(maps)
         for spec in specs:
@@ -609,6 +714,10 @@ def action_prepare(args: argparse.Namespace) -> int:
     except Exception as exc:
         try:
             stop_dnsmasq_syscall_trace(args, ev)
+        except Exception:
+            pass
+        try:
+            stop_dhcp_reply_trace(args, ev)
         except Exception:
             pass
         try:
@@ -751,7 +860,7 @@ def namespace_forward_seen(path: pathlib.Path, *, source_mac: str,
                for line in lines)
 
 
-def dhcp_syscall_summary(path: pathlib.Path) -> dict:
+def dhcp_syscall_summary(path: pathlib.Path, client_ip: str | None = None) -> dict:
     """Summarize successful datagram syscalls without recording payload data."""
     if not path.exists():
         return {"trace_present": False, "receive_count": 0, "send_count": 0,
@@ -764,9 +873,13 @@ def dhcp_syscall_summary(path: pathlib.Path) -> dict:
     dhcp_socket = [line for line in recv + send if re.search(r"UDP:\[[^]]*:67\]", line)
                    or "sin_port=htons(67)" in line]
     # strace is invoked with -s 0, so payload bytes are omitted from these lines.
+    client_offers = [line for line in send if "sin_port=htons(68)" in line
+                     and (client_ip is None or f'inet_addr("{client_ip}")' in line)]
     return {"trace_present": True, "receive_count": len(recv), "send_count": len(send),
             "dhcp_port_67_count": len(dhcp_socket), "dhcp_port_67_lines": dhcp_socket,
-            "receive_lines": recv, "send_lines": send}
+            "receive_lines": recv, "send_lines": send,
+            "positive_udp67_send_to_client_count": len(client_offers),
+            "positive_udp67_send_to_client_lines": client_offers}
 
 
 def nft_drop_deltas(ev: pathlib.Path) -> dict:
@@ -870,9 +983,11 @@ def action_finish(args: argparse.Namespace) -> int:
         for spec in specs:
             stop_and_copy(args, ev, spec)
         stop_dnsmasq_syscall_trace(args, ev)
-        syscall_summary = dhcp_syscall_summary(ev / "dhcp" / "dnsmasq-network-syscalls.log")
+        stop_dhcp_reply_trace(args, ev)
         stop_forward_trace(args, ev)
         maps = json.loads((ev / "topology" / "topology-map.json").read_text())
+        syscall_summary = dhcp_syscall_summary(ev / "dhcp" / "dnsmasq-network-syscalls.log",
+                                               maps["b"]["fixed_ip"])
         for h in "abc":
             save_snapshot(args, ev, h, maps[h], "after")
         sequence = [
@@ -998,9 +1113,14 @@ def action_finish(args: argparse.Namespace) -> int:
                                            if vni else ("REMOTE_REALM_BRIDGE_DEFECT", "A VXLAN -> A fabric veth (no VNI-auth drop counter increase)"))
         else:
             classification, absent_name = classes.get(absent, ("DHCP_INTERFACE_BINDING_DEFECT", "A Realm bridge -> dnsmasq"))
-        result = {"result": "BOUNDARY_ESTABLISHED", "classification": classification,
-                  "first_present_boundary": (f"{present[0]}:{present[1]}" if present else "guest B solicitation transcript"),
-                  "first_absent_boundary": absent_name,
+        has_b_reply = syscall_summary["positive_udp67_send_to_client_count"] > 0
+        result = {"result": "RETURN_PATH_DIAGNOSTIC_REQUIRED" if has_b_reply else "BOUNDARY_ESTABLISHED",
+                  "classification": "RETURN_PATH_DIAGNOSTIC_REQUIRED" if has_b_reply else classification,
+                  "first_present_boundary": ("host-a dnsmasq received B DHCP and positive UDP/67 send targeted B fixed IP"
+                                             if has_b_reply else
+                                             (f"{present[0]}:{present[1]}" if present else "guest B solicitation transcript")),
+                  "first_absent_boundary": ("DHCP OFFER return path after dnsmasq sendmsg; inspect reply trace"
+                                            if has_b_reply else absent_name),
                   "observations": observations,
                   "link_counter_deltas": link_deltas, "nft_drop_counter_deltas": drop_deltas,
                   "counter_summary": counter_summary,
@@ -1019,6 +1139,10 @@ def action_finish(args: argparse.Namespace) -> int:
     except Exception as exc:
         try:
             stop_dnsmasq_syscall_trace(args, ev)
+        except Exception:
+            pass
+        try:
+            stop_dhcp_reply_trace(args, ev)
         except Exception:
             pass
         try:

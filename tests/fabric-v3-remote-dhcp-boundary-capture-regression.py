@@ -124,22 +124,52 @@ class AuthoritySyscallTests(unittest.TestCase):
             self.assertNotIn("pkill", script)
             subprocess.run(["bash", "-n"], input=script, text=True, check=True)
 
+    def test_offer_trace_is_scoped_to_a_to_b_dhcp_tuple(self) -> None:
+        args = Namespace(run_id="reply-owned")
+        maps = {
+            h: {"namespace": f"ns-{h}", "realm_bridge": f"realm-{h}",
+                "root_veth": f"root-{h}", "fabric_veth": f"fabric-{h}",
+                "vxlan": f"vxlan-{h}", "tap": f"tap-{h}"}
+            for h in "ab"
+        }
+        maps["a"]["gateway_ip"] = "10.77.0.1"
+        maps["b"]["fixed_ip"] = "10.77.0.3"
+        commands = []
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(MODULE, "ssh", return_value="1"), \
+             patch.object(MODULE, "remote_script",
+                          side_effect=lambda _args, host, script: commands.append((host, script))):
+            evidence = pathlib.Path(tmp)
+            (evidence / "topology").mkdir()
+            MODULE.configure_dhcp_reply_trace(args, evidence, maps)
+            self.assertEqual(len(commands), 2)
+            for _, script in commands:
+                subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+            a_script = commands[0][1]
+            b_script = commands[1][1]
+            self.assertIn("hook output", a_script)
+            self.assertIn("ip saddr 10.77.0.1 ip daddr 10.77.0.3 udp sport 67 udp dport 68", a_script)
+            self.assertIn('oifname "root-a"', a_script)
+            self.assertIn('oifname "fabric-b"', b_script)
+            self.assertNotIn("delete table", a_script + b_script)
+
     def test_bounded_summary_detects_udp_receive_and_send_without_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "syscalls.log"
             path.write_text("""recvmsg(3<UDP:[0.0.0.0:67]>, {msg_name={sa_family=AF_INET, sin_port=htons(68)}, ...}, 0) = 342
-sendto(4<UDP:[0.0.0.0:67]>, ..., 548, 0, {sa_family=AF_INET, sin_port=htons(68)}, 16) = 548
+sendto(4<UDP:[0.0.0.0:67]>, ..., 548, 0, {sa_family=AF_INET, sin_port=htons(68), sin_addr=inet_addr("10.77.0.3")}, 16) = 548
 recvfrom(5<UDP:[127.0.0.1:53]>, ..., 512, 0, NULL, NULL) = 64
 """)
             summary = MODULE.dhcp_syscall_summary(path)
             self.assertEqual(summary["receive_count"], 2)
             self.assertEqual(summary["send_count"], 1)
             self.assertEqual(summary["dhcp_port_67_count"], 2)
+            self.assertEqual(summary["positive_udp67_send_to_client_count"], 1)
             self.assertNotIn("DHCP-Message", "\n".join(summary["receive_lines"] + summary["send_lines"]))
 
     def test_missing_syscall_trace_is_not_misreported_as_no_receive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            summary = MODULE.dhcp_syscall_summary(pathlib.Path(tmp) / "missing.log")
+            summary = MODULE.dhcp_syscall_summary(pathlib.Path(tmp) / "missing.log", "10.77.0.3")
             self.assertFalse(summary["trace_present"])
 
 
