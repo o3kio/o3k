@@ -8,12 +8,21 @@ capture="$root/tests/fabric-v3-remote-dhcp-boundary-capture.py"
 
 bash -n "$installer"
 bash -n "$campaign"
-python3 - "$installer" "$campaign" "$capture" <<'PY'
+python3 - "$root" "$installer" "$campaign" "$capture" <<'PY'
+import subprocess
 import pathlib
 import re
 import sys
 
-installer, campaign, capture = map(lambda p: pathlib.Path(p).read_text(), sys.argv[1:])
+root, installer_path, campaign_path, capture_path = sys.argv[1:]
+installer, campaign, capture = map(lambda p: pathlib.Path(p).read_text(),
+                                   (installer_path, campaign_path, capture_path))
+product_sha = 'e4ca1805dc16839b855e969e7e17928a54cc211f'
+assert f'PRODUCT_SHA={product_sha}' in campaign
+dhcp_realizer = subprocess.run(
+    ['git', '-C', root, 'show', f'{product_sha}:crates/o3k-network/src/fabric_dhcp.rs'],
+    check=True, text=True, capture_output=True
+).stdout
 assert re.search(r'fabric_root="\$base/network/fabric"', installer)
 assert re.search(r'provider_key_dir="\$fabric_root/fabric-provider"', installer)
 assert re.search(r'O3K_NETWORK_FABRIC_ROOT="\$fabric_root"', installer)
@@ -25,5 +34,8 @@ assert 'wireguard_identity_check' in capture
 assert 'live_interface_public_key' in capture
 assert 'prime_wireguard_peers(args, ev, maps)' in capture
 assert capture.index('prime_wireguard_peers(args, ev, maps)') < capture.index('ok, detail = wg_check(args, ev, maps)')
+assert 'fabric-dhcp-ownership.json' in dhcp_realizer
+assert 'fabric-dhcp-ownership.json' in capture and 'owner.json' not in capture
+assert 'config.get("mtu") != 1390' in capture
 print('WireGuard provider key-root and runtime identity contract: PASS')
 PY

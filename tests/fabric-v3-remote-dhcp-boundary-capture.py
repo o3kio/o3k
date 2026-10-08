@@ -102,7 +102,7 @@ def topology(args: argparse.Namespace, ev: pathlib.Path) -> dict:
             expected_endpoints[endpoint] = (mac, observed[endpoint][1], selected)
     for h in "abc":
         dhcp_root = f"/var/lib/o3k-fabric-v3/{args.run_id}/network/dhcp/fabric/{realm_id}"
-        owner_path = f"{dhcp_root}/owner.json"
+        owner_path = f"{dhcp_root}/fabric-dhcp-ownership.json"
         pids = ssh(args, h, f"sudo find {shlex.quote(dhcp_root)} -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print")
         (ev / "dhcp" / f"host-{h}-owned-pids.txt").write_text(pids)
         pid_lines = [line for line in pids.splitlines() if line.strip()]
@@ -111,9 +111,10 @@ def topology(args: argparse.Namespace, ev: pathlib.Path) -> dict:
         if h == "a":
             owner = read_remote_json(args, h, owner_path)
             write_json(ev / "dhcp" / f"host-{h}-ownership.json", owner)
-            if (owner.get("authority_host") != "host-a" or not owner.get("enabled")
+            if (owner.get("authority_host") != "host-a" or not owner.get("dhcp_enabled")
                     or owner.get("pending") or owner.get("directory_generation") != plans[h].get("directory_generation")
-                    or owner.get("local_fabric_generation") != plans[h].get("local_fabric_generation")):
+                    or owner.get("local_fabric_generation") != plans[h].get("local_fabric_generation")
+                    or owner.get("withdrawn")):
                 raise RuntimeError("host-a DHCP ownership is not committed to the current authority plan")
             # Durable bindings and dnsmasq config belong to the selected
             # authority only. Non-authority participants intentionally have
@@ -130,9 +131,10 @@ def topology(args: argparse.Namespace, ev: pathlib.Path) -> dict:
                 if binding.get("mac", "").lower() != mac or binding.get("address") != ip:
                     raise RuntimeError(f"host-a DHCP binding differs from canonical endpoint {endpoint}")
         if h == "a":
-            if state.get("config", {}).get("interface") != maps[h]["realm_bridge"]:
+            config = state.get("config") or {}
+            if config.get("interface") != maps[h]["realm_bridge"]:
                 raise RuntimeError("authority dnsmasq is not bound to the A Realm bridge")
-            if state.get("tenant_mtu") != 1390 or "dhcp-option=26,1390" not in conf:
+            if config.get("mtu") != 1390 or "dhcp-option=26,1390" not in conf:
                 raise RuntimeError("authority DHCP state does not propagate tenant MTU 1390")
         else:
             present = ssh(args, h, f"if sudo test -e {shlex.quote(owner_path)}; then echo present; fi")
