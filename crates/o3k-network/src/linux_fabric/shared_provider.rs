@@ -133,6 +133,7 @@ mod tests {
             proxy_mac: directory.proxy_mac.clone(),
             directory,
             tenant_mtu: 1390,
+            dhcp: None,
             policy_generation: 1,
             policies: Vec::new(),
             policy_defaults: Vec::new(),

@@ -1153,6 +1153,20 @@ impl FabricRealmReconciler {
                 prefix,
                 overlapping_prefixes: realm_record.overlapping_prefixes,
             };
+            let subnet = self
+                .network
+                .get_subnet_for_project(project_id, realm.id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if subnet.id != realm.id
+                || subnet.network_id != network_id
+                || subnet.project_id != project_id
+                || subnet.cidr != realm_record.prefix
+                || !realm.prefix.contains(subnet.gateway_ip)
+                || subnet.gateway_ip == realm.prefix.network
+            {
+                return Err("canonical subnet DHCP inputs do not match the Fabric Realm".to_owned());
+            }
             let endpoints = self
                 .network
                 .list_canonical_endpoints_for_project(project_id, realm.id)
@@ -1273,6 +1287,10 @@ impl FabricRealmReconciler {
                     "apply"
                 }
             );
+            semantic_identity.push_str(&format!(
+                "|dhcp:{}:{}",
+                subnet.enable_dhcp, subnet.gateway_ip
+            ));
             for endpoint in &locations {
                 semantic_identity.push_str(&format!(
                     "|endpoint:{}:{}:{}:{}:{}:{}:{}",
@@ -1341,6 +1359,12 @@ impl FabricRealmReconciler {
                         &binding,
                     )
                     .map_err(|error| error.to_string())?;
+                let mut fabric = fabric;
+                fabric.dhcp = Some(o3k_domain::FabricDhcpIntent {
+                    enabled: false,
+                    gateway: subnet.gateway_ip,
+                    authority_host: identity.host_id.clone(),
+                });
                 let plan = o3k_network::NodeNetworkPlan {
                     schema_version: o3k_network::NODE_NETWORK_PLAN_SCHEMA_VERSION,
                     plan_id: Uuid::new_v5(
@@ -1386,9 +1410,13 @@ impl FabricRealmReconciler {
                 locations,
                 &participants,
                 &binding,
-                realm_record.generation,
-                operation_id,
-                deadline_unix_ms,
+                o3k_network::FabricRealmPlanContext {
+                    directory_generation: realm_record.generation,
+                    dhcp_enabled: subnet.enable_dhcp,
+                    dhcp_gateway: subnet.gateway_ip,
+                    operation_id,
+                    deadline_unix_ms,
+                },
             )
             .map_err(|error| error.to_string())?;
             let realm_generations = plan_set
@@ -1417,6 +1445,72 @@ impl FabricRealmReconciler {
             } else {
                 None
             };
+            if let Some(identity_record) = departing_identity
+                && !participants_by_host.contains_key(&identity_record.host_id)
+            {
+                _realm_lease.assert_current().await?;
+                let identity = fabric_identity(&identity_record);
+                let mut all_identities = participants.clone();
+                all_identities.push(identity.clone());
+                let tenant_mtu = identity.fabric_mtu.checked_sub(50).ok_or_else(|| {
+                    "departing Fabric host MTU is below the tenant minimum".to_owned()
+                })?;
+                let fabric = plan_set
+                    .directory
+                    .compile_fabric_plan(&identity, &all_identities, tenant_mtu, &binding)
+                    .map_err(|error| error.to_string())?;
+                let mut fabric = fabric;
+                fabric.dhcp = Some(o3k_domain::FabricDhcpIntent {
+                    enabled: false,
+                    gateway: subnet.gateway_ip,
+                    authority_host: plan_set
+                        .directory
+                        .entries
+                        .iter()
+                        .map(|entry| entry.selected_host.as_str())
+                        .min()
+                        .unwrap_or(identity.host_id.as_str())
+                        .to_owned(),
+                });
+                let plan = o3k_network::NodeNetworkPlan {
+                    schema_version: o3k_network::NODE_NETWORK_PLAN_SCHEMA_VERSION,
+                    plan_id: Uuid::new_v5(
+                        &operation_id,
+                        format!("fabric-realm-remove:{}:{}", realm.id, identity.host_id).as_bytes(),
+                    ),
+                    node_id: identity.host_id.clone(),
+                    operation_id,
+                    deadline_unix_ms,
+                    resource_generations: realm_generations,
+                    intents: Vec::new(),
+                    fabric: None,
+                    gateway: None,
+                    fingerprint_sha256: String::new(),
+                }
+                .with_fabric(fabric)
+                .map_err(|error| error.to_string())?;
+                let target = self
+                    .dispatcher
+                    .target_for_host(&identity.host_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "departing host has no network-agent target".to_owned())?;
+                self.dispatch_realm_plan(
+                    (&target, &identity.host_id),
+                    plan,
+                    o3k_network::NetworkPlanAction::Remove,
+                    RealmPlanAttempt {
+                        operation_id,
+                        deadline_unix_ms,
+                        lease: &_realm_lease,
+                        historical: not_found.iter().find(|record| {
+                            record.target_host_id == identity.host_id
+                                && record.target_agent_id == target.agent_id
+                        }),
+                    },
+                )
+                .await?;
+            }
             for (host_id, mut plan) in plan_set.plans {
                 let local_endpoints = plan_set
                     .directory
@@ -1515,59 +1609,6 @@ impl FabricRealmReconciler {
                 )
                 .await?;
                 _realm_lease.assert_current().await?;
-            }
-            if let Some(identity_record) = departing_identity
-                && !participants_by_host.contains_key(&identity_record.host_id)
-            {
-                _realm_lease.assert_current().await?;
-                let identity = fabric_identity(&identity_record);
-                let mut all_identities = participants.clone();
-                all_identities.push(identity.clone());
-                let tenant_mtu = identity.fabric_mtu.checked_sub(50).ok_or_else(|| {
-                    "departing Fabric host MTU is below the tenant minimum".to_owned()
-                })?;
-                let fabric = plan_set
-                    .directory
-                    .compile_fabric_plan(&identity, &all_identities, tenant_mtu, &binding)
-                    .map_err(|error| error.to_string())?;
-                let plan = o3k_network::NodeNetworkPlan {
-                    schema_version: o3k_network::NODE_NETWORK_PLAN_SCHEMA_VERSION,
-                    plan_id: Uuid::new_v5(
-                        &operation_id,
-                        format!("fabric-realm-remove:{}:{}", realm.id, identity.host_id).as_bytes(),
-                    ),
-                    node_id: identity.host_id.clone(),
-                    operation_id,
-                    deadline_unix_ms,
-                    resource_generations: realm_generations,
-                    intents: Vec::new(),
-                    fabric: None,
-                    gateway: None,
-                    fingerprint_sha256: String::new(),
-                }
-                .with_fabric(fabric)
-                .map_err(|error| error.to_string())?;
-                let target = self
-                    .dispatcher
-                    .target_for_host(&identity.host_id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "departing host has no network-agent target".to_owned())?;
-                self.dispatch_realm_plan(
-                    (&target, &identity.host_id),
-                    plan,
-                    o3k_network::NetworkPlanAction::Remove,
-                    RealmPlanAttempt {
-                        operation_id,
-                        deadline_unix_ms,
-                        lease: &_realm_lease,
-                        historical: not_found.iter().find(|record| {
-                            record.target_host_id == identity.host_id
-                                && record.target_agent_id == target.agent_id
-                        }),
-                    },
-                )
-                .await?;
             }
             Ok(())
         }
@@ -3967,6 +4008,49 @@ mod dispatcher_tests {
         .await
         .map_err(|_| "port C canonical endpoint did not retire after HTTP deletion")??;
 
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let withdrawn = ["network-agent-a", "network-agent-b"].iter().all(|agent| {
+                    realizer_logs[*agent]
+                        .lock()
+                        .ok()
+                        .and_then(|plans| plans.last().cloned())
+                        .and_then(|plan| plan.fabric)
+                        .is_some_and(|fabric| {
+                            fabric.directory.entries.len() == 2 && fabric.peers.len() == 1
+                        })
+                });
+                if withdrawn {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .map_err(|_| "port C deletion did not withdraw C from A/B HER")?;
+        for agent in ["network-agent-a", "network-agent-b"] {
+            let plans = realizer_logs[agent]
+                .lock()
+                .map_err(|_| "plan log poisoned")?;
+            let fabric = plans
+                .last()
+                .and_then(|plan| plan.fabric.as_ref())
+                .ok_or("C withdrawal plan")?;
+            let peers = fabric
+                .peers
+                .iter()
+                .map(|peer| peer.host_id.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                peers,
+                BTreeSet::from([if agent == "network-agent-a" {
+                    "compute-b".to_owned()
+                } else {
+                    "compute-a".to_owned()
+                }])
+            );
+        }
+
         for server in &server_ids[..2] {
             let (status, body) = http_json(
                 &app,
@@ -4450,12 +4534,12 @@ mod dispatcher_tests {
             StatusCode::CONFLICT,
             "injected post-binding crash must not return DELETE success: {finalize_failure_body}"
         );
+        let binding_after_failure = store
+            .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
+            .await?;
         assert!(
-            store
-                .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
-                .await?
-                .is_none(),
-            "binding deletion must remain committed before interrupted Realm finalization"
+            binding_after_failure.is_none(),
+            "binding deletion must remain committed before interrupted Realm finalization: {binding_after_failure:?}"
         );
         assert!(
             store
@@ -5569,7 +5653,9 @@ mod dispatcher_tests {
                 .lock()
                 .map_err(|_| "recording dispatcher poisoned")?;
             assert_eq!(commands.len(), 9);
-            let withdrawn = commands[6..8]
+            assert_eq!(commands[6].target.agent_id, "agent-c");
+            assert_eq!(commands[6].action, o3k_network::NetworkPlanAction::Remove);
+            let withdrawn = commands[7..9]
                 .iter()
                 .map(|command| {
                     let fabric = command.plan.fabric.as_ref().expect("Fabric plan");
@@ -5586,13 +5672,11 @@ mod dispatcher_tests {
                     .map(str::to_owned)
                     .collect()
             );
-            assert_eq!(commands[8].target.agent_id, "agent-c");
-            assert_eq!(commands[8].action, o3k_network::NetworkPlanAction::Remove);
         }
         let final_remove_command = dispatcher
             .commands
             .lock()
-            .map_err(|_| "recording dispatcher poisoned")?[8]
+            .map_err(|_| "recording dispatcher poisoned")?[6]
             .clone();
 
         // A controller restart must recover from durable canonical state

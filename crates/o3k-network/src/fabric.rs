@@ -21,6 +21,15 @@ pub struct FabricRealmPlanSet {
     pub plans: BTreeMap<String, NodeNetworkPlan>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FabricRealmPlanContext {
+    pub directory_generation: u64,
+    pub dhcp_enabled: bool,
+    pub dhcp_gateway: std::net::Ipv4Addr,
+    pub operation_id: Uuid,
+    pub deadline_unix_ms: u64,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum FabricRealmPlanError {
     #[error("realm plan contains an invalid or conflicting host identity")]
@@ -47,10 +56,15 @@ pub fn compile_fabric_realm_plans(
     locations: Vec<EndpointLocation>,
     participants: &[o3k_domain::FabricHostIdentity],
     binding: &RealmEncapsulationBinding,
-    directory_generation: u64,
-    operation_id: Uuid,
-    deadline_unix_ms: u64,
+    context: FabricRealmPlanContext,
 ) -> Result<FabricRealmPlanSet, FabricRealmPlanError> {
+    let FabricRealmPlanContext {
+        directory_generation,
+        dhcp_enabled,
+        dhcp_gateway,
+        operation_id,
+        deadline_unix_ms,
+    } = context;
     if binding.realm_id != realm.id || binding.validate().is_err() {
         return Err(FabricRealmPlanError::InvalidBinding);
     }
@@ -122,6 +136,11 @@ pub fn compile_fabric_realm_plans(
         .iter()
         .map(|identity| (*identity).clone())
         .collect::<Vec<_>>();
+    let authority_host = host_ids
+        .iter()
+        .next()
+        .ok_or(FabricRealmPlanError::NoParticipants)?
+        .to_string();
     for local_identity in &selected {
         let fabric = directory
             .compile_fabric_plan(local_identity, &selected_identities, tenant_mtu, binding)
@@ -147,6 +166,18 @@ pub fn compile_fabric_realm_plans(
             fingerprint_sha256: String::new(),
         }
         .with_fabric(fabric)
+        .and_then(|plan| {
+            let mut fabric = plan
+                .fabric
+                .clone()
+                .ok_or(crate::NetworkPlanError::InvalidFabricPlan)?;
+            fabric.dhcp = Some(o3k_domain::FabricDhcpIntent {
+                enabled: dhcp_enabled,
+                gateway: dhcp_gateway,
+                authority_host: authority_host.clone(),
+            });
+            plan.with_fabric(fabric)
+        })
         .map_err(|_| FabricRealmPlanError::Fingerprint)?;
         plans.insert(local_identity.host_id.clone(), node_plan);
     }
@@ -385,9 +416,13 @@ mod tests {
                 host("compute-c", 3),
             ],
             &binding(),
-            1,
-            Uuid::from_u128(103),
-            10_000,
+            FabricRealmPlanContext {
+                directory_generation: 1,
+                dhcp_enabled: true,
+                dhcp_gateway: Ipv4Addr::new(10, 40, 1, 1),
+                operation_id: Uuid::from_u128(103),
+                deadline_unix_ms: 10_000,
+            },
         )
         .expect("three host plans");
         assert_eq!(result.plans.len(), 3);
@@ -423,6 +458,78 @@ mod tests {
             result.plans["compute-a"].fingerprint_sha256,
             result.plans["compute-b"].fingerprint_sha256
         );
+        for plan in result.plans.values() {
+            let dhcp = plan.fabric.as_ref().and_then(|fabric| fabric.dhcp.as_ref());
+            assert_eq!(dhcp.map(|intent| intent.enabled), Some(true));
+            assert_eq!(
+                dhcp.map(|intent| intent.authority_host.as_str()),
+                Some("compute-a")
+            );
+            assert_eq!(
+                plan.fabric
+                    .as_ref()
+                    .map(|fabric| fabric.directory.entries.len()),
+                Some(3),
+                "each host receives the complete canonical binding directory"
+            );
+        }
+    }
+
+    #[test]
+    fn realm_dhcp_intent_is_fingerprinted_and_disabled_value_is_preserved() {
+        let locations = vec![
+            endpoint(1, "compute-a", 10),
+            endpoint(2, "compute-b", 20),
+            endpoint(3, "compute-c", 30),
+        ];
+        let participants = [
+            host("compute-c", 3),
+            host("compute-a", 1),
+            host("compute-b", 2),
+        ];
+        let enabled = compile_fabric_realm_plans(
+            &realm(),
+            locations.clone(),
+            &participants,
+            &binding(),
+            FabricRealmPlanContext {
+                directory_generation: 1,
+                dhcp_enabled: true,
+                dhcp_gateway: Ipv4Addr::new(10, 40, 1, 1),
+                operation_id: Uuid::from_u128(501),
+                deadline_unix_ms: 10_000,
+            },
+        )
+        .expect("enabled plan");
+        let disabled = compile_fabric_realm_plans(
+            &realm(),
+            locations,
+            &participants,
+            &binding(),
+            FabricRealmPlanContext {
+                directory_generation: 1,
+                dhcp_enabled: false,
+                dhcp_gateway: Ipv4Addr::new(10, 40, 1, 1),
+                operation_id: Uuid::from_u128(501),
+                deadline_unix_ms: 10_000,
+            },
+        )
+        .expect("disabled plan");
+        assert!(enabled.plans.values().all(|plan| {
+            plan.fabric
+                .as_ref()
+                .and_then(|fabric| fabric.dhcp.as_ref())
+                .is_some_and(|intent| intent.enabled && intent.authority_host == "compute-a")
+        }));
+        assert!(disabled.plans.values().all(|plan| {
+            plan.fabric
+                .as_ref()
+                .and_then(|fabric| fabric.dhcp.as_ref())
+                .is_some_and(|intent| !intent.enabled && intent.authority_host == "compute-a")
+        }));
+        assert!(enabled.plans.iter().all(|(host, plan)| {
+            disabled.plans[host].fingerprint_sha256 != plan.fingerprint_sha256
+        }));
     }
 
     #[test]
@@ -434,9 +541,13 @@ mod tests {
                 locations.clone(),
                 &[host("compute-a", 1)],
                 &binding(),
-                1,
-                Uuid::from_u128(103),
-                10_000,
+                FabricRealmPlanContext {
+                    directory_generation: 1,
+                    dhcp_enabled: true,
+                    dhcp_gateway: Ipv4Addr::new(10, 40, 1, 1),
+                    operation_id: Uuid::from_u128(103),
+                    deadline_unix_ms: 10_000,
+                },
             ),
             Err(FabricRealmPlanError::MissingHostIdentity)
         );
@@ -448,9 +559,13 @@ mod tests {
             locations,
             &[host("compute-a", 1), lower_mtu],
             &binding(),
-            1,
-            Uuid::from_u128(103),
-            10_000,
+            FabricRealmPlanContext {
+                directory_generation: 1,
+                dhcp_enabled: true,
+                dhcp_gateway: Ipv4Addr::new(10, 40, 1, 1),
+                operation_id: Uuid::from_u128(103),
+                deadline_unix_ms: 10_000,
+            },
         )
         .expect("a lower peer MTU yields a common safe tenant MTU");
         assert!(plans.plans.values().all(|plan| {

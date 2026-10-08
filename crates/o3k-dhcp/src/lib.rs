@@ -291,6 +291,8 @@ fn record_spawn_identity(child: &Child, identity_file: &Path) -> Result<(), Dhcp
 struct State {
     config: Option<DhcpConfig>,
     bindings: BTreeMap<String, Binding>,
+    #[serde(default)]
+    tenant_mtu: Option<u16>,
 }
 
 pub struct DhcpService {
@@ -313,13 +315,27 @@ impl DhcpService {
     }
 
     pub fn configure(&mut self, config: DhcpConfig) -> Result<(), DhcpError> {
+        self.configure_with_mtu(config, None)
+    }
+
+    /// Configure the tenant Realm and optionally propagate its canonical MTU
+    /// using DHCP option 26. Flat callers keep their original behavior.
+    pub fn configure_with_mtu(
+        &mut self,
+        config: DhcpConfig,
+        tenant_mtu: Option<u16>,
+    ) -> Result<(), DhcpError> {
         validate_config(&config)?;
+        if tenant_mtu.is_some_and(|mtu| !(576..=9000).contains(&mtu)) {
+            return Err(DhcpError::InvalidConfig);
+        }
         for binding in self.state.bindings.values() {
             if !valid_host(&config.subnet, binding.address) || binding.address == config.gateway {
                 return Err(DhcpError::InvalidConfig);
             }
         }
         self.state.config = Some(config);
+        self.state.tenant_mtu = tenant_mtu;
         self.persist()
     }
 
@@ -347,6 +363,37 @@ impl DhcpService {
         self.persist()
     }
 
+    /// Removes one binding and its matching lease from this service's own
+    /// dnsmasq lease file. The caller stops the supervised process first so
+    /// dnsmasq cannot concurrently rewrite the lease snapshot.
+    pub fn remove_binding_and_lease(&mut self, port_id: &str) -> Result<(), DhcpError> {
+        if let Some(binding) = self.state.bindings.get(port_id) {
+            let lease_path = self.managed_lease_path();
+            match fs::read_to_string(&lease_path) {
+                Ok(contents) => {
+                    let retained = contents
+                        .lines()
+                        .filter(|line| {
+                            let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+                            !(fields.len() >= 3
+                                && fields[1].eq_ignore_ascii_case(&binding.mac)
+                                && fields[2] == binding.address.to_string())
+                        })
+                        .collect::<Vec<_>>();
+                    let updated = if retained.is_empty() {
+                        String::new()
+                    } else {
+                        retained.join("\n") + "\n"
+                    };
+                    atomic_write(&lease_path, updated.as_bytes())?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(DhcpError::Storage(error)),
+            }
+        }
+        self.remove_binding(port_id)
+    }
+
     pub fn bindings(&self) -> impl Iterator<Item = &Binding> {
         self.state.bindings.values()
     }
@@ -359,6 +406,11 @@ impl DhcpService {
     /// Returns the persisted network configuration for restart reconciliation.
     pub fn configuration(&self) -> Option<&DhcpConfig> {
         self.state.config.as_ref()
+    }
+
+    /// Returns the configured tenant MTU advertised as DHCP option 26.
+    pub fn tenant_mtu(&self) -> Option<u16> {
+        self.state.tenant_mtu
     }
 
     /// Clears the persisted network configuration after the last binding was
@@ -408,6 +460,9 @@ impl DhcpService {
                     .collect::<Vec<_>>()
                     .join(",")
             ));
+        }
+        if let Some(mtu) = self.state.tenant_mtu {
+            lines.push(format!("dhcp-option=26,{mtu}"));
         }
         lines.extend(
             self.state
@@ -603,6 +658,50 @@ mod tests {
             rendered.contains("except-interface=lo"),
             "rendered dnsmasq config must exclude the loopback:\n{rendered}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fabric_tenant_mtu_is_persisted_and_rendered_as_option_26() -> Result<(), DhcpError> {
+        let root = std::env::temp_dir().join(format!("o3k-dhcp-mtu-{}", uuid::Uuid::now_v7()));
+        let mut service = DhcpService::open(&root)?;
+        service.configure_with_mtu(config()?, Some(1390))?;
+        assert!(service.render_config()?.contains("dhcp-option=26,1390"));
+        let reopened = DhcpService::open(&root)?;
+        assert_eq!(reopened.tenant_mtu(), Some(1390));
+        assert!(reopened.render_config()?.contains("dhcp-option=26,1390"));
+        fs::remove_dir_all(root).map_err(DhcpError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn binding_removal_clears_only_its_matching_owned_lease() -> Result<(), DhcpError> {
+        let root =
+            std::env::temp_dir().join(format!("o3k-dhcp-lease-remove-{}", uuid::Uuid::now_v7()));
+        let mut service = DhcpService::open(&root)?;
+        service.configure(config()?)?;
+        service.upsert_binding(Binding {
+            port_id: "port-a".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+            address: "192.0.2.10".parse().map_err(|_| DhcpError::InvalidConfig)?,
+        })?;
+        service.upsert_binding(Binding {
+            port_id: "port-b".to_owned(),
+            mac: "02:00:00:00:00:02".to_owned(),
+            address: "192.0.2.11".parse().map_err(|_| DhcpError::InvalidConfig)?,
+        })?;
+        fs::write(
+            service.managed_lease_path(),
+            "2000000000 02:00:00:00:00:01 192.0.2.10 client-a *\n2000000000 02:00:00:00:00:02 192.0.2.11 client-b *\n",
+        )
+        .map_err(DhcpError::Storage)?;
+        service.remove_binding_and_lease("port-a")?;
+        let leases =
+            fs::read_to_string(service.managed_lease_path()).map_err(DhcpError::Storage)?;
+        assert!(!leases.contains("02:00:00:00:00:01"));
+        assert!(leases.contains("02:00:00:00:00:02"));
+        assert_eq!(service.bindings().count(), 1);
+        fs::remove_dir_all(root).map_err(DhcpError::Storage)?;
         Ok(())
     }
 

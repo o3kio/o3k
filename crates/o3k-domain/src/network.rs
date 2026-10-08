@@ -778,6 +778,11 @@ pub struct NamespacedRoutedFabricPlan {
     pub directory: RealmEndpointDirectory,
     pub proxy_mac: String,
     pub tenant_mtu: u16,
+    /// Canonical single-authority DHCP semantics for this complete Realm
+    /// snapshot. Provider execution consumes this value but does not choose
+    /// tenant DHCP policy or endpoint bindings.
+    #[serde(default)]
+    pub dhcp: Option<FabricDhcpIntent>,
     /// Derived policy generation and endpoint rules compiled from canonical
     /// reusable policies. Providers may derive nftables/nft flow state from
     /// this snapshot, but may not authorize a packet from observations alone.
@@ -796,6 +801,15 @@ pub struct NamespacedRoutedFabricPlan {
     pub public_bindings: Vec<PublicAddressBindingIntent>,
     pub routes: Vec<FabricEndpointRoute>,
     pub peers: Vec<FabricPeer>,
+}
+
+/// DHCP policy and deterministic serving authority compiled from canonical
+/// subnet state and the current Realm participant set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FabricDhcpIntent {
+    pub enabled: bool,
+    pub gateway: Ipv4Addr,
+    pub authority_host: String,
 }
 
 fn default_policy_generation() -> u64 {
@@ -1102,6 +1116,7 @@ impl RealmEndpointDirectory {
             directory: self.clone(),
             proxy_mac: self.proxy_mac.clone(),
             tenant_mtu,
+            dhcp: None,
             policy_generation: default_policy_generation(),
             policies: Vec::new(),
             policy_defaults: Vec::new(),

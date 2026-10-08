@@ -121,8 +121,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             uplink: flat_uplink,
         },
         ownership_root,
-        dhcp_root,
-        dnsmasq,
+        dhcp_root.clone(),
+        dnsmasq.clone(),
         tap_access,
     )?;
     let routed = match external_realm {
@@ -154,6 +154,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?)),
         Err(_) => None,
     };
+    let fabric_dhcp = match (&fabric, env::var("O3K_NETWORK_FABRIC_HOST_ID")) {
+        (Some(_), Ok(host_id)) if !host_id.trim().is_empty() => Some(
+            o3k_network::FabricDhcpRealizer::open(dhcp_root.clone(), host_id, dnsmasq.clone())?,
+        ),
+        (Some(_), _) => {
+            return Err("Fabric network agent requires O3K_NETWORK_FABRIC_HOST_ID".into());
+        }
+        (None, _) => None,
+    };
     let gateway = match env::var("O3K_NETWORK_GATEWAY_ROOT") {
         Ok(root) => {
             let contexts = match env::var("O3K_NETWORK_REALM_CONTEXTS") {
@@ -175,6 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         policy,
         public,
         fabric,
+        fabric_dhcp,
         gateway,
     };
     let service = agent::NetworkAgentService::new_dynamic(executor, realizer)?;
@@ -202,6 +212,7 @@ struct CompositeRealizer {
     policy: Option<StatefulPolicyProvider>,
     public: Option<PublicAddressRealizer>,
     fabric: Option<FabricRealizer<o3k_network::LinuxFabricBackend>>,
+    fabric_dhcp: Option<o3k_network::FabricDhcpRealizer>,
     gateway: Option<L3GatewayRealizer<LinuxL3GatewayProvider>>,
 }
 
@@ -225,6 +236,8 @@ enum CompositeRealizerError {
     FabricNotConfigured,
     #[error("Edge fabric realization failed: {0}")]
     Fabric(String),
+    #[error("Edge Fabric DHCP realization failed: {0}")]
+    FabricDhcp(String),
     #[error("Edge fabric plan contains an intent not yet activated by the Fabric provider")]
     FabricUnsupportedIntent,
     #[error("L3 gateway realization failed: {0}")]
@@ -275,6 +288,47 @@ impl NetworkPlanRealizer for CompositeRealizer {
                 .ok_or(CompositeRealizerError::FabricNotConfigured)?
                 .realize(plan)
                 .map_err(|error| CompositeRealizerError::Fabric(error.to_string()))?;
+            let fabric_plan = plan
+                .fabric
+                .as_ref()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            let contexts = self
+                .fabric
+                .as_ref()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?
+                .backend()
+                .realm_execution_contexts();
+            let context = contexts.get(&fabric_plan.realm_id).ok_or_else(|| {
+                CompositeRealizerError::FabricDhcp(
+                    "Fabric Realm bridge context is absent".to_owned(),
+                )
+            })?;
+            self.fabric_dhcp
+                .as_mut()
+                .ok_or_else(|| {
+                    CompositeRealizerError::FabricDhcp("Fabric DHCP is not configured".to_owned())
+                })?
+                .realize(fabric_plan, &context.namespace, &context.bridge)
+                .map_err(|error| CompositeRealizerError::FabricDhcp(error.to_string()))?;
+            let fabric_observed = self
+                .fabric
+                .as_mut()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?
+                .observe(plan)
+                .map_err(|error| CompositeRealizerError::Fabric(error.to_string()))?;
+            let dhcp_observed = self
+                .fabric_dhcp
+                .as_mut()
+                .ok_or_else(|| {
+                    CompositeRealizerError::FabricDhcp("Fabric DHCP is not configured".to_owned())
+                })?
+                .observe(fabric_plan, &context.namespace, &context.bridge)
+                .map_err(|error| CompositeRealizerError::FabricDhcp(error.to_string()))?;
+            if !fabric_observed || !dhcp_observed {
+                return Err(CompositeRealizerError::FabricDhcp(
+                    "Fabric or DHCP postcondition was not observed".to_owned(),
+                ));
+            }
             return Ok(());
         }
         let mut flat_plan = plan.clone();
@@ -341,6 +395,41 @@ impl NetworkPlanRealizer for CompositeRealizer {
             }) {
                 return Err(CompositeRealizerError::FabricUnsupportedIntent);
             }
+            let fabric_plan = plan
+                .fabric
+                .as_ref()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            let contexts = self
+                .fabric
+                .as_ref()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?
+                .backend()
+                .realm_execution_contexts();
+            let context = contexts.get(&fabric_plan.realm_id).ok_or_else(|| {
+                CompositeRealizerError::FabricDhcp(
+                    "Fabric Realm bridge context is absent".to_owned(),
+                )
+            })?;
+            self.fabric_dhcp
+                .as_mut()
+                .ok_or_else(|| {
+                    CompositeRealizerError::FabricDhcp("Fabric DHCP is not configured".to_owned())
+                })?
+                .withdraw(fabric_plan, &context.namespace)
+                .map_err(|error| CompositeRealizerError::FabricDhcp(error.to_string()))?;
+            if !self
+                .fabric_dhcp
+                .as_ref()
+                .ok_or_else(|| {
+                    CompositeRealizerError::FabricDhcp("Fabric DHCP is not configured".to_owned())
+                })?
+                .is_withdrawn(fabric_plan.realm_id)
+                .map_err(|error| CompositeRealizerError::FabricDhcp(error.to_string()))?
+            {
+                return Err(CompositeRealizerError::FabricDhcp(
+                    "Fabric DHCP withdrawal was not observed".to_owned(),
+                ));
+            }
             self.fabric
                 .as_mut()
                 .ok_or(CompositeRealizerError::FabricNotConfigured)?
@@ -405,12 +494,36 @@ impl NetworkPlanRealizer for CompositeRealizer {
             }
         }
         if plan.fabric.is_some() {
-            return self
+            let fabric_plan = plan
+                .fabric
+                .as_ref()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?;
+            let contexts = self
+                .fabric
+                .as_ref()
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?
+                .backend()
+                .realm_execution_contexts();
+            let context = contexts.get(&fabric_plan.realm_id).ok_or_else(|| {
+                CompositeRealizerError::FabricDhcp(
+                    "Fabric Realm bridge context is absent".to_owned(),
+                )
+            })?;
+            let fabric_ok = self
                 .fabric
                 .as_mut()
                 .ok_or(CompositeRealizerError::FabricNotConfigured)?
                 .observe(plan)
-                .map_err(|error| CompositeRealizerError::Fabric(error.to_string()));
+                .map_err(|error| CompositeRealizerError::Fabric(error.to_string()))?;
+            let dhcp_ok = self
+                .fabric_dhcp
+                .as_mut()
+                .ok_or_else(|| {
+                    CompositeRealizerError::FabricDhcp("Fabric DHCP is not configured".to_owned())
+                })?
+                .observe(fabric_plan, &context.namespace, &context.bridge)
+                .map_err(|error| CompositeRealizerError::FabricDhcp(error.to_string()))?;
+            return Ok(fabric_ok && dhcp_ok);
         }
         let mut flat_plan = plan.clone();
         flat_plan.intents.retain(is_flat_intent);

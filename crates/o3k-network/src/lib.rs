@@ -4,6 +4,7 @@ pub mod anti_spoof;
 pub mod canonical_policy;
 pub mod execution;
 pub mod fabric;
+mod fabric_dhcp;
 pub mod gateway;
 mod host;
 pub mod linux_fabric;
@@ -26,9 +27,10 @@ pub use execution::{
     PlanAdmission, journal_path,
 };
 pub use fabric::{
-    FabricBackend, FabricError, FabricRealizer, FabricRealmPlanError, FabricRealmPlanSet,
-    InMemoryFabricBackend, compile_fabric_realm_plans,
+    FabricBackend, FabricError, FabricRealizer, FabricRealmPlanContext, FabricRealmPlanError,
+    FabricRealmPlanSet, InMemoryFabricBackend, compile_fabric_realm_plans,
 };
+pub use fabric_dhcp::{FabricDhcpError, FabricDhcpRealizer};
 pub use gateway::{
     InMemoryL3GatewayBackend, L3GatewayBackend, L3GatewayError, L3GatewayRealizer,
     LinuxL3GatewayProvider, RealmExecutionContext, compile_l3_gateway_execution_plan,
@@ -283,6 +285,7 @@ mod p9_plan_tests {
             },
             proxy_mac: "02:11:22:33:44:55".to_owned(),
             tenant_mtu: 1390,
+            dhcp: None,
             policy_generation: 1,
             policies: Vec::new(),
             policy_defaults: Vec::new(),

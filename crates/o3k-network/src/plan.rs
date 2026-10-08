@@ -145,6 +145,26 @@ impl NodeNetworkPlan {
         {
             return Err(NetworkPlanError::InvalidFabricPlan);
         }
+        if let Some(dhcp) = fabric.dhcp.as_ref() {
+            let participant_hosts = fabric
+                .directory
+                .entries
+                .iter()
+                .map(|entry| entry.selected_host.as_str())
+                .collect::<BTreeSet<_>>();
+            if !fabric.realm_prefix.contains(dhcp.gateway)
+                || dhcp.gateway == fabric.realm_prefix.network
+                || dhcp.authority_host.trim().is_empty()
+                || (!participant_hosts.is_empty()
+                    && !participant_hosts.contains(dhcp.authority_host.as_str()))
+                || participant_hosts
+                    .iter()
+                    .next()
+                    .is_some_and(|expected| *expected != dhcp.authority_host)
+            {
+                return Err(NetworkPlanError::InvalidFabricPlan);
+            }
+        }
         let mut policy_ids = BTreeSet::new();
         for policy in &fabric.policies {
             if policy.id == Uuid::nil()

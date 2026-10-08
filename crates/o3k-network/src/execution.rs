@@ -914,6 +914,7 @@ mod tests {
             },
             proxy_mac: "02:11:22:33:44:55".to_owned(),
             tenant_mtu: 1390,
+            dhcp: None,
             policy_generation: 1,
             policies: Vec::new(),
             policy_defaults: Vec::new(),
