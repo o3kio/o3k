@@ -12,16 +12,21 @@ XML records it for observation; file-backed serial is not interactive and is
 not used to issue packet commands.
 
 The guest command path is a deterministic probe image built by
-tests/fabric-v3-build-probe-image.sh from the pinned Ubuntu cloud image. It uses
-SSH to the guest's IPv6 link-local address, scoped to that guest's local Realm
-bridge on its compute host. The command path does not use tenant IPv4, VXLAN, or
-WireGuard. The harness captures the local bridge and Fabric namespace paths to
-prove that the control exchange remains local before packet testing.
+tests/fabric-v3-build-probe-image.sh from the pinned CirrOS 0.6.3 image
+(`7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b`). The
+recipe installs the campaign public key and an explicit key-only, IPv6-only
+Dropbear policy into the CirrOS initramfs. It uses SSH to the guest's IPv6
+link-local address, scoped to that guest's local Realm bridge on its compute
+host. The command path does not use tenant IPv4, VXLAN, or WireGuard. The
+harness captures the local bridge and Fabric namespace paths to prove that the
+control exchange remains local before packet testing.
 
 The probe obtains its tenant IPv4 address through the normal O3K DHCP path. It
 uses normal guest-generated IPv6 link-local addressing. The recipe does not
 assign tenant addresses or add bypass routes. Its generated SHA-256, source
-image checksum, build recipe revision, and tool versions are recorded per run.
+image checksum, build recipe revision, Dropbear version, and tool versions are
+recorded per run. The resulting qcow2 is checked against the frozen product's
+64 MiB public image upload limit before upload.
 
 ## Gate order
 

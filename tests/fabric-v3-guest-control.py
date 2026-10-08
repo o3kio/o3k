@@ -23,7 +23,7 @@ def scoped_target(address: str, bridge: str) -> str:
         raise ValueError("guest control target must be IPv6 link-local")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", bridge):
         raise ValueError("invalid scoped Realm bridge name")
-    return f"ubuntu@{parsed}%{bridge}"
+    return f"cirros@{parsed}%{bridge}"
 
 
 def serial_capabilities(xml_path: str) -> dict:

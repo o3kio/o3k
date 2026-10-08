@@ -53,7 +53,10 @@ reproducible acceptance image. Record its source, build recipe revision, SHA-256
 tool versions, and command-service version. Stock images with nondeterministic
 management-service readiness MUST NOT be a mandatory control dependency. The
 image MUST NOT contain production secrets or statically configure the tenant
-address or bypass routes.
+address or bypass routes. For the current Fabric v3 nested campaign, the pinned
+CirrOS 0.6.3 base image is transformed by the checked-in recipe to install the
+campaign public key and explicit key-only IPv6 Dropbear policy. The generated
+image is checked against the frozen product image-upload limit before use.
 
 ## Preflight before product predicates
 

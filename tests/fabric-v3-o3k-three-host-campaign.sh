@@ -8,6 +8,8 @@ PRODUCT_SHA=e3f5ce764b4d7ee1bba34f645da8ec6c156bde99
 PRODUCT_TREE=5cfaa3bd0b173fc4ad048db32ef834cbd55839b8
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 BASE_IMAGE_SHA=612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354
+PROBE_BASE_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
+PROBE_BASE_SHA=7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
 RUN_ID="${O3K_FABRIC_V3_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="o3k-fabric-v3-${RUN_ID}"
 EVIDENCE_ROOT="${O3K_FABRIC_V3_EVIDENCE_ROOT:-/var/tmp}"
@@ -106,23 +108,6 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" >"$EVIDENC
 cleanup_on_success() {
   local rc=$?
   if declare -F stop_dhcp_capture >/dev/null 2>&1; then stop_dhcp_capture || true; fi
-  if (( rc == 0 )) && [[ "${CAMPAIGN_TEARDOWN_PASS:-0}" == 1 ]]; then
-    # Teardown is API-led; guests are deleted only if their exact run prefix
-    # and UUID markers still match the inventory recorded by this process.
-    for domain in "${FRESH_DOMAINS[@]}"; do
-      [[ "$domain" == "$PREFIX-compute-"[abc] ]] || continue
-      xml="$(virsh -c qemu:///system dumpxml "$domain" 2>/dev/null || true)"
-      expected_uuid="$(awk -F '\t' -v n="$domain" '$2==n{print $5}' "$EVIDENCE/environment/inventory.tsv")"
-      actual_uuid="$(virsh -c qemu:///system domuuid "$domain" 2>/dev/null || true)"
-      if [[ -n "$expected_uuid" && "$actual_uuid" == "$expected_uuid" ]] \
-        && grep -Fq "<name>$domain</name>" <<<"$xml" \
-        && grep -Fq "$PREFIX" <<<"$xml"; then
-        virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1 || true
-        virsh -c qemu:///system undefine "$domain" --remove-all-storage >/dev/null 2>&1 || true
-      fi
-    done
-  fi
-  if [[ -n "$O3KD_PID" ]]; then kill -TERM "$O3KD_PID" 2>/dev/null || true; wait "$O3KD_PID" 2>/dev/null || true; fi
   if [[ -f "$EVIDENCE/.o3k-fabric-v3-owned" ]] && grep -Fqx "run=$RUN_ID" "$EVIDENCE/.o3k-fabric-v3-owned"; then
     date -u +%FT%TZ >"$EVIDENCE/ended_at_utc.txt"
     if [[ ! -f "$EVIDENCE/result.json" ]]; then
@@ -133,6 +118,76 @@ json.dump({"result":"FAIL","run_id":run,"product_sha":product,"product_tree":tre
 print(file=open(path,"a"))
 PY
     fi
+    # Remove any API resources created before a stop-at-first-failure. The
+    # reverse order and run-generated IDs keep this on the supported API path.
+    if [[ -n "$TOKEN" && -n "$BASE" ]] \
+      && { (( rc != 0 )) || [[ "${CAMPAIGN_TEARDOWN_PASS:-0}" != 1 ]]; }; then
+      {
+        for ((i=${#SERVER_IDS[@]}-1; i>=0; i--)); do
+          [[ -n "${SERVER_IDS[i]}" ]] || continue
+          curl --silent --show-error --max-time 30 -o /dev/null -w "server ${SERVER_IDS[i]} %{http_code}\n" \
+            -X DELETE "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[i]}" -H "x-auth-token: $TOKEN" || true
+        done
+        for ((i=${#PORT_IDS[@]}-1; i>=0; i--)); do
+          [[ -n "${PORT_IDS[i]}" ]] || continue
+          curl --silent --show-error --max-time 30 -o /dev/null -w "port ${PORT_IDS[i]} %{http_code}\n" \
+            -X DELETE "$BASE/v2.0/ports/${PORT_IDS[i]}" -H "x-auth-token: $TOKEN" || true
+        done
+        [[ -z "$SUBNET_ID" ]] || curl --silent --show-error --max-time 30 -o /dev/null -w "subnet $SUBNET_ID %{http_code}\n" \
+          -X DELETE "$BASE/v2.0/subnets/$SUBNET_ID" -H "x-auth-token: $TOKEN" || true
+        [[ -z "$NETWORK_ID" ]] || curl --silent --show-error --max-time 30 -o /dev/null -w "network $NETWORK_ID %{http_code}\n" \
+          -X DELETE "$BASE/v2.0/networks/$NETWORK_ID" -H "x-auth-token: $TOKEN" || true
+        [[ -z "$IMAGE_ID" ]] || curl --silent --show-error --max-time 30 -o /dev/null -w "image $IMAGE_ID %{http_code}\n" \
+          -X DELETE "$BASE/v2/images/$IMAGE_ID" -H "x-auth-token: $TOKEN" || true
+      } >"$EVIDENCE/teardown/failure-api-cleanup.txt" 2>&1
+    fi
+    # Always clean run-created compute guests after evidence has been captured.
+    # A domain is eligible only when its inventory UUID, name, XML, disk and
+    # seed paths all exactly match this run's ownership record.
+    if [[ -s "$EVIDENCE/environment/inventory.tsv" ]]; then
+      : >"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+      for domain in "${FRESH_DOMAINS[@]}"; do
+        if [[ ! "$domain" =~ ^${PREFIX}-compute-[abc]$ ]]; then continue; fi
+        expected_uuid="$(awk -F '\t' -v n="$domain" '$2==n{print $5}' "$EVIDENCE/environment/inventory.tsv")"
+        actual_uuid="$(virsh -c qemu:///system domuuid "$domain" 2>/dev/null || true)"
+        if [[ -z "$actual_uuid" ]]; then
+          printf 'ALREADY_REMOVED %s uuid=%s\n' "$domain" "$expected_uuid" \
+            >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          continue
+        fi
+        xml="$(virsh -c qemu:///system dumpxml "$domain" 2>/dev/null || true)"
+        role="${domain##*-}"
+        disk="$IMAGE_STORE/$PREFIX-compute-$role.qcow2"
+        seed="$IMAGE_STORE/$PREFIX-compute-$role-seed.iso"
+        if [[ -z "$expected_uuid" || "$actual_uuid" != "$expected_uuid" ]] \
+          || ! grep -Fq "<name>$domain</name>" <<<"$xml" \
+          || ! grep -Fq "<uuid>$expected_uuid</uuid>" <<<"$xml" \
+          || ! grep -Fq "$disk" <<<"$xml" \
+          || ! grep -Fq "$seed" <<<"$xml"; then
+          printf 'PRESERVED ownership check failed for %s\n' "$domain" >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          continue
+        fi
+        virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1 || true
+        if virsh -c qemu:///system undefine "$domain" --remove-all-storage >/dev/null 2>&1; then
+          printf 'REMOVED %s uuid=%s disk=%s seed=%s\n' "$domain" "$expected_uuid" "$disk" "$seed" \
+            >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+        else
+          printf 'CLEANUP_FAILED %s uuid=%s\n' "$domain" "$expected_uuid" \
+            >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+        fi
+      done
+    fi
+    if [[ -n "$O3KD_PID" ]]; then kill -TERM "$O3KD_PID" 2>/dev/null || true; wait "$O3KD_PID" 2>/dev/null || true; fi
+    python3 - "$EVIDENCE/manifest.json" "$EVIDENCE/result.json" "$EVIDENCE/ended_at_utc.txt" <<'PYFINAL'
+import json,pathlib,sys
+manifest,result,ended=sys.argv[1:]
+m=json.loads(pathlib.Path(manifest).read_text()) if pathlib.Path(manifest).exists() else {}
+r=json.loads(pathlib.Path(result).read_text())
+m.update(result=r.get('result','FAIL'),ended_at_utc=pathlib.Path(ended).read_text().strip())
+for key in ('first_failure','classification','harness_sha','harness_tree','product_sha','product_tree'):
+    if key in r: m[key]=r[key]
+pathlib.Path(manifest).write_text(json.dumps(m,sort_keys=True,indent=2)+'\n')
+PYFINAL
   tar --exclude="$(basename "$EVIDENCE")/management/campaign_ed25519" \
       --exclude="$(basename "$EVIDENCE")/management/probe_ed25519" \
       --exclude="$(basename "$EVIDENCE")/management/tls/certs" \
@@ -157,7 +212,7 @@ if ! command -v cargo >/dev/null 2>&1; then
     export PATH
   fi
 fi
-for tool in cargo curl openssl python3 virsh virt-install qemu-img genisoimage ssh ssh-keygen ssh-keyscan scp ip wg tcpdump sha256sum tar timeout bridge hostnamectl; do need "$tool"; done
+for tool in cargo curl openssl python3 virsh virt-install qemu-img guestfish virt-ls lsinitramfs cpio gzip genisoimage ssh ssh-keygen ssh-keyscan scp ip wg tcpdump sha256sum tar timeout bridge hostnamectl; do need "$tool"; done
 [[ $EUID -eq 0 ]] || fail "campaign must run as root to provision nested libvirt guests" "ENVIRONMENT_GAP"
 [[ -c /dev/kvm ]] || fail "/dev/kvm unavailable" "ENVIRONMENT_GAP"
 [[ -r "$BASE_IMAGE" ]] || fail "base image unreadable: $BASE_IMAGE" "ENVIRONMENT_GAP"
@@ -181,6 +236,19 @@ pathlib.Path(path).write_text(json.dumps(doc,sort_keys=True,indent=2)+'\n')
 PYMANIFEST
 sha256sum "$BASE_IMAGE" >"$EVIDENCE/environment/base-image.sha256"
 [[ "$(awk '{print $1}' "$EVIDENCE/environment/base-image.sha256")" == "$BASE_IMAGE_SHA" ]] || fail "base image checksum mismatch" "ENVIRONMENT_GAP"
+PROBE_BASE_IMAGE="$EVIDENCE/environment/cirros-0.6.3-x86_64-disk.img"
+if [[ -n "${O3K_FABRIC_V3_PROBE_BASE_IMAGE:-}" ]]; then
+  [[ -r "$O3K_FABRIC_V3_PROBE_BASE_IMAGE" ]] || fail "probe base image unreadable" "ENVIRONMENT_GAP"
+  cp --reflink=auto -- "$O3K_FABRIC_V3_PROBE_BASE_IMAGE" "$PROBE_BASE_IMAGE"
+else
+  curl --fail --silent --show-error --location --max-time 120 \
+    "$PROBE_BASE_URL" -o "$PROBE_BASE_IMAGE" \
+    || fail "pinned CirrOS probe base download failed" "ENVIRONMENT_GAP"
+fi
+printf '%s  %s\n' "$PROBE_BASE_SHA" "$PROBE_BASE_IMAGE" | sha256sum --check --status \
+  || fail "pinned CirrOS probe base checksum mismatch" "ENVIRONMENT_GAP"
+printf 'source=%s\nsha256=%s\n' "$PROBE_BASE_URL" "$PROBE_BASE_SHA" \
+  >"$EVIDENCE/environment/probe-image-source.txt"
 
 echo "Building frozen binaries from $PRODUCT_SHA"
 git -C "$ROOT_DIR" worktree add --detach "$PRODUCT_SOURCE_DIR" "$PRODUCT_SHA" \
@@ -475,11 +543,11 @@ p.write_text(re.sub(r'(?im)^(x-subject-token:\s*).+$',r'\1[REDACTED]',s))
 PY
 
 O3K_PROBE_IMAGE="$EVIDENCE/environment/o3k-fabric-probe.qcow2"
-bash "$ROOT_DIR/tests/fabric-v3-build-probe-image.sh" "$BASE_IMAGE" "$PROBE_KEY.pub" "$O3K_PROBE_IMAGE" "$EVIDENCE/environment" \
+bash "$ROOT_DIR/tests/fabric-v3-build-probe-image.sh" "$PROBE_BASE_IMAGE" "$PROBE_KEY.pub" "$O3K_PROBE_IMAGE" "$EVIDENCE/environment" \
   || fail "deterministic guest probe image build failed" "HARNESS_GAP"
 sha256sum "$O3K_PROBE_IMAGE" >"$EVIDENCE/environment/probe-image.sha256"
 printf 'source_image=%s\nsource_sha256=%s\nrecipe_revision=%s\n' \
-  "$BASE_IMAGE" "$BASE_IMAGE_SHA" "$(git -C "$ROOT_DIR" rev-parse HEAD)" \
+  "$PROBE_BASE_URL" "$PROBE_BASE_SHA" "$(git -C "$ROOT_DIR" rev-parse HEAD)" \
   >"$EVIDENCE/environment/probe-image-identity.txt"
 python3 - "$EVIDENCE/environment/control-channel-capabilities.json" "$EVIDENCE/environment/probe-image.sha256" <<'PY'
 import json,pathlib,sys

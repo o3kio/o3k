@@ -47,7 +47,7 @@ class GuestControlRegression(unittest.TestCase):
         ll = helper.link_local("02:ee:e0:4e:1a:31")
         target = helper.scoped_target(ll, "br-o3k-local")
         self.assertTrue(ll.startswith("fe80::"))
-        self.assertEqual(target, f"ubuntu@{ll}%br-o3k-local")
+        self.assertEqual(target, f"cirros@{ll}%br-o3k-local")
         with self.assertRaises(ValueError):
             helper.scoped_target("10.77.0.2", "br-o3k-local")
 
@@ -74,6 +74,22 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("failure-class \"$transport_error\" \"$phase_class\"", DRIVER)
         self.assertIn("guest_control_preflight \"$host\"", DRIVER)
         self.assertIn("ip addr show dev eth0", DRIVER)
+
+    def test_probe_image_is_pinned_deterministic_and_within_product_upload_limit(self):
+        builder = (ROOT / "fabric-v3-build-probe-image.sh").read_text()
+        self.assertIn("7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b", builder)
+        self.assertIn("64 * 1024 * 1024", builder)
+        self.assertIn("home/cirros/.ssh/authorized_keys", builder)
+        self.assertIn('DROPBEAR_ARGS="-s -w -p [::]:22"', builder)
+        self.assertIn("--reproducible", builder)
+        self.assertNotIn("ip addr add", builder)
+        self.assertIn("cirros@", (ROOT / "fabric-v3-guest-control.py").read_text())
+
+    def test_campaign_downloads_the_pinned_small_probe_base(self):
+        self.assertIn("cirros-0.6.3-x86_64-disk.img", DRIVER)
+        self.assertIn("7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b", DRIVER)
+        self.assertIn('"$PROBE_BASE_IMAGE"', DRIVER)
+        self.assertIn('"$PROBE_BASE_IMAGE" "$PROBE_KEY.pub"', DRIVER)
 
 
 if __name__ == "__main__":
