@@ -1286,7 +1286,18 @@ PY
   echo "$realm_id" >"$EVIDENCE/plans/host-$host-realm-id.txt"
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json" >"$EVIDENCE/plans/host-$host-fabric-plan.json" || fail "current Fabric plan snapshot failed on $host" "OWNERSHIP_DEFECT"
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json" >"$EVIDENCE/plans/host-$host-execution-plans.json" || fail "network execution plan snapshot failed on $host" "OWNERSHIP_DEFECT"
-  ssh_vm "$address" 'sudo wg show all transfer; sudo ip -d -j link' >"$EVIDENCE/wireguard/host-$host-before-traffic.txt" || fail "WireGuard/VXLAN snapshot failed on $host" "ENVIRONMENT_GAP"
+  fabric_ns="$(python3 - "$EVIDENCE/plans/host-$host-ownership.json" <<'PYNS'
+import json,sys
+print(json.load(open(sys.argv[1]))['fabric']['namespace'])
+PYNS
+)" || fail "Fabric namespace identity missing on host-$host" "OWNERSHIP_DEFECT"
+  [[ "$fabric_ns" =~ ^[a-zA-Z0-9_.-]{1,15}$ ]] || fail "invalid Fabric namespace identity on host-$host" "OWNERSHIP_DEFECT"
+  printf '%s\n' "$fabric_ns" >"$EVIDENCE/wireguard/host-$host-namespace.txt"
+  host_dir="$EVIDENCE/compute-$host"
+  ssh_vm "$address" "sudo ip netns exec '$fabric_ns' ip -j -d link; sudo ip netns exec '$fabric_ns' bridge -j link; sudo ip netns exec '$fabric_ns' bridge -j fdb; sudo ip netns exec '$fabric_ns' wg show; sudo ip netns exec '$fabric_ns' ip route; sudo ip netns exec '$fabric_ns' nft list ruleset" >"$host_dir/fabric-runtime-state.txt" \
+    || fail "Fabric namespace runtime evidence failed for host-$host" "ENVIRONMENT_GAP"
+  ssh_vm "$address" "sudo ip netns exec '$fabric_ns' wg show all transfer; sudo ip netns exec '$fabric_ns' ip -d -j link" \
+    >"$EVIDENCE/wireguard/host-$host-before-traffic.txt" || fail "WireGuard/VXLAN snapshot failed on host-$host" "ENVIRONMENT_GAP"
 done
 
 # Confirm HER converged to every remote participant in each durable current
@@ -1310,7 +1321,9 @@ done
 # never enter the evidence bundle.
 for host in a b c; do
   address="${MGMT_IP[$host]}"
-  ssh_vm "$address" 'sudo wg show all transfer' >"$EVIDENCE/wireguard/host-$host-after-traffic.txt" || fail "WireGuard counters unavailable on $host" "DATAPLANE_DEFECT"
+  fabric_ns="$(cat "$EVIDENCE/wireguard/host-$host-namespace.txt")"
+  ssh_vm "$address" "sudo ip netns exec '$fabric_ns' wg show all transfer" >"$EVIDENCE/wireguard/host-$host-after-traffic.txt" \
+    || fail "Fabric namespace WireGuard counters unavailable on host-$host" "DATAPLANE_DEFECT"
 done
 python3 - "$EVIDENCE/wireguard" <<'PY' || fail "WireGuard traffic counters did not grow" "DATAPLANE_DEFECT"
 import glob,sys

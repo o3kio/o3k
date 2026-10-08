@@ -127,6 +127,12 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('grep -Fq "IP6 $ll."', preflight)
         self.assertNotIn("packets captured", preflight)
 
+    def test_fabric_wireguard_counters_use_owned_fabric_namespace(self):
+        self.assertIn("sudo ip netns exec '$fabric_ns' wg show all transfer", DRIVER)
+        self.assertIn("host-$host-namespace.txt", DRIVER)
+        self.assertNotIn("ssh_vm \"$address\" 'sudo wg show all transfer'", DRIVER)
+        self.assertIn("sudo ip netns exec '$fabric_ns' ip -d -j link", DRIVER)
+
     def test_link_local_readiness_collects_local_evidence_before_bounded_probe(self):
         start = DRIVER.index("prepare_guest_control() {")
         end = DRIVER.index("\n}\n\nguest_control_command()", start)
