@@ -198,41 +198,58 @@ def save_snapshot(args: argparse.Namespace, ev: pathlib.Path, h: str, topo: dict
 
 
 def configure_forward_trace(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> None:
-    """Trace B DHCP through A's Fabric and root bridges; rules set metadata only."""
+    """Trace DHCP at B/A bridge ingress, local input, and forwarding hooks."""
     topo = maps["a"]
     owner_ns = f"o3k-dhcp-boundary-trace:{args.run_id}:namespace"
     owner_root = f"o3k-dhcp-boundary-trace:{args.run_id}:root"
     ns_exists = ssh(args, "a", f"sudo ip netns exec {shlex.quote(topo['namespace'])} nft list table bridge o3k-dhcp-trace >/dev/null 2>&1; echo $?", check=False).strip()
-    root_exists = ssh(args, "a", "sudo nft list table bridge o3k-dhcp-root-trace >/dev/null 2>&1; echo $?", check=False).strip()
-    if ns_exists == "0" or root_exists == "0":
+    root_exists = {h: ssh(args, h, "sudo nft list table bridge o3k-dhcp-root-trace >/dev/null 2>&1; echo $?", check=False).strip()
+                   for h in "ab"}
+    if ns_exists == "0" or any(value == "0" for value in root_exists.values()):
         raise RuntimeError("refusing to reuse a pre-existing bridge trace table")
-    remote_dir = f"/var/lib/o3k-fabric-v3/{args.run_id}/network/dhcp-boundary/a/trace"
+    remote_dirs = {h: f"/var/lib/o3k-fabric-v3/{args.run_id}/network/dhcp-boundary/{h}/trace"
+                   for h in "ab"}
     ns_batch = (
         f'add table bridge o3k-dhcp-trace {{ comment "{owner_ns}"; }}\n'
         f'add chain bridge o3k-dhcp-trace forward {{ type filter hook forward priority -600; policy accept; comment "{owner_ns}"; }}\n'
         f'add rule bridge o3k-dhcp-trace forward iifname "{topo["vxlan"]}" ether saddr {maps["b"]["guest_mac"]} ip saddr 0.0.0.0 udp sport 68 udp dport 67 meta nftrace set 1 comment "{owner_ns}"\n'
     )
-    root_batch = (
-        f'add table bridge o3k-dhcp-root-trace {{ comment "{owner_root}"; }}\n'
-        f'add chain bridge o3k-dhcp-root-trace forward {{ type filter hook forward priority -600; policy accept; comment "{owner_root}"; }}\n'
-        f'add rule bridge o3k-dhcp-root-trace forward iifname "{topo["root_veth"]}" ether saddr {maps["b"]["guest_mac"]} ip saddr 0.0.0.0 udp sport 68 udp dport 67 meta nftrace set 1 comment "{owner_root}"\n'
-    )
+    root_batches = {}
+    for h in "ab":
+        root_topo = maps[h]
+        ingress = root_topo["tap"] if h == "b" else root_topo["root_veth"]
+        root_batches[h] = (
+            f'add table bridge o3k-dhcp-root-trace {{ comment "{owner_root}:{h}"; }}\n'
+            f'add chain bridge o3k-dhcp-root-trace prerouting {{ type filter hook prerouting priority -600; policy accept; comment "{owner_root}:{h}"; }}\n'
+            f'add chain bridge o3k-dhcp-root-trace input {{ type filter hook input priority -600; policy accept; comment "{owner_root}:{h}"; }}\n'
+            f'add chain bridge o3k-dhcp-root-trace forward {{ type filter hook forward priority -600; policy accept; comment "{owner_root}:{h}"; }}\n'
+            f'add rule bridge o3k-dhcp-root-trace prerouting iifname "{ingress}" ether saddr {maps["b"]["guest_mac"]} ip saddr 0.0.0.0 udp sport 68 udp dport 67 meta nftrace set 1 comment "{owner_root}:{h}:prerouting"\n'
+            f'add rule bridge o3k-dhcp-root-trace input iifname "{ingress}" ether saddr {maps["b"]["guest_mac"]} ip saddr 0.0.0.0 udp sport 68 udp dport 67 meta nftrace set 1 comment "{owner_root}:{h}:input"\n'
+            f'add rule bridge o3k-dhcp-root-trace forward iifname "{ingress}" ether saddr {maps["b"]["guest_mac"]} ip saddr 0.0.0.0 udp sport 68 udp dport 67 meta nftrace set 1 comment "{owner_root}:{h}:forward"\n'
+        )
     write_json(ev / "topology" / "trace-manifest.json", {
         "host": "a", "namespace": topo["namespace"], "vxlan": topo["vxlan"],
         "root_veth": topo["root_veth"], "source_mac": maps["b"]["guest_mac"],
         "table": "o3k-dhcp-trace", "root_table": "o3k-dhcp-root-trace",
-        "owner_comment": owner_ns, "root_owner_comment": owner_root, "remote_dir": remote_dir,
+        "owner_comment": owner_ns, "root_owner_comment": owner_root,
+        "remote_dirs": remote_dirs, "root_trace_hosts": ["a", "b"],
+        "root_ingress": {h: maps[h]["tap"] if h == "b" else maps[h]["root_veth"] for h in "ab"},
     })
     remote_script(args, "a", f"""set -e
-install -d -m 0700 {shlex.quote(remote_dir)}
+install -d -m 0700 {shlex.quote(remote_dirs['a'])}
 ip netns exec {shlex.quote(topo['namespace'])} nft -f - <<'NFT'
 {ns_batch}NFT
+nohup ip netns exec {shlex.quote(topo['namespace'])} nft monitor trace >{shlex.quote(remote_dirs['a'] + '/trace.log')} 2>&1 </dev/null &
+echo $! >{shlex.quote(remote_dirs['a'] + '/trace.pid')}
+""")
+    for h in "ab":
+        root_dir = remote_dirs[h]
+        remote_script(args, h, f"""set -e
+install -d -m 0700 {shlex.quote(root_dir)}
 nft -f - <<'NFT'
-{root_batch}NFT
-nohup ip netns exec {shlex.quote(topo['namespace'])} nft monitor trace >{shlex.quote(remote_dir + '/trace.log')} 2>&1 </dev/null &
-echo $! >{shlex.quote(remote_dir + '/trace.pid')}
-nohup nft monitor trace >{shlex.quote(remote_dir + '/root-trace.log')} 2>&1 </dev/null &
-echo $! >{shlex.quote(remote_dir + '/root-trace.pid')}
+{root_batches[h]}NFT
+nohup nft monitor trace >{shlex.quote(root_dir + '/root-trace.log')} 2>&1 </dev/null &
+echo $! >{shlex.quote(root_dir + '/root-trace.pid')}
 """)
 
 
@@ -241,9 +258,8 @@ def stop_forward_trace(args: argparse.Namespace, ev: pathlib.Path) -> None:
     if not manifest.exists():
         return
     info = json.loads(manifest.read_text())
-    remote_dir = info["remote_dir"]
-    script = f"""set +e
-stop_monitor() {{
+    remote_dirs = info["remote_dirs"]
+    monitor_stop = r"""stop_monitor() {
   pid_file="$1"
   pid=$(cat "$pid_file" 2>/dev/null || true)
   case "$pid" in *[!0-9]*|'') return 0;; esac
@@ -254,21 +270,32 @@ stop_monitor() {{
     for _ in $(seq 1 20); do test ! -e "/proc/$pid" && return 0; sleep 0.1; done
     return 1
   fi
-}}
-stop_monitor {shlex.quote(remote_dir + '/trace.pid')}
-stop_monitor {shlex.quote(remote_dir + '/root-trace.pid')}
-ip netns exec {shlex.quote(info['namespace'])} nft list table bridge o3k-dhcp-trace >{shlex.quote(remote_dir + '/table.txt')} 2>&1
-if grep -Fq {shlex.quote(info['owner_comment'])} {shlex.quote(remote_dir + '/table.txt')}; then
+}
+"""
+    script = f"""set +e
+{monitor_stop}
+stop_monitor {shlex.quote(remote_dirs['a'] + '/trace.pid')}
+ip netns exec {shlex.quote(info['namespace'])} nft list table bridge o3k-dhcp-trace >{shlex.quote(remote_dirs['a'] + '/table.txt')} 2>&1
+if grep -Fq {shlex.quote(info['owner_comment'])} {shlex.quote(remote_dirs['a'] + '/table.txt')}; then
   ip netns exec {shlex.quote(info['namespace'])} nft delete table bridge o3k-dhcp-trace
-fi
-nft list table bridge o3k-dhcp-root-trace >{shlex.quote(remote_dir + '/root-table.txt')} 2>&1
-if grep -Fq {shlex.quote(info['root_owner_comment'])} {shlex.quote(remote_dir + '/root-table.txt')}; then
-  nft delete table bridge o3k-dhcp-root-trace
 fi
 """
     remote_script(args, "a", script)
-    for name in ("trace.log", "table.txt", "root-trace.log", "root-table.txt"):
-        content = ssh(args, "a", f"sudo cat {shlex.quote(remote_dir + '/' + name)}", check=False)
+    for h in info["root_trace_hosts"]:
+        root_dir = remote_dirs[h]
+        remote_script(args, h, f"""set +e
+{monitor_stop}
+stop_monitor {shlex.quote(root_dir + '/root-trace.pid')}
+nft list table bridge o3k-dhcp-root-trace >{shlex.quote(root_dir + '/root-table.txt')} 2>&1
+if grep -Fq {shlex.quote(info['root_owner_comment'] + ':' + h)} {shlex.quote(root_dir + '/root-table.txt')}; then
+  nft delete table bridge o3k-dhcp-root-trace
+fi
+""")
+        for name in ("root-trace.log", "root-table.txt"):
+            content = ssh(args, h, f"sudo cat {shlex.quote(root_dir + '/' + name)}", check=False)
+            (ev / "topology" / f"{h}-{name}").write_text(content)
+    for name in ("trace.log", "table.txt"):
+        content = ssh(args, "a", f"sudo cat {shlex.quote(remote_dirs['a'] + '/' + name)}", check=False)
         (ev / "topology" / f"a-{name}").write_text(content)
 
 
@@ -572,6 +599,61 @@ def tcpdump_packet_blocks(text: str) -> list[str]:
             for index, start in enumerate(starts)]
 
 
+def correlated_discover_xids(captures: dict[str, str], source_mac: str) -> dict[str, set[str]]:
+    """Return XIDs only where MAC and DHCP option 53 share one packet block."""
+    result: dict[str, set[str]] = {}
+    for label, text in captures.items():
+        xids = set()
+        for block in tcpdump_packet_blocks(text):
+            if source_mac.lower() not in block.lower():
+                continue
+            if not re.search(r"DHCP-Message[^\n]*Discover", block, re.I):
+                continue
+            match = re.search(r"\bxid\s+(0x[0-9a-f]+)", block, re.I)
+            if match:
+                xids.add(match.group(1).lower())
+        result[label] = xids
+    return result
+
+
+def trace_packet_seen(path: pathlib.Path, *, hook: str, source_mac: str,
+                      ingress: str | None = None, egress: str | None = None) -> bool:
+    """Match a bounded bridge nft trace event for the DHCP source/interface."""
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        if " packet:" not in line or "bridge o3k-dhcp-root-trace " not in line:
+            continue
+        if f"bridge o3k-dhcp-root-trace {hook} packet:" not in line:
+            continue
+        if (f"ether saddr {source_mac.lower()}" not in line.lower()
+                or "ip saddr 0.0.0.0" not in line
+                or "udp sport 68 udp dport 67" not in line):
+            continue
+        if ingress is not None and f'iif "{ingress}"' not in line:
+            continue
+        if egress is not None and f'oif "{egress}"' not in line:
+            continue
+        return True
+    return False
+
+
+def namespace_forward_seen(path: pathlib.Path, *, source_mac: str,
+                           ingress: str, egress: str) -> bool:
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return False
+    return any(" packet:" in line and "bridge o3k-dhcp-trace forward packet:" in line
+               and f'ether saddr {source_mac.lower()}' in line.lower()
+               and "ip saddr 0.0.0.0" in line
+               and "udp sport 68 udp dport 67" in line
+               and f'iif "{ingress}"' in line and f'oif "{egress}"' in line
+               for line in lines)
+
+
 def nft_drop_deltas(ev: pathlib.Path) -> dict:
     result = {}
     for h in "abc":
@@ -684,21 +766,26 @@ def action_finish(args: argparse.Namespace) -> int:
             ("a", "root-veth"), ("a", "realm-bridge"),
         ]
         b_tap = ev / "b" / "tap.pcap"
-        b_tap_text = call(["tcpdump", "-nn", "-e", "-tt", "-vvv", "-r", str(b_tap)], check=False)
-        xid_matches = set(re.findall(r"\bxid\s+(0x[0-9a-f]+)", b_tap_text, re.I))
-        if maps["b"]["guest_mac"].lower() not in b_tap_text.lower() or not xid_matches:
-            raise RuntimeError("B TAP capture did not prove a canonical-MAC DHCPDISCOVER with a transaction ID")
-        discover_blocks = [block for block in tcpdump_packet_blocks(b_tap_text)
-                           if maps["b"]["guest_mac"].lower() in block.lower()
-                           and re.search(r"DHCP-Message[^\n]*Discover", block, re.I)]
-        discover_xids = {m.group(1).lower() for block in discover_blocks
-                         if (m := re.search(r"\bxid\s+(0x[0-9a-f]+)", block, re.I))}
+        packet_sources = ("tap", "realm-bridge", "root-veth", "fabric-veth",
+                          "fabric-bridge", "vxlan")
+        decoded_sources = {}
+        for label in packet_sources:
+            pcap = ev / "b" / f"{label}.pcap"
+            decoded = call(["tcpdump", "-nn", "-e", "-tt", "-vvv", "-r", str(pcap)], check=False)
+            decoded_sources[label] = decoded
+        discover_by_source = correlated_discover_xids(decoded_sources, maps["b"]["guest_mac"])
+        discover_xids = set().union(*discover_by_source.values())
         if len(discover_xids) != 1:
-            raise RuntimeError(f"bounded B window did not contain exactly one DHCP transaction ID: {sorted(discover_xids)}")
+            raise RuntimeError(f"bounded B window did not contain exactly one canonical-MAC DHCP transaction ID across observed capture points: {sorted(discover_xids)}")
         xid = next(iter(discover_xids))
-        (ev / "b" / "tap.decoded.txt").write_text(b_tap_text)
+        source = next((label for label in packet_sources if xid in discover_by_source[label]), None)
+        (ev / "b" / "tap.decoded.txt").write_text(decoded_sources["tap"])
+        write_json(ev / "topology" / "dhcp-packet-source.json", {
+            "transaction_id": xid, "canonical_mac": maps["b"]["guest_mac"],
+            "capture_source": source, "tap_capture_valid": xid in decoded_sources["tap"].lower(),
+            "capture_sources_checked": list(packet_sources),
+        })
         observations = []
-        first_missing = None
         for h, label in sequence:
             mac = maps["b"]["guest_mac"]
             transport = label in {"wireguard", "underlay"}
@@ -713,22 +800,33 @@ def action_finish(args: argparse.Namespace) -> int:
                 raw = p.read_text(errors="replace") if p.exists() else ""
                 seen = "4789" in raw if label == "wireguard" else "65001" in raw
                 observations[-1]["packet_seen"] = seen
-            if not seen:
-                first_missing = (h, label)
-                break
-        # Capture every side's packet observation even after identifying the first
-        # missing boundary, for evidence review; decision remains at first absence.
-        if first_missing:
-            idx = len(observations)
-            for h, label in sequence[idx:]:
-                transport = label in {"wireguard", "underlay"}
-                seen, excerpt = packet_seen(ev / h / f"{label}.pcap", maps["b"]["guest_mac"],
-                                            "4789" if transport else "Discover", None if transport else xid)
-                if label in {"wireguard", "underlay"}:
-                    decoded = ev / h / f"{label}.decoded.txt"
-                    raw = decoded.read_text(errors="replace") if decoded.exists() else ""
-                    seen = ("4789" in raw) if label == "wireguard" else ("65001" in raw)
-                observations.append({"host": h, "boundary": label, "packet_seen": seen, "excerpt": excerpt})
+        # nft trace is used only to resolve known packet-socket blind spots. Each
+        # trace is scoped to this run's unique source MAC and the bounded DHCP
+        # capture window; all other boundaries require the captured packet.
+        root_trace = {h: ev / "topology" / f"{h}-root-trace.log" for h in "ab"}
+        ns_trace = ev / "topology" / "a-trace.log"
+        trace_checks = {
+            ("b", "tap"): trace_packet_seen(root_trace["b"], hook="prerouting",
+                source_mac=maps["b"]["guest_mac"], ingress=maps["b"]["tap"]),
+            ("b", "realm-bridge"): trace_packet_seen(root_trace["b"], hook="forward",
+                source_mac=maps["b"]["guest_mac"], ingress=maps["b"]["tap"]),
+            ("b", "root-veth"): trace_packet_seen(root_trace["b"], hook="forward",
+                source_mac=maps["b"]["guest_mac"], egress=maps["b"]["root_veth"]),
+            ("a", "fabric-veth"): namespace_forward_seen(ns_trace,
+                source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["vxlan"],
+                egress=maps["a"]["fabric_veth"]),
+            ("a", "root-veth"): trace_packet_seen(root_trace["a"], hook="prerouting",
+                source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["root_veth"]),
+            ("a", "realm-bridge"): trace_packet_seen(root_trace["a"], hook="input",
+                source_mac=maps["b"]["guest_mac"], ingress=maps["a"]["root_veth"]),
+        }
+        for item in observations:
+            key = (item["host"], item["boundary"])
+            if not item["packet_seen"] and trace_checks.get(key, False):
+                item["packet_seen"] = True
+                item["observation_source"] = "run-owned nft trace; source MAC, DHCP UDP tuple, interface, and bounded solicitation window matched"
+            else:
+                item["observation_source"] = "pcap"
         present_index = next((i for i, item in enumerate(observations) if not item["packet_seen"]), len(observations))
         present = sequence[present_index - 1] if present_index > 0 else None
         absent = sequence[present_index] if present_index < len(sequence) else None
@@ -782,6 +880,8 @@ def action_finish(args: argparse.Namespace) -> int:
                   "counter_summary": counter_summary,
                   "wireguard_transfer_deltas": wireguard_deltas,
                   "dhcp_transaction_id": xid,
+                  "dhcp_packet_capture_source": source,
+                  "trace_observations": {f"{h}:{label}": value for (h, label), value in trace_checks.items()},
                   "transport_capture_correlation": "B peer IP/port filtered; same bounded DHCP retry window and WireGuard transfer-counter deltas",
                   "b_her_entry_for_a": True, "b_wireguard_peer_for_a": True,
                   "stop_at_first_failure": True}
