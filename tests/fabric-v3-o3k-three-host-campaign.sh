@@ -692,68 +692,6 @@ done
 printf 'server,host,tenant_ip,guest_mac\n' >"$EVIDENCE/canonical/endpoints.csv"
 for host in a b c; do printf '%s,host-%s,%s,%s\n' "$host" "$host" "${TENANT_IP[$host]}" "${TENANT_MAC[$host]}" >>"$EVIDENCE/canonical/endpoints.csv"; done
 
-guest_tunnel_command() {
-  local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" bridge="${REALM_BRIDGE[$1]}" ipv6="${GUEST_IPV6[$1]}"
-  local port tunnel_pid known_alias keyscan_file rc
-  LAST_GUEST_CHANNEL_ERROR=0
-  port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
-  known_alias="o3k-guest-$host"
-  tunnel_log="$EVIDENCE/compute-$host/guest-ssh-tunnel.log"
-  ssh "${ssh_opts[@]}" -o ExitOnForwardFailure=yes -N -L "127.0.0.1:$port:[$ipv6%$bridge]:22" "$SSH_USER@$address" >"$tunnel_log" 2>&1 &
-  tunnel_pid=$!
-  cleanup_tunnel() { kill "$tunnel_pid" 2>/dev/null || true; wait "$tunnel_pid" 2>/dev/null || true; }
-  for _ in $(seq 1 40); do
-    if timeout 1 bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1; then break; fi
-    if ! kill -0 "$tunnel_pid" 2>/dev/null; then cat "$tunnel_log" >&2; cleanup_tunnel; LAST_GUEST_CHANNEL_ERROR=1; return 1; fi
-    sleep 0.25
-  done
-  if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1; then cleanup_tunnel; LAST_GUEST_CHANNEL_ERROR=1; return 1; fi
-  keyscan_file="$EVIDENCE/compute-$host/guest-keyscan.tmp"
-  ssh-keyscan -T 4 -p "$port" 127.0.0.1 2>/dev/null >"$keyscan_file" || { cleanup_tunnel; LAST_GUEST_CHANNEL_ERROR=1; return 1; }
-  if ! python3 - "$keyscan_file" "$KNOWN_HOSTS" "$known_alias" "$port" <<'PY'
-import sys
-src,dst,alias,port=sys.argv[1:]
-lines=[]
-for line in open(src):
-    fields=line.split()
-    if len(fields)>=3: lines.append(f'{alias} {fields[1]} {fields[2]}\n')
-assert lines
-with open(dst,'a') as out: out.writelines(lines)
-PY
-  then cleanup_tunnel; LAST_GUEST_CHANNEL_ERROR=1; return 1; fi
-  rm -f "$keyscan_file"
-  python3 - "$KNOWN_HOSTS" "$SSH_KEY" "$known_alias" "$port" "$command" "$EVIDENCE/$label" <<'PY'
-import pexpect,sys
-known,key,alias,port,command,output=sys.argv[1:]
-wrapped=f'{command}; rc=$?; printf "\\n__O3K_RC_%s__\\n" "$rc"'
-args=['-tt','-i',key,'-p',port,'-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes','-o',f'HostKeyAlias={alias}','-o',f'UserKnownHostsFile={known}','-o','PreferredAuthentications=password','-o','PubkeyAuthentication=no',f'cirros@127.0.0.1',wrapped]
-p=pexpect.spawn('ssh',args,encoding='utf-8',timeout=45)
-with open(output,'w',encoding='utf-8') as f:
-    p.logfile_read=f
-    try:
-        for _ in range(3):
-            i=p.expect([r"(?i)password:",r'__O3K_RC_([0-9]+)__',pexpect.EOF])
-            if i==0:
-                p.sendline('gocubsgo')
-                continue
-            if i==1:
-                rc=int(p.match.group(1)); p.expect(pexpect.EOF,timeout=8)
-                if rc: raise SystemExit(rc)
-                break
-            raise RuntimeError('guest SSH closed before command completed')
-        else: raise RuntimeError('guest SSH authentication prompt repeated')
-    except (pexpect.EOF,pexpect.TIMEOUT,OSError) as exc:
-        f.write(f'\nGUEST_CHANNEL_ERROR: {type(exc).__name__}\n')
-        raise SystemExit(254)
-    finally:
-        if p.isalive(): p.close(force=True)
-PY
-  rc=$?
-  cleanup_tunnel
-  if (( rc == 254 )); then LAST_GUEST_CHANNEL_ERROR=1; fi
-  return "$rc"
-}
-
 console_command() {
   local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" domain
   domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
@@ -1095,6 +1033,21 @@ PY
 echo 'FABRIC DHCP DORA: PASS (one authority; endpoint bindings A/B/C)' \
   >"$EVIDENCE/attachments/dhcp-dora-result.txt"
 
+# Packet probes must use an independent serial command channel. Never depend
+# on SSH over the tenant network to execute acceptance traffic.
+for host in a b c; do
+  console_command "$host" true "compute-$host/serial-preflight-true.txt" \
+    || fail "serial guest shell preflight failed on $host" "HARNESS_GAP"
+  grep -Fq '__O3K_RC_0__' "$EVIDENCE/compute-$host/serial-preflight-true.txt" \
+    || fail "serial true command exit marker absent on $host" "HARNESS_GAP"
+  console_command "$host" "ip -o -4 addr show dev eth0" "compute-$host/serial-preflight-address.txt" \
+    || fail "serial guest address preflight failed on $host" "HARNESS_GAP"
+  grep -Fq "${TENANT_IP[$host]}/" "$EVIDENCE/compute-$host/serial-preflight-address.txt" \
+    || fail "guest $host lacks its canonical DHCP address on eth0" "HARNESS_GAP"
+  printf 'serial_console=PASS\nguest_shell=PASS\ntrue=PASS\ncanonical_eth0_ipv4=%s\n' \
+    "${TENANT_IP[$host]}" >"$EVIDENCE/compute-$host/serial-command-channel.txt"
+done
+
 guest_failure_class() {
   local phase_class="$1"
   if (( LAST_GUEST_CHANNEL_ERROR )); then printf 'HARNESS_GAP\n'; else printf '%s\n' "$phase_class"; fi
@@ -1103,21 +1056,21 @@ guest_failure_class() {
 # Cold neighbor resolution and the six required tenant-address ICMP flows.
 for pair in a:b b:a a:c c:a b:c c:b; do
   from="${pair%%:*}"; to="${pair##*:}"
-  guest_tunnel_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "icmp/$from-to-$to.txt" || fail "ICMP $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-  guest_tunnel_command "$from" "ip neigh show ${TENANT_IP[$to]}" "arp/$from-to-$to.txt" || fail "ARP observation $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+  console_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "icmp/$from-to-$to.txt" || fail "ICMP $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+  console_command "$from" "ip neigh show ${TENANT_IP[$to]}" "arp/$from-to-$to.txt" || fail "ARP observation $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
   grep -Fqi "${TENANT_MAC[$to]}" "$EVIDENCE/arp/$from-to-$to.txt" || fail "ARP $from->$to resolved to wrong MAC" "DATAPLANE_DEFECT"
 done
 
 # Bounded TCP and UDP listeners run inside B/C CirrOS guests; sender commands
 # originate inside A over tenant addresses.
-guest_tunnel_command b 'rm -f /tmp/o3k-tcp-data; nohup busybox nc -l -p 18081 >/tmp/o3k-tcp-data 2>&1 </dev/null &' tcp-listener.txt || fail "TCP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command b 'rm -f /tmp/o3k-tcp-data; nohup busybox nc -l -p 18081 >/tmp/o3k-tcp-data 2>&1 </dev/null &' tcp-listener.txt || fail "TCP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
 sleep 1
-guest_tunnel_command a "echo o3k-tcp-$RUN_ID | busybox nc -w 5 ${TENANT_IP[b]} 18081" tcp/sender.txt || fail "TCP A->B failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-guest_tunnel_command b 'grep -F o3k-tcp- /tmp/o3k-tcp-data' tcp/receiver.txt || fail "TCP payload did not arrive at B" "$(guest_failure_class DATAPLANE_DEFECT)"
-guest_tunnel_command c 'rm -f /tmp/o3k-udp-data; nohup busybox nc -u -l -p 18082 >/tmp/o3k-udp-data 2>&1 </dev/null &' udp-listener.txt || fail "UDP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command a "echo o3k-tcp-$RUN_ID | busybox nc -w 5 ${TENANT_IP[b]} 18081" tcp/sender.txt || fail "TCP A->B failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command b 'grep -F o3k-tcp- /tmp/o3k-tcp-data' tcp/receiver.txt || fail "TCP payload did not arrive at B" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command c 'rm -f /tmp/o3k-udp-data; nohup busybox nc -u -l -p 18082 >/tmp/o3k-udp-data 2>&1 </dev/null &' udp-listener.txt || fail "UDP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
 sleep 1
-guest_tunnel_command a "echo o3k-udp-$RUN_ID | busybox nc -u -w 3 ${TENANT_IP[c]} 18082" udp/sender.txt || fail "UDP A->C failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-guest_tunnel_command c 'sleep 1; grep -F o3k-udp- /tmp/o3k-udp-data' udp/receiver.txt || fail "UDP payload did not arrive at C" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command a "echo o3k-udp-$RUN_ID | busybox nc -u -w 3 ${TENANT_IP[c]} 18082" udp/sender.txt || fail "UDP A->C failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command c 'sleep 1; grep -F o3k-udp- /tmp/o3k-udp-data' udp/receiver.txt || fail "UDP payload did not arrive at C" "$(guest_failure_class DATAPLANE_DEFECT)"
 
 for host in a b c; do
   address="${MGMT_IP[$host]}"
@@ -1195,7 +1148,7 @@ for _ in $(seq 1 120); do curl -fsS "$BASE/healthz" >/dev/null 2>&1 && break; ki
 curl -fsS "$BASE/readyz" >"$EVIDENCE/restart/ready.json" || fail "controller did not become ready after restart" "DURABLE_RECONCILIATION_GAP"
 for pair in a:b b:a a:c c:a b:c c:b; do
   from="${pair%%:*}"; to="${pair##*:}"
-  guest_tunnel_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "restart/$from-to-$to.txt" || fail "post-controller-restart ICMP $from->$to failed" "$(guest_failure_class DURABLE_RECONCILIATION_GAP)"
+  console_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "restart/$from-to-$to.txt" || fail "post-controller-restart ICMP $from->$to failed" "$(guest_failure_class DURABLE_RECONCILIATION_GAP)"
 done
 api "$BASE/v2.1/$PROJECT_ID/servers" >"$EVIDENCE/restart/servers.json" || fail "API unavailable after controller restart" "DURABLE_RECONCILIATION_GAP"
 for host in a b c; do grep -Fq "$PREFIX-server-$host" "$EVIDENCE/restart/servers.json" || fail "server $host missing after controller recovery" "DURABLE_RECONCILIATION_GAP"; done
@@ -1229,8 +1182,8 @@ for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
     hosts={e["selected_host"] for e in plan.get("directory",{}).get("entries",[])}
     assert hosts=={"host-a","host-b"}, (path,hosts)
 PY
-guest_tunnel_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
-guest_tunnel_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" endpoint-removal/b-to-a.txt || fail "B/A failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
+console_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" endpoint-removal/b-to-a.txt || fail "B/A failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
 
 # Supported API teardown; provider state is never manually repaired/deleted.
 for index in 1 0; do
