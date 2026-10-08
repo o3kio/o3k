@@ -906,11 +906,14 @@ PYNS
   scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" \
     "$SSH_USER@$address:/tmp/$RUN_ID-$host-fabric.pcap" "$EVIDENCE/management/guest-$host-fabric-control.pcap" \
     || fail "guest $host Fabric capture retrieval failed" "HARNESS_GAP"
-  if grep -Eq '^[0-9]+ packets captured' "$EVIDENCE/management/guest-$host-fabric-control-capture.txt"; then
+  if grep -Fq "IP6 $ll." "$EVIDENCE/management/guest-$host-fabric-control-capture.txt"; then
     fail "guest $host control packet entered VXLAN/WireGuard namespace" "HARNESS_GAP"
   fi
-  grep -Eq '^[0-9]+ packets captured' "$EVIDENCE/management/guest-$host-local-control-capture.txt" \
-    || fail "guest $host local Realm bridge did not observe control SSH" "HARNESS_GAP"
+  if ! grep -Fq "IP6 " "$EVIDENCE/management/guest-$host-local-control-capture.txt" \
+    || ! grep -Fq "> $ll.22:" "$EVIDENCE/management/guest-$host-local-control-capture.txt" \
+    || ! grep -Fq "$ll.22 >" "$EVIDENCE/management/guest-$host-local-control-capture.txt"; then
+    fail "guest $host local Realm bridge did not observe control SSH" "HARNESS_GAP"
+  fi
   printf 'guest_control=PASS\ncontrol_destination=%s\ncontrol_scope=%s\ncanonical_ipv4=%s\nlocal_bridge_capture=PASS\nfabric_namespace_capture=EMPTY\n' \
     "$ll" "$bridge" "${TENANT_IP[$host]}" >"$EVIDENCE/compute-$host/guest-control-result.txt"
   serial_report="$(python3 "$ROOT_DIR/tests/fabric-v3-guest-control.py" serial "$EVIDENCE/compute-$host/domain.xml")" \

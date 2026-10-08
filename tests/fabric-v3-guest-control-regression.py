@@ -118,6 +118,15 @@ class GuestControlRegression(unittest.TestCase):
         self.assertEqual(result.stdout, "guest-command-ok")
         self.assertEqual(result.returncode, 1)
 
+    def test_local_control_capture_checks_packets_not_live_capture_summary(self):
+        start = DRIVER.index("guest_control_preflight() {")
+        end = DRIVER.index("\n}\n\ncreate_server a", start)
+        preflight = DRIVER[start:end]
+        self.assertIn('grep -Fq "> $ll.22:"', preflight)
+        self.assertIn('grep -Fq "$ll.22 >"', preflight)
+        self.assertIn('grep -Fq "IP6 $ll."', preflight)
+        self.assertNotIn("packets captured", preflight)
+
     def test_link_local_readiness_collects_local_evidence_before_bounded_probe(self):
         start = DRIVER.index("prepare_guest_control() {")
         end = DRIVER.index("\n}\n\nguest_control_command()", start)
