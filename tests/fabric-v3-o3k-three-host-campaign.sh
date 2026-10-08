@@ -881,17 +881,42 @@ data=json.load(open(manifest)); data.update({
 })
 json.dump(data,open(manifest,'w'),sort_keys=True,indent=2); open(manifest,'a').write('\n')
 PY
-  # Start one explicit, bounded DHCPv4 client transaction after all captures
-  # are live. CirrOS in this profile uses dhcpcd (not udhcpc); stop its
-  # background client and run dhcpcd in the foreground with a timeout so the
-  # packet window is deterministic and no address is assigned manually.
-  # The single-quoted command is evaluated by the guest shell over serial.
-  # shellcheck disable=SC2016
-  console_command b \
-    'sudo dhcpcd -k eth0 >/dev/null 2>&1 || true; sudo dhcpcd -4 -d -t 5 -B eth0; rc=$?; echo __O3K_DHCP_ATTEMPT_RC_$rc__; exit 0' \
-    compute-b/dhcp-attempt.log \
-    || fail "could not trigger one bounded DHCPv4 attempt from guest B" "HARNESS_GAP"
-  sleep 8
+  # The nested domains expose file-backed serial devices, not an interactive
+  # console. Trigger a fresh B boot through the supported compute HTTP action;
+  # B has no DHCP lease yet, so its normal boot client must issue DISCOVER.
+  # Preserve both the exact request/response and the bounded state poll.
+  python3 - "$EVIDENCE/api/server-b-dhcp-trigger.request.json" <<'PY'
+import json,sys
+json.dump({"reboot":{"type":"HARD"}},open(sys.argv[1],"w"),sort_keys=True)
+open(sys.argv[1],"a").write("\n")
+PY
+  reboot_http_status="$(curl --silent --show-error --max-time 30 \
+    --output "$EVIDENCE/api/server-b-dhcp-trigger.response.json" \
+    --write-out '%{http_code}' -X POST \
+    "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[1]}/action" \
+    -H "x-auth-token: $TOKEN" -H 'content-type: application/json' \
+    --data-binary "@$EVIDENCE/api/server-b-dhcp-trigger.request.json")" \
+    || fail "supported server-B reboot request failed at transport" "HARNESS_GAP"
+  printf '%s\n' "$reboot_http_status" >"$EVIDENCE/api/server-b-dhcp-trigger.http-status"
+  [[ "$reboot_http_status" == 202 ]] \
+    || fail "supported server-B reboot returned HTTP $reboot_http_status" "HARNESS_GAP"
+  reboot_seen_status=0
+  for _ in $(seq 1 30); do
+    api "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[1]}" \
+      >"$EVIDENCE/api/server-b-dhcp-trigger.current.json" \
+      || fail "could not observe server B after accepted reboot" "HARNESS_GAP"
+    reboot_status="$(field server.status <"$EVIDENCE/api/server-b-dhcp-trigger.current.json")"
+    printf '%s\t%s\n' "$(date -u +%FT%TZ)" "$reboot_status" \
+      >>"$EVIDENCE/api/server-b-dhcp-trigger.status-timeline.tsv"
+    [[ "$reboot_status" == REBOOT || "$reboot_status" == REBOOTING ]] && reboot_seen_status=1
+    [[ "$reboot_status" == ACTIVE ]] && break
+    [[ "$reboot_status" == ERROR ]] && fail "server B entered ERROR during DHCP trigger reboot" "HARNESS_GAP"
+    sleep 1
+  done
+  [[ "$reboot_status" == ACTIVE ]] \
+    || fail "server B did not return ACTIVE after the accepted DHCP trigger reboot" "HARNESS_GAP"
+  printf 'HTTP 202 accepted; returned ACTIVE; intermediate reboot status observed=%s\n' "$reboot_seen_status" \
+    >"$EVIDENCE/api/server-b-dhcp-trigger.result.txt"
   set +e
   run_dhcp_boundary_tool finish >"$EVIDENCE/topology/finish-result.json"
   finish_rc=$?

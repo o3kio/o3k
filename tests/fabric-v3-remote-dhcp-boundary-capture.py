@@ -369,11 +369,17 @@ def action_prepare(args: argparse.Namespace) -> int:
             base = f"{remote_dir}/{spec['label']}"
             pcap, log, pid = base + ".pcap", base + ".log", base + ".pid"
             iface_cmd = (f"ip netns exec {shlex.quote(spec['ns'])} " if spec["ns"] else "")
-            cmd = (f"{iface_cmd}timeout --signal=INT 20s tcpdump -c 20000 -i {shlex.quote(spec['iface'])} "
+            cmd = (f"{iface_cmd}timeout --signal=INT 45s tcpdump -c 20000 -i {shlex.quote(spec['iface'])} "
                    f"-nn -e -s 256 -U -w {shlex.quote(pcap)} {shlex.quote(spec['filter'])}")
             script = (f"install -d -m 0700 {shlex.quote(remote_dir)}\n"
                       f"nohup bash -c {shlex.quote(cmd + ' >' + shlex.quote(log) + ' 2>&1')} </dev/null >/dev/null 2>&1 &\n"
-                      f"echo $! > {shlex.quote(pid)}\n")
+                      f"echo $! > {shlex.quote(pid)}\n"
+                      f"ready=0\n"
+                      f"for _ in $(seq 1 25); do\n"
+                      f"  if test -s {shlex.quote(log)} && grep -Fq 'listening on ' {shlex.quote(log)}; then ready=1; break; fi\n"
+                      f"  sleep 0.2\n"
+                      f"done\n"
+                      f"if test \"$ready\" != 1; then cat {shlex.quote(log)} 2>/dev/null || true; exit 42; fi\n")
             remote_script(args, h, script)
             spec.update({"pcap": pcap, "log": log, "pid": pid, "remote_dir": remote_dir})
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(specs)) as pool:

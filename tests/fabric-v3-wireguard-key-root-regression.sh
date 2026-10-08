@@ -38,6 +38,12 @@ assert 'fabric-dhcp-ownership.json' in dhcp_realizer
 assert 'fabric-dhcp-ownership.json' in capture and 'owner.json' not in capture
 assert 'config.get("mtu") != 1390' in capture
 assert 'else {"config": None, "bindings": {}}' in capture
-assert 'dhcpcd -4 -d -t 5 -B eth0' in campaign
+assert 'server-b-dhcp-trigger.request.json' in campaign
+assert '"reboot":{"type":"HARD"}' in campaign
+assert '/servers/${SERVER_IDS[1]}/action' in campaign
+assert "reboot_http_status\" == 202" in campaign
+assert 'console_command b' not in campaign[campaign.index('if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" == 1 ]]; then'):campaign.index('if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then')]
+assert "grep -Fq 'listening on '" in capture
+assert 'timeout --signal=INT 45s tcpdump' in capture
 print('WireGuard provider key-root and runtime identity contract: PASS')
 PY
