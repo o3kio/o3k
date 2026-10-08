@@ -4,8 +4,8 @@ set -Eeuo pipefail
 # Supported-HTTP Fabric v3 three-host nested campaign. This script is test
 # harness only and refuses to run against a different product source tree.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRODUCT_SHA=c69ba39b51d26e069a39e160968c5fc3fdd5f765
-PRODUCT_TREE=953c40626a96eeb1e5868cfc169f342ebf00bf84
+PRODUCT_SHA=e4ca1805dc16839b855e969e7e17928a54cc211f
+PRODUCT_TREE=d00fecc537d8106b0f1ff73ccd3d3e0be8e0d963
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 CIRROS_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
 CIRROS_SHA=7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
@@ -718,7 +718,7 @@ console_command() {
   if ! python3 - "$SSH_KEY" "$KNOWN_HOSTS" "$SSH_USER" "$address" "$domain" "$command" "$EVIDENCE/$label" <<'PY'
 import pexpect,sys
 key,known,user,address,domain,command,output=sys.argv[1:]
-args=['-i',key,'-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes',
+args=['-tt','-i',key,'-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes',
       '-o',f'UserKnownHostsFile={known}',f'{user}@{address}',
       f'sudo virsh -c qemu:///system console --force --safe {domain}']
 p=pexpect.spawn('ssh',args,encoding='utf-8',timeout=45)
