@@ -79,9 +79,11 @@ class GuestControlRegression(unittest.TestCase):
         start = DRIVER.index("guest_control_command() {")
         end = DRIVER.index("\n\n" + "guest_control_preflight() {", start)
         command = DRIVER[start:end]
+        self.assertIn("%q sh -c %q", command)
         self.assertIn("; sh %q; rc=$?;", command)
         self.assertIn("rm -f %q; exit 0", command)
         self.assertNotIn("bash %q", command)
+        self.assertNotIn("bash -lc", command)
         self.assertNotIn("python3 -c", command)
 
     def test_link_local_readiness_collects_local_evidence_before_bounded_probe(self):
