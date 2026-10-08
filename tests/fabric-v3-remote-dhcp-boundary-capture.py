@@ -304,9 +304,18 @@ fi
         (ev / "topology" / f"a-{name}").write_text(content)
 
 
+def dhcp_reply_addressing(maps: dict) -> tuple[str, str]:
+    """Return the authority gateway and B's fixed address from canonical topology."""
+    gateway = maps["a"].get("gateway_ip")
+    fixed = maps["b"].get("fixed_ip")
+    if not gateway or not fixed:
+        raise RuntimeError("canonical authority gateway or B fixed address is missing")
+    return gateway, fixed
+
+
 def configure_dhcp_reply_trace(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> None:
     """Trace a dnsmasq OFFER from A through B without changing forwarding."""
-    gateway, fixed = maps["a"]["gateway_ip"], maps["b"]["fixed_ip"]
+    gateway, fixed = dhcp_reply_addressing(maps)
     records = []
     for h in "ab":
         root_table = "o3k-dhcp-reply-root"
@@ -1147,7 +1156,7 @@ def action_finish(args: argparse.Namespace) -> int:
         b_tap_reply_trace_seen, b_tap_reply_trace_packets = dhcp_reply_forwarded_to_tap(
             ev / "topology" / "b-root-reply-trace.log",
             tap=maps["b"]["tap"], root_veth=maps["b"]["root_veth"],
-            client_mac=maps["b"]["guest_mac"], gateway_ip=maps["b"]["gateway_ip"],
+            client_mac=maps["b"]["guest_mac"], gateway_ip=dhcp_reply_addressing(maps)[0],
             client_ip=maps["b"]["fixed_ip"], xid=xid)
         b_tap_reply_seen = b_tap_reply_capture_seen or b_tap_reply_trace_seen
         present_index = next((i for i, item in enumerate(observations) if not item["packet_seen"]), len(observations))

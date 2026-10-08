@@ -111,6 +111,19 @@ class DhcpBoundaryCaptureTests(unittest.TestCase):
         self.assertEqual(len(filters), 1)
         self.assertIn(f"ether host {self.mac}", filters[0])
 
+    def test_reply_addressing_uses_authority_gateway_and_b_fixed_ip(self):
+        self.assertEqual(
+            boundary.dhcp_reply_addressing({
+                "a": {"gateway_ip": "10.77.0.1"},
+                "b": {"fixed_ip": "10.77.0.3"},
+            }),
+            ("10.77.0.1", "10.77.0.3"),
+        )
+
+    def test_reply_addressing_fails_closed_when_canonical_address_missing(self):
+        with self.assertRaisesRegex(RuntimeError, "authority gateway"):
+            boundary.dhcp_reply_addressing({"a": {}, "b": {"fixed_ip": "10.77.0.3"}})
+
 
 if __name__ == "__main__":
     unittest.main()
