@@ -646,9 +646,11 @@ print('fe80::'+':'.join(f'{int.from_bytes(b[i:i+2],"big"):x}' for i in range(0,8
 PY
 }
 
-for host in a b c; do
-  guest_boot_proof "$host" || fail "guest $host file-backed serial did not prove boot/login readiness" "ENVIRONMENT_GAP"
-done
+if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then
+  for host in a b c; do
+    guest_boot_proof "$host" || fail "guest $host file-backed serial did not prove boot/login readiness" "ENVIRONMENT_GAP"
+  done
+fi
 
 declare -A TENANT_IP=() TENANT_MAC=()
 for host in a b c; do
@@ -772,7 +774,29 @@ run_dhcp_boundary_tool() {
 if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" == 1 ]]; then
   # All three public creates have reached ACTIVE. Preserve the initial authority
   # capture, then take fresh ownership/plan-derived topology and verify HER and
-  # WireGuard before a single bounded B retransmission is generated.
+  # WireGuard before observing one bounded B retry window.
+  for host in a b c; do
+    domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
+    serial_path="$(python3 - "$EVIDENCE/compute-$host/domain.xml" "$RUN_ID" <<'PY'
+import sys,xml.etree.ElementTree as ET
+root=ET.parse(sys.argv[1]).getroot(); prefix=f'/var/lib/o3k-fabric-v3/{sys.argv[2]}/compute/console/'
+paths=[]
+for node in root.findall('./devices/serial'):
+    source=node.find('source'); path=source.get('path','') if source is not None else ''
+    if node.get('type')=='file' and path.startswith(prefix): paths.append(path)
+assert len(paths)==1,paths
+print(paths[0])
+PY
+)" || fail "guest $host serial evidence path is not run-owned" "OWNERSHIP_DEFECT"
+    ssh_vm "${MGMT_IP[$host]}" "sudo cat '$serial_path'" >"$EVIDENCE/compute-$host/serial.log" \
+      || fail "guest $host serial evidence could not be collected" "HARNESS_GAP"
+  done
+  python3 - "$EVIDENCE/compute-a/serial.log" "${TENANT_IP[a]}" <<'PY' \
+    || fail "guest A serial log did not prove its canonical DHCP lease" "DATAPLANE_DEFECT"
+import pathlib,re,sys
+text=pathlib.Path(sys.argv[1]).read_text(errors='replace')
+assert re.search(rf'eth0: leased {re.escape(sys.argv[2])}(?:/\d+)?(?:\s|$)',text),sys.argv[2]
+PY
   stop_dhcp_capture
   [[ -s "$EVIDENCE/attachments/dhcp-dora.pcap" ]] \
     || fail "server A DHCP packet capture is absent before the B boundary run" "HARNESS_GAP"
@@ -787,12 +811,6 @@ assert mac in text
 for label in ('discover','offer','request','ack'):
     assert re.search(r'dhcp-message[^\n]*'+label,text,re.I),label
 PY
-  console_command b 'killall udhcpc 2>/dev/null || true; echo __O3K_DHCP_CLIENT_PAUSED__' \
-    'b/guest-dhcp-client-paused.txt' \
-    || fail "could not pause B background DHCP retries before synchronized capture" "HARNESS_GAP"
-  console_command c 'killall udhcpc 2>/dev/null || true; echo __O3K_DHCP_CLIENT_PAUSED__' \
-    'c/guest-dhcp-client-paused.txt' \
-    || fail "could not pause C background DHCP retries before synchronized capture" "HARNESS_GAP"
   set +e
   run_dhcp_boundary_tool prepare >"$EVIDENCE/topology/prepare-result.json"
   prepare_rc=$?
@@ -840,10 +858,9 @@ data=json.load(open(manifest)); data.update({
 })
 json.dump(data,open(manifest,'w'),sort_keys=True,indent=2); open(manifest,'a').write('\n')
 PY
-  # Retire CirrOS's background DHCP client and request one bounded transaction.
-  # No static address is installed; nonzero is expected when the OFFER is lost.
-  console_command b 'udhcpc -f -v -n -q -t 1 -T 2 -i eth0' \
-    'b/guest-dhcp-retry.txt' || true
+  # Capture one bounded interval of B's already-running DHCP client. The packet
+  # itself and its transaction ID identify the request; no guest IP is assigned.
+  sleep 18
   set +e
   run_dhcp_boundary_tool finish >"$EVIDENCE/topology/finish-result.json"
   finish_rc=$?

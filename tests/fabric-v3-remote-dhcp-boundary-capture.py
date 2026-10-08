@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import pathlib
 import re
@@ -224,6 +225,8 @@ def wg_check(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> tuple[bo
 
 def capture_specs(maps: dict) -> list[dict]:
     result = []
+    bmac = maps["b"]["guest_mac"]
+    b_transport = maps["b"]["fabric_transport_ip"]
     for h in "ab":
         t = maps[h]
         route_peer = "host-a" if h == "b" else "host-b"
@@ -231,18 +234,22 @@ def capture_specs(maps: dict) -> list[dict]:
         if not peer:
             raise RuntimeError(f"host-{h} plan has no peer for {route_peer}")
         underlay = peer["underlay_endpoint"].rsplit(":", 1)[0]
+        inner_filter = f"udp and (port 67 or port 68) and ether src {bmac}"
+        wg_filter = f"udp port 4789 and src host {b_transport}"
+        underlay_direction = "dst" if h == "b" else "src"
+        underlay_filter = f"udp port 65001 and {underlay_direction} host {underlay}"
         result.extend([
-            {"host": h, "label": "tap", "iface": t["tap"], "ns": None, "filter": "udp and (port 67 or port 68)"},
-            {"host": h, "label": "realm-bridge", "iface": t["realm_bridge"], "ns": None, "filter": "udp and (port 67 or port 68)"},
-            {"host": h, "label": "root-veth", "iface": t["root_veth"], "ns": None, "filter": "udp and (port 67 or port 68)"},
-            {"host": h, "label": "fabric-veth", "iface": t["fabric_veth"], "ns": t["namespace"], "filter": "udp and (port 67 or port 68)"},
-            {"host": h, "label": "fabric-bridge", "iface": t["fabric_bridge"], "ns": t["namespace"], "filter": "udp and (port 67 or port 68)"},
-            {"host": h, "label": "vxlan", "iface": t["vxlan"], "ns": t["namespace"], "filter": "udp and (port 67 or port 68)"},
-            {"host": h, "label": "wireguard", "iface": t["wireguard"], "ns": t["namespace"], "filter": "udp port 4789"},
+            {"host": h, "label": "tap", "iface": t["tap"], "ns": None, "filter": inner_filter},
+            {"host": h, "label": "realm-bridge", "iface": t["realm_bridge"], "ns": None, "filter": inner_filter},
+            {"host": h, "label": "root-veth", "iface": t["root_veth"], "ns": None, "filter": inner_filter},
+            {"host": h, "label": "fabric-veth", "iface": t["fabric_veth"], "ns": t["namespace"], "filter": inner_filter},
+            {"host": h, "label": "fabric-bridge", "iface": t["fabric_bridge"], "ns": t["namespace"], "filter": inner_filter},
+            {"host": h, "label": "vxlan", "iface": t["vxlan"], "ns": t["namespace"], "filter": inner_filter},
+            {"host": h, "label": "wireguard", "iface": t["wireguard"], "ns": t["namespace"], "filter": wg_filter},
         ])
         # The physical device is resolved by the caller and saved into this spec.
         result.append({"host": h, "label": "underlay", "underlay_ip": underlay,
-                       "iface": "", "ns": None, "filter": "udp port 65001"})
+                       "iface": "", "ns": None, "filter": underlay_filter})
     return result
 
 
@@ -288,6 +295,9 @@ def action_prepare(args: argparse.Namespace) -> int:
                     raise RuntimeError(f"host-{h} has no physical route to {spec['underlay_ip']}")
                 spec["iface"] = m.group(1)
                 (ev / "topology" / "links" / f"host-{h}-underlay-route.txt").write_text(route)
+
+        def start_capture(spec: dict) -> None:
+            h = spec["host"]
             remote_dir = f"/var/lib/o3k-fabric-v3/{args.run_id}/network/dhcp-boundary/{h}/capture"
             base = f"{remote_dir}/{spec['label']}"
             pcap, log, pid = base + ".pcap", base + ".log", base + ".pid"
@@ -299,7 +309,12 @@ def action_prepare(args: argparse.Namespace) -> int:
                       f"echo $! > {shlex.quote(pid)}\n")
             remote_script(args, h, script)
             spec.update({"pcap": pcap, "log": log, "pid": pid, "remote_dir": remote_dir})
-            write_json(ev / "topology" / "capture-manifest.json", specs[:specs.index(spec) + 1])
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(specs)) as pool:
+            futures = [pool.submit(start_capture, spec) for spec in specs]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+                write_json(ev / "topology" / "capture-manifest.json",
+                           [spec for spec in specs if "pid" in spec])
         write_json(ev / "topology" / "capture-manifest.json", specs)
         time.sleep(2)
         print(json.dumps({"state": "ready", "captures": len(specs), "her": "PASS", "wireguard": "PASS"}))
@@ -471,10 +486,17 @@ def action_finish(args: argparse.Namespace) -> int:
         ]
         b_tap = ev / "b" / "tap.pcap"
         b_tap_text = call(["tcpdump", "-nn", "-e", "-tt", "-vvv", "-r", str(b_tap)], check=False)
-        xid_match = re.search(r"\bxid\s+(0x[0-9a-f]+)", b_tap_text, re.I)
-        if maps["b"]["guest_mac"].lower() not in b_tap_text.lower() or not xid_match:
+        xid_matches = set(re.findall(r"\bxid\s+(0x[0-9a-f]+)", b_tap_text, re.I))
+        if maps["b"]["guest_mac"].lower() not in b_tap_text.lower() or not xid_matches:
             raise RuntimeError("B TAP capture did not prove a canonical-MAC DHCPDISCOVER with a transaction ID")
-        xid = xid_match.group(1).lower()
+        discover_lines = [line for line in b_tap_text.splitlines()
+                          if maps["b"]["guest_mac"].lower() in line.lower()
+                          and re.search(r"DHCP-Message[^\n]*Discover", line, re.I)]
+        discover_xids = {m.group(1).lower() for line in discover_lines
+                         if (m := re.search(r"\bxid\s+(0x[0-9a-f]+)", line, re.I))}
+        if len(discover_xids) != 1:
+            raise RuntimeError(f"bounded B window did not contain exactly one DHCP transaction ID: {sorted(discover_xids)}")
+        xid = next(iter(discover_xids))
         (ev / "b" / "tap.decoded.txt").write_text(b_tap_text)
         observations = []
         first_missing = None
@@ -561,7 +583,7 @@ def action_finish(args: argparse.Namespace) -> int:
                   "counter_summary": counter_summary,
                   "wireguard_transfer_deltas": wireguard_deltas,
                   "dhcp_transaction_id": xid,
-                  "transport_capture_correlation": "single bounded retry window; UDP port/VNI state and transfer-counter deltas",
+                  "transport_capture_correlation": "B peer IP/port filtered; same bounded DHCP retry window and WireGuard transfer-counter deltas",
                   "b_her_entry_for_a": True, "b_wireguard_peer_for_a": True,
                   "stop_at_first_failure": True}
         write_json(ev / "result.json", result)
