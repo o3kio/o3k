@@ -37,5 +37,6 @@ assert capture.index('prime_wireguard_peers(args, ev, maps)') < capture.index('o
 assert 'fabric-dhcp-ownership.json' in dhcp_realizer
 assert 'fabric-dhcp-ownership.json' in capture and 'owner.json' not in capture
 assert 'config.get("mtu") != 1390' in capture
+assert 'else {"config": None, "bindings": {}}' in capture
 print('WireGuard provider key-root and runtime identity contract: PASS')
 PY

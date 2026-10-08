@@ -134,7 +134,10 @@ def topology(args: argparse.Namespace, ev: pathlib.Path) -> dict:
             if config.get("mtu") != 1390 or "dhcp-option=26,1390" not in conf:
                 raise RuntimeError("authority DHCP state does not propagate tenant MTU 1390")
         else:
-            state = read_remote_json(args, h, f"{dhcp_root}/state.json")
+            state_path = f"{dhcp_root}/state.json"
+            present = ssh(args, h, f"if sudo test -f {shlex.quote(state_path)}; then echo present; fi")
+            state = (read_remote_json(args, h, state_path) if present.strip()
+                     else {"config": None, "bindings": {}})
             write_json(ev / "dhcp" / f"host-{h}-state.json", state)
             if state.get("config") is not None or state.get("bindings"):
                 raise RuntimeError(f"host-{h}: non-authority carries DHCP service configuration or bindings")
