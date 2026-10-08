@@ -409,7 +409,7 @@ impl DhcpService {
     pub fn render_config(&self) -> Result<String, DhcpError> {
         let config = self.state.config.as_ref().ok_or(DhcpError::InvalidConfig)?;
         validate_config(config)?;
-        let (network, _) = subnet_bounds(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
+        let (network, broadcast) = subnet_bounds(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
         let dhcp_start = Ipv4Addr::from(u32::from(network) + 1);
         let subnet_mask = subnet_mask(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
         let mut lines = vec![
@@ -426,15 +426,15 @@ impl DhcpService {
                 "dhcp-leasefile={}",
                 self.root.join("dnsmasq.leases").display()
             ),
-            // dnsmasq's `<mode>` keyword occupies the `<end-addr>` position,
-            // so `start,end,static` is rejected by 2.90 ("bad dhcp-range").
-            // `start,static[,lease]` spans the interface subnet and serves
-            // only hosts with a dhcp-host binding, preserving the static-only
-            // intent for fixed IPs.
-            format!("dhcp-range={},static,{}", dhcp_start, config.lease_seconds),
             // Fabric gives its DHCP gateway a /32 on the Realm bridge to
-            // avoid installing overlapping tenant routes. Keep the client
-            // mask sourced from the canonical tenant subnet instead.
+            // avoid installing overlapping tenant routes. dnsmasq would
+            // otherwise infer a /32 DHCP subnet from that interface, which
+            // excludes every fixed endpoint address. Carry the canonical
+            // tenant mask and broadcast in the static range itself.
+            format!(
+                "dhcp-range={dhcp_start},static,{subnet_mask},{broadcast},{}",
+                config.lease_seconds
+            ),
             format!("dhcp-option=1,{subnet_mask}"),
             format!("dhcp-option=3,{}", config.gateway),
         ];
@@ -612,10 +612,10 @@ mod tests {
         ));
         let rendered = service.render_config()?;
         assert!(rendered.contains("dhcp-host=02:00:00:00:00:01,192.0.2.10"));
-        // dnsmasq 2.90 grammar: `<mode>` occupies the <end-addr> position, so
-        // `start,end,static` is rejected ("bad dhcp-range"); the static-only
-        // intent is `start,static[,lease]`, which spans the interface subnet.
-        assert!(rendered.contains("dhcp-range=192.0.2.1,static,3600"));
+        // The Fabric bridge gateway is /32, so the DHCP subnet cannot be
+        // inferred from its interface address. Keep the canonical tenant
+        // mask and broadcast explicit in the static range.
+        assert!(rendered.contains("dhcp-range=192.0.2.1,static,255.255.255.0,192.0.2.255,3600"));
         assert!(rendered.contains("dhcp-option=1,255.255.255.0"));
         assert!(rendered.contains("dhcp-leasefile="));
         assert!(service.managed_lease_path().ends_with("dnsmasq.leases"));
