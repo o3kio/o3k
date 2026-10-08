@@ -1,6 +1,6 @@
-# Fabric v3 O3K lifecycle integration plan
+# Fabric v3 O3K lifecycle integration record
 
-Status: implementation in progress; supported lifecycle milestone not yet accepted
+Status: historical implementation record; the entries below are superseded by later candidate and campaign evidence
 
 ## Provenance
 
@@ -62,13 +62,27 @@ First add focused fail-before tests for identity validation/persistence, complet
 - The first workspace test run failed because the SQLite reopen expectation
   omitted the newly durable port binding generation. Updated the expected
   generation and reran that test successfully.
-- `SUPPORTED_API_GAP` remains open: the passing composition test drives
-  `DaemonCreateResolver` directly. It does not yet create the network and
-  servers through the supported HTTP APIs or prove nested packet delivery.
-- `ENVIRONMENT_GAP` remains open: the three nested compute guests are running,
-  but the available host SSH identities are not accepted by their installed
-  guest keys. No guest credentials or state have been changed.
-- Controller restart reconciliation remains unproven: canonical state and VNI
-  bindings persist, but this branch does not yet have a durable realm work
-  inventory/reconciliation sweep that resumes all affected realms after
-  `o3kd` restart.
+- Historical status only: the `SUPPORTED_API_GAP`, guest credential
+  `ENVIRONMENT_GAP`, and controller-restart reconciliation notes above describe
+  earlier candidates. Later source-bound campaigns exercised supported HTTP
+  lifecycle, deterministic guest provisioning, and controller restart on the
+  current frozen product. They are not open blockers for this harness task.
+
+## Historical acceptance failure ledger
+
+The entries below preserve superseded failure evidence. They are resolved for
+the current frozen product/harness profile; old runs remain failures and are
+never converted into passing evidence.
+
+| Historical issue | Failing identity and classification | Preserved evidence | Resolution |
+| --- | --- | --- | --- |
+| Supported HTTP lifecycle was not exercised | Product `4cdb50eddc41de8de1b78535950f6f9bf698f0dc`; `SUPPORTED_API_GAP` | The earlier composition-only result is retained in the original campaign records; no archive digest is asserted here because the source record did not include one. | Successor lifecycle coverage uses supported HTTP APIs; fresh three-host campaigns create network, subnet, ports, and servers through HTTP. Current product `e3f5ce764b4d7ee1bba34f645da8ec6c156bde99`. |
+| Optional `config_drive=false` was mishandled | Product `ad741747cc9e772f429d011130452340ce2020ee`; `PRODUCT_DEFECT` | Failed candidate evidence retained with that candidate. | Fixed in product successor `ba23a65e312ae8755673e2af131937760b4fb248`; optional-create regressions pass. |
+| iproute2 TAP subtype expected the wrong JSON field | Product `ad741747cc9e772f429d011130452340ce2020ee`; `ATTACHMENT_DEFECT` | Real-host `ip -j -d link` observation and failed candidate retained. | Product successor `ba23a65e312ae8755673e2af131937760b4fb248` recognizes `info_data.type=tap`; later TAP ownership validation is included in `e3f5ce764b4d7ee1bba34f645da8ec6c156bde99`. |
+| QEMU could not traverse run-owned overlay storage | Product `ba23a65e312ae8755673e2af131937760b4fb248`; `HARNESS_GAP` | QEMU runner failure archive retained in the campaign evidence area. | Harness dynamically provisions QEMU access and preflights storage as the execution identity; product remained frozen. |
+| Fabric DHCP authority/return path did not provide cross-host leases | Product `e4ca1805dc16839b855e969e7e17928a54cc211f`; `DATAPLANE_DEFECT` | Remote DHCP boundary captures and failed three-host runs retained under `/var/tmp/fabric-v3-remote-dhcp-boundary-*` and `/var/tmp/fabric-v3-minimal-three-host-*`. | Fixed in product successor `e3f5ce764b4d7ee1bba34f645da8ec6c156bde99`; fresh campaign reached A/B/C ACTIVE and DHCP DORA PASS. |
+| Tenant-IPv4 SSH was used as mandatory guest command transport | Product `e3f5ce764b4d7ee1bba34f645da8ec6c156bde99`; `HARNESS_GAP` | `fabric-v3-minimal-three-host-20261008T-guestssh-knownhosts.tar.gz`, SHA-256 `46086f9924b3143232c9a0eca8499716a9aee18bb7d3438cb3f0edbe11ed3e7e`. | Replaced by the independent host-local IPv6 link-local command channel in the harness successor. |
+| File-backed serial was mistaken for an interactive shell | Product `e3f5ce764b4d7ee1bba34f645da8ec6c156bde99`; `HARNESS_GAP` | `fabric-v3-minimal-three-host-20261008-serial-channel-183000.tar.gz`, SHA-256 `7d9febb2776556df649343ab7072b848494ce67c953a88f847c48c2e31c8f8bc`. | Live serial capability is classified from domain XML; the deterministic probe guest control path is host-local IPv6 link-local SSH. |
+
+Historical evidence archives are immutable. A future fix creates a new run ID
+and archive; it does not update these records or revise the old classification.

@@ -7,8 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PRODUCT_SHA=e3f5ce764b4d7ee1bba34f645da8ec6c156bde99
 PRODUCT_TREE=5cfaa3bd0b173fc4ad048db32ef834cbd55839b8
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
-CIRROS_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
-CIRROS_SHA=7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
+BASE_IMAGE_SHA=612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354
 RUN_ID="${O3K_FABRIC_V3_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="o3k-fabric-v3-${RUN_ID}"
 EVIDENCE_ROOT="${O3K_FABRIC_V3_EVIDENCE_ROOT:-/var/tmp}"
@@ -27,6 +26,7 @@ CONTROL_PORT="${O3K_FABRIC_V3_CONTROL_PORT:-50051}"
 PROJECT_ID=eba29e2d-53de-461d-ae91-ede7402713cb
 FABRIC_DOMAIN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 SSH_KEY="$EVIDENCE/management/campaign_ed25519"
+PROBE_KEY="$EVIDENCE/management/probe_ed25519"
 KNOWN_HOSTS="$EVIDENCE/management/known_hosts"
 TLS_DIR="$EVIDENCE/management/tls"
 STAGE="$EVIDENCE/environment/stage"
@@ -95,9 +95,12 @@ chmod 0600 "$EVIDENCE/.o3k-fabric-v3-owned"
 git -C "$ROOT_DIR" rev-parse HEAD >"$EVIDENCE/environment/harness_sha.txt"
 git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}' >"$EVIDENCE/environment/harness_tree.txt"
 cp "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" "$EVIDENCE/environment/campaign-driver.sh"
+cp "$ROOT_DIR/tests/fabric-v3-build-probe-image.sh" "$EVIDENCE/environment/build-probe-image.sh"
+cp "$ROOT_DIR/tests/fabric-v3-guest-control.py" "$EVIDENCE/environment/guest-control-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-install-agent-host.sh" "$EVIDENCE/environment/install-agent-host.sh"
 cp "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" "$EVIDENCE/environment/boundary-capture-helper.py"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" >"$EVIDENCE/environment/boundary-capture-helper.sha256"
 
 cleanup_on_success() {
@@ -130,7 +133,8 @@ json.dump({"result":"FAIL","run_id":run,"product_sha":product,"product_tree":tre
 print(file=open(path,"a"))
 PY
     fi
-    tar --exclude="$(basename "$EVIDENCE")/management/campaign_ed25519" \
+  tar --exclude="$(basename "$EVIDENCE")/management/campaign_ed25519" \
+      --exclude="$(basename "$EVIDENCE")/management/probe_ed25519" \
       --exclude="$(basename "$EVIDENCE")/management/tls/certs" \
       --exclude="$(basename "$EVIDENCE")/environment/stage" \
       --exclude="$(basename "$EVIDENCE")/environment/product-source" \
@@ -166,8 +170,17 @@ git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA" >"$EVIDENCE/environment/product_sha.
 git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}" >"$EVIDENCE/environment/product_tree.txt"
 hostnamectl >"$EVIDENCE/environment/physical-host.txt" 2>&1 || hostname >"$EVIDENCE/environment/physical-host.txt"
 date -u +%FT%TZ >"$EVIDENCE/started_at_utc.txt"
+python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" <<'PYMANIFEST'
+import json,pathlib,sys
+path,run,product,product_tree,harness,harness_tree,started,physical=sys.argv[1:]
+doc={"result":"IN_PROGRESS","run_id":run,"product_sha":product,"product_tree":product_tree,
+     "harness_sha":harness,"harness_tree":harness_tree,
+     "started_at_utc":pathlib.Path(started).read_text().strip(),
+     "physical_host_identity":pathlib.Path(physical).read_text(errors='replace').strip()}
+pathlib.Path(path).write_text(json.dumps(doc,sort_keys=True,indent=2)+'\n')
+PYMANIFEST
 sha256sum "$BASE_IMAGE" >"$EVIDENCE/environment/base-image.sha256"
-[[ "$(awk '{print $1}' "$EVIDENCE/environment/base-image.sha256")" == 612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354 ]] || fail "base image checksum mismatch" "ENVIRONMENT_GAP"
+[[ "$(awk '{print $1}' "$EVIDENCE/environment/base-image.sha256")" == "$BASE_IMAGE_SHA" ]] || fail "base image checksum mismatch" "ENVIRONMENT_GAP"
 
 echo "Building frozen binaries from $PRODUCT_SHA"
 git -C "$ROOT_DIR" worktree add --detach "$PRODUCT_SOURCE_DIR" "$PRODUCT_SHA" \
@@ -208,6 +221,9 @@ ssh-keygen -q -t ed25519 -N '' -C "$PREFIX" -f "$SSH_KEY"
 ssh-keygen -lf "$SSH_KEY.pub" >"$EVIDENCE/management/ssh-key-fingerprint.txt"
 cp "$SSH_KEY.pub" "$EVIDENCE/management/ssh-authorized-key.pub"
 chmod 0600 "$SSH_KEY"; chmod 0644 "$SSH_KEY.pub"
+ssh-keygen -q -t ed25519 -N '' -C "$PREFIX-probe" -f "$PROBE_KEY"
+ssh-keygen -lf "$PROBE_KEY.pub" >"$EVIDENCE/management/probe-key-fingerprint.txt"
+chmod 0600 "$PROBE_KEY"; chmod 0644 "$PROBE_KEY.pub"
 : >"$KNOWN_HOSTS"; chmod 0600 "$KNOWN_HOSTS"
 
 gateway="$(virsh -c qemu:///system net-dumpxml "$NETWORK" | sed -n "s/.*ip address='\([0-9.]*\)'.*/\1/p" | head -1)"
@@ -367,6 +383,8 @@ for host in a b c; do
   ssh_vm "$address" "sudo install -d -o o3k -g o3k -m 0700 /tmp/$RUN_ID-stage"
   scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$STAGE"/* "$SSH_USER@$address:/tmp/$RUN_ID-stage/"
   ssh_vm "$address" "sudo bash /tmp/$RUN_ID-stage/install-agent-host.sh $host $octet $RUN_ID /tmp/$RUN_ID-stage" >"$EVIDENCE/management/install-$host.log" 2>&1 || fail "network agent installation failed on compute-$host" "ENVIRONMENT_GAP"
+  scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$PROBE_KEY" "$SSH_USER@$address:/tmp/$RUN_ID-probe-key"
+  ssh_vm "$address" "sudo install -d -o root -g root -m 0700 /var/lib/o3k-fabric-v3/$RUN_ID/control && sudo install -o root -g root -m 0600 /tmp/$RUN_ID-probe-key /var/lib/o3k-fabric-v3/$RUN_ID/control/probe_ed25519 && sudo python3 -c 'import pathlib; pathlib.Path(\"/tmp/$RUN_ID-probe-key\").unlink()'"
   case "$host" in a) health_port=19101;; b) health_port=19102;; c) health_port=19103;; esac
   ssh_vm "$address" "sudo install -m 0755 /tmp/$RUN_ID-stage/o3k-compute /usr/local/bin/o3k-compute-bin; sudo install -d -m 0700 /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls; sudo install -m 0644 /tmp/$RUN_ID-stage/compute-agent-$host.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/agent.pem; sudo install -m 0600 /tmp/$RUN_ID-stage/compute-agent-$host-key.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/agent-key.pem; sudo install -m 0644 /tmp/$RUN_ID-stage/ca.pem /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls/ca.pem; sudo chown -R root:root /var/lib/o3k-fabric-v3/$RUN_ID/compute/tls; sudo bash -c 'umask 077; printf compute-agent-$host > /var/lib/o3k-fabric-v3/$RUN_ID/compute/agent-id'; sudo bash -c 'nohup env O3K_COMPUTE_DATA_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute O3K_COMPUTE_CONTROL_ENDPOINT=https://$HOST_MGMT_IP:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_HOST_LABEL=host-$host O3K_COMPUTE_TLS_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute/tls O3K_COMPUTE_HEALTH_ADDR=0.0.0.0:$health_port O3K_COMPUTE_MAX_DISK_GB=30 O3K_COMPUTE_NETWORK_EXTERNAL=1 O3K_COMPUTE_NETWORK_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/ownership O3K_COMPUTE_BRIDGE_NAME=o3k-br0 O3K_COMPUTE_DHCP_BINARY=/usr/sbin/dnsmasq O3K_COMPUTE_FABRIC_HOST_ID=host-$host O3K_COMPUTE_FABRIC_STATE_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric RUST_LOG=info /usr/local/bin/o3k-compute-bin >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.log 2>&1 </dev/null & echo \$! >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.pid'"
 done
@@ -456,13 +474,38 @@ p=pathlib.Path(sys.argv[1]); s=p.read_text(errors="replace")
 p.write_text(re.sub(r'(?im)^(x-subject-token:\s*).+$',r'\1[REDACTED]',s))
 PY
 
-curl --fail --silent --show-error --max-time 30 -X POST "$BASE/v2/images" -H "x-auth-token: $TOKEN" -H 'content-type: application/json' -d "{\"name\":\"$PREFIX-cirros\",\"disk_format\":\"qcow2\",\"container_format\":\"bare\",\"visibility\":\"private\"}" >"$EVIDENCE/api/image-create.response.json" || fail "supported image create failed" "SUPPORTED_API_GAP"
+O3K_PROBE_IMAGE="$EVIDENCE/environment/o3k-fabric-probe.qcow2"
+bash "$ROOT_DIR/tests/fabric-v3-build-probe-image.sh" "$BASE_IMAGE" "$PROBE_KEY.pub" "$O3K_PROBE_IMAGE" "$EVIDENCE/environment" \
+  || fail "deterministic guest probe image build failed" "HARNESS_GAP"
+sha256sum "$O3K_PROBE_IMAGE" >"$EVIDENCE/environment/probe-image.sha256"
+printf 'source_image=%s\nsource_sha256=%s\nrecipe_revision=%s\n' \
+  "$BASE_IMAGE" "$BASE_IMAGE_SHA" "$(git -C "$ROOT_DIR" rev-parse HEAD)" \
+  >"$EVIDENCE/environment/probe-image-identity.txt"
+python3 - "$EVIDENCE/environment/control-channel-capabilities.json" "$EVIDENCE/environment/probe-image.sha256" <<'PY'
+import json,pathlib,sys
+probe_sha=pathlib.Path(sys.argv[2]).read_text().split()[0]
+doc={"status":"capability_discovery_complete",
+ "mechanisms":{
+  "serial_pty":{"present":False,"interactive":False,"read_only":False,"bidirectional":False,"depends_on_tenant_dhcp":False,"depends_on_cross_host_fabric":False,"accepted_for_control":False,"discovery":"not configured by the frozen product domain definition; each live domain is inspected before control preflight"},
+  "file_backed_serial":{"present":True,"interactive":False,"read_only":True,"bidirectional":False,"depends_on_tenant_dhcp":False,"depends_on_cross_host_fabric":False,"accepted_for_control":False,"discovery":"verified on the frozen product domain in the preserved prior campaign; every fresh domain is checked against live XML before guest commands"},
+  "qemu_guest_agent":{"present":False,"interactive":False,"read_only":False,"bidirectional":False,"depends_on_tenant_dhcp":False,"depends_on_cross_host_fabric":False,"accepted_for_control":False},
+  "vsock":{"present":False,"interactive":False,"read_only":False,"bidirectional":False,"depends_on_tenant_dhcp":False,"depends_on_cross_host_fabric":False,"accepted_for_control":False},
+  "dedicated_management_nic":{"present":False,"interactive":False,"read_only":False,"bidirectional":False,"depends_on_tenant_dhcp":False,"depends_on_cross_host_fabric":False,"accepted_for_control":False},
+  "guest_ipv6_link_local_host_local_realm_bridge":{"present":True,"interactive":True,"read_only":False,"bidirectional":True,"depends_on_tenant_dhcp":False,"depends_on_cross_host_fabric":False,"accepted_for_control":"pending per-guest readiness/locality preflight"}},
+ "probe_image":{"recipe":"tests/fabric-v3-build-probe-image.sh","sha256":probe_sha}}
+pathlib.Path(sys.argv[1]).write_text(json.dumps(doc,sort_keys=True,indent=2)+"\n")
+PY
+python3 - "$EVIDENCE/manifest.json" "$EVIDENCE/environment/probe-image.sha256" "$(git -C "$ROOT_DIR" rev-parse HEAD)" <<'PYMANIFEST'
+import json,pathlib,sys
+manifest,sha_file,recipe_revision=sys.argv[1:]
+data=json.loads(pathlib.Path(manifest).read_text())
+data['probe_image_sha256']=pathlib.Path(sha_file).read_text().split()[0]
+data['probe_image_recipe_revision']=recipe_revision
+pathlib.Path(manifest).write_text(json.dumps(data,sort_keys=True,indent=2)+'\n')
+PYMANIFEST
+curl --fail --silent --show-error --max-time 30 -X POST "$BASE/v2/images" -H "x-auth-token: $TOKEN" -H 'content-type: application/json' -d "{\"name\":\"$PREFIX-probe\",\"disk_format\":\"qcow2\",\"container_format\":\"bare\",\"visibility\":\"private\"}" >"$EVIDENCE/api/image-create.response.json" || fail "supported image create failed" "SUPPORTED_API_GAP"
 IMAGE_ID="$(field id <"$EVIDENCE/api/image-create.response.json")"
-image_file="${O3K_FABRIC_V3_CIRROS_IMAGE:-$EVIDENCE/environment/cirros-0.6.3-x86_64-disk.img}"
-if [[ ! -f "$image_file" ]]; then curl --fail --location --silent --show-error "$CIRROS_URL" -o "$image_file" || fail "CirrOS download failed" "ENVIRONMENT_GAP"; fi
-printf '%s  %s\n' "$CIRROS_SHA" "$image_file" | sha256sum --check --status || fail "CirrOS checksum mismatch" "ENVIRONMENT_GAP"
-sha256sum "$image_file" >"$EVIDENCE/environment/cirros.sha256"
-curl --fail --silent --show-error --max-time 120 -X PUT "$BASE/v2/images/$IMAGE_ID/file" -H "x-auth-token: $TOKEN" -H 'content-type: application/octet-stream' --data-binary "@$image_file" >"$EVIDENCE/api/image-upload.response.txt" || fail "supported image upload failed" "SUPPORTED_API_GAP"
+curl --fail --silent --show-error --max-time 900 -X PUT "$BASE/v2/images/$IMAGE_ID/file" -H "x-auth-token: $TOKEN" -H 'content-type: application/octet-stream' --data-binary "@$O3K_PROBE_IMAGE" >"$EVIDENCE/api/image-upload.response.txt" || fail "supported probe image upload failed" "SUPPORTED_API_GAP"
 
 curl --fail --silent --show-error -X POST "$BASE/v2.0/networks" -H "x-auth-token: $TOKEN" -H 'content-type: application/json' -d "{\"network\":{\"name\":\"$PREFIX-network\"}}" >"$EVIDENCE/api/network-create.response.json" || fail "supported network create failed" "SUPPORTED_API_GAP"
 NETWORK_ID="$(field network.id <"$EVIDENCE/api/network-create.response.json")"
@@ -623,111 +666,146 @@ PY
   echo "tap=$tap info_kind=tun info_data.type=tap master=$bridge" >>"$EVIDENCE/attachments/server-$host-attestation.txt"
 }
 
-guest_boot_proof() {
-  local host="$1" address="${MGMT_IP[$1]}" domain xml serial_path serial_dir expected_ip
-  expected_ip="${TENANT_IP[$host]}"
-  domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
-  xml="$EVIDENCE/compute-$host/domain.xml"
-  serial_path="$(python3 - "$xml" "$RUN_ID" <<'PY'
-import sys,xml.etree.ElementTree as ET
-root=ET.parse(sys.argv[1]).getroot(); run=sys.argv[2]
-devices=root.find('devices'); matches=[]
-for node in devices.findall('serial') if devices is not None else []:
-    source=node.find('source')
-    path=source.get('path','') if source is not None else ''
-    if node.get('type')=='file' and path.startswith(f'/var/lib/o3k-fabric-v3/{run}/compute/console/'):
-        matches.append(path)
-assert len(matches)==1, matches
-print(matches[0])
-PY
+mac_link_local() {
+  python3 "$ROOT_DIR/tests/fabric-v3-guest-control.py" link-local "$1"
+}
+
+prepare_guest_control() {
+  local host="$1" address="${MGMT_IP[$1]}" bridge="${REALM_BRIDGE[$1]}" ll="${GUEST_IPV6[$1]}"
+  local ownership="$EVIDENCE/attachments/server-$1-provider-ownership.json" fabric_ns alias remote_known route capture_root
+  alias="o3k-probe-$host"
+  fabric_ns="$(python3 - "$ownership" <<'PYNS'
+import json,sys
+print(json.load(open(sys.argv[1]))['fabric']['namespace'])
+PYNS
 )" || return 1
-  serial_dir="/var/lib/o3k-fabric-v3/$RUN_ID/compute/console/"
-  [[ "$serial_path" == "$serial_dir"* && "$serial_path" != *$'\n'* ]] || return 1
-  # The run-owned serial device is bound to this exact server domain. Its
-  # canonical DHCP offer and lease prove that this guest booted and installed
-  # the expected endpoint address. Do not wait for CirrOS's optional metadata
-  # retry loop: with config_drive=false it can delay the login prompt for many
-  # minutes after the guest has already completed the required network boot.
-  for _ in $(seq 1 120); do
-    if ssh_vm "$address" "sudo test -f '$serial_path' && sudo cat '$serial_path'" >"$EVIDENCE/compute-$host/serial.log" 2>/dev/null; then
-      if grep -Fq "eth0: offered $expected_ip from 10.77.0.1" "$EVIDENCE/compute-$host/serial.log" \
-        && grep -Fq "eth0: leased $expected_ip" "$EVIDENCE/compute-$host/serial.log"; then
-        printf 'domain=%s\nserial_file=%s\ncanonical_guest_mac=%s\ncanonical_fixed_ip=%s\nboot_dhcp_lease=PASS\n' \
-          "$domain" "$serial_path" "${TENANT_MAC[$host]}" "$expected_ip" \
-          >"$EVIDENCE/compute-$host/guest-serial-readiness.txt"
-        return 0
-      fi
-    fi
-    sleep 2
-  done
-  return 1
+  [[ "$bridge" =~ ^[a-zA-Z0-9_.-]{1,15}$ && "$fabric_ns" =~ ^[a-zA-Z0-9_.-]{1,15}$ && "$ll" == fe80::* ]] || return 1
+  remote_known="/var/lib/o3k-fabric-v3/$RUN_ID/control/known_hosts-$host"
+  ssh_vm "$address" "sudo ssh-keyscan -6 -T 5 -t ed25519 '$ll%$bridge' 2>/dev/null | awk -v alias='$alias' '{\$1=alias; print}' | sudo tee '$remote_known' >/dev/null && sudo chmod 0600 '$remote_known' && sudo test -s '$remote_known'" \
+    >"$EVIDENCE/management/guest-$host-keyscan.txt" 2>&1 || return 1
+  ssh_vm "$address" "sudo ssh-keygen -lf '$remote_known'" >"$EVIDENCE/management/guest-$host-hostkey-fingerprint.txt" || return 1
+  route="$(ssh_vm "$address" "sudo ip -6 route get '$ll' oif '$bridge'")" || return 1
+  printf '%s\n' "$route" >"$EVIDENCE/management/guest-$host-local-route.txt"
+  grep -Fq "dev $bridge" <<<"$route" || return 1
+  capture_root="/var/lib/o3k-fabric-v3/$RUN_ID/control/$host"
+  ssh_vm "$address" "sudo install -d -m 0700 '$capture_root'; sudo timeout 10 ip netns exec '$fabric_ns' tcpdump -nn -i any -U -w '$capture_root/fabric-control.pcap' 'ip6 and host $ll and tcp port 22' >'$capture_root/fabric-control-tcpdump.log' 2>&1 & echo \$!" \
+    >"$EVIDENCE/management/guest-$host-fabric-capture.pid" || return 1
+  ssh_vm "$address" "sudo timeout 10 tcpdump -nn -i '$bridge' -U -w '$capture_root/local-control.pcap' 'ip6 and host $ll and tcp port 22' >'$capture_root/local-control-tcpdump.log' 2>&1 & echo \$!" \
+    >"$EVIDENCE/management/guest-$host-bridge-capture.pid" || return 1
+  sleep 1
+}
+
+guest_control_command() {
+  local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" bridge="${REALM_BRIDGE[$1]}" ll="${GUEST_IPV6[$1]}"
+  local control_root="/var/lib/o3k-fabric-v3/$RUN_ID/control" remote_known="/var/lib/o3k-fabric-v3/$RUN_ID/control/known_hosts-$1"
+  local encoded tmp remote_script remote_cmd rc marker target
+  LAST_GUEST_CHANNEL_ERROR=0
+  encoded="$(printf '%s' "$command" | base64 -w0)"
+  tmp="/tmp/o3k-$RUN_ID-guest-command"
+  target="$(python3 "$ROOT_DIR/tests/fabric-v3-guest-control.py" target "$ll" "$bridge")"
+  # shellcheck disable=SC2016
+  printf -v remote_script 'printf %%s %q | base64 -d >%q; bash %q; rc=$?; printf "\\n__O3K_GUEST_RC=%%d__\\n" "$rc"; python3 -c %q; exit 0' \
+    "$encoded" "$tmp" "$tmp" "import pathlib; pathlib.Path('$tmp').unlink(missing_ok=True)"
+  printf -v remote_cmd 'sudo timeout 60 ssh -6 -i %q -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%q -o HostKeyAlias=%q -o BindInterface=%q -o ConnectTimeout=8 %q %q' \
+    "$control_root/probe_ed25519" "$remote_known" "o3k-probe-$host" "$bridge" "$target" "bash -lc $(printf '%q' "$remote_script")"
+  if ! ssh_vm "$address" "$remote_cmd" >"$EVIDENCE/$label" 2>"$EVIDENCE/$label.stderr"; then
+    LAST_GUEST_CHANNEL_ERROR=1
+    printf 'transport=FAIL\n' >"$EVIDENCE/$label.status"
+    return 1
+  fi
+  marker="$(grep -Eo '__O3K_GUEST_RC=[0-9]+' "$EVIDENCE/$label" | tail -1 | cut -d= -f2 || true)"
+  if [[ ! "$marker" =~ ^[0-9]+$ ]]; then
+    LAST_GUEST_CHANNEL_ERROR=1
+    printf 'transport=FAIL\nmissing_guest_exit_marker=yes\n' >"$EVIDENCE/$label.status"
+    return 1
+  fi
+  rc="$marker"
+  printf 'transport=PASS\nguest_exit_code=%s\ncontrol_destination=%s\ncontrol_interface=%s\n' "$rc" "$ll" "$bridge" >"$EVIDENCE/$label.status"
+  (( rc == 0 ))
+}
+
+guest_control_preflight() {
+  local host="$1" address="${MGMT_IP[$1]}" bridge="${REALM_BRIDGE[$1]}" ll="${GUEST_IPV6[$1]}"
+  local capture_root="/var/lib/o3k-fabric-v3/$RUN_ID/control/$host" fabric_ns
+  fabric_ns="$(python3 - "$EVIDENCE/attachments/server-$host-provider-ownership.json" <<'PYNS'
+import json,sys
+print(json.load(open(sys.argv[1]))['fabric']['namespace'])
+PYNS
+)"
+  prepare_guest_control "$host" || fail "host-local IPv6 link-local SSH unavailable for guest $host" "HARNESS_GAP"
+  guest_control_command "$host" true "compute-$host/control-true.txt" || fail "guest $host control true failed" "HARNESS_GAP"
+  guest_control_command "$host" 'ip link show dev eth0' "compute-$host/control-ip-link.txt" || fail "guest $host ip link preflight failed" "HARNESS_GAP"
+  guest_control_command "$host" 'ip addr show dev eth0' "compute-$host/control-ip-address.txt" || fail "guest $host interface address preflight failed" "HARNESS_GAP"
+  guest_control_command "$host" 'ip -o -4 addr show dev eth0' "compute-$host/control-ipv4.txt" || fail "guest $host IPv4 preflight failed" "HARNESS_GAP"
+  guest_control_command "$host" 'ip -o -6 addr show dev eth0 scope link' "compute-$host/control-ipv6-linklocal.txt" || fail "guest $host IPv6 link-local preflight failed" "HARNESS_GAP"
+  grep -Fq "${TENANT_IP[$host]}/" "$EVIDENCE/compute-$host/control-ipv4.txt" || fail "guest $host lacks canonical DHCP IPv4 on eth0" "HARNESS_GAP"
+  grep -Fq "${TENANT_IP[$host]}/" "$EVIDENCE/compute-$host/control-ip-address.txt" || fail "guest $host ip addr show lacks canonical DHCP IPv4" "HARNESS_GAP"
+  grep -Fqi "$ll" "$EVIDENCE/compute-$host/control-ipv6-linklocal.txt" || fail "guest $host link-local did not match canonical MAC derivation" "HARNESS_GAP"
+  sleep 10
+  ssh_vm "$address" "sudo timeout 2 tcpdump -nn -r '$capture_root/local-control.pcap'" \
+    >"$EVIDENCE/management/guest-$host-local-control-capture.txt" 2>&1 || true
+  ssh_vm "$address" "sudo timeout 2 ip netns exec '$fabric_ns' tcpdump -nn -r '$capture_root/fabric-control.pcap'" \
+    >"$EVIDENCE/management/guest-$host-fabric-control-capture.txt" 2>&1 || true
+  ssh_vm "$address" "sudo cp '$capture_root/fabric-control.pcap' /tmp/$RUN_ID-$host-fabric.pcap && sudo chown '$SSH_USER:$SSH_USER' /tmp/$RUN_ID-$host-fabric.pcap" \
+    || fail "guest $host Fabric control capture unavailable" "HARNESS_GAP"
+  scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" \
+    "$SSH_USER@$address:/tmp/$RUN_ID-$host-fabric.pcap" "$EVIDENCE/management/guest-$host-fabric-control.pcap" \
+    || fail "guest $host Fabric capture retrieval failed" "HARNESS_GAP"
+  if grep -Eq '^[0-9]+ packets captured' "$EVIDENCE/management/guest-$host-fabric-control-capture.txt"; then
+    fail "guest $host control packet entered VXLAN/WireGuard namespace" "HARNESS_GAP"
+  fi
+  grep -Eq '^[0-9]+ packets captured' "$EVIDENCE/management/guest-$host-local-control-capture.txt" \
+    || fail "guest $host local Realm bridge did not observe control SSH" "HARNESS_GAP"
+  printf 'guest_control=PASS\ncontrol_destination=%s\ncontrol_scope=%s\ncanonical_ipv4=%s\nlocal_bridge_capture=PASS\nfabric_namespace_capture=EMPTY\n' \
+    "$ll" "$bridge" "${TENANT_IP[$host]}" >"$EVIDENCE/compute-$host/guest-control-result.txt"
+  serial_report="$(python3 "$ROOT_DIR/tests/fabric-v3-guest-control.py" serial "$EVIDENCE/compute-$host/domain.xml")" \
+  || fail "could not inspect live serial devices for $host" "HARNESS_GAP"
+python3 - "$EVIDENCE/environment/control-channel-capabilities.json" "$host" "$serial_report" <<'PYCAP'
+import json,pathlib,sys
+path=pathlib.Path(sys.argv[1]); doc=json.loads(path.read_text()); host=sys.argv[2]; live=json.loads(sys.argv[3])
+if live['serial_pty_interactive']:
+    doc['mechanisms']['serial_pty'].update(present=True,interactive=True,bidirectional=True,accepted_for_control=False,discovery='live domain XML verified; profile selects the separately preflighted host-local link-local channel')
+if live['file_backed_serial_read_only']:
+    doc['mechanisms']['file_backed_serial'].update(present=True,read_only=True,discovery='live domain XML verified')
+else:
+    doc['mechanisms']['file_backed_serial'].update(present=False,read_only=False,discovery='live domain XML verified')
+doc['mechanisms']['qemu_guest_agent'].update(present=live['qemu_guest_agent_present'],discovery='live domain XML channel targets inspected')
+doc['mechanisms']['vsock'].update(present=live['vsock_present'],discovery='live domain XML devices inspected')
+doc['mechanisms']['dedicated_management_nic'].update(present=live['dedicated_management_nic_present'],discovery='live domain XML network interface count inspected')
+doc['mechanisms']['guest_ipv6_link_local_host_local_realm_bridge'].update(interactive=False,accepted_for_control=True,discovery='per-guest SSH/readiness/address checks passed; local bridge capture contains control flow and Fabric namespace capture is empty')
+doc.setdefault('live_domains',{})[host]={**live,'guest_control':'host-local IPv6 link-local SSH','accepted_for_control':True}
+path.write_text(json.dumps(doc,sort_keys=True,indent=2)+'\n')
+PYCAP
+  echo "GUEST CONTROL $host: PASS"
 }
 
 create_server a
-if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then
-  guest_boot_proof a || fail "guest a file-backed serial did not prove its canonical DHCP boot lease" "ENVIRONMENT_GAP"
-fi
+GUEST_IPV6[a]="$(mac_link_local "${TENANT_MAC[a]}")"
+if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then guest_control_preflight a; fi
 create_server b
-if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then
-  guest_boot_proof b || fail "guest b file-backed serial did not prove its canonical DHCP boot lease" "ENVIRONMENT_GAP"
-fi
+GUEST_IPV6[b]="$(mac_link_local "${TENANT_MAC[b]}")"
+if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then guest_control_preflight b; fi
 create_server c
-if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then
-  guest_boot_proof c || fail "guest c file-backed serial did not prove its canonical DHCP boot lease" "ENVIRONMENT_GAP"
-fi
-
-mac_link_local() {
-  python3 - "$1" <<'PY'
-import sys
-b=bytes.fromhex(sys.argv[1].replace(':',''))
-assert len(b)==6
-b=bytes([b[0]^2,b[1],b[2],0xff,0xfe,b[3],b[4],b[5]])
-print('fe80::'+':'.join(f'{int.from_bytes(b[i:i+2],"big"):x}' for i in range(0,8,2)))
-PY
-}
-
-for host in a b c; do
-  GUEST_IPV6[$host]="$(mac_link_local "${TENANT_MAC[$host]}")"
-done
+GUEST_IPV6[c]="$(mac_link_local "${TENANT_MAC[c]}")"
+if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then guest_control_preflight c; fi
 printf 'server,host,tenant_ip,guest_mac\n' >"$EVIDENCE/canonical/endpoints.csv"
 for host in a b c; do printf '%s,host-%s,%s,%s\n' "$host" "$host" "${TENANT_IP[$host]}" "${TENANT_MAC[$host]}" >>"$EVIDENCE/canonical/endpoints.csv"; done
-
-console_command() {
-  local host="$1" command="$2" label="$3" address="${MGMT_IP[$1]}" domain
-  domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
-  LAST_GUEST_CHANNEL_ERROR=0
-  if ! python3 - "$SSH_KEY" "$KNOWN_HOSTS" "$SSH_USER" "$address" "$domain" "$command" "$EVIDENCE/$label" <<'PY'
-import pexpect,sys
-key,known,user,address,domain,command,output=sys.argv[1:]
-args=['-tt','-i',key,'-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes',
-      '-o',f'UserKnownHostsFile={known}',f'{user}@{address}',
-      f'sudo virsh -c qemu:///system console --force --safe {domain}']
-p=pexpect.spawn('ssh',args,encoding='utf-8',timeout=45)
-with open(output,'w',encoding='utf-8') as f:
-    p.logfile_read=f
-    try:
-        i=p.expect([r'(?i)login:',r'(?m)[^\r\n]*[#$] ?$',pexpect.EOF])
-        if i==0:
-            p.sendline('cirros')
-            p.expect(r'(?i)password:')
-            p.sendline('gocubsgo')
-            p.expect(r'(?m)[^\r\n]*[#$] ?$')
-        elif i==2:
-            raise RuntimeError('serial console ended before shell readiness')
-        p.sendline(command+'; rc=$?; echo __O3K_RC_$rc__')
-        p.expect(r'__O3K_RC_([0-9]+)__')
-        rc=int(p.match.group(1))
-        p.send('\x1d')
-        p.expect(pexpect.EOF,timeout=8)
-        if rc: raise SystemExit(rc)
-    finally:
-        if p.isalive(): p.close(force=True)
-PY
-  then
-    LAST_GUEST_CHANNEL_ERROR=1
-    return 1
-  fi
-}
+python3 - "$EVIDENCE/manifest.json" "$EVIDENCE/environment/control-channel-capabilities.json" <<'PYMANIFEST'
+import csv,json,pathlib,sys
+manifest=pathlib.Path(sys.argv[1]); caps=json.loads(pathlib.Path(sys.argv[2]).read_text()); data=json.loads(manifest.read_text())
+with (manifest.parent/'canonical/endpoints.csv').open() as stream:
+    data['canonical_endpoints']={r['server']:{'host':r['host'],'fixed_ip':r['tenant_ip'],'canonical_guest_mac':r['guest_mac'],'dhcp':'PASS'} for r in csv.DictReader(stream)}
+addresses=(manifest.parent/'environment/management-addresses.txt').read_text().splitlines()
+data['management_addresses']={line.split('=',1)[0].split('-')[-1]:line.split('=',1)[1] for line in addresses}
+data['stable_host_ids']={h:f'host-{h}' for h in 'abc'}
+data['compute_agent_ids']={h:f'compute-agent-{h}' for h in 'abc'}
+data['network_agent_ids']={h:f'network-agent-{h}' for h in 'abc'}
+data['guest_control']='PASS A/B/C; host-local IPv6 link-local SSH; local Realm bridge scoped; Fabric namespace capture empty'
+data['control_channel_capabilities']=caps['mechanisms']
+data['live_domains']=caps.get('live_domains',{})
+data['server_status']={h:'ACTIVE' for h in 'abc'}
+manifest.write_text(json.dumps(data,sort_keys=True,indent=2)+'\n')
+PYMANIFEST
 
 run_dhcp_boundary_tool() {
   local action="$1" harness_sha
@@ -744,28 +822,7 @@ if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" == 1 ]]; then
   # All three public creates have reached ACTIVE. Preserve the initial authority
   # capture, then take fresh ownership/plan-derived topology and verify HER and
   # WireGuard before observing one bounded B retry window.
-  for host in a b c; do
-    domain="$(cat "$EVIDENCE/compute-$host/domain.txt")"
-    serial_path="$(python3 - "$EVIDENCE/compute-$host/domain.xml" "$RUN_ID" <<'PY'
-import sys,xml.etree.ElementTree as ET
-root=ET.parse(sys.argv[1]).getroot(); prefix=f'/var/lib/o3k-fabric-v3/{sys.argv[2]}/compute/console/'
-paths=[]
-for node in root.findall('./devices/serial'):
-    source=node.find('source'); path=source.get('path','') if source is not None else ''
-    if node.get('type')=='file' and path.startswith(prefix): paths.append(path)
-assert len(paths)==1,paths
-print(paths[0])
-PY
-)" || fail "guest $host serial evidence path is not run-owned" "OWNERSHIP_DEFECT"
-    ssh_vm "${MGMT_IP[$host]}" "sudo cat '$serial_path'" >"$EVIDENCE/compute-$host/serial.log" \
-      || fail "guest $host serial evidence could not be collected" "HARNESS_GAP"
-  done
-  python3 - "$EVIDENCE/compute-a/serial.log" "${TENANT_IP[a]}" <<'PY' \
-    || fail "guest A serial log did not prove its canonical DHCP lease" "DATAPLANE_DEFECT"
-import pathlib,re,sys
-text=pathlib.Path(sys.argv[1]).read_text(errors='replace')
-assert re.search(rf'eth0: leased {re.escape(sys.argv[2])}(?:/\d+)?(?:\s|$)',text),sys.argv[2]
-PY
+  for host in a b c; do guest_control_preflight "$host"; done
   stop_dhcp_capture
   [[ -s "$EVIDENCE/attachments/dhcp-dora.pcap" ]] \
     || fail "server A DHCP packet capture is absent before the B boundary run" "HARNESS_GAP"
@@ -827,8 +884,9 @@ data=json.load(open(manifest)); data.update({
 })
 json.dump(data,open(manifest,'w'),sort_keys=True,indent=2); open(manifest,'a').write('\n')
 PY
-  # The nested domains expose file-backed serial devices, not an interactive
-  # console. Trigger a fresh B boot through the supported compute HTTP action;
+  # Serial device capability was inventoried and the fresh live domain XML was
+  # checked before use. This diagnostic uses serial only as read-only evidence.
+  # Trigger a fresh B boot through the supported compute HTTP action;
   # B has no DHCP lease yet, so its normal boot client must issue DISCOVER.
   # Preserve both the exact request/response and the bounded state poll.
   python3 - "$EVIDENCE/api/server-b-dhcp-trigger.request.json" <<'PY'
@@ -913,30 +971,17 @@ PY
   exit 0
 fi
 
-# The nested domains expose file-backed serial devices, so `virsh console`
-# cannot provide an interactive PTY. Their already captured boot logs contain
-# the DHCP client's OFFER/lease observations; use those read-only observations
-# to prove the canonical fixed address was acquired from DHCP.
+# Canonical guest IPv4 acquisition was proven through the host-local control
+# channel before entering any packet predicate; serial output is evidence-only.
 for host in a b c; do
-  python3 - "${TENANT_IP[$host]}" "${TENANT_MAC[$host]}" \
-    "$EVIDENCE/compute-$host/serial.log" "$EVIDENCE/compute-$host/guest-ip.txt" <<'PY' \
-    || fail "guest $host did not receive its canonical fixed IP through DHCP" "DATAPLANE_DEFECT"
-import re,sys
-address,mac,serial_path,output=sys.argv[1:]
-text=open(serial_path,encoding='utf-8',errors='replace').read()
-lines=[line.strip() for line in text.splitlines()
-       if re.search(rf'eth0: leased {re.escape(address)}(?:/\d+)?(?:\s|$)',line)]
-if not lines:
-    raise SystemExit(1)
-offer=[line.strip() for line in text.splitlines()
-       if re.search(rf'eth0: offered {re.escape(address)} from 10\.77\.0\.1(?:\s|$)',line)]
-if not offer:
-    raise SystemExit(1)
-with open(output,'w',encoding='utf-8') as f:
-    f.write(f'guest_mac={mac}\ncanonical_fixed_ip={address}\n')
-    f.write('dhcp_server=10.77.0.1\noffer=PASS\nlease=PASS\n')
-    f.write(f'lease_observation={lines[-1]}\n')
-PY
+  grep -Fq "${TENANT_IP[$host]}/" "$EVIDENCE/compute-$host/control-ipv4.txt" \
+    || fail "guest $host did not receive its canonical fixed IP through DHCP" "HARNESS_GAP"
+  python3 - "${TENANT_IP[$host]}" "${TENANT_MAC[$host]}" "$EVIDENCE/compute-$host/control-ipv4.txt" "$EVIDENCE/compute-$host/guest-ip.txt" <<'PYIP'
+import pathlib,sys
+address,mac,source,output=sys.argv[1:]
+text=pathlib.Path(source).read_text(); assert address+'/' in text
+pathlib.Path(output).write_text(f'guest_mac={mac}\ncanonical_fixed_ip={address}\ndhcp=PASS\n')
+PYIP
 done
 
 stop_dhcp_capture
@@ -1033,44 +1078,36 @@ PY
 echo 'FABRIC DHCP DORA: PASS (one authority; endpoint bindings A/B/C)' \
   >"$EVIDENCE/attachments/dhcp-dora-result.txt"
 
-# Packet probes must use an independent serial command channel. Never depend
-# on SSH over the tenant network to execute acceptance traffic.
+# A/B/C control preflight completed immediately after each ACTIVE create.
 for host in a b c; do
-  console_command "$host" true "compute-$host/serial-preflight-true.txt" \
-    || fail "serial guest shell preflight failed on $host" "HARNESS_GAP"
-  grep -Fq '__O3K_RC_0__' "$EVIDENCE/compute-$host/serial-preflight-true.txt" \
-    || fail "serial true command exit marker absent on $host" "HARNESS_GAP"
-  console_command "$host" "ip -o -4 addr show dev eth0" "compute-$host/serial-preflight-address.txt" \
-    || fail "serial guest address preflight failed on $host" "HARNESS_GAP"
-  grep -Fq "${TENANT_IP[$host]}/" "$EVIDENCE/compute-$host/serial-preflight-address.txt" \
-    || fail "guest $host lacks its canonical DHCP address on eth0" "HARNESS_GAP"
-  printf 'serial_console=PASS\nguest_shell=PASS\ntrue=PASS\ncanonical_eth0_ipv4=%s\n' \
-    "${TENANT_IP[$host]}" >"$EVIDENCE/compute-$host/serial-command-channel.txt"
+  grep -Fq 'guest_control=PASS' "$EVIDENCE/compute-$host/guest-control-result.txt" \
+    || fail "guest $host control channel did not pass preflight" "HARNESS_GAP"
 done
 
 guest_failure_class() {
-  local phase_class="$1"
-  if (( LAST_GUEST_CHANNEL_ERROR )); then printf 'HARNESS_GAP\n'; else printf '%s\n' "$phase_class"; fi
+  local phase_class="$1" transport_error=no
+  (( LAST_GUEST_CHANNEL_ERROR )) && transport_error=yes
+  python3 "$ROOT_DIR/tests/fabric-v3-guest-control.py" failure-class "$transport_error" "$phase_class"
 }
 
 # Cold neighbor resolution and the six required tenant-address ICMP flows.
 for pair in a:b b:a a:c c:a b:c c:b; do
   from="${pair%%:*}"; to="${pair##*:}"
-  console_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "icmp/$from-to-$to.txt" || fail "ICMP $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-  console_command "$from" "ip neigh show ${TENANT_IP[$to]}" "arp/$from-to-$to.txt" || fail "ARP observation $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+  guest_control_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "icmp/$from-to-$to.txt" || fail "ICMP $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+  guest_control_command "$from" "ip neigh show ${TENANT_IP[$to]}" "arp/$from-to-$to.txt" || fail "ARP observation $from->$to failed" "$(guest_failure_class DATAPLANE_DEFECT)"
   grep -Fqi "${TENANT_MAC[$to]}" "$EVIDENCE/arp/$from-to-$to.txt" || fail "ARP $from->$to resolved to wrong MAC" "DATAPLANE_DEFECT"
 done
 
-# Bounded TCP and UDP listeners run inside B/C CirrOS guests; sender commands
+# Bounded TCP and UDP listeners run inside B/C probe guests; sender commands
 # originate inside A over tenant addresses.
-console_command b 'rm -f /tmp/o3k-tcp-data; nohup busybox nc -l -p 18081 >/tmp/o3k-tcp-data 2>&1 </dev/null &' tcp-listener.txt || fail "TCP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command b 'rm -f /tmp/o3k-tcp-data; nohup nc -l -p 18081 >/tmp/o3k-tcp-data 2>&1 </dev/null &' tcp-listener.txt || fail "TCP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
 sleep 1
-console_command a "echo o3k-tcp-$RUN_ID | busybox nc -w 5 ${TENANT_IP[b]} 18081" tcp/sender.txt || fail "TCP A->B failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-console_command b 'grep -F o3k-tcp- /tmp/o3k-tcp-data' tcp/receiver.txt || fail "TCP payload did not arrive at B" "$(guest_failure_class DATAPLANE_DEFECT)"
-console_command c 'rm -f /tmp/o3k-udp-data; nohup busybox nc -u -l -p 18082 >/tmp/o3k-udp-data 2>&1 </dev/null &' udp-listener.txt || fail "UDP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command a "echo o3k-tcp-$RUN_ID | nc -w 5 ${TENANT_IP[b]} 18081" tcp/sender.txt || fail "TCP A->B failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command b 'grep -F o3k-tcp- /tmp/o3k-tcp-data' tcp/receiver.txt || fail "TCP payload did not arrive at B" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command c 'rm -f /tmp/o3k-udp-data; nohup nc -u -l -p 18082 >/tmp/o3k-udp-data 2>&1 </dev/null &' udp-listener.txt || fail "UDP listener setup failed" "$(guest_failure_class DATAPLANE_DEFECT)"
 sleep 1
-console_command a "echo o3k-udp-$RUN_ID | busybox nc -u -w 3 ${TENANT_IP[c]} 18082" udp/sender.txt || fail "UDP A->C failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-console_command c 'sleep 1; grep -F o3k-udp- /tmp/o3k-udp-data' udp/receiver.txt || fail "UDP payload did not arrive at C" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command a "echo o3k-udp-$RUN_ID | nc -u -w 3 ${TENANT_IP[c]} 18082" udp/sender.txt || fail "UDP A->C failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command c 'sleep 1; grep -F o3k-udp- /tmp/o3k-udp-data' udp/receiver.txt || fail "UDP payload did not arrive at C" "$(guest_failure_class DATAPLANE_DEFECT)"
 
 for host in a b c; do
   address="${MGMT_IP[$host]}"
@@ -1148,7 +1185,7 @@ for _ in $(seq 1 120); do curl -fsS "$BASE/healthz" >/dev/null 2>&1 && break; ki
 curl -fsS "$BASE/readyz" >"$EVIDENCE/restart/ready.json" || fail "controller did not become ready after restart" "DURABLE_RECONCILIATION_GAP"
 for pair in a:b b:a a:c c:a b:c c:b; do
   from="${pair%%:*}"; to="${pair##*:}"
-  console_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "restart/$from-to-$to.txt" || fail "post-controller-restart ICMP $from->$to failed" "$(guest_failure_class DURABLE_RECONCILIATION_GAP)"
+  guest_control_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "restart/$from-to-$to.txt" || fail "post-controller-restart ICMP $from->$to failed" "$(guest_failure_class DURABLE_RECONCILIATION_GAP)"
 done
 api "$BASE/v2.1/$PROJECT_ID/servers" >"$EVIDENCE/restart/servers.json" || fail "API unavailable after controller restart" "DURABLE_RECONCILIATION_GAP"
 for host in a b c; do grep -Fq "$PREFIX-server-$host" "$EVIDENCE/restart/servers.json" || fail "server $host missing after controller recovery" "DURABLE_RECONCILIATION_GAP"; done
@@ -1182,8 +1219,8 @@ for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
     hosts={e["selected_host"] for e in plan.get("directory",{}).get("entries",[])}
     assert hosts=={"host-a","host-b"}, (path,hosts)
 PY
-console_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
-console_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" endpoint-removal/b-to-a.txt || fail "B/A failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
+guest_control_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" endpoint-removal/b-to-a.txt || fail "B/A failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
 
 # Supported API teardown; provider state is never manually repaired/deleted.
 for index in 1 0; do
@@ -1239,6 +1276,7 @@ diff -u "$EVIDENCE/environment/libvirt-domains-before.txt" "$EVIDENCE/teardown/l
 git -C "$ROOT_DIR" rev-parse HEAD >"$EVIDENCE/environment/harness_sha.txt"
 git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}' >"$EVIDENCE/environment/harness_tree.txt"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"
 CAMPAIGN_TEARDOWN_PASS=1
 
 cat >"$EVIDENCE/result.json" <<JSON

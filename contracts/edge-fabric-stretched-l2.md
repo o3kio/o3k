@@ -14,6 +14,7 @@ Related architecture:
 - [ADR-0168](../docs/adr/ADR-0168-o3k-routed-fabric-and-network-execution.md)
 - [ADR-0172](../docs/adr/ADR-0172-configurable-edge-fabric-transport-ports.md)
 - [current execution-boundary contract](execution-boundaries.md)
+- [real-host acceptance evidence contract](real-host-acceptance-evidence.md)
 - Shared substrate implementation: [o3kio/fabric](https://github.com/o3kio/fabric)
 
 Aligned external decision: CHV
@@ -205,15 +206,22 @@ functional gate (three independent KVM/libvirt hosts) and provider conformance
 requirements to be recorded as passing evidence, including at minimum:
 
 - cross-host ARP resolved to the remote endpoint's actual canonical MAC;
+- guest-control channel capabilities discovered before the run;
+- guest command/control traffic proven not to traverse the tested cross-host Fabric path;
+- probe image source-bound identity recorded;
+- canonical DHCP address proven before unicast tests;
+- packet command execution independently proven before classifying its result;
 - cross-host unicast after MAC learning;
 - overlapping-realm isolation with identical inner IPs;
-- DHCP broadcast across hosts;
+- DHCP DISCOVER/OFFER/REQUEST/ACK broadcast across hosts through one Realm authority, with canonical IP/MAC bindings, tenant MTU option, no competing offer, and the scoped anti-spoof return exception retained;
 - bounded flood delivery (hosting peers only);
 - wrong/unknown VNI drop; anti-spoof rejection with visible counters;
 - no cleartext tenant traffic on the physical underlay;
 - MTU boundary behavior;
 - zero leaked netns/bridge/veth/VXLAN/FDB/WireGuard/nft state after
   restart/reconcile, drain, and cleanup.
+- `DATAPLANE_DEFECT` only after guest-control health, source/destination canonical
+  state, and packet-command start are proven.
 
 ## Compatibility with prior contracts
 

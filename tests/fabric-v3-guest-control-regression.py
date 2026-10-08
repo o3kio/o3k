@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Regression checks for the Fabric acceptance guest-control contract."""
+from __future__ import annotations
+
+import importlib.util
+import pathlib
+import tempfile
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parent
+DRIVER = (ROOT / "fabric-v3-o3k-three-host-campaign.sh").read_text()
+SPEC = importlib.util.spec_from_file_location("guest_control", ROOT / "fabric-v3-guest-control.py")
+assert SPEC and SPEC.loader
+helper = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(helper)
+
+
+class GuestControlRegression(unittest.TestCase):
+    def inspect(self, serial_xml: str) -> dict:
+        with tempfile.NamedTemporaryFile("w", suffix=".xml") as f:
+            f.write(serial_xml)
+            f.flush()
+            return helper.serial_capabilities(f.name)
+
+    def test_file_backed_serial_is_read_only_not_interactive(self):
+        result = self.inspect('<domain><devices><serial type="pty"><source path="/dev/pts/2"/></serial><console type="file"><source path="/tmp/serial.log"/></console></devices></domain>')
+        self.assertFalse(result["serial_pty_interactive"])
+        self.assertTrue(result["file_backed_serial_read_only"])
+
+    def test_pty_requires_live_pty_source_path(self):
+        accepted = self.inspect('<domain><devices><serial type="pty"><source path="/dev/pts/9"/></serial><console type="pty"><source path="/dev/pts/9"/></console></devices></domain>')
+        absent = self.inspect('<domain><devices><serial type="pty"><source path="/dev/pts/9"/></serial><console type="pty"><source path="/tmp/serial.log"/></console></devices></domain>')
+        self.assertTrue(accepted["serial_pty_interactive"])
+        self.assertFalse(absent["serial_pty_interactive"])
+
+    def test_agent_vsock_and_extra_nic_inventory_uses_live_devices(self):
+        domain = '<domain><devices><channel><target name="org.qemu.guest_agent.0"/></channel><vsock/><interface/><interface/></devices></domain>'
+        result = self.inspect(domain)
+        self.assertTrue(result["qemu_guest_agent_present"])
+        self.assertTrue(result["vsock_present"])
+        self.assertTrue(result["dedicated_management_nic_present"])
+
+    def test_missing_ssh_listener_is_harness_gap(self):
+        self.assertEqual(helper.failure_class(True, "DATAPLANE_DEFECT"), "HARNESS_GAP")
+
+    def test_link_local_control_target_is_scoped_to_local_bridge(self):
+        ll = helper.link_local("02:ee:e0:4e:1a:31")
+        target = helper.scoped_target(ll, "br-o3k-local")
+        self.assertTrue(ll.startswith("fe80::"))
+        self.assertEqual(target, f"ubuntu@{ll}%br-o3k-local")
+        with self.assertRaises(ValueError):
+            helper.scoped_target("10.77.0.2", "br-o3k-local")
+
+    def test_healthy_control_then_failed_packet_is_dataplane_defect(self):
+        self.assertEqual(helper.failure_class(False, "DATAPLANE_DEFECT"), "DATAPLANE_DEFECT")
+
+    def test_control_transport_is_not_tenant_ipv4_and_has_no_static_fallback(self):
+        start = DRIVER.index("guest_control_command() {")
+        end = DRIVER.index("\n\nguest_control_preflight() {", start)
+        command = DRIVER[start:end]
+        self.assertIn("fabric-v3-guest-control.py\" target", command)
+        self.assertIn("ssh -6", command)
+        self.assertIn("BindInterface", command)
+        self.assertNotIn("TENANT_IP", command)
+        self.assertNotIn("ip addr add", DRIVER)
+        self.assertNotIn("ip route add", DRIVER)
+        self.assertNotIn("virsh edit", DRIVER)
+        self.assertNotIn("update-device", DRIVER)
+        self.assertNotIn("virsh console", DRIVER)
+        self.assertNotIn("guest_tunnel_command", DRIVER)
+
+    def test_packet_classifier_uses_control_transport_state(self):
+        self.assertIn("LAST_GUEST_CHANNEL_ERROR", DRIVER)
+        self.assertIn("failure-class \"$transport_error\" \"$phase_class\"", DRIVER)
+        self.assertIn("guest_control_preflight \"$host\"", DRIVER)
+        self.assertIn("ip addr show dev eth0", DRIVER)
+
+
+if __name__ == "__main__":
+    unittest.main()
