@@ -108,17 +108,14 @@ def topology(args: argparse.Namespace, ev: pathlib.Path) -> dict:
         pid_lines = [line for line in pids.splitlines() if line.strip()]
         if len(pid_lines) != (1 if h == "a" else 0):
             raise RuntimeError(f"host-{h}: expected exactly one authority dnsmasq process across A/B/C")
+        owner = read_remote_json(args, h, owner_path)
+        write_json(ev / "dhcp" / f"host-{h}-ownership.json", owner)
+        if (owner.get("local_host") != f"host-{h}" or owner.get("authority_host") != "host-a"
+                or not owner.get("dhcp_enabled") or owner.get("pending") or owner.get("withdrawn")
+                or owner.get("directory_generation") != plans[h].get("directory_generation")
+                or owner.get("local_fabric_generation") != plans[h].get("local_fabric_generation")):
+            raise RuntimeError(f"host-{h} DHCP ownership is not committed to the current authority/plan")
         if h == "a":
-            owner = read_remote_json(args, h, owner_path)
-            write_json(ev / "dhcp" / f"host-{h}-ownership.json", owner)
-            if (owner.get("authority_host") != "host-a" or not owner.get("dhcp_enabled")
-                    or owner.get("pending") or owner.get("directory_generation") != plans[h].get("directory_generation")
-                    or owner.get("local_fabric_generation") != plans[h].get("local_fabric_generation")
-                    or owner.get("withdrawn")):
-                raise RuntimeError("host-a DHCP ownership is not committed to the current authority plan")
-            # Durable bindings and dnsmasq config belong to the selected
-            # authority only. Non-authority participants intentionally have
-            # neither ownership records nor competing DHCP services.
             state = read_remote_json(args, h, f"{dhcp_root}/state.json")
             conf = ssh(args, h, f"sudo cat {shlex.quote(dhcp_root + '/dnsmasq.conf')}")
             write_json(ev / "dhcp" / f"host-{h}-state.json", state)
@@ -137,9 +134,10 @@ def topology(args: argparse.Namespace, ev: pathlib.Path) -> dict:
             if config.get("mtu") != 1390 or "dhcp-option=26,1390" not in conf:
                 raise RuntimeError("authority DHCP state does not propagate tenant MTU 1390")
         else:
-            present = ssh(args, h, f"if sudo test -e {shlex.quote(owner_path)}; then echo present; fi")
-            if present or pid_lines:
-                raise RuntimeError(f"host-{h}: non-authority DHCP ownership/process exists")
+            state = read_remote_json(args, h, f"{dhcp_root}/state.json")
+            write_json(ev / "dhcp" / f"host-{h}-state.json", state)
+            if state.get("config") is not None or state.get("bindings"):
+                raise RuntimeError(f"host-{h}: non-authority carries DHCP service configuration or bindings")
     (ev / "dhcp" / "preconditions.txt").write_text(
         "A/B/C canonical bindings present; host-a is the sole committed DHCP authority; "
         "A DHCP Realm bridge and MTU match are proved.\n")
