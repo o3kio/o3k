@@ -204,6 +204,48 @@ def fdb_check(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> tuple[b
     return True, "all three VXLAN devices contain exactly the two current participant BUM destinations"
 
 
+def wireguard_identity_check(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> tuple[bool, str]:
+    identity_path = ev / "environment" / "fabric-identities.json"
+    try:
+        identities = json.loads(identity_path.read_text())
+        expected = {item["host_id"]: item["public_key"] for item in identities}
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        return False, f"registered Fabric identity evidence is malformed: {exc}"
+    if set(expected) != {f"host-{h}" for h in "abc"} or len(set(expected.values())) != 3:
+        return False, "registered Fabric host identities are missing or not unique"
+    observed: dict[str, dict[str, str]] = {}
+    for h in "abc":
+        t = maps[h]
+        command = (f"sudo ip netns exec {shlex.quote(t['namespace'])} "
+                   f"wg show {shlex.quote(t['wireguard'])} public-key")
+        live = ssh(args, h, command).strip()
+        expected_key = expected[f"host-{h}"]
+        observed[h] = {"registered_public_key": expected_key, "live_interface_public_key": live}
+        if live != expected_key:
+            write_json(ev / "topology" / "wireguard" / "runtime-identities.json", observed)
+            return False, (f"host-{h} live Fabric interface key differs from the registered host identity; "
+                           "provider key path/configuration is inconsistent")
+    write_json(ev / "topology" / "wireguard" / "runtime-identities.json", observed)
+    return True, "all live namespace WireGuard interface keys equal their registered canonical host identities"
+
+
+def prime_wireguard_peers(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> None:
+    """Send bounded transport probes so lazy WireGuard handshakes can start."""
+    results = []
+    for h in "abc":
+        t = maps[h]
+        for peer_host, peer in sorted(t["peers"].items()):
+            if peer_host not in {f"host-{x}" for x in "abc"}:
+                continue
+            command = (f"sudo ip netns exec {shlex.quote(t['namespace'])} "
+                       f"timeout 4s ping -n -c 1 -W 2 {shlex.quote(peer['fabric_transport_ip'])}")
+            output = ssh(args, h, command, check=False)
+            results.append({"source_host": f"host-{h}", "peer_host": peer_host,
+                            "peer_transport_ip": peer["fabric_transport_ip"],
+                            "probe_output": output[-1200:]})
+    write_json(ev / "topology" / "wireguard" / "bounded-peer-probes.json", results)
+
+
 def wg_check(args: argparse.Namespace, ev: pathlib.Path, maps: dict) -> tuple[bool, str]:
     for h in "abc":
         t = maps[h]
@@ -277,8 +319,6 @@ def action_prepare(args: argparse.Namespace) -> int:
             "vni_binding_generations": {h: maps[h]["binding_generation"] for h in "abc"},
             "endpoints": {h: {"id": args.endpoints[h], "mac": args.macs[h]} for h in "abc"},
         })
-        for h in "abc":
-            save_snapshot(args, ev, h, maps[h], "before")
         ok, detail = fdb_check(args, ev, maps)
         if not ok:
             write_json(ev / "result.json", {"result": "STOP", "classification": "HER_REALIZATION_DEFECT",
@@ -287,6 +327,16 @@ def action_prepare(args: argparse.Namespace) -> int:
             print(json.dumps({"state": "stop", "classification": "HER_REALIZATION_DEFECT", "detail": detail}))
             return 20
         (ev / "topology" / "fdb" / "result.txt").write_text(detail + "\n")
+        ok, detail = wireguard_identity_check(args, ev, maps)
+        if not ok:
+            write_json(ev / "result.json", {"result": "STOP", "classification": "WIREGUARD_PEER_DEFECT",
+                                             "first_present_boundary": "current HER FDB",
+                                             "first_absent_boundary": "live WireGuard identity matches registered host identity",
+                                             "detail": detail})
+            print(json.dumps({"state": "stop", "classification": "WIREGUARD_PEER_DEFECT", "detail": detail}))
+            return 20
+        (ev / "topology" / "wireguard" / "identity-result.txt").write_text(detail + "\n")
+        prime_wireguard_peers(args, ev, maps)
         ok, detail = wg_check(args, ev, maps)
         if not ok:
             write_json(ev / "result.json", {"result": "STOP", "classification": "WIREGUARD_PEER_DEFECT",
@@ -295,6 +345,10 @@ def action_prepare(args: argparse.Namespace) -> int:
             print(json.dumps({"state": "stop", "classification": "WIREGUARD_PEER_DEFECT", "detail": detail}))
             return 20
         (ev / "topology" / "wireguard" / "result.txt").write_text(detail + "\n")
+        # Baseline counters after bounded handshake probes, immediately before
+        # the DHCP-only capture window begins.
+        for h in "abc":
+            save_snapshot(args, ev, h, maps[h], "before")
         specs = capture_specs(maps)
         for spec in specs:
             h = spec["host"]

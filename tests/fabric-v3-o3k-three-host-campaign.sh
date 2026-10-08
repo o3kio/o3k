@@ -4,8 +4,8 @@ set -Eeuo pipefail
 # Supported-HTTP Fabric v3 three-host nested campaign. This script is test
 # harness only and refuses to run against a different product source tree.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRODUCT_SHA=9f5d2a9eae1e83430185b1677553d09a27810111
-PRODUCT_TREE=7ccdd3ad981c3f6796c8b9903370f334fbd24146
+PRODUCT_SHA=e4ca1805dc16839b855e969e7e17928a54cc211f
+PRODUCT_TREE=d00fecc537d8106b0f1ff73ccd3d3e0be8e0d963
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 CIRROS_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
 CIRROS_SHA=7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
@@ -373,12 +373,17 @@ done
 
 for host in a b c; do
   address="${MGMT_IP[$host]}"; ready=0
-  ssh_vm "$address" "sudo ip -j -d link show dev mgmt0; sudo wg show; sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key" >"$EVIDENCE/management/compute-$host.txt" || fail "host-$host runtime observation failed" "ENVIRONMENT_GAP"
+  ssh_vm "$address" "sudo ip -j -d link show dev mgmt0; sudo wg show; sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/fabric-provider/wireguard-public.key" >"$EVIDENCE/management/compute-$host.txt" || fail "host-$host runtime observation failed" "ENVIRONMENT_GAP"
 done
 
-WG_A="$(ssh_vm "${MGMT_IP[a]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key")"
-WG_B="$(ssh_vm "${MGMT_IP[b]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key")"
-WG_C="$(ssh_vm "${MGMT_IP[c]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric-provider/wireguard-public.key")"
+WG_A="$(ssh_vm "${MGMT_IP[a]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/fabric-provider/wireguard-public.key")"
+WG_B="$(ssh_vm "${MGMT_IP[b]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/fabric-provider/wireguard-public.key")"
+WG_C="$(ssh_vm "${MGMT_IP[c]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/fabric-provider/wireguard-public.key")"
+for host in a b c; do
+  case "$host" in a) expected="$WG_A";; b) expected="$WG_B";; c) expected="$WG_C";; esac
+  [[ "$expected" =~ ^[A-Za-z0-9+/]{43}=$ ]] \
+    || fail "host-$host provider WireGuard public key is malformed" "HARNESS_GAP"
+done
 cat >"$EVIDENCE/environment/fabric-identities.json" <<JSON
 [
  {"host_id":"host-a","agent_id":"network-agent-a","public_key":"$WG_A","underlay_endpoint":"${MGMT_IP[a]}:65001","fabric_transport_ip":"100.64.3.1","provider_version":"wireguard-v1","fabric_generation":1,"underlay_mtu":1500,"fabric_mtu":1440,"administrative_state":"enabled"},
