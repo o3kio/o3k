@@ -1007,20 +1007,23 @@ PY
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   dhcp_root="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$REALM_ID"
+  ssh_vm "$address" "sudo cat '$dhcp_root/fabric-dhcp-ownership.json'" \
+    >"$EVIDENCE/attachments/dhcp-host-$host-ownership.json" \
+    || fail "host-$host has no durable Fabric DHCP ownership record" "DATAPLANE_DEFECT"
   if [[ "$host" == a ]]; then
-    ssh_vm "$address" "sudo cat '$dhcp_root/owner.json'" \
-      >"$EVIDENCE/attachments/dhcp-host-$host-ownership.json" \
-      || fail "selected authority has no durable Fabric DHCP ownership" "DATAPLANE_DEFECT"
     ssh_vm "$address" "sudo cat '$dhcp_root/state.json'" \
       >"$EVIDENCE/attachments/dhcp-host-$host-state.json" \
       || fail "selected authority has no Fabric DHCP state snapshot" "DATAPLANE_DEFECT"
   else
-    ssh_vm "$address" "sudo test ! -e '$dhcp_root/owner.json' && ! sudo find '$dhcp_root' -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print -quit 2>/dev/null | grep -q ." \
-      >"$EVIDENCE/attachments/dhcp-host-$host-no-authority.txt" \
-      || fail "non-authority host retained Fabric DHCP ownership or process" "SECURITY_DEFECT"
+    ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print 2>/dev/null || true" \
+      >"$EVIDENCE/attachments/dhcp-host-$host-owned-pids.txt"
+    [[ ! -s "$EVIDENCE/attachments/dhcp-host-$host-owned-pids.txt" ]] \
+      || fail "non-authority host runs a competing Fabric DHCP authority" "SECURITY_DEFECT"
   fi
-  ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print 2>/dev/null || true" \
-    >"$EVIDENCE/attachments/dhcp-host-$host-owned-pids.txt"
+  if [[ "$host" == a ]]; then
+    ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print 2>/dev/null || true" \
+      >"$EVIDENCE/attachments/dhcp-host-$host-owned-pids.txt"
+  fi
 done
 ssh_vm "${MGMT_IP[a]}" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$REALM_ID/dnsmasq.conf'" \
   >"$EVIDENCE/attachments/dhcp-authority.conf" \
@@ -1037,8 +1040,10 @@ for host in 'abc':
     expected[port['id']]={'mac':port['mac_address'].lower(),'ip':port['fixed_ips'][0]['ip_address']}
     pids=[line for line in (root/f'dhcp-host-{host}-owned-pids.txt').read_text().splitlines() if line.strip()]
     assert len(pids)==(1 if host=='a' else 0),(host,pids)
-owner=json.load(open(root/'dhcp-host-a-ownership.json'))
-assert owner['authority_host']=='host-a' and owner['enabled'] and not owner['pending'], owner
+for host in 'abc':
+    owner=json.load(open(root/f'dhcp-host-{host}-ownership.json'))
+    assert owner['local_host']==f'host-{host}',owner
+    assert owner['authority_host']=='host-a' and owner['dhcp_enabled'] and not owner['pending'] and not owner['withdrawn'],owner
 state=json.load(open(root/'dhcp-host-a-state.json'))
 assert state['config']['interface']==bridge,state['config']
 assert state['tenant_mtu']==1390,state

@@ -17,7 +17,7 @@ import sys
 root, installer_path, campaign_path, capture_path = sys.argv[1:]
 installer, campaign, capture = map(lambda p: pathlib.Path(p).read_text(),
                                    (installer_path, campaign_path, capture_path))
-product_sha = 'e4ca1805dc16839b855e969e7e17928a54cc211f'
+product_sha = 'e3f5ce764b4d7ee1bba34f645da8ec6c156bde99'
 assert f'PRODUCT_SHA={product_sha}' in campaign
 dhcp_realizer = subprocess.run(
     ['git', '-C', root, 'show', f'{product_sha}:crates/o3k-network/src/fabric_dhcp.rs'],
@@ -36,6 +36,8 @@ assert 'prime_wireguard_peers(args, ev, maps)' in capture
 assert capture.index('prime_wireguard_peers(args, ev, maps)') < capture.index('ok, detail = wg_check(args, ev, maps)')
 assert 'fabric-dhcp-ownership.json' in dhcp_realizer
 assert 'fabric-dhcp-ownership.json' in capture and 'owner.json' not in capture
+assert 'fabric-dhcp-ownership.json' in campaign and "owner.json'" not in campaign
+assert "owner['dhcp_enabled']" in campaign
 assert 'config.get("mtu") != 1390' in capture
 assert 'else {"config": None, "bindings": {}}' in capture
 assert 'server-b-dhcp-trigger.request.json' in campaign
@@ -44,7 +46,7 @@ assert '/servers/${SERVER_IDS[1]}/action' in campaign
 assert "reboot_http_status\" == 202" in campaign
 assert 'console_command b' not in campaign[campaign.index('if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" == 1 ]]; then'):campaign.index('if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" != 1 ]]; then')]
 assert "grep -Fq 'listening on '" in capture
-assert 'timeout --signal=INT 45s tcpdump' in capture
+assert 'tcpdump -c 20000 -i ' in capture and 'timeout --signal=INT 45s tcpdump' not in capture
 assert '-s 512 -U -w' in capture and '-s 256 -U -w' not in capture
 print('WireGuard provider key-root and runtime identity contract: PASS')
 PY
