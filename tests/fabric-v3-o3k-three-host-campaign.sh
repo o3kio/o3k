@@ -108,6 +108,22 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" >"$EVIDENC
 cleanup_on_success() {
   local rc=$?
   if declare -F stop_dhcp_capture >/dev/null 2>&1; then stop_dhcp_capture || true; fi
+  cleanup_owned_api_resource() {
+    local label="$1" path="$2" attempt delete_status get_status
+    for attempt in $(seq 1 60); do
+      delete_status="$(curl --silent --show-error --max-time 15 -o /dev/null -w '%{http_code}' \
+        -X DELETE "$BASE$path" -H "x-auth-token: $TOKEN" 2>>"$EVIDENCE/teardown/failure-api-cleanup-errors.txt" || true)"
+      get_status="$(curl --silent --show-error --max-time 15 -o /dev/null -w '%{http_code}' \
+        "$BASE$path" -H "x-auth-token: $TOKEN" 2>>"$EVIDENCE/teardown/failure-api-cleanup-errors.txt" || true)"
+      printf '%s attempt=%s delete=%s get=%s\n' "$label" "$attempt" "$delete_status" "$get_status" \
+        >>"$EVIDENCE/teardown/failure-api-cleanup.txt"
+      if [[ "$get_status" == 404 || "$delete_status" == 404 ]]; then return 0; fi
+      sleep 2
+    done
+    printf '%s cleanup did not converge within 120 seconds\n' "$label" \
+      >>"$EVIDENCE/teardown/failure-api-cleanup.txt"
+    return 1
+  }
   if [[ -f "$EVIDENCE/.o3k-fabric-v3-owned" ]] && grep -Fqx "run=$RUN_ID" "$EVIDENCE/.o3k-fabric-v3-owned"; then
     date -u +%FT%TZ >"$EVIDENCE/ended_at_utc.txt"
     if [[ ! -f "$EVIDENCE/result.json" ]]; then
@@ -122,24 +138,18 @@ PY
     # reverse order and run-generated IDs keep this on the supported API path.
     if [[ -n "$TOKEN" && -n "$BASE" ]] \
       && { (( rc != 0 )) || [[ "${CAMPAIGN_TEARDOWN_PASS:-0}" != 1 ]]; }; then
-      {
-        for ((i=${#SERVER_IDS[@]}-1; i>=0; i--)); do
-          [[ -n "${SERVER_IDS[i]}" ]] || continue
-          curl --silent --show-error --max-time 30 -o /dev/null -w "server ${SERVER_IDS[i]} %{http_code}\n" \
-            -X DELETE "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[i]}" -H "x-auth-token: $TOKEN" || true
-        done
-        for ((i=${#PORT_IDS[@]}-1; i>=0; i--)); do
-          [[ -n "${PORT_IDS[i]}" ]] || continue
-          curl --silent --show-error --max-time 30 -o /dev/null -w "port ${PORT_IDS[i]} %{http_code}\n" \
-            -X DELETE "$BASE/v2.0/ports/${PORT_IDS[i]}" -H "x-auth-token: $TOKEN" || true
-        done
-        [[ -z "$SUBNET_ID" ]] || curl --silent --show-error --max-time 30 -o /dev/null -w "subnet $SUBNET_ID %{http_code}\n" \
-          -X DELETE "$BASE/v2.0/subnets/$SUBNET_ID" -H "x-auth-token: $TOKEN" || true
-        [[ -z "$NETWORK_ID" ]] || curl --silent --show-error --max-time 30 -o /dev/null -w "network $NETWORK_ID %{http_code}\n" \
-          -X DELETE "$BASE/v2.0/networks/$NETWORK_ID" -H "x-auth-token: $TOKEN" || true
-        [[ -z "$IMAGE_ID" ]] || curl --silent --show-error --max-time 30 -o /dev/null -w "image $IMAGE_ID %{http_code}\n" \
-          -X DELETE "$BASE/v2/images/$IMAGE_ID" -H "x-auth-token: $TOKEN" || true
-      } >"$EVIDENCE/teardown/failure-api-cleanup.txt" 2>&1
+      : >"$EVIDENCE/teardown/failure-api-cleanup.txt"
+      for ((i=${#SERVER_IDS[@]}-1; i>=0; i--)); do
+        [[ -n "${SERVER_IDS[i]}" ]] || continue
+        cleanup_owned_api_resource "server-${SERVER_IDS[i]}" "/v2.1/$PROJECT_ID/servers/${SERVER_IDS[i]}" || true
+      done
+      for ((i=${#PORT_IDS[@]}-1; i>=0; i--)); do
+        [[ -n "${PORT_IDS[i]}" ]] || continue
+        cleanup_owned_api_resource "port-${PORT_IDS[i]}" "/v2.0/ports/${PORT_IDS[i]}" || true
+      done
+      [[ -z "$SUBNET_ID" ]] || cleanup_owned_api_resource "subnet-$SUBNET_ID" "/v2.0/subnets/$SUBNET_ID" || true
+      [[ -z "$NETWORK_ID" ]] || cleanup_owned_api_resource "network-$NETWORK_ID" "/v2.0/networks/$NETWORK_ID" || true
+      [[ -z "$IMAGE_ID" ]] || cleanup_owned_api_resource "image-$IMAGE_ID" "/v2/images/$IMAGE_ID" || true
     fi
     # Always clean run-created compute guests after evidence has been captured.
     # A domain is eligible only when its inventory UUID, name, XML, disk and
@@ -1364,32 +1374,68 @@ for host in a b c; do grep -Fq "$PREFIX-server-$host" "$EVIDENCE/restart/servers
 # Remove C only through the supported API and prove HER/local endpoint
 # withdrawal, then exercise A/B before final API teardown.
 curl --fail --silent --show-error --max-time 60 -X DELETE "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" >"$EVIDENCE/endpoint-removal/server-c-delete.txt" || fail "supported server C deletion failed" "CLEANUP_DEFECT"
-for _ in $(seq 1 120); do
-  if ! curl -fsS "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" >"$EVIDENCE/endpoint-removal/server-c-final.json" 2>/dev/null; then break; fi
-  sleep 1
-done
-for host in a b c; do
-  address="${MGMT_IP[$host]}"
-  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" >"$EVIDENCE/endpoint-removal/host-$host-ownership.json" || fail "post-C-removal state unavailable on $host" "OWNERSHIP_DEFECT"
-  realm_id="$(python3 - "$EVIDENCE/endpoint-removal/host-$host-ownership.json" "${PORT_IDS[0]}" "${PORT_IDS[1]}" <<'PY'
+printf 'attempt,server_absent,ownership_and_plans_converged\n' >"$EVIDENCE/endpoint-removal/convergence-attempts.csv"
+converged=0
+for attempt in $(seq 1 120); do
+  server_absent=0
+  server_status="$(curl --silent --show-error --max-time 10 -o "$EVIDENCE/endpoint-removal/server-c-final.json" \
+      -w '%{http_code}' "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" || true)"
+  [[ "$server_status" == 404 ]] && server_absent=1
+  state_ready=1
+  for host in a b c; do
+    address="${MGMT_IP[$host]}"
+    if ! ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" \
+        >"$EVIDENCE/endpoint-removal/host-$host-ownership.json.tmp" 2>>"$EVIDENCE/endpoint-removal/state-read-errors.txt"; then
+      state_ready=0
+    else
+      mv "$EVIDENCE/endpoint-removal/host-$host-ownership.json.tmp" "$EVIDENCE/endpoint-removal/host-$host-ownership.json"
+    fi
+  done
+  plans_ready=0
+  if (( state_ready )); then
+    realm_a="$(python3 - "$EVIDENCE/endpoint-removal/host-a-ownership.json" "${PORT_IDS[0]}" <<'PY' 2>/dev/null || true
 import json,sys
-x=json.load(open(sys.argv[1])); endpoints=set(sys.argv[2:])
-matches=[rid for rid,r in x.get('realms',{}).items() if endpoints.intersection(r.get('endpoint_taps',{}))]
-assert len(matches)==1, matches
+x=json.load(open(sys.argv[1])); matches=[rid for rid,r in x.get('realms',{}).items() if sys.argv[2] in r.get('endpoint_taps',{})]
+assert len(matches)==1
 print(matches[0])
 PY
-)" || fail "A/B Realm ownership could not be resolved on $host" "OWNERSHIP_DEFECT"
-  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json" >"$EVIDENCE/endpoint-removal/host-$host-fabric-plan.json" || fail "post-C-removal Fabric plan unavailable on $host" "OWNERSHIP_DEFECT"
-done
-python3 - "$EVIDENCE/endpoint-removal" "${PORT_IDS[2]}" <<'PY' || fail "C endpoint/HER did not withdraw" "CLEANUP_DEFECT"
-import glob,json,sys
-for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
-    x=json.load(open(path)); assert all(sys.argv[2] not in r.get("endpoint_taps",{}) for r in x.get("realms",{}).values()), path
-    host=path.rsplit("/",1)[-1].split("-")[1]
-    plan=json.load(open(sys.argv[1]+f"/host-{host}-fabric-plan.json"))
-    hosts={e["selected_host"] for e in plan.get("directory",{}).get("entries",[])}
-    assert hosts=={"host-a","host-b"}, (path,hosts)
+)"
+    realm_b="$(python3 - "$EVIDENCE/endpoint-removal/host-b-ownership.json" "${PORT_IDS[1]}" <<'PY' 2>/dev/null || true
+import json,sys
+x=json.load(open(sys.argv[1])); matches=[rid for rid,r in x.get('realms',{}).items() if sys.argv[2] in r.get('endpoint_taps',{})]
+assert len(matches)==1
+print(matches[0])
 PY
+)"
+    if [[ -n "$realm_a" && -n "$realm_b" ]] \
+      && ssh_vm "${MGMT_IP[a]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_a.json" \
+          >"$EVIDENCE/endpoint-removal/host-a-fabric-plan.json.tmp" 2>>"$EVIDENCE/endpoint-removal/state-read-errors.txt" \
+      && ssh_vm "${MGMT_IP[b]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_b.json" \
+          >"$EVIDENCE/endpoint-removal/host-b-fabric-plan.json.tmp" 2>>"$EVIDENCE/endpoint-removal/state-read-errors.txt"; then
+      mv "$EVIDENCE/endpoint-removal/host-a-fabric-plan.json.tmp" "$EVIDENCE/endpoint-removal/host-a-fabric-plan.json"
+      mv "$EVIDENCE/endpoint-removal/host-b-fabric-plan.json.tmp" "$EVIDENCE/endpoint-removal/host-b-fabric-plan.json"
+      if python3 - "$EVIDENCE/endpoint-removal" "${PORT_IDS[0]}" "${PORT_IDS[1]}" "${PORT_IDS[2]}" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]); a,b,c=sys.argv[2:]
+for host in ('a','b','c'):
+    state=json.loads((root/f'host-{host}-ownership.json').read_text())
+    assert all(c not in realm.get('endpoint_taps',{}) for realm in state.get('realms',{}).values()), host
+for host,endpoint in (('a',a),('b',b)):
+    state=json.loads((root/f'host-{host}-ownership.json').read_text())
+    matches=[realm for realm in state.get('realms',{}).values() if endpoint in realm.get('endpoint_taps',{})]
+    assert len(matches)==1, (host,endpoint)
+    plan=json.loads((root/f'host-{host}-fabric-plan.json').read_text())
+    participants={entry['selected_host'] for entry in plan.get('directory',{}).get('entries',[])}
+    assert participants=={'host-a','host-b'}, (host,participants)
+PY
+      then plans_ready=1; fi
+    fi
+  fi
+  printf '%s,%s,%s\n' "$attempt" "$server_absent" "$plans_ready" >>"$EVIDENCE/endpoint-removal/convergence-attempts.csv"
+  if (( server_absent && plans_ready )); then converged=1; break; fi
+  sleep 1
+done
+(( converged )) || fail "C deletion did not converge to A/B-only Fabric ownership within 120 seconds" "CLEANUP_DEFECT"
 guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
 guest_control_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" endpoint-removal/b-to-a.txt || fail "B/A failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
 

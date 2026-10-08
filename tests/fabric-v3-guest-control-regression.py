@@ -133,6 +133,31 @@ class GuestControlRegression(unittest.TestCase):
         self.assertNotIn("ssh_vm \"$address\" 'sudo wg show all transfer'", DRIVER)
         self.assertIn("sudo ip netns exec '$fabric_ns' ip -d -j link", DRIVER)
 
+    def test_endpoint_removal_waits_for_bounded_fabric_convergence(self):
+        start = DRIVER.index("printf 'attempt,server_absent,ownership_and_plans_converged")
+        end = DRIVER.index('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt', start)
+        removal = DRIVER[start:end]
+        self.assertIn('for attempt in $(seq 1 120)', removal)
+        self.assertIn('[[ "$server_status" == 404 ]]', removal)
+        self.assertIn('for host in a b c', removal)
+        self.assertIn("for host in ('a','b','c')", removal)
+        self.assertIn("for host,endpoint in (('a',a),('b',b))", removal)
+        self.assertIn("participants=={'host-a','host-b'}", removal)
+        self.assertNotIn('host-c-fabric-plan.json', removal)
+        self.assertIn('C deletion did not converge to A/B-only Fabric ownership within 120 seconds', removal)
+
+    def test_failure_cleanup_retries_only_run_owned_api_ids(self):
+        start = DRIVER.index('cleanup_owned_api_resource() {')
+        end = DRIVER.index('\n    # Always clean run-created compute guests', start)
+        cleanup = DRIVER[start:end]
+        self.assertIn('for attempt in $(seq 1 60)', cleanup)
+        self.assertIn('for ((i=${#SERVER_IDS[@]}-1; i>=0; i--))', cleanup)
+        self.assertIn('for ((i=${#PORT_IDS[@]}-1; i>=0; i--))', cleanup)
+        self.assertIn('"/v2.1/$PROJECT_ID/servers/${SERVER_IDS[i]}"', cleanup)
+        self.assertIn('"/v2.0/ports/${PORT_IDS[i]}"', cleanup)
+        self.assertIn('"/v2.0/subnets/$SUBNET_ID"', cleanup)
+        self.assertIn('"/v2.0/networks/$NETWORK_ID"', cleanup)
+
     def test_link_local_readiness_collects_local_evidence_before_bounded_probe(self):
         start = DRIVER.index("prepare_guest_control() {")
         end = DRIVER.index("\n}\n\nguest_control_command()", start)
