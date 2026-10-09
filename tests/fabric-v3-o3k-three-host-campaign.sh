@@ -4,8 +4,8 @@ set -Eeuo pipefail
 # Supported-HTTP Fabric v3 three-host nested campaign. This script is test
 # harness only and refuses to run against a different product source tree.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRODUCT_SHA=ba23a65e312ae8755673e2af131937760b4fb248
-PRODUCT_TREE=b7a71360fac7e6cf8ba931018e5b4f9ff40a055c
+PRODUCT_SHA=16789fdd206565456cbd5c7c091ace8fc00f7c48
+PRODUCT_TREE=fcb8dedd11bc28ea8a2a09907f3b07b81accd559
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 CIRROS_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
 CIRROS_SHA=7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
@@ -621,6 +621,38 @@ done
 api "$BASE/v2.1/$PROJECT_ID/servers" >"$EVIDENCE/restart/servers.json" || fail "API unavailable after controller restart" "DURABLE_RECONCILIATION_GAP"
 for host in a b c; do grep -Fq "$PREFIX-server-$host" "$EVIDENCE/restart/servers.json" || fail "server $host missing after controller recovery" "DURABLE_RECONCILIATION_GAP"; done
 
+# Restart compute-agent B without destroying its domain. The exact run-owned
+# PID and data root are checked before signaling; the same launch identity is
+# reused so the agent obtains a new epoch while host-b and the guest remain.
+compute_b_root="/var/lib/o3k-fabric-v3/$RUN_ID/compute"
+compute_b_pid="$(ssh_vm "${MGMT_IP[b]}" "sudo cat '$compute_b_root/agent.pid'")"
+ssh_vm "${MGMT_IP[b]}" "sudo curl -fsS http://127.0.0.1:19102/readyz" >"$EVIDENCE/compute-agent-restart/ready-before.json" || fail "compute-agent B was not ready before restart" "HARNESS_GAP"
+python3 - "$EVIDENCE/compute-agent-restart/ready-before.json" <<'PY' || fail "compute-agent B identity missing before restart" "HARNESS_GAP"
+import json,sys
+state=json.load(open(sys.argv[1])); assert state["agent_id"] == "compute-agent-b" and state.get("agent_epoch")
+PY
+printf '%s\n' "$compute_b_pid" >"$EVIDENCE/compute-agent-restart/pid-before.txt"
+ssh_vm "${MGMT_IP[b]}" "sudo bash -c 'set -e; pid=$compute_b_pid; test -r /proc/\$pid/cmdline; tr "\\0" " " </proc/\$pid/cmdline | grep -Fq /usr/local/bin/o3k-compute-bin; kill -TERM \$pid; for n in \$(seq 1 60); do test ! -e /proc/\$pid || grep -q "^State:[[:space:]]*Z" /proc/\$pid/status && break; sleep 1; done; test ! -e /proc/\$pid || grep -q "^State:[[:space:]]*Z" /proc/\$pid/status; nohup env O3K_COMPUTE_DATA_DIR=$compute_b_root O3K_COMPUTE_CONTROL_ENDPOINT=https://$HOST_MGMT_IP:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_HOST_LABEL=host-b O3K_COMPUTE_TLS_DIR=$compute_b_root/tls O3K_COMPUTE_HEALTH_ADDR=0.0.0.0:19102 O3K_COMPUTE_MAX_DISK_GB=30 O3K_COMPUTE_NETWORK_EXTERNAL=1 O3K_COMPUTE_NETWORK_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/ownership O3K_COMPUTE_BRIDGE_NAME=o3k-br0 O3K_COMPUTE_DHCP_BINARY=/usr/sbin/dnsmasq O3K_COMPUTE_FABRIC_HOST_ID=host-b O3K_COMPUTE_FABRIC_STATE_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric RUST_LOG=info /usr/local/bin/o3k-compute-bin >>$compute_b_root/agent.log 2>&1 </dev/null & echo \$! >$compute_b_root/agent.pid'" >"$EVIDENCE/compute-agent-restart/restart.log" 2>&1 || fail "compute-agent B restart command failed" "ENVIRONMENT_GAP"
+restart_ready=0
+for _ in $(seq 1 120); do
+  if ssh_vm "${MGMT_IP[b]}" "sudo curl -fsS http://127.0.0.1:19102/readyz" >"$EVIDENCE/compute-agent-restart/ready-after.json" 2>/dev/null; then
+    if python3 - "$EVIDENCE/compute-agent-restart/ready-before.json" "$EVIDENCE/compute-agent-restart/ready-after.json" <<'PY'
+import json,sys
+old,new=(json.load(open(path)) for path in sys.argv[1:])
+raise SystemExit(0 if new.get("agent_id")=="compute-agent-b" and new.get("agent_epoch") and new["agent_epoch"] != old["agent_epoch"] else 1)
+PY
+    then restart_ready=1; break; fi
+  fi
+  sleep 1
+done
+(( restart_ready == 1 )) || fail "compute-agent B did not register with a new epoch" "DURABLE_RECONCILIATION_GAP"
+ssh_vm "${MGMT_IP[b]}" "sudo virsh -c qemu:///system domstate '$(cat "$EVIDENCE/compute-b/domain.txt")'" >"$EVIDENCE/compute-agent-restart/domain-state.txt" || fail "B domain unavailable after compute-agent restart" "DURABLE_RECONCILIATION_GAP"
+[[ "$(tr -d '\r' <"$EVIDENCE/compute-agent-restart/domain-state.txt")" == running ]] || fail "B domain did not remain running across compute-agent restart" "DURABLE_RECONCILIATION_GAP"
+api "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[1]}" >"$EVIDENCE/compute-agent-restart/server-b.json" || fail "B server ownership unavailable after compute-agent restart" "DURABLE_RECONCILIATION_GAP"
+[[ "$(field server.OS-EXT-SRV-ATTR:host <"$EVIDENCE/compute-agent-restart/server-b.json")" == compute-agent-b ]] || fail "B stable host changed after compute-agent restart" "DURABLE_RECONCILIATION_GAP"
+console_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" compute-agent-restart/a-to-b.txt || fail "A->B failed after compute-agent restart" "DURABLE_RECONCILIATION_GAP"
+console_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" compute-agent-restart/b-to-a.txt || fail "B->A failed after compute-agent restart" "DURABLE_RECONCILIATION_GAP"
+
 # Remove C only through the supported API and prove HER/local endpoint
 # withdrawal, then exercise A/B before final API teardown.
 curl --fail --silent --show-error --max-time 60 -X DELETE "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" >"$EVIDENCE/endpoint-removal/server-c-delete.txt" || fail "supported server C deletion failed" "CLEANUP_DEFECT"
@@ -628,16 +660,114 @@ for _ in $(seq 1 120); do
   if ! curl -fsS "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" >"$EVIDENCE/endpoint-removal/server-c-final.json" 2>/dev/null; then break; fi
   sleep 1
 done
+ssh_vm "${MGMT_IP[c]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" >"$EVIDENCE/endpoint-removal/host-c-ownership-before.json" || fail "C pre-removal ownership unavailable" "OWNERSHIP_DEFECT"
+realm_id="$(python3 - "$EVIDENCE/endpoint-removal/host-c-ownership-before.json" "${PORT_IDS[2]}" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1])); endpoint=sys.argv[2]
+print(next(realm_id for realm_id,realm in x["realms"].items() if endpoint in realm.get("endpoint_taps",{})))
+PY
+)"
+tap_name="$(python3 - "$EVIDENCE/endpoint-removal/host-c-ownership-before.json" "${PORT_IDS[2]}" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1])); endpoint=sys.argv[2]
+realm=next(realm for realm in x["realms"].values() if endpoint in realm.get("endpoint_taps",{}))
+print(realm["endpoint_taps"][endpoint]["interface"])
+PY
+)"
+python3 - "$EVIDENCE/endpoint-removal/host-c-ownership-before.json" "$realm_id" >"$EVIDENCE/endpoint-removal/c-local-object-names.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1])); r=x["realms"][sys.argv[2]]
+json.dump({"namespace":r["namespace"],"bridge":r["bridge"],"host_veth":r["host_veth"],"public_host_veth":r.get("public_host_veth",""),"vxlan":r.get("vxlan")},sys.stdout,sort_keys=True,indent=2)
+PY
+withdrawal_ready=0
+for _ in $(seq 1 120); do
+  if ssh_vm "${MGMT_IP[c]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" >"$EVIDENCE/endpoint-removal/host-c-ownership.json" 2>/dev/null; then
+    if python3 - "$EVIDENCE/endpoint-removal/host-c-ownership.json" "$realm_id" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1])); raise SystemExit(0 if sys.argv[2] not in x.get("realms",{}) else 1)
+PY
+    then
+      if ! ssh_vm "${MGMT_IP[c]}" "sudo ip -j -d link show dev '$tap_name'" >"$EVIDENCE/endpoint-removal/c-tap-after.json" 2>&1; then
+        withdrawal_ready=1; break
+      fi
+    fi
+  fi
+  sleep 1
+done
+(( withdrawal_ready == 1 )) || fail "C TAP/ownership did not converge to observed absence" "CLEANUP_DEFECT"
+for field_name in bridge host_veth public_host_veth; do
+  object_name="$(python3 - "$EVIDENCE/endpoint-removal/c-local-object-names.json" "$field_name" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
+PY
+)"
+  [[ -z "$object_name" ]] && continue
+  if ssh_vm "${MGMT_IP[c]}" "sudo ip -j -d link show dev '$object_name'" >"$EVIDENCE/endpoint-removal/c-$field_name-after.json" 2>&1; then
+    fail "C Realm object remains after final endpoint departure: $object_name" "CLEANUP_DEFECT"
+  fi
+done
+namespace_name="$(python3 - "$EVIDENCE/endpoint-removal/c-local-object-names.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["namespace"])
+PY
+)"
+ssh_vm "${MGMT_IP[c]}" 'sudo ip netns list' >"$EVIDENCE/endpoint-removal/c-namespaces-after.txt" || fail "C namespace observation failed" "ENVIRONMENT_GAP"
+if awk '{print $1}' "$EVIDENCE/endpoint-removal/c-namespaces-after.txt" | grep -Fxq "$namespace_name"; then fail "C Realm namespace remains after final endpoint departure" "CLEANUP_DEFECT"; fi
+vxlan_host="$(python3 - "$EVIDENCE/endpoint-removal/c-local-object-names.json" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1])).get("vxlan") or {}
+print(v.get("host_veth",""))
+PY
+)"
+if [[ -n "$vxlan_host" ]] && ssh_vm "${MGMT_IP[c]}" "sudo ip -j -d link show dev '$vxlan_host'" >"$EVIDENCE/endpoint-removal/c-vxlan-host-veth-after.json" 2>&1; then fail "C host-side VXLAN attachment remains after final endpoint departure" "CLEANUP_DEFECT"; fi
+vxlan_namespace_names="$(python3 - "$EVIDENCE/endpoint-removal/c-local-object-names.json" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1])).get("vxlan") or {}
+print(" ".join(v.get(k,"") for k in ("interface","bridge","fabric_veth")))
+PY
+)"
+for object_name in $vxlan_namespace_names; do
+  [[ -z "$object_name" ]] && continue
+  if ssh_vm "${MGMT_IP[c]}" "sudo ip netns exec o3k-fabric ip -j -d link show dev '$object_name'" >"$EVIDENCE/endpoint-removal/c-fabric-$object_name-after.json" 2>&1; then fail "C Realm VXLAN attachment remains after final endpoint departure: $object_name" "CLEANUP_DEFECT"; fi
+done
+if ssh_vm "${MGMT_IP[c]}" "sudo test -e /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json"; then fail "C durable Realm plan remains after Remove" "CLEANUP_DEFECT"; fi
+ssh_vm "${MGMT_IP[c]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json" >"$EVIDENCE/endpoint-removal/host-c-command-journal.json" || fail "C Remove command journal unavailable" "CLEANUP_DEFECT"
+ssh_vm "${MGMT_IP[c]}" "sudo tail -n 300 /var/lib/o3k-fabric-v3/$RUN_ID/network/agent.log" >"$EVIDENCE/endpoint-removal/host-c-network-agent.log" || fail "C network-agent removal log unavailable" "CLEANUP_DEFECT"
+python3 - "$EVIDENCE/endpoint-removal/host-c-command-journal.json" "$realm_id" <<'PY' || fail "C Remove was not durably admitted and observed successful" "CLEANUP_DEFECT"
+import json,sys
+j=json.load(open(sys.argv[1])); realm=sys.argv[2]
+matches=[p for p in j.get("plans",[]) if p.get("action")=="Remove" and p.get("plan",{}).get("fabric",{}).get("realm_id")==realm]
+assert matches, "no C-targeted Remove in executor journal"
+r=matches[-1]
+assert r.get("target",{}).get("agent_id")=="network-agent-c", r
+assert r.get("status")=="Succeeded", r
+print(json.dumps({k:r.get(k) for k in ("command_id","operation_id","action","target","status")},sort_keys=True,indent=2))
+PY
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" >"$EVIDENCE/endpoint-removal/host-$host-ownership.json" || fail "post-C-removal state unavailable on $host" "OWNERSHIP_DEFECT"
 done
-python3 - "$EVIDENCE/endpoint-removal" "${PORT_IDS[2]}" <<'PY' || fail "C endpoint/HER did not withdraw" "CLEANUP_DEFECT"
+for host in a b; do
+  vxlan_interface="$(python3 - "$EVIDENCE/endpoint-removal/host-$host-ownership.json" "$realm_id" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]))["realms"][sys.argv[2]]
+print(r["vxlan"]["interface"])
+PY
+)"
+  ssh_vm "${MGMT_IP[$host]}" "sudo ip netns exec o3k-fabric bridge fdb show dev '$vxlan_interface'" >"$EVIDENCE/endpoint-removal/host-$host-her-fdb.txt" || fail "A/B HER FDB observation failed after C removal" "ENVIRONMENT_GAP"
+done
+python3 - "$EVIDENCE/endpoint-removal" "${PORT_IDS[2]}" "$realm_id" <<'PY' || fail "C endpoint/HER did not withdraw" "CLEANUP_DEFECT"
 import glob,json,sys
+directory,endpoint,realm_id=sys.argv[1:]
 for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
-    x=json.load(open(path)); assert sys.argv[2] not in x.get("realm",{}).get("endpoint_taps",{}), path
-    hosts={e["selected_host"] for e in x.get("plan",{}).get("directory",{}).get("entries",[])}
-    assert hosts=={"host-a","host-b"}, (path,hosts)
+    x=json.load(open(path)); assert all(endpoint not in r.get("endpoint_taps",{}) for r in x.get("realms",{}).values()), path
+assert realm_id not in json.load(open(directory+"/host-c-ownership.json")).get("realms",{}), "C retains a local Realm shell"
+for host,peer in (("a","100.64.3.2"),("b","100.64.3.1")):
+    x=json.load(open(directory+f"/host-{host}-ownership.json")); peers=x["realms"][realm_id]["vxlan"]["flood_peers"]
+    assert peers==[peer], (host,peers)
+    fdb=open(directory+f"/host-{host}-her-fdb.txt").read().splitlines()
+    destinations={line.split("dst ",1)[1].split()[0] for line in fdb if line.startswith("00:00:00:00:00:00 ") and " dst " in line}
+    assert destinations=={peer}, (host,destinations,fdb)
 PY
 console_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "DATAPLANE_DEFECT"
 console_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" endpoint-removal/b-to-a.txt || fail "B/A failed after C removal" "DATAPLANE_DEFECT"
