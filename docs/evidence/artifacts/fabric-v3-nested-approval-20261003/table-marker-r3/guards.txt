@@ -1,0 +1,103 @@
+=== Maintainability Guard Regression Suite ===
+
+Test 0: maintainability inventory cfg(test) scope regression -> PASS
+maintainability inventory cfg(test) regression tests passed
+Test 1: clean repository and approved boundaries -> PASS
+  PASS: clean repository
+Test 2: SQL in store/domain -> FAIL
+  PASS: SQL in store/domain
+Test 3: SQL in store/port -> FAIL
+  PASS: SQL in store/port
+Test 4: SQL in store/unified -> FAIL
+  PASS: SQL in store/unified
+Test 5: SQL in o3kd composition -> FAIL
+  PASS: SQL in o3kd composition
+Test 6: SQL in Network application -> FAIL
+  PASS: SQL in Network application
+Test 7: SQL in Compute runtime -> FAIL
+  PASS: SQL in Compute runtime
+Test 8: imported SQL query -> FAIL
+  PASS: imported SQL query
+Test 9: aliased SQL query -> FAIL
+  PASS: aliased SQL query
+Test 10: grouped SQL imports -> FAIL
+  PASS: grouped SQL imports
+Test 11: grouped aliased SQL imports -> FAIL
+  PASS: grouped aliased SQL imports
+Test 12: multiline grouped SQL imports -> FAIL
+  PASS: multiline grouped SQL imports
+Test 12a: extended SQLx query APIs -> FAIL
+  PASS: extended SQLx query APIs
+Test 12b: SQLx file and unchecked macros -> FAIL
+  PASS: SQLx file and unchecked macros
+Test 12c: extended grouped SQLx imports -> FAIL
+  PASS: extended grouped SQLx imports
+Test 12d: extended aliased SQLx imports -> FAIL
+  PASS: extended aliased SQLx imports
+Test 12e: SQLx Executor import and alias -> FAIL
+  PASS: SQLx Executor import and alias
+Test 12f: SQLx prelude Executor imports -> FAIL
+  PASS: SQLx prelude Executor imports
+Test 12g: grouped SQLx Executor imports -> FAIL
+  PASS: grouped SQLx Executor imports
+Test 12h: SQLx prelude wildcard -> FAIL
+  PASS: SQLx prelude wildcard
+Test 12i: SQLx wildcard -> FAIL
+  PASS: SQLx wildcard
+Test 12j: nested QueryBuilder path and alias -> FAIL
+  PASS: nested QueryBuilder path and alias
+Test 13: SQL path-prefix collision -> FAIL
+  PASS: SQL path-prefix collision
+Test 14: forbidden architecture paths are not approved -> PASS
+  PASS: forbidden architecture paths remain unapproved
+Test 15: multiline std grouped Command import -> FAIL
+  PASS: multiline std grouped Command import
+Test 16: multiline tokio grouped Command import -> FAIL
+  PASS: multiline tokio grouped Command import
+Test 17: imported bare Command::new -> FAIL
+  PASS: bare Command::new
+Test 18: std Command alias import -> FAIL
+  PASS: std Command alias import
+Test 19: std grouped Command alias import -> FAIL
+  PASS: std grouped Command alias import
+Test 20: std Command type alias -> FAIL
+  PASS: std Command type alias
+Test 21: tokio Command alias import -> FAIL
+  PASS: tokio Command alias import
+Test 22: tokio grouped Command alias import -> FAIL
+  PASS: tokio grouped Command alias import
+Test 23: fully qualified Command::new -> FAIL
+  PASS: fully qualified Command::new
+Test 24: tokio qualified Command::new -> FAIL
+  PASS: tokio qualified Command::new
+Test 25: Command::new after #[cfg(test)] -> FAIL
+  PASS: Command after cfg(test)
+Test 26: SQL after #[cfg(test)] -> FAIL
+  PASS: SQL after cfg(test)
+Test 27: raw Linux wrapper in canonical Network -> FAIL
+  PASS: raw Linux wrapper in canonical Network
+Test 28: host command in o3kd composition -> FAIL
+  PASS: host command in o3kd composition
+Test 29: host command in Compute binary source -> FAIL
+  PASS: host command in Compute binary source
+Test 30: shell execution -> FAIL
+  PASS: shell execution
+Test 31: approved SQLite persistence -> ACCEPT
+  PASS: approved SQLite persistence
+Test 32: approved PostgreSQL persistence -> ACCEPT
+  PASS: approved PostgreSQL persistence
+Test 32a: approved PostgreSQL execution capabilities -> ACCEPT
+  PASS: approved PostgreSQL execution capabilities
+Test 33: approved Linux Network execution -> ACCEPT
+  PASS: approved Linux Network execution
+Test 33a: shell alias remains forbidden in approved execution -> FAIL
+  PASS: shell alias in approved execution
+Test 34: test-only file -> ACCEPT
+  PASS: test-only file ignored
+Test 35: dependency cycle -> SKIP (requires isolated Cargo.toml fixture)
+Test 36: weakened safety policy -> SKIP (requires isolated Cargo.toml fixture)
+
+=== Results ===
+  PASS: 46
+  FAIL: 0
+  All regression tests passed.

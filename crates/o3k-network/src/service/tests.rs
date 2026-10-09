@@ -799,6 +799,77 @@ async fn realm_cleanup_unknown_outcome_replays_and_finalizes_after_observation()
 }
 
 #[tokio::test]
+async fn realm_deletion_rejects_gateway_dependents_and_cannot_be_reattached()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("realm-delete-gateway-dependent");
+    let _ = fs::remove_dir_all(&path);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open_for_test(&path, store.clone()).await?;
+    let network = service
+        .create_canonical_network_for_project("project-a", "net".to_owned())
+        .await?;
+    let realm = service
+        .create_canonical_realm_for_project(
+            "project-a",
+            network.id,
+            "192.0.2.0/24".to_owned(),
+            false,
+        )
+        .await?;
+    let gateway = service
+        .create_l3_gateway_for_project("project-a", "edge".to_owned(), None, true)
+        .await?;
+    let attachment = service
+        .attach_l3_gateway_realm("project-a", &gateway.id, &realm.id)
+        .await?;
+
+    assert!(matches!(
+        service
+            .begin_canonical_realm_deletion_for_project("project-a", realm.id)
+            .await,
+        Err(NetworkError::Conflict)
+    ));
+    assert!(matches!(
+        store
+            .begin_canonical_realm_deletion("project-a", &realm.id, realm.generation)
+            .await,
+        Err(o3k_store::StoreError::NetworkInUse)
+    ));
+    assert_eq!(
+        service
+            .get_canonical_realm_for_project("project-a", realm.id)
+            .await?
+            .state,
+        "active"
+    );
+
+    // The attachment remains a deletion dependency until its own lifecycle
+    // proves detachment and removes the relation.
+    let deleting_attachment = service
+        .detach_l3_gateway_realm("project-a", &attachment.id, attachment.generation)
+        .await?;
+    service
+        .finalize_l3_gateway_realm_detachment_for_project(
+            "project-a",
+            &attachment.id,
+            deleting_attachment.generation,
+        )
+        .await?;
+    let deletion = service
+        .begin_canonical_realm_deletion_for_project("project-a", realm.id)
+        .await?;
+    assert!(matches!(deletion, RealmCleanupProgress::Deleting { .. }));
+    assert!(matches!(
+        service
+            .attach_l3_gateway_realm("project-a", &gateway.id, &realm.id)
+            .await,
+        Err(NetworkError::Conflict)
+    ));
+    let _ = fs::remove_dir_all(path);
+    Ok(())
+}
+
+#[tokio::test]
 async fn allocation_is_deterministic_collision_safe_and_restartable()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = root("allocation");
@@ -1691,6 +1762,18 @@ async fn create_outcome_projection_and_unbind_are_durable_and_idempotent()
             .project_create_outcome("project-a", Uuid::now_v7(), PortBindingState::Bound)
             .await,
         Err(NetworkError::NotFound)
+    ));
+    // During Fabric v3 withdrawal, the selected host is retained with a down
+    // tombstone until all peer plans converge. A delayed create callback may
+    // not resurrect that endpoint, including after controller restart.
+    service
+        .project_binding_observation("project-a", port.id, "compute-1", "down")
+        .await?;
+    assert!(matches!(
+        service
+            .project_create_outcome("project-a", port.id, PortBindingState::Bound)
+            .await,
+        Err(NetworkError::Conflict)
     ));
     // Unbind clears the binding idempotently and is durable.
     let unbound = service.unbind_port("project-a", port.id).await?;

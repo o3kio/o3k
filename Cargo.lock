@@ -625,6 +625,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "fabric-conformance"
+version = "0.1.5"
+source = "git+https://github.com/o3kio/fabric?tag=v0.1.5#bf99a9f2134ae44b5f485fa2efcb37b103c298a2"
+dependencies = [
+ "fabric-linux",
+ "fabric-plan",
+ "serde_json",
+]
+
+[[package]]
+name = "fabric-linux"
+version = "0.1.5"
+source = "git+https://github.com/o3kio/fabric?tag=v0.1.5#bf99a9f2134ae44b5f485fa2efcb37b103c298a2"
+dependencies = [
+ "fabric-plan",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "fabric-plan"
+version = "0.1.5"
+source = "git+https://github.com/o3kio/fabric?tag=v0.1.5#bf99a9f2134ae44b5f485fa2efcb37b103c298a2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "fancy-regex"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1684,6 +1716,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1868,6 +1901,9 @@ name = "o3k-network"
 version = "0.4.0-rc.5"
 dependencies = [
  "async-trait",
+ "fabric-conformance",
+ "fabric-linux",
+ "fabric-plan",
  "o3k-dhcp",
  "o3k-domain",
  "o3k-kernel",
@@ -1890,8 +1926,10 @@ dependencies = [
  "o3k-domain",
  "o3k-network",
  "o3k-network-protocol",
+ "o3k-store",
  "prost",
  "rustls",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
@@ -2062,6 +2100,7 @@ dependencies = [
  "o3k-kernel",
  "o3k-native-api",
  "o3k-network",
+ "o3k-network-bin",
  "o3k-network-protocol",
  "o3k-placement",
  "o3k-provider",

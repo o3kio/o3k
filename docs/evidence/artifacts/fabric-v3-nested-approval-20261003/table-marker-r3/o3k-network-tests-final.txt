@@ -1,0 +1,200 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running unittests src/lib.rs (target/debug/deps/o3k_network-7e219d99595811cd)
+
+running 157 tests
+test canonical_policy::tests::linux_realizer_observes_exact_fingerprint_after_fresh_instances ... ignored, requires CAP_NET_ADMIN; run in the privileged Linux provider gate
+test canonical_policy::tests::linux_realizer_rebuilds_one_endpoint_without_removing_another ... ignored, requires CAP_NET_ADMIN; run in the privileged Linux provider gate
+test canonical_policy::tests::active_rules_are_compiled_with_stable_rule_identity ... ok
+test anti_spoof::tests::accepts_each_overlapping_realm_only_with_its_identity ... ok
+test anti_spoof::tests::rejects_mac_ip_arp_vni_host_and_generations ... ok
+test canonical_policy::tests::mixed_defaults_are_rejected ... ok
+test canonical_policy::tests::no_policy_preserves_baseline ... ok
+test canonical_policy::tests::compatible_policies_compile_as_one_endpoint_snapshot ... ok
+test canonical_policy::tests::fingerprint_ignores_unrelated_policy_and_is_order_independent ... ok
+test canonical_policy::tests::zero_rule_policy_emits_default ... ok
+test canonical_policy::tests::same_summary_generation_does_not_collapse_distinct_graphs ... ok
+test fabric::tests::portable_backend_resolves_local_actual_mac_and_remote_proxy ... ok
+test host::host_network_tests::cleanup_preserves_same_name_foreign_bridge_replacement ... ok
+test execution::tests::semantic_payload_change_with_reused_fingerprint_is_rejected ... ok
+test fabric::tests::portable_backend_rejects_stale_generation_and_removes_current_state ... ok
+test execution::tests::deadline_is_checked_before_journaling ... ok
+test host::host_network_tests::discovery_only_returns_taps_attached_to_the_configured_bridge ... ok
+test host::host_network_tests::existing_link_must_be_a_bridge_before_it_is_reused ... ok
+test host::host_network_tests::existing_uplink_must_be_up_and_attached_to_the_managed_bridge ... ok
+test host::host_network_tests::bridge_creation_failure_removes_only_the_new_bridge ... ok
+test host::host_network_tests::foreign_existing_tap_is_never_deleted ... ok
+test host::host_network_tests::crash_between_record_and_rename_is_fully_reaped ... ok
+test host::host_network_tests::ensure_tap_fails_closed_on_a_foreign_link_at_the_recorded_name ... ok
+test host::host_network_tests::managed_bridge_mac_is_stable_and_locally_administered ... ok
+test host::host_network_tests::gateway_does_not_mutate_an_unowned_existing_bridge ... ok
+test host::host_network_tests::crash_residue_is_enumerated_and_reaped_across_restart ... ok
+test host::host_network_tests::manifest_accepts_multiple_taps_for_one_instance ... ok
+test host::host_network_tests::ensure_tap_recreates_a_recorded_but_absent_tap_and_reuses_a_present_one ... ok
+test host::host_network_tests::provisional_bridge_failure_removes_only_the_provisional_link ... ok
+test host::host_network_tests::provisional_bridge_residue_is_reaped_without_a_manifest_proof ... ok
+test host::host_network_tests::provisional_tap_residue_is_reaped_without_a_manifest_proof ... ok
+test host::host_network_tests::ownership_tokens_are_matched_without_prefix_collisions ... ok
+test host::host_network_tests::gateway_and_bridge_lifecycle_requires_owned_reverse_order ... ok
+test host::host_network_tests::reaping_a_never_prepared_instance_is_a_noop ... ok
+test host::host_network_tests::validates_names_and_generates_stable_interface_identity ... ok
+test host::host_network_tests::tap_setup_failure_removes_new_tap_and_bridge ... ok
+test linux_fabric::fabric::nft_ownership_tests::nft_ownership_requires_the_exact_expected_chain_comment ... ok
+test linux_fabric::fabric::nft_ownership_tests::nft_table_ownership_survives_device_bound_chain_removal ... ok
+test linux_fabric::fabric::nft_ownership_tests::nft_recovery_requires_durable_random_token_and_fail_closed_expected_hook ... ok
+test host::host_network_tests::tap_address_is_reapplied_after_external_replacement ... ok
+test linux_fabric::gateway::tests::fingerprint_is_stable_for_attachment_order ... ok
+test host::host_network_tests::tap_address_reapply_failure_rolls_back_owned_resources ... ok
+test linux_fabric::gateway::tests::linux_provider_preserves_unaffected_realms_after_fresh_reopen ... ignored, requires CAP_NET_ADMIN; run in the privileged Linux provider gate
+test linux_fabric::gateway::tests::gateway_is_independent_realization_unit ... ok
+test host::host_network_tests::tap_ownership_binds_instance_across_manager_restart ... ok
+test linux_fabric::gateway::tests::gateway_provider_uses_kernel_lock_for_live_writer_exclusion ... ok
+test linux_fabric::gateway::tests::provider_link_addresses_are_not_taken_from_tenant_prefix ... ok
+test linux_fabric::gateway::tests::provider_link_names_bind_gateway_and_attachment_identity ... ok
+test linux_fabric::gateway::tests::stale_gateway_generation_is_rejected ... ok
+test host::host_network_tests::reaping_one_instance_keeps_the_shared_bridge_until_the_last_tap_is_gone ... ok
+test linux_fabric::policy_realization::tests::empty_endpoint_snapshot_preserves_no_policy_baseline ... ok
+test execution::tests::conflicting_payload_and_stale_identity_fail_closed ... ok
+test linux_fabric::policy_realization::tests::deny_default_realizes_endpoint_scoped_terminal_drops ... ok
+test linux_fabric::policy_realization::tests::cleanup_reaps_durable_policy_state_when_table_is_already_absent ... ok
+test linux_fabric::policy_realization::tests::foreign_table_is_never_adopted ... ok
+test linux_fabric::policy_realization::tests::invalid_port_rule_is_rejected_before_host_mutation ... ok
+test linux_fabric::policy_realization::tests::isolated_namespace_proves_native_policy_traffic_allow_and_deny ... ignored, requires CAP_NET_ADMIN; run in the privileged Linux provider gate
+test linux_fabric::policy_realization::tests::ingress_and_egress_ports_target_destination ... ok
+test linux_fabric::policy_realization::tests::endpoint_fingerprint_observation_survives_provider_restart ... ok
+test linux_fabric::policy_realization::tests::unknown_endpoint_is_rejected_before_host_mutation ... ok
+test execution::tests::equivalent_command_replays_after_controller_takeover ... ok
+test linux_fabric::policy_realization::tests::endpoint_evidence_is_rejected_when_aggregate_realization_changes ... ok
+test linux_fabric::public_realization::tests::allocation_is_idempotent_and_restartable ... ok
+test linux_fabric::policy_realization::tests::policy_realization_preserves_unrelated_endpoint_rules ... ok
+test linux_fabric::gateway::tests::linux_provider_reopens_exact_gateway_snapshot ... ok
+test linux_fabric::gateway::tests::external_realm_is_realized_as_a_provider_attachment_with_snat ... ok
+test linux_fabric::public_realization::tests::cross_project_association_and_release_are_concealed ... ok
+test linux_fabric::public_realization::tests::public_realization_never_adopts_foreign_table ... ok
+test execution::tests::equivalent_command_replays_after_executor_restart ... ok
+test linux_fabric::public_realization::tests::public_realization_never_adopts_foreign_uplink_address ... ok
+test linux_fabric::public_realization::tests::public_realization_rejects_missing_endpoint_before_mutation ... ok
+test execution::tests::remove_action_calls_cleanup_and_reconciles_absence ... ok
+test linux_fabric::public_realization::tests::public_realization_rejects_missing_realm_before_mutation ... ok
+test linux_fabric::routed::tests::disabled_egress_fails_before_any_host_command ... ok
+test linux_fabric::routed::tests::foreign_existing_table_is_never_adopted_or_mutated ... ok
+test linux_fabric::routed::tests::internal_gateway_routes_fail_closed_before_external_mutation ... ok
+test linux_fabric::public_realization::tests::public_realization_cleanup_removes_only_durable_owned_addresses ... ok
+test linux_fabric::public_realization::tests::public_realization_fails_when_nat_chain_creation_fails ... ok
+test linux_fabric::routed::tests::snat_chain_is_a_postrouting_nat_hook ... ok
+test linux_fabric::routed::tests::tenant_cannot_select_an_unconfigured_external_realm ... ok
+test linux_fabric::routed::tests::route_delete_failure_keeps_owned_state_retryable ... ok
+test linux_fabric::routed::tests::forwarding_is_enabled_and_restored_as_owned_state ... ok
+test linux_fabric::policy_realization::tests::stale_provider_instance_cannot_replace_newer_aggregate ... ok
+test linux_fabric::shared_provider::tests::converts_vxlan_plan_without_losing_fencing_or_peers ... ok
+test linux_fabric::shared_provider::tests::rejects_geneve_binding_before_provider_mutation ... ok
+test linux_fabric::public_realization::tests::public_realization_rebuilds_owned_table_after_restart ... ok
+test linux_fabric::public_realization::tests::association_is_idempotent_and_release_requires_disassociation ... ok
+test execution::tests::failed_realization_is_unknown_until_observation_resolves_it ... ok
+test linux_fabric::tests::provider_observation_extracts_exact_owned_fingerprint ... ok
+test execution::tests::restarted_executor_reconciles_pending_state_after_lease_takeover ... ok
+test linux_fabric::tests::provider_rejects_invalid_preprovisioned_host_key ... ok
+test linux_fabric::tests::provider_refuses_foreign_fabric_namespace ... ok
+test linux_fabric::tests::provider_rejects_invalid_policy_before_host_mutation ... ok
+test linux_fabric::vxlan::tests::veth_ownership_requires_the_kernel_peer_identity ... ok
+test linux_fabric::public_realization::tests::overlapping_private_addresses_remain_realm_scoped ... ok
+test p9_plan_tests::canonical_l3_gateway_compiles_connected_realm_intents ... ok
+test p9_plan_tests::equivalent_plan_replay_is_allowed_but_payload_conflict_is_rejected ... ok
+test p9_plan_tests::geneve_capability_allows_overlap_only_when_realm_and_provider_opt_in ... ok
+test p9_plan_tests::equivalent_retry_with_new_deadline_keeps_plan_fingerprint ... ok
+test p9_plan_tests::plan_carries_gateway_egress_public_binding_and_deadline ... ok
+test p9_plan_tests::fabric_payload_is_fingerprinted_and_admission_validated ... ok
+test p9_plan_tests::plan_rejects_cross_project_bindings_and_invalid_policies ... ok
+test p9_plan_tests::plan_rejects_cross_project_endpoint ... ok
+test p9_plan_tests::plan_fingerprint_is_deterministic_and_semantic ... ok
+test p9_plan_tests::plan_rejects_foreign_realm_and_pool ... ok
+test p9_plan_tests::plan_rejects_duplicate_endpoint_addresses_and_macs ... ok
+test p9_plan_tests::plan_rejects_nat_without_provider_capability ... ok
+test p9_plan_tests::plan_rejects_overlap_before_provider_mutation ... ok
+test p9_plan_tests::plan_rejects_pool_gateway_from_the_allocatable_range ... ok
+test p9_plan_tests::plan_rejects_unsupported_capability_before_mutation ... ok
+test p9_plan_tests::prefixes_are_canonical_and_overlap_is_explicit ... ok
+test service::tests::attachment_plan_can_carry_operator_owned_routed_egress ... ok
+test linux_fabric::policy_realization::tests::endpoint_replacement_preserves_unaffected_endpoint_evidence ... ok
+test linux_fabric::public_realization::tests::public_realization_preserves_unrelated_bindings_during_apply_and_remove ... ok
+test service::tests::binding_state_strings_round_trip_through_canonical_parsing ... ok
+test linux_fabric::tests::provider_adopts_preprovisioned_host_key ... ok
+test linux_fabric::tests::provider_reconciles_bounded_her_entries ... ok
+test linux_fabric::tests::provider_fences_generation_changes_and_retains_host_key ... ok
+test linux_fabric::tests::provider_realizes_realm_scoped_policy_with_owned_marker ... ok
+test linux_fabric::tests::provider_records_key_path_but_never_plan_key_material ... ok
+test linux_fabric::tests::provider_realizes_realm_scoped_public_binding_without_bare_ip_nat ... ok
+test canonical_policy::tests::applying_recovery_observes_before_retrying ... ok
+test canonical_policy::tests::one_policy_reconciles_each_attached_endpoint_independently ... ok
+test service::tests::authenticated_canonical_entry_points_enforce_scope_and_audit ... ok
+test service::tests::attachment_detach_reservation_is_gateway_scoped_and_not_finalized_implicitly ... ok
+test service::tests::caller_supplied_port_identity_is_stable_and_conflicts_on_replay ... ok
+test service::tests::canonical_reads_do_not_require_projection_metadata ... ok
+test service::tests::authenticated_parent_actions_use_canonical_owner_and_audit_outcomes ... ok
+test service::tests::binding_intent_and_observation_projection_are_durable ... ok
+test service::tests::allocation_is_deterministic_collision_safe_and_restartable ... ok
+test service::tests::canonical_service_reconstructs_zero_and_multiple_realms ... ok
+test service::tests::concurrent_explicit_fixed_ip_creation_has_one_winner ... ok
+test service::tests::concurrent_port_creation_never_allocates_duplicate_ips_or_macs ... ok
+test service::tests::concurrent_stable_native_ports_keep_identity_and_address_unique ... ok
+test canonical_policy::tests::unknown_observation_never_blindly_applies_and_stale_observation_retries ... ok
+test service::tests::gateway_delete_reservation_reconstructs_a_generation_fenced_snapshot ... ok
+test service::tests::gateway_delete_with_stale_generation_is_conflict_not_concealed ... ok
+test canonical_policy::tests::reconciliation_failure_retry_and_unknown_recovery_are_durable ... ok
+test service::tests::gateway_delete_with_active_attachments_is_conflict_not_concealed ... ok
+test service::tests::create_outcome_projection_and_unbind_are_durable_and_idempotent ... ok
+test service::tests::server_owned_endpoint_identity_requires_the_owning_project_and_a_context ... ok
+test vocabulary_tests::p9_vocabulary_is_typed_and_stable ... ok
+test service::tests::invalid_cidr_exhaustion_and_project_isolation_are_enforced ... ok
+test service::tests::delete_cleanup_and_ip_reuse_after_restart ... ok
+test service::tests::independent_services_preserve_canonical_endpoint_and_realm_races ... ok
+test service::tests::network_quota_enforcement_and_isolation ... ok
+test service::tests::independent_services_preserve_network_realm_races ... ok
+test service::tests::concurrent_cross_instance_writers_conflict_deterministically_without_duplicates ... ok
+test service::tests::network_subnet_and_port_quota_enforcement ... ok
+test service::tests::policy_intent_is_durable_generation_fenced_and_compiled ... ok
+test service::tests::network_rename_updates_projection_and_reopens_with_new_name ... ok
+test service::tests::realm_deletion_is_fenced_when_provider_binding_remains ... ok
+test service::tests::server_owned_endpoint_cleanup_preserves_a_bound_endpoint_until_unbound ... ok
+test service::tests::security_group_rules_project_to_endpoint_policy_and_enforce_scope ... ok
+test service::tests::realm_cleanup_unknown_outcome_replays_and_finalizes_after_observation ... ok
+test service::tests::server_owned_endpoint_cleanup_is_ownership_filtered_and_frees_the_address ... ok
+test service::tests::legacy_metadata_file_is_imported_once_and_never_read_again ... ok
+
+test result: ok. 153 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 7.32s
+
+     Running tests/fabric_conformance.rs (target/debug/deps/fabric_conformance-a47bb356777cb29d)
+
+running 1 test
+test fabric_provider_conformance_suite_passes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests/p13_f3_runtime_acceptance.rs (target/debug/deps/p13_f3_runtime_acceptance-e6c4a46c801fcb82)
+
+running 1 test
+test fresh_runtime_reconstructs_canonical_hierarchy_without_network_intent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/p13_r2a_fingerprint_parity.rs (target/debug/deps/p13_r2a_fingerprint_parity-6199543b97a511c1)
+
+running 2 tests
+test postgres_insertion_order_does_not_change_fingerprint ... ignored, requires a disposable PostgreSQL conformance database
+test sqlite_insertion_order_does_not_change_fingerprint ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests/postgres_p13_f2_r1.rs (target/debug/deps/postgres_p13_f2_r1-efbfb6e314c26194)
+
+running 2 tests
+test postgres_p13_f2_r1_reconstructs_and_recovers_realm_cleanup ... ignored, requires the configured PostgreSQL conformance database
+test postgres_p13_f3_fresh_runtime_reconstructs_policy_and_zero_realm_network ... ignored, requires the configured PostgreSQL conformance database
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests o3k_network
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

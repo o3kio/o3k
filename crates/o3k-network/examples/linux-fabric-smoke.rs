@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider_version: "wireguard-v1".to_owned(),
         fabric_generation: 1,
         underlay_mtu: 1500,
-        fabric_mtu: 1420,
+        fabric_mtu: 1440,
     };
     let remote = FabricHostIdentity {
         host_id: "smoke-remote".to_owned(),
@@ -70,22 +70,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider_version: "wireguard-v1".to_owned(),
         fabric_generation: 1,
         underlay_mtu: 1500,
-        fabric_mtu: 1420,
+        fabric_mtu: 1440,
     };
     let binding = RealmEncapsulationBinding {
         fabric_domain_id: Uuid::from_u128(0x1300),
         realm_id: realm.id,
-        provider_kind: FabricProviderKind::Geneve,
+        provider_kind: FabricProviderKind::Vxlan,
         provider_segment_id: 101,
         binding_generation: 1,
     };
-    let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding)?;
-    let mut provider = LinuxFabricBackend::open(LinuxFabricConfig::for_root(&root))?;
-    provider.apply(&plan)?;
-    if !provider.observe(&plan)? {
+    let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1390, &binding)?;
+    let config = LinuxFabricConfig::for_root(&root);
+    let fabric_interface = config.fabric_interface.clone();
+    let mut provider = LinuxFabricBackend::open(config)
+        .map_err(|error| format!("provider open failed: {error}"))?;
+    provider
+        .apply(&plan)
+        .map_err(|error| format!("provider apply failed: {error}"))?;
+    if !provider
+        .observe(&plan)
+        .map_err(|error| format!("provider observe failed: {error}"))?
+    {
         return Err("provider did not observe its applied state".into());
     }
-    let geneve = Command::new("ip")
+    let vxlan = Command::new("ip")
         .args([
             "netns",
             "exec",
@@ -95,16 +103,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "link",
             "show",
             "type",
-            "geneve",
+            "vxlan",
         ])
         .output()?;
-    let geneve_output = String::from_utf8_lossy(&geneve.stdout);
-    if !geneve.status.success()
-        || !geneve_output.contains("geneve")
-        || !geneve_output.contains("id 101")
-        || !geneve_output.contains("remote 198.18.0.2")
+    let vxlan_output = String::from_utf8_lossy(&vxlan.stdout);
+    if !vxlan.status.success()
+        || !vxlan_output.contains("vxlan")
+        || !vxlan_output.contains("id 101")
+        || !vxlan_output.contains("dstport 4789")
+        || vxlan_output.contains("nolearning")
     {
-        return Err("provider did not realize the expected Geneve object".into());
+        return Err("provider did not realize the expected VXLAN object".into());
     }
     let transport = Command::new("ip")
         .args([
@@ -116,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "addr",
             "show",
             "dev",
-            "wg-o3k",
+            fabric_interface.as_str(),
         ])
         .output()?;
     if !transport.status.success()
@@ -125,30 +134,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("provider did not assign the local fabric transport address".into());
     }
     let attachments = Command::new("ip")
-        .args([
-            "netns",
-            "exec",
-            "o3k-fabric",
-            "ip",
-            "-d",
-            "link",
-            "show",
-            "type",
-            "bridge",
-        ])
+        .args(["netns", "exec", "o3k-fabric", "bridge", "link", "show"])
         .output()?;
     if !attachments.status.success()
-        || !String::from_utf8_lossy(&attachments.stdout).contains("o3k-c-")
+        || !String::from_utf8_lossy(&attachments.stdout).contains("o3k-x-")
+        || !String::from_utf8_lossy(&attachments.stdout).contains("o3k-p-")
     {
-        return Err("provider did not realize the isolated Geneve attachment bridge".into());
+        return Err("provider did not realize the isolated VXLAN attachment bridge".into());
     }
-    let realm_attachment = Command::new("ip")
+    let realm_bridge = Command::new("ip")
         .args(["netns", "exec", "o3k-r-00000000", "ip", "link", "show"])
         .output()?;
-    if !realm_attachment.status.success()
-        || !String::from_utf8_lossy(&realm_attachment.stdout).contains("o3k-e-")
+    if !realm_bridge.status.success()
+        || !String::from_utf8_lossy(&realm_bridge.stdout).contains("o3k-n-00000000")
     {
-        return Err("provider did not realize the realm-side Geneve attachment".into());
+        return Err("provider did not realize the realm bridge".into());
     }
     let local_tap = Command::new("ip")
         .args(["-d", "link", "show", "type", "tun"])
@@ -176,10 +176,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("provider did not realize the realm-local gateway".into());
     }
     println!("linux-fabric-smoke: host-transport-address=passed");
-    println!("linux-fabric-smoke: geneve-realization=passed");
+    println!("linux-fabric-smoke: vxlan-realization=passed");
     println!("linux-fabric-smoke: isolated-attachment=passed");
-    provider.remove(&plan)?;
-    if !provider.observe_removed(&plan)? {
+    provider
+        .remove(&plan)
+        .map_err(|error| format!("provider remove failed: {error}"))?;
+    if !provider
+        .observe_removed(&plan)
+        .map_err(|error| format!("provider remove observation failed: {error}"))?
+    {
         return Err("provider did not observe cleanup".into());
     }
     fs::remove_dir_all(root)?;

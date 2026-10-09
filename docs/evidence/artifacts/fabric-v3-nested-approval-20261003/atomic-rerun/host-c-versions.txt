@@ -1,0 +1,5 @@
+host=o3k-pp5-fabric-v3-gate-20261003-host-c
+Linux o3k-pp5-fabric-v3-gate-20261003-host-c 6.8.0-139-generic #139-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 03:52:05 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+ip utility, iproute2-6.1.0, libbpf 1.3.0
+wireguard-tools v1.0.20210914 - https://git.zx2c4.com/wireguard-tools/
+nftables v1.0.9 (Old Doc Yak #3)

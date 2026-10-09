@@ -196,6 +196,11 @@ message ResolvedCreateInputs {
   ArtifactReference image_transfer = 10;
   ArtifactReference config_drive_transfer = 11;
   string project_id = 12;
+  // Presence distinguishes new commands that intentionally omit config-drive
+  // media from legacy commands (where the artifact identity and transfer are
+  // required). `false` requires all config-drive fields above to be absent;
+  // `true` requires a complete, authenticated config-drive reference.
+  optional bool config_drive_enabled = 13;
 }
 
 message ArtifactReference {

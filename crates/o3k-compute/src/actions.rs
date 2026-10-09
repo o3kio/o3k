@@ -427,7 +427,7 @@ impl ComputeService {
                 &intent,
                 accepted_operation_id.unwrap_or(intent.operation_id),
             )
-            .await;
+            .await?;
             // The delete is already terminal, so this is the retry seat for the
             // server-owned endpoint release: a replay of the same delete must
             // finish cleanup that a transient failure left behind, and it

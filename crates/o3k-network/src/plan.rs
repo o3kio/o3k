@@ -108,6 +108,13 @@ impl NodeNetworkPlan {
             || fabric.local_underlay_mtu == 0
             || fabric.local_fabric_mtu == 0
             || fabric.local_fabric_mtu > fabric.local_underlay_mtu
+            || !matches!(
+                fabric
+                    .local_underlay_mtu
+                    .saturating_sub(fabric.local_fabric_mtu),
+                60 | 80
+            )
+            || fabric.tenant_mtu > fabric.local_fabric_mtu.saturating_sub(50)
             || fabric.directory_generation == 0
             || fabric.tenant_mtu == 0
             || fabric.tenant_mtu > fabric.local_fabric_mtu
@@ -119,7 +126,15 @@ impl NodeNetworkPlan {
             || fabric.directory.prefix != fabric.realm_prefix
             || fabric.directory.directory_generation != fabric.directory_generation
             || fabric.directory.proxy_mac != fabric.proxy_mac
+            || fabric.encapsulation.provider_kind != o3k_domain::FabricProviderKind::Vxlan
         {
+            return Err(NetworkPlanError::InvalidFabricPlan);
+        }
+        if fabric.peers.iter().any(|peer| {
+            peer.host_id.is_empty()
+                || peer.fabric_transport_ip.is_unspecified()
+                || peer.fabric_transport_ip.is_loopback()
+        }) {
             return Err(NetworkPlanError::InvalidFabricPlan);
         }
         if fabric
@@ -128,6 +143,14 @@ impl NodeNetworkPlan {
             .iter()
             .any(|entry| !fabric.realm_prefix.contains(entry.fixed_ip))
         {
+            return Err(NetworkPlanError::InvalidFabricPlan);
+        }
+        if fabric.dhcp.is_some_and(|dhcp| {
+            !fabric.realm_prefix.contains(dhcp.gateway)
+                || dhcp.gateway == fabric.realm_prefix.network
+                || dhcp.gateway == Ipv4Addr::BROADCAST
+                || broadcast_address(fabric.realm_prefix) == Some(dhcp.gateway)
+        }) {
             return Err(NetworkPlanError::InvalidFabricPlan);
         }
         let mut policy_ids = BTreeSet::new();

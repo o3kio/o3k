@@ -6,8 +6,8 @@ use o3k_identity;
 use o3k_image;
 use o3k_provider::{
     AgentNodeSnapshot, ArtifactKind, ConfigDriveRequest, CreateArtifactResolver,
-    CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
-    ResolvedCreateInputs, ResolvedCreateResolver,
+    CreateInstanceRequest, OperationState, ProviderError, ResolvedConfigDrive,
+    ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -23,6 +23,7 @@ pub(crate) struct DaemonCreateResolver {
     pub(crate) network: o3k_network::NetworkService,
     pub(crate) config_drive: o3k_config_drive::ConfigDriveStore,
     pub(crate) network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
+    pub(crate) fabric_reconciler: Option<Arc<super::network::FabricRealmReconciler>>,
     pub(crate) network_controller: o3k_network::NetworkControllerLease,
     pub(crate) network_external_realm_id: Option<Uuid>,
     pub(crate) network_agent: Option<o3k_network::NetworkAgentIdentity>,
@@ -74,8 +75,7 @@ impl DaemonCreateResolver {
     pub(crate) async fn resolve_network(
         &self,
         request: &CreateInstanceRequest,
-        agent_id: &str,
-        agent_epoch: &str,
+        compute_agent: &AgentNodeSnapshot,
     ) -> Result<
         (
             Vec<o3k_compute_agent::NetworkAttachmentSpec>,
@@ -84,6 +84,13 @@ impl DaemonCreateResolver {
         ProviderError,
     > {
         let external_realm_id = self.resolve_external_realm_id(&request.project_id).await?;
+        let legacy_network_agent_id = self
+            .network_agent
+            .as_ref()
+            .map_or(compute_agent.agent_id.as_str(), |agent| {
+                agent.agent_id.as_str()
+            })
+            .to_owned();
         let mut attachments = Vec::with_capacity(request.network_ids.len());
         let mut network_data = BTreeMap::new();
         for network_id in &request.network_ids {
@@ -106,10 +113,20 @@ impl DaemonCreateResolver {
             // Record the selected-host intent only after the full attachment
             // resolved; a port whose subnet cannot be resolved is never
             // dispatched and must not carry a binding intent.
-            let network_agent_id = self
-                .network_agent
-                .as_ref()
-                .map_or(agent_id, |agent| agent.agent_id.as_str());
+            let binding_host = if let Some(reconciler) = &self.fabric_reconciler {
+                reconciler
+                    .validate_compute_placement(compute_agent)
+                    .await
+                    .map_err(|_| ProviderError::InvalidRequest)?;
+                compute_agent.host_id.clone()
+            } else {
+                self.network_agent
+                    .as_ref()
+                    .map_or(compute_agent.agent_id.as_str(), |agent| {
+                        agent.agent_id.as_str()
+                    })
+                    .to_owned()
+            };
             let public_address = self
                 .public_allocator
                 .as_ref()
@@ -143,14 +160,69 @@ impl DaemonCreateResolver {
             } else {
                 (Vec::new(), Vec::new())
             };
-            self.network
-                .record_binding_intent(&request.project_id, port_id, network_agent_id)
-                .await
-                .map_err(|error| match error {
-                    o3k_network::NetworkError::Conflict => ProviderError::Conflict,
-                    _ => ProviderError::InvalidRequest,
-                })?;
-            if let Some(dispatcher) = &self.network_dispatcher {
+            if let Some(fabric_reconciler) = &self.fabric_reconciler {
+                // A selected host without an accepted Fabric identity is a
+                // known pre-dispatch configuration failure. Reject it before
+                // recording placement intent or entering the collective
+                // reconciler so Compute can terminalize the create as failed
+                // (and safely release its resources). Errors after realm
+                // reconciliation starts remain UnknownOutcome because a
+                // provider command may already have crossed the mutation
+                // boundary.
+                let selected_host_enrolled = self
+                    .network
+                    .list_fabric_host_transport_identities()
+                    .await
+                    .map_err(|_| ProviderError::InvalidRequest)?
+                    .into_iter()
+                    .any(|identity| {
+                        identity.host_id == binding_host
+                            && identity.administrative_state == "enabled"
+                    });
+                if !selected_host_enrolled {
+                    return Err(ProviderError::InvalidRequest);
+                }
+                self.network
+                    .record_fabric_binding_intent(&request.project_id, port_id, &binding_host)
+                    .await
+                    .map_err(|error| match error {
+                        o3k_network::NetworkError::Conflict => ProviderError::Conflict,
+                        _ => ProviderError::InvalidRequest,
+                    })?;
+                fabric_reconciler
+                    .reconcile_realm(
+                        &request.project_id,
+                        port.network_id,
+                        request.operation_id,
+                        super::unix_time_millis().saturating_add(30_000),
+                    )
+                    .await
+                    // Fabric keeps its own durable command journal and
+                    // observation-first recovery. The compute-agent command
+                    // has not been admitted yet, so surface a bounded retry
+                    // to the compute lifecycle; the next pass re-enters the
+                    // Fabric reconciler before it can dispatch VM creation.
+                    .map_err(|error| {
+                        tracing::warn!(
+                            realm_id = %port.network_id,
+                            operation_id = %request.operation_id,
+                            error = %error,
+                            "Fabric realm reconciliation did not complete before compute admission"
+                        );
+                        ProviderError::Retryable
+                    })?;
+            } else {
+                self.network
+                    .record_binding_intent(&request.project_id, port_id, &legacy_network_agent_id)
+                    .await
+                    .map_err(|error| match error {
+                        o3k_network::NetworkError::Conflict => ProviderError::Conflict,
+                        _ => ProviderError::InvalidRequest,
+                    })?;
+            }
+            if self.fabric_reconciler.is_none()
+                && let Some(dispatcher) = &self.network_dispatcher
+            {
                 let deadline_unix_ms = super::unix_time_millis().saturating_add(30_000);
                 let plan = o3k_network::compile_attachment_plan_with_defaults(
                     o3k_network::AttachmentPlanInput {
@@ -165,7 +237,7 @@ impl DaemonCreateResolver {
                         // plan node bound to the network agent lets the executor
                         // reject cross-agent replay without conflating compute
                         // placement with network mutation authority.
-                        node_id: network_agent_id,
+                        node_id: &legacy_network_agent_id,
                         operation_id: request.operation_id,
                         deadline_unix_ms,
                         public_address,
@@ -191,8 +263,8 @@ impl DaemonCreateResolver {
                         action: o3k_network::NetworkPlanAction::Apply,
                         target: self.network_agent.clone().unwrap_or_else(|| {
                             o3k_network::NetworkAgentIdentity {
-                                agent_id: agent_id.to_owned(),
-                                agent_epoch: agent_epoch.to_owned(),
+                                agent_id: legacy_network_agent_id.clone(),
+                                agent_epoch: compute_agent.agent_epoch.clone(),
                             }
                         }),
                         controller: self.network_controller.clone(),
@@ -268,6 +340,23 @@ impl DaemonCreateResolver {
         }
     }
 
+    fn network_data_from_attachments(
+        attachments: &[o3k_compute_agent::NetworkAttachmentSpec],
+    ) -> BTreeMap<String, String> {
+        let mut network_data = BTreeMap::new();
+        for attachment in attachments {
+            network_data.insert(
+                format!("{}.mac", attachment.port_id),
+                attachment.mac.clone(),
+            );
+            network_data.insert(
+                format!("{}.ipv4", attachment.port_id),
+                attachment.fixed_ipv4.clone(),
+            );
+        }
+        network_data
+    }
+
     fn materialize_config_drive(
         &self,
         request: &CreateInstanceRequest,
@@ -316,8 +405,9 @@ fn operation_allows_create(operation: &o3k_store::OperationRecord, server_id: Uu
 
 #[cfg(test)]
 mod operation_tests {
-    use super::operation_allows_create;
+    use super::{DaemonCreateResolver, operation_allows_create};
     use o3k_store::{OperationRecord, OperationState};
+    use std::collections::BTreeMap;
     use uuid::Uuid;
 
     fn operation(kind: &str, state: OperationState, resource_id: Uuid) -> OperationRecord {
@@ -356,6 +446,24 @@ mod operation_tests {
             server_id
         ));
     }
+
+    #[test]
+    fn config_drive_network_data_comes_from_resolved_attachments() {
+        let attachments = [o3k_compute_agent::NetworkAttachmentSpec {
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+            fixed_ipv4: "10.0.0.10".to_owned(),
+            subnet_cidr: "10.0.0.0/24".to_owned(),
+            gateway_ipv4: "10.0.0.1".to_owned(),
+        }];
+        assert_eq!(
+            DaemonCreateResolver::network_data_from_attachments(&attachments),
+            BTreeMap::from([
+                ("port-1.ipv4".to_owned(), "10.0.0.10".to_owned()),
+                ("port-1.mac".to_owned(), "02:00:00:00:00:01".to_owned()),
+            ])
+        );
+    }
 }
 
 fn select_active_external_realm(
@@ -385,13 +493,22 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
             error
         })?;
         let (network_attachments, network_data) = self
-            .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
+            .resolve_network(request, agent)
             .await
             .map_err(|error| {
                 tracing::warn!(resource_id = %request.o3k_server_id, error = %error, "compute create network resolution rejected");
                 error
             })?;
-        let (iso, _) = self.materialize_config_drive(request, network_data).map_err(|error| {
+        let config_drive = request.config_drive.as_ref().map(|_| {
+            self.materialize_config_drive(request, network_data.clone())
+                .map(|(iso, _)| {
+                    let artifact_id = Uuid::new_v5(
+                        &Uuid::NAMESPACE_URL,
+                        format!("o3k:config-drive:{}:{}", request.o3k_server_id, iso.fingerprint_sha256).as_bytes(),
+                    ).to_string();
+                    ResolvedConfigDrive { artifact_id, sha256: iso.fingerprint_sha256 }
+                })
+        }).transpose().map_err(|error| {
             tracing::warn!(resource_id = %request.o3k_server_id, error = %error, "compute create config-drive resolution rejected");
             error
         })?;
@@ -401,23 +518,13 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
         let disk_gib = (request.disk_gib > 0)
             .then_some(request.disk_gib)
             .ok_or(ProviderError::InvalidRequest)?;
-        let config_artifact_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!(
-                "o3k:config-drive:{}:{}",
-                request.o3k_server_id, iso.fingerprint_sha256
-            )
-            .as_bytes(),
-        )
-        .to_string();
         Ok(ResolvedCreateInputs {
             flavor_id,
             image_artifact_id: image.id.to_string(),
             image_sha256: image.checksum,
             image_format: image.format,
             disk_gib,
-            config_drive_artifact_id: config_artifact_id,
-            config_drive_sha256: iso.fingerprint_sha256,
+            config_drive,
             network_attachments,
         })
     }
@@ -428,7 +535,7 @@ impl CreateArtifactResolver for DaemonCreateResolver {
     async fn resolve_artifacts(
         &self,
         request: &CreateInstanceRequest,
-        agent: &AgentNodeSnapshot,
+        _agent: &AgentNodeSnapshot,
         inputs: &ResolvedCreateInputs,
     ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
         self.ensure_create_operation_active(request).await?;
@@ -436,29 +543,36 @@ impl CreateArtifactResolver for DaemonCreateResolver {
         if image.checksum != inputs.image_sha256 || image.format != inputs.image_format {
             return Err(ProviderError::Conflict);
         }
-        let (_, network_data) = self
-            .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
-            .await?;
-        let (iso, iso_bytes) = self.materialize_config_drive(request, network_data)?;
-        if iso.fingerprint_sha256 != inputs.config_drive_sha256 {
-            return Err(ProviderError::Conflict);
+        // `resolve` already resolved and realized these attachments before
+        // constructing the pending compute command. Resolving them again here
+        // would repeat provider mutations while preparing an artifact and can
+        // replay the same Fabric command identity with a different deadline.
+        let network_data = Self::network_data_from_attachments(&inputs.network_attachments);
+        let mut artifacts = vec![ResolvedCreateArtifact {
+            artifact_id: inputs.image_artifact_id.clone(),
+            kind: ArtifactKind::ImageBase,
+            sha256: image.checksum,
+            format: image.format,
+            bytes: image.content,
+        }];
+        match (&request.config_drive, &inputs.config_drive) {
+            (None, None) => {}
+            (Some(_), Some(config_drive)) => {
+                let (iso, iso_bytes) = self.materialize_config_drive(request, network_data)?;
+                if iso.fingerprint_sha256 != config_drive.sha256 {
+                    return Err(ProviderError::Conflict);
+                }
+                artifacts.push(ResolvedCreateArtifact {
+                    artifact_id: config_drive.artifact_id.clone(),
+                    kind: ArtifactKind::ConfigDriveIso,
+                    sha256: iso.fingerprint_sha256,
+                    format: "iso".to_owned(),
+                    bytes: iso_bytes,
+                });
+            }
+            _ => return Err(ProviderError::Conflict),
         }
-        Ok(vec![
-            ResolvedCreateArtifact {
-                artifact_id: inputs.image_artifact_id.clone(),
-                kind: ArtifactKind::ImageBase,
-                sha256: image.checksum,
-                format: image.format,
-                bytes: image.content,
-            },
-            ResolvedCreateArtifact {
-                artifact_id: inputs.config_drive_artifact_id.clone(),
-                kind: ArtifactKind::ConfigDriveIso,
-                sha256: iso.fingerprint_sha256,
-                format: "iso".to_owned(),
-                bytes: iso_bytes,
-            },
-        ])
+        Ok(artifacts)
     }
 }
 

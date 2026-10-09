@@ -1,0 +1,2 @@
+f3c3474933 {"address": "62:31:8b:a5:19:aa", "flags": ["NO-CARRIER", "BROADCAST", "MULTICAST", "UP"], "ifname": "f3c3474933", "kind": "bridge", "mtu": 1500}
+f3c3476343 {"address": "32:ec:cb:d5:ed:c1", "flags": ["NO-CARRIER", "BROADCAST", "MULTICAST", "UP"], "ifname": "f3c3476343", "kind": "bridge", "mtu": 1500}

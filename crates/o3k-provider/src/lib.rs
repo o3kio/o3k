@@ -24,8 +24,9 @@ pub use attachment::{
 pub use node::{
     AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentCapabilityFlag,
     AgentEpochLease, AgentNodeRegistry, AgentNodeSnapshot, ArtifactKind, CreateArtifactResolver,
-    NetworkAttachmentSpec, ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
-    UnconfiguredCreateArtifactResolver, UnconfiguredResolvedCreateResolver,
+    NetworkAttachmentSpec, ResolvedConfigDrive, ResolvedCreateArtifact, ResolvedCreateInputs,
+    ResolvedCreateResolver, UnconfiguredCreateArtifactResolver, UnconfiguredResolvedCreateResolver,
+    is_valid_host_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -14,6 +14,7 @@ Related architecture:
 - [ADR-0168](../docs/adr/ADR-0168-o3k-routed-fabric-and-network-execution.md)
 - [ADR-0172](../docs/adr/ADR-0172-configurable-edge-fabric-transport-ports.md)
 - [current execution-boundary contract](execution-boundaries.md)
+- Shared substrate implementation: [o3kio/fabric](https://github.com/o3kio/fabric)
 
 Aligned external decision: CHV
 [ADR-021](https://github.com/kubedoio/chv/blob/main/docs/specs/adr/021-stretched-l2-vxlan-her-wireguard-fabric.md)
@@ -23,6 +24,19 @@ This accepted contract supersedes `contracts/edge-fabric-realm-overlay.md` for
 P11 v3 implementation authority. Acceptance authorizes bounded implementation
 only; runtime, product, and real-host support claims remain gated by the
 evidence requirements in this contract and SPEC-0049.
+
+The WireGuard host-fabric substrate beneath this contract (netns, WireGuard
+transport, per-network VXLAN/HER objects, ownership journaling, key hygiene)
+is implemented once in the shared repository
+[o3kio/fabric](https://github.com/o3kio/fabric) and consumed by git tag by
+both O3K and CHV; its
+[`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/main/contracts/fabric-provider-v1.md)
+is normative for that substrate, and
+[`docs/change-control.md`](https://github.com/o3kio/fabric/blob/main/docs/change-control.md)
+governs cross-project change requests. On any disagreement between this
+contract and the shared provider contract about the substrate, the shared
+provider contract wins for the substrate and this contract wins for the
+realm/policy layers above it.
 
 ## Purpose
 
@@ -71,6 +85,34 @@ WireGuard host transport                   -> provider execution/security state
 
 The executor does not invent a tenant IP/MAC, realm, VNI, destination host,
 public identity, or authorization decision.
+
+### Departing-host removal evidence
+
+When the final current endpoint leaves a host, the reconciler must send that
+host a Realm `Remove` while applying the reduced participant directory to the
+remaining hosts. Removal is complete only when the remaining hosts have
+withdrawn it from HER, the departing host's endpoint TAPs and local Realm
+realization are absent, provider absence has been observed, and durable
+ownership no longer claims the removed endpoint or Realm. Remove mutation
+success alone does not prove provider absence. Ownership evidence must remain
+available until exact live state is observed absent so interrupted cleanup can
+resume safely. When one of several local endpoints is removed, the host remains
+a participant and only that endpoint's provider state is withdrawn.
+
+The reconciler derives the desired participant set from current canonical
+active endpoints and accepted bindings. It derives possible prior realization
+from the Realm's durable host plan/work history. A latest Apply remains a
+retirement obligation until a later Remove has succeeded with provider
+absence observed; a later Apply supersedes an earlier Remove as current
+ownership evidence. Unresolved or ambiguous latest work keeps the Realm
+unconverged. Recovery after controller restart must derive and resume pending
+retirement without requiring another API mutation, and must dispatch all
+retiring-host Removes before survivor Apply plans.
+
+Request-driven server deletion returns Fabric unbind or endpoint-release
+failure to its caller after the server deletion is durably terminal. The server
+is not restored; cleanup remains retryable. Background terminal projection
+may log and retry when no request is waiting.
 
 ## Canonical endpoint address key
 

@@ -122,6 +122,7 @@ pub struct AppState {
     identity: Option<Arc<TokenService>>,
     image: Option<Arc<ImageService>>,
     network: Option<Arc<NetworkService>>,
+    realm_deletion_workflow: Option<Arc<dyn RealmDeletionWorkflow>>,
     public_allocator: Option<Arc<PublicAddressAllocator>>,
     network_external_realm_id: Option<uuid::Uuid>,
     network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
@@ -158,6 +159,7 @@ impl Default for AppState {
             identity: None,
             image: None,
             network: None,
+            realm_deletion_workflow: None,
             public_allocator: None,
             network_external_realm_id: None,
             network_dispatcher: None,
@@ -186,6 +188,14 @@ pub trait NativeAttachmentWorkflow: Send + Sync {
     async fn attach(&self, attachment_id: uuid::Uuid) -> Result<(), String>;
     async fn detach(&self, attachment_id: uuid::Uuid) -> Result<(), String>;
     async fn recover(&self) -> Result<(), String>;
+}
+
+/// Provider-aware AddressRealm cleanup supplied by the O3K composition root.
+/// The Neutron-compatible API remains the client entry point, while canonical
+/// network services stay independent of provider transports.
+#[async_trait]
+pub trait RealmDeletionWorkflow: Send + Sync {
+    async fn delete_subnet(&self, project_id: &str, realm_id: uuid::Uuid) -> Result<(), String>;
 }
 
 impl FromRef<AppState> for NativeApiState {
@@ -239,6 +249,16 @@ impl AppState {
     #[must_use]
     pub fn with_network(mut self, service: NetworkService) -> Self {
         self.network = Some(Arc::new(service));
+        self
+    }
+
+    /// Configures provider-aware cleanup for Neutron subnet deletion.
+    #[must_use]
+    pub fn with_realm_deletion_workflow(
+        mut self,
+        workflow: Arc<dyn RealmDeletionWorkflow>,
+    ) -> Self {
+        self.realm_deletion_workflow = Some(workflow);
         self
     }
 

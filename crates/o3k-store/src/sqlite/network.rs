@@ -19,13 +19,119 @@ use uuid::Uuid;
 use crate::{
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
     CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
-    CanonicalNetworkRecord, CanonicalRealmBindingRecord, NetworkAddressAllocationRecord,
-    NetworkIntentRecord, NetworkRecord, NetworkRepository, PortRecord, SQLITE_BUSY_MAX_ATTEMPTS,
-    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, StoreError,
-    SubnetRecord, is_sqlite_busy, legacy_policy_records,
+    CanonicalNetworkRecord, CanonicalRealmBindingRecord, FabricHostTransportIdentityRecord,
+    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, NetworkRepository,
+    PortRecord, SQLITE_BUSY_MAX_ATTEMPTS, SecurityGroupBindingRecord, SecurityGroupRecord,
+    SecurityGroupRuleRecord, StoreError, SubnetRecord, is_sqlite_busy, legacy_policy_records,
 };
 
 impl SqliteStore {
+    async fn read_fabric_host_identity(
+        &self,
+        host_id: &str,
+    ) -> Result<Option<FabricHostTransportIdentityRecord>, StoreError> {
+        let row = sqlx::query("SELECT host_id,agent_id,public_key,underlay_endpoint,fabric_transport_ip,provider_version,fabric_generation,underlay_mtu,fabric_mtu,administrative_state FROM canonical_fabric_host_transport_identities WHERE host_id=?")
+            .bind(host_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        row.map(|row| {
+            let generation: i64 = row
+                .try_get("fabric_generation")
+                .map_err(StoreError::Database)?;
+            let underlay_mtu: i64 = row.try_get("underlay_mtu").map_err(StoreError::Database)?;
+            let fabric_mtu: i64 = row.try_get("fabric_mtu").map_err(StoreError::Database)?;
+            Ok(FabricHostTransportIdentityRecord {
+                host_id: row.try_get("host_id").map_err(StoreError::Database)?,
+                agent_id: row.try_get("agent_id").map_err(StoreError::Database)?,
+                public_key: row.try_get("public_key").map_err(StoreError::Database)?,
+                underlay_endpoint: row
+                    .try_get("underlay_endpoint")
+                    .map_err(StoreError::Database)?,
+                fabric_transport_ip: row
+                    .try_get::<String, _>("fabric_transport_ip")
+                    .map_err(StoreError::Database)?
+                    .parse()
+                    .map_err(|_| {
+                        StoreError::Corrupt("invalid Fabric transport address".to_owned())
+                    })?,
+                provider_version: row
+                    .try_get("provider_version")
+                    .map_err(StoreError::Database)?,
+                fabric_generation: u64::try_from(generation)
+                    .map_err(|_| StoreError::Corrupt("invalid Fabric generation".to_owned()))?,
+                underlay_mtu: u16::try_from(underlay_mtu)
+                    .map_err(|_| StoreError::Corrupt("invalid underlay MTU".to_owned()))?,
+                fabric_mtu: u16::try_from(fabric_mtu)
+                    .map_err(|_| StoreError::Corrupt("invalid Fabric MTU".to_owned()))?,
+                administrative_state: row
+                    .try_get("administrative_state")
+                    .map_err(StoreError::Database)?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn read_all_fabric_host_identities(
+        &self,
+    ) -> Result<Vec<FabricHostTransportIdentityRecord>, StoreError> {
+        let rows = sqlx::query("SELECT host_id,agent_id,public_key,underlay_endpoint,fabric_transport_ip,provider_version,fabric_generation,underlay_mtu,fabric_mtu,administrative_state FROM canonical_fabric_host_transport_identities ORDER BY host_id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        let mut identities = Vec::with_capacity(rows.len());
+        for row in rows {
+            let host_id: String = row.try_get("host_id").map_err(StoreError::Database)?;
+            identities.push(
+                self.read_fabric_host_identity(&host_id)
+                    .await?
+                    .ok_or_else(|| {
+                        StoreError::Corrupt(
+                            "Fabric host identity disappeared during read".to_owned(),
+                        )
+                    })?,
+            );
+        }
+        Ok(identities)
+    }
+
+    async fn write_fabric_host_identity(
+        &self,
+        identity: &FabricHostTransportIdentityRecord,
+        expected_generation: Option<u64>,
+    ) -> Result<FabricHostTransportIdentityRecord, StoreError> {
+        crate::validate_fabric_host_identity(identity)?;
+        let current = self.read_fabric_host_identity(&identity.host_id).await?;
+        match (current, expected_generation) {
+            (None, None) => {
+                sqlx::query("INSERT INTO canonical_fabric_host_transport_identities(host_id,agent_id,public_key,underlay_endpoint,fabric_transport_ip,provider_version,fabric_generation,underlay_mtu,fabric_mtu,administrative_state) VALUES(?,?,?,?,?,?,?,?,?,?)")
+                    .bind(&identity.host_id).bind(&identity.agent_id).bind(&identity.public_key).bind(&identity.underlay_endpoint).bind(identity.fabric_transport_ip.to_string()).bind(&identity.provider_version).bind(checked_generation(identity.fabric_generation)?).bind(i64::from(identity.underlay_mtu)).bind(i64::from(identity.fabric_mtu)).bind(&identity.administrative_state)
+                    .execute(&self.pool).await.map_err(map_canonical_insert_error)?;
+            }
+            (Some(current), Some(expected))
+                if current == *identity && current.fabric_generation == expected =>
+            {
+                return Ok(current);
+            }
+            (Some(current), Some(expected))
+                if current.fabric_generation == expected
+                    && identity.fabric_generation == expected.saturating_add(1) =>
+            {
+                let result = sqlx::query("UPDATE canonical_fabric_host_transport_identities SET agent_id=?,public_key=?,underlay_endpoint=?,fabric_transport_ip=?,provider_version=?,fabric_generation=?,underlay_mtu=?,fabric_mtu=?,administrative_state=? WHERE host_id=? AND fabric_generation=?")
+                    .bind(&identity.agent_id).bind(&identity.public_key).bind(&identity.underlay_endpoint).bind(identity.fabric_transport_ip.to_string()).bind(&identity.provider_version).bind(checked_generation(identity.fabric_generation)?).bind(i64::from(identity.underlay_mtu)).bind(i64::from(identity.fabric_mtu)).bind(&identity.administrative_state).bind(&identity.host_id).bind(checked_generation(expected)?)
+                    .execute(&self.pool).await.map_err(map_canonical_insert_error)?;
+                if result.rows_affected() != 1 {
+                    return Err(StoreError::StaleGeneration);
+                }
+            }
+            (None, Some(_)) | (Some(_), None) => return Err(StoreError::StaleGeneration),
+            (Some(_), Some(_)) => return Err(StoreError::StaleGeneration),
+        }
+        self.read_fabric_host_identity(&identity.host_id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+
     pub async fn allocate_network_address(
         &self,
         realm_id: &Uuid,
@@ -491,6 +597,30 @@ impl SqliteStore {
         rows.iter().map(canonical_realm_from_row).collect()
     }
 
+    pub async fn list_active_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, project_id, prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE state = 'active' ORDER BY project_id, network_id, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_realm_from_row).collect()
+    }
+
+    pub async fn list_deleting_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, project_id, prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE state = 'deleting' ORDER BY project_id, network_id, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_realm_from_row).collect()
+    }
+
     pub async fn insert_canonical_pool(
         &self,
         pool: &CanonicalAddressPoolRecord,
@@ -905,7 +1035,7 @@ impl SqliteStore {
         expected_generation: u64,
     ) -> Result<CanonicalAddressRealmRecord, StoreError> {
         let result = sqlx::query(
-            "UPDATE canonical_address_realms SET state = 'deleting', generation = generation + 1 WHERE id = ? AND project_id = ? AND generation = ? AND state = 'active' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id)",
+            "UPDATE canonical_address_realms SET state = 'deleting', generation = generation + 1 WHERE id = ? AND project_id = ? AND generation = ? AND state = 'active' AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE realm_id = canonical_address_realms.id)",
         )
         .bind(realm_id.to_string())
         .bind(project_id)
@@ -925,6 +1055,27 @@ impl SqliteStore {
             .ok_or(StoreError::ResourceNotFound)
     }
 
+    pub async fn advance_canonical_realm_generation(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalAddressRealmRecord, StoreError> {
+        let updated = sqlx::query("UPDATE canonical_address_realms SET generation = generation + 1 WHERE id = ? AND project_id = ? AND generation = ? AND state = 'active'")
+            .bind(realm_id.to_string())
+            .bind(project_id)
+            .bind(checked_generation(expected_generation)?)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::StaleGeneration);
+        }
+        self.get_canonical_realm(project_id, realm_id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+
     pub async fn finalize_canonical_realm_deletion(
         &self,
         project_id: &str,
@@ -932,7 +1083,7 @@ impl SqliteStore {
         expected_generation: u64,
     ) -> Result<(), StoreError> {
         let result = sqlx::query(
-            "DELETE FROM canonical_address_realms WHERE id = ? AND project_id = ? AND generation = ? AND state = 'deleting' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_network_policies p JOIN canonical_endpoints e ON e.id = p.endpoint_id WHERE e.realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_realm_encapsulation_bindings WHERE realm_id = canonical_address_realms.id)",
+            "DELETE FROM canonical_address_realms WHERE id = ? AND project_id = ? AND generation = ? AND state = 'deleting' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_network_policies p JOIN canonical_endpoints e ON e.id = p.endpoint_id WHERE e.realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_realm_encapsulation_bindings WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE realm_id = canonical_address_realms.id)",
         )
         .bind(realm_id.to_string())
         .bind(project_id)
@@ -1613,7 +1764,7 @@ impl SqliteStore {
 
     pub async fn list_ports(&self, project_id: &str) -> Result<Vec<PortRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state FROM network_ports WHERE project_id = ? ORDER BY rowid",
+            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state, binding_generation FROM network_ports WHERE project_id = ? ORDER BY rowid",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -1628,7 +1779,7 @@ impl SqliteStore {
         network_id: &Uuid,
     ) -> Result<Vec<PortRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state FROM network_ports WHERE project_id = ? AND network_id = ? ORDER BY rowid",
+            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state, binding_generation FROM network_ports WHERE project_id = ? AND network_id = ? ORDER BY rowid",
         )
         .bind(project_id)
         .bind(network_id.to_string())
@@ -1644,7 +1795,7 @@ impl SqliteStore {
         id: &Uuid,
     ) -> Result<Option<PortRecord>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state FROM network_ports WHERE id = ? AND project_id = ?",
+            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state, binding_generation FROM network_ports WHERE id = ? AND project_id = ?",
         )
         .bind(id.to_string())
         .bind(project_id)
@@ -1656,7 +1807,7 @@ impl SqliteStore {
 
     pub async fn get_port_by_id(&self, id: &Uuid) -> Result<Option<PortRecord>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state FROM network_ports WHERE id = ?",
+            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state, binding_generation FROM network_ports WHERE id = ?",
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -1695,8 +1846,9 @@ impl SqliteStore {
         binding_state: Option<&str>,
     ) -> Result<PortRecord, StoreError> {
         let result = sqlx::query(
-            "UPDATE network_ports SET binding_host = ?, binding_state = ? WHERE id = ? AND project_id = ?",
+            "UPDATE network_ports SET binding_generation = CASE WHEN binding_host IS NOT ? THEN binding_generation + 1 ELSE binding_generation END, binding_host = ?, binding_state = ? WHERE id = ? AND project_id = ?",
         )
+        .bind(binding_host)
         .bind(binding_host)
         .bind(binding_state)
         .bind(id.to_string())
@@ -2094,7 +2246,22 @@ impl SqliteStore {
     ) -> Result<(), StoreError> {
         validate_canonical_state(&a.state)?;
         checked_generation(a.generation)?;
-        sqlx::query("INSERT INTO canonical_l3_gateway_attachments (id,gateway_id,realm_id,project_id,generation,state) VALUES (?,?,?,?,?,?)").bind(a.id.to_string()).bind(a.gateway_id.to_string()).bind(a.realm_id.to_string()).bind(&a.project_id).bind(a.generation as i64).bind(&a.state).execute(&self.pool).await.map_err(map_canonical_insert_error).map(|_|())
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let realm_state = sqlx::query_scalar::<_, String>(
+            "SELECT state FROM canonical_address_realms WHERE id = ? AND project_id = ?",
+        )
+        .bind(a.realm_id.to_string())
+        .bind(&a.project_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ResourceNotFound)?;
+        if realm_state != "active" {
+            return Err(StoreError::NetworkInUse);
+        }
+        sqlx::query("INSERT INTO canonical_l3_gateway_attachments (id,gateway_id,realm_id,project_id,generation,state) VALUES (?,?,?,?,?,?)").bind(a.id.to_string()).bind(a.gateway_id.to_string()).bind(a.realm_id.to_string()).bind(&a.project_id).bind(a.generation as i64).bind(&a.state).execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(())
     }
     pub async fn get_canonical_l3_gateway_attachment(
         &self,
@@ -2230,6 +2397,28 @@ impl SqliteStore {
 
 #[async_trait]
 impl NetworkRepository for SqliteStore {
+    async fn get_fabric_host_identity(
+        &self,
+        host_id: &str,
+    ) -> Result<Option<FabricHostTransportIdentityRecord>, StoreError> {
+        self.read_fabric_host_identity(host_id).await
+    }
+
+    async fn list_fabric_host_identities(
+        &self,
+    ) -> Result<Vec<FabricHostTransportIdentityRecord>, StoreError> {
+        self.read_all_fabric_host_identities().await
+    }
+
+    async fn upsert_fabric_host_identity(
+        &self,
+        identity: &FabricHostTransportIdentityRecord,
+        expected_generation: Option<u64>,
+    ) -> Result<FabricHostTransportIdentityRecord, StoreError> {
+        self.write_fabric_host_identity(identity, expected_generation)
+            .await
+    }
+
     async fn get_canonical_owner(
         &self,
         resource_name: &str,
@@ -2409,6 +2598,18 @@ impl NetworkRepository for SqliteStore {
     ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
         self.list_canonical_realms(project_id, network_id).await
     }
+
+    async fn list_active_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.list_active_canonical_realms().await
+    }
+
+    async fn list_deleting_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.list_deleting_canonical_realms().await
+    }
     async fn insert_canonical_pool(
         &self,
         pool: &CanonicalAddressPoolRecord,
@@ -2520,6 +2721,15 @@ impl NetworkRepository for SqliteStore {
         self.begin_canonical_realm_deletion(project_id, realm_id, expected_generation)
             .await
     }
+    async fn advance_canonical_realm_generation(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalAddressRealmRecord, StoreError> {
+        self.advance_canonical_realm_generation(project_id, realm_id, expected_generation)
+            .await
+    }
     async fn finalize_canonical_realm_deletion(
         &self,
         project_id: &str,
@@ -2534,6 +2744,20 @@ impl NetworkRepository for SqliteStore {
         realm_id: &Uuid,
     ) -> Result<Vec<CanonicalRealmBindingRecord>, StoreError> {
         self.list_canonical_realm_bindings(realm_id).await
+    }
+    async fn insert_canonical_realm_binding(
+        &self,
+        binding: &CanonicalRealmBindingRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_realm_binding(binding).await
+    }
+    async fn get_canonical_realm_binding(
+        &self,
+        fabric_domain_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Option<CanonicalRealmBindingRecord>, StoreError> {
+        self.get_canonical_realm_binding(fabric_domain_id, realm_id)
+            .await
     }
     async fn delete_canonical_realm_binding(
         &self,

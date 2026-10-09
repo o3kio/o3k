@@ -25,10 +25,71 @@ use uuid::Uuid;
 /// authenticated wire delivery.
 #[async_trait::async_trait]
 pub trait NetworkPlanDispatcher: Send + Sync {
+    /// Resolve the current network execution identity for a stable host.
+    /// Fabric plans use this host-scoped directory; it is deliberately
+    /// separate from the compute-agent registry.
+    async fn target_for_host(
+        &self,
+        _host_id: &str,
+    ) -> Result<Option<NetworkAgentIdentity>, NetworkDispatchError> {
+        Ok(None)
+    }
+
+    /// Stable host IDs covered by the configured target-aware network-agent
+    /// directory. Legacy single-agent dispatchers return an empty list.
+    fn configured_target_hosts(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     async fn dispatch(
         &self,
         command: NetworkPlanCommand,
     ) -> Result<NetworkPlanStatus, NetworkDispatchError>;
+
+    /// Dispatch a fresh execution attempt after the authoritative agent has
+    /// proved that the historical command was never admitted. Implementations
+    /// must atomically supersede the historical durable work before sending
+    /// the successor to the agent.
+    async fn dispatch_superseding(
+        &self,
+        command: NetworkPlanCommand,
+        _historical_command_id: String,
+        _historical_revision: u64,
+    ) -> Result<NetworkPlanStatus, NetworkDispatchError> {
+        let _ = command;
+        Err(NetworkDispatchError::Rejected(
+            "atomic historical work supersession is unsupported by this dispatcher".to_owned(),
+        ))
+    }
+
+    /// Replays an already-durable successor that was committed before a
+    /// controller crash but had not yet reached the agent. The command ID is
+    /// retained while its execution envelope is refreshed under current
+    /// authority.
+    async fn dispatch_existing_successor(
+        &self,
+        command: NetworkPlanCommand,
+        _successor_command_id: String,
+    ) -> Result<NetworkPlanStatus, NetworkDispatchError> {
+        let _ = command;
+        Err(NetworkDispatchError::Rejected(
+            "durable recovery successor replay is unsupported by this dispatcher".to_owned(),
+        ))
+    }
+
+    /// Observe a historical command using current control ownership. This
+    /// operation is read-only with respect to the provider and must never
+    /// resubmit the stored command as a mutation.
+    async fn observe_command(
+        &self,
+        _target_host_id: &str,
+        _target: NetworkAgentIdentity,
+        _command_id: Uuid,
+    ) -> Result<Option<NetworkPlanStatus>, NetworkDispatchError> {
+        Err(NetworkDispatchError::Rejected(
+            "historical command observation is unsupported by this dispatcher".to_owned(),
+        ))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -143,7 +204,7 @@ pub enum NetworkExecutionError {
 pub struct NetworkPlanExecutor {
     root: PathBuf,
     agent: NetworkAgentIdentity,
-    lease: NetworkControllerLease,
+    lease: Mutex<NetworkControllerLease>,
     journal_lock: Mutex<()>,
 }
 
@@ -158,7 +219,7 @@ impl NetworkPlanExecutor {
         let executor = Self {
             root,
             agent,
-            lease,
+            lease: Mutex::new(lease),
             journal_lock: Mutex::new(()),
         };
         let _ = executor.load()?;
@@ -170,7 +231,21 @@ impl NetworkPlanExecutor {
         command: &NetworkPlanCommand,
         now_unix_ms: u64,
     ) -> Result<PlanAdmission, NetworkExecutionError> {
-        self.validate(command, now_unix_ms)?;
+        let lease = self.controller_lease()?;
+        self.admit_with_authority(command, now_unix_ms, &lease)
+    }
+
+    /// Durably admits a command against the authority snapshot held by the
+    /// authenticated agent control path. Dynamic-lease agents call this while
+    /// synchronizing with authority updates; provider execution happens only
+    /// after this durable journal boundary and does not revalidate the lease.
+    pub fn admit_with_authority(
+        &self,
+        command: &NetworkPlanCommand,
+        now_unix_ms: u64,
+        authority: &NetworkControllerLease,
+    ) -> Result<PlanAdmission, NetworkExecutionError> {
+        self.validate(command, now_unix_ms, authority)?;
         let _guard = self
             .journal_lock
             .lock()
@@ -235,6 +310,30 @@ impl NetworkPlanExecutor {
         &self.agent.agent_epoch
     }
 
+    /// Replace the controller authority used for new mutations. The caller
+    /// is responsible for validating the takeover lease and its expiry.
+    pub fn set_controller_lease(
+        &self,
+        lease: NetworkControllerLease,
+    ) -> Result<(), NetworkExecutionError> {
+        *self
+            .lease
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)? = lease;
+        Ok(())
+    }
+
+    pub fn controller_lease(&self) -> Result<NetworkControllerLease, NetworkExecutionError> {
+        self.lease
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)
+            .map(|lease| lease.clone())
+    }
+
+    pub fn state_root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn accepted(&self, command_id: Uuid) -> Result<bool, NetworkExecutionError> {
         let _guard = self
             .journal_lock
@@ -289,25 +388,50 @@ impl NetworkPlanExecutor {
     where
         R::Error: std::fmt::Display,
     {
-        let admission = self.admit(command, now_unix_ms)?;
+        let lease = self.controller_lease()?;
+        let admission = self.admit_with_authority(command, now_unix_ms, &lease)?;
         if admission != PlanAdmission::Accepted {
             return Ok(admission);
         }
+        self.execute_admitted(command, realizer)?;
+        Ok(PlanAdmission::Accepted)
+    }
+
+    /// Executes a command whose immutable identity has already crossed the
+    /// durable admission boundary. Authority expiry or takeover after that
+    /// point prevents further admissions but does not cancel this operation.
+    pub fn execute_admitted<R: NetworkPlanRealizer>(
+        &self,
+        command: &NetworkPlanCommand,
+        realizer: &mut R,
+    ) -> Result<(), NetworkExecutionError>
+    where
+        R::Error: std::fmt::Display,
+    {
         self.set_status(command.command_id, NetworkPlanStatus::Applying)?;
         let result = match command.action {
             NetworkPlanAction::Apply => realizer.realize(&command.plan),
             NetworkPlanAction::Remove => realizer.remove(&command.plan),
         };
+        let result: Result<(), String> = match (command.action, result) {
+            (NetworkPlanAction::Remove, Ok(())) => match realizer.observe_removed(&command.plan) {
+                Ok(true) => Ok(()),
+                Ok(false) => {
+                    Err("provider removal returned success but owned state remains".into())
+                }
+                Err(error) => Err(error.to_string()),
+            },
+            (_, Ok(())) => Ok(()),
+            (_, Err(error)) => Err(error.to_string()),
+        };
         match result {
             Ok(()) => {
                 self.set_status(command.command_id, NetworkPlanStatus::Succeeded)?;
-                Ok(PlanAdmission::Accepted)
+                Ok(())
             }
             Err(error) => {
                 self.set_status(command.command_id, NetworkPlanStatus::Unknown)?;
-                Err(NetworkExecutionError::MutationOutcomeUnknown(
-                    error.to_string(),
-                ))
+                Err(NetworkExecutionError::MutationOutcomeUnknown(error))
             }
         }
     }
@@ -328,6 +452,11 @@ impl NetworkPlanExecutor {
                 .iter_mut()
                 .find(|plan| plan.command_id == command_id)
                 .ok_or(NetworkExecutionError::UnknownCommand)?;
+            // A terminal command is immutable historical evidence. A later
+            // Apply may legitimately recreate the Realm after a successful
+            // Remove, so re-observing an old Remove must not downgrade it.
+            // Nonterminal Remove commands below are observed before they can
+            // become Succeeded; mutation is never repeated during recovery.
             if record.status == NetworkPlanStatus::Succeeded {
                 return Ok(record.status);
             }
@@ -364,10 +493,24 @@ impl NetworkPlanExecutor {
         self.store(&journal)
     }
 
+    pub fn status(&self, command_id: Uuid) -> Result<NetworkPlanStatus, NetworkExecutionError> {
+        let _guard = self
+            .journal_lock
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)?;
+        self.load()?
+            .plans
+            .into_iter()
+            .find(|plan| plan.command_id == command_id)
+            .map(|plan| plan.status)
+            .ok_or(NetworkExecutionError::UnknownCommand)
+    }
+
     fn validate(
         &self,
         command: &NetworkPlanCommand,
         _now_unix_ms: u64,
+        authority: &NetworkControllerLease,
     ) -> Result<(), NetworkExecutionError> {
         if command.idempotency_key.trim().is_empty()
             || command.target.agent_id.trim().is_empty()
@@ -376,7 +519,11 @@ impl NetworkPlanExecutor {
             || command.controller.controller_epoch.trim().is_empty()
             || command.controller.fencing_token == 0
             || command.plan.node_id.trim().is_empty()
-            || command.plan.node_id != command.target.agent_id
+            || if let Some(fabric) = command.plan.fabric.as_ref() {
+                fabric.local_host != command.plan.node_id
+            } else {
+                command.plan.node_id != command.target.agent_id
+            }
             || command.plan.fingerprint_sha256.len() != 64
             || !command
                 .plan
@@ -402,7 +549,7 @@ impl NetworkPlanExecutor {
         if command.target != self.agent {
             return Err(NetworkExecutionError::StaleAgentEpoch);
         }
-        if command.controller != self.lease {
+        if command.controller != *authority {
             return Err(NetworkExecutionError::StaleControllerLease);
         }
         Ok(())
@@ -560,6 +707,7 @@ impl NetworkPlanRealizer for FlatNetworkRealizer {
                 .bridge_name()
                 .ok_or(FlatNetworkError::MissingRealm)?,
             lease_seconds: 3600,
+            mtu: None,
         })?;
         for intent in &plan.intents {
             if let NetworkPlanIntent::EndpointAttachment {
@@ -733,10 +881,86 @@ mod tests {
         }
     }
 
+    fn fabric_for_other_agent(mut value: NodeNetworkPlan) -> NetworkPlanCommand {
+        use o3k_domain::{
+            EndpointLocation, FabricEndpointRoute, FabricPeer, FabricProviderKind,
+            NamespacedRoutedFabricPlan, RealmEncapsulationBinding, RealmEndpointDirectory,
+        };
+        let prefix =
+            |ip: &str, length| Ipv4Prefix::new(ip.parse().expect("ip"), length).expect("prefix");
+        value.node_id = "host-a".to_owned();
+        let fabric = NamespacedRoutedFabricPlan {
+            dhcp: None,
+            local_host: "host-a".to_owned(),
+            local_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
+            local_fabric_generation: 2,
+            local_underlay_mtu: 1500,
+            local_fabric_mtu: 1440,
+            realm_id: Uuid::from_u128(22),
+            realm_prefix: prefix("10.0.0.0", 24),
+            encapsulation: RealmEncapsulationBinding {
+                fabric_domain_id: Uuid::from_u128(100),
+                realm_id: Uuid::from_u128(22),
+                provider_kind: FabricProviderKind::Vxlan,
+                provider_segment_id: 101,
+                binding_generation: 1,
+            },
+            directory_generation: 3,
+            directory: RealmEndpointDirectory {
+                realm_id: Uuid::from_u128(22),
+                prefix: prefix("10.0.0.0", 24),
+                directory_generation: 3,
+                proxy_mac: "02:11:22:33:44:55".to_owned(),
+                entries: vec![EndpointLocation {
+                    endpoint_id: Uuid::from_u128(33),
+                    project_id: "project-a".to_owned(),
+                    realm_id: Uuid::from_u128(22),
+                    fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
+                    mac: "02:00:00:00:00:03".to_owned(),
+                    selected_host: "host-b".to_owned(),
+                    endpoint_generation: 4,
+                    placement_generation: 5,
+                }],
+            },
+            proxy_mac: "02:11:22:33:44:55".to_owned(),
+            tenant_mtu: 1390,
+            policy_generation: 1,
+            policies: Vec::new(),
+            policy_defaults: Vec::new(),
+            public_bindings: Vec::new(),
+            routes: vec![FabricEndpointRoute {
+                realm_id: Uuid::from_u128(22),
+                destination: prefix("10.0.0.3", 32),
+                endpoint_id: Uuid::from_u128(33),
+                target_host: "host-b".to_owned(),
+                target_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
+                endpoint_generation: 4,
+                placement_generation: 5,
+                realm_binding_generation: 1,
+                fabric_generation: 6,
+            }],
+            peers: vec![FabricPeer {
+                host_id: "host-b".to_owned(),
+                public_key: "public-key".to_owned(),
+                underlay_endpoint: "192.0.2.2:65001".to_owned(),
+                fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
+                fabric_generation: 6,
+            }],
+        };
+        value = value
+            .with_fabric(fabric)
+            .expect("valid host-bound fabric plan");
+        let mut result = command();
+        result.target.agent_id = "network-agent-a".to_owned();
+        result.plan = value;
+        result
+    }
+
     #[derive(Default)]
     struct RecordingRealizer {
         calls: usize,
         observed: bool,
+        removed_observed: bool,
     }
 
     impl NetworkPlanRealizer for RecordingRealizer {
@@ -754,6 +978,10 @@ mod tests {
 
         fn observe(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
             Ok(self.observed)
+        }
+
+        fn observe_removed(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+            Ok(self.removed_observed)
         }
     }
 
@@ -778,6 +1006,23 @@ mod tests {
             NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
         assert_eq!(restarted.admit(&command, 2)?, PlanAdmission::Replayed);
         assert!(restarted.accepted(command.command_id)?);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn fabric_plan_host_identity_is_distinct_from_agent_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile_path("fabric-host-agent-identity");
+        let command = fabric_for_other_agent(plan());
+        let executor =
+            NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
+        let mut realizer = RecordingRealizer::default();
+        assert_eq!(
+            executor.execute(&command, 1, &mut realizer)?,
+            PlanAdmission::Accepted
+        );
+        assert_eq!(realizer.calls, 1);
         let _ = fs::remove_dir_all(root);
         Ok(())
     }
@@ -826,16 +1071,44 @@ mod tests {
             NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
         let mut realizer = RecordingRealizer {
             calls: 0,
-            observed: false,
+            removed_observed: false,
+            ..Default::default()
         };
-        assert_eq!(
-            executor.execute(&command, 1, &mut realizer)?,
-            PlanAdmission::Accepted
-        );
+        assert!(matches!(
+            executor.execute(&command, 1, &mut realizer),
+            Err(NetworkExecutionError::MutationOutcomeUnknown(_))
+        ));
         assert_eq!(realizer.calls, 1);
         assert_eq!(
+            executor.status(command.command_id)?,
+            NetworkPlanStatus::Unknown,
+            "successful mutation without observed absence must not be terminal"
+        );
+        assert_eq!(
             executor.reconcile(command.command_id, &mut realizer)?,
+            NetworkPlanStatus::Unknown,
+            "reconciliation observes only and must not repeat removal"
+        );
+        assert_eq!(realizer.calls, 1);
+        drop(executor);
+        let restarted =
+            NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
+        assert_eq!(
+            restarted.reconcile(command.command_id, &mut realizer)?,
+            NetworkPlanStatus::Unknown,
+            "restart must preserve unresolved Remove until absence is observed"
+        );
+        assert_eq!(realizer.calls, 1, "restart must not blindly repeat removal");
+        realizer.removed_observed = true;
+        assert_eq!(
+            restarted.reconcile(command.command_id, &mut realizer)?,
             NetworkPlanStatus::Succeeded
+        );
+        realizer.removed_observed = false;
+        assert_eq!(
+            restarted.reconcile(command.command_id, &mut realizer)?,
+            NetworkPlanStatus::Succeeded,
+            "a later Apply must not downgrade a terminal Remove command"
         );
         let _ = fs::remove_dir_all(root);
         Ok(())

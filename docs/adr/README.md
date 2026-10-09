@@ -196,6 +196,8 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0184](ADR-0184-p15-scale-and-composition-foundation.md) (accepted)
 - [ADR-0185](ADR-0185-release-signing-trust-transition.md) (accepted)
 - [ADR-0186](ADR-0186-stretched-l2-edge-fabric-vxlan-her.md) (accepted; supersedes ADR-0171)
+- [ADR-0187](ADR-0187-fabric-owned-compute-tap-attachment.md) (accepted; clarifies ADR-0057 for Fabric-owned endpoint TAP attachment)
+- [ADR-0188](ADR-0188-stable-host-compute-and-network-agent-identity-separation.md) (accepted; separates canonical host identity from compute/network execution identities)
 
 ## Required audit
 

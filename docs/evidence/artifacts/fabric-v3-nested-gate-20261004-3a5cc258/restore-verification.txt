@@ -1,0 +1,12 @@
+post-test-restore=completed
+vm_a=o3k-pp5-fabric-v3-gate-20261003-host-a state=running address=192.168.122.118/24
+vm_a_baseline_sha256=d899f2b0ccfe7239a788f911ed2003a092c0ad697977bc6b1667de76d815b5cb
+vm_b=o3k-pp5-fabric-v3-gate-20261003-host-b state=running address=192.168.122.134/24
+vm_b_baseline_sha256=ee7f795b63eb28ee175424f7d0e28bbaf830ed002970ebec3700fd5b8f22ef24
+vm_c=o3k-pp5-fabric-v3-gate-20261003-host-c state=running address=192.168.122.196/24
+vm_c_baseline_sha256=6a0a2d556d89d134745bb157f78945b6db59505afd40717f1e316b929a23ad30
+qemu_img_check=all three restored images reported no errors
+running_vm_count=3
+icmp_after_restore=a,b no reply; c replied (not used as disk-identity proof)
+temporary_ssh_probe=exit 255; inconclusive because guest connectivity was not established to a and b
+access_key_cleanup=temporary controller key directory removed after this record

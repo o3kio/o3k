@@ -1,0 +1,147 @@
+=== host-a ===
+--vxlan--
+2: o3k-x-77c2d768: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-77c2d768 state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether 3e:4f:23:82:be:d7 brd ff:ff:ff:ff:ff:ff promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 
+    vxlan id 101 local 192.168.122.118 dev o3k-wg srcport 0 0 dstport 4789 ttl auto ageing 300 udpcsum noudp6zerocsumtx noudp6zerocsumrx 
+    bridge_slave state forwarding priority 32 cost 100 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.12:59:29:dd:e3:4c designated_root 8000.12:59:29:dd:e3:4c hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 
+4: o3k-x-4ce51c6b: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-4ce51c6b state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether 86:32:81:7b:62:f8 brd ff:ff:ff:ff:ff:ff promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 
+    vxlan id 102 local 192.168.122.118 dev o3k-wg srcport 0 0 dstport 4789 ttl auto ageing 300 udpcsum noudp6zerocsumtx noudp6zerocsumrx 
+    bridge_slave state forwarding priority 32 cost 100 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.86:32:81:7b:62:f8 designated_root 8000.86:32:81:7b:62:f8 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 
+--her--
+00:00:00:00:00:00 dev o3k-x-77c2d768 dst 192.168.122.134 self permanent
+00:00:00:00:00:00 dev o3k-x-4ce51c6b dst 192.168.122.134 self permanent
+00:00:00:00:00:00 dev o3k-x-4ce51c6b dst 192.168.122.196 self permanent
+--wg--
+interface: o3k-wg
+  public key: W2qJeF8ItM7Aa5GrfYdHJCGMLIuMkAchLlTAaTvfVEo=
+  private key: (hidden)
+  listening port: 65001
+
+peer: wx9D4yWr+KUqdFJjsJb0OVP79B6KoFQEcdsmoptuWj0=
+  endpoint: 192.168.122.134:65001
+  allowed ips: 192.168.122.134/32
+  latest handshake: 13 seconds ago
+  transfer: 10.65 KiB received, 16.42 KiB sent
+
+peer: UNKHmjPEGY+Ey6T1y99T3V4MA3RcRtBvIUth8GECjh0=
+  endpoint: 192.168.122.196:65001
+  allowed ips: 192.168.122.196/32
+  latest handshake: 35 seconds ago
+  transfer: 6.33 KiB received, 6.64 KiB sent
+--antispoof--
+		comment "o3k-p11-antispoof"
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:02 ip saddr 10.0.0.20 accept # handle 2
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:02 ip saddr 0.0.0.0 accept # handle 3
+		iifname "o3k-c-77c2d768" arp saddr ether 02:00:00:00:a1:02 arp saddr ip 10.0.0.20 accept # handle 4
+		iifname "o3k-c-77c2d768" counter packets 108 bytes 7056 drop comment "o3k-p11-antispoof" # handle 5
+		iifname "o3k-t-489bfd8c" ether saddr != 02:00:00:00:a1:01 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 6
+		iifname "o3k-t-489bfd8c" ip saddr != 10.0.0.10 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 7
+		iifname "o3k-t-489bfd8c" arp saddr ether != 02:00:00:00:a1:01 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 8
+		iifname "o3k-t-489bfd8c" arp saddr ip != 10.0.0.10 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 9
+		comment "o3k-p11-antispoof"
+		iifname "o3k-c-4ce51c6b" ether saddr 02:00:00:00:b1:01 ip saddr 10.0.0.10 accept # handle 2
+		iifname "o3k-c-4ce51c6b" ether saddr 02:00:00:00:b1:01 ip saddr 0.0.0.0 accept # handle 3
+		iifname "o3k-c-4ce51c6b" arp saddr ether 02:00:00:00:b1:01 arp saddr ip 10.0.0.10 accept # handle 4
+		iifname "o3k-c-4ce51c6b" ether saddr 02:00:00:00:b1:02 ip saddr 10.0.0.20 accept # handle 5
+		iifname "o3k-c-4ce51c6b" ether saddr 02:00:00:00:b1:02 ip saddr 0.0.0.0 accept # handle 6
+		iifname "o3k-c-4ce51c6b" arp saddr ether 02:00:00:00:b1:02 arp saddr ip 10.0.0.20 accept # handle 7
+		iifname "o3k-c-4ce51c6b" counter packets 17 bytes 1148 drop comment "o3k-p11-antispoof" # handle 8
+=== host-b ===
+--vxlan--
+6: o3k-x-77c2d768: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-77c2d768 state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether ce:d7:e8:eb:89:4b brd ff:ff:ff:ff:ff:ff promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 
+    vxlan id 101 local 192.168.122.134 dev o3k-wg srcport 0 0 dstport 4789 ttl auto ageing 300 udpcsum noudp6zerocsumtx noudp6zerocsumrx 
+    bridge_slave state forwarding priority 32 cost 100 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.76:f5:6d:d4:5e:43 designated_root 8000.76:f5:6d:d4:5e:43 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    1.51 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 
+7: o3k-x-4ce51c6b: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-4ce51c6b state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether ea:bb:9c:1c:90:e2 brd ff:ff:ff:ff:ff:ff promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 
+    vxlan id 102 local 192.168.122.134 dev o3k-wg srcport 0 0 dstport 4789 ttl auto ageing 300 udpcsum noudp6zerocsumtx noudp6zerocsumrx 
+    bridge_slave state forwarding priority 32 cost 100 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.1e:e0:d4:81:36:f designated_root 8000.1e:e0:d4:81:36:f hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    1.78 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 
+--her--
+00:00:00:00:00:00 dev o3k-x-77c2d768 dst 192.168.122.118 self permanent
+00:00:00:00:00:00 dev o3k-x-4ce51c6b dst 192.168.122.196 self permanent
+--wg--
+interface: o3k-wg
+  public key: wx9D4yWr+KUqdFJjsJb0OVP79B6KoFQEcdsmoptuWj0=
+  private key: (hidden)
+  listening port: 65001
+
+peer: UNKHmjPEGY+Ey6T1y99T3V4MA3RcRtBvIUth8GECjh0=
+  endpoint: 192.168.122.196:65001
+  allowed ips: 192.168.122.196/32
+  latest handshake: 12 seconds ago
+  transfer: 1.64 KiB received, 1.75 KiB sent
+
+peer: W2qJeF8ItM7Aa5GrfYdHJCGMLIuMkAchLlTAaTvfVEo=
+  endpoint: 192.168.122.118:65001
+  allowed ips: 192.168.122.118/32
+  latest handshake: 13 seconds ago
+  transfer: 2.26 KiB received, 2.38 KiB sent
+--antispoof--
+		comment "o3k-p11-antispoof"
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:01 ip saddr 10.0.0.10 accept # handle 2
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:01 ip saddr 0.0.0.0 accept # handle 3
+		iifname "o3k-c-77c2d768" arp saddr ether 02:00:00:00:a1:01 arp saddr ip 10.0.0.10 accept # handle 4
+		iifname "o3k-c-77c2d768" counter packets 78 bytes 4916 drop comment "o3k-p11-antispoof" # handle 5
+		iifname "o3k-t-489c02a5" ether saddr != 02:00:00:00:a1:02 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 6
+		iifname "o3k-t-489c02a5" ip saddr != 10.0.0.20 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 7
+		iifname "o3k-t-489c02a5" arp saddr ether != 02:00:00:00:a1:02 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 8
+		iifname "o3k-t-489c02a5" arp saddr ip != 10.0.0.20 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 9
+		comment "o3k-p11-antispoof"
+		iifname "o3k-c-4ce51c6b" ether saddr 02:00:00:00:b1:01 ip saddr 10.0.0.10 accept # handle 2
+		iifname "o3k-c-4ce51c6b" ether saddr 02:00:00:00:b1:01 ip saddr 0.0.0.0 accept # handle 3
+		iifname "o3k-c-4ce51c6b" arp saddr ether 02:00:00:00:b1:01 arp saddr ip 10.0.0.10 accept # handle 4
+		iifname "o3k-c-4ce51c6b" counter packets 92 bytes 5904 drop comment "o3k-p11-antispoof" # handle 5
+		iifname "o3k-t-6e979f05" ether saddr != 02:00:00:00:b1:02 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 6
+		iifname "o3k-t-6e979f05" ip saddr != 10.0.0.20 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 7
+		iifname "o3k-t-6e979f05" arp saddr ether != 02:00:00:00:b1:02 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 8
+		iifname "o3k-t-6e979f05" arp saddr ip != 10.0.0.20 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 9
+=== host-c ===
+--vxlan--
+2: o3k-x-77c2d768: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-77c2d768 state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether 22:c8:d6:f0:1c:16 brd ff:ff:ff:ff:ff:ff promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 
+    vxlan id 101 local 192.168.122.196 dev o3k-wg srcport 0 0 dstport 4789 ttl auto ageing 300 udpcsum noudp6zerocsumtx noudp6zerocsumrx 
+    bridge_slave state forwarding priority 32 cost 100 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.22:c8:d6:f0:1c:16 designated_root 8000.22:c8:d6:f0:1c:16 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 
+4: o3k-x-4ce51c6b: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1390 qdisc noqueue master o3k-b-4ce51c6b state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether ba:1d:0c:eb:41:09 brd ff:ff:ff:ff:ff:ff promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 
+    vxlan id 102 local 192.168.122.196 dev o3k-wg srcport 0 0 dstport 4789 ttl auto ageing 300 udpcsum noudp6zerocsumtx noudp6zerocsumrx 
+    bridge_slave state forwarding priority 32 cost 100 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.aa:46:cf:37:81:62 designated_root 8000.aa:46:cf:37:81:62 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 
+--her--
+00:00:00:00:00:00 dev o3k-x-77c2d768 dst 192.168.122.118 self permanent
+00:00:00:00:00:00 dev o3k-x-77c2d768 dst 192.168.122.134 self permanent
+00:00:00:00:00:00 dev o3k-x-4ce51c6b dst 192.168.122.134 self permanent
+--wg--
+interface: o3k-wg
+  public key: UNKHmjPEGY+Ey6T1y99T3V4MA3RcRtBvIUth8GECjh0=
+  private key: (hidden)
+  listening port: 65001
+
+peer: wx9D4yWr+KUqdFJjsJb0OVP79B6KoFQEcdsmoptuWj0=
+  endpoint: 192.168.122.134:65001
+  allowed ips: 192.168.122.134/32
+  latest handshake: 13 seconds ago
+  transfer: 9.97 KiB received, 15.08 KiB sent
+
+peer: W2qJeF8ItM7Aa5GrfYdHJCGMLIuMkAchLlTAaTvfVEo=
+  endpoint: 192.168.122.118:65001
+  allowed ips: 192.168.122.118/32
+  latest handshake: 36 seconds ago
+  transfer: 6.50 KiB received, 6.33 KiB sent
+--antispoof--
+		comment "o3k-p11-antispoof"
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:01 ip saddr 10.0.0.10 accept # handle 2
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:01 ip saddr 0.0.0.0 accept # handle 3
+		iifname "o3k-c-77c2d768" arp saddr ether 02:00:00:00:a1:01 arp saddr ip 10.0.0.10 accept # handle 4
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:02 ip saddr 10.0.0.20 accept # handle 5
+		iifname "o3k-c-77c2d768" ether saddr 02:00:00:00:a1:02 ip saddr 0.0.0.0 accept # handle 6
+		iifname "o3k-c-77c2d768" arp saddr ether 02:00:00:00:a1:02 arp saddr ip 10.0.0.20 accept # handle 7
+		iifname "o3k-c-77c2d768" counter packets 17 bytes 1148 drop comment "o3k-p11-antispoof" # handle 8
+		comment "o3k-p11-antispoof"
+		iifname "o3k-c-4ce51c6b" ether saddr 02:00:00:00:b1:02 ip saddr 10.0.0.20 accept # handle 2
+		iifname "o3k-c-4ce51c6b" ether saddr 02:00:00:00:b1:02 ip saddr 0.0.0.0 accept # handle 3
+		iifname "o3k-c-4ce51c6b" arp saddr ether 02:00:00:00:b1:02 arp saddr ip 10.0.0.20 accept # handle 4
+		iifname "o3k-c-4ce51c6b" counter packets 92 bytes 5876 drop comment "o3k-p11-antispoof" # handle 5
+		iifname "o3k-t-6e9799ec" ether saddr != 02:00:00:00:b1:01 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 6
+		iifname "o3k-t-6e9799ec" ip saddr != 10.0.0.10 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 7
+		iifname "o3k-t-6e9799ec" arp saddr ether != 02:00:00:00:b1:01 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 8
+		iifname "o3k-t-6e9799ec" arp saddr ip != 10.0.0.10 counter packets 0 bytes 0 drop comment "o3k-p11-antispoof" # handle 9

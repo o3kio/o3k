@@ -8,9 +8,9 @@ use crate::{
     ArtifactTransferUpdate, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
     DurableStore, IdempotencyReservation, IdempotencyReservationRequest, ImageOverlayIdentity,
     ImageOverlayOwnershipRecord, ImageOverlayState, ImageOverlayUpdate, LifecycleTerminalization,
-    ObservationUpdate, OperationRecord, OperationState, ProviderReference, RepositoryPage,
-    ResourceRecord, StoreError, validate_canonical_idempotent_operation_identity,
-    validate_canonical_lifecycle_update,
+    NetworkPlanWorkRecord, NetworkPlanWorkState, ObservationUpdate, OperationRecord,
+    OperationState, ProviderReference, RepositoryPage, ResourceRecord, StoreError,
+    validate_canonical_idempotent_operation_identity, validate_canonical_lifecycle_update,
 };
 
 use super::{
@@ -25,6 +25,275 @@ use super::{
 
 #[async_trait]
 impl DurableStore for PostgresStore {
+    async fn insert_network_plan_work(
+        &self,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        work.validate()?;
+        let result=sqlx::query("INSERT INTO network_plan_work (command_id,operation_id,idempotency_key,target_host_id,target_agent_id,target_agent_epoch,controller_id,controller_epoch,fencing_token,deadline_unix_ms,fingerprint_sha256,snapshot,state,revision,outcome) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)").bind(&work.command_id).bind(work.operation_id.to_string()).bind(&work.idempotency_key).bind(&work.target_host_id).bind(&work.target_agent_id).bind(&work.target_agent_epoch).bind(&work.controller_id).bind(&work.controller_epoch).bind(i64::try_from(work.fencing_token).map_err(|_| StoreError::Corrupt("fencing token overflow".into()))?).bind(i64::try_from(work.deadline_unix_ms).map_err(|_| StoreError::Corrupt("deadline overflow".into()))?).bind(&work.fingerprint_sha256).bind(&work.snapshot).bind(work.state.as_str()).bind(i64::try_from(work.revision).map_err(|_| StoreError::Corrupt("revision overflow".into()))?).bind(&work.outcome).execute(&self.pool).await;
+        match result {
+            Ok(_) => self.get_network_plan_work(&work.command_id).await,
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                let id = sqlx::query(
+                    "SELECT command_id FROM network_plan_work WHERE idempotency_key=$1",
+                )
+                .bind(&work.idempotency_key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+                .map(|r| r.get::<String, _>("command_id"));
+                let old = self
+                    .get_network_plan_work(id.as_deref().unwrap_or(&work.command_id))
+                    .await?;
+                if old.same_command_identity(work) {
+                    Ok(old)
+                } else {
+                    Err(StoreError::Corrupt(
+                        "network plan work idempotency conflict".into(),
+                    ))
+                }
+            }
+            Err(e) => Err(StoreError::Database(e)),
+        }
+    }
+    async fn insert_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        work.validate()?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let result = async {
+            let lease = sqlx::query("SELECT owner_controller_id, owner_controller_epoch, fencing_token, lease_until > NOW() AS active FROM work_leases WHERE work_key=$1 FOR UPDATE")
+                .bind(realm_work_key).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.ok_or(StoreError::Fenced)?;
+            if lease.get::<String, _>("owner_controller_id") != controller_id
+                || lease.get::<String, _>("owner_controller_epoch") != controller_epoch
+                || u64::try_from(lease.get::<i64, _>("fencing_token")).ok() != Some(fencing_token)
+            || !lease.get::<bool, _>("active") { return Err(StoreError::Fenced); }
+            if let Some(existing) = sqlx::query("SELECT operation_id,idempotency_key,target_host_id,target_agent_id,target_agent_epoch,fingerprint_sha256 FROM network_plan_work WHERE command_id=$1 FOR UPDATE")
+                .bind(&work.command_id).fetch_optional(&mut *tx).await.map_err(StoreError::Database)? {
+                let same_desired = existing.get::<String, _>("operation_id") == work.operation_id.to_string()
+                    && existing.get::<String, _>("idempotency_key") == work.idempotency_key
+                    && existing.get::<String, _>("target_host_id") == work.target_host_id
+                    && existing.get::<String, _>("target_agent_id") == work.target_agent_id
+                    && existing.get::<String, _>("target_agent_epoch") == work.target_agent_epoch
+                    && existing.get::<String, _>("fingerprint_sha256") == work.fingerprint_sha256;
+                if same_desired { return Ok(()); }
+                return Err(StoreError::Corrupt("network plan command identity conflicts with existing desired work".into()));
+            }
+            if work.controller_id != controller_id || work.controller_epoch != controller_epoch {
+                return Err(StoreError::Fenced);
+            }
+            sqlx::query("INSERT INTO network_plan_work (command_id,operation_id,idempotency_key,target_host_id,target_agent_id,target_agent_epoch,controller_id,controller_epoch,fencing_token,deadline_unix_ms,fingerprint_sha256,snapshot,state,revision,outcome) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
+                .bind(&work.command_id).bind(work.operation_id.to_string()).bind(&work.idempotency_key)
+                .bind(&work.target_host_id).bind(&work.target_agent_id).bind(&work.target_agent_epoch)
+                .bind(&work.controller_id).bind(&work.controller_epoch)
+                .bind(i64::try_from(work.fencing_token).map_err(|_| StoreError::Corrupt("fencing token overflow".into()))?)
+                .bind(i64::try_from(work.deadline_unix_ms).map_err(|_| StoreError::Corrupt("deadline overflow".into()))?)
+                .bind(&work.fingerprint_sha256).bind(&work.snapshot).bind(work.state.as_str())
+                .bind(i64::try_from(work.revision).map_err(|_| StoreError::Corrupt("revision overflow".into()))?).bind(&work.outcome)
+                .execute(&mut *tx).await.map_err(|e| match e { sqlx::Error::Database(ref db) if db.is_unique_violation() => StoreError::Corrupt("network plan work identity conflicts".into()), _ => StoreError::Database(e) })?;
+            Ok(())
+        }.await;
+        match result {
+            Ok(()) => {
+                tx.commit().await.map_err(StoreError::Database)?;
+                self.get_network_plan_work(&work.command_id).await
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+    async fn get_network_plan_work(
+        &self,
+        command_id: &str,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        let row = sqlx::query("SELECT * FROM network_plan_work WHERE command_id=$1")
+            .bind(command_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+        let u = |n: &str| {
+            u64::try_from(row.get::<i64, _>(n))
+                .map_err(|_| StoreError::Corrupt(format!("negative {n}")))
+        };
+        Ok(NetworkPlanWorkRecord {
+            command_id: row.get("command_id"),
+            operation_id: Uuid::parse_str(&row.get::<String, _>("operation_id"))
+                .map_err(StoreError::InvalidUuid)?,
+            idempotency_key: row.get("idempotency_key"),
+            target_host_id: row.get("target_host_id"),
+            target_agent_id: row.get("target_agent_id"),
+            target_agent_epoch: row.get("target_agent_epoch"),
+            controller_id: row.get("controller_id"),
+            controller_epoch: row.get("controller_epoch"),
+            fencing_token: u("fencing_token")?,
+            deadline_unix_ms: u("deadline_unix_ms")?,
+            fingerprint_sha256: row.get("fingerprint_sha256"),
+            snapshot: row.get("snapshot"),
+            state: NetworkPlanWorkState::parse(&row.get::<String, _>("state"))?,
+            revision: u("revision")?,
+            outcome: row.get("outcome"),
+        })
+    }
+    async fn update_network_plan_work(
+        &self,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        let n = i64::try_from(expected_revision)
+            .map_err(|_| StoreError::Corrupt("revision overflow".into()))?;
+        let current = self.get_network_plan_work(command_id).await?;
+        if !current.state.can_transition_to(state) {
+            return Err(StoreError::Corrupt(
+                "invalid network plan work transition".into(),
+            ));
+        }
+        let r=sqlx::query("UPDATE network_plan_work SET state=$1,outcome=$2,revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE command_id=$3 AND revision=$4").bind(state.as_str()).bind(outcome).bind(command_id).bind(n).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if r.rows_affected() == 0 {
+            return Err(StoreError::Corrupt(
+                "network plan work fencing conflict".into(),
+            ));
+        }
+        self.get_network_plan_work(command_id).await
+    }
+    async fn update_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let result = async {
+            let lease = sqlx::query("SELECT owner_controller_id, owner_controller_epoch, fencing_token, lease_until > NOW() AS active FROM work_leases WHERE work_key=$1 FOR UPDATE")
+                .bind(realm_work_key).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.ok_or(StoreError::Fenced)?;
+            if lease.get::<String, _>("owner_controller_id") != controller_id
+                || lease.get::<String, _>("owner_controller_epoch") != controller_epoch
+                || u64::try_from(lease.get::<i64, _>("fencing_token")).ok() != Some(fencing_token)
+                || !lease.get::<bool, _>("active") { return Err(StoreError::Fenced); }
+            let row = sqlx::query("SELECT state, revision FROM network_plan_work WHERE command_id=$1 FOR UPDATE")
+                .bind(command_id).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.ok_or(StoreError::OperationNotFound)?;
+            let old_state = NetworkPlanWorkState::parse(&row.get::<String, _>("state"))?;
+            let old_revision = u64::try_from(row.get::<i64, _>("revision")).map_err(|_| StoreError::Corrupt("negative network work revision".into()))?;
+            if old_revision != expected_revision || !old_state.can_transition_to(state) { return Err(StoreError::Corrupt("network plan work revision/state conflict".into())); }
+            let result = sqlx::query("UPDATE network_plan_work SET state=$1,outcome=$2,revision=revision+1,updated_at=NOW() WHERE command_id=$3 AND revision=$4")
+                .bind(state.as_str()).bind(outcome).bind(command_id).bind(i64::try_from(expected_revision).map_err(|_| StoreError::Corrupt("revision overflow".into()))?)
+                .execute(&mut *tx).await.map_err(StoreError::Database)?;
+            if result.rows_affected() != 1 { return Err(StoreError::Fenced); }
+            Ok(())
+        }.await;
+        match result {
+            Ok(()) => {
+                tx.commit().await.map_err(StoreError::Database)?;
+                self.get_network_plan_work(command_id).await
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+    async fn supersede_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        old_command_id: &str,
+        expected_old_revision: u64,
+        successor: &NetworkPlanWorkRecord,
+    ) -> Result<(NetworkPlanWorkRecord, NetworkPlanWorkRecord), StoreError> {
+        successor.validate()?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let result = async {
+            let lease = sqlx::query("SELECT owner_controller_id, owner_controller_epoch, fencing_token, lease_until > NOW() AS active FROM work_leases WHERE work_key=$1 FOR UPDATE")
+                .bind(realm_work_key).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.ok_or(StoreError::Fenced)?;
+            if lease.get::<String, _>("owner_controller_id") != controller_id
+                || lease.get::<String, _>("owner_controller_epoch") != controller_epoch
+                || u64::try_from(lease.get::<i64, _>("fencing_token")).ok() != Some(fencing_token)
+                || !lease.get::<bool, _>("active") { return Err(StoreError::Fenced); }
+            if successor.controller_id != controller_id || successor.controller_epoch != controller_epoch {
+                return Err(StoreError::Fenced);
+            }
+            let old = sqlx::query("SELECT state, revision FROM network_plan_work WHERE command_id=$1 FOR UPDATE")
+                .bind(old_command_id).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.ok_or(StoreError::OperationNotFound)?;
+            let old_state = NetworkPlanWorkState::parse(&old.get::<String, _>("state"))?;
+            let old_revision = u64::try_from(old.get::<i64, _>("revision")).map_err(|_| StoreError::Corrupt("negative network work revision".into()))?;
+            if old_revision != expected_old_revision || old_state.terminal() || !old_state.can_transition_to(NetworkPlanWorkState::Failed) { return Err(StoreError::Corrupt("historical work cannot be superseded from current state".into())); }
+            let outcome = serde_json::to_vec(&serde_json::json!({"classification":"superseded_not_admitted","successor_command_id":successor.command_id}))
+                .map_err(|_| StoreError::Corrupt("supersession outcome serialization failed".into()))?;
+            sqlx::query("INSERT INTO network_plan_work (command_id,operation_id,idempotency_key,target_host_id,target_agent_id,target_agent_epoch,controller_id,controller_epoch,fencing_token,deadline_unix_ms,fingerprint_sha256,snapshot,state,revision,outcome) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
+                .bind(&successor.command_id).bind(successor.operation_id.to_string()).bind(&successor.idempotency_key)
+                .bind(&successor.target_host_id).bind(&successor.target_agent_id).bind(&successor.target_agent_epoch)
+                .bind(&successor.controller_id).bind(&successor.controller_epoch)
+                .bind(i64::try_from(successor.fencing_token).map_err(|_| StoreError::Corrupt("fencing token overflow".into()))?)
+                .bind(i64::try_from(successor.deadline_unix_ms).map_err(|_| StoreError::Corrupt("deadline overflow".into()))?)
+                .bind(&successor.fingerprint_sha256).bind(&successor.snapshot).bind(successor.state.as_str())
+                .bind(i64::try_from(successor.revision).map_err(|_| StoreError::Corrupt("revision overflow".into()))?).bind(&successor.outcome)
+                .execute(&mut *tx).await.map_err(|e| match e { sqlx::Error::Database(ref db) if db.is_unique_violation() => StoreError::Corrupt("successor network work identity conflicts".into()), _ => StoreError::Database(e) })?;
+            let changed = sqlx::query("UPDATE network_plan_work SET state='failed',outcome=$1,revision=revision+1,updated_at=NOW() WHERE command_id=$2 AND revision=$3")
+                .bind(outcome).bind(old_command_id).bind(i64::try_from(expected_old_revision).map_err(|_| StoreError::Corrupt("revision overflow".into()))?)
+                .execute(&mut *tx).await.map_err(StoreError::Database)?;
+            if changed.rows_affected() != 1 { return Err(StoreError::Fenced); }
+            Ok(())
+        }.await;
+        match result {
+            Ok(()) => {
+                tx.commit().await.map_err(StoreError::Database)?;
+                Ok((
+                    self.get_network_plan_work(old_command_id).await?,
+                    self.get_network_plan_work(&successor.command_id).await?,
+                ))
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+    async fn list_unresolved_network_plan_work(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError> {
+        let rows=sqlx::query("SELECT command_id FROM network_plan_work WHERE state NOT IN ('succeeded','failed') ORDER BY created_at,command_id").fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(
+                self.get_network_plan_work(&r.get::<String, _>("command_id"))
+                    .await?,
+            );
+        }
+        Ok(out)
+    }
+    async fn list_network_plan_work_history(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError> {
+        let rows =
+            sqlx::query("SELECT command_id FROM network_plan_work ORDER BY created_at, command_id")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            records.push(
+                self.get_network_plan_work(&row.get::<String, _>("command_id"))
+                    .await?,
+            );
+        }
+        Ok(records)
+    }
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
         let id_str = resource.id.to_string();
         sqlx::query(
@@ -74,6 +343,13 @@ impl DurableStore for PostgresStore {
         .map_err(StoreError::Database)?;
 
         rows.iter().map(row_to_resource).collect()
+    }
+
+    async fn list_resources_for_reconciliation(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<ResourceRecord>, StoreError> {
+        crate::ComputeRepository::list_resources_by_kind(self, kind).await
     }
 
     async fn list_resources_page(

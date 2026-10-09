@@ -124,6 +124,7 @@ pub(super) async fn import_legacy_metadata(
             status: port.status.clone(),
             binding_host: None,
             binding_state: None,
+            binding_generation: 0,
         };
         match repository.insert_port(&record).await {
             Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}

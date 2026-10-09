@@ -24,6 +24,8 @@ pub(crate) struct LibvirtCommandExecutor {
     pub(crate) artifact_root: PathBuf,
     pub(crate) image_materializer: o3k_compute_agent::ImageMaterializer,
     pub(crate) network: Arc<o3k_network::HostNetworkManager>,
+    pub(crate) fabric_attachments: Option<Arc<o3k_network::LinuxFabricAttachmentResolver>>,
+    pub(crate) local_host: String,
     pub(crate) dhcp: Arc<Mutex<DhcpRuntime>>,
     /// The agent's configured disk capacity (`O3K_COMPUTE_MAX_DISK_GB`). The
     /// same value is published to placement as the DISK_GB inventory; the
@@ -41,15 +43,21 @@ pub(crate) struct CommittedArtifact {
     pub(crate) path: PathBuf,
 }
 
-/// A TAP name is usable only together with the network subsystem's ownership
-/// evidence.  A port id and MAC address alone are not sufficient proof that a
-/// host device may be attached to a domain.
+/// A verified TAP can be consumed by libvirt, but its owner remains the
+/// network subsystem that produced the matching proof. In particular,
+/// Fabric's provider TAP MAC is distinct from the canonical guest NIC MAC.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OwnedTap {
+pub(crate) struct VerifiedNetworkAttachment {
     pub(crate) port_id: String,
     pub(crate) tap_name: String,
-    pub(crate) mac_address: String,
-    pub(crate) ownership_token: String,
+    pub(crate) guest_mac: String,
+    pub(crate) ownership: NetworkAttachmentOwnership,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NetworkAttachmentOwnership {
+    HostNetwork,
+    Fabric(o3k_network::FabricEndpointAttachmentEvidence),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,8 +72,8 @@ pub(crate) struct CreateDomainIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommittedCreateInputs {
     pub(crate) image: CommittedArtifact,
-    pub(crate) config_drive: CommittedArtifact,
-    pub(crate) owned_taps: Vec<OwnedTap>,
+    pub(crate) config_drive: Option<CommittedArtifact>,
+    pub(crate) network_attachments: Vec<VerifiedNetworkAttachment>,
     pub(crate) identity: CreateDomainIdentity,
 }
 
@@ -98,11 +106,11 @@ pub(crate) fn resolve_create_domain_spec(
             "create command resolved inputs are missing".to_owned(),
         ));
     };
+    let config_drive_requested = o3k_compute_agent::config_drive_requested(command)
+        .map_err(|_| AgentError::Protocol("config-drive command state is invalid".to_owned()))?;
     if resolved.image_artifact_id.trim().is_empty()
         || resolved.image_sha256.trim().is_empty()
         || resolved.image_format.trim().is_empty()
-        || resolved.config_drive_artifact_id.trim().is_empty()
-        || resolved.config_drive_sha256.trim().is_empty()
     {
         return Err(AgentError::Protocol(
             "create command artifact references are incomplete".to_owned(),
@@ -120,10 +128,15 @@ pub(crate) fn resolve_create_domain_spec(
         || committed.image.kind != proto::ArtifactKind::ImageBase
         || committed.image.sha256 != resolved.image_sha256
         || committed.image.format != resolved.image_format
-        || committed.config_drive.artifact_id != resolved.config_drive_artifact_id
-        || committed.config_drive.kind != proto::ArtifactKind::ConfigDriveIso
-        || committed.config_drive.sha256 != resolved.config_drive_sha256
-        || committed.config_drive.format != "iso"
+        || committed.config_drive.as_ref().is_some_and(|artifact| {
+            artifact.kind != proto::ArtifactKind::ConfigDriveIso || artifact.format != "iso"
+        })
+        || (config_drive_requested
+            && committed.config_drive.as_ref().is_none_or(|artifact| {
+                artifact.artifact_id != resolved.config_drive_artifact_id
+                    || artifact.sha256 != resolved.config_drive_sha256
+            }))
+        || (!config_drive_requested && committed.config_drive.is_some())
     {
         return Err(AgentError::Protocol(
             "committed artifact evidence does not match create references".to_owned(),
@@ -140,21 +153,17 @@ pub(crate) fn resolve_create_domain_spec(
     }
     if committed.image.path.as_os_str().is_empty()
         || !committed.image.path.is_absolute()
-        || committed.config_drive.path.as_os_str().is_empty()
-        || !committed.config_drive.path.is_absolute()
+        || committed.config_drive.as_ref().is_some_and(|artifact| {
+            artifact.path.as_os_str().is_empty() || !artifact.path.is_absolute()
+        })
     {
         return Err(AgentError::Protocol(
             "committed artifact paths must be absolute host-local paths".to_owned(),
         ));
     }
-    if committed.owned_taps.len() != resolved.network_attachments.len()
-        || committed
-            .owned_taps
-            .iter()
-            .any(|tap| tap.ownership_token.trim().is_empty())
-    {
+    if committed.network_attachments.len() != resolved.network_attachments.len() {
         return Err(AgentError::Protocol(
-            "owned TAP evidence is incomplete or does not cover network attachments".to_owned(),
+            "verified attachment evidence does not cover network attachments".to_owned(),
         ));
     }
     let network_interfaces = resolved
@@ -162,22 +171,38 @@ pub(crate) fn resolve_create_domain_spec(
         .iter()
         .map(|attachment| {
             let tap = committed
-                .owned_taps
+                .network_attachments
                 .iter()
                 .find(|tap| tap.port_id == attachment.port_id);
             let Some(tap) = tap else {
                 return Err(AgentError::Protocol(
-                    "network attachment has no matching owned TAP".to_owned(),
+                    "network attachment has no matching verified TAP".to_owned(),
                 ));
             };
-            if tap.mac_address != attachment.mac || tap.tap_name.trim().is_empty() {
+            let ownership_valid = match &tap.ownership {
+                NetworkAttachmentOwnership::HostNetwork => true,
+                NetworkAttachmentOwnership::Fabric(evidence) => {
+                    evidence.tap_name == tap.tap_name
+                        && evidence.guest_mac.eq_ignore_ascii_case(&tap.guest_mac)
+                        && evidence.endpoint_id.to_string() == tap.port_id
+                        && evidence.endpoint_generation > 0
+                        && evidence.placement_generation > 0
+                        && evidence.directory_generation > 0
+                        && evidence.fabric_generation > 0
+                        && evidence.binding_generation > 0
+                        && evidence.vni > 0
+                        && !evidence.realm_bridge.is_empty()
+                }
+            };
+            if tap.guest_mac != attachment.mac || tap.tap_name.trim().is_empty() || !ownership_valid
+            {
                 return Err(AgentError::Protocol(
-                    "owned TAP evidence does not match network attachment".to_owned(),
+                    "verified TAP evidence does not match network attachment".to_owned(),
                 ));
             }
             Ok(o3k_libvirt::DomainNetworkInterface {
                 tap_name: tap.tap_name.clone(),
-                mac_address: tap.mac_address.clone(),
+                mac_address: tap.guest_mac.clone(),
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -193,9 +218,11 @@ pub(crate) fn resolve_create_domain_spec(
         vcpus: resolved.vcpus,
         memory_mib: resolved.memory_mib,
         image_id: committed.image.path.to_string_lossy().into_owned(),
-        config_drive_image: Some(o3k_libvirt::ConfigDriveImage {
-            path: committed.config_drive.path.to_string_lossy().into_owned(),
-            sha256: committed.config_drive.sha256.clone(),
+        config_drive_image: committed.config_drive.as_ref().map(|artifact| {
+            o3k_libvirt::ConfigDriveImage {
+                path: artifact.path.to_string_lossy().into_owned(),
+                sha256: artifact.sha256.clone(),
+            }
         }),
         network_interfaces,
     };
@@ -212,6 +239,8 @@ pub(crate) fn resolve_committed_create_inputs(
     image_materializer: &o3k_compute_agent::ImageMaterializer,
     network: &o3k_network::HostNetworkManager,
     network_owned_by_external_agent: bool,
+    fabric_attachments: Option<&o3k_network::LinuxFabricAttachmentResolver>,
+    local_host: &str,
 ) -> Result<CommittedCreateInputs, AgentError> {
     let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
         return Err(AgentError::Protocol("create action is missing".to_owned()));
@@ -244,31 +273,60 @@ pub(crate) fn resolve_committed_create_inputs(
             AgentError::Protocol("instance image overlay could not be realized".to_owned())
         })?
         .overlay_path;
-    let config_path = store
-        .resolve_committed_artifact(&o3k_compute_agent::CommittedArtifactQuery {
-            command_id: command.command_id.clone(),
-            operation_id: command.operation_id.clone(),
-            resource_id: command.resource_id.clone(),
+    let config_drive = if o3k_compute_agent::config_drive_requested(command)
+        .map_err(|_| AgentError::Protocol("config-drive command state is invalid".to_owned()))?
+    {
+        let path = store
+            .resolve_committed_artifact(&o3k_compute_agent::CommittedArtifactQuery {
+                command_id: command.command_id.clone(),
+                operation_id: command.operation_id.clone(),
+                resource_id: command.resource_id.clone(),
+                artifact_id: resolved.config_drive_artifact_id.clone(),
+                kind: proto::ArtifactKind::ConfigDriveIso,
+                sha256: resolved.config_drive_sha256.clone(),
+                format: "iso".to_owned(),
+            })
+            .map_err(|_| {
+                AgentError::Protocol("committed config-drive artifact is unavailable".to_owned())
+            })?;
+        Some(CommittedArtifact {
             artifact_id: resolved.config_drive_artifact_id.clone(),
             kind: proto::ArtifactKind::ConfigDriveIso,
-            sha256: resolved.config_drive_sha256.clone(),
             format: "iso".to_owned(),
+            sha256: resolved.config_drive_sha256.clone(),
+            path,
         })
-        .map_err(|_| {
-            AgentError::Protocol("committed config-drive artifact is unavailable".to_owned())
-        })?;
-    let mut owned_taps = Vec::with_capacity(resolved.network_attachments.len());
+    } else {
+        None
+    };
+    let mut network_attachments = Vec::with_capacity(resolved.network_attachments.len());
     for attachment in &resolved.network_attachments {
-        let tap_name = network
-            .resolve_owned_tap(&o3k_network::TapSpec {
-                instance_id: if network_owned_by_external_agent {
-                    attachment.port_id.clone()
-                } else {
-                    command.resource_id.clone()
-                },
-                port_id: attachment.port_id.clone(),
-                mac: attachment.mac.clone(),
-            })
+        let (tap_name, ownership) = if network_owned_by_external_agent {
+            let resolver = fabric_attachments.ok_or_else(|| {
+                AgentError::Protocol("Fabric attachment resolver is not configured".to_owned())
+            })?;
+            let endpoint_id = uuid::Uuid::parse_str(&attachment.port_id).map_err(|_| {
+                AgentError::Protocol("Fabric endpoint identity is invalid".to_owned())
+            })?;
+            let evidence = resolver
+                .resolve(endpoint_id, &attachment.mac, local_host)
+                .map_err(|error| {
+                    AgentError::Protocol(format!(
+                        "Fabric endpoint attachment for port {} is not verified: {error}",
+                        attachment.port_id,
+                    ))
+                })?;
+            (
+                evidence.tap_name.clone(),
+                NetworkAttachmentOwnership::Fabric(evidence),
+            )
+        } else {
+            let tap_name = network
+                .resolve_owned_tap(&o3k_network::TapSpec {
+                    instance_id: command.resource_id.clone(),
+                    port_id: attachment.port_id.clone(),
+                    mac: attachment.mac.clone(),
+                })
             .map_err(|error| {
                 let managed_taps = network.discover_managed().unwrap_or_default();
                 AgentError::Protocol(format!(
@@ -276,11 +334,13 @@ pub(crate) fn resolve_committed_create_inputs(
                     attachment.port_id,
                 ))
             })?;
-        owned_taps.push(OwnedTap {
+            (tap_name, NetworkAttachmentOwnership::HostNetwork)
+        };
+        network_attachments.push(VerifiedNetworkAttachment {
             port_id: attachment.port_id.clone(),
             tap_name,
-            mac_address: attachment.mac.clone(),
-            ownership_token: "durable-network-manifest".to_owned(),
+            guest_mac: attachment.mac.clone(),
+            ownership,
         });
     }
     Ok(CommittedCreateInputs {
@@ -291,14 +351,8 @@ pub(crate) fn resolve_committed_create_inputs(
             sha256: resolved.image_sha256.clone(),
             path: image_path,
         },
-        config_drive: CommittedArtifact {
-            artifact_id: resolved.config_drive_artifact_id.clone(),
-            kind: proto::ArtifactKind::ConfigDriveIso,
-            format: "iso".to_owned(),
-            sha256: resolved.config_drive_sha256.clone(),
-            path: config_path,
-        },
-        owned_taps,
+        config_drive,
+        network_attachments,
         identity: CreateDomainIdentity {
             server_id: command.resource_id.clone(),
             project_id: resolved.project_id.clone(),
@@ -553,6 +607,8 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     &self.image_materializer,
                     &self.network,
                     self.network_owned_by_external_agent,
+                    self.fabric_attachments.as_deref(),
+                    &self.local_host,
                 ) {
                     Ok(value) => value,
                     Err(error) => {
@@ -721,7 +777,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     memory_mib = spec.memory_mib,
                     network_attachment_count = spec.network_interfaces.len(),
                     image_artifact_id = %committed.image.artifact_id,
-                    config_drive_artifact_id = %committed.config_drive.artifact_id,
+                    config_drive_artifact_id = ?committed.config_drive.as_ref().map(|drive| &drive.artifact_id),
                     xml_bytes = definition.xml.len(),
                     "libvirt create request"
                 );
@@ -1398,43 +1454,77 @@ impl StartupDomainRestore for LibvirtAdapter {
 /// instance (issue #613 blocker A): a host reboot deletes the ephemeral TAP
 /// devices while the persisted domain XML still references them, so the
 /// domain start would fail. The real implementation reuses the create-time
-/// [`o3k_network::HostNetworkManager::ensure_tap`] ownership path; tests
-/// inject fakes without touching the host network.
+/// Startup attachment gate used before restoring a domain. It remains a
+/// narrow seam so the bounded retry state machine can be tested without
+/// touching host networking.
 #[async_trait]
 pub(crate) trait StartupTapRestore: Send + Sync {
-    /// Ensures every TAP recorded as O3K-owned for the instance exists and
-    /// is attached to the managed bridge before the domain start. An absent
-    /// TAP is re-created under the recorded deterministic name, a present
-    /// owned TAP is verified and reused, and a foreign link at the recorded
-    /// name fails closed without being touched. `Err` means the outcome is
-    /// unknown or foreign: the caller must hold back the instance's domain
-    /// start and retries inside the bounded window.
+    /// Verifies/restores network attachments before domain start. The
+    /// owner-specific implementation may recreate only resources it owns.
+    /// An unavailable or foreign attachment fails closed, so the caller
+    /// holds the domain and retries inside the bounded window.
     async fn restore_owned_taps(&self, resource_id: &str) -> Result<(), AgentError>;
 }
 
-/// Real TAP restoration driven by the durable network ownership manifest.
-/// Each recorded spec is re-verified by `ensure_tap` against both the
-/// manifest and the kernel, so a forged or stale record can never create or
-/// mutate a foreign interface.
+/// Owner-aware startup attachment restoration. Fabric attachments are
+/// re-attested read-only; only the legacy HostNetworkManager path can restore
+/// its own TAPs from its durable manifest.
 pub(crate) struct NetworkStartupTapRestore {
     pub(crate) network: Arc<o3k_network::HostNetworkManager>,
+    pub(crate) fabric_attachments: Option<Arc<o3k_network::LinuxFabricAttachmentResolver>>,
     pub(crate) external_owner: bool,
+    pub(crate) local_host: String,
+    pub(crate) identity_path: PathBuf,
+    pub(crate) agent_id: String,
 }
 
 #[async_trait]
 impl StartupTapRestore for NetworkStartupTapRestore {
     async fn restore_owned_taps(&self, resource_id: &str) -> Result<(), AgentError> {
+        if self.external_owner {
+            let resolver = self.fabric_attachments.as_ref().ok_or_else(|| {
+                AgentError::Protocol("Fabric attachment resolver is not configured".to_owned())
+            })?;
+            let attachments =
+                o3k_compute_agent::load_journal_successful_create_network_attachments(
+                    &self.identity_path,
+                    &self.agent_id,
+                )
+                .map_err(|_| {
+                    AgentError::Protocol(
+                        "durable guest network attachment identity is unavailable".to_owned(),
+                    )
+                })?;
+            let expected = attachments.get(resource_id).ok_or_else(|| {
+                AgentError::Protocol(
+                    "durable guest network attachment identity is missing".to_owned(),
+                )
+            })?;
+            if expected.is_empty() {
+                return Err(AgentError::Protocol(
+                    "running guest has no durable network attachment identity".to_owned(),
+                ));
+            }
+            for attachment in expected {
+                let endpoint_id = uuid::Uuid::parse_str(&attachment.port_id).map_err(|_| {
+                    AgentError::Protocol("durable Fabric endpoint identity is invalid".to_owned())
+                })?;
+                resolver
+                    .resolve(endpoint_id, &attachment.mac, &self.local_host)
+                    .map_err(|error| {
+                        AgentError::Protocol(format!(
+                            "Fabric endpoint attachment for port {} is not verified: {error}",
+                            attachment.port_id,
+                        ))
+                    })?;
+            }
+            return Ok(());
+        }
         let specs = self
             .network
             .owned_tap_specs_for_instance(resource_id)
             .map_err(|error| AgentError::Protocol(format!("owned TAP lookup failed: {error}")))?;
         for spec in specs {
-            if self.external_owner {
-                self.network.resolve_owned_tap(&spec).map_err(|error| {
-                    AgentError::Protocol(format!("external network TAP is unavailable: {error}"))
-                })?;
-                continue;
-            }
             let (name, created) = self.network.ensure_tap(&spec).map_err(|error| {
                 AgentError::Protocol(format!("owned TAP restoration failed: {error}"))
             })?;

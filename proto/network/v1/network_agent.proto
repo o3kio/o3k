@@ -12,6 +12,8 @@ message ControlRequest {
   oneof body {
     Register register = 1;
     NetworkCommand command = 2;
+    ControllerLease lease = 3;
+    ObserveCommand observe = 4;
   }
 }
 
@@ -20,7 +22,24 @@ message ControlResponse {
     RegisterAck register = 1;
     CommandResult result = 2;
     ProtocolError error = 3;
+    ControllerLeaseAck lease = 4;
   }
+}
+
+message ControllerLease {
+  string controller_id = 1;
+  string controller_epoch = 2;
+  uint64 fencing_token = 3;
+  uint64 lease_expiry_unix_ms = 4;
+}
+
+message ControllerLeaseAck {
+  uint64 fencing_token = 1;
+  uint64 lease_expiry_unix_ms = 2;
+}
+
+message ObserveCommand {
+  string command_id = 1;
 }
 
 message Register {

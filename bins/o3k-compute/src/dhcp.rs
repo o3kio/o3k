@@ -53,6 +53,7 @@ impl DhcpRuntime {
             dns: vec![gateway],
             interface: self.interface.clone(),
             lease_seconds: 3600,
+            mtu: None,
         };
         if let Some(existing) = self.service.configuration()
             && existing != &expected
@@ -98,6 +99,7 @@ impl DhcpRuntime {
                     dns: vec![gateway],
                     interface: self.interface.clone(),
                     lease_seconds: 3600,
+                    mtu: None,
                 })
                 .map_err(|_| AgentError::Protocol("DHCP configuration is invalid".to_owned()))?;
         }

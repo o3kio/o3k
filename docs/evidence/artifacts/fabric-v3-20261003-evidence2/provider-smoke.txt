@@ -1,0 +1,21 @@
+source implementation SHA: 0005fa2edc04883b588982bc9a957aa4f0933f6a
+binary: target/debug/examples/linux-fabric-smoke
+root: /tmp/o3k-fabric-v3-smoke (disposable per guest)
+
+HOST a (192.168.122.18):
+  host-transport-address=passed
+  vxlan-realization=passed
+  isolated-attachment=passed
+  topology-and-cleanup=passed
+
+HOST b (192.168.122.4):
+  host-transport-address=passed
+  vxlan-realization=passed
+  isolated-attachment=passed
+  topology-and-cleanup=passed
+
+HOST c (192.168.122.241):
+  host-transport-address=passed
+  vxlan-realization=passed
+  isolated-attachment=passed
+  topology-and-cleanup=passed

@@ -4,15 +4,54 @@ use uuid::Uuid;
 use crate::{
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
     CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
-    CanonicalNetworkRecord, CanonicalRealmBindingRecord, NetworkAddressAllocationRecord,
-    NetworkIntentRecord, NetworkRecord, NetworkRepository, PortRecord, SecurityGroupBindingRecord,
-    SecurityGroupRecord, SecurityGroupRuleRecord, StoreError, SubnetRecord,
+    CanonicalNetworkRecord, CanonicalRealmBindingRecord, FabricHostTransportIdentityRecord,
+    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, NetworkRepository,
+    PortRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
+    StoreError, SubnetRecord,
 };
 
 use super::O3kStore;
 
 #[async_trait]
 impl NetworkRepository for O3kStore {
+    async fn get_fabric_host_identity(
+        &self,
+        host_id: &str,
+    ) -> Result<Option<FabricHostTransportIdentityRecord>, StoreError> {
+        match self {
+            Self::Sqlite(store) => store.get_fabric_host_identity(host_id).await,
+            Self::Postgres(store) => store.get_fabric_host_identity(host_id).await,
+        }
+    }
+
+    async fn list_fabric_host_identities(
+        &self,
+    ) -> Result<Vec<FabricHostTransportIdentityRecord>, StoreError> {
+        match self {
+            Self::Sqlite(store) => store.list_fabric_host_identities().await,
+            Self::Postgres(store) => store.list_fabric_host_identities().await,
+        }
+    }
+
+    async fn upsert_fabric_host_identity(
+        &self,
+        identity: &FabricHostTransportIdentityRecord,
+        expected_generation: Option<u64>,
+    ) -> Result<FabricHostTransportIdentityRecord, StoreError> {
+        match self {
+            Self::Sqlite(store) => {
+                store
+                    .upsert_fabric_host_identity(identity, expected_generation)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .upsert_fabric_host_identity(identity, expected_generation)
+                    .await
+            }
+        }
+    }
+
     async fn get_canonical_owner(
         &self,
         resource_name: &str,
@@ -272,6 +311,22 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.list_canonical_realms(project_id, network_id).await,
         }
     }
+    async fn list_active_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_active_canonical_realms().await,
+            Self::Postgres(s) => s.list_active_canonical_realms().await,
+        }
+    }
+    async fn list_deleting_canonical_realms(
+        &self,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_deleting_canonical_realms().await,
+            Self::Postgres(s) => s.list_deleting_canonical_realms().await,
+        }
+    }
     async fn insert_canonical_pool(
         &self,
         pool: &CanonicalAddressPoolRecord,
@@ -443,6 +498,23 @@ impl NetworkRepository for O3kStore {
             }
         }
     }
+    async fn advance_canonical_realm_generation(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalAddressRealmRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.advance_canonical_realm_generation(project_id, realm_id, expected_generation)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.advance_canonical_realm_generation(project_id, realm_id, expected_generation)
+                    .await
+            }
+        }
+    }
     async fn finalize_canonical_realm_deletion(
         &self,
         project_id: &str,
@@ -467,6 +539,31 @@ impl NetworkRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.list_canonical_realm_bindings(realm_id).await,
             Self::Postgres(s) => s.list_canonical_realm_bindings(realm_id).await,
+        }
+    }
+    async fn insert_canonical_realm_binding(
+        &self,
+        binding: &CanonicalRealmBindingRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_canonical_realm_binding(binding).await,
+            Self::Postgres(s) => s.insert_canonical_realm_binding(binding).await,
+        }
+    }
+    async fn get_canonical_realm_binding(
+        &self,
+        fabric_domain_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Option<CanonicalRealmBindingRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.get_canonical_realm_binding(fabric_domain_id, realm_id)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.get_canonical_realm_binding(fabric_domain_id, realm_id)
+                    .await
+            }
         }
     }
     async fn delete_canonical_realm_binding(

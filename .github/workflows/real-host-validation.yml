@@ -14,6 +14,8 @@ on:
         type: choice
         options:
           - integrated
+          - s1-boundary
+          - s2-boundary
           - s5-scale
           - 1035-crash-recovery
           - host-maintenance
@@ -136,7 +138,7 @@ jobs:
         run: |
           set -euo pipefail
           case "${PP5_LANE}" in
-            integrated|s5-scale|1035-crash-recovery|host-maintenance) ;;
+            integrated|s1-boundary|s2-boundary|s5-scale|1035-crash-recovery|host-maintenance) ;;
             *) echo "unsupported PP.5 lane: ${PP5_LANE}" >&2; exit 2 ;;
           esac
 
@@ -728,6 +730,8 @@ jobs:
           set -euo pipefail
           case "${PP5_LANE}" in
             integrated) bash tests/p15_7_scale_composition.sh ;;
+            s1-boundary) bash tests/pp5_s1_boundary_smoke.sh ;;
+            s2-boundary) bash tests/pp5_s2_boundary_smoke.sh ;;
             s5-scale) bash tests/pp5_s5_scale.sh ;;
             1035-crash-recovery) bash tests/pp5_1035_crash_recovery.sh ;;
             host-maintenance) bash tests/pp5_host_maintenance.sh ;;
@@ -913,6 +917,9 @@ jobs:
             target/real-host-workflow-artifacts/p15-7-scale-composition-evidence.json
             target/real-host-workflow-artifacts/p15-7-gate-result.json
             target/real-host-workflow-artifacts/pp5-s5-scale-result.json
+            target/real-host-workflow-artifacts/pp5-s1-boundary-smoke-result.json
+            target/real-host-workflow-artifacts/pp5-s2-boundary-smoke-result.json
+            target/real-host-workflow-artifacts/p15-7-boundary-smoke-evidence.json
             target/real-host-workflow-artifacts/pp5-1035-crash-recovery-result.json
             target/real-host-workflow-artifacts/pp5-host-maintenance-result.json
             target/real-host-workflow-artifacts/pp5-overall-result.json

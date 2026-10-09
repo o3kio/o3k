@@ -418,6 +418,7 @@ mod tests {
     fn snapshot(agent_id: &str) -> AgentNodeSnapshot {
         AgentNodeSnapshot {
             agent_id: agent_id.to_owned(),
+            host_id: agent_id.to_owned(),
             agent_epoch: "epoch-1".to_owned(),
             availability: AgentAvailability::Available,
             administrative_state: AgentAdministrativeState::Enabled,

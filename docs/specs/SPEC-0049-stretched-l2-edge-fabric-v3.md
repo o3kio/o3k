@@ -27,6 +27,11 @@ Related normative sources:
 - [SPEC-0029](SPEC-0029-addressrealm-encapsulated-edge-fabric-v2.md) (superseded)
 - [SPEC-0033](SPEC-0033-canonical-network-addressrealm-lifecycle-v1.md)
 - [execution-boundary contract](../../contracts/execution-boundaries.md)
+- Shared implementation authority: [o3kio/fabric](https://github.com/o3kio/fabric) —
+  provider contract
+  [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/main/contracts/fabric-provider-v1.md)
+  and change control
+  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/main/docs/change-control.md)
 
 ## Purpose and governance gate
 
@@ -246,6 +251,40 @@ Requirements:
 - removal of the last realm endpoint from a host must withdraw that host's HER
   entries on all peers and remove learned state for the realm.
 
+### Departing-host provider withdrawal
+
+When the final current endpoint of a realm leaves a host, the host must receive
+a Realm `Remove` operation. Removal is complete only after:
+
+- remaining participants have withdrawn the departing host from HER;
+- the departing host has removed its local Realm realization, including its
+  endpoint TAPs, endpoint policy state, and Realm-scoped VXLAN attachment;
+- the provider has read back and observed the owned live objects absent; and
+- durable provider ownership no longer claims the removed endpoint or Realm.
+
+A control-plane directory update or a successful Remove mutation call alone is
+not provider-absence proof. Providers retain enough ownership state to resume a
+partial removal safely, and execution remains nonterminal until a read-only
+absence observation succeeds. If the host still has another current endpoint
+in the Realm, only the removed endpoint's state is withdrawn and the host stays
+a participant.
+
+Realm reconciliation derives desired hosts from current canonical active
+endpoints and accepted bindings, and derives possibly realized hosts from
+durable Fabric plan/work history. A host's latest ownership-relevant Apply
+without a later observed-successful Remove remains a retirement obligation
+when it disappears from the desired set. An Applying, Unknown, or otherwise
+ambiguous latest operation is unresolved and cannot prove absence. The
+reconciler must create and observe each retiring-host Remove before applying
+the reduced directory to surviving hosts. Startup recovery uses the same
+history derivation and must resume this sequence without a new tenant API
+mutation.
+
+For request-driven server deletion, a Fabric unbind or endpoint-release error
+is returned to the waiting caller after the server deletion is durably
+terminal. The server deletion is not rolled back; cleanup remains retryable.
+Background terminal projection may log and retry because no request is waiting.
+
 ## Egress and ingress semantics
 
 ### Egress
@@ -359,6 +398,19 @@ Before privileged successor implementation:
 
 ## Provider conformance requirements
 
+The WireGuard host-fabric substrate is realized by the shared provider in
+[o3kio/fabric](https://github.com/o3kio/fabric) (ADR-0186); its
+provider-level conformance suite (`fabric-conformance`, 25 cases — plan
+validation, apply/idempotency, socket placement, NAT-free underlay,
+legacy-state cleanup, healing, flood-list scoping, teardown convergence,
+key hygiene) runs in this repository's CI at the pinned git tag
+(`crates/o3k-network/tests/fabric_conformance.rs`), so every build
+re-proves the pinned revision on O3K's toolchain. The requirements below
+remain the full P11 provider surface: the substrate-level subset is
+covered by that shared gate, and the realm/VNI/policy-level requirements
+by this repository's own portable tests as the `linux_fabric` migration
+proceeds.
+
 Before real-host promotion, portable/provider tests must cover:
 
 - valid realm-to-VNI allocation (unchanged);
@@ -412,3 +464,7 @@ Prove:
 10. MTU boundary: near-boundary packet succeeds, oversize behavior is explicit;
 11. restart/reconcile, drain, and cleanup leave zero leaked netns/bridge/veth/
     VXLAN/FDB/WireGuard/nft state across all hosts.
+12. final endpoint departure from a host completes only after the departing
+    host's Realm realization and durable endpoint ownership are absent and
+    that absence has been observed by the provider; Remove mutation success
+    alone is insufficient.

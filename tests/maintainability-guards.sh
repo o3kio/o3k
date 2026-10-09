@@ -208,6 +208,13 @@ echo "Test 26: SQL after #[cfg(test)] -> FAIL"
 check_fixture "SQL after cfg(test)" 1 "SQL ARCHITECTURE VIOLATION" \
     $'#[cfg(test)] mod tests {}\nfn production_after_tests() { sqlx::query("SELECT 1"); }' "crates/o3k-kernel/src"
 
+echo "Test 26a: SQL inside cfg(test) module -> ACCEPT"
+check_fixture "SQL inside cfg(test) module" 0 "" \
+    $'#[cfg(test)]\nmod tests {\n    fn test_query() { sqlx::query("SELECT 1"); }\n}' "crates/o3k-kernel/src"
+echo "Test 26b: Command inside cfg(test) module -> ACCEPT"
+check_fixture "Command inside cfg(test) module" 0 "" \
+    $'#[cfg(test)]\nmod tests {\n    use std::process::Command;\n    fn test_command() { let _ = Command::new("sleep"); }\n}' "crates/o3k-kernel/src"
+
 echo "Test 27: raw Linux wrapper in canonical Network -> FAIL"
 check_fixture "raw Linux wrapper in canonical Network" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { run("ip", &["link"]); }' "crates/o3k-network/src"

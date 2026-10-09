@@ -450,6 +450,11 @@ impl ComputeService {
                 _ => continue,
             };
             if let Err(error) = outcome {
+                if delete_release {
+                    return Err(ComputeError::EndpointRelease(format!(
+                        "server port {port_id} Fabric unbind failed: {error}"
+                    )));
+                }
                 tracing::warn!(
                     operation_id = %operation_id,
                     resource_id = %operation.resource_id,
@@ -672,7 +677,8 @@ impl ComputeService {
     /// Clears the binding of every port named by the server's durable create
     /// intent. Used when a delete reached terminal success, including the
     /// already-deleted shortcut, where the delete completed in a previous
-    /// run. Best-effort and idempotent like `project_terminal_binding_outcome`.
+    /// run. Request-driven replay propagates cleanup errors while preserving
+    /// the already-terminal server deletion.
     ///
     /// #1035 backstop (delete-replay seat): a port a NEW live server has
     /// explicitly re-attached must never be unbound here, or the replay tears
@@ -684,9 +690,9 @@ impl ComputeService {
         &self,
         request: &CreateInstanceRequest,
         operation_id: uuid::Uuid,
-    ) {
+    ) -> Result<(), ComputeError> {
         let Some(projector) = self.binding_projector.as_ref() else {
-            return;
+            return Ok(());
         };
         // Serialize the [referenced-scan -> unbind] window against port-attaching
         // creates and the orphan sweep (issue #1035): a port a live server now
@@ -696,30 +702,25 @@ impl ComputeService {
         let attached = match self.referenced_port_ids().await {
             Ok(set) => set,
             Err(error) => {
-                tracing::warn!(
-                    resource_id = %request.o3k_server_id,
-                    error = ?error,
-                    "port unbind skipped: live-server attachment set unavailable"
-                );
-                return;
+                return Err(ComputeError::EndpointRelease(format!(
+                    "live-server attachment set unavailable before port unbind: {error}"
+                )));
             }
         };
         for port_id in &request.network_ids {
             if attached.contains(port_id.as_str()) {
                 continue;
             }
-            if let Err(error) = projector
+            projector
                 .unbind_port(&request.project_id, port_id, operation_id)
                 .await
-            {
-                tracing::warn!(
-                    resource_id = %request.o3k_server_id,
-                    port_id = %port_id,
-                    error = %error,
-                    "port unbind projection rejected"
-                );
-            }
+                .map_err(|error| {
+                    ComputeError::EndpointRelease(format!(
+                        "server port {port_id} Fabric unbind failed: {error}"
+                    ))
+                })?;
         }
+        Ok(())
     }
 
     /// Applies the same reverse-order compensation as the synchronous create

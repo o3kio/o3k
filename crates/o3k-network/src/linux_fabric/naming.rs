@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) const STATE_VERSION: u32 = 2;
+pub(crate) const STATE_VERSION: u32 = 3;
 pub(crate) const FABRIC_PUBLIC_MARKER: &str = "o3k-p11-public";
 pub(crate) fn valid_name(value: &str) -> bool {
     !value.is_empty()
@@ -17,20 +17,6 @@ pub(crate) fn valid_mac(value: &str) -> bool {
             .iter()
             .all(|octet| octet.len() == 2 && octet.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
-pub(crate) fn geneve_name(realm_id: Uuid, target_host: &str) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in realm_id
-        .as_bytes()
-        .iter()
-        .copied()
-        .chain(target_host.as_bytes().iter().copied())
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("o3k-g-{:08x}", hash as u32)
-}
-
 pub(crate) fn provider_name(prefix: &str, realm_id: Uuid, target_host: &str) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in prefix
@@ -95,16 +81,28 @@ pub(crate) fn public_transit_addresses(realm_id: Uuid) -> (Ipv4Addr, Ipv4Addr) {
     let base = 0x6440_0000u32 + u32::from(subnet) * 4;
     (Ipv4Addr::from(base + 1), Ipv4Addr::from(base + 2))
 }
-pub(crate) fn geneve_bridge_name(realm_id: Uuid, target_host: &str) -> String {
-    provider_name("c", realm_id, target_host)
+pub(crate) fn vxlan_name(realm_id: Uuid) -> String {
+    provider_name("x", realm_id, "vxlan")
 }
 
-pub(crate) fn geneve_realm_veth_name(realm_id: Uuid, target_host: &str) -> String {
-    provider_name("e", realm_id, target_host)
+pub(crate) fn vxlan_bridge_name(realm_id: Uuid) -> String {
+    provider_name("c", realm_id, "vxlan")
 }
 
-pub(crate) fn geneve_fabric_veth_name(realm_id: Uuid, target_host: &str) -> String {
-    provider_name("i", realm_id, target_host)
+pub(crate) fn vxlan_host_veth_name(realm_id: Uuid) -> String {
+    provider_name("v", realm_id, "vxlan-host")
+}
+
+pub(crate) fn vxlan_fabric_veth_name(realm_id: Uuid) -> String {
+    provider_name("i", realm_id, "vxlan-fabric")
+}
+
+pub(crate) fn vxlan_link_matches(output: &str, vni: u32, local: Ipv4Addr) -> bool {
+    output.contains("vxlan")
+        && output.contains(&format!("id {vni}"))
+        && output.contains("dstport 4789")
+        && output.contains(&format!("local {local}"))
+        && !output.contains("nolearning")
 }
 pub(crate) fn endpoint_tap_name(realm_id: Uuid, endpoint_id: Uuid) -> String {
     let bytes = realm_id
@@ -142,47 +140,6 @@ pub(crate) fn endpoint_tap_mac(realm_id: Uuid, endpoint_id: Uuid) -> String {
     )
 }
 
-pub(crate) fn tunnel_mac(realm_id: Uuid, host_id: &str) -> String {
-    let bytes = realm_id
-        .as_bytes()
-        .iter()
-        .copied()
-        .chain(host_id.as_bytes().iter().copied())
-        .fold(0xcbf29ce484222325u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-        })
-        .to_be_bytes();
-    format!(
-        "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        bytes[2], bytes[3], bytes[4], bytes[5], bytes[6]
-    )
-}
-pub(crate) fn bridge_ports_are_owned(output: &str, geneve: &GeneveOwnership) -> bool {
-    let names = output
-        .lines()
-        .filter_map(|line| line.split_once(": ").map(|(_, rest)| rest))
-        .filter_map(|rest| rest.split_whitespace().next())
-        .map(|name| name.trim_end_matches(':').split('@').next().unwrap_or(name))
-        .collect::<BTreeSet<_>>();
-    names == BTreeSet::from([geneve.interface.as_str(), geneve.fabric_veth.as_str()])
-}
-
-pub(crate) fn geneve_link_matches(output: &str, ownership: &GeneveOwnership, port: u16) -> bool {
-    output.contains("geneve")
-        && output.contains(&format!("id {}", ownership.vni))
-        && output.contains(&format!("remote {}", ownership.remote_transport_ip))
-        && output.contains(&format!("dstport {}", port))
-}
-
-pub(crate) fn tap_link_matches(
-    output: &str,
-    ownership: &EndpointTapOwnership,
-    bridge: &str,
-) -> bool {
-    output.contains("tun")
-        && output.contains(&format!("link/ether {}", ownership.mac))
-        && output.contains(&format!("master {}", bridge))
-}
 pub(crate) fn valid_wireguard_key(value: &str) -> bool {
     value.len() == 44
         && value.ends_with('=')

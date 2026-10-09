@@ -281,6 +281,7 @@ pub struct Composition {
     create_convergence_reconciler: tokio::task::JoinHandle<()>,
     lifecycle_convergence_reconciler: tokio::task::JoinHandle<()>,
     orphan_endpoint_reconciler: tokio::task::JoinHandle<()>,
+    fabric_recovery_task: Option<tokio::task::JoinHandle<()>>,
     inventory_task: Option<tokio::task::JoinHandle<()>>,
     composition_task: Option<tokio::task::JoinHandle<()>>,
     native_storage_recovery_task: Option<tokio::task::JoinHandle<()>>,
@@ -326,6 +327,10 @@ impl Composition {
         let _ = self.create_convergence_reconciler.await;
         self.lifecycle_convergence_reconciler.abort();
         self.orphan_endpoint_reconciler.abort();
+        if let Some(task) = self.fabric_recovery_task {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = self.native_storage_recovery_task {
             task.abort();
             let _ = task.await;
@@ -482,6 +487,20 @@ pub async fn build_composition(
     )
     .await?
     .with_required_audit_publisher(audit_sink.clone());
+    let fabric_domain_id = std::env::var("O3K_FABRIC_DOMAIN_ID")
+        .ok()
+        .map(|value| Uuid::parse_str(&value))
+        .transpose()?;
+    if std::env::var_os("O3K_FABRIC_HOST_IDENTITIES").is_some() && fabric_domain_id.is_none() {
+        return Err("O3K_FABRIC_HOST_IDENTITIES requires O3K_FABRIC_DOMAIN_ID".into());
+    }
+    if fabric_domain_id.is_some() && std::env::var_os("O3K_NETWORK_AGENT_DIRECTORY").is_none() {
+        return Err(
+            "O3K_FABRIC_DOMAIN_ID requires target-aware O3K_NETWORK_AGENT_DIRECTORY dispatch"
+                .into(),
+        );
+    }
+    network::enroll_fabric_hosts_from_env(&network_service).await?;
     let config_drive_root = config.data_dir.join("config-drive");
     let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
@@ -522,21 +541,68 @@ pub async fn build_composition(
         );
     }
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
-    let network_dispatcher = network_dispatcher_from_env()?;
+    let durable_store: Arc<dyn o3k_store::DurableStore> = store.clone();
+    let network_dispatcher = network_dispatcher_from_env(
+        coordination_store.clone(),
+        durable_store.clone(),
+        controller_id.clone(),
+        controller_epoch.clone(),
+    )?;
+    if fabric_domain_id.is_some() {
+        let dispatcher = network_dispatcher
+            .as_deref()
+            .ok_or("O3K_FABRIC_DOMAIN_ID requires network-agent target dispatch")?;
+        network::validate_fabric_control_targets(&network_service, dispatcher).await?;
+    }
     let public_allocator = public_allocator_from_env(&config.data_dir)?;
     let public_allocator_for_binding = public_allocator_from_env(&config.data_dir)?.map(Arc::new);
-    let network_controller = o3k_network::NetworkControllerLease {
-        controller_id: controller_id.to_string(),
-        controller_epoch: controller_epoch.to_string(),
-        fencing_token: std::env::var("O3K_NETWORK_FENCING_TOKEN")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(1),
-    };
     let network_external_realm_id = std::env::var("O3K_NETWORK_EXTERNAL_REALM_ID")
         .ok()
         .map(|value| Uuid::parse_str(&value))
         .transpose()?;
+    if fabric_domain_id.is_some() && std::env::var_os("O3K_NETWORK_FENCING_TOKEN").is_some() {
+        return Err(
+            "O3K_NETWORK_FENCING_TOKEN is legacy-only and cannot be configured with Fabric v3"
+                .into(),
+        );
+    }
+    let network_controller = o3k_network::NetworkControllerLease {
+        controller_id: controller_id.to_string(),
+        controller_epoch: controller_epoch.to_string(),
+        // Fabric v3 commands receive their authority only after the
+        // target-aware dispatcher acquires the per-agent coordination lease.
+        // Zero is an inert placeholder and can never authorize provider work.
+        fencing_token: if fabric_domain_id.is_some() {
+            0
+        } else {
+            std::env::var("O3K_NETWORK_FENCING_TOKEN")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1)
+        },
+    };
+    let fabric_reconciler = match (fabric_domain_id, network_dispatcher.as_ref()) {
+        (Some(fabric_domain_id), Some(dispatcher)) => {
+            Some(Arc::new(network::FabricRealmReconciler {
+                network: network_service.clone(),
+                coordination: coordination_store.clone(),
+                durable: durable_store.clone(),
+                registry: Arc::new(registry.clone()),
+                dispatcher: dispatcher.clone(),
+                controller: network_controller.clone(),
+                fabric_domain_id,
+                network_external_realm_id,
+                public_allocator: public_allocator_for_binding.clone(),
+                reconciliation_locks: Arc::new(std::sync::Mutex::new(
+                    std::collections::BTreeMap::new(),
+                )),
+            }))
+        }
+        (Some(_), None) => {
+            return Err("O3K_FABRIC_DOMAIN_ID requires target-aware network-agent dispatch".into());
+        }
+        (None, _) => None,
+    };
     let network_agent_identity = match (
         std::env::var("O3K_NETWORK_AGENT_ID").ok(),
         std::env::var("O3K_NETWORK_AGENT_EPOCH").ok(),
@@ -563,6 +629,7 @@ pub async fn build_composition(
         network_controller: network_controller.clone(),
         network_external_realm_id,
         network_agent: network_agent_identity.clone(),
+        fabric_reconciler: fabric_reconciler.clone(),
         public_allocator: public_allocator_for_binding.clone(),
         unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
     });
@@ -575,6 +642,7 @@ pub async fn build_composition(
             network: network_service.clone(),
             config_drive: config_drive_store.clone(),
             network_dispatcher: network_dispatcher.clone(),
+            fabric_reconciler: fabric_reconciler.clone(),
             network_controller: network_controller.clone(),
             network_external_realm_id,
             network_agent: network_agent_identity.clone(),
@@ -1075,6 +1143,10 @@ pub async fn build_composition(
             compute: std::sync::Arc::new(compute_service.clone()),
             image: Some(std::sync::Arc::new(image_service.clone())),
             network_service: std::sync::Arc::new(network_service.clone()),
+            realm_deletion: fabric_reconciler.as_ref().map(|reconciler| {
+                reconciler.clone()
+                    as Arc<dyn crate::native_adapters::resource::RealmDeletionWorkflow>
+            }),
             store: native_api_store.clone(),
             storage_provider: native_storage_provider.clone(),
             server: server_reader
@@ -1188,6 +1260,11 @@ pub async fn build_composition(
             .with_volume_attachments_enabled(volume_attachments_enabled)
             .with_compute(compute_service)
     };
+    if let Some(reconciler) = &fabric_reconciler {
+        state = state.with_realm_deletion_workflow(
+            reconciler.clone() as Arc<dyn o3k_api::RealmDeletionWorkflow>
+        );
+    }
     // Native pagination is reachable only when IAM is configured.  In the
     // IAM-disabled health/operational profile, keep the API unavailable and
     // avoid requiring production secrets solely to start healthz.
@@ -1393,6 +1470,13 @@ pub async fn build_composition(
         }
     };
     let inspect_probe_task = agent_inspect_probe_from_env(inspect_compute_service);
+    let fabric_recovery_task = fabric_reconciler.as_ref().map(|reconciler| {
+        network::spawn_fabric_recovery(
+            Arc::clone(reconciler),
+            durable_store,
+            registry.registration_notify(),
+        )
+    });
 
     Ok(Composition {
         state,
@@ -1406,6 +1490,7 @@ pub async fn build_composition(
         create_convergence_reconciler,
         lifecycle_convergence_reconciler,
         orphan_endpoint_reconciler,
+        fabric_recovery_task,
         inventory_task,
         composition_task,
         native_storage_recovery_task,
@@ -1530,8 +1615,53 @@ mod tests {
         commands: Arc<std::sync::Mutex<Vec<o3k_network::NetworkPlanCommand>>>,
     }
 
+    fn compute_snapshot(
+        agent_id: &str,
+        host_id: &str,
+        epoch: &str,
+    ) -> o3k_provider::AgentNodeSnapshot {
+        o3k_provider::AgentNodeSnapshot {
+            agent_id: agent_id.to_owned(),
+            host_id: host_id.to_owned(),
+            agent_epoch: epoch.to_owned(),
+            availability: o3k_provider::AgentAvailability::Available,
+            administrative_state: o3k_provider::AgentAdministrativeState::Enabled,
+            capabilities: o3k_provider::AgentCapabilities {
+                agent_provider_name: "test".to_owned(),
+                agent_provider_version: "1".to_owned(),
+                max_vcpus: 8,
+                max_memory_mib: 8192,
+                max_disk_gb: 100,
+                lifecycle_actions: vec!["create".to_owned()],
+                console_log: false,
+                flags: Vec::new(),
+            },
+        }
+    }
+
     #[async_trait::async_trait]
     impl o3k_network::NetworkPlanDispatcher for RecordingNetworkDispatcher {
+        async fn target_for_host(
+            &self,
+            host_id: &str,
+        ) -> Result<Option<o3k_network::NetworkAgentIdentity>, o3k_network::NetworkDispatchError>
+        {
+            let suffix = host_id.strip_prefix("host-").ok_or_else(|| {
+                o3k_network::NetworkDispatchError::Rejected("unknown test host".to_owned())
+            })?;
+            Ok(Some(o3k_network::NetworkAgentIdentity {
+                agent_id: format!("network-agent-{suffix}"),
+                agent_epoch: "network-epoch-1".to_owned(),
+            }))
+        }
+
+        fn configured_target_hosts(&self) -> Vec<String> {
+            ["host-a", "host-b", "host-c"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        }
+
         async fn dispatch(
             &self,
             command: o3k_network::NetworkPlanCommand,
@@ -1838,6 +1968,7 @@ mod tests {
             network: network.clone(),
             config_drive,
             network_dispatcher: Some(Arc::new(dispatcher)),
+            fabric_reconciler: None,
             network_controller: o3k_network::NetworkControllerLease {
                 controller_id: "test-controller".to_owned(),
                 controller_epoch: "test-epoch".to_owned(),
@@ -1907,7 +2038,10 @@ mod tests {
             idempotency_key: "test".to_owned(),
         };
         let (attachments, _) = resolver
-            .resolve_network(&request, "compute-1", "epoch-1")
+            .resolve_network(
+                &request,
+                &compute_snapshot("compute-1", "compute-1", "epoch-1"),
+            )
             .await?;
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].port_id, port.id.to_string());
@@ -1942,6 +2076,7 @@ mod tests {
             status: "ACTIVE".to_owned(),
             binding_host: None,
             binding_state: None,
+            binding_generation: 0,
         };
         store.insert_port(&unresolved_port).await?;
         let unresolved = o3k_provider::CreateInstanceRequest {
@@ -1963,7 +2098,10 @@ mod tests {
             idempotency_key: "test".to_owned(),
         };
         let failed = resolver
-            .resolve_network(&unresolved, "compute-1", "epoch-1")
+            .resolve_network(
+                &unresolved,
+                &compute_snapshot("compute-1", "compute-1", "epoch-1"),
+            )
             .await;
         assert!(failed.is_err());
         let after = store
@@ -1972,6 +2110,241 @@ mod tests {
             .ok_or("legacy projection disappeared")?;
         assert_eq!(after.binding_host, None);
         assert_eq!(after.binding_state, None);
+        drop(resolver);
+        drop(network);
+        std::fs::remove_dir_all(&root)?;
+        let _ = std::fs::remove_file(&sqlite_path);
+        let _ = std::fs::remove_file(format!("{}-wal", sqlite_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", sqlite_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn server_attachment_resolution_reconciles_each_fabric_host()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3kd-fabric-attachment-{}", Uuid::now_v7()));
+        let sqlite_path = root.with_extension("sqlite");
+        std::fs::create_dir_all(&root)?;
+        let store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let image = o3k_image::ImageService::open_for_test(
+            root.join("images"),
+            o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
+            store.clone(),
+        )
+        .await?;
+        let config_drive = o3k_config_drive::ConfigDriveStore::open(root.join("config-drive"))?;
+        let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
+        let network =
+            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
+                .await?;
+        let network_record = network
+            .create_network_for_project("project-a", "fabric-a".to_owned())
+            .await?;
+        network
+            .create_subnet_for_project(
+                "project-a",
+                network_record.id,
+                "fabric-a-subnet".to_owned(),
+                "10.91.0.0/24".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+
+        let hosts = [
+            (
+                "host-a",
+                "network-agent-a",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                11_u8,
+            ),
+            (
+                "host-b",
+                "network-agent-b",
+                "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+                12_u8,
+            ),
+            (
+                "host-c",
+                "network-agent-c",
+                "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+                13_u8,
+            ),
+        ];
+        let registry = Arc::new(o3k_compute_agent::NodeRegistry::default());
+        for (host_id, agent_id, public_key, octet) in hosts {
+            network
+                .enroll_fabric_host_transport_identity(
+                    &o3k_store::FabricHostTransportIdentityRecord {
+                        host_id: host_id.to_owned(),
+                        agent_id: agent_id.to_owned(),
+                        public_key: public_key.to_owned(),
+                        underlay_endpoint: format!("192.0.2.{octet}:65001"),
+                        fabric_transport_ip: std::net::Ipv4Addr::new(198, 18, 1, octet),
+                        provider_version: "0.1.5".to_owned(),
+                        fabric_generation: 1,
+                        underlay_mtu: 1500,
+                        fabric_mtu: 1440,
+                        administrative_state: "enabled".to_owned(),
+                    },
+                    None,
+                )
+                .await?;
+            registry
+                .register(&o3k_compute_agent::proto::RegisterRequest {
+                    agent_id: format!("compute-agent-{}", &host_id[5..]),
+                    agent_epoch: "epoch-1".to_owned(),
+                    software_version: "test".to_owned(),
+                    host_label: host_id.to_owned(),
+                    supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+                    capabilities: Some(o3k_compute_agent::proto::Capabilities::default()),
+                })
+                .await?;
+        }
+        let dispatched = RecordingNetworkDispatcher::default();
+        let commands = dispatched.commands.clone();
+        let fabric_reconciler = Arc::new(super::network::FabricRealmReconciler {
+            network: network.clone(),
+            coordination: store.clone(),
+            durable: store.clone(),
+            registry,
+            dispatcher: Arc::new(dispatched),
+            controller: o3k_network::NetworkControllerLease {
+                controller_id: "test-controller".to_owned(),
+                controller_epoch: "epoch-1".to_owned(),
+                fencing_token: 1,
+            },
+            fabric_domain_id: Uuid::from_u128(991),
+            network_external_realm_id: None,
+            public_allocator: None,
+            reconciliation_locks: Arc::new(
+                std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            ),
+        });
+        let resolver = DaemonCreateResolver {
+            store: store.clone(),
+            image,
+            network: network.clone(),
+            config_drive,
+            network_dispatcher: None,
+            fabric_reconciler: Some(fabric_reconciler.clone()),
+            network_controller: o3k_network::NetworkControllerLease {
+                controller_id: "test-controller".to_owned(),
+                controller_epoch: "epoch-1".to_owned(),
+                fencing_token: 1,
+            },
+            network_agent: None,
+            network_external_realm_id: None,
+            public_allocator: None,
+        };
+        let ports = [
+            network
+                .create_port_for_project("project-a", network_record.id, "endpoint-a".to_owned())
+                .await?,
+            network
+                .create_port_for_project("project-a", network_record.id, "endpoint-b".to_owned())
+                .await?,
+            network
+                .create_port_for_project("project-a", network_record.id, "endpoint-c".to_owned())
+                .await?,
+            network
+                .create_port_for_project("project-a", network_record.id, "endpoint-a2".to_owned())
+                .await?,
+        ];
+
+        let placements = [
+            ("compute-agent-a", "host-a"),
+            ("compute-agent-b", "host-b"),
+            ("compute-agent-c", "host-c"),
+            ("compute-agent-a", "host-a"),
+        ];
+        for (index, ((compute_agent_id, host_id), port)) in
+            placements.iter().zip(&ports).enumerate()
+        {
+            let selected = compute_snapshot(compute_agent_id, host_id, "epoch-1");
+            fabric_reconciler
+                .validate_compute_placement(&selected)
+                .await
+                .map_err(|error| format!("placement validation failed: {error}"))?;
+            let request = o3k_provider::CreateInstanceRequest {
+                operation_id: Uuid::from_u128(10_000 + index as u128),
+                o3k_server_id: Uuid::now_v7(),
+                project_id: "project-a".to_owned(),
+                name: format!("server-{compute_agent_id}"),
+                vcpus: 1,
+                memory_mib: 512,
+                flavor_id: String::new(),
+                disk_gib: 1,
+                image_id: None,
+                key_name: None,
+                keypair_id: None,
+                network_ids: vec![port.id.to_string()],
+                placement_provider_id: None,
+                placement_allocation_id: None,
+                config_drive: None,
+                idempotency_key: format!("attach-{compute_agent_id}"),
+            };
+            let (attachments, _) = resolver
+                .resolve_network(&request, &selected)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "resolve index {index} agent {compute_agent_id} host {host_id}: {error:?}"
+                    )
+                })?;
+            assert_eq!(attachments.len(), 1);
+            assert_eq!(attachments[0].port_id, port.id.to_string());
+        }
+
+        {
+            let dispatched = commands.lock().map_err(|_| "commands poisoned")?;
+            assert_eq!(
+                dispatched.len(),
+                9,
+                "each addition reconciles all participants"
+            );
+            for (host_index, (host_id, network_agent_id, _, _)) in hosts.into_iter().enumerate() {
+                let host_commands = dispatched
+                    .iter()
+                    .filter(|command| command.target.agent_id == network_agent_id)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    host_commands.len(),
+                    [4, 3, 2][host_index],
+                    "each newly accepted endpoint updates every current participant"
+                );
+                let latest = host_commands
+                    .iter()
+                    .max_by_key(|command| {
+                        command
+                            .plan
+                            .fabric
+                            .as_ref()
+                            .map(|fabric| fabric.directory_generation)
+                    })
+                    .ok_or("host did not receive a Fabric plan")?;
+                assert_eq!(latest.plan.node_id, host_id);
+                let fabric = latest.plan.fabric.as_ref().ok_or("missing Fabric plan")?;
+                assert_eq!(fabric.local_host, host_id);
+                assert_eq!(fabric.peers.len(), 2);
+                assert_eq!(fabric.directory.entries.len(), 4);
+                assert_eq!(
+                    fabric
+                        .directory
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.selected_host == host_id)
+                        .count(),
+                    if host_id == "host-a" { 2 } else { 1 }
+                );
+            }
+        }
+        for port in &ports {
+            let bound = network.get_port_for_project("project-a", port.id).await?;
+            assert_eq!(bound.binding_state.as_deref(), Some("binding"));
+        }
+
         drop(resolver);
         drop(network);
         std::fs::remove_dir_all(&root)?;
@@ -2005,6 +2378,7 @@ mod tests {
             network: network.clone(),
             config_drive,
             network_dispatcher: None,
+            fabric_reconciler: None,
             network_controller: o3k_network::NetworkControllerLease {
                 controller_id: "test-controller".to_owned(),
                 controller_epoch: "test-epoch".to_owned(),
@@ -2053,7 +2427,10 @@ mod tests {
             idempotency_key: "test-network-agent-target".to_owned(),
         };
         let (attachments, _) = resolver
-            .resolve_network(&request, "compute-agent-1", "compute-epoch-1")
+            .resolve_network(
+                &request,
+                &compute_snapshot("compute-agent-1", "compute-agent-1", "compute-epoch-1"),
+            )
             .await?;
         assert_eq!(attachments[0].port_id, port.id.to_string());
         let bound = network.get_port_for_project("project-a", port.id).await?;
@@ -2125,6 +2502,7 @@ mod tests {
                 agent_id: "network-agent".to_owned(),
                 agent_epoch: "agent-epoch".to_owned(),
             }),
+            fabric_reconciler: None,
             public_allocator: Some(Arc::new(public_allocator)),
             unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
@@ -2204,6 +2582,7 @@ mod tests {
             },
             network_agent: None,
             network_external_realm_id: None,
+            fabric_reconciler: None,
             public_allocator: None,
             unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
         };

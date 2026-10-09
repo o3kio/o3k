@@ -18,8 +18,13 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from collections import defaultdict
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from rust_source_scope import classify_rust_lines, is_dedicated_test_file
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -147,7 +152,11 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
             continue
 
         lines = path.read_text(encoding="utf-8").splitlines()
-        source = "\n".join(lines)
+        test_lines = classify_rust_lines(
+            lines, dedicated_test=is_dedicated_test_file(rel)
+        )
+        production_lines = ["" if is_test else line for line, is_test in zip(lines, test_lines)]
+        source = "\n".join(production_lines)
 
         for import_pattern in (SQL_IMPORT_PATTERN, SQL_NESTED_IMPORT_PATTERN):
             for match in import_pattern.finditer(source):
@@ -160,7 +169,7 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
                     "or upgrade boundary."
                 )
 
-        for i, line in enumerate(lines, 1):
+        for i, line in enumerate(production_lines, 1):
             for pat in SQL_PATTERNS:
                 if re.search(pat, line):
                     stripped = line.strip()
@@ -275,7 +284,11 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
             continue
 
         lines = path.read_text(encoding="utf-8").splitlines()
-        source = "\n".join(lines)
+        test_lines = classify_rust_lines(
+            lines, dedicated_test=is_dedicated_test_file(rel)
+        )
+        production_lines = ["" if is_test else line for line, is_test in zip(lines, test_lines)]
+        source = "\n".join(production_lines)
         command_aliases = _host_command_aliases(source)
 
         for pattern, name in HOST_IMPORT_PATTERNS:
@@ -290,7 +303,7 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
                     "  Host execution belongs in an explicit execution adapter."
                 )
 
-        for i, line in enumerate(lines, 1):
+        for i, line in enumerate(production_lines, 1):
             stripped = line.strip()
             if not stripped.startswith("//"):
                 for alias in command_aliases - {"Command"}:

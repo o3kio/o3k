@@ -1,0 +1,5 @@
+source-before-commit=a4e3a6167840944a2e432c1fcaedc3bff2c015c2
+branch=fabric-v3-runtime
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo 1.97.1 (c980f4866 2026-06-30)
+psql (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
