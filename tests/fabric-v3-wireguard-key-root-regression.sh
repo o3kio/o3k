@@ -28,6 +28,11 @@ assert re.search(r'provider_key_dir="\$fabric_root/fabric-provider"', installer)
 assert re.search(r'O3K_NETWORK_FABRIC_ROOT="\$fabric_root"', installer)
 assert re.search(r'private_key="\$provider_key_dir/wireguard-private\.key"', installer)
 assert re.search(r'public_key="\$provider_key_dir/wireguard-public\.key"', installer)
+octet_pattern = re.search(r'\$octet" =~ \^\(([^)]*)\)\$', installer)
+assert octet_pattern, 'installer management octet guard is missing'
+octet_re = re.compile(f'(?:{octet_pattern.group(1)})')
+assert all(octet_re.fullmatch(str(value)) for value in (201, 208, 219, 229, 239))
+assert not any(octet_re.fullmatch(str(value)) for value in (200, 240))
 assert 'network/fabric/fabric-provider/wireguard-public.key' in campaign
 assert 'network/fabric-provider/wireguard-public.key' not in campaign
 assert 'wireguard_identity_check' in capture
