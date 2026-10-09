@@ -27,6 +27,7 @@ Related normative sources:
 - [SPEC-0029](SPEC-0029-addressrealm-encapsulated-edge-fabric-v2.md) (superseded)
 - [SPEC-0033](SPEC-0033-canonical-network-addressrealm-lifecycle-v1.md)
 - [execution-boundary contract](../../contracts/execution-boundaries.md)
+- [real-host acceptance evidence contract](../../contracts/real-host-acceptance-evidence.md)
 - Shared implementation authority: [o3kio/fabric](https://github.com/o3kio/fabric) —
   provider contract
   [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/main/contracts/fabric-provider-v1.md)
@@ -251,24 +252,6 @@ Requirements:
 - removal of the last realm endpoint from a host must withdraw that host's HER
   entries on all peers and remove learned state for the realm.
 
-### Departing-host provider withdrawal
-
-When the final current endpoint of a realm leaves a host, the host must receive
-a Realm `Remove` operation. Removal is complete only after:
-
-- remaining participants have withdrawn the departing host from HER;
-- the departing host has removed its local Realm realization, including its
-  endpoint TAPs, endpoint policy state, and Realm-scoped VXLAN attachment;
-- the provider has read back and observed the owned live objects absent; and
-- durable provider ownership no longer claims the removed endpoint or Realm.
-
-A control-plane directory update or a successful Remove mutation call alone is
-not provider-absence proof. Providers retain enough ownership state to resume a
-partial removal safely, and execution remains nonterminal until a read-only
-absence observation succeeds. If the host still has another current endpoint
-in the Realm, only the removed endpoint's state is withdrawn and the host stays
-a participant.
-
 ## Egress and ingress semantics
 
 ### Egress
@@ -415,6 +398,24 @@ Before real-host promotion, portable/provider tests must cover:
 
 ## Real functional gate
 
+### Guest-control isolation
+
+The real functional gate MUST NOT depend on guest services carried by the
+cross-host tenant dataplane in order to issue the packet operation being tested.
+
+The harness MUST discover and preflight the available guest-control mechanism
+before entering dataplane predicates.
+
+An interactive serial console MUST NOT be assumed solely because a serial
+device exists; file-backed serial evidence is read-only for acceptance purposes.
+
+For the reference nested profile, a deterministic acceptance guest may expose
+SSH over its host-local IPv6 link-local address. Such control traffic must
+remain local to the compute host and must not traverse VXLAN/WireGuard.
+
+Failure of the guest-control mechanism is HARNESS_GAP, never evidence of a
+Fabric dataplane defect.
+
 Use at least three independent KVM/libvirt compute hosts unless a later accepted
 SPEC strengthens the requirement.
 
@@ -437,7 +438,11 @@ Prove:
 3. B1 ARPs for B2 and receives B2's actual canonical MAC;
 4. A and B traffic never cross despite identical inner IPs;
 5. DHCP discovery broadcast from A1 is answered across hosts by the realm-A
-   DHCP authority;
+   DHCP authority, which is the sole authority for that AddressRealm and has
+   current canonical bindings for local and remote endpoints; prove DISCOVER,
+   OFFER, REQUEST, ACK, canonical IP/MAC binding, tenant MTU option, and no
+   competing offer. Retain the narrowly scoped DHCP anti-spoof return exception
+   and the final fail-closed anti-spoof behavior;
 6. unknown-unicast and broadcast frames are delivered to every host hosting
    realm endpoints and to no others;
 7. an unattached/stale VNI delivers nothing;
@@ -448,7 +453,3 @@ Prove:
 10. MTU boundary: near-boundary packet succeeds, oversize behavior is explicit;
 11. restart/reconcile, drain, and cleanup leave zero leaked netns/bridge/veth/
     VXLAN/FDB/WireGuard/nft state across all hosts.
-12. final endpoint departure from a host completes only after the departing
-    host's Realm realization and durable endpoint ownership are absent and
-    that absence has been observed by the provider; Remove mutation success
-    alone is insufficient.
