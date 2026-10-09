@@ -18,30 +18,43 @@ REQUIRED_AUTOMATED = (
 
 
 def evaluate(record: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        raise ValueError("status record must be an object")
     evidence = record.get("evidence")
     authorizations = record.get("authorized_deferrals")
     if not isinstance(evidence, dict) or not isinstance(authorizations, dict):
         raise ValueError("evidence and authorized_deferrals must be objects")
 
     for name, state in evidence.items():
-        if state not in STATES:
+        if not isinstance(state, str) or state not in STATES:
             raise ValueError(f"{name}: unsupported state {state!r}")
-        if state == "DEFERRED_BY_POLICY" and not authorizations.get(name):
-            raise ValueError(f"{name}: deferral lacks explicit authorization")
+        if state == "DEFERRED_BY_POLICY":
+            authorization = authorizations.get(name)
+            if not isinstance(authorization, str) or not authorization.strip():
+                raise ValueError(f"{name}: deferral lacks explicit authorization")
 
     missing = [name for name in REQUIRED_AUTOMATED if evidence.get(name) != "PASS"]
     physical = evidence.get("physical_three_host_gate_b", "NOT_RUN")
     nested = evidence.get("real_host_nested_microgate", "NOT_RUN")
 
-    if physical not in STATES or nested not in STATES:
+    if (
+        not isinstance(physical, str)
+        or physical not in STATES
+        or not isinstance(nested, str)
+        or nested not in STATES
+    ):
         raise ValueError("physical evidence has an unsupported state")
+
+    physical_validation_blocked = any(
+        state in {"FAIL", "NOT_RUN"} for state in (physical, nested)
+    )
 
     return {
         "automated_product_validation": "PASS" if not missing else "FAIL",
         "missing_automated_passes": missing,
         "real_host_nested_microgate": nested,
         "physical_three_host_gate_b": physical,
-        "merge_blocked_by_physical_validation": physical in {"FAIL", "NOT_RUN"},
+        "merge_blocked_by_physical_validation": physical_validation_blocked,
         "final_physical_certification_claimed": False,
     }
 
@@ -61,7 +74,12 @@ def main() -> int:
     except (OSError, json.JSONDecodeError, ValueError) as error:
         parser.error(str(error))
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0 if result["automated_product_validation"] == "PASS" else 1
+    return (
+        0
+        if result["automated_product_validation"] == "PASS"
+        and not result["merge_blocked_by_physical_validation"]
+        else 1
+    )
 
 
 if __name__ == "__main__":

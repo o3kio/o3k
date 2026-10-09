@@ -29,7 +29,11 @@ this policy update, and no libvirt network or host networking was changed.
 The authorized deferral means lack of physical evidence does not block
 automated product review or evaluation of PR #1057. It does not turn the
 physical gate green, satisfy Gate B, or authorize a physical-certification
-claim. PR #1058 may carry the harness changes without a real-host pass.
+claim. The nested microgate and physical Gate B are evaluated independently:
+either `FAIL` or `NOT_RUN` blocks review; an explicitly authorized
+`DEFERRED_BY_POLICY` state is non-blocking but never satisfies a physical
+certification predicate. PR #1058 may carry the harness changes without a
+real-host pass.
 
 The management-address preflight attempts remain historical
 `ENVIRONMENT_GAP` evidence. They are not product failures and are not
