@@ -31,6 +31,7 @@ mod persistence;
 
 mod anti_spoof;
 mod attachment;
+pub(crate) mod dhcp_execution;
 mod fabric;
 mod policy;
 mod public_;

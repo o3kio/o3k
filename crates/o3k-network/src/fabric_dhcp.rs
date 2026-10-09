@@ -3,6 +3,9 @@
 //! This slice manages dnsmasq plus the authority's scoped gateway address.
 //! Fabric remains the sole authority for the Realm bridge, TAPs, VXLAN, and HER.
 
+use crate::linux_fabric::dhcp_execution::{
+    DhcpExecutionError, DhcpNetworkExecutor, GatewayAddressAction,
+};
 use o3k_dhcp::{Binding, DhcpConfig, DhcpError, DhcpService, DnsmasqSupervisor};
 use o3k_domain::NamespacedRoutedFabricPlan;
 use serde::{Deserialize, Serialize};
@@ -11,7 +14,6 @@ use std::{
     fs, io,
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    process::Command,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -110,23 +112,6 @@ impl GatewayAddressOwnership {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct LinkAddressObservation {
-    ifname: String,
-    addr_info: Vec<AddressInfoObservation>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinkIdentityObservation {
-    ifname: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AddressInfoObservation {
-    local: Ipv4Addr,
-    prefixlen: u8,
-}
-
 impl Ownership {
     fn from_plan(plan: &NamespacedRoutedFabricPlan, authority: &str, enabled: bool) -> Self {
         Self {
@@ -160,7 +145,7 @@ struct RealmRuntime {
     service: DhcpService,
     supervisor: Option<DnsmasqSupervisor>,
     ownership: Option<Ownership>,
-    ip_binary: PathBuf,
+    network: DhcpNetworkExecutor,
     gateway_address: Option<GatewayAddressOwnership>,
 }
 
@@ -190,7 +175,7 @@ impl RealmRuntime {
             service,
             supervisor,
             ownership,
-            ip_binary: ip_binary.to_owned(),
+            network: DhcpNetworkExecutor::new(ip_binary),
             gateway_address,
         })
     }
@@ -210,59 +195,27 @@ impl RealmRuntime {
     }
 
     fn observe_ipv4(&self, interface: &str) -> Result<Vec<(Ipv4Addr, u8)>, FabricDhcpError> {
-        // `ip -j -4 addr show dev <link>` emits `[]` for an existing link
-        // that has no IPv4 address. Verify the link separately so that this
-        // valid no-address state is distinguishable from a missing bridge.
-        let link_output = Command::new(&self.ip_binary)
-            .args(["-j", "link", "show", "dev", interface])
-            .output()
-            .map_err(|_| FabricDhcpError::BridgeAddressCommand)?;
-        if !link_output.status.success() {
-            return Err(FabricDhcpError::BridgeAddressCommand);
-        }
-        let links: Vec<LinkIdentityObservation> = serde_json::from_slice(&link_output.stdout)
-            .map_err(|_| FabricDhcpError::BridgeAddressObservation)?;
-        if links.len() != 1 || links[0].ifname != interface {
-            return Err(FabricDhcpError::BridgeAddressObservation);
-        }
-
-        let output = Command::new(&self.ip_binary)
-            .args(["-j", "-4", "addr", "show", "dev", interface])
-            .output()
-            .map_err(|_| FabricDhcpError::BridgeAddressCommand)?;
-        if !output.status.success() {
-            return Err(FabricDhcpError::BridgeAddressCommand);
-        }
-        let links: Vec<LinkAddressObservation> = serde_json::from_slice(&output.stdout)
-            .map_err(|_| FabricDhcpError::BridgeAddressObservation)?;
-        if links.is_empty() {
-            return Ok(Vec::new());
-        }
-        if links.len() != 1 || links[0].ifname != interface {
-            return Err(FabricDhcpError::BridgeAddressObservation);
-        }
-        Ok(links[0]
-            .addr_info
-            .iter()
-            .map(|address| (address.local, address.prefixlen))
-            .collect())
+        self.network
+            .observe_ipv4(interface)
+            .map_err(|error| match error {
+                DhcpExecutionError::Command => FabricDhcpError::BridgeAddressCommand,
+                DhcpExecutionError::Observation => FabricDhcpError::BridgeAddressObservation,
+            })
     }
 
     fn mutate_gateway_address(
         &self,
-        verb: &str,
+        action: GatewayAddressAction,
         ownership: &GatewayAddressOwnership,
     ) -> Result<(), FabricDhcpError> {
-        let address = format!("{}/{}", ownership.address, ownership.prefix_len);
-        let output = Command::new(&self.ip_binary)
-            .args(["addr", verb, &address, "dev", &ownership.interface])
-            .output()
-            .map_err(|_| FabricDhcpError::BridgeAddressCommand)?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(FabricDhcpError::BridgeAddressCommand)
-        }
+        self.network
+            .mutate_gateway_address(
+                action,
+                &ownership.interface,
+                ownership.address,
+                ownership.prefix_len,
+            )
+            .map_err(|_| FabricDhcpError::BridgeAddressCommand)
     }
 
     fn ensure_gateway_address(
@@ -312,7 +265,7 @@ impl RealmRuntime {
         let mut pending = desired.clone();
         pending.pending = true;
         self.persist_gateway_address(pending)?;
-        self.mutate_gateway_address("add", &desired)?;
+        self.mutate_gateway_address(GatewayAddressAction::Add, &desired)?;
         if self.observe_ipv4(&desired.interface)? != [(desired.address, desired.prefix_len)] {
             return Err(FabricDhcpError::ForeignBridgeAddress);
         }
@@ -327,7 +280,7 @@ impl RealmRuntime {
         };
         let observed = self.observe_ipv4(&ownership.interface)?;
         if observed == [(ownership.address, ownership.prefix_len)] {
-            self.mutate_gateway_address("del", &ownership)?;
+            self.mutate_gateway_address(GatewayAddressAction::Delete, &ownership)?;
             if self
                 .observe_ipv4(&ownership.interface)?
                 .contains(&(ownership.address, ownership.prefix_len))
