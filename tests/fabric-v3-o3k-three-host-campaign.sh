@@ -148,7 +148,7 @@ if [[ -z "${O3K_FABRIC_V3_CONTROL_PORT:-}" ]]; then
 fi
 
 [[ ! -e "$EVIDENCE" && ! -L "$EVIDENCE" ]] || fail "evidence path already exists: $EVIDENCE" "HARNESS_GAP"
-mkdir -p "$EVIDENCE"/{environment,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown,topology/{plans,ownership,fdb,wireguard,links,nft-before,nft-after},a,b,dhcp}
+mkdir -p "$EVIDENCE"/{environment,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown,topology/{plans,ownership,fdb,wireguard,links,nft-before,nft-after},a,b,dhcp,departure-micro}
 chmod 0700 "$EVIDENCE"
 [[ ! -e "$EVIDENCE/.o3k-fabric-v3-owned" ]] || fail "evidence path collision"
 printf 'o3k-fabric-v3-campaign-v1\nrun=%s\nprefix=%s\n' "$RUN_ID" "$PREFIX" >"$EVIDENCE/.o3k-fabric-v3-owned"
@@ -1324,9 +1324,9 @@ guest_failure_class() {
 
 if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
   guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" departure-micro/a-to-b-before-c-delete.txt \
-    || fail "micro-gate baseline A->B ICMP failed" "DATAPLANE_DEFECT"
+    || fail "micro-gate baseline A->B ICMP failed" "$(guest_failure_class DATAPLANE_DEFECT)"
   guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[c]}" departure-micro/a-to-c-before-c-delete.txt \
-    || fail "micro-gate baseline A->C ICMP failed" "DATAPLANE_DEFECT"
+    || fail "micro-gate baseline A->C ICMP failed" "$(guest_failure_class DATAPLANE_DEFECT)"
 fi
 
 if [[ "$CAMPAIGN_MODE" == full ]]; then

@@ -92,6 +92,8 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('CAMPAIGN_MODE="${1:-full}"', DRIVER)
         self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" departure-micro/a-to-b-before-c-delete.txt', DRIVER)
         self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[c]}" departure-micro/a-to-c-before-c-delete.txt', DRIVER)
+        self.assertIn('dhcp,departure-micro}', DRIVER)
+        self.assertIn('$(guest_failure_class DATAPLANE_DEFECT)', DRIVER)
         self.assertIn('pre-delete-work-history.json', DRIVER)
         full_mode = DRIVER.index('if [[ "$CAMPAIGN_MODE" == full ]]; then')
         remove_c = DRIVER.index('# Remove C only through the supported API')
