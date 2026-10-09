@@ -1410,10 +1410,9 @@ async fn create_orphaned_endpoint(
 /// path could neither unbind nor release it). Returns the server id and the
 /// still-present, still-bound endpoint id.
 ///
-/// Fail the unbind is what keeps the port `bound`; because the unbind failed,
-/// the release is never attempted, so the delete mutation itself converges
-/// terminal (the failed unbind is a best-effort projection, not a mutation
-/// failure).
+/// Failing the unbind keeps the port `bound`; because the unbind failed, release
+/// is never attempted. The server delete remains durably terminal, while the
+/// request reports that network cleanup is incomplete.
 async fn create_bound_orphan(
     harness: &Harness,
     name: &str,
@@ -1444,8 +1443,8 @@ async fn create_bound_orphan(
 
     let (status, body) = harness.native_delete(&id).await;
     assert!(
-        status.is_success(),
-        "a failed unbind must not fail the delete mutation: {status} {body}"
+        status.is_server_error(),
+        "a failed unbind must be returned to the delete caller: {status} {body}"
     );
     let bound = harness
         .network

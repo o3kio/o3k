@@ -65,6 +65,94 @@ struct RealmPlanAttempt<'a> {
     historical: Option<&'a o3k_store::NetworkPlanWorkRecord>,
 }
 
+struct LatestRealmHostWork {
+    record: o3k_store::NetworkPlanWorkRecord,
+    command: o3k_network::NetworkPlanCommand,
+}
+
+/// Durable plan history is the cleanup authority when a host disappears from
+/// the current canonical endpoint directory. Realm generation, rather than
+/// history listing order, selects the latest ownership-relevant host command
+/// (including Apply/Remove/Apply).
+fn latest_realm_host_work(
+    history: Vec<o3k_store::NetworkPlanWorkRecord>,
+    realm_id: Uuid,
+) -> Result<BTreeMap<String, LatestRealmHostWork>, String> {
+    let mut latest: BTreeMap<String, (u64, LatestRealmHostWork)> = BTreeMap::new();
+    for record in history {
+        let command: o3k_network::NetworkPlanCommand = serde_json::from_slice(&record.snapshot)
+            .map_err(|_| format!("durable network plan {} is corrupt", record.command_id))?;
+        let Some(fabric) = command.plan.fabric.as_ref() else {
+            continue;
+        };
+        if fabric.realm_id != realm_id {
+            continue;
+        }
+        let command_id = Uuid::parse_str(&record.command_id).map_err(|_| {
+            format!(
+                "durable Fabric command {} has an invalid ID",
+                record.command_id
+            )
+        })?;
+        if command.command_id != command_id
+            || command.operation_id != record.operation_id
+            || command.idempotency_key != record.idempotency_key
+            || command.target.agent_id != record.target_agent_id
+            || command.plan.node_id != record.target_host_id
+            || fabric.local_host != record.target_host_id
+        {
+            return Err(format!(
+                "durable Fabric plan {} has conflicting cleanup ownership",
+                record.command_id
+            ));
+        }
+        let generation = command
+            .plan
+            .resource_generations
+            .get(&realm_id)
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "durable Fabric work {} lacks Realm generation",
+                    record.command_id
+                )
+            })?;
+        let host_id = record.target_host_id.clone();
+        match latest.get(&host_id) {
+            Some((current_generation, _current)) if *current_generation > generation => {}
+            Some((current_generation, current)) if *current_generation == generation => {
+                if current.record.command_id != record.command_id
+                    && current.command.action != command.action
+                {
+                    return Err(format!(
+                        "durable Fabric host {host_id} has conflicting Apply/Remove history at Realm generation {generation}"
+                    ));
+                }
+                if current.record.command_id != record.command_id {
+                    return Err(format!(
+                        "durable Fabric host {host_id} has ambiguous same-generation command history at Realm generation {generation}"
+                    ));
+                }
+            }
+            _ => {
+                latest.insert(
+                    host_id,
+                    (generation, LatestRealmHostWork { record, command }),
+                );
+            }
+        }
+    }
+    Ok(latest
+        .into_iter()
+        .map(|(host, (_, latest))| (host, latest))
+        .collect())
+}
+
+fn realm_host_may_still_own(work: &LatestRealmHostWork) -> bool {
+    !(work.command.action == o3k_network::NetworkPlanAction::Remove
+        && work.record.state == o3k_store::NetworkPlanWorkState::Succeeded)
+}
+
 fn recovery_successor_parent(record: &o3k_store::NetworkPlanWorkRecord) -> Option<&str> {
     record
         .idempotency_key
@@ -827,33 +915,7 @@ impl FabricRealmReconciler {
                 .list_network_plan_work_history()
                 .await
                 .map_err(|error| format!("cannot load durable Fabric cleanup history: {error}"))?;
-            let mut by_host = BTreeMap::<String, Vec<o3k_store::NetworkPlanWorkRecord>>::new();
-            for record in history {
-                let command: o3k_network::NetworkPlanCommand =
-                    serde_json::from_slice(&record.snapshot).map_err(|_| {
-                        format!("durable network plan {} is corrupt", record.command_id)
-                    })?;
-                let Some(fabric) = command.plan.fabric.as_ref() else {
-                    continue;
-                };
-                if fabric.realm_id != realm_id {
-                    continue;
-                }
-                if command.command_id.to_string() != record.command_id
-                    || command.plan.node_id != record.target_host_id
-                    || command.target.agent_id != record.target_agent_id
-                    || fabric.local_host != record.target_host_id
-                {
-                    return Err(format!(
-                        "durable Fabric plan {} has conflicting cleanup ownership",
-                        record.command_id
-                    ));
-                }
-                by_host
-                    .entry(record.target_host_id.clone())
-                    .or_default()
-                    .push(record);
-            }
+            let by_host = latest_realm_host_work(history, realm_id)?;
 
             // A bound v3 Realm must have durable host plan history. With no
             // binding there is no current VNI to release, but any retained
@@ -872,21 +934,18 @@ impl FabricRealmReconciler {
                 .list_fabric_host_transport_identities()
                 .await
                 .map_err(|error| error.to_string())?;
-            for (host_id, records) in by_host {
+            for (host_id, latest) in by_host {
+                if !realm_host_may_still_own(&latest) {
+                    continue;
+                }
                 lease.assert_current().await?;
                 // Prefer an already-issued removal command; otherwise use a
                 // durable Apply snapshot as the exact ownership identity from
                 // which to derive a new idempotent Remove command.
-                // Store history is ordered by creation time and command ID.
-                // The latest plan is the only one that can describe current
-                // provider state: an older successful Remove may have been
-                // followed by a later Apply on this host.
-                let selected = records
-                    .last()
-                    .ok_or_else(|| "empty durable Realm plan history".to_owned())?;
-                let mut historical: o3k_network::NetworkPlanCommand =
-                    serde_json::from_slice(&selected.snapshot)
-                        .map_err(|_| "durable cleanup plan is corrupt")?;
+                // Realm generation establishes host-plan order: an older
+                // successful Remove may have been followed by a later Apply.
+                let selected = latest.record;
+                let mut historical = latest.command;
                 let fabric = historical
                     .plan
                     .fabric
@@ -1106,7 +1165,7 @@ impl FabricRealmReconciler {
         network_id: Uuid,
         _operation_id: Uuid,
         deadline_unix_ms: u64,
-        departing_host_id: Option<&str>,
+        _departing_host_id: Option<&str>,
     ) -> Result<(), String> {
         let realms = self
             .network
@@ -1175,14 +1234,6 @@ impl FabricRealmReconciler {
                     );
                 }
             }
-            let departing_identity = departing_host_id
-                .map(|host_id| {
-                    transport_by_host
-                        .get(host_id)
-                        .cloned()
-                        .ok_or_else(|| "departing endpoint host lacks Fabric enrollment".to_owned())
-                })
-                .transpose()?;
             let mut locations = Vec::new();
             let mut participants_by_host = BTreeMap::new();
             let mut selected_ports = BTreeMap::new();
@@ -1329,12 +1380,6 @@ impl FabricRealmReconciler {
                     participant.fabric_mtu
                 ));
             }
-            if let Some(departing) = &departing_identity {
-                semantic_identity.push_str(&format!(
-                    "|departing:{}:{}",
-                    departing.host_id, departing.fabric_generation
-                ));
-            }
             for policy in &all_policies {
                 semantic_identity.push_str(&format!(
                     "|policy:{}:{}:{:?}:{:?}:{:?}:{:?}:{:?}",
@@ -1351,124 +1396,73 @@ impl FabricRealmReconciler {
                 semantic_identity.push_str(&format!("|policy-default:{endpoint_id}:{defaults:?}"));
             }
             let operation_id = Uuid::new_v5(&realm.id, semantic_identity.as_bytes());
-            if participants.is_empty() {
-                let Some(identity_record) = departing_identity.as_ref() else {
-                    return Err("Fabric realm has no current participating endpoint".to_owned());
-                };
-                let identity = fabric_identity(identity_record);
-                let directory = o3k_domain::RealmEndpointDirectory::build(
-                    &realm,
-                    Vec::new(),
-                    &[],
-                    realm_record.generation,
-                )
-                .map_err(|error| error.to_string())?;
-                let tenant_mtu = identity.fabric_mtu.checked_sub(50).ok_or_else(|| {
-                    "departing Fabric host MTU is below the tenant minimum".to_owned()
+            let history = self
+                .durable
+                .list_network_plan_work_history()
+                .await
+                .map_err(|error| format!("cannot load durable Realm host history: {error}"))?;
+            let latest_by_host = latest_realm_host_work(history, realm.id)?;
+            let retiring_hosts = latest_by_host
+                .iter()
+                .filter(|(host_id, work)| {
+                    !participants_by_host.contains_key(*host_id) && realm_host_may_still_own(work)
+                })
+                .map(|(host_id, work)| (host_id.clone(), work))
+                .collect::<Vec<_>>();
+            let directory = o3k_domain::RealmEndpointDirectory::build(
+                &realm,
+                locations.clone(),
+                &[],
+                realm_record.generation,
+            )
+            .map_err(|error| error.to_string())?;
+            let realm_generations = BTreeMap::from([(realm.id, realm_record.generation)]);
+
+            // Durable history, rather than an unbind callback argument, owns
+            // retiring-host discovery. Dispatch all retirements first so a
+            // leaving DHCP authority is observed absent before survivors can
+            // select a replacement.
+            for (host_id, latest) in retiring_hosts {
+                _realm_lease.assert_current().await?;
+                let historical_fabric = latest
+                    .command
+                    .plan
+                    .fabric
+                    .as_ref()
+                    .ok_or_else(|| "historical host plan lacks Fabric identity".to_owned())?;
+                let identity_record = transport_by_host.get(&host_id).ok_or_else(|| {
+                    format!("retiring host {host_id} has no current Fabric enrollment")
                 })?;
+                if identity_record.fabric_generation != historical_fabric.local_fabric_generation {
+                    return Err(format!(
+                        "retiring host {host_id} has a stale Fabric generation"
+                    ));
+                }
+                if historical_fabric.encapsulation.fabric_domain_id != self.fabric_domain_id
+                    || historical_fabric.encapsulation.realm_id != realm.id
+                    || historical_fabric.encapsulation.provider_segment_id
+                        != binding.provider_segment_id
+                    || historical_fabric.encapsulation.binding_generation
+                        != binding.binding_generation
+                {
+                    return Err(format!(
+                        "retiring host {host_id} history conflicts with the current Realm VNI binding"
+                    ));
+                }
+                let identity = fabric_identity(identity_record);
+                let tenant_mtu = identity.fabric_mtu.checked_sub(50).ok_or_else(|| {
+                    "retiring Fabric host MTU is below the tenant minimum".to_owned()
+                })?;
+                let mut remove_participants = participants.clone();
+                remove_participants.push(identity.clone());
+                remove_participants.sort_by(|left, right| left.host_id.cmp(&right.host_id));
                 let fabric = directory
                     .compile_fabric_plan(
                         &identity,
-                        std::slice::from_ref(&identity),
+                        &remove_participants,
                         tenant_mtu,
                         &binding,
                     )
-                    .map_err(|error| error.to_string())?;
-                let plan = o3k_network::NodeNetworkPlan {
-                    schema_version: o3k_network::NODE_NETWORK_PLAN_SCHEMA_VERSION,
-                    plan_id: Uuid::new_v5(
-                        &operation_id,
-                        format!("fabric-realm-remove:{}:{}", realm.id, identity.host_id).as_bytes(),
-                    ),
-                    node_id: identity.host_id.clone(),
-                    operation_id,
-                    deadline_unix_ms,
-                    resource_generations: BTreeMap::from([(realm.id, realm_record.generation)]),
-                    intents: Vec::new(),
-                    fabric: None,
-                    gateway: None,
-                    fingerprint_sha256: String::new(),
-                }
-                .with_fabric(fabric)
-                .map_err(|error| error.to_string())?;
-                let target = self
-                    .dispatcher
-                    .target_for_host(&identity.host_id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "departing host has no network-agent target".to_owned())?;
-                return self
-                    .dispatch_realm_plan(
-                        (&target, &identity.host_id),
-                        plan,
-                        o3k_network::NetworkPlanAction::Remove,
-                        RealmPlanAttempt {
-                            operation_id,
-                            deadline_unix_ms,
-                            lease: &_realm_lease,
-                            historical: not_found.iter().find(|record| {
-                                record.target_host_id == identity.host_id
-                                    && record.target_agent_id == target.agent_id
-                            }),
-                        },
-                    )
-                    .await;
-            }
-            let realm_subnet = realm_subnet
-                .ok_or_else(|| "active Fabric endpoints have no subnet DHCP settings".to_owned())?;
-            let plan_set = o3k_network::compile_fabric_realm_plans(
-                &realm,
-                locations,
-                &participants,
-                &binding,
-                realm_record.generation,
-                operation_id,
-                deadline_unix_ms,
-            )
-            .map_err(|error| error.to_string())?;
-            let realm_generations = plan_set
-                .plans
-                .values()
-                .next()
-                .map(|plan| plan.resource_generations.clone())
-                .unwrap_or_else(|| BTreeMap::from([(realm.id, realm_record.generation)]));
-            let external_realm = if let Some(external_network_id) = self.network_external_realm_id {
-                let external_realms = self
-                    .network
-                    .list_canonical_realms_for_project(project_id, external_network_id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .filter(|realm| realm.state == "active")
-                    .collect::<Vec<_>>();
-                match external_realms.as_slice() {
-                    [realm] => Some(realm.id),
-                    _ => {
-                        return Err(
-                            "configured external AddressRealm is missing or ambiguous".to_owned()
-                        );
-                    }
-                }
-            } else {
-                None
-            };
-            // If a host is leaving the current endpoint directory, withdraw
-            // its old Fabric/DHCP state before any newly selected authority
-            // can start. A failed or unreachable old authority therefore
-            // fences reselection instead of allowing competing dnsmasq.
-            if let Some(identity_record) = departing_identity.as_ref()
-                && !participants_by_host.contains_key(&identity_record.host_id)
-            {
-                _realm_lease.assert_current().await?;
-                let identity = fabric_identity(identity_record);
-                let mut all_identities = participants.clone();
-                all_identities.push(identity.clone());
-                let tenant_mtu = identity.fabric_mtu.checked_sub(50).ok_or_else(|| {
-                    "departing Fabric host MTU is below the tenant minimum".to_owned()
-                })?;
-                let fabric = plan_set
-                    .directory
-                    .compile_fabric_plan(&identity, &all_identities, tenant_mtu, &binding)
                     .map_err(|error| error.to_string())?;
                 let plan = o3k_network::NodeNetworkPlan {
                     schema_version: o3k_network::NODE_NETWORK_PLAN_SCHEMA_VERSION,
@@ -1489,17 +1483,15 @@ impl FabricRealmReconciler {
                 .map_err(|error| error.to_string())?;
                 let target = self
                     .dispatcher
-                    .target_for_host(&identity.host_id)
+                    .target_for_host(&host_id)
                     .await
                     .map_err(|error| error.to_string())?
-                    .ok_or_else(|| {
-                        format!(
-                            "departing host {} has no network-agent target",
-                            identity.host_id
-                        )
-                    })?;
+                    .ok_or_else(|| format!("retiring host {host_id} has no network-agent target"))?;
+                if target.agent_id != latest.record.target_agent_id {
+                    return Err(format!("retiring host {host_id} network-agent identity changed"));
+                }
                 self.dispatch_realm_plan(
-                    (&target, &identity.host_id),
+                    (&target, &host_id),
                     plan,
                     o3k_network::NetworkPlanAction::Remove,
                     RealmPlanAttempt {
@@ -1507,14 +1499,51 @@ impl FabricRealmReconciler {
                         deadline_unix_ms,
                         lease: &_realm_lease,
                         historical: not_found.iter().find(|record| {
-                            record.target_host_id == identity.host_id
+                            record.target_host_id == host_id
                                 && record.target_agent_id == target.agent_id
                         }),
                     },
                 )
                 .await?;
             }
-
+            if participants.is_empty() {
+                if latest_by_host.is_empty() {
+                    return Err("Fabric realm has no participants or durable provider history".to_owned());
+                }
+                return Ok(());
+            }
+            let realm_subnet = realm_subnet
+                .ok_or_else(|| "active Fabric endpoints have no subnet DHCP settings".to_owned())?;
+            let plan_set = o3k_network::compile_fabric_realm_plans(
+                &realm,
+                locations,
+                &participants,
+                &binding,
+                realm_record.generation,
+                operation_id,
+                deadline_unix_ms,
+            )
+            .map_err(|error| error.to_string())?;
+            let external_realm = if let Some(external_network_id) = self.network_external_realm_id {
+                let external_realms = self
+                    .network
+                    .list_canonical_realms_for_project(project_id, external_network_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|realm| realm.state == "active")
+                    .collect::<Vec<_>>();
+                match external_realms.as_slice() {
+                    [realm] => Some(realm.id),
+                    _ => {
+                        return Err(
+                            "configured external AddressRealm is missing or ambiguous".to_owned()
+                        );
+                    }
+                }
+            } else {
+                None
+            };
             for (host_id, mut plan) in plan_set.plans {
                 let local_endpoints = plan_set
                     .directory
@@ -2014,7 +2043,7 @@ async fn recover_fabric_state(
                 &realm.project_id,
                 realm.network_id,
                 operation_id,
-                super::unix_time_millis().saturating_add(30_000),
+                crate::composition::unix_time_millis().saturating_add(30_000),
             )
             .await
         {
@@ -3171,6 +3200,10 @@ mod dispatcher_tests {
         }
 
         fn remove(&mut self, plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            self.lifecycle_events
+                .lock()
+                .map_err(|_| "lifecycle event log poisoned".to_owned())?
+                .push(format!("fabric_remove_mutated:{}", plan.node_id));
             self.removes
                 .lock()
                 .map_err(|_| "realizer removal log poisoned".to_owned())?
@@ -3184,11 +3217,18 @@ mod dispatcher_tests {
 
         fn observe_removed(
             &mut self,
-            _plan: &o3k_network::NodeNetworkPlan,
+            plan: &o3k_network::NodeNetworkPlan,
         ) -> Result<bool, Self::Error> {
-            Ok(self
+            let absent = self
                 .removed_is_proven
-                .load(std::sync::atomic::Ordering::SeqCst))
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if absent {
+                self.lifecycle_events
+                    .lock()
+                    .map_err(|_| "lifecycle event log poisoned".to_owned())?
+                    .push(format!("fabric_remove_absent:{}", plan.node_id));
+            }
+            Ok(absent)
         }
     }
 
@@ -3923,6 +3963,16 @@ mod dispatcher_tests {
             assert_eq!(status, StatusCode::OK, "{body}");
         }
 
+        let work_before_c_delete = store
+            .list_network_plan_work_history()
+            .await?
+            .into_iter()
+            .map(|work| work.command_id)
+            .collect::<BTreeSet<_>>();
+        let event_count_before_c_delete = lifecycle_events
+            .lock()
+            .map_err(|_| "lifecycle event log poisoned")?
+            .len();
         let (status, body) = http_json(
             &app,
             Method::DELETE,
@@ -3935,6 +3985,129 @@ mod dispatcher_tests {
             status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT,
             "delete server C: {status} {body}"
         );
+        let c_delete_work_result =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let history = store.list_network_plan_work_history().await?;
+                    let work = history
+                        .into_iter()
+                        .filter(|work| !work_before_c_delete.contains(&work.command_id))
+                        .map(|work| {
+                            let command: o3k_network::NetworkPlanCommand =
+                                serde_json::from_slice(&work.snapshot)?;
+                            Ok::<_, Box<dyn std::error::Error>>((work, command))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if work.iter().any(|(_, command)| {
+                        command.action == o3k_network::NetworkPlanAction::Remove
+                            && command.plan.node_id == "compute-c"
+                            && command
+                                .plan
+                                .fabric
+                                .as_ref()
+                                .is_some_and(|fabric| fabric.realm_id == realm_id)
+                    }) {
+                        return Ok::<_, Box<dyn std::error::Error>>(work);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+            .await;
+        let c_delete_work = match c_delete_work_result {
+            Ok(result) => result?,
+            Err(_) => {
+                let port = network
+                    .get_port_for_project("project-a", Uuid::parse_str(&port_ids[2])?)
+                    .await?;
+                let server = store.get_resource(Uuid::parse_str(&server_ids[2])?).await;
+                let history = store.list_network_plan_work_history().await?;
+                let events = lifecycle_events
+                    .lock()
+                    .map(|events| events.clone())
+                    .unwrap_or_default();
+                return Err(std::io::Error::other(format!(
+                    "server C delete did not create durable C Remove work; port={port:?}, server={server:?}, history_len={}, events={events:?}",
+                    history.len()
+                )).into());
+            }
+        };
+        let retirement_sequence = c_delete_work
+            .iter()
+            .filter(|(_, command)| {
+                command
+                    .plan
+                    .fabric
+                    .as_ref()
+                    .is_some_and(|fabric| fabric.realm_id == realm_id)
+            })
+            .map(|(work, command)| {
+                assert_eq!(
+                    work.state,
+                    o3k_store::NetworkPlanWorkState::Succeeded,
+                    "request-driven Realm transition must wait for observed work success"
+                );
+                (
+                    command.plan.node_id.as_str(),
+                    command.action,
+                    work.target_agent_id.as_str(),
+                    command
+                        .plan
+                        .resource_generations
+                        .get(&realm_id)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let c_remove_index = retirement_sequence
+            .iter()
+            .position(|(host, action, agent, _)| {
+                *host == "compute-c"
+                    && *action == o3k_network::NetworkPlanAction::Remove
+                    && *agent == "network-agent-c"
+            })
+            .ok_or("durable C Remove work missing after server delete")?;
+        let c_remove_generation = retirement_sequence[c_remove_index].3;
+        assert_eq!(
+            retirement_sequence[c_remove_index].2, "network-agent-c",
+            "C Remove must target the durable network agent"
+        );
+        let removal_events = lifecycle_events
+            .lock()
+            .map_err(|_| "lifecycle event log poisoned")?
+            .iter()
+            .skip(event_count_before_c_delete)
+            .cloned()
+            .collect::<Vec<_>>();
+        let c_absent_index = removal_events
+            .iter()
+            .position(|event| event == "fabric_remove_absent:compute-c")
+            .ok_or_else(|| format!("C Remove absence was not observed: {removal_events:?}"))?;
+        for (host, agent) in [
+            ("compute-a", "network-agent-a"),
+            ("compute-b", "network-agent-b"),
+        ] {
+            assert!(
+                retirement_sequence
+                    .iter()
+                    .any(|(candidate, action, target, generation)| {
+                        *candidate == host
+                            && *action == o3k_network::NetworkPlanAction::Apply
+                            && *target == agent
+                            && *generation == c_remove_generation
+                    }),
+                "durable survivor Apply missing for {host}: {retirement_sequence:?}"
+            );
+            let apply_event = format!("fabric_realized:{host}");
+            let apply_event_index = removal_events
+                .iter()
+                .position(|event| event == &apply_event)
+                .ok_or_else(|| format!("{host} Apply execution missing: {removal_events:?}"))?;
+            assert!(
+                c_absent_index < apply_event_index,
+                "C provider absence must be observed before {host} Apply: {removal_events:?}"
+            );
+        }
         let (status, detached_port) = http_json(
             &app,
             Method::GET,
@@ -4365,10 +4538,9 @@ mod dispatcher_tests {
                 .await?;
         }
         let subnet_id = subnet_json["subnet"]["id"].as_str().ok_or("subnet id")?;
-        // A successful REMOVE command is not sufficient evidence to release
-        // the Realm's VNI. Make one provider report that absence is not yet
-        // proven, then let startup recovery retry observation without another
-        // tenant mutation.
+        // Endpoint departure has already removed every local provider owner.
+        // Deleting the empty Realm must observe that durable history and must
+        // not issue duplicate Remove mutations.
         let remove_counts_before_delete: BTreeMap<_, _> = removal_logs
             .iter()
             .map(|(agent, logs)| {
@@ -4378,7 +4550,20 @@ mod dispatcher_tests {
                 ))
             })
             .collect::<Result<_, _>>()?;
-        absence_flags["network-agent-c"].store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            latest_realm_host_work(store.list_network_plan_work_history().await?, realm_id)?
+                .values()
+                .all(|work| !realm_host_may_still_own(work)),
+            "all provider owners must have been observed absent before Realm deletion"
+        );
+        set_realm_delete_failpoint(
+            store.as_ref(),
+            &sqlite_path,
+            realm_id,
+            RealmDeleteFailpoint::Binding,
+            true,
+        )
+        .await?;
         let (status, body) = http_json(
             &app,
             Method::DELETE,
@@ -4390,7 +4575,7 @@ mod dispatcher_tests {
         assert_eq!(
             status,
             StatusCode::CONFLICT,
-            "subnet DELETE must fail closed until provider absence is proven: {body}"
+            "injected pre-binding failure must not report subnet DELETE success: {body}"
         );
         let deleting_realm = network
             .get_canonical_realm_for_project("project-a", realm_id)
@@ -4404,7 +4589,7 @@ mod dispatcher_tests {
                 .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
                 .await?
                 .is_some(),
-            "VNI binding must remain while provider absence is unresolved"
+            "VNI binding must remain when the deletion transaction is interrupted"
         );
         assert_eq!(
             store
@@ -4412,55 +4597,11 @@ mod dispatcher_tests {
                 .await?
                 .len(),
             1,
-            "Realm pools must remain while provider absence is unresolved"
+            "Realm pools must remain when the deletion transaction is interrupted"
         );
-        let deleting_generation = deleting_realm.generation;
-        let (retry_status, retry_body) = http_json(
-            &app,
-            Method::DELETE,
-            &format!("/v2.0/subnets/{subnet_id}"),
-            &token,
-            None,
-        )
-        .await?;
-        assert_eq!(
-            retry_status,
-            StatusCode::CONFLICT,
-            "repeated DELETE must remain pending when absence is still unproven: {retry_body}"
-        );
-        assert_eq!(
-            network
-                .get_canonical_realm_for_project("project-a", realm_id)
-                .await?
-                .generation,
-            deleting_generation,
-            "retry must not reset the deleting generation"
-        );
-        absence_flags["network-agent-c"].store(true, std::sync::atomic::Ordering::SeqCst);
         // Fault after provider absence but before VNI binding removal. The
         // supported DELETE must leave the durable Realm/binding intact and a
         // retry must resume without issuing another provider mutation.
-        set_realm_delete_failpoint(
-            store.as_ref(),
-            &sqlite_path,
-            realm_id,
-            RealmDeleteFailpoint::Binding,
-            true,
-        )
-        .await?;
-        let (binding_failure_status, binding_failure_body) = http_json(
-            &app,
-            Method::DELETE,
-            &format!("/v2.0/subnets/{subnet_id}"),
-            &token,
-            None,
-        )
-        .await?;
-        assert_eq!(
-            binding_failure_status,
-            StatusCode::CONFLICT,
-            "injected pre-binding crash must not return DELETE success: {binding_failure_body}"
-        );
         assert!(
             store
                 .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
@@ -4575,8 +4716,8 @@ mod dispatcher_tests {
         for (agent, logs) in &removal_logs {
             assert_eq!(
                 logs.lock().map_err(|_| "remove log poisoned")?.len(),
-                remove_counts_before_delete[agent] + 1,
-                "provider Remove must run once per host; recovery observes rather than redispatches ({agent}); before={}",
+                remove_counts_before_delete[agent],
+                "Realm teardown must not repeat endpoint departure Remove mutations ({agent}); before={}",
                 remove_counts_before_delete[agent]
             );
         }
@@ -4769,6 +4910,91 @@ mod dispatcher_tests {
                 .expect("Fabric plan"),
         );
         command
+    }
+
+    fn host_work_record(
+        mut command: o3k_network::NetworkPlanCommand,
+        realm_generation: u64,
+        state: o3k_store::NetworkPlanWorkState,
+    ) -> o3k_store::NetworkPlanWorkRecord {
+        command.plan.operation_id = command.operation_id;
+        let realm_id = command
+            .plan
+            .fabric
+            .as_ref()
+            .expect("Fabric history fixture")
+            .realm_id;
+        command
+            .plan
+            .resource_generations
+            .insert(realm_id, realm_generation);
+        command.idempotency_key = format!("history:{}", command.command_id);
+        o3k_store::NetworkPlanWorkRecord {
+            command_id: command.command_id.to_string(),
+            operation_id: command.operation_id,
+            idempotency_key: command.idempotency_key.clone(),
+            target_host_id: command.plan.node_id.clone(),
+            target_agent_id: command.target.agent_id.clone(),
+            target_agent_epoch: command.target.agent_epoch.clone(),
+            controller_id: command.controller.controller_id.clone(),
+            controller_epoch: command.controller.controller_epoch.clone(),
+            fencing_token: command.controller.fencing_token,
+            deadline_unix_ms: command.deadline_unix_ms,
+            fingerprint_sha256: command.plan.fingerprint_sha256.clone(),
+            snapshot: serde_json::to_vec(&command).expect("command fixture serializes"),
+            state,
+            revision: 0,
+            outcome: None,
+        }
+    }
+
+    #[test]
+    fn latest_apply_after_successful_remove_restores_retirement_obligation() {
+        let mut apply_g4 = fabric_command("agent-c", "compute-c");
+        apply_g4.action = o3k_network::NetworkPlanAction::Apply;
+        let mut remove_g5 = fabric_command("agent-c", "compute-c");
+        remove_g5.action = o3k_network::NetworkPlanAction::Remove;
+        let mut apply_g6 = fabric_command("agent-c", "compute-c");
+        apply_g6.action = o3k_network::NetworkPlanAction::Apply;
+        let realm_id = apply_g4
+            .plan
+            .fabric
+            .as_ref()
+            .expect("Fabric fixture")
+            .realm_id;
+
+        let latest = latest_realm_host_work(
+            vec![
+                host_work_record(apply_g4, 4, o3k_store::NetworkPlanWorkState::Succeeded),
+                host_work_record(
+                    remove_g5.clone(),
+                    5,
+                    o3k_store::NetworkPlanWorkState::Succeeded,
+                ),
+                host_work_record(apply_g6, 6, o3k_store::NetworkPlanWorkState::Succeeded),
+            ],
+            realm_id,
+        )
+        .expect("durable host history parses");
+        let c_latest = latest.get("compute-c").expect("host C history");
+        assert_eq!(
+            c_latest.command.action,
+            o3k_network::NetworkPlanAction::Apply
+        );
+        assert!(realm_host_may_still_own(c_latest));
+
+        let removed = latest_realm_host_work(
+            vec![host_work_record(
+                remove_g5,
+                5,
+                o3k_store::NetworkPlanWorkState::Succeeded,
+            )],
+            realm_id,
+        )
+        .expect("Remove history parses");
+        assert!(!realm_host_may_still_own(
+            removed.get("compute-c").expect("host C removal")
+        ));
     }
 
     #[derive(Clone, Default)]
@@ -5166,6 +5392,7 @@ mod dispatcher_tests {
     #[derive(Default)]
     struct RecordingDispatcher {
         commands: Mutex<Vec<o3k_network::NetworkPlanCommand>>,
+        unavailable_hosts: Mutex<BTreeSet<String>>,
         not_found: Mutex<BTreeSet<String>>,
         durable: Mutex<Option<Arc<dyn o3k_store::DurableStore>>>,
         coordination: Mutex<Option<Arc<dyn o3k_store::CoordinationRepository>>>,
@@ -5181,6 +5408,14 @@ mod dispatcher_tests {
             host_id: &str,
         ) -> Result<Option<o3k_network::NetworkAgentIdentity>, o3k_network::NetworkDispatchError>
         {
+            if self
+                .unavailable_hosts
+                .lock()
+                .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?
+                .contains(host_id)
+            {
+                return Ok(None);
+            }
             let suffix = host_id.strip_prefix("compute-").ok_or_else(|| {
                 o3k_network::NetworkDispatchError::Rejected("unknown test host".to_owned())
             })?;
@@ -5560,7 +5795,7 @@ mod dispatcher_tests {
                     "project-a",
                     network_record.id,
                     Uuid::from_u128(991 + index as u128),
-                    u64::MAX,
+                    crate::composition::unix_time_millis().saturating_add(30_000),
                 )
                 .await?;
         }
@@ -5598,23 +5833,253 @@ mod dispatcher_tests {
             }
         }
 
+        // A second endpoint on C keeps C in Realm membership when only the
+        // first endpoint departs. The host-level Remove is required only
+        // after C's final endpoint leaves.
+        let c_second_port = network
+            .create_port_for_project(
+                "project-a",
+                network_record.id,
+                "port-compute-c-second".to_owned(),
+            )
+            .await?;
+        network
+            .record_fabric_binding_intent("project-a", c_second_port.id, "compute-c")
+            .await?;
+        reconciler
+            .reconcile_realm(
+                "project-a",
+                network_record.id,
+                Uuid::from_u128(994),
+                crate::composition::unix_time_millis().saturating_add(30_000),
+            )
+            .await?;
+        let c_first_port = port_by_host["compute-c"];
+        network
+            .advance_fabric_realm_generation("project-a", network_record.id)
+            .await?;
+        network
+            .project_binding_observation("project-a", c_first_port, "compute-c", "down")
+            .await?;
+        reconciler
+            .reconcile_realm(
+                "project-a",
+                network_record.id,
+                Uuid::from_u128(995),
+                crate::composition::unix_time_millis().saturating_add(30_000),
+            )
+            .await?;
+        assert!(
+            !dispatcher
+                .commands
+                .lock()
+                .map_err(|_| "recording dispatcher poisoned")?
+                .iter()
+                .any(|command| {
+                    command.plan.node_id == "compute-c"
+                        && command.action == o3k_network::NetworkPlanAction::Remove
+                }),
+            "removing one endpoint must not remove C while C2 remains bound"
+        );
+        let latest_c_apply = dispatcher
+            .commands
+            .lock()
+            .map_err(|_| "recording dispatcher poisoned")?
+            .iter()
+            .rev()
+            .find(|command| command.plan.node_id == "compute-c")
+            .cloned()
+            .ok_or("C Apply after one endpoint departure")?;
+        assert_eq!(latest_c_apply.action, o3k_network::NetworkPlanAction::Apply);
+        assert_eq!(
+            latest_c_apply
+                .plan
+                .fabric
+                .as_ref()
+                .ok_or("C Fabric plan")?
+                .directory
+                .entries
+                .len(),
+            3,
+            "C remains a participant while its second endpoint is active"
+        );
+        network.unbind_port("project-a", c_first_port).await?;
+
+        // Seed the fake dispatcher with the durable ownership history the
+        // production dispatcher writes on successful Apply. Retirement must
+        // be derivable from this journal alone after canonical C is down.
+        let realm_key = format!("fabric-realm:{}", subnet.id);
+        let controller_id = o3k_store::ControllerId::new("controller");
+        let controller_epoch = o3k_store::ControllerEpoch::new("epoch-1");
+        let lease = match store
+            .acquire_work_lease(
+                &realm_key,
+                "fabric_reconciliation",
+                &controller_id,
+                &controller_epoch,
+                FABRIC_REALM_LEASE_TTL,
+            )
+            .await?
+        {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                return Err("realm unexpectedly busy while seeding durable Apply history".into());
+            }
+        };
+        let mut latest_apply_by_host = BTreeMap::new();
+        for command in dispatcher
+            .commands
+            .lock()
+            .map_err(|_| "recording dispatcher poisoned")?
+            .iter()
+            .filter(|command| command.action == o3k_network::NetworkPlanAction::Apply)
+        {
+            let generation = command
+                .plan
+                .resource_generations
+                .get(&subnet.id)
+                .copied()
+                .unwrap_or_default();
+            let host = command.plan.node_id.clone();
+            if latest_apply_by_host
+                .get(&host)
+                .is_none_or(|(latest_generation, _)| generation >= *latest_generation)
+            {
+                latest_apply_by_host.insert(host, (generation, command.clone()));
+            }
+        }
+        for (_, mut command) in latest_apply_by_host.into_values() {
+            command.controller = o3k_network::NetworkControllerLease {
+                controller_id: controller_id.0.clone(),
+                controller_epoch: controller_epoch.0.clone(),
+                fencing_token: lease.fencing_token,
+            };
+            command.plan.operation_id = command.operation_id;
+            let work = o3k_store::NetworkPlanWorkRecord {
+                command_id: command.command_id.to_string(),
+                operation_id: command.operation_id,
+                idempotency_key: command.idempotency_key.clone(),
+                target_host_id: command.plan.node_id.clone(),
+                target_agent_id: command.target.agent_id.clone(),
+                target_agent_epoch: command.target.agent_epoch.clone(),
+                controller_id: controller_id.0.clone(),
+                controller_epoch: controller_epoch.0.clone(),
+                fencing_token: lease.fencing_token,
+                deadline_unix_ms: command.deadline_unix_ms,
+                fingerprint_sha256: command.plan.fingerprint_sha256.clone(),
+                snapshot: serde_json::to_vec(&command)?,
+                state: o3k_store::NetworkPlanWorkState::Pending,
+                revision: 0,
+                outcome: None,
+            };
+            store
+                .insert_network_plan_work_under_lease(
+                    &realm_key,
+                    &controller_id.0,
+                    &controller_epoch.0,
+                    lease.fencing_token,
+                    &work,
+                )
+                .await
+                .map_err(|error| {
+                    format!("cannot seed retirement work {}: {error}", work.command_id)
+                })?;
+            let running = store
+                .update_network_plan_work_under_lease(
+                    &realm_key,
+                    &controller_id.0,
+                    &controller_epoch.0,
+                    lease.fencing_token,
+                    &work.command_id,
+                    0,
+                    o3k_store::NetworkPlanWorkState::Running,
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    format!(
+                        "cannot mark retirement work {} running: {error}",
+                        work.command_id
+                    )
+                })?;
+            store
+                .update_network_plan_work_under_lease(
+                    &realm_key,
+                    &controller_id.0,
+                    &controller_epoch.0,
+                    lease.fencing_token,
+                    &work.command_id,
+                    running.revision,
+                    o3k_store::NetworkPlanWorkState::Succeeded,
+                    Some(b"succeeded"),
+                )
+                .await
+                .map_err(|error| {
+                    format!(
+                        "cannot mark retirement work {} succeeded: {error}",
+                        work.command_id
+                    )
+                })?;
+        }
+        assert!(
+            store
+                .relinquish_work_lease_preserving_fence(
+                    &realm_key,
+                    &controller_id,
+                    &controller_epoch,
+                    lease.fencing_token,
+                )
+                .await?
+        );
+
         // Unbinding the final endpoint on C keeps the binding tombstone until
         // the full directory has withdrawn C from A/B HER and C has received
         // an owned realm removal plan.
-        let departing_port = port_by_host["compute-c"];
+        let departing_port = c_second_port.id;
         network
             .advance_fabric_realm_generation("project-a", network_record.id)
             .await?;
         network
             .project_binding_observation("project-a", departing_port, "compute-c", "down")
             .await?;
+        dispatcher
+            .unavailable_hosts
+            .lock()
+            .map_err(|_| "recording unavailable-host lock poisoned")?
+            .insert("compute-c".to_owned());
+        let before_unavailable_reconcile = dispatcher
+            .commands
+            .lock()
+            .map_err(|_| "recording dispatcher poisoned")?
+            .len();
+        // This is the controller-crash window: canonical departure is
+        // recorded, but no Remove work exists yet. Startup recovery must
+        // derive C from durable Apply history and stay pending while C is
+        // unreachable.
+        recover_fabric_state(&reconciler, store.as_ref()).await;
+        assert_eq!(
+            dispatcher
+                .commands
+                .lock()
+                .map_err(|_| "recording dispatcher poisoned")?
+                .len(),
+            before_unavailable_reconcile,
+            "survivor Apply must not overtake a retiring host that cannot be reached"
+        );
+        dispatcher
+            .unavailable_hosts
+            .lock()
+            .map_err(|_| "recording unavailable-host lock poisoned")?
+            .remove("compute-c");
+        // On reconnect, ordinary startup reconciliation derives C's
+        // retirement from durable Apply history without an API mutation or
+        // ephemeral departing-host hint.
         reconciler
-            .reconcile_realm_after_unbind(
+            .reconcile_realm(
                 "project-a",
                 network_record.id,
-                Uuid::from_u128(992),
-                u64::MAX,
-                "compute-c",
+                Uuid::from_u128(993),
+                crate::composition::unix_time_millis().saturating_add(30_000),
             )
             .await?;
         network.unbind_port("project-a", departing_port).await?;
@@ -5623,10 +6088,11 @@ mod dispatcher_tests {
                 .commands
                 .lock()
                 .map_err(|_| "recording dispatcher poisoned")?;
-            assert_eq!(commands.len(), 9);
-            assert_eq!(commands[6].target.agent_id, "agent-c");
-            assert_eq!(commands[6].action, o3k_network::NetworkPlanAction::Remove);
-            let withdrawn = commands[7..9]
+            let retirement = &commands[before_unavailable_reconcile..];
+            assert_eq!(retirement.len(), 3);
+            assert_eq!(retirement[0].target.agent_id, "agent-c");
+            assert_eq!(retirement[0].action, o3k_network::NetworkPlanAction::Remove);
+            let withdrawn = retirement[1..]
                 .iter()
                 .map(|command| {
                     let fabric = command.plan.fabric.as_ref().expect("Fabric plan");
@@ -5644,12 +6110,109 @@ mod dispatcher_tests {
                     .collect()
             );
         }
-        let final_remove_command = dispatcher
+        let lease_after_retirement = match store
+            .acquire_work_lease(
+                &realm_key,
+                "fabric_reconciliation",
+                &controller_id,
+                &controller_epoch,
+                FABRIC_REALM_LEASE_TTL,
+            )
+            .await?
+        {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                return Err("realm unexpectedly busy after retirement".into());
+            }
+        };
+        let retirement_commands = dispatcher
             .commands
             .lock()
-            .map_err(|_| "recording dispatcher poisoned")?[6]
-            .clone();
-
+            .map_err(|_| "recording dispatcher poisoned")?[before_unavailable_reconcile..]
+            .to_vec();
+        for mut command in retirement_commands {
+            command.controller = o3k_network::NetworkControllerLease {
+                controller_id: controller_id.0.clone(),
+                controller_epoch: controller_epoch.0.clone(),
+                fencing_token: lease_after_retirement.fencing_token,
+            };
+            command.plan.operation_id = command.operation_id;
+            let work = o3k_store::NetworkPlanWorkRecord {
+                command_id: command.command_id.to_string(),
+                operation_id: command.operation_id,
+                idempotency_key: command.idempotency_key.clone(),
+                target_host_id: command.plan.node_id.clone(),
+                target_agent_id: command.target.agent_id.clone(),
+                target_agent_epoch: command.target.agent_epoch.clone(),
+                controller_id: controller_id.0.clone(),
+                controller_epoch: controller_epoch.0.clone(),
+                fencing_token: lease_after_retirement.fencing_token,
+                deadline_unix_ms: command.deadline_unix_ms,
+                fingerprint_sha256: command.plan.fingerprint_sha256.clone(),
+                snapshot: serde_json::to_vec(&command)?,
+                state: o3k_store::NetworkPlanWorkState::Pending,
+                revision: 0,
+                outcome: None,
+            };
+            store
+                .insert_network_plan_work_under_lease(
+                    &realm_key,
+                    &controller_id.0,
+                    &controller_epoch.0,
+                    lease_after_retirement.fencing_token,
+                    &work,
+                )
+                .await
+                .map_err(|error| {
+                    format!("cannot seed retirement work {}: {error}", work.command_id)
+                })?;
+            let running = store
+                .update_network_plan_work_under_lease(
+                    &realm_key,
+                    &controller_id.0,
+                    &controller_epoch.0,
+                    lease_after_retirement.fencing_token,
+                    &work.command_id,
+                    0,
+                    o3k_store::NetworkPlanWorkState::Running,
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    format!(
+                        "cannot mark retirement work {} running: {error}",
+                        work.command_id
+                    )
+                })?;
+            store
+                .update_network_plan_work_under_lease(
+                    &realm_key,
+                    &controller_id.0,
+                    &controller_epoch.0,
+                    lease_after_retirement.fencing_token,
+                    &work.command_id,
+                    running.revision,
+                    o3k_store::NetworkPlanWorkState::Succeeded,
+                    Some(b"succeeded"),
+                )
+                .await
+                .map_err(|error| {
+                    format!(
+                        "cannot mark retirement work {} succeeded: {error}",
+                        work.command_id
+                    )
+                })?;
+        }
+        assert!(
+            store
+                .relinquish_work_lease_preserving_fence(
+                    &realm_key,
+                    &controller_id,
+                    &controller_epoch,
+                    lease_after_retirement.fencing_token,
+                )
+                .await?
+        );
         // A controller restart must recover from durable canonical state
         // without another endpoint mutation. After C's supported unbind, a
         // startup scan should recreate the current A/B realm plan set.
@@ -5720,143 +6283,6 @@ mod dispatcher_tests {
             );
         }
 
-        // The final-endpoint remove path is recovered from durable work even
-        // after every canonical endpoint has been deleted. Observation says
-        // not_found, so the production reconciler must invoke atomic
-        // supersession before dispatching the cleanup successor.
-        for port_id in port_by_host.values() {
-            network
-                .delete_port_for_project("project-a", *port_id)
-                .await?;
-        }
-        let realm_id = subnet.id;
-        let realm_key = format!("fabric-realm:{realm_id}");
-        let controller_id = o3k_store::ControllerId::new("controller");
-        let controller_epoch = o3k_store::ControllerEpoch::new("epoch-1");
-        let lease = match store
-            .acquire_work_lease(
-                &realm_key,
-                "fabric_reconciliation",
-                &controller_id,
-                &controller_epoch,
-                FABRIC_REALM_LEASE_TTL,
-            )
-            .await?
-        {
-            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
-            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
-                return Err("realm unexpectedly busy".into());
-            }
-        };
-        let mut old_command = final_remove_command;
-        old_command.deadline_unix_ms =
-            crate::composition::unix_time_millis().saturating_add(60_000);
-        old_command.plan.deadline_unix_ms = old_command.deadline_unix_ms;
-        let old_work = o3k_store::NetworkPlanWorkRecord {
-            command_id: old_command.command_id.to_string(),
-            operation_id: old_command.operation_id,
-            idempotency_key: old_command.idempotency_key.clone(),
-            target_host_id: old_command.plan.node_id.clone(),
-            target_agent_id: old_command.target.agent_id.clone(),
-            target_agent_epoch: old_command.target.agent_epoch.clone(),
-            controller_id: controller_id.0.clone(),
-            controller_epoch: controller_epoch.0.clone(),
-            fencing_token: lease.fencing_token,
-            deadline_unix_ms: old_command.deadline_unix_ms,
-            fingerprint_sha256: old_command.plan.fingerprint_sha256.clone(),
-            snapshot: serde_json::to_vec(&old_command)?,
-            state: o3k_store::NetworkPlanWorkState::Pending,
-            revision: 0,
-            outcome: None,
-        };
-        store
-            .insert_network_plan_work_under_lease(
-                &realm_key,
-                &controller_id.0,
-                &controller_epoch.0,
-                lease.fencing_token,
-                &old_work,
-            )
-            .await?;
-        let running = store
-            .update_network_plan_work_under_lease(
-                &realm_key,
-                &controller_id.0,
-                &controller_epoch.0,
-                lease.fencing_token,
-                &old_work.command_id,
-                0,
-                o3k_store::NetworkPlanWorkState::Running,
-                None,
-            )
-            .await?;
-        assert_eq!(running.revision, 1);
-        assert!(
-            store
-                .relinquish_work_lease_preserving_fence(
-                    &realm_key,
-                    &controller_id,
-                    &controller_epoch,
-                    lease.fencing_token,
-                )
-                .await?
-        );
-        dispatcher
-            .not_found
-            .lock()
-            .map_err(|_| "recording not-found lock poisoned")?
-            .insert(old_work.command_id.clone());
-        dispatcher
-            .commit_only
-            .store(true, std::sync::atomic::Ordering::Release);
-        recover_fabric_state(&reconciler, store.as_ref()).await;
-        let terminal = store.get_network_plan_work(&old_work.command_id).await?;
-        assert_eq!(terminal.state, o3k_store::NetworkPlanWorkState::Failed);
-        let outcome: serde_json::Value = serde_json::from_slice(
-            terminal
-                .outcome
-                .as_deref()
-                .ok_or("missing supersession outcome")?,
-        )?;
-        let successor_id = outcome["successor_command_id"]
-            .as_str()
-            .ok_or("missing successor id")?;
-        let pending_successor = store.get_network_plan_work(successor_id).await?;
-        assert_eq!(
-            pending_successor.state,
-            o3k_store::NetworkPlanWorkState::Pending,
-            "crash after supersession must leave a durable pending successor"
-        );
-        assert_eq!(
-            dispatcher
-                .provider_mutations
-                .load(std::sync::atomic::Ordering::Acquire),
-            0
-        );
-        dispatcher
-            .not_found
-            .lock()
-            .map_err(|_| "recording not-found lock poisoned")?
-            .insert(successor_id.to_owned());
-        recover_fabric_state(&reconciler, store.as_ref()).await;
-        let successor = store.get_network_plan_work(successor_id).await?;
-        assert_eq!(successor.state, o3k_store::NetworkPlanWorkState::Succeeded);
-        assert_eq!(
-            dispatcher
-                .provider_mutations
-                .load(std::sync::atomic::Ordering::Acquire),
-            1,
-            "recovery must dispatch the existing successor exactly once"
-        );
-        assert!(
-            dispatcher
-                .commands
-                .lock()
-                .map_err(|_| "recording dispatcher poisoned")?
-                .iter()
-                .any(|command| command.command_id.to_string() == successor_id
-                    && command.action == o3k_network::NetworkPlanAction::Remove)
-        );
         let _ = std::fs::remove_dir_all(root);
         Ok(())
     }

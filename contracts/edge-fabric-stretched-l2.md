@@ -99,6 +99,21 @@ available until exact live state is observed absent so interrupted cleanup can
 resume safely. When one of several local endpoints is removed, the host remains
 a participant and only that endpoint's provider state is withdrawn.
 
+The reconciler derives the desired participant set from current canonical
+active endpoints and accepted bindings. It derives possible prior realization
+from the Realm's durable host plan/work history. A latest Apply remains a
+retirement obligation until a later Remove has succeeded with provider
+absence observed; a later Apply supersedes an earlier Remove as current
+ownership evidence. Unresolved or ambiguous latest work keeps the Realm
+unconverged. Recovery after controller restart must derive and resume pending
+retirement without requiring another API mutation, and must dispatch all
+retiring-host Removes before survivor Apply plans.
+
+Request-driven server deletion returns Fabric unbind or endpoint-release
+failure to its caller after the server deletion is durably terminal. The server
+is not restored; cleanup remains retryable. Background terminal projection
+may log and retry when no request is waiting.
+
 ## Canonical endpoint address key
 
 Unchanged from the realm-overlay contract: any cross-host endpoint lookup with

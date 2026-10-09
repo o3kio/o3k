@@ -5104,6 +5104,97 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn request_terminal_delete_propagates_fabric_unbind_failure_without_reversing_delete()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-delete-unbind-error-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(FailingUnbindProjector::default());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
+        let server_id = Uuid::now_v7();
+        let operation_id = Uuid::now_v7();
+        let desired_state = serde_json::json!({
+            "operation_id": operation_id.to_string(),
+            "o3k_server_id": server_id.to_string(),
+            "project_id": "project-a",
+            "name": "terminal-server",
+            "vcpus": 1,
+            "memory_mib": 512,
+            "flavor_id": "flavor-1",
+            "disk_gib": 1,
+            "image_id": "image-1",
+            "key_name": null,
+            "keypair_id": null,
+            "network_ids": ["port-c"],
+            "placement_provider_id": null,
+            "placement_allocation_id": null,
+            "config_drive": null,
+            "idempotency_key": "terminal-delete",
+        })
+        .to_string();
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 2,
+                observed_generation: 2,
+                desired_state,
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id: server_id,
+                kind: "lifecycle:delete".to_owned(),
+                state: o3k_store::OperationState::Succeeded,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+
+        let result = service
+            .delete_server("project-a", ServerId::from_uuid(server_id))
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(()) => return Err("request-path server deletion hid failed Fabric cleanup".into()),
+        };
+        assert!(matches!(error, ComputeError::EndpointRelease(_)));
+        assert_eq!(
+            store.get_resource(server_id).await?.observed_state,
+            "DELETED",
+            "cleanup failure must not roll back durable server deletion"
+        );
+        assert_eq!(
+            *projector
+                .unbinds
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            1
+        );
+        assert_eq!(
+            *projector
+                .releases
+                .lock()
+                .map_err(|_| "failing projector lock poisoned")?,
+            0,
+            "endpoint release must wait for successful unbind"
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
     /// The one-unbind-per-pass cap must count ATTEMPTS, not successes: under a
     /// fabric outage a single pass must not dispatch a failing unbind per
     /// stale-bound orphan (each up to the dispatch deadline) while holding the

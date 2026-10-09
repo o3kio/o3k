@@ -269,6 +269,22 @@ absence observation succeeds. If the host still has another current endpoint
 in the Realm, only the removed endpoint's state is withdrawn and the host stays
 a participant.
 
+Realm reconciliation derives desired hosts from current canonical active
+endpoints and accepted bindings, and derives possibly realized hosts from
+durable Fabric plan/work history. A host's latest ownership-relevant Apply
+without a later observed-successful Remove remains a retirement obligation
+when it disappears from the desired set. An Applying, Unknown, or otherwise
+ambiguous latest operation is unresolved and cannot prove absence. The
+reconciler must create and observe each retiring-host Remove before applying
+the reduced directory to surviving hosts. Startup recovery uses the same
+history derivation and must resume this sequence without a new tenant API
+mutation.
+
+For request-driven server deletion, a Fabric unbind or endpoint-release error
+is returned to the waiting caller after the server deletion is durably
+terminal. The server deletion is not rolled back; cleanup remains retryable.
+Background terminal projection may log and retry because no request is waiting.
+
 ## Egress and ingress semantics
 
 ### Egress
