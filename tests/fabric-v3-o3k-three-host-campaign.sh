@@ -446,24 +446,29 @@ PY
   ssh_vm "$address" "sudo ip -j -d link show dev '$tap'" >"$EVIDENCE/attachments/server-$host-live-tap.json" || fail "real Fabric TAP disappeared for $host" "ATTACHMENT_DEFECT"
   ownership="/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json"
   ssh_vm "$address" "sudo cat '$ownership'" >"$EVIDENCE/attachments/server-$host-provider-ownership.json" || fail "Fabric ownership observation failed for $host" "OWNERSHIP_DEFECT"
-  tap_mac="$(python3 - "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$port_id" <<'PY'
+  realm_id="$(field port.fixed_ips.0.subnet_id <"$EVIDENCE/api/port-$host.response.json")"
+  ssh_vm "$address" "sudo cat '/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json'" >"$EVIDENCE/attachments/server-$host-provider-plan.json" || fail "current provider Realm plan unavailable for $host" "OWNERSHIP_DEFECT"
+  tap_mac="$(python3 - "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$port_id" "$realm_id" <<'PY'
 import json,sys
-x=json.load(open(sys.argv[1])); taps=x.get("realm",{}).get("endpoint_taps",{})
+x=json.load(open(sys.argv[1])); realm=x.get("realms",{}).get(sys.argv[3],{}); taps=realm.get("endpoint_taps",{})
 assert sys.argv[2] in taps
-assert sys.argv[2] not in x.get("realm",{}).get("pending_endpoint_taps",{})
+assert sys.argv[2] not in realm.get("pending_endpoint_taps",{})
 print(taps[sys.argv[2]]["mac"])
 PY
 )" || fail "durable committed TAP ownership was absent for $host" "OWNERSHIP_DEFECT"
   guest_mac="$(field port.mac_address <"$EVIDENCE/api/port-$host.response.json")"
-  python3 - "$EVIDENCE/attachments/server-$host-live-tap.json" "$tap" "$tap_mac" "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$server_id" "$host" <<'PY' || fail "live TAP identity/type/owner/bridge attestation failed for $host" "ATTACHMENT_DEFECT"
+  python3 - "$EVIDENCE/attachments/server-$host-live-tap.json" "$tap" "$tap_mac" "$EVIDENCE/attachments/server-$host-provider-ownership.json" "$EVIDENCE/attachments/server-$host-provider-plan.json" "$server_id" "$host" "$port_id" "$realm_id" "$guest_mac" <<'PY' || fail "live TAP identity/type/owner/bridge attestation failed for $host" "ATTACHMENT_DEFECT"
 import json,sys
 x=json.load(open(sys.argv[1])); name,mac=sys.argv[2:4]
 assert len(x)==1 and x[0].get('ifname')==name and x[0].get('address','').lower()==mac.lower()
 i=x[0]['linkinfo']; assert i.get('info_kind')=='tun' and i.get('info_data',{}).get('type')=='tap'
-o=json.load(open(sys.argv[4])); plan=o['plan']; assert plan['local_host']=='host-'+sys.argv[6]
-assert plan['directory']['directory_generation']==o['directory_generation']
-tap=o['realm']['endpoint_taps']; assert sys.argv[5] in tap and sys.argv[5] not in o['realm']['pending_endpoint_taps']
-assert x[0].get('master')==o['realm']['bridge']
+o=json.load(open(sys.argv[4])); plan=json.load(open(sys.argv[5])); realm_id,guest_mac=sys.argv[9:11]
+r=o['realms'][realm_id]; assert plan['local_host']=='host-'+sys.argv[7]
+assert plan['realm_id']==realm_id and plan['directory']['directory_generation']==r['directory_generation']
+tap=r['endpoint_taps']; assert sys.argv[8] in tap and sys.argv[8] not in r['pending_endpoint_taps']
+entries=plan['directory']['entries']; entry=next(e for e in entries if e['endpoint_id']==sys.argv[8])
+assert entry['selected_host']=='host-'+sys.argv[7] and entry['mac'].lower()==guest_mac.lower()
+assert x[0].get('master')==r['bridge']
 PY
   bridge="$(python3 - "$EVIDENCE/attachments/server-$host-live-tap.json" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))[0].get('master',''))
@@ -801,7 +806,7 @@ python3 - "$EVIDENCE/teardown" <<'PY' || fail "run-owned endpoint TAP/HER state 
 import glob,json,sys
 for path in glob.glob(sys.argv[1]+"/host-*-ownership.json"):
   if not open(path).read().strip(): continue
-    x=json.load(open(path)); assert not x.get("realm",{}).get("endpoint_taps",{}), path
+  x=json.load(open(path)); assert all(not r.get("endpoint_taps",{}) for r in x.get("realms",{}).values()), path
 PY
 # Remove only the three exact fresh compute guests after proving their API
 # resources and server domains are gone. Then compare the physical libvirt
