@@ -23,7 +23,17 @@ store-failure-output = true
 filter = 'package(o3k-compute-agent) and test(/committed_raw_image_becomes_owned_overlay_and_deletes_idempotently|distinct_instances_share_base_but_own_independent_overlays/)'
 test-group = 'qemu-img'
 
+# The production mTLS recovery cases share the destructive PostgreSQL test
+# database and the same durable Realm fixture.  Run that narrow fixture family
+# serially so one case cannot truncate another case's lease/work state.
+[[profile.pr.overrides]]
+filter = 'package(o3kd) and test(/production_mtls_.*/)'
+test-group = 'production-mtls-recovery-postgres'
+
 [test-groups.qemu-img]
+max-threads = 1
+
+[test-groups.production-mtls-recovery-postgres]
 max-threads = 1
 
 [profile.deep]
