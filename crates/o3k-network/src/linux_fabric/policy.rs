@@ -292,11 +292,35 @@ impl super::LinuxFabricBackend {
         {
             return Err(LinuxFabricError::CommandFailed);
         }
-        let mut cleared = current;
+        let (remains, _) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    current.namespace.as_str(),
+                    "nft",
+                    "list",
+                    "table",
+                    "ip",
+                    &table,
+                ],
+            )
+            .map_err(LinuxFabricError::Storage)?;
+        if remains {
+            return Err(LinuxFabricError::CommandFailed);
+        }
+        let mut next = self.state.clone();
+        let cleared = next
+            .realms
+            .get_mut(&plan.realm_id)
+            .ok_or(LinuxFabricError::CorruptState)?;
         cleared.policy_generation = 0;
         cleared.policy_fingerprint.clear();
-        self.state.realms.insert(plan.realm_id, cleared);
-        store_state(&self.state_path, &self.state)
+        store_state(&self.state_path, &next)?;
+        self.state = next;
+        Ok(())
     }
     pub(crate) fn validate_policy_plan(
         plan: &NamespacedRoutedFabricPlan,

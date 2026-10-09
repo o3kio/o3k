@@ -414,6 +414,36 @@ this fabric: the nested gate exercises the listed O3K fabric flows, not every
 Neutron API, service extension, client behavior, or interoperability profile.
 PP.5 final certification remains unclaimed.
 
+## Historical cleanup failure — 2026-10-09
+
+The fresh guest-control campaign for product
+`e3f5ce764b4d7ee1bba34f645da8ec6c156bde99` ended at its first cleanup failure:
+supported deletion removed server C and advanced the canonical A/B directory,
+but host C still reported C's TAP in committed Fabric ownership after 120
+seconds. The preserved evidence is
+`/var/tmp/fabric-v3-minimal-three-host-20261009T024500Z-guestcontrol-14.tar.gz`
+with SHA-256
+`102f40389ad18c3047513dbec0f9c08fccae37dde186852acdf89bc21d101a96`.
+
+The archive proves server C is absent, A/B plans use generation 5 and contain
+only A/B, while C's ownership remains at generation 4 with C's endpoint TAP.
+It does not contain C's post-delete Remove command record, admission/execution
+status, or live TAP observation. Therefore the historical dispatch boundary
+cannot be reconstructed from that bundle; the first *observed* divergence is
+between canonical A/B convergence and C's retained provider ownership. The
+source path constructs a host-targeted C Remove before A/B Apply. Inspection
+also found that the node executor treated a successful Remove mutator as
+terminal without requiring `observe_removed`, and the Linux provider discarded
+ownership after deletion commands without reading back all owned live objects.
+
+The successor fix keeps ownership until TAPs and Realm-scoped provider objects
+are observed absent, makes Remove execution terminal only after a fresh
+read-only absence observation, and tests both retained-live-state and complete
+cleanup. This is a resolved implementation defect only after the successor's
+workspace and fresh real-host campaign evidence pass. The preserved failed run
+remains immutable and is not reinterpreted as a pass. Gate A and PP.5 remain
+unclaimed.
+
 ## Candidate rerun on 2026-10-04
 
 A final nested rerun completed successfully on source

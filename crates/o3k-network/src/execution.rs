@@ -413,6 +413,17 @@ impl NetworkPlanExecutor {
             NetworkPlanAction::Apply => realizer.realize(&command.plan),
             NetworkPlanAction::Remove => realizer.remove(&command.plan),
         };
+        let result: Result<(), String> = match (command.action, result) {
+            (NetworkPlanAction::Remove, Ok(())) => match realizer.observe_removed(&command.plan) {
+                Ok(true) => Ok(()),
+                Ok(false) => {
+                    Err("provider removal returned success but owned state remains".into())
+                }
+                Err(error) => Err(error.to_string()),
+            },
+            (_, Ok(())) => Ok(()),
+            (_, Err(error)) => Err(error.to_string()),
+        };
         match result {
             Ok(()) => {
                 self.set_status(command.command_id, NetworkPlanStatus::Succeeded)?;
@@ -420,9 +431,7 @@ impl NetworkPlanExecutor {
             }
             Err(error) => {
                 self.set_status(command.command_id, NetworkPlanStatus::Unknown)?;
-                Err(NetworkExecutionError::MutationOutcomeUnknown(
-                    error.to_string(),
-                ))
+                Err(NetworkExecutionError::MutationOutcomeUnknown(error))
             }
         }
     }
@@ -443,13 +452,12 @@ impl NetworkPlanExecutor {
                 .iter_mut()
                 .find(|plan| plan.command_id == command_id)
                 .ok_or(NetworkExecutionError::UnknownCommand)?;
-            // A terminal REMOVE is only historical execution evidence. Realm
-            // deletion requires fresh provider evidence that owned state is
-            // still absent, so deliberately re-run the read-only removal
-            // observation even when the journal previously recorded success.
-            if record.status == NetworkPlanStatus::Succeeded
-                && record.action == NetworkPlanAction::Apply
-            {
+            // A terminal command is immutable historical evidence. A later
+            // Apply may legitimately recreate the Realm after a successful
+            // Remove, so re-observing an old Remove must not downgrade it.
+            // Nonterminal Remove commands below are observed before they can
+            // become Succeeded; mutation is never repeated during recovery.
+            if record.status == NetworkPlanStatus::Succeeded {
                 return Ok(record.status);
             }
             let observed = match record.action {
@@ -952,6 +960,7 @@ mod tests {
     struct RecordingRealizer {
         calls: usize,
         observed: bool,
+        removed_observed: bool,
     }
 
     impl NetworkPlanRealizer for RecordingRealizer {
@@ -969,6 +978,10 @@ mod tests {
 
         fn observe(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
             Ok(self.observed)
+        }
+
+        fn observe_removed(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+            Ok(self.removed_observed)
         }
     }
 
@@ -1058,16 +1071,44 @@ mod tests {
             NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
         let mut realizer = RecordingRealizer {
             calls: 0,
-            observed: false,
+            removed_observed: false,
+            ..Default::default()
         };
-        assert_eq!(
-            executor.execute(&command, 1, &mut realizer)?,
-            PlanAdmission::Accepted
-        );
+        assert!(matches!(
+            executor.execute(&command, 1, &mut realizer),
+            Err(NetworkExecutionError::MutationOutcomeUnknown(_))
+        ));
         assert_eq!(realizer.calls, 1);
         assert_eq!(
+            executor.status(command.command_id)?,
+            NetworkPlanStatus::Unknown,
+            "successful mutation without observed absence must not be terminal"
+        );
+        assert_eq!(
             executor.reconcile(command.command_id, &mut realizer)?,
+            NetworkPlanStatus::Unknown,
+            "reconciliation observes only and must not repeat removal"
+        );
+        assert_eq!(realizer.calls, 1);
+        drop(executor);
+        let restarted =
+            NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
+        assert_eq!(
+            restarted.reconcile(command.command_id, &mut realizer)?,
+            NetworkPlanStatus::Unknown,
+            "restart must preserve unresolved Remove until absence is observed"
+        );
+        assert_eq!(realizer.calls, 1, "restart must not blindly repeat removal");
+        realizer.removed_observed = true;
+        assert_eq!(
+            restarted.reconcile(command.command_id, &mut realizer)?,
             NetworkPlanStatus::Succeeded
+        );
+        realizer.removed_observed = false;
+        assert_eq!(
+            restarted.reconcile(command.command_id, &mut realizer)?,
+            NetworkPlanStatus::Succeeded,
+            "a later Apply must not downgrade a terminal Remove command"
         );
         let _ = fs::remove_dir_all(root);
         Ok(())

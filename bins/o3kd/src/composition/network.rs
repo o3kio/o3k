@@ -4502,12 +4502,12 @@ mod dispatcher_tests {
             StatusCode::CONFLICT,
             "injected post-binding crash must not return DELETE success: {finalize_failure_body}"
         );
+        let binding_after_finalize_failure = store
+            .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
+            .await?;
         assert!(
-            store
-                .get_canonical_realm_binding(&Uuid::from_u128(991).to_string(), &realm_id)
-                .await?
-                .is_none(),
-            "binding deletion must remain committed before interrupted Realm finalization"
+            binding_after_finalize_failure.is_none(),
+            "binding deletion must remain committed before interrupted Realm finalization; binding={binding_after_finalize_failure:?}; response={finalize_failure_body}"
         );
         assert!(
             store

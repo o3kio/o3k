@@ -548,6 +548,12 @@ impl super::LinuxFabricBackend {
         {
             return Err(LinuxFabricError::CommandFailed);
         }
+        if observe_endpoint_tap(self.command.as_ref(), &tap.interface)
+            .map_err(endpoint_tap_provider_error)?
+            .is_some()
+        {
+            return Err(LinuxFabricError::CommandFailed);
+        }
         Ok(())
     }
 
@@ -623,7 +629,7 @@ impl super::LinuxFabricBackend {
     }
 }
 
-fn endpoint_tap_provider_error(error: TapObservationError) -> LinuxFabricError {
+pub(super) fn endpoint_tap_provider_error(error: TapObservationError) -> LinuxFabricError {
     match error {
         TapObservationError::Absent => LinuxFabricError::CommandFailed,
         TapObservationError::MultipleLinks

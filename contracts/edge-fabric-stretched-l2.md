@@ -86,6 +86,19 @@ WireGuard host transport                   -> provider execution/security state
 The executor does not invent a tenant IP/MAC, realm, VNI, destination host,
 public identity, or authorization decision.
 
+### Departing-host removal evidence
+
+When the final current endpoint leaves a host, the reconciler must send that
+host a Realm `Remove` while applying the reduced participant directory to the
+remaining hosts. Removal is complete only when the remaining hosts have
+withdrawn it from HER, the departing host's endpoint TAPs and local Realm
+realization are absent, provider absence has been observed, and durable
+ownership no longer claims the removed endpoint or Realm. Remove mutation
+success alone does not prove provider absence. Ownership evidence must remain
+available until exact live state is observed absent so interrupted cleanup can
+resume safely. When one of several local endpoints is removed, the host remains
+a participant and only that endpoint's provider state is withdrawn.
+
 ## Canonical endpoint address key
 
 Unchanged from the realm-overlay contract: any cross-host endpoint lookup with

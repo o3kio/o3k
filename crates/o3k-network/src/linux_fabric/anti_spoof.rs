@@ -457,6 +457,13 @@ impl LinuxFabricBackend {
         {
             return Err(LinuxFabricError::CommandFailed);
         }
+        let (remains, _) = self
+            .command
+            .output("nft", &["list", "table", "bridge", table.as_str()])
+            .map_err(LinuxFabricError::Storage)?;
+        if remains {
+            return Err(LinuxFabricError::CommandFailed);
+        }
         Ok(())
     }
 }
