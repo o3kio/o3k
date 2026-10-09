@@ -2739,7 +2739,9 @@ pub(crate) fn network_error(error: NetworkError) -> axum::response::Response {
             );
             keystone_error(StatusCode::CONFLICT, "Conflict", message)
         }
-        NetworkError::Store(_) | NetworkError::CorruptMetadata(_) => keystone_error(
+        NetworkError::Store(_)
+        | NetworkError::CorruptMetadata(_)
+        | NetworkError::CorruptBindingState => keystone_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal Server Error",
             "network storage is unavailable",

@@ -41,6 +41,27 @@ fn root(label: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/o3k-network-{label}-{}", std::process::id()))
 }
 
+#[test]
+fn canonical_endpoint_status_projects_from_durable_binding_state() {
+    let cases = [
+        (None, "ACTIVE"),
+        (Some("binding"), "BUILD"),
+        (Some("bound"), "ACTIVE"),
+        (Some("down"), "DOWN"),
+        (Some("error"), "ERROR"),
+    ];
+    for (binding_state, expected) in cases {
+        assert!(matches!(
+            super::port::project_neutron_port_status("active", binding_state),
+            Ok(status) if status == expected
+        ));
+    }
+    assert!(matches!(
+        super::port::project_neutron_port_status("active", Some("unknown")),
+        Err(NetworkError::CorruptBindingState)
+    ));
+}
+
 #[tokio::test]
 async fn canonical_service_reconstructs_zero_and_multiple_realms()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -1739,6 +1760,10 @@ async fn create_outcome_projection_and_unbind_are_durable_and_idempotent()
         .await?;
     assert_eq!(bound.binding_host.as_deref(), Some("compute-1"));
     assert_eq!(bound.binding_state.as_deref(), Some("bound"));
+    assert_eq!(
+        service.get_port(&auth("project-a"), port.id).await?.status,
+        "ACTIVE"
+    );
     // A failed outcome after a fresh intent projects `error`.
     service
         .project_binding_observation("project-a", port.id, "compute-1", "down")
@@ -1750,6 +1775,10 @@ async fn create_outcome_projection_and_unbind_are_durable_and_idempotent()
         .project_create_outcome("project-a", port.id, PortBindingState::Error)
         .await?;
     assert_eq!(errored.binding_state.as_deref(), Some("error"));
+    assert_eq!(
+        service.get_port(&auth("project-a"), port.id).await?.status,
+        "ERROR"
+    );
     // Only terminal create outcomes are projectable.
     assert!(matches!(
         service
@@ -1775,10 +1804,42 @@ async fn create_outcome_projection_and_unbind_are_durable_and_idempotent()
             .await,
         Err(NetworkError::Conflict)
     ));
+    // A new deliberate attachment intent, rather than a stale create callback,
+    // reopens the same caller-owned endpoint.
+    let endpoint_before_reattach = service
+        .get_canonical_endpoint(&auth("project-a"), port.id)
+        .await?;
+    service
+        .record_binding_intent("project-a", port.id, "compute-1")
+        .await?;
+    let binding = service.get_port(&auth("project-a"), port.id).await?;
+    assert_eq!(binding.status, "BUILD");
+    let reattached = service
+        .project_create_outcome("project-a", port.id, PortBindingState::Bound)
+        .await?;
+    assert_eq!(
+        service.get_port(&auth("project-a"), port.id).await?.status,
+        "ACTIVE"
+    );
+    assert_eq!(reattached.id, port.id);
+    assert_eq!(reattached.mac_address, port.mac_address);
+    assert_eq!(reattached.fixed_ip, port.fixed_ip);
+    let endpoint_after_reattach = service
+        .get_canonical_endpoint(&auth("project-a"), port.id)
+        .await?;
+    assert_eq!(endpoint_after_reattach.state, "active");
+    assert_eq!(
+        endpoint_after_reattach.generation,
+        endpoint_before_reattach.generation
+    );
     // Unbind clears the binding idempotently and is durable.
     let unbound = service.unbind_port("project-a", port.id).await?;
     assert_eq!(unbound.binding_host, None);
     assert_eq!(unbound.binding_state.as_deref(), Some("down"));
+    assert_eq!(
+        service.get_port(&auth("project-a"), port.id).await?.status,
+        "DOWN"
+    );
     let again = service.unbind_port("project-a", port.id).await?;
     assert_eq!(again.binding_host, None);
     assert!(matches!(
@@ -1792,6 +1853,7 @@ async fn create_outcome_projection_and_unbind_are_durable_and_idempotent()
     let restored = reopened.get_port(&auth("project-a"), port.id).await?;
     assert_eq!(restored.binding_host, None);
     assert_eq!(restored.binding_state.as_deref(), Some("down"));
+    assert_eq!(restored.status, "DOWN");
     drop(reopened);
     drop(reopened_store);
     fs::remove_dir_all(path)?;

@@ -2121,6 +2121,13 @@ pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
         .expect("update_port_binding");
     assert_eq!(updated_port.binding_host.as_deref(), Some("compute-node-1"));
     assert_eq!(updated_port.binding_state.as_deref(), Some("bound"));
+    let unbound_port = store
+        .update_port_binding(&proj, &port_id, None, Some("down"))
+        .await
+        .expect("clear_port_binding");
+    assert_eq!(unbound_port.binding_host, None);
+    assert_eq!(unbound_port.binding_state.as_deref(), Some("down"));
+    assert!(unbound_port.binding_generation > updated_port.binding_generation);
 
     // Subnet deletion fails when in-use
     let in_use_sub = store.delete_subnet(&proj, &sub_id).await.unwrap_err();
