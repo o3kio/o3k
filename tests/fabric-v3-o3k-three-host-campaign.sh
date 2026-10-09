@@ -439,7 +439,7 @@ import sys,xml.etree.ElementTree as E
 r=E.parse(sys.argv[1]).getroot()
 for i in r.findall('./devices/interface'):
  t=i.find('target')
- if t is not None and t.get('dev','').startswith('o3ktap-'): print(t.get('dev')); break
+ if t is not None and t.get('dev','').startswith('o3k-t-'): print(t.get('dev')); break
 PY
 )"
   [[ -n "$tap" ]] || fail "server $host domain XML has no Fabric TAP" "ATTACHMENT_DEFECT"
