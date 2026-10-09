@@ -85,7 +85,7 @@ class GuestControlRegression(unittest.TestCase):
         provisioning = DRIVER.index("virsh -c qemu:///system net-info")
         self.assertLess(guard, provisioning)
         self.assertIn('merge-base HEAD "$ACCEPTED_HARNESS_BASE"', DRIVER)
-        self.assertIn('PRODUCT_SHA=16789fdd206565456cbd5c7c091ace8fc00f7c48', DRIVER)
+        self.assertIn('PRODUCT_SHA=b7f92ae362a158be555037fadeadb74e70ae3735', DRIVER)
 
     def test_controller_restart_uses_the_frozen_product_binary(self):
         restart = DRIVER[DRIVER.index("# Controller restart while A/B/C are alive."):]

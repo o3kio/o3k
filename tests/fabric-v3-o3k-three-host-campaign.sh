@@ -4,8 +4,8 @@ set -Eeuo pipefail
 # Supported-HTTP Fabric v3 three-host nested campaign. This script is test
 # harness only and refuses to run against a different product source tree.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRODUCT_SHA=16789fdd206565456cbd5c7c091ace8fc00f7c48
-PRODUCT_TREE=fcb8dedd11bc28ea8a2a09907f3b07b81accd559
+PRODUCT_SHA=b7f92ae362a158be555037fadeadb74e70ae3735
+PRODUCT_TREE=8e39e747bb4b786d86b51648aceb5a029b2c79a9
 ACCEPTED_HARNESS_BASE=d41e40ae89531a08e4bf015f1626d5d2f9f5746b
 # Guard the acceptance control contract before creating evidence or guests.
 [[ -f "$ROOT_DIR/contracts/real-host-acceptance-evidence.md" ]] \
