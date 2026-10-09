@@ -3074,6 +3074,16 @@ mod dispatcher_tests {
     use tonic::transport::Server;
     use tower::ServiceExt;
 
+    // These recovery tests use the shared destructive PostgreSQL test
+    // database. Keep their reset-and-exercise sequence exclusive even when
+    // the test runner schedules lib tests concurrently.
+    static PRODUCTION_MTLS_POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
+
+    async fn production_mtls_postgres_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        PRODUCTION_MTLS_POSTGRES_TEST_LOCK.lock().await
+    }
+
     /// A test compute execution boundary that asks the same production
     /// `DaemonCreateResolver` used by the agent provider to resolve the
     /// request before delegating the synthetic VM operation to the fake.
@@ -6290,6 +6300,7 @@ mod dispatcher_tests {
     #[tokio::test]
     async fn production_mtls_recovery_reuses_final_endpoint_successor_after_restart()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _postgres_test_guard = production_mtls_postgres_test_guard().await;
         let root = std::env::temp_dir().join(format!("o3kd-mtls-recovery-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root)?;
         let store = if let Ok(database_url) = std::env::var("O3K_DATABASE_URL") {
@@ -6496,6 +6507,7 @@ mod dispatcher_tests {
     #[tokio::test]
     async fn production_mtls_two_controller_supersession_is_realm_fenced()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _postgres_test_guard = production_mtls_postgres_test_guard().await;
         let root =
             std::env::temp_dir().join(format!("o3kd-mtls-two-controller-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root)?;
@@ -6674,6 +6686,7 @@ mod dispatcher_tests {
     #[tokio::test]
     async fn production_mtls_not_found_crash_before_supersession_retries_safely()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _postgres_test_guard = production_mtls_postgres_test_guard().await;
         let root = std::env::temp_dir().join(format!("o3kd-mtls-precommit-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root)?;
         let store = if let Ok(database_url) = std::env::var("O3K_DATABASE_URL") {
@@ -6842,6 +6855,7 @@ mod dispatcher_tests {
     #[tokio::test]
     async fn production_mtls_unknown_final_removal_is_not_superseded()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _postgres_test_guard = production_mtls_postgres_test_guard().await;
         let root = std::env::temp_dir().join(format!("o3kd-mtls-unknown-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root)?;
         let store = if let Ok(database_url) = std::env::var("O3K_DATABASE_URL") {
