@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "product_sha": "1c2d20f6618ea0549428285641865788e7416662",
+  "product_tree": "6667b03cae6f218aad16d141b3037ff4cccd39c0",
+  "harness_sha": "1c3196824aba88fab943868ea48ffccd4917672f",
+  "harness_tree": "ef46b3d4ef7ed79cbaebe29dfe30ec219e993d7d",
+  "evidence": {
+    "product_unit_integration": "PASS",
+    "sqlite_lifecycle": "PASS",
+    "postgresql_lifecycle": "PASS",
+    "real_host_nested_microgate": "DEFERRED_BY_POLICY",
+    "physical_three_host_gate_b": "DEFERRED_BY_POLICY"
+  },
+  "authorized_deferrals": {
+    "real_host_nested_microgate": "Management-address environment limitation; explicitly deferred by policy on 2026-10-09.",
+    "physical_three_host_gate_b": "Physical acceptance explicitly deferred by policy on 2026-10-09."
+  },
+  "historical_environment_gap_archives": [
+    {
+      "path": "/var/tmp/fabric-v3-minimal-three-host-20261009T134000Z-portstatus-micro.tar.gz",
+      "sha256": "2724cfac969b4c9a44e674394581bf961785d004fbf42a301b1c9878a28fd497"
+    },
+    {
+      "path": "/var/tmp/fabric-v3-minimal-three-host-20261009T134500Z-portstatus-micro.tar.gz",
+      "sha256": "7fc114dfd4c446a64329a7f14f2e5469953a6e9d6f3788b6f9e70aa5fce8bd74"
+    },
+    {
+      "path": "/var/tmp/fabric-v3-minimal-three-host-20261009T135500Z-portstatus-micro2.tar.gz",
+      "sha256": "00834c79f66317e11b36cfe9f0e6d4cd57fdfc69366b35b2c3432d8da1b46cbb"
+    }
+  ],
+  "merge_blocked_by_physical_validation": false,
+  "final_physical_certification_claimed": false,
+  "follow_up": "Run the preserved Fabric v3 real-host/physical acceptance campaign before the release milestone that requires physical Fabric certification."
+}
