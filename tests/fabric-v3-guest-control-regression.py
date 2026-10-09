@@ -85,8 +85,8 @@ class GuestControlRegression(unittest.TestCase):
         provisioning = DRIVER.index("virsh -c qemu:///system net-info")
         self.assertLess(guard, provisioning)
         self.assertIn('merge-base HEAD "$ACCEPTED_HARNESS_BASE"', DRIVER)
-        self.assertIn('PRODUCT_SHA=b7f92ae362a158be555037fadeadb74e70ae3735', DRIVER)
-        self.assertIn('PRODUCT_TREE=8e39e747bb4b786d86b51648aceb5a029b2c79a9', DRIVER)
+        self.assertIn('PRODUCT_SHA=1c2d20f6618ea0549428285641865788e7416662', DRIVER)
+        self.assertIn('PRODUCT_TREE=6667b03cae6f218aad16d141b3037ff4cccd39c0', DRIVER)
 
     def test_departure_micro_gate_stops_before_full_campaign_phases(self):
         self.assertIn('CAMPAIGN_MODE="${1:-full}"', DRIVER)
