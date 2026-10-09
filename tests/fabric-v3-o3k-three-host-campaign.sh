@@ -7,8 +7,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CAMPAIGN_MODE="${1:-full}"
 [[ "$CAMPAIGN_MODE" == full || "$CAMPAIGN_MODE" == departure-micro ]] \
   || { echo "HARNESS_GAP: unsupported campaign mode: $CAMPAIGN_MODE" >&2; exit 1; }
-PRODUCT_SHA=b7f92ae362a158be555037fadeadb74e70ae3735
-PRODUCT_TREE=8e39e747bb4b786d86b51648aceb5a029b2c79a9
+PRODUCT_SHA=1c2d20f6618ea0549428285641865788e7416662
+PRODUCT_TREE=6667b03cae6f218aad16d141b3037ff4cccd39c0
 ACCEPTED_HARNESS_BASE=d41e40ae89531a08e4bf015f1626d5d2f9f5746b
 # Guard the acceptance control contract before creating evidence or guests.
 [[ -f "$ROOT_DIR/contracts/real-host-acceptance-evidence.md" ]] \
