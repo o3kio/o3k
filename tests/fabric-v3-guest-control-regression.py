@@ -87,6 +87,11 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('merge-base HEAD "$ACCEPTED_HARNESS_BASE"', DRIVER)
         self.assertIn('PRODUCT_SHA=16789fdd206565456cbd5c7c091ace8fc00f7c48', DRIVER)
 
+    def test_controller_restart_uses_the_frozen_product_binary(self):
+        restart = DRIVER[DRIVER.index("# Controller restart while A/B/C are alive."):]
+        self.assertIn('"$PRODUCT_SOURCE_DIR/target/release/o3kd"', restart)
+        self.assertNotIn('"$ROOT_DIR/target/release/o3kd"', restart)
+
     def test_mandatory_packet_phases_use_guest_control_abstraction(self):
         self.assertNotIn("console_command", DRIVER)
         self.assertNotIn('virsh console', DRIVER)
