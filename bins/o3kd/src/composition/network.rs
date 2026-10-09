@@ -3979,6 +3979,23 @@ mod dispatcher_tests {
             .into_iter()
             .map(|work| work.command_id)
             .collect::<BTreeSet<_>>();
+        let (status, attached_port_before_delete) = http_json(
+            &app,
+            Method::GET,
+            &format!("/v2.0/ports/{}", port_ids[2]),
+            &token,
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{attached_port_before_delete}");
+        let original_port_mac = attached_port_before_delete["port"]["mac_address"]
+            .as_str()
+            .ok_or("port MAC before server deletion")?
+            .to_owned();
+        let original_fixed_ip = attached_port_before_delete["port"]["fixed_ips"][0]["ip_address"]
+            .as_str()
+            .ok_or("port fixed IP before server deletion")?
+            .to_owned();
         let event_count_before_c_delete = lifecycle_events
             .lock()
             .map_err(|_| "lifecycle event log poisoned")?
@@ -4127,10 +4144,26 @@ mod dispatcher_tests {
         )
         .await?;
         assert_eq!(status, StatusCode::OK, "{detached_port}");
+        assert_eq!(detached_port["port"]["id"], port_ids[2]);
+        assert_eq!(detached_port["port"]["mac_address"], original_port_mac);
+        assert_eq!(
+            detached_port["port"]["fixed_ips"][0]["ip_address"],
+            original_fixed_ip
+        );
+        assert_eq!(
+            detached_port["port"]["status"], "DOWN",
+            "an explicitly unbound caller-owned endpoint projects Neutron DOWN"
+        );
+        assert_eq!(detached_port["port"]["device_id"], "");
         assert!(
             detached_port["port"]["binding:host_id"].is_null(),
             "server deletion must detach the caller-owned port"
         );
+        let detached_record = network
+            .get_port_for_project("project-a", Uuid::parse_str(&port_ids[2])?)
+            .await?;
+        assert_eq!(detached_record.binding_host, None);
+        assert_eq!(detached_record.binding_state.as_deref(), Some("down"));
         for agent in ["network-agent-a", "network-agent-b"] {
             let plans = realizer_logs[agent]
                 .lock()

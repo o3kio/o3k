@@ -477,6 +477,9 @@ pub struct PortRecord {
     pub name: String,
     pub mac_address: String,
     pub fixed_ip: Ipv4Addr,
+    /// Legacy/imported Neutron status for records without canonical endpoint
+    /// state. Canonical ports derive their public status from endpoint and
+    /// binding lifecycle instead of treating this copy as authoritative.
     pub status: String,
     pub binding_host: Option<String>,
     pub binding_state: Option<String>,

@@ -18,6 +18,27 @@ use uuid::Uuid;
 /// intent names it.
 pub const SERVER_OWNED_ENDPOINT_PREFIX: &str = "o3k-server:";
 
+/// Projects canonical endpoint existence and durable attachment state into
+/// Neutron's compatibility status. An explicit binding state is authoritative;
+/// endpoint state is retained only for legacy records with no binding
+/// observation.
+pub(super) fn project_neutron_port_status(
+    endpoint_state: &str,
+    binding_state: Option<&str>,
+) -> Result<String, NetworkError> {
+    let Some(binding_state) = binding_state else {
+        return Ok(endpoint_state.to_ascii_uppercase());
+    };
+    let status = match PortBindingState::parse(binding_state) {
+        Some(PortBindingState::Binding) => "BUILD",
+        Some(PortBindingState::Bound) => "ACTIVE",
+        Some(PortBindingState::Down) => "DOWN",
+        Some(PortBindingState::Error) => "ERROR",
+        None => return Err(NetworkError::CorruptBindingState),
+    };
+    Ok(status.to_owned())
+}
+
 /// Returns the server-context component of an O3K server-owned endpoint name.
 ///
 /// The name is `o3k-server:<project-id>:<context>`. The context is non-empty
@@ -561,7 +582,12 @@ impl NetworkService {
                 .unwrap_or_default(),
             mac_address: endpoint.mac.clone(),
             fixed_ip: endpoint.fixed_ip,
-            status: endpoint.state.to_ascii_uppercase(),
+            status: project_neutron_port_status(
+                &endpoint.state,
+                metadata
+                    .as_ref()
+                    .and_then(|value| value.binding_state.as_deref()),
+            )?,
             binding_host: metadata
                 .as_ref()
                 .and_then(|value| value.binding_host.clone()),

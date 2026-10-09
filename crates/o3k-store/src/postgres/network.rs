@@ -2393,9 +2393,9 @@ impl NetworkRepository for PostgresStore {
         let id_str = id.to_string();
         let res = sqlx::query(
             "UPDATE network_ports
-             SET binding_generation = CASE WHEN $1 IS NOT NULL AND binding_host IS DISTINCT FROM $1 THEN binding_generation + 1 ELSE binding_generation END,
-                 binding_host = COALESCE($1, binding_host),
-                 binding_state = COALESCE($2, binding_state)
+             SET binding_generation = CASE WHEN binding_host IS DISTINCT FROM $1 THEN binding_generation + 1 ELSE binding_generation END,
+                 binding_host = $1,
+                 binding_state = $2
              WHERE id = $3 AND project_id = $4",
         )
         .bind(binding_host)
