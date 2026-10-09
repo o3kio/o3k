@@ -4,6 +4,9 @@ set -Eeuo pipefail
 # Supported-HTTP Fabric v3 three-host nested campaign. This script is test
 # harness only and refuses to run against a different product source tree.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CAMPAIGN_MODE="${1:-full}"
+[[ "$CAMPAIGN_MODE" == full || "$CAMPAIGN_MODE" == departure-micro ]] \
+  || { echo "HARNESS_GAP: unsupported campaign mode: $CAMPAIGN_MODE" >&2; exit 1; }
 PRODUCT_SHA=b7f92ae362a158be555037fadeadb74e70ae3735
 PRODUCT_TREE=8e39e747bb4b786d86b51648aceb5a029b2c79a9
 ACCEPTED_HARNESS_BASE=d41e40ae89531a08e4bf015f1626d5d2f9f5746b
@@ -1319,6 +1322,14 @@ guest_failure_class() {
   python3 "$ROOT_DIR/tests/fabric-v3-guest-control.py" failure-class "$transport_error" "$phase_class"
 }
 
+if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
+  guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" departure-micro/a-to-b-before-c-delete.txt \
+    || fail "micro-gate baseline A->B ICMP failed" "DATAPLANE_DEFECT"
+  guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[c]}" departure-micro/a-to-c-before-c-delete.txt \
+    || fail "micro-gate baseline A->C ICMP failed" "DATAPLANE_DEFECT"
+fi
+
+if [[ "$CAMPAIGN_MODE" == full ]]; then
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo ip -j -d link; sudo bridge -j link; sudo bridge -j fdb; sudo wg show; sudo nft list ruleset" >"$EVIDENCE/$([ "$host" = a ] && echo compute-a || ([ "$host" = b ] && echo compute-b || echo compute-c))/runtime-state.txt" || fail "runtime evidence failed for host-$host" "ENVIRONMENT_GAP"
@@ -1491,6 +1502,8 @@ guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" compute-agent-restart/a
 guest_control_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" compute-agent-restart/b-to-a.txt \
   || fail "B->A failed after compute-agent restart" "$(guest_failure_class DURABLE_RECONCILIATION_GAP)"
 
+fi
+
 # Remove C only through the supported API and prove HER/local endpoint
 # withdrawal, then exercise A/B before final API teardown.
 realm_id="$REALM_ID"
@@ -1505,6 +1518,26 @@ for host in a b c; do
     >"$EVIDENCE/endpoint-removal/host-$host-plan-before.json" \
     || fail "pre-removal Fabric plan unavailable on $host" "OWNERSHIP_DEFECT"
 done
+python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" \
+  "$EVIDENCE/endpoint-removal/pre-delete-work-history.json" <<'PY' \
+  || fail "pre-delete durable work history unavailable or C is not currently applied" "DURABLE_RECONCILIATION_GAP"
+import json,pathlib,sqlite3,sys
+path,realm,out=sys.argv[1:]
+db=sqlite3.connect(f"file:{path}?mode=ro",uri=True,timeout=3); db.row_factory=sqlite3.Row
+rows=db.execute("SELECT command_id,target_host_id,snapshot,state,revision,updated_at FROM network_plan_work WHERE target_host_id IN ('host-a','host-b','host-c') ORDER BY updated_at,command_id").fetchall()
+history={host:[] for host in ('host-a','host-b','host-c')}
+for row in rows:
+    command=json.loads(bytes(row['snapshot'])); plan=command.get('plan',{})
+    fabric=plan.get('fabric',{}) if isinstance(plan,dict) else {}
+    if fabric.get('realm_id')!=realm: continue
+    history[row['target_host_id']].append({'command_id':row['command_id'],'action':command.get('action'),
+        'state':row['state'],'revision':row['revision'],'updated_at':row['updated_at'],
+        'directory_generation':plan.get('directory_generation'),'binding_generation':plan.get('binding_generation'),
+        'fabric_generation':plan.get('fabric_generation')})
+latest={host:(items[-1] if items else None) for host,items in history.items()}
+assert all(latest[h] and latest[h]['action']=='Apply' and latest[h]['state']=='succeeded' for h in history),latest
+pathlib.Path(out).write_text(json.dumps({'realm_id':realm,'history':history,'latest':latest},sort_keys=True,indent=2)+'\n')
+PY
 python3 - "$EVIDENCE/endpoint-removal/host-c-ownership-before.json" "$realm_id" "${PORT_IDS[2]}" <<'PY' >"$EVIDENCE/endpoint-removal/c-owned-objects.json" \
   || fail "C endpoint or local Realm ownership missing before removal" "OWNERSHIP_DEFECT"
 import json,sys

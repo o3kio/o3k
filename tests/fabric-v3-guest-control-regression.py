@@ -86,6 +86,21 @@ class GuestControlRegression(unittest.TestCase):
         self.assertLess(guard, provisioning)
         self.assertIn('merge-base HEAD "$ACCEPTED_HARNESS_BASE"', DRIVER)
         self.assertIn('PRODUCT_SHA=b7f92ae362a158be555037fadeadb74e70ae3735', DRIVER)
+        self.assertIn('PRODUCT_TREE=8e39e747bb4b786d86b51648aceb5a029b2c79a9', DRIVER)
+
+    def test_departure_micro_gate_stops_before_full_campaign_phases(self):
+        self.assertIn('CAMPAIGN_MODE="${1:-full}"', DRIVER)
+        self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" departure-micro/a-to-b-before-c-delete.txt', DRIVER)
+        self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[c]}" departure-micro/a-to-c-before-c-delete.txt', DRIVER)
+        self.assertIn('pre-delete-work-history.json', DRIVER)
+        full_mode = DRIVER.index('if [[ "$CAMPAIGN_MODE" == full ]]; then')
+        remove_c = DRIVER.index('# Remove C only through the supported API')
+        history_capture = DRIVER.index('pre-delete-work-history.json')
+        delete_request = DRIVER.index('DELETE "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}"')
+        self.assertLess(full_mode, remove_c)
+        self.assertLess(history_capture, delete_request)
+        self.assertLess(remove_c, delete_request)
+        self.assertIn("assert all(latest[h] and latest[h]['action']=='Apply' and latest[h]['state']=='succeeded'", DRIVER)
 
     def test_controller_restart_uses_the_frozen_product_binary(self):
         restart = DRIVER[DRIVER.index("# Controller restart while A/B/C are alive."):]
