@@ -1296,7 +1296,7 @@ async fn run_iteration(
     probe.require_closed_at_restart()?;
     evidence.set(
         "restart_probe_lifecycle",
-        json!({"closed_before_old_kill": true, "closed_before_replacement_start": true, "reopened_after_replacement_ready": false}),
+        json!({"closed_before_old_kill": true, "closed_before_replacement_start": true, "reopened_after_reconstruction_checkpoint": false}),
     );
     let kill_at = now();
     kill_process(child.child_mut()?)?;
@@ -1423,9 +1423,49 @@ async fn run_iteration(
     evidence.checkpoint("readyz_verified")?;
     evidence.checkpoint("controller_identity_verified")?;
 
+    if let Some(stale_lease) = stale_lease.as_ref() {
+        let busy = last_structured_event(&log, "orphan_repair_lease_busy")
+            .ok_or("shipped PostgreSQL scheduler did not observe Busy before lease takeover")?;
+        if busy["owner_controller_id"] != old_controller.0
+            || busy["owner_controller_epoch"] != old_controller.1
+            || busy["fencing_token"].as_u64() != Some(stale_lease.fencing_token)
+            || busy["lease_created_at"].as_str().is_none_or(str::is_empty)
+            || busy["lease_until"].as_str().is_none_or(str::is_empty)
+        {
+            return Err("PostgreSQL Busy scheduler event did not preserve the old owner and timestamp fields".into());
+        }
+        evidence.set("lease_busy_before_expiry", busy);
+    }
+
+    let operator_token = token(&client, new_http, "admin", BOOTSTRAP_PASSWORD, "system").await?;
+    let diag_start = Instant::now();
+    let diag = client
+        .get(format!(
+            "http://{new_http}/o3k/v1/operator/diagnostics/providers?limit=1"
+        ))
+        .header("authorization", format!("Bearer {operator_token}"))
+        .send()
+        .await?;
+    let diag_status = diag.status().as_u16();
+    let diag_latency = diag_start.elapsed().as_millis();
+    evidence.set("responsiveness", json!({"request_start":now(),"request_end":now(),"status":diag_status,"latency_ms":diag_latency,"bounded_success":diag_status == 200}));
+    evidence.checkpoint("reconciler_tick_seen")?;
+    let checkpoint = wait_orphan_checkpoint(
+        &orphan_checkpoint,
+        run_id,
+        server_id,
+        &endpoint_id,
+        Duration::from_secs(30),
+    )
+    .await?;
+    // `/readyz` means the composition is serving requests, while this
+    // run-owned checkpoint proves replacement reconstruction has reached the
+    // pre-mutation repair boundary.  Open a direct store pool only after that
+    // boundary so its connect-time migration/backfill checks do not overlap
+    // replacement startup/reconstruction work.
     store_operation(
         evidence,
-        "post_restart_probe_open",
+        "post_restart_probe_open_after_reconstruction",
         "connect_fresh_test_owned_probe",
         backend,
         probe.is_alive(),
@@ -1435,7 +1475,7 @@ async fn run_iteration(
     probe.reopen(backend).await?;
     evidence.set(
         "restart_probe_lifecycle",
-        json!({"closed_before_old_kill": true, "closed_before_replacement_start": true, "reopened_after_replacement_ready": true}),
+        json!({"closed_before_old_kill": true, "closed_before_replacement_start": true, "reopened_after_reconstruction_checkpoint": true}),
     );
     store_operation(
         evidence,
@@ -1497,42 +1537,6 @@ async fn run_iteration(
             "port_binding_expected_some": true,
         }),
     );
-
-    if let Some(stale_lease) = stale_lease.as_ref() {
-        let busy = last_structured_event(&log, "orphan_repair_lease_busy")
-            .ok_or("shipped PostgreSQL scheduler did not observe Busy before lease takeover")?;
-        if busy["owner_controller_id"] != old_controller.0
-            || busy["owner_controller_epoch"] != old_controller.1
-            || busy["fencing_token"].as_u64() != Some(stale_lease.fencing_token)
-            || busy["lease_created_at"].as_str().is_none_or(str::is_empty)
-            || busy["lease_until"].as_str().is_none_or(str::is_empty)
-        {
-            return Err("PostgreSQL Busy scheduler event did not preserve the old owner and timestamp fields".into());
-        }
-        evidence.set("lease_busy_before_expiry", busy);
-    }
-
-    let operator_token = token(&client, new_http, "admin", BOOTSTRAP_PASSWORD, "system").await?;
-    let diag_start = Instant::now();
-    let diag = client
-        .get(format!(
-            "http://{new_http}/o3k/v1/operator/diagnostics/providers?limit=1"
-        ))
-        .header("authorization", format!("Bearer {operator_token}"))
-        .send()
-        .await?;
-    let diag_status = diag.status().as_u16();
-    let diag_latency = diag_start.elapsed().as_millis();
-    evidence.set("responsiveness", json!({"request_start":now(),"request_end":now(),"status":diag_status,"latency_ms":diag_latency,"bounded_success":diag_status == 200}));
-    evidence.checkpoint("reconciler_tick_seen")?;
-    let checkpoint = wait_orphan_checkpoint(
-        &orphan_checkpoint,
-        run_id,
-        server_id,
-        &endpoint_id,
-        Duration::from_secs(30),
-    )
-    .await?;
     if backend.is_postgres() && checkpoint["binding_state"] != reconstructed_binding_state {
         return Err(
             "PostgreSQL restart changed the durable endpoint binding before orphan repair".into(),
