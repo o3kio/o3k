@@ -557,28 +557,16 @@ async fn create_existing_port(
 }
 
 async fn wait_state(
-    probe: &o3k_store::unified::O3kStore,
+    probe: &TestOwnedProbe,
     id: Uuid,
     state: &str,
     timeout: Duration,
-    evidence: &mut Evidence,
-    backend: &Backend,
-    old_pid: Option<u32>,
-    new_pid: Option<u32>,
-    phase: &str,
+    diagnostics: &mut StoreDiagnostics<'_>,
 ) -> Result<(), Error> {
     let deadline = Instant::now() + timeout;
     loop {
-        store_operation(
-            evidence,
-            phase,
-            "get_resource",
-            backend,
-            true,
-            old_pid,
-            new_pid,
-        );
-        let resource = probe.get_resource(id).await?;
+        diagnostics.record("get_resource", probe.is_alive());
+        let resource = probe.store()?.get_resource(id).await?;
         if resource.observed_state == state {
             return Ok(());
         }
@@ -602,6 +590,12 @@ impl TestOwnedProbe {
         self.store.is_some()
     }
 
+    fn store(&self) -> Result<&o3k_store::unified::O3kStore, Error> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "test-owned probe is closed across the restart boundary".into())
+    }
+
     fn close(&mut self) {
         self.store.take();
     }
@@ -622,6 +616,28 @@ impl TestOwnedProbe {
     }
 }
 
+struct StoreDiagnostics<'a> {
+    evidence: &'a mut Evidence,
+    backend: &'a Backend,
+    old_pid: Option<u32>,
+    new_pid: Option<u32>,
+    phase: &'a str,
+}
+
+impl StoreDiagnostics<'_> {
+    fn record(&mut self, operation: &str, probe_alive: bool) {
+        store_operation(
+            self.evidence,
+            self.phase,
+            operation,
+            self.backend,
+            probe_alive,
+            self.old_pid,
+            self.new_pid,
+        );
+    }
+}
+
 #[tokio::test]
 async fn pp5_1035_test_probe_must_close_across_restart_boundary() -> Result<(), Error> {
     let root = std::env::temp_dir().join(format!("o3k-pp5-probe-lifecycle-{}", Uuid::now_v7()));
@@ -638,16 +654,6 @@ async fn pp5_1035_test_probe_must_close_across_restart_boundary() -> Result<(), 
     probe.close();
     fs::remove_dir_all(root)?;
     Ok(())
-}
-
-impl std::ops::Deref for TestOwnedProbe {
-    type Target = o3k_store::unified::O3kStore;
-
-    fn deref(&self) -> &Self::Target {
-        self.store
-            .as_ref()
-            .expect("test-owned probe is closed across the restart boundary")
-    }
 }
 
 fn store_operation(
@@ -1127,11 +1133,13 @@ async fn run_iteration(
         server_id,
         "ACTIVE",
         Duration::from_secs(30),
-        evidence,
-        backend,
-        Some(old_pid),
-        None,
-        "pre_restart_server_active",
+        &mut StoreDiagnostics {
+            evidence,
+            backend,
+            old_pid: Some(old_pid),
+            new_pid: None,
+            phase: "pre_restart_server_active",
+        },
     )
     .await?;
     let owned_before = ports(&client, http, &admin_token)
@@ -1155,6 +1163,7 @@ async fn run_iteration(
         None,
     );
     probe
+        .store()?
         .update_port_binding(
             PROJECT_ID,
             &endpoint_uuid,
@@ -1188,7 +1197,7 @@ async fn run_iteration(
             Some(old_pid),
             None,
         );
-        let resource = probe.get_resource(server_id).await?;
+        let resource = probe.store()?.get_resource(server_id).await?;
         store_operation(
             evidence,
             "pre_restart_terminal_delete_window",
@@ -1199,6 +1208,7 @@ async fn run_iteration(
             None,
         );
         let nonterminal = probe
+            .store()?
             .list_non_terminal_lifecycle_operations()
             .await?
             .iter()
@@ -1227,6 +1237,7 @@ async fn run_iteration(
         None,
     );
     let mut operation_id = probe
+        .store()?
         .list_canonical_operations_page(PROJECT_ID, None, 100)
         .await?
         .into_iter()
@@ -1486,7 +1497,7 @@ async fn run_iteration(
         Some(old_pid),
         Some(new_pid),
     );
-    let reconstructed_server = probe.get_resource(server_id).await?;
+    let reconstructed_server = probe.store()?.get_resource(server_id).await?;
     if reconstructed_server.observed_state != "DELETED" {
         return Err("PostgreSQL restart did not reconstruct the terminal compute resource".into());
     }
@@ -1508,6 +1519,7 @@ async fn run_iteration(
         Some(new_pid),
     );
     let reconstructed_port = probe
+        .store()?
         .get_port(PROJECT_ID, &endpoint_uuid)
         .await?
         .ok_or("restart did not reconstruct the durable endpoint record")?;
@@ -1654,11 +1666,13 @@ async fn run_iteration(
         created_id,
         "ACTIVE",
         Duration::from_secs(60),
-        evidence,
-        backend,
-        Some(old_pid),
-        Some(new_pid),
-        "post_restart_new_server_active",
+        &mut StoreDiagnostics {
+            evidence,
+            backend,
+            old_pid: Some(old_pid),
+            new_pid: Some(new_pid),
+            phase: "post_restart_new_server_active",
+        },
     )
     .await?;
     let create_accepted_at = now();
@@ -1751,11 +1765,13 @@ async fn run_iteration(
         created_id,
         "DELETED",
         Duration::from_secs(30),
-        evidence,
-        backend,
-        Some(old_pid),
-        Some(new_pid),
-        "post_restart_cleanup_delete",
+        &mut StoreDiagnostics {
+            evidence,
+            backend,
+            old_pid: Some(old_pid),
+            new_pid: Some(new_pid),
+            phase: "post_restart_cleanup_delete",
+        },
     )
     .await;
     store_operation(
@@ -1768,6 +1784,7 @@ async fn run_iteration(
         Some(new_pid),
     );
     let owned_servers = probe
+        .store()?
         .list_resources(PROJECT_ID, "compute_instance")
         .await?
         .into_iter()
