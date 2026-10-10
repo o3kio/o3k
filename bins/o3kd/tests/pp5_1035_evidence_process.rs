@@ -410,7 +410,14 @@ fn start_o3kd(
         );
     }
     if fault_pause {
-        command.env(FAULT_ENV, "4000");
+        if backend.is_postgres() {
+            command.env(FAULT_ENV, "0").env(
+                "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RELEASE_FILE",
+                root.join("sync/old-endpoint-release-gate"),
+            );
+        } else {
+            command.env(FAULT_ENV, "4000");
+        }
     }
     let child = command.spawn()?;
     Ok(child)
@@ -874,6 +881,7 @@ async fn run_iteration(
     let sync = root.join("sync");
     fs::create_dir_all(&sync)?;
     let release = sync.join("release");
+    let old_endpoint_release_gate = sync.join("old-endpoint-release-gate");
     let waiter = sync.join("waiter");
     let orphan_checkpoint = sync.join("orphan-checkpoint.json");
     let bootstrap_cleanup_failure = root.join("bootstrap-cleanup-failure");
@@ -882,6 +890,7 @@ async fn run_iteration(
     fs::remove_file(&bootstrap_cleanup_failure).ok();
     fs::remove_file(&old_cleanup_failure).ok();
     fs::remove_file(&replacement_cleanup_failure).ok();
+    fs::remove_file(&old_endpoint_release_gate).ok();
     File::create(&release)?;
     let old_controller = (format!("old-{run_id}"), format!("old-epoch-{run_id}"));
     // The operator diagnostics route is deliberately system-scoped.  Seed a
@@ -1025,11 +1034,23 @@ async fn run_iteration(
         (String::from("O3K_CONTROL_ADDRESS"), control.to_string()),
         (String::from("O3K_DATABASE_ID"), backend.evidence_id()),
         (String::from("O3K_REPAIR_TIMEOUT_MS"), String::from("30000")),
-        (
+    ]);
+    let mut intended = intended;
+    if backend.is_postgres() {
+        intended.insert(
+            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"),
+            String::from("0"),
+        );
+        intended.insert(
+            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RELEASE_FILE"),
+            old_endpoint_release_gate.display().to_string(),
+        );
+    } else {
+        intended.insert(
             String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"),
             String::from("4000"),
-        ),
-    ]);
+        );
+    }
     let effective = proc_env(old_pid)?;
     evidence.set("old", json!({"pid": old_pid, "proc_starttime": old_start, "executable_path": old_exe, "executable_sha256": old_digest, "cmdline_digest": proc_cmdline_digest(old_pid)?, "state_root": root, "http_address": http, "control_address": control, "listeners": old_listeners, "controller_id": old_controller.0, "controller_epoch": old_controller.1}));
     evidence.set("environment", env_value_map(&intended, &effective));
@@ -1222,6 +1243,54 @@ async fn run_iteration(
     if !terminal {
         return Err("terminal delete window not observed".into());
     }
+    let stale_lease = if backend.is_postgres() {
+        // The terminal delete path holds the local orphan-repair lock while
+        // this run-scoped gate is closed. Claim the durable lease during that
+        // known interval, before the queued scheduled pass can enter the lock
+        // and race the fixture. Release the gate only after recording owner.
+        let pause_engaged = wait_log(
+            &log,
+            "test-only fault pause before-endpoint-release engaged; awaiting release gate",
+            Duration::from_secs(10),
+        )
+        .await?;
+        if old_endpoint_release_gate.exists() {
+            return Err(
+                "old daemon endpoint-release gate unexpectedly opened before lease seeding".into(),
+            );
+        }
+        let coordination = backend.connect().await?;
+        let outcome = coordination
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                &o3k_store::ControllerId::new(old_controller.0.clone()),
+                &o3k_store::ControllerEpoch::new(old_controller.1.clone()),
+                Duration::from_secs(12),
+            )
+            .await?;
+        let lease = match outcome {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                return Err("old controller could not seed the short PostgreSQL repair lease while the terminal delete held the local repair lock".into());
+            }
+        };
+        evidence.set(
+            "stale_lease",
+            json!({
+                "owner_controller_id": old_controller.0,
+                "owner_controller_epoch": old_controller.1,
+                "fencing_token": lease.fencing_token,
+                "lease_until": lease.lease_until,
+                "ttl_ms": 12000,
+                "seeded_before_lock_release": true,
+                "endpoint_release_pause_engaged_at": pause_engaged,
+            }),
+        );
+        Some(lease)
+    } else {
+        None
+    };
     let owned_endpoint = ports(&client, http, &admin_token)
         .await?
         .into_iter()
@@ -1257,40 +1326,12 @@ async fn run_iteration(
             .map(str::to_owned);
     }
     let operation_id = operation_id.ok_or("delete response missing durable operation id")?;
+    if backend.is_postgres() && old_endpoint_release_gate.exists() {
+        return Err("old daemon endpoint-release gate opened before SIGKILL".into());
+    }
     evidence.set("terminal_state", json!({"server_id":server_id,"delete_operation_id":operation_id,"project_id":PROJECT_ID,"endpoint_id":endpoint_id,"operation_state":"Succeeded","resource_state":"DELETED","owned_endpoint_present":true,"endpoint":{"ownership":owned_endpoint["project_id"],"project":PROJECT_ID,"binding":{"device_id":owned_endpoint["device_id"],"device_owner":owned_endpoint["device_owner"],"status":owned_endpoint["status"]},"ip":fixed_ip}}));
     evidence.checkpoint("terminal_state_observed")?;
     evidence.checkpoint("endpoint_present")?;
-    let stale_lease = if backend.is_postgres() {
-        let coordination = backend.connect().await?;
-        let outcome = coordination
-            .acquire_work_lease(
-                "server-endpoint-orphan-repair",
-                "repair",
-                &o3k_store::ControllerId::new(old_controller.0.clone()),
-                &o3k_store::ControllerEpoch::new(old_controller.1.clone()),
-                Duration::from_secs(12),
-            )
-            .await?;
-        let lease = match outcome {
-            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
-            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
-                return Err("old controller could not seed the short PostgreSQL repair lease; scheduled repair claimed it while only waiting on the local lock".into());
-            }
-        };
-        evidence.set(
-            "stale_lease",
-            json!({
-                "owner_controller_id": old_controller.0,
-                "owner_controller_epoch": old_controller.1,
-                "fencing_token": lease.fencing_token,
-                "lease_until": lease.lease_until,
-                "ttl_ms": 12000,
-            }),
-        );
-        Some(lease)
-    } else {
-        None
-    };
     // No fixture or direct observation pool may overlap the restart boundary.
     // The old daemon remains live through the intentional terminal-delete
     // window; all direct writes and reads above finish before SIGKILL.
@@ -1320,6 +1361,7 @@ async fn run_iteration(
     if !old_gone {
         return Err("old process still represents old starttime".into());
     }
+    fs::remove_file(&old_endpoint_release_gate).ok();
     child.disarm();
 
     let new_controller = (format!("new-{run_id}"), format!("new-epoch-{run_id}"));
