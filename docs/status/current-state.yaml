@@ -806,3 +806,24 @@ profiles:
       - live migration
       - arbitrary OpenStack parity
       - unsupported external services
+
+# Fabric v3 current acceptance status for the Neutron port-status projection
+# candidate. A policy deferral is deliberately distinct from evidence PASS.
+fabric_v3_neutron_port_status:
+  product_sha: 1c2d20f6618ea0549428285641865788e7416662
+  product_tree: 6667b03cae6f218aad16d141b3037ff4cccd39c0
+  harness_sha: 1c3196824aba88fab943868ea48ffccd4917672f
+  harness_tree: ef46b3d4ef7ed79cbaebe29dfe30ec219e993d7d
+  evidence:
+    product_unit_integration: PASS
+    sqlite_lifecycle: PASS
+    postgresql_lifecycle: PASS
+    real_host_nested_microgate: DEFERRED_BY_POLICY
+    physical_three_host_gate_b: DEFERRED_BY_POLICY
+  merge_blocked_by_physical_validation: false
+  final_physical_certification_claimed: false
+  status_record: docs/evidence/fabric-v3-validation-deferral-20261009.md
+  machine_status: docs/evidence/fabric-v3-validation-status.json
+  follow_up: >-
+    Run the preserved Fabric v3 real-host/physical acceptance campaign before
+    the release milestone that requires physical Fabric certification.
