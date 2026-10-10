@@ -25,10 +25,10 @@ Related decisions and specifications:
 - [Execution-boundary contract](../../contracts/execution-boundaries.md)
 - Shared implementation authority: [o3kio/fabric](https://github.com/o3kio/fabric) —
   the hardened provider extracted from this design lineage (WireGuard host
-  fabric + per-realm VXLAN/HER), normative contract
-  [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/main/contracts/fabric-provider-v1.md)
+  fabric + per-realm VXLAN/HER), provider contract
+  [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/contracts/fabric-provider-v1.md)
   and change control
-  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/main/docs/change-control.md)
+  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/docs/change-control.md)
 
 This is a privileged multi-host networking decision. The requester acceptance
 recorded in the introducing pull request activates this ADR and SPEC-0049 as the
@@ -51,9 +51,9 @@ shared repository [o3kio/fabric](https://github.com/o3kio/fabric) and
 consumed by both projects as git-tag dependencies
 (`fabric-plan` / `fabric-linux` / `fabric-conformance`), pinned to one tag
 fleet-wide. Its contract,
-[`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/main/contracts/fabric-provider-v1.md),
-is normative for that substrate, and
-[`docs/change-control.md`](https://github.com/o3kio/fabric/blob/main/docs/change-control.md)
+[`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/contracts/fabric-provider-v1.md),
+specifies provider-level substrate invariants, and
+[`docs/change-control.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/docs/change-control.md)
 governs how both consumers request changes: the design changes rarely,
 deliberately, and for fabric-wide reasons — never per-project. Neither
 project forks, patches, or re-implements it.
