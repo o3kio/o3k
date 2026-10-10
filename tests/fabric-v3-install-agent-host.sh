@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 
 host="$1"; octet="$2"; run="$3"; stage="$4"
-[[ "$host" =~ ^[abc]$ && "$octet" =~ ^(20[1-3]|21[1-3]|22[1-9]|23[0-9])$ ]] || { echo "invalid host identity" >&2; exit 2; }
+[[ "$host" =~ ^[abc]$ && "$octet" =~ ^(20[1-9]|21[0-9]|22[0-9]|23[0-9])$ ]] || { echo "invalid host identity" >&2; exit 2; }
 [[ "$run" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "invalid run id" >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 2; }
 [[ -d "$stage" && ! -L "$stage" ]] || { echo "invalid staging directory" >&2; exit 2; }
@@ -56,7 +56,11 @@ virsh -c qemu:///system destroy "$probe" >/dev/null
 rm -f -- "$probe_xml"
 trap - EXIT
 
-install -d -m 0700 "$base" "$base/network" "$base/network/fabric-provider" \
+fabric_root="$base/network/fabric"
+provider_key_dir="$fabric_root/fabric-provider"
+private_key="$provider_key_dir/wireguard-private.key"
+public_key="$provider_key_dir/wireguard-public.key"
+install -d -m 0700 "$base" "$base/network" "$provider_key_dir" \
   "$base/compute" "$base/compute/tls" "$tls"
 printf 'o3k-fabric-v3-run-v1\nrun=%s\nhost=%s\n' "$run" "$host" >"$base/.o3k-fabric-v3-owned"
 chmod 0600 "$base/.o3k-fabric-v3-owned"
@@ -87,13 +91,12 @@ install -m 0644 "$stage/controller-network.pem" "$tls/controller-network.pem"
 install -m 0600 "$stage/controller-network-key.pem" "$tls/controller-network-key.pem"
 printf '%s\n' "compute-agent-$host" >"$base/compute/agent-id"
 chmod 0600 "$base/compute/agent-id"
-if [[ ! -e "$base/network/fabric-provider/wireguard-private.key" ]]; then
-  (umask 077; wg genkey >"$base/network/fabric-provider/wireguard-private.key")
+if [[ ! -e "$private_key" ]]; then
+  (umask 077; wg genkey >"$private_key")
 fi
-chmod 0600 "$base/network/fabric-provider/wireguard-private.key"
-wg pubkey <"$base/network/fabric-provider/wireguard-private.key" \
-  >"$base/network/fabric-provider/wireguard-public.key"
-chmod 0600 "$base/network/fabric-provider/wireguard-public.key"
+chmod 0600 "$private_key"
+wg pubkey <"$private_key" >"$public_key"
+chmod 0600 "$public_key"
 if ! pgrep -x o3k-network >/dev/null; then
   nohup env \
     O3K_NETWORK_AGENT_ID="network-agent-$host" \
@@ -108,7 +111,7 @@ if ! pgrep -x o3k-network >/dev/null; then
     O3K_NETWORK_OWNERSHIP_ROOT="$base/network/ownership" \
     O3K_NETWORK_DHCP_ROOT="$base/network/dhcp" \
     O3K_NETWORK_DNSMASQ=/usr/sbin/dnsmasq \
-    O3K_NETWORK_FABRIC_ROOT="$base/network/fabric" \
+    O3K_NETWORK_FABRIC_ROOT="$fabric_root" \
     O3K_NETWORK_TAP_USER="$qemu_user" \
     O3K_NETWORK_TAP_GROUP="$qemu_group" \
     O3K_NETWORK_LISTEN=0.0.0.0:50061 \
