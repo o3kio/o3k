@@ -91,6 +91,40 @@ async fn test_fault_pause_async_with(name: &str, ms: Option<u64>) {
     tracing::warn!(pause_ms = ms, "test-only fault pause {} released", name);
 }
 
+async fn test_fault_pause_until_release_file(name: &str) -> Result<(), crate::ComputeError> {
+    let Some(path) = std::env::var_os("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RELEASE_FILE")
+        .map(std::path::PathBuf::from)
+    else {
+        return Ok(());
+    };
+
+    tracing::warn!(
+        pause_gate = "file",
+        "test-only fault pause {} engaged; awaiting release gate",
+        name
+    );
+    let released = tokio::time::timeout(Duration::from_secs(30), async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if released.is_err() {
+        tracing::error!(
+            pause_gate = "file",
+            "test-only fault pause {} release gate timed out",
+            name
+        );
+        return Err(crate::ComputeError::Unavailable);
+    }
+    tracing::warn!(
+        pause_gate = "file",
+        "test-only fault pause {} released",
+        name
+    );
+    Ok(())
+}
+
 /// Apply the endpoint-release crash-window pause only to the explicitly
 /// targeted server when a target is configured.  The protected #1035 journey
 /// arms the daemon before a delete is dispatched, so unrelated terminal
@@ -99,15 +133,17 @@ pub(crate) async fn test_fault_pause_async_for_resource(
     name: &str,
     ms: Option<u64>,
     resource_id: Option<uuid::Uuid>,
-) {
+) -> Result<(), crate::ComputeError> {
     let raw_target = std::env::var_os("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RESOURCE_ID");
     if !test_fault_target_matches(raw_target.as_deref(), resource_id) {
         if raw_target.is_some() {
             tracing::debug!("test-only endpoint-release fault target did not match");
         }
-        return;
+        return Ok(());
     }
+    test_fault_pause_until_release_file(name).await?;
     test_fault_pause_async_with(name, ms).await;
+    Ok(())
 }
 
 fn test_fault_target_matches(
