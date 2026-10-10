@@ -1906,9 +1906,9 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
                 .cloned()
                 .unwrap_or(Value::Null);
             let message = if cleanup_failures.is_empty() {
-                error.to_string()
+                format!("{} ({error:?})", error)
             } else {
-                format!("{error}; {}", cleanup_failures.join("; "))
+                format!("{error:?}; {}", cleanup_failures.join("; "))
             };
             let message = format!("{message}; store diagnostic: {diagnostic}");
             let _ = evidence.fail(&phase, &message);
