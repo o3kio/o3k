@@ -17,6 +17,8 @@ ACCEPTED_HARNESS_BASE=d41e40ae89531a08e4bf015f1626d5d2f9f5746b
   || { echo "HARNESS_GAP: accepted guest-control lineage is absent" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-guest-control-regression.py" \
   || { echo "HARNESS_GAP: guest-control acceptance regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage-test.py" \
+  || { echo "HARNESS_GAP: ownership-safe domain cleanup regression failed" >&2; exit 1; }
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 BASE_IMAGE_SHA=612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354
 PROBE_BASE_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
@@ -231,17 +233,22 @@ PY
         disk="$IMAGE_STORE/$PREFIX-compute-$role.qcow2"
         seed="$IMAGE_STORE/$PREFIX-compute-$role-seed.iso"
         if [[ -z "$expected_uuid" || "$actual_uuid" != "$expected_uuid" ]] \
-          || ! grep -Fq "<name>$domain</name>" <<<"$xml" \
-          || ! grep -Fq "<uuid>$expected_uuid</uuid>" <<<"$xml" \
-          || ! grep -Fq "$disk" <<<"$xml" \
-          || ! grep -Fq "$seed" <<<"$xml"; then
+          || ! python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" \
+            "$domain" "$expected_uuid" "$disk" "$seed" <<<"$xml" \
+          || [[ -L "$disk" || -L "$seed" || ! -f "$disk" || ! -f "$seed" ]]; then
           printf 'PRESERVED ownership check failed for %s\n' "$domain" >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
           continue
         fi
         virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1 || true
-        if virsh -c qemu:///system undefine "$domain" --remove-all-storage >/dev/null 2>&1; then
-          printf 'REMOVED %s uuid=%s disk=%s seed=%s\n' "$domain" "$expected_uuid" "$disk" "$seed" \
-            >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+        if virsh -c qemu:///system undefine "$domain" >/dev/null 2>&1; then
+          if rm -- "$disk" "$seed"; then
+            printf 'REMOVED %s uuid=%s disk=%s seed=%s\n' "$domain" "$expected_uuid" "$disk" "$seed" \
+              >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          else
+            printf 'CLEANUP_FAILED storage %s uuid=%s disk=%s seed=%s\n' \
+              "$domain" "$expected_uuid" "$disk" "$seed" \
+              >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          fi
         else
           printf 'CLEANUP_FAILED %s uuid=%s\n' "$domain" "$expected_uuid" \
             >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
@@ -1781,11 +1788,32 @@ for index in 1 0; do
   id="${SERVER_IDS[$index]}"
   curl --fail --silent --show-error --max-time 60 -X DELETE "$BASE/v2.1/$PROJECT_ID/servers/$id" -H "x-auth-token: $TOKEN" >"$EVIDENCE/teardown/server-${id}.delete.txt" || fail "supported server delete failed: $id" "CLEANUP_DEFECT"
 done
-for _ in $(seq 1 120); do
+servers_remaining=1
+server_poll_deadline=$((SECONDS + 120))
+for attempt in $(seq 1 120); do
+  (( SECONDS < server_poll_deadline )) || break
   left=0
-  for id in "${SERVER_IDS[@]}"; do if curl -sS -o /dev/null "$BASE/v2.1/$PROJECT_ID/servers/$id" -H "x-auth-token: $TOKEN"; then left=1; fi; done
-  (( left == 0 )) && break; sleep 1
+  poll_complete=1
+  for id in "${SERVER_IDS[@]}"; do
+    request_timeout=$((server_poll_deadline - SECONDS))
+    if (( request_timeout <= 0 )); then poll_complete=0; break; fi
+    response_file="$EVIDENCE/teardown/server-$id.poll-$attempt.response.txt"
+    if ! status="$(curl --silent --show-error --max-time "$request_timeout" -o "$response_file" -w '%{http_code}' \
+      "$BASE/v2.1/$PROJECT_ID/servers/$id" -H "x-auth-token: $TOKEN")"; then
+      fail "server deletion observation failed for $id" "CLEANUP_DEFECT"
+    fi
+    case "$status" in
+      404) ;;
+      200) left=1 ;;
+      *) fail "unexpected server deletion observation HTTP $status for $id" "CLEANUP_DEFECT" ;;
+    esac
+  done
+  (( poll_complete == 1 )) || break
+  if (( left == 0 )); then servers_remaining=0; break; fi
+  (( SECONDS < server_poll_deadline )) || break
+  sleep 1
 done
+(( servers_remaining == 0 )) || fail "server deletion did not converge within 120 seconds" "CLEANUP_DEFECT"
 for id in "${PORT_IDS[@]}"; do curl --fail --silent --show-error --max-time 30 -X DELETE "$BASE/v2.0/ports/$id" -H "x-auth-token: $TOKEN" >"$EVIDENCE/teardown/port-$id.delete.txt" || fail "supported port delete failed: $id" "CLEANUP_DEFECT"; done
 curl --fail --silent --show-error --max-time 30 -X DELETE "$BASE/v2.0/subnets/$SUBNET_ID" -H "x-auth-token: $TOKEN" >"$EVIDENCE/teardown/subnet-delete.txt" || fail "supported subnet delete failed" "CLEANUP_DEFECT"
 curl --fail --silent --show-error --max-time 30 -X DELETE "$BASE/v2.0/networks/$NETWORK_ID" -H "x-auth-token: $TOKEN" >"$EVIDENCE/teardown/network-delete.txt" || fail "supported network delete failed" "CLEANUP_DEFECT"
@@ -1846,14 +1874,19 @@ for domain in "${FRESH_DOMAINS[@]}"; do
   expected_uuid="$(awk -F '\t' -v n="$domain" '$2==n{print $5}' "$EVIDENCE/environment/inventory.tsv")"
   xml="$(virsh -c qemu:///system dumpxml "$domain" 2>/dev/null || true)"
   actual_uuid="$(virsh -c qemu:///system domuuid "$domain" 2>/dev/null || true)"
+  role="${domain##*-}"
+  disk="$IMAGE_STORE/$PREFIX-compute-$role.qcow2"
+  seed="$IMAGE_STORE/$PREFIX-compute-$role-seed.iso"
   if [[ -z "$expected_uuid" || "$actual_uuid" != "$expected_uuid" ]] \
-    || ! grep -Fq "<name>$domain</name>" <<<"$xml" \
-    || ! grep -Fq "$PREFIX" <<<"$xml"; then
+    || ! python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" \
+      "$domain" "$expected_uuid" "$disk" "$seed" <<<"$xml" \
+    || [[ -L "$disk" || -L "$seed" || ! -f "$disk" || ! -f "$seed" ]]; then
     fail "fresh compute guest ownership could not be re-proven for $domain" "OWNERSHIP_DEFECT"
   fi
   virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1 || true
-  virsh -c qemu:///system undefine "$domain" --remove-all-storage >/dev/null \
+  virsh -c qemu:///system undefine "$domain" >/dev/null \
     || fail "could not remove owned fresh compute guest $domain" "CLEANUP_DEFECT"
+  rm -- "$disk" "$seed" || fail "could not remove exact owned storage for $domain" "CLEANUP_DEFECT"
 done
 virsh -c qemu:///system list --all --name | sed '/^$/d' | sort >"$EVIDENCE/teardown/libvirt-domains-after.txt"
 diff -u "$EVIDENCE/environment/libvirt-domains-before.txt" "$EVIDENCE/teardown/libvirt-domains-after.txt" >"$EVIDENCE/teardown/libvirt-domains.diff" \

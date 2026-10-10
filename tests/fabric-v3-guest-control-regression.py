@@ -138,6 +138,22 @@ class GuestControlRegression(unittest.TestCase):
         self.assertNotIn("virsh net-destroy", DRIVER)
         self.assertNotIn("nft flush ruleset", DRIVER)
 
+    def test_server_teardown_poll_distinguishes_http_absence_and_is_bounded(self):
+        poll = DRIVER[DRIVER.index("servers_remaining=1"):DRIVER.index('for id in "${PORT_IDS[@]}"; do')]
+        self.assertIn('--max-time "$request_timeout"', poll)
+        self.assertIn("server_poll_deadline=$((SECONDS + 120))", poll)
+        self.assertIn('server_poll_deadline - SECONDS', poll)
+        self.assertIn("-w '%{http_code}'", poll)
+        self.assertIn("404)", poll)
+        self.assertIn("200)", poll)
+        self.assertIn("unexpected server deletion observation HTTP", poll)
+        self.assertIn("server deletion did not converge within 120 seconds", poll)
+
+    def test_nested_domain_cleanup_never_removes_unverified_storage(self):
+        self.assertNotIn("--remove-all-storage", DRIVER)
+        self.assertIn("fabric-v3-owned-domain-storage.py", DRIVER)
+        self.assertIn('rm -- "$disk" "$seed"', DRIVER)
+
     def test_packet_classifier_uses_control_transport_state(self):
         self.assertIn("LAST_GUEST_CHANNEL_ERROR", DRIVER)
         self.assertIn("failure-class \"$transport_error\" \"$phase_class\"", DRIVER)
