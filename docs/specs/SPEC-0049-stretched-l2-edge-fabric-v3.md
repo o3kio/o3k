@@ -29,9 +29,9 @@ Related normative sources:
 - [execution-boundary contract](../../contracts/execution-boundaries.md)
 - Shared implementation authority: [o3kio/fabric](https://github.com/o3kio/fabric) —
   provider contract
-  [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/main/contracts/fabric-provider-v1.md)
+  [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/contracts/fabric-provider-v1.md)
   and change control
-  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/main/docs/change-control.md)
+  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/docs/change-control.md)
 
 ## Purpose and governance gate
 
