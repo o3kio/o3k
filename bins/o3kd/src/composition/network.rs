@@ -7656,11 +7656,16 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
             )
         })?;
         let _guard = self.unbind_lock.lock().await;
-        let port = self
-            .network
-            .get_port_for_project(project_id, port_id)
-            .await
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let port = match self.network.get_port_for_project(project_id, port_id).await {
+            Ok(port) => port,
+            // A concurrent equivalent server delete can finish releasing a
+            // server-owned endpoint before this request reaches its unbind
+            // seat. The endpoint's absence is already the desired terminal
+            // state, so do not turn an idempotent delete replay into HTTP 500.
+            // Other lookup failures still fail closed.
+            Err(o3k_network::NetworkError::NotFound) => return Ok(()),
+            Err(error) => return Err(std::io::Error::other(error.to_string()).into()),
+        };
         let v3_reconciler = self.fabric_reconciler.as_ref();
         if v3_reconciler.is_none()
             && let (Some(dispatcher), Some(host)) = (
@@ -7767,11 +7772,10 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 .await
                 .map_err(std::io::Error::other)?;
         }
-        self.network
-            .unbind_port(project_id, port_id)
-            .await
-            .map(|_| ())
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        match self.network.unbind_port(project_id, port_id).await {
+            Ok(_) | Err(o3k_network::NetworkError::NotFound) => {}
+            Err(error) => return Err(std::io::Error::other(error.to_string()).into()),
+        }
         Ok(())
     }
 
