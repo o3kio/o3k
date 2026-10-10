@@ -1,8 +1,10 @@
 use o3k_kernel::{ActionId, LimitKey, ResourceType, ServiceNamespace};
 
+pub mod anti_spoof;
 pub mod canonical_policy;
 pub mod execution;
 pub mod fabric;
+pub mod fabric_dhcp;
 pub mod gateway;
 mod host;
 pub mod linux_fabric;
@@ -24,7 +26,11 @@ pub use execution::{
     NetworkPlanDispatcher, NetworkPlanExecutor, NetworkPlanRealizer, NetworkPlanStatus,
     PlanAdmission, journal_path,
 };
-pub use fabric::{FabricBackend, FabricError, FabricRealizer, InMemoryFabricBackend};
+pub use fabric::{
+    FabricBackend, FabricError, FabricRealizer, FabricRealmPlanError, FabricRealmPlanSet,
+    InMemoryFabricBackend, compile_fabric_realm_plans,
+};
+pub use fabric_dhcp::{FabricDhcpError, FabricDhcpRealizer};
 pub use gateway::{
     InMemoryL3GatewayBackend, L3GatewayBackend, L3GatewayError, L3GatewayRealizer,
     LinuxL3GatewayProvider, RealmExecutionContext, compile_l3_gateway_execution_plan,
@@ -34,7 +40,10 @@ pub use host::{
     BridgeOwnership, GatewayOwnership, GatewaySpec, HostNetworkConfig, HostNetworkError,
     HostNetworkManager, NetworkOwnershipManifest, TapAccess, TapOwnership, TapSpec,
 };
-pub use linux_fabric::{LinuxFabricBackend, LinuxFabricConfig, LinuxFabricError};
+pub use linux_fabric::{
+    FabricAttachmentError, FabricEndpointAttachmentEvidence, LinuxFabricAttachmentResolver,
+    LinuxFabricBackend, LinuxFabricConfig, LinuxFabricError,
+};
 pub use o3k_store::{NetworkRecord, PortRecord, SubnetRecord};
 pub use plan::{
     AttachmentPlanInput, NODE_NETWORK_PLAN_SCHEMA_VERSION, NetworkPlanError, NodeNetworkPlan,
@@ -243,17 +252,18 @@ mod p9_plan_tests {
         .expect("plan");
         let destination = prefix("10.0.0.3", 32);
         let fabric = NamespacedRoutedFabricPlan {
+            dhcp: None,
             local_host: "node-a".to_owned(),
             local_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
             local_fabric_generation: 2,
             local_underlay_mtu: 1500,
-            local_fabric_mtu: 1420,
+            local_fabric_mtu: 1440,
             realm_id: Uuid::from_u128(2),
             realm_prefix: prefix("10.0.0.0", 24),
             encapsulation: RealmEncapsulationBinding {
                 fabric_domain_id: Uuid::from_u128(100),
                 realm_id: Uuid::from_u128(2),
-                provider_kind: FabricProviderKind::Geneve,
+                provider_kind: FabricProviderKind::Vxlan,
                 provider_segment_id: 101,
                 binding_generation: 1,
             },
@@ -275,7 +285,7 @@ mod p9_plan_tests {
                 }],
             },
             proxy_mac: "02:11:22:33:44:55".to_owned(),
-            tenant_mtu: 1400,
+            tenant_mtu: 1390,
             policy_generation: 1,
             policies: Vec::new(),
             policy_defaults: Vec::new(),

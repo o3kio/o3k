@@ -144,6 +144,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             image: None,
             public_address_workflow: None,
             network_service: network_service.clone(),
+            realm_deletion: None,
             store: store.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),
@@ -245,6 +246,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             image: None,
             public_address_workflow: None,
             network_service: network_service.clone(),
+            realm_deletion: None,
             store: store.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),
@@ -771,6 +773,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             image: None,
             public_address_workflow: None,
             network_service: independent_network,
+            realm_deletion: None,
             store: store.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),
@@ -1302,6 +1305,7 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                 image: None,
                 public_address_workflow: None,
                 network_service: network.clone(),
+                realm_deletion: None,
                 store: store.clone(),
                 storage_provider: Some(Arc::new(
                     o3k_storage::testkit::InMemoryStorageProvider::default(),
@@ -1527,6 +1531,7 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
             image: None,
             public_address_workflow: None,
             network_service: network_b,
+            realm_deletion: None,
             store: store_b.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),
@@ -1789,6 +1794,7 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             image: None,
             public_address_workflow: None,
             network_service: left_network.clone(),
+            realm_deletion: None,
             store: left_store.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),
@@ -1812,6 +1818,7 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             image: None,
             public_address_workflow: None,
             network_service: right_network.clone(),
+            realm_deletion: None,
             store: right_store.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),

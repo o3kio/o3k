@@ -1,0 +1,15 @@
+
+running 1 test
+
+thread 'postgres_p13_f2_r1_reconstructs_and_recovers_realm_cleanup' (3192010) panicked at crates/o3k-network/tests/postgres_p13_f2_r1.rs:28:10:
+destructive PostgreSQL test database must have the expected purpose: "invalid PostgreSQL test URL: error with configuration: empty host"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test postgres_p13_f2_r1_reconstructs_and_recovers_realm_cleanup ... FAILED
+
+failures:
+
+failures:
+    postgres_p13_f2_r1_reconstructs_and_recovers_realm_cleanup
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

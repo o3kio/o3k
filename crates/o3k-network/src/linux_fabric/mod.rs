@@ -6,8 +6,8 @@
 
 use crate::fabric::{FabricBackend, FabricError};
 use o3k_domain::{
-    FabricPeer, NamespacedRoutedFabricPlan, NetworkProtocol, PolicyAction, PolicyDirection,
-    PolicyStatefulMode,
+    FabricPeer, FabricProviderKind, NamespacedRoutedFabricPlan, NetworkProtocol, PolicyAction,
+    PolicyDirection, PolicyStatefulMode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,6 +21,7 @@ use std::{
     process::Command,
     sync::Arc,
 };
+use tap_observation::observe_endpoint_tap;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -28,11 +29,20 @@ mod naming;
 mod ownership;
 mod persistence;
 
+mod anti_spoof;
+mod attachment;
+pub(crate) mod dhcp_execution;
 mod fabric;
-mod geneve;
 mod policy;
 mod public_;
 mod realm;
+mod shared_provider;
+mod tap_observation;
+mod vxlan;
+
+pub use attachment::{
+    FabricAttachmentError, FabricEndpointAttachmentEvidence, LinuxFabricAttachmentResolver,
+};
 
 pub(crate) mod gateway;
 pub(crate) mod gateway_execution;
@@ -47,6 +57,7 @@ pub(crate) mod routed_execution;
 pub(crate) use naming::*;
 pub(crate) use ownership::*;
 pub(crate) use persistence::*;
+use realm::endpoint_tap_provider_error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinuxFabricConfig {
@@ -54,7 +65,7 @@ pub struct LinuxFabricConfig {
     pub fabric_namespace: String,
     pub fabric_interface: String,
     pub wireguard_port: u16,
-    pub geneve_port: u16,
+    pub vxlan_port: u16,
     pub public_uplink: Option<String>,
 }
 
@@ -64,9 +75,9 @@ impl LinuxFabricConfig {
         Self {
             root: root.into(),
             fabric_namespace: "o3k-fabric".to_owned(),
-            fabric_interface: "wg-o3k".to_owned(),
+            fabric_interface: "o3k-wg".to_owned(),
             wireguard_port: 65_001,
-            geneve_port: 6_081,
+            vxlan_port: 4_789,
             public_uplink: None,
         }
     }
@@ -84,18 +95,19 @@ impl LinuxFabricConfig {
     }
 
     #[must_use]
-    pub fn with_geneve_port(mut self, port: u16) -> Self {
-        self.geneve_port = port;
+    pub fn with_vxlan_port(mut self, port: u16) -> Self {
+        self.vxlan_port = port;
         self
     }
 
     fn validate(&self) -> Result<(), LinuxFabricError> {
-        if self.root == Path::new("/")
+        if !self.root.is_absolute()
+            || self.root == Path::new("/")
             || self.root.as_os_str().is_empty()
             || !valid_name(&self.fabric_namespace)
             || !valid_name(&self.fabric_interface)
             || self.wireguard_port == 0
-            || self.geneve_port == 0
+            || self.vxlan_port != 4_789
             || self
                 .public_uplink
                 .as_deref()
@@ -110,7 +122,7 @@ impl LinuxFabricConfig {
     /// WireGuard port falls inside the host's ephemeral range, without
     /// mutating the OS range. Returns an error if the port is already bound.
     pub fn validate_ports(&self) -> Result<(), LinuxFabricError> {
-        if self.wireguard_port < 1 || self.geneve_port < 1 {
+        if self.wireguard_port < 1 || self.vxlan_port != 4_789 {
             return Err(LinuxFabricError::InvalidConfiguration);
         }
         if is_port_bound(self.wireguard_port) {
@@ -139,6 +151,8 @@ pub enum LinuxFabricError {
     OwnershipConflict,
     #[error("Linux fabric provider command failed")]
     CommandFailed,
+    #[error("shared Linux fabric provider rejected the operation: {0}")]
+    Provider(String),
     #[error("Linux fabric provider state storage failed: {0}")]
     Storage(#[from] io::Error),
 }
@@ -151,6 +165,7 @@ impl From<LinuxFabricError> for FabricError {
 pub(crate) trait LinuxFabricCommand: Send + Sync {
     fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)>;
     fn run(&self, program: &str, args: &[&str]) -> io::Result<bool>;
+    fn run_with_input(&self, program: &str, args: &[&str], input: &[u8]) -> io::Result<bool>;
 }
 
 pub(crate) struct SystemLinuxFabricCommand;
@@ -167,6 +182,19 @@ impl LinuxFabricCommand for SystemLinuxFabricCommand {
     fn run(&self, program: &str, args: &[&str]) -> io::Result<bool> {
         Ok(Command::new(program).args(args).status()?.success())
     }
+
+    fn run_with_input(&self, program: &str, args: &[&str], input: &[u8]) -> io::Result<bool> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input)?;
+        }
+        Ok(child.wait()?.success())
+    }
 }
 pub struct LinuxFabricBackend {
     pub(crate) config: LinuxFabricConfig,
@@ -175,6 +203,7 @@ pub struct LinuxFabricBackend {
     pub(crate) command: Arc<dyn LinuxFabricCommand>,
     pub(crate) state: ProviderState,
     pub(crate) plans: BTreeMap<Uuid, NamespacedRoutedFabricPlan>,
+    pub(crate) shared: Option<shared_provider::SharedFabricAdapter>,
 }
 impl LinuxFabricBackend {
     pub fn open(config: LinuxFabricConfig) -> Result<Self, LinuxFabricError> {
@@ -182,6 +211,7 @@ impl LinuxFabricBackend {
         let state_path = config.root.join("ownership.json");
         let plans_path = config.root.join("plans");
         fs::create_dir_all(&plans_path)?;
+        let shared = shared_provider::SharedFabricAdapter::open(&config)?;
         let backend = Self {
             config,
             state_path: state_path.clone(),
@@ -189,6 +219,7 @@ impl LinuxFabricBackend {
             command: Arc::new(SystemLinuxFabricCommand),
             state: load_state(&state_path)?,
             plans: load_plans(&plans_path)?,
+            shared: Some(shared),
         };
         backend.validate_loaded_state()?;
         Ok(backend)
@@ -218,6 +249,16 @@ impl LinuxFabricBackend {
             .collect()
     }
 
+    /// Returns the bridge name recorded by the current Fabric ownership state
+    /// for one Realm. DHCP may bind to this interface, but never creates or
+    /// mutates it.
+    pub fn realm_bridge_name(&self, realm_id: Uuid) -> Option<&str> {
+        self.state
+            .realms
+            .get(&realm_id)
+            .map(|realm| realm.bridge.as_str())
+    }
+
     #[cfg(test)]
     fn with_command(
         config: LinuxFabricConfig,
@@ -234,6 +275,7 @@ impl LinuxFabricBackend {
             command,
             state: load_state(&state_path)?,
             plans: load_plans(&plans_path)?,
+            shared: None,
         };
         backend.validate_loaded_state()?;
         Ok(backend)
@@ -245,13 +287,24 @@ impl LinuxFabricBackend {
         if self.state.version != STATE_VERSION {
             return Err(LinuxFabricError::CorruptState);
         }
+        let expected_key_parent = if self.shared.is_some() {
+            self.config.root.join("fabric-provider")
+        } else {
+            self.config.root.clone()
+        };
         if let Some(fabric) = &self.state.fabric
             && (fabric.namespace != self.config.fabric_namespace
                 || fabric.interface != self.config.fabric_interface
                 || fabric.fabric_transport_ip.is_unspecified()
                 || fabric.fabric_transport_ip.is_loopback()
                 || fabric.fabric_generation == 0
-                || Path::new(&fabric.private_key_path).parent() != Some(self.config.root.as_path()))
+                || fabric.fabric_mtu == 0
+                || self
+                    .plans
+                    .values()
+                    .any(|plan| plan.local_fabric_mtu != fabric.fabric_mtu)
+                || Path::new(&fabric.private_key_path).parent()
+                    != Some(expected_key_parent.as_path()))
         {
             return Err(LinuxFabricError::CorruptState);
         }
@@ -268,6 +321,11 @@ impl LinuxFabricBackend {
                 || plan.local_fabric_generation != ownership.local_fabric_generation
             {
                 return Err(LinuxFabricError::CorruptState);
+            }
+            if matches!(plan.encapsulation.provider_kind, FabricProviderKind::Vxlan)
+                && (!ownership.fabric_veth.is_empty() || !ownership.fabric_realm_veth.is_empty())
+            {
+                return Err(LinuxFabricError::ForeignState);
             }
             for (target_host, geneve) in &ownership.geneve {
                 if target_host != &geneve.target_host
@@ -303,6 +361,42 @@ impl LinuxFabricBackend {
                 {
                     return Err(LinuxFabricError::CorruptState);
                 }
+            }
+            if let Some(vxlan) = &ownership.vxlan
+                && (!valid_name(&vxlan.interface)
+                    || !valid_name(&vxlan.bridge)
+                    || !valid_name(&vxlan.host_veth)
+                    || !valid_name(&vxlan.fabric_veth)
+                    || vxlan.vni == 0
+                    || vxlan.vni > 0x00ff_ffff
+                    || vxlan.binding_generation == 0
+                    || vxlan.vni != plan.encapsulation.provider_segment_id
+                    || vxlan.binding_generation != plan.encapsulation.binding_generation
+                    || vxlan.local_transport_ip != plan.local_fabric_transport_ip
+                    || vxlan.tenant_mtu != plan.tenant_mtu
+                    || vxlan.local_transport_ip.is_unspecified()
+                    || vxlan.local_transport_ip.is_loopback()
+                    || vxlan.tenant_mtu == 0
+                    || vxlan.flood_peers.contains(&vxlan.local_transport_ip)
+                    || vxlan
+                        .flood_peers
+                        .iter()
+                        .any(|peer| peer.is_unspecified() || peer.is_loopback())
+                    || vxlan.flood_peers
+                        != plan
+                            .peers
+                            .iter()
+                            .map(|peer| peer.fabric_transport_ip)
+                            .collect::<BTreeSet<_>>())
+            {
+                return Err(LinuxFabricError::CorruptState);
+            }
+            if ownership.anti_spoof_generation == 0 && !ownership.anti_spoof_fingerprint.is_empty()
+                || ownership.anti_spoof_generation > plan.directory_generation
+                || (ownership.anti_spoof_generation > 0
+                    && ownership.anti_spoof_fingerprint.is_empty())
+            {
+                return Err(LinuxFabricError::CorruptState);
             }
             for (endpoint_id, tap) in &ownership.endpoint_taps {
                 if endpoint_id != &tap.endpoint_id
@@ -380,13 +474,154 @@ impl LinuxFabricBackend {
         Ok(())
     }
     fn remove_plan(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxFabricError> {
+        let path = self.plans_path.join(format!("{}.json", plan.realm_id));
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         self.plans.remove(&plan.realm_id);
-        let _ = fs::remove_file(self.plans_path.join(format!("{}.json", plan.realm_id)));
-        if self.state.realms.remove(&plan.realm_id).is_some() {
-            store_state(&self.state_path, &self.state)?;
+        let mut next = self.state.clone();
+        if next.realms.remove(&plan.realm_id).is_some() {
+            // Keep the in-memory and durable ownership snapshot until the
+            // atomic state write succeeds. A failed journal update must leave
+            // enough information to resume safe cleanup after restart.
+            store_state(&self.state_path, &next)?;
+            self.state = next;
         }
         Ok(())
     }
+
+    fn observe_owned_realm_absent(
+        &self,
+        ownership: &RealmOwnership,
+    ) -> Result<bool, LinuxFabricError> {
+        for tap in ownership
+            .endpoint_taps
+            .values()
+            .chain(ownership.pending_endpoint_taps.values())
+        {
+            if observe_endpoint_tap(self.command.as_ref(), &tap.interface)
+                .map_err(endpoint_tap_provider_error)?
+                .is_some()
+            {
+                // A same-named link is still present, even if its attributes
+                // no longer match our recorded ownership. Do not clear the
+                // journal or attempt to adopt/delete it.
+                return Ok(false);
+            }
+        }
+
+        for interface in [
+            ownership.bridge.as_str(),
+            ownership.host_veth.as_str(),
+            ownership.public_host_veth.as_str(),
+        ] {
+            let (present, _) = self
+                .command
+                .output("ip", &["-j", "-d", "link", "show", "dev", interface])
+                .map_err(LinuxFabricError::Storage)?;
+            if present {
+                return Ok(false);
+            }
+        }
+
+        if linux_namespace_exists(self.command.as_ref(), &ownership.namespace)? {
+            return Ok(false);
+        }
+
+        if let Some(vxlan) = ownership.vxlan.as_ref() {
+            if let Some(shared) = self.shared.as_ref()
+                && shared.ownership(ownership.realm_id).is_some()
+            {
+                return Ok(false);
+            }
+            let (present, _) = self
+                .command
+                .output(
+                    "ip",
+                    &["-j", "-d", "link", "show", "dev", vxlan.host_veth.as_str()],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            if present {
+                return Ok(false);
+            }
+            if self.shared.is_some() {
+                for interface in [
+                    vxlan.interface.as_str(),
+                    vxlan.bridge.as_str(),
+                    vxlan.fabric_veth.as_str(),
+                ] {
+                    let (present, _) = self
+                        .command
+                        .output(
+                            "ip",
+                            &[
+                                "netns",
+                                "exec",
+                                &self.config.fabric_namespace,
+                                "ip",
+                                "-j",
+                                "-d",
+                                "link",
+                                "show",
+                                "dev",
+                                interface,
+                            ],
+                        )
+                        .map_err(LinuxFabricError::Storage)?;
+                    if present {
+                        return Ok(false);
+                    }
+                }
+            } else {
+                for interface in [
+                    vxlan.interface.as_str(),
+                    vxlan.bridge.as_str(),
+                    vxlan.fabric_veth.as_str(),
+                ] {
+                    let (present, _) = self
+                        .command
+                        .output(
+                            "ip",
+                            &[
+                                "netns",
+                                "exec",
+                                &ownership.namespace,
+                                "ip",
+                                "-j",
+                                "-d",
+                                "link",
+                                "show",
+                                "dev",
+                                interface,
+                            ],
+                        )
+                        .map_err(LinuxFabricError::Storage)?;
+                    if present {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn linux_namespace_exists(
+    command: &dyn LinuxFabricCommand,
+    namespace: &str,
+) -> Result<bool, LinuxFabricError> {
+    let (success, listing) = command
+        .output("ip", &["netns", "list"])
+        .map_err(LinuxFabricError::Storage)?;
+    if !success {
+        return Err(LinuxFabricError::CommandFailed);
+    }
+    Ok(listing
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .any(|name| name == namespace))
 }
 
 fn extract_policy_fingerprint(listing: &str) -> Result<String, LinuxFabricError> {
@@ -404,14 +639,124 @@ impl FabricBackend for LinuxFabricBackend {
     fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), FabricError> {
         Self::validate_policy_plan(plan)?;
         Self::validate_public_plan(plan)?;
-        self.ensure_fabric(plan)?;
+        if self.shared.is_none() {
+            self.ensure_fabric(plan)?;
+        }
         self.persist_plan(plan)?;
         self.ensure_realm(plan)?;
-        self.configure_peers()?;
-        self.ensure_geneve(plan)?;
+        if let Some(shared) = self.shared.as_mut() {
+            shared.apply(plan)?;
+            let owned = shared
+                .ownership(plan.realm_id)
+                .ok_or(LinuxFabricError::CorruptState)?;
+            let bridge = {
+                let realm = self
+                    .state
+                    .realms
+                    .get_mut(&plan.realm_id)
+                    .ok_or(LinuxFabricError::CorruptState)?;
+                realm.vxlan = Some(VxlanOwnership {
+                    interface: owned.vxlan_name.clone(),
+                    bridge: owned.bridge_name.clone(),
+                    host_veth: owned.consumer_port_veth.clone(),
+                    fabric_veth: owned.fabric_port_veth.clone(),
+                    vni: owned.vni,
+                    binding_generation: plan.encapsulation.binding_generation,
+                    local_transport_ip: plan.local_fabric_transport_ip,
+                    tenant_mtu: plan.tenant_mtu,
+                    flood_peers: owned.flood_peers.iter().copied().collect(),
+                });
+                realm.bridge.clone()
+            };
+            store_state(&self.state_path, &self.state)?;
+            let consumer = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        owned.consumer_port_veth.as_str(),
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            let bridge_observed = self
+                .command
+                .output("ip", &["-d", "link", "show", "dev", bridge.as_str()])
+                .map_err(LinuxFabricError::Storage)?;
+            if !consumer.0 || !consumer.1.contains("veth") {
+                return Err(LinuxFabricError::ForeignState.into());
+            }
+            if !bridge_observed.0 || !bridge_observed.1.contains("bridge") {
+                return Err(LinuxFabricError::ForeignState.into());
+            }
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "link",
+                        "set",
+                        owned.consumer_port_veth.as_str(),
+                        "master",
+                        bridge.as_str(),
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?
+            {
+                return Err(LinuxFabricError::CommandFailed.into());
+            }
+        }
+        if self.shared.is_none() {
+            self.configure_peers()?;
+            self.ensure_vxlan(plan)?;
+            self.reconcile_ingress_auth()?;
+        } else {
+            // Mirror only provider-derived host identity into O3K's execution
+            // journal; canonical generations and VNI admission remain O3K-owned.
+            let ingress_owner_token = self
+                .state
+                .fabric
+                .as_ref()
+                .map(|owned| owned.ingress_owner_token.clone())
+                .unwrap_or_default();
+            self.state.fabric = Some(FabricOwnership {
+                namespace: self.config.fabric_namespace.clone(),
+                interface: "o3k-wg".to_owned(),
+                private_key_path: self
+                    .config
+                    .root
+                    .join("fabric-provider/wireguard-private.key")
+                    .display()
+                    .to_string(),
+                fabric_transport_ip: plan.local_fabric_transport_ip,
+                fabric_generation: plan.local_fabric_generation,
+                fabric_mtu: plan.local_fabric_mtu,
+                ingress_owner_token,
+                ingress_auth_fingerprint: String::new(),
+                ingress_vni_fingerprint: String::new(),
+                managed_peers: self
+                    .plans
+                    .values()
+                    .filter(|p| self.state.realms.contains_key(&p.realm_id))
+                    .flat_map(|p| p.peers.iter().map(|peer| peer.public_key.clone()))
+                    .collect(),
+            });
+            store_state(&self.state_path, &self.state)?;
+            // The shared provider authenticates the host transport; O3K still
+            // owns the realm/VNI/source-host admission decision.
+            self.reconcile_ingress_auth()?;
+        }
         self.ensure_endpoint_taps(plan)?;
+        self.attest_committed_endpoint_taps(plan.realm_id)?;
+        self.ensure_anti_spoof(plan)?;
+        self.attest_committed_endpoint_taps(plan.realm_id)?;
         self.ensure_policy(plan)?;
+        self.attest_committed_endpoint_taps(plan.realm_id)?;
         self.ensure_public(plan)?;
+        self.attest_committed_endpoint_taps(plan.realm_id)?;
         let ownership = self
             .state
             .realms
@@ -419,6 +764,7 @@ impl FabricBackend for LinuxFabricBackend {
             .cloned()
             .ok_or(LinuxFabricError::CorruptState)?;
         self.realize_routes(plan, &ownership)?;
+        self.attest_committed_endpoint_taps(plan.realm_id)?;
         Ok(())
     }
 
@@ -434,6 +780,7 @@ impl FabricBackend for LinuxFabricBackend {
         }
         self.remove_public(plan)?;
         self.remove_policy(plan)?;
+        self.remove_anti_spoof(plan, &ownership)?;
         for tap in ownership.endpoint_taps.values() {
             self.remove_endpoint_tap(tap, &ownership.bridge)?;
         }
@@ -442,52 +789,35 @@ impl FabricBackend for LinuxFabricBackend {
                 self.remove_endpoint_tap(tap, &ownership.bridge)?;
             }
         }
-        for geneve in ownership.geneve.values() {
-            self.remove_geneve_attachment(geneve, &ownership.namespace)?;
-            let (exists, output) = self
+        if let Some(shared) = self.shared.as_mut() {
+            // The consumer veth is owned by the shared provider but enslaved
+            // to the O3K realm bridge. Detach it before provider teardown and
+            // refuse a same-name foreign link.
+            let Some(vxlan) = ownership.vxlan.as_ref() else {
+                return Err(LinuxFabricError::CorruptState.into());
+            };
+            let consumer = self
                 .command
                 .output(
                     "ip",
-                    &[
-                        "netns",
-                        "exec",
-                        &self.config.fabric_namespace,
-                        "ip",
-                        "-d",
-                        "link",
-                        "show",
-                        "dev",
-                        &geneve.interface,
-                    ],
+                    &["-d", "link", "show", "dev", vxlan.host_veth.as_str()],
                 )
                 .map_err(LinuxFabricError::Storage)?;
-            if exists {
-                if !geneve_link_matches(&output, geneve, self.config.geneve_port) {
-                    return Err(FabricError::Backend(
-                        LinuxFabricError::ForeignState.to_string(),
-                    ));
+            if consumer.0 {
+                if !consumer.1.contains("veth") {
+                    return Err(LinuxFabricError::ForeignState.into());
                 }
                 if !self
                     .command
-                    .run(
-                        "ip",
-                        &[
-                            "netns",
-                            "exec",
-                            &self.config.fabric_namespace,
-                            "ip",
-                            "link",
-                            "del",
-                            &geneve.interface,
-                        ],
-                    )
+                    .run("ip", &["link", "set", vxlan.host_veth.as_str(), "nomaster"])
                     .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(FabricError::Backend(
-                        LinuxFabricError::CommandFailed.to_string(),
-                    ));
+                    return Err(LinuxFabricError::CommandFailed.into());
                 }
             }
+            shared.remove(plan.realm_id)?;
+        } else {
+            self.remove_vxlan(plan, &ownership)?;
         }
         let commands = [
             vec![
@@ -513,11 +843,35 @@ impl FabricBackend for LinuxFabricBackend {
                 return Err(LinuxFabricError::CommandFailed.into());
             }
         }
-        self.remove_plan(plan)?;
-        if !self.state.realms.is_empty() {
-            self.configure_peers()?;
+        if !self.observe_owned_realm_absent(&ownership)? {
+            return Err(LinuxFabricError::CommandFailed.into());
         }
-        self.remove_fabric_if_unused(plan.local_fabric_generation)?;
+        self.remove_plan(plan)?;
+        if self.shared.is_none() && !self.state.realms.is_empty() {
+            self.configure_peers()?;
+            self.reconcile_ingress_auth()?;
+        }
+        if self.shared.is_some() && !self.state.realms.is_empty() {
+            if let Some(fabric) = self.state.fabric.as_mut() {
+                fabric.managed_peers = self
+                    .plans
+                    .values()
+                    .filter(|p| self.state.realms.contains_key(&p.realm_id))
+                    .flat_map(|p| p.peers.iter().map(|peer| peer.public_key.clone()))
+                    .collect();
+            }
+            store_state(&self.state_path, &self.state)?;
+            self.reconcile_ingress_auth()?;
+        }
+        if let Some(shared) = self.shared.as_mut() {
+            shared.remove_fabric_if_unused()?;
+            if self.state.realms.is_empty() {
+                self.state.fabric = None;
+                store_state(&self.state_path, &self.state)?;
+            }
+        } else {
+            self.remove_fabric_if_unused(plan.local_fabric_generation)?;
+        }
         Ok(())
     }
 
@@ -533,8 +887,105 @@ impl FabricBackend for LinuxFabricBackend {
     }
 
     fn observe_removed(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, FabricError> {
-        Ok(!self.state.realms.contains_key(&plan.realm_id)
-            && !self.plans.contains_key(&plan.realm_id))
+        if self.state.realms.contains_key(&plan.realm_id) || self.plans.contains_key(&plan.realm_id)
+        {
+            return Ok(false);
+        }
+        if self
+            .plans_path
+            .join(format!("{}.json", plan.realm_id))
+            .try_exists()
+            .map_err(LinuxFabricError::Storage)?
+        {
+            return Ok(false);
+        }
+        let expected = self.realm_ownership(plan);
+        // The ownership journal has already been removed only after the
+        // provider observed its recorded TAPs absent. Recheck the exact
+        // deterministic TAP names from this Remove snapshot as an independent
+        // postcondition; an endpoint link still present after journal removal
+        // is not acceptable provider absence.
+        for endpoint in plan
+            .directory
+            .entries
+            .iter()
+            .filter(|endpoint| endpoint.selected_host == plan.local_host)
+        {
+            if observe_endpoint_tap(
+                self.command.as_ref(),
+                &endpoint_tap_name(plan.realm_id, endpoint.endpoint_id),
+            )
+            .map_err(endpoint_tap_provider_error)?
+            .is_some()
+            {
+                return Ok(false);
+            }
+        }
+        for interface in [
+            expected.bridge.as_str(),
+            expected.host_veth.as_str(),
+            expected.public_host_veth.as_str(),
+        ] {
+            let (present, _) = self
+                .command
+                .output("ip", &["-j", "-d", "link", "show", "dev", interface])
+                .map_err(LinuxFabricError::Storage)?;
+            if present {
+                return Ok(false);
+            }
+        }
+        if linux_namespace_exists(self.command.as_ref(), &expected.namespace)? {
+            return Ok(false);
+        }
+        if self
+            .shared
+            .as_ref()
+            .is_some_and(|shared| shared.ownership(plan.realm_id).is_some())
+        {
+            return Ok(false);
+        }
+        let vxlan_host_veth = vxlan_host_veth_name(plan.realm_id);
+        let (present, _) = self
+            .command
+            .output("ip", &["-j", "-d", "link", "show", "dev", &vxlan_host_veth])
+            .map_err(LinuxFabricError::Storage)?;
+        if present {
+            return Ok(false);
+        }
+        let vxlan_namespace = self
+            .shared
+            .as_ref()
+            .map_or(expected.namespace.as_str(), |_| {
+                self.config.fabric_namespace.as_str()
+            });
+        for interface in [
+            vxlan_name(plan.realm_id),
+            vxlan_bridge_name(plan.realm_id),
+            vxlan_fabric_veth_name(plan.realm_id),
+        ] {
+            let (present, _) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        vxlan_namespace,
+                        "ip",
+                        "-j",
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        &interface,
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            if present {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 // ---------------------------------------------------------------------------
@@ -566,11 +1017,207 @@ pub(crate) fn ephemeral_port_low() -> Option<u16> {
 mod tests {
     use super::*;
     use o3k_domain::{
-        AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
-        NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
+        AddressRealm, EndpointLocation, FabricDhcpIntent, FabricHostIdentity, FabricProviderKind,
+        Ipv4Prefix, NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
         PublicAddressBindingIntent, RealmEncapsulationBinding, RealmEndpointDirectory,
     };
+    use serde_json::{Value, json};
     use std::{os::unix::fs::PermissionsExt, sync::Mutex};
+
+    struct EndpointTapCommand {
+        tap_name: String,
+        tap: Mutex<Option<Value>>,
+        extra_taps: Mutex<BTreeMap<String, Value>>,
+        bridge_present: Mutex<bool>,
+        extra_links: Mutex<Vec<Value>>,
+        leave_tap_on_delete: Mutex<bool>,
+        set_expected_mac: bool,
+        run_calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl EndpointTapCommand {
+        fn new(plan: &NamespacedRoutedFabricPlan, initially_present: bool, set_mac: bool) -> Self {
+            let entry = &plan.directory.entries[0];
+            let interface = endpoint_tap_name(plan.realm_id, entry.endpoint_id);
+            let bridge = format!("o3k-b-{}", &plan.realm_id.simple().to_string()[..8]);
+            let expected_mac = endpoint_tap_mac(plan.realm_id, entry.endpoint_id);
+            let tap = initially_present.then(|| {
+                json!({
+                    "ifname": interface,
+                    "ifindex": 41,
+                    "address": expected_mac,
+                    "master": bridge,
+                    "linkinfo": {"info_kind":"tun", "info_data":{"type":"tap"}},
+                    "flags": ["BROADCAST", "MULTICAST", "UP"],
+                    "operstate": "DOWN"
+                })
+            });
+            Self {
+                tap_name: interface,
+                tap: Mutex::new(tap),
+                extra_taps: Mutex::new(BTreeMap::new()),
+                bridge_present: Mutex::new(true),
+                extra_links: Mutex::new(Vec::new()),
+                leave_tap_on_delete: Mutex::new(false),
+                set_expected_mac: set_mac,
+                run_calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl LinuxFabricCommand for EndpointTapCommand {
+        fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)> {
+            if program == "wg" {
+                return Ok((true, format!("{}\n", "A".repeat(43) + "=")));
+            }
+            if program == "ip" && args == ["netns", "list"] {
+                return Ok((true, String::new()));
+            }
+            if args.first() != Some(&"-j") {
+                return Ok((false, String::new()));
+            }
+            let name = args.last().copied().unwrap_or_default();
+            if name.starts_with("o3k-b-") {
+                if !*self.bridge_present.lock().expect("bridge") {
+                    return Ok((false, String::new()));
+                }
+                return Ok((
+                    true,
+                    json!([{
+                        "ifname": name,
+                        "ifindex": 55,
+                        "linkinfo": {"info_kind":"bridge", "info_data":{}}
+                    }])
+                    .to_string(),
+                ));
+            }
+            if let Some(tap) = self
+                .extra_taps
+                .lock()
+                .expect("extra taps")
+                .get(name)
+                .cloned()
+            {
+                return Ok((true, Value::Array(vec![tap]).to_string()));
+            }
+            if name != self.tap_name {
+                return Ok((false, String::new()));
+            }
+            let Some(tap) = self.tap.lock().expect("tap").clone() else {
+                return Ok((false, String::new()));
+            };
+            let mut links = vec![tap];
+            links.extend(self.extra_links.lock().expect("extra links").clone());
+            Ok((true, Value::Array(links).to_string()))
+        }
+
+        fn run(&self, _program: &str, args: &[&str]) -> io::Result<bool> {
+            self.run_calls
+                .lock()
+                .expect("run calls")
+                .push(args.iter().map(|value| (*value).to_owned()).collect());
+            let mut tap = self.tap.lock().expect("tap");
+            match args {
+                ["tuntap", "add", "dev", name, "mode", "tap"] if *name == self.tap_name => {
+                    *tap = Some(json!({
+                        "ifname": name,
+                        "ifindex": 41,
+                        "address": "ea:7b:0b:df:96:4b",
+                        "linkinfo": {"info_kind":"tun", "info_data":{"type":"tap"}},
+                        "flags": ["BROADCAST", "MULTICAST"],
+                        "operstate": "DOWN"
+                    }));
+                }
+                ["link", "set", "dev", name, "address", mac] if *name == self.tap_name => {
+                    if self.set_expected_mac {
+                        tap.as_mut().expect("created TAP")["address"] = json!(mac);
+                    }
+                }
+                ["link", "set", "dev", name, "master", bridge] if *name == self.tap_name => {
+                    tap.as_mut().expect("created TAP")["master"] = json!(bridge);
+                }
+                ["link", "set", "dev", name, "up"] if *name == self.tap_name => {
+                    tap.as_mut().expect("created TAP")["flags"] =
+                        json!(["BROADCAST", "MULTICAST", "UP"]);
+                }
+                ["link", "del", "dev", name] if name.starts_with("o3k-t-") => {
+                    if !*self.leave_tap_on_delete.lock().expect("delete behavior") {
+                        if *name == self.tap_name {
+                            *tap = None;
+                        } else {
+                            self.extra_taps.lock().expect("extra taps").remove(*name);
+                        }
+                    }
+                }
+                ["link", "del", name] if name.starts_with("o3k-b-") => {
+                    *self.bridge_present.lock().expect("bridge") = false;
+                }
+                _ => {}
+            }
+            Ok(true)
+        }
+
+        fn run_with_input(
+            &self,
+            _program: &str,
+            _args: &[&str],
+            _input: &[u8],
+        ) -> io::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    fn local_endpoint_plan() -> NamespacedRoutedFabricPlan {
+        plan_with_endpoint_host(Uuid::from_u128(11), "host-a")
+    }
+
+    fn endpoint_tap_backend(
+        root: &Path,
+        plan: &NamespacedRoutedFabricPlan,
+        command: Arc<dyn LinuxFabricCommand>,
+    ) -> LinuxFabricBackend {
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(root), command)
+                .expect("backend");
+        let realm = backend.realm_ownership(plan);
+        backend.state.realms.insert(plan.realm_id, realm);
+        store_state(&backend.state_path, &backend.state).expect("initial ownership");
+        backend
+    }
+
+    fn commit_test_tap(
+        backend: &mut LinuxFabricBackend,
+        plan: &NamespacedRoutedFabricPlan,
+    ) -> EndpointTapOwnership {
+        let endpoint_id = plan.directory.entries[0].endpoint_id;
+        let tap = EndpointTapOwnership {
+            endpoint_id,
+            interface: endpoint_tap_name(plan.realm_id, endpoint_id),
+            mac: endpoint_tap_mac(plan.realm_id, endpoint_id),
+        };
+        backend
+            .state
+            .realms
+            .get_mut(&plan.realm_id)
+            .expect("realm ownership")
+            .endpoint_taps
+            .insert(endpoint_id, tap.clone());
+        store_state(&backend.state_path, &backend.state).expect("commit TAP ownership");
+        backend.persist_plan(plan).expect("persist realm plan");
+        tap
+    }
+
+    fn live_test_tap(realm_id: Uuid, endpoint_id: Uuid, bridge: &str, ifindex: u32) -> Value {
+        json!({
+            "ifname": endpoint_tap_name(realm_id, endpoint_id),
+            "ifindex": ifindex,
+            "address": endpoint_tap_mac(realm_id, endpoint_id),
+            "master": bridge,
+            "linkinfo": {"info_kind":"tun", "info_data":{"type":"tap"}},
+            "flags": ["BROADCAST", "MULTICAST", "UP"],
+            "operstate": "UP"
+        })
+    }
 
     struct FakeCommand {
         calls: Mutex<Vec<(String, Vec<String>)>>,
@@ -583,6 +1230,42 @@ mod tests {
                 program.to_owned(),
                 args.iter().map(|arg| (*arg).to_owned()).collect(),
             ));
+            if program == "ip" && args == ["netns", "list"] {
+                return Ok((
+                    true,
+                    if self.namespace_exists {
+                        "o3k-r-00000000\n".to_owned()
+                    } else {
+                        String::new()
+                    },
+                ));
+            }
+            if program == "ip"
+                && args
+                    .windows(4)
+                    .any(|window| window == ["bridge", "fdb", "show", "dev"])
+            {
+                let reconciled = self
+                    .calls
+                    .lock()
+                    .expect("calls")
+                    .iter()
+                    .any(|(_, call)| call.windows(2).any(|window| window == ["fdb", "append"]));
+                return Ok((
+                    true,
+                    if reconciled {
+                        "00:00:00:00:00:00 dst 198.18.0.2\n".to_owned()
+                    } else {
+                        String::new()
+                    },
+                ));
+            }
+            if args
+                .windows(3)
+                .any(|window| window == ["nft", "list", "table"])
+            {
+                return Ok((false, String::new()));
+            }
             if args.starts_with(&["netns", "exec"]) && self.namespace_exists {
                 return Ok((true, String::new()));
             }
@@ -599,11 +1282,29 @@ mod tests {
             ));
             Ok(true)
         }
+
+        fn run_with_input(&self, program: &str, args: &[&str], input: &[u8]) -> io::Result<bool> {
+            let mut recorded: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            recorded.push(String::from_utf8_lossy(input).into_owned());
+            self.calls
+                .lock()
+                .expect("calls")
+                .push((program.to_owned(), recorded));
+            Ok(true)
+        }
     }
 
     fn plan() -> NamespacedRoutedFabricPlan {
+        plan_with_realm(Uuid::from_u128(11))
+    }
+
+    fn plan_with_realm(realm_id: Uuid) -> NamespacedRoutedFabricPlan {
+        plan_with_endpoint_host(realm_id, "host-b")
+    }
+
+    fn plan_with_endpoint_host(realm_id: Uuid, endpoint_host: &str) -> NamespacedRoutedFabricPlan {
         let realm = AddressRealm {
-            id: Uuid::from_u128(11),
+            id: realm_id,
             network_id: Uuid::from_u128(12),
             project_id: "project-a".to_owned(),
             prefix: Ipv4Prefix::new("10.40.1.0".parse().expect("ip"), 24).expect("prefix"),
@@ -617,7 +1318,7 @@ mod tests {
                 realm_id: realm.id,
                 fixed_ip: "10.40.1.12".parse().expect("ip"),
                 mac: "02:00:00:00:00:12".to_owned(),
-                selected_host: "host-b".to_owned(),
+                selected_host: endpoint_host.to_owned(),
                 endpoint_generation: 1,
                 placement_generation: 1,
             }],
@@ -633,7 +1334,7 @@ mod tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 3,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         };
         let remote = FabricHostIdentity {
             host_id: "host-b".to_owned(),
@@ -643,18 +1344,335 @@ mod tests {
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 3,
             underlay_mtu: 1500,
-            fabric_mtu: 1420,
+            fabric_mtu: 1440,
         };
         let binding = RealmEncapsulationBinding {
             fabric_domain_id: Uuid::from_u128(100),
             realm_id: realm.id,
-            provider_kind: FabricProviderKind::Geneve,
+            provider_kind: FabricProviderKind::Vxlan,
             provider_segment_id: 101,
             binding_generation: 3,
         };
         directory
-            .compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding)
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1390, &binding)
             .expect("plan")
+    }
+
+    #[test]
+    fn local_endpoint_allows_only_canonical_dhcp_bootstrap_before_ip_filter() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-dhcp-bootstrap-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
+                .expect("backend");
+        let mut realm = backend.realm_ownership(&plan);
+        let endpoint = &plan.directory.entries[0];
+        let tap = endpoint_tap_name(plan.realm_id, endpoint.endpoint_id);
+        let fixed_ip = endpoint.fixed_ip.to_string();
+        realm.endpoint_taps.insert(
+            endpoint.endpoint_id,
+            EndpointTapOwnership {
+                endpoint_id: endpoint.endpoint_id,
+                interface: tap.clone(),
+                mac: endpoint_tap_mac(plan.realm_id, endpoint.endpoint_id),
+            },
+        );
+        backend.state.realms.insert(plan.realm_id, realm);
+
+        backend
+            .ensure_anti_spoof(&plan)
+            .expect("DHCP bootstrap anti-spoof rules");
+
+        let table = format!("o3k-as-{:08x}", public_mark(plan.realm_id));
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        let rules = calls
+            .iter()
+            .filter(|(program, _)| program == "nft")
+            .map(|(_, args)| args.as_slice())
+            .collect::<Vec<_>>();
+        let dhcp_rule = vec![
+            "add",
+            "rule",
+            "bridge",
+            table.as_str(),
+            "forward",
+            "iifname",
+            tap.as_str(),
+            "ether",
+            "saddr",
+            endpoint.mac.as_str(),
+            "ip",
+            "saddr",
+            "0.0.0.0",
+            "udp",
+            "sport",
+            "68",
+            "udp",
+            "dport",
+            "67",
+            "accept",
+            "comment",
+            "\"o3k-p11-antispoof\"",
+        ];
+        assert!(rules.iter().any(|rule| {
+            rule.iter()
+                .map(String::as_str)
+                .eq(dhcp_rule.iter().copied())
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule.windows(4)
+                .any(|window| window == ["ip", "saddr", "!=", fixed_ip.as_str()])
+                && rule.windows(2).any(|window| window == ["drop", "comment"])
+        }));
+        drop(calls);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn local_dhcp_reply_is_narrowly_admitted_before_fail_closed_rule() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-dhcp-reply-{}", Uuid::now_v7()));
+        let mut plan = plan_with_endpoint_host(Uuid::from_u128(11), "host-a");
+        plan.dhcp = Some(FabricDhcpIntent {
+            enabled: true,
+            gateway: "10.40.1.1".parse().expect("gateway"),
+        });
+        let endpoint = &plan.directory.entries[0];
+        let endpoint_ip = endpoint.fixed_ip.to_string();
+        let endpoint_mac = endpoint.mac.clone();
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
+                .expect("backend");
+        let mut realm = backend.realm_ownership(&plan);
+        realm.vxlan = Some(VxlanOwnership {
+            interface: "o3k-x-vxlan".to_owned(),
+            bridge: "o3k-b-fabric".to_owned(),
+            host_veth: "o3k-c-root".to_owned(),
+            fabric_veth: "o3k-i-fabric".to_owned(),
+            vni: plan.encapsulation.provider_segment_id,
+            binding_generation: plan.encapsulation.binding_generation,
+            local_transport_ip: plan.local_fabric_transport_ip,
+            tenant_mtu: plan.tenant_mtu,
+            flood_peers: BTreeSet::new(),
+        });
+        realm.endpoint_taps.insert(
+            endpoint.endpoint_id,
+            EndpointTapOwnership {
+                endpoint_id: endpoint.endpoint_id,
+                interface: endpoint_tap_name(plan.realm_id, endpoint.endpoint_id),
+                mac: endpoint_tap_mac(plan.realm_id, endpoint.endpoint_id),
+            },
+        );
+        backend.state.realms.insert(plan.realm_id, realm);
+
+        backend
+            .ensure_anti_spoof(&plan)
+            .expect("install local DHCP response exception");
+
+        let table = format!("o3k-as-{:08x}", public_mark(plan.realm_id));
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        let rules = calls
+            .iter()
+            .filter(|(program, args)| {
+                program == "nft"
+                    && args.first().is_some_and(|arg| arg == "add")
+                    && args.get(1).is_some_and(|arg| arg == "rule")
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        let unicast_offer = vec![
+            "add",
+            "rule",
+            "bridge",
+            table.as_str(),
+            "forward",
+            "iifname",
+            "o3k-c-root",
+            "ether",
+            "daddr",
+            endpoint_mac.as_str(),
+            "ip",
+            "saddr",
+            "10.40.1.1",
+            "ip",
+            "daddr",
+            endpoint_ip.as_str(),
+            "udp",
+            "sport",
+            "67",
+            "udp",
+            "dport",
+            "68",
+            "accept",
+            "comment",
+            "\"o3k-p11-antispoof\"",
+        ];
+        let broadcast_offer = vec![
+            "add",
+            "rule",
+            "bridge",
+            table.as_str(),
+            "forward",
+            "iifname",
+            "o3k-c-root",
+            "ether",
+            "daddr",
+            "ff:ff:ff:ff:ff:ff",
+            "ip",
+            "saddr",
+            "10.40.1.1",
+            "ip",
+            "daddr",
+            "255.255.255.255",
+            "udp",
+            "sport",
+            "67",
+            "udp",
+            "dport",
+            "68",
+            "accept",
+            "comment",
+            "\"o3k-p11-antispoof\"",
+        ];
+        let fail_closed = vec![
+            "add",
+            "rule",
+            "bridge",
+            table.as_str(),
+            "forward",
+            "iifname",
+            "o3k-c-root",
+            "counter",
+            "drop",
+            "comment",
+            "\"o3k-p11-antispoof\"",
+        ];
+        let unicast_index = rules
+            .iter()
+            .position(|args| {
+                args.iter()
+                    .map(String::as_str)
+                    .eq(unicast_offer.iter().copied())
+            })
+            .expect("endpoint-scoped DHCP unicast offer rule");
+        let broadcast_index = rules
+            .iter()
+            .position(|args| {
+                args.iter()
+                    .map(String::as_str)
+                    .eq(broadcast_offer.iter().copied())
+            })
+            .expect("gateway-scoped DHCP broadcast offer rule");
+        let fail_closed_index = rules
+            .iter()
+            .position(|args| {
+                args.iter()
+                    .map(String::as_str)
+                    .eq(fail_closed.iter().copied())
+            })
+            .expect("final fail-closed rule");
+        assert!(unicast_index < fail_closed_index);
+        assert!(broadcast_index < fail_closed_index);
+        drop(calls);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn remote_endpoint_does_not_get_a_local_dhcp_reply_exception() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-dhcp-remote-{}", Uuid::now_v7()));
+        let mut plan = plan();
+        plan.dhcp = Some(FabricDhcpIntent {
+            enabled: true,
+            gateway: "10.40.1.1".parse().expect("gateway"),
+        });
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
+                .expect("backend");
+        let mut realm = backend.realm_ownership(&plan);
+        realm.vxlan = Some(VxlanOwnership {
+            interface: "o3k-x-vxlan".to_owned(),
+            bridge: "o3k-b-fabric".to_owned(),
+            host_veth: "o3k-c-root".to_owned(),
+            fabric_veth: "o3k-i-fabric".to_owned(),
+            vni: plan.encapsulation.provider_segment_id,
+            binding_generation: plan.encapsulation.binding_generation,
+            local_transport_ip: plan.local_fabric_transport_ip,
+            tenant_mtu: plan.tenant_mtu,
+            flood_peers: BTreeSet::new(),
+        });
+        backend.state.realms.insert(plan.realm_id, realm);
+
+        backend
+            .ensure_anti_spoof(&plan)
+            .expect("install remote endpoint anti-spoof rules");
+
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(!calls.iter().any(|(program, args)| {
+            program == "nft"
+                && args.windows(2).any(|window| window == ["sport", "67"])
+                && args.windows(2).any(|window| window == ["dport", "68"])
+                && args.iter().any(|arg| arg == "10.40.1.12")
+        }));
+        drop(calls);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn disabled_fabric_dhcp_does_not_install_remote_offer_exceptions() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-dhcp-off-{}", Uuid::now_v7()));
+        let mut plan = plan();
+        plan.dhcp = Some(FabricDhcpIntent {
+            enabled: false,
+            gateway: "10.40.1.1".parse().expect("gateway"),
+        });
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
+                .expect("backend");
+        let mut realm = backend.realm_ownership(&plan);
+        realm.vxlan = Some(VxlanOwnership {
+            interface: "o3k-x-vxlan".to_owned(),
+            bridge: "o3k-b-fabric".to_owned(),
+            host_veth: "o3k-c-root".to_owned(),
+            fabric_veth: "o3k-i-fabric".to_owned(),
+            vni: plan.encapsulation.provider_segment_id,
+            binding_generation: plan.encapsulation.binding_generation,
+            local_transport_ip: plan.local_fabric_transport_ip,
+            tenant_mtu: plan.tenant_mtu,
+            flood_peers: BTreeSet::new(),
+        });
+        backend.state.realms.insert(plan.realm_id, realm);
+
+        backend
+            .ensure_anti_spoof(&plan)
+            .expect("install disabled-DHCP anti-spoof rules");
+
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(!calls.iter().any(|(program, args)| {
+            program == "nft"
+                && args.windows(2).any(|window| window == ["sport", "67"])
+                && args.windows(2).any(|window| window == ["dport", "68"])
+        }));
+        drop(calls);
+        fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
@@ -672,6 +1690,662 @@ mod tests {
             Err(FabricError::Backend(message)) if message.contains("foreign")
         ));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn endpoint_tap_wrong_live_mac_never_commits_even_when_mutations_succeed() {
+        let root = std::env::temp_dir().join(format!("o3k-tap-wrong-mac-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let command = Arc::new(EndpointTapCommand::new(&plan, false, false));
+        let mut backend = endpoint_tap_backend(&root, &plan, command.clone());
+
+        assert!(matches!(
+            backend.ensure_endpoint_taps(&plan),
+            Err(LinuxFabricError::ForeignState)
+        ));
+        let realm = backend.state.realms.get(&plan.realm_id).expect("realm");
+        assert!(realm.endpoint_taps.is_empty());
+        assert_eq!(realm.pending_endpoint_taps.len(), 1);
+        assert!(
+            fs::read_to_string(&backend.state_path)
+                .expect("durable state")
+                .contains("pending_endpoint_taps")
+        );
+        let calls = command.run_calls.lock().expect("mutation calls");
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.first().is_some_and(|word| word == "tuntap"))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.iter().any(|word| word == "address"))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.iter().any(|word| word == "master"))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.last().is_some_and(|word| word == "up"))
+        );
+        assert!(calls.iter().any(|call| call
+            == &[
+                "link",
+                "del",
+                "dev",
+                endpoint_tap_name(plan.realm_id, plan.directory.entries[0].endpoint_id).as_str()
+            ]));
+        drop(calls);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn departing_realm_remove_converges_live_tap_and_durable_ownership_together() {
+        let root = std::env::temp_dir().join(format!("o3k-tap-remove-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let command = Arc::new(EndpointTapCommand::new(&plan, true, true));
+        let mut backend = endpoint_tap_backend(&root, &plan, command.clone());
+        let tap = commit_test_tap(&mut backend, &plan);
+        let second_endpoint = Uuid::from_u128(13);
+        let second_tap = EndpointTapOwnership {
+            endpoint_id: second_endpoint,
+            interface: endpoint_tap_name(plan.realm_id, second_endpoint),
+            mac: endpoint_tap_mac(plan.realm_id, second_endpoint),
+        };
+        backend
+            .state
+            .realms
+            .get_mut(&plan.realm_id)
+            .expect("realm ownership")
+            .endpoint_taps
+            .insert(second_endpoint, second_tap.clone());
+        command.extra_taps.lock().expect("extra taps").insert(
+            second_tap.interface.clone(),
+            live_test_tap(plan.realm_id, second_endpoint, "o3k-b-00000000", 42),
+        );
+        store_state(&backend.state_path, &backend.state).expect("persist second TAP");
+
+        backend.remove(&plan).expect("remove departed Realm");
+        assert!(
+            backend
+                .observe_removed(&plan)
+                .expect("observe full removal")
+        );
+        assert!(!backend.state.realms.contains_key(&plan.realm_id));
+        assert!(!backend.plans.contains_key(&plan.realm_id));
+        assert!(
+            !backend
+                .plans_path
+                .join(format!("{}.json", plan.realm_id))
+                .exists()
+        );
+        assert!(!backend.state.realms.values().any(|realm| {
+            realm.endpoint_taps.contains_key(&tap.endpoint_id)
+                || realm.pending_endpoint_taps.contains_key(&tap.endpoint_id)
+        }));
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn departing_realm_remove_keeps_ownership_when_owned_tap_remains_live() {
+        let root = std::env::temp_dir().join(format!("o3k-tap-remove-live-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let command = Arc::new(EndpointTapCommand::new(&plan, true, true));
+        *command.leave_tap_on_delete.lock().expect("delete behavior") = true;
+        let mut backend = endpoint_tap_backend(&root, &plan, command.clone());
+        let tap = commit_test_tap(&mut backend, &plan);
+
+        assert!(matches!(
+            backend.remove(&plan),
+            Err(FabricError::Backend(_))
+        ));
+        assert!(backend.state.realms.contains_key(&plan.realm_id));
+        assert_eq!(
+            backend.state.realms[&plan.realm_id]
+                .endpoint_taps
+                .get(&tap.endpoint_id),
+            Some(&tap),
+            "live provider state must not outlast its ownership proof"
+        );
+        assert!(
+            backend
+                .plans_path
+                .join(format!("{}.json", plan.realm_id))
+                .exists()
+        );
+        assert!(!backend.observe_removed(&plan).expect("observe live tap"));
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn observe_removed_rejects_live_deterministic_tap_without_ownership_record() {
+        let root = std::env::temp_dir().join(format!("o3k-tap-orphan-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let command = Arc::new(EndpointTapCommand::new(&plan, true, true));
+        let provider =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command.clone())
+                .expect("provider");
+
+        assert!(
+            !provider.observe_removed(&plan).expect("observe removal"),
+            "a live deterministic TAP must prevent Remove success even if ownership is absent"
+        );
+        assert!(command.run_calls.lock().expect("mutation calls").is_empty());
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn removing_one_of_two_local_endpoints_keeps_realm_and_other_tap() {
+        let root = std::env::temp_dir().join(format!("o3k-tap-remove-one-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let command = Arc::new(EndpointTapCommand::new(&plan, false, true));
+        let mut backend = endpoint_tap_backend(&root, &plan, command.clone());
+        let remaining = commit_test_tap(&mut backend, &plan);
+        let removed_id = Uuid::from_u128(13);
+        let removed = EndpointTapOwnership {
+            endpoint_id: removed_id,
+            interface: endpoint_tap_name(plan.realm_id, removed_id),
+            mac: endpoint_tap_mac(plan.realm_id, removed_id),
+        };
+        backend
+            .state
+            .realms
+            .get_mut(&plan.realm_id)
+            .expect("realm ownership")
+            .endpoint_taps
+            .insert(removed_id, removed.clone());
+        command.extra_taps.lock().expect("extra taps").insert(
+            removed.interface.clone(),
+            live_test_tap(plan.realm_id, removed_id, "o3k-b-00000000", 42),
+        );
+        store_state(&backend.state_path, &backend.state).expect("persist both endpoint TAPs");
+
+        backend
+            .ensure_endpoint_taps(&plan)
+            .expect("withdraw only removed endpoint");
+        let realm = backend
+            .state
+            .realms
+            .get(&plan.realm_id)
+            .expect("Realm remains");
+        assert_eq!(realm.endpoint_taps.len(), 1);
+        assert_eq!(
+            realm.endpoint_taps.get(&remaining.endpoint_id),
+            Some(&remaining)
+        );
+        assert!(!realm.endpoint_taps.contains_key(&removed_id));
+        assert!(
+            command
+                .extra_taps
+                .lock()
+                .expect("extra taps")
+                .get(&removed.interface)
+                .is_none()
+        );
+        assert!(
+            !command
+                .run_calls
+                .lock()
+                .expect("mutation calls")
+                .iter()
+                .any(|call| call.as_slice() == ["link", "del", "dev", "o3k-b-00000000"])
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn endpoint_withdrawal_keeps_ownership_until_tap_absence_is_observed() {
+        let root = std::env::temp_dir().join(format!("o3k-tap-remove-pending-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let command = Arc::new(EndpointTapCommand::new(&plan, false, true));
+        *command.leave_tap_on_delete.lock().expect("delete behavior") = true;
+        let mut backend = endpoint_tap_backend(&root, &plan, command.clone());
+        let remaining = commit_test_tap(&mut backend, &plan);
+        let removed_id = Uuid::from_u128(13);
+        let removed = EndpointTapOwnership {
+            endpoint_id: removed_id,
+            interface: endpoint_tap_name(plan.realm_id, removed_id),
+            mac: endpoint_tap_mac(plan.realm_id, removed_id),
+        };
+        backend
+            .state
+            .realms
+            .get_mut(&plan.realm_id)
+            .expect("realm ownership")
+            .endpoint_taps
+            .insert(removed_id, removed.clone());
+        command.extra_taps.lock().expect("extra taps").insert(
+            removed.interface.clone(),
+            live_test_tap(plan.realm_id, removed_id, "o3k-b-00000000", 42),
+        );
+        store_state(&backend.state_path, &backend.state).expect("persist both endpoint TAPs");
+
+        assert!(matches!(
+            backend.ensure_endpoint_taps(&plan),
+            Err(LinuxFabricError::CommandFailed)
+        ));
+        let realm = backend
+            .state
+            .realms
+            .get(&plan.realm_id)
+            .expect("Realm ownership is retained");
+        assert_eq!(realm.endpoint_taps.get(&removed_id), Some(&removed));
+        assert_eq!(
+            realm.pending_endpoint_taps.get(&remaining.endpoint_id),
+            Some(&remaining)
+        );
+        assert!(!realm.pending_endpoint_taps.contains_key(&removed_id));
+        assert_eq!(
+            realm.endpoint_taps.get(&remaining.endpoint_id),
+            Some(&remaining)
+        );
+        assert!(
+            command
+                .extra_taps
+                .lock()
+                .expect("extra taps")
+                .contains_key(&removed.interface)
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn valid_endpoint_tap_creation_commits_only_after_live_attestation() {
+        let root = std::env::temp_dir().join(format!("o3k-tap-valid-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let command = Arc::new(EndpointTapCommand::new(&plan, false, true));
+        let mut backend = endpoint_tap_backend(&root, &plan, command);
+
+        backend
+            .ensure_endpoint_taps(&plan)
+            .expect("attested endpoint TAP creation");
+        let realm = backend.state.realms.get(&plan.realm_id).expect("realm");
+        assert_eq!(realm.endpoint_taps.len(), 1);
+        assert!(realm.pending_endpoint_taps.is_empty());
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn existing_valid_endpoint_tap_is_reused_without_kernel_mutation() {
+        let root = std::env::temp_dir().join(format!("o3k-tap-reuse-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let command = Arc::new(EndpointTapCommand::new(&plan, true, true));
+        let mut backend = endpoint_tap_backend(&root, &plan, command.clone());
+        let entry = &plan.directory.entries[0];
+        let tap = EndpointTapOwnership {
+            endpoint_id: entry.endpoint_id,
+            interface: endpoint_tap_name(plan.realm_id, entry.endpoint_id),
+            mac: endpoint_tap_mac(plan.realm_id, entry.endpoint_id),
+        };
+        backend
+            .state
+            .realms
+            .get_mut(&plan.realm_id)
+            .expect("realm")
+            .endpoint_taps
+            .insert(entry.endpoint_id, tap);
+        store_state(&backend.state_path, &backend.state).expect("committed TAP state");
+
+        backend
+            .ensure_endpoint_taps(&plan)
+            .expect("reuse exact existing TAP");
+        assert!(command.run_calls.lock().expect("mutation calls").is_empty());
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn pending_endpoint_tap_recovery_attests_reuses_or_safely_recreates() {
+        let plan = local_endpoint_plan();
+        let entry = &plan.directory.entries[0];
+        let tap = EndpointTapOwnership {
+            endpoint_id: entry.endpoint_id,
+            interface: endpoint_tap_name(plan.realm_id, entry.endpoint_id),
+            mac: endpoint_tap_mac(plan.realm_id, entry.endpoint_id),
+        };
+
+        let root = std::env::temp_dir().join(format!("o3k-tap-pending-live-{}", Uuid::now_v7()));
+        let command = Arc::new(EndpointTapCommand::new(&plan, true, true));
+        let mut backend = endpoint_tap_backend(&root, &plan, command.clone());
+        backend
+            .state
+            .realms
+            .get_mut(&plan.realm_id)
+            .expect("realm")
+            .pending_endpoint_taps
+            .insert(entry.endpoint_id, tap.clone());
+        store_state(&backend.state_path, &backend.state).expect("pending state");
+        backend
+            .ensure_endpoint_taps(&plan)
+            .expect("recover valid pending TAP");
+        let realm = backend.state.realms.get(&plan.realm_id).expect("realm");
+        assert!(realm.pending_endpoint_taps.is_empty());
+        assert_eq!(realm.endpoint_taps.get(&entry.endpoint_id), Some(&tap));
+        assert!(command.run_calls.lock().expect("mutation calls").is_empty());
+        fs::remove_dir_all(root).expect("remove fixture");
+
+        let root = std::env::temp_dir().join(format!("o3k-tap-pending-absent-{}", Uuid::now_v7()));
+        let command = Arc::new(EndpointTapCommand::new(&plan, false, true));
+        let mut backend = endpoint_tap_backend(&root, &plan, command);
+        backend
+            .state
+            .realms
+            .get_mut(&plan.realm_id)
+            .expect("realm")
+            .pending_endpoint_taps
+            .insert(entry.endpoint_id, tap);
+        store_state(&backend.state_path, &backend.state).expect("pending state");
+        backend
+            .ensure_endpoint_taps(&plan)
+            .expect("recreate absent pending TAP");
+        let realm = backend.state.realms.get(&plan.realm_id).expect("realm");
+        assert!(realm.pending_endpoint_taps.is_empty());
+        assert!(realm.endpoint_taps.contains_key(&entry.endpoint_id));
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn absent_committed_tap_is_demoted_before_recreation() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-tap-absent-committed-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let entry = &plan.directory.entries[0];
+        let command = Arc::new(EndpointTapCommand::new(&plan, false, false));
+        let mut backend = endpoint_tap_backend(&root, &plan, command);
+        let tap = EndpointTapOwnership {
+            endpoint_id: entry.endpoint_id,
+            interface: endpoint_tap_name(plan.realm_id, entry.endpoint_id),
+            mac: endpoint_tap_mac(plan.realm_id, entry.endpoint_id),
+        };
+        backend
+            .state
+            .realms
+            .get_mut(&plan.realm_id)
+            .expect("realm")
+            .endpoint_taps
+            .insert(entry.endpoint_id, tap);
+        store_state(&backend.state_path, &backend.state).expect("committed state");
+
+        assert!(matches!(
+            backend.ensure_endpoint_taps(&plan),
+            Err(LinuxFabricError::ForeignState)
+        ));
+        let realm = backend.state.realms.get(&plan.realm_id).expect("realm");
+        assert!(!realm.endpoint_taps.contains_key(&entry.endpoint_id));
+        assert!(realm.pending_endpoint_taps.contains_key(&entry.endpoint_id));
+        assert!(
+            fs::read_to_string(&backend.state_path)
+                .expect("durable state")
+                .contains("pending_endpoint_taps")
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn existing_mismatched_endpoint_taps_fail_closed_without_kernel_mutation() {
+        let plan = local_endpoint_plan();
+        let entry = &plan.directory.entries[0];
+        for variant in [
+            "wrong-mac",
+            "wrong-bridge",
+            "tun",
+            "veth",
+            "missing-subtype",
+            "multiple",
+        ] {
+            let root = std::env::temp_dir().join(format!("o3k-tap-foreign-{}", Uuid::now_v7()));
+            let command = Arc::new(EndpointTapCommand::new(&plan, true, true));
+            let mut backend = endpoint_tap_backend(&root, &plan, command.clone());
+            let tap = EndpointTapOwnership {
+                endpoint_id: entry.endpoint_id,
+                interface: endpoint_tap_name(plan.realm_id, entry.endpoint_id),
+                mac: endpoint_tap_mac(plan.realm_id, entry.endpoint_id),
+            };
+            backend
+                .state
+                .realms
+                .get_mut(&plan.realm_id)
+                .expect("realm")
+                .endpoint_taps
+                .insert(entry.endpoint_id, tap);
+            store_state(&backend.state_path, &backend.state).expect("committed TAP state");
+
+            if variant == "multiple" {
+                command
+                    .extra_links
+                    .lock()
+                    .expect("extra links")
+                    .push(json!({
+                        "ifname": "unexpected", "ifindex": 42,
+                        "address": "02:00:00:00:00:01",
+                        "linkinfo": {"info_kind":"tun", "info_data":{"type":"tap"}}
+                    }));
+            } else {
+                let mut live = command.tap.lock().expect("tap");
+                let tap = live.as_mut().expect("initial TAP");
+                match variant {
+                    "wrong-mac" => tap["address"] = json!("02:aa:bb:cc:dd:ee"),
+                    "wrong-bridge" => tap["master"] = json!("o3k-b-ffffffff"),
+                    "tun" => tap["linkinfo"]["info_data"]["type"] = json!("tun"),
+                    "veth" => tap["linkinfo"]["info_kind"] = json!("veth"),
+                    "missing-subtype" => tap["linkinfo"]["info_data"] = json!({}),
+                    _ => unreachable!(),
+                }
+            }
+
+            assert!(
+                matches!(
+                    backend.ensure_endpoint_taps(&plan),
+                    Err(LinuxFabricError::ForeignState)
+                ),
+                "{variant}"
+            );
+            assert!(
+                command.run_calls.lock().expect("mutation calls").is_empty(),
+                "{variant}"
+            );
+            let realm = backend.state.realms.get(&plan.realm_id).expect("realm");
+            assert!(
+                !realm.endpoint_taps.contains_key(&entry.endpoint_id),
+                "{variant}"
+            );
+            assert!(
+                realm.pending_endpoint_taps.contains_key(&entry.endpoint_id),
+                "{variant}"
+            );
+            fs::remove_dir_all(root).expect("remove fixture");
+        }
+    }
+
+    #[test]
+    fn provider_committed_tap_is_accepted_by_the_compute_attachment_resolver() {
+        let root = std::env::temp_dir().join(format!("o3k-tap-cross-boundary-{}", Uuid::now_v7()));
+        let plan = local_endpoint_plan();
+        let entry = &plan.directory.entries[0];
+        let command = Arc::new(EndpointTapCommand::new(&plan, false, true));
+        let mut backend = endpoint_tap_backend(&root, &plan, command.clone());
+        backend.ensure_endpoint_taps(&plan).expect("provider TAP");
+
+        backend.state.fabric = Some(FabricOwnership {
+            namespace: "o3k-fabric".to_owned(),
+            interface: "o3k-wg".to_owned(),
+            private_key_path: root.join("wireguard-private.key").display().to_string(),
+            fabric_transport_ip: plan.local_fabric_transport_ip,
+            fabric_generation: plan.local_fabric_generation,
+            fabric_mtu: plan.local_fabric_mtu,
+            ingress_owner_token: "owned".to_owned(),
+            ingress_auth_fingerprint: String::new(),
+            ingress_vni_fingerprint: String::new(),
+            managed_peers: Default::default(),
+        });
+        let realm = backend.state.realms.get_mut(&plan.realm_id).expect("realm");
+        realm.vxlan = Some(VxlanOwnership {
+            interface: "o3k-x-test".to_owned(),
+            bridge: "o3k-c-test".to_owned(),
+            host_veth: "o3k-v-test".to_owned(),
+            fabric_veth: "o3k-i-test".to_owned(),
+            vni: plan.encapsulation.provider_segment_id,
+            binding_generation: plan.encapsulation.binding_generation,
+            local_transport_ip: plan.local_fabric_transport_ip,
+            tenant_mtu: plan.tenant_mtu,
+            flood_peers: Default::default(),
+        });
+        store_state(&backend.state_path, &backend.state).expect("provider state");
+        store_plan(
+            &root.join("plans").join(format!("{}.json", plan.realm_id)),
+            &plan,
+        )
+        .expect("current plan");
+
+        let resolver = LinuxFabricAttachmentResolver::with_command(
+            root.clone(),
+            plan.local_host.clone(),
+            command,
+        )
+        .expect("resolver");
+        let evidence = resolver
+            .resolve(entry.endpoint_id, &entry.mac, &plan.local_host)
+            .expect("same provider TAP attests across boundary");
+        assert_eq!(
+            evidence.tap_mac,
+            endpoint_tap_mac(plan.realm_id, entry.endpoint_id)
+        );
+        assert_eq!(evidence.guest_mac, entry.mac);
+        assert_ne!(evidence.tap_mac, evidence.guest_mac);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN; creates one uniquely named disposable bridge and TAP"]
+    fn real_host_provider_tap_microgate() {
+        let root = std::env::temp_dir().join(format!("o3k-tap-microgate-{}", Uuid::now_v7()));
+        let mut plan = plan_with_realm(Uuid::now_v7());
+        plan.directory.entries[0].selected_host = plan.local_host.clone();
+        let command: Arc<dyn LinuxFabricCommand> = Arc::new(SystemLinuxFabricCommand);
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command.clone())
+                .expect("provider backend");
+        let mut realm = backend.realm_ownership(&plan);
+        let bridge = realm.bridge.clone();
+        let endpoint = &plan.directory.entries[0];
+        let tap = EndpointTapOwnership {
+            endpoint_id: endpoint.endpoint_id,
+            interface: endpoint_tap_name(plan.realm_id, endpoint.endpoint_id),
+            mac: endpoint_tap_mac(plan.realm_id, endpoint.endpoint_id),
+        };
+        let (exists, _) = command
+            .output("ip", &["-j", "-d", "link", "show", "dev", &bridge])
+            .expect("observe candidate bridge name");
+        assert!(!exists, "refusing to adopt pre-existing bridge {bridge}");
+        assert!(
+            command
+                .run("ip", &["link", "add", &bridge, "type", "bridge"])
+                .expect("create disposable bridge")
+        );
+        assert!(
+            command
+                .run("ip", &["link", "set", "dev", &bridge, "up"])
+                .expect("bring disposable bridge up")
+        );
+
+        realm
+            .pending_endpoint_taps
+            .insert(endpoint.endpoint_id, tap.clone());
+        backend.state.realms.insert(plan.realm_id, realm);
+        store_state(&backend.state_path, &backend.state).expect("persist provider fixture");
+        store_plan(
+            &root.join("plans").join(format!("{}.json", plan.realm_id)),
+            &plan,
+        )
+        .expect("persist current plan");
+
+        let provider_result = backend.ensure_endpoint_taps(&plan);
+        assert!(
+            provider_result.is_ok(),
+            "provider TAP realization: {provider_result:?}"
+        );
+        let committed = backend
+            .state
+            .realms
+            .get(&plan.realm_id)
+            .expect("realm ownership")
+            .endpoint_taps
+            .get(&endpoint.endpoint_id)
+            .expect("committed provider TAP");
+        assert_eq!(committed, &tap);
+
+        let (exists, observed_json) = command
+            .output("ip", &["-j", "-d", "link", "show", "dev", &tap.interface])
+            .expect("independent TAP observation");
+        assert!(exists, "provider TAP missing from kernel");
+        eprintln!("real host TAP observation: {observed_json}");
+        let observed: Value = serde_json::from_str(&observed_json).expect("iproute2 JSON");
+        let link = observed
+            .as_array()
+            .and_then(|links| (links.len() == 1).then(|| &links[0]))
+            .expect("exactly one TAP link");
+        assert_eq!(link["ifname"].as_str(), Some(tap.interface.as_str()));
+        assert_eq!(link["linkinfo"]["info_kind"].as_str(), Some("tun"));
+        assert_eq!(link["linkinfo"]["info_data"]["type"].as_str(), Some("tap"));
+        assert_eq!(
+            link["address"].as_str().map(str::to_ascii_lowercase),
+            Some(tap.mac.clone())
+        );
+        assert_eq!(link["master"].as_str(), Some(bridge.as_str()));
+
+        backend.state.fabric = Some(FabricOwnership {
+            namespace: "o3k-fabric".to_owned(),
+            interface: "o3k-wg".to_owned(),
+            private_key_path: root
+                .join("fabric-provider/wireguard-private.key")
+                .display()
+                .to_string(),
+            fabric_transport_ip: plan.local_fabric_transport_ip,
+            fabric_generation: plan.local_fabric_generation,
+            fabric_mtu: plan.local_fabric_mtu,
+            ingress_owner_token: "microgate-owned".to_owned(),
+            ingress_auth_fingerprint: String::new(),
+            ingress_vni_fingerprint: String::new(),
+            managed_peers: Default::default(),
+        });
+        backend
+            .state
+            .realms
+            .get_mut(&plan.realm_id)
+            .expect("realm ownership")
+            .vxlan = Some(VxlanOwnership {
+            interface: "o3k-x-micro".to_owned(),
+            bridge: "o3k-c-micro".to_owned(),
+            host_veth: "o3k-v-micro".to_owned(),
+            fabric_veth: "o3k-i-micro".to_owned(),
+            vni: plan.encapsulation.provider_segment_id,
+            binding_generation: plan.encapsulation.binding_generation,
+            local_transport_ip: plan.local_fabric_transport_ip,
+            tenant_mtu: plan.tenant_mtu,
+            flood_peers: Default::default(),
+        });
+        store_state(&backend.state_path, &backend.state).expect("persist committed state");
+        let resolver = LinuxFabricAttachmentResolver::open(&root, plan.local_host.clone())
+            .expect("production read-only resolver");
+        let evidence = resolver
+            .resolve(endpoint.endpoint_id, &endpoint.mac, &plan.local_host)
+            .expect("production resolver accepts provider-owned live TAP");
+        assert_eq!(evidence.tap_mac, tap.mac);
+        assert_eq!(evidence.guest_mac, endpoint.mac);
+        assert_ne!(evidence.tap_mac, evidence.guest_mac);
+
+        backend
+            .remove_endpoint_tap(&tap, &bridge)
+            .expect("ownership-safe test TAP cleanup");
+        assert!(
+            command
+                .run("ip", &["link", "del", "dev", &bridge])
+                .expect("remove disposable bridge")
+        );
+        fs::remove_dir_all(root).expect("remove microgate provider state");
     }
 
     #[test]
@@ -707,22 +2381,12 @@ mod tests {
                 .iter()
                 .any(|(program, args)| program == "wg" && args == &["genkey"])
         );
-        let interface = geneve_name(plan().realm_id, "host-b");
+        let interface = vxlan_name(plan().realm_id);
         assert!(calls.iter().any(|(program, args)| {
             program == "ip"
-                && args.windows(8).any(|window| {
-                    window
-                        == [
-                            "type",
-                            "geneve",
-                            "id",
-                            "101",
-                            "remote",
-                            "198.18.0.2",
-                            "dstport",
-                            "6081",
-                        ]
-                })
+                && args
+                    .windows(6)
+                    .any(|window| window == ["type", "vxlan", "id", "101", "dstport", "4789"])
                 && args.iter().any(|arg| arg == &interface)
         }));
         assert!(calls.iter().any(|(program, args)| {
@@ -735,35 +2399,68 @@ mod tests {
             args.windows(2)
                 .any(|window| window == ["allowed-ips", "10.40.1.12/32"])
         }));
-        let remote_tunnel_mac = tunnel_mac(plan().realm_id, "host-b");
-        let attachment = provider
+        let vxlan = provider
             .state
             .realms
             .get(&plan().realm_id)
-            .and_then(|realm| realm.attachments.get("host-b"))
-            .expect("remote attachment");
+            .and_then(|realm| realm.vxlan.as_ref())
+            .expect("vxlan ownership");
+        assert_eq!(vxlan.vni, 101);
+        assert_eq!(
+            vxlan.flood_peers,
+            BTreeSet::from([Ipv4Addr::new(198, 18, 0, 2)])
+        );
         assert!(calls.iter().any(|(program, args)| {
             program == "ip"
-                && args.windows(4).any(|window| {
-                    window == ["lladdr", remote_tunnel_mac.as_str(), "nud", "permanent"]
+                && args.contains(&"fdb".to_owned())
+                && args.contains(&"append".to_owned())
+                && args.contains(&"00:00:00:00:00:00".to_owned())
+                && args.contains(&"198.18.0.2".to_owned())
+        }));
+        let ingress_batch = calls
+            .iter()
+            .find_map(|(program, args)| {
+                (program == "ip" && args.windows(2).any(|window| window == ["nft", "-f"]))
+                    .then(|| args.last().expect("nft batch"))
+            })
+            .expect("atomic nftables reconciliation batch");
+        assert!(ingress_batch.contains("add table netdev o3k-fabric-auth"));
+        assert!(ingress_batch.contains("policy drop"));
+        assert!(ingress_batch.contains("@th,96,24 101 ip saddr 198.18.0.2"));
+        assert!(ingress_batch.contains("counter drop comment \"o3k-fabric-auth\""));
+        assert!(ingress_batch.contains("add table bridge o3k-fabric-vni-auth"));
+        assert!(ingress_batch.contains("counter drop comment \"o3k-fabric-vni-auth\""));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(program, args)| {
+                    program == "ip" && args.windows(2).any(|window| window == ["nft", "-f"])
                 })
-                && args.last() == Some(&attachment.realm_veth)
-        }));
-        assert!(calls.iter().any(|(program, args)| {
+                .count(),
+            1,
+            "both admission tables must change in a single kernel transaction"
+        );
+        assert!(!calls.iter().any(|(program, args)| {
             program == "ip"
-                && args.contains(&"bridge".to_owned())
                 && args
-                    .windows(2)
-                    .any(|window| window == ["replace", remote_tunnel_mac.as_str()])
+                    .windows(4)
+                    .any(|window| window == ["add", "rule", "netdev", "o3k-fabric-auth"])
+                && args.contains(&"vxlan".to_owned())
+                && args.contains(&"vni".to_owned())
+        }));
+        assert!(ingress_batch.contains("add table bridge o3k-fabric-vni-auth"));
+        assert!(ingress_batch.contains("counter drop comment \"o3k-fabric-vni-auth\""));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip" && args.contains(&vxlan_name(plan().realm_id))
         }));
         assert!(calls.iter().any(|(program, args)| {
-            program == "ip" && args.windows(2).any(|window| window == ["mtu", "1400"])
+            program == "ip" && args.windows(2).any(|window| window == ["mtu", "1390"])
         }));
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn provider_uses_static_fdb_entries_not_permanent() {
+    fn provider_reconciles_bounded_her_entries() {
         let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
@@ -775,29 +2472,19 @@ mod tests {
                 .expect("provider");
         provider.apply(&plan()).expect("apply");
         let calls = command_for_assertion.calls.lock().expect("calls");
-        let remote_mac = tunnel_mac(plan().realm_id, "host-b");
-        let local_mac = tunnel_mac(plan().realm_id, "host-a");
-        // Every bridge FDB replace must use "static" not "permanent",
-        // because "permanent" on a bridge port's own MAC creates a local
-        // entry that consumes frames instead of forwarding them.
         let bridge_calls: Vec<_> = calls
             .iter()
             .filter(|(prog, args)| {
                 prog == "ip"
-                    && args.contains(&"bridge".to_owned())
                     && args.contains(&"fdb".to_owned())
-                    && args.contains(&"replace".to_owned())
-                    && (args.iter().any(|a| a == remote_mac.as_str())
-                        || args.iter().any(|a| a == local_mac.as_str()))
+                    && args.contains(&"append".to_owned())
+                    && args.contains(&"00:00:00:00:00:00".to_owned())
             })
             .collect();
         assert!(!bridge_calls.is_empty(), "no bridge fdb calls found");
-        for (_, args) in &bridge_calls {
-            assert!(
-                args.contains(&"static".to_owned()),
-                "bridge FDB uses permanent instead of static — run 45 regression"
-            );
-        }
+        assert!(bridge_calls.iter().all(|(_, args)| {
+            !args.contains(&"static".to_owned()) && !args.contains(&"permanent".to_owned())
+        }));
         let _ = fs::remove_dir_all(root);
     }
 

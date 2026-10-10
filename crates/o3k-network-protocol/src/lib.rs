@@ -9,8 +9,8 @@ pub mod proto {
 }
 
 use proto::{
-    CommandResult, ControlRequest, NetworkCommand, Register, control_request::Body as RequestBody,
-    control_response::Body as ResponseBody,
+    CommandResult, ControlRequest, ControllerLease, NetworkCommand, ObserveCommand, Register,
+    control_request::Body as RequestBody, control_response::Body as ResponseBody,
     network_agent_client::NetworkAgentClient as NetworkAgentGrpcClient,
 };
 use std::{fs, path::Path};
@@ -72,7 +72,16 @@ impl NetworkAgentClient {
         register: Register,
         command: NetworkCommand,
     ) -> Result<CommandResult, NetworkTransportError> {
-        let (tx, rx) = mpsc::channel(2);
+        self.execute_with_lease(register, command, None).await
+    }
+
+    pub async fn execute_with_lease(
+        &self,
+        register: Register,
+        command: NetworkCommand,
+        lease: Option<ControllerLease>,
+    ) -> Result<CommandResult, NetworkTransportError> {
+        let (tx, rx) = mpsc::channel(3);
         let mut client = NetworkAgentGrpcClient::new(self.channel.clone());
         let response = client
             .control(Request::new(ReceiverStream::new(rx)))
@@ -83,13 +92,50 @@ impl NetworkAgentClient {
         })
         .await
         .map_err(|_| NetworkTransportError::Protocol("agent stream closed".to_owned()))?;
+        if let Some(lease) = lease {
+            tx.send(ControlRequest {
+                body: Some(RequestBody::Lease(lease)),
+            })
+            .await
+            .map_err(|_| NetworkTransportError::Protocol("agent stream closed".to_owned()))?;
+        }
         tx.send(ControlRequest {
             body: Some(RequestBody::Command(command)),
         })
         .await
         .map_err(|_| NetworkTransportError::Protocol("agent stream closed".to_owned()))?;
         drop(tx);
-        let mut stream = response.into_inner();
+        Self::collect_result(response.into_inner()).await
+    }
+
+    pub async fn observe_with_lease(
+        &self,
+        register: Register,
+        lease: ControllerLease,
+        command_id: String,
+    ) -> Result<CommandResult, NetworkTransportError> {
+        let (tx, rx) = mpsc::channel(3);
+        let mut client = NetworkAgentGrpcClient::new(self.channel.clone());
+        let response = client
+            .control(Request::new(ReceiverStream::new(rx)))
+            .await
+            .map_err(|error| NetworkTransportError::Protocol(error.to_string()))?;
+        for body in [
+            RequestBody::Register(register),
+            RequestBody::Lease(lease),
+            RequestBody::Observe(ObserveCommand { command_id }),
+        ] {
+            tx.send(ControlRequest { body: Some(body) })
+                .await
+                .map_err(|_| NetworkTransportError::Protocol("agent stream closed".to_owned()))?;
+        }
+        drop(tx);
+        Self::collect_result(response.into_inner()).await
+    }
+
+    async fn collect_result(
+        mut stream: tonic::Streaming<proto::ControlResponse>,
+    ) -> Result<CommandResult, NetworkTransportError> {
         let mut registered = false;
         while let Some(response) = stream.next().await {
             let response =
@@ -100,6 +146,7 @@ impl NetworkAgentClient {
                 Some(ResponseBody::Error(error)) => {
                     return Err(NetworkTransportError::Protocol(error.code));
                 }
+                Some(ResponseBody::Lease(_)) => {}
                 Some(ResponseBody::Result(_)) => {
                     return Err(NetworkTransportError::Protocol(
                         "agent returned command result before registration".to_owned(),

@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use crate::cleanup::cleanup_config_drive_artifact;
     use crate::cleanup::reap_config_drive_artifacts;
@@ -6,10 +7,10 @@ mod tests {
     use crate::network::{DomainPresence, cleanup_instance_network};
     use crate::process::pid_is_alive;
     use crate::runtime::{
-        CommittedArtifact, CommittedCreateInputs, CreateDomainIdentity, OwnedTap,
-        StartupDomainRestore, StartupJournalRefresh, StartupTapRestore, capacity_failure_result,
-        create_disk_gib, definitive_create_failure_result, definitive_failure_result,
-        inspect_not_found_result, resolve_create_domain_spec,
+        CommittedArtifact, CommittedCreateInputs, CreateDomainIdentity, NetworkAttachmentOwnership,
+        StartupDomainRestore, StartupJournalRefresh, StartupTapRestore, VerifiedNetworkAttachment,
+        capacity_failure_result, create_disk_gib, definitive_create_failure_result,
+        definitive_failure_result, inspect_not_found_result, resolve_create_domain_spec,
         restore_expected_running_domains_with_window, verify_owned_domain,
     };
     use crate::*;
@@ -280,6 +281,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse()?],
             interface: "o3k-br0".to_owned(),
             lease_seconds: 3600,
+            mtu: None,
         })?;
         for (port_id, address, mac) in [
             ("port-1", "192.0.2.10", "02:00:00:00:00:01"),
@@ -319,6 +321,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse()?],
             interface: "o3k-br0".to_owned(),
             lease_seconds: 3600,
+            mtu: None,
         })?;
         runtime.service.upsert_binding(o3k_dhcp::Binding {
             port_id: "port-1".to_owned(),
@@ -448,6 +451,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse()?],
             interface: "o3k-br0".to_owned(),
             lease_seconds: 3600,
+            mtu: None,
         })?;
         runtime.service.upsert_binding(o3k_dhcp::Binding {
             port_id: "port-1".to_owned(),
@@ -633,6 +637,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse()?],
             interface: "o3k-br0".to_owned(),
             lease_seconds: 3600,
+            mtu: None,
         })?;
         runtime.service.upsert_binding(o3k_dhcp::Binding {
             port_id: "port-1".to_owned(),
@@ -964,6 +969,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse()?],
             interface: "o3k-br0".to_owned(),
             lease_seconds: 3600,
+            mtu: None,
         })?;
         runtime.service.upsert_binding(o3k_dhcp::Binding {
             port_id: port_id.to_owned(),
@@ -1108,8 +1114,17 @@ mod tests {
                     disk_gib: 1,
                     config_drive_artifact_id: "config-artifact".to_owned(),
                     config_drive_sha256: "b".repeat(64),
+                    config_drive_enabled: Some(true),
                     image_transfer: None,
-                    config_drive_transfer: None,
+                    config_drive_transfer: Some(proto::ArtifactReference {
+                        transfer_id: o3k_compute_agent::deterministic_artifact_transfer_id(
+                            "",
+                            proto::ArtifactKind::ConfigDriveIso,
+                            "config-artifact",
+                        ),
+                        size_bytes: 1,
+                        expires_at_unix_ms: i64::MAX,
+                    }),
                     project_id: "project-1".to_owned(),
                     network_attachments: vec![proto::NetworkAttachment {
                         port_id: "port-1".to_owned(),
@@ -1137,6 +1152,7 @@ mod tests {
             action: Some(proto::command::Action::Create(proto::CreateCommand {
                 resolved: Some(proto::ResolvedCreateInputs {
                     image_artifact_id: String::new(),
+                    config_drive_enabled: Some(false),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1236,8 +1252,18 @@ mod tests {
                     image_format: "qcow2".to_owned(),
                     vcpus: 1,
                     memory_mib: 512,
+                    config_drive_enabled: Some(true),
                     config_drive_artifact_id: "config-artifact".to_owned(),
                     config_drive_sha256: "b".repeat(64),
+                    config_drive_transfer: Some(proto::ArtifactReference {
+                        transfer_id: o3k_compute_agent::deterministic_artifact_transfer_id(
+                            "command-1",
+                            proto::ArtifactKind::ConfigDriveIso,
+                            "config-artifact",
+                        ),
+                        size_bytes: 1,
+                        expires_at_unix_ms: i64::MAX,
+                    }),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1252,14 +1278,14 @@ mod tests {
                 sha256: "a".repeat(64),
                 path: PathBuf::from("/var/lib/o3k/artifacts/image.qcow2"),
             },
-            config_drive: CommittedArtifact {
+            config_drive: Some(CommittedArtifact {
                 artifact_id: "config-artifact".to_owned(),
                 kind: proto::ArtifactKind::ConfigDriveIso,
                 format: "iso".to_owned(),
                 sha256: "b".repeat(64),
                 path: PathBuf::from("/var/lib/o3k/artifacts/config.iso"),
-            },
-            owned_taps: Vec::new(),
+            }),
+            network_attachments: Vec::new(),
             identity: CreateDomainIdentity {
                 server_id: "server-1".to_owned(),
                 project_id: "project-1".to_owned(),
@@ -1277,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_contract_rejects_unowned_tap_even_with_matching_port_data() {
+    fn typed_contract_rejects_unvalidated_tap_name() {
         let command = proto::Command {
             command_id: "command-1".to_owned(),
             operation_id: "operation-1".to_owned(),
@@ -1289,8 +1315,18 @@ mod tests {
                     image_format: "qcow2".to_owned(),
                     vcpus: 1,
                     memory_mib: 512,
+                    config_drive_enabled: Some(true),
                     config_drive_artifact_id: "config-artifact".to_owned(),
                     config_drive_sha256: "b".repeat(64),
+                    config_drive_transfer: Some(proto::ArtifactReference {
+                        transfer_id: o3k_compute_agent::deterministic_artifact_transfer_id(
+                            "command-1",
+                            proto::ArtifactKind::ConfigDriveIso,
+                            "config-artifact",
+                        ),
+                        size_bytes: 1,
+                        expires_at_unix_ms: i64::MAX,
+                    }),
                     network_attachments: vec![proto::NetworkAttachment {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
@@ -1312,18 +1348,18 @@ mod tests {
                 sha256: "a".repeat(64),
                 path: PathBuf::from("/var/lib/o3k/artifacts/image.qcow2"),
             },
-            config_drive: CommittedArtifact {
+            config_drive: Some(CommittedArtifact {
                 artifact_id: "config-artifact".to_owned(),
                 kind: proto::ArtifactKind::ConfigDriveIso,
                 format: "iso".to_owned(),
                 sha256: "b".repeat(64),
                 path: PathBuf::from("/var/lib/o3k/artifacts/config.iso"),
-            },
-            owned_taps: vec![OwnedTap {
+            }),
+            network_attachments: vec![VerifiedNetworkAttachment {
                 port_id: "port-1".to_owned(),
-                tap_name: "o3ktap-port1".to_owned(),
-                mac_address: "02:00:00:00:00:01".to_owned(),
-                ownership_token: String::new(),
+                tap_name: "eth0".to_owned(),
+                guest_mac: "02:00:00:00:00:01".to_owned(),
+                ownership: NetworkAttachmentOwnership::HostNetwork,
             }],
             identity: CreateDomainIdentity {
                 server_id: "server-1".to_owned(),
@@ -1337,8 +1373,136 @@ mod tests {
         let result = resolve_create_domain_spec(&command, Some(&committed));
         assert!(result.is_err());
         if let Err(error) = result {
-            assert!(error.to_string().contains("owned TAP evidence"));
+            assert!(error.to_string().contains("libvirt validation"));
         }
+    }
+
+    #[test]
+    fn fabric_tap_mac_is_separate_from_guest_mac_in_domain_spec() {
+        let endpoint_id = uuid::Uuid::from_u128(1);
+        let guest_mac = "fa:16:3e:12:34:56";
+        let tap_mac = "02:aa:bb:cc:dd:ee";
+        let config_drive_path = std::env::temp_dir().join(format!(
+            "o3k-fabric-domain-config-{}.iso",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::write(&config_drive_path, b"abc").expect("config drive fixture");
+        let config_drive_sha256 =
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let command = proto::Command {
+            command_id: "command-1".to_owned(),
+            operation_id: "operation-1".to_owned(),
+            resource_id: "server-1".to_owned(),
+            action: Some(proto::command::Action::Create(proto::CreateCommand {
+                resolved: Some(proto::ResolvedCreateInputs {
+                    image_artifact_id: "image-artifact".to_owned(),
+                    image_sha256: "a".repeat(64),
+                    image_format: "qcow2".to_owned(),
+                    vcpus: 1,
+                    memory_mib: 512,
+                    config_drive_enabled: Some(true),
+                    config_drive_artifact_id: "config-artifact".to_owned(),
+                    config_drive_sha256: config_drive_sha256.to_owned(),
+                    config_drive_transfer: Some(proto::ArtifactReference {
+                        transfer_id: o3k_compute_agent::deterministic_artifact_transfer_id(
+                            "command-1",
+                            proto::ArtifactKind::ConfigDriveIso,
+                            "config-artifact",
+                        ),
+                        size_bytes: 3,
+                        expires_at_unix_ms: i64::MAX,
+                    }),
+                    network_attachments: vec![proto::NetworkAttachment {
+                        port_id: endpoint_id.to_string(),
+                        mac: guest_mac.to_owned(),
+                        fixed_ipv4: "192.0.2.10".to_owned(),
+                        subnet_cidr: String::new(),
+                        gateway_ipv4: String::new(),
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let committed = CommittedCreateInputs {
+            image: CommittedArtifact {
+                artifact_id: "image-artifact".to_owned(),
+                kind: proto::ArtifactKind::ImageBase,
+                format: "qcow2".to_owned(),
+                sha256: "a".repeat(64),
+                path: PathBuf::from("/var/lib/o3k/artifacts/image.qcow2"),
+            },
+            config_drive: Some(CommittedArtifact {
+                artifact_id: "config-artifact".to_owned(),
+                kind: proto::ArtifactKind::ConfigDriveIso,
+                format: "iso".to_owned(),
+                sha256: config_drive_sha256.to_owned(),
+                path: config_drive_path.clone(),
+            }),
+            network_attachments: vec![VerifiedNetworkAttachment {
+                port_id: endpoint_id.to_string(),
+                tap_name: "o3k-t-a1b2c3d4".to_owned(),
+                guest_mac: guest_mac.to_owned(),
+                ownership: NetworkAttachmentOwnership::Fabric(
+                    o3k_network::FabricEndpointAttachmentEvidence {
+                        endpoint_id,
+                        realm_id: uuid::Uuid::from_u128(2),
+                        tap_name: "o3k-t-a1b2c3d4".to_owned(),
+                        tap_mac: tap_mac.to_owned(),
+                        realm_bridge: "o3k-b-12345678".to_owned(),
+                        guest_mac: guest_mac.to_owned(),
+                        local_host: "compute-a".to_owned(),
+                        endpoint_generation: 1,
+                        placement_generation: 1,
+                        directory_generation: 1,
+                        fabric_generation: 1,
+                        binding_generation: 1,
+                        vni: 1001,
+                        tenant_mtu: 1390,
+                    },
+                ),
+            }],
+            identity: CreateDomainIdentity {
+                server_id: "server-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                generation: 1,
+                operation_id: "operation-1".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+        };
+        let spec = resolve_create_domain_spec(&command, Some(&committed))
+            .expect("verified Fabric attachment should be accepted");
+        assert_eq!(spec.network_interfaces[0].tap_name, "o3k-t-a1b2c3d4");
+        assert_eq!(spec.network_interfaces[0].mac_address, guest_mac);
+        assert_ne!(spec.network_interfaces[0].mac_address, tap_mac);
+        let xml = o3k_libvirt::build_domain_xml(&spec)
+            .expect("valid domain XML")
+            .xml;
+        assert!(xml.contains(&format!("mac address=\"{guest_mac}\"")));
+        assert!(xml.contains("target dev=\"o3k-t-a1b2c3d4\""));
+        assert!(!xml.contains(tap_mac));
+
+        let mut no_drive_command = command.clone();
+        if let Some(proto::command::Action::Create(create)) = no_drive_command.action.as_mut()
+            && let Some(resolved) = create.resolved.as_mut()
+        {
+            resolved.config_drive_enabled = Some(false);
+            resolved.config_drive_artifact_id.clear();
+            resolved.config_drive_sha256.clear();
+            resolved.config_drive_transfer = None;
+        }
+        let mut no_drive_committed = committed.clone();
+        no_drive_committed.config_drive = None;
+        let no_drive_spec =
+            resolve_create_domain_spec(&no_drive_command, Some(&no_drive_committed))
+                .expect("explicitly disabled config drive should resolve without media");
+        assert!(no_drive_spec.config_drive_image.is_none());
+        let no_drive_xml = o3k_libvirt::build_domain_xml(&no_drive_spec)
+            .expect("no-config-drive domain XML")
+            .xml;
+        assert!(!no_drive_xml.contains("device=\"cdrom\""));
+        std::fs::remove_file(config_drive_path).expect("remove config drive fixture");
     }
 
     /// Commits an artifact through the same store API the agent's transfer

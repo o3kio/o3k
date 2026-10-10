@@ -5,7 +5,9 @@ use std::net::Ipv4Addr;
 
 use o3k_store::{
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
-    CanonicalNetworkRecord, NetworkRepository, PortRecord, PostgresStore, StoreError, SubnetRecord,
+    CanonicalNetworkRecord, CanonicalRealmBindingRecord, DurableStore,
+    FabricHostTransportIdentityRecord, NetworkPlanWorkRecord, NetworkPlanWorkState,
+    NetworkRepository, PortRecord, PostgresStore, StoreError, SubnetRecord,
 };
 use sqlx::{
     Connection, PgPool, Row,
@@ -714,6 +716,7 @@ async fn postgres_p13_2c_endpoint_port_atomic_lifecycle_and_reopen() {
         status: "ACTIVE".into(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
     };
     store
         .insert_canonical_endpoint_and_port(&endpoint, &port)
@@ -755,5 +758,285 @@ async fn postgres_p13_2c_endpoint_port_atomic_lifecycle_and_reopen() {
             .await
             .expect("network after reopen")
             .is_some()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the configured PostgreSQL conformance database"]
+async fn postgres_fabric_identity_binding_and_network_queries_reopen() {
+    let url = database_url();
+    let _database_guard = acquire_database_guard(&url).await;
+    let pool = fresh_pool(&url).await;
+    let store = PostgresStore::connect_pool(pool)
+        .await
+        .expect("migrate store");
+    let project = "fabric-pg-proof";
+    let network_id = Uuid::from_u128(0xfeed);
+    let realm_id = Uuid::from_u128(0xfeee);
+    let endpoint_id = Uuid::from_u128(0xfeef);
+    store
+        .insert_network(&o3k_store::NetworkRecord {
+            id: network_id,
+            name: "fabric-pg-network".into(),
+            project_id: project.into(),
+            status: "ACTIVE".into(),
+        })
+        .await
+        .expect("legacy network projection");
+    store
+        .insert_canonical_network(&CanonicalNetworkRecord {
+            id: network_id,
+            project_id: project.into(),
+            name: "fabric-pg-network".into(),
+            admin_state_up: true,
+            generation: 1,
+            state: "active".into(),
+        })
+        .await
+        .expect("canonical network");
+    store
+        .insert_subnet_bundle(
+            &CanonicalAddressRealmRecord {
+                id: realm_id,
+                network_id,
+                project_id: project.into(),
+                prefix: "198.18.10.0/24".into(),
+                overlapping_prefixes: false,
+                generation: 1,
+                state: "active".into(),
+            },
+            &CanonicalAddressPoolRecord {
+                id: Uuid::from_u128(0xfef0),
+                realm_id,
+                project_id: project.into(),
+                prefix: "198.18.10.0/24".into(),
+                gateway: Some(Ipv4Addr::new(198, 18, 10, 1)),
+                first_usable: Ipv4Addr::new(198, 18, 10, 2),
+                last_usable: Ipv4Addr::new(198, 18, 10, 254),
+                generation: 1,
+                state: "active".into(),
+            },
+            &SubnetRecord {
+                id: realm_id,
+                network_id,
+                name: "fabric-pg-subnet".into(),
+                project_id: project.into(),
+                cidr: "198.18.10.0/24".into(),
+                gateway_ip: Ipv4Addr::new(198, 18, 10, 1),
+                allocation_start: Ipv4Addr::new(198, 18, 10, 2),
+                allocation_end: Ipv4Addr::new(198, 18, 10, 254),
+                ip_version: 4,
+                enable_dhcp: false,
+            },
+        )
+        .await
+        .expect("subnet bundle");
+    let identity = FabricHostTransportIdentityRecord {
+        host_id: "fabric-pg-host-a".into(),
+        agent_id: "fabric-pg-agent-a".into(),
+        public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+        underlay_endpoint: "198.18.0.1:65001".into(),
+        fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
+        provider_version: "0.1.5".into(),
+        fabric_generation: 1,
+        underlay_mtu: 1500,
+        fabric_mtu: 1440,
+        administrative_state: "enabled".into(),
+    };
+    assert_eq!(
+        store
+            .upsert_fabric_host_identity(&identity, None)
+            .await
+            .expect("create identity"),
+        identity
+    );
+    assert_eq!(
+        store
+            .get_fabric_host_identity(&identity.host_id)
+            .await
+            .expect("read identity"),
+        Some(identity.clone())
+    );
+    let mut updated = identity.clone();
+    updated.fabric_generation = 2;
+    updated.fabric_transport_ip = Ipv4Addr::new(198, 18, 0, 2);
+    updated.underlay_endpoint = "198.18.0.2:65001".into();
+    store
+        .upsert_fabric_host_identity(&updated, Some(1))
+        .await
+        .expect("generation update");
+    assert!(matches!(
+        store.upsert_fabric_host_identity(&identity, Some(1)).await,
+        Err(StoreError::StaleGeneration)
+    ));
+    let mut duplicate = updated.clone();
+    duplicate.host_id = "fabric-pg-host-b".into();
+    duplicate.agent_id = "fabric-pg-agent-b".into();
+    assert!(matches!(
+        store.upsert_fabric_host_identity(&duplicate, None).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+    let mut conflicting = updated.clone();
+    conflicting.public_key = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=".into();
+    conflicting.agent_id = "fabric-pg-agent-conflict".into();
+    let conflicting_result = store
+        .upsert_fabric_host_identity(&conflicting, Some(2))
+        .await;
+    assert!(
+        matches!(conflicting_result, Err(StoreError::StaleGeneration)),
+        "same-generation identity conflict was not rejected as stale: {conflicting_result:?}"
+    );
+    store
+        .insert_canonical_realm_binding(&CanonicalRealmBindingRecord {
+            fabric_domain_id: "fabric-pg".into(),
+            realm_id,
+            provider_kind: "vxlan".into(),
+            provider_segment_id: 4242,
+            binding_generation: 7,
+            state: "active".into(),
+        })
+        .await
+        .expect("binding");
+    let port = PortRecord {
+        id: endpoint_id,
+        network_id,
+        subnet_id: Some(realm_id),
+        project_id: project.into(),
+        name: "fabric-pg-port".into(),
+        mac_address: "02:00:00:fe:ef:01".into(),
+        fixed_ip: Ipv4Addr::new(198, 18, 10, 10),
+        status: "ACTIVE".into(),
+        binding_host: Some(identity.host_id.clone()),
+        binding_state: Some("bound".into()),
+        binding_generation: 1,
+    };
+    store.insert_port(&port).await.expect("port");
+    drop(store);
+    let reopened = PostgresStore::connect(&url).await.expect("reopen store");
+    assert_eq!(
+        reopened
+            .get_fabric_host_identity(&updated.host_id)
+            .await
+            .expect("identity after reopen"),
+        Some(updated)
+    );
+    assert_eq!(
+        reopened
+            .get_canonical_realm_binding("fabric-pg", &realm_id)
+            .await
+            .expect("binding after reopen")
+            .expect("binding")
+            .binding_generation,
+        7
+    );
+    assert_eq!(
+        reopened
+            .get_port(project, &endpoint_id)
+            .await
+            .expect("port after reopen")
+            .expect("port")
+            .fixed_ip,
+        Ipv4Addr::new(198, 18, 10, 10)
+    );
+    assert_eq!(
+        reopened
+            .list_canonical_realms(project, &network_id)
+            .await
+            .expect("realms after reopen")
+            .len(),
+        1
+    );
+
+    let work = NetworkPlanWorkRecord {
+        command_id: Uuid::from_u128(0xfef0).to_string(),
+        operation_id: Uuid::from_u128(0xfef1),
+        idempotency_key: "fabric-pg-work-key".into(),
+        target_host_id: "fabric-pg-host-a".into(),
+        target_agent_id: "fabric-pg-agent-a".into(),
+        target_agent_epoch: "agent-epoch-1".into(),
+        controller_id: "controller-a".into(),
+        controller_epoch: "controller-epoch-1".into(),
+        fencing_token: 9,
+        deadline_unix_ms: 1_900_000_000_000,
+        fingerprint_sha256: "f".repeat(64),
+        snapshot: br#"{"bounded":"command-snapshot"}"#.to_vec(),
+        state: NetworkPlanWorkState::Pending,
+        revision: 0,
+        outcome: None,
+    };
+    assert_eq!(
+        reopened
+            .insert_network_plan_work(&work)
+            .await
+            .expect("insert network plan work"),
+        work
+    );
+    assert_eq!(
+        reopened
+            .insert_network_plan_work(&work)
+            .await
+            .expect("idempotent network plan work"),
+        work
+    );
+    let mut conflicting_replay = work.clone();
+    conflicting_replay.snapshot.push(b'!');
+    assert!(matches!(
+        reopened.insert_network_plan_work(&conflicting_replay).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    let mut command_collision = work.clone();
+    command_collision.idempotency_key = "different-key".into();
+    assert!(matches!(
+        reopened.insert_network_plan_work(&command_collision).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    let running = reopened
+        .update_network_plan_work(&work.command_id, 0, NetworkPlanWorkState::Running, None)
+        .await
+        .expect("CAS transition to running");
+    assert!(matches!(
+        reopened
+            .update_network_plan_work(&work.command_id, 0, NetworkPlanWorkState::Succeeded, None)
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    let failed = reopened
+        .update_network_plan_work(
+            &work.command_id,
+            running.revision,
+            NetworkPlanWorkState::Failed,
+            Some(b"known rejection"),
+        )
+        .await
+        .expect("terminal failure transition");
+    assert_eq!(failed.revision, 2);
+    assert!(matches!(
+        reopened
+            .update_network_plan_work(
+                &work.command_id,
+                failed.revision,
+                NetworkPlanWorkState::Pending,
+                None
+            )
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    drop(reopened);
+    let after_work_restart = PostgresStore::connect(&url)
+        .await
+        .expect("reopen store after work persistence");
+    assert_eq!(
+        after_work_restart
+            .get_network_plan_work(&work.command_id)
+            .await
+            .expect("network plan work after reopen"),
+        failed
+    );
+    assert!(
+        after_work_restart
+            .list_unresolved_network_plan_work()
+            .await
+            .expect("unresolved network plan work")
+            .is_empty()
     );
 }

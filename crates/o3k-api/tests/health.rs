@@ -2583,6 +2583,33 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .await?;
     let port_id = port.id.to_string();
     let expected_fixed_ip = port.fixed_ip.to_string();
+    let explicit_true_port = network_service
+        .create_port_for_project(
+            "eba29e2d-53de-461d-ae91-ede7402713cb",
+            network.id,
+            "config-drive-true-port".to_owned(),
+        )
+        .await?
+        .id
+        .to_string();
+    let omitted_config_drive_port = network_service
+        .create_port_for_project(
+            "eba29e2d-53de-461d-ae91-ede7402713cb",
+            network.id,
+            "config-drive-omitted-port".to_owned(),
+        )
+        .await?
+        .id
+        .to_string();
+    let omitted_with_key_port = network_service
+        .create_port_for_project(
+            "eba29e2d-53de-461d-ae91-ede7402713cb",
+            network.id,
+            "config-drive-omitted-with-key-port".to_owned(),
+        )
+        .await?
+        .id
+        .to_string();
     let console = o3k_console::ConsoleService::open(format!(
         "/tmp/o3k-api-console-{}",
         uuid::Uuid::now_v7()
@@ -2742,7 +2769,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
             .map(Vec::len),
         Some(1)
     );
-    let request_body = serde_json::json!({"server":{"name":"nova-test","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"port":port_id.clone()}],"key_name":"nova-test-key"}});
+    let request_body = serde_json::json!({"server":{"name":"nova-test","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"port":port_id.clone()}],"key_name":"nova-test-key","config_drive":false}});
     let created = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -2758,6 +2785,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let server_json: Value =
         serde_json::from_slice(&axum::body::to_bytes(created.into_body(), 8192).await?)?;
     assert_eq!(server_json["server"]["status"], "ACTIVE");
+    assert_eq!(server_json["server"]["config_drive"], false);
     // Public clients (openstackclient 6.6 `_prep_server_detail`) pop the
     // server metadata object unconditionally; Nova always carries one.
     assert_eq!(server_json["server"]["metadata"], serde_json::json!({}));
@@ -2775,6 +2803,139 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let canonical_operation = store.get_canonical_operation(expected_operation_id).await?;
     assert_eq!(canonical_operation.resource_id.as_deref(), Some(server_id));
     assert_eq!(canonical_operation.action, "compute:CreateServer");
+
+    // Explicit true remains supported when a project keypair supplies the
+    // config-drive key. Omission without a key keeps the accepted keyless
+    // behavior and does not request media.
+    for (name, request_id, port, key_name, explicit, expected) in [
+        (
+            "nova-config-drive-true",
+            "nova-config-drive-true-request",
+            explicit_true_port.as_str(),
+            Some("nova-test-key"),
+            Some(true),
+            true,
+        ),
+        (
+            "nova-config-drive-omitted",
+            "nova-config-drive-omitted-request",
+            omitted_config_drive_port.as_str(),
+            None,
+            None,
+            false,
+        ),
+        (
+            "nova-config-drive-omitted-with-key",
+            "nova-config-drive-omitted-with-key-request",
+            omitted_with_key_port.as_str(),
+            Some("nova-test-key"),
+            None,
+            true,
+        ),
+    ] {
+        let mut server = serde_json::json!({
+            "name": name,
+            "image": {"id": "image-1"},
+            "flavor": {"id": flavor_id},
+            "networks": [{"port": port}],
+        });
+        if let Some(key_name) = key_name {
+            server["key_name"] = serde_json::json!(key_name);
+        }
+        if let Some(config_drive) = explicit {
+            server["config_drive"] = serde_json::json!(config_drive);
+        }
+        let created = o3k_api::router_with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers")
+                    .header("x-auth-token", &token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-openstack-request-id", request_id)
+                    .body(Body::from(
+                        serde_json::json!({"server": server}).to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(created.status(), StatusCode::ACCEPTED);
+        let created_json: Value =
+            serde_json::from_slice(&axum::body::to_bytes(created.into_body(), 8192).await?)?;
+        assert_eq!(created_json["server"]["status"], "ACTIVE");
+        assert_eq!(created_json["server"]["config_drive"], expected);
+        let server_id = created_json["server"]["id"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("created server ID missing"))?;
+        let deleted = o3k_api::router_with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!(
+                        "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}"
+                    ))
+                    .header("x-auth-token", &token)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    }
+
+    // Regression for the failure window that exposed the original defect:
+    // the HTTP layer can own a newly allocated endpoint before the provider
+    // create reaches its terminal failure. Existing compensation must release
+    // that request-owned endpoint instead of leaving an orphan participant.
+    let ports_before = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.0/ports")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let ports_before_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(ports_before.into_body(), 8192).await?)?;
+    let ports_before_count = ports_before_json["ports"]
+        .as_array()
+        .ok_or_else(|| std::io::Error::other("port list missing"))?
+        .len();
+    provider.set_failure(FailureInjection::Terminal)?;
+    let failed_create = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-openstack-request-id", "nova-terminal-create-failure")
+                .body(Body::from(
+                    serde_json::json!({"server": {
+                        "name": "nova-terminal-create-failure",
+                        "image": {"id": "image-1"},
+                        "flavor": {"id": flavor_id},
+                        "networks": [{"uuid": network.id.to_string()}],
+                        "config_drive": false
+                    }})
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(failed_create.status(), StatusCode::CONFLICT);
+    provider.set_failure(FailureInjection::None)?;
+    let ports_after = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.0/ports")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let ports_after_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(ports_after.into_body(), 8192).await?)?;
+    assert_eq!(
+        ports_after_json["ports"].as_array().map(Vec::len),
+        Some(ports_before_count)
+    );
+
     let server_uuid = server_id.parse::<uuid::Uuid>()?;
     console.write(server_uuid, b"0123456789abcdef")?;
     let console_response = o3k_api::router_with_state(state.clone())

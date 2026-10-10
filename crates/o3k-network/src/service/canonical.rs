@@ -5,7 +5,7 @@ use crate::{
     CanonicalPolicyService, CanonicalPolicyServiceError, PolicyApplyOutcome,
     PolicySnapshotRealizer, compile_l3_gateway_execution_plan,
 };
-use o3k_domain::{Ipv4Prefix, NetworkPlanIntent};
+use o3k_domain::{FabricProviderKind, Ipv4Prefix, NetworkPlanIntent, RealmEncapsulationBinding};
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuthContext, AuthorizationRequest, Authorizer,
     DecisionReason, MemoryAuditSink, OwnershipScope, ResourceId, ResourceTarget, ResourceType,
@@ -186,6 +186,154 @@ pub enum RealmCleanupProgress {
 }
 
 impl NetworkService {
+    /// Records or idempotently replays one operator-enrolled Fabric transport
+    /// identity. This is canonical host admission state; secret key material
+    /// is not representable in the record.
+    pub async fn enroll_fabric_host_transport_identity(
+        &self,
+        identity: &o3k_store::FabricHostTransportIdentityRecord,
+        expected_generation: Option<u64>,
+    ) -> Result<o3k_store::FabricHostTransportIdentityRecord, NetworkError> {
+        self.inner
+            .repository
+            .upsert_fabric_host_identity(identity, expected_generation)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_fabric_host_transport_identities(
+        &self,
+    ) -> Result<Vec<o3k_store::FabricHostTransportIdentityRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_fabric_host_identities()
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Allocates a stable provider VNI for an active realm using the existing
+    /// durable encapsulation binding table. A deterministic probe sequence
+    /// makes concurrent first allocation converge while the database's
+    /// uniqueness constraints arbitrate collisions.
+    pub async fn ensure_vxlan_realm_binding(
+        &self,
+        fabric_domain_id: Uuid,
+        realm: &o3k_store::CanonicalAddressRealmRecord,
+    ) -> Result<RealmEncapsulationBinding, NetworkError> {
+        if fabric_domain_id.is_nil() || realm.state != "active" {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let domain_key = fabric_domain_id.to_string();
+        if let Some(existing) = self
+            .inner
+            .repository
+            .get_canonical_realm_binding(&domain_key, &realm.id)
+            .await
+            .map_err(map_store_error)?
+        {
+            if existing.provider_kind != "vxlan" || existing.state != "active" {
+                return Err(NetworkError::Conflict);
+            }
+            let binding = RealmEncapsulationBinding {
+                fabric_domain_id,
+                realm_id: realm.id,
+                provider_kind: FabricProviderKind::Vxlan,
+                provider_segment_id: u32::try_from(existing.provider_segment_id)
+                    .map_err(|_| NetworkError::InvalidRequest)?,
+                binding_generation: existing.binding_generation,
+            };
+            binding.validate().map_err(|_| NetworkError::Conflict)?;
+            return Ok(binding);
+        }
+
+        const MAX_VNI: u32 = 0x000f_ffff;
+        let seed = u32::from_be_bytes(
+            realm.id.as_bytes()[..4]
+                .try_into()
+                .map_err(|_| NetworkError::InvalidRequest)?,
+        ) % MAX_VNI;
+        for offset in 0..MAX_VNI {
+            let segment = ((seed + offset) % MAX_VNI) + 1;
+            let candidate = o3k_store::CanonicalRealmBindingRecord {
+                fabric_domain_id: domain_key.clone(),
+                realm_id: realm.id,
+                provider_kind: "vxlan".to_owned(),
+                provider_segment_id: u64::from(segment),
+                binding_generation: 1,
+                state: "active".to_owned(),
+            };
+            match self
+                .inner
+                .repository
+                .insert_canonical_realm_binding(&candidate)
+                .await
+            {
+                Ok(()) => {
+                    return Ok(RealmEncapsulationBinding {
+                        fabric_domain_id,
+                        realm_id: realm.id,
+                        provider_kind: FabricProviderKind::Vxlan,
+                        provider_segment_id: segment,
+                        binding_generation: 1,
+                    });
+                }
+                Err(o3k_store::StoreError::ResourceAlreadyExists) => {
+                    if let Some(existing) = self
+                        .inner
+                        .repository
+                        .get_canonical_realm_binding(&domain_key, &realm.id)
+                        .await
+                        .map_err(map_store_error)?
+                    {
+                        if existing.provider_kind == "vxlan" && existing.state == "active" {
+                            return Ok(RealmEncapsulationBinding {
+                                fabric_domain_id,
+                                realm_id: realm.id,
+                                provider_kind: FabricProviderKind::Vxlan,
+                                provider_segment_id: u32::try_from(existing.provider_segment_id)
+                                    .map_err(|_| NetworkError::InvalidRequest)?,
+                                binding_generation: existing.binding_generation,
+                            });
+                        }
+                        return Err(NetworkError::Conflict);
+                    }
+                }
+                Err(error) => return Err(map_store_error(error)),
+            }
+        }
+        Err(NetworkError::PoolExhausted)
+    }
+}
+
+impl NetworkService {
+    /// Advances the sole active AddressRealm generation for a network before
+    /// a v3 endpoint binding is withdrawn. The compare-and-swap makes a stale
+    /// unbind retry fail closed rather than publishing plans under an old
+    /// realm directory generation.
+    pub async fn advance_fabric_realm_generation(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+    ) -> Result<o3k_store::CanonicalAddressRealmRecord, NetworkError> {
+        let realms = self
+            .inner
+            .repository
+            .list_canonical_realms(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .into_iter()
+            .filter(|realm| realm.state == "active")
+            .collect::<Vec<_>>();
+        let [realm] = realms.as_slice() else {
+            return Err(NetworkError::Conflict);
+        };
+        self.inner
+            .repository
+            .advance_canonical_realm_generation(project_id, &realm.id, realm.generation)
+            .await
+            .map_err(map_store_error)
+    }
+
     /// Creates the provider-independent L3 gateway authority. This is
     /// intentionally persistence-only; Neutron projection and provider
     /// realization are layered above the canonical graph.
@@ -363,15 +511,15 @@ impl NetworkService {
         if gateway.state != "active" {
             return Err(NetworkError::Conflict);
         }
-        if self
+        let realm = self
             .inner
             .repository
             .get_canonical_realm(project_id, realm_id)
             .await
             .map_err(map_store_error)?
-            .is_none()
-        {
-            return Err(NetworkError::NotFound);
+            .ok_or(NetworkError::NotFound)?;
+        if realm.state != "active" {
+            return Err(NetworkError::Conflict);
         }
         if self
             .inner
@@ -1180,6 +1328,43 @@ impl NetworkService {
         result
     }
 
+    /// Lists canonical active AddressRealms for controller recovery. The
+    /// recovery path must not depend on generic resource mirrors populated by
+    /// only some API creation paths.
+    pub async fn list_active_realms_for_reconciliation(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalAddressRealmRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_active_canonical_realms()
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Lists realms whose provider-aware deletion was durably accepted but
+    /// not yet finalized. Startup recovery uses this canonical state instead
+    /// of relying on a later tenant request to resume cleanup.
+    pub async fn list_deleting_realms_for_reconciliation(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalAddressRealmRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_deleting_canonical_realms()
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_realm_bindings_for_reconciliation(
+        &self,
+        realm_id: Uuid,
+    ) -> Result<Vec<o3k_store::CanonicalRealmBindingRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_realm_bindings(&realm_id)
+            .await
+            .map_err(map_store_error)
+    }
+
     pub async fn list_canonical_realms_for_project(
         &self,
         project_id: &str,
@@ -1351,6 +1536,17 @@ impl NetworkService {
             .await
             .map_err(map_store_error)?
             .ok_or(NetworkError::NotFound)?;
+        if self
+            .inner
+            .repository
+            .list_canonical_realm_l3_gateway_attachments(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .iter()
+            .any(|attachment| attachment.state == "active" || attachment.state == "deleting")
+        {
+            return Err(NetworkError::Conflict);
+        }
         let (operation, canonical, request) = realm_delete_operation(project_id, realm_id)?;
         let accepted = self
             .inner
@@ -1410,18 +1606,30 @@ impl NetworkService {
                 return Err(map_store_error(error));
             }
         };
-        self.inner
-            .repository
-            .update_resource(
-                realm_id,
-                i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
-                "deleting",
-                "deleting",
-                i64::try_from(deleting.generation).map_err(|_| NetworkError::InvalidRequest)?,
-                None,
-            )
-            .await
-            .map_err(map_store_error)?;
+        // Neutron-compatible Subnets are represented directly by the
+        // canonical AddressRealm plus subnet metadata and do not have a
+        // generic ResourceRecord. Native AddressRealms do, so keep that
+        // projection fenced when it exists without making it a prerequisite
+        // for the canonical deletion state machine.
+        let has_resource_projection = match self.inner.repository.get_resource(realm_id).await {
+            Ok(_) => true,
+            Err(o3k_store::StoreError::ResourceNotFound) => false,
+            Err(error) => return Err(map_store_error(error)),
+        };
+        if has_resource_projection {
+            self.inner
+                .repository
+                .update_resource(
+                    realm_id,
+                    i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                    "deleting",
+                    "deleting",
+                    i64::try_from(deleting.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                    None,
+                )
+                .await
+                .map_err(map_store_error)?;
+        }
         let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
             o3k_kernel::OperationState::Running,
             1,
@@ -1554,6 +1762,19 @@ impl NetworkService {
             self.inner
                 .repository
                 .delete_canonical_realm_binding(&binding, realm.generation)
+                .await
+                .map_err(map_store_error)?;
+        }
+        for pool in self
+            .inner
+            .repository
+            .list_canonical_pools(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+        {
+            self.inner
+                .repository
+                .delete_canonical_pool(project_id, &pool.id)
                 .await
                 .map_err(map_store_error)?;
         }
@@ -1861,6 +2082,22 @@ impl NetworkService {
         )
         .await?;
         result
+    }
+
+    /// Internal composition read used to derive execution plans from
+    /// canonical state after the caller has already established project and
+    /// operation authority. Public protocol handlers use the authenticated
+    /// method above.
+    pub async fn list_canonical_endpoints_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+    ) -> Result<Vec<o3k_store::CanonicalEndpointRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_endpoints(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)
     }
 
     pub async fn get_canonical_endpoint(

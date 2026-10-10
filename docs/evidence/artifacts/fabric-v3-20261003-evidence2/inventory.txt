@@ -1,0 +1,15 @@
+domain	o3k-pp5-fabric-v3-20261003-evidence2-host-a	4d4dcb91-f0fb-4ce4-87dd-bdf15fa2468e
+ip	o3k-pp5-fabric-v3-20261003-evidence2-host-a	192.168.122.18
+disk	o3k-pp5-fabric-v3-20261003-evidence2-host-a	/tmp/fabric-v3-evidence-images/o3k-pp5-fabric-v3-20261003-evidence2-host-a.qcow2
+seed	o3k-pp5-fabric-v3-20261003-evidence2-host-a	/tmp/fabric-v3-evidence-images/o3k-pp5-fabric-v3-20261003-evidence2-host-a-seed.iso
+key	o3k-pp5-fabric-v3-20261003-evidence2-host-a	/home/ubuntu/o3k/tests/pp5-small-edge-campaign/runs/fabric-v3-20261003-evidence2/keys/host-a/id_ed25519
+domain	o3k-pp5-fabric-v3-20261003-evidence2-host-b	45f2e067-1f33-4f01-973b-7273d565b1b5
+ip	o3k-pp5-fabric-v3-20261003-evidence2-host-b	192.168.122.4
+disk	o3k-pp5-fabric-v3-20261003-evidence2-host-b	/tmp/fabric-v3-evidence-images/o3k-pp5-fabric-v3-20261003-evidence2-host-b.qcow2
+seed	o3k-pp5-fabric-v3-20261003-evidence2-host-b	/tmp/fabric-v3-evidence-images/o3k-pp5-fabric-v3-20261003-evidence2-host-b-seed.iso
+key	o3k-pp5-fabric-v3-20261003-evidence2-host-b	/home/ubuntu/o3k/tests/pp5-small-edge-campaign/runs/fabric-v3-20261003-evidence2/keys/host-b/id_ed25519
+domain	o3k-pp5-fabric-v3-20261003-evidence2-host-c	6c2233ca-4172-4b7b-a475-7499688a59b5
+ip	o3k-pp5-fabric-v3-20261003-evidence2-host-c	192.168.122.241
+disk	o3k-pp5-fabric-v3-20261003-evidence2-host-c	/tmp/fabric-v3-evidence-images/o3k-pp5-fabric-v3-20261003-evidence2-host-c.qcow2
+seed	o3k-pp5-fabric-v3-20261003-evidence2-host-c	/tmp/fabric-v3-evidence-images/o3k-pp5-fabric-v3-20261003-evidence2-host-c-seed.iso
+key	o3k-pp5-fabric-v3-20261003-evidence2-host-c	/home/ubuntu/o3k/tests/pp5-small-edge-campaign/runs/fabric-v3-20261003-evidence2/keys/host-c/id_ed25519

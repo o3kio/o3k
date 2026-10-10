@@ -18,6 +18,27 @@ use uuid::Uuid;
 /// intent names it.
 pub const SERVER_OWNED_ENDPOINT_PREFIX: &str = "o3k-server:";
 
+/// Projects canonical endpoint existence and durable attachment state into
+/// Neutron's compatibility status. An explicit binding state is authoritative;
+/// endpoint state is retained only for legacy records with no binding
+/// observation.
+pub(super) fn project_neutron_port_status(
+    endpoint_state: &str,
+    binding_state: Option<&str>,
+) -> Result<String, NetworkError> {
+    let Some(binding_state) = binding_state else {
+        return Ok(endpoint_state.to_ascii_uppercase());
+    };
+    let status = match PortBindingState::parse(binding_state) {
+        Some(PortBindingState::Binding) => "BUILD",
+        Some(PortBindingState::Bound) => "ACTIVE",
+        Some(PortBindingState::Down) => "DOWN",
+        Some(PortBindingState::Error) => "ERROR",
+        None => return Err(NetworkError::CorruptBindingState),
+    };
+    Ok(status.to_owned())
+}
+
 /// Returns the server-context component of an O3K server-owned endpoint name.
 ///
 /// The name is `o3k-server:<project-id>:<context>`. The context is non-empty
@@ -291,6 +312,7 @@ impl NetworkService {
                     status: "ACTIVE".to_owned(),
                     binding_host: None,
                     binding_state: None,
+                    binding_generation: 0,
                 };
                 let scope = OwnershipScope::project(
                     ScopeId::new_unchecked(project_id.to_owned()),
@@ -560,11 +582,19 @@ impl NetworkService {
                 .unwrap_or_default(),
             mac_address: endpoint.mac.clone(),
             fixed_ip: endpoint.fixed_ip,
-            status: endpoint.state.to_ascii_uppercase(),
+            status: project_neutron_port_status(
+                &endpoint.state,
+                metadata
+                    .as_ref()
+                    .and_then(|value| value.binding_state.as_deref()),
+            )?,
             binding_host: metadata
                 .as_ref()
                 .and_then(|value| value.binding_host.clone()),
-            binding_state: metadata.and_then(|value| value.binding_state),
+            binding_state: metadata
+                .as_ref()
+                .and_then(|value| value.binding_state.clone()),
+            binding_generation: metadata.map_or(0, |value| value.binding_generation),
         })
     }
 
@@ -808,6 +838,67 @@ impl NetworkService {
             .map_err(map_store_error)
     }
 
+    /// Records a selected host for v3 and advances the durable AddressRealm
+    /// plan generation when this is a new placement. Replays against an
+    /// already selected host preserve the same directory generation.
+    pub async fn record_fabric_binding_intent(
+        &self,
+        project_id: &str,
+        port_id: Uuid,
+        host: &str,
+    ) -> Result<PortRecord, NetworkError> {
+        if host.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let _guard = self.lock().await;
+        let port = self
+            .inner
+            .repository
+            .get_port(project_id, &port_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        if port
+            .binding_host
+            .as_deref()
+            .is_some_and(|current| current != host)
+        {
+            return Err(NetworkError::Conflict);
+        }
+        if port.binding_host.is_none() {
+            let realms = self
+                .inner
+                .repository
+                .list_canonical_realms(project_id, &port.network_id)
+                .await
+                .map_err(map_store_error)?
+                .into_iter()
+                .filter(|realm| realm.state == "active")
+                .collect::<Vec<_>>();
+            let [realm] = realms.as_slice() else {
+                return Err(NetworkError::Conflict);
+            };
+            self.inner
+                .repository
+                .advance_canonical_realm_generation(project_id, &realm.id, realm.generation)
+                .await
+                .map_err(map_store_error)?;
+        }
+        let next = match port
+            .binding_state
+            .as_deref()
+            .and_then(PortBindingState::parse)
+        {
+            Some(PortBindingState::Bound) => PortBindingState::Bound,
+            _ => PortBindingState::Binding,
+        };
+        self.inner
+            .repository
+            .update_port_binding(project_id, &port_id, Some(host), Some(next.as_str()))
+            .await
+            .map_err(map_store_error)
+    }
+
     pub async fn project_binding_observation(
         &self,
         project_id: &str,
@@ -856,6 +947,13 @@ impl NetworkService {
             .await
             .map_err(map_store_error)?
             .ok_or(NetworkError::NotFound)?;
+        if port.binding_state.as_deref() == Some(PortBindingState::Down.as_str()) {
+            // Fabric v3 unbind retains the selected host in a durable down
+            // tombstone until every affected realm has converged. A late
+            // create result must not turn that retirement intent back into a
+            // live endpoint, including across a control-plane restart.
+            return Err(NetworkError::Conflict);
+        }
         let host = port.binding_host.as_deref().ok_or(NetworkError::Conflict)?;
         self.inner
             .repository

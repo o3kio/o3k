@@ -103,6 +103,20 @@ Fixed **now**, before any execution, so the result cannot choose the target.
 Changing a tier requires an explicit replan recorded on #974; a failed tier
 never silently lowers the declared envelope.
 
+### Boundary smokes and foundation gate
+
+S1 and S2 are required non-soak boundary smokes, not scale-certification tiers:
+
+| Smoke | Eligible compute blocks | Required evidence |
+| --- | --- | --- |
+| `S1` | 1 | The actual `o3k-small-edge-v1` lower endpoint: bootstrap compute block only, exact canonical Placement-eligible Ready count, and one real guest lifecycle to `ACTIVE`. |
+| `S2` | 2 | First multi-host transition: bootstrap plus one separately booted and authenticated compute block, exact canonical Placement-eligible Ready count, and one real guest lifecycle to `ACTIVE`. |
+
+Both smokes require owned-resource cleanup and remain labeled with their
+execution environment. They do not imply soak coverage or replace S3, S10,
+or S20. S5 remains the mandatory first-installation development/integration
+gate; it is recorded separately and cannot replace a declared scale tier.
+
 ### 4.1 Scale tiers
 
 | Tier | Hypervisors | Purpose | Required |
@@ -471,24 +485,32 @@ asserts exactly five eligible Ready BuildingBlocks initially and finally.
 | #1035 live-endpoint safety gap | repaired + regression on both backends (§8.1 item 6) |
 | PostgreSQL conformance hardening | delivered (soft skip closed) |
 | #1040 create-convergence flake | classified test-only, repaired (§8.1 item 3) |
-| PP.5 evidence validator + CI gate | delivered — 26 validator cases, `rust`-job step, fail-closed `pp5-evidence-certify` workflow |
+| PP.5 evidence validator + CI gate | delivered — fail-closed campaign contract tests, `rust`-job step, fail-closed `pp5-evidence-certify` workflow |
 | PostgreSQL provider modes (`external` / `disposable`) | delivered in the P15.7 journey config layer; external-mode fault injection via a run-owned proxy |
 | 5-host first installation | **provisioning proven** — 5 genuine nested-KVM hosts up with `/dev/kvm`, `svm`, 2 vCPU / ~1967 MiB, SSH reachable |
-| 5-eligible-host O3K lifecycle journey (S5) | **topology and counting updated** — bootstrap compute-agent + 4 initial children + `block-e` replacement; eligibility-based counting (exactly 5 initial/final eligible Ready) with per-phase checkpoint identity sets; #1042 blocker re-query, #1035 crash-injection leg, and #1033 host-maintenance leg wired into `scripts/p15-7-real-host-journey.sh` — **not yet executed on the protected host** |
-| declared tiers `S3`/`S10`/`S20`, `K-min`/`K-full` | not started (deliberate — this run is the S5 foundation) |
+| 5-eligible-host O3K lifecycle journey (S5) | **protected S5 lane passed** on source `d3628c6f4dd3f694889f712583b5f438418a02d8` (run `37155032743`); the boundary-lane successor must rerun S5 before combining results for one candidate SHA |
+| S1/S2 non-soak boundary smokes | protected lanes implemented; nested-host execution pending on the exact candidate SHA |
+| declared tiers `S3`/`S10`/`S20`, `K-min`/`K-full` | not started (S1/S2 and S5 do not replace these tiers) |
 | #1033 host-reboot contract | **decided and documented** (`docs/operations/pp5-host-maintenance.md`); S5 maintenance journey not yet run |
 
 ### 12.3.1 PP.5 acceptance lanes
 
-The protected campaign has three independently classified phases.  The S5
-lane stops after the `5 -> 5 -> 4 -> 4 -> 5 -> 5` lifecycle checkpoints;
+The protected runner has independently classified S1/S2 boundary-smoke, S5
+foundation, and crash/maintenance lanes; the final campaign bundle separately
+records S3/S10/S20 scale and K-min/K-full soak results. The S1/S2 lanes stop
+after exact-cardinality Placement eligibility and a real guest reaching
+`ACTIVE`, with cleanup checked before evidence is emitted. These boundary
+results do not affect the overall certification result. The S5 lane stops
+after the `5 -> 5 -> 4 -> 4 -> 5 -> 5` lifecycle checkpoints;
 the #1035 lane exercises the real PostgreSQL/o3kd/compute/network crash and
 orphan-repair contract on its minimum runner-provided topology; and the
 maintenance lane owns the planned drain/reboot/recovery contract.  The
 integrated campaign remains the certification authority and requires all
 three phase results to be `passed`.
 
-The phase artifacts are `pp5-s5-scale-result.json`,
+Boundary artifacts are `pp5-s1-boundary-smoke-result.json` and
+`pp5-s2-boundary-smoke-result.json`; they are never treated as the integrated
+campaign result. The phase artifacts are `pp5-s5-scale-result.json`,
 `pp5-1035-crash-recovery-result.json`, `pp5-host-maintenance-result.json`,
 and `pp5-overall-result.json`.  A downstream crash or maintenance failure is
 therefore never reported as an S5 scale failure.

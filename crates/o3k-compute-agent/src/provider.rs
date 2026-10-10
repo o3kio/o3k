@@ -1330,8 +1330,7 @@ impl ComputeProvider for AgentComputeProvider {
             vcpus: request.vcpus,
             memory_mib: request.memory_mib,
             disk_gib: resolved.disk_gib,
-            config_drive_artifact_id: resolved.config_drive_artifact_id,
-            config_drive_sha256: resolved.config_drive_sha256,
+            config_drive: resolved.config_drive,
             network_attachments: resolved.network_attachments.clone(),
         })
         .map_err(|error| {
@@ -1385,7 +1384,8 @@ impl ComputeProvider for AgentComputeProvider {
             artifact_count = artifacts.len(),
             "agent create artifacts resolved"
         );
-        if artifacts.len() != 2 {
+        let expected_count = 1 + usize::from(artifact_inputs.config_drive.is_some());
+        if artifacts.len() != expected_count {
             tracing::warn!(
                 resource_id = %request.o3k_server_id,
                 artifact_count = artifacts.len(),
@@ -1393,21 +1393,21 @@ impl ComputeProvider for AgentComputeProvider {
             );
             return Err(ProviderError::InvalidRequest);
         }
-        let required = [
-            (
-                o3k_provider::ArtifactKind::ImageBase,
-                &artifact_inputs.image_artifact_id,
-                &artifact_inputs.image_sha256,
-                artifact_inputs.image_format.as_str(),
-            ),
-            (
+        let mut required = vec![(
+            o3k_provider::ArtifactKind::ImageBase,
+            &artifact_inputs.image_artifact_id,
+            &artifact_inputs.image_sha256,
+            artifact_inputs.image_format.as_str(),
+        )];
+        if let Some(config_drive) = artifact_inputs.config_drive.as_ref() {
+            required.push((
                 o3k_provider::ArtifactKind::ConfigDriveIso,
-                &artifact_inputs.config_drive_artifact_id,
-                &artifact_inputs.config_drive_sha256,
+                &config_drive.artifact_id,
+                &config_drive.sha256,
                 "iso",
-            ),
-        ];
-        let mut seen = [false; 2];
+            ));
+        }
+        let mut seen = vec![false; required.len()];
         for artifact in artifacts {
             let expected_index = required
                 .iter()
@@ -1629,11 +1629,11 @@ impl ComputeProvider for AgentComputeProvider {
                 }
             }
         }
-        if seen != [true, true] {
+        if seen.iter().any(|was_seen| !was_seen) {
             tracing::warn!(
                 resource_id = %request.o3k_server_id,
                 image_seen = seen[0],
-                config_drive_seen = seen[1],
+                config_drive_seen = seen.get(1).copied().unwrap_or(false),
                 "create artifacts did not include every required artifact"
             );
             return Err(ProviderError::InvalidRequest);
@@ -2171,9 +2171,11 @@ mod tests {
                     .to_owned(),
                 image_format: "qcow2".to_owned(),
                 disk_gib: 10,
-                config_drive_artifact_id: "config-drive.test".to_owned(),
-                config_drive_sha256:
-                    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+                config_drive: Some(o3k_provider::ResolvedConfigDrive {
+                    artifact_id: "config-drive.test".to_owned(),
+                    sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                        .to_owned(),
+                }),
                 network_attachments: vec![NetworkAttachmentSpec {
                     port_id: "port.test".to_owned(),
                     mac: "52:54:00:12:34:56".to_owned(),
@@ -3372,8 +3374,10 @@ mod tests {
                 image_sha256: sha256_hex(IMAGE_PAYLOAD),
                 image_format: "qcow2".to_owned(),
                 disk_gib: 10,
-                config_drive_artifact_id: "config-drive.test".to_owned(),
-                config_drive_sha256: sha256_hex(CONFIG_DRIVE_PAYLOAD),
+                config_drive: Some(o3k_provider::ResolvedConfigDrive {
+                    artifact_id: "config-drive.test".to_owned(),
+                    sha256: sha256_hex(CONFIG_DRIVE_PAYLOAD),
+                }),
                 network_attachments: vec![NetworkAttachmentSpec {
                     port_id: "port.test".to_owned(),
                     mac: "52:54:00:12:34:56".to_owned(),
@@ -3464,8 +3468,10 @@ mod tests {
             vcpus: 2,
             memory_mib: 2048,
             disk_gib: 10,
-            config_drive_artifact_id: "config-drive.test".to_owned(),
-            config_drive_sha256: sha256_hex(CONFIG_DRIVE_PAYLOAD),
+            config_drive: Some(o3k_provider::ResolvedConfigDrive {
+                artifact_id: "config-drive.test".to_owned(),
+                sha256: sha256_hex(CONFIG_DRIVE_PAYLOAD),
+            }),
             network_attachments: vec![NetworkAttachmentSpec {
                 port_id: "port.test".to_owned(),
                 mac: "52:54:00:12:34:56".to_owned(),

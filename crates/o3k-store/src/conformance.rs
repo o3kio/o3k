@@ -61,15 +61,17 @@ pub fn assert_destructive_postgres_test_database_name(
 
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, CanonicalOperationRecord, ComputeRepository, ControllerEpoch,
-    ControllerId, ControllerSession, ControllerState, CoordinationRepository, DurableStore,
+    ArtifactTransferUpdate, CanonicalAddressRealmRecord, CanonicalNetworkRecord,
+    CanonicalOperationRecord, ComputeRepository, ControllerEpoch, ControllerId, ControllerSession,
+    ControllerState, CoordinationRepository, DurableStore, FabricHostTransportIdentityRecord,
     IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity,
     ImageOverlayOwnershipRecord, ImageOverlayState, ImageOverlayUpdate, ImageRepository,
     KeypairRecord, KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord,
     KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
     KeystoneServiceRecord, KeystoneUserRecord, LeaseAcquireOutcome, LifecycleTerminalization,
-    NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
-    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    NetworkIntentRecord, NetworkPlanWorkRecord, NetworkPlanWorkState, NetworkRecord,
+    NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
+    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementRepository, PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
     StoreError, SubnetRecord, VolumeAttachmentRecord, VolumeAttachmentRepository,
     quota::QuotaRepository,
@@ -114,6 +116,8 @@ impl<T> StoreUnderTest for T where
 
 pub async fn run_all_conformance_tests<S: StoreUnderTest>(store: Arc<S>) {
     test_durable_store_resources(store.clone()).await;
+    test_network_plan_work_durability(store.clone()).await;
+    test_network_plan_work_realm_fencing(store.clone()).await;
     test_list_resources_by_kind_includes_deleted_tombstones(store.clone()).await;
     test_durable_store_operations(store.clone()).await;
     test_durable_store_lifecycle_terminalization(store.clone()).await;
@@ -133,6 +137,287 @@ pub async fn run_all_conformance_tests<S: StoreUnderTest>(store: Arc<S>) {
     test_concurrent_placement_allocation_fencing(store.clone()).await;
     test_duplicate_port_ip_mac_conflict(store.clone()).await;
     test_operation_state_monotonicity(store.clone()).await;
+}
+
+pub async fn test_network_plan_work_durability<S: StoreUnderTest>(store: Arc<S>) {
+    let command_id = Uuid::now_v7().to_string();
+    let work = NetworkPlanWorkRecord {
+        command_id: command_id.clone(),
+        operation_id: Uuid::now_v7(),
+        idempotency_key: format!("network-plan:{command_id}"),
+        target_host_id: "host-a".to_owned(),
+        target_agent_id: "agent-a".to_owned(),
+        target_agent_epoch: "epoch-a".to_owned(),
+        controller_id: "controller-a".to_owned(),
+        controller_epoch: "epoch-a".to_owned(),
+        fencing_token: 4,
+        deadline_unix_ms: 1,
+        fingerprint_sha256: "test-fingerprint".to_owned(),
+        snapshot: b"historical-command".to_vec(),
+        state: NetworkPlanWorkState::Pending,
+        revision: 0,
+        outcome: None,
+    };
+    assert_eq!(store.insert_network_plan_work(&work).await.unwrap(), work);
+    assert_eq!(store.insert_network_plan_work(&work).await.unwrap(), work);
+    let running = store
+        .update_network_plan_work(&command_id, 0, NetworkPlanWorkState::Running, None)
+        .await
+        .unwrap();
+    let unresolved = store.list_unresolved_network_plan_work().await.unwrap();
+    assert!(unresolved.iter().any(|item| item == &running));
+    let unknown = store
+        .update_network_plan_work(
+            &command_id,
+            running.revision,
+            NetworkPlanWorkState::UnknownOutcome,
+            Some(b"observation_required"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_network_plan_work(&command_id).await.unwrap(),
+        unknown
+    );
+    let terminal = store
+        .update_network_plan_work(
+            &command_id,
+            unknown.revision,
+            NetworkPlanWorkState::Succeeded,
+            Some(b"observed_succeeded"),
+        )
+        .await
+        .unwrap();
+    assert!(terminal.state.terminal());
+    assert!(
+        store
+            .list_unresolved_network_plan_work()
+            .await
+            .unwrap()
+            .iter()
+            .all(|item| item.command_id != command_id)
+    );
+}
+
+pub async fn test_network_plan_work_realm_fencing<S: StoreUnderTest>(store: Arc<S>) {
+    use std::time::Duration;
+    let realm_key = format!("fabric-realm:{}", Uuid::now_v7());
+    let owner = ControllerId::new(format!("controller-{}", Uuid::now_v7()));
+    let epoch = ControllerEpoch::new("epoch-a");
+    let lease = match store
+        .acquire_work_lease(
+            &realm_key,
+            "fabric_reconciliation",
+            &owner,
+            &epoch,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+    {
+        LeaseAcquireOutcome::Acquired { lease } => lease,
+        LeaseAcquireOutcome::Busy { .. } => panic!("fresh realm lease must be acquirable"),
+    };
+    let work = |command_id: String, idempotency_key: String| NetworkPlanWorkRecord {
+        command_id,
+        operation_id: Uuid::now_v7(),
+        idempotency_key,
+        target_host_id: "host-a".into(),
+        target_agent_id: "agent-a".into(),
+        target_agent_epoch: "agent-epoch-a".into(),
+        controller_id: owner.0.clone(),
+        controller_epoch: epoch.0.clone(),
+        fencing_token: 4,
+        deadline_unix_ms: 100,
+        fingerprint_sha256: "e".repeat(64),
+        snapshot: b"opaque-command".to_vec(),
+        state: NetworkPlanWorkState::Pending,
+        revision: 0,
+        outcome: None,
+    };
+    let old = work(
+        Uuid::now_v7().to_string(),
+        format!("old:{}", Uuid::now_v7()),
+    );
+    let successor = work(
+        Uuid::now_v7().to_string(),
+        format!("next:{}", Uuid::now_v7()),
+    );
+    store.insert_network_plan_work(&old).await.unwrap();
+
+    let mut controller_takeover_replay = old.clone();
+    controller_takeover_replay.controller_id = "controller-successor".into();
+    controller_takeover_replay.controller_epoch = "epoch-successor".into();
+    controller_takeover_replay.fencing_token = lease.fencing_token;
+    controller_takeover_replay.deadline_unix_ms += 60_000;
+    controller_takeover_replay.snapshot = b"fresh execution envelope".to_vec();
+    let replayed = store
+        .insert_network_plan_work_under_lease(
+            &realm_key,
+            &owner.0,
+            &epoch.0,
+            lease.fencing_token,
+            &controller_takeover_replay,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replayed, old,
+        "equivalent desired work reuses its durable row across controller takeover"
+    );
+
+    assert!(matches!(
+        store
+            .update_network_plan_work_under_lease(
+                &realm_key,
+                &owner.0,
+                &epoch.0,
+                lease.fencing_token + 1,
+                &old.command_id,
+                0,
+                NetworkPlanWorkState::Failed,
+                Some(b"stale"),
+            )
+            .await,
+        Err(StoreError::Fenced)
+    ));
+
+    // A conflicting successor identity must roll back the whole transaction:
+    // the historical row remains unresolved and no partial supersession is
+    // visible after the failed insert.
+    store.insert_network_plan_work(&successor).await.unwrap();
+    let conflicting = work(
+        successor.command_id.clone(),
+        format!("conflict:{}", Uuid::now_v7()),
+    );
+    assert!(
+        store
+            .supersede_network_plan_work_under_lease(
+                &realm_key,
+                &owner.0,
+                &epoch.0,
+                lease.fencing_token,
+                &old.command_id,
+                0,
+                &conflicting,
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .get_network_plan_work(&old.command_id)
+            .await
+            .unwrap()
+            .state,
+        NetworkPlanWorkState::Pending
+    );
+
+    let successor = work(
+        Uuid::now_v7().to_string(),
+        format!("next:{}", Uuid::now_v7()),
+    );
+    let (historical, current) = store
+        .supersede_network_plan_work_under_lease(
+            &realm_key,
+            &owner.0,
+            &epoch.0,
+            lease.fencing_token,
+            &old.command_id,
+            0,
+            &successor,
+        )
+        .await
+        .unwrap();
+    assert_eq!(historical.state, NetworkPlanWorkState::Failed);
+    assert_eq!(current.state, NetworkPlanWorkState::Pending);
+    let outcome: serde_json::Value =
+        serde_json::from_slice(historical.outcome.as_deref().unwrap()).unwrap();
+    assert_eq!(outcome["classification"], "superseded_not_admitted");
+    assert_eq!(outcome["successor_command_id"], successor.command_id);
+    let running = store
+        .update_network_plan_work_under_lease(
+            &realm_key,
+            &owner.0,
+            &epoch.0,
+            lease.fencing_token,
+            &successor.command_id,
+            0,
+            NetworkPlanWorkState::Running,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.state, NetworkPlanWorkState::Running);
+
+    let other = ControllerId::new(format!("controller-{}", Uuid::now_v7()));
+    assert!(
+        store
+            .relinquish_work_lease_preserving_fence(&realm_key, &owner, &epoch, lease.fencing_token)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        store
+            .update_network_plan_work_under_lease(
+                &realm_key,
+                &owner.0,
+                &epoch.0,
+                lease.fencing_token,
+                &successor.command_id,
+                running.revision,
+                NetworkPlanWorkState::Succeeded,
+                Some(b"stale-owner"),
+            )
+            .await,
+        Err(StoreError::Fenced)
+    ));
+    let takeover = match store
+        .acquire_work_lease(
+            &realm_key,
+            "fabric_reconciliation",
+            &other,
+            &ControllerEpoch::new("epoch-b"),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+    {
+        LeaseAcquireOutcome::Acquired { lease } => lease,
+        LeaseAcquireOutcome::Busy { .. } => panic!("relinquished realm lease must be acquirable"),
+    };
+    assert!(takeover.fencing_token > lease.fencing_token);
+    let succeeded = store
+        .update_network_plan_work_under_lease(
+            &realm_key,
+            &other.0,
+            "epoch-b",
+            takeover.fencing_token,
+            &successor.command_id,
+            running.revision,
+            NetworkPlanWorkState::Succeeded,
+            Some(b"current-owner"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(succeeded.state, NetworkPlanWorkState::Succeeded);
+    let mut restarted_replay = successor.clone();
+    restarted_replay.controller_id = other.0.clone();
+    restarted_replay.controller_epoch = "epoch-b".into();
+    restarted_replay.fencing_token = takeover.fencing_token;
+    restarted_replay.deadline_unix_ms += 60_000;
+    restarted_replay.snapshot = b"fresh controller envelope".to_vec();
+    let replayed = store
+        .insert_network_plan_work_under_lease(
+            &realm_key,
+            &other.0,
+            "epoch-b",
+            takeover.fencing_token,
+            &restarted_replay,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed.state, NetworkPlanWorkState::Succeeded);
 }
 
 pub async fn test_durable_store_resources<S: StoreUnderTest>(store: Arc<S>) {
@@ -1548,8 +1833,106 @@ pub async fn test_image_repository<S: StoreUnderTest>(store: Arc<S>) {
 }
 
 pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
+    let fabric_host = FabricHostTransportIdentityRecord {
+        host_id: format!("fabric-host-{}", Uuid::now_v7()),
+        agent_id: format!("fabric-agent-{}", Uuid::now_v7()),
+        public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
+        underlay_endpoint: "198.18.0.1:65001".to_owned(),
+        fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
+        provider_version: "0.1.5".to_owned(),
+        fabric_generation: 1,
+        underlay_mtu: 1500,
+        fabric_mtu: 1440,
+        administrative_state: "enabled".to_owned(),
+    };
+    assert_eq!(
+        store
+            .upsert_fabric_host_identity(&fabric_host, None)
+            .await
+            .expect("enroll Fabric host"),
+        fabric_host
+    );
+    assert_eq!(
+        store
+            .get_fabric_host_identity(&fabric_host.host_id)
+            .await
+            .expect("read Fabric host identity"),
+        Some(fabric_host.clone())
+    );
+    assert_eq!(
+        store
+            .upsert_fabric_host_identity(&fabric_host, Some(1))
+            .await
+            .expect("idempotent Fabric host enrollment"),
+        fabric_host
+    );
+    let mut duplicate_transport = fabric_host.clone();
+    duplicate_transport.host_id.push_str("-duplicate");
+    duplicate_transport.agent_id.push_str("-duplicate");
+    assert!(matches!(
+        store
+            .upsert_fabric_host_identity(&duplicate_transport, None)
+            .await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+
     let proj = format!("proj-{}", Uuid::now_v7());
     let other_proj = format!("proj-{}", Uuid::now_v7());
+
+    // Startup recovery must enumerate canonical active realms independently
+    // of generic ResourceRecord mirrors.
+    let canonical_network_id = Uuid::now_v7();
+    store
+        .insert_canonical_network(&CanonicalNetworkRecord {
+            id: canonical_network_id,
+            project_id: proj.clone(),
+            name: "fabric-recovery-network".to_owned(),
+            admin_state_up: true,
+            generation: 1,
+            state: "active".to_owned(),
+        })
+        .await
+        .expect("insert canonical recovery network");
+    let active_realm_id = Uuid::now_v7();
+    store
+        .insert_canonical_realm(&CanonicalAddressRealmRecord {
+            id: active_realm_id,
+            network_id: canonical_network_id,
+            project_id: proj.clone(),
+            prefix: "203.0.113.0/24".to_owned(),
+            overlapping_prefixes: false,
+            generation: 1,
+            state: "active".to_owned(),
+        })
+        .await
+        .expect("insert canonical recovery realm");
+    let inactive_realm_id = Uuid::now_v7();
+    store
+        .insert_canonical_realm(&CanonicalAddressRealmRecord {
+            id: inactive_realm_id,
+            network_id: canonical_network_id,
+            project_id: proj.clone(),
+            prefix: "203.0.114.0/24".to_owned(),
+            overlapping_prefixes: false,
+            generation: 1,
+            state: "deleted".to_owned(),
+        })
+        .await
+        .expect("insert inactive canonical recovery realm");
+    let recovery_realms = store
+        .list_active_canonical_realms()
+        .await
+        .expect("enumerate canonical recovery realms");
+    assert!(
+        recovery_realms
+            .iter()
+            .any(|realm| realm.id == active_realm_id)
+    );
+    assert!(
+        !recovery_realms
+            .iter()
+            .any(|realm| realm.id == inactive_realm_id)
+    );
 
     let realm_id = Uuid::now_v7();
     let endpoint_id = Uuid::now_v7();
@@ -1721,6 +2104,7 @@ pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
         status: "DOWN".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
     };
     store.insert_port(&port).await.expect("insert_port");
 
@@ -1737,6 +2121,13 @@ pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
         .expect("update_port_binding");
     assert_eq!(updated_port.binding_host.as_deref(), Some("compute-node-1"));
     assert_eq!(updated_port.binding_state.as_deref(), Some("bound"));
+    let unbound_port = store
+        .update_port_binding(&proj, &port_id, None, Some("down"))
+        .await
+        .expect("clear_port_binding");
+    assert_eq!(unbound_port.binding_host, None);
+    assert_eq!(unbound_port.binding_state.as_deref(), Some("down"));
+    assert!(unbound_port.binding_generation > updated_port.binding_generation);
 
     // Subnet deletion fails when in-use
     let in_use_sub = store.delete_subnet(&proj, &sub_id).await.unwrap_err();
@@ -2209,6 +2600,7 @@ pub async fn test_duplicate_port_ip_mac_conflict<S: StoreUnderTest>(store: Arc<S
         mac_address: "fa:16:3e:00:11:22".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
         status: "ACTIVE".to_owned(),
     };
     store.insert_port(&port1).await.expect("insert port 1");
@@ -2225,6 +2617,7 @@ pub async fn test_duplicate_port_ip_mac_conflict<S: StoreUnderTest>(store: Arc<S
         mac_address: "fa:16:3e:00:11:33".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
         status: "ACTIVE".to_owned(),
     };
     let dup_ip_err = store.insert_port(&port2_dup_ip).await;
@@ -2245,6 +2638,7 @@ pub async fn test_duplicate_port_ip_mac_conflict<S: StoreUnderTest>(store: Arc<S
         mac_address: "fa:16:3e:00:11:22".to_owned(),
         binding_host: None,
         binding_state: None,
+        binding_generation: 0,
         status: "ACTIVE".to_owned(),
     };
     let dup_mac_err = store.insert_port(&port3_dup_mac).await;
@@ -2521,6 +2915,149 @@ pub async fn test_coordination_repository<S: StoreUnderTest>(store: Arc<S>) {
         .expect("inspect after release");
     assert!(after_release.is_none(), "released lease must be removed");
 
+    // Reacquisition after release must not reset the fencing generation. The
+    // active lease row is removable, but its authority history is durable.
+    let released_key = format!("op-release-reacquire:{}", Uuid::now_v7());
+    let first = store
+        .acquire_work_lease(
+            &released_key,
+            "operation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("initial release/reacquire lease");
+    let first_token = match first {
+        LeaseAcquireOutcome::Acquired { lease } => lease.fencing_token,
+        LeaseAcquireOutcome::Busy { .. } => panic!("initial lease must succeed"),
+    };
+    assert_eq!(first_token, 1);
+    assert!(
+        store
+            .release_work_lease(&released_key, &ctrl1, &epoch1, first_token)
+            .await
+            .expect("release lease")
+    );
+    let second = store
+        .acquire_work_lease(
+            &released_key,
+            "operation",
+            &ctrl2,
+            &epoch2,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("reacquire released lease");
+    match second {
+        LeaseAcquireOutcome::Acquired { lease } => {
+            assert_eq!(lease.fencing_token, 2);
+        }
+        LeaseAcquireOutcome::Busy { .. } => panic!("reacquire must succeed"),
+    }
+
+    // Graceful relinquish keeps the active row's fencing generation, so a
+    // clean A -> B -> C handoff is strictly monotonic too.
+    let handoff_key = format!("op-clean-handoff:{}", Uuid::now_v7());
+    let handoff_a = match store
+        .acquire_work_lease(
+            &handoff_key,
+            "fabric_reconciliation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("acquire clean handoff A")
+    {
+        LeaseAcquireOutcome::Acquired { lease } => lease,
+        LeaseAcquireOutcome::Busy { .. } => panic!("first handoff lease must succeed"),
+    };
+    assert_eq!(handoff_a.fencing_token, 1);
+    assert!(
+        store
+            .relinquish_work_lease_preserving_fence(
+                &handoff_key,
+                &ctrl1,
+                &epoch1,
+                handoff_a.fencing_token,
+            )
+            .await
+            .expect("relinquish A")
+    );
+    let handoff_b = match store
+        .acquire_work_lease(
+            &handoff_key,
+            "fabric_reconciliation",
+            &ctrl2,
+            &epoch2,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("acquire clean handoff B")
+    {
+        LeaseAcquireOutcome::Acquired { lease } => lease,
+        LeaseAcquireOutcome::Busy { .. } => panic!("relinquished B lease must be acquirable"),
+    };
+    assert_eq!(handoff_b.fencing_token, 2);
+    assert!(
+        store
+            .relinquish_work_lease_preserving_fence(
+                &handoff_key,
+                &ctrl2,
+                &epoch2,
+                handoff_b.fencing_token,
+            )
+            .await
+            .expect("relinquish B")
+    );
+    let handoff_c = match store
+        .acquire_work_lease(
+            &handoff_key,
+            "fabric_reconciliation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("acquire clean handoff C")
+    {
+        LeaseAcquireOutcome::Acquired { lease } => lease,
+        LeaseAcquireOutcome::Busy { .. } => panic!("relinquished C lease must be acquirable"),
+    };
+    assert_eq!(handoff_c.fencing_token, 3);
+
+    // Expiry also fences the same controller identity. An owner cannot renew
+    // an already-expired generation merely by reusing its ID and epoch.
+    let expired_same_owner_key = format!("op-expired-same-owner:{}", Uuid::now_v7());
+    let first_same_owner = store
+        .acquire_work_lease(
+            &expired_same_owner_key,
+            "operation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .expect("acquire short same-owner lease");
+    assert!(
+        matches!(first_same_owner, LeaseAcquireOutcome::Acquired { lease } if lease.fencing_token == 1)
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let same_owner_after_expiry = store
+        .acquire_work_lease(
+            &expired_same_owner_key,
+            "operation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("same owner reacquires only with a new fence");
+    assert!(
+        matches!(same_owner_after_expiry, LeaseAcquireOutcome::Acquired { lease } if lease.fencing_token == 2)
+    );
+
     // 7. Drain controller session
     let drain_res = store
         .drain_controller_session(&ctrl1, &epoch1)
@@ -2599,18 +3136,15 @@ mod tests {
         // server must fail the suite when the backend was explicitly
         // configured — otherwise `cargo test -p o3k-store` passes without ever
         // exercising PostgreSQL. Only the unconfigured local default may skip.
-        let configured = std::env::var("O3K_DATABASE_URL").ok();
-        let db_url = configured
-            .clone()
-            .unwrap_or_else(|| "postgres://o3k:password@127.0.0.1/o3k_test".to_owned());
+        let Some(db_url) = std::env::var("O3K_DATABASE_URL").ok() else {
+            eprintln!("Skipping test_postgres_conformance: O3K_DATABASE_URL unavailable");
+            return;
+        };
         let Some(_database_guard) = prepare_shared_postgres_test_database(&db_url).await else {
-            assert!(
-                configured.is_none(),
+            panic!(
                 "O3K_DATABASE_URL is configured but the PostgreSQL conformance database \
                  could not be prepared; the PostgreSQL adapter is unproven"
             );
-            eprintln!("Skipping test_postgres_conformance: no Postgres instance available");
-            return;
         };
         let store = PostgresStore::connect(&db_url)
             .await
@@ -2729,5 +3263,108 @@ mod tests {
             .await
             .expect("clean the PostgreSQL conformance tables at test start");
         test_durable_store_lifecycle_terminalization(Arc::new(store)).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_network_plan_work_is_idempotent_cas_and_reopenable() {
+        use crate::{NetworkPlanWorkRecord, NetworkPlanWorkState};
+        let path =
+            std::env::temp_dir().join(format!("o3k-network-plan-work-{}.db", Uuid::new_v4()));
+        let work = NetworkPlanWorkRecord {
+            command_id: Uuid::new_v4().to_string(),
+            operation_id: Uuid::new_v4(),
+            idempotency_key: "work-key".into(),
+            target_host_id: "host-a".into(),
+            target_agent_id: "agent-a".into(),
+            target_agent_epoch: "epoch-1".into(),
+            controller_id: "controller".into(),
+            controller_epoch: "epoch-c".into(),
+            fencing_token: 7,
+            deadline_unix_ms: 9_000,
+            fingerprint_sha256: "fp".into(),
+            snapshot: br#"{"command":"opaque"}"#.to_vec(),
+            state: NetworkPlanWorkState::Pending,
+            revision: 0,
+            outcome: None,
+        };
+        let store = SqliteStore::connect_file(&path).await.unwrap();
+        let mut invalid_initial = work.clone();
+        invalid_initial.revision = 1;
+        assert!(invalid_initial.validate().is_err());
+        assert!(
+            store
+                .insert_network_plan_work(&invalid_initial)
+                .await
+                .is_err()
+        );
+        assert_eq!(store.insert_network_plan_work(&work).await.unwrap(), work);
+        assert_eq!(store.insert_network_plan_work(&work).await.unwrap(), work);
+        let mut conflicting_replay = work.clone();
+        conflicting_replay.snapshot.push(b'!');
+        assert!(matches!(
+            store.insert_network_plan_work(&conflicting_replay).await,
+            Err(crate::StoreError::Corrupt(_))
+        ));
+        assert!(!NetworkPlanWorkState::Succeeded.can_transition_to(NetworkPlanWorkState::Running));
+        assert!(NetworkPlanWorkState::Pending.can_transition_to(NetworkPlanWorkState::Pending));
+        let updated = store
+            .update_network_plan_work(
+                &work.command_id,
+                0,
+                NetworkPlanWorkState::UnknownOutcome,
+                Some(b"observed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.revision, 1);
+        assert!(
+            store
+                .update_network_plan_work(
+                    &work.command_id,
+                    0,
+                    NetworkPlanWorkState::Succeeded,
+                    None
+                )
+                .await
+                .is_err()
+        );
+        let terminal = store
+            .update_network_plan_work(
+                &work.command_id,
+                1,
+                NetworkPlanWorkState::Succeeded,
+                Some(b"done"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .update_network_plan_work(
+                    &work.command_id,
+                    terminal.revision,
+                    NetworkPlanWorkState::Retryable,
+                    None,
+                )
+                .await
+                .is_err()
+        );
+        drop(store);
+        let reopened = SqliteStore::connect_file(&path).await.unwrap();
+        assert_eq!(
+            reopened
+                .get_network_plan_work(&work.command_id)
+                .await
+                .unwrap(),
+            terminal
+        );
+        assert_eq!(
+            reopened
+                .list_unresolved_network_plan_work()
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

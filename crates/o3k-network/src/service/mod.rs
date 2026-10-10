@@ -69,6 +69,8 @@ pub enum NetworkError {
     Store(#[source] o3k_store::StoreError),
     #[error("network metadata is corrupt")]
     CorruptMetadata(#[source] serde_json::Error),
+    #[error("network binding state is corrupt")]
+    CorruptBindingState,
     #[error("durable audit unavailable")]
     AuditUnavailable,
 }

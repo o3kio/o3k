@@ -21,11 +21,19 @@ pub trait PublicAddressWorkflow: Send + Sync {
     async fn remove(&self, project_id: &str, allocation_id: Uuid) -> Result<(), String>;
 }
 
+#[async_trait::async_trait]
+pub trait RealmDeletionWorkflow: Send + Sync {
+    async fn delete_subnet(&self, project_id: &str, realm_id: Uuid) -> Result<(), String>;
+}
+
 /// Application adapter for generic native resource reads and mutations.
 pub struct GenericResourceApplication {
     pub compute: Arc<o3k_compute::ComputeService>,
     pub image: Option<Arc<o3k_image::ImageService>>,
     pub network_service: Arc<o3k_network::NetworkService>,
+    /// Provider-aware Realm cleanup is supplied by o3kd composition. The
+    /// canonical NetworkService remains independent of provider transports.
+    pub realm_deletion: Option<Arc<dyn RealmDeletionWorkflow>>,
     pub store: Arc<o3k_store::unified::O3kStore>,
     pub storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
     pub server: Arc<dyn o3k_native_api::compute::ServerReader>,
@@ -2899,11 +2907,19 @@ impl ResourceApplication for GenericResourceApplication {
                     .delete_network_for_project(project_id, resource_id)
                     .await
                     .map_err(|_| ResourceApplicationError::Conflict)?,
-                "network:subnet" => self
-                    .network_service
-                    .delete_subnet_for_project(project_id, resource_id)
-                    .await
-                    .map_err(|_| ResourceApplicationError::Conflict)?,
+                "network:subnet" => {
+                    if let Some(workflow) = &self.realm_deletion {
+                        workflow
+                            .delete_subnet(project_id, resource_id)
+                            .await
+                            .map_err(|_| ResourceApplicationError::Conflict)?;
+                    } else {
+                        self.network_service
+                            .delete_subnet_for_project(project_id, resource_id)
+                            .await
+                            .map_err(|_| ResourceApplicationError::Conflict)?;
+                    }
+                }
                 "network:port" => self
                     .network_service
                     .delete_port_for_project(project_id, resource_id)

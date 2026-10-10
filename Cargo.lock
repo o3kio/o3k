@@ -1716,6 +1716,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1901,6 +1902,8 @@ version = "0.4.0-rc.5"
 dependencies = [
  "async-trait",
  "fabric-conformance",
+ "fabric-linux",
+ "fabric-plan",
  "o3k-dhcp",
  "o3k-domain",
  "o3k-kernel",
@@ -1923,8 +1926,10 @@ dependencies = [
  "o3k-domain",
  "o3k-network",
  "o3k-network-protocol",
+ "o3k-store",
  "prost",
  "rustls",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
@@ -2095,6 +2100,7 @@ dependencies = [
  "o3k-kernel",
  "o3k-native-api",
  "o3k-network",
+ "o3k-network-bin",
  "o3k-network-protocol",
  "o3k-placement",
  "o3k-provider",

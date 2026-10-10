@@ -115,6 +115,7 @@ async fn build_runtime(
             image: None,
             public_address_workflow: None,
             network_service: network.clone(),
+            realm_deletion: None,
             store: store.clone(),
             storage_provider: Some(Arc::new(
                 o3k_storage::testkit::InMemoryStorageProvider::default(),

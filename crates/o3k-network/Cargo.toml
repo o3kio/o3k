@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+fabric-plan.workspace = true
+fabric-linux.workspace = true
 o3k-dhcp = { path = "../o3k-dhcp" }
 o3k-domain = { path = "../o3k-domain" }
 o3k-kernel = { path = "../o3k-kernel" }

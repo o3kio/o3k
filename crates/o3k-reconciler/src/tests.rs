@@ -167,6 +167,7 @@ mod reconciler_tests {
                 agent_id.to_owned(),
                 o3k_provider::AgentNodeSnapshot {
                     agent_id: agent_id.to_owned(),
+                    host_id: agent_id.to_owned(),
                     agent_epoch: agent_epoch.to_owned(),
                     availability: o3k_provider::AgentAvailability::Available,
                     administrative_state: o3k_provider::AgentAdministrativeState::Enabled,
@@ -3933,6 +3934,124 @@ mod reconciler_tests {
 
     #[async_trait::async_trait]
     impl DurableStore for StaleObservationStore {
+        async fn insert_network_plan_work(
+            &self,
+            work: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner.insert_network_plan_work(work).await
+        }
+
+        async fn insert_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            work: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .insert_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    work,
+                )
+                .await
+        }
+
+        async fn get_network_plan_work(
+            &self,
+            command_id: &str,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner.get_network_plan_work(command_id).await
+        }
+
+        async fn update_network_plan_work(
+            &self,
+            command_id: &str,
+            expected_revision: u64,
+            state: o3k_store::NetworkPlanWorkState,
+            outcome: Option<&[u8]>,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .update_network_plan_work(command_id, expected_revision, state, outcome)
+                .await
+        }
+
+        async fn update_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            command_id: &str,
+            expected_revision: u64,
+            state: o3k_store::NetworkPlanWorkState,
+            outcome: Option<&[u8]>,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .update_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    command_id,
+                    expected_revision,
+                    state,
+                    outcome,
+                )
+                .await
+        }
+
+        async fn supersede_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            old_command_id: &str,
+            expected_old_revision: u64,
+            successor: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<
+            (
+                o3k_store::NetworkPlanWorkRecord,
+                o3k_store::NetworkPlanWorkRecord,
+            ),
+            StoreError,
+        > {
+            self.inner
+                .supersede_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    old_command_id,
+                    expected_old_revision,
+                    successor,
+                )
+                .await
+        }
+
+        async fn list_unresolved_network_plan_work(
+            &self,
+        ) -> Result<Vec<o3k_store::NetworkPlanWorkRecord>, StoreError> {
+            self.inner.list_unresolved_network_plan_work().await
+        }
+
+        async fn list_network_plan_work_history(
+            &self,
+        ) -> Result<Vec<o3k_store::NetworkPlanWorkRecord>, StoreError> {
+            self.inner.list_network_plan_work_history().await
+        }
+
+        async fn list_resources_for_reconciliation(
+            &self,
+            kind: &str,
+        ) -> Result<Vec<ResourceRecord>, StoreError> {
+            self.inner.list_resources_for_reconciliation(kind).await
+        }
+
         async fn get_idempotency_reservation(
             &self,
             owner_scope: &str,
@@ -4437,6 +4556,124 @@ mod reconciler_tests {
 
     #[async_trait::async_trait]
     impl DurableStore for TerminalizationFaultStore {
+        async fn insert_network_plan_work(
+            &self,
+            work: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner.insert_network_plan_work(work).await
+        }
+
+        async fn insert_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            work: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .insert_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    work,
+                )
+                .await
+        }
+
+        async fn get_network_plan_work(
+            &self,
+            command_id: &str,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner.get_network_plan_work(command_id).await
+        }
+
+        async fn update_network_plan_work(
+            &self,
+            command_id: &str,
+            expected_revision: u64,
+            state: o3k_store::NetworkPlanWorkState,
+            outcome: Option<&[u8]>,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .update_network_plan_work(command_id, expected_revision, state, outcome)
+                .await
+        }
+
+        async fn update_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            command_id: &str,
+            expected_revision: u64,
+            state: o3k_store::NetworkPlanWorkState,
+            outcome: Option<&[u8]>,
+        ) -> Result<o3k_store::NetworkPlanWorkRecord, StoreError> {
+            self.inner
+                .update_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    command_id,
+                    expected_revision,
+                    state,
+                    outcome,
+                )
+                .await
+        }
+
+        async fn supersede_network_plan_work_under_lease(
+            &self,
+            realm_work_key: &str,
+            controller_id: &str,
+            controller_epoch: &str,
+            fencing_token: u64,
+            old_command_id: &str,
+            expected_old_revision: u64,
+            successor: &o3k_store::NetworkPlanWorkRecord,
+        ) -> Result<
+            (
+                o3k_store::NetworkPlanWorkRecord,
+                o3k_store::NetworkPlanWorkRecord,
+            ),
+            StoreError,
+        > {
+            self.inner
+                .supersede_network_plan_work_under_lease(
+                    realm_work_key,
+                    controller_id,
+                    controller_epoch,
+                    fencing_token,
+                    old_command_id,
+                    expected_old_revision,
+                    successor,
+                )
+                .await
+        }
+
+        async fn list_unresolved_network_plan_work(
+            &self,
+        ) -> Result<Vec<o3k_store::NetworkPlanWorkRecord>, StoreError> {
+            self.inner.list_unresolved_network_plan_work().await
+        }
+
+        async fn list_network_plan_work_history(
+            &self,
+        ) -> Result<Vec<o3k_store::NetworkPlanWorkRecord>, StoreError> {
+            self.inner.list_network_plan_work_history().await
+        }
+
+        async fn list_resources_for_reconciliation(
+            &self,
+            kind: &str,
+        ) -> Result<Vec<ResourceRecord>, StoreError> {
+            self.inner.list_resources_for_reconciliation(kind).await
+        }
+
         async fn get_idempotency_reservation(
             &self,
             owner_scope: &str,

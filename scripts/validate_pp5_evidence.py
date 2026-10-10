@@ -27,17 +27,18 @@ PHASE = "PP.5"
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-# The declared matrix from §4 as executed. Each tier records its executed
-# verdict, and a claimed campaign pass requires every verdict to be "pass".
+# S1/S2 are boundary smokes, S5 is the mandatory development foundation, and
+# only S3/S10/S20 are the declared scale-certification tiers. Each result is
+# represented separately so a boundary smoke cannot be mislabeled as a scale
+# tier and S5 cannot replace a certification tier.
 ACCEPTANCE_ROWS = "ABCDEFGHIJKLMNOPQRS"
 REQUIRED_SCALE_CARDINALITIES = {
-    "S1": 1,
-    "S2": 2,
     "S3": 3,
-    "S5": 5,
     "S10": 10,
     "S20": 20,
 }
+REQUIRED_BOUNDARY_CARDINALITIES = {"S1": 1, "S2": 2}
+FOUNDATION_CARDINALITY = ("S5", 5)
 REQUIRED_SOAK_ENVELOPES = {
     "K-min": ("2h", "S10"),
     "K-full": ("12h", "S20"),
@@ -47,7 +48,8 @@ REQUIRED_SOAK_ENVELOPES = {
 # §12.2) must actually appear in the executed campaign.  A certification that
 # drops a required tier row fails closed: the result may not silently choose a
 # smaller envelope than the plan bound for this profile.
-REQUIRED_SCALE_TIERS = ("S1", "S2", "S5", "S3", "S10", "S20")
+REQUIRED_SCALE_TIERS = ("S3", "S10", "S20")
+REQUIRED_BOUNDARY_SMOKES = ("S1", "S2")
 REQUIRED_SOAK_TIERS = ("K-min", "K-full")
 
 # PP.5 declares a fixed set of claims it explicitly does NOT make.  Every one
@@ -197,6 +199,36 @@ def validate_scale_tier(tier: Any, index: int, errors: list[str]) -> None:
     validate_tier_verdict(tier.get("verdict"), f"{name}.verdict", errors)
 
 
+def validate_boundary_smoke(smoke: Any, index: int, errors: list[str]) -> None:
+    name = f"campaign.boundary_smokes[{index}]"
+    smoke = mapping(smoke, name, errors)
+    if smoke is None:
+        return
+    required_string(smoke.get("name"), f"{name}.name", errors)
+    smoke_name = smoke.get("name")
+    expected = REQUIRED_BOUNDARY_CARDINALITIES.get(smoke_name) if isinstance(smoke_name, str) else None
+    if expected is None:
+        fail(errors, f"{name}.name must be S1 or S2")
+    if required_int(smoke.get("hypervisors"), f"{name}.hypervisors", errors, minimum=1) and expected is not None:
+        if smoke.get("hypervisors") != expected:
+            fail(errors, f"{name} {smoke_name} must declare {expected} hypervisors")
+    validate_tier_verdict(smoke.get("verdict"), f"{name}.verdict", errors)
+
+
+def validate_foundation_tier(foundation: Any, errors: list[str]) -> None:
+    name = "campaign.foundation_tier"
+    foundation = mapping(foundation, name, errors)
+    if foundation is None:
+        return
+    required_string(foundation.get("name"), f"{name}.name", errors)
+    if foundation.get("name") != FOUNDATION_CARDINALITY[0]:
+        fail(errors, f"{name}.name must be S5")
+    if required_int(foundation.get("hypervisors"), f"{name}.hypervisors", errors, minimum=1):
+        if foundation.get("hypervisors") != FOUNDATION_CARDINALITY[1]:
+            fail(errors, f"{name} S5 must declare 5 hypervisors")
+    validate_tier_verdict(foundation.get("verdict"), f"{name}.verdict", errors)
+
+
 def validate_soak_tier(tier: Any, index: int, errors: list[str]) -> None:
     name = f"campaign.soak_tiers[{index}]"
     tier = mapping(tier, name, errors)
@@ -226,6 +258,27 @@ def validate_campaign(root: Mapping[str, Any], errors: list[str]) -> None:
         return
     required_string(campaign.get("declared_scale_tier"), "campaign.declared_scale_tier", errors)
     required_string(campaign.get("declared_soak_tier"), "campaign.declared_soak_tier", errors)
+
+    validate_foundation_tier(campaign.get("foundation_tier"), errors)
+
+    boundary_smokes = campaign.get("boundary_smokes")
+    if not isinstance(boundary_smokes, list) or not boundary_smokes:
+        fail(errors, "campaign.boundary_smokes must be a non-empty list")
+    elif not all(isinstance(smoke, dict) for smoke in boundary_smokes):
+        fail(errors, "campaign.boundary_smokes must contain objects")
+    else:
+        boundary_names = []
+        for index, smoke in enumerate(boundary_smokes):
+            validate_boundary_smoke(smoke, index, errors)
+            name = smoke.get("name")
+            if isinstance(name, str):
+                boundary_names.append(name)
+        missing = [name for name in REQUIRED_BOUNDARY_SMOKES if name not in boundary_names]
+        if missing:
+            fail(errors, "campaign.boundary_smokes missing required smoke(s): " + ", ".join(missing))
+        duplicates = sorted({name for name in boundary_names if boundary_names.count(name) > 1})
+        if duplicates:
+            fail(errors, "campaign.boundary_smokes duplicate smoke(s): " + ", ".join(duplicates))
 
     scale_tiers = campaign.get("scale_tiers")
     if not isinstance(scale_tiers, list) or not scale_tiers:

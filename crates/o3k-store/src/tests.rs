@@ -7,6 +7,95 @@ mod tests {
     use std::time::Duration;
     use uuid::Uuid;
 
+    fn fabric_host(
+        host_id: &str,
+        agent_id: &str,
+        fabric_transport_ip: std::net::Ipv4Addr,
+    ) -> FabricHostTransportIdentityRecord {
+        FabricHostTransportIdentityRecord {
+            host_id: host_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+            public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
+            underlay_endpoint: "192.0.2.10:51820".to_owned(),
+            fabric_transport_ip,
+            provider_version: "0.1.5".to_owned(),
+            fabric_generation: 1,
+            underlay_mtu: 1500,
+            fabric_mtu: 1440,
+            administrative_state: "enabled".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fabric_host_identity_is_persisted_and_generation_fenced() -> Result<(), Box<dyn Error>>
+    {
+        let store = O3kStore::connect_sqlite_memory().await?;
+        let first = fabric_host("compute-a", "agent-a", "198.18.0.1".parse()?);
+        assert_eq!(
+            store.upsert_fabric_host_identity(&first, None).await?,
+            first
+        );
+        assert_eq!(
+            store.get_fabric_host_identity("compute-a").await?,
+            Some(first.clone())
+        );
+        assert_eq!(
+            store.list_fabric_host_identities().await?,
+            vec![first.clone()]
+        );
+
+        // Exact replay is safe; a conflicting current-generation replay and
+        // a skipped/stale generation are rejected.
+        assert_eq!(
+            store.upsert_fabric_host_identity(&first, Some(1)).await?,
+            first
+        );
+        let mut successor = first.clone();
+        successor.fabric_generation = 2;
+        successor.fabric_transport_ip = "198.18.0.3".parse()?;
+        assert_eq!(
+            store
+                .upsert_fabric_host_identity(&successor, Some(1))
+                .await?,
+            successor
+        );
+        assert!(matches!(
+            store.upsert_fabric_host_identity(&first, Some(1)).await,
+            Err(StoreError::StaleGeneration)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fabric_host_identity_rejects_duplicate_transport_and_malformed_values()
+    -> Result<(), Box<dyn Error>> {
+        let store = O3kStore::connect_sqlite_memory().await?;
+        let first = fabric_host("compute-a", "agent-a", "198.18.0.1".parse()?);
+        store.upsert_fabric_host_identity(&first, None).await?;
+        let duplicate_ip = fabric_host("compute-b", "agent-b", "198.18.0.1".parse()?);
+        assert!(matches!(
+            store.upsert_fabric_host_identity(&duplicate_ip, None).await,
+            Err(StoreError::ResourceAlreadyExists)
+        ));
+        let mut malformed = fabric_host("compute-c", "agent-c", "198.18.0.3".parse()?);
+        malformed.underlay_endpoint = "not-an-endpoint".to_owned();
+        assert!(matches!(
+            store.upsert_fabric_host_identity(&malformed, None).await,
+            Err(StoreError::Corrupt(_))
+        ));
+        let mut ipv6_underlay = fabric_host("compute-d", "agent-d", "198.18.0.4".parse()?);
+        ipv6_underlay.underlay_endpoint = "[2001:db8::4]:51820".to_owned();
+        ipv6_underlay.public_key = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=".to_owned();
+        ipv6_underlay.fabric_mtu = 1420;
+        assert_eq!(
+            store
+                .upsert_fabric_host_identity(&ipv6_underlay, None)
+                .await?,
+            ipv6_underlay
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn sqlite_bootstrap_state_and_grants_are_durable_and_single_use()
     -> Result<(), Box<dyn Error>> {
@@ -2007,6 +2096,7 @@ mod tests {
             status: "DOWN".to_owned(),
             binding_host: None,
             binding_state: None,
+            binding_generation: 0,
         };
         {
             let store = testkit::open_file(&path).await?;
@@ -2035,6 +2125,7 @@ mod tests {
         let mut expected_port = port.clone();
         expected_port.binding_host = Some("compute-1".to_owned());
         expected_port.binding_state = Some("active".to_owned());
+        expected_port.binding_generation = 1;
         assert_eq!(restored_port, expected_port);
         assert_eq!(restored_port.binding_host.as_deref(), Some("compute-1"));
         assert_eq!(restored_port.binding_state.as_deref(), Some("active"));
@@ -3768,6 +3859,7 @@ mod tests {
                 status: "ACTIVE".to_owned(),
                 binding_host: None,
                 binding_state: None,
+                binding_generation: 0,
             })
             .await?;
         store.backfill_canonical_network_state().await?;

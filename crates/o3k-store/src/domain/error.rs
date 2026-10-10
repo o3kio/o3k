@@ -99,4 +99,6 @@ pub enum StoreError {
     ReservationConflict(String),
     #[error("reservation not found")]
     ReservationNotFound,
+    #[error("durable work lease no longer owns this transition")]
+    Fenced,
 }

@@ -10,6 +10,15 @@ use async_trait::async_trait;
 
 use crate::{AgentEvent, CreateInstanceRequest, ProviderError};
 
+/// Stable host IDs are bounded operator/protocol identifiers, never inferred
+/// from an agent ID, address, hostname lookup, or observed network state.
+pub fn is_valid_host_id(host_id: &str) -> bool {
+    let mut bytes = host_id.bytes();
+    matches!(bytes.next(), Some(first) if first.is_ascii_alphanumeric())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && host_id.len() <= 255
+}
+
 /// Whether the agent's control connection is currently alive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentAvailability {
@@ -47,13 +56,15 @@ pub struct AgentCapabilities {
     pub flags: Vec<AgentCapabilityFlag>,
 }
 
-/// Application-level snapshot of one registered agent node. The stable agent
-/// ID doubles as the Placement provider ID, so reconnects update the same
-/// provider and preserve durable allocations.
+/// Application-level snapshot of one authenticated compute agent.
+/// `host_id` is the stable O3K host identity carried by the registration's
+/// host identity field. It joins compute placement to Fabric host state;
+/// `agent_id` and `agent_epoch` identify only this compute execution process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentNodeSnapshot {
     pub agent_id: String,
     pub agent_epoch: String,
+    pub host_id: String,
     pub availability: AgentAvailability,
     pub administrative_state: AgentAdministrativeState,
     pub capabilities: AgentCapabilities,
@@ -72,6 +83,16 @@ pub trait AgentEpochLease: Send {}
 pub trait AgentNodeRegistry: Send + Sync {
     async fn all(&self) -> Vec<AgentNodeSnapshot>;
     async fn snapshot(&self, agent_id: &str) -> Option<AgentNodeSnapshot>;
+
+    /// Returns compute agents claiming this authenticated stable host ID.
+    /// Callers that require a unique host must reject zero or multiple matches.
+    async fn snapshots_for_host(&self, host_id: &str) -> Vec<AgentNodeSnapshot> {
+        self.all()
+            .await
+            .into_iter()
+            .filter(|snapshot| snapshot.host_id == host_id)
+            .collect()
+    }
     async fn lease_current_epoch(
         &self,
         agent_id: &str,
@@ -112,6 +133,15 @@ pub struct NetworkAttachmentSpec {
     pub gateway_ipv4: String,
 }
 
+/// Verified config-drive identity when a create explicitly requests media.
+/// Absence is represented as `None`; placeholder artifact identifiers and
+/// digests are never used for a disabled config drive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConfigDrive {
+    pub artifact_id: String,
+    pub sha256: String,
+}
+
 /// Fully resolved, immutable inputs required by the agent create command.
 /// The control plane constructs this value from its image, network, and
 /// config-drive services; the agent provider never guesses paths, checksums,
@@ -123,8 +153,7 @@ pub struct ResolvedCreateInputs {
     pub image_sha256: String,
     pub image_format: String,
     pub disk_gib: u64,
-    pub config_drive_artifact_id: String,
-    pub config_drive_sha256: String,
+    pub config_drive: Option<ResolvedConfigDrive>,
     pub network_attachments: Vec<NetworkAttachmentSpec>,
 }
 

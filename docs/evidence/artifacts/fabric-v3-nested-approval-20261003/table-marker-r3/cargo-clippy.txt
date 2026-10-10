@@ -1,0 +1,6 @@
+    Checking o3k-network v0.4.0-rc.5 (/home/ubuntu/o3k/crates/o3k-network)
+    Checking o3k-api v0.4.0-rc.5 (/home/ubuntu/o3k/crates/o3k-api)
+    Checking o3k-compute-bin v0.4.0-rc.5 (/home/ubuntu/o3k/bins/o3k-compute)
+    Checking o3k-network-bin v0.4.0-rc.5 (/home/ubuntu/o3k/bins/o3k-network)
+    Checking o3kd v0.4.0-rc.5 (/home/ubuntu/o3k/bins/o3kd)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.65s

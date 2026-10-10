@@ -12,6 +12,9 @@ pub struct DhcpConfig {
     pub dns: Vec<Ipv4Addr>,
     pub interface: String,
     pub lease_seconds: u32,
+    /// Optional RFC 2132 interface MTU advertised to fixed-address guests.
+    #[serde(default)]
+    pub mtu: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

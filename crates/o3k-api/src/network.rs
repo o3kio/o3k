@@ -24,6 +24,36 @@ use crate::{
     pagination::{CollectionLink, CollectionPage},
 };
 
+/// Resolve Fabric v3 execution identity through the stable host directory.
+/// The compute registry is only a compatibility fallback for legacy network
+/// profiles that do not expose host-targeted dispatch.
+async fn resolve_network_target(
+    state: &AppState,
+    host_id: &str,
+) -> Result<o3k_network::NetworkAgentIdentity, ()> {
+    if let Some(dispatcher) = state.network_dispatcher.as_ref() {
+        match dispatcher.target_for_host(host_id).await {
+            Ok(Some(target)) => return Ok(target),
+            Ok(None) => {}
+            Err(_) => return Err(()),
+        }
+    }
+    if let Some(registry) = state.agent_registry.as_ref()
+        && let Some(agent) = registry.snapshot(host_id).await
+    {
+        return Ok(o3k_network::NetworkAgentIdentity {
+            agent_id: agent.agent_id,
+            agent_epoch: agent.agent_epoch,
+        });
+    }
+    if let Some(agent) = state.network_agent.as_ref()
+        && agent.agent_id == host_id
+    {
+        return Ok(agent.clone());
+    }
+    Err(())
+}
+
 #[derive(serde::Deserialize)]
 pub(crate) struct RouterRequestBody {
     router: RouterRequest,
@@ -2267,24 +2297,13 @@ async fn dispatch_policy_network_with_gateway(
     let Some(host) = port.binding_host.clone() else {
         return Ok(false);
     };
-    let agent = if let Some(registry) = state.agent_registry.as_ref()
-        && let Some(agent) = registry.snapshot(&host).await
-    {
-        o3k_network::NetworkAgentIdentity {
-            agent_id: agent.agent_id,
-            agent_epoch: agent.agent_epoch,
-        }
-    } else if let Some(agent) = state.network_agent.as_ref()
-        && agent.agent_id == host
-    {
-        agent.clone()
-    } else {
-        return Err(keystone_error(
+    let agent = resolve_network_target(state, &host).await.map_err(|_| {
+        keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",
-            "selected network agent is unavailable",
-        ));
-    };
+            "selected network agent is unavailable or not enrolled for the selected host",
+        )
+    })?;
     let subnet_id = port.subnet_id.ok_or_else(|| {
         keystone_error(
             StatusCode::BAD_REQUEST,
@@ -2720,7 +2739,9 @@ pub(crate) fn network_error(error: NetworkError) -> axum::response::Response {
             );
             keystone_error(StatusCode::CONFLICT, "Conflict", message)
         }
-        NetworkError::Store(_) | NetworkError::CorruptMetadata(_) => keystone_error(
+        NetworkError::Store(_)
+        | NetworkError::CorruptMetadata(_)
+        | NetworkError::CorruptBindingState => keystone_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal Server Error",
             "network storage is unavailable",
@@ -2844,24 +2865,13 @@ async fn dispatch_public_binding(
     let Some(host) = port.binding_host.as_deref() else {
         return Ok(());
     };
-    let agent = if let Some(registry) = state.agent_registry.as_ref()
-        && let Some(agent) = registry.snapshot(host).await
-    {
-        o3k_network::NetworkAgentIdentity {
-            agent_id: agent.agent_id,
-            agent_epoch: agent.agent_epoch,
-        }
-    } else if let Some(agent) = state.network_agent.as_ref()
-        && agent.agent_id == host
-    {
-        agent.clone()
-    } else {
-        return Err(keystone_error(
+    let agent = resolve_network_target(state, host).await.map_err(|_| {
+        keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",
-            "selected network agent is unavailable",
-        ));
-    };
+            "selected network agent is unavailable or not enrolled for the selected host",
+        )
+    })?;
     let subnet_id = port.subnet_id.ok_or_else(|| {
         keystone_error(
             StatusCode::BAD_REQUEST,
@@ -3538,6 +3548,24 @@ pub(crate) async fn delete_subnet(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if let Some(workflow) = &state.realm_deletion_workflow {
+        if let Err(error) = service.authorize_subnet_deletion(&auth, id).await {
+            return network_error(error);
+        }
+        let project_id = auth.effective_scope().id().as_str();
+        let result = workflow.delete_subnet(project_id, id).await;
+        let error = result.as_ref().err().map(|_| NetworkError::Conflict);
+        if let Err(audit_error) = service
+            .record_subnet_deletion_result(&auth, id, error.as_ref())
+            .await
+        {
+            return network_error(audit_error);
+        }
+        return match result {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(_) => network_error(NetworkError::Conflict),
+        };
+    }
     match service.delete_subnet(&auth, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),

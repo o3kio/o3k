@@ -251,6 +251,40 @@ Requirements:
 - removal of the last realm endpoint from a host must withdraw that host's HER
   entries on all peers and remove learned state for the realm.
 
+### Departing-host provider withdrawal
+
+When the final current endpoint of a realm leaves a host, the host must receive
+a Realm `Remove` operation. Removal is complete only after:
+
+- remaining participants have withdrawn the departing host from HER;
+- the departing host has removed its local Realm realization, including its
+  endpoint TAPs, endpoint policy state, and Realm-scoped VXLAN attachment;
+- the provider has read back and observed the owned live objects absent; and
+- durable provider ownership no longer claims the removed endpoint or Realm.
+
+A control-plane directory update or a successful Remove mutation call alone is
+not provider-absence proof. Providers retain enough ownership state to resume a
+partial removal safely, and execution remains nonterminal until a read-only
+absence observation succeeds. If the host still has another current endpoint
+in the Realm, only the removed endpoint's state is withdrawn and the host stays
+a participant.
+
+Realm reconciliation derives desired hosts from current canonical active
+endpoints and accepted bindings, and derives possibly realized hosts from
+durable Fabric plan/work history. A host's latest ownership-relevant Apply
+without a later observed-successful Remove remains a retirement obligation
+when it disappears from the desired set. An Applying, Unknown, or otherwise
+ambiguous latest operation is unresolved and cannot prove absence. The
+reconciler must create and observe each retiring-host Remove before applying
+the reduced directory to surviving hosts. Startup recovery uses the same
+history derivation and must resume this sequence without a new tenant API
+mutation.
+
+For request-driven server deletion, a Fabric unbind or endpoint-release error
+is returned to the waiting caller after the server deletion is durably
+terminal. The server deletion is not rolled back; cleanup remains retryable.
+Background terminal projection may log and retry because no request is waiting.
+
 ## Egress and ingress semantics
 
 ### Egress
@@ -430,3 +464,7 @@ Prove:
 10. MTU boundary: near-boundary packet succeeds, oversize behavior is explicit;
 11. restart/reconcile, drain, and cleanup leave zero leaked netns/bridge/veth/
     VXLAN/FDB/WireGuard/nft state across all hosts.
+12. final endpoint departure from a host completes only after the departing
+    host's Realm realization and durable endpoint ownership are absent and
+    that absence has been observed by the provider; Remove mutation success
+    alone is insufficient.

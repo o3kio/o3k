@@ -347,6 +347,41 @@ impl DhcpService {
         self.persist()
     }
 
+    /// Removes a binding and any lease recorded for its MAC from this
+    /// service's isolated lease file. Callers that have a serving supervisor
+    /// must stop it before invoking this method so dnsmasq cannot rewrite the
+    /// lease concurrently.
+    pub fn remove_binding_and_lease(&mut self, port_id: &str) -> Result<(), DhcpError> {
+        let mac = self
+            .state
+            .bindings
+            .get(port_id)
+            .map(|binding| binding.mac.to_ascii_lowercase());
+        if let Some(mac) = mac {
+            let lease_path = self.managed_lease_path();
+            let contents = match fs::read_to_string(&lease_path) {
+                Ok(contents) => contents,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+                Err(error) => return Err(DhcpError::Storage(error)),
+            };
+            let retained = contents
+                .lines()
+                .filter(|line| {
+                    line.split_whitespace()
+                        .nth(1)
+                        .is_none_or(|lease_mac| !lease_mac.eq_ignore_ascii_case(&mac))
+                })
+                .collect::<Vec<_>>();
+            let mut next = retained.join("\n");
+            if contents.ends_with('\n') && !next.is_empty() {
+                next.push('\n');
+            }
+            atomic_write(&lease_path, next.as_bytes())?;
+        }
+        self.state.bindings.remove(port_id);
+        self.persist()
+    }
+
     pub fn bindings(&self) -> impl Iterator<Item = &Binding> {
         self.state.bindings.values()
     }
@@ -374,8 +409,9 @@ impl DhcpService {
     pub fn render_config(&self) -> Result<String, DhcpError> {
         let config = self.state.config.as_ref().ok_or(DhcpError::InvalidConfig)?;
         validate_config(config)?;
-        let (network, _) = subnet_bounds(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
+        let (network, broadcast) = subnet_bounds(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
         let dhcp_start = Ipv4Addr::from(u32::from(network) + 1);
+        let subnet_mask = subnet_mask(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
         let mut lines = vec![
             "# Managed by o3k-dhcp; do not edit.".to_owned(),
             format!("interface={}", config.interface),
@@ -390,12 +426,16 @@ impl DhcpService {
                 "dhcp-leasefile={}",
                 self.root.join("dnsmasq.leases").display()
             ),
-            // dnsmasq's `<mode>` keyword occupies the `<end-addr>` position,
-            // so `start,end,static` is rejected by 2.90 ("bad dhcp-range").
-            // `start,static[,lease]` spans the interface subnet and serves
-            // only hosts with a dhcp-host binding, preserving the static-only
-            // intent for fixed IPs.
-            format!("dhcp-range={},static,{}", dhcp_start, config.lease_seconds),
+            // Fabric gives its DHCP gateway a /32 on the Realm bridge to
+            // avoid installing overlapping tenant routes. dnsmasq would
+            // otherwise infer a /32 DHCP subnet from that interface, which
+            // excludes every fixed endpoint address. Carry the canonical
+            // tenant mask and broadcast in the static range itself.
+            format!(
+                "dhcp-range={dhcp_start},static,{subnet_mask},{broadcast},{}",
+                config.lease_seconds
+            ),
+            format!("dhcp-option=1,{subnet_mask}"),
             format!("dhcp-option=3,{}", config.gateway),
         ];
         if !config.dns.is_empty() {
@@ -408,6 +448,9 @@ impl DhcpService {
                     .collect::<Vec<_>>()
                     .join(",")
             ));
+        }
+        if let Some(mtu) = config.mtu {
+            lines.push(format!("dhcp-option=26,{mtu}"));
         }
         lines.extend(
             self.state
@@ -462,6 +505,7 @@ fn validate_config(config: &DhcpConfig) -> Result<(), DhcpError> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         || config.lease_seconds == 0
+        || config.mtu == Some(0)
         || !valid_host(&config.subnet, config.gateway)
         || config
             .dns
@@ -494,6 +538,20 @@ fn subnet_bounds(cidr: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
     };
     let network = u32::from(address) & mask;
     Some((Ipv4Addr::from(network), Ipv4Addr::from(network | !mask)))
+}
+
+fn subnet_mask(cidr: &str) -> Option<Ipv4Addr> {
+    let (_, prefix) = cidr.split_once('/')?;
+    let prefix = prefix.parse::<u8>().ok()?;
+    if prefix > 30 {
+        return None;
+    }
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Some(Ipv4Addr::from(mask))
 }
 
 fn valid_mac(mac: &str) -> bool {
@@ -532,6 +590,7 @@ mod tests {
             dns: vec!["192.0.2.1".parse().map_err(|_| DhcpError::InvalidConfig)?],
             interface: "o3k-br0".into(),
             lease_seconds: 3600,
+            mtu: None,
         })
     }
     #[test]
@@ -553,12 +612,54 @@ mod tests {
         ));
         let rendered = service.render_config()?;
         assert!(rendered.contains("dhcp-host=02:00:00:00:00:01,192.0.2.10"));
-        // dnsmasq 2.90 grammar: `<mode>` occupies the <end-addr> position, so
-        // `start,end,static` is rejected ("bad dhcp-range"); the static-only
-        // intent is `start,static[,lease]`, which spans the interface subnet.
-        assert!(rendered.contains("dhcp-range=192.0.2.1,static,3600"));
+        // The Fabric bridge gateway is /32, so the DHCP subnet cannot be
+        // inferred from its interface address. Keep the canonical tenant
+        // mask and broadcast explicit in the static range.
+        assert!(rendered.contains("dhcp-range=192.0.2.1,static,255.255.255.0,192.0.2.255,3600"));
+        assert!(rendered.contains("dhcp-option=1,255.255.255.0"));
         assert!(rendered.contains("dhcp-leasefile="));
         assert!(service.managed_lease_path().ends_with("dnsmasq.leases"));
+        Ok(())
+    }
+
+    #[test]
+    fn removing_binding_clears_only_its_managed_lease() -> Result<(), DhcpError> {
+        let mut service = service()?;
+        service.configure(config()?)?;
+        service.upsert_binding(Binding {
+            port_id: "p1".into(),
+            mac: "02:00:00:00:00:01".into(),
+            address: "192.0.2.10".parse().map_err(|_| DhcpError::InvalidConfig)?,
+        })?;
+        service.upsert_binding(Binding {
+            port_id: "p2".into(),
+            mac: "02:00:00:00:00:02".into(),
+            address: "192.0.2.11".parse().map_err(|_| DhcpError::InvalidConfig)?,
+        })?;
+        fs::write(
+            service.managed_lease_path(),
+            "1 02:00:00:00:00:01 192.0.2.10 host-a *\n2 02:00:00:00:00:02 192.0.2.11 host-b *\n",
+        )
+        .map_err(DhcpError::Storage)?;
+
+        service.remove_binding_and_lease("p1")?;
+
+        let leases =
+            fs::read_to_string(service.managed_lease_path()).map_err(DhcpError::Storage)?;
+        assert!(!leases.contains("02:00:00:00:00:01"));
+        assert!(leases.contains("02:00:00:00:00:02"));
+        assert!(service.binding("p1").is_none());
+        assert!(service.binding("p2").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn renders_fabric_tenant_mtu_as_dhcp_option_26() -> Result<(), DhcpError> {
+        let mut service = service()?;
+        let mut config = config()?;
+        config.mtu = Some(1370);
+        service.configure(config)?;
+        assert!(service.render_config()?.contains("dhcp-option=26,1370"));
         Ok(())
     }
 

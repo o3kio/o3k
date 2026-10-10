@@ -475,6 +475,23 @@ impl NetworkService {
     }
 
     pub async fn delete_subnet(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
+        self.authorize_subnet_deletion(auth, id).await?;
+        let result = self
+            .delete_subnet_for_project(auth.effective_scope().id().as_str(), id)
+            .await;
+        self.record_subnet_deletion_result(auth, id, result.as_ref().err())
+            .await?;
+        result
+    }
+
+    /// Authorizes a Neutron subnet deletion before a composition-owned
+    /// provider workflow begins. This keeps provider transport outside the
+    /// canonical NetworkService while preserving the DeleteSubnet action.
+    pub async fn authorize_subnet_deletion(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+    ) -> Result<(), NetworkError> {
         let ns = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
         let act = ActionId::new("network", "DeleteSubnet").unwrap_or_else(|_| {
@@ -497,29 +514,44 @@ impl NetworkService {
             self.record_required_audit(&event).await?;
             return Err(NetworkError::NotFound);
         }
-        match self
-            .delete_subnet_for_project(auth.effective_scope().id().as_str(), id)
-            .await
-        {
-            Ok(()) => {
-                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
-                    .with_resource(
-                        ResourceType::new("network", "subnet").unwrap_or_else(|_| {
-                            ResourceType::new_unchecked("network".to_owned(), "subnet".to_owned())
-                        }),
-                        ResourceId::new(id.to_string()).ok(),
-                        Some(auth.effective_scope().clone()),
-                    );
-                self.record_required_audit(&event).await?;
-                Ok(())
-            }
-            Err(error) => {
-                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
-                    .with_reason(error.to_string());
-                self.record_required_audit(&event).await?;
-                Err(error)
-            }
+        Ok(())
+    }
+
+    /// Records the result of an authorized subnet deletion, including a
+    /// provider-aware deletion performed by the application composition.
+    pub async fn record_subnet_deletion_result(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        error: Option<&NetworkError>,
+    ) -> Result<(), NetworkError> {
+        let namespace = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let action = ActionId::new("network", "DeleteSubnet").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "DeleteSubnet".to_owned())
+        });
+        let resource_type = ResourceType::new("network", "subnet").unwrap_or_else(|_| {
+            ResourceType::new_unchecked("network".to_owned(), "subnet".to_owned())
+        });
+        let mut event = AuditEvent::from_auth(
+            auth,
+            namespace,
+            action,
+            if error.is_some() {
+                AuditOutcome::Failed
+            } else {
+                AuditOutcome::Succeeded
+            },
+        )
+        .with_resource(
+            resource_type,
+            ResourceId::new(id.to_string()).ok(),
+            Some(auth.effective_scope().clone()),
+        );
+        if let Some(error) = error {
+            event = event.with_reason(error.to_string());
         }
+        self.record_required_audit(&event).await
     }
 
     pub async fn delete_subnet_for_project(

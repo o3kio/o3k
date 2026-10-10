@@ -191,6 +191,17 @@ pub trait CoordinationRepository: Send + Sync {
         fencing_token: FencingToken,
     ) -> Result<bool, StoreError>;
 
+    /// Relinquishes the active owner while retaining the durable lease row and
+    /// its fencing generation. The next successful acquisition must advance
+    /// this token, including across a graceful controller handoff.
+    async fn relinquish_work_lease_preserving_fence(
+        &self,
+        work_key: &str,
+        controller_id: &ControllerId,
+        controller_epoch: &ControllerEpoch,
+        fencing_token: FencingToken,
+    ) -> Result<bool, StoreError>;
+
     async fn inspect_work_lease(&self, work_key: &str) -> Result<Option<WorkLease>, StoreError>;
 
     async fn list_active_controller_sessions(&self) -> Result<Vec<ControllerSession>, StoreError>;
@@ -325,14 +336,28 @@ impl CoordinationRepository for PostgresStore {
 
         match maybe_row {
             None => {
-                // New lease -> initialize fencing token to 1
+                let token_row = sqlx::query(
+                    r#"
+                    INSERT INTO work_lease_fence_counters (work_key, fencing_token)
+                    VALUES ($1, 1)
+                    ON CONFLICT (work_key) DO UPDATE
+                    SET fencing_token = work_lease_fence_counters.fencing_token + 1
+                    RETURNING fencing_token;
+                    "#,
+                )
+                .bind(work_key)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+                let fencing_token: i64 = token_row.get("fencing_token");
+
                 let row = sqlx::query(
                     r#"
                     INSERT INTO work_leases (
                         work_key, work_kind, owner_controller_id, owner_controller_epoch,
                         fencing_token, lease_until, created_at, updated_at
                     )
-                    VALUES ($1, $2, $3, $4, 1, NOW() + $5::interval, NOW(), NOW())
+                    VALUES ($1, $2, $3, $4, $5, NOW() + $6::interval, NOW(), NOW())
                     RETURNING work_key, work_kind, owner_controller_id, owner_controller_epoch,
                               fencing_token, lease_until::text, created_at::text, updated_at::text;
                     "#,
@@ -341,6 +366,7 @@ impl CoordinationRepository for PostgresStore {
                 .bind(work_kind)
                 .bind(&controller_id.0)
                 .bind(&controller_epoch.0)
+                .bind(fencing_token)
                 .bind(&interval_str)
                 .fetch_one(&mut *tx)
                 .await
@@ -366,7 +392,7 @@ impl CoordinationRepository for PostgresStore {
                 let current_token: i64 = existing.get("fencing_token");
                 let is_expired: bool = existing.get("is_expired");
 
-                if owner_id == controller_id.0 && owner_epoch == controller_epoch.0 {
+                if owner_id == controller_id.0 && owner_epoch == controller_epoch.0 && !is_expired {
                     // Same owner session re-acquiring -> renew lease without bumping fencing token
                     let row = sqlx::query(
                         r#"
@@ -515,6 +541,33 @@ impl CoordinationRepository for PostgresStore {
         .await
         .map_err(StoreError::Database)?;
 
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn relinquish_work_lease_preserving_fence(
+        &self,
+        work_key: &str,
+        controller_id: &ControllerId,
+        controller_epoch: &ControllerEpoch,
+        fencing_token: FencingToken,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE work_leases
+            SET lease_until = NOW() - INTERVAL '1 second', updated_at = NOW()
+            WHERE work_key = $1
+              AND owner_controller_id = $2
+              AND owner_controller_epoch = $3
+              AND fencing_token = $4;
+            "#,
+        )
+        .bind(work_key)
+        .bind(&controller_id.0)
+        .bind(&controller_epoch.0)
+        .bind(fencing_token as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -704,19 +757,35 @@ impl CoordinationRepository for SqliteStore {
 
         match maybe_row {
             None => {
+                let token_row = sqlx::query(
+                    r#"
+                    INSERT INTO work_lease_fence_counters (work_key, fencing_token)
+                    VALUES (?1, 1)
+                    ON CONFLICT(work_key) DO UPDATE SET
+                        fencing_token = fencing_token + 1
+                    RETURNING fencing_token;
+                    "#,
+                )
+                .bind(work_key)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+                let fencing_token: i64 = token_row.get("fencing_token");
+
                 sqlx::query(
                     r#"
                     INSERT INTO work_leases (
                         work_key, work_kind, owner_controller_id, owner_controller_epoch,
                         fencing_token, lease_until, created_at, updated_at
                     )
-                    VALUES (?1, ?2, ?3, ?4, 1, datetime('now', ?5), datetime('now'), datetime('now'));
+                    VALUES (?1, ?2, ?3, ?4, ?5, datetime('now', ?6), datetime('now'), datetime('now'));
                     "#,
                 )
                 .bind(work_key)
                 .bind(work_kind)
                 .bind(&controller_id.0)
                 .bind(&controller_epoch.0)
+                .bind(fencing_token)
                 .bind(&ttl_mod)
                 .execute(&mut *tx)
                 .await
@@ -755,7 +824,10 @@ impl CoordinationRepository for SqliteStore {
                 let current_token: i64 = existing.get("fencing_token");
                 let is_expired: i64 = existing.get("is_expired");
 
-                if owner_id == controller_id.0 && owner_epoch == controller_epoch.0 {
+                if owner_id == controller_id.0
+                    && owner_epoch == controller_epoch.0
+                    && is_expired == 0
+                {
                     sqlx::query(
                         r#"
                         UPDATE work_leases
@@ -916,6 +988,33 @@ impl CoordinationRepository for SqliteStore {
         .await
         .map_err(StoreError::Database)?;
 
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn relinquish_work_lease_preserving_fence(
+        &self,
+        work_key: &str,
+        controller_id: &ControllerId,
+        controller_epoch: &ControllerEpoch,
+        fencing_token: FencingToken,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE work_leases
+            SET lease_until = datetime('now', '-1 second'), updated_at = datetime('now')
+            WHERE work_key = ?1
+              AND owner_controller_id = ?2
+              AND owner_controller_epoch = ?3
+              AND fencing_token = ?4;
+            "#,
+        )
+        .bind(work_key)
+        .bind(&controller_id.0)
+        .bind(&controller_epoch.0)
+        .bind(fencing_token as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
         Ok(result.rows_affected() > 0)
     }
 

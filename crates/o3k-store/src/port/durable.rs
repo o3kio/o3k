@@ -7,8 +7,8 @@ use crate::domain::error::StoreError;
 use crate::domain::records::{
     AgentCommandRecord, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
     IdempotencyReservationRequest, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
-    ImageOverlayUpdate, LifecycleTerminalization, ObservationUpdate, OperationRecord,
-    ProviderReference, ResourceRecord,
+    ImageOverlayUpdate, LifecycleTerminalization, NetworkPlanWorkRecord, NetworkPlanWorkState,
+    ObservationUpdate, OperationRecord, ProviderReference, ResourceRecord,
 };
 use crate::domain::state::{
     AgentCommandState, CanonicalAcceptanceOutcome, IdempotencyReservation, OperationState,
@@ -168,6 +168,64 @@ pub(crate) fn bounded_fetch_limit(limit: usize) -> Result<i64, StoreError> {
 
 #[async_trait]
 pub trait DurableStore: Send + Sync {
+    async fn insert_network_plan_work(
+        &self,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    async fn insert_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        work: &NetworkPlanWorkRecord,
+    ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    async fn get_network_plan_work(
+        &self,
+        command_id: &str,
+    ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    async fn update_network_plan_work(
+        &self,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    /// Atomically verifies the current realm reconciliation lease and applies
+    /// a revision-fenced transition to its network-plan work record.
+    #[allow(clippy::too_many_arguments)]
+    async fn update_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        command_id: &str,
+        expected_revision: u64,
+        state: NetworkPlanWorkState,
+        outcome: Option<&[u8]>,
+    ) -> Result<NetworkPlanWorkRecord, StoreError>;
+    /// Atomically terminalizes a never-admitted historical command and inserts
+    /// its current-authority successor while holding the realm lease fence.
+    #[allow(clippy::too_many_arguments)]
+    async fn supersede_network_plan_work_under_lease(
+        &self,
+        realm_work_key: &str,
+        controller_id: &str,
+        controller_epoch: &str,
+        fencing_token: u64,
+        old_command_id: &str,
+        expected_old_revision: u64,
+        successor: &NetworkPlanWorkRecord,
+    ) -> Result<(NetworkPlanWorkRecord, NetworkPlanWorkRecord), StoreError>;
+    async fn list_unresolved_network_plan_work(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError>;
+    /// Lists persisted plan snapshots, including terminal history, for
+    /// ownership-proven provider cleanup and forensic recovery.
+    async fn list_network_plan_work_history(
+        &self,
+    ) -> Result<Vec<NetworkPlanWorkRecord>, StoreError>;
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError>;
     async fn get_resource(&self, id: Uuid) -> Result<ResourceRecord, StoreError>;
     /// Internal compatibility/domain reader. Native northbound collection
@@ -176,6 +234,13 @@ pub trait DurableStore: Send + Sync {
     async fn list_resources(
         &self,
         project_id: &str,
+        kind: &str,
+    ) -> Result<Vec<ResourceRecord>, StoreError>;
+    /// Lists resources of one canonical kind across projects for bounded
+    /// controller repair scans. Callers must still validate desired state,
+    /// ownership, and service-specific lifecycle before reconciliation.
+    async fn list_resources_for_reconciliation(
+        &self,
         kind: &str,
     ) -> Result<Vec<ResourceRecord>, StoreError>;
     async fn list_resources_page(

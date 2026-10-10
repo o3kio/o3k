@@ -486,6 +486,7 @@ mod native_compute_tests {
             compute: compute.clone(),
             image: None,
             network_service,
+            realm_deletion: None,
             store: store.clone(),
             server: Arc::new(ServerReaderAdapter {
                 service: compute.clone(),

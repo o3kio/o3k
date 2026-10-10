@@ -664,14 +664,19 @@ impl super::LinuxFabricBackend {
         {
             return Err(LinuxFabricError::CommandFailed);
         }
-        let mut cleared = current;
+        let mut next = self.state.clone();
+        let cleared = next
+            .realms
+            .get_mut(&plan.realm_id)
+            .ok_or(LinuxFabricError::CorruptState)?;
         cleared.public_generation = 0;
         cleared.public_fingerprint.clear();
         cleared.public_mark = 0;
         cleared.public_route_table = 0;
         cleared.public_addresses.clear();
-        self.state.realms.insert(plan.realm_id, cleared);
-        store_state(&self.state_path, &self.state)
+        store_state(&self.state_path, &next)?;
+        self.state = next;
+        Ok(())
     }
     pub(crate) fn validate_public_plan(
         plan: &NamespacedRoutedFabricPlan,

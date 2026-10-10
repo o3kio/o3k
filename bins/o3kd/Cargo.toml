@@ -53,6 +53,7 @@ rustix = { workspace = true, features = ["fs"] }
 [dev-dependencies]
 tower.workspace = true
 tokio-stream.workspace = true
+o3k-network-bin = { path = "../o3k-network" }
 o3k-database-example = { path = "../../crates/o3k-database-example" }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 sqlx = { workspace = true }

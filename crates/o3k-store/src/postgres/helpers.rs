@@ -693,6 +693,8 @@ pub(crate) fn parse_pg_port(row: &PgRow) -> Result<PortRecord, StoreError> {
         status: row.get("status"),
         binding_host: row.get("binding_host"),
         binding_state: row.get("binding_state"),
+        binding_generation: u64::try_from(row.get::<i64, _>("binding_generation"))
+            .map_err(|_| StoreError::Corrupt("negative port binding generation".to_owned()))?,
     })
 }
 pub(crate) fn amounts_match(a: &[ResourceAmount], b: &[ResourceAmount]) -> bool {

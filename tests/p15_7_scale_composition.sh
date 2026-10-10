@@ -13,7 +13,7 @@ PROFILE="${O3K_P15_7_PROFILE:-small-edge-cloud}"
 PHASE="${O3K_P15_7_PHASE:-integrated}"
 JOURNEY_COMMAND="${O3K_P15_7_JOURNEY_COMMAND:-bash scripts/p15-7-real-host-journey.sh}"
 case "${PHASE}" in
-    integrated|s5-scale|1035-crash-recovery|host-maintenance) ;;
+    integrated|s5-scale|s1-boundary|s2-boundary|1035-crash-recovery|host-maintenance) ;;
     *) echo "unsupported PP.5 phase: ${PHASE}" >&2; exit 2 ;;
 esac
 mkdir -p "${ARTIFACT_DIR}"
@@ -172,6 +172,8 @@ if [[ "${PHASE}" != integrated ]]; then
     write_phase_results
     case "${PHASE}" in
         s5-scale) selected_result="${ARTIFACT_DIR}/pp5-s5-scale-result.json" ;;
+        s1-boundary) selected_result="${ARTIFACT_DIR}/pp5-s1-boundary-smoke-result.json" ;;
+        s2-boundary) selected_result="${ARTIFACT_DIR}/pp5-s2-boundary-smoke-result.json" ;;
         1035-crash-recovery) selected_result="${ARTIFACT_DIR}/pp5-1035-crash-recovery-result.json" ;;
         host-maintenance) selected_result="${ARTIFACT_DIR}/pp5-host-maintenance-result.json" ;;
     esac
