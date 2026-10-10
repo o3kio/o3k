@@ -154,6 +154,16 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("fabric-v3-owned-domain-storage.py", DRIVER)
         self.assertIn('rm -- "$disk" "$seed"', DRIVER)
 
+    def test_failure_cleanup_requires_observed_absence_and_has_one_deadline(self):
+        start = DRIVER.index("cleanup_owned_api_resource() {")
+        end = DRIVER.index("\n  }\n  if [[ -f", start)
+        cleanup = DRIVER[start:end]
+        self.assertIn("local deadline=$((SECONDS + 120))", cleanup)
+        self.assertIn('deadline - SECONDS', cleanup)
+        self.assertIn('[[ "$get_status" == 404 ]]', cleanup)
+        self.assertNotIn('get_status" == 404 || "$delete_status" == 404', cleanup)
+        self.assertNotIn('[[ "$delete_status" == 404 ]]', cleanup)
+
     def test_packet_classifier_uses_control_transport_state(self):
         self.assertIn("LAST_GUEST_CHANNEL_ERROR", DRIVER)
         self.assertIn("failure-class \"$transport_error\" \"$phase_class\"", DRIVER)

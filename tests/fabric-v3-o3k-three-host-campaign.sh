@@ -172,15 +172,21 @@ cleanup_on_success() {
   local rc=$?
   if declare -F stop_dhcp_capture >/dev/null 2>&1; then stop_dhcp_capture || true; fi
   cleanup_owned_api_resource() {
-    local label="$1" path="$2" attempt delete_status get_status
+    local label="$1" path="$2" attempt delete_status get_status request_timeout
+    local deadline=$((SECONDS + 120))
     for attempt in $(seq 1 60); do
-      delete_status="$(curl --silent --show-error --max-time 15 -o /dev/null -w '%{http_code}' \
+      request_timeout=$((deadline - SECONDS))
+      (( request_timeout > 0 )) || break
+      delete_status="$(curl --silent --show-error --max-time "$request_timeout" -o /dev/null -w '%{http_code}' \
         -X DELETE "$BASE$path" -H "x-auth-token: $TOKEN" 2>>"$EVIDENCE/teardown/failure-api-cleanup-errors.txt" || true)"
-      get_status="$(curl --silent --show-error --max-time 15 -o /dev/null -w '%{http_code}' \
+      request_timeout=$((deadline - SECONDS))
+      (( request_timeout > 0 )) || break
+      get_status="$(curl --silent --show-error --max-time "$request_timeout" -o /dev/null -w '%{http_code}' \
         "$BASE$path" -H "x-auth-token: $TOKEN" 2>>"$EVIDENCE/teardown/failure-api-cleanup-errors.txt" || true)"
       printf '%s attempt=%s delete=%s get=%s\n' "$label" "$attempt" "$delete_status" "$get_status" \
         >>"$EVIDENCE/teardown/failure-api-cleanup.txt"
-      if [[ "$get_status" == 404 || "$delete_status" == 404 ]]; then return 0; fi
+      if [[ "$get_status" == 404 ]]; then return 0; fi
+      (( SECONDS < deadline )) || break
       sleep 2
     done
     printf '%s cleanup did not converge within 120 seconds\n' "$label" \
