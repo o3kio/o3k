@@ -561,9 +561,23 @@ async fn wait_state(
     id: Uuid,
     state: &str,
     timeout: Duration,
+    evidence: &mut Evidence,
+    backend: &Backend,
+    old_pid: Option<u32>,
+    new_pid: Option<u32>,
+    phase: &str,
 ) -> Result<(), Error> {
     let deadline = Instant::now() + timeout;
     loop {
+        store_operation(
+            evidence,
+            phase,
+            "get_resource",
+            backend,
+            true,
+            old_pid,
+            new_pid,
+        );
         let resource = probe.get_resource(id).await?;
         if resource.observed_state == state {
             return Ok(());
@@ -573,6 +587,110 @@ async fn wait_state(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+struct TestOwnedProbe {
+    store: Option<o3k_store::unified::O3kStore>,
+}
+
+impl TestOwnedProbe {
+    fn new(store: o3k_store::unified::O3kStore) -> Self {
+        Self { store: Some(store) }
+    }
+
+    fn is_alive(&self) -> bool {
+        self.store.is_some()
+    }
+
+    fn close(&mut self) {
+        self.store.take();
+    }
+
+    fn require_closed_at_restart(&self) -> Result<(), Error> {
+        if self.is_alive() {
+            return Err("test-owned probe is still alive at the daemon restart boundary".into());
+        }
+        Ok(())
+    }
+
+    async fn reopen(&mut self, backend: &Backend) -> Result<(), Error> {
+        if self.is_alive() {
+            return Err("test-owned probe must be closed before opening a fresh pool".into());
+        }
+        self.store = Some(backend.connect().await?);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn pp5_1035_test_probe_must_close_across_restart_boundary() -> Result<(), Error> {
+    let root = std::env::temp_dir().join(format!("o3k-pp5-probe-lifecycle-{}", Uuid::now_v7()));
+    fs::create_dir_all(&root)?;
+    let backend = Backend::Sqlite(root.join("o3k.sqlite"));
+    let mut probe = TestOwnedProbe::new(backend.connect().await?);
+    assert!(probe.is_alive());
+    assert!(probe.require_closed_at_restart().is_err());
+    probe.close();
+    probe.require_closed_at_restart()?;
+    assert!(!probe.is_alive());
+    probe.reopen(&backend).await?;
+    assert!(probe.is_alive());
+    probe.close();
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+impl std::ops::Deref for TestOwnedProbe {
+    type Target = o3k_store::unified::O3kStore;
+
+    fn deref(&self) -> &Self::Target {
+        self.store
+            .as_ref()
+            .expect("test-owned probe is closed across the restart boundary")
+    }
+}
+
+fn store_operation(
+    evidence: &mut Evidence,
+    phase: &str,
+    operation: &str,
+    backend: &Backend,
+    probe_alive: bool,
+    old_pid: Option<u32>,
+    new_pid: Option<u32>,
+) {
+    let process_state = |pid: Option<u32>| {
+        pid.map(|pid| json!({"pid": pid, "alive": proc_starttime(pid).is_ok()}))
+            .unwrap_or(Value::Null)
+    };
+    let sqlite_state = match backend {
+        Backend::Sqlite(path) => {
+            let state = |path: &Path| {
+                fs::metadata(path)
+                    .ok()
+                    .map(|metadata| json!({"present": true, "bytes": metadata.len()}))
+                    .unwrap_or_else(|| json!({"present": false}))
+            };
+            json!({
+                "database": state(path),
+                "wal": state(&PathBuf::from(format!("{}-wal", path.display()))),
+                "shm": state(&PathBuf::from(format!("{}-shm", path.display()))),
+            })
+        }
+        Backend::Postgres(_) => Value::Null,
+    };
+    evidence.data.insert("current_phase".into(), json!(phase));
+    evidence.data.insert(
+        "store_diagnostic".into(),
+        json!({
+            "phase": phase,
+            "operation": operation,
+            "test_owned_probe_alive": probe_alive,
+            "old_daemon": process_state(old_pid),
+            "replacement_daemon": process_state(new_pid),
+            "sqlite_files": sqlite_state,
+        }),
+    );
 }
 
 async fn delete_native(
@@ -796,8 +914,26 @@ async fn run_iteration(
         // subsequent daemon processes reopen this run-owned database normally.
         stop_process(bootstrap.child_mut()?)?;
         bootstrap.disarm();
+        store_operation(
+            evidence,
+            "bootstrap_daemon_stopped_fixture_seed",
+            "connect_fixture_store",
+            backend,
+            false,
+            None,
+            None,
+        );
         let store = backend.connect().await?;
         let now_ts = now();
+        store_operation(
+            evidence,
+            "bootstrap_daemon_stopped_fixture_seed",
+            "insert_keystone_project",
+            backend,
+            false,
+            None,
+            None,
+        );
         store
             .insert_keystone_project(&o3k_store::KeystoneProjectRecord {
                 id: "system".to_owned(),
@@ -808,6 +944,15 @@ async fn run_iteration(
                 created_at: now_ts.clone(),
             })
             .await?;
+        store_operation(
+            evidence,
+            "bootstrap_daemon_stopped_fixture_seed",
+            "insert_keystone_role_assignment",
+            backend,
+            false,
+            None,
+            None,
+        );
         store
             .insert_keystone_role_assignment(&o3k_store::KeystoneRoleAssignmentRecord {
                 id: format!("pp5-system-admin-{run_id}"),
@@ -817,6 +962,15 @@ async fn run_iteration(
                 created_at: now_ts.clone(),
             })
             .await?;
+        store_operation(
+            evidence,
+            "bootstrap_daemon_stopped_fixture_seed",
+            "insert_operator_assignment",
+            backend,
+            false,
+            None,
+            None,
+        );
         store
             .insert_operator_assignment(&o3k_store::OperatorAssignmentRecord {
                 id: format!("pp5-system-operator-{run_id}"),
@@ -949,7 +1103,16 @@ async fn run_iteration(
     evidence.set("foreign", json!({"project":FOREIGN_PROJECT_ID,"port_id":foreign_port_id,"network_id":foreign_network,"subnet_id":foreign_subnet,"attachment_id":"not-applicable-in-fake-provider-topology","before":foreign_port,"after":foreign_port,"changed":false}));
     evidence.checkpoint("prepared")?;
 
-    let probe = backend.connect().await?;
+    store_operation(
+        evidence,
+        "old_daemon_running_probe_open",
+        "connect_test_owned_probe",
+        backend,
+        false,
+        Some(old_pid),
+        None,
+    );
+    let mut probe = TestOwnedProbe::new(backend.connect().await?);
     let quota_baseline = quota_usage(&client, http, &admin_token).await?;
     let (server_id, _) = create_native(
         &client,
@@ -959,7 +1122,18 @@ async fn run_iteration(
         &network_id,
     )
     .await?;
-    wait_state(&probe, server_id, "ACTIVE", Duration::from_secs(30)).await?;
+    wait_state(
+        &probe,
+        server_id,
+        "ACTIVE",
+        Duration::from_secs(30),
+        evidence,
+        backend,
+        Some(old_pid),
+        None,
+        "pre_restart_server_active",
+    )
+    .await?;
     let owned_before = ports(&client, http, &admin_token)
         .await?
         .into_iter()
@@ -971,6 +1145,15 @@ async fn run_iteration(
         .ok_or("owned endpoint missing")?;
     let endpoint_id = owned_before["id"].as_str().ok_or("endpoint id")?.to_owned();
     let endpoint_uuid = Uuid::parse_str(&endpoint_id)?;
+    store_operation(
+        evidence,
+        "pre_restart_fixture_binding",
+        "update_port_binding",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        None,
+    );
     probe
         .update_port_binding(
             PROJECT_ID,
@@ -996,7 +1179,25 @@ async fn run_iteration(
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut terminal = false;
     while Instant::now() < deadline {
+        store_operation(
+            evidence,
+            "pre_restart_terminal_delete_window",
+            "get_resource",
+            backend,
+            probe.is_alive(),
+            Some(old_pid),
+            None,
+        );
         let resource = probe.get_resource(server_id).await?;
+        store_operation(
+            evidence,
+            "pre_restart_terminal_delete_window",
+            "list_non_terminal_lifecycle_operations",
+            backend,
+            probe.is_alive(),
+            Some(old_pid),
+            None,
+        );
         let nonterminal = probe
             .list_non_terminal_lifecycle_operations()
             .await?
@@ -1016,6 +1217,15 @@ async fn run_iteration(
         .into_iter()
         .find(|port| port["id"] == endpoint_id)
         .ok_or("owned endpoint disappeared before SIGKILL")?;
+    store_operation(
+        evidence,
+        "pre_restart_operation_observation",
+        "list_canonical_operations_page",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        None,
+    );
     let mut operation_id = probe
         .list_canonical_operations_page(PROJECT_ID, None, 100)
         .await?
@@ -1070,6 +1280,24 @@ async fn run_iteration(
     } else {
         None
     };
+    // No fixture or direct observation pool may overlap the restart boundary.
+    // The old daemon remains live through the intentional terminal-delete
+    // window; all direct writes and reads above finish before SIGKILL.
+    store_operation(
+        evidence,
+        "before_old_daemon_kill",
+        "close_test_owned_probe",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        None,
+    );
+    probe.close();
+    probe.require_closed_at_restart()?;
+    evidence.set(
+        "restart_probe_lifecycle",
+        json!({"closed_before_old_kill": true, "closed_before_replacement_start": true, "reopened_after_replacement_ready": false}),
+    );
     let kill_at = now();
     kill_process(child.child_mut()?)?;
     let _ = child.child_mut()?.wait();
@@ -1085,6 +1313,15 @@ async fn run_iteration(
 
     let new_controller = (format!("new-{run_id}"), format!("new-epoch-{run_id}"));
     fs::remove_file(&release).ok();
+    store_operation(
+        evidence,
+        "replacement_daemon_startup",
+        "start_replacement_daemon",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        None,
+    );
     let replacement_child = start_o3kd(
         root,
         backend,
@@ -1106,6 +1343,15 @@ async fn run_iteration(
     let new_start = proc_starttime(new_pid)?;
     let new_exe = proc_exe(new_pid)?;
     let new_digest = file_sha256(&new_exe)?;
+    store_operation(
+        evidence,
+        "replacement_daemon_startup",
+        "wait_replacement_readiness",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        Some(new_pid),
+    );
     let readiness = wait_ready(
         replacement.child_mut()?,
         new_http,
@@ -1177,6 +1423,29 @@ async fn run_iteration(
     evidence.checkpoint("readyz_verified")?;
     evidence.checkpoint("controller_identity_verified")?;
 
+    store_operation(
+        evidence,
+        "post_restart_probe_open",
+        "connect_fresh_test_owned_probe",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        Some(new_pid),
+    );
+    probe.reopen(backend).await?;
+    evidence.set(
+        "restart_probe_lifecycle",
+        json!({"closed_before_old_kill": true, "closed_before_replacement_start": true, "reopened_after_replacement_ready": true}),
+    );
+    store_operation(
+        evidence,
+        "post_restart_reconstruction",
+        "get_resource",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        Some(new_pid),
+    );
     let reconstructed_server = probe.get_resource(server_id).await?;
     if reconstructed_server.observed_state != "DELETED" {
         return Err("PostgreSQL restart did not reconstruct the terminal compute resource".into());
@@ -1189,6 +1458,15 @@ async fn run_iteration(
     let reconstructed_name = reconstructed_endpoint["name"]
         .as_str()
         .ok_or("reconstructed endpoint has no durable name")?;
+    store_operation(
+        evidence,
+        "post_restart_reconstruction",
+        "get_port",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        Some(new_pid),
+    );
     let reconstructed_port = probe
         .get_port(PROJECT_ID, &endpoint_uuid)
         .await?
@@ -1367,7 +1645,18 @@ async fn run_iteration(
     .await?;
     let (created_id, created_body, started) = create_task.await??;
     let accepted = started.elapsed().as_millis();
-    wait_state(&probe, created_id, "ACTIVE", Duration::from_secs(60)).await?;
+    wait_state(
+        &probe,
+        created_id,
+        "ACTIVE",
+        Duration::from_secs(60),
+        evidence,
+        backend,
+        Some(old_pid),
+        Some(new_pid),
+        "post_restart_new_server_active",
+    )
+    .await?;
     let create_accepted_at = now();
     let create_to_active_latency = create_start.elapsed().as_millis();
     evidence.set("contention", json!({"create_request_start":create_request_start,"waiter_marker_at":waiter_at,"repair_release_at":release_at,"repair_released_at":repair_released_at,"repair_completed_at":repair_completed_at,"create_accepted_at":create_accepted_at,"create_resource_id":created_id,"create_operation_id":created_body["operation_id"],"waiter_observed":true,"acceptance_latency_ms":accepted,"create_to_active_latency_ms":create_to_active_latency}));
@@ -1453,7 +1742,27 @@ async fn run_iteration(
         &format!("pp5-cleanup-{fixture}"),
     )
     .await;
-    let _ = wait_state(&probe, created_id, "DELETED", Duration::from_secs(30)).await;
+    let _ = wait_state(
+        &probe,
+        created_id,
+        "DELETED",
+        Duration::from_secs(30),
+        evidence,
+        backend,
+        Some(old_pid),
+        Some(new_pid),
+        "post_restart_cleanup_delete",
+    )
+    .await;
+    store_operation(
+        evidence,
+        "post_restart_teardown",
+        "list_resources",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        Some(new_pid),
+    );
     let owned_servers = probe
         .list_resources(PROJECT_ID, "compute_instance")
         .await?
@@ -1591,17 +1900,19 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
                     .map(|message| message.trim().to_owned())
             })
             .collect::<Vec<_>>();
+            let diagnostic = evidence
+                .data
+                .get("store_diagnostic")
+                .cloned()
+                .unwrap_or(Value::Null);
             let message = if cleanup_failures.is_empty() {
                 error.to_string()
             } else {
                 format!("{error}; {}", cleanup_failures.join("; "))
             };
+            let message = format!("{message}; store diagnostic: {diagnostic}");
             let _ = evidence.fail(&phase, &message);
-            if cleanup_failures.is_empty() {
-                Err(error)
-            } else {
-                Err(std::io::Error::other(message).into())
-            }
+            Err(std::io::Error::other(message).into())
         }
     }
 }
