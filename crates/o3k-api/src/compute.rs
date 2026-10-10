@@ -312,8 +312,27 @@ pub(crate) fn keypair_response(keypair: o3k_compute::Keypair) -> KeypairResponse
     }
 }
 
+/// Process-local diagnostic attached to compute error responses for
+/// in-process harnesses. It is never serialized into the northbound response.
+#[cfg(feature = "test-diagnostics")]
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct ComputeErrorDiagnostic {
+    pub phase: &'static str,
+    pub error: String,
+}
+
 pub(crate) fn compute_error(error: ComputeError) -> axum::response::Response {
-    match error {
+    compute_error_at(error, "compute request")
+}
+
+fn compute_error_at(error: ComputeError, _phase: &'static str) -> axum::response::Response {
+    #[cfg(feature = "test-diagnostics")]
+    let diagnostic = ComputeErrorDiagnostic {
+        phase: _phase,
+        error: format!("{error:?}"),
+    };
+    let response = match error {
         ComputeError::Unauthorized => keystone_error(
             StatusCode::UNAUTHORIZED,
             "Unauthorized",
@@ -396,7 +415,15 @@ pub(crate) fn compute_error(error: ComputeError) -> axum::response::Response {
             "Service Unavailable",
             "compute service is unavailable",
         ),
+    };
+    #[cfg(feature = "test-diagnostics")]
+    {
+        let mut response = response;
+        response.extensions_mut().insert(diagnostic);
+        response
     }
+    #[cfg(not(feature = "test-diagnostics"))]
+    response
 }
 
 pub(crate) fn cached_console_response(
@@ -1051,7 +1078,7 @@ pub(crate) async fn create_server(
                         server_id = %server_id,
                         "retaining server endpoints for the durable create outcome"
                     );
-                    return compute_error(error);
+                    return compute_error_at(error, "create server lifecycle");
                 }
                 // Compensate the request-owned endpoints *and* the endpoints the
                 // durable create intent still names: a terminally failed create
@@ -1085,7 +1112,7 @@ pub(crate) async fn create_server(
                     );
                 }
             }
-            compute_error(error)
+            compute_error_at(error, "create server lifecycle")
         }
     }
 }
@@ -1231,7 +1258,7 @@ pub(crate) async fn delete_server(
             .filter_map(|port_id| port_id.parse::<uuid::Uuid>().ok())
             .collect::<Vec<_>>(),
         Err(ComputeError::NotFound) => Vec::new(),
-        Err(error) => return compute_error(error),
+        Err(error) => return compute_error_at(error, "delete server attachment lookup"),
     };
     match service
         .delete_server_for_auth(&auth, ServerId::from_uuid(id))
@@ -1261,7 +1288,9 @@ pub(crate) async fn delete_server(
                 let _mutation_guard = state.network_mutation_lock.lock().await;
                 let attached = match service.live_attached_endpoint_ids().await {
                     Ok(set) => set,
-                    Err(error) => return compute_error(error),
+                    Err(error) => {
+                        return compute_error_at(error, "delete server attachment release");
+                    }
                 };
                 let releasable = owned_ports
                     .iter()
@@ -1283,7 +1312,7 @@ pub(crate) async fn delete_server(
             }
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(error) => compute_error(error),
+        Err(error) => compute_error_at(error, "delete server lifecycle"),
     }
 }
 

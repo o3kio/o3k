@@ -51,6 +51,10 @@ mod placement;
 mod volume;
 mod volume_attachment;
 
+#[cfg(feature = "test-diagnostics")]
+#[doc(hidden)]
+pub use compute::ComputeErrorDiagnostic;
+
 pub use volume::{
     VOLUME_ALLOCATION_METER, observe_volume_allocation, observe_volume_open_if_consuming,
     realize_native_volume_create, recover_native_volumes, remove_native_volume,

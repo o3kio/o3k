@@ -51,6 +51,7 @@ url.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
+o3k-api = { path = "../../crates/o3k-api", features = ["test-diagnostics"] }
 tower.workspace = true
 tokio-stream.workspace = true
 o3k-network-bin = { path = "../o3k-network" }

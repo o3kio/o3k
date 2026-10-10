@@ -3080,6 +3080,58 @@ mod dispatcher_tests {
     static PRODUCTION_MTLS_POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> =
         tokio::sync::Mutex::const_new(());
 
+    struct TestTaskOwnership {
+        network_servers: Vec<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>>,
+        reconcilers: Vec<tokio::task::JoinHandle<()>>,
+    }
+
+    impl TestTaskOwnership {
+        fn new() -> Self {
+            Self {
+                network_servers: Vec::new(),
+                reconcilers: Vec::new(),
+            }
+        }
+
+        async fn stop_and_join(&mut self) -> Result<(), &'static str> {
+            let mut all_stopped = true;
+            for task in &self.network_servers {
+                task.abort();
+            }
+            for task in &self.reconcilers {
+                task.abort();
+            }
+            for task in self.network_servers.drain(..) {
+                match task.await {
+                    Err(error) if error.is_cancelled() => {}
+                    _ => all_stopped = false,
+                }
+            }
+            for task in self.reconcilers.drain(..) {
+                match task.await {
+                    Err(error) if error.is_cancelled() => {}
+                    _ => all_stopped = false,
+                }
+            }
+            if all_stopped {
+                Ok(())
+            } else {
+                Err("test-owned background task did not stop by cancellation")
+            }
+        }
+    }
+
+    impl Drop for TestTaskOwnership {
+        fn drop(&mut self) {
+            for task in &self.network_servers {
+                task.abort();
+            }
+            for task in &self.reconcilers {
+                task.abort();
+            }
+        }
+    }
+
     async fn production_mtls_postgres_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
         PRODUCTION_MTLS_POSTGRES_TEST_LOCK.lock().await
     }
@@ -3249,6 +3301,24 @@ mod dispatcher_tests {
         token: &str,
         body: Option<serde_json::Value>,
     ) -> Result<(axum::http::StatusCode, serde_json::Value), Box<dyn std::error::Error>> {
+        let (status, value, _) = http_json_with_diagnostic(app, method, uri, token, body).await?;
+        Ok((status, value))
+    }
+
+    async fn http_json_with_diagnostic(
+        app: &axum::Router,
+        method: axum::http::Method,
+        uri: &str,
+        token: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<
+        (
+            axum::http::StatusCode,
+            serde_json::Value,
+            Option<o3k_api::ComputeErrorDiagnostic>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         use axum::body::Body;
         use axum::http::{Request, header};
         use tower::ServiceExt;
@@ -3266,6 +3336,10 @@ mod dispatcher_tests {
         };
         let response = app.clone().oneshot(request.body(body)?).await?;
         let status = response.status();
+        let diagnostic = response
+            .extensions()
+            .get::<o3k_api::ComputeErrorDiagnostic>()
+            .cloned();
         let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024).await?;
         let value = if bytes.is_empty() {
             serde_json::Value::Null
@@ -3274,7 +3348,61 @@ mod dispatcher_tests {
                 |_| serde_json::json!({"body": String::from_utf8_lossy(&bytes).to_string()}),
             )
         };
-        Ok((status, value))
+        Ok((status, value, diagnostic))
+    }
+
+    async fn wait_for_server_create_convergence(
+        app: &axum::Router,
+        store: &o3k_store::unified::O3kStore,
+        token: &str,
+        server_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use axum::http::{Method, StatusCode};
+        use o3k_store::DurableStore as _;
+
+        let mut last_state = String::from("server has not reached ACTIVE");
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let (status, body) = http_json(
+                    app,
+                    Method::GET,
+                    &format!("/v2.1/project-a/servers/{server_id}"),
+                    token,
+                    None,
+                )
+                .await?;
+                if status == StatusCode::OK && body["server"]["status"] == "ACTIVE" {
+                    let server_uuid = Uuid::parse_str(server_id)?;
+                    let resource = store.get_resource(server_uuid).await?;
+                    let create_intent: o3k_provider::CreateInstanceRequest =
+                        serde_json::from_str(&resource.desired_state)?;
+                    let create_operation = store.get_operation(create_intent.operation_id).await?;
+                    last_state = format!(
+                        "observed_state:{}, generation:{}, observed_generation:{}, provider_id:{:?}, create_operation={{id:{}, state:{:?}, error_category:{:?}, error_message:{:?}}}",
+                        resource.observed_state,
+                        resource.generation,
+                        resource.observed_generation,
+                        resource.provider_id,
+                        create_operation.id,
+                        create_operation.state,
+                        create_operation.error_category,
+                        create_operation.error_message,
+                    );
+                    if resource.observed_state == "ACTIVE"
+                        && resource.provider_id.is_some()
+                        && create_operation.state == o3k_store::OperationState::Succeeded
+                    {
+                        return Ok::<(), Box<dyn std::error::Error>>(());
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            format!("server {server_id} create did not durably converge: {last_state}")
+        })??;
+        Ok(())
     }
 
     async fn wait_for_http_fabric_plan(
@@ -3427,6 +3555,27 @@ mod dispatcher_tests {
     #[tokio::test]
     async fn supported_http_server_lifecycle_dispatches_incremental_fabric_plans_over_mtls()
     -> Result<(), Box<dyn std::error::Error>> {
+        let mut owned_tasks = TestTaskOwnership::new();
+        let test_result =
+            supported_http_server_lifecycle_dispatches_incremental_fabric_plans_over_mtls_inner(
+                &mut owned_tasks,
+            )
+            .await;
+        let teardown_result = owned_tasks.stop_and_join().await;
+        match (test_result, teardown_result) {
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(teardown)) => Err(std::io::Error::other(format!(
+                "test failed: {error}; task teardown failed: {teardown}"
+            ))
+            .into()),
+            (Ok(()), Err(error)) => Err(std::io::Error::other(error).into()),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    async fn supported_http_server_lifecycle_dispatches_incremental_fabric_plans_over_mtls_inner(
+        owned_tasks: &mut TestTaskOwnership,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use axum::http::{Method, StatusCode};
         use o3k_store::{DurableStore as _, NetworkRepository as _};
 
@@ -3484,7 +3633,6 @@ mod dispatcher_tests {
                 13_u8,
             ),
         ];
-        let mut server_tasks = Vec::new();
         let mut target_map = BTreeMap::new();
         let mut realizer_logs = BTreeMap::new();
         let mut removal_logs = BTreeMap::new();
@@ -3516,8 +3664,9 @@ mod dispatcher_tests {
         )?;
         let agent_d_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let agent_d_address = agent_d_listener.local_addr()?;
-        let _agent_d_server_task =
-            start_mtls_network_agent(agent_d_listener, agent_d_service).await?;
+        owned_tasks
+            .network_servers
+            .push(start_mtls_network_agent(agent_d_listener, agent_d_service).await?);
         target_map.insert(
             "compute-d".to_owned(),
             NetworkAgentControlTarget {
@@ -3592,7 +3741,9 @@ mod dispatcher_tests {
                 o3k_network_bin::agent::NetworkAgentService::new_dynamic(executor, realizer)?;
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let address = listener.local_addr()?;
-            server_tasks.push(start_mtls_network_agent(listener, service).await?);
+            owned_tasks
+                .network_servers
+                .push(start_mtls_network_agent(listener, service).await?);
             target_map.insert(
                 host_id.to_owned(),
                 NetworkAgentControlTarget {
@@ -3673,8 +3824,9 @@ mod dispatcher_tests {
                 .await?;
         }
         let resolver_errors = Arc::new(Mutex::new(Vec::new()));
+        let fake_compute_provider = o3k_provider::FakeComputeProvider::new();
         let compute_provider = HttpResolvedComputeProvider {
-            inner: o3k_provider::FakeComputeProvider::new(),
+            inner: fake_compute_provider.clone(),
             resolver,
             registry: (*registry).clone(),
             resolver_errors: resolver_errors.clone(),
@@ -3701,9 +3853,15 @@ mod dispatcher_tests {
                 .with_scheduler(o3k_scheduler::Scheduler::new(placement))
                 .with_agent_registry(registry.clone())
                 .with_binding_projector(projector);
-        let create_reconciler = compute.spawn_create_convergence_reconciler(1);
-        let lifecycle_reconciler = compute.spawn_lifecycle_convergence_reconciler(1);
-        let orphan_reconciler = compute.spawn_orphan_endpoint_reconciler(1);
+        owned_tasks
+            .reconcilers
+            .push(compute.spawn_create_convergence_reconciler(1));
+        owned_tasks
+            .reconcilers
+            .push(compute.spawn_lifecycle_convergence_reconciler(1));
+        owned_tasks
+            .reconcilers
+            .push(compute.spawn_orphan_endpoint_reconciler(1));
         let app = o3k_api::router_with_state(
             o3k_api::AppState::new()
                 .with_identity(identity)
@@ -3763,7 +3921,7 @@ mod dispatcher_tests {
         let mut server_ids = Vec::new();
         for (n, port_id) in port_ids.iter().enumerate() {
             let body = serde_json::json!({"server":{"name":format!("fabric-server-{run}-{n}"),"image":{"id":"image-a"},"flavor":{"id":"00000000-0000-0000-0000-000000000001"},"networks":[{"port":port_id}]}});
-            let (status, response) = http_json(
+            let (status, response, create_diagnostic) = http_json_with_diagnostic(
                 &app,
                 Method::POST,
                 "/v2.1/project-a/servers",
@@ -3771,7 +3929,11 @@ mod dispatcher_tests {
                 Some(body),
             )
             .await?;
-            assert_eq!(status, StatusCode::ACCEPTED, "server {n}: {response}");
+            assert_eq!(
+                status,
+                StatusCode::ACCEPTED,
+                "server {n}: {response}; compute_error={create_diagnostic:?}"
+            );
             server_ids.push(
                 response["server"]["id"]
                     .as_str()
@@ -3972,6 +4134,9 @@ mod dispatcher_tests {
             .await?;
             assert_eq!(status, StatusCode::OK, "{body}");
         }
+        for server in &server_ids {
+            wait_for_server_create_convergence(&app, store.as_ref(), &token, server).await?;
+        }
 
         let work_before_c_delete = store
             .list_network_plan_work_history()
@@ -4000,7 +4165,7 @@ mod dispatcher_tests {
             .lock()
             .map_err(|_| "lifecycle event log poisoned")?
             .len();
-        let (status, body) = http_json(
+        let (status, body, delete_diagnostic) = http_json_with_diagnostic(
             &app,
             Method::DELETE,
             &format!("/v2.1/project-a/servers/{}", server_ids[2]),
@@ -4008,9 +4173,30 @@ mod dispatcher_tests {
             None,
         )
         .await?;
+        let c_delete_failure = if status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT
+        {
+            String::new()
+        } else {
+            let snapshot: Result<String, Box<dyn std::error::Error>> = async {
+                let resource = store.get_resource(Uuid::parse_str(&server_ids[2])?).await?;
+                let create_intent: o3k_provider::CreateInstanceRequest =
+                    serde_json::from_str(&resource.desired_state)?;
+                let create_operation = store.get_operation(create_intent.operation_id).await?;
+                Ok(format!(
+                    "durable={{state:{}, generation:{}, observed_generation:{}, provider_id:{:?}}}; create_operation={create_operation:?}; fake_provider_instance_ids={:?}",
+                    resource.observed_state,
+                    resource.generation,
+                    resource.observed_generation,
+                    resource.provider_id,
+                    fake_compute_provider.instance_ids(),
+                ))
+            }
+            .await;
+            format!("compute_error={delete_diagnostic:?}; state_snapshot={snapshot:?}")
+        };
         assert!(
             status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT,
-            "delete server C: {status} {body}"
+            "delete server C: {status} {body}; {c_delete_failure}"
         );
         let c_delete_work_result =
             tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -4236,7 +4422,7 @@ mod dispatcher_tests {
         .map_err(|_| "port C canonical endpoint did not retire after HTTP deletion")??;
 
         for server in &server_ids[..2] {
-            let (status, body) = http_json(
+            let (status, body, diagnostic) = http_json_with_diagnostic(
                 &app,
                 Method::DELETE,
                 &format!("/v2.1/project-a/servers/{server}"),
@@ -4246,7 +4432,7 @@ mod dispatcher_tests {
             .await?;
             assert!(
                 status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT,
-                "delete server: {status} {body}"
+                "delete server: {status} {body}; compute_error={diagnostic:?}"
             );
         }
         for port in &port_ids[..2] {
@@ -4446,24 +4632,8 @@ mod dispatcher_tests {
             .as_str()
             .ok_or("compute-restart server id")?
             .to_owned();
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                let (status, body) = http_json(
-                    &app,
-                    Method::GET,
-                    &format!("/v2.1/project-a/servers/{restarted_server_id}"),
-                    &token,
-                    None,
-                )
-                .await?;
-                if status == StatusCode::OK && body["server"]["status"] == "ACTIVE" {
-                    break Ok::<(), Box<dyn std::error::Error>>(());
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .map_err(|_| "compute-agent restart did not complete HTTP server creation")??;
+        wait_for_server_create_convergence(&app, store.as_ref(), &token, &restarted_server_id)
+            .await?;
         let d_work = store.list_network_plan_work_history().await?;
         assert!(
             d_work.iter().any(|work| {
@@ -4481,7 +4651,7 @@ mod dispatcher_tests {
                 > plans_before_compute_restart,
             "the unchanged network agent must realize the endpoint after compute-agent restart"
         );
-        let (status, body) = http_json(
+        let (status, body, delete_diagnostic) = http_json_with_diagnostic(
             &app,
             Method::DELETE,
             &format!("/v2.1/project-a/servers/{restarted_server_id}"),
@@ -4489,9 +4659,90 @@ mod dispatcher_tests {
             None,
         )
         .await?;
+        let delete_failure_snapshot = if status == StatusCode::ACCEPTED
+            || status == StatusCode::NO_CONTENT
+        {
+            String::new()
+        } else {
+            let snapshot: Result<String, Box<dyn std::error::Error>> = async {
+                let server_uuid = Uuid::parse_str(&restarted_server_id)?;
+                let resource = store.get_resource(server_uuid).await?;
+                let lifecycle_operations = store
+                    .list_canonical_operations_page("project-a", None, 100)
+                    .await?
+                    .into_iter()
+                    .filter(|operation| {
+                        operation.resource_id.as_deref() == Some(&restarted_server_id)
+                    })
+                    .collect::<Vec<_>>();
+                let pending_operations = lifecycle_operations
+                    .iter()
+                    .filter(|operation| {
+                        !matches!(
+                            operation.state,
+                            o3k_store::OperationState::Succeeded
+                                | o3k_store::OperationState::Failed
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let compute_agent = registry.snapshot("compute-agent-d").await;
+                let placement_state = placement_for_negative_tests
+                    .provider("compute-agent-d")
+                    .await
+                    .ok();
+                let restart_port_uuid = Uuid::parse_str(&restart_port_id)?;
+                let port_binding = store.get_port_by_id(&restart_port_uuid).await?;
+                let fabric_history = store
+                    .list_network_plan_work_history()
+                    .await?
+                    .into_iter()
+                    .filter(|work| {
+                        work.target_host_id == "compute-d"
+                            || work.target_agent_id == "network-agent-d"
+                    })
+                    .collect::<Vec<_>>();
+                let unresolved_fabric = store.list_unresolved_network_plan_work().await?;
+                let fabric_participants = realizer_logs
+                    .iter()
+                    .map(|(agent, plans)| {
+                        let plan_count = plans.lock().map(|plans| plans.len()).ok();
+                        let remove_count = removal_logs
+                            .get(agent)
+                            .and_then(|logs| logs.lock().ok().map(|logs| logs.len()));
+                        let absence_proven = absence_flags
+                            .get(agent)
+                            .map(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
+                        (agent, plan_count, remove_count, absence_proven)
+                    })
+                    .collect::<Vec<_>>();
+                let agent_d_participant = (
+                    "network-agent-d",
+                    agent_d_plans.lock().map(|plans| plans.len()).ok(),
+                    agent_d_removes.lock().map(|removes| removes.len()).ok(),
+                    Some(agent_d_absence.load(std::sync::atomic::Ordering::SeqCst)),
+                );
+                Ok(format!(
+                    "durable={{generation:{}, observed_generation:{}, observed_state:{}, provider_instance_id:{:?}}}; \
+                     lifecycle_operations={lifecycle_operations:?}; pending_operations={pending_operations:?}; \
+                     compute_agent_d={compute_agent:?}; placement_compute_agent_d={placement_state:?}; \
+                     fake_provider_instance_ids={:?}; port_binding={port_binding:?}; \
+                     fabric_history={fabric_history:?}; unresolved_fabric={unresolved_fabric:?}; \
+                     fabric_participants={fabric_participants:?}; agent_d_participant={agent_d_participant:?}",
+                    resource.generation,
+                    resource.observed_generation,
+                    resource.observed_state,
+                    resource.provider_id,
+                    fake_compute_provider.instance_ids(),
+                ))
+            }
+            .await;
+            format!(
+                "HTTP DELETE failed; diagnostic={delete_diagnostic:?}; state_snapshot={snapshot:?}"
+            )
+        };
         assert!(
             status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT,
-            "{body}"
+            "{body}; {delete_failure_snapshot}"
         );
         let (status, body) = http_json(
             &app,
@@ -4827,12 +5078,10 @@ mod dispatcher_tests {
             status == StatusCode::NO_CONTENT || status == StatusCode::ACCEPTED,
             "delete network: {status} {body}"
         );
-        for task in server_tasks {
-            task.abort();
-        }
-        for task in [create_reconciler, lifecycle_reconciler, orphan_reconciler] {
-            task.abort();
-        }
+        owned_tasks
+            .stop_and_join()
+            .await
+            .map_err(|error| format!("test task teardown failed: {error}"))?;
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
