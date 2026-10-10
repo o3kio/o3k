@@ -153,6 +153,8 @@ class GuestControlRegression(unittest.TestCase):
         self.assertNotIn("--remove-all-storage", DRIVER)
         self.assertIn("fabric-v3-owned-domain-storage.py", DRIVER)
         self.assertIn('rm -- "$disk" "$seed"', DRIVER)
+        self.assertIn('owned-domain-storage-check.py"', DRIVER)
+        self.assertIn('owned-domain-storage-check.sha256"', DRIVER)
 
     def test_failure_cleanup_requires_observed_absence_and_has_one_deadline(self):
         start = DRIVER.index("cleanup_owned_api_resource() {")

@@ -160,11 +160,13 @@ git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}' >"$EVIDENCE/environment/harness_tree.
 git -C "$ROOT_DIR" merge-base HEAD "$ACCEPTED_HARNESS_BASE" >"$EVIDENCE/environment/accepted-harness-merge-base.txt"
 printf '%s\n' "$ACCEPTED_HARNESS_BASE" >"$EVIDENCE/environment/accepted-harness-base.txt"
 cp "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" "$EVIDENCE/environment/campaign-driver.sh"
+cp "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" "$EVIDENCE/environment/owned-domain-storage-check.py"
 cp "$ROOT_DIR/tests/fabric-v3-build-probe-image.sh" "$EVIDENCE/environment/build-probe-image.sh"
 cp "$ROOT_DIR/tests/fabric-v3-guest-control.py" "$EVIDENCE/environment/guest-control-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-install-agent-host.sh" "$EVIDENCE/environment/install-agent-host.sh"
 cp "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" "$EVIDENCE/environment/boundary-capture-helper.py"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" >"$EVIDENCE/environment/owned-domain-storage-check.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" >"$EVIDENCE/environment/boundary-capture-helper.sha256"
 
