@@ -557,19 +557,19 @@ jobs:
         if: always() && steps.guard.outputs.ready == 'true'
         run: bash scripts/cleanup-disposable-testlab.sh
 
-      - name: Bind generic phase to campaign PostgreSQL
+      - name: Bind generic phase to workspace PostgreSQL
         id: generic_postgres_bootstrap
         if: steps.protected_preflight.outcome == 'success' && steps.guard.outputs.ready == 'true' && steps.postgres_purpose.outcome == 'success'
         run: |
           set -euo pipefail
-          test "${O3K_PP5_CAMPAIGN_DATABASE_URL##*/}" = "o3k_pp5_s5_${GITHUB_RUN_ID}"
-          unset O3K_PP5_WORKSPACE_DATABASE_URL O3K_PP5_ENDPOINT_DATABASE_URL O3K_PP5_P13_DATABASE_URL
+          test "${O3K_PP5_WORKSPACE_DATABASE_URL##*/}" = "o3k_workspace_test_${GITHUB_RUN_ID}"
+          unset O3K_PP5_CAMPAIGN_DATABASE_URL O3K_PP5_ENDPOINT_DATABASE_URL O3K_PP5_P13_DATABASE_URL
           {
             printf 'O3K_DATABASE_BACKEND=postgres\n'
-            printf 'O3K_DATABASE_URL=%s\n' "${O3K_PP5_CAMPAIGN_DATABASE_URL}"
+            printf 'O3K_DATABASE_URL=%s\n' "${O3K_PP5_WORKSPACE_DATABASE_URL}"
             printf 'O3K_P15_7_POSTGRES_MODE=external\n'
             printf 'O3K_P15_7_EXTERNAL_PG_TARGET=%s\n' "${O3K_PP5_POSTGRES_TARGET}"
-            printf 'O3K_PP5_WORKSPACE_DATABASE_URL=\n'
+            printf 'O3K_PP5_CAMPAIGN_DATABASE_URL=\n'
             printf 'O3K_PP5_ENDPOINT_DATABASE_URL=\n'
             printf 'O3K_PP5_P13_DATABASE_URL=\n'
           } >>"${GITHUB_ENV}"
@@ -603,6 +603,7 @@ jobs:
         if: steps.protected_preflight.outcome == 'success' && steps.guard.outputs.ready == 'true' && steps.generic_image.outcome == 'success'
         continue-on-error: true
         env:
+          O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-generic
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_PROVIDER: agent
           # Bind the daemon/TestLab source identity to the requested target,
@@ -649,6 +650,10 @@ jobs:
           GITHUB_BASE_REF: ${{ github.base_ref }}
         run: bash scripts/real-host-pre-run-guard.sh
 
+      - name: Preserve generic epoch inventory baseline
+        if: steps.generic_guard.outputs.ready == 'true'
+        run: cp target/real-host-workflow-artifacts/real-host-owned-inventory-baseline.json target/real-host-workflow-artifacts/real-host-generic-inventory-baseline.json
+
       - name: Run public real-host lifecycle
         id: lifecycle
         if: steps.protected_preflight.outcome == 'success' && steps.generic_guard.outputs.ready == 'true'
@@ -664,7 +669,7 @@ jobs:
           # dispatch budget so the API can return a terminal error response.
           O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS: 25
           O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ github.workspace }}/target/real-host-workflow-artifacts/agent-inspect-resource-id
-          O3K_AGENT_INSPECT_PROBE_OUTPUT: /var/lib/o3k-testlab/${{ github.run_id }}/agent-inspect-probe.json
+          O3K_AGENT_INSPECT_PROBE_OUTPUT: /var/lib/o3k-testlab/${{ github.run_id }}-generic/agent-inspect-probe.json
         run: bash tests/testlab-libvirt.sh
 
       - name: Run compute-agent mTLS command evidence
@@ -683,9 +688,107 @@ jobs:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
         run: bash tests/real-compute-agent-process-mtls.sh
 
+      - name: Stop and prove generic TestLab epoch absent
+        id: generic_cleanup
+        if: always() && steps.generic_bootstrap.outcome == 'success'
+        env:
+          O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-generic
+          O3K_TESTLAB_STATE_ROOT: /var/lib/o3k-testlab/${{ github.run_id }}-generic
+          O3K_TESTLAB_PID_ROOT: ${{ runner.temp }}/o3k-testlab-pids/${{ github.run_id }}-generic
+          O3K_REAL_HOST_INVENTORY_ROOT: ${{ runner.temp }}/o3k-testlab-inventory/${{ github.run_id }}-generic
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_GENERIC_BASELINE: target/real-host-workflow-artifacts/real-host-generic-inventory-baseline.json
+          O3K_REAL_HOST_GENERIC_AFTER: target/real-host-workflow-artifacts/real-host-generic-inventory-after.json
+          O3K_REAL_HOST_OPENSTACK_INVENTORY: "true"
+        run: |
+          set -euo pipefail
+          workload_status=0
+          python3 scripts/pp5-testlab-epoch-guard.py generic-workloads \
+            --run-id "${GITHUB_RUN_ID}" \
+            --artifact "target/real-host-workflow-artifacts/pp5-generic-workloads-before-teardown.json" \
+            || workload_status=$?
+          cleanup_status=0
+          bash scripts/cleanup-disposable-testlab.sh || cleanup_status=$?
+          inventory_status=0
+          O3K_REAL_HOST_OPENSTACK_INVENTORY=false \
+            python3 scripts/real-host-owned-inventory.py "${O3K_REAL_HOST_GENERIC_AFTER}" || inventory_status=$?
+          guard_status="${workload_status}"
+          if test "${guard_status}" -eq 0 && test "${cleanup_status}" -ne 0; then
+            guard_status="${cleanup_status}"
+          fi
+          if test "${guard_status}" -eq 0 && test "${inventory_status}" -ne 0; then
+            guard_status="${inventory_status}"
+          fi
+          python3 scripts/pp5-testlab-epoch-guard.py generic-cleanup \
+            --run-id "${GITHUB_RUN_ID}" --runner-temp "${RUNNER_TEMP}" \
+            --state-root "/var/lib/o3k-testlab/${GITHUB_RUN_ID}-generic" \
+            --cleanup-status "${guard_status}" \
+            --baseline "${O3K_REAL_HOST_GENERIC_BASELINE}" --after "${O3K_REAL_HOST_GENERIC_AFTER}" \
+            --workloads "target/real-host-workflow-artifacts/pp5-generic-workloads-before-teardown.json" \
+            --artifact "target/real-host-workflow-artifacts/pp5-generic-epoch-cleanup.json"
+
+      - name: Bind PP.5 lane to campaign PostgreSQL
+        id: pp5_postgres_bootstrap
+        if: steps.generic_cleanup.outcome == 'success' && steps.lifecycle.outcome == 'success' && steps.agent_mtls.outcome == 'success' && steps.agent_process.outcome == 'success'
+        run: |
+          set -euo pipefail
+          test "${O3K_PP5_CAMPAIGN_DATABASE_URL##*/}" = "o3k_pp5_s5_${GITHUB_RUN_ID}"
+          unset O3K_PP5_WORKSPACE_DATABASE_URL O3K_PP5_ENDPOINT_DATABASE_URL O3K_PP5_P13_DATABASE_URL
+          {
+            printf 'O3K_DATABASE_BACKEND=postgres\n'
+            printf 'O3K_DATABASE_URL=%s\n' "${O3K_PP5_CAMPAIGN_DATABASE_URL}"
+            printf 'O3K_PP5_WORKSPACE_DATABASE_URL=\n'
+          } >>"${GITHUB_ENV}"
+
+      - name: Prepare fresh PP.5 TestLab image
+        id: pp5_image
+        if: steps.generic_cleanup.outcome == 'success' && steps.pp5_postgres_bootstrap.outcome == 'success'
+        continue-on-error: true
+        env:
+          CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
+          CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
+        run: |
+          set -euo pipefail
+          image_path="$(mktemp "${RUNNER_TEMP}/cirros-0.6.3-x86_64-disk.img.pp5.XXXXXX")"
+          printf 'o3k-disposable-image-v1\nrun=%s\nphase=pp5\n' "${GITHUB_RUN_ID}" >"${image_path}.o3k-owned"
+          chmod 0600 "${image_path}.o3k-owned"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 \
+            --proto '=https' --tlsv1.2 --output "${image_path}" "${CIRROS_IMAGE_URL}"
+          printf '%s  %s\n' "${CIRROS_IMAGE_SHA256}" "${image_path}" \
+            | sha256sum --check --strict --status
+          chmod 0644 "${image_path}"
+          printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >>"${GITHUB_ENV}"
+
+      - name: Bootstrap fresh PP.5 lane TestLab
+        id: pp5_bootstrap
+        if: steps.pp5_image.outcome == 'success'
+        continue-on-error: true
+        env:
+          O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_PROVIDER: agent
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_LOG_FILTER: debug
+          O3K_COMPUTE_LOG_FILTER: debug
+          O3K_TESTLAB_ADDITIONAL_AGENT_IDS: block-a,block-b,block-c,block-d,block-e
+          O3K_TESTLAB_CONTROL_BIND_ADDR: 0.0.0.0
+          O3K_AGENT_INSPECT_PROBE_ENABLED: true
+          O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ github.workspace }}/target/real-host-workflow-artifacts/agent-inspect-resource-id
+        run: bash scripts/bootstrap-disposable-testlab.sh
+
+      - name: Verify fresh PP.5 lane preconditions
+        id: pp5_lane_preconditions
+        if: steps.pp5_bootstrap.outcome == 'success'
+        env:
+          O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5
+          O3K_TESTLAB_STATE_ROOT: /var/lib/o3k-testlab/${{ github.run_id }}-pp5
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_P15_7_PHASE: ${{ inputs.lane || 'integrated' }}
+        run: bash scripts/pp5-testlab-epoch-guard.sh
+
       - name: Prepare pinned P15.7 VM host image
         id: p15_7_host_image
-        if: steps.protected_preflight.outcome == 'success' && steps.generic_guard.outputs.ready == 'true'
+        if: steps.pp5_lane_preconditions.outcome == 'success'
         continue-on-error: true
         env:
           P15_7_HOST_IMAGE_URL: https://cloud-images.ubuntu.com/releases/releases/noble/release-20260911/ubuntu-24.04-server-cloudimg-amd64.img
@@ -709,8 +812,12 @@ jobs:
 
       - name: Run selected PP.5 acceptance lane
         id: p15_7
-        if: steps.protected_preflight.outcome == 'success' && steps.generic_guard.outputs.ready == 'true' && steps.p15_7_host_image.outcome == 'success'
+        if: steps.pp5_lane_preconditions.outcome == 'success' && steps.p15_7_host_image.outcome == 'success'
         env:
+          O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5
+          O3K_TESTLAB_STATE_ROOT: /var/lib/o3k-testlab/${{ github.run_id }}-pp5
+          O3K_TESTLAB_PID_ROOT: ${{ runner.temp }}/o3k-testlab-pids/${{ github.run_id }}-pp5
+          O3K_PP5_LANE_PRECONDITIONS: target/real-host-workflow-artifacts/pp5-lane-preconditions.json
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_P15_7_REAL_HOST: "1"
           O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
@@ -742,7 +849,7 @@ jobs:
         if: always() && steps.protected_preflight.outcome == 'success'
         run: |
           output=target/real-host-workflow-artifacts/create-diagnostics.log
-          state_root="/var/lib/o3k-testlab/${GITHUB_RUN_ID}"
+          state_root="/var/lib/o3k-testlab/${GITHUB_RUN_ID}-pp5"
           {
             printf 'artifact_type=protected-create-diagnostics\n'
             printf 'source_commit=%s\n' "${TARGET_SHA}"
@@ -760,7 +867,7 @@ jobs:
         if: always() && steps.protected_preflight.outcome == 'success'
         run: |
           output=target/real-host-workflow-artifacts/console-boundary-diagnostics.log
-          state_root="/var/lib/o3k-testlab/${GITHUB_RUN_ID}"
+          state_root="/var/lib/o3k-testlab/${GITHUB_RUN_ID}-pp5"
           {
             printf 'artifact_type=protected-console-boundary-diagnostics\n'
             printf 'source_commit=%s\n' "${TARGET_SHA}"
@@ -801,8 +908,18 @@ jobs:
           } >"${output}"
           chmod 0644 "${output}"
 
+      - name: Stop and remove PP.5 lane TestLab before database cleanup
+        id: pp5_testlab_cleanup
+        if: always() && steps.pp5_bootstrap.outcome == 'success'
+        env:
+          O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5
+          O3K_TESTLAB_STATE_ROOT: /var/lib/o3k-testlab/${{ github.run_id }}-pp5
+          O3K_TESTLAB_PID_ROOT: ${{ runner.temp }}/o3k-testlab-pids/${{ github.run_id }}-pp5
+          O3K_REAL_HOST_INVENTORY_ROOT: ${{ runner.temp }}/o3k-testlab-inventory/${{ github.run_id }}-pp5
+        run: bash scripts/cleanup-disposable-testlab.sh
+
       - name: Clean up run-owned PP.5 PostgreSQL purpose databases
-        if: always()
+        if: always() && (steps.generic_bootstrap.outcome != 'success' || steps.generic_cleanup.outcome == 'success') && (steps.pp5_bootstrap.outcome != 'success' || steps.pp5_testlab_cleanup.outcome == 'success')
         env:
           O3K_PP5_RUN_ID: ${{ github.run_id }}
           O3K_PP5_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
@@ -815,7 +932,7 @@ jobs:
           fi
 
       - name: Restore local PP.5 PostgreSQL service state
-        if: always()
+        if: always() && (steps.generic_bootstrap.outcome != 'success' || steps.generic_cleanup.outcome == 'success') && (steps.pp5_bootstrap.outcome != 'success' || steps.pp5_testlab_cleanup.outcome == 'success')
         env:
           O3K_PP5_RUN_ID: ${{ github.run_id }}
           O3K_PP5_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
@@ -831,10 +948,6 @@ jobs:
       # also force the database's bridge-networked docker veth pair into the
       # foreign-link digest; its random per-container identity falsely failed
       # the foreign-state comparison in certification attempts 4 and 5.
-      - name: Stop and remove disposable TestLab
-        if: always()
-        run: bash scripts/cleanup-disposable-testlab.sh
-
       - name: Remove protected operator authority file
         if: always()
         run: |
@@ -903,6 +1016,12 @@ jobs:
             target/real-host-workflow-artifacts/disposable-testlab-startup-diagnostics.log
             target/real-host-workflow-artifacts/real-host-owned-inventory-baseline.json
             target/real-host-workflow-artifacts/real-host-owned-inventory-after.json
+            target/real-host-workflow-artifacts/real-host-generic-inventory-baseline.json
+            target/real-host-workflow-artifacts/real-host-generic-inventory-after.json
+            target/real-host-workflow-artifacts/pp5-generic-epoch-cleanup.json
+            target/real-host-workflow-artifacts/pp5-generic-workloads-before-teardown.json
+            target/real-host-workflow-artifacts/pp5-lane-preconditions.json
+            target/real-host-workflow-artifacts/pp5-lane-initial-state.json
             target/real-host-workflow-artifacts/real-host-workflow-result.json
             target/real-host-workflow-artifacts/resource-leak-result.json
             target/real-host-workflow-artifacts/libvirt-result.json

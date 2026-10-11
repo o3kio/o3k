@@ -4,13 +4,13 @@ set -Eeuo pipefail
 # Remove only prior disposable TestLab runs that carry the O3K ownership
 # marker. The per-run cleanup script remains the authority for process
 # identity, state ownership, and bounded shutdown.
-RUN_ID="${GITHUB_RUN_ID:-${O3K_RUN_ID:-local-$$}}"
+RUN_ID="${O3K_TESTLAB_RUN_ID:-${GITHUB_RUN_ID:-${O3K_RUN_ID:-local-$$}}}"
 RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 STATE_BASE="${O3K_TESTLAB_STATE_BASE:-/var/lib/o3k-testlab}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLEANUP_SCRIPT="${ROOT_DIR}/scripts/cleanup-disposable-testlab.sh"
 
-if [[ ! "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]]; then
+if [[ ! "$RUN_ID" =~ ^[0-9]+(-generic|-pp5)?$|^local-[0-9]+(-generic|-pp5)?$ ]]; then
   RUN_ID="local-$$"
 fi
 [[ "$RUNNER_TEMP" == /* && "$RUNNER_TEMP" != *..* && -d "$RUNNER_TEMP" && ! -L "$RUNNER_TEMP" ]] || {
@@ -36,7 +36,7 @@ for base_dir in "${STATE_BASES[@]}"; do
   for state_root in "$base_dir"/*; do
     [[ -d "$state_root" && ! -L "$state_root" ]] || continue
     stale_run_id="${state_root##*/}"
-    [[ "$stale_run_id" =~ ^[0-9]+$|^local-[0-9]+$ ]] || continue
+    [[ "$stale_run_id" =~ ^[0-9]+(-generic|-pp5)?$|^local-[0-9]+(-generic|-pp5)?$ ]] || continue
     [[ "$stale_run_id" != "$RUN_ID" ]] || continue
     marker="$state_root/.o3k-run-owned"
     sudo -n test -f "$marker" 2>/dev/null && ! sudo -n test -L "$marker" 2>/dev/null || continue
@@ -47,7 +47,7 @@ for base_dir in "${STATE_BASES[@]}"; do
     }
 
     echo "stale cleanup: removing prior owned run ${stale_run_id}"
-    RUNNER_TEMP="$RUNNER_TEMP" GITHUB_RUN_ID="$stale_run_id" \
+    RUNNER_TEMP="$RUNNER_TEMP" O3K_TESTLAB_RUN_ID="$stale_run_id" \
       O3K_TESTLAB_STATE_ROOT="$state_root" \
       O3K_REAL_HOST_INVENTORY_ROOT="${RUNNER_TEMP%/}/o3k-testlab-inventory/${stale_run_id}" \
       O3K_TESTLAB_PID_ROOT="${RUNNER_TEMP%/}/o3k-testlab-pids/${stale_run_id}" \
