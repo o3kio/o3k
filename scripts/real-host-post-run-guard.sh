@@ -10,6 +10,8 @@ AGENT_PROCESS_RESULT="${ARTIFACT_DIR}/compute-agent-process-mtls-result.json"
 P15_7_RESULT="${ARTIFACT_DIR}/p15-7-gate-result.json"
 STEP_STATUS="${O3K_REAL_HOST_WORKFLOW_STEP_STATUS:-skipped}"
 P15_7_STEP_STATUS="${O3K_REAL_HOST_P15_7_STEP_STATUS:-skipped}"
+PP5_LANE="${O3K_REAL_HOST_PP5_LANE:-integrated}"
+MICROGATE_STEP_STATUS="${O3K_REAL_HOST_PP5_MICROGATE_STEP_STATUS:-skipped}"
 CURRENT_INVENTORY="${ARTIFACT_DIR}/real-host-owned-inventory-after.json"
 mkdir -p "${ARTIFACT_DIR}"
 
@@ -29,9 +31,9 @@ then
     fi
 fi
 
-python3 - "${RESULT_PATH}" "${LIFECYCLE_RESULT}" "${AGENT_PROCESS_RESULT}" "${P15_7_RESULT}" "${STEP_STATUS}" "${P15_7_STEP_STATUS}" "${CURRENT_INVENTORY}" "${inventory_status}" "${LEAK_RESULT_PATH}" <<'PY'
+python3 - "${RESULT_PATH}" "${LIFECYCLE_RESULT}" "${AGENT_PROCESS_RESULT}" "${P15_7_RESULT}" "${STEP_STATUS}" "${P15_7_STEP_STATUS}" "${CURRENT_INVENTORY}" "${inventory_status}" "${LEAK_RESULT_PATH}" "${PP5_LANE}" "${MICROGATE_STEP_STATUS}" "${ARTIFACT_DIR}/pp5-protected-harness-microgate.json" "${ARTIFACT_DIR}/pp5-lane-initial-state.json" <<'PY'
 import json, os, sys, tempfile, time
-result_path, lifecycle_path, agent_process_path, p15_7_path, step_status, p15_7_step_status, current_inventory_path, inventory_status, leak_result_path = sys.argv[1:]
+result_path, lifecycle_path, agent_process_path, p15_7_path, step_status, p15_7_step_status, current_inventory_path, inventory_status, leak_result_path, pp5_lane, microgate_step_status, microgate_path, initial_state_path = sys.argv[1:]
 
 def write_atomic(path, document):
     directory = os.path.dirname(path) or "."
@@ -71,6 +73,17 @@ try:
 except (OSError, json.JSONDecodeError):
     p15_7_status = None
 p15_7_observed = p15_7_step_status != "skipped" or p15_7_status is not None
+try:
+    with open(microgate_path, encoding="utf-8") as stream:
+        microgate_status = json.load(stream).get("status")
+except (OSError, json.JSONDecodeError):
+    microgate_status = None
+try:
+    with open(initial_state_path, encoding="utf-8") as stream:
+        initial_state_status = json.load(stream).get("status")
+except (OSError, json.JSONDecodeError):
+    initial_state_status = None
+microgate_required = pp5_lane in {"harness-microgate", "s1-boundary"}
 
 baseline = preflight.get("inventory_baseline", {})
 after = None
@@ -126,6 +139,9 @@ elif result_leaks["domains"] or result_leaks["network_links"] or result_leaks["o
 elif foreign_state_changed:
     final_status = "failed"
     reason = "foreign_state_changed"
+elif microgate_required and (microgate_step_status != "success" or microgate_status != "passed" or initial_state_status != "passed"):
+    final_status = "failed"
+    reason = "pp5_harness_microgate_failed"
 elif step_status != "success":
     final_status = "failed" if step_status == "failure" else "skipped"
     reason = "workflow_step_failed" if step_status == "failure" else "workflow_step_skipped"
@@ -155,6 +171,11 @@ result = {"artifact_type": "real-host-workflow-result", "status": final_status,
           "reason": reason, "redacted": True, "finished_at": int(time.time()),
           "preflight_status": status, "lifecycle_status": lifecycle_status}
 result["agent_process_status"] = agent_process_status
+if microgate_required:
+    result["pp5_lane"] = pp5_lane
+    result["microgate_step_status"] = microgate_step_status
+    result["microgate_status"] = microgate_status
+    result["initial_state_status"] = initial_state_status
 if p15_7_observed:
     result["p15_7_step_status"] = p15_7_step_status
     result["p15_7_status"] = p15_7_status

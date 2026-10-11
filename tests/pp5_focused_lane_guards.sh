@@ -9,7 +9,7 @@ journey="$root_dir/scripts/p15-7-real-host-journey.sh"
 test -f "$workflow"
 grep -Fq 'lane:' "$workflow"
 grep -Fq 'default: integrated' "$workflow"
-for lane in integrated s1-boundary s2-boundary s5-scale 1035-crash-recovery host-maintenance; do
+for lane in harness-microgate integrated s1-boundary s2-boundary s5-scale 1035-crash-recovery host-maintenance; do
     grep -Fq -- "- $lane" "$workflow"
 done
 grep -Fq 'case "${PP5_LANE}" in' "$workflow"
@@ -21,10 +21,10 @@ grep -Fq '1035-crash-recovery) bash tests/pp5_1035_crash_recovery.sh' "$workflow
 grep -Fq 'host-maintenance) bash tests/pp5_host_maintenance.sh' "$workflow"
 grep -Fq 'O3K_P15_7_JOURNEY_COMMAND: bash scripts/p15-7-real-host-journey.sh' "$workflow"
 for protected_workflow in "$dispatcher" "$preflight"; do
-    for lane in s1-boundary s2-boundary s5-scale 1035-crash-recovery host-maintenance integrated; do
+    for lane in harness-microgate s1-boundary s2-boundary s5-scale 1035-crash-recovery host-maintenance integrated; do
         grep -Fq -- "- $lane" "$protected_workflow"
     done
-    grep -Fq 'integrated|s1-boundary|s2-boundary|s5-scale|1035-crash-recovery|host-maintenance' "$protected_workflow"
+    grep -Fq 'harness-microgate|integrated|s1-boundary|s2-boundary|s5-scale|1035-crash-recovery|host-maintenance' "$protected_workflow"
 done
 ! grep -Fq 'O3K_P15_7_1035_JOURNEY_COMMAND' "$workflow" "$root_dir/tests"/*.sh
 ! grep -Fq 'O3K_P15_7_MAINTENANCE_JOURNEY_COMMAND' "$workflow" "$root_dir/tests"/*.sh

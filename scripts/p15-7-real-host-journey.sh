@@ -409,7 +409,9 @@ rejoin_bootstrap_agent() {
   # bootstrap-disposable-testlab.sh uses, reusing the durable TLS identity the
   # canonical bootstrap already recorded.
   local agent_id enrollment_token agent_epoch vcpus memory_mb join_attempt init_output
-  agent_id="$(sudo -n cat "$STATE_ROOT/tls/agent-id")"
+  agent_id="$(python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" bootstrap-agent-id \
+    --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_SHA")" \
+    || die "cannot read the protected bootstrap compute identity"
   [[ "$agent_id" =~ ^[A-Za-z0-9._-]+$ ]] || die "bootstrap agent identity is unavailable"
   init_output="$WORK_ROOT/bootstrap-rejoin-init.json"
   O3K_API_URL="$API" O3K_BOOTSTRAP_SECRET="$(sudo -n cat "$STATE_ROOT/.bootstrap-secret")" \
@@ -1205,7 +1207,10 @@ grep -Fqx 'phase=generic' "$WORKLOAD_IMAGE_MARKER" \
   || die "owned workload image phase marker is invalid"
 grep -Fqx "run=$RUN_ID" "$WORKLOAD_IMAGE_MARKER" \
   || die "owned workload image marker run mismatch"
-[[ -f "$STATE_ROOT/.o3k-run-owned" && -f "$TLS_ROOT/ca.pem" ]] || die "owned TestLab state/TLS unavailable"
+python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" verify-marker \
+  --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_SHA" >/dev/null \
+  || die "owned TestLab marker failed privileged verification"
+[[ -f "$TLS_ROOT/ca.pem" ]] || die "owned TestLab TLS unavailable"
 sudo -n test -d "$LIBVIRT_IMAGE_ROOT" && sudo -n test ! -L "$LIBVIRT_IMAGE_ROOT" \
   || die "libvirt image root unavailable"
 O3K_P15_7_LIBVIRT_IMAGE_ROOT="$LIBVIRT_IMAGE_ROOT" \
@@ -1233,7 +1238,8 @@ done
 # state the canonical bootstrap recorded. It is matched by identity (never by
 # display name or a hardcoded assumption) when the scale checkpoints decide
 # which BuildingBlock is the bootstrap block.
-BOOTSTRAP_AGENT_ID="$(sudo -n cat "$STATE_ROOT/tls/agent-id" 2>/dev/null || true)"
+BOOTSTRAP_AGENT_ID="$(python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" bootstrap-agent-id \
+  --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_SHA" 2>/dev/null || true)"
 [[ "$BOOTSTRAP_AGENT_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "bootstrap agent identity is unavailable"
 if [[ "$POSTGRES_MODE" == external ]]; then
   # Consume a required, operator-owned endpoint. Fail closed on a missing or
@@ -2521,7 +2527,7 @@ api_get /operator/diagnostics/capacity initial-capacity-diagnostics >"$WORK_ROOT
 api_get /services initial-services >"$WORK_ROOT/services.json"
 api_get /resource-types initial-resource-types >"$WORK_ROOT/resource-types.json"
 if ! python3 - "$WORK_ROOT/blocks.json" "$WORK_ROOT/providers.json" "$BOOTSTRAP_AGENT_ID" \
-  "${BLOCK_IDS[block-a]}" "$PP5_PHASE" "$ARTIFACT_DIR/pp5-lane-initial-state.json" \
+  "${BLOCK_IDS[block-a]}" "$PP5_PHASE" "$ARTIFACT_DIR/pp5-lane-journey-initial-state.json" \
   "${O3K_PP5_LANE_PRECONDITIONS:-$ARTIFACT_DIR/pp5-lane-preconditions.json}" <<'PY'
 import json, pathlib, sys
 blocks_path, providers_path, bootstrap_id, block_a_id, phase, output, guard_path = sys.argv[1:]
@@ -3168,7 +3174,8 @@ if [[ -z "$REPLAY_JOIN_FILE" && "$DRAIN_AGENT" == "$BOOTSTRAP_AGENT_ID" ]]; then
   # placeholder exercises it.
   [[ -s "$STATE_ROOT/tls/agent.pem" && -s "$STATE_ROOT/tls/agent-id" ]] \
     || die "bootstrap agent identity unavailable for drained-agent replay probe"
-  [[ "$(sudo -n cat "$STATE_ROOT/tls/agent-id" 2>/dev/null)" == "$BOOTSTRAP_AGENT_ID" ]] \
+  [[ "$(python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" bootstrap-agent-id \
+      --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_SHA" 2>/dev/null)" == "$BOOTSTRAP_AGENT_ID" ]] \
     || die "bootstrap agent identity does not match the drained host"
   REPLAY_JOIN_FILE="$WORK_ROOT/compute-agent-replay-join.json"
   # The certificate is public material (the journey stages block agent certs

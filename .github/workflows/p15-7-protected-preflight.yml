@@ -12,6 +12,7 @@ on:
         required: true
         type: choice
         options:
+          - harness-microgate
           - s1-boundary
           - s2-boundary
           - 1035-crash-recovery
@@ -179,7 +180,7 @@ jobs:
         run: |
           set -euo pipefail
           case "${PP5_LANE}" in
-            integrated|s1-boundary|s2-boundary|s5-scale|1035-crash-recovery|host-maintenance) ;;
+            harness-microgate|integrated|s1-boundary|s2-boundary|s5-scale|1035-crash-recovery|host-maintenance) ;;
             *) echo "unsupported PP.5 lane: ${PP5_LANE}" >&2; exit 2 ;;
           esac
 

@@ -13,6 +13,7 @@ on:
         default: integrated
         type: choice
         options:
+          - harness-microgate
           - integrated
           - s1-boundary
           - s2-boundary
@@ -138,7 +139,7 @@ jobs:
         run: |
           set -euo pipefail
           case "${PP5_LANE}" in
-            integrated|s1-boundary|s2-boundary|s5-scale|1035-crash-recovery|host-maintenance) ;;
+            harness-microgate|integrated|s1-boundary|s2-boundary|s5-scale|1035-crash-recovery|host-maintenance) ;;
             *) echo "unsupported PP.5 lane: ${PP5_LANE}" >&2; exit 2 ;;
           esac
 
@@ -302,7 +303,7 @@ jobs:
 
       - name: Install pinned P13.4 provider tools and build runtime
         id: storage_tools
-        if: steps.bootstrap.outcome == 'success' && steps.image.outcome == 'success' && steps.capabilities.outcome == 'success'
+        if: steps.bootstrap.outcome == 'success' && steps.image.outcome == 'success' && steps.capabilities.outcome == 'success' && env.PP5_LANE != 'harness-microgate'
         run: |
           set -euo pipefail
           if ! command -v unzip >/dev/null 2>&1; then
@@ -344,7 +345,7 @@ jobs:
 
       - name: Provision disposable tagged P13.4 LVM profile
         id: storage_lvm
-        if: steps.protected_preflight.outcome == 'success' && steps.guard.outputs.ready == 'true'
+        if: steps.protected_preflight.outcome == 'success' && steps.guard.outputs.ready == 'true' && env.PP5_LANE != 'harness-microgate'
         env:
           O3K_LVM_RUN_ID: ${{ github.run_id }}
           O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
@@ -477,7 +478,7 @@ jobs:
           bash scripts/real-lvm-guest-gate.sh
 
       - name: Verify all P13.4 protected storage gates ran
-        if: always()
+        if: always() && env.PP5_LANE != 'harness-microgate'
         env:
           GUARD_OUTCOME: ${{ steps.guard.outcome }}
           TOOLS_OUTCOME: ${{ steps.storage_tools.outcome }}
@@ -497,7 +498,7 @@ jobs:
           done
 
       - name: Write redacted P13.4 protected storage evidence
-        if: always()
+        if: always() && env.PP5_LANE != 'harness-microgate'
         env:
           SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
           VOLUME_OUTCOME: ${{ steps.storage_volume.outcome || 'skipped' }}
@@ -530,14 +531,14 @@ jobs:
           PY
 
       - name: Clean up P13.4 real guest resources
-        if: always()
+        if: always() && env.PP5_LANE != 'harness-microgate'
         env:
           O3K_LVM_RUN_ID: ${{ github.run_id }}
           O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
         run: sudo -n --preserve-env=GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE bash scripts/real-lvm-guest-gate.sh cleanup
 
       - name: Tear down disposable P13.4 LVM profile
-        if: always()
+        if: always() && env.PP5_LANE != 'harness-microgate'
         env:
           O3K_LVM_RUN_ID: ${{ github.run_id }}
           O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
@@ -545,7 +546,7 @@ jobs:
         run: sudo -n --preserve-env=O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE,O3K_LVM_PROVIDER_NAMESPACE bash scripts/lvm-testlab-profile.sh cleanup
 
       - name: Remove P13.4 disposable guest inputs
-        if: always()
+        if: always() && env.PP5_LANE != 'harness-microgate'
         run: |
           set -euo pipefail
           slug="$(printf '%s' "${GITHUB_RUN_ID}" | tr -cd '[:alnum:]' | head -c 16)"
@@ -555,6 +556,9 @@ jobs:
 
       - name: Stop storage-phase disposable TestLab
         if: always() && steps.guard.outputs.ready == 'true'
+        env:
+          O3K_TESTLAB_RUN_ID: ${{ github.run_id }}
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
         run: bash scripts/cleanup-disposable-testlab.sh
 
       - name: Bind generic phase to workspace PostgreSQL
@@ -701,6 +705,7 @@ jobs:
           O3K_REAL_HOST_GENERIC_BASELINE: target/real-host-workflow-artifacts/real-host-generic-inventory-baseline.json
           O3K_REAL_HOST_GENERIC_AFTER: target/real-host-workflow-artifacts/real-host-generic-inventory-after.json
           O3K_REAL_HOST_OPENSTACK_INVENTORY: "true"
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
         run: |
           set -euo pipefail
           workload_absence_status=0
@@ -709,35 +714,40 @@ jobs:
             --lifecycle "target/real-host-workflow-artifacts/openstack-cli-result.json" \
             --artifact "target/real-host-workflow-artifacts/pp5-generic-workloads-before-teardown.json" \
             || workload_absence_status=$?
-          cleanup_status=0
-          bash scripts/cleanup-disposable-testlab.sh || cleanup_status=$?
-          inventory_status=0
-          env -i \
-            PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-            O3K_REAL_HOST_OPENSTACK_INVENTORY=false \
-            O3K_REAL_HOST_PROTECTED_PATHS="" \
-            O3K_P15_7_LIBVIRT_IMAGE_ROOT="${O3K_P15_7_LIBVIRT_IMAGE_ROOT:-/var/lib/libvirt/images}" \
-            /usr/bin/python3 scripts/real-host-owned-inventory.py "${O3K_REAL_HOST_GENERIC_AFTER}" \
-            || inventory_status=$?
-          host_absence_status="${inventory_status}"
-          if test "${inventory_status}" -eq 0; then
-            host_absence_status=0
+          cleanup_status=125
+          inventory_status=125
+          if test "${workload_absence_status}" -eq 0; then
+            cleanup_status=0
+            bash scripts/cleanup-disposable-testlab.sh || cleanup_status=$?
+            inventory_status=0
             env -i \
               PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-              /usr/bin/python3 scripts/pp5-testlab-epoch-guard.py post-teardown-host-absence \
-                --run-id "${GITHUB_RUN_ID}" \
-                --state-root "/var/lib/o3k-testlab/${GITHUB_RUN_ID}-generic" \
-                --pid-root "${RUNNER_TEMP}/o3k-testlab-pids/${GITHUB_RUN_ID}-generic" \
-                --inventory-root "${RUNNER_TEMP}/o3k-testlab-inventory/${GITHUB_RUN_ID}-generic" \
-                --openstack-venv "${O3K_OPENSTACK_VENV:-}" \
-                --image-path "${O3K_TESTLAB_IMAGE_PATH:-}" \
-                --baseline "${O3K_REAL_HOST_GENERIC_BASELINE}" \
-                --after "${O3K_REAL_HOST_GENERIC_AFTER}" \
-                --artifact "target/real-host-workflow-artifacts/pp5-generic-host-absence-after.json" \
-                || host_absence_status=$?
+              O3K_REAL_HOST_OPENSTACK_INVENTORY=false \
+              O3K_REAL_HOST_PROTECTED_PATHS="" \
+              O3K_P15_7_LIBVIRT_IMAGE_ROOT="${O3K_P15_7_LIBVIRT_IMAGE_ROOT:-/var/lib/libvirt/images}" \
+              /usr/bin/python3 scripts/real-host-owned-inventory.py "${O3K_REAL_HOST_GENERIC_AFTER}" \
+              || inventory_status=$?
+            host_absence_status="${inventory_status}"
+            if test "${inventory_status}" -eq 0; then
+              host_absence_status=0
+              env -i \
+                PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+                /usr/bin/python3 scripts/pp5-testlab-epoch-guard.py post-teardown-host-absence \
+                  --run-id "${GITHUB_RUN_ID}" \
+                  --state-root "/var/lib/o3k-testlab/${GITHUB_RUN_ID}-generic" \
+                  --pid-root "${RUNNER_TEMP}/o3k-testlab-pids/${GITHUB_RUN_ID}-generic" \
+                  --inventory-root "${RUNNER_TEMP}/o3k-testlab-inventory/${GITHUB_RUN_ID}-generic" \
+                  --openstack-venv "${O3K_OPENSTACK_VENV:-}" \
+                  --image-path "${O3K_TESTLAB_IMAGE_PATH:-}" \
+                  --baseline "${O3K_REAL_HOST_GENERIC_BASELINE}" \
+                  --after "${O3K_REAL_HOST_GENERIC_AFTER}" \
+                  --artifact "target/real-host-workflow-artifacts/pp5-generic-host-absence-after.json" \
+                  || host_absence_status=$?
+            fi
           fi
           /usr/bin/python3 scripts/pp5-testlab-epoch-guard.py generic-cleanup \
             --run-id "${GITHUB_RUN_ID}" \
+            --source-sha "${O3K_P15_7_SOURCE_SHA}" \
             --workload-status "${workload_absence_status}" \
             --cleanup-status "${cleanup_status}" \
             --inventory-status "${host_absence_status}" \
@@ -758,7 +768,7 @@ jobs:
 
       - name: Prepare fresh PP.5 TestLab image
         id: pp5_image
-        if: steps.generic_cleanup.outcome == 'success' && steps.pp5_postgres_bootstrap.outcome == 'success'
+        if: steps.generic_cleanup.outcome == 'success' && steps.pp5_postgres_bootstrap.outcome == 'success' && env.PP5_LANE != 'harness-microgate'
         continue-on-error: true
         env:
           CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
@@ -777,7 +787,7 @@ jobs:
 
       - name: Bootstrap fresh PP.5 lane TestLab
         id: pp5_bootstrap
-        if: steps.pp5_image.outcome == 'success'
+        if: steps.pp5_postgres_bootstrap.outcome == 'success' && (env.PP5_LANE == 'harness-microgate' || steps.pp5_image.outcome == 'success')
         continue-on-error: true
         env:
           O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5
@@ -790,7 +800,13 @@ jobs:
           O3K_TESTLAB_CONTROL_BIND_ADDR: 0.0.0.0
           O3K_AGENT_INSPECT_PROBE_ENABLED: true
           O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ github.workspace }}/target/real-host-workflow-artifacts/agent-inspect-resource-id
-        run: bash scripts/bootstrap-disposable-testlab.sh
+          PP5_LANE: ${{ inputs.lane || 'integrated' }}
+        run: |
+          set -euo pipefail
+          if [[ "${PP5_LANE}" == "harness-microgate" || "${PP5_LANE}" == "s1-boundary" ]]; then
+            unset O3K_TESTLAB_ADDITIONAL_AGENT_IDS
+          fi
+          bash scripts/bootstrap-disposable-testlab.sh
 
       - name: Verify fresh PP.5 lane preconditions
         id: pp5_lane_preconditions
@@ -799,12 +815,42 @@ jobs:
           O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5
           O3K_TESTLAB_STATE_ROOT: /var/lib/o3k-testlab/${{ github.run_id }}-pp5
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
           O3K_P15_7_PHASE: ${{ inputs.lane || 'integrated' }}
         run: bash scripts/pp5-testlab-epoch-guard.sh
 
+      - name: Run PP.5 protected harness microgate
+        id: pp5_harness_microgate
+        if: steps.pp5_lane_preconditions.outcome == 'success' && (env.PP5_LANE == 'harness-microgate' || env.PP5_LANE == 's1-boundary')
+        env:
+          O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5
+          O3K_TESTLAB_STATE_ROOT: /var/lib/o3k-testlab/${{ github.run_id }}-pp5
+          O3K_TESTLAB_PID_ROOT: ${{ runner.temp }}/o3k-testlab-pids/${{ github.run_id }}-pp5
+          O3K_REAL_HOST_INVENTORY_ROOT: ${{ runner.temp }}/o3k-testlab-inventory/${{ github.run_id }}-pp5
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_PP5_LANE: ${{ inputs.lane || 'integrated' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/pp5-protected-harness-microgate.py run \
+            --run-id "${GITHUB_RUN_ID}" \
+            --source-sha "${O3K_P15_7_SOURCE_SHA}" \
+            --state-root "${O3K_TESTLAB_STATE_ROOT}" \
+            --pid-root "${O3K_TESTLAB_PID_ROOT}" \
+            --inventory-root "${O3K_REAL_HOST_INVENTORY_ROOT}" \
+            --openstack-venv "${O3K_OPENSTACK_VENV}" \
+            --generic-cleanup target/real-host-workflow-artifacts/pp5-generic-epoch-cleanup.json \
+            --campaign-binding target/real-host-workflow-artifacts/pp5-campaign-binding.json \
+            --postgres-manifest target/real-host-workflow-artifacts/pp5-postgres-purpose-map.json \
+            --bootstrap-artifact target/real-host-workflow-artifacts/disposable-testlab-bootstrap.json \
+            --generic-baseline target/real-host-workflow-artifacts/real-host-generic-inventory-baseline.json \
+            --api-port "${O3K_TESTLAB_PORT}" \
+            --artifact target/real-host-workflow-artifacts/pp5-lane-initial-state.json \
+            --microgate-artifact target/real-host-workflow-artifacts/pp5-protected-harness-microgate.json
+
       - name: Prepare pinned P15.7 VM host image
         id: p15_7_host_image
-        if: steps.pp5_lane_preconditions.outcome == 'success'
+        if: steps.pp5_lane_preconditions.outcome == 'success' && env.PP5_LANE != 'harness-microgate' && (env.PP5_LANE != 's1-boundary' || steps.pp5_harness_microgate.outcome == 'success')
         continue-on-error: true
         env:
           P15_7_HOST_IMAGE_URL: https://cloud-images.ubuntu.com/releases/releases/noble/release-20260911/ubuntu-24.04-server-cloudimg-amd64.img
@@ -828,7 +874,7 @@ jobs:
 
       - name: Run selected PP.5 acceptance lane
         id: p15_7
-        if: steps.pp5_lane_preconditions.outcome == 'success' && steps.p15_7_host_image.outcome == 'success'
+        if: steps.pp5_lane_preconditions.outcome == 'success' && steps.p15_7_host_image.outcome == 'success' && env.PP5_LANE != 'harness-microgate' && (env.PP5_LANE != 's1-boundary' || steps.pp5_harness_microgate.outcome == 'success')
         env:
           O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5
           O3K_TESTLAB_STATE_ROOT: /var/lib/o3k-testlab/${{ github.run_id }}-pp5
@@ -837,6 +883,7 @@ jobs:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_P15_7_REAL_HOST: "1"
           O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
           O3K_P15_7_PROFILE: small-edge-cloud
           O3K_PROVIDER: agent
           O3K_P15_7_OPERATOR_TOKEN_FILE: ${{ runner.temp }}/o3k-p15-7-operator-${{ github.run_id }}.token
@@ -932,6 +979,7 @@ jobs:
           O3K_TESTLAB_STATE_ROOT: /var/lib/o3k-testlab/${{ github.run_id }}-pp5
           O3K_TESTLAB_PID_ROOT: ${{ runner.temp }}/o3k-testlab-pids/${{ github.run_id }}-pp5
           O3K_REAL_HOST_INVENTORY_ROOT: ${{ runner.temp }}/o3k-testlab-inventory/${{ github.run_id }}-pp5
+          O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
         run: bash scripts/cleanup-disposable-testlab.sh
 
       - name: Clean up run-owned PP.5 PostgreSQL purpose databases
@@ -1019,6 +1067,8 @@ jobs:
           O3K_REAL_HOST_PROTECTED_PATHS: ""
           O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
           O3K_REAL_HOST_P15_7_STEP_STATUS: ${{ steps.p15_7.outcome || 'skipped' }}
+          O3K_REAL_HOST_PP5_LANE: ${{ inputs.lane || 'integrated' }}
+          O3K_REAL_HOST_PP5_MICROGATE_STEP_STATUS: ${{ steps.pp5_harness_microgate.outcome || 'skipped' }}
         run: bash scripts/real-host-post-run-guard.sh
 
       - name: Upload redacted real-host artifacts
@@ -1039,6 +1089,8 @@ jobs:
             target/real-host-workflow-artifacts/pp5-generic-host-absence-after.json
             target/real-host-workflow-artifacts/pp5-lane-preconditions.json
             target/real-host-workflow-artifacts/pp5-lane-initial-state.json
+            target/real-host-workflow-artifacts/pp5-protected-harness-microgate.json
+            target/real-host-workflow-artifacts/pp5-lane-journey-initial-state.json
             target/real-host-workflow-artifacts/real-host-workflow-result.json
             target/real-host-workflow-artifacts/resource-leak-result.json
             target/real-host-workflow-artifacts/libvirt-result.json
