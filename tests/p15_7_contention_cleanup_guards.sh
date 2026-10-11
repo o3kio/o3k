@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Fixture shell snippets intentionally expand inside their child bash.
+# shellcheck disable=SC2016
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -60,6 +62,9 @@ PY
 # helper is extracted without running the expensive journey.
 helper="$(awk '/^stop_contending_create\(\) \{/{on=1} on{print} on && /^}/{exit}' "$SCRIPT")"
 [[ -n "$helper" ]] || { echo "could not extract cleanup helper" >&2; exit 1; }
+identity_helper="$(awk '/^wait_contending_create_identity\(\) \{/{on=1} on{print} on && /^}/{exit}' "$SCRIPT")"
+[[ -n "$identity_helper" ]] || { echo "could not extract identity readiness helper" >&2; exit 1; }
+grep -Eq '^wait_contending_create_identity[[:space:]]' "$SCRIPT"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p15-7-contention.XXXXXX")"
 trap 'rm -rf -- "$WORK_DIR"' EXIT
 mkdir -p "$WORK_DIR/state"
@@ -72,14 +77,16 @@ if ! env WORK_DIR="$WORK_DIR" bash -c '
   : >"$CRASH_REPAIR_RELEASE_FILE"
   setsid --wait sleep 60 & CONTENDING_CREATE_PID=$!
   child_pid="$CONTENDING_CREATE_PID"
-  CONTENDING_CREATE_PGID="$CONTENDING_CREATE_PID"
-  CONTENDING_CREATE_STARTTIME="$(cut -d " " -f22 "/proc/$child_pid/stat")"
+  trap '\''kill -KILL "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true'\'' EXIT
+  '"$identity_helper"'
+  wait_contending_create_identity
   '"$helper"'
   stop_contending_create
   [[ -z "$CONTENDING_CREATE_PID" ]]
   [[ "$CONTENDING_CREATE_OBSERVED_PID" == "$child_pid" && "$CONTENDING_CREATE_OBSERVED_PGID" == "$child_pid" ]]
   ! kill -0 "$child_pid" 2>/dev/null
   [[ ! -e "$CRASH_REPAIR_WAITER_FILE" && ! -e "$CRASH_REPAIR_RELEASE_FILE" ]]
+  trap - EXIT
 '; then
   echo "exact-PID contention cleanup regression failed" >&2
   exit 1
@@ -96,14 +103,19 @@ if ! env WORK_DIR="$WORK_DIR" bash -c '
   : >"$CRASH_REPAIR_RELEASE_FILE"
   setsid --wait false & CONTENDING_CREATE_PID=$!
   child_pid="$CONTENDING_CREATE_PID"
+  trap '\''kill -KILL "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true'\'' EXIT
   CONTENDING_CREATE_PGID="$CONTENDING_CREATE_PID"
-  sleep 0.1
+  # Wait for the deliberately early exit, rather than guessing when it ran.
+  early_status=0
+  wait "$child_pid" || early_status=$?
+  [[ "$early_status" -eq 1 ]]
   CONTENDING_CREATE_STARTTIME=""
   '"$helper"'
   stop_contending_create
   [[ -z "$CONTENDING_CREATE_PID" && "$CONTENDING_CREATE_REAPED" == true ]]
   ! kill -0 "$child_pid" 2>/dev/null
   [[ ! -e "$CRASH_REPAIR_WAITER_FILE" && ! -e "$CRASH_REPAIR_RELEASE_FILE" ]]
+  trap - EXIT
 '; then
   echo "early-exit contention cleanup regression failed" >&2
   exit 1
@@ -111,7 +123,7 @@ fi
 
 # A child ignoring TERM must hit the bounded KILL fallback and be reaped.
 IGNORE_TERM_SCRIPT="$WORK_DIR/ignore-term.sh"
-printf '#!/bin/sh\ntrap "" TERM\nsleep 60\n' >"$IGNORE_TERM_SCRIPT"
+printf '#!/bin/sh\ntrap "" TERM\n: >"$WORK_DIR/term-handler-ready"\nexec sleep 60\n' >"$IGNORE_TERM_SCRIPT"
 chmod 0700 "$IGNORE_TERM_SCRIPT"
 if ! env WORK_DIR="$WORK_DIR" bash -c '
   set -Eeuo pipefail
@@ -122,15 +134,65 @@ if ! env WORK_DIR="$WORK_DIR" bash -c '
   : >"$CRASH_REPAIR_RELEASE_FILE"
   setsid --wait "$WORK_DIR/ignore-term.sh" & CONTENDING_CREATE_PID=$!
   child_pid="$CONTENDING_CREATE_PID"
-  CONTENDING_CREATE_PGID="$CONTENDING_CREATE_PID"
-  CONTENDING_CREATE_STARTTIME="$(cut -d " " -f22 "/proc/$child_pid/stat")"
+  trap '\''kill -KILL "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true'\'' EXIT
+  '"$identity_helper"'
+  wait_contending_create_identity
+  ready_deadline=$((SECONDS + 5))
+  until [[ -f "$WORK_DIR/term-handler-ready" ]]; do
+    (( SECONDS < ready_deadline )) || exit 1
+    sleep 0.01
+  done
   '"$helper"'
   stop_contending_create
   [[ -z "$CONTENDING_CREATE_PID" && "$CONTENDING_CREATE_REAPED" == true ]]
+  [[ "$CONTENDING_CREATE_WRAPPER_EXIT_STATUS" -eq 137 ]]
   ! kill -0 "$child_pid" 2>/dev/null
   [[ ! -e "$CRASH_REPAIR_WAITER_FILE" && ! -e "$CRASH_REPAIR_RELEASE_FILE" ]]
+  trap - EXIT
 '; then
   echo "TERM-to-KILL contention cleanup regression failed" >&2
+  exit 1
+fi
+
+
+cat >"$WORK_DIR/delayed-session.py" <<'PYCHILD'
+import os
+import signal
+os.kill(os.getpid(), signal.SIGSTOP)
+os.setsid()
+os.execlp("sleep", "sleep", "60")
+PYCHILD
+if ! env WORK_DIR="$WORK_DIR" bash -c '
+  set -Eeuo pipefail
+  set +m
+  python3 "$WORK_DIR/delayed-session.py" & CONTENDING_CREATE_PID=$!
+  child_pid="$CONTENDING_CREATE_PID"
+  trap '\''kill -KILL "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true'\'' EXIT
+  stopped_deadline=$((SECONDS + 5))
+  until [[ "$(ps -o stat= -p "$child_pid")" == T* ]]; do
+    (( SECONDS < stopped_deadline )) || exit 1
+    sleep 0.01
+  done
+  [[ "$(ps -o pgid= -p "$child_pid" | tr -d "[:space:]")" != "$child_pid" ]]
+  polled=false
+  sleep() {
+    if [[ "$polled" == false ]]; then
+      polled=true
+      kill -CONT "$child_pid"
+    fi
+    command sleep "$@"
+  }
+  '"$identity_helper"'
+  wait_contending_create_identity
+  [[ "$polled" == true && "$CONTENDING_CREATE_PGID" == "$child_pid" ]]
+  unset -f sleep
+  '"$helper"'
+  stop_contending_create
+  [[ "$CONTENDING_CREATE_REAPED" == true ]]
+  ! kill -0 "$child_pid" 2>/dev/null
+  trap - EXIT
+'; then
+  echo "delayed-setsid identity readiness regression failed" >&2
   exit 1
 fi
 
