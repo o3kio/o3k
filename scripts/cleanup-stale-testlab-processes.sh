@@ -9,6 +9,7 @@ RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 STATE_BASE="${O3K_TESTLAB_STATE_BASE:-/var/lib/o3k-testlab}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLEANUP_SCRIPT="${ROOT_DIR}/scripts/cleanup-disposable-testlab.sh"
+PROTECTED_OBSERVER="${ROOT_DIR}/scripts/pp5-protected-state-observer.py"
 
 if [[ ! "$RUN_ID" =~ ^[0-9]+(-generic|-pp5)?$|^local-[0-9]+(-generic|-pp5)?$ ]]; then
   RUN_ID="local-$$"
@@ -38,16 +39,15 @@ for base_dir in "${STATE_BASES[@]}"; do
     stale_run_id="${state_root##*/}"
     [[ "$stale_run_id" =~ ^[0-9]+(-generic|-pp5)?$|^local-[0-9]+(-generic|-pp5)?$ ]] || continue
     [[ "$stale_run_id" != "$RUN_ID" ]] || continue
-    marker="$state_root/.o3k-run-owned"
-    sudo -n test -f "$marker" 2>/dev/null && ! sudo -n test -L "$marker" 2>/dev/null || continue
-    sudo -n grep -Fqx 'o3k-disposable-testlab-v1' "$marker" 2>/dev/null || continue
-    sudo -n grep -Fqx "run=$stale_run_id" "$marker" 2>/dev/null || {
-      echo "stale cleanup: refusing ambiguous run marker ${stale_run_id}" >&2
-      exit 1
-    }
+    if ! stale_source_sha="$(python3 "$PROTECTED_OBSERVER" read-marker-source-sha \
+      --state-root "$state_root" --run-id "$stale_run_id" 2>/dev/null)"; then
+      continue
+    fi
+    [[ "$stale_source_sha" =~ ^[0-9a-f]{40}$ ]] || continue
 
     echo "stale cleanup: removing prior owned run ${stale_run_id}"
     RUNNER_TEMP="$RUNNER_TEMP" O3K_TESTLAB_RUN_ID="$stale_run_id" \
+      O3K_P15_7_SOURCE_SHA="$stale_source_sha" \
       O3K_TESTLAB_STATE_ROOT="$state_root" \
       O3K_REAL_HOST_INVENTORY_ROOT="${RUNNER_TEMP%/}/o3k-testlab-inventory/${stale_run_id}" \
       O3K_TESTLAB_PID_ROOT="${RUNNER_TEMP%/}/o3k-testlab-pids/${stale_run_id}" \

@@ -260,6 +260,32 @@ def validate_names(names: dict[str, str], run: str) -> None:
             die(f"database {purpose} has an invalid run-owned name")
 
 
+def check_manifest_identity(manifest: dict, run: str, sha: str) -> None:
+    """Validate non-secret purpose-map ownership fields without host access."""
+    if manifest.get("schema") != SCHEMA or manifest.get("schema_version") != 1:
+        raise ValueError("unsupported PP.5 PostgreSQL manifest schema")
+    if manifest.get("run_id") != run or str(manifest.get("source_sha", "")).lower() != sha.lower():
+        raise ValueError("PP.5 PostgreSQL manifest run/source mismatch")
+    if manifest.get("role") != expected_role(run):
+        raise ValueError("PP.5 PostgreSQL manifest role mismatch")
+    databases = manifest.get("databases")
+    if not isinstance(databases, dict):
+        raise ValueError("PP.5 PostgreSQL manifest database map is missing")
+    for purpose, name in expected_names(run).items():
+        entry = databases.get(purpose)
+        if not isinstance(entry, dict) or entry.get("name") != name:
+            raise ValueError("PP.5 PostgreSQL manifest database identity mismatch")
+    if manifest.get("all_distinct") is not True:
+        raise ValueError("PP.5 PostgreSQL databases are not proven distinct")
+
+
+def verify_purpose_sentinel(url: str, manifest: dict, purpose: str) -> bool:
+    """Read a purpose sentinel through the credential-safe psql boundary."""
+    row = db_psql(f"SELECT purpose,run_id,source_sha FROM {SENTINEL_TABLE} WHERE id=1", url)
+    return row == (f"{purpose}|{manifest.get('run_id')}|"
+                   f"{str(manifest.get('source_sha', '')).lower()}")
+
+
 def preflight() -> None:
     """Read-only prerequisite checks, repeated before provisioning mutation."""
     artifact = {
@@ -415,20 +441,14 @@ def load_manifest() -> dict:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         die(f"invalid PP.5 PostgreSQL manifest: {exc}")
-    if value.get("schema") != SCHEMA or value.get("schema_version") != 1:
-        die("unsupported PP.5 PostgreSQL manifest schema")
-    if value.get("run_id") != run_id() or value.get("source_sha") != source_sha():
-        die("PP.5 PostgreSQL manifest run/source mismatch")
-    if value.get("role") != expected_role(run_id()):
-        die("PP.5 PostgreSQL manifest role is not the deterministic run-owned role")
+    try:
+        check_manifest_identity(value, run_id(), source_sha())
+    except (ValueError, KeyError) as exc:
+        die(str(exc))
     server = value.get("server", {})
     expected_server = dict(zip(("host", "port"), parse_target(admin_url())))
     if server.get("host") != expected_server["host"] or server.get("port") != expected_server["port"]:
         die("PP.5 PostgreSQL manifest server does not match the configured local endpoint")
-    names = {purpose: value.get("databases", {}).get(purpose, {}).get("name", "") for purpose in PURPOSES}
-    validate_names(names, run_id())
-    if value.get("all_distinct") is not True:
-        die("PP.5 PostgreSQL manifest does not prove distinct databases")
     return value
 
 
@@ -525,8 +545,7 @@ def bind_campaign() -> None:
     if any(env(ENV_NAMES[p]) for p in ("workspace", "endpoint", "p13")):
         die("destructive-purpose URLs are still available to the campaign binding")
     url = canonical[ENV_NAMES["campaign"]]
-    row = db_psql(f"SELECT purpose,run_id,source_sha FROM {SENTINEL_TABLE} WHERE id=1", url)
-    if row != f"campaign|{manifest['run_id']}|{manifest['source_sha']}":
+    if not verify_purpose_sentinel(url, manifest, "campaign"):
         die("campaign database sentinel changed or is missing")
     binding = {
         "O3K_DATABASE_BACKEND": "postgres", "O3K_DATABASE_URL": url,

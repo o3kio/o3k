@@ -116,7 +116,11 @@ class TestLabEpochGuardTests(unittest.TestCase):
                 self.assertEqual(GUARD.run_owned_api_absence(args), 1)
             result = json.loads(args.artifact.read_text(encoding="utf-8"))
             self.assertEqual(result["classification"], "HARNESS_GAP")
-            self.assertEqual(result["failed_operation"], "server")
+            self.assertEqual(result["failed_operation"], "show_run_owned_server")
+            self.assertEqual(result["observer_type"], "api_observation")
+            self.assertEqual(result["resource_class"], "openstack_server")
+            self.assertEqual(result["command_class"], "openstack")
+            self.assertEqual(result["exit_code"], 0)
             self.assertEqual(result["run_owned_servers"], 1)
             self.assertNotIn("server-owned", args.artifact.read_text(encoding="utf-8"))
 
@@ -130,7 +134,9 @@ class TestLabEpochGuardTests(unittest.TestCase):
                 self.assertEqual(GUARD.run_owned_api_absence(args), 1)
             result = json.loads(args.artifact.read_text(encoding="utf-8"))
             self.assertEqual(result["classification"], "HARNESS_GAP")
-            self.assertEqual(result["failed_operation"], "port")
+            self.assertEqual(result["failed_operation"], "show_run_owned_port")
+            self.assertEqual(result["observer_type"], "api_observation")
+            self.assertEqual(result["resource_class"], "openstack_port")
             self.assertEqual(result["run_owned_servers"], 0)
             self.assertEqual(result["run_owned_ports"], 1)
 
@@ -144,7 +150,9 @@ class TestLabEpochGuardTests(unittest.TestCase):
                 self.assertEqual(GUARD.run_owned_api_absence(args), 1)
             result = json.loads(args.artifact.read_text(encoding="utf-8"))
             self.assertEqual(result["classification"], "HARNESS_GAP")
-            self.assertEqual(result["failed_operation"], "port")
+            self.assertEqual(result["failed_operation"], "show_run_owned_port")
+            self.assertEqual(result["command_class"], "openstack")
+            self.assertEqual(result["exit_code"], 2)
 
     def test_supported_openstack_no_resource_response_proves_absence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -169,7 +177,7 @@ class TestLabEpochGuardTests(unittest.TestCase):
             mocked.assert_not_called()
             result = json.loads(args.artifact.read_text(encoding="utf-8"))
             self.assertEqual(result["classification"], "HARNESS_GAP")
-            self.assertEqual(result["failed_operation"], "lifecycle")
+            self.assertEqual(result["failed_operation"], "read_generic_lifecycle_evidence")
 
     def test_lifecycle_from_another_testlab_phase_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -183,7 +191,7 @@ class TestLabEpochGuardTests(unittest.TestCase):
             mocked.assert_not_called()
             result = json.loads(args.artifact.read_text(encoding="utf-8"))
             self.assertEqual(result["classification"], "HARNESS_GAP")
-            self.assertEqual(result["failed_operation"], "lifecycle")
+            self.assertEqual(result["failed_operation"], "read_generic_lifecycle_evidence")
 
     def test_all_three_cleanup_phases_are_required(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -359,22 +367,27 @@ class TestLabEpochGuardTests(unittest.TestCase):
                 "o3k-disposable-testlab-v1\nrun=42-pp5\n", encoding="utf-8"
             )
             artifact = root / "preconditions.json"
-            args = Namespace(run_id="42", testlab_run_id="42-pp5", state_root=str(state_root), artifact=artifact)
+            args = Namespace(run_id="42", testlab_run_id="42-pp5", source_sha="a" * 40,
+                             state_root=str(state_root), artifact=artifact)
             completed = [
-                SimpleNamespace(stdout='{"id":"testlab-project"}'),
-                SimpleNamespace(stdout='[{"ID":"active-server"}]'),
-                SimpleNamespace(stdout="[]"),
-                SimpleNamespace(stdout="o3k-active-server\n"),
+                SimpleNamespace(returncode=0, stdout='[{"ID":"active-server"}]'),
+                SimpleNamespace(returncode=0, stdout="[]"),
+                SimpleNamespace(returncode=0, stdout="o3k-p15-7-42-server\n"),
             ]
-            with patch.object(GUARD.subprocess, "run", side_effect=completed) as mocked:
+            with patch.object(GUARD.PROTECTED_OBSERVER, "verify_marker", return_value={
+                "owner_uid": 0, "mode": "0600", "regular_file": True,
+                "privileged_observer": "sudo -n cat", "marker_verified": True,
+            }) as marker, patch.dict(GUARD.os.environ, {"OS_PROJECT_ID": "testlab-project"}), \
+                    patch.object(GUARD.subprocess, "run", side_effect=completed) as mocked:
                 self.assertEqual(GUARD.lane_preconditions(args), 1)
+            marker.assert_called_once_with(state_root, "42-pp5", "a" * 40)
             self.assertTrue(all("--all-projects" not in call.args[0] for call in mocked.call_args_list))
             self.assertEqual(
-                mocked.call_args_list[1].args[0],
+                mocked.call_args_list[0].args[0],
                 ["openstack", "server", "list", "--project", "testlab-project", "-f", "json"],
             )
             self.assertEqual(
-                mocked.call_args_list[2].args[0],
+                mocked.call_args_list[1].args[0],
                 ["openstack", "port", "list", "--project", "testlab-project", "-f", "json"],
             )
             result = json.loads(artifact.read_text(encoding="utf-8"))
@@ -390,15 +403,20 @@ class TestLabEpochGuardTests(unittest.TestCase):
                 "o3k-disposable-testlab-v1\nrun=42-pp5\n", encoding="utf-8"
             )
             artifact = root / "preconditions.json"
-            args = Namespace(run_id="42", testlab_run_id="42-pp5", state_root=str(state_root), artifact=artifact)
+            args = Namespace(run_id="42", testlab_run_id="42-pp5", source_sha="a" * 40,
+                             state_root=str(state_root), artifact=artifact)
             completed = [
-                SimpleNamespace(stdout='{"id":"testlab-project"}'),
-                SimpleNamespace(stdout="[]"),
-                SimpleNamespace(stdout="[]"),
-                SimpleNamespace(stdout=""),
+                SimpleNamespace(returncode=0, stdout="[]"),
+                SimpleNamespace(returncode=0, stdout="[]"),
+                SimpleNamespace(returncode=0, stdout=""),
             ]
-            with patch.object(GUARD.subprocess, "run", side_effect=completed):
+            with patch.object(GUARD.PROTECTED_OBSERVER, "verify_marker", return_value={
+                "owner_uid": 0, "mode": "0600", "regular_file": True,
+                "privileged_observer": "sudo -n cat", "marker_verified": True,
+            }) as marker, patch.dict(GUARD.os.environ, {"OS_PROJECT_ID": "testlab-project"}), \
+                    patch.object(GUARD.subprocess, "run", side_effect=completed):
                 self.assertEqual(GUARD.lane_preconditions(args), 0)
+            marker.assert_called_once_with(state_root, "42-pp5", "a" * 40)
             self.assertNotIn("--all-projects", str(completed))
             result = json.loads(artifact.read_text(encoding="utf-8"))
             self.assertEqual(result["run_owned_servers"], 0)

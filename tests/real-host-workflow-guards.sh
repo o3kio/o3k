@@ -415,6 +415,60 @@ PY
 unset O3K_REAL_HOST_P15_7_STEP_STATUS
 rm -f "${O3K_REAL_HOST_ARTIFACT_DIR}/p15-7-gate-result.json"
 
+# Seed a fresh ready preflight for the independent microgate guard regression.
+# The post-run guard rewrites the same artifact with its final result, so save
+# the preflight snapshot and restore it before checking the green path.
+bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" \
+  "${WORK_DIR}/microgate-preflight-ready.json" <<'PY'
+import json, shutil, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "ready", value
+shutil.copyfile(sys.argv[1], sys.argv[2])
+PY
+
+# A PP.5 microgate lane is green only if the protected microgate and S1
+# initial-state artifacts both passed in the same run.
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/pp5-protected-harness-microgate.json" \
+  "${O3K_REAL_HOST_ARTIFACT_DIR}/pp5-lane-initial-state.json" <<'PY'
+import json, sys
+common = {"workflow_run_id": "guard-run-1",
+          "tested_source_sha": "0123456789abcdef0123456789abcdef01234567", "redacted": True}
+json.dump({**common, "artifact_type": "pp5-protected-harness-microgate", "status": "failed"},
+          open(sys.argv[1], "w", encoding="utf-8"))
+json.dump({**common, "artifact_type": "pp5-lane-initial-state", "status": "passed"},
+          open(sys.argv[2], "w", encoding="utf-8"))
+PY
+export O3K_REAL_HOST_PP5_LANE=harness-microgate O3K_REAL_HOST_PP5_MICROGATE_STEP_STATUS=failure
+if bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"; then
+    echo "failed PP.5 microgate was accepted by the post-run guard" >&2
+    exit 1
+fi
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "failed" and value["reason"] == "pp5_harness_microgate_failed", value
+assert value["microgate_step_status"] == "failure" and value["microgate_status"] == "failed"
+PY
+export O3K_REAL_HOST_PP5_MICROGATE_STEP_STATUS=success
+cp -- "${WORK_DIR}/microgate-preflight-ready.json" \
+  "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json"
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/pp5-protected-harness-microgate.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["status"] = "passed"
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "passed", value
+assert value["microgate_step_status"] == "success" and value["microgate_status"] == "passed"
+PY
+unset O3K_REAL_HOST_PP5_LANE O3K_REAL_HOST_PP5_MICROGATE_STEP_STATUS
+
 # schema_version 3 snapshots (extended inventory) are accepted by both guards
 V3_ROOT="${WORK_DIR}/v3-state"
 mkdir -p "${V3_ROOT}/data/dhcp"
@@ -745,6 +799,14 @@ for needle in ("workflow_dispatch:",
                "Fresh generic TestLab pre-run guard",
                "steps.generic_guard.outputs.ready == 'true'"):
     assert needle in text, needle
+for cleanup_name, expected_run in (
+        ("Stop storage-phase disposable TestLab", 'O3K_TESTLAB_RUN_ID: ${{ github.run_id }}'),
+        ("Stop and remove PP.5 lane TestLab before database cleanup",
+         'O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5')):
+    cleanup_step = text.split(f"      - name: {cleanup_name}\n", 1)[1].split(
+        "\n      - name:", 1)[0]
+    assert expected_run in cleanup_step
+    assert 'O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}' in cleanup_step
 assert "Repair prior protected artifact ownership" in text
 assert 'repair_tree()' in text
 assert 'runner_uid="${O3K_PREFLIGHT_RUNNER_UID:-$(id -u)}"' in text
@@ -815,6 +877,18 @@ assert 'actual_source_commit="$(git -C "$ROOT_DIR" rev-parse HEAD' in pathlib.Pa
 assert '[[ "$actual_source_commit" == "$SOURCE_COMMIT" ]]' in pathlib.Path("scripts/bootstrap-disposable-testlab.sh").read_text(encoding="utf-8")
 assert 'WORKFLOW_REVISION_SHA: ${{ github.sha }}' in text
 assert 'test "${WORKFLOW_REVISION_SHA}" = "${TARGET_SHA}"' in text
+generic_cleanup_step = text.split("      - name: Stop and prove generic TestLab epoch absent\n", 1)[1].split(
+    "\n      - name:", 1
+)[0]
+assert "O3K_P15_7_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}" in generic_cleanup_step
+assert '--source-sha "${O3K_P15_7_SOURCE_SHA}"' in generic_cleanup_step
+assert 'cleanup_status=125' in generic_cleanup_step
+assert 'inventory_status=125' in generic_cleanup_step
+absence_gate = generic_cleanup_step.index('if test "${workload_absence_status}" -eq 0; then')
+teardown_command = generic_cleanup_step.index('bash scripts/cleanup-disposable-testlab.sh')
+post_teardown_inventory = generic_cleanup_step.index('scripts/real-host-owned-inventory.py')
+assert absence_gate < teardown_command < post_teardown_inventory
+assert generic_cleanup_step.index('workload_absence_status=0') < absence_gate
 dispatcher = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-dispatch.yml").read_text(encoding="utf-8")
 preflight = pathlib.Path(sys.argv[1]).with_name("p15-7-protected-preflight.yml").read_text(encoding="utf-8")
 assert 'inputs[target_sha]=${TARGET_SHA}' in dispatcher
@@ -897,6 +971,40 @@ assert "steps.pp5_lane_preconditions.outcome == 'success'" in text.split(
 assert "O3K_PP5_LANE_PRECONDITIONS: target/real-host-workflow-artifacts/pp5-lane-preconditions.json" in text
 assert "O3K_PP5_WORKSPACE_DATABASE_URL" in text
 assert "O3K_PP5_CAMPAIGN_DATABASE_URL" in text
+assert "- harness-microgate" in text
+microgate_step = text.split("      - name: Run PP.5 protected harness microgate\n", 1)[1].split("\n      - name:", 1)[0]
+assert "steps.pp5_lane_preconditions.outcome == 'success'" in microgate_step
+assert "env.PP5_LANE == 'harness-microgate' || env.PP5_LANE == 's1-boundary'" in microgate_step
+assert "scripts/pp5-protected-harness-microgate.py run" in microgate_step
+selected_lane = text.split("      - name: Run selected PP.5 acceptance lane\n", 1)[1].split("\n      - name:", 1)[0]
+assert "env.PP5_LANE != 's1-boundary' || steps.pp5_harness_microgate.outcome == 'success'" in selected_lane
+host_image = text.split("      - name: Prepare pinned P15.7 VM host image\n", 1)[1].split("\n      - name:", 1)[0]
+assert "env.PP5_LANE != 's1-boundary' || steps.pp5_harness_microgate.outcome == 'success'" in host_image
+assert "--generic-cleanup" in microgate_step and "--campaign-binding" in microgate_step
+assert "--postgres-manifest" in microgate_step and "--generic-baseline" in microgate_step
+assert "--microgate-artifact" in microgate_step
+assert "--openstack-venv \"${O3K_OPENSTACK_VENV}\"" in microgate_step
+pp5_image_step = text.split("      - name: Prepare fresh PP.5 TestLab image\n", 1)[1].split("\n      - name:", 1)[0]
+assert "env.PP5_LANE != 'harness-microgate'" in pp5_image_step
+pp5_bootstrap_step = text.split("      - name: Bootstrap fresh PP.5 lane TestLab\n", 1)[1].split("\n      - name:", 1)[0]
+assert "env.PP5_LANE == 'harness-microgate' || steps.pp5_image.outcome == 'success'" in pp5_bootstrap_step
+assert "unset O3K_TESTLAB_ADDITIONAL_AGENT_IDS" in pp5_bootstrap_step
+assert '"${PP5_LANE}" == "harness-microgate" || "${PP5_LANE}" == "s1-boundary"' in pp5_bootstrap_step
+host_image_step = text.split("      - name: Prepare pinned P15.7 VM host image\n", 1)[1].split(
+    "\n      - name: Run selected PP.5 acceptance lane", 1)[0]
+assert "env.PP5_LANE != 'harness-microgate'" in host_image_step
+assert "env.PP5_LANE != 'harness-microgate'" in text.split(
+    "      - name: Install pinned P13.4 provider tools and build runtime\n", 1)[1].split(
+        "\n      - name:", 1)[0]
+assert "env.PP5_LANE != 'harness-microgate'" in text.split(
+    "      - name: Provision disposable tagged P13.4 LVM profile\n", 1)[1].split(
+        "\n      - name:", 1)[0]
+assert "env.PP5_LANE != 'harness-microgate'" in text.split(
+    "      - name: Verify all P13.4 protected storage gates ran\n", 1)[1].split(
+        "\n      - name:", 1)[0]
+assert "env.PP5_LANE != 'harness-microgate'" in text.split(
+    "      - name: Tear down disposable P13.4 LVM profile\n", 1)[1].split(
+        "\n      - name:", 1)[0]
 epoch_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/pp5-testlab-epoch-guard.py").read_text(encoding="utf-8")
 assert '"HARNESS_GAP"' in epoch_guard
 assert "foreign_state_unchanged" in epoch_guard
@@ -909,9 +1017,19 @@ assert '"openstack", "server", "list", "--project", project_id' in epoch_guard
 assert "post_teardown_host_absence" in epoch_guard
 assert "openstack_api_consulted=False" in epoch_guard
 journey = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/p15-7-real-host-journey.sh").read_text(encoding="utf-8")
-precondition_pos = journey.index('pp5-lane-initial-state.json')
+precondition_pos = journey.index('O3K_PP5_LANE_PRECONDITIONS')
 workload_pos = journey.index('openstack image create "o3k-p15-7-$RUN_ID-image"')
 assert precondition_pos < workload_pos
+smoke = pathlib.Path(sys.argv[1]).parents[2].joinpath("tests/pp5_s1_boundary_smoke.sh").read_text(encoding="utf-8")
+assert smoke.index("validate-artifact") < smoke.index("p15_7_scale_composition.sh")
+assert "pp5-protected-harness-microgate.json" in smoke
+observer = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/pp5-protected-state-observer.py").read_text(encoding="utf-8")
+assert '["sudo", "-n", "cat", "--", str(path)]' in observer
+assert "MAX_MARKER_BYTES = 512" in observer
+assert "def read_marker_source_sha" in observer
+stale_cleanup = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/cleanup-stale-testlab-processes.sh").read_text(encoding="utf-8")
+assert "read-marker-source-sha" in stale_cleanup
+assert 'sudo -n grep' not in stale_cleanup
 boundary_pos = journey.index('run_boundary_smoke() {')
 server_create_pos = journey.index('"$API/compute/servers"', boundary_pos)
 checkpoint_pos = journey.index('record_scale_checkpoint "$phase" "$expected"', boundary_pos)

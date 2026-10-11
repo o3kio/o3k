@@ -9,7 +9,7 @@ cleanup_test_state() {
     kill "$UNRECORDED_PID" 2>/dev/null || true
     wait "$UNRECORDED_PID" 2>/dev/null || true
   fi
-  rm -rf -- "$WORK_DIR"
+  sudo -n rm -rf -- "$WORK_DIR"
 }
 trap cleanup_test_state EXIT
 
@@ -43,6 +43,8 @@ EOF
 # is a no-op while `sudo kill -0` keeps reporting the process alive, so
 # cleanup-disposable-testlab.sh cannot confirm shutdown and must preserve the
 # run ledger. Every other sudo command passes through unchanged.
+REAL_SUDO="$(command -v sudo)"
+export REAL_SUDO
 cat >"$WORK_DIR/bin/sudo" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -53,7 +55,11 @@ if [[ "${1:-}" == kill ]]; then
   done
   exit 0
 fi
-exec "$@"
+if [[ "${1:-}" == ps ]]; then
+  printf 'o3k\n'
+  exit 0
+fi
+exec "$REAL_SUDO" -n "$@"
 EOF
 # The cleanup proves the daemon identity partly through `ps -o user`; report
 # the owned account so process_record_matches can succeed.
@@ -83,17 +89,21 @@ echo "stale cleanup foreign-name safety test passed"
 # so an alive verified-owned process must preserve STATE_ROOT and PID_ROOT
 # rather than delete them.  Pin that behavior.
 PROC_RUN="local-42"
+SOURCE_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 PROC_RUNNER_TEMP="$WORK_DIR/proc-runner"
 PROC_STATE_ROOT="$PROC_RUNNER_TEMP/o3k-testlab/$PROC_RUN"
 PROC_PID_ROOT="$PROC_RUNNER_TEMP/o3k-testlab-pids/$PROC_RUN"
 mkdir -p "$PROC_STATE_ROOT/bin" "$PROC_PID_ROOT" \
   "$PROC_RUNNER_TEMP/o3k-testlab-inventory" \
   "$PROC_RUNNER_TEMP/o3k-testlab-pids" "$PROC_RUNNER_TEMP/o3k-testlab-inventory"
-printf 'o3k-disposable-testlab-v1\nrun=%s\n' "$PROC_RUN" >"$PROC_STATE_ROOT/.o3k-run-owned"
+printf 'o3k-disposable-testlab-v1\ncommit=%s\nrun=%s\n' "$SOURCE_SHA" "$PROC_RUN" >"$PROC_STATE_ROOT/.o3k-run-owned"
+sudo -n chown root:root "$PROC_STATE_ROOT/.o3k-run-owned"
+sudo -n chmod 0600 "$PROC_STATE_ROOT/.o3k-run-owned"
 printf 'o3k-owned-v1 path=%s\n' "$PROC_STATE_ROOT" >"$PROC_STATE_ROOT/.o3k-owned"
 chmod 0755 "$PROC_STATE_ROOT"
 cp /usr/bin/sleep "$PROC_STATE_ROOT/bin/o3kd"
 chmod 0755 "$PROC_STATE_ROOT/bin/o3kd"
+sudo -n chown -R root:root "$PROC_STATE_ROOT"
 "$PROC_STATE_ROOT/bin/o3kd" 300 & proc_pid=$!
 proc_ticks="$(awk '{print $22}' "/proc/$proc_pid/stat")"
 printf '%s|%s|o3k|o3kd\n' "$proc_pid" "$proc_ticks" >"$PROC_PID_ROOT/o3kd.pid"
@@ -109,7 +119,7 @@ set -e
 [[ "$proc_rc" != 0 ]] \
   || { echo "cleanup deleted state while an owned daemon was alive" >&2; exit 1; }
 grep -Fq "service did not stop" <<<"$proc_out" \
-  || { echo "cleanup did not refuse shutdown on a live owned daemon" >&2; exit 1; }
+  || { echo "cleanup did not refuse shutdown on a live owned daemon: $proc_out" >&2; exit 1; }
 [[ -d "$PROC_STATE_ROOT" ]] \
   || { echo "STATE_ROOT deleted while an owned daemon was alive" >&2; exit 1; }
 [[ -d "$PROC_PID_ROOT" ]] \
@@ -128,11 +138,14 @@ MISSING_PID_TEMP="$WORK_DIR/missing-pid-runner"
 MISSING_PID_STATE="$MISSING_PID_TEMP/o3k-testlab/$MISSING_PID_RUN"
 mkdir -p "$MISSING_PID_STATE/bin" "$MISSING_PID_TEMP/o3k-testlab-pids" \
   "$MISSING_PID_TEMP/o3k-testlab-inventory"
-printf 'o3k-disposable-testlab-v1\nrun=%s\n' "$MISSING_PID_RUN" >"$MISSING_PID_STATE/.o3k-run-owned"
+printf 'o3k-disposable-testlab-v1\ncommit=%s\nrun=%s\n' "$SOURCE_SHA" "$MISSING_PID_RUN" >"$MISSING_PID_STATE/.o3k-run-owned"
+sudo -n chown root:root "$MISSING_PID_STATE/.o3k-run-owned"
+sudo -n chmod 0600 "$MISSING_PID_STATE/.o3k-run-owned"
 printf 'o3k-owned-v1 path=%s\n' "$MISSING_PID_STATE" >"$MISSING_PID_STATE/.o3k-owned"
 chmod 0755 "$MISSING_PID_STATE"
 cp /usr/bin/sleep "$MISSING_PID_STATE/bin/o3kd"
 chmod 0755 "$MISSING_PID_STATE/bin/o3kd"
+sudo -n chown -R root:root "$MISSING_PID_STATE"
 "$MISSING_PID_STATE/bin/o3kd" 300 & UNRECORDED_PID=$!
 
 set +e

@@ -9,7 +9,7 @@ teardown. This guard never deletes cloud or host resources.
 from __future__ import annotations
 
 import argparse
-import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -18,6 +18,15 @@ import subprocess
 import sys
 import time
 from typing import Any
+
+
+OBSERVER_PATH = pathlib.Path(__file__).with_name("pp5-protected-state-observer.py")
+OBSERVER_SPEC = importlib.util.spec_from_file_location("pp5_protected_state_observer", OBSERVER_PATH)
+if OBSERVER_SPEC is None or OBSERVER_SPEC.loader is None:
+    raise RuntimeError("PP.5 protected state observer is unavailable")
+PROTECTED_OBSERVER = importlib.util.module_from_spec(OBSERVER_SPEC)
+sys.modules[OBSERVER_SPEC.name] = PROTECTED_OBSERVER
+OBSERVER_SPEC.loader.exec_module(PROTECTED_OBSERVER)
 
 
 FOREIGN_FIELDS = (
@@ -77,11 +86,57 @@ def fail(path: pathlib.Path, phase: str, run_id: str, reason: str, **fields: Any
     return 1
 
 
+class OperationFailure(Exception):
+    def __init__(self, operation: str, observer_type: str, resource_class: str,
+                 diagnostic: str, command_class: str | None = None,
+                 exit_code: int | None = None) -> None:
+        super().__init__(diagnostic)
+        self.operation = operation
+        self.observer_type = observer_type
+        self.resource_class = resource_class
+        self.diagnostic = diagnostic
+        self.command_class = command_class
+        self.exit_code = exit_code
+
+    def evidence(self) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "failed_operation": self.operation,
+            "observer_type": self.observer_type,
+            "resource_class": self.resource_class,
+            "diagnostic": self.diagnostic,
+        }
+        if self.command_class is not None:
+            fields["command_class"] = self.command_class
+        if self.exit_code is not None:
+            fields["exit_code"] = self.exit_code
+        return fields
+
+
 def run_owned_api_absence(args: argparse.Namespace) -> int:
     """Verify only exact resource IDs captured by the successful lifecycle."""
     checked = {"servers": 0, "ports": 0, "other_resources": 0}
     remaining: dict[str, int | None] = {"servers": None, "ports": None, "domains": None}
-    current_resource = "lifecycle"
+    context: dict[str, Any] = {
+        "current_operation": "read_generic_lifecycle_evidence",
+        "observer_type": "runner_readable",
+        "resource_class": "generic_lifecycle_evidence",
+    }
+
+    def at(operation: str, observer_type: str, resource_class: str) -> None:
+        context.clear()
+        context.update(current_operation=operation, observer_type=observer_type,
+                       resource_class=resource_class)
+
+    def current_failure(error: Exception) -> dict[str, Any]:
+        fields = {
+            "failed_operation": context["current_operation"],
+            "observer_type": context["observer_type"],
+            "resource_class": context["resource_class"],
+            "diagnostic": str(error) if isinstance(error, RuntimeError) else type(error).__name__,
+        }
+        fields.update({key: context[key] for key in ("command_class", "exit_code") if key in context})
+        return fields
+
     try:
         lifecycle = load_json(args.lifecycle)
         if lifecycle.get("workflow_run_id") != args.run_id:
@@ -104,19 +159,24 @@ def run_owned_api_absence(args: argparse.Namespace) -> int:
 
         server_id = resources["server_id"]
         for resource, id_key in LIFECYCLE_RESOURCES.items():
-            current_resource = resource
+            at(f"show_run_owned_{resource}", "api_observation", f"openstack_{resource}")
             resource_id = resources[id_key]
             if not isinstance(resource_id, str) or not resource_id or len(resource_id) > 128:
                 raise ValueError("lifecycle resource identity is invalid")
             if cleanup[resource] != "verified_absent":
                 raise ValueError("lifecycle cleanup did not verify every run-owned resource absent")
-            result = subprocess.run(
-                ["openstack", resource, "show", resource_id, "-f", "json"],
-                check=False,
-                text=True,
-                capture_output=True,
-                timeout=20,
-            )
+            try:
+                result = subprocess.run(
+                    ["openstack", resource, "show", resource_id, "-f", "json"],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                    timeout=20,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                context["command_class"] = "openstack"
+                raise RuntimeError(type(error).__name__) from error
+            context.update(command_class="openstack", exit_code=result.returncode)
             if result.returncode == 0:
                 if resource == "server":
                     remaining["servers"] = 1
@@ -134,20 +194,28 @@ def run_owned_api_absence(args: argparse.Namespace) -> int:
             else:
                 checked["other_resources"] += 1
 
-        domain_output = subprocess.run(
-            ["virsh", "-c", "qemu:///system", "list", "--all", "--name"],
-            check=True,
-            text=True,
-            capture_output=True,
-            timeout=20,
-        ).stdout
-        current_resource = "domain"
+        at("list_run_owned_libvirt_domain", "libvirt_observation", "libvirt_domains")
+        try:
+            domain_result = subprocess.run(
+                ["virsh", "-c", "qemu:///system", "list", "--all", "--name"],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            context["command_class"] = "virsh"
+            raise RuntimeError(type(error).__name__) from error
+        context.update(command_class="virsh", exit_code=domain_result.returncode)
+        if domain_result.returncode != 0:
+            raise RuntimeError("SubprocessError")
+        domain_output = domain_result.stdout
         expected_domain = f"o3k-{server_id}"
         if expected_domain in {line.strip() for line in domain_output.splitlines()}:
             remaining["domains"] = 1
             raise ValueError("run-owned libvirt domain remains before TestLab teardown")
         remaining["domains"] = 0
-    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         return fail(
             args.artifact,
             "pre-teardown-api-absence",
@@ -159,8 +227,7 @@ def run_owned_api_absence(args: argparse.Namespace) -> int:
             servers_checked=checked["servers"],
             ports_checked=checked["ports"],
             other_resources_absent=checked["other_resources"],
-            failed_operation=current_resource,
-            diagnostic=type(error).__name__,
+            **current_failure(error),
         )
 
     write_evidence(
@@ -186,15 +253,18 @@ def process_matches_state_root(state_root: pathlib.Path) -> list[str]:
     try:
         subprocess.run(["sudo", "-n", "true"], check=True, capture_output=True, timeout=5)
     except (OSError, subprocess.SubprocessError) as error:
-        raise ValueError("privileged host process inspection is unavailable") from error
+        raise OperationFailure("verify_sudo_read_only_process_observer", "sudo_read_only",
+                               "run_owned_processes", type(error).__name__, "sudo") from error
     try:
         entries = list(proc_root.iterdir())
     except OSError as error:
-        raise ValueError("host process inventory is unavailable") from error
+        raise OperationFailure("enumerate_host_processes", "runner_readable",
+                               "host_process_inventory", type(error).__name__) from error
     expected_prefix = str(state_root) + "/bin/"
     for entry in entries:
         if not entry.name.isdigit():
             continue
+        operation = "inspect_host_process_cmdline"
         try:
             if not (entry / "cmdline").read_bytes():
                 continue
@@ -203,20 +273,26 @@ def process_matches_state_root(state_root: pathlib.Path) -> list[str]:
                 continue
             # If a process cannot be read, the privileged exe check below is
             # still required; cmdline contents are never retained.
-        result = subprocess.run(
-            ["sudo", "-n", "readlink", str(entry / "exe")],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        operation = "inspect_host_process_executable"
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "readlink", str(entry / "exe")],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise OperationFailure(operation, "sudo_read_only", "run_owned_processes",
+                                   type(error).__name__, "sudo") from error
         if result.returncode != 0:
             if not entry.exists():
                 continue
-            raise ValueError("a host process could not be inspected")
+            raise OperationFailure(operation, "sudo_read_only", "run_owned_processes",
+                                   "SubprocessError", "sudo", result.returncode)
         executable = result.stdout.rstrip("\n")
         if not executable:
-            raise ValueError("host process executable identity is empty")
+            raise OperationFailure(operation, "sudo_read_only", "run_owned_processes", "ValueError", "sudo", 0)
         if executable.startswith(expected_prefix):
             matches.append(entry.name)
     return matches
@@ -234,28 +310,58 @@ def post_teardown_host_absence(args: argparse.Namespace) -> int:
         roots["image"] = pathlib.Path(args.image_path)
         roots["image_marker"] = pathlib.Path(args.image_path + ".o3k-owned")
 
+    operation = "inspect_generic_testlab_roots"
+    remaining_roots: list[str] = []
+    live_processes: list[str] = []
     try:
-        remaining_roots = sorted(name for name, path in roots.items() if path.exists() or path.is_symlink())
+        remaining_roots = []
+        for name, path in roots.items():
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            remaining_roots.append(name)
+        if remaining_roots:
+            raise OperationFailure("verify_generic_testlab_roots_absent", "runner_readable",
+                                   "generic_testlab_roots", "ValueError")
         live_processes = process_matches_state_root(pathlib.Path(args.state_root))
+        if live_processes:
+            raise OperationFailure("verify_run_owned_processes_absent", "sudo_read_only",
+                                   "run_owned_processes", "ValueError")
+        operation = "read_pre_teardown_host_inventory"
         before = load_json(args.baseline)
+        operation = "read_post_teardown_host_inventory"
         after = load_json(args.after)
         if before.get("status") != "available" or after.get("status") != "available":
-            raise ValueError("host-only inventory snapshot is unavailable")
+            raise OperationFailure(operation, "runner_readable", "host_owned_inventory", "ValueError")
         if after.get("openstack", {}).get("status") != "not_checked":
-            raise ValueError("post-teardown inventory unexpectedly consulted OpenStack")
+            raise OperationFailure("verify_post_teardown_inventory_is_host_only", "runner_readable",
+                                   "host_owned_inventory", "ValueError")
         for field in ("domains", "network_links", "pools"):
             if before.get(field) != after.get(field):
-                raise ValueError("run-owned host inventory differs from the pre-generic baseline")
+                raise OperationFailure("compare_run_owned_host_inventory", "libvirt_observation",
+                                       field, "ValueError")
         before_foreign = before.get("foreign_state")
         after_foreign = after.get("foreign_state")
         if not isinstance(before_foreign, dict) or not isinstance(after_foreign, dict):
-            raise ValueError("foreign-state fingerprints are missing")
+            raise OperationFailure("validate_foreign_state_fingerprints", "runner_readable",
+                                   "foreign_state", "ValueError")
         differences = {
             key: {"before": before_foreign.get(key), "after": after_foreign.get(key)}
             for key in FOREIGN_FIELDS
             if before_foreign.get(key) != after_foreign.get(key)
         }
         if remaining_roots or live_processes or differences:
+            failed_operation = (
+                "verify_generic_testlab_roots_absent" if remaining_roots else
+                "verify_run_owned_processes_absent" if live_processes else
+                "compare_foreign_state_fingerprint"
+            )
+            resource_class = (
+                "generic_testlab_roots" if remaining_roots else
+                "run_owned_processes" if live_processes else
+                "foreign_state"
+            )
             return fail(
                 args.artifact,
                 "post-teardown-host-absence",
@@ -265,13 +371,34 @@ def post_teardown_host_absence(args: argparse.Namespace) -> int:
                 run_owned_processes=0 if not live_processes else len(live_processes),
                 foreign_state_unchanged=not differences,
                 foreign_state_differences=differences,
+                failed_operation=failed_operation,
+                observer_type="libvirt_observation" if differences else "runner_readable",
+                resource_class=resource_class,
+                diagnostic="ValueError",
             )
+    except OperationFailure as error:
+        return fail(
+            args.artifact,
+            "post-teardown-host-absence",
+            args.run_id,
+            "post-teardown host-only absence could not be proven",
+            generic_roots_absent=not remaining_roots,
+            run_owned_processes=len(live_processes),
+            foreign_state_unchanged=None,
+            **error.evidence(),
+        )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         return fail(
             args.artifact,
             "post-teardown-host-absence",
             args.run_id,
             "post-teardown host-only absence could not be proven",
+            generic_roots_absent=not remaining_roots,
+            run_owned_processes=len(live_processes),
+            foreign_state_unchanged=None,
+            failed_operation=operation,
+            observer_type="runner_readable",
+            resource_class="host_owned_inventory",
             diagnostic=type(error).__name__,
         )
 
@@ -290,6 +417,7 @@ def post_teardown_host_absence(args: argparse.Namespace) -> int:
 
 
 def generic_cleanup(args: argparse.Namespace) -> int:
+    source_sha = getattr(args, "source_sha", "")
     statuses = {
         "workload_absence_status": int(args.workload_status),
         "cleanup_command_status": int(args.cleanup_status),
@@ -334,11 +462,53 @@ def generic_cleanup(args: argparse.Namespace) -> int:
     ):
         failures.append("post_teardown_host_absence")
     if failures:
+        if statuses["workload_absence_status"] != 0:
+            failure = {
+                "failed_operation": api.get("failed_operation", "verify_pre_teardown_api_absence"),
+                "observer_type": api.get("observer_type", "api_observation"),
+                "resource_class": api.get("resource_class", "run_owned_openstack_resources"),
+                "exit_code": statuses["workload_absence_status"],
+            }
+            for key in ("command_class", "diagnostic"):
+                if api.get(key) is not None:
+                    failure[key] = api[key]
+        elif statuses["cleanup_command_status"] != 0:
+            failure = {
+                "failed_operation": "teardown_generic_testlab",
+                "observer_type": "runner_executable",
+                "resource_class": "generic_testlab_epoch",
+                "command_class": "cleanup-disposable-testlab.sh",
+                "exit_code": statuses["cleanup_command_status"],
+            }
+        elif statuses["post_cleanup_inventory_status"] != 0:
+            failure = {
+                "failed_operation": host.get("failed_operation", "collect_post_teardown_host_inventory"),
+                "observer_type": host.get("observer_type", "libvirt_observation"),
+                "resource_class": host.get("resource_class", "host_owned_inventory"),
+                "exit_code": statuses["post_cleanup_inventory_status"],
+            }
+            for key in ("command_class", "diagnostic"):
+                if host.get(key) is not None:
+                    failure[key] = host[key]
+        elif "pre_teardown_workload_absence" in failures:
+            failure = {
+                "failed_operation": "validate_pre_teardown_workload_absence",
+                "observer_type": "runner_readable",
+                "resource_class": "generic_lifecycle_evidence",
+            }
+        else:
+            failure = {
+                "failed_operation": "validate_post_teardown_host_absence",
+                "observer_type": "runner_readable",
+                "resource_class": "generic_testlab_host_state",
+            }
         return fail(
             args.artifact,
             "generic-cleanup",
             args.run_id,
             "one or more generic TestLab cleanup proof phases failed",
+            **failure,
+            tested_source_sha=source_sha.lower() if source_sha else None,
             **statuses,
             failed_phases=sorted(set(failures)),
             run_owned_servers=api.get("run_owned_servers"),
@@ -347,12 +517,14 @@ def generic_cleanup(args: argparse.Namespace) -> int:
             servers_checked=api.get("servers_checked"),
             ports_checked=api.get("ports_checked"),
             generic_roots_absent=host.get("generic_roots_absent"),
+            run_owned_processes=host.get("run_owned_processes"),
             foreign_state_unchanged=host.get("foreign_state_unchanged"),
         )
     write_evidence(
         args.artifact,
         "generic-cleanup",
         args.run_id,
+        tested_source_sha=source_sha.lower() if source_sha else None,
         **statuses,
         pre_teardown_workload_absence="passed",
         cleanup_command="passed",
@@ -363,22 +535,42 @@ def generic_cleanup(args: argparse.Namespace) -> int:
         servers_checked=api.get("servers_checked"),
         ports_checked=api.get("ports_checked"),
         generic_roots_absent=host.get("generic_roots_absent"),
+        run_owned_processes=host.get("run_owned_processes"),
         foreign_state_unchanged=host.get("foreign_state_unchanged"),
     )
     return 0
 
 
-def command_json(command: list[str]) -> Any:
-    result = subprocess.run(command, check=True, text=True, capture_output=True)
-    return json.loads(result.stdout)
+def command_json(command: list[str], operation: str, observer_type: str,
+                 resource_class: str, context: dict[str, str | int | None]) -> Any:
+    context.clear()
+    context.update(current_operation=operation, observer_type=observer_type,
+                   resource_class=resource_class)
+    try:
+        result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as error:
+        context["command_class"] = pathlib.Path(command[0]).name
+        context["exit_code"] = None
+        raise RuntimeError(type(error).__name__) from error
+    if result.returncode != 0:
+        context["command_class"] = pathlib.Path(command[0]).name
+        context["exit_code"] = result.returncode
+        raise RuntimeError("SubprocessError")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        context["command_class"] = pathlib.Path(command[0]).name
+        context["exit_code"] = result.returncode
+        raise RuntimeError("JSONDecodeError") from error
 
 
-def lane_project_id() -> str:
+def lane_project_id(context: dict[str, str | int | None]) -> str:
     configured = os.environ.get("OS_PROJECT_ID", "").strip()
     if configured:
         return configured
     project_name = os.environ.get("OS_PROJECT_NAME", "admin").strip() or "admin"
-    project = command_json(["openstack", "project", "show", project_name, "-f", "json"])
+    project = command_json(["openstack", "project", "show", project_name, "-f", "json"],
+                           "lookup_project_identity", "api_observation", "openstack_project_identity", context)
     if not isinstance(project, dict) or not isinstance(project.get("id"), str) or not project["id"]:
         raise ValueError("current TestLab project identity is unavailable")
     return project["id"]
@@ -387,37 +579,90 @@ def lane_project_id() -> str:
 def lane_preconditions(args: argparse.Namespace) -> int:
     if not re.fullmatch(r"[0-9]+-pp5", args.testlab_run_id):
         return fail(args.artifact, "lane-preconditions", args.run_id,
-                    "selected lane is not bound to the PP.5 phase identity")
-    marker = pathlib.Path(args.state_root) / ".o3k-run-owned"
+                    "selected lane is not bound to the PP.5 phase identity",
+                    failed_operation="validate_pp5_phase_identity",
+                    observer_type="runner_readable",
+                    resource_class="testlab_run_identity",
+                    diagnostic="ValueError")
+    context: dict[str, str | int | None] = {
+        "current_operation": "read_testlab_ownership_marker",
+        "observer_type": "sudo_read_only",
+        "resource_class": "testlab_ownership_marker",
+    }
+
+    def at(operation: str, observer_type: str, resource_class: str) -> None:
+        context.clear()
+        context.update(current_operation=operation, observer_type=observer_type,
+                       resource_class=resource_class)
+
+    def fail_context(error: Exception) -> dict[str, str | int | None]:
+        fields: dict[str, str | int | None] = {
+            "failed_operation": context.get("current_operation"),
+            "observer_type": context.get("observer_type"),
+            "resource_class": context.get("resource_class"),
+            "diagnostic": str(error) if isinstance(error, RuntimeError) else type(error).__name__,
+        }
+        fields.update({key: context[key] for key in ("command_class", "exit_code") if key in context})
+        return fields
+
     try:
-        marker_lines = marker.read_text(encoding="utf-8").splitlines()
-        if "o3k-disposable-testlab-v1" not in marker_lines or f"run={args.testlab_run_id}" not in marker_lines:
-            raise ValueError("PP.5 TestLab ownership marker does not match phase identity")
-        project_id = lane_project_id()
-        servers = command_json(["openstack", "server", "list", "--project", project_id, "-f", "json"])
-        ports = command_json(["openstack", "port", "list", "--project", project_id, "-f", "json"])
+        PROTECTED_OBSERVER.verify_marker(pathlib.Path(args.state_root), args.testlab_run_id, args.source_sha)
+        project_id = lane_project_id(context)
+        servers = command_json(["openstack", "server", "list", "--project", project_id, "-f", "json"],
+                               "list_project_scoped_servers", "api_observation", "openstack_servers", context)
+        ports = command_json(["openstack", "port", "list", "--project", project_id, "-f", "json"],
+                             "list_project_scoped_ports", "api_observation", "openstack_ports", context)
         if not isinstance(servers, list) or not isinstance(ports, list):
+            at("validate_project_scoped_inventory", "api_observation", "openstack_inventory")
             raise ValueError("project-scoped OpenStack server/port inventory is malformed")
-        domain_output = subprocess.run(
-            ["virsh", "-c", "qemu:///system", "list", "--all", "--name"],
-            check=True, text=True, capture_output=True,
-        ).stdout
-        run_domains = sorted(line.strip() for line in domain_output.splitlines()
-                             if line.strip().startswith("o3k-"))
-        domain_digest = hashlib.sha256("\n".join(run_domains).encode("utf-8")).hexdigest()
+        at("list_libvirt_domains", "libvirt_observation", "libvirt_domains")
+        try:
+            domain_output = subprocess.run(
+                ["virsh", "-c", "qemu:///system", "list", "--all", "--name"],
+                check=False, text=True, capture_output=True, timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            context["command_class"] = "virsh"
+            context["exit_code"] = None
+            raise RuntimeError(type(error).__name__) from error
+        if domain_output.returncode != 0:
+            context["command_class"] = "virsh"
+            context["exit_code"] = domain_output.returncode
+            raise RuntimeError("SubprocessError")
+        context["command_class"] = "virsh"
+        context["exit_code"] = 0
+        run_domain_prefix = f"o3k-p15-7-{args.run_id}-"
+        run_domains = sorted(line.strip() for line in domain_output.stdout.splitlines()
+                             if line.strip().startswith(run_domain_prefix))
         counts = {"run_owned_servers": len(servers), "run_owned_ports": len(ports),
                   "run_owned_domains": len(run_domains)}
         if any(counts.values()):
+            at("verify_zero_existing_workloads", "api_observation", "run_owned_workloads")
             return fail(args.artifact, "lane-preconditions", args.run_id,
-                        "fresh PP.5 TestLab has pre-existing run-owned workloads or an ambiguous O3K domain",
-                        **counts, o3k_domain_candidates_sha256=domain_digest)
-    except (OSError, ValueError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+                        "fresh PP.5 TestLab has pre-existing run-owned workloads",
+                        **counts, **fail_context(ValueError()))
+    except PROTECTED_OBSERVER.ObservationError as error:
+        context.update(current_operation=error.operation, observer_type=error.observer_type,
+                       resource_class=error.resource_class, diagnostic=error.diagnostic)
+        if error.command_class is not None:
+            context["command_class"] = error.command_class
+        if error.exit_code is not None:
+            context["exit_code"] = error.exit_code
+        return fail(args.artifact, "lane-preconditions", args.run_id,
+                    "fresh PP.5 ownership marker could not be verified",
+                    failed_operation=error.operation,
+                    observer_type=error.observer_type,
+                    resource_class=error.resource_class,
+                    diagnostic=error.diagnostic,
+                    **({"command_class": error.command_class} if error.command_class else {}),
+                    **({"exit_code": error.exit_code} if error.exit_code is not None else {}))
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         return fail(args.artifact, "lane-preconditions", args.run_id,
                     "fresh PP.5 workload inventory could not be proven empty",
-                    diagnostic=type(error).__name__)
+                    **fail_context(error))
     write_evidence(args.artifact, "lane-preconditions", args.run_id,
                    testlab_phase_id=args.testlab_run_id, **counts,
-                   o3k_domain_candidates_sha256=domain_digest,
+                   ownership_marker_verified=True,
                    provider_allocations="awaiting-native-diagnostics-before-workload-mutation",
                    topology="awaiting-canonical-topology-check-before-workload-mutation")
     return 0
@@ -445,6 +690,7 @@ def main() -> int:
 
     cleanup = subparsers.add_parser("generic-cleanup")
     cleanup.add_argument("--run-id", required=True)
+    cleanup.add_argument("--source-sha", default="")
     cleanup.add_argument("--workload-status", type=int, required=True)
     cleanup.add_argument("--cleanup-status", type=int, required=True)
     cleanup.add_argument("--inventory-status", type=int, required=True)
@@ -456,6 +702,7 @@ def main() -> int:
     lane.add_argument("--run-id", required=True)
     lane.add_argument("--testlab-run-id", required=True)
     lane.add_argument("--state-root", required=True)
+    lane.add_argument("--source-sha", required=True)
     lane.add_argument("--artifact", type=pathlib.Path, required=True)
 
     args = parser.parse_args()

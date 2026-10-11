@@ -342,14 +342,9 @@ PASSWORD=
 BOOTSTRAP_SECRET=
 if [[ -e "$STATE_ROOT" ]]; then
   [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || fail "run state is not a directory"
-  [[ -f "$STATE_ROOT/.o3k-run-owned" && ! -L "$STATE_ROOT/.o3k-run-owned" ]] \
-    || fail "existing run state is not owned by this bootstrap"
-  marker="$(sudo -n cat "$STATE_ROOT/.o3k-run-owned" 2>/dev/null)" \
-    || fail "cannot inspect existing run ownership marker"
-  grep -Fqx 'o3k-disposable-testlab-v1' <<<"$marker" \
-    || fail "existing run state has a foreign ownership marker"
-  grep -Fqx "commit=$SOURCE_COMMIT" <<<"$marker" \
-    || fail "existing run state belongs to a different source commit"
+  python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" verify-marker \
+    --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_COMMIT" >/dev/null \
+    || fail "existing run ownership marker failed privileged verification"
   [[ -d "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
     || fail "existing run state has no inventory state"
   grep -Fqx 'o3k-disposable-inventory-v1' "$INVENTORY_ROOT/.o3k-inventory-owned" \
@@ -782,7 +777,10 @@ start_service() {
   uid="$(process_uid "$child")"
   [[ "$start_ticks" =~ ^[0-9]+$ && "$uid" == "$account" ]] \
     || fail "$name did not expose a valid service identity"
-  printf '%s|%s|%s|%s\n' "$child" "$start_ticks" "$uid" "$(basename "$binary")" >"$pid_file"
+  (
+    umask 077
+    printf '%s|%s|%s|%s\n' "$child" "$start_ticks" "$uid" "$(basename "$binary")" >"$pid_file"
+  )
   if [[ "$name" == o3kd ]]; then O3KD_PID="$child"; else COMPUTE_PID="$child"; fi
 }
 
@@ -807,7 +805,9 @@ wait_for_o3kd_control() {
 
 bootstrap_testlab() {
   local agent_id agent_epoch vcpus memory_mb disk_gb init_output enrollment_token join_attempt
-  agent_id="$(sudo -n cat "$STATE_ROOT/tls/agent-id")"
+  agent_id="$(python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" bootstrap-agent-id \
+    --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_COMMIT")" \
+    || fail "cannot read the protected bootstrap compute identity"
   [[ "$agent_id" =~ ^[A-Za-z0-9._-]+$ ]] || fail "generated agent identity is invalid"
   agent_epoch="$(openssl rand -hex 16)"
   vcpus="$(nproc --all 2>/dev/null || true)"

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 RUN_ID="${O3K_TESTLAB_RUN_ID:-${GITHUB_RUN_ID:-}}"
+SOURCE_SHA="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}}"
 ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
 [[ "$RUN_ID" =~ ^[0-9]+(-generic|-pp5)?$|^local-[0-9]+(-generic|-pp5)?$ ]] || { echo "cleanup: invalid workflow run id" >&2; exit 1; }
 [[ "$RUNNER_TEMP" == /* && "$RUNNER_TEMP" != *..* && -d "$RUNNER_TEMP" && ! -L "$RUNNER_TEMP" ]] \
@@ -80,13 +82,11 @@ if [[ ! -e "$STATE_ROOT" ]]; then
 fi
 [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] \
   || { echo "cleanup: state root is not a real directory" >&2; exit 1; }
-sudo -n test -f "$STATE_ROOT/.o3k-run-owned" \
-  && ! sudo -n test -L "$STATE_ROOT/.o3k-run-owned" \
-  || { echo "cleanup: ownership marker is missing" >&2; exit 1; }
-sudo -n grep -Fqx 'o3k-disposable-testlab-v1' "$STATE_ROOT/.o3k-run-owned" \
-  || { echo "cleanup: ownership marker is invalid" >&2; exit 1; }
-sudo -n grep -Fqx "run=$RUN_ID" "$STATE_ROOT/.o3k-run-owned" \
-  || { echo "cleanup: ownership marker belongs to another run" >&2; exit 1; }
+[[ "$SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] \
+  || { echo "cleanup: exact source SHA is unavailable for marker verification" >&2; exit 1; }
+python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" verify-marker \
+  --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_SHA" >/dev/null \
+  || { echo "cleanup: protected ownership marker verification failed" >&2; exit 1; }
 sudo -n grep -Fqx "o3k-owned-v1 path=$STATE_ROOT" "$STATE_ROOT/.o3k-owned" \
   || { echo "cleanup: O3K ownership marker is invalid" >&2; exit 1; }
 state_metadata="$(sudo -n stat -c '%U:%G:%a' "$STATE_ROOT" 2>/dev/null)"

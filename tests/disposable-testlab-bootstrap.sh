@@ -108,6 +108,7 @@ tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/o3k-disposable-bootstrap-test.XXXXXX")"
 trap 'rm -rf -- "$tmp_root"' EXIT
 chmod 0755 "$tmp_root"
 run_id=local-991
+source_sha="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 state="$tmp_root/o3k-testlab/$run_id"
 pid_root="$tmp_root/o3k-testlab-pids/$run_id"
 venv="$tmp_root/o3k-openstack-venv.test"
@@ -116,9 +117,11 @@ mkdir -p "$state" "$pid_root" "$venv"
 printf 'o3k-disposable-venv-v1\n' >"$venv/.o3k-venv-owned"
 mkdir -p "$state/bin"
 cp /bin/sleep "$state/bin/o3kd"
-printf 'o3k-disposable-testlab-v1\ncommit=test\nrun=%s\n' "$run_id" >"$state/.o3k-run-owned"
+printf 'o3k-disposable-testlab-v1\ncommit=%s\nrun=%s\n' "$source_sha" "$run_id" >"$state/.o3k-run-owned"
 printf 'o3k-owned-v1 path=%s\n' "$state" >"$state/.o3k-owned"
 sudo chown -R o3k:o3k "$state"
+sudo chown root:root "$state/.o3k-run-owned"
+sudo chmod 0600 "$state/.o3k-run-owned"
 sudo chmod 0700 "$state"
 sudo -n -u o3k -- "$state/bin/o3kd" 60 & supervisor_pid=$!
 sleep 0.2
@@ -143,7 +146,9 @@ RUNNER_TEMP="$tmp_root" GITHUB_RUN_ID="$run_id" \
 # neither daemon owns the other daemon's state.  Cleanup must still recognize
 # and remove that explicitly marked O3K-owned root.
 mkdir -p "$state"
-printf 'o3k-disposable-testlab-v1\ncommit=test\nrun=%s\n' "$run_id" >"$state/.o3k-run-owned"
+printf 'o3k-disposable-testlab-v1\ncommit=%s\nrun=%s\n' "$source_sha" "$run_id" >"$state/.o3k-run-owned"
+sudo chown root:root "$state/.o3k-run-owned"
+sudo chmod 0600 "$state/.o3k-run-owned"
 printf 'o3k-owned-v1 path=%s\n' "$state" >"$state/.o3k-owned"
 sudo chown -R root:root "$state"
 sudo chmod 0755 "$state"
