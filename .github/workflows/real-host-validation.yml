@@ -663,6 +663,7 @@ jobs:
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
           O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-host-workflow-artifacts/runner-capabilities.json
           O3K_TESTLAB_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_TESTLAB_RESOURCE_SUFFIX: ${{ github.run_id }}-generic
           O3K_TESTLAB_CONFIG_DRIVE: true
           O3K_TESTLAB_CONSOLE_ATTEMPTS: 12
           # Keep the client watchdog outside the API's 15-second agent
@@ -702,29 +703,46 @@ jobs:
           O3K_REAL_HOST_OPENSTACK_INVENTORY: "true"
         run: |
           set -euo pipefail
-          workload_status=0
-          python3 scripts/pp5-testlab-epoch-guard.py generic-workloads \
+          workload_absence_status=0
+          python3 scripts/pp5-testlab-epoch-guard.py pre-teardown-api-absence \
             --run-id "${GITHUB_RUN_ID}" \
+            --lifecycle "target/real-host-workflow-artifacts/openstack-cli-result.json" \
             --artifact "target/real-host-workflow-artifacts/pp5-generic-workloads-before-teardown.json" \
-            || workload_status=$?
+            || workload_absence_status=$?
           cleanup_status=0
           bash scripts/cleanup-disposable-testlab.sh || cleanup_status=$?
           inventory_status=0
-          O3K_REAL_HOST_OPENSTACK_INVENTORY=false \
-            python3 scripts/real-host-owned-inventory.py "${O3K_REAL_HOST_GENERIC_AFTER}" || inventory_status=$?
-          guard_status="${workload_status}"
-          if test "${guard_status}" -eq 0 && test "${cleanup_status}" -ne 0; then
-            guard_status="${cleanup_status}"
+          env -i \
+            PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            O3K_REAL_HOST_OPENSTACK_INVENTORY=false \
+            O3K_REAL_HOST_PROTECTED_PATHS="" \
+            O3K_P15_7_LIBVIRT_IMAGE_ROOT="${O3K_P15_7_LIBVIRT_IMAGE_ROOT:-/var/lib/libvirt/images}" \
+            /usr/bin/python3 scripts/real-host-owned-inventory.py "${O3K_REAL_HOST_GENERIC_AFTER}" \
+            || inventory_status=$?
+          host_absence_status="${inventory_status}"
+          if test "${inventory_status}" -eq 0; then
+            host_absence_status=0
+            env -i \
+              PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              /usr/bin/python3 scripts/pp5-testlab-epoch-guard.py post-teardown-host-absence \
+                --run-id "${GITHUB_RUN_ID}" \
+                --state-root "/var/lib/o3k-testlab/${GITHUB_RUN_ID}-generic" \
+                --pid-root "${RUNNER_TEMP}/o3k-testlab-pids/${GITHUB_RUN_ID}-generic" \
+                --inventory-root "${RUNNER_TEMP}/o3k-testlab-inventory/${GITHUB_RUN_ID}-generic" \
+                --openstack-venv "${O3K_OPENSTACK_VENV:-}" \
+                --image-path "${O3K_TESTLAB_IMAGE_PATH:-}" \
+                --baseline "${O3K_REAL_HOST_GENERIC_BASELINE}" \
+                --after "${O3K_REAL_HOST_GENERIC_AFTER}" \
+                --artifact "target/real-host-workflow-artifacts/pp5-generic-host-absence-after.json" \
+                || host_absence_status=$?
           fi
-          if test "${guard_status}" -eq 0 && test "${inventory_status}" -ne 0; then
-            guard_status="${inventory_status}"
-          fi
-          python3 scripts/pp5-testlab-epoch-guard.py generic-cleanup \
-            --run-id "${GITHUB_RUN_ID}" --runner-temp "${RUNNER_TEMP}" \
-            --state-root "/var/lib/o3k-testlab/${GITHUB_RUN_ID}-generic" \
-            --cleanup-status "${guard_status}" \
-            --baseline "${O3K_REAL_HOST_GENERIC_BASELINE}" --after "${O3K_REAL_HOST_GENERIC_AFTER}" \
+          /usr/bin/python3 scripts/pp5-testlab-epoch-guard.py generic-cleanup \
+            --run-id "${GITHUB_RUN_ID}" \
+            --workload-status "${workload_absence_status}" \
+            --cleanup-status "${cleanup_status}" \
+            --inventory-status "${host_absence_status}" \
             --workloads "target/real-host-workflow-artifacts/pp5-generic-workloads-before-teardown.json" \
+            --host-absence "target/real-host-workflow-artifacts/pp5-generic-host-absence-after.json" \
             --artifact "target/real-host-workflow-artifacts/pp5-generic-epoch-cleanup.json"
 
       - name: Bind PP.5 lane to campaign PostgreSQL
@@ -1020,6 +1038,7 @@ jobs:
             target/real-host-workflow-artifacts/real-host-generic-inventory-after.json
             target/real-host-workflow-artifacts/pp5-generic-epoch-cleanup.json
             target/real-host-workflow-artifacts/pp5-generic-workloads-before-teardown.json
+            target/real-host-workflow-artifacts/pp5-generic-host-absence-after.json
             target/real-host-workflow-artifacts/pp5-lane-preconditions.json
             target/real-host-workflow-artifacts/pp5-lane-initial-state.json
             target/real-host-workflow-artifacts/real-host-workflow-result.json
