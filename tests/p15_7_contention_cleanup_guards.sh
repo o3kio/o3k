@@ -65,6 +65,7 @@ trap 'rm -rf -- "$WORK_DIR"' EXIT
 mkdir -p "$WORK_DIR/state"
 if ! env WORK_DIR="$WORK_DIR" bash -c '
   set -Eeuo pipefail
+  set +m
   CRASH_REPAIR_WAITER_FILE="$WORK_DIR/state/waiter"
   CRASH_REPAIR_RELEASE_FILE="$WORK_DIR/state/release"
   : >"$CRASH_REPAIR_WAITER_FILE"
@@ -88,6 +89,7 @@ fi
 # cannot strand synchronization state.
 if ! env WORK_DIR="$WORK_DIR" bash -c '
   set -Eeuo pipefail
+  set +m
   CRASH_REPAIR_WAITER_FILE="$WORK_DIR/state/early-waiter"
   CRASH_REPAIR_RELEASE_FILE="$WORK_DIR/state/early-release"
   : >"$CRASH_REPAIR_WAITER_FILE"
@@ -113,6 +115,7 @@ printf '#!/bin/sh\ntrap "" TERM\nsleep 60\n' >"$IGNORE_TERM_SCRIPT"
 chmod 0700 "$IGNORE_TERM_SCRIPT"
 if ! env WORK_DIR="$WORK_DIR" bash -c '
   set -Eeuo pipefail
+  set +m
   CRASH_REPAIR_WAITER_FILE="$WORK_DIR/state/kill-waiter"
   CRASH_REPAIR_RELEASE_FILE="$WORK_DIR/state/kill-release"
   : >"$CRASH_REPAIR_WAITER_FILE"

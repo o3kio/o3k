@@ -133,6 +133,7 @@ O3K_FAULT_ENV_VALUE="${O3K_P15_7_FAULT_PAUSE_MS:-45000}"
 BOOTSTRAP_AGENT_ID=""
 classify_failure() {
   case "${1:-}" in
+    *harness*|*epoch*|*precondition*) echo harness_gap ;;
     # Match the most specific crash/repair terms before the generic
     # "source" pattern: the word "resource" contains the substring
     # "source", so the old ordering misclassified
@@ -1078,7 +1079,7 @@ stop_contending_create() {
         current_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
         if [[ -z "${CONTENDING_CREATE_STARTTIME:-}" || "$current_starttime" != "$CONTENDING_CREATE_STARTTIME" \
           || -z "$pgid" || ! "$pgid" =~ ^[0-9]+$ || "$current_pgid" != "$pgid" ]]; then
-          echo "P15.7 cleanup: contending-create PID identity changed before signal: $pid" >&2
+          echo "P15.7 cleanup: contending-create PID identity changed before signal: pid=$pid expected_starttime=${CONTENDING_CREATE_STARTTIME:-missing} current_starttime=${current_starttime:-missing} expected_pgid=${pgid:-missing} current_pgid=${current_pgid:-missing}" >&2
           failed=true
         fi
       fi
@@ -2496,21 +2497,65 @@ api_get /operator/diagnostics/providers initial-provider-diagnostics >"$WORK_ROO
 api_get /operator/diagnostics/capacity initial-capacity-diagnostics >"$WORK_ROOT/capacity.json"
 api_get /services initial-services >"$WORK_ROOT/services.json"
 api_get /resource-types initial-resource-types >"$WORK_ROOT/resource-types.json"
+if ! python3 - "$WORK_ROOT/blocks.json" "$WORK_ROOT/providers.json" "$BOOTSTRAP_AGENT_ID" \
+  "${BLOCK_IDS[block-a]}" "$PP5_PHASE" "$ARTIFACT_DIR/pp5-lane-initial-state.json" \
+  "${O3K_PP5_LANE_PRECONDITIONS:-$ARTIFACT_DIR/pp5-lane-preconditions.json}" <<'PY'
+import json, pathlib, sys
+blocks_path, providers_path, bootstrap_id, block_a_id, phase, output, guard_path = sys.argv[1:]
+guard = json.load(open(guard_path, encoding="utf-8"))
+if guard.get("status") != "passed" or guard.get("phase") != "lane-preconditions":
+    raise SystemExit("PP.5 lane precondition workload guard did not pass")
+if any(guard.get(field) != 0 for field in ("run_owned_servers", "run_owned_ports", "run_owned_domains")):
+    raise SystemExit("PP.5 lane precondition workload guard did not prove zero existing workloads")
+blocks = json.load(open(blocks_path, encoding="utf-8"))
+page = json.load(open(providers_path, encoding="utf-8"))
+if not isinstance(blocks, list) or not isinstance(page, dict) or not isinstance(page.get("items"), list):
+    raise SystemExit("PP.5 lane precondition diagnostics are malformed")
+if not page["items"]:
+    raise SystemExit("PP.5 lane precondition has no provider capacity baseline")
+identities = [item.get("block", {}).get("execution_identity") for item in blocks]
+block_ids = {item.get("block", {}).get("id") for item in blocks}
+allocations = []
+for provider in page["items"]:
+    capacities = provider.get("capacity")
+    if not isinstance(capacities, list) or not capacities:
+        raise SystemExit("PP.5 lane precondition provider capacity dimensions are absent")
+    for capacity in capacities:
+        allocations.append({"provider_id": provider.get("provider_id"),
+                            "resource_class": capacity.get("resource_class"),
+                            "allocated": capacity.get("allocated")})
+        if capacity.get("allocated") != 0:
+            raise SystemExit("fresh PP.5 lane provider has a non-zero allocation")
+if phase == "s1-boundary":
+    if len(blocks) != 1 or identities != [bootstrap_id]:
+        raise SystemExit("S1 precondition requires exactly the bootstrap compute host and no child hosts")
+elif phase == "s2-boundary":
+    if len(blocks) != 2 or block_a_id not in block_ids or identities.count(bootstrap_id) != 1 or set(identities) != {bootstrap_id, "block-a"}:
+        raise SystemExit("S2 precondition requires exactly the bootstrap host and block-a")
+document = {
+    "artifact_type": "pp5-lane-initial-state",
+    "schema_version": 1,
+    "redacted": True,
+    "phase": phase,
+    "existing_workloads": {"servers": guard["run_owned_servers"],
+                            "ports": guard["run_owned_ports"],
+                            "domains": guard["run_owned_domains"]},
+    "workload_guard_artifact": pathlib.Path(guard_path).name,
+    "provider_allocations": allocations,
+    "provider_allocations_zero": all(item["allocated"] == 0 for item in allocations),
+    "canonical_building_blocks": identities,
+    "expected_topology": "bootstrap-only" if phase == "s1-boundary" else "bootstrap-plus-block-a" if phase == "s2-boundary" else "lane-specific",
+}
+pathlib.Path(output).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+then
+  FAILURE_CLASS=harness_gap
+  die "PP.5 lane precondition topology or provider allocation baseline is invalid"
+fi
 if [[ "$PP5_PHASE" == s1-boundary ]]; then
-  python3 - "$WORK_ROOT/blocks.json" "$BOOTSTRAP_AGENT_ID" <<'PY'
-import json,sys
-blocks=json.load(open(sys.argv[1], encoding="utf-8"))
-matches=[x.get("block",{}) for x in blocks if x.get("block",{}).get("execution_identity")==sys.argv[2]]
-assert len(matches)==1, "S1 must contain one canonical bootstrap BuildingBlock"
-PY
+  : # Exact bootstrap-only topology and zero allocations were checked above.
 elif [[ "$PP5_PHASE" == s2-boundary ]]; then
-  python3 - "$WORK_ROOT/blocks.json" "${BLOCK_IDS[block-a]}" "$BOOTSTRAP_AGENT_ID" <<'PY'
-import json,sys
-blocks=json.load(open(sys.argv[1], encoding="utf-8"))
-ids={x.get("block",{}).get("id") for x in blocks}
-agents=[x.get("block",{}).get("execution_identity") for x in blocks]
-assert sys.argv[2] in ids and sys.argv[3] in agents and len(agents)==len(set(agents))
-PY
+  : # Exact bootstrap-plus-block-a topology and zero allocations were checked above.
 else
 python3 - "$WORK_ROOT/blocks.json" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" <<'PY'
 import json,sys
@@ -3917,6 +3962,11 @@ persist_crash_checkpoint repair_lock_acquired running \
   repair_lock_wait_ms "$CRASH_REPAIR_LOCK_WAIT_MS" repair_lock_wait_bound_ms "$CRASH_REPAIR_LOCK_WAIT_BOUND_MS" \
   repair_lease_takeover "$CRASH_REPAIR_LEASE_TAKEOVER"
 CONTENDING_CREATE_REQUEST_START_MS="$(date +%s%3N)"
+# Keep the background launcher in the shell's inherited process group so
+# util-linux `setsid` can exec in place. With monitor mode enabled, Bash makes
+# the launcher a process-group leader and `setsid` may fork; then `$!` no
+# longer identifies the process group the exact-PID cleanup owns.
+set +m
 setsid --wait timeout --foreground --kill-after=5s --signal=TERM 67s openstack server create --image "$OS_IMAGE_ID" --flavor "$OS_FLAVOR_ID" --key-name "$OS_KEYPAIR_NAME" \
   --nic "port-id=$OS_PORT_D_ID" "o3k-p15-7-$RUN_ID-d" -f value -c id >"$WORK_ROOT/workload-d-create.txt" 2>"$WORK_ROOT/workload-d-create.err" &
 CONTENDING_CREATE_PID=$!

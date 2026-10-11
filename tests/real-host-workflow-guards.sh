@@ -852,6 +852,42 @@ assert "compute_agent_process_probe_failed" in post_guard
 assert "p15-7-gate-result.json" in post_guard
 assert "p15_7_gate_failed" in post_guard
 assert "p15_7_gate_blocked" in post_guard
+generic_cleanup = "Stop and prove generic TestLab epoch absent"
+pp5_bootstrap = "Bootstrap fresh PP.5 lane TestLab"
+lane_guard = "Verify fresh PP.5 lane preconditions"
+selected_lane = "Run selected PP.5 acceptance lane"
+generic_workload_guard = text.split(f"      - name: {generic_cleanup}\n", 1)[1].split("\n      - name:", 1)[0]
+assert "pp5-testlab-epoch-guard.py generic-workloads" in generic_workload_guard
+assert generic_workload_guard.index("generic-workloads") < generic_workload_guard.index("cleanup-disposable-testlab.sh")
+assert "--workloads \"target/real-host-workflow-artifacts/pp5-generic-workloads-before-teardown.json\"" in generic_workload_guard
+assert text.index("Run public real-host lifecycle") < text.index(generic_cleanup)
+assert text.index(generic_cleanup) < text.index("Bind PP.5 lane to campaign PostgreSQL")
+assert text.index("Bind PP.5 lane to campaign PostgreSQL") < text.index(pp5_bootstrap)
+assert text.index(pp5_bootstrap) < text.index(lane_guard) < text.index(selected_lane)
+assert "O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-generic" in text
+assert "O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5" in text
+assert "steps.pp5_lane_preconditions.outcome == 'success'" in text.split(
+    f"      - name: {selected_lane}\n", 1
+)[1].split("\n      - name:", 1)[0]
+assert "O3K_PP5_LANE_PRECONDITIONS: target/real-host-workflow-artifacts/pp5-lane-preconditions.json" in text
+assert "O3K_PP5_WORKSPACE_DATABASE_URL" in text
+assert "O3K_PP5_CAMPAIGN_DATABASE_URL" in text
+epoch_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/pp5-testlab-epoch-guard.py").read_text(encoding="utf-8")
+assert '"HARNESS_GAP"' in epoch_guard
+assert "foreign_state_unchanged" in epoch_guard
+assert "run_owned_servers" in epoch_guard and "run_owned_ports" in epoch_guard and "run_owned_domains" in epoch_guard
+journey = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/p15-7-real-host-journey.sh").read_text(encoding="utf-8")
+precondition_pos = journey.index('pp5-lane-initial-state.json')
+workload_pos = journey.index('openstack image create "o3k-p15-7-$RUN_ID-image"')
+assert precondition_pos < workload_pos
+boundary_pos = journey.index('run_boundary_smoke() {')
+server_create_pos = journey.index('"$API/compute/servers"', boundary_pos)
+checkpoint_pos = journey.index('record_scale_checkpoint "$phase" "$expected"', boundary_pos)
+assert checkpoint_pos < server_create_pos
+assert "S1 precondition requires exactly the bootstrap compute host and no child hosts" in journey
+assert "S2 precondition requires exactly the bootstrap host and block-a" in journey
+assert 'guard.get("status") != "passed"' in journey
+assert '"run_owned_servers", "run_owned_ports", "run_owned_domains"' in journey
 o3kd = pathlib.Path(sys.argv[1]).parents[2].joinpath("bins/o3kd/src/composition/compute.rs").read_text(encoding="utf-8")
 probe = o3kd.split("async fn run_agent_inspect_probe(", 1)[1]
 assert ".inspect_server(" in probe
@@ -859,3 +895,4 @@ assert "registry.dispatch_command" not in probe
 assert "o3kd-compute-service-to-scheduler-to-agent-to-libvirt" in probe
 PY
 echo "real-host workflow guard tests passed"
+python3 "${ROOT_DIR}/tests/pp5_testlab_epoch_guard.py"

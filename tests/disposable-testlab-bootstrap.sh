@@ -36,6 +36,9 @@ assert '--init-groups' in bootstrap
 assert 'nohup bash -c' in bootstrap
 assert 'O3K_COMPUTE_BRIDGE_NAME' in bootstrap
 assert 'O3K_TESTLAB_AUTO_SELECT_PORTS' in bootstrap
+assert 'RUN_ID="${O3K_TESTLAB_RUN_ID:-${GITHUB_RUN_ID:-local-$$}}"' in bootstrap
+assert 'O3K_TESTLAB_RUN_ID=%s\\n' in bootstrap
+assert '(-generic|-pp5)?' in bootstrap
 assert 'select_free_ports()' in bootstrap
 assert 'no free run-scoped TestLab port triplet is available' in bootstrap
 assert 'GitHub environment file path is unsafe' in bootstrap

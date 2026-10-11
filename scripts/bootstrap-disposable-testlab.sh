@@ -9,14 +9,14 @@ RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 command -v realpath >/dev/null 2>&1 \
   || { echo "disposable TestLab bootstrap failed: realpath is unavailable" >&2; exit 1; }
 RUNNER_TEMP="$(realpath -e -- "$RUNNER_TEMP")"
-RUN_ID="${GITHUB_RUN_ID:-local-$$}"
+RUN_ID="${O3K_TESTLAB_RUN_ID:-${GITHUB_RUN_ID:-local-$$}}"
 # Workflow dispatches may target an exact SHA that differs from GitHub's
 # immutable default GITHUB_SHA (the workflow file's revision).  The explicit
 # O3K source binding is therefore authoritative when supplied; this keeps the
 # bootstrap's checkout check aligned with the protected P15.7 target.
 SOURCE_COMMIT="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}}"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflow-artifacts}"
-[[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] \
+[[ "$RUN_ID" =~ ^[0-9]+(-generic|-pp5)?$|^local-[0-9]+(-generic|-pp5)?$ ]] \
   || { echo "disposable TestLab bootstrap failed: invalid workflow run id" >&2; exit 1; }
 STATE_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
 PID_ROOT="${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}"
@@ -989,7 +989,7 @@ sudo -n install -o "$(id -u)" -g "$(id -g)" -m 0600 \
   "$bootstrap_env_tmp" "$BOOTSTRAP_ENV_FILE"
 rm -f -- "$bootstrap_env_tmp"
 
-printf 'O3K_TESTLAB_STATE_ROOT=%s\nO3K_REAL_HOST_SERVICE_ACCOUNT=%s\n' "$STATE_ROOT" "$(id -un)" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_TESTLAB_RUN_ID=%s\nO3K_TESTLAB_STATE_ROOT=%s\nO3K_REAL_HOST_SERVICE_ACCOUNT=%s\n' "$RUN_ID" "$STATE_ROOT" "$(id -un)" >>"${GITHUB_ENV:-/dev/null}"
 if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
   printf 'O3K_AGENT_INSPECT_PROBE_OUTPUT=%s/agent-inspect-probe.json\n' "$STATE_ROOT" >>"${GITHUB_ENV:-/dev/null}"
 fi

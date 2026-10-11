@@ -2,9 +2,9 @@
 set -Eeuo pipefail
 
 RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-RUN_ID="${GITHUB_RUN_ID:-}"
+RUN_ID="${O3K_TESTLAB_RUN_ID:-${GITHUB_RUN_ID:-}}"
 ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
-[[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || { echo "cleanup: invalid workflow run id" >&2; exit 1; }
+[[ "$RUN_ID" =~ ^[0-9]+(-generic|-pp5)?$|^local-[0-9]+(-generic|-pp5)?$ ]] || { echo "cleanup: invalid workflow run id" >&2; exit 1; }
 [[ "$RUNNER_TEMP" == /* && "$RUNNER_TEMP" != *..* && -d "$RUNNER_TEMP" && ! -L "$RUNNER_TEMP" ]] \
   || { echo "cleanup: runner temp path is unsafe" >&2; exit 1; }
 command -v realpath >/dev/null 2>&1 || { echo "cleanup: realpath is unavailable" >&2; exit 1; }
