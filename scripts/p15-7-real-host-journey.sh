@@ -1079,7 +1079,7 @@ stop_contending_create() {
         current_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
         if [[ -z "${CONTENDING_CREATE_STARTTIME:-}" || "$current_starttime" != "$CONTENDING_CREATE_STARTTIME" \
           || -z "$pgid" || ! "$pgid" =~ ^[0-9]+$ || "$current_pgid" != "$pgid" ]]; then
-          echo "P15.7 cleanup: contending-create PID identity changed before signal: $pid" >&2
+          echo "P15.7 cleanup: contending-create PID identity changed before signal: pid=$pid expected_starttime=${CONTENDING_CREATE_STARTTIME:-missing} current_starttime=${current_starttime:-missing} expected_pgid=${pgid:-missing} current_pgid=${current_pgid:-missing}" >&2
           failed=true
         fi
       fi
@@ -3962,6 +3962,11 @@ persist_crash_checkpoint repair_lock_acquired running \
   repair_lock_wait_ms "$CRASH_REPAIR_LOCK_WAIT_MS" repair_lock_wait_bound_ms "$CRASH_REPAIR_LOCK_WAIT_BOUND_MS" \
   repair_lease_takeover "$CRASH_REPAIR_LEASE_TAKEOVER"
 CONTENDING_CREATE_REQUEST_START_MS="$(date +%s%3N)"
+# Keep the background launcher in the shell's inherited process group so
+# util-linux `setsid` can exec in place. With monitor mode enabled, Bash makes
+# the launcher a process-group leader and `setsid` may fork; then `$!` no
+# longer identifies the process group the exact-PID cleanup owns.
+set +m
 setsid --wait timeout --foreground --kill-after=5s --signal=TERM 67s openstack server create --image "$OS_IMAGE_ID" --flavor "$OS_FLAVOR_ID" --key-name "$OS_KEYPAIR_NAME" \
   --nic "port-id=$OS_PORT_D_ID" "o3k-p15-7-$RUN_ID-d" -f value -c id >"$WORK_ROOT/workload-d-create.txt" 2>"$WORK_ROOT/workload-d-create.err" &
 CONTENDING_CREATE_PID=$!
