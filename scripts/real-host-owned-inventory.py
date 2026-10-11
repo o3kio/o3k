@@ -17,7 +17,7 @@ Schema versions
   classification (the stale-pool sweep reaps proven stale pools before the
   guard runs, so pools have no `stale_owned` class; anything with broken or
   missing ownership evidence is `ambiguous`); foreign pool names are counted
-  only in `foreign_state.pools_count`.
+  in a redacted `foreign_state.pools_sha256` fingerprint and count.
 - schema_version 3: adds the independent verifier sections. The v2 fields are
   preserved byte-identically; the new sections are gated by environment
   variables so a configuration that never sets them produces an unchanged v2
@@ -1111,7 +1111,8 @@ def collect_pools(image_root: Path) -> dict[str, object] | None:
     """Inventory owned-name libvirt dir storage pools for the base snapshot.
 
     Only pools whose name starts with ``o3k-p15-7-`` are recorded
-    individually; foreign pools are counted only (``foreign_count``). Any
+    individually; foreign pool names are represented only by a count and
+    SHA-256 fingerprint. Any
     virsh command failure (listing pools, listing domains, dumping a domain
     or an owned pool) fails closed (None) — consistent with how the domains
     section is collected.
@@ -1132,17 +1133,17 @@ def collect_pools(image_root: Path) -> dict[str, object] | None:
     details = command(("virsh", "-c", "qemu:///system", "pool-list", "--all", "--details"))
     autostart_map = _pool_autostart_map(details) if details is not None else {}
 
-    foreign_count = 0
+    foreign_names: list[str] = []
     pools: list[dict[str, object]] = []
     for name in (line.strip() for line in listing.splitlines() if line.strip()):
         if not name.startswith(POOL_PREFIX):
-            foreign_count += 1
+            foreign_names.append(name)
             continue
         record = classify_pool(name, image_root, autostart_map, domain_xmls)
         if record is None:
             return None
         pools.append(record)
-    return {"pools": pools, "foreign_count": foreign_count}
+    return {"pools": pools, "foreign_names_sha256": digest(foreign_names), "foreign_count": len(foreign_names)}
 
 
 def classification_summary(document: dict[str, object]) -> dict[str, int]:
@@ -2172,6 +2173,7 @@ def snapshot() -> dict[str, object] | None:
             "network_links_sha256": digest(foreign_links),
             "protected_paths_sha256": protected_paths,
             "pools_count": pool_result["foreign_count"],
+            "pools_sha256": pool_result["foreign_names_sha256"],
         },
     }
 

@@ -133,7 +133,7 @@ chmod +x "${FAKE_BIN}/openstack"
 
 export PATH="${FAKE_BIN}:${PATH}" O3K_REAL_HOST_ARTIFACT_DIR="${WORK_DIR}/artifacts"
 export O3K_REAL_HOST_KVM_PATH=/dev/null GITHUB_REPOSITORY=o3kio/o3k
-export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_HEAD_REF= GITHUB_BASE_REF= GITHUB_REF=refs/heads/main
+export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_HEAD_REF='' GITHUB_BASE_REF='' GITHUB_REF=refs/heads/main
 export GITHUB_OUTPUT="${WORK_DIR}/github-output" O3K_TEST_SECRET=do-not-upload-this-value
 export O3K_REAL_HOST_OPENSTACK_INVENTORY=true OS_PASSWORD=fake-password
 export O3K_REAL_HOST_PROTECTED_PATHS="${WORK_DIR}/protected-state.txt"
@@ -856,16 +856,27 @@ generic_cleanup = "Stop and prove generic TestLab epoch absent"
 pp5_bootstrap = "Bootstrap fresh PP.5 lane TestLab"
 lane_guard = "Verify fresh PP.5 lane preconditions"
 selected_lane = "Run selected PP.5 acceptance lane"
-generic_workload_guard = text.split(f"      - name: {generic_cleanup}\n", 1)[1].split("\n      - name:", 1)[0]
-assert "pp5-testlab-epoch-guard.py generic-workloads" in generic_workload_guard
-assert generic_workload_guard.index("generic-workloads") < generic_workload_guard.index("cleanup-disposable-testlab.sh")
-assert "--workloads \"target/real-host-workflow-artifacts/pp5-generic-workloads-before-teardown.json\"" in generic_workload_guard
+generic_cleanup_guard = text.split(f"      - name: {generic_cleanup}\n", 1)[1].split("\n      - name:", 1)[0]
+assert "pre-teardown-api-absence" in generic_cleanup_guard
+assert generic_cleanup_guard.index("pre-teardown-api-absence") < generic_cleanup_guard.index("cleanup-disposable-testlab.sh")
+assert generic_cleanup_guard.index("cleanup-disposable-testlab.sh") < generic_cleanup_guard.index("real-host-owned-inventory.py")
+assert generic_cleanup_guard.index("real-host-owned-inventory.py") < generic_cleanup_guard.index("post-teardown-host-absence")
+assert "--workload-status \"${workload_absence_status}\"" in generic_cleanup_guard
+assert "--cleanup-status \"${cleanup_status}\"" in generic_cleanup_guard
+assert "--inventory-status \"${host_absence_status}\"" in generic_cleanup_guard
+assert "env -i" in generic_cleanup_guard and "/usr/bin/python3" in generic_cleanup_guard
+assert "pp5-generic-host-absence-after.json" in generic_cleanup_guard
+assert "--lifecycle \"target/real-host-workflow-artifacts/openstack-cli-result.json\"" in generic_cleanup_guard
 assert text.index("Run public real-host lifecycle") < text.index(generic_cleanup)
 assert text.index(generic_cleanup) < text.index("Bind PP.5 lane to campaign PostgreSQL")
 assert text.index("Bind PP.5 lane to campaign PostgreSQL") < text.index(pp5_bootstrap)
 assert text.index(pp5_bootstrap) < text.index(lane_guard) < text.index(selected_lane)
 assert "O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-generic" in text
 assert "O3K_TESTLAB_RUN_ID: ${{ github.run_id }}-pp5" in text
+assert "O3K_TESTLAB_RESOURCE_SUFFIX: ${{ github.run_id }}-generic" in text
+cli_lifecycle = pathlib.Path(sys.argv[1]).parents[2].joinpath("tests/openstack-cli-libvirt.sh").read_text(encoding="utf-8")
+assert '"${GITHUB_RUN_ID:-}" "${RESOURCE_SUFFIX}"' in cli_lifecycle
+assert 'name_with_suffix o3k-testlab-image' in cli_lifecycle
 assert "steps.pp5_lane_preconditions.outcome == 'success'" in text.split(
     f"      - name: {selected_lane}\n", 1
 )[1].split("\n      - name:", 1)[0]
@@ -876,6 +887,13 @@ epoch_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/pp5-testlab
 assert '"HARNESS_GAP"' in epoch_guard
 assert "foreign_state_unchanged" in epoch_guard
 assert "run_owned_servers" in epoch_guard and "run_owned_ports" in epoch_guard and "run_owned_domains" in epoch_guard
+assert '"openstack", resource, "show", resource_id' in epoch_guard
+assert '"openstack", "port", "list", "--all-projects"' not in epoch_guard
+assert '"openstack", "server", "list", "--all-projects"' not in epoch_guard
+assert '"openstack", "port", "list", "--project", project_id' in epoch_guard
+assert '"openstack", "server", "list", "--project", project_id' in epoch_guard
+assert "post_teardown_host_absence" in epoch_guard
+assert "openstack_api_consulted=False" in epoch_guard
 journey = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/p15-7-real-host-journey.sh").read_text(encoding="utf-8")
 precondition_pos = journey.index('pp5-lane-initial-state.json')
 workload_pos = journey.index('openstack image create "o3k-p15-7-$RUN_ID-image"')

@@ -363,7 +363,7 @@ write_result() {
         "${CLEANUP_SERVER_STATUS}" "${SERVER_ACTIVE}" "${SERVER_CONFIG_DRIVE}" \
         "${SERVER_FIXED_IP}" "${CONSOLE_BOOT_MARKER}" \
         "${SERVER_RESTART_ACTIVE}" "${SERVER_RESTART_CONFIG_DRIVE}" \
-        "${SERVER_RESTART_FIXED_IP}" <<'PY'
+        "${SERVER_RESTART_FIXED_IP}" "${GITHUB_RUN_ID:-}" "${RESOURCE_SUFFIX}" <<'PY'
 import json, sys, time
 # Normative resource membership for the openstack-cli-e2e artifact; must stay
 # in sync with contracts/release-e2e-evidence.schema.json (enforced by
@@ -375,7 +375,7 @@ CLEANUP_KEYS = ("image", "keypair", "network", "subnet", "port", "flavor", "serv
     port_id, keypair_id, flavor_id, server_id, image_status, keypair_status, network_status, subnet_status,
     flavor_status, port_status, server_status, server_active, server_config_drive,
     server_fixed_ip, console_boot_marker, restart_active, restart_config_drive,
-    restart_fixed_ip,
+    restart_fixed_ip, workflow_run_id, testlab_phase_id,
 ) = sys.argv[1:]
 resource_values = (image_id, keypair_id, network_id, subnet_id, port_id, flavor_id, server_id)
 cleanup_values = (image_status, keypair_status, network_status, subnet_status, port_status, flavor_status, server_status)
@@ -389,6 +389,10 @@ result = {
     "cleanup": {"status": cleanup_status},
     "finished_at": int(time.time()),
 }
+if workflow_run_id:
+    result["workflow_run_id"] = workflow_run_id
+if testlab_phase_id:
+    result["testlab_phase_id"] = testlab_phase_id
 cleanup_resources = {
     name: value for name, value in zip(CLEANUP_KEYS, cleanup_values) if value
 }
@@ -502,7 +506,7 @@ fi
 # uploaded. The public CLI does not expose operation IDs here.
 # CirrOS publishes this disk as qcow2. Preserve that format in Glance so the
 # compute agent can build a qcow2 overlay with the correct backing format.
-IMAGE_ID="$(openstack image create o3k-testlab-image --file "${IMAGE_PATH}" --disk-format qcow2 --container-format bare -f value -c id)"
+IMAGE_ID="$(openstack image create "$(name_with_suffix o3k-testlab-image)" --file "${IMAGE_PATH}" --disk-format qcow2 --container-format bare -f value -c id)"
 CREATED_IMAGE_ID="${IMAGE_ID}"
 CLEANUP_IMAGE_STATUS=pending
 KEYPAIR_PUBLIC_KEY="${DATA_DIR}/o3k-testlab-keypair.pub"
@@ -598,7 +602,7 @@ PY
                     if [[ -n "${O3K_REAL_HOST_ARTIFACT_DIR:-}" ]]; then
                         mkdir -p "${O3K_REAL_HOST_ARTIFACT_DIR}"
                         if ! cp -f "${probe_output}" "${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null; then
-                            sudo -n cat "${probe_output}" >"${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null || true
+                            sudo -n cat "${probe_output}" 2>/dev/null | cat >"${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" || true
                             chmod 0600 "${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null || true
                         fi
                     fi

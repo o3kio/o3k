@@ -42,6 +42,12 @@ if [[ "$*" == "-c qemu:///system list --all --name" ]]; then
     fi
     exit 0
 fi
+if [[ "$*" == "-c qemu:///system pool-list --all --name" ]]; then
+    if [[ -n "${O3K_FAKE_VIRSH_FOREIGN_POOL_NAME:-}" ]]; then
+        printf '%s\n' "${O3K_FAKE_VIRSH_FOREIGN_POOL_NAME}"
+    fi
+    exit 0
+fi
 if [[ "$*" == "-c qemu:///system dumpxml"* ]]; then
     name="${*: -1}"
     if [[ "${name}" == "canary-dom" ]]; then
@@ -114,9 +120,7 @@ printf 'protected baseline\n' >"${O3K_REAL_HOST_PROTECTED_PATHS}"
 export OS_PASSWORD=do-not-upload-this-value
 
 DELETED_INSTANCE="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-LIVE_INSTANCE="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 NETWORK_ID="cccccccc-cccc-cccc-cccc-cccccccccccc"
-PORT_ID="dddddddd-dddd-dddd-dddd-dddddddddddd"
 CANARY_FILE="${WORK_DIR}/canary-file.txt"
 
 fail() {
@@ -258,6 +262,20 @@ json.dump(config, open(sys.argv[1], "w", encoding="utf-8"))
 PY
 export O3K_FAKE_VIRSH_FOREIGN=true O3K_FAKE_IP_FOREIGN=true
 
+# A foreign pool replacement with an unchanged count still changes the
+# redacted host fingerprint; names must stay private in the artifact.
+O3K_FAKE_VIRSH_FOREIGN_POOL_NAME=foreign-pool-a collect "${WORK_DIR}/foreign-pool-a.json"
+O3K_FAKE_VIRSH_FOREIGN_POOL_NAME=foreign-pool-b collect "${WORK_DIR}/foreign-pool-b.json"
+python3 - "${WORK_DIR}/foreign-pool-a.json" "${WORK_DIR}/foreign-pool-b.json" <<'PY'
+import json, sys
+before = json.load(open(sys.argv[1], encoding="utf-8"))["foreign_state"]
+after = json.load(open(sys.argv[2], encoding="utf-8"))["foreign_state"]
+assert before["pools_count"] == after["pools_count"] == 1
+assert before["pools_sha256"] != after["pools_sha256"]
+assert "foreign-pool-a" not in json.dumps(before)
+assert "foreign-pool-b" not in json.dumps(after)
+PY
+
 # --- 1. deterministic canonicalization -----------------------------------
 collect "${WORK_DIR}/det-a.json"
 collect "${WORK_DIR}/det-b.json"
@@ -274,6 +292,8 @@ assert value["domains"] == [], value["domains"]  # no owned domains in the fixtu
 assert value["network_links"] == [], value["network_links"]
 assert value["foreign_state"]["domains_sha256"]
 assert value["foreign_state"]["network_links_sha256"]
+assert value["foreign_state"]["pools_sha256"]
+assert value["foreign_state"]["pools_count"] == 0
 assert "foreign-domain-1" not in json.dumps(value)
 assert "eth0" not in json.dumps(value)
 assert value["managed_state"]["status"] == "available"
