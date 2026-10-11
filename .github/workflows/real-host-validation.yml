@@ -749,6 +749,10 @@ jobs:
         id: pp5_postgres_bootstrap
         if: steps.generic_cleanup.outcome == 'success' && steps.lifecycle.outcome == 'success' && steps.agent_mtls.outcome == 'success' && steps.agent_process.outcome == 'success'
         env:
+          O3K_PP5_RUN_ID: ${{ github.run_id }}
+          O3K_PP5_SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_PP5_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_PP5_ENV_FILE: target/pp5-postgres.env
           O3K_PP5_POSTGRES_ADMIN_URL: ${{ secrets.O3K_PP5_POSTGRES_ADMIN_URL }}
         run: bash scripts/pp5-bind-campaign-postgres.sh
 

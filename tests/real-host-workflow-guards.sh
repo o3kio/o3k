@@ -874,6 +874,13 @@ binding = text.split("      - name: Bind PP.5 lane to campaign PostgreSQL\n", 1)
 assert "run: bash scripts/pp5-bind-campaign-postgres.sh" in binding
 assert "O3K_PP5_POSTGRES_ADMIN_URL: ${{ secrets.O3K_PP5_POSTGRES_ADMIN_URL }}" in binding
 assert "steps.generic_cleanup.outcome == 'success'" in binding
+provisioning = text.split("      - name: Provision isolated PP.5 PostgreSQL purpose databases\n", 1)[1].split("\n      - name:", 1)[0]
+# Binding must select the same canonical file/identity even on a runner with
+# inherited PP.5 settings. Compare the actual workflow step environments.
+for key in ("O3K_PP5_RUN_ID", "O3K_PP5_SOURCE_SHA", "O3K_PP5_ARTIFACT_DIR",
+            "O3K_PP5_ENV_FILE", "O3K_PP5_POSTGRES_ADMIN_URL"):
+    provision_value = next(line.strip() for line in provisioning.splitlines() if line.strip().startswith(key + ":"))
+    assert provision_value in binding, key
 assert "test \"${O3K_PP5_CAMPAIGN_DATABASE_URL##*/}\"" not in binding
 assert text.count("run: python3 scripts/provision_pp5_postgres.py provision") == 1
 assert "target/real-host-workflow-artifacts/pp5-campaign-binding.json" in text

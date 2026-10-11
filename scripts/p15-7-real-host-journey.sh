@@ -1065,6 +1065,29 @@ capture_workload_failure_diagnostics() {
     "$server_http" "$operation_http" "$workload_label" || echo "P15.7 workload diagnostics could not be safely captured" >&2
   P15_WORKLOAD_DIAGNOSTICS_CAPTURED=true
 }
+wait_contending_create_identity() {
+  # $! is available before the child executes setsid(). Observe the dedicated
+  # process group before treating it as a cleanup identity; scheduling is not
+  # a readiness guarantee. Preserve starttime across every observation.
+  local pid="${CONTENDING_CREATE_PID:-}" deadline=$((SECONDS + 5)) current_starttime current_pgid
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  CONTENDING_CREATE_PGID="$pid"
+  while (( SECONDS < deadline )); do
+    current_starttime="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+    current_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "$current_starttime" =~ ^[0-9]+$ && "$current_pgid" =~ ^[0-9]+$ ]] || return 1
+    if [[ -n "${CONTENDING_CREATE_STARTTIME:-}" && "$current_starttime" != "$CONTENDING_CREATE_STARTTIME" ]]; then
+      echo "P15.7 contender identity changed while awaiting its process group" >&2
+      return 1
+    fi
+    CONTENDING_CREATE_STARTTIME="$current_starttime"
+    [[ "$current_pgid" != "$pid" ]] || return 0
+    sleep 0.01
+  done
+  echo "P15.7 contender did not establish its owned process group within 5s" >&2
+  return 1
+}
+
 stop_contending_create() {
   # Address only the exact run-owned background child, reap it, and remove
   # only this run's synchronization markers. Never kill by process name.
@@ -3970,12 +3993,8 @@ set +m
 setsid --wait timeout --foreground --kill-after=5s --signal=TERM 67s openstack server create --image "$OS_IMAGE_ID" --flavor "$OS_FLAVOR_ID" --key-name "$OS_KEYPAIR_NAME" \
   --nic "port-id=$OS_PORT_D_ID" "o3k-p15-7-$RUN_ID-d" -f value -c id >"$WORK_ROOT/workload-d-create.txt" 2>"$WORK_ROOT/workload-d-create.err" &
 CONTENDING_CREATE_PID=$!
-CONTENDING_CREATE_PGID="$CONTENDING_CREATE_PID"
-CONTENDING_CREATE_STARTTIME="$(sudo -n awk '{print $22}' "/proc/$CONTENDING_CREATE_PID/stat" 2>/dev/null || true)"
-[[ "$CONTENDING_CREATE_STARTTIME" =~ ^[0-9]+$ ]] \
-  || die "contending existing-port create process starttime could not be recorded"
-[[ "$(ps -o pgid= -p "$CONTENDING_CREATE_PID" 2>/dev/null | tr -d '[:space:]')" == "$CONTENDING_CREATE_PGID" ]] \
-  || die "contending existing-port create process group could not be verified"
+wait_contending_create_identity \
+  || die "contending existing-port create process identity could not be verified"
 CONTENDING_CREATE_WAITER_WAIT_START_MS="$(date +%s%3N)"
 while :; do
   if sudo -n test -f "$CRASH_REPAIR_WAITER_FILE"; then

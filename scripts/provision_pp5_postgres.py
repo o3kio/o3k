@@ -440,7 +440,8 @@ def validate_url(manifest: dict, purpose: str, value: str) -> str:
         host, port = parse_target(value)
     except ValueError:
         die(f"malformed {purpose} PostgreSQL URL")
-    if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname or not 1 <= port <= 65535:
+    if (parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname
+            or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
         die(f"malformed {purpose} PostgreSQL endpoint")
     allowed = {"sslmode", "sslrootcert", "sslcert", "sslkey"}
     if parsed.fragment or any(key not in allowed for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)):

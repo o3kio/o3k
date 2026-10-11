@@ -430,6 +430,19 @@ class CampaignBindingTests(unittest.TestCase):
             self.assertFalse(self.github_env.exists())
         return result, artifact
 
+    def test_binding_consumes_actual_provisioner_output(self):
+        with patch.dict(os.environ, {**self.environment, "O3K_PP5_PERSIST_ENV": "0"}, clear=True), \
+                patch.object(pg, "preflight"), patch.object(pg, "psql", return_value=""), \
+                contextlib.redirect_stdout(io.StringIO()):
+            pg.provision()
+        self.environment[pg.ENV_NAMES["campaign"]] = ""
+        before = self.canonical.read_bytes()
+        self.bind()
+        self.assertEqual(self.canonical.read_bytes(), before)
+        canonical = dict(line.split("=", 1) for line in before.decode().splitlines())
+        bound = dict(line.split("=", 1) for line in self.github_env.read_text().splitlines())
+        self.assertEqual(bound["O3K_DATABASE_URL"], canonical[pg.ENV_NAMES["campaign"]])
+
     def test_generic_blanking_then_canonical_restore(self):
         workflow = (self.repo / ".github/workflows/real-host-validation.yml").read_text()
         block = workflow.split("- name: Bind generic phase to workspace PostgreSQL", 1)[1].split("\n      - name:", 1)[0]
@@ -454,6 +467,35 @@ class CampaignBindingTests(unittest.TestCase):
         self.assertEqual(self.canonical.read_bytes(), original)
         self.assertEqual(artifact["campaign_sentinel"], "passed")
 
+    def test_restored_binding_survives_daemon_environment_serialization(self):
+        self.bind()
+        bound = dict(line.split("=", 1) for line in self.github_env.read_text().splitlines())
+        # Execute the existing bootstrap writer and its daemon shell consumption,
+        # without requiring privileged TestLab/VM setup in ordinary CI.
+        bootstrap = (self.repo / "scripts/bootstrap-disposable-testlab.sh").read_text()
+        start = bootstrap.index('if [[ -n "${O3K_DATABASE_BACKEND:-}" ]]')
+        end = bootstrap.index("\nfi", bootstrap.index('if [[ -n "${O3K_DATABASE_URL:-}" ]]', start)) + 3
+        daemon_env = self.root / "o3kd.env"
+        command = bootstrap[start:end] + '\nset -a; source "$o3kd_env_tmp"; set +a\n'
+        command += "python3 -c 'import os; assert os.environ[\"O3K_DATABASE_BACKEND\"] == \"postgres\"; assert os.environ[\"O3K_DATABASE_URL\"] == os.environ[\"O3K_PP5_CAMPAIGN_DATABASE_URL\"]'"
+        result = subprocess.run(["bash", "-euo", "pipefail", "-c", command],
+                                env={**self.environment, **bound, "o3kd_env_tmp": str(daemon_env)},
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("DO_NOT_LOG", result.stdout + result.stderr)
+
+    def test_removed_generic_virtualenv_is_not_required(self):
+        missing = str(self.root / "removed-generic-venv")
+        self.environment.update(O3K_OPENSTACK_VENV=missing,
+                                PATH=missing + "/bin:" + self.environment["PATH"],
+                                OS_CLIENT_CONFIG_FILE=str(self.root / "removed-clouds.yaml"))
+        self.bind()
+
+    def test_completed_cleanup_is_rejected(self):
+        self.manifest["cleanup"] = {"status": "completed"}
+        self.write_manifest()
+        self.bind(False)
+
     def test_manifest_failures(self):
         cases = [("run_id", "other"), ("source_sha", "b" * 40),
                  ("provisioning", {"status": "started"}), ("role", "foreign"),
@@ -475,6 +517,7 @@ class CampaignBindingTests(unittest.TestCase):
                  ("O3K_PP5_POSTGRES_ROLE", "foreign"),
                  (pg.ENV_NAMES["campaign"], self.urls["workspace"]),
                  (pg.ENV_NAMES["campaign"], self.urls["campaign"].replace(":5432", ":5544")),
+                 (pg.ENV_NAMES["campaign"], self.urls["campaign"].replace(":5432", ":0")),
                  (pg.ENV_NAMES["campaign"], self.urls["campaign"].replace(self.role + ":", "foreign:")),
                  (pg.ENV_NAMES["campaign"], self.urls["campaign"] + "?host=foreign"),
                  (pg.ENV_NAMES["campaign"], "postgresql://[DO_NOT_LOG"),
@@ -494,6 +537,10 @@ class CampaignBindingTests(unittest.TestCase):
                 self.environment[key] = "b" * 40
                 self.bind(False)
                 self.environment[key] = old
+
+    def test_postgres_client_failure_is_redacted(self):
+        (self.root / "psql").write_text("#!/bin/sh\nprintf 'DO_NOT_LOG postgresql://secret' >&2\nexit 2\n")
+        self.bind(False)
 
     def test_sentinel_mismatch(self):
         for value in ("workspace|123456|" + self.sha, "campaign|wrong|" + self.sha,
