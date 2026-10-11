@@ -748,15 +748,9 @@ jobs:
       - name: Bind PP.5 lane to campaign PostgreSQL
         id: pp5_postgres_bootstrap
         if: steps.generic_cleanup.outcome == 'success' && steps.lifecycle.outcome == 'success' && steps.agent_mtls.outcome == 'success' && steps.agent_process.outcome == 'success'
-        run: |
-          set -euo pipefail
-          test "${O3K_PP5_CAMPAIGN_DATABASE_URL##*/}" = "o3k_pp5_s5_${GITHUB_RUN_ID}"
-          unset O3K_PP5_WORKSPACE_DATABASE_URL O3K_PP5_ENDPOINT_DATABASE_URL O3K_PP5_P13_DATABASE_URL
-          {
-            printf 'O3K_DATABASE_BACKEND=postgres\n'
-            printf 'O3K_DATABASE_URL=%s\n' "${O3K_PP5_CAMPAIGN_DATABASE_URL}"
-            printf 'O3K_PP5_WORKSPACE_DATABASE_URL=\n'
-          } >>"${GITHUB_ENV}"
+        env:
+          O3K_PP5_POSTGRES_ADMIN_URL: ${{ secrets.O3K_PP5_POSTGRES_ADMIN_URL }}
+        run: bash scripts/pp5-bind-campaign-postgres.sh
 
       - name: Prepare fresh PP.5 TestLab image
         id: pp5_image
@@ -1089,6 +1083,7 @@ jobs:
             target/real-host-workflow-artifacts/pp5-runner-prerequisite*.json
             target/real-host-workflow-artifacts/pp5-runner-postgres-service-state.json
             target/real-host-workflow-artifacts/pp5-postgres-purpose-map.json
+            target/real-host-workflow-artifacts/pp5-campaign-binding.json
             target/real-host-workflow-artifacts/p13-4-volume-trace.jsonl
             target/real-host-workflow-artifacts/p13-4-storage-evidence.json
             target/lvm-real-guest-artifacts/lvm-real-guest-result.json

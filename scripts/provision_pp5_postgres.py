@@ -15,6 +15,8 @@ import os
 import pwd
 import shutil
 import secrets
+import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -430,24 +432,139 @@ def load_manifest() -> dict:
     return value
 
 
-def urls_from_env(manifest: dict) -> dict[str, str]:
-    urls: dict[str, str] = {}
-    for purpose in PURPOSES:
-        value = env(ENV_NAMES[purpose])
-        if not value:
-            die(f"missing {ENV_NAMES[purpose]} for PP.5 verification")
+def validate_url(manifest: dict, purpose: str, value: str) -> str:
+    if not value or any(ord(c) < 33 or ord(c) == 127 for c in value):
+        die(f"missing or malformed {purpose} PostgreSQL URL")
+    try:
         parsed = urllib.parse.urlsplit(value)
-        actual = (parsed.path or "").lstrip("/")
-        expected = manifest["databases"][purpose]["name"]
-        if actual != expected:
-            die(f"{purpose} database URL does not target its manifest database")
-        if parsed.username is None or urllib.parse.unquote(parsed.username) != manifest["role"]:
-            die(f"{purpose} database URL does not use the manifest role")
         host, port = parse_target(value)
-        if host != manifest["server"]["host"] or port != manifest["server"]["port"]:
-            die(f"{purpose} database URL does not use the manifest server")
-        urls[purpose] = value
-    return urls
+    except ValueError:
+        die(f"malformed {purpose} PostgreSQL URL")
+    if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname or not 1 <= port <= 65535:
+        die(f"malformed {purpose} PostgreSQL endpoint")
+    allowed = {"sslmode", "sslrootcert", "sslcert", "sslkey"}
+    if parsed.fragment or any(key not in allowed for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)):
+        die(f"{purpose} database URL has unsupported connection overrides")
+    if parsed.path != "/" + manifest["databases"][purpose]["name"]:
+        die(f"{purpose} database URL does not target its manifest database")
+    if parsed.username is None or urllib.parse.unquote(parsed.username) != manifest["role"]:
+        die(f"{purpose} database URL does not use the manifest role")
+    if host != manifest["server"]["host"] or port != manifest["server"]["port"]:
+        die(f"{purpose} database URL does not use the manifest server")
+    return value
+
+
+def urls_from_env(manifest: dict) -> dict[str, str]:
+    return {purpose: validate_url(manifest, purpose, env(ENV_NAMES[purpose]))
+            for purpose in PURPOSES}
+
+
+def campaign_manifest() -> dict:
+    # The protected workflow identity must win over inherited purpose variables.
+    if env("GITHUB_RUN_ID") != run_id() or env("TARGET_SHA").lower() != source_sha():
+        die("PP.5 campaign workflow run/source mismatch")
+    manifest = load_manifest()
+    if manifest.get("provisioning", {}).get("status") != "completed":
+        die("PP.5 PostgreSQL provisioning did not complete")
+    if manifest.get("cleanup"):
+        die("PP.5 PostgreSQL purpose map has already entered cleanup")
+    return manifest
+
+
+def canonical_campaign(manifest: dict) -> dict[str, str]:
+    # Read the same opened inode we validate; never execute the file as code.
+    # O_NONBLOCK also makes a malformed FIFO fail immediately instead of hanging.
+    try:
+        fd = os.open(env_file(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
+                die("canonical PP.5 env must be a runner-owned regular mode-0600 file")
+            content = handle.read(65537)
+    except (OSError, UnicodeError):
+        die("canonical PP.5 env is missing, unreadable, malformed, or a symlink")
+    if len(content) > 65536 or not content.endswith("\n"):
+        die("canonical PP.5 env is malformed")
+    values = {}
+    for line in content.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key in values or not value or any(ord(c) < 33 or ord(c) == 127 for c in line):
+            die("canonical PP.5 env has malformed or duplicate assignments")
+        values[key] = value
+    identity = {
+        "O3K_PP5_RUN_ID": manifest["run_id"],
+        "O3K_PP5_SOURCE_SHA": manifest["source_sha"],
+        "O3K_PP5_POSTGRES_ROLE": manifest["role"],
+        "O3K_PP5_POSTGRES_TARGET": f"{manifest['server']['host']}:{manifest['server']['port']}",
+    }
+    if set(values) != set(identity) | set(ENV_NAMES.values()):
+        die("canonical PP.5 env has unexpected or missing assignments")
+    if any(values[key] != value for key, value in identity.items()):
+        die("canonical PP.5 env identity does not match manifest")
+    for purpose in PURPOSES:
+        validate_url(manifest, purpose, values[ENV_NAMES[purpose]])
+    return {
+        "O3K_PP5_CAMPAIGN_DATABASE_URL": values[ENV_NAMES["campaign"]],
+        "O3K_PP5_POSTGRES_TARGET": values["O3K_PP5_POSTGRES_TARGET"],
+    }
+
+
+def campaign_env() -> None:
+    # stdout is a private shell-input channel, not evidence. Shell-quote literal
+    # values from the validated file, including URLs containing TLS query '&'.
+    for key, value in canonical_campaign(campaign_manifest()).items():
+        print(f"export {key}={shlex.quote(value)}")
+
+
+def bind_campaign() -> None:
+    manifest = campaign_manifest()
+    canonical = canonical_campaign(manifest)
+    if any(env(key) != value for key, value in canonical.items()):
+        die("PP.5 campaign shell binding differs from canonical env")
+    if any(env(ENV_NAMES[p]) for p in ("workspace", "endpoint", "p13")):
+        die("destructive-purpose URLs are still available to the campaign binding")
+    url = canonical[ENV_NAMES["campaign"]]
+    row = db_psql(f"SELECT purpose,run_id,source_sha FROM {SENTINEL_TABLE} WHERE id=1", url)
+    if row != f"campaign|{manifest['run_id']}|{manifest['source_sha']}":
+        die("campaign database sentinel changed or is missing")
+    binding = {
+        "O3K_DATABASE_BACKEND": "postgres", "O3K_DATABASE_URL": url,
+        ENV_NAMES["campaign"]: url, "O3K_P15_7_POSTGRES_MODE": "external",
+        "O3K_P15_7_EXTERNAL_PG_TARGET": canonical["O3K_PP5_POSTGRES_TARGET"],
+        **{ENV_NAMES[purpose]: "" for purpose in ("workspace", "endpoint", "p13")},
+    }
+    # Register masks before persistence or any subsequent workflow output.
+    masked_url = url.replace("%", "%25")
+    print(f"::add-mask::{masked_url}", flush=True)
+    password = urllib.parse.urlsplit(url).password
+    if password:
+        # Escape workflow command control characters, even in decoded passwords.
+        masked = urllib.parse.unquote(password).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::add-mask::{masked}", flush=True)
+    with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+        handle.write("".join(f"{key}={value}\n" for key, value in binding.items()))
+    atomic_write(manifest_path().with_name("pp5-campaign-binding.json"), json.dumps({
+        "artifact_type": "pp5-campaign-binding", "schema_version": 1,
+        "status": "passed", "classification": None, "redacted": True,
+        "run_id": manifest["run_id"], "source_sha": manifest["source_sha"],
+        "canonical_env": "passed", "manifest_validation": "passed",
+        "campaign_sentinel": "passed", "campaign_url_restored": True,
+        "destructive_urls_absent": True,
+    }, indent=2) + "\n")
+    print("PP.5 campaign PostgreSQL binding PASS")
+
+
+def campaign_action(action) -> None:
+    try:
+        action()
+    except (Exception, SystemExit):
+        # Do not serialize exceptions: a malformed URL/file may contain secrets.
+        atomic_write(manifest_path().with_name("pp5-campaign-binding.json"), json.dumps({
+            "artifact_type": "pp5-campaign-binding", "schema_version": 1,
+            "status": "failed", "classification": "HARNESS_GAP", "redacted": True,
+            "phase": "canonical_env" if action is campaign_env else "campaign_binding",
+        }, indent=2) + "\n")
+        die("PP.5 campaign PostgreSQL binding failed (HARNESS_GAP); diagnostics withheld")
 
 
 def verify_database_ownership(manifest: dict, admin: str, allow_missing: bool = False) -> None:
@@ -524,8 +641,11 @@ def cleanup() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("preflight", "provision", "verify", "verify-p13", "cleanup"))
+    parser.add_argument("command", choices=("preflight", "provision", "verify", "verify-p13", "cleanup", "campaign-env", "bind-campaign"))
     args = parser.parse_args()
+    if args.command in ("campaign-env", "bind-campaign"):
+        campaign_action(campaign_env if args.command == "campaign-env" else bind_campaign)
+        return
     {"preflight": preflight, "provision": provision, "verify": verify,
      "verify-p13": verify_after_p13, "cleanup": cleanup}[args.command]()
 

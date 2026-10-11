@@ -354,5 +354,201 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(before, set(Path(tempfile.gettempdir()).glob("pp5-pgpass-*")))
 
 
+
+class CampaignBindingTests(unittest.TestCase):
+    """Exercise the actual generic workflow shell and campaign binding wrapper."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.repo = Path(__file__).resolve().parents[1]
+        self.run = "123456"
+        self.sha = "a" * 40
+        self.role = pg.expected_role(self.run)
+        self.urls = {purpose: pg.build_url("", self.role, "DO_NOT_LOG", name)
+                     for purpose, name in pg.expected_names(self.run).items()}
+        self.canonical = self.root / "canonical.env"
+        self.values = {
+            "O3K_PP5_RUN_ID": self.run, "O3K_PP5_SOURCE_SHA": self.sha,
+            "O3K_PP5_POSTGRES_TARGET": "127.0.0.1:5432",
+            "O3K_PP5_POSTGRES_ROLE": self.role,
+            **{pg.ENV_NAMES[p]: url for p, url in self.urls.items()},
+        }
+        self.write_env()
+        self.manifest = {
+            "schema": pg.SCHEMA, "schema_version": 1,
+            "run_id": self.run, "source_sha": self.sha, "role": self.role,
+            "server": {"host": "127.0.0.1", "port": 5432},
+            "databases": {p: {"name": name} for p, name in pg.expected_names(self.run).items()},
+            "all_distinct": True, "provisioning": {"status": "completed"},
+        }
+        self.write_manifest()
+        self.github_env = self.root / "github.env"
+        self.environment = {**os.environ, **self.values,
+                            "GITHUB_RUN_ID": self.run, "TARGET_SHA": self.sha,
+                            "GITHUB_ENV": str(self.github_env),
+                            "O3K_PP5_ENV_FILE": str(self.canonical),
+                            "O3K_PP5_ARTIFACT_DIR": str(self.root),
+                            "O3K_PP5_POSTGRES_ADMIN_URL": "",
+                            "PATH": str(self.root) + os.pathsep + os.environ["PATH"]}
+        # Only the PostgreSQL transport is substituted. The real wrapper,
+        # canonical-file validation, URL checks and sentinel comparison run.
+        client = self.root / "psql"
+        client.write_text("#!/usr/bin/env python3\nimport os,sys\n"
+                          "assert os.environ['PGDATABASE'] == 'o3k_pp5_s5_123456'\n"
+                          "assert os.environ['PGUSER'] == 'o3k_pp5_123456'\n"
+                          "assert not os.environ.get('O3K_PP5_WORKSPACE_DATABASE_URL')\n"
+                          "sql = sys.stdin.read()\n"
+                          "assert sql.startswith('SELECT purpose,run_id,source_sha')\n"
+                          "print(os.environ.get('TEST_SENTINEL', 'campaign|123456|' + 'a'*40))\n")
+        client.chmod(0o700)
+
+    def write_env(self):
+        self.canonical.write_text("".join(f"{k}={v}\n" for k, v in self.values.items()))
+        self.canonical.chmod(0o600)
+
+    def write_manifest(self):
+        (self.root / "pp5-postgres-purpose-map.json").write_text(json.dumps(self.manifest))
+
+    def bind(self, success=True):
+        result = subprocess.run(["bash", "-x", "scripts/pp5-bind-campaign-postgres.sh"],
+                                cwd=self.repo, env=self.environment, text=True, capture_output=True)
+        self.assertEqual(result.returncode == 0, success, result.stderr)
+        # Mask commands are the runner's secret-registration protocol, not log
+        # evidence. Nothing else may disclose credentials, even under bash -x.
+        log = "\n".join(line for line in result.stdout.splitlines()
+                        if not line.startswith("::add-mask::")) + result.stderr
+        self.assertNotIn("DO_NOT_LOG", log)
+        self.assertNotIn("postgresql://", log)
+        artifact = json.loads((self.root / "pp5-campaign-binding.json").read_text())
+        self.assertNotIn("DO_NOT_LOG", json.dumps(artifact))
+        self.assertNotIn("postgresql://", json.dumps(artifact))
+        self.assertEqual(artifact["status"], "passed" if success else "failed")
+        if not success:
+            self.assertEqual(artifact["classification"], "HARNESS_GAP")
+            self.assertFalse(self.github_env.exists())
+        return result, artifact
+
+    def test_generic_blanking_then_canonical_restore(self):
+        workflow = (self.repo / ".github/workflows/real-host-validation.yml").read_text()
+        block = workflow.split("- name: Bind generic phase to workspace PostgreSQL", 1)[1].split("\n      - name:", 1)[0]
+        body = block.split("        run: |\n", 1)[1]
+        shell = "\n".join(line[10:] for line in body.splitlines())
+        original = self.canonical.read_bytes()
+        subprocess.run(["bash", "-c", shell], cwd=self.repo, env=self.environment, check=True)
+        generic = dict(line.split("=", 1) for line in self.github_env.read_text().splitlines())
+        self.assertEqual(generic["O3K_PP5_CAMPAIGN_DATABASE_URL"], "")
+        self.assertEqual(self.canonical.read_bytes(), original)
+        self.environment.update(generic)
+        self.github_env.unlink()
+        result, artifact = self.bind()
+        bound = dict(line.split("=", 1) for line in self.github_env.read_text().splitlines())
+        self.assertEqual(bound, {
+            "O3K_DATABASE_BACKEND": "postgres", "O3K_DATABASE_URL": self.urls["campaign"],
+            "O3K_PP5_CAMPAIGN_DATABASE_URL": self.urls["campaign"],
+            "O3K_P15_7_POSTGRES_MODE": "external", "O3K_P15_7_EXTERNAL_PG_TARGET": "127.0.0.1:5432",
+            **{pg.ENV_NAMES[p]: "" for p in ("workspace", "endpoint", "p13")},
+        })
+        self.assertEqual(result.stdout.splitlines()[0], "::add-mask::" + self.urls["campaign"])
+        self.assertEqual(self.canonical.read_bytes(), original)
+        self.assertEqual(artifact["campaign_sentinel"], "passed")
+
+    def test_manifest_failures(self):
+        cases = [("run_id", "other"), ("source_sha", "b" * 40),
+                 ("provisioning", {"status": "started"}), ("role", "foreign"),
+                 ("server", {"host": "127.0.0.1", "port": 5544}),
+                 ("databases", {p: {"name": "wrong"} for p in pg.PURPOSES})]
+        for key, value in cases:
+            with self.subTest(key=key):
+                old = self.manifest[key]
+                self.manifest[key] = value
+                self.write_manifest()
+                self.bind(False)
+                self.manifest[key] = old
+        (self.root / "pp5-postgres-purpose-map.json").unlink()
+        self.bind(False)
+
+    def test_canonical_identity_and_url_failures(self):
+        cases = [("O3K_PP5_RUN_ID", "other"), ("O3K_PP5_SOURCE_SHA", "b" * 40),
+                 ("O3K_PP5_POSTGRES_TARGET", "127.0.0.1:9999"),
+                 ("O3K_PP5_POSTGRES_ROLE", "foreign"),
+                 (pg.ENV_NAMES["campaign"], self.urls["workspace"]),
+                 (pg.ENV_NAMES["campaign"], self.urls["campaign"].replace(":5432", ":5544")),
+                 (pg.ENV_NAMES["campaign"], self.urls["campaign"].replace(self.role + ":", "foreign:")),
+                 (pg.ENV_NAMES["campaign"], self.urls["campaign"] + "?host=foreign"),
+                 (pg.ENV_NAMES["campaign"], "postgresql://[DO_NOT_LOG"),
+                 (pg.ENV_NAMES["campaign"], "")]
+        for key, value in cases:
+            with self.subTest(key=key, case=cases.index((key, value))):
+                old = self.values[key]
+                self.values[key] = value
+                self.write_env()
+                self.bind(False)
+                self.values[key] = old
+
+    def test_workflow_identity_cannot_be_overridden(self):
+        for key in ("GITHUB_RUN_ID", "TARGET_SHA"):
+            with self.subTest(key=key):
+                old = self.environment[key]
+                self.environment[key] = "b" * 40
+                self.bind(False)
+                self.environment[key] = old
+
+    def test_sentinel_mismatch(self):
+        for value in ("workspace|123456|" + self.sha, "campaign|wrong|" + self.sha,
+                      "campaign|123456|" + "b" * 40, ""):
+            self.environment["TEST_SENTINEL"] = value
+            self.bind(False)
+
+    def test_file_missing_symlink_mode_and_malformed(self):
+        self.canonical.unlink()
+        self.bind(False)
+        self.write_env()
+        other = self.root / "other.env"
+        self.canonical.rename(other)
+        self.canonical.symlink_to(other)
+        self.bind(False)
+        self.canonical.unlink()
+        other.rename(self.canonical)
+        self.canonical.chmod(0o644)
+        self.bind(False)
+        self.canonical.chmod(0o600)
+        for malformed in ("broken DO_NOT_LOG\n", "O3K_PP5_RUN_ID=123456\n" * 2,
+                          "EVIL=$(touch should-not-exist)\n", "\x00DO_NOT_LOG"):
+            self.write_env()
+            with self.canonical.open("a") as handle:
+                handle.write(malformed)
+            self.bind(False)
+
+    def test_shell_metacharacters_are_literal_and_masked(self):
+        # A valid percent-encoded password and multiple TLS options must survive
+        # sourcing as literal data, without shell command/query interpretation.
+        self.values[pg.ENV_NAMES["campaign"]] = pg.build_url(
+            "postgresql://127.0.0.1:5432/postgres?sslmode=require&sslrootcert=%2Ftmp%2Fca.pem",
+            self.role, "DO_NOT_LOG%$(false)", pg.expected_names(self.run)["campaign"])
+        self.write_env()
+        result, _ = self.bind()
+        url = self.values[pg.ENV_NAMES["campaign"]]
+        self.assertEqual(result.stdout.splitlines()[0], "::add-mask::" + url.replace("%", "%25"))
+        bound = dict(line.split("=", 1) for line in self.github_env.read_text().splitlines())
+        self.assertEqual(bound["O3K_DATABASE_URL"], url)
+
+    def test_non_regular_file(self):
+        self.canonical.unlink()
+        os.mkfifo(self.canonical, 0o600)
+        self.bind(False)
+
+    def test_invalid_manifest_is_redacted(self):
+        (self.root / "pp5-postgres-purpose-map.json").write_text("DO_NOT_LOG")
+        self.bind(False)
+
+    def test_wrong_owner(self):
+        with patch.dict(os.environ, self.environment, clear=True), \
+                patch.object(pg.os, "getuid", return_value=os.getuid() + 1), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            pg.campaign_env()
+
+
 if __name__ == "__main__":
     unittest.main()
