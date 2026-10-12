@@ -533,7 +533,8 @@ PYSTATUS
 import json,pathlib,sys
 manifest,result,ended=sys.argv[1:]
 m=json.loads(pathlib.Path(manifest).read_text()) if pathlib.Path(manifest).exists() else {}
-r=json.loads(pathlib.Path(result).read_text())
+try: r=json.loads(pathlib.Path(result).read_text())
+except (OSError,json.JSONDecodeError): r={}
 m.update(result=r.get('result','FAIL'),ended_at_utc=pathlib.Path(ended).read_text().strip())
 for key in ('first_failure','classification','harness_sha','harness_tree','product_sha','product_tree'):
     if key in r: m[key]=r[key]

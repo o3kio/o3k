@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -94,6 +95,39 @@ class HostPreflightTests(unittest.TestCase):
         after = {"domains": [], "networks": [], "pools": [], "links": [],
                  "dhcp_leases": "192.168.122.105 52:54:00:00:00:05 ipv4"}
         self.assertEqual(preflight.compare_inventory(before, after, {"192.168.122.105"}), [])
+
+    def test_pool_config_fingerprint_ignores_capacity_telemetry_but_keeps_configuration(self):
+        first = """<pool type='dir'><name>images</name><uuid>abc</uuid>
+          <capacity unit='bytes'>1000</capacity><allocation unit='bytes'>100</allocation>
+          <available unit='bytes'>900</available><target><path>/srv/images</path></target></pool>"""
+        changed_capacity = first.replace(">1000<", ">1100<").replace(">100<", ">120<").replace(">900<", ">980<")
+        changed_path = changed_capacity.replace("/srv/images", "/srv/other")
+        self.assertEqual(preflight._pool_config_sha(first), preflight._pool_config_sha(changed_capacity))
+        self.assertNotEqual(preflight._pool_config_sha(first), preflight._pool_config_sha(changed_path))
+
+    def test_bridge_link_fingerprint_ignores_timer_counters_but_keeps_configuration(self):
+        def observed(gc_timer, stp_state=1):
+            return [{"ifname": "virbr0", "address": "52:54:00:00:00:01", "mtu": 1500,
+                     "flags": ["UP"], "linkinfo": {"info_kind": "bridge", "info_data": {
+                         "gc_timer": gc_timer, "hello_timer": 0.2, "tcn_timer": 0.0,
+                         "topology_change_timer": 0.0, "stp_state": stp_state,
+                         "vlan_filtering": 0}}}]
+
+        with patch.object(preflight, "_run", side_effect=lambda *_: json.dumps(observed(1.2))):
+            first = preflight._stable_links()
+        with patch.object(preflight, "_run", side_effect=lambda *_: json.dumps(observed(9.8))):
+            timer_change = preflight._stable_links()
+        with patch.object(preflight, "_run", side_effect=lambda *_: json.dumps(observed(9.8, 0))):
+            config_change = preflight._stable_links()
+        self.assertEqual(first, timer_change)
+        self.assertNotEqual(first, config_change)
+
+    def test_foreign_pool_or_link_configuration_change_is_reported(self):
+        before = {"domains": [], "networks": [], "pools": [{"name": "foreign-pool", "xml_sha256": "a"}],
+                  "links": [{"ifname": "foreign0", "mtu": 1500}]}
+        after = {"domains": [], "networks": [], "pools": [{"name": "foreign-pool", "xml_sha256": "b"}],
+                 "links": [{"ifname": "foreign0", "mtu": 1400}]}
+        self.assertEqual(preflight.compare_inventory(before, after), ["pools", "links"])
 
 
 if __name__ == "__main__":
