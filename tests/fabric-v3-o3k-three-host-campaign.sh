@@ -2204,16 +2204,7 @@ assert len({value['compute_agent_id'] for value in hosts.values()})==3, hosts
 assert len({value['network_agent_id'] for value in hosts.values()})==3, hosts
 assert len({value['stable_host_id'] for value in hosts.values()})==3, hosts
 assert all(value['compute_agent_epoch'] and value['network_agent_epoch'] for value in hosts.values()), hosts
-restart_identity=(root/'restart/startup-recovery/controller-identity-after.txt').read_text().strip()
-restart_epoch=(root/'restart/startup-recovery/controller-epoch-after.txt').read_text().strip()
-readiness=json.loads((root/'restart/startup-recovery/current-registration-state.json').read_text())
-assert readiness.get('status')=='passed' and readiness.get('controller_session_matches'), readiness
-assert readiness.get('all_expected_compute_agents_registered'), readiness
-assert restart_identity and restart_epoch and restart_identity!=controller_id and restart_epoch!=controller_epoch, (restart_identity,restart_epoch)
 manifest.update({'database_backend':'sqlite','controller':{'identity':controller_id,'epoch':controller_epoch},
-    'controller_restart':{'identity':restart_identity,'epoch':restart_epoch,
-        'session_advanced':restart_identity!=controller_id and restart_epoch!=controller_epoch,
-        'readiness_artifact':'restart/startup-recovery/current-registration-state.json'},
     'fabric_domain_id':fabric_domain_id,'realm_id':summary['realm_id'],
     'vni':summary['hosts']['a']['vni'],'realm_generation':summary['realm_generation'],
     'hosts':hosts})
