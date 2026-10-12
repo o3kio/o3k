@@ -72,12 +72,15 @@ try:
     }
     replacement_check = (
         'set -o pipefail\n'
-        'env_dump="$(cat "/proc/$new_pid/environ" 2>/dev/null | tr \'\\0\' \'\\n\')"\n'
+        'env_dump="$(sudo -n cat "/proc/$new_pid/environ" 2>/dev/null | tr \'\\0\' \'\\n\')"\n'
         'grep -Fx "O3K_DATA_DIR=$STATE_ROOT/data" <<<"$env_dump" >/dev/null'
     )
     all_checks = [replacement_check] + checks
     for index, check in enumerate(all_checks):
-        command = 'set -o pipefail\n' + check.replace('sudo -n cat', 'cat', 1)
+        # Keep the same narrow privileged observer used by the live harness.
+        # A plain `cat` can be denied by runner procfs/Yama policy even when
+        # the run-owned environment entry is present.
+        command = 'set -o pipefail\n' + check
         result = subprocess.run(['bash', '-c', command], env=test_env,
                                 capture_output=True, timeout=5)
         assert result.returncode == 0, (
