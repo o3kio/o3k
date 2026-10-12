@@ -874,10 +874,16 @@ cp "$TLS_DIR/certs/agents/controller-network/agent.pem" "$STAGE/controller-netwo
 cp "$TLS_DIR/certs/agents/controller-network/agent-key.pem" "$STAGE/controller-network-key.pem"
 
 for host in a b c; do
-  octet="${MGMT_OCTET[$host]}"; address="${MGMT_IP[$host]}"
+  address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo install -d -o o3k -g o3k -m 0700 /tmp/$RUN_ID-stage"
   scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$STAGE"/* "$SSH_USER@$address:/tmp/$RUN_ID-stage/"
-  ssh_vm "$address" "sudo bash /tmp/$RUN_ID-stage/install-agent-host.sh $host $octet $RUN_ID /tmp/$RUN_ID-stage" >"$EVIDENCE/management/install-$host.log" 2>&1 || fail "network agent installation failed on compute-$host" "ENVIRONMENT_GAP"
+  if ! ssh_vm "$address" "sudo bash /tmp/$RUN_ID-stage/install-agent-host.sh $host $RUN_ID /tmp/$RUN_ID-stage" \
+    >"$EVIDENCE/management/install-$host.log" 2>&1; then
+    if grep -Fq 'invalid host identity' "$EVIDENCE/management/install-$host.log"; then
+      fail "agent installer rejected the collision-safe selected management address" "HARNESS_GAP"
+    fi
+    fail "network agent installation failed on compute-$host; see install-$host.log" "ENVIRONMENT_GAP"
+  fi
   scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$PROBE_KEY" "$SSH_USER@$address:/tmp/$RUN_ID-probe-key"
   ssh_vm "$address" "sudo install -d -o root -g root -m 0700 /var/lib/o3k-fabric-v3/$RUN_ID/control && sudo install -o root -g root -m 0600 /tmp/$RUN_ID-probe-key /var/lib/o3k-fabric-v3/$RUN_ID/control/probe_ed25519 && sudo python3 -c 'import pathlib; pathlib.Path(\"/tmp/$RUN_ID-probe-key\").unlink()'"
   case "$host" in a) health_port=19101;; b) health_port=19102;; c) health_port=19103;; esac
