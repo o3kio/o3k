@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -465,6 +465,9 @@ async fn wait_ready(
     http: SocketAddr,
     control: SocketAddr,
     timeout: Duration,
+    log: &Path,
+    phase: &'static str,
+    operation: &'static str,
 ) -> Result<Value, Error> {
     let client = reqwest::Client::new();
     let deadline = Instant::now() + timeout;
@@ -484,13 +487,111 @@ async fn wait_ready(
             );
         }
         if let Some(status) = child.try_wait()? {
-            return Err(format!("o3kd exited during readiness: {status}").into());
+            let diagnostic = json!({
+                "phase": phase,
+                "status": "failed",
+                "failed_operation": operation,
+                "observer_type": "test_process_and_bounded_log",
+                "resource_class": "daemon_startup",
+                "command_class": "o3kd_process",
+                "process_id": child.id(),
+                "exit_code": status.code(),
+                "http_listener_present": listener_present(http).ok(),
+                "control_listener_present": listener_present(control).ok(),
+                "startup_log": startup_log_tail(log),
+            });
+            return Err(format!(
+                "o3kd exited during readiness: {status}; diagnostic={}",
+                serde_json::to_string(&diagnostic)?
+            )
+            .into());
         }
         if Instant::now() >= deadline {
             return Err("replacement did not become ready with both listeners owned".into());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+fn startup_log_tail(path: &Path) -> Value {
+    const MAX_BYTES: u64 = 16 * 1024;
+
+    let result = (|| -> Result<(Vec<u8>, bool), Error> {
+        let mut file = File::open(path)?;
+        let length = file.metadata()?.len();
+        let offset = length.saturating_sub(MAX_BYTES);
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::with_capacity(MAX_BYTES as usize);
+        file.take(MAX_BYTES).read_to_end(&mut bytes)?;
+        Ok((bytes, offset > 0))
+    })();
+
+    match result {
+        Ok((bytes, truncated)) => {
+            let raw = String::from_utf8_lossy(&bytes);
+            let tail = raw
+                .lines()
+                .rev()
+                .take(32)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(redact_startup_log_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            json!({
+                "read_status": "ok",
+                "truncated": truncated,
+                "tail_bytes": bytes.len(),
+                "tail_sha256": sha256(&bytes),
+                "tail": tail,
+            })
+        }
+        Err(error) => json!({
+            "read_status": "failed",
+            "diagnostic": error.to_string(),
+        }),
+    }
+}
+
+fn redact_startup_log_line(line: &str) -> String {
+    let mut redacted = line
+        .replace(BOOTSTRAP_PASSWORD, "[REDACTED]")
+        .replace(FOREIGN_PASSWORD, "[REDACTED]")
+        .replace(TOKEN_SIGNING_KEY, "[REDACTED]");
+
+    // Startup errors can include a PostgreSQL connection URL. Keep the
+    // diagnostic context while withholding any authority or query secrets.
+    for scheme in ["postgres://", "postgresql://"] {
+        let mut search_from = 0;
+        while let Some(relative_start) = redacted[search_from..].find(scheme) {
+            let start = search_from + relative_start;
+            let end = redacted[start..]
+                .find(char::is_whitespace)
+                .map_or(redacted.len(), |relative_end| start + relative_end);
+            redacted.replace_range(start..end, "[REDACTED_POSTGRES_URL]");
+            search_from = start + "[REDACTED_POSTGRES_URL]".len();
+            if search_from >= redacted.len() {
+                break;
+            }
+        }
+    }
+    redacted
+}
+
+#[test]
+fn startup_log_diagnostic_redacts_credentials() {
+    let line = format!(
+        "database startup failed password={BOOTSTRAP_PASSWORD} url=postgresql://db-user:db-password@db.invalid/o3k?sslkey=private-key"
+    );
+    let redacted = redact_startup_log_line(&line);
+
+    assert!(redacted.contains("database startup failed"));
+    assert!(redacted.contains("[REDACTED]"));
+    assert!(redacted.contains("[REDACTED_POSTGRES_URL]"));
+    assert!(!redacted.contains(BOOTSTRAP_PASSWORD));
+    assert!(!redacted.contains("db-password"));
+    assert!(!redacted.contains("private-key"));
 }
 
 async fn token(
@@ -1138,6 +1239,9 @@ async fn run_iteration(
             http,
             control,
             Duration::from_secs(20),
+            &log,
+            "bootstrap_daemon_startup",
+            "wait_bootstrap_readiness",
         )
         .await?;
         // Finish the bootstrap process before opening the same SQLite file for
@@ -1231,8 +1335,16 @@ async fn run_iteration(
         run_id,
     )?;
     let mut setup = ChildCleanupGuard::new(setup_child, setup_cleanup_failure);
-    let _ready_setup =
-        wait_ready(setup.child_mut()?, http, control, Duration::from_secs(20)).await?;
+    let _ready_setup = wait_ready(
+        setup.child_mut()?,
+        http,
+        control,
+        Duration::from_secs(20),
+        &log,
+        "fixture_setup_daemon_startup",
+        "wait_fixture_setup_readiness",
+    )
+    .await?;
     let setup_pid = setup.id()?;
     let setup_start = proc_starttime(setup_pid)?;
     let setup_exe = proc_exe(setup_pid)?;
@@ -1427,8 +1539,16 @@ async fn run_iteration(
         run_id,
     )?;
     let mut child = ChildCleanupGuard::new(old_child, old_cleanup_failure);
-    let readiness_old =
-        wait_ready(child.child_mut()?, http, control, Duration::from_secs(20)).await?;
+    let readiness_old = wait_ready(
+        child.child_mut()?,
+        http,
+        control,
+        Duration::from_secs(20),
+        &log,
+        "old_daemon_startup",
+        "wait_old_daemon_readiness",
+    )
+    .await?;
     probe.mark_daemon_started()?;
     let old_pid = child.id()?;
     let old_start = proc_starttime(old_pid)?;
@@ -1682,6 +1802,9 @@ async fn run_iteration(
         new_http,
         new_control,
         Duration::from_secs(20),
+        &log,
+        "replacement_daemon_startup",
+        "wait_replacement_readiness",
     )
     .await?;
     probe.mark_daemon_started()?;
