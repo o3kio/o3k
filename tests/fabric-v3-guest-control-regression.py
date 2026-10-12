@@ -352,6 +352,12 @@ class GuestControlRegression(unittest.TestCase):
         guest_setup = DRIVER[start:end]
         self.assertLess(guest_setup.index('mac="${MGMT_MAC[$host]}"'), guest_setup.index('"$mac"'))
 
+    def test_selected_management_address_is_not_rejected_by_stale_octet_range(self):
+        installer = (ROOT / "fabric-v3-install-agent-host.sh").read_text()
+        self.assertIn('host="$1"; run="$2"; stage="$3"', installer)
+        self.assertNotIn("$octet", installer)
+        self.assertIn('install-agent-host.sh $host $RUN_ID /tmp/$RUN_ID-stage', DRIVER)
+
 
 if __name__ == "__main__":
     unittest.main()
