@@ -295,6 +295,27 @@ PY
       || fail "replacement controller did not re-register all expected compute agents within 120 seconds; see current-registration-state.json" "DURABLE_RECOVERY_DEFECT"
     printf '%s\n' "$O3K_CONTROLLER_ID" >"$EVIDENCE/restart/startup-recovery/controller-identity-after.txt"
     printf '%s\n' "$O3K_CONTROLLER_EPOCH" >"$EVIDENCE/restart/startup-recovery/controller-epoch-after.txt"
+    python3 - "$EVIDENCE/manifest.json" "$INITIAL_CONTROLLER_ID" "$INITIAL_CONTROLLER_EPOCH" \
+      "$O3K_CONTROLLER_ID" "$O3K_CONTROLLER_EPOCH" \
+      "$EVIDENCE/restart/startup-recovery/current-registration-state.json" <<'PY' \
+      || fail "restart identity and current registrations could not be bound into the manifest" "HARNESS_GAP"
+import json,pathlib,sys
+manifest_path=pathlib.Path(sys.argv[1]); initial_id,initial_epoch,restart_id,restart_epoch=sys.argv[2:6]
+readiness=json.loads(pathlib.Path(sys.argv[6]).read_text())
+manifest=json.loads(manifest_path.read_text())
+assert manifest.get('controller')=={'identity':initial_id,'epoch':initial_epoch}, manifest.get('controller')
+assert restart_id and restart_epoch and restart_id!=initial_id and restart_epoch!=initial_epoch
+assert readiness.get('status')=='passed' and readiness.get('controller_session_matches'), readiness
+assert readiness.get('all_expected_compute_agents_registered'), readiness
+assert readiness.get('expected_controller_session')=={'identity':restart_id,'epoch':restart_epoch}, readiness
+assert readiness.get('observed_controller_session',{}).get('identity')==restart_id, readiness
+assert readiness.get('observed_controller_session',{}).get('epoch')==restart_epoch, readiness
+expected={host['compute_agent_id']:host['compute_agent_epoch'] for host in manifest['hosts'].values()}
+assert readiness.get('expected_compute_agents')==dict(sorted(expected.items())), (readiness,expected)
+manifest['controller_restart']={'identity':restart_id,'epoch':restart_epoch,'session_advanced':True,
+    'readiness_artifact':'restart/startup-recovery/current-registration-state.json'}
+manifest_path.write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n')
+PY
     for host in a b; do
       if [[ "$host" == a ]]; then server_index=0; else server_index=1; fi
       code="$(curl --silent --show-error --max-time 20 -o \

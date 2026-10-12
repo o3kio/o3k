@@ -75,12 +75,24 @@ class GuestControlRegression(unittest.TestCase):
         restart_start = RETIREMENT.index("O3K_CONTROLLER_ID=\"${INITIAL_CONTROLLER_ID}-restart\"")
         replacement_start = RETIREMENT.index('"$PRODUCT_SOURCE_DIR/target/release/o3kd"', restart_start)
         readiness_gate = RETIREMENT.index("current-registration-state.json", replacement_start)
+        manifest_bind = RETIREMENT.index("manifest['controller_restart']", readiness_gate)
         survivor_gets = RETIREMENT.index('"$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[$server_index]}"', readiness_gate)
         self.assertLess(restart_start, replacement_start)
         self.assertLess(replacement_start, readiness_gate)
+        self.assertLess(readiness_gate, manifest_bind)
+        self.assertLess(manifest_bind, survivor_gets)
         self.assertLess(readiness_gate, survivor_gets)
         self.assertIn('O3K_CONTROLLER_EPOCH="${INITIAL_CONTROLLER_EPOCH}-restart"', RETIREMENT)
         self.assertIn('[[ "$new_controller_pid" != "$old_controller_pid" ]]', RETIREMENT)
+
+    def test_predelete_manifest_does_not_require_postrestart_artifacts(self):
+        start = DRIVER.index('python3 - "$EVIDENCE" "$RUN_ID" "$INITIAL_CONTROLLER_ID"')
+        end = DRIVER.index("PY\npython3 - \"$EVIDENCE/endpoint-removal/host-c-ownership-before.json\"", start)
+        predelete_manifest = DRIVER[start:end]
+        self.assertNotIn("controller-identity-after.txt", predelete_manifest)
+        self.assertNotIn("current-registration-state.json", predelete_manifest)
+        self.assertNotIn("controller_restart", predelete_manifest)
+        self.assertIn("manifest['controller_restart']", RETIREMENT)
 
     def inspect(self, serial_xml: str) -> dict:
         with tempfile.NamedTemporaryFile("w", suffix=".xml") as f:
