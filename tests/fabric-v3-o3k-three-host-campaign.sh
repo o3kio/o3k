@@ -299,8 +299,50 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" >"$EVIDENCE/enviro
 sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" >"$EVIDENCE/environment/boundary-capture-helper.sha256"
 
+refresh_image_store_pool() {
+  local output="$1"
+  python3 - "$IMAGE_STORE" "$output" <<'PYPOOL'
+import json,pathlib,subprocess,sys,xml.etree.ElementTree as ET
+image_store=pathlib.Path(sys.argv[1]).resolve(strict=False)
+output=pathlib.Path(sys.argv[2])
+result={'image_store':str(image_store),'observer':'libvirt_pool_path_match','status':'FAIL'}
+def run(*args):
+    return subprocess.run(['virsh','-c','qemu:///system',*args],check=True,capture_output=True,text=True).stdout
+try:
+    matches=[]
+    for name in (line.strip() for line in run('pool-list','--all','--name').splitlines() if line.strip()):
+        root=ET.fromstring(run('pool-dumpxml',name))
+        path=root.findtext('./target/path')
+        if path and pathlib.Path(path).resolve(strict=False)==image_store:
+            matches.append(name)
+    if len(matches)>1:
+        raise RuntimeError('multiple libvirt pools target the exact campaign image store')
+    if not matches:
+        result.update({'status':'NOT_APPLICABLE','reason':'no libvirt pool targets the campaign image store'})
+    else:
+        pool=matches[0]
+        info=run('pool-info',pool)
+        state=next((line.split(':',1)[1].strip().lower() for line in info.splitlines()
+                    if line.lstrip().startswith('State:')), '')
+        result.update({'pool':pool,'pool_state':state})
+        if state not in {'running','active'}:
+            result.update({'status':'NOT_APPLICABLE','reason':'matching image store pool is inactive'})
+        else:
+            completed=subprocess.run(['virsh','-c','qemu:///system','pool-refresh',pool],capture_output=True,text=True)
+            result.update({'command_class':'refresh_exact_image_store_pool','exit_code':completed.returncode,
+                           'status':'PASS' if completed.returncode==0 else 'FAIL'})
+            if completed.returncode:
+                result['diagnostic']=completed.stderr.strip()[:500]
+except (OSError,subprocess.SubprocessError,ET.ParseError,RuntimeError) as error:
+    result.update({'status':'FAIL','diagnostic':f'{type(error).__name__}: {error}'[:500]})
+output.write_text(json.dumps(result,sort_keys=True,indent=2)+'\n')
+if result['status']=='FAIL':
+    raise SystemExit(1)
+PYPOOL
+}
+
 cleanup_on_success() {
-  local rc=$? api_ok=-1 guest_ok=-1 controller_ok=-1 host_snapshot_ok=-1 foreign_ok=-1 capture_ok=-1
+  local rc=$? api_ok=-1 guest_ok=-1 controller_ok=-1 host_snapshot_ok=-1 foreign_ok=-1 capture_ok=-1 pool_refresh_ok=-1
   local cleanup_problem=0 cleanup_classification="" cleanup_failure=""
   trap - EXIT
   if declare -F stop_dhcp_capture >/dev/null 2>&1 && [[ "$DHCP_CAPTURE_CLEANUP_STATUS" == PENDING ]]; then
@@ -452,6 +494,18 @@ cleanup_on_success() {
         O3KD_PID=""
       fi
     fi
+    if (( ${#FRESH_DOMAINS[@]} > 0 )); then
+      if refresh_image_store_pool "$EVIDENCE/teardown/image-store-pool-refresh.json" \
+          >"$EVIDENCE/teardown/image-store-pool-refresh.stdout" \
+          2>"$EVIDENCE/teardown/image-store-pool-refresh.stderr"; then
+        pool_refresh_ok=1
+      else
+        pool_refresh_ok=0
+        cleanup_problem=1
+        cleanup_classification=CLEANUP_DEFECT
+        cleanup_failure="the exact libvirt image-store pool inventory could not be refreshed after owned storage cleanup"
+      fi
+    fi
     if [[ -s "$EVIDENCE/environment/host-inventory-before.json" ]]; then
       if python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
           --output "$EVIDENCE/teardown/host-inventory-after-cleanup.json" \
@@ -505,15 +559,20 @@ cleanup_on_success() {
       [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
       [[ -n "$cleanup_failure" ]] || cleanup_failure="controller required forced termination during cleanup"
     fi
+    if (( pool_refresh_ok == 0 )); then
+      cleanup_problem=1
+      [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
+      [[ -n "$cleanup_failure" ]] || cleanup_failure="the exact libvirt image-store pool inventory could not be refreshed after owned storage cleanup"
+    fi
     if (( host_snapshot_ok == 0 )) && [[ -s "$EVIDENCE/environment/host-inventory-before.json" ]]; then
       cleanup_problem=1
       [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
       [[ -n "$cleanup_failure" ]] || cleanup_failure="post-cleanup host inventory is unavailable"
     fi
     python3 - "$EVIDENCE/teardown/cleanup-status.json" "$api_ok" "$guest_ok" \
-      "$controller_ok" "$host_snapshot_ok" "$foreign_ok" "$capture_ok" <<'PYSTATUS'
+      "$controller_ok" "$host_snapshot_ok" "$foreign_ok" "$capture_ok" "$pool_refresh_ok" <<'PYSTATUS'
 import json,sys
-path,api,guests,controller,host,foreign,capture=sys.argv[1:]
+path,api,guests,controller,host,foreign,capture,pool_refresh=sys.argv[1:]
 def status(value): return 'PASS' if value=='1' else ('FAIL' if value=='0' else 'NOT_APPLICABLE')
 value={
   'api_resources': status(api),
@@ -522,6 +581,7 @@ value={
   'post_cleanup_host_inventory': status(host),
   'foreign_state_unchanged': status(foreign),
   'run_owned_dhcp_capture': status(capture),
+  'image_store_pool_refresh': status(pool_refresh),
 }
 json.dump(value,open(path,'w'),sort_keys=True,indent=2); open(path,'a').write('\n')
 PYSTATUS
@@ -1979,19 +2039,17 @@ for host in 'abc':
         "HER_peers":sorted(peers),"directory_generation":plan['directory_generation'],
         "binding_generation":plan['encapsulation']['binding_generation'],
         "local_fabric_generation":plan['local_fabric_generation'],
-        "vni":plan['encapsulation']['provider_segment_id'],
-        "realm_generation":plan.get('resource_generations',{}).get(realm)}
-realm_generations={summary[h]['realm_generation'] for h in 'abc'}
-assert len(realm_generations)==1 and None not in realm_generations, summary
+        "vni":plan['encapsulation']['provider_segment_id']}
 assert len({summary[h]['vni'] for h in 'abc'})==1, summary
 pathlib.Path(root/'pre-delete-plan-summary.json').write_text(json.dumps({"realm_id":realm,
-    "realm_generation":next(iter(realm_generations)),"hosts":summary},sort_keys=True,indent=2)+'\n')
+    "hosts":summary},sort_keys=True,indent=2)+'\n')
 PY
 python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" \
-  "$EVIDENCE/endpoint-removal/pre-delete-work-history.json" <<'PY' \
-  || fail "pre-delete durable work history unavailable or C is not currently applied" "DURABLE_RECONCILIATION_GAP"
+  "$EVIDENCE/endpoint-removal/pre-delete-work-history.json" \
+  "$EVIDENCE/endpoint-removal/pre-delete-plan-summary.json" <<'PY' \
+  || fail "pre-delete durable Apply state or shared Realm generation is not current across A/B/C" "SURVIVOR_RECONCILIATION_DEFECT"
 import json,pathlib,sqlite3,sys
-path,realm,out=sys.argv[1:]
+path,realm,out,summary_path=sys.argv[1:]
 db=sqlite3.connect(f"file:{path}?mode=ro",uri=True,timeout=3); db.row_factory=sqlite3.Row
 rows=db.execute("SELECT rowid AS insertion_order,* FROM network_plan_work WHERE target_host_id IN ('host-a','host-b','host-c') ORDER BY rowid").fetchall()
 history={host:[] for host in ('host-a','host-b','host-c')}
@@ -2010,13 +2068,31 @@ for row in rows:
         'local_host':fabric.get('local_host'),
         'binding_generation':fabric.get('encapsulation',{}).get('binding_generation'),
         'fabric_generation':fabric.get('local_fabric_generation'),
+        'participants':sorted({entry.get('selected_host') for entry in fabric.get('directory',{}).get('entries',[])}),
+        'her_peers':sorted({peer.get('host_id') for peer in fabric.get('peers',[])}),
         'realm_generation':plan.get('resource_generations',{}).get(realm),
         'state':row['state'],'revision':row['revision'],
         'outcome':bytes(outcome).decode('utf-8',errors='replace') if outcome is not None else None,
         'created_at':row['created_at'],'updated_at':row['updated_at']})
 latest={host:(items[-1] if items else None) for host,items in history.items()}
+# Persist the raw durable work observation before evaluating predicates so an
+# unsuccessful pre-delete check still has enough evidence to diagnose.
+pathlib.Path(out).write_text(json.dumps({'realm_id':realm,'status':'observed_before_predicate_checks',
+    'history':history,'latest':latest,'c_prior_apply':latest['host-c']},sort_keys=True,indent=2)+'\n')
 assert all(latest[h] and latest[h]['action']=='Apply' and latest[h]['state']=='succeeded' for h in history),latest
 assert all(latest[h]['target_agent_id']==f'network-agent-{h[-1]}' for h in history),latest
+realm_generations={latest[h]['realm_generation'] for h in history}
+assert len(realm_generations)==1 and None not in realm_generations,latest
+expected_participants=['host-a','host-b','host-c']
+summary=json.loads(pathlib.Path(summary_path).read_text())
+for host in history:
+    suffix=host[-1]
+    assert latest[host]['participants']==expected_participants,latest[host]
+    assert latest[host]['her_peers']==[peer for peer in expected_participants if peer!=host],latest[host]
+    assert latest[host]['directory_generation']==summary['hosts'][suffix]['directory_generation'],(latest[host],summary['hosts'][suffix])
+    summary['hosts'][suffix]['realm_generation']=latest[host]['realm_generation']
+summary['realm_generation']=next(iter(realm_generations))
+pathlib.Path(summary_path).write_text(json.dumps(summary,sort_keys=True,indent=2)+'\n')
 pathlib.Path(out).write_text(json.dumps({'realm_id':realm,'history':history,'latest':latest,
     'c_prior_apply':latest['host-c']},sort_keys=True,indent=2)+'\n')
 PY
@@ -2146,6 +2222,7 @@ before=json.load(open(sys.argv[1])); remove=json.load(open(sys.argv[2])); prior=
 assert prior['action']=='Apply' and prior['state']=='succeeded', prior
 assert remove.get('found') and remove.get('action')=='Remove' and remove.get('state')=='succeeded', remove
 assert remove.get('target_host_id')=='host-c' and remove.get('target_agent_id')=='network-agent-c', remove
+assert remove.get('local_host')=='host-c', remove
 assert int(remove['insertion_order'])>int(prior['insertion_order']), (prior,remove)
 assert remove.get('target_agent_epoch') and remove.get('operation_id') and remove.get('idempotency_key'), remove
 assert remove.get('realm_generation') is not None, remove
@@ -2193,11 +2270,13 @@ row_path,journal_path,realm=sys.argv[1:]
 row=json.load(open(row_path)); assert row.get('found') and row.get('state')=='succeeded', row
 assert row.get('target_host_id')=='host-c' and row.get('target_agent_id')=='network-agent-c', row
 assert row.get('action')=='Remove' and row.get('realm_id')==realm, row
+assert row.get('local_host')=='host-c', row
 journal=json.load(open(journal_path))
 matches=[p for p in journal.get('plans',[]) if p.get('action')=='Remove' and p.get('plan',{}).get('fabric',{}).get('realm_id')==realm]
 assert matches, 'executor journal has no C Remove'
 command=matches[-1]
 assert command.get('target',{}).get('agent_id')=='network-agent-c', command
+assert command.get('plan',{}).get('fabric',{}).get('local_host')=='host-c', command
 assert command.get('status')=='Succeeded', command
 assert command.get('command_id')==row.get('command_id'), (command,row)
 print(json.dumps({k:command.get(k) for k in ('command_id','operation_id','action','target','status')},sort_keys=True,indent=2))

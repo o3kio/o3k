@@ -138,10 +138,29 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("C Realm namespace remains after final endpoint departure", DRIVER)
         self.assertIn("C durable Realm plan remains after Remove", DRIVER)
         self.assertIn("C port did not reach an unbound DOWN tombstone", DRIVER)
+        self.assertIn("remove.get('local_host')=='host-c'", DRIVER)
+        self.assertIn("row.get('local_host')=='host-c'", DRIVER)
+        self.assertIn("command.get('plan',{}).get('fabric',{}).get('local_host')=='host-c'", DRIVER)
         self.assertIn("C Remove identity/outcome was not retained across controller restart", RETIREMENT)
         self.assertIn("A/B traffic failed after C retirement", RETIREMENT)
         self.assertIn("B/A traffic failed after C retirement", RETIREMENT)
         self.assertIn("local_host", RETIREMENT_EVIDENCE)
+
+    def test_predelete_realm_generation_comes_from_durable_work_snapshot(self):
+        provider_start = DRIVER.index('python3 - "$EVIDENCE/endpoint-removal" "$realm_id"')
+        durable_start = DRIVER.index('python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id"', provider_start)
+        provider_checks = DRIVER[provider_start:durable_start]
+        durable_end = DRIVER.index('cp "$EVIDENCE/endpoint-removal/pre-delete-work-history.json"', durable_start)
+        durable_checks = DRIVER[durable_start:durable_end]
+
+        self.assertNotIn("resource_generations", provider_checks)
+        self.assertIn("plan.get('resource_generations',{}).get(realm)", durable_checks)
+        self.assertIn("realm_generations={latest[h]['realm_generation'] for h in history}", durable_checks)
+        self.assertIn("latest[host]['participants']==expected_participants", durable_checks)
+        self.assertIn("summary['hosts'][suffix]['realm_generation']=latest[host]['realm_generation']", durable_checks)
+        observed = durable_checks.index("status':'observed_before_predicate_checks'")
+        first_predicate = durable_checks.index("assert all(latest[h]")
+        self.assertLess(observed, first_predicate)
 
     def test_teardown_checks_fabric_and_dhcp_owned_state_without_global_cleanup(self):
         self.assertIn("run-owned-provider-objects.json", DRIVER)
@@ -154,6 +173,20 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("vni_binding_released_after_provider_absence", DRIVER)
         self.assertNotIn("virsh net-destroy", DRIVER)
         self.assertNotIn("nft flush ruleset", DRIVER)
+
+    def test_cleanup_refreshes_only_the_libvirt_pool_for_run_image_store(self):
+        start = DRIVER.index("refresh_image_store_pool() {")
+        end = DRIVER.index("\n}\n\ncleanup_on_success()", start)
+        observer = DRIVER[start:end]
+        self.assertIn("pool-dumpxml", observer)
+        self.assertIn("pathlib.Path(path).resolve(strict=False)==image_store", observer)
+        self.assertIn("pool-refresh',pool", observer)
+        self.assertIn("multiple libvirt pools target the exact campaign image store", observer)
+        self.assertIn("'image_store_pool_refresh': status(pool_refresh)", DRIVER)
+        self.assertNotIn("pool-refresh --all", DRIVER)
+        refresh = DRIVER.index('refresh_image_store_pool "$EVIDENCE/teardown/image-store-pool-refresh.json"')
+        inventory = DRIVER.index('snapshot --network "$NETWORK" \\\n          --output "$EVIDENCE/teardown/host-inventory-after-cleanup.json"')
+        self.assertLess(refresh, inventory)
 
     def test_server_teardown_poll_distinguishes_http_absence_and_is_bounded(self):
         poll = DRIVER[DRIVER.index("servers_remaining=1"):DRIVER.index('for id in "${PORT_IDS[@]}"; do')]
