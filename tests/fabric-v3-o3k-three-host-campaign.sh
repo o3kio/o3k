@@ -12,12 +12,12 @@ if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
 else
   ACCEPTANCE_GATE="FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE"
 fi
-PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
-PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871
+PRODUCT_SHA=a539276944bfb0000701c34317b662996f037b51
+PRODUCT_TREE=6b9d7091a8a733d0690e82abefefe06b6393ca29
 PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
-PRODUCT_EXPECTED_PARENT_COMMITS="91500b3a101edaf41292502938e3796dc1da71ae 98ae87f527f3bd021cd18258239ab0f233e15130"
-PRODUCT_REMOTE_REF=refs/heads/main
-HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-microgate
+PRODUCT_EXPECTED_PARENT_COMMITS="d7335166563d28084fbad5ac7f5d0f0e07e000a4"
+PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-retirement-provider-016
+HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-successor-harness
 HOST_PREFLIGHT="$ROOT_DIR/tests/fabric-v3-host-preflight.py"
 # Guard the acceptance control contract before creating evidence or guests.
 [[ -f "$ROOT_DIR/contracts/real-host-acceptance-evidence.md" ]] \
@@ -727,8 +727,10 @@ git -C "$ROOT_DIR" fetch --no-tags origin main \
 protected_main_tip="$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)"
 [[ "$protected_main_tip" == "$PRODUCT_PROTECTED_MAIN_BASE" ]] \
   || fail "protected main no longer matches the frozen product candidate" "HARNESS_GAP"
-[[ "$PRODUCT_SHA" == "$protected_main_tip" ]] \
-  || fail "frozen product candidate is not the exact protected main SHA" "HARNESS_GAP"
+[[ "$PRODUCT_SHA" != "$protected_main_tip" ]] \
+  || fail "frozen successor unexpectedly aliases its protected-main base" "HARNESS_GAP"
+git -C "$ROOT_DIR" merge-base --is-ancestor "$protected_main_tip" "$PRODUCT_SHA" \
+  || fail "frozen product successor is not descended from its protected-main base" "HARNESS_GAP"
 product_remote_sha="$(git -C "$ROOT_DIR" ls-remote origin "$PRODUCT_REMOTE_REF" | awk 'NR==1 {print $1}')"
 [[ "$product_remote_sha" == "$PRODUCT_SHA" ]] \
   || fail "frozen product successor is not remotely visible at the exact SHA" "HARNESS_GAP"
@@ -748,7 +750,7 @@ git -C "$ROOT_DIR" fetch --no-tags origin "$PRODUCT_REMOTE_REF" \
   || fail "remote product successor ref does not match the frozen candidate SHA" "HARNESS_GAP"
 product_parents="$(git -C "$ROOT_DIR" show -s --format=%P "$PRODUCT_SHA")"
 [[ "$product_parents" == "$PRODUCT_EXPECTED_PARENT_COMMITS" ]] \
-  || fail "protected-main merge ancestry differs from the recorded candidate lineage" "HARNESS_GAP"
+  || fail "product successor ancestry differs from the recorded candidate lineage" "HARNESS_GAP"
 url_port "$API_PORT" || fail "API port is occupied: $API_PORT" "ENVIRONMENT_GAP"
 url_port "$CONTROL_PORT" || fail "compute control port is occupied: $CONTROL_PORT" "ENVIRONMENT_GAP"
 python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
