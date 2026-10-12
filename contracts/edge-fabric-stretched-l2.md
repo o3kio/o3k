@@ -31,9 +31,9 @@ transport, per-network VXLAN/HER objects, ownership journaling, key hygiene)
 is implemented once in the shared repository
 [o3kio/fabric](https://github.com/o3kio/fabric) and consumed by git tag by
 both O3K and CHV; its
-[`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/contracts/fabric-provider-v1.md)
+[`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/65d06a34f36144df14bfbec0d414b31e6304eafe/contracts/fabric-provider-v1.md)
 specifies provider-level substrate invariants, and
-[`docs/change-control.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/docs/change-control.md)
+[`docs/change-control.md`](https://github.com/o3kio/fabric/blob/65d06a34f36144df14bfbec0d414b31e6304eafe/docs/change-control.md)
 governs cross-project change requests. The provider contract is normative for
 provider behavioral invariants within ADR-0186 and SPEC-0049; O3K's accepted
 ADRs and SPEC-0049 remain normative for O3K architecture and externally visible
