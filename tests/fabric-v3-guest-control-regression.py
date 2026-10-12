@@ -346,6 +346,12 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('"$PROBE_BASE_IMAGE"', DRIVER)
         self.assertIn('"$PROBE_BASE_IMAGE" "$PROBE_KEY.pub"', DRIVER)
 
+    def test_guest_inventory_mac_is_initialized_before_strict_shell_use(self):
+        start = DRIVER.index('for host in a b c; do\n  octet=')
+        end = DRIVER.index('  cat >"$ws/user-data"', start)
+        guest_setup = DRIVER[start:end]
+        self.assertLess(guest_setup.index('mac="${MGMT_MAC[$host]}"'), guest_setup.index('"$mac"'))
+
 
 if __name__ == "__main__":
     unittest.main()
