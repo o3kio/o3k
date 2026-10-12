@@ -27,6 +27,15 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _pool_config_sha(xml: str) -> str:
+    """Fingerprint pool configuration without live capacity telemetry."""
+    root = ET.fromstring(xml)
+    for name in ("capacity", "allocation", "available"):
+        for node in root.findall(f"./{name}"):
+            root.remove(node)
+    return _sha(ET.tostring(root, encoding="unicode"))
+
+
 def _names(text: str) -> list[str]:
     """Normalize virsh --name output, which pads rows to a fixed width."""
     return [line.strip() for line in text.splitlines() if line.strip()]
@@ -76,14 +85,28 @@ def _capture_pools() -> list[dict[str, Any]]:
             fields = line.split()
             if len(fields) >= 5:
                 volume_rows.append(fields[:4])
-        result.append({"name": name, "info": stable_info, "xml_sha256": _sha(xml), "volumes": sorted(volume_rows)})
+        result.append({"name": name, "info": stable_info, "xml_sha256": _pool_config_sha(xml), "volumes": sorted(volume_rows)})
     return result
 
 
 def _stable_links() -> list[dict[str, Any]]:
     rows = json.loads(_run("ip", "-j", "-d", "link", "show"))
     keep = ("ifname", "address", "broadcast", "mtu", "master", "operstate", "flags", "link_type", "linkinfo")
-    return sorted(({key: row[key] for key in keep if key in row} for row in rows), key=lambda row: row.get("ifname", ""))
+    volatile_bridge_fields = {"gc_timer", "hello_timer", "tcn_timer", "topology_change_timer"}
+    stable_rows = []
+    for row in rows:
+        stable = {key: row[key] for key in keep if key in row}
+        linkinfo = stable.get("linkinfo")
+        if isinstance(linkinfo, dict):
+            info_data = linkinfo.get("info_data")
+            if isinstance(info_data, dict) and linkinfo.get("info_kind") == "bridge":
+                linkinfo = dict(linkinfo)
+                linkinfo["info_data"] = {
+                    key: value for key, value in info_data.items() if key not in volatile_bridge_fields
+                }
+                stable["linkinfo"] = linkinfo
+        stable_rows.append(stable)
+    return sorted(stable_rows, key=lambda row: row.get("ifname", ""))
 
 
 def capture_inventory(network: str) -> dict[str, Any]:
