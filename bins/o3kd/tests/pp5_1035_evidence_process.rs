@@ -28,6 +28,7 @@ const FOREIGN_PASSWORD: &str = "pp5-interrupted-delete-foreign-password";
 const TOKEN_SIGNING_KEY: &str = "pp5-interrupted-delete-signing-key-0123456789abcdef";
 const FLAVOR_ID: &str = "00000000-0000-0000-0000-000000000001";
 const FAULT_ENV: &str = "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS";
+const MAX_CONTROLLER_IDENTITY_BYTES: usize = 64;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -359,6 +360,7 @@ fn start_o3kd(
     tls: &(PathBuf, PathBuf, PathBuf),
     run_id: &str,
 ) -> Result<Child, Error> {
+    validate_controller_identity(controller.0, controller.1)?;
     let log_file = OpenOptions::new().create(true).append(true).open(log)?;
     let log_copy = log_file.try_clone()?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_o3kd"));
@@ -454,6 +456,29 @@ fn start_o3kd(
     }
     let child = command.spawn()?;
     Ok(child)
+}
+
+fn controller_identity(prefix: &str, run_id: &str) -> (String, String) {
+    (
+        format!("{prefix}-{run_id}"),
+        format!("{prefix}-epoch-{run_id}"),
+    )
+}
+
+fn validate_controller_identity(controller_id: &str, controller_epoch: &str) -> Result<(), Error> {
+    for (field, value) in [
+        ("controller ID", controller_id),
+        ("controller epoch", controller_epoch),
+    ] {
+        if value.len() > MAX_CONTROLLER_IDENTITY_BYTES {
+            return Err(format!(
+                "test fixture {field} is {} bytes; store limit is {MAX_CONTROLLER_IDENTITY_BYTES}",
+                value.len()
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn kill_process(child: &mut Child) -> Result<(), Error> {
@@ -598,6 +623,32 @@ fn startup_log_diagnostic_redacts_credentials() {
     assert!(!redacted.contains(BOOTSTRAP_PASSWORD));
     assert!(!redacted.contains("db-password"));
     assert!(!redacted.contains("private-key"));
+}
+
+#[test]
+fn postgres_run_controller_identities_fit_store_bound() -> Result<(), Error> {
+    let run_id = format!("postgres-{}", Uuid::now_v7().simple());
+    let fixture_setup = controller_identity("fixture-setup", &run_id);
+    assert!(fixture_setup.0.len() <= MAX_CONTROLLER_IDENTITY_BYTES);
+    assert!(fixture_setup.1.len() <= MAX_CONTROLLER_IDENTITY_BYTES);
+    validate_controller_identity(&fixture_setup.0, &fixture_setup.1)?;
+
+    let previous_run_id = format!("postgres-{}", Uuid::now_v7());
+    let previous_fixture_setup = controller_identity("fixture-setup", &previous_run_id);
+    assert_eq!(
+        previous_fixture_setup.1.len(),
+        MAX_CONTROLLER_IDENTITY_BYTES + 1
+    );
+    assert!(
+        validate_controller_identity(&previous_fixture_setup.0, &previous_fixture_setup.1).is_err()
+    );
+
+    let boundary_value = "x".repeat(MAX_CONTROLLER_IDENTITY_BYTES);
+    validate_controller_identity(&boundary_value, &boundary_value)?;
+    let oversized_value = "x".repeat(MAX_CONTROLLER_IDENTITY_BYTES + 1);
+    assert!(validate_controller_identity(&oversized_value, "epoch").is_err());
+    assert!(validate_controller_identity("controller", &oversized_value).is_err());
+    Ok(())
 }
 
 async fn token(
@@ -1187,11 +1238,8 @@ async fn run_iteration(
     fs::remove_file(&replacement_cleanup_failure).ok();
     fs::remove_file(&old_endpoint_release_gate).ok();
     File::create(&release)?;
-    let old_controller = (format!("old-{run_id}"), format!("old-epoch-{run_id}"));
-    let fixture_setup_controller = (
-        format!("fixture-setup-{run_id}"),
-        format!("fixture-setup-epoch-{run_id}"),
-    );
+    let old_controller = controller_identity("old", run_id);
+    let fixture_setup_controller = controller_identity("fixture-setup", run_id);
     // The operator diagnostics route is deliberately system-scoped.  Seed a
     // run-local system project/role assignment before the evidence process is
     // started, then let the real IAM snapshot load it during startup.  This
@@ -1764,7 +1812,7 @@ async fn run_iteration(
     fs::remove_file(&old_endpoint_release_gate).ok();
     child.disarm();
 
-    let new_controller = (format!("new-{run_id}"), format!("new-epoch-{run_id}"));
+    let new_controller = controller_identity("new", run_id);
     fs::remove_file(&release).ok();
     store_operation(
         evidence,
@@ -2413,7 +2461,9 @@ async fn pp5_1035_postgres_restart_takes_over_lease_and_reconstructs_endpoint() 
     let Some(fixture) = PgFixture::new().await? else {
         return Ok(());
     };
-    let run_id = format!("postgres-{}", Uuid::now_v7());
+    // Preserve a unique per-run identity while keeping the longer fixture
+    // controller epoch below the store's VARCHAR(64) bound.
+    let run_id = format!("postgres-{}", Uuid::now_v7().simple());
     let root = std::env::temp_dir().join(format!("o3k-pp5-evidence-{run_id}"));
     fs::create_dir_all(&root)?;
     let artifact = root.join("pp5-1035-postgres-restart-evidence.json");
