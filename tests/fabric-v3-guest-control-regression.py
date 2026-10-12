@@ -19,9 +19,69 @@ SPEC = importlib.util.spec_from_file_location("guest_control", ROOT / "fabric-v3
 assert SPEC and SPEC.loader
 helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
+RESTART_SPEC = importlib.util.spec_from_file_location(
+    "controller_restart_readiness", ROOT / "fabric-v3-controller-restart-readiness.py"
+)
+assert RESTART_SPEC and RESTART_SPEC.loader
+restart_readiness = importlib.util.module_from_spec(RESTART_SPEC)
+RESTART_SPEC.loader.exec_module(restart_readiness)
 
 
 class GuestControlRegression(unittest.TestCase):
+    def test_restart_readiness_requires_new_controller_session_and_exact_agent_epochs(self):
+        log = "\n".join(
+            [
+                '{"fields":{"message":"controller session registered","controller_id":"ctrl-new","controller_epoch":"epoch-new"}}',
+                '{"fields":{"message":"compute agent registered","agent_id":"compute-a","epoch":"a-2"}}',
+                '{"fields":{"message":"compute agent registered","agent_id":"compute-b","epoch":"b-2"}}',
+                '{"fields":{"message":"compute agent registered","agent_id":"compute-c","epoch":"c-2"}}',
+            ]
+        )
+        evidence = restart_readiness.parse_readiness(
+            log, "ctrl-new", "epoch-new", {"compute-a": "a-2", "compute-b": "b-2", "compute-c": "c-2"}
+        )
+        self.assertEqual(evidence["status"], "passed")
+        self.assertTrue(evidence["controller_session_matches"])
+        self.assertTrue(evidence["all_expected_compute_agents_registered"])
+
+    def test_restart_readiness_rejects_stale_controller_session(self):
+        evidence = restart_readiness.parse_readiness(
+            'controller_id=old controller_epoch=old-epoch message="controller session registered"',
+            "new",
+            "new-epoch",
+            {"compute-a": "a-2"},
+        )
+        self.assertEqual(evidence["status"], "pending")
+        self.assertFalse(evidence["controller_session_matches"])
+
+    def test_restart_readiness_rejects_missing_agent_and_wrong_epoch(self):
+        log = "\n".join(
+            [
+                'controller_id=new controller_epoch=new-epoch message="controller session registered"',
+                'agent_id=compute-a epoch=a-old message="compute agent registered"',
+            ]
+        )
+        evidence = restart_readiness.parse_readiness(
+            log, "new", "new-epoch", {"compute-a": "a-current", "compute-b": "b-current"}
+        )
+        self.assertEqual(evidence["status"], "pending")
+        self.assertEqual(evidence["missing_compute_agent_ids"], ["compute-b"])
+        self.assertEqual(
+            evidence["mismatched_compute_agent_epochs"]["compute-a"],
+            {"expected_epoch": "a-current", "observed_epoch": "a-old"},
+        )
+
+    def test_restart_registration_gate_precedes_post_restart_api_observations(self):
+        restart_start = RETIREMENT.index("O3K_CONTROLLER_ID=\"${INITIAL_CONTROLLER_ID}-restart\"")
+        replacement_start = RETIREMENT.index('"$PRODUCT_SOURCE_DIR/target/release/o3kd"', restart_start)
+        readiness_gate = RETIREMENT.index("current-registration-state.json", replacement_start)
+        survivor_gets = RETIREMENT.index('"$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[$server_index]}"', readiness_gate)
+        self.assertLess(restart_start, replacement_start)
+        self.assertLess(replacement_start, readiness_gate)
+        self.assertLess(readiness_gate, survivor_gets)
+        self.assertIn('O3K_CONTROLLER_EPOCH="${INITIAL_CONTROLLER_EPOCH}-restart"', RETIREMENT)
+        self.assertIn('[[ "$new_controller_pid" != "$old_controller_pid" ]]', RETIREMENT)
+
     def inspect(self, serial_xml: str) -> dict:
         with tempfile.NamedTemporaryFile("w", suffix=".xml") as f:
             f.write(serial_xml)
@@ -130,7 +190,8 @@ class GuestControlRegression(unittest.TestCase):
 
     def test_retirement_poll_distinguishes_convergence_from_harness_failure(self):
         self.assertEqual(RETIREMENT.count('case "$evidence_status" in'), 2)
-        self.assertEqual(RETIREMENT.count('1) ;;'), 2)
+        self.assertEqual(RETIREMENT.count('case "$registration_status" in'), 1)
+        self.assertEqual(RETIREMENT.count('1) ;;'), 3)
         self.assertEqual(RETIREMENT.count('2) fail "retirement evidence schema/observer failure'), 1)
         self.assertEqual(RETIREMENT.count('2) fail "post-restart retirement evidence schema/observer failure'), 1)
         self.assertIn('validator exited unexpectedly ($evidence_status)', RETIREMENT)
