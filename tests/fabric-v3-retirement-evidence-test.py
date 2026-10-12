@@ -35,10 +35,11 @@ class RetirementEvidenceTests(unittest.TestCase):
         ])
         prior = self._work("host-c", "Apply", "succeeded", 1, ["host-a", "host-b", "host-c"], ["host-a", "host-b"])
         remove = self._work("host-c", "Remove", "succeeded", 2, ["host-a", "host-b"], [])
+        remove_command = {**remove, "local_host": "host-c"}
         apply_a = self._work("host-a", "Apply", "succeeded", 3, ["host-a", "host-b"], ["host-b"])
         apply_b = self._work("host-b", "Apply", "succeeded", 4, ["host-a", "host-b"], ["host-a"])
         self._write("c-delete/remove-command/c-remove-command.json", {
-            "found": True, "matches": [remove], **remove
+            "found": True, "matches": [remove_command], **remove_command
         })
         self._write("c-delete/retirement-obligation/c-prior-apply.json", {"c_prior_apply": prior})
         self._write("survivor-convergence/plans/durable-work.json", {
@@ -88,7 +89,7 @@ class RetirementEvidenceTests(unittest.TestCase):
     def _work(host, action, state, insertion, participants, her):
         return {
             "target_host_id": host, "target_agent_id": f"network-agent-{host[-1]}",
-            "local_host": host, "target_agent_epoch": f"epoch-{host[-1]}",
+            "target_agent_epoch": f"epoch-{host[-1]}",
             "action": action, "state": state, "insertion_order": insertion,
             "command_id": f"cmd-{host}-{insertion}", "participants": participants,
             "her_peers": her, "created_at": f"2026-10-12T00:00:0{insertion}Z",
@@ -119,6 +120,20 @@ class RetirementEvidenceTests(unittest.TestCase):
         for row in history["history"]:
             if row["target_host_id"] == "host-a":
                 row["insertion_order"] = 1
+        self._write("survivor-convergence/plans/durable-work.json", history)
+        with self.assertRaises(AssertionError):
+            evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
+
+    def test_durable_target_host_without_local_host_is_accepted(self):
+        history = json.loads((self.root / "survivor-convergence/plans/durable-work.json").read_text())
+        self.assertTrue(history["history"])
+        self.assertTrue(all("local_host" not in row for row in history["history"]))
+        result = evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
+        self.assertEqual(result["c_remove_latest_history"]["target_host_id"], "host-c")
+
+    def test_mismatched_durable_c_remove_target_is_rejected(self):
+        history = json.loads((self.root / "survivor-convergence/plans/durable-work.json").read_text())
+        next(row for row in history["history"] if row["action"] == "Remove")["target_host_id"] = "host-a"
         self._write("survivor-convergence/plans/durable-work.json", history)
         with self.assertRaises(AssertionError):
             evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
