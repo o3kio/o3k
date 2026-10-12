@@ -4,7 +4,7 @@
 # server C. All reads below are observations; resource mutation remains on the
 # supported API lifecycle in the caller.
 run_retirement_microgate() {
-  local realm_id="$1" namespace_name address host object_name
+  local realm_id="$1" namespace_name address host object_name fabric_namespace namespace_state
   local convergence_deadline survivor_converged poll old_controller_pid new_controller_pid recovery_ready code
 
   for host in a b c; do
@@ -28,15 +28,48 @@ run_retirement_microgate() {
   ssh_vm "${MGMT_IP[c]}" 'sudo nft list ruleset' \
     >"$EVIDENCE/provider-absence/host-c/nft/ruleset.txt" \
     || fail "could not observe host-C policy state after Remove" "ENVIRONMENT_GAP"
-  ssh_vm "${MGMT_IP[c]}" 'sudo ip netns exec o3k-fabric ip -j -d link show' \
-    >"$EVIDENCE/provider-absence/host-c/links/shared-fabric-links.json" \
-    || fail "could not observe C shared-fabric links after Remove" "ENVIRONMENT_GAP"
-  ssh_vm "${MGMT_IP[c]}" 'sudo ip netns exec o3k-fabric bridge -j fdb show' \
-    >"$EVIDENCE/provider-absence/host-c/fdb/shared-fabric-fdb.json" \
-    || fail "could not observe C shared-fabric FDB after Remove" "ENVIRONMENT_GAP"
-  ssh_vm "${MGMT_IP[c]}" 'sudo ip netns exec o3k-fabric nft list ruleset' \
-    >"$EVIDENCE/provider-absence/host-c/nft/shared-fabric-ruleset.txt" \
-    || fail "could not observe C shared-fabric policy after Remove" "ENVIRONMENT_GAP"
+  python3 "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace.py" \
+    "$EVIDENCE/before-departure/host-c/ownership.json" \
+    "$EVIDENCE/provider-absence/host-c/ownership/ownership.json" \
+    "$EVIDENCE/provider-absence/host-c/links/namespaces.txt" \
+    "$EVIDENCE/provider-absence/host-c/links/shared-fabric-namespace-state.json" \
+    || fail "could not reconcile C shared-fabric namespace ownership and inventory" "HARNESS_GAP"
+  fabric_namespace="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["namespace"])' \
+    "$EVIDENCE/provider-absence/host-c/links/shared-fabric-namespace-state.json")"
+  namespace_state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' \
+    "$EVIDENCE/provider-absence/host-c/links/shared-fabric-namespace-state.json")"
+  python3 - "$EVIDENCE/provider-absence/host-c/links/shared-fabric-namespace-state.json" <<'PY' \
+    || fail "C shared-fabric ownership changed namespace identity during Remove" "PROVIDER_ABSENCE_DEFECT"
+import json,sys
+state=json.load(open(sys.argv[1])); assert state['post_ownership_namespace'] in (None,state['namespace']), state
+PY
+  if [[ "$namespace_state" == present ]]; then
+    ssh_vm "${MGMT_IP[c]}" "sudo ip netns exec '$fabric_namespace' ip -j -d link show" \
+      >"$EVIDENCE/provider-absence/host-c/links/shared-fabric-links.json" \
+      || fail "could not observe C shared-fabric links after Remove" "ENVIRONMENT_GAP"
+    ssh_vm "${MGMT_IP[c]}" "sudo ip netns exec '$fabric_namespace' bridge -j fdb show" \
+      >"$EVIDENCE/provider-absence/host-c/fdb/shared-fabric-fdb.json" \
+      || fail "could not observe C shared-fabric FDB after Remove" "ENVIRONMENT_GAP"
+    ssh_vm "${MGMT_IP[c]}" "sudo ip netns exec '$fabric_namespace' nft list ruleset" \
+      >"$EVIDENCE/provider-absence/host-c/nft/shared-fabric-ruleset.txt" \
+      || fail "could not observe C shared-fabric policy after Remove" "ENVIRONMENT_GAP"
+  elif [[ "$namespace_state" == absent ]]; then
+    python3 - "$EVIDENCE/provider-absence/host-c/links/shared-fabric-namespace-state.json" \
+      "$EVIDENCE/provider-absence/host-c/links/shared-fabric-links.json" \
+      "$EVIDENCE/provider-absence/host-c/fdb/shared-fabric-fdb.json" \
+      "$EVIDENCE/provider-absence/host-c/nft/shared-fabric-ruleset.txt" <<'PY' \
+      || fail "C shared-fabric namespace is absent but durable ownership still claims it" "PROVIDER_ABSENCE_DEFECT"
+import json,pathlib,sys
+state_path,links,fdb,ruleset=sys.argv[1:]
+state=json.load(open(state_path)); assert not state['post_ownership_claims_namespace'], state
+namespace=state['namespace']
+pathlib.Path(links).write_text('[]\n')
+pathlib.Path(fdb).write_text('[]\n')
+pathlib.Path(ruleset).write_text(f'namespace {namespace} absent after Remove; no namespace-scoped policy exists\n')
+PY
+  else
+    fail "shared-fabric namespace observer returned an invalid state: $namespace_state" "HARNESS_GAP"
+  fi
   namespace_name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["namespace"])' \
     "$EVIDENCE/endpoint-removal/c-owned-objects.json")"
   if awk '{print $1}' "$EVIDENCE/provider-absence/host-c/links/namespaces.txt" | grep -Fxq "$namespace_name"; then
@@ -288,6 +321,21 @@ PY
 import json,sys
 state=json.load(open(sys.argv[1])); assert sys.argv[2] not in state.get('realms',{}), state
 PY
+    python3 "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace.py" \
+      "$EVIDENCE/before-departure/host-c/ownership.json" \
+      "$EVIDENCE/restart/startup-recovery/host-c-ownership.json" \
+      "$EVIDENCE/restart/startup-recovery/host-c-namespaces.txt" \
+      "$EVIDENCE/restart/startup-recovery/host-c-shared-namespace-state.json" \
+      || fail "could not reconcile C shared-fabric namespace ownership after controller restart" "HARNESS_GAP"
+    fabric_namespace="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["namespace"])' \
+      "$EVIDENCE/restart/startup-recovery/host-c-shared-namespace-state.json")"
+    namespace_state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' \
+      "$EVIDENCE/restart/startup-recovery/host-c-shared-namespace-state.json")"
+    python3 - "$EVIDENCE/restart/startup-recovery/host-c-shared-namespace-state.json" <<'PY' \
+      || fail "C shared-fabric ownership changed namespace identity after controller restart" "DURABLE_RECOVERY_DEFECT"
+import json,sys
+state=json.load(open(sys.argv[1])); assert state['post_ownership_namespace'] in (None,state['namespace']), state
+PY
     ssh_vm "${MGMT_IP[c]}" 'sudo ip -j -d link show' \
       >"$EVIDENCE/restart/startup-recovery/host-c-root-links.json" \
       || fail "host-C root link inventory unavailable after controller restart" "ENVIRONMENT_GAP"
@@ -297,15 +345,33 @@ PY
     ssh_vm "${MGMT_IP[c]}" 'sudo nft list ruleset' \
       >"$EVIDENCE/restart/startup-recovery/host-c-root-nft.txt" \
       || fail "host-C root policy state unavailable after controller restart" "ENVIRONMENT_GAP"
-    ssh_vm "${MGMT_IP[c]}" 'sudo ip netns exec o3k-fabric ip -j -d link show' \
-      >"$EVIDENCE/restart/startup-recovery/host-c-shared-links.json" \
-      || fail "host-C shared Fabric links unavailable after controller restart" "ENVIRONMENT_GAP"
-    ssh_vm "${MGMT_IP[c]}" 'sudo ip netns exec o3k-fabric bridge -j fdb show' \
-      >"$EVIDENCE/restart/startup-recovery/host-c-shared-fdb.json" \
-      || fail "host-C shared Fabric FDB unavailable after controller restart" "ENVIRONMENT_GAP"
-    ssh_vm "${MGMT_IP[c]}" 'sudo ip netns exec o3k-fabric nft list ruleset' \
-      >"$EVIDENCE/restart/startup-recovery/host-c-shared-nft.txt" \
-      || fail "host-C shared Fabric policy unavailable after controller restart" "ENVIRONMENT_GAP"
+    if [[ "$namespace_state" == present ]]; then
+      ssh_vm "${MGMT_IP[c]}" "sudo ip netns exec '$fabric_namespace' ip -j -d link show" \
+        >"$EVIDENCE/restart/startup-recovery/host-c-shared-links.json" \
+        || fail "host-C shared Fabric links unavailable after controller restart" "ENVIRONMENT_GAP"
+      ssh_vm "${MGMT_IP[c]}" "sudo ip netns exec '$fabric_namespace' bridge -j fdb show" \
+        >"$EVIDENCE/restart/startup-recovery/host-c-shared-fdb.json" \
+        || fail "host-C shared Fabric FDB unavailable after controller restart" "ENVIRONMENT_GAP"
+      ssh_vm "${MGMT_IP[c]}" "sudo ip netns exec '$fabric_namespace' nft list ruleset" \
+        >"$EVIDENCE/restart/startup-recovery/host-c-shared-nft.txt" \
+        || fail "host-C shared Fabric policy unavailable after controller restart" "ENVIRONMENT_GAP"
+    elif [[ "$namespace_state" == absent ]]; then
+      python3 - "$EVIDENCE/restart/startup-recovery/host-c-shared-namespace-state.json" \
+        "$EVIDENCE/restart/startup-recovery/host-c-shared-links.json" \
+        "$EVIDENCE/restart/startup-recovery/host-c-shared-fdb.json" \
+        "$EVIDENCE/restart/startup-recovery/host-c-shared-nft.txt" <<'PY' \
+        || fail "C shared-fabric namespace is absent but ownership returned after controller restart" "DURABLE_RECOVERY_DEFECT"
+import json,pathlib,sys
+state_path,links,fdb,ruleset=sys.argv[1:]
+state=json.load(open(state_path)); assert not state['post_ownership_claims_namespace'], state
+namespace=state['namespace']
+pathlib.Path(links).write_text('[]\n')
+pathlib.Path(fdb).write_text('[]\n')
+pathlib.Path(ruleset).write_text(f'namespace {namespace} absent after controller restart; no namespace-scoped policy exists\n')
+PY
+    else
+      fail "post-restart shared-fabric namespace observer returned an invalid state: $namespace_state" "HARNESS_GAP"
+    fi
     mapfile -t c_root_links < <(python3 - "$EVIDENCE/provider-absence/host-c/ownership/owned-object-identities.json" <<'PYCROOTRESTART'
 import json,sys
 for item in json.load(open(sys.argv[1]))['root_links']: print(item)

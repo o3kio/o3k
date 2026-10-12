@@ -27,6 +27,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" \
   || { echo "HARNESS_GAP: durable server-delete evidence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-port-detach-evidence-test.py" \
   || { echo "HARNESS_GAP: durable port-detach evidence regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" \
+  || { echo "HARNESS_GAP: shared Fabric namespace evidence regression failed" >&2; exit 1; }
 bash -n "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" \
   || { echo "HARNESS_GAP: durable retirement observer syntax failed" >&2; exit 1; }
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
@@ -298,12 +300,16 @@ cp "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" "$EVIDENCE/environme
 cp "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" "$EVIDENCE/environment/delete-operation-evidence-test.py"
 cp "$ROOT_DIR/tests/fabric-v3-port-detach-evidence.py" "$EVIDENCE/environment/port-detach-evidence-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-port-detach-evidence-test.py" "$EVIDENCE/environment/port-detach-evidence-test.py"
+cp "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace.py" "$EVIDENCE/environment/shared-fabric-namespace-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" "$EVIDENCE/environment/shared-fabric-namespace-test.py"
 cp "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" "$EVIDENCE/environment/retirement-microgate-helper.sh"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
 sha256sum "$HOST_PREFLIGHT" >"$EVIDENCE/environment/host-preflight-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-evidence.py" >"$EVIDENCE/environment/retirement-evidence-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" >"$EVIDENCE/environment/delete-operation-evidence-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-port-detach-evidence.py" >"$EVIDENCE/environment/port-detach-evidence-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace.py" >"$EVIDENCE/environment/shared-fabric-namespace-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" >"$EVIDENCE/environment/shared-fabric-namespace-test.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" >"$EVIDENCE/environment/retirement-microgate-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" >"$EVIDENCE/environment/owned-domain-storage-check.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"

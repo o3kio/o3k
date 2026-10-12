@@ -150,6 +150,18 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("B/A traffic failed after C retirement", RETIREMENT)
         self.assertIn("local_host", RETIREMENT_EVIDENCE)
 
+    def test_retirement_observer_uses_owned_namespace_and_accepts_namespace_absence(self):
+        self.assertIn("fabric-v3-shared-fabric-namespace.py", RETIREMENT)
+        self.assertIn("before-departure/host-c/ownership.json", RETIREMENT)
+        self.assertIn("shared-fabric-namespace-state.json", RETIREMENT)
+        self.assertGreaterEqual(RETIREMENT.count("fabric-v3-shared-fabric-namespace.py"), 2)
+        self.assertGreaterEqual(RETIREMENT.count('if [[ "$namespace_state" == absent ]]'), 2)
+        self.assertIn("host-c-shared-namespace-state.json", RETIREMENT)
+        self.assertNotIn("ip netns exec o3k-fabric", RETIREMENT)
+        self.assertIn("ownership returned after controller restart", RETIREMENT)
+        self.assertIn("post_ownership_namespace", RETIREMENT)
+        self.assertIn("changed namespace identity", RETIREMENT)
+
     def test_predelete_realm_generation_comes_from_durable_work_snapshot(self):
         provider_start = DRIVER.index('python3 - "$EVIDENCE/endpoint-removal" "$realm_id"')
         durable_start = DRIVER.index('python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id"', provider_start)
