@@ -224,7 +224,7 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('PRODUCT_TREE=7cbb507e08e4fce5902186ba23e6d9faf5616892', DRIVER)
         self.assertIn('PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e', DRIVER)
         self.assertIn('PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-dhcp-cleanup', DRIVER)
-        self.assertIn('PRODUCT_EXPECTED_PARENT_COMMITS="adaf6168b124111ee62bf53f6eaf6e0f6cab155e"', DRIVER)
+        self.assertIn('PRODUCT_EXPECTED_PARENT_COMMITS="d7335166563d28084fbad5ac7f5d0f0e07e000a4"', DRIVER)
         self.assertIn('[[ "$protected_main_tip" == "$PRODUCT_PROTECTED_MAIN_BASE" ]] \\', DRIVER)
         self.assertIn('[[ "$PRODUCT_SHA" != "$protected_main_tip" ]] \\', DRIVER)
         self.assertNotIn('[[ "$PRODUCT_SHA" == "$protected_main_tip" ]] \\', DRIVER)
