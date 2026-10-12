@@ -87,12 +87,16 @@ class GuestControlRegression(unittest.TestCase):
         guard = DRIVER.index("fabric-v3-guest-control-regression.py")
         provisioning = DRIVER.index("virsh -c qemu:///system net-info")
         self.assertLess(guard, provisioning)
-        self.assertIn('PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e', DRIVER)
-        self.assertIn('PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871', DRIVER)
-        self.assertIn('rev-parse origin/main', DRIVER)
-        self.assertIn('rev-parse origin/main)" == "$PRODUCT_SHA"', DRIVER)
+        self.assertIn('PRODUCT_SHA=d7335166563d28084fbad5ac7f5d0f0e07e000a4', DRIVER)
+        self.assertIn('PRODUCT_TREE=d5b75b5674009d8c135218556aa2177371e489a3', DRIVER)
+        self.assertIn('PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e', DRIVER)
+        self.assertIn('fetch --no-tags origin main', DRIVER)
+        self.assertIn('merge-base --is-ancestor "$PRODUCT_SHA" "$protected_main_tip"', DRIVER)
+        self.assertIn('PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-retirement-provider-016', DRIVER)
+        self.assertIn('HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-microgate', DRIVER)
+        self.assertIn('ls-remote origin "$PRODUCT_REMOTE_REF"', DRIVER)
         self.assertIn('show -s --format=%P "$PRODUCT_SHA"', DRIVER)
-        self.assertIn('"parents_verified":True', DRIVER)
+        self.assertIn('"parent_verified":True', DRIVER)
 
     def test_departure_micro_gate_stops_before_full_campaign_phases(self):
         self.assertIn('CAMPAIGN_MODE="${1:-full}"', DRIVER)
@@ -168,6 +172,15 @@ class GuestControlRegression(unittest.TestCase):
             '"$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence.py"',
             RETIREMENT,
         )
+
+    def test_durable_work_history_uses_the_canonical_target_host_field(self):
+        start = DRIVER.index("capture_realm_work_history() {")
+        end = DRIVER.index("\nfield() {", start)
+        capture = DRIVER[start:end]
+        self.assertIn("'target_host_id':row['target_host_id']", capture)
+        self.assertIn('survivor-convergence/plans/durable-work.json', RETIREMENT)
+        self.assertIn('c_latest["target_host_id"] == remove["local_host"]', RETIREMENT_EVIDENCE)
+        self.assertNotIn('c_latest["local_host"]', RETIREMENT_EVIDENCE)
 
     def test_retirement_observer_uses_owned_namespace_and_accepts_namespace_absence(self):
         self.assertIn("fabric-v3-shared-fabric-namespace.py", RETIREMENT)

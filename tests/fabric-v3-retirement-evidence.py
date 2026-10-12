@@ -46,7 +46,8 @@ def validate(root: Path, realm: str, ports: list[str]) -> dict[str, Any]:
     assert c_latest["action"] == "Remove", c_latest
     assert c_latest["state"] == "succeeded", c_latest
     assert c_latest["command_id"] == remove["command_id"], (c_latest, remove)
-    assert c_latest["local_host"] == remove["local_host"] == "host-c", (c_latest, remove)
+    assert c_latest["target_host_id"] == remove["local_host"] == "host-c", (c_latest, remove)
+    assert remove_matches[0]["target_host_id"] == "host-c", remove_matches
     assert c_latest["target_agent_id"] == "network-agent-c", c_latest
     assert c_latest["target_agent_epoch"] == remove["target_agent_epoch"] and remove["target_agent_epoch"], (c_latest, remove)
     assert remove.get("outcome"), remove

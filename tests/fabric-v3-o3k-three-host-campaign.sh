@@ -7,10 +7,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CAMPAIGN_MODE="${1:-full}"
 [[ "$CAMPAIGN_MODE" == full || "$CAMPAIGN_MODE" == departure-micro ]] \
   || { echo "HARNESS_GAP: unsupported campaign mode: $CAMPAIGN_MODE" >&2; exit 1; }
-PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
-PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871
-PRODUCT_MAIN_PARENT_1=91500b3a101edaf41292502938e3796dc1da71ae
-PRODUCT_MAIN_PARENT_2=98ae87f527f3bd021cd18258239ab0f233e15130
+PRODUCT_SHA=d7335166563d28084fbad5ac7f5d0f0e07e000a4
+PRODUCT_TREE=d5b75b5674009d8c135218556aa2177371e489a3
+PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
+PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-retirement-provider-016
+HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-microgate
 HOST_PREFLIGHT="$ROOT_DIR/tests/fabric-v3-host-preflight.py"
 # Guard the acceptance control contract before creating evidence or guests.
 [[ -f "$ROOT_DIR/contracts/real-host-acceptance-evidence.md" ]] \
@@ -688,13 +689,37 @@ for tool in cargo curl openssl python3 virsh virt-install qemu-img guestfish vir
 [[ -c /dev/kvm ]] || fail "/dev/kvm unavailable" "ENVIRONMENT_GAP"
 [[ -r "$BASE_IMAGE" ]] || fail "base image unreadable: $BASE_IMAGE" "ENVIRONMENT_GAP"
 [[ "$(git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}")" == "$PRODUCT_TREE" ]] || fail "frozen product source tree mismatch" "HARNESS_GAP"
-git -C "$ROOT_DIR" show-ref --verify --quiet refs/remotes/origin/main \
-  || fail "protected origin/main ref is unavailable for the frozen product candidate" "HARNESS_GAP"
-[[ "$(git -C "$ROOT_DIR" rev-parse origin/main)" == "$PRODUCT_SHA" ]] \
-  || fail "frozen product candidate is not the current protected origin/main tip" "HARNESS_GAP"
+git -C "$ROOT_DIR" fetch --no-tags origin main \
+  >"$EVIDENCE/environment/protected-main-fetch.stdout" \
+  2>"$EVIDENCE/environment/protected-main-fetch.stderr" \
+  || fail "could not refresh protected main for candidate ancestry proof" "HARNESS_GAP"
+protected_main_tip="$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)"
+if [[ "$protected_main_tip" != "$PRODUCT_PROTECTED_MAIN_BASE" ]]; then
+  git -C "$ROOT_DIR" merge-base --is-ancestor "$PRODUCT_SHA" "$protected_main_tip" \
+    || fail "protected main advanced outside the frozen product candidate lineage" "HARNESS_GAP"
+  [[ "$(git -C "$ROOT_DIR" rev-parse "$protected_main_tip^{tree}")" == "$PRODUCT_TREE" ]] \
+    || fail "protected main advanced beyond the frozen product candidate tree" "HARNESS_GAP"
+fi
+product_remote_sha="$(git -C "$ROOT_DIR" ls-remote origin "$PRODUCT_REMOTE_REF" | awk 'NR==1 {print $1}')"
+[[ "$product_remote_sha" == "$PRODUCT_SHA" ]] \
+  || fail "frozen product successor ref is not remotely visible at the exact candidate SHA" "HARNESS_GAP"
+git -C "$ROOT_DIR" fetch --no-tags origin "$HARNESS_REMOTE_REF" \
+  >"$EVIDENCE/environment/harness-ref-fetch.stdout" \
+  2>"$EVIDENCE/environment/harness-ref-fetch.stderr" \
+  || fail "frozen harness successor ref is not remotely visible" "HARNESS_GAP"
+[[ "$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)" == "$(git -C "$ROOT_DIR" rev-parse HEAD)" ]] \
+  || fail "remote harness ref does not match the running harness commit" "HARNESS_GAP"
+[[ -z "$(git -C "$ROOT_DIR" status --porcelain=v1)" ]] \
+  || fail "harness source tree has uncommitted changes" "HARNESS_GAP"
+git -C "$ROOT_DIR" fetch --no-tags origin "$PRODUCT_REMOTE_REF" \
+  >"$EVIDENCE/environment/product-ref-fetch.stdout" \
+  2>"$EVIDENCE/environment/product-ref-fetch.stderr" \
+  || fail "frozen product successor ref is not remotely visible" "HARNESS_GAP"
+[[ "$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)" == "$PRODUCT_SHA" ]] \
+  || fail "remote product successor ref does not match the frozen candidate SHA" "HARNESS_GAP"
 product_parents="$(git -C "$ROOT_DIR" show -s --format=%P "$PRODUCT_SHA")"
-[[ "$product_parents" == "$PRODUCT_MAIN_PARENT_1 $PRODUCT_MAIN_PARENT_2" ]] \
-  || fail "frozen protected-main merge ancestry differs from the recorded candidate" "HARNESS_GAP"
+[[ "$product_parents" == "$PRODUCT_PROTECTED_MAIN_BASE" ]] \
+  || fail "frozen product successor is not a direct child of the protected-main baseline" "HARNESS_GAP"
 url_port "$API_PORT" || fail "API port is occupied: $API_PORT" "ENVIRONMENT_GAP"
 url_port "$CONTROL_PORT" || fail "compute control port is occupied: $CONTROL_PORT" "ENVIRONMENT_GAP"
 python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
@@ -728,16 +753,18 @@ git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA" >"$EVIDENCE/environment/product_sha.
 git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}" >"$EVIDENCE/environment/product_tree.txt"
 hostnamectl >"$EVIDENCE/environment/physical-host.txt" 2>&1 || hostname >"$EVIDENCE/environment/physical-host.txt"
 date -u +%FT%TZ >"$EVIDENCE/started_at_utc.txt"
-python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" "$FABRIC_DOMAIN_ID" <<'PYMANIFEST'
+python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" "$FABRIC_DOMAIN_ID" "$protected_main_tip" "$PRODUCT_REMOTE_REF" "$HARNESS_REMOTE_REF" <<'PYMANIFEST'
 import json,pathlib,sys
-path,run,product,product_tree,harness,harness_tree,started,physical,fabric_domain_id=sys.argv[1:]
+path,run,product,product_tree,harness,harness_tree,started,physical,fabric_domain_id,protected_main,product_ref,harness_ref=sys.argv[1:]
 doc={"result":"IN_PROGRESS","run_id":run,"product_sha":product,"product_tree":product_tree,
      "harness_sha":harness,"harness_tree":harness_tree,
-     "product_remote_visible":True,"harness_remote_visible":False,
+     "protected_main_at_run":protected_main,
+     "product_remote_visible":True,"product_remote_ref":product_ref,
+     "harness_remote_visible":True,"harness_remote_ref":harness_ref,
+     "product_lineage":{"protected_main_base":"adaf6168b124111ee62bf53f6eaf6e0f6cab155e",
+                         "successor_parent":"adaf6168b124111ee62bf53f6eaf6e0f6cab155e",
+                         "parent_verified":True},
      "fabric_domain_id":fabric_domain_id,
-     "merge_ancestry":{"main_parent_1":"91500b3a101edaf41292502938e3796dc1da71ae",
-                       "main_parent_2":"98ae87f527f3bd021cd18258239ab0f233e15130",
-                       "parents_verified":True},
      "started_at_utc":pathlib.Path(started).read_text().strip(),
      "physical_host_identity":pathlib.Path(physical).read_text(errors='replace').strip()}
 pathlib.Path(path).write_text(json.dumps(doc,sort_keys=True,indent=2)+'\n')
