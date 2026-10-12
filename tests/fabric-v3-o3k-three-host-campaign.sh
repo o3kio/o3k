@@ -27,6 +27,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" \
   || { echo "HARNESS_GAP: durable server-delete evidence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-port-detach-evidence-test.py" \
   || { echo "HARNESS_GAP: durable port-detach evidence regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence-test.py" \
+  || { echo "HARNESS_GAP: canonical endpoint retention evidence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" \
   || { echo "HARNESS_GAP: shared Fabric namespace evidence regression failed" >&2; exit 1; }
 bash -n "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" \
@@ -302,6 +304,8 @@ cp "$ROOT_DIR/tests/fabric-v3-port-detach-evidence.py" "$EVIDENCE/environment/po
 cp "$ROOT_DIR/tests/fabric-v3-port-detach-evidence-test.py" "$EVIDENCE/environment/port-detach-evidence-test.py"
 cp "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace.py" "$EVIDENCE/environment/shared-fabric-namespace-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" "$EVIDENCE/environment/shared-fabric-namespace-test.py"
+cp "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence.py" "$EVIDENCE/environment/canonical-endpoint-retention-evidence-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence-test.py" "$EVIDENCE/environment/canonical-endpoint-retention-evidence-test.py"
 cp "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" "$EVIDENCE/environment/retirement-microgate-helper.sh"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
 sha256sum "$HOST_PREFLIGHT" >"$EVIDENCE/environment/host-preflight-helper.sha256"
@@ -310,6 +314,8 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" >"$EVIDENCE/e
 sha256sum "$ROOT_DIR/tests/fabric-v3-port-detach-evidence.py" >"$EVIDENCE/environment/port-detach-evidence-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace.py" >"$EVIDENCE/environment/shared-fabric-namespace-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" >"$EVIDENCE/environment/shared-fabric-namespace-test.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence.py" >"$EVIDENCE/environment/canonical-endpoint-retention-evidence-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence-test.py" >"$EVIDENCE/environment/canonical-endpoint-retention-evidence-test.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" >"$EVIDENCE/environment/retirement-microgate-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" >"$EVIDENCE/environment/owned-domain-storage-check.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"

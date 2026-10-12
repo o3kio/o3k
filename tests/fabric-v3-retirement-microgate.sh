@@ -154,20 +154,18 @@ assert owner is not None, 'C DHCP ownership tombstone is missing'
 assert owner.get('withdrawn') is True and owner.get('pending') is False, owner
 PY
 
-  python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" \
+  if python3 "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence.py" \
+    "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" \
     "${PORT_IDS[0]}" "${PORT_IDS[1]}" "${PORT_IDS[2]}" \
-    "$EVIDENCE/provider-absence/host-c/ownership/canonical-endpoints.json" <<'PY' \
-    || fail "canonical endpoint departure state could not be observed" "HARNESS_GAP"
-import json,pathlib,sqlite3,sys
-database,realm,*rest=sys.argv[1:]; ids=rest[:3]; out=pathlib.Path(rest[3])
-db=sqlite3.connect(f'file:{database}?mode=ro',uri=True,timeout=3); db.row_factory=sqlite3.Row
-rows=[dict(row) for row in db.execute('SELECT id,realm_id,project_id,fixed_ip,mac,generation,state FROM canonical_endpoints WHERE realm_id=? ORDER BY id',(realm,))]
-by_id={row['id']:row for row in rows}
-assert ids[0] in by_id and by_id[ids[0]]['state']=='active', by_id
-assert ids[1] in by_id and by_id[ids[1]]['state']=='active', by_id
-assert ids[2] not in by_id, by_id
-out.write_text(json.dumps({'realm_id':realm,'endpoints':rows,'departed_endpoint_absent':True},sort_keys=True,indent=2)+'\n')
-PY
+    "$EVIDENCE/c-delete/port/canonical-endpoint-state.json"; then
+    :
+  else
+    endpoint_state_status=$?
+    if (( endpoint_state_status == 1 )); then
+      fail "caller-supplied canonical endpoint was not retained until supported port DELETE" "DURABLE_RETIREMENT_DEFECT"
+    fi
+    fail "canonical endpoint state could not be observed" "HARNESS_GAP"
+  fi
 
   # Poll observed A/B plans, ownership, HER, journals, and durable work.
   convergence_deadline=$((SECONDS + 120)); survivor_converged=0; poll=0
