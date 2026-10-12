@@ -12,11 +12,11 @@ if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
 else
   ACCEPTANCE_GATE="FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE"
 fi
-PRODUCT_SHA=d7335166563d28084fbad5ac7f5d0f0e07e000a4
-PRODUCT_TREE=d5b75b5674009d8c135218556aa2177371e489a3
+PRODUCT_SHA=5d8e3002c18b063b1ca328ed3e3a096ac6fe8ed7
+PRODUCT_TREE=7cbb507e08e4fce5902186ba23e6d9faf5616892
 PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
 PRODUCT_EXPECTED_PARENT_COMMITS="adaf6168b124111ee62bf53f6eaf6e0f6cab155e"
-PRODUCT_REMOTE_REF=refs/heads/fabric-v3-retirement-product-candidate
+PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-dhcp-cleanup
 HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-successor-harness
 HOST_PREFLIGHT="$ROOT_DIR/tests/fabric-v3-host-preflight.py"
 # Guard the acceptance control contract before creating evidence or guests.
