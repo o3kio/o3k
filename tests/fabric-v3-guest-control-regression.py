@@ -11,6 +11,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent
 DRIVER = (ROOT / "fabric-v3-o3k-three-host-campaign.sh").read_text()
+RETIREMENT = (ROOT / "fabric-v3-retirement-microgate.sh").read_text()
+RETIREMENT_EVIDENCE = (ROOT / "fabric-v3-retirement-evidence.py").read_text()
 CONTRACT = (ROOT.parent / "contracts/real-host-acceptance-evidence.md").read_text()
 SPEC = importlib.util.spec_from_file_location("guest_control", ROOT / "fabric-v3-guest-control.py")
 assert SPEC and SPEC.loader
@@ -84,25 +86,35 @@ class GuestControlRegression(unittest.TestCase):
         guard = DRIVER.index("fabric-v3-guest-control-regression.py")
         provisioning = DRIVER.index("virsh -c qemu:///system net-info")
         self.assertLess(guard, provisioning)
-        self.assertIn('merge-base HEAD "$ACCEPTED_HARNESS_BASE"', DRIVER)
-        self.assertIn('PRODUCT_SHA=f7df49067bd5c7a23135292a3234d9e51be0cf92', DRIVER)
-        self.assertIn('PRODUCT_TREE=1b193969041e46c71adf9d4351e44df974b44c7e', DRIVER)
+        self.assertIn('PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e', DRIVER)
+        self.assertIn('PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871', DRIVER)
+        self.assertIn('rev-parse origin/main', DRIVER)
+        self.assertIn('rev-parse origin/main)" == "$PRODUCT_SHA"', DRIVER)
+        self.assertIn('show -s --format=%P "$PRODUCT_SHA"', DRIVER)
+        self.assertIn('"parents_verified":True', DRIVER)
 
     def test_departure_micro_gate_stops_before_full_campaign_phases(self):
         self.assertIn('CAMPAIGN_MODE="${1:-full}"', DRIVER)
-        self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" departure-micro/a-to-b-before-c-delete.txt', DRIVER)
-        self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[c]}" departure-micro/a-to-c-before-c-delete.txt', DRIVER)
-        self.assertIn('dhcp,departure-micro}', DRIVER)
-        self.assertIn('$(guest_failure_class DATAPLANE_DEFECT)', DRIVER)
+        self.assertIn('if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then', DRIVER)
+        self.assertIn('before-departure/traffic/a-to-b-icmp.txt', DRIVER)
+        self.assertIn('before-departure/traffic/b-to-a-icmp.txt', DRIVER)
+        self.assertIn('before-departure/traffic/a-to-c-icmp.txt', DRIVER)
+        self.assertIn('before-departure/traffic/c-to-a-icmp.txt', DRIVER)
+        self.assertIn('before-departure/traffic/a-to-b-canonical-arp.txt', DRIVER)
         self.assertIn('pre-delete-work-history.json', DRIVER)
         full_mode = DRIVER.index('if [[ "$CAMPAIGN_MODE" == full ]]; then')
         remove_c = DRIVER.index('# Remove C only through the supported API')
         history_capture = DRIVER.index('pre-delete-work-history.json')
-        delete_request = DRIVER.index('DELETE "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}"')
+        delete_request = DRIVER.index('delete_status="$(curl --silent --show-error --max-time 60')
         self.assertLess(full_mode, remove_c)
         self.assertLess(history_capture, delete_request)
         self.assertLess(remove_c, delete_request)
+        self.assertIn('-X DELETE \\\n  "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}"', DRIVER[delete_request:])
         self.assertIn("assert all(latest[h] and latest[h]['action']=='Apply' and latest[h]['state']=='succeeded'", DRIVER)
+        self.assertIn('run_retirement_microgate', RETIREMENT)
+        self.assertIn('CAMPAIGN_MODE" == departure-micro', RETIREMENT)
+        self.assertIn('stop_controller', RETIREMENT)
+        self.assertIn('replacement controller did not become ready after retirement', RETIREMENT)
 
     def test_controller_restart_uses_the_frozen_product_binary(self):
         restart = DRIVER[DRIVER.index("# Controller restart while A/B/C are alive."):]
@@ -126,15 +138,20 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("C Realm namespace remains after final endpoint departure", DRIVER)
         self.assertIn("C durable Realm plan remains after Remove", DRIVER)
         self.assertIn("C port did not reach an unbound DOWN tombstone", DRIVER)
-        self.assertIn("A/B failed after C removal", DRIVER)
+        self.assertIn("C Remove identity/outcome was not retained across controller restart", RETIREMENT)
+        self.assertIn("A/B traffic failed after C retirement", RETIREMENT)
+        self.assertIn("B/A traffic failed after C retirement", RETIREMENT)
+        self.assertIn("local_host", RETIREMENT_EVIDENCE)
 
     def test_teardown_checks_fabric_and_dhcp_owned_state_without_global_cleanup(self):
         self.assertIn("run-owned-provider-objects.json", DRIVER)
-        self.assertIn("state.get('realms',{})", DRIVER)
+        self.assertIn("x.get('realms',{})", DRIVER)
         self.assertIn("host-$host-dhcp-state.txt", DRIVER)
         self.assertIn("host-$host-dnsmasq-processes.txt", DRIVER)
         self.assertIn("run not in processes", DRIVER)
         self.assertIn("foreign libvirt domain inventory changed", DRIVER)
+        self.assertIn("final-durable-state.json", DRIVER)
+        self.assertIn("vni_binding_released_after_provider_absence", DRIVER)
         self.assertNotIn("virsh net-destroy", DRIVER)
         self.assertNotIn("nft flush ruleset", DRIVER)
 
@@ -229,17 +246,15 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("sudo ip netns exec '$fabric_ns' ip -d -j link", DRIVER)
 
     def test_endpoint_removal_waits_for_bounded_fabric_convergence(self):
-        start = DRIVER.index("printf 'attempt,server_absent,ownership_and_plans_converged")
-        end = DRIVER.index('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt', start)
-        removal = DRIVER[start:end]
-        self.assertIn('for attempt in $(seq 1 120)', removal)
-        self.assertIn('[[ "$server_status" == 404 ]]', removal)
-        self.assertIn('for host in a b c', removal)
-        self.assertIn("for host in ('a','b','c')", removal)
-        self.assertIn("for host,endpoint in (('a',a),('b',b))", removal)
-        self.assertIn("participants=={'host-a','host-b'}", removal)
-        self.assertNotIn('host-c-fabric-plan.json', removal)
-        self.assertIn('C deletion did not converge to A/B-only Fabric ownership within 120 seconds', removal)
+        start = RETIREMENT.index('convergence_deadline=$((SECONDS + 120))')
+        end = RETIREMENT.index('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" survivor-convergence/traffic/a-to-b-icmp.txt', start)
+        removal = RETIREMENT[start:end]
+        self.assertIn('while (( SECONDS < convergence_deadline ))', removal)
+        self.assertIn('capture_c_remove_work_row "$realm_id"', removal)
+        self.assertIn('capture_realm_work_history "$realm_id"', removal)
+        self.assertIn('for host in a b', removal)
+        self.assertIn('fabric-v3-retirement-evidence.py', removal)
+        self.assertIn('A/B did not reach durable reduced-Realm convergence with C retirement retained within 120 seconds', removal)
 
     def test_wireguard_counter_baseline_precedes_packet_generation(self):
         baseline = DRIVER.index('>"$EVIDENCE/wireguard/host-$host-before-traffic.txt"')
