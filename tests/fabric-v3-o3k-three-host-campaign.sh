@@ -1059,6 +1059,8 @@ SIGNING_KEY="$(openssl rand -hex 48)"
 FABRIC_HOST_IDENTITIES="$(cat "$EVIDENCE/environment/fabric-identities.json")"
 install -d -m 0700 "$EVIDENCE/controller-data"
 export O3K_PROVIDER=agent O3K_DATA_DIR="$EVIDENCE/controller-data" O3K_CONTROLLER_ID="controller-$RUN_ID" O3K_CONTROLLER_EPOCH="controller-epoch-1" O3K_BOOTSTRAP_PASSWORD="campaign-$RUN_ID" O3K_TOKEN_SIGNING_KEY="$SIGNING_KEY"
+INITIAL_CONTROLLER_ID="$O3K_CONTROLLER_ID"
+INITIAL_CONTROLLER_EPOCH="$O3K_CONTROLLER_EPOCH"
 export O3K_FABRIC_DOMAIN_ID="$FABRIC_DOMAIN_ID" O3K_FABRIC_HOST_IDENTITIES="$FABRIC_HOST_IDENTITIES" O3K_NETWORK_AGENT_DIRECTORY="$DIRECTORY"
 export O3K_NETWORK_AGENT_CA="$TLS_DIR/certs/ca.pem" O3K_NETWORK_AGENT_CLIENT_CERT="$TLS_DIR/certs/agents/controller-network/agent.pem" O3K_NETWORK_AGENT_CLIENT_KEY="$TLS_DIR/certs/agents/controller-network/agent-key.pem"
 export O3K_COMPUTE_CONTROL_ADDR="0.0.0.0:$CONTROL_PORT" O3K_COMPUTE_SERVER_CERTIFICATE="$TLS_DIR/certs/server.pem" O3K_COMPUTE_SERVER_PRIVATE_KEY="$TLS_DIR/certs/server-key.pem" O3K_COMPUTE_CLIENT_CA="$TLS_DIR/certs/ca.pem" O3K_COMPUTE_AUTHORIZED_AGENTS="$AUTHORIZED"
@@ -2165,7 +2167,7 @@ pathlib.Path(out).write_text(json.dumps({'realm_id':realm,'history':history,'lat
 PY
 cp "$EVIDENCE/endpoint-removal/pre-delete-work-history.json" "$EVIDENCE/before-departure/durable-work/history.json"
 cp "$EVIDENCE/endpoint-removal/pre-delete-work-history.json" "$EVIDENCE/c-delete/retirement-obligation/c-prior-apply.json"
-python3 - "$EVIDENCE" "$RUN_ID" "$O3K_CONTROLLER_ID" "$O3K_CONTROLLER_EPOCH" "$FABRIC_DOMAIN_ID" <<'PY' \
+python3 - "$EVIDENCE" "$RUN_ID" "$INITIAL_CONTROLLER_ID" "$INITIAL_CONTROLLER_EPOCH" "$FABRIC_DOMAIN_ID" <<'PY' \
   || fail "retirement manifest could not bind the live host and controller identities" "HARNESS_GAP"
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1]); run,controller_id,controller_epoch,fabric_domain_id=sys.argv[2:]
@@ -2202,7 +2204,16 @@ assert len({value['compute_agent_id'] for value in hosts.values()})==3, hosts
 assert len({value['network_agent_id'] for value in hosts.values()})==3, hosts
 assert len({value['stable_host_id'] for value in hosts.values()})==3, hosts
 assert all(value['compute_agent_epoch'] and value['network_agent_epoch'] for value in hosts.values()), hosts
+restart_identity=(root/'restart/startup-recovery/controller-identity-after.txt').read_text().strip()
+restart_epoch=(root/'restart/startup-recovery/controller-epoch-after.txt').read_text().strip()
+readiness=json.loads((root/'restart/startup-recovery/current-registration-state.json').read_text())
+assert readiness.get('status')=='passed' and readiness.get('controller_session_matches'), readiness
+assert readiness.get('all_expected_compute_agents_registered'), readiness
+assert restart_identity and restart_epoch and restart_identity!=controller_id and restart_epoch!=controller_epoch, (restart_identity,restart_epoch)
 manifest.update({'database_backend':'sqlite','controller':{'identity':controller_id,'epoch':controller_epoch},
+    'controller_restart':{'identity':restart_identity,'epoch':restart_epoch,
+        'session_advanced':restart_identity!=controller_id and restart_epoch!=controller_epoch,
+        'readiness_artifact':'restart/startup-recovery/current-registration-state.json'},
     'fabric_domain_id':fabric_domain_id,'realm_id':summary['realm_id'],
     'vni':summary['hosts']['a']['vni'],'realm_generation':summary['realm_generation'],
     'hosts':hosts})

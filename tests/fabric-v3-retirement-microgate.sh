@@ -6,6 +6,8 @@
 run_retirement_microgate() {
   local realm_id="$1" namespace_name address host object_name fabric_namespace namespace_state
   local convergence_deadline survivor_converged poll old_controller_pid new_controller_pid recovery_ready code evidence_status
+  local registration_ready expected_agent_identity registration_status
+  local -a registration_agent_args=()
 
   for host in a b c; do
     address="${MGMT_IP[$host]}"
@@ -228,6 +230,14 @@ PY
     [[ ! -e "/proc/$old_controller_pid" ]] \
       || fail "old controller PID remains after stop" "DURABLE_RECOVERY_DEFECT"
     printf '%s\n' absent >"$EVIDENCE/restart/startup-recovery/old-controller-process.txt"
+    O3K_CONTROLLER_ID="${INITIAL_CONTROLLER_ID}-restart"
+    O3K_CONTROLLER_EPOCH="${INITIAL_CONTROLLER_EPOCH}-restart"
+    [[ "$O3K_CONTROLLER_ID" != "$INITIAL_CONTROLLER_ID" \
+      && "$O3K_CONTROLLER_EPOCH" != "$INITIAL_CONTROLLER_EPOCH" ]] \
+      || fail "replacement controller session did not advance its identity and epoch" "HARNESS_GAP"
+    export O3K_CONTROLLER_ID O3K_CONTROLLER_EPOCH
+    printf '%s\n' "$O3K_CONTROLLER_ID" >"$EVIDENCE/restart/startup-recovery/controller-identity-expected-after.txt"
+    printf '%s\n' "$O3K_CONTROLLER_EPOCH" >"$EVIDENCE/restart/startup-recovery/controller-epoch-expected-after.txt"
     "$PRODUCT_SOURCE_DIR/target/release/o3kd" --listen-addr "$HOST_MGMT_IP:$API_PORT" \
       --data-dir "$EVIDENCE/controller-data" --log-filter info \
       >"$EVIDENCE/restart/startup-recovery/o3kd.log" 2>&1 &
@@ -247,10 +257,44 @@ PY
     done
     (( recovery_ready == 1 )) \
       || fail "replacement controller did not become ready after retirement" "DURABLE_RECOVERY_DEFECT"
-    printf '%s\n' "$O3K_CONTROLLER_ID" >"$EVIDENCE/restart/startup-recovery/controller-identity-after.txt"
-    printf '%s\n' "$O3K_CONTROLLER_EPOCH" >"$EVIDENCE/restart/startup-recovery/controller-epoch-after.txt"
     [[ ! -e "/proc/$old_controller_pid" ]] \
       || fail "old controller process was still present after replacement readiness" "DURABLE_RECOVERY_DEFECT"
+    for host in a b c; do
+      expected_agent_identity="$(python3 - "$EVIDENCE/management/compute-$host-ready.json" <<'PY'
+import json,sys
+value=json.load(open(sys.argv[1])); agent=value.get('agent_id'); epoch=value.get('agent_epoch')
+assert isinstance(agent,str) and agent.strip() and isinstance(epoch,str) and epoch.strip(), value
+print(f'{agent}={epoch}')
+PY
+)" || fail "pre-restart compute identity is unavailable for host-$host" "HARNESS_GAP"
+      registration_agent_args+=(--agent "$expected_agent_identity")
+    done
+    registration_ready=0
+    for _ in $(seq 1 120); do
+      if python3 "$ROOT_DIR/tests/fabric-v3-controller-restart-readiness.py" \
+        --log "$EVIDENCE/restart/startup-recovery/o3kd.log" \
+        --controller-id "$O3K_CONTROLLER_ID" --controller-epoch "$O3K_CONTROLLER_EPOCH" \
+        "${registration_agent_args[@]}" \
+        --output "$EVIDENCE/restart/startup-recovery/current-registration-state.json" \
+        >"$EVIDENCE/restart/startup-recovery/registration-observer.stdout" \
+        2>"$EVIDENCE/restart/startup-recovery/registration-observer.stderr"; then
+        registration_ready=1
+        break
+      else
+        registration_status=$?
+        case "$registration_status" in
+          1) ;;
+          *) fail "replacement controller registration observer failed; see registration-observer.stderr" "HARNESS_GAP" ;;
+        esac
+      fi
+      kill -0 "$new_controller_pid" 2>/dev/null \
+        || fail "replacement controller exited before all compute agents re-registered" "DURABLE_RECOVERY_DEFECT"
+      sleep 1
+    done
+    (( registration_ready == 1 )) \
+      || fail "replacement controller did not re-register all expected compute agents within 120 seconds; see current-registration-state.json" "DURABLE_RECOVERY_DEFECT"
+    printf '%s\n' "$O3K_CONTROLLER_ID" >"$EVIDENCE/restart/startup-recovery/controller-identity-after.txt"
+    printf '%s\n' "$O3K_CONTROLLER_EPOCH" >"$EVIDENCE/restart/startup-recovery/controller-epoch-after.txt"
     for host in a b; do
       if [[ "$host" == a ]]; then server_index=0; else server_index=1; fi
       code="$(curl --silent --show-error --max-time 20 -o \
