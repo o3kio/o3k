@@ -649,11 +649,113 @@ async fn wait_server_api_state(
 
 struct TestOwnedProbe {
     store: Option<o3k_store::unified::O3kStore>,
+    initialized: bool,
+    daemon_running: bool,
+    delete_paused: bool,
+    reconstruction_observed: bool,
 }
 
 impl TestOwnedProbe {
-    fn new(store: o3k_store::unified::O3kStore) -> Self {
-        Self { store: Some(store) }
+    fn new() -> Self {
+        Self {
+            store: None,
+            initialized: false,
+            daemon_running: false,
+            delete_paused: false,
+            reconstruction_observed: false,
+        }
+    }
+
+    async fn open_while_daemon_stopped(&mut self, backend: &Backend) -> Result<(), Error> {
+        if self.daemon_running {
+            return Err("test-owned probe must open only while o3kd is stopped".into());
+        }
+        if self.is_alive() {
+            return Err("test-owned probe is already open".into());
+        }
+        self.store = Some(backend.connect().await?);
+        self.initialized = true;
+        Ok(())
+    }
+
+    fn mark_daemon_started(&mut self) -> Result<(), Error> {
+        if self.daemon_running {
+            return Err("test daemon is already marked running".into());
+        }
+        if !self.initialized {
+            return Err("test-owned probe must be initialized before daemon startup".into());
+        }
+        self.daemon_running = true;
+        self.delete_paused = false;
+        Ok(())
+    }
+
+    fn mark_delete_paused(&mut self) -> Result<(), Error> {
+        if !self.daemon_running {
+            return Err("delete pause requires a running daemon".into());
+        }
+        self.delete_paused = true;
+        Ok(())
+    }
+
+    fn mark_daemon_stopped(&mut self) -> Result<(), Error> {
+        if !self.daemon_running {
+            return Err("test daemon is not marked running".into());
+        }
+        self.daemon_running = false;
+        self.delete_paused = false;
+        Ok(())
+    }
+
+    async fn update_port_binding_fixture(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        host: &str,
+        state: &str,
+    ) -> Result<(), Error> {
+        if self.daemon_running {
+            return Err(
+                "test fixture writes are forbidden while an o3kd daemon may own a write transaction"
+                    .into(),
+            );
+        }
+        self.store()?
+            .update_port_binding(project_id, endpoint_id, Some(host), Some(state))
+            .await?;
+        Ok(())
+    }
+
+    async fn acquire_repair_lease_during_paused_delete(
+        &self,
+        backend: &Backend,
+        controller_id: &o3k_store::ControllerId,
+        controller_epoch: &o3k_store::ControllerEpoch,
+    ) -> Result<o3k_store::LeaseAcquireOutcome, Error> {
+        if !self.daemon_running || !self.delete_paused {
+            return Err(
+                "concurrent repair lease seeding requires the old daemon's paused delete window"
+                    .into(),
+            );
+        }
+        if !backend.is_postgres() {
+            return Err("concurrent repair lease seeding is PostgreSQL-only".into());
+        }
+
+        // This is the one intentional direct write while a daemon is running:
+        // the PostgreSQL test holds a competing durable lease during the
+        // old daemon's explicitly paused delete window. Other fixture writes
+        // remain forbidden until the daemon is stopped.
+        Ok(self
+            .store()?
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                controller_id,
+                controller_epoch,
+                Duration::from_secs(12),
+            )
+            .await?)
     }
 
     fn is_alive(&self) -> bool {
@@ -681,7 +783,20 @@ impl TestOwnedProbe {
         if self.is_alive() {
             return Err("test-owned probe must be closed before opening a fresh pool".into());
         }
+        if !self.daemon_running || !self.reconstruction_observed {
+            return Err(
+                "fresh probe may open only after replacement reconstruction is observed".into(),
+            );
+        }
         self.store = Some(backend.connect().await?);
+        Ok(())
+    }
+
+    fn mark_reconstruction_observed(&mut self) -> Result<(), Error> {
+        if !self.daemon_running {
+            return Err("replacement daemon must be running at reconstruction observation".into());
+        }
+        self.reconstruction_observed = true;
         Ok(())
     }
 }
@@ -713,12 +828,36 @@ async fn pp5_1035_test_probe_must_close_across_restart_boundary() -> Result<(), 
     let root = std::env::temp_dir().join(format!("o3k-pp5-probe-lifecycle-{}", Uuid::now_v7()));
     fs::create_dir_all(&root)?;
     let backend = Backend::Sqlite(root.join("o3k.sqlite"));
-    let mut probe = TestOwnedProbe::new(backend.connect().await?);
+    let mut probe = TestOwnedProbe::new();
+    probe.open_while_daemon_stopped(&backend).await?;
     assert!(probe.is_alive());
     assert!(probe.require_closed_at_restart().is_err());
+    probe.mark_daemon_started()?;
+    let fixture_write = probe
+        .update_port_binding_fixture(PROJECT_ID, &Uuid::now_v7(), "pp5-compute-agent", "bound")
+        .await;
+    let fixture_write_error = fixture_write
+        .err()
+        .ok_or("fixture write while the daemon runs did not fail closed")?;
+    assert!(fixture_write_error.to_string().contains("forbidden"));
+    probe.mark_delete_paused()?;
+    assert!(probe
+        .acquire_repair_lease_during_paused_delete(
+            &backend,
+            &o3k_store::ControllerId::new("test-controller"),
+            &o3k_store::ControllerEpoch::new("test-epoch"),
+        )
+        .await
+        .is_err());
     probe.close();
     probe.require_closed_at_restart()?;
     assert!(!probe.is_alive());
+    probe.mark_daemon_stopped()?;
+    probe.open_while_daemon_stopped(&backend).await?;
+    probe.close();
+    probe.mark_daemon_started()?;
+    assert!(probe.reopen(&backend).await.is_err());
+    probe.mark_reconstruction_observed()?;
     probe.reopen(&backend).await?;
     assert!(probe.is_alive());
     probe.close();
@@ -1258,7 +1397,8 @@ async fn run_iteration(
         None,
         None,
     );
-    let mut probe = TestOwnedProbe::new(backend.connect().await?);
+    let mut probe = TestOwnedProbe::new();
+    probe.open_while_daemon_stopped(backend).await?;
     store_operation(
         evidence,
         "setup_daemon_stopped_fixture_binding",
@@ -1269,13 +1409,7 @@ async fn run_iteration(
         None,
     );
     probe
-        .store()?
-        .update_port_binding(
-            PROJECT_ID,
-            &endpoint_uuid,
-            Some("pp5-compute-agent"),
-            Some("bound"),
-        )
+        .update_port_binding_fixture(PROJECT_ID, &endpoint_uuid, "pp5-compute-agent", "bound")
         .await?;
 
     let old_child = start_o3kd(
@@ -1295,6 +1429,7 @@ async fn run_iteration(
     let mut child = ChildCleanupGuard::new(old_child, old_cleanup_failure);
     let readiness_old =
         wait_ready(child.child_mut()?, http, control, Duration::from_secs(20)).await?;
+    probe.mark_daemon_started()?;
     let old_pid = child.id()?;
     let old_start = proc_starttime(old_pid)?;
     let old_exe = proc_exe(old_pid)?;
@@ -1395,14 +1530,12 @@ async fn run_iteration(
                 "old daemon endpoint-release gate unexpectedly opened before lease seeding".into(),
             );
         }
-        let coordination = backend.connect().await?;
-        let outcome = coordination
-            .acquire_work_lease(
-                "server-endpoint-orphan-repair",
-                "repair",
+        probe.mark_delete_paused()?;
+        let outcome = probe
+            .acquire_repair_lease_during_paused_delete(
+                backend,
                 &o3k_store::ControllerId::new(old_controller.0.clone()),
                 &o3k_store::ControllerEpoch::new(old_controller.1.clone()),
-                Duration::from_secs(12),
             )
             .await?;
         let lease = match outcome {
@@ -1489,14 +1622,17 @@ async fn run_iteration(
     let kill_at = now();
     kill_process(child.child_mut()?)?;
     let _ = child.child_mut()?.wait();
-    let old_gone = proc_starttime(old_pid).is_err();
-    let kill = json!({"signal":"SIGKILL","timestamp":kill_at,"old_process_gone":old_gone,"old_http_listener_gone":!listener_owner(http, old_pid, old_start).is_ok(),"old_control_listener_gone":!listener_owner(control, old_pid, old_start).is_ok()});
+    let old_gone = process_instance_gone(old_pid, old_start)?;
+    let old_http_listener_gone = !listener_present(http)?;
+    let old_control_listener_gone = !listener_present(control)?;
+    let kill = json!({"signal":"SIGKILL","timestamp":kill_at,"old_process_gone":old_gone,"old_http_listener_gone":old_http_listener_gone,"old_control_listener_gone":old_control_listener_gone});
     evidence.set("kill", kill);
     evidence.checkpoint("sigkill_sent")?;
     evidence.checkpoint("old_process_gone")?;
-    if !old_gone {
-        return Err("old process still represents old starttime".into());
+    if !old_gone || !old_http_listener_gone || !old_control_listener_gone {
+        return Err("old daemon process or listener remained after SIGKILL".into());
     }
+    probe.mark_daemon_stopped()?;
     fs::remove_file(&old_endpoint_release_gate).ok();
     child.disarm();
 
@@ -1548,6 +1684,7 @@ async fn run_iteration(
         Duration::from_secs(20),
     )
     .await?;
+    probe.mark_daemon_started()?;
     let new_listeners = json!({"http": listener_owner(new_http, new_pid, new_start)?, "control": listener_owner(new_control, new_pid, new_start)?});
     let effective_new = proc_env(new_pid)?;
     let intended_new = BTreeMap::from([
@@ -1647,6 +1784,7 @@ async fn run_iteration(
         Duration::from_secs(30),
     )
     .await?;
+    probe.mark_reconstruction_observed()?;
     // `/readyz` means the composition is serving requests, while this
     // run-owned checkpoint proves replacement reconstruction has reached the
     // pre-mutation repair boundary.  Open a direct store pool only after that
@@ -1977,7 +2115,9 @@ async fn run_iteration(
                 .is_some_and(|name| name.starts_with("o3k-server:"))
         })
         .count();
+    probe.close();
     stop_process(replacement.child_mut()?)?;
+    probe.mark_daemon_stopped()?;
     replacement.disarm();
     fs::remove_file(&release).ok();
     fs::remove_file(&waiter).ok();
