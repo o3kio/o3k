@@ -87,16 +87,17 @@ class GuestControlRegression(unittest.TestCase):
         guard = DRIVER.index("fabric-v3-guest-control-regression.py")
         provisioning = DRIVER.index("virsh -c qemu:///system net-info")
         self.assertLess(guard, provisioning)
-        self.assertIn('PRODUCT_SHA=d7335166563d28084fbad5ac7f5d0f0e07e000a4', DRIVER)
-        self.assertIn('PRODUCT_TREE=d5b75b5674009d8c135218556aa2177371e489a3', DRIVER)
+        self.assertIn('PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e', DRIVER)
+        self.assertIn('PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871', DRIVER)
         self.assertIn('PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e', DRIVER)
-        self.assertIn('fetch --no-tags origin main', DRIVER)
-        self.assertIn('merge-base --is-ancestor "$PRODUCT_SHA" "$protected_main_tip"', DRIVER)
-        self.assertIn('PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-retirement-provider-016', DRIVER)
+        self.assertIn('PRODUCT_REMOTE_REF=refs/heads/main', DRIVER)
+        self.assertIn('[[ "$protected_main_tip" == "$PRODUCT_SHA" \\', DRIVER)
+        self.assertIn('"product_parent_commits":product_parents.split()', DRIVER)
+        self.assertNotIn('d7335166563d28084fbad5ac7f5d0f0e07e000a4', DRIVER)
         self.assertIn('HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-microgate', DRIVER)
         self.assertIn('ls-remote origin "$PRODUCT_REMOTE_REF"', DRIVER)
         self.assertIn('show -s --format=%P "$PRODUCT_SHA"', DRIVER)
-        self.assertIn('"parent_verified":True', DRIVER)
+        self.assertIn('"candidate_is_protected_main":product==protected_main', DRIVER)
 
     def test_departure_micro_gate_stops_before_full_campaign_phases(self):
         self.assertIn('CAMPAIGN_MODE="${1:-full}"', DRIVER)
@@ -125,6 +126,15 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('CAMPAIGN_MODE" == departure-micro', RETIREMENT)
         self.assertIn('stop_controller', RETIREMENT)
         self.assertIn('replacement controller did not become ready after retirement', RETIREMENT)
+
+    def test_retirement_poll_distinguishes_convergence_from_harness_failure(self):
+        self.assertEqual(RETIREMENT.count('case "$evidence_status" in'), 2)
+        self.assertEqual(RETIREMENT.count('1) ;;'), 2)
+        self.assertEqual(RETIREMENT.count('2) fail "retirement evidence schema/observer failure'), 1)
+        self.assertEqual(RETIREMENT.count('2) fail "post-restart retirement evidence schema/observer failure'), 1)
+        self.assertIn('validator exited unexpectedly ($evidence_status)', RETIREMENT)
+        self.assertIn('invalid retirement evidence: {type(error).__name__}', RETIREMENT_EVIDENCE)
+        self.assertIn('return 2', RETIREMENT_EVIDENCE)
 
     def test_controller_restart_uses_the_frozen_product_binary(self):
         restart = DRIVER[DRIVER.index("# Controller restart while A/B/C are alive."):]

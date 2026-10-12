@@ -5,7 +5,7 @@
 # supported API lifecycle in the caller.
 run_retirement_microgate() {
   local realm_id="$1" namespace_name address host object_name fabric_namespace namespace_state
-  local convergence_deadline survivor_converged poll old_controller_pid new_controller_pid recovery_ready code
+  local convergence_deadline survivor_converged poll old_controller_pid new_controller_pid recovery_ready code evidence_status
 
   for host in a b c; do
     address="${MGMT_IP[$host]}"
@@ -188,6 +188,13 @@ PY
         2>"$EVIDENCE/survivor-convergence/plans/poll-$poll.stderr"; then
       survivor_converged=1
       break
+    else
+      evidence_status=$?
+      case "$evidence_status" in
+        1) ;;
+        2) fail "retirement evidence schema/observer failure; see poll-$poll.stderr" "HARNESS_GAP" ;;
+        *) fail "retirement evidence validator exited unexpectedly ($evidence_status); see poll-$poll.stderr" "HARNESS_GAP" ;;
+      esac
     fi
     sleep 1
   done
@@ -276,6 +283,13 @@ PY
           >"$EVIDENCE/restart/plans/poll-$attempt.stdout" \
           2>"$EVIDENCE/restart/plans/poll-$attempt.stderr"; then
         break
+      else
+        evidence_status=$?
+        case "$evidence_status" in
+          1) ;;
+          2) fail "post-restart retirement evidence schema/observer failure; see poll-$attempt.stderr" "HARNESS_GAP" ;;
+          *) fail "post-restart retirement validator exited unexpectedly ($evidence_status); see poll-$attempt.stderr" "HARNESS_GAP" ;;
+        esac
       fi
       (( attempt < 120 )) \
         || fail "C retirement or A/B convergence was not reconstructed after controller restart" "DURABLE_RECOVERY_DEFECT"
