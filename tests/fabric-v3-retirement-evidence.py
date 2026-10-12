@@ -20,7 +20,8 @@ def _time(value: str) -> datetime:
 
 
 def validate(root: Path, realm: str, ports: list[str]) -> dict[str, Any]:
-    assert len(ports) == 3, ports
+    if len(ports) != 3:
+        raise ValueError("exactly three campaign ports are required")
     before = _read(root / "before-departure/plans/host-a.json")
     before_generation = int(before["directory_generation"])
     identities = _read(root / "environment/fabric-identities.json")
@@ -151,14 +152,26 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = validate(args.root, args.realm, args.ports)
-    except (AssertionError, KeyError, OSError, ValueError, TypeError) as error:
+    except AssertionError as error:
+        # A well-formed snapshot that has not reached the retirement predicates
+        # is retryable by the caller's bounded convergence poll.
         print(f"retirement evidence not converged: {type(error).__name__}: {error}", file=sys.stderr)
         return 1
-    rendered = json.dumps(result, sort_keys=True, indent=2) + "\n"
-    if args.output:
-        args.output.write_text(rendered)
-    else:
-        print(rendered, end="")
+    except Exception as error:
+        # Missing fields, malformed JSON, failed reads, and unexpected observer
+        # errors are harness failures. Do not let the polling shell reinterpret
+        # them as an O3K reconciliation defect.
+        print(f"invalid retirement evidence: {type(error).__name__}", file=sys.stderr)
+        return 2
+    try:
+        rendered = json.dumps(result, sort_keys=True, indent=2) + "\n"
+        if args.output:
+            args.output.write_text(rendered)
+        else:
+            print(rendered, end="")
+    except Exception as error:
+        print(f"retirement evidence output failure: {type(error).__name__}", file=sys.stderr)
+        return 2
     return 0
 
 

@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stderr, redirect_stdout
+import io
 
 
 MODULE_PATH = Path(__file__).with_name("fabric-v3-retirement-evidence.py")
@@ -137,6 +140,47 @@ class RetirementEvidenceTests(unittest.TestCase):
         self._write("survivor-convergence/plans/durable-work.json", history)
         with self.assertRaises(AssertionError):
             evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
+
+    def _run_cli(self):
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with patch("sys.argv", [
+            str(MODULE_PATH), "--root", str(self.root), "--realm", "realm",
+            "--ports", "port-a", "port-b", "port-c",
+        ]), redirect_stderr(stderr), redirect_stdout(stdout):
+            status = evidence.main()
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_missing_required_evidence_field_is_harness_gap_status(self):
+        before = json.loads((self.root / "before-departure/plans/host-a.json").read_text())
+        del before["directory_generation"]
+        self._write("before-departure/plans/host-a.json", before)
+
+        status, stdout, stderr = self._run_cli()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("invalid retirement evidence", stderr)
+
+    def test_malformed_json_is_harness_gap_status(self):
+        (self.root / "survivor-convergence/plans/durable-work.json").write_text("{not-json")
+
+        status, stdout, stderr = self._run_cli()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("invalid retirement evidence", stderr)
+
+    def test_well_formed_but_unconverged_evidence_is_retryable_status(self):
+        plan = json.loads((self.root / "survivor-convergence/host-a/plan.json").read_text())
+        plan["peers"].append({"host_id": "host-c"})
+        self._write("survivor-convergence/host-a/plan.json", plan)
+
+        status, stdout, stderr = self._run_cli()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("retirement evidence not converged", stderr)
 
 
 if __name__ == "__main__":
