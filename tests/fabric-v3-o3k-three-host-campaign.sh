@@ -12,11 +12,11 @@ if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
 else
   ACCEPTANCE_GATE="FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE"
 fi
-PRODUCT_SHA=f6b25a7b8fdc4c4b71bd22abbf009f2dab47a342
-PRODUCT_TREE=a09704847c6ed517d622408be301ad5ee14d3ece
+PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
+PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871
 PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
-PRODUCT_EXPECTED_PARENT_COMMITS="16464f644070295ee2240def185640bec97f7d35"
-PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-retirement-provider-016
+PRODUCT_EXPECTED_PARENT_COMMITS="91500b3a101edaf41292502938e3796dc1da71ae 98ae87f527f3bd021cd18258239ab0f233e15130"
+PRODUCT_REMOTE_REF=refs/heads/main
 HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-successor-harness
 HOST_PREFLIGHT="$ROOT_DIR/tests/fabric-v3-host-preflight.py"
 # Guard the acceptance control contract before creating evidence or guests.
@@ -727,8 +727,8 @@ git -C "$ROOT_DIR" fetch --no-tags origin main \
 protected_main_tip="$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)"
 [[ "$protected_main_tip" == "$PRODUCT_PROTECTED_MAIN_BASE" ]] \
   || fail "protected main no longer matches the frozen product candidate" "HARNESS_GAP"
-[[ "$PRODUCT_SHA" != "$protected_main_tip" ]] \
-  || fail "frozen successor unexpectedly aliases its protected-main base" "HARNESS_GAP"
+[[ "$PRODUCT_SHA" == "$protected_main_tip" ]] \
+  || fail "frozen product candidate is not the exact protected-main SHA" "HARNESS_GAP"
 git -C "$ROOT_DIR" merge-base --is-ancestor "$protected_main_tip" "$PRODUCT_SHA" \
   || fail "frozen product successor is not descended from its protected-main base" "HARNESS_GAP"
 product_remote_sha="$(git -C "$ROOT_DIR" ls-remote origin "$PRODUCT_REMOTE_REF" | awk 'NR==1 {print $1}')"
