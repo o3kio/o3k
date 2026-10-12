@@ -101,6 +101,11 @@ class GuestControlRegression(unittest.TestCase):
     def test_departure_micro_gate_stops_before_full_campaign_phases(self):
         self.assertIn('CAMPAIGN_MODE="${1:-full}"', DRIVER)
         self.assertIn('if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then', DRIVER)
+        self.assertIn('ACCEPTANCE_GATE="FABRIC V3 DURABLE HOST RETIREMENT MICROGATE"', DRIVER)
+        self.assertIn('"acceptance_gate":"$ACCEPTANCE_GATE"', DRIVER)
+        self.assertIn('echo "FABRIC V3 DURABLE HOST RETIREMENT MICROGATE: PASS"', DRIVER)
+        self.assertIn('echo "FABRIC V3 DURABLE HOST RETIREMENT MICROGATE: FAIL"', DRIVER)
+        self.assertIn('if [[ "$CAMPAIGN_MODE" == full ]]; then\n  echo "FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE: PASS"', DRIVER)
         self.assertIn('before-departure/traffic/a-to-b-icmp.txt', DRIVER)
         self.assertIn('before-departure/traffic/b-to-a-icmp.txt', DRIVER)
         self.assertIn('before-departure/traffic/a-to-c-icmp.txt', DRIVER)
