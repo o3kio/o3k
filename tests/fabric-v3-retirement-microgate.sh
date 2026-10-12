@@ -6,7 +6,10 @@
 run_retirement_microgate() {
   local realm_id="$1" namespace_name address host object_name fabric_namespace namespace_state
   local convergence_deadline survivor_converged poll old_controller_pid new_controller_pid recovery_ready code evidence_status
-  local registration_ready expected_agent_identity registration_status
+  local registration_ready registration_status host address health_port
+  local expected_agent_id current_agent_identity current_ready_status all_agents_ready
+  local registration_transport_failure registration_observer_pending
+  local -A expected_compute_agent_ids=()
   local -a registration_agent_args=()
 
   for host in a b c; do
@@ -260,44 +263,113 @@ PY
     [[ ! -e "/proc/$old_controller_pid" ]] \
       || fail "old controller process was still present after replacement readiness" "DURABLE_RECOVERY_DEFECT"
     for host in a b c; do
-      expected_agent_identity="$(python3 - "$EVIDENCE/management/compute-$host-ready.json" <<'PY'
+      expected_agent_id="$(python3 - "$EVIDENCE/management/compute-$host-ready.json" <<'PY'
 import json,sys
-value=json.load(open(sys.argv[1])); agent=value.get('agent_id'); epoch=value.get('agent_epoch')
-assert isinstance(agent,str) and agent.strip() and isinstance(epoch,str) and epoch.strip(), value
-print(f'{agent}={epoch}')
+value=json.load(open(sys.argv[1])); agent=value.get('agent_id')
+assert isinstance(agent,str) and agent.strip(), value
+print(agent)
 PY
 )" || fail "pre-restart compute identity is unavailable for host-$host" "HARNESS_GAP"
-      registration_agent_args+=(--agent "$expected_agent_identity")
+      expected_compute_agent_ids[$host]="$expected_agent_id"
     done
     registration_ready=0
     for _ in $(seq 1 120); do
-      if python3 "$ROOT_DIR/tests/fabric-v3-controller-restart-readiness.py" \
-        --log "$EVIDENCE/restart/startup-recovery/o3kd.log" \
-        --controller-id "$O3K_CONTROLLER_ID" --controller-epoch "$O3K_CONTROLLER_EPOCH" \
-        "${registration_agent_args[@]}" \
-        --output "$EVIDENCE/restart/startup-recovery/current-registration-state.json" \
-        >"$EVIDENCE/restart/startup-recovery/registration-observer.stdout" \
-        2>"$EVIDENCE/restart/startup-recovery/registration-observer.stderr"; then
-        registration_ready=1
-        break
-      else
-        registration_status=$?
-        case "$registration_status" in
-          1) ;;
-          *) fail "replacement controller registration observer failed; see registration-observer.stderr" "HARNESS_GAP" ;;
+      registration_agent_args=()
+      all_agents_ready=1
+      registration_transport_failure=0
+      registration_observer_pending=0
+      for host in a b c; do
+        address="${MGMT_IP[$host]}"
+        case "$host" in a) health_port=19101;; b) health_port=19102;; c) health_port=19103;; esac
+        rm -f "$EVIDENCE/restart/startup-recovery/compute-$host-current-ready.json"
+        if ! ssh_vm "$address" \
+          "sudo curl --silent --show-error --max-time 5 --write-out '\n__O3K_HTTP_STATUS=%{http_code}\n' http://127.0.0.1:$health_port/readyz" \
+          >"$EVIDENCE/restart/startup-recovery/compute-$host-readyz-response.txt" \
+          2>"$EVIDENCE/restart/startup-recovery/compute-$host-readyz-ssh.stderr"; then
+          registration_transport_failure=1
+          all_agents_ready=0
+          continue
+        fi
+        if python3 "$ROOT_DIR/tests/fabric-v3-controller-restart-readiness.py" capture-agent-ready \
+          --response "$EVIDENCE/restart/startup-recovery/compute-$host-readyz-response.txt" \
+          --host "host-$host" --expected-agent-id "${expected_compute_agent_ids[$host]}" \
+          --output "$EVIDENCE/restart/startup-recovery/compute-$host-current-ready.json" \
+          >"$EVIDENCE/restart/startup-recovery/compute-$host-readyz-observer.stdout" \
+          2>"$EVIDENCE/restart/startup-recovery/compute-$host-readyz-observer.stderr"; then
+          current_ready_status=0
+        else
+          current_ready_status=$?
+        fi
+        case "$current_ready_status" in
+          0)
+            current_agent_identity="$(python3 - "$EVIDENCE/restart/startup-recovery/compute-$host-current-ready.json" <<'PY'
+import json,sys
+value=json.load(open(sys.argv[1])); agent=value.get('agent_id'); epoch=value.get('agent_epoch')
+assert value.get('status')=='ready' and isinstance(agent,str) and agent.strip()
+assert isinstance(epoch,str) and epoch.strip()
+print(f'{agent}={epoch}')
+PY
+)" || fail "live current compute readiness artifact is malformed for host-$host" "HARNESS_GAP"
+            registration_agent_args+=(--agent "$current_agent_identity")
+            ;;
+          1) all_agents_ready=0 ;;
+          2) fail "live compute /readyz observer failed for host-$host; see compute-$host-readyz-observer.stderr" "HARNESS_GAP" ;;
+          3) fail "compute agent identity changed after controller restart on host-$host" "DURABLE_RECOVERY_DEFECT" ;;
+          4) fail "compute agent returned invalid /readyz state after controller restart on host-$host" "DURABLE_RECOVERY_DEFECT" ;;
+          *) fail "live compute /readyz observer returned unexpected status $current_ready_status for host-$host" "HARNESS_GAP" ;;
         esac
+      done
+      python3 - "$EVIDENCE/restart/startup-recovery/current-registration-state.json" \
+        "$EVIDENCE/restart/startup-recovery/compute-a-current-ready.json" \
+        "$EVIDENCE/restart/startup-recovery/compute-b-current-ready.json" \
+        "$EVIDENCE/restart/startup-recovery/compute-c-current-ready.json" <<'PY'
+import json,pathlib,sys
+path=pathlib.Path(sys.argv[1]); records={}
+for host,source in zip('abc',sys.argv[2:]):
+    try: records[f'host-{host}']=json.loads(pathlib.Path(source).read_text())
+    except (OSError,json.JSONDecodeError): records[f'host-{host}']={'status':'unobserved'}
+path.write_text(json.dumps({'schema_version':1,'artifact_type':'fabric-v3-controller-restart-readiness',
+    'status':'pending','observer':'live_compute_agent_readyz','compute_agents':records},sort_keys=True,indent=2)+'\n')
+PY
+      if (( all_agents_ready == 1 )); then
+        if python3 "$ROOT_DIR/tests/fabric-v3-controller-restart-readiness.py" observe-controller-restart \
+          --log "$EVIDENCE/restart/startup-recovery/o3kd.log" \
+          --controller-id "$O3K_CONTROLLER_ID" --controller-epoch "$O3K_CONTROLLER_EPOCH" \
+          "${registration_agent_args[@]}" \
+          --output "$EVIDENCE/restart/startup-recovery/current-registration-state.json" \
+          >"$EVIDENCE/restart/startup-recovery/registration-observer.stdout" \
+          2>"$EVIDENCE/restart/startup-recovery/registration-observer.stderr"; then
+          registration_ready=1
+          break
+        else
+          registration_status=$?
+          case "$registration_status" in
+            1) registration_observer_pending=1 ;;
+            *) fail "replacement controller registration observer failed; see registration-observer.stderr" "HARNESS_GAP" ;;
+          esac
+        fi
       fi
       kill -0 "$new_controller_pid" 2>/dev/null \
         || fail "replacement controller exited before all compute agents re-registered" "DURABLE_RECOVERY_DEFECT"
       sleep 1
     done
-    (( registration_ready == 1 )) \
-      || fail "replacement controller did not re-register all expected compute agents within 120 seconds; see current-registration-state.json" "DURABLE_RECOVERY_DEFECT"
+    if (( registration_ready != 1 )); then
+      if (( registration_observer_pending == 1 )); then
+        fail "replacement controller log did not confirm the live compute agent epochs within 120 seconds; see current-registration-state.json" "DURABLE_RECOVERY_DEFECT"
+      elif (( registration_transport_failure == 1 )); then
+        fail "compute-agent management observation remained unavailable during controller restart; see compute-*-readyz-ssh.stderr" "ENVIRONMENT_GAP"
+      else
+        fail "compute agents did not become ready with the replacement controller within 120 seconds; see current-registration-state.json" "DURABLE_RECOVERY_DEFECT"
+      fi
+    fi
     printf '%s\n' "$O3K_CONTROLLER_ID" >"$EVIDENCE/restart/startup-recovery/controller-identity-after.txt"
     printf '%s\n' "$O3K_CONTROLLER_EPOCH" >"$EVIDENCE/restart/startup-recovery/controller-epoch-after.txt"
     python3 - "$EVIDENCE/manifest.json" "$INITIAL_CONTROLLER_ID" "$INITIAL_CONTROLLER_EPOCH" \
       "$O3K_CONTROLLER_ID" "$O3K_CONTROLLER_EPOCH" \
-      "$EVIDENCE/restart/startup-recovery/current-registration-state.json" <<'PY' \
+      "$EVIDENCE/restart/startup-recovery/current-registration-state.json" \
+      "$EVIDENCE/restart/startup-recovery/compute-a-current-ready.json" \
+      "$EVIDENCE/restart/startup-recovery/compute-b-current-ready.json" \
+      "$EVIDENCE/restart/startup-recovery/compute-c-current-ready.json" <<'PY' \
       || fail "restart identity and current registrations could not be bound into the manifest" "HARNESS_GAP"
 import json,pathlib,sys
 manifest_path=pathlib.Path(sys.argv[1]); initial_id,initial_epoch,restart_id,restart_epoch=sys.argv[2:6]
@@ -310,10 +382,23 @@ assert readiness.get('all_expected_compute_agents_registered'), readiness
 assert readiness.get('expected_controller_session')=={'identity':restart_id,'epoch':restart_epoch}, readiness
 assert readiness.get('observed_controller_session',{}).get('identity')==restart_id, readiness
 assert readiness.get('observed_controller_session',{}).get('epoch')==restart_epoch, readiness
-expected={host['compute_agent_id']:host['compute_agent_epoch'] for host in manifest['hosts'].values()}
-assert readiness.get('expected_compute_agents')==dict(sorted(expected.items())), (readiness,expected)
+current_agents={}
+for host,source in zip('abc',sys.argv[7:10]):
+    live=json.loads(pathlib.Path(source).read_text())
+    manifest_host=manifest['hosts'][f'host-{host}']
+    assert live.get('status')=='ready' and live.get('observer')=='ssh_sudo_local_readyz', live
+    assert live.get('agent_id')==manifest_host['compute_agent_id'], (live,manifest_host)
+    assert live.get('agent_epoch'), live
+    current_agents[manifest_host['compute_agent_id']]=live['agent_epoch']
+assert len(current_agents)==3, current_agents
+assert readiness.get('expected_compute_agents')==dict(sorted(current_agents.items())), (readiness,current_agents)
+assert {agent_id:row.get('epoch') for agent_id,row in readiness.get('registered_compute_agents',{}).items()}==current_agents, readiness
 manifest['controller_restart']={'identity':restart_id,'epoch':restart_epoch,'session_advanced':True,
-    'readiness_artifact':'restart/startup-recovery/current-registration-state.json'}
+    'readiness_artifact':'restart/startup-recovery/current-registration-state.json',
+    'current_compute_agents':{f'host-{host}':{'agent_id':manifest['hosts'][f'host-{host}']['compute_agent_id'],
+        'agent_epoch':json.loads(pathlib.Path(source).read_text())['agent_epoch'],
+        'readiness_artifact':f'restart/startup-recovery/compute-{host}-current-ready.json'}
+        for host,source in zip('abc',sys.argv[7:10])}}
 manifest_path.write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n')
 PY
     for host in a b; do

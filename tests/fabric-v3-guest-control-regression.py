@@ -71,6 +71,61 @@ class GuestControlRegression(unittest.TestCase):
             {"expected_epoch": "a-current", "observed_epoch": "a-old"},
         )
 
+    def test_live_agent_readyz_binds_current_epoch_after_controller_restart(self):
+        evidence, status = restart_readiness.capture_agent_readiness(
+            '{"status":"ready","agent_id":"compute-a","agent_epoch":"a-restarted"}'
+            "\n__O3K_HTTP_STATUS=200\n",
+            "host-a",
+            "compute-a",
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(evidence["agent_id"], "compute-a")
+        self.assertEqual(evidence["agent_epoch"], "a-restarted")
+        log = '\n'.join([
+            'controller_id=new controller_epoch=new-epoch message="controller session registered"',
+            'agent_id=compute-a epoch=a-old message="compute agent registered"',
+        ])
+        stale = restart_readiness.parse_readiness(
+            log, "new", "new-epoch", {evidence["agent_id"]: evidence["agent_epoch"]}
+        )
+        self.assertEqual(stale["status"], "pending")
+        self.assertEqual(
+            stale["mismatched_compute_agent_epochs"]["compute-a"],
+            {"expected_epoch": "a-restarted", "observed_epoch": "a-old"},
+        )
+
+    def test_live_agent_readyz_503_is_pending_without_retaining_body(self):
+        evidence, status = restart_readiness.capture_agent_readiness(
+            '{"diagnostic":"controller registration pending"}'
+            "\n__O3K_HTTP_STATUS=503\n",
+            "host-b",
+            "compute-b",
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(evidence["status"], "pending")
+        self.assertEqual(evidence["diagnostic"], "agent_not_ready")
+        self.assertNotIn("controller registration pending", repr(evidence))
+
+    def test_live_agent_readyz_rejects_changed_identity_and_malformed_body(self):
+        changed, changed_status = restart_readiness.capture_agent_readiness(
+            '{"status":"ready","agent_id":"compute-other","agent_epoch":"new"}'
+            "\n__O3K_HTTP_STATUS=200\n",
+            "host-c",
+            "compute-c",
+        )
+        malformed, malformed_status = restart_readiness.capture_agent_readiness(
+            "not-json\n__O3K_HTTP_STATUS=200\n", "host-c", "compute-c"
+        )
+        unavailable, unavailable_status = restart_readiness.capture_agent_readiness(
+            "service unavailable\n__O3K_HTTP_STATUS=500\n", "host-c", "compute-c"
+        )
+        self.assertEqual(changed_status, 3)
+        self.assertEqual(changed["diagnostic"], "agent_identity_changed")
+        self.assertEqual(malformed_status, 4)
+        self.assertEqual(malformed["diagnostic"], "malformed_ready_json")
+        self.assertEqual(unavailable_status, 4)
+        self.assertEqual(unavailable["diagnostic"], "unexpected_http_status")
+
     def test_restart_registration_gate_precedes_post_restart_api_observations(self):
         restart_start = RETIREMENT.index("O3K_CONTROLLER_ID=\"${INITIAL_CONTROLLER_ID}-restart\"")
         replacement_start = RETIREMENT.index('"$PRODUCT_SOURCE_DIR/target/release/o3kd"', restart_start)
@@ -84,6 +139,12 @@ class GuestControlRegression(unittest.TestCase):
         self.assertLess(readiness_gate, survivor_gets)
         self.assertIn('O3K_CONTROLLER_EPOCH="${INITIAL_CONTROLLER_EPOCH}-restart"', RETIREMENT)
         self.assertIn('[[ "$new_controller_pid" != "$old_controller_pid" ]]', RETIREMENT)
+        self.assertIn("capture-agent-ready", RETIREMENT)
+        self.assertIn("compute-$host-current-ready.json", RETIREMENT)
+        self.assertIn("observe-controller-restart", RETIREMENT)
+        self.assertIn("manifest['controller_restart']", RETIREMENT)
+        self.assertIn("current_compute_agents", RETIREMENT)
+        self.assertIn('"DURABLE_RECOVERY_DEFECT" ;;', RETIREMENT)
 
     def test_predelete_manifest_does_not_require_postrestart_artifacts(self):
         start = DRIVER.index('python3 - "$EVIDENCE" "$RUN_ID" "$INITIAL_CONTROLLER_ID"')
@@ -203,7 +264,7 @@ class GuestControlRegression(unittest.TestCase):
     def test_retirement_poll_distinguishes_convergence_from_harness_failure(self):
         self.assertEqual(RETIREMENT.count('case "$evidence_status" in'), 2)
         self.assertEqual(RETIREMENT.count('case "$registration_status" in'), 1)
-        self.assertEqual(RETIREMENT.count('1) ;;'), 3)
+        self.assertEqual(RETIREMENT.count('1) ;;'), 2)
         self.assertEqual(RETIREMENT.count('2) fail "retirement evidence schema/observer failure'), 1)
         self.assertEqual(RETIREMENT.count('2) fail "post-restart retirement evidence schema/observer failure'), 1)
         self.assertIn('validator exited unexpectedly ($evidence_status)', RETIREMENT)
