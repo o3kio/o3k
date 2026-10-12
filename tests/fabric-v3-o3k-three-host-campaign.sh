@@ -12,10 +12,10 @@ if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
 else
   ACCEPTANCE_GATE="FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE"
 fi
-PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
-PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871
+PRODUCT_SHA=d7335166563d28084fbad5ac7f5d0f0e07e000a4
+PRODUCT_TREE=d5b75b5674009d8c135218556aa2177371e489a3
 PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
-PRODUCT_REMOTE_REF=refs/heads/main
+PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-retirement-provider-016
 HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-microgate
 HOST_PREFLIGHT="$ROOT_DIR/tests/fabric-v3-host-preflight.py"
 # Guard the acceptance control contract before creating evidence or guests.
@@ -714,12 +714,11 @@ git -C "$ROOT_DIR" fetch --no-tags origin main \
   2>"$EVIDENCE/environment/protected-main-fetch.stderr" \
   || fail "could not refresh protected main for candidate ancestry proof" "HARNESS_GAP"
 protected_main_tip="$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)"
-[[ "$protected_main_tip" == "$PRODUCT_SHA" \
-  && "$PRODUCT_SHA" == "$PRODUCT_PROTECTED_MAIN_BASE" ]] \
-  || fail "protected main is not the exact frozen product candidate" "HARNESS_GAP"
+[[ "$protected_main_tip" == "$PRODUCT_PROTECTED_MAIN_BASE" ]] \
+  || fail "protected main no longer matches the frozen product successor base" "HARNESS_GAP"
 product_remote_sha="$(git -C "$ROOT_DIR" ls-remote origin "$PRODUCT_REMOTE_REF" | awk 'NR==1 {print $1}')"
 [[ "$product_remote_sha" == "$PRODUCT_SHA" ]] \
-  || fail "frozen protected-main candidate is not remotely visible at the exact SHA" "HARNESS_GAP"
+  || fail "frozen product successor is not remotely visible at the exact SHA" "HARNESS_GAP"
 git -C "$ROOT_DIR" fetch --no-tags origin "$HARNESS_REMOTE_REF" \
   >"$EVIDENCE/environment/harness-ref-fetch.stdout" \
   2>"$EVIDENCE/environment/harness-ref-fetch.stderr" \
@@ -731,10 +730,12 @@ git -C "$ROOT_DIR" fetch --no-tags origin "$HARNESS_REMOTE_REF" \
 git -C "$ROOT_DIR" fetch --no-tags origin "$PRODUCT_REMOTE_REF" \
   >"$EVIDENCE/environment/product-ref-fetch.stdout" \
   2>"$EVIDENCE/environment/product-ref-fetch.stderr" \
-  || fail "frozen protected-main ref is not remotely visible" "HARNESS_GAP"
+  || fail "frozen product successor ref is not remotely visible" "HARNESS_GAP"
 [[ "$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)" == "$PRODUCT_SHA" ]] \
-  || fail "remote protected-main ref does not match the frozen candidate SHA" "HARNESS_GAP"
+  || fail "remote product successor ref does not match the frozen candidate SHA" "HARNESS_GAP"
 product_parents="$(git -C "$ROOT_DIR" show -s --format=%P "$PRODUCT_SHA")"
+[[ "$product_parents" == "$PRODUCT_PROTECTED_MAIN_BASE" ]] \
+  || fail "frozen product successor does not descend directly from the recorded protected main" "HARNESS_GAP"
 url_port "$API_PORT" || fail "API port is occupied: $API_PORT" "ENVIRONMENT_GAP"
 url_port "$CONTROL_PORT" || fail "compute control port is occupied: $CONTROL_PORT" "ENVIRONMENT_GAP"
 python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
@@ -779,7 +780,8 @@ doc={"result":"IN_PROGRESS","run_id":run,"product_sha":product,"product_tree":pr
      "harness_remote_visible":True,"harness_remote_ref":harness_ref,
      "product_parent_commits":product_parents.split(),
      "product_lineage":{"protected_main_base":protected_main_base,
-                         "candidate_is_protected_main":product==protected_main},
+                         "candidate_is_protected_main":product==protected_main,
+                         "candidate_is_successor":product!=protected_main},
      "fabric_domain_id":fabric_domain_id,
      "started_at_utc":pathlib.Path(started).read_text().strip(),
      "physical_host_identity":pathlib.Path(physical).read_text(errors='replace').strip()}
