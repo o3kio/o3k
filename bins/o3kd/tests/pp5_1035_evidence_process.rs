@@ -166,6 +166,20 @@ fn proc_starttime(pid: u32) -> Result<u64, Error> {
         .map_err(Into::into)
 }
 
+fn process_instance_gone(pid: u32, expected_starttime: u64) -> Result<bool, Error> {
+    match proc_starttime(pid) {
+        Ok(observed_starttime) => Ok(observed_starttime != expected_starttime),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn proc_exe(pid: u32) -> Result<PathBuf, Error> {
     Ok(fs::read_link(format!("/proc/{pid}/exe"))?)
 }
@@ -196,21 +210,40 @@ fn proc_env(pid: u32) -> Result<BTreeMap<String, String>, Error> {
     Ok(result)
 }
 
-fn listener_owner(address: SocketAddr, pid: u32, starttime: u64) -> Result<Value, Error> {
+fn listener_table() -> Result<String, Error> {
     let output = Command::new("ss").args(["-ltnpH"]).output()?;
     if !output.status.success() {
         return Err("ss failed".into());
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let needle = format!(":{}", address.port());
-    let owned = text
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn listener_port(line: &str) -> Option<u16> {
+    line.split_whitespace()
+        .nth(3)?
+        .rsplit_once(':')?
+        .1
+        .parse()
+        .ok()
+}
+
+fn listener_present(address: SocketAddr) -> Result<bool, Error> {
+    let text = listener_table()?;
+    Ok(text
         .lines()
-        .any(|line| line.contains(&needle) && line.contains(&format!("pid={pid},")));
+        .any(|line| listener_port(line) == Some(address.port())))
+}
+
+fn listener_owner(address: SocketAddr, pid: u32, starttime: u64) -> Result<Value, Error> {
+    let text = listener_table()?;
+    let owned = text.lines().any(|line| {
+        listener_port(line) == Some(address.port()) && line.contains(&format!("pid={pid},"))
+    });
     if !owned {
         return Err(format!("listener {} is not owned by pid {pid}: {text}", address).into());
     }
     Ok(
-        json!({"socket": address.to_string(), "owner": {"pid": pid, "proc_starttime": starttime}, "owned": true, "ss": text.lines().filter(|line| line.contains(&needle)).collect::<Vec<_>>() }),
+        json!({"socket": address.to_string(), "owner": {"pid": pid, "proc_starttime": starttime}, "owned": true, "ss": text.lines().filter(|line| listener_port(line) == Some(address.port())).collect::<Vec<_>>() }),
     )
 }
 
@@ -586,11 +619,113 @@ async fn wait_state(
 
 struct TestOwnedProbe {
     store: Option<o3k_store::unified::O3kStore>,
+    initialized: bool,
+    daemon_running: bool,
+    delete_paused: bool,
+    reconstruction_observed: bool,
 }
 
 impl TestOwnedProbe {
-    fn new(store: o3k_store::unified::O3kStore) -> Self {
-        Self { store: Some(store) }
+    fn new() -> Self {
+        Self {
+            store: None,
+            initialized: false,
+            daemon_running: false,
+            delete_paused: false,
+            reconstruction_observed: false,
+        }
+    }
+
+    async fn open_before_daemon(&mut self, backend: &Backend) -> Result<(), Error> {
+        if self.daemon_running {
+            return Err("test-owned probe must be initialized while no daemon is running".into());
+        }
+        if self.is_alive() {
+            return Err("test-owned probe is already open".into());
+        }
+        self.store = Some(backend.connect().await?);
+        self.initialized = true;
+        Ok(())
+    }
+
+    fn mark_daemon_started(&mut self) -> Result<(), Error> {
+        if self.daemon_running {
+            return Err("test daemon is already marked running".into());
+        }
+        if !self.initialized {
+            return Err("test-owned probe must be initialized before daemon startup".into());
+        }
+        self.daemon_running = true;
+        self.delete_paused = false;
+        Ok(())
+    }
+
+    fn mark_delete_paused(&mut self) -> Result<(), Error> {
+        if !self.daemon_running {
+            return Err("delete pause requires a running daemon".into());
+        }
+        self.delete_paused = true;
+        Ok(())
+    }
+
+    fn mark_daemon_stopped(&mut self) -> Result<(), Error> {
+        if !self.daemon_running {
+            return Err("test daemon is not marked running".into());
+        }
+        self.daemon_running = false;
+        self.delete_paused = false;
+        Ok(())
+    }
+
+    async fn update_port_binding_fixture(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        host: &str,
+        state: &str,
+    ) -> Result<(), Error> {
+        if self.daemon_running {
+            return Err(
+                "test fixture writes are forbidden while an o3kd daemon may own a write transaction"
+                    .into(),
+            );
+        }
+        self.store()?
+            .update_port_binding(project_id, endpoint_id, Some(host), Some(state))
+            .await?;
+        Ok(())
+    }
+
+    async fn acquire_repair_lease_during_paused_delete(
+        &self,
+        backend: &Backend,
+        controller_id: &o3k_store::ControllerId,
+        controller_epoch: &o3k_store::ControllerEpoch,
+    ) -> Result<o3k_store::LeaseAcquireOutcome, Error> {
+        if !self.daemon_running || !self.delete_paused {
+            return Err(
+                "concurrent repair lease seeding requires the old daemon's paused delete window"
+                    .into(),
+            );
+        }
+        if !backend.is_postgres() {
+            return Err("concurrent repair lease seeding is PostgreSQL-only".into());
+        }
+
+        // This is the one intentional direct write while a daemon is running:
+        // the PostgreSQL test holds a competing durable lease during the
+        // old daemon's explicitly paused delete window to exercise takeover.
+        // Fixture writes remain forbidden until the daemon is stopped.
+        Ok(self
+            .store()?
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                controller_id,
+                controller_epoch,
+                Duration::from_secs(12),
+            )
+            .await?)
     }
 
     fn is_alive(&self) -> bool {
@@ -618,7 +753,20 @@ impl TestOwnedProbe {
         if self.is_alive() {
             return Err("test-owned probe must be closed before opening a fresh pool".into());
         }
+        if !self.daemon_running || !self.reconstruction_observed {
+            return Err(
+                "fresh probe may open only after replacement reconstruction is observed".into(),
+            );
+        }
         self.store = Some(backend.connect().await?);
+        Ok(())
+    }
+
+    fn mark_reconstruction_observed(&mut self) -> Result<(), Error> {
+        if !self.daemon_running {
+            return Err("replacement daemon must be running at reconstruction observation".into());
+        }
+        self.reconstruction_observed = true;
         Ok(())
     }
 }
@@ -650,15 +798,57 @@ async fn pp5_1035_test_probe_must_close_across_restart_boundary() -> Result<(), 
     let root = std::env::temp_dir().join(format!("o3k-pp5-probe-lifecycle-{}", Uuid::now_v7()));
     fs::create_dir_all(&root)?;
     let backend = Backend::Sqlite(root.join("o3k.sqlite"));
-    let mut probe = TestOwnedProbe::new(backend.connect().await?);
+    let mut probe = TestOwnedProbe::new();
+    probe.open_before_daemon(&backend).await?;
     assert!(probe.is_alive());
     assert!(probe.require_closed_at_restart().is_err());
+    probe.mark_daemon_started()?;
+    let premature_lease = probe
+        .acquire_repair_lease_during_paused_delete(
+            &backend,
+            &o3k_store::ControllerId::new("test-controller"),
+            &o3k_store::ControllerEpoch::new("test-epoch"),
+        )
+        .await;
+    assert!(premature_lease.is_err());
+    probe.mark_delete_paused()?;
+    let sqlite_lease = probe
+        .acquire_repair_lease_during_paused_delete(
+            &backend,
+            &o3k_store::ControllerId::new("test-controller"),
+            &o3k_store::ControllerEpoch::new("test-epoch"),
+        )
+        .await;
+    let sqlite_lease_error = sqlite_lease
+        .err()
+        .ok_or("concurrent repair lease seeding was allowed against SQLite")?;
+    assert!(sqlite_lease_error.to_string().contains("PostgreSQL-only"));
+    probe.delete_paused = false;
+    let fixture_write = probe
+        .update_port_binding_fixture(PROJECT_ID, &Uuid::now_v7(), "pp5-compute-agent", "bound")
+        .await;
+    let fixture_write_error = fixture_write
+        .err()
+        .ok_or("fixture write while the daemon runs did not fail closed")?;
+    assert!(
+        fixture_write_error
+            .to_string()
+            .contains("forbidden while an o3kd daemon may own a write transaction")
+    );
+    assert!(probe.open_before_daemon(&backend).await.is_err());
     probe.close();
     probe.require_closed_at_restart()?;
     assert!(!probe.is_alive());
+    probe.mark_daemon_stopped()?;
+    probe.open_before_daemon(&backend).await?;
+    probe.close();
+    probe.mark_daemon_started()?;
+    assert!(probe.reopen(&backend).await.is_err());
+    probe.mark_reconstruction_observed()?;
     probe.reopen(&backend).await?;
     assert!(probe.is_alive());
     probe.close();
+    probe.mark_daemon_stopped()?;
     fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -826,13 +1016,15 @@ async fn wait_orphan_checkpoint(
 struct ChildCleanupGuard {
     child: Option<Child>,
     failure_path: PathBuf,
+    process_label: &'static str,
 }
 
 impl ChildCleanupGuard {
-    fn new(child: Child, failure_path: PathBuf) -> Self {
+    fn new(child: Child, failure_path: PathBuf, process_label: &'static str) -> Self {
         Self {
             child: Some(child),
             failure_path,
+            process_label,
         }
     }
 
@@ -860,7 +1052,7 @@ impl Drop for ChildCleanupGuard {
             return;
         };
         if let Err(error) = stop_process(child) {
-            let diagnostic = format!("replacement process cleanup failed: {error}");
+            let diagnostic = format!("{} process cleanup failed: {error}", self.process_label);
             let _ = fs::write(&self.failure_path, diagnostic.as_bytes());
             eprintln!("{diagnostic}");
         }
@@ -885,14 +1077,20 @@ async fn run_iteration(
     let waiter = sync.join("waiter");
     let orphan_checkpoint = sync.join("orphan-checkpoint.json");
     let bootstrap_cleanup_failure = root.join("bootstrap-cleanup-failure");
+    let fixture_setup_cleanup_failure = root.join("fixture-setup-cleanup-failure");
     let old_cleanup_failure = root.join("old-process-cleanup-failure");
     let replacement_cleanup_failure = root.join("replacement-cleanup-failure");
     fs::remove_file(&bootstrap_cleanup_failure).ok();
+    fs::remove_file(&fixture_setup_cleanup_failure).ok();
     fs::remove_file(&old_cleanup_failure).ok();
     fs::remove_file(&replacement_cleanup_failure).ok();
     fs::remove_file(&old_endpoint_release_gate).ok();
     File::create(&release)?;
     let old_controller = (format!("old-{run_id}"), format!("old-epoch-{run_id}"));
+    let fixture_setup_controller = (
+        format!("fixture-setup-{run_id}"),
+        format!("fixture-setup-epoch-{run_id}"),
+    );
     // The operator diagnostics route is deliberately system-scoped.  Seed a
     // run-local system project/role assignment before the evidence process is
     // started, then let the real IAM snapshot load it during startup.  This
@@ -913,7 +1111,8 @@ async fn run_iteration(
             &tls,
             run_id,
         )?;
-        let mut bootstrap = ChildCleanupGuard::new(bootstrap_child, bootstrap_cleanup_failure);
+        let mut bootstrap =
+            ChildCleanupGuard::new(bootstrap_child, bootstrap_cleanup_failure, "bootstrap");
         let _ = wait_ready(
             bootstrap.child_mut()?,
             http,
@@ -997,67 +1196,55 @@ async fn run_iteration(
             })
             .await?;
     }
-    let old_child = start_o3kd(
+    let mut probe = TestOwnedProbe::new();
+    store_operation(
+        evidence,
+        "fixture_setup_probe_open",
+        "connect_test_owned_probe_before_daemon",
+        backend,
+        false,
+        None,
+        None,
+    );
+    probe.open_before_daemon(backend).await?;
+    let fixture_setup_child = start_o3kd(
         root,
         backend,
         http,
         control,
         &log,
-        (&old_controller.0, &old_controller.1),
+        (&fixture_setup_controller.0, &fixture_setup_controller.1),
         None,
         None,
         None,
-        true,
+        false,
         &tls,
         run_id,
     )?;
-    let mut child = ChildCleanupGuard::new(old_child, old_cleanup_failure);
-    let _ready_old = wait_ready(child.child_mut()?, http, control, Duration::from_secs(20)).await?;
-    let old_pid = child.id()?;
-    let old_start = proc_starttime(old_pid)?;
-    let old_exe = proc_exe(old_pid)?;
-    let old_digest = file_sha256(&old_exe)?;
-    let old_listeners = json!({"http": listener_owner(http, old_pid, old_start)?, "control": listener_owner(control, old_pid, old_start)?});
-    let intended = BTreeMap::from([
-        (String::from("O3K_PP5_RUN_ID"), run_id.to_owned()),
-        (
-            String::from("O3K_AUTHORITY_MODE"),
-            String::from("o3k-implemented"),
-        ),
-        (String::from("O3K_CONTROLLER_ID"), old_controller.0.clone()),
-        (
-            String::from("O3K_CONTROLLER_EPOCH"),
-            old_controller.1.clone(),
-        ),
-        (String::from("O3K_STATE_ROOT"), root.display().to_string()),
-        (String::from("O3K_HTTP_ADDRESS"), http.to_string()),
-        (String::from("O3K_CONTROL_ADDRESS"), control.to_string()),
-        (String::from("O3K_DATABASE_ID"), backend.evidence_id()),
-        (String::from("O3K_REPAIR_TIMEOUT_MS"), String::from("30000")),
-    ]);
-    let mut intended = intended;
-    if backend.is_postgres() {
-        intended.insert(
-            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"),
-            String::from("0"),
-        );
-        intended.insert(
-            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RELEASE_FILE"),
-            old_endpoint_release_gate.display().to_string(),
-        );
-    } else {
-        intended.insert(
-            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"),
-            String::from("4000"),
-        );
-    }
-    let effective = proc_env(old_pid)?;
-    evidence.set("old", json!({"pid": old_pid, "proc_starttime": old_start, "executable_path": old_exe, "executable_sha256": old_digest, "cmdline_digest": proc_cmdline_digest(old_pid)?, "state_root": root, "http_address": http, "control_address": control, "listeners": old_listeners, "controller_id": old_controller.0, "controller_epoch": old_controller.1}));
-    evidence.set("environment", env_value_map(&intended, &effective));
-    evidence.checkpoint("old_process_verified")?;
-    let mut old_environment = env_value_map(&intended, &effective);
-    old_environment["secret_presence"] = Value::Object(secret_presence(old_pid)?);
-    evidence.set("old_environment", old_environment);
+    let mut fixture_setup = ChildCleanupGuard::new(
+        fixture_setup_child,
+        fixture_setup_cleanup_failure,
+        "fixture setup",
+    );
+    let fixture_setup_pid = fixture_setup.id()?;
+    let fixture_setup_start = proc_starttime(fixture_setup_pid)?;
+    store_operation(
+        evidence,
+        "fixture_setup_daemon_startup",
+        "wait_fixture_setup_readiness",
+        backend,
+        probe.is_alive(),
+        Some(fixture_setup_pid),
+        None,
+    );
+    let _ready_setup = wait_ready(
+        fixture_setup.child_mut()?,
+        http,
+        control,
+        Duration::from_secs(20),
+    )
+    .await?;
+    probe.mark_daemon_started()?;
 
     let admin_token = token(&client, http, "admin", BOOTSTRAP_PASSWORD, "admin").await?;
     let foreign_token = token(
@@ -1126,20 +1313,6 @@ async fn run_iteration(
         .as_str()
         .ok_or("foreign port")?
         .to_owned();
-    evidence.set("caller", json!({"endpoint_id":caller_id,"project":PROJECT_ID,"ownership_before":caller["project_id"],"ownership_after":caller["project_id"],"exists_before":true,"exists_after":true,"ownership_unchanged":true}));
-    evidence.set("foreign", json!({"project":FOREIGN_PROJECT_ID,"port_id":foreign_port_id,"network_id":foreign_network,"subnet_id":foreign_subnet,"attachment_id":"not-applicable-in-fake-provider-topology","before":foreign_port,"after":foreign_port,"changed":false}));
-    evidence.checkpoint("prepared")?;
-
-    store_operation(
-        evidence,
-        "old_daemon_running_probe_open",
-        "connect_test_owned_probe",
-        backend,
-        false,
-        Some(old_pid),
-        None,
-    );
-    let mut probe = TestOwnedProbe::new(backend.connect().await?);
     let quota_baseline = quota_usage(&client, http, &admin_token).await?;
     let (server_id, _) = create_native(
         &client,
@@ -1149,6 +1322,15 @@ async fn run_iteration(
         &network_id,
     )
     .await?;
+    store_operation(
+        evidence,
+        "fixture_setup_server_active",
+        "wait_server_active",
+        backend,
+        probe.is_alive(),
+        Some(fixture_setup_pid),
+        None,
+    );
     wait_state(
         &probe,
         server_id,
@@ -1157,7 +1339,7 @@ async fn run_iteration(
         &mut StoreDiagnostics {
             evidence,
             backend,
-            old_pid: Some(old_pid),
+            old_pid: Some(fixture_setup_pid),
             new_pid: None,
             phase: "pre_restart_server_active",
         },
@@ -1174,29 +1356,121 @@ async fn run_iteration(
         .ok_or("owned endpoint missing")?;
     let endpoint_id = owned_before["id"].as_str().ok_or("endpoint id")?.to_owned();
     let endpoint_uuid = Uuid::parse_str(&endpoint_id)?;
-    store_operation(
-        evidence,
-        "pre_restart_fixture_binding",
-        "update_port_binding",
-        backend,
-        probe.is_alive(),
-        Some(old_pid),
-        None,
-    );
-    probe
-        .store()?
-        .update_port_binding(
-            PROJECT_ID,
-            &endpoint_uuid,
-            Some("pp5-compute-agent"),
-            Some("bound"),
-        )
-        .await?;
     let fixed_ip = owned_before["fixed_ips"][0]["ip_address"]
         .as_str()
         .ok_or("fixed ip")?
         .to_owned();
     let quota_before = quota_usage(&client, http, &admin_token).await?;
+
+    store_operation(
+        evidence,
+        "fixture_setup_shutdown",
+        "stop_fixture_setup_daemon",
+        backend,
+        probe.is_alive(),
+        Some(fixture_setup_pid),
+        None,
+    );
+    stop_process(fixture_setup.child_mut()?)?;
+    let fixture_setup_gone = process_instance_gone(fixture_setup_pid, fixture_setup_start)?;
+    let fixture_setup_http_listener_gone = !listener_present(http)?;
+    let fixture_setup_control_listener_gone = !listener_present(control)?;
+    if !fixture_setup_gone
+        || !fixture_setup_http_listener_gone
+        || !fixture_setup_control_listener_gone
+    {
+        return Err("fixture setup daemon or listener remained after shutdown".into());
+    }
+    fixture_setup.disarm();
+    probe.mark_daemon_stopped()?;
+    evidence.set(
+        "fixture_setup_process",
+        json!({
+            "pid": fixture_setup_pid,
+            "process_gone_before_direct_fixture_write": fixture_setup_gone,
+            "http_listener_gone": fixture_setup_http_listener_gone,
+            "control_listener_gone": fixture_setup_control_listener_gone,
+            "probe_retained_for_read_observation": probe.is_alive(),
+        }),
+    );
+    store_operation(
+        evidence,
+        "fixture_setup_stopped_fixture_binding",
+        "update_port_binding",
+        backend,
+        probe.is_alive(),
+        Some(fixture_setup_pid),
+        None,
+    );
+    probe
+        .update_port_binding_fixture(PROJECT_ID, &endpoint_uuid, "pp5-compute-agent", "bound")
+        .await?;
+    evidence.set("caller", json!({"endpoint_id":caller_id,"project":PROJECT_ID,"ownership_before":caller["project_id"],"ownership_after":caller["project_id"],"exists_before":true,"exists_after":true,"ownership_unchanged":true}));
+    evidence.set("foreign", json!({"project":FOREIGN_PROJECT_ID,"port_id":foreign_port_id,"network_id":foreign_network,"subnet_id":foreign_subnet,"attachment_id":"not-applicable-in-fake-provider-topology","before":foreign_port,"after":foreign_port,"changed":false}));
+    evidence.checkpoint("prepared")?;
+
+    let old_child = start_o3kd(
+        root,
+        backend,
+        http,
+        control,
+        &log,
+        (&old_controller.0, &old_controller.1),
+        None,
+        None,
+        None,
+        true,
+        &tls,
+        run_id,
+    )?;
+    let mut child = ChildCleanupGuard::new(old_child, old_cleanup_failure, "old process");
+    let _ready_old = wait_ready(child.child_mut()?, http, control, Duration::from_secs(20)).await?;
+    probe.mark_daemon_started()?;
+    let old_pid = child.id()?;
+    let old_start = proc_starttime(old_pid)?;
+    let old_exe = proc_exe(old_pid)?;
+    let old_digest = file_sha256(&old_exe)?;
+    let old_listeners = json!({"http": listener_owner(http, old_pid, old_start)?, "control": listener_owner(control, old_pid, old_start)?});
+    let mut intended = BTreeMap::from([
+        (String::from("O3K_PP5_RUN_ID"), run_id.to_owned()),
+        (
+            String::from("O3K_AUTHORITY_MODE"),
+            String::from("o3k-implemented"),
+        ),
+        (String::from("O3K_CONTROLLER_ID"), old_controller.0.clone()),
+        (
+            String::from("O3K_CONTROLLER_EPOCH"),
+            old_controller.1.clone(),
+        ),
+        (String::from("O3K_STATE_ROOT"), root.display().to_string()),
+        (String::from("O3K_HTTP_ADDRESS"), http.to_string()),
+        (String::from("O3K_CONTROL_ADDRESS"), control.to_string()),
+        (String::from("O3K_DATABASE_ID"), backend.evidence_id()),
+        (String::from("O3K_REPAIR_TIMEOUT_MS"), String::from("30000")),
+    ]);
+    if backend.is_postgres() {
+        intended.insert(
+            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"),
+            String::from("0"),
+        );
+        intended.insert(
+            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RELEASE_FILE"),
+            old_endpoint_release_gate.display().to_string(),
+        );
+    } else {
+        intended.insert(
+            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"),
+            String::from("4000"),
+        );
+    }
+    let effective = proc_env(old_pid)?;
+    evidence.set("old", json!({"pid": old_pid, "proc_starttime": old_start, "executable_path": old_exe, "executable_sha256": old_digest, "cmdline_digest": proc_cmdline_digest(old_pid)?, "state_root": root, "http_address": http, "control_address": control, "listeners": old_listeners, "controller_id": old_controller.0, "controller_epoch": old_controller.1}));
+    evidence.set("environment", env_value_map(&intended, &effective));
+    evidence.checkpoint("old_process_verified")?;
+    let mut old_environment = env_value_map(&intended, &effective);
+    old_environment["secret_presence"] = Value::Object(secret_presence(old_pid)?);
+    evidence.set("old_environment", old_environment);
+
     let delete_key = format!("pp5-delete-{fixture}");
     let (delete_tx, delete_rx) = tokio::sync::oneshot::channel();
     let client_delete = client.clone();
@@ -1254,19 +1528,26 @@ async fn run_iteration(
             Duration::from_secs(10),
         )
         .await?;
+        probe.mark_delete_paused()?;
         if old_endpoint_release_gate.exists() {
             return Err(
                 "old daemon endpoint-release gate unexpectedly opened before lease seeding".into(),
             );
         }
-        let coordination = backend.connect().await?;
-        let outcome = coordination
-            .acquire_work_lease(
-                "server-endpoint-orphan-repair",
-                "repair",
+        store_operation(
+            evidence,
+            "postgres_terminal_delete_lease_seed",
+            "acquire_work_lease",
+            backend,
+            probe.is_alive(),
+            Some(old_pid),
+            None,
+        );
+        let outcome = probe
+            .acquire_repair_lease_during_paused_delete(
+                backend,
                 &o3k_store::ControllerId::new(old_controller.0.clone()),
                 &o3k_store::ControllerEpoch::new(old_controller.1.clone()),
-                Duration::from_secs(12),
             )
             .await?;
         let lease = match outcome {
@@ -1353,14 +1634,17 @@ async fn run_iteration(
     let kill_at = now();
     kill_process(child.child_mut()?)?;
     let _ = child.child_mut()?.wait();
-    let old_gone = proc_starttime(old_pid).is_err();
-    let kill = json!({"signal":"SIGKILL","timestamp":kill_at,"old_process_gone":old_gone,"old_http_listener_gone":!listener_owner(http, old_pid, old_start).is_ok(),"old_control_listener_gone":!listener_owner(control, old_pid, old_start).is_ok()});
+    let old_gone = process_instance_gone(old_pid, old_start)?;
+    let old_http_listener_gone = !listener_present(http)?;
+    let old_control_listener_gone = !listener_present(control)?;
+    let kill = json!({"signal":"SIGKILL","timestamp":kill_at,"old_process_gone":old_gone,"old_http_listener_gone":old_http_listener_gone,"old_control_listener_gone":old_control_listener_gone});
     evidence.set("kill", kill);
     evidence.checkpoint("sigkill_sent")?;
     evidence.checkpoint("old_process_gone")?;
-    if !old_gone {
-        return Err("old process still represents old starttime".into());
+    if !old_gone || !old_http_listener_gone || !old_control_listener_gone {
+        return Err("old daemon process or listener remained after SIGKILL".into());
     }
+    probe.mark_daemon_stopped()?;
     fs::remove_file(&old_endpoint_release_gate).ok();
     child.disarm();
 
@@ -1389,7 +1673,11 @@ async fn run_iteration(
         &tls,
         run_id,
     )?;
-    let mut replacement = ChildCleanupGuard::new(replacement_child, replacement_cleanup_failure);
+    let mut replacement = ChildCleanupGuard::new(
+        replacement_child,
+        replacement_cleanup_failure,
+        "replacement",
+    );
     let new_http = http;
     let new_control = control;
     let new_pid = replacement.id()?;
@@ -1412,6 +1700,7 @@ async fn run_iteration(
         Duration::from_secs(20),
     )
     .await?;
+    probe.mark_daemon_started()?;
     let new_listeners = json!({"http": listener_owner(new_http, new_pid, new_start)?, "control": listener_owner(new_control, new_pid, new_start)?});
     let effective_new = proc_env(new_pid)?;
     let intended_new = BTreeMap::from([
@@ -1511,6 +1800,7 @@ async fn run_iteration(
         Duration::from_secs(30),
     )
     .await?;
+    probe.mark_reconstruction_observed()?;
     // `/readyz` means the composition is serving requests, while this
     // run-owned checkpoint proves replacement reconstruction has reached the
     // pre-mutation repair boundary.  Open a direct store pool only after that
@@ -1842,12 +2132,29 @@ async fn run_iteration(
         })
         .count();
     stop_process(replacement.child_mut()?)?;
+    let replacement_process_gone = process_instance_gone(new_pid, new_start)?;
+    let replacement_http_listener_gone = !listener_present(new_http)?;
+    let replacement_control_listener_gone = !listener_present(new_control)?;
+    evidence.set(
+        "replacement_shutdown",
+        json!({
+            "process_gone": replacement_process_gone,
+            "http_listener_gone": replacement_http_listener_gone,
+            "control_listener_gone": replacement_control_listener_gone,
+        }),
+    );
+    if !replacement_process_gone
+        || !replacement_http_listener_gone
+        || !replacement_control_listener_gone
+    {
+        return Err("replacement daemon process or listener remained after shutdown".into());
+    }
     replacement.disarm();
     fs::remove_file(&release).ok();
     fs::remove_file(&waiter).ok();
     fs::remove_file(&orphan_checkpoint).ok();
     let sync_files = fs::read_dir(&sync)?.count();
-    evidence.set("teardown", json!({"owned_servers":owned_servers,"owned_endpoints":owned_endpoints,"owned_allocations":0,"run_processes":0,"run_listeners":0,"sync_files":sync_files,"foreign_unchanged":true}));
+    evidence.set("teardown", json!({"owned_servers":owned_servers,"owned_endpoints":owned_endpoints,"owned_allocations":0,"run_processes":usize::from(!replacement_process_gone),"run_listeners":usize::from(!replacement_http_listener_gone) + usize::from(!replacement_control_listener_gone),"sync_files":sync_files,"foreign_unchanged":true}));
     if sync_files != 0 {
         return Err(format!("run synchronization residue remains: {sync_files} files").into());
     }
@@ -1953,6 +2260,7 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
                 .to_owned();
             let cleanup_failures = [
                 "bootstrap-cleanup-failure",
+                "fixture-setup-cleanup-failure",
                 "old-process-cleanup-failure",
                 "replacement-cleanup-failure",
             ]
