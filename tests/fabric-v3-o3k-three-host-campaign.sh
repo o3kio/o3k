@@ -2159,7 +2159,7 @@ printf '%s\n' "$delete_started_at" >"$EVIDENCE/c-delete/operation/request-starte
 delete_status="$(curl --silent --show-error --max-time 60 -D "$EVIDENCE/c-delete/operation/response-headers.txt" \
   -o "$EVIDENCE/c-delete/operation/response-body.txt" -w '%{http_code}' -X DELETE \
   "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" \
-  -H "x-openstack-request-id: $delete_request_id")" \
+  -H "x-request-id: $delete_request_id")" \
   || fail "supported server C deletion request failed" "CLEANUP_DEFECT"
 printf '%s\n' "$delete_status" >"$EVIDENCE/c-delete/operation/http-status.txt"
 [[ "$delete_status" == 204 ]] || fail "supported server C deletion returned HTTP $delete_status" "CLEANUP_DEFECT"
@@ -2169,10 +2169,10 @@ python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$delete_request_id" "$delete_s
 import json,pathlib,sqlite3,sys
 database,request_id,started_at,server_id,out=sys.argv[1:]
 db=sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3); db.row_factory=sqlite3.Row
-rows=db.execute("SELECT event_id,timestamp,request_id,audit_id,service,action,resource_type,resource_id,operation_id,outcome,reason_category FROM audit_events WHERE service='compute' AND action='DeleteServer' AND resource_id=? AND timestamp>=? ORDER BY timestamp,event_id",(server_id,started_at)).fetchall()
+rows=db.execute("SELECT event_id,timestamp,request_id,audit_id,service,action,resource_type,resource_id,operation_id,outcome,reason_category FROM audit_events WHERE service='compute' AND action='compute:DeleteServer' AND resource_id=? AND request_id=? AND timestamp>=? ORDER BY timestamp,event_id",(server_id,request_id,started_at)).fetchall()
 events=[dict(row) for row in rows]
-matches=[event for event in events if event['service']=='compute' and event['action']=='DeleteServer'
-    and event['resource_id']==server_id and event['outcome']=='succeeded']
+matches=[event for event in events if event['service']=='compute' and event['action']=='compute:DeleteServer'
+    and event['resource_id']==server_id and event['request_id']==request_id and event['outcome']=='succeeded']
 assert matches, {'request_id':request_id,'started_at':started_at,'server_id':server_id,'events':events}
 pathlib.Path(out).write_text(json.dumps({'delete_request_id':request_id,'http_status':204,
     'request_started_at_utc':started_at,'terminal_state':'succeeded',

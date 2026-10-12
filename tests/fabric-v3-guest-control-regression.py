@@ -162,6 +162,16 @@ class GuestControlRegression(unittest.TestCase):
         first_predicate = durable_checks.index("assert all(latest[h]")
         self.assertLess(observed, first_predicate)
 
+    def test_c_delete_evidence_uses_native_request_id_and_qualified_audit_action(self):
+        delete_start = DRIVER.index('delete_request_id="$PREFIX-server-c-delete"')
+        delete_end = DRIVER.index('cp "$EVIDENCE/c-delete/operation/audit-terminal-state.json"', delete_start)
+        delete_evidence = DRIVER[delete_start:delete_end]
+        self.assertIn('"x-request-id: $delete_request_id"', delete_evidence)
+        self.assertNotIn('x-openstack-request-id', delete_evidence)
+        self.assertIn("action='compute:DeleteServer'", delete_evidence)
+        self.assertIn("event['request_id']==request_id", delete_evidence)
+        self.assertIn("event['outcome']=='succeeded'", delete_evidence)
+
     def test_teardown_checks_fabric_and_dhcp_owned_state_without_global_cleanup(self):
         self.assertIn("run-owned-provider-objects.json", DRIVER)
         self.assertIn("x.get('realms',{})", DRIVER)
