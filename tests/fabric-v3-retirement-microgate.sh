@@ -131,9 +131,10 @@ PY
       >"$EVIDENCE/provider-absence/host-c/${host}-dhcp-state.json" <<'PYDHCP'
 import json,pathlib,sys
 run,realm=sys.argv[1:]; root=pathlib.Path('/var/lib/o3k-fabric-v3')/run/'network/dhcp/fabric'/realm
-result={'root_exists':root.exists(),'files':{}}
+result={'root_exists':root.exists(),'root_is_symlink':root.is_symlink(),'files':{}}
 for name in ('state.json','fabric-dhcp-ownership.json','gateway-address-ownership.json','dnsmasq.conf','dnsmasq.leases'):
     path=root/name
+    if path.is_symlink(): result['files'][name]={'symlink':True}; continue
     if not path.is_file(): result['files'][name]=None; continue
     text=path.read_text()
     try: result['files'][name]=json.loads(text)
@@ -144,19 +145,39 @@ PYDHCP
       fail "DHCP provider state observation failed on host-$host" "ENVIRONMENT_GAP"
     fi
   done
+  ssh_vm "${MGMT_IP[c]}" "sudo -n true || exit 125; if sudo -n pgrep -a dnsmasq; then exit 0; else status=\$?; if [ \"\$status\" -eq 1 ]; then exit 0; else exit \"\$status\"; fi; fi" \
+    >"$EVIDENCE/provider-absence/host-c/dnsmasq-processes.txt" \
+    || fail "could not observe dnsmasq process state on host-c" "ENVIRONMENT_GAP"
   python3 - "$EVIDENCE/provider-absence/host-c/a-dhcp-state.json" \
-    "$EVIDENCE/provider-absence/host-c/c-dhcp-state.json" "${PORT_IDS[2]}" <<'PY' \
+    "$EVIDENCE/provider-absence/host-c/c-dhcp-state.json" "${PORT_IDS[2]}" \
+    "$EVIDENCE/provider-absence/host-c/dnsmasq-processes.txt" "$RUN_ID" "$realm_id" <<'PY' \
     || fail "C DHCP binding/process state is not withdrawn" "PROVIDER_ABSENCE_DEFECT"
-import json,sys
-authority,departing=(json.load(open(path)) for path in sys.argv[1:3]); c_port=sys.argv[3]
+import json,pathlib,sys
+authority,departing=(json.load(open(path)) for path in sys.argv[1:3])
+c_port,processes_path,run,realm=sys.argv[3:]
 authority_state=authority['files']['state.json'] or {}
 assert c_port not in (authority_state.get('bindings') or {}), authority_state
 assert c_port not in {binding.get('port_id') for binding in (authority_state.get('bindings') or {}).values()}, authority_state
+assert departing.get('root_exists') and departing.get('root_is_symlink') is False, departing
 local_state=departing['files']['state.json'] or {}
+assert isinstance(local_state,dict), local_state
 assert not local_state.get('bindings') and local_state.get('config') is None, local_state
 owner=departing['files']['fabric-dhcp-ownership.json']
 assert owner is not None, 'C DHCP ownership tombstone is missing'
+assert type(owner.get('schema_version')) is int and owner['schema_version']==1 and owner.get('realm_id')==realm, owner
+assert owner.get('local_host')=='host-c' and isinstance(owner.get('authority_host'),str) and owner['authority_host'] in {'host-a','host-b','host-c'}, owner
+assert owner.get('dhcp_enabled') is False and owner.get('gateway') is None, owner
 assert owner.get('withdrawn') is True and owner.get('pending') is False, owner
+for field in ('realm_generation','directory_generation','binding_generation','local_fabric_generation'):
+    assert type(owner.get(field)) is int and owner[field]>=0, owner
+assert owner['realm_generation']==owner['directory_generation'], owner
+assert type(owner.get('tenant_mtu')) is int and 1<=owner['tenant_mtu']<=65535, owner
+assert departing['files']['gateway-address-ownership.json'] is None, departing['files']
+config=departing['files']['dnsmasq.conf']
+assert config is None, 'non-authority host C must not retain rendered DHCP configuration'
+leases=departing['files']['dnsmasq.leases']
+assert leases is None, 'non-authority host C must not retain a DHCP lease file'
+assert run not in pathlib.Path(processes_path).read_text(), pathlib.Path(processes_path).read_text()
 PY
 
   if python3 "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence.py" \

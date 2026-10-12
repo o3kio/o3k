@@ -12,10 +12,11 @@ if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
 else
   ACCEPTANCE_GATE="FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE"
 fi
-PRODUCT_SHA=d7335166563d28084fbad5ac7f5d0f0e07e000a4
-PRODUCT_TREE=d5b75b5674009d8c135218556aa2177371e489a3
+PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
+PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871
 PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
-PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-retirement-provider-016
+PRODUCT_EXPECTED_PARENT_COMMITS="91500b3a101edaf41292502938e3796dc1da71ae 98ae87f527f3bd021cd18258239ab0f233e15130"
+PRODUCT_REMOTE_REF=refs/heads/main
 HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-microgate
 HOST_PREFLIGHT="$ROOT_DIR/tests/fabric-v3-host-preflight.py"
 # Guard the acceptance control contract before creating evidence or guests.
@@ -33,6 +34,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" \
   || { echo "HARNESS_GAP: durable server-delete evidence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-port-detach-evidence-test.py" \
   || { echo "HARNESS_GAP: durable port-detach evidence regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-dhcp-teardown-evidence-test.py" \
+  || { echo "HARNESS_GAP: Fabric DHCP teardown regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence-test.py" \
   || { echo "HARNESS_GAP: canonical endpoint retention evidence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" \
@@ -94,6 +97,14 @@ fail() {
 }
 
 need() { command -v "$1" >/dev/null 2>&1 || fail "required command missing: $1"; }
+select_management_addresses() {
+  local snapshot="$1" output="$2"
+  sudo -n true || return 1
+  # Only live ARP probing needs CAP_NET_RAW. Keep the driver and evidence-file
+  # ownership with the unprivileged runner; sudo writes JSON to inherited stdout.
+  sudo -n python3 "$HOST_PREFLIGHT" select \
+    --snapshot "$snapshot" --output /dev/stdout | tee "$output" >/dev/null
+}
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || fail "run ID is not safe for ownership-scoped paths" "HARNESS_GAP"
 ssh_opts=(-i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" -o ConnectTimeout=8)
 # The destination is local shell data; ssh intentionally expands remote command arguments client-side.
@@ -715,7 +726,9 @@ git -C "$ROOT_DIR" fetch --no-tags origin main \
   || fail "could not refresh protected main for candidate ancestry proof" "HARNESS_GAP"
 protected_main_tip="$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)"
 [[ "$protected_main_tip" == "$PRODUCT_PROTECTED_MAIN_BASE" ]] \
-  || fail "protected main no longer matches the frozen product successor base" "HARNESS_GAP"
+  || fail "protected main no longer matches the frozen product candidate" "HARNESS_GAP"
+[[ "$PRODUCT_SHA" == "$protected_main_tip" ]] \
+  || fail "frozen product candidate is not the exact protected main SHA" "HARNESS_GAP"
 product_remote_sha="$(git -C "$ROOT_DIR" ls-remote origin "$PRODUCT_REMOTE_REF" | awk 'NR==1 {print $1}')"
 [[ "$product_remote_sha" == "$PRODUCT_SHA" ]] \
   || fail "frozen product successor is not remotely visible at the exact SHA" "HARNESS_GAP"
@@ -734,8 +747,8 @@ git -C "$ROOT_DIR" fetch --no-tags origin "$PRODUCT_REMOTE_REF" \
 [[ "$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)" == "$PRODUCT_SHA" ]] \
   || fail "remote product successor ref does not match the frozen candidate SHA" "HARNESS_GAP"
 product_parents="$(git -C "$ROOT_DIR" show -s --format=%P "$PRODUCT_SHA")"
-[[ "$product_parents" == "$PRODUCT_PROTECTED_MAIN_BASE" ]] \
-  || fail "frozen product successor does not descend directly from the recorded protected main" "HARNESS_GAP"
+[[ "$product_parents" == "$PRODUCT_EXPECTED_PARENT_COMMITS" ]] \
+  || fail "protected-main merge ancestry differs from the recorded candidate lineage" "HARNESS_GAP"
 url_port "$API_PORT" || fail "API port is occupied: $API_PORT" "ENVIRONMENT_GAP"
 url_port "$CONTROL_PORT" || fail "compute control port is occupied: $CONTROL_PORT" "ENVIRONMENT_GAP"
 python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
@@ -743,10 +756,9 @@ python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
   >"$EVIDENCE/environment/host-inventory-before.stdout" \
   2>"$EVIDENCE/environment/host-inventory-before.stderr" \
   || fail "could not capture the pre-run libvirt/network inventory" "ENVIRONMENT_GAP"
-python3 "$HOST_PREFLIGHT" select \
-  --snapshot "$EVIDENCE/environment/host-inventory-before.json" \
-  --output "$EVIDENCE/environment/management-address-selection.json" \
-  >"$EVIDENCE/environment/management-address-selection.stdout" \
+select_management_addresses \
+  "$EVIDENCE/environment/host-inventory-before.json" \
+  "$EVIDENCE/environment/management-address-selection.json" \
   2>"$EVIDENCE/environment/management-address-selection.stderr" \
   || fail "fewer than three safe management addresses could be proved" "ENVIRONMENT_GAP"
 mapfile -t selected_addresses < <(python3 - "$EVIDENCE/environment/management-address-selection.json" <<'PYADDR'
@@ -841,10 +853,9 @@ if ! python3 "$HOST_PREFLIGHT" compare \
     >"$EVIDENCE/environment/qemu-preflight-inventory-comparison.json"; then
   fail "QEMU preflight did not restore the exact pre-run host inventory" "CLEANUP_DEFECT"
 fi
-python3 "$HOST_PREFLIGHT" select \
-  --snapshot "$EVIDENCE/environment/host-inventory-after-preflight.json" \
-  --output "$EVIDENCE/environment/management-address-selection-recheck.json" \
-  >"$EVIDENCE/environment/management-address-selection-recheck.stdout" \
+select_management_addresses \
+  "$EVIDENCE/environment/host-inventory-after-preflight.json" \
+  "$EVIDENCE/environment/management-address-selection-recheck.json" \
   2>"$EVIDENCE/environment/management-address-selection-recheck.stderr" \
   || fail "management address selection is no longer collision-safe" "ENVIRONMENT_GAP"
 python3 - "$EVIDENCE/environment/management-address-selection.json" \
@@ -2501,19 +2512,45 @@ for host in a b c; do
     fi
   done
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json 2>/dev/null || true" >"$EVIDENCE/teardown/host-$host-ownership.json"
-  ssh_vm "$address" "sudo find /var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp -maxdepth 3 -type f -print 2>/dev/null | sort" \
-    >"$EVIDENCE/teardown/host-$host-dhcp-files.txt"
-  ssh_vm "$address" "sudo find /var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp -name state.json -type f -print -exec cat {} \; 2>/dev/null" \
-    >"$EVIDENCE/teardown/host-$host-dhcp-state.txt"
-  ssh_vm "$address" "sudo find /var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp -name fabric-dhcp-ownership.json -type f -print -exec cat {} \; 2>/dev/null" \
-    >"$EVIDENCE/teardown/host-$host-dhcp-ownership.txt"
-  ssh_vm "$address" 'sudo pgrep -a dnsmasq || true' >"$EVIDENCE/teardown/host-$host-dnsmasq-processes.txt"
+  dhcp_root="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp"
+  ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 3 -printf '%y\\t%p\\t%s\\n' 2>/dev/null || sudo test ! -e '$dhcp_root'" \
+    >"$EVIDENCE/teardown/host-$host-dhcp-files.txt" \
+    || fail "could not capture run-owned DHCP filesystem inventory on host-$host" "ENVIRONMENT_GAP"
+  ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 3 -name state.json -type f -print -exec cat {} \; 2>/dev/null || sudo test ! -e '$dhcp_root'" \
+    >"$EVIDENCE/teardown/host-$host-dhcp-state.txt" \
+    || fail "could not capture DHCP service state on host-$host" "ENVIRONMENT_GAP"
+  ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 3 -name fabric-dhcp-ownership.json -type f -print -exec cat {} \; 2>/dev/null || sudo test ! -e '$dhcp_root'" \
+    >"$EVIDENCE/teardown/host-$host-dhcp-ownership.txt" \
+    || fail "could not capture DHCP ownership tombstone on host-$host" "ENVIRONMENT_GAP"
+  if ! ssh_vm "$address" "sudo -n true || exit 125; if sudo -n pgrep -a dnsmasq; then exit 0; else status=\$?; if [ \"\$status\" -eq 1 ]; then exit 0; else exit \"\$status\"; fi; fi" \
+    >"$EVIDENCE/teardown/host-$host-dnsmasq-processes.txt"; then
+    fail "could not observe dnsmasq process state on host-$host" "ENVIRONMENT_GAP"
+  fi
+  if ! ssh_vm "$address" "sudo python3 - '$RUN_ID' '$realm_id'" \
+    >"$EVIDENCE/teardown/host-$host-dhcp-rendered-files.json" <<'PYDHCPFILES'
+import json,pathlib,sys
+run,realm=sys.argv[1:]
+root=pathlib.Path('/var/lib/o3k-fabric-v3')/run/'network/dhcp/fabric'/realm
+result={}
+for name in ('dnsmasq.conf','dnsmasq.leases'):
+    path=root/name
+    if path.is_symlink():
+        result[name]={'symlink':True}
+    elif path.is_file():
+        result[name]=path.read_text()
+    else:
+        result[name]=None
+json.dump(result,sys.stdout,sort_keys=True); print()
+PYDHCPFILES
+  then
+    fail "could not capture rendered DHCP file state on host-$host" "ENVIRONMENT_GAP"
+  fi
   ssh_vm "$address" 'sudo ip -j -d link; sudo ip netns list; sudo bridge -j fdb; sudo nft list ruleset' \
     >"$EVIDENCE/teardown/host-$host-runtime-after.txt" \
     || fail "post-teardown provider runtime snapshot failed on host-$host" "ENVIRONMENT_GAP"
 done
 python3 - "$EVIDENCE/teardown" "$RUN_ID" "$EVIDENCE/teardown/run-owned-provider-objects.json" <<'PY' \
-  || fail "run-owned Fabric/DHCP provider state leaked after teardown" "CLEANUP_DEFECT"
+  || fail "run-owned Fabric provider state remains after teardown" "CLEANUP_DEFECT"
 import json,pathlib,re,sys
 root=pathlib.Path(sys.argv[1]); run=sys.argv[2]; expected=json.loads(pathlib.Path(sys.argv[3]).read_text())
 for path in root.glob('host-*-ownership.json'):
@@ -2525,21 +2562,31 @@ for host,record in expected.items():
     for name in record['endpoint_taps']+record['links']:
         assert not re.search(rf'(?m)^\s*\d+:\s+{re.escape(name)}(?:@|:|\s)',runtime), (host,name)
     assert record['namespace'] not in runtime, (host,record['namespace'])
-    dhcp=(root/f'host-{host}-dhcp-state.txt').read_text()
-    states=re.findall(r'(?m)^\{.*?^\}',dhcp,re.S)
-    for state in states:
-        parsed=json.loads(state)
-        assert parsed.get('config') is None and not parsed.get('bindings'), (host,parsed)
-    ownership=(root/f'host-{host}-dhcp-ownership.txt').read_text()
-    dhcp_owners=re.findall(r'(?m)^\{.*?^\}',ownership,re.S)
-    for owner in dhcp_owners:
-        parsed=json.loads(owner)
-        assert parsed.get('withdrawn') is True and parsed.get('pending') is False, (host,parsed)
-    owned=(root/f'host-{host}-dhcp-files.txt').read_text()
-    assert f'/var/lib/o3k-fabric-v3/{run}/network/dhcp/' not in owned or 'state.json' in owned, (host,owned)
     processes=(root/f'host-{host}-dnsmasq-processes.txt').read_text()
-    assert run not in processes, (host,processes)
+    assert run not in processes, (host,'run-owned dnsmasq process remains')
 PY
+for host in a b c; do
+  expected_config="-"
+  [[ "$host" != a ]] || expected_config="$EVIDENCE/attachments/dhcp-authority.conf"
+  if python3 "$ROOT_DIR/tests/fabric_v3_dhcp_teardown_evidence.py" \
+    "$RUN_ID" "$realm_id" "$host" \
+    "$EVIDENCE/teardown/host-$host-dhcp-files.txt" \
+    "$EVIDENCE/teardown/host-$host-dhcp-state.txt" \
+    "$EVIDENCE/teardown/host-$host-dhcp-ownership.txt" \
+    "$EVIDENCE/teardown/host-$host-dhcp-rendered-files.json" \
+    "$expected_config" \
+    >"$EVIDENCE/teardown/host-$host-dhcp-teardown-observation.json" \
+    2>"$EVIDENCE/teardown/host-$host-dhcp-teardown-observation.stderr"; then
+    :
+  else
+    evidence_status=$?
+    case "$evidence_status" in
+      1) fail "run-owned DHCP provider state remains after teardown on host-$host" "CLEANUP_DEFECT" ;;
+      2) fail "DHCP teardown observation is incomplete on host-$host; see host-$host-dhcp-teardown-observation.stderr" "HARNESS_GAP" ;;
+      *) fail "DHCP teardown validator exited unexpectedly ($evidence_status) on host-$host" "HARNESS_GAP" ;;
+    esac
+  fi
+done
 date -u +%FT%TZ >"$EVIDENCE/teardown/provider-absence-observed-at.txt"
 python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" "$NETWORK_ID" \
   "$EVIDENCE/teardown/provider-absence-observed-at.txt" \
