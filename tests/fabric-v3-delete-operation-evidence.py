@@ -41,16 +41,19 @@ def capture(database: Path, server_id: str, started_at: str, http_status: str) -
         if valid_start is None:
             raise HarnessEvidenceError("DELETE request start time is invalid")
 
+        # The server ID is unique to this run and the controller database is
+        # freshly provisioned. Do not correlate by timestamp: SQLite stores
+        # operation created_at at whole-second precision, while the runner
+        # records a higher-resolution request start time.
         operations = connection.execute(
             """
             SELECT id, resource_id, kind, state, error_category, created_at
             FROM operations
             WHERE resource_id = ?
               AND kind = 'lifecycle:delete'
-              AND julianday(created_at) >= julianday(?)
             ORDER BY created_at, id
             """,
-            (server_id, started_at),
+            (server_id,),
         ).fetchall()
         if len(operations) != 1 or operations[0]["state"] != "succeeded":
             raise LifecycleEvidenceError(
@@ -66,10 +69,9 @@ def capture(database: Path, server_id: str, started_at: str, http_status: str) -
               AND action = 'compute:DeleteServer'
               AND resource_type = 'compute:server'
               AND resource_id = ?
-              AND julianday(timestamp) >= julianday(?)
             ORDER BY timestamp, event_id
             """,
-            (server_id, started_at),
+            (server_id,),
         ).fetchall()
         if len(audit_events) != 1 or audit_events[0]["outcome"] != "succeeded":
             raise LifecycleEvidenceError(

@@ -12,7 +12,7 @@ import unittest
 HELPER = Path(__file__).with_name("fabric-v3-delete-operation-evidence.py")
 SERVER_ID = "00000000-0000-4000-8000-000000000103"
 DELETE_OPERATION_ID = "00000000-0000-4000-8000-000000000203"
-STARTED_AT = "2026-10-12T11:35:35Z"
+STARTED_AT = "2026-10-12T11:35:35.891701430Z"
 
 
 class DeleteOperationEvidenceTests(unittest.TestCase):
@@ -61,7 +61,7 @@ class DeleteOperationEvidenceTests(unittest.TestCase):
                 "INSERT INTO audit_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     "00000000-0000-4000-8000-000000000303",
-                    "2026-10-12T11:35:35.250000Z",
+                    "2026-10-12T11:35:35.925000Z",
                     "generated-request-id-not-the-client-label",
                     "00000000-0000-4000-8000-000000000403",
                     "compute",
@@ -91,7 +91,7 @@ class DeleteOperationEvidenceTests(unittest.TestCase):
             check=False,
         )
 
-    def test_fractional_audit_time_and_generated_request_id_are_accepted(self):
+    def test_second_precision_operation_and_fractional_audit_time_are_accepted(self):
         self._insert_delete()
 
         result = self._run()
