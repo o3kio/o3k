@@ -23,6 +23,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-host-preflight-test.py" \
   || { echo "HARNESS_GAP: live libvirt/address preflight regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-retirement-evidence-test.py" \
   || { echo "HARNESS_GAP: durable retirement evidence regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" \
+  || { echo "HARNESS_GAP: durable server-delete evidence regression failed" >&2; exit 1; }
 bash -n "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" \
   || { echo "HARNESS_GAP: durable retirement observer syntax failed" >&2; exit 1; }
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
@@ -290,10 +292,13 @@ cp "$ROOT_DIR/tests/fabric-v3-install-agent-host.sh" "$EVIDENCE/environment/inst
 cp "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" "$EVIDENCE/environment/boundary-capture-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-retirement-evidence.py" "$EVIDENCE/environment/retirement-evidence-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-retirement-evidence-test.py" "$EVIDENCE/environment/retirement-evidence-test.py"
+cp "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" "$EVIDENCE/environment/delete-operation-evidence-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" "$EVIDENCE/environment/delete-operation-evidence-test.py"
 cp "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" "$EVIDENCE/environment/retirement-microgate-helper.sh"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
 sha256sum "$HOST_PREFLIGHT" >"$EVIDENCE/environment/host-preflight-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-evidence.py" >"$EVIDENCE/environment/retirement-evidence-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" >"$EVIDENCE/environment/delete-operation-evidence-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" >"$EVIDENCE/environment/retirement-microgate-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" >"$EVIDENCE/environment/owned-domain-storage-check.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"
@@ -2153,31 +2158,25 @@ print()
 PY
 ssh_vm "${MGMT_IP[c]}" 'sudo nft list ruleset' >"$EVIDENCE/endpoint-removal/c-nft-before.txt" \
   || fail "C anti-spoof pre-removal state unavailable" "ENVIRONMENT_GAP"
-delete_request_id="$PREFIX-server-c-delete"
-delete_started_at="$(date -u +%FT%TZ)"
+delete_started_at="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
 printf '%s\n' "$delete_started_at" >"$EVIDENCE/c-delete/operation/request-started-at-utc.txt"
 delete_status="$(curl --silent --show-error --max-time 60 -D "$EVIDENCE/c-delete/operation/response-headers.txt" \
   -o "$EVIDENCE/c-delete/operation/response-body.txt" -w '%{http_code}' -X DELETE \
-  "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" \
-  -H "x-request-id: $delete_request_id")" \
+  "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN")" \
   || fail "supported server C deletion request failed" "CLEANUP_DEFECT"
 printf '%s\n' "$delete_status" >"$EVIDENCE/c-delete/operation/http-status.txt"
 [[ "$delete_status" == 204 ]] || fail "supported server C deletion returned HTTP $delete_status" "CLEANUP_DEFECT"
-python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$delete_request_id" "$delete_started_at" "${SERVER_IDS[2]}" \
-  "$EVIDENCE/c-delete/operation/audit-terminal-state.json" <<'PY' \
-  || fail "supported C deletion lacks a successful durable audit operation record" "CLEANUP_DEFECT"
-import json,pathlib,sqlite3,sys
-database,request_id,started_at,server_id,out=sys.argv[1:]
-db=sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3); db.row_factory=sqlite3.Row
-rows=db.execute("SELECT event_id,timestamp,request_id,audit_id,service,action,resource_type,resource_id,operation_id,outcome,reason_category FROM audit_events WHERE service='compute' AND action='compute:DeleteServer' AND resource_id=? AND request_id=? AND timestamp>=? ORDER BY timestamp,event_id",(server_id,request_id,started_at)).fetchall()
-events=[dict(row) for row in rows]
-matches=[event for event in events if event['service']=='compute' and event['action']=='compute:DeleteServer'
-    and event['resource_id']==server_id and event['request_id']==request_id and event['outcome']=='succeeded']
-assert matches, {'request_id':request_id,'started_at':started_at,'server_id':server_id,'events':events}
-pathlib.Path(out).write_text(json.dumps({'delete_request_id':request_id,'http_status':204,
-    'request_started_at_utc':started_at,'terminal_state':'succeeded',
-    'audit_events':matches},sort_keys=True,indent=2)+'\n')
-PY
+if python3 "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" \
+  "$EVIDENCE/controller-data/o3k.sqlite" "${SERVER_IDS[2]}" "$delete_started_at" "$delete_status" \
+  "$EVIDENCE/c-delete/operation/audit-terminal-state.json"; then
+  :
+else
+  evidence_status=$?
+  if [[ "$evidence_status" == 2 ]]; then
+    fail "supported C deletion evidence source could not be read safely" "HARNESS_GAP"
+  fi
+  fail "supported C deletion lacks successful durable lifecycle and audit records" "CLEANUP_DEFECT"
+fi
 cp "$EVIDENCE/c-delete/operation/audit-terminal-state.json" "$EVIDENCE/endpoint-removal/server-c-delete.txt"
 printf 'observed_at_utc,state,revision,command_id\n' >"$EVIDENCE/endpoint-removal/c-remove-work-row-observations.csv"
 printf 'attempt,server_absent,c_remove_found,c_remove_state\n' >"$EVIDENCE/endpoint-removal/convergence-attempts.csv"

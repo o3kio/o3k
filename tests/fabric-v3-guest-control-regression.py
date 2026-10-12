@@ -13,6 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parent
 DRIVER = (ROOT / "fabric-v3-o3k-three-host-campaign.sh").read_text()
 RETIREMENT = (ROOT / "fabric-v3-retirement-microgate.sh").read_text()
 RETIREMENT_EVIDENCE = (ROOT / "fabric-v3-retirement-evidence.py").read_text()
+DELETE_OPERATION_EVIDENCE = (ROOT / "fabric-v3-delete-operation-evidence.py").read_text()
 CONTRACT = (ROOT.parent / "contracts/real-host-acceptance-evidence.md").read_text()
 SPEC = importlib.util.spec_from_file_location("guest_control", ROOT / "fabric-v3-guest-control.py")
 assert SPEC and SPEC.loader
@@ -162,15 +163,20 @@ class GuestControlRegression(unittest.TestCase):
         first_predicate = durable_checks.index("assert all(latest[h]")
         self.assertLess(observed, first_predicate)
 
-    def test_c_delete_evidence_uses_native_request_id_and_qualified_audit_action(self):
-        delete_start = DRIVER.index('delete_request_id="$PREFIX-server-c-delete"')
+    def test_c_delete_evidence_uses_durable_operation_and_generated_audit_identity(self):
+        delete_start = DRIVER.index('delete_started_at="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"')
         delete_end = DRIVER.index('cp "$EVIDENCE/c-delete/operation/audit-terminal-state.json"', delete_start)
         delete_evidence = DRIVER[delete_start:delete_end]
-        self.assertIn('"x-request-id: $delete_request_id"', delete_evidence)
-        self.assertNotIn('x-openstack-request-id', delete_evidence)
-        self.assertIn("action='compute:DeleteServer'", delete_evidence)
-        self.assertIn("event['request_id']==request_id", delete_evidence)
-        self.assertIn("event['outcome']=='succeeded'", delete_evidence)
+        self.assertNotIn("delete_request_id", delete_evidence)
+        self.assertNotIn("x-request-id:", delete_evidence)
+        self.assertIn("fabric-v3-delete-operation-evidence.py", delete_evidence)
+        self.assertIn("kind = 'lifecycle:delete'", DELETE_OPERATION_EVIDENCE)
+        self.assertIn("action = 'compute:DeleteServer'", DELETE_OPERATION_EVIDENCE)
+        self.assertIn("julianday(timestamp) >= julianday(?)", DELETE_OPERATION_EVIDENCE)
+        self.assertIn('"request_id": audit_event["request_id"]', DELETE_OPERATION_EVIDENCE)
+        self.assertNotIn("request_id = ?", DELETE_OPERATION_EVIDENCE)
+        self.assertIn('operations[0]["state"] != "succeeded"', DELETE_OPERATION_EVIDENCE)
+        self.assertIn('audit_events[0]["outcome"] != "succeeded"', DELETE_OPERATION_EVIDENCE)
 
     def test_teardown_checks_fabric_and_dhcp_owned_state_without_global_cleanup(self):
         self.assertIn("run-owned-provider-objects.json", DRIVER)
