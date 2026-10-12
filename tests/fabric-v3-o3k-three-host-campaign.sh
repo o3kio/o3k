@@ -770,10 +770,10 @@ for host in a b c; do
   [[ ! -e "$disk" && ! -e "$seed" ]] || fail "fresh guest disk/seed collision for $host" "ENVIRONMENT_GAP"
   domain_uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   FRESH_DOMAINS+=("$domain")
+  mac="${MGMT_MAC[$host]}"
   printf '%s\t%s\t%s\t%s\t%s\n' "compute-$host" "$domain" "$address" "$mac" "$domain_uuid" \
     >>"$EVIDENCE/environment/inventory.tsv"
   mkdir -m 0700 "$ws"
-  mac="${MGMT_MAC[$host]}"
   cat >"$ws/user-data" <<EOF
 #cloud-config
 hostname: compute-$host
