@@ -7,6 +7,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CAMPAIGN_MODE="${1:-full}"
 [[ "$CAMPAIGN_MODE" == full || "$CAMPAIGN_MODE" == departure-micro ]] \
   || { echo "HARNESS_GAP: unsupported campaign mode: $CAMPAIGN_MODE" >&2; exit 1; }
+if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
+  ACCEPTANCE_GATE="FABRIC V3 DURABLE HOST RETIREMENT MICROGATE"
+else
+  ACCEPTANCE_GATE="FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE"
+fi
 PRODUCT_SHA=d7335166563d28084fbad5ac7f5d0f0e07e000a4
 PRODUCT_TREE=d5b75b5674009d8c135218556aa2177371e489a3
 PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
@@ -593,11 +598,13 @@ cleanup_on_success() {
       [[ -n "$cleanup_failure" ]] || cleanup_failure="post-cleanup host inventory is unavailable"
     fi
     python3 - "$EVIDENCE/teardown/cleanup-status.json" "$api_ok" "$guest_ok" \
-      "$controller_ok" "$host_snapshot_ok" "$foreign_ok" "$capture_ok" "$pool_refresh_ok" <<'PYSTATUS'
+      "$controller_ok" "$host_snapshot_ok" "$foreign_ok" "$capture_ok" "$pool_refresh_ok" \
+      "$ACCEPTANCE_GATE" <<'PYSTATUS'
 import json,sys
-path,api,guests,controller,host,foreign,capture,pool_refresh=sys.argv[1:]
+path,api,guests,controller,host,foreign,capture,pool_refresh,acceptance_gate=sys.argv[1:]
 def status(value): return 'PASS' if value=='1' else ('FAIL' if value=='0' else 'NOT_APPLICABLE')
 value={
+  'acceptance_gate': acceptance_gate,
   'api_resources': status(api),
   'owned_guests_and_storage': status(guests),
   'controller_process': status(controller),
@@ -619,21 +626,21 @@ m=json.loads(pathlib.Path(manifest).read_text()) if pathlib.Path(manifest).exist
 try: r=json.loads(pathlib.Path(result).read_text())
 except (OSError,json.JSONDecodeError): r={}
 m.update(result=r.get('result','FAIL'),ended_at_utc=pathlib.Path(ended).read_text().strip())
-for key in ('first_failure','classification','harness_sha','harness_tree','product_sha','product_tree'):
+for key in ('acceptance_gate','first_failure','classification','harness_sha','harness_tree','product_sha','product_tree'):
     if key in r: m[key]=r[key]
 pathlib.Path(manifest).write_text(json.dumps(m,sort_keys=True,indent=2)+'\n')
 PYFINAL
     python3 - "$EVIDENCE/result.json" "$EVIDENCE/manifest.json" "$EVIDENCE/teardown/cleanup-status.json" \
       "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$CAMPAIGN_FAILURE" "$CLASSIFICATION" \
-      "$cleanup_problem" "$cleanup_failure" "$cleanup_classification" <<'PYRESULT'
+      "$cleanup_problem" "$cleanup_failure" "$cleanup_classification" "$ACCEPTANCE_GATE" <<'PYRESULT'
 import json,pathlib,sys
-result_path,manifest_path,status_path,run,product,tree,original_failure,original_classification,cleanup_problem,cleanup_failure,cleanup_classification=sys.argv[1:]
+result_path,manifest_path,status_path,run,product,tree,original_failure,original_classification,cleanup_problem,cleanup_failure,cleanup_classification,acceptance_gate=sys.argv[1:]
 path=pathlib.Path(result_path)
 try: result=json.loads(path.read_text())
 except (OSError,json.JSONDecodeError): result={}
 try: cleanup=json.loads(pathlib.Path(status_path).read_text())
 except (OSError,json.JSONDecodeError): cleanup={}
-result.update({'run_id':run,'product_sha':product,'product_tree':tree,'cleanup':cleanup})
+result.update({'acceptance_gate':acceptance_gate,'run_id':run,'product_sha':product,'product_tree':tree,'cleanup':cleanup})
 if original_failure:
     result['result']='FAIL'; result['first_failure']=original_failure
     result['classification']=original_classification or 'HARNESS_GAP'
@@ -650,11 +657,24 @@ elif result.get('result')!='PASS':
 path.write_text(json.dumps(result,sort_keys=True,indent=2)+'\n')
 manifest_path=pathlib.Path(manifest_path)
 manifest=json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-manifest.update({'result':result['result'],'cleanup':cleanup})
+manifest.update({'acceptance_gate':acceptance_gate,'result':result['result'],'cleanup':cleanup})
 if result.get('first_failure'): manifest['first_failure']=result['first_failure']
 if result.get('classification'): manifest['classification']=result['classification']
 manifest_path.write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n')
 PYRESULT
+    if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
+      result_status="$(python3 - "$EVIDENCE/result.json" <<'PYSTATUS'
+import json,pathlib,sys
+try: print(json.loads(pathlib.Path(sys.argv[1]).read_text()).get('result','FAIL'))
+except (OSError,json.JSONDecodeError): print('FAIL')
+PYSTATUS
+)"
+      if [[ "$result_status" == PASS ]]; then
+        echo "FABRIC V3 DURABLE HOST RETIREMENT MICROGATE: PASS"
+      else
+        echo "FABRIC V3 DURABLE HOST RETIREMENT MICROGATE: FAIL"
+      fi
+    fi
   tar --exclude="$(basename "$EVIDENCE")/management/campaign_ed25519" \
       --exclude="$(basename "$EVIDENCE")/management/probe_ed25519" \
       --exclude="$(basename "$EVIDENCE")/management/tls/certs" \
@@ -2599,6 +2619,8 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/g
 CAMPAIGN_TEARDOWN_PASS=1
 
 cat >"$EVIDENCE/result.json" <<JSON
-{"result":"PASS","run_id":"$RUN_ID","product_sha":"$PRODUCT_SHA","product_tree":"$PRODUCT_TREE","harness_sha":"$(git -C "$ROOT_DIR" rev-parse HEAD)","fabric_domain_id":"$FABRIC_DOMAIN_ID","servers":["${SERVER_IDS[0]}","${SERVER_IDS[1]}","${SERVER_IDS[2]}"],"teardown":"PASS"}
+{"result":"PASS","acceptance_gate":"$ACCEPTANCE_GATE","run_id":"$RUN_ID","product_sha":"$PRODUCT_SHA","product_tree":"$PRODUCT_TREE","harness_sha":"$(git -C "$ROOT_DIR" rev-parse HEAD)","fabric_domain_id":"$FABRIC_DOMAIN_ID","servers":["${SERVER_IDS[0]}","${SERVER_IDS[1]}","${SERVER_IDS[2]}"],"teardown":"PASS"}
 JSON
-echo "FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE: PASS"
+if [[ "$CAMPAIGN_MODE" == full ]]; then
+  echo "FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE: PASS"
+fi
