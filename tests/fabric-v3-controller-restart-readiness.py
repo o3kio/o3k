@@ -11,6 +11,61 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+def capture_agent_readiness(
+    response_text: str, host: str, expected_agent_id: str
+) -> tuple[dict[str, Any], int]:
+    """Normalize one live agent /readyz response without retaining response details."""
+    base: dict[str, Any] = {
+        "schema_version": 1,
+        "artifact_type": "fabric-v3-current-compute-agent-readiness",
+        "host": host,
+        "observer": "ssh_sudo_local_readyz",
+    }
+    if not host.strip() or not expected_agent_id.strip():
+        return {**base, "status": "failed", "diagnostic": "missing_expected_identity"}, 2
+    match = re.search(r"(?:\A|\n)__O3K_HTTP_STATUS=(\d{3})\s*\Z", response_text)
+    if not match:
+        return {**base, "status": "failed", "diagnostic": "missing_http_status"}, 2
+
+    http_status = int(match.group(1))
+    evidence = {**base, "http_status": http_status}
+    if http_status == 503:
+        return {**evidence, "status": "pending", "diagnostic": "agent_not_ready"}, 1
+    if http_status != 200:
+        return {**evidence, "status": "failed", "diagnostic": "unexpected_http_status"}, 4
+
+    body = response_text[: match.start()].rstrip("\r\n")
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError:
+        return {**evidence, "status": "failed", "diagnostic": "malformed_ready_json"}, 4
+    if not isinstance(value, dict):
+        return {**evidence, "status": "failed", "diagnostic": "malformed_ready_json"}, 4
+    if value.get("status") != "ready":
+        return {**evidence, "status": "failed", "diagnostic": "invalid_ready_status"}, 4
+
+    agent_id = value.get("agent_id")
+    epoch = value.get("agent_epoch")
+    if not isinstance(agent_id, str) or not agent_id.strip():
+        return {**evidence, "status": "failed", "diagnostic": "missing_agent_id"}, 4
+    if agent_id != expected_agent_id:
+        return {
+            **evidence,
+            "status": "failed",
+            "diagnostic": "agent_identity_changed",
+            "expected_agent_id": expected_agent_id,
+            "observed_agent_id": agent_id,
+        }, 3
+    if not isinstance(epoch, str) or not epoch.strip():
+        return {**evidence, "status": "failed", "diagnostic": "missing_agent_epoch"}, 4
+    return {
+        **evidence,
+        "status": "ready",
+        "agent_id": agent_id,
+        "agent_epoch": epoch,
+    }, 0
+
+
 def _field(line: str, name: str) -> str | None:
     match = re.search(
         rf"(?:^|\s){re.escape(name)}=(?:\"([^\"]*)\"|'([^']*)'|([^\s,]+))",
@@ -103,14 +158,55 @@ def parse_readiness(
     }
 
 
+def _write_evidence(path: pathlib.Path, evidence: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log", required=True, type=pathlib.Path)
-    parser.add_argument("--controller-id", required=True)
-    parser.add_argument("--controller-epoch", required=True)
-    parser.add_argument("--agent", action="append", required=True, metavar="ID=EPOCH")
-    parser.add_argument("--output", required=True, type=pathlib.Path)
+    commands = parser.add_subparsers(dest="command", required=True)
+    capture = commands.add_parser("capture-agent-ready")
+    capture.add_argument("--response", required=True, type=pathlib.Path)
+    capture.add_argument("--host", required=True)
+    capture.add_argument("--expected-agent-id", required=True)
+    capture.add_argument("--output", required=True, type=pathlib.Path)
+
+    observe = commands.add_parser("observe-controller-restart")
+    observe.add_argument("--log", required=True, type=pathlib.Path)
+    observe.add_argument("--controller-id", required=True)
+    observe.add_argument("--controller-epoch", required=True)
+    observe.add_argument("--agent", action="append", required=True, metavar="ID=EPOCH")
+    observe.add_argument("--output", required=True, type=pathlib.Path)
     args = parser.parse_args()
+
+    if args.command == "capture-agent-ready":
+        try:
+            response_text = args.response.read_text(encoding="utf-8")
+        except OSError as error:
+            evidence = {
+                "schema_version": 1,
+                "artifact_type": "fabric-v3-current-compute-agent-readiness",
+                "host": args.host,
+                "observer": "ssh_sudo_local_readyz",
+                "status": "failed",
+                "diagnostic": f"response_read_{type(error).__name__}",
+            }
+            _write_evidence(args.output, evidence)
+            print("cannot read current agent readiness response", file=sys.stderr)
+            return 2
+        evidence, status = capture_agent_readiness(
+            response_text, args.host, args.expected_agent_id
+        )
+        _write_evidence(args.output, evidence)
+        if status == 2:
+            print("current agent readiness response is invalid", file=sys.stderr)
+        elif status == 3:
+            print("current compute agent identity changed after controller restart", file=sys.stderr)
+        elif status == 4:
+            print("current compute agent returned an invalid readiness response", file=sys.stderr)
+        return status
+
     if not args.controller_id.strip() or not args.controller_epoch.strip():
         parser.error("controller identity and epoch must be non-empty")
     expected_agents: dict[str, str] = {}
@@ -128,8 +224,7 @@ def main() -> int:
         print(f"cannot read replacement controller log: {type(error).__name__}", file=sys.stderr)
         return 2
     evidence = parse_readiness(log_text, args.controller_id, args.controller_epoch, expected_agents)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    _write_evidence(args.output, evidence)
     return 0 if evidence["status"] == "passed" else 1
 
 
