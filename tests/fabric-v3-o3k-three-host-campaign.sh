@@ -25,6 +25,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-retirement-evidence-test.py" \
   || { echo "HARNESS_GAP: durable retirement evidence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" \
   || { echo "HARNESS_GAP: durable server-delete evidence regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-port-detach-evidence-test.py" \
+  || { echo "HARNESS_GAP: durable port-detach evidence regression failed" >&2; exit 1; }
 bash -n "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" \
   || { echo "HARNESS_GAP: durable retirement observer syntax failed" >&2; exit 1; }
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
@@ -294,11 +296,14 @@ cp "$ROOT_DIR/tests/fabric-v3-retirement-evidence.py" "$EVIDENCE/environment/ret
 cp "$ROOT_DIR/tests/fabric-v3-retirement-evidence-test.py" "$EVIDENCE/environment/retirement-evidence-test.py"
 cp "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" "$EVIDENCE/environment/delete-operation-evidence-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" "$EVIDENCE/environment/delete-operation-evidence-test.py"
+cp "$ROOT_DIR/tests/fabric-v3-port-detach-evidence.py" "$EVIDENCE/environment/port-detach-evidence-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-port-detach-evidence-test.py" "$EVIDENCE/environment/port-detach-evidence-test.py"
 cp "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" "$EVIDENCE/environment/retirement-microgate-helper.sh"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
 sha256sum "$HOST_PREFLIGHT" >"$EVIDENCE/environment/host-preflight-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-evidence.py" >"$EVIDENCE/environment/retirement-evidence-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" >"$EVIDENCE/environment/delete-operation-evidence-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-port-detach-evidence.py" >"$EVIDENCE/environment/port-detach-evidence-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" >"$EVIDENCE/environment/retirement-microgate-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" >"$EVIDENCE/environment/owned-domain-storage-check.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"
@@ -2240,17 +2245,17 @@ assert port.get('status')=='DOWN', port
 assert not port.get('device_id'), port
 assert not port.get('binding:host_id'), port
 PY
-python3 - "$EVIDENCE/controller-data/o3k.sqlite" "${PORT_IDS[2]}" "$EVIDENCE/c-delete/port/durable-after.json" <<'PY' \
-  || fail "C port durable binding tombstone is not unbound DOWN" "PORT_STATUS_DEFECT"
-import json,pathlib,sqlite3,sys
-database,port_id,out=sys.argv[1:]
-db=sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3); db.row_factory=sqlite3.Row
-row=db.execute('SELECT id,status,binding_host,binding_state FROM network_ports WHERE id=?',(port_id,)).fetchone()
-assert row is not None, port_id
-value=dict(row)
-assert value['binding_host'] is None and value['binding_state']=='down' and value['status']=='down', value
-pathlib.Path(out).write_text(json.dumps(value,sort_keys=True,indent=2)+'\n')
-PY
+if python3 "$ROOT_DIR/tests/fabric-v3-port-detach-evidence.py" \
+  "$EVIDENCE/controller-data/o3k.sqlite" "${PORT_IDS[2]}" \
+  "$EVIDENCE/c-delete/port/durable-after.json"; then
+  :
+else
+  durable_port_status=$?
+  if (( durable_port_status == 1 )); then
+    fail "C port durable binding tombstone is not unbound DOWN" "PORT_STATUS_DEFECT"
+  fi
+  fail "C port durable binding observation unavailable" "HARNESS_GAP"
+fi
 capture_c_remove_work_row "$realm_id" >"$EVIDENCE/endpoint-removal/c-remove-work-row-final-state.txt" \
   || fail "final C Remove durable work read failed" "HARNESS_GAP"
 ssh_vm "${MGMT_IP[c]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json" \
