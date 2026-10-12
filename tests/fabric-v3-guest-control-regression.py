@@ -142,6 +142,9 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("fabric-v3-port-detach-evidence.py", DRIVER)
         self.assertIn("assert port.get('status')=='DOWN'", DRIVER)
         self.assertNotIn("value['status']=='down'", DRIVER)
+        self.assertIn("fabric-v3-canonical-endpoint-retention-evidence.py", RETIREMENT)
+        self.assertIn("c-delete/port/canonical-endpoint-state.json", RETIREMENT)
+        self.assertNotIn("departed_endpoint_absent", RETIREMENT)
         self.assertIn("remove.get('local_host')=='host-c'", DRIVER)
         self.assertIn("row.get('local_host')=='host-c'", DRIVER)
         self.assertIn("command.get('plan',{}).get('fabric',{}).get('local_host')=='host-c'", DRIVER)
@@ -149,6 +152,22 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("A/B traffic failed after C retirement", RETIREMENT)
         self.assertIn("B/A traffic failed after C retirement", RETIREMENT)
         self.assertIn("local_host", RETIREMENT_EVIDENCE)
+
+    def test_canonical_endpoint_retention_is_observed_after_remove_before_port_delete(self):
+        self.assertIn("source \"$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh\"", DRIVER)
+        delete_c = DRIVER.index('[[ "$delete_status" == 204 ]]')
+        retirement_call = DRIVER.index('run_retirement_microgate "$REALM_ID"')
+        port_delete = DRIVER.index('for id in "${PORT_IDS[@]}"; do curl')
+        self.assertLess(delete_c, retirement_call)
+        self.assertLess(retirement_call, port_delete)
+        self.assertIn(
+            '"$EVIDENCE/c-delete/port/canonical-endpoint-state.json"',
+            RETIREMENT,
+        )
+        self.assertIn(
+            '"$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence.py"',
+            RETIREMENT,
+        )
 
     def test_retirement_observer_uses_owned_namespace_and_accepts_namespace_absence(self):
         self.assertIn("fabric-v3-shared-fabric-namespace.py", RETIREMENT)
