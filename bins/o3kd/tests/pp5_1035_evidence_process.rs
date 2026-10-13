@@ -993,14 +993,16 @@ async fn pp5_1035_test_probe_must_close_across_restart_boundary() -> Result<(), 
         .ok_or("fixture write while the daemon runs did not fail closed")?;
     assert!(fixture_write_error.to_string().contains("forbidden"));
     probe.mark_delete_paused()?;
-    assert!(probe
-        .acquire_repair_lease_during_paused_delete(
-            &backend,
-            &o3k_store::ControllerId::new("test-controller"),
-            &o3k_store::ControllerEpoch::new("test-epoch"),
-        )
-        .await
-        .is_err());
+    assert!(
+        probe
+            .acquire_repair_lease_during_paused_delete(
+                &backend,
+                &o3k_store::ControllerId::new("test-controller"),
+                &o3k_store::ControllerEpoch::new("test-epoch"),
+            )
+            .await
+            .is_err()
+    );
     probe.close();
     probe.require_closed_at_restart()?;
     assert!(!probe.is_alive());
