@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import tempfile
 import unittest
 
 MODULE_PATH = pathlib.Path(__file__).with_name("fabric-v3-owned-domain-storage.py")
@@ -33,6 +34,32 @@ class OwnedDomainStorageTest(unittest.TestCase):
     def test_exact_run_owned_disk_and_seed_are_accepted(self):
         self.assertTrue(self.matches(self.xml()))
 
+    def test_libvirt_source_indexes_are_accepted(self):
+        xml = self.xml().replace(
+            '<source file="/images/run-compute-a.qcow2"/>',
+            '<source file="/images/run-compute-a.qcow2" index="2"/>',
+        ).replace(
+            '<source file="/images/run-compute-a-seed.iso"/>',
+            '<source file="/images/run-compute-a-seed.iso" index="1"/>',
+        )
+        self.assertTrue(self.matches(xml))
+
+    def test_non_file_disk_source_is_rejected(self):
+        self.assertFalse(self.matches(self.xml().replace(
+            '<disk type="file" device="disk">',
+            '<disk type="block" device="disk">',
+        )))
+
+    def test_unexpected_source_attributes_or_invalid_indexes_are_rejected(self):
+        self.assertFalse(self.matches(self.xml().replace(
+            '<source file="/images/run-compute-a.qcow2"/>',
+            '<source file="/images/run-compute-a.qcow2" dev="/dev/foreign"/>',
+        )))
+        self.assertFalse(self.matches(self.xml().replace(
+            '<source file="/images/run-compute-a.qcow2"/>',
+            '<source file="/images/run-compute-a.qcow2" index="x"/>',
+        )))
+
     def test_additional_disk_is_rejected(self):
         self.assertFalse(
             self.matches(
@@ -50,6 +77,23 @@ class OwnedDomainStorageTest(unittest.TestCase):
     def test_non_file_or_unexpected_storage_source_is_rejected(self):
         self.assertFalse(self.matches(self.xml().replace('source file="/images/run-compute-a.qcow2"', 'source dev="/dev/sda"')))
         self.assertFalse(self.matches("not xml"))
+
+    def test_owned_storage_path_may_be_absent_or_regular_file_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            missing = root / "run-disk.qcow2"
+            self.assertTrue(module.safe_owned_storage_path(str(missing)))
+            missing.write_bytes(b"run-owned")
+            self.assertTrue(module.safe_owned_storage_path(str(missing)))
+            foreign = root / "foreign.qcow2"
+            foreign.write_bytes(b"foreign")
+            link = root / "run-seed.iso"
+            link.symlink_to(foreign)
+            self.assertFalse(module.safe_owned_storage_path(str(link)))
+            self.assertTrue(foreign.exists())
+            folder = root / "run-directory"
+            folder.mkdir()
+            self.assertFalse(module.safe_owned_storage_path(str(folder)))
 
 
 if __name__ == "__main__":

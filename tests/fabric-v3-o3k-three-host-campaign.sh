@@ -4,6 +4,7 @@ set -Eeuo pipefail
 # Supported-HTTP Fabric v3 three-host nested campaign. This script is test
 # harness only and refuses to run against a different product source tree.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/tests/fabric-v3-host-slot.sh"
 CAMPAIGN_MODE="${1:-full}"
 [[ "$CAMPAIGN_MODE" == full || "$CAMPAIGN_MODE" == departure-micro ]] \
   || { echo "HARNESS_GAP: unsupported campaign mode: $CAMPAIGN_MODE" >&2; exit 1; }
@@ -21,6 +22,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-guest-control-regression.py" \
   || { echo "HARNESS_GAP: guest-control acceptance regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage-test.py" \
   || { echo "HARNESS_GAP: ownership-safe domain cleanup regression failed" >&2; exit 1; }
+bash "$ROOT_DIR/tests/fabric-v3-host-slot-regression.sh" \
+  || { echo "HARNESS_GAP: management host-slot mapping regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-management-network-regression.py" \
   || { echo "HARNESS_GAP: management-network allocation regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-provider-state-observer-regression.py" \
@@ -259,6 +262,8 @@ git -C "$ROOT_DIR" merge-base HEAD "$PRODUCT_SHA" >"$EVIDENCE/environment/harnes
 printf '%s\n' "$PRODUCT_SHA" >"$EVIDENCE/environment/harness-product-base.txt"
 cp "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" "$EVIDENCE/environment/campaign-driver.sh"
 cp "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" "$EVIDENCE/environment/owned-domain-storage-check.py"
+cp "$ROOT_DIR/tests/fabric-v3-host-slot.sh" "$EVIDENCE/environment/host-slot-helper.sh"
+cp "$ROOT_DIR/tests/fabric-v3-host-slot-regression.sh" "$EVIDENCE/environment/host-slot-regression.sh"
 cp "$ROOT_DIR/tests/fabric-v3-build-probe-image.sh" "$EVIDENCE/environment/build-probe-image.sh"
 cp "$ROOT_DIR/tests/fabric-v3-guest-control.py" "$EVIDENCE/environment/guest-control-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-install-agent-host.sh" "$EVIDENCE/environment/install-agent-host.sh"
@@ -270,6 +275,8 @@ cp "$ROOT_DIR/tests/fabric-v3-provider-state-observer.py" "$EVIDENCE/environment
 cp "$ROOT_DIR/tests/fabric-v3-evidence-archive.py" "$EVIDENCE/environment/evidence-archive-helper.py"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" >"$EVIDENCE/environment/owned-domain-storage-check.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-host-slot.sh" >"$EVIDENCE/environment/host-slot-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-host-slot-regression.sh" >"$EVIDENCE/environment/host-slot-regression.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" >"$EVIDENCE/environment/boundary-capture-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-work-evidence.py" >"$EVIDENCE/environment/retirement-work-evidence-helper.sha256"
@@ -343,33 +350,39 @@ PY
         disk="$IMAGE_STORE/$PREFIX-compute-$role.qcow2"
         seed="$IMAGE_STORE/$PREFIX-compute-$role-seed.iso"
         if [[ -z "$actual_uuid" ]]; then
-          if [[ -n "$expected_uuid" && ! -L "$disk" && ! -L "$seed" \
-              && ( ! -e "$disk" || -f "$disk" ) && ( ! -e "$seed" || -f "$seed" ) ]]; then
-            if rm -f -- "$disk" "$seed"; then
-              printf 'REMOVED_PARTIAL_STORAGE %s uuid=%s disk=%s seed=%s\n' \
-                "$domain" "$expected_uuid" "$disk" "$seed" \
-                >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
-            else
-              printf 'CLEANUP_FAILED partial storage %s uuid=%s\n' "$domain" "$expected_uuid" \
-                >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
-            fi
-          else
+          if [[ -z "$expected_uuid" || -L "$disk" || -L "$seed" \
+              || ( -e "$disk" && ! -f "$disk" ) || ( -e "$seed" && ! -f "$seed" ) ]]; then
+            printf 'PRESERVED ownership check failed for absent domain %s\n' "$domain" \
+              >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+            printf 'unsafe or ambiguous storage for absent domain %s\n' "$domain" \
+              >>"$EVIDENCE/teardown/cleanup-failures.txt"
+          elif [[ ! -e "$disk" && ! -e "$seed" ]]; then
             printf 'ALREADY_REMOVED %s uuid=%s\n' "$domain" "$expected_uuid" \
               >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          elif rm -f -- "$disk" "$seed"; then
+            printf 'REMOVED_PARTIAL_STORAGE %s uuid=%s disk=%s seed=%s\n' \
+              "$domain" "$expected_uuid" "$disk" "$seed" \
+              >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          else
+            printf 'CLEANUP_FAILED partial storage %s uuid=%s\n' "$domain" "$expected_uuid" \
+              >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+            printf 'could not remove exact partial storage for %s\n' "$domain" \
+              >>"$EVIDENCE/teardown/cleanup-failures.txt"
           fi
           continue
         fi
         xml="$(virsh -c qemu:///system dumpxml "$domain" 2>/dev/null || true)"
         if [[ -z "$expected_uuid" || "$actual_uuid" != "$expected_uuid" ]] \
           || ! python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" \
-            "$domain" "$expected_uuid" "$disk" "$seed" <<<"$xml" \
-          || [[ -L "$disk" || -L "$seed" || ! -f "$disk" || ! -f "$seed" ]]; then
+            "$domain" "$expected_uuid" "$disk" "$seed" <<<"$xml"; then
           printf 'PRESERVED ownership check failed for %s\n' "$domain" >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          printf 'could not prove exact run ownership for domain %s\n' "$domain" \
+            >>"$EVIDENCE/teardown/cleanup-failures.txt"
           continue
         fi
         virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1 || true
         if virsh -c qemu:///system undefine "$domain" >/dev/null 2>&1; then
-          if rm -- "$disk" "$seed"; then
+          if rm -f -- "$disk" "$seed"; then
             printf 'REMOVED %s uuid=%s disk=%s seed=%s\n' "$domain" "$expected_uuid" "$disk" "$seed" \
               >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
           else
@@ -584,7 +597,10 @@ HOST_MGMT_IP="$BRIDGE_IP"
 BASE="http://$HOST_MGMT_IP:$API_PORT"
 for host in a b c; do
   MGMT_IP[$host]="$(field "addresses.$host" <"$NETWORK_PLAN")"
-  MGMT_SLOT[$host]="${MGMT_IP[$host]##*.}"
+  MGMT_SLOT[$host]="$(fabric_v3_host_slot "$host")" \
+    || fail "could not map compute-$host to its stable installer slot" "HARNESS_GAP"
+  [[ "${MGMT_SLOT[$host]}" =~ ^[2-4]$ ]] \
+    || fail "invalid stable installer slot for compute-$host" "HARNESS_GAP"
   MGMT_MAC[$host]="$(field "macs.$host" <"$NETWORK_PLAN")"
 done
 printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_IP[a]}" "${MGMT_IP[b]}" "${MGMT_IP[c]}" >"$EVIDENCE/environment/management-addresses.txt"
@@ -728,7 +744,12 @@ for host in a b c; do
   slot="${MGMT_SLOT[$host]}"; address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo install -d -o o3k -g o3k -m 0700 /tmp/$RUN_ID-stage"
   scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$STAGE"/* "$SSH_USER@$address:/tmp/$RUN_ID-stage/"
-  ssh_vm "$address" "sudo bash /tmp/$RUN_ID-stage/install-agent-host.sh $host $slot $RUN_ID /tmp/$RUN_ID-stage" >"$EVIDENCE/management/install-$host.log" 2>&1 || fail "network agent installation failed on compute-$host" "ENVIRONMENT_GAP"
+  if ! ssh_vm "$address" "sudo bash /tmp/$RUN_ID-stage/install-agent-host.sh $host $slot $RUN_ID /tmp/$RUN_ID-stage" >"$EVIDENCE/management/install-$host.log" 2>&1; then
+    if grep -Fq 'invalid host identity' "$EVIDENCE/management/install-$host.log"; then
+      fail "installer rejected stable host identity compute-$host slot=$slot" "HARNESS_GAP"
+    fi
+    fail "network agent installation failed on compute-$host slot=$slot" "ENVIRONMENT_GAP"
+  fi
   scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$PROBE_KEY" "$SSH_USER@$address:/tmp/$RUN_ID-probe-key"
   ssh_vm "$address" "sudo install -d -o root -g root -m 0700 /var/lib/o3k-fabric-v3/$RUN_ID/control && sudo install -o root -g root -m 0600 /tmp/$RUN_ID-probe-key /var/lib/o3k-fabric-v3/$RUN_ID/control/probe_ed25519 && sudo python3 -c 'import pathlib; pathlib.Path(\"/tmp/$RUN_ID-probe-key\").unlink()'"
   case "$host" in a) health_port=19101;; b) health_port=19102;; c) health_port=19103;; esac
@@ -2366,14 +2387,13 @@ for domain in "${FRESH_DOMAINS[@]}"; do
   seed="$IMAGE_STORE/$PREFIX-compute-$role-seed.iso"
   if [[ -z "$expected_uuid" || "$actual_uuid" != "$expected_uuid" ]] \
     || ! python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" \
-      "$domain" "$expected_uuid" "$disk" "$seed" <<<"$xml" \
-    || [[ -L "$disk" || -L "$seed" || ! -f "$disk" || ! -f "$seed" ]]; then
+      "$domain" "$expected_uuid" "$disk" "$seed" <<<"$xml"; then
     fail "fresh compute guest ownership could not be re-proven for $domain" "OWNERSHIP_DEFECT"
   fi
   virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1 || true
   virsh -c qemu:///system undefine "$domain" >/dev/null \
     || fail "could not remove owned fresh compute guest $domain" "CLEANUP_DEFECT"
-  rm -- "$disk" "$seed" || fail "could not remove exact owned storage for $domain" "CLEANUP_DEFECT"
+  rm -f -- "$disk" "$seed" || fail "could not remove exact owned storage for $domain" "CLEANUP_DEFECT"
 done
 virsh -c qemu:///system list --all --name | sed '/^$/d' | sort >"$EVIDENCE/teardown/libvirt-domains-after.txt"
 diff -u "$EVIDENCE/environment/libvirt-domains-before.txt" "$EVIDENCE/teardown/libvirt-domains-after.txt" >"$EVIDENCE/teardown/libvirt-domains.diff" \

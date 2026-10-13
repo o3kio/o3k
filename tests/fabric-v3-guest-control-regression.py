@@ -192,12 +192,27 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("unexpected server deletion observation HTTP", poll)
         self.assertIn("server deletion did not converge within 120 seconds", poll)
 
+    def test_management_installer_slot_is_identity_derived_not_ip_derived(self):
+        self.assertIn('MGMT_SLOT[$host]="$(fabric_v3_host_slot "$host")"', DRIVER)
+        self.assertNotIn('MGMT_SLOT[$host]="${MGMT_IP[$host]##*.}"', DRIVER)
+        self.assertIn('installer rejected stable host identity', DRIVER)
+        self.assertIn('HARNESS_GAP', DRIVER[DRIVER.index('installer rejected stable host identity') :])
+
     def test_nested_domain_cleanup_never_removes_unverified_storage(self):
         self.assertNotIn("--remove-all-storage", DRIVER)
         self.assertIn("fabric-v3-owned-domain-storage.py", DRIVER)
-        self.assertIn('rm -- "$disk" "$seed"', DRIVER)
+        self.assertIn('rm -f -- "$disk" "$seed"', DRIVER)
+        self.assertIn('safe_owned_storage_path', (ROOT / "fabric-v3-owned-domain-storage.py").read_text())
         self.assertIn('owned-domain-storage-check.py"', DRIVER)
         self.assertIn('owned-domain-storage-check.sha256"', DRIVER)
+        self.assertIn('host-slot-regression.sh"', DRIVER)
+
+    def test_partial_guest_cleanup_preserves_unsafe_paths_and_accepts_absent_exact_storage(self):
+        cleanup = DRIVER[DRIVER.index("if [[ -z \"$actual_uuid\" ]]; then"):DRIVER.index("xml=\"$(virsh", DRIVER.index("if [[ -z \"$actual_uuid\" ]]; then"))]
+        self.assertIn('[[ -z "$expected_uuid" || -L "$disk" || -L "$seed"', cleanup)
+        self.assertIn('PRESERVED ownership check failed for absent domain', cleanup)
+        self.assertIn('[[ ! -e "$disk" && ! -e "$seed" ]]', cleanup)
+        self.assertIn('REMOVED_PARTIAL_STORAGE', cleanup)
 
     def test_failure_cleanup_requires_observed_absence_and_has_one_deadline(self):
         start = DRIVER.index("cleanup_owned_api_resource() {")
