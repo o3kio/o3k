@@ -26,9 +26,9 @@ Related decisions and specifications:
 - Shared implementation authority: [o3kio/fabric](https://github.com/o3kio/fabric) —
   the hardened provider extracted from this design lineage (WireGuard host
   fabric + per-realm VXLAN/HER), provider contract
-  [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/contracts/fabric-provider-v1.md)
+  [`contracts/fabric-provider-v2.md`](https://github.com/o3kio/fabric/blob/b15c2cc977a9b53fcae805b9837e0781297d6e24/contracts/fabric-provider-v2.md)
   and change control
-  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/docs/change-control.md)
+  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/b15c2cc977a9b53fcae805b9837e0781297d6e24/docs/change-control.md)
 
 This is a privileged multi-host networking decision. The requester acceptance
 recorded in the introducing pull request activates this ADR and SPEC-0049 as the
@@ -51,9 +51,9 @@ shared repository [o3kio/fabric](https://github.com/o3kio/fabric) and
 consumed by both projects as git-tag dependencies
 (`fabric-plan` / `fabric-linux` / `fabric-conformance`), pinned to one tag
 fleet-wide. Its contract,
-[`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/contracts/fabric-provider-v1.md),
+[`contracts/fabric-provider-v2.md`](https://github.com/o3kio/fabric/blob/b15c2cc977a9b53fcae805b9837e0781297d6e24/contracts/fabric-provider-v2.md),
 specifies provider-level substrate invariants, and
-[`docs/change-control.md`](https://github.com/o3kio/fabric/blob/bf99a9f2134ae44b5f485fa2efcb37b103c298a2/docs/change-control.md)
+[`docs/change-control.md`](https://github.com/o3kio/fabric/blob/b15c2cc977a9b53fcae805b9837e0781297d6e24/docs/change-control.md)
 governs how both consumers request changes: the design changes rarely,
 deliberately, and for fabric-wide reasons — never per-project. Neither
 project forks, patches, or re-implements it.
