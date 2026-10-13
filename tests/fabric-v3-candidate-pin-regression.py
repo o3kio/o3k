@@ -5,8 +5,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DRIVER = (ROOT / "fabric-v3-o3k-three-host-campaign.sh").read_text()
 
-EXPECTED_SHA = "2193e50f6fb72dccf2bd8be5968eb8c178220809"
-EXPECTED_TREE = "72e739f8c1fcd841aac535f3e8686679ebd8254a"
+EXPECTED_SHA = "0f93d11eeb4793c141a60265457143f5ee0d0546"
+EXPECTED_TREE = "66ffbda2f2f9b5069a61f4570e0147c595d0167a"
 
 assert f"PRODUCT_SHA={EXPECTED_SHA}" in DRIVER
 assert f"PRODUCT_TREE={EXPECTED_TREE}" in DRIVER

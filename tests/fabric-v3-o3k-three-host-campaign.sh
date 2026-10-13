@@ -8,8 +8,8 @@ source "$ROOT_DIR/tests/fabric-v3-host-slot.sh"
 CAMPAIGN_MODE="${1:-full}"
 [[ "$CAMPAIGN_MODE" == full || "$CAMPAIGN_MODE" == departure-micro ]] \
   || { echo "HARNESS_GAP: unsupported campaign mode: $CAMPAIGN_MODE" >&2; exit 1; }
-PRODUCT_SHA=2193e50f6fb72dccf2bd8be5968eb8c178220809
-PRODUCT_TREE=72e739f8c1fcd841aac535f3e8686679ebd8254a
+PRODUCT_SHA=0f93d11eeb4793c141a60265457143f5ee0d0546
+PRODUCT_TREE=66ffbda2f2f9b5069a61f4570e0147c595d0167a
 PRODUCT_REMOTE_NAME=origin
 PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-survivor-fdb-retirement
 # Guard the accepted control contract and exact, committed harness lineage
