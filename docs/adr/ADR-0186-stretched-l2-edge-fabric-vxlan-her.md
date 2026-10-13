@@ -26,9 +26,9 @@ Related decisions and specifications:
 - Shared implementation authority: [o3kio/fabric](https://github.com/o3kio/fabric) —
   the hardened provider extracted from this design lineage (WireGuard host
   fabric + per-realm VXLAN/HER), provider contract
-  [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/65d06a34f36144df14bfbec0d414b31e6304eafe/contracts/fabric-provider-v1.md)
+  [`contracts/fabric-provider-v2.md`](https://github.com/o3kio/fabric/blob/b15c2cc977a9b53fcae805b9837e0781297d6e24/contracts/fabric-provider-v2.md)
   and change control
-  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/65d06a34f36144df14bfbec0d414b31e6304eafe/docs/change-control.md)
+  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/b15c2cc977a9b53fcae805b9837e0781297d6e24/docs/change-control.md)
 
 This is a privileged multi-host networking decision. The requester acceptance
 recorded in the introducing pull request activates this ADR and SPEC-0049 as the
@@ -51,9 +51,9 @@ shared repository [o3kio/fabric](https://github.com/o3kio/fabric) and
 consumed by both projects as git-tag dependencies
 (`fabric-plan` / `fabric-linux` / `fabric-conformance`), pinned to one tag
 fleet-wide. Its contract,
-[`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/65d06a34f36144df14bfbec0d414b31e6304eafe/contracts/fabric-provider-v1.md),
+[`contracts/fabric-provider-v2.md`](https://github.com/o3kio/fabric/blob/b15c2cc977a9b53fcae805b9837e0781297d6e24/contracts/fabric-provider-v2.md),
 specifies provider-level substrate invariants, and
-[`docs/change-control.md`](https://github.com/o3kio/fabric/blob/65d06a34f36144df14bfbec0d414b31e6304eafe/docs/change-control.md)
+[`docs/change-control.md`](https://github.com/o3kio/fabric/blob/b15c2cc977a9b53fcae805b9837e0781297d6e24/docs/change-control.md)
 governs how both consumers request changes: the design changes rarely,
 deliberately, and for fabric-wide reasons — never per-project. Neither
 project forks, patches, or re-implements it.
@@ -244,7 +244,7 @@ for the WireGuard host-fabric substrate is the shared provider in
 [o3kio/fabric](https://github.com/o3kio/fabric) (already proven in
 production form by CHV): the workspace pins its git-tag dependencies and a
 CI conformance gate (`crates/o3k-network/tests/fabric_conformance.rs`)
-proves the pinned tag on O3K's toolchain continuously; the
+proves the pinned revision on O3K's toolchain continuously; the
 `linux_fabric` migration onto `LinuxFabricProvider` then proceeds in
 bounded phases, deleting the duplicated substrate while keeping the
 portable realm/policy/public layers. No runtime, product, or real-host
