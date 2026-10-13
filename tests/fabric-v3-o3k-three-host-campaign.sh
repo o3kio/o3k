@@ -33,6 +33,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-provider-state-observer-regression.py" \
   || { echo "HARNESS_GAP: provider-state observer regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-provider-dhcp-withdrawal-regression.py" \
   || { echo "HARNESS_GAP: DHCP withdrawal tombstone regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-dhcp-teardown-absence-regression.py" \
+  || { echo "HARNESS_GAP: DHCP teardown-absence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-retirement-work-evidence-regression.py" \
   || { echo "HARNESS_GAP: retirement-work evidence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-retirement-result-regression.py" \
@@ -2477,7 +2479,7 @@ for host in a b c; do
     fi
   done
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json 2>/dev/null || true" >"$EVIDENCE/teardown/host-$host-ownership.json"
-  ssh_vm "$address" "sudo find /var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp -maxdepth 3 -type f -print 2>/dev/null | sort" \
+  ssh_vm "$address" "sudo find /var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp -mindepth 1 -maxdepth 3 -printf '%y %p\\n' 2>/dev/null | sort" \
     >"$EVIDENCE/teardown/host-$host-dhcp-files.txt"
   ssh_vm "$address" "sudo find /var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp -name state.json -type f -print -exec cat {} \; 2>/dev/null" \
     >"$EVIDENCE/teardown/host-$host-dhcp-state.txt"
@@ -2488,10 +2490,15 @@ for host in a b c; do
     >"$EVIDENCE/teardown/host-$host-runtime-after.txt" \
     || fail "post-teardown provider runtime snapshot failed on host-$host" "ENVIRONMENT_GAP"
 done
-python3 - "$EVIDENCE/teardown" "$RUN_ID" "$EVIDENCE/teardown/run-owned-provider-objects.json" <<'PY' \
+python3 "$ROOT_DIR/tests/fabric-v3-dhcp-teardown-absence.py" \
+  --evidence-dir "$EVIDENCE/teardown" \
+  --run-id "$RUN_ID" \
+  --output "$EVIDENCE/teardown/dhcp-teardown-absence.json" \
+  || fail "run-owned DHCP provider state leaked after teardown; see teardown/dhcp-teardown-absence.json" "CLEANUP_DEFECT"
+python3 - "$EVIDENCE/teardown" "$EVIDENCE/teardown/run-owned-provider-objects.json" <<'PY' \
   || fail "run-owned Fabric/DHCP provider state leaked after teardown" "CLEANUP_DEFECT"
 import json,pathlib,re,sys
-root=pathlib.Path(sys.argv[1]); run=sys.argv[2]; expected=json.loads(pathlib.Path(sys.argv[3]).read_text())
+root=pathlib.Path(sys.argv[1]); expected=json.loads(pathlib.Path(sys.argv[2]).read_text())
 for path in root.glob('host-*-ownership.json'):
     if path.stat().st_size:
         x=json.loads(path.read_text())
@@ -2501,20 +2508,6 @@ for host,record in expected.items():
     for name in record['endpoint_taps']+record['links']:
         assert not re.search(rf'(?m)^\s*\d+:\s+{re.escape(name)}(?:@|:|\s)',runtime), (host,name)
     assert record['namespace'] not in runtime, (host,record['namespace'])
-    dhcp=(root/f'host-{host}-dhcp-state.txt').read_text()
-    states=re.findall(r'(?m)^\{.*?^\}',dhcp,re.S)
-    for state in states:
-        parsed=json.loads(state)
-        assert parsed.get('config') is None and not parsed.get('bindings'), (host,parsed)
-    ownership=(root/f'host-{host}-dhcp-ownership.txt').read_text()
-    dhcp_owners=re.findall(r'(?m)^\{.*?^\}',ownership,re.S)
-    for owner in dhcp_owners:
-        parsed=json.loads(owner)
-        assert parsed.get('withdrawn') is True and parsed.get('pending') is False, (host,parsed)
-    owned=(root/f'host-{host}-dhcp-files.txt').read_text()
-    assert f'/var/lib/o3k-fabric-v3/{run}/network/dhcp/' not in owned or 'state.json' in owned, (host,owned)
-    processes=(root/f'host-{host}-dnsmasq-processes.txt').read_text()
-    assert run not in processes, (host,processes)
 PY
 # Remove only the three exact fresh compute guests after proving their API
 # resources and server domains are gone. Then compare the physical libvirt
