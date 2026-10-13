@@ -111,6 +111,23 @@ class RetirementEvidenceTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
 
+    def test_learned_departing_host_fdb_entry_is_rejected_as_survivor_defect(self):
+        path = self.root / "survivor-convergence/host-a/fdb.txt"
+        path.write_text(
+            "00:00:00:00:00:00 dst 100.64.3.2 self permanent\n"
+            "02:65:4f:e7:5f:62 dst 100.64.3.3 self learned\n"
+        )
+        with self.assertRaises(evidence.SurvivorReconciliationDefect):
+            evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
+
+    def test_learned_departing_host_fdb_cli_status_is_distinct(self):
+        path = self.root / "survivor-convergence/host-a/fdb.txt"
+        path.write_text("02:65:4f:e7:5f:62 dst 100.64.3.3 self learned\n")
+        status, stdout, stderr = self._run_cli()
+        self.assertEqual(status, 3)
+        self.assertEqual(stdout, "")
+        self.assertIn("SURVIVOR_RECONCILIATION_DEFECT", stderr)
+
     def test_c_apply_after_remove_is_rejected(self):
         history = json.loads((self.root / "survivor-convergence/plans/durable-work.json").read_text())
         history["history"].append(self._work("host-c", "Apply", "succeeded", 5, ["host-a", "host-b", "host-c"], ["host-a", "host-b"]))

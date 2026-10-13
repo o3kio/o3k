@@ -219,6 +219,7 @@ PY
       case "$evidence_status" in
         1) ;;
         2) fail "retirement evidence schema/observer failure; see poll-$poll.stderr" "HARNESS_GAP" ;;
+        3) fail "survivor convergence retained departing-host FDB state; see poll-$poll.stderr" "SURVIVOR_RECONCILIATION_DEFECT" ;;
         *) fail "retirement evidence validator exited unexpectedly ($evidence_status); see poll-$poll.stderr" "HARNESS_GAP" ;;
       esac
     fi

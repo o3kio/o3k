@@ -11,6 +11,10 @@ import sys
 from typing import Any
 
 
+class SurvivorReconciliationDefect(AssertionError):
+    """Observed survivor state still contains a departing-host FDB entry."""
+
+
 def _read(path: Path) -> Any:
     return json.loads(path.read_text())
 
@@ -93,6 +97,18 @@ def validate(root: Path, realm: str, ports: list[str]) -> dict[str, Any]:
             for line in fdb
             if line.startswith("00:00:00:00:00:00 ") and " dst " in line
         }
+        departing_ip = transport["host-c"]
+        learned_departing = [
+            line for line in fdb
+            if " dst " in line
+            and line.split(" dst ", 1)[1].split()[0] == departing_ip
+            and line.split()[0].lower() != "00:00:00:00:00:00"
+        ]
+        if learned_departing:
+            raise SurvivorReconciliationDefect(
+                f"{host} survivor FDB retains learned departing host {departing_ip}: "
+                f"{learned_departing}"
+            )
         assert destinations == {expected_peer_ip}, (host, destinations, fdb)
 
         journal = _read(directory / f"{host}/command-journal.json")
@@ -152,6 +168,9 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = validate(args.root, args.realm, args.ports)
+    except SurvivorReconciliationDefect as error:
+        print(f"SURVIVOR_RECONCILIATION_DEFECT: {error}", file=sys.stderr)
+        return 3
     except AssertionError as error:
         # A well-formed snapshot that has not reached the retirement predicates
         # is retryable by the caller's bounded convergence poll.
