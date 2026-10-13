@@ -4,8 +4,8 @@
 # process, then grant only that group access to this run's compute storage.
 set -Eeuo pipefail
 
-host="$1"; octet="$2"; run="$3"; stage="$4"
-[[ "$host" =~ ^[abc]$ && "$octet" =~ ^(20[1-9]|21[0-9]|22[0-9]|23[0-9])$ ]] || { echo "invalid host identity" >&2; exit 2; }
+host="$1"; slot="$2"; run="$3"; stage="$4"
+[[ "$host" =~ ^[abc]$ && "$slot" =~ ^[2-4]$ ]] || { echo "invalid host identity" >&2; exit 2; }
 [[ "$run" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "invalid run id" >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 2; }
 [[ -d "$stage" && ! -L "$stage" ]] || { echo "invalid staging directory" >&2; exit 2; }
@@ -61,7 +61,7 @@ provider_key_dir="$fabric_root/fabric-provider"
 private_key="$provider_key_dir/wireguard-private.key"
 public_key="$provider_key_dir/wireguard-public.key"
 install -d -m 0700 "$base" "$base/network" "$provider_key_dir" \
-  "$base/compute" "$base/compute/tls" "$tls"
+  "$base/compute" "$base/compute/tls" "$base/harness" "$tls"
 printf 'o3k-fabric-v3-run-v1\nrun=%s\nhost=%s\n' "$run" "$host" >"$base/.o3k-fabric-v3-owned"
 chmod 0600 "$base/.o3k-fabric-v3-owned"
 # Ancestors are traversable by the QEMU group; private network keys and agent
@@ -70,6 +70,8 @@ chmod 0600 "$base/.o3k-fabric-v3-owned"
 chown "root:$qemu_gid" "$base" "$base/compute"
 chmod 0710 "$base"
 chmod 2710 "$base/compute"
+install -o root -g root -m 0755 "$stage/provider-state-observer.py" \
+  "$base/harness/provider-state-observer.py"
 
 install -m 0755 "$stage/o3k-network" /usr/local/bin/o3k-network
 install -d -m 0755 /usr/local/libexec

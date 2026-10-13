@@ -11,6 +11,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent
 DRIVER = (ROOT / "fabric-v3-o3k-three-host-campaign.sh").read_text()
+RETIREMENT_EVIDENCE = (ROOT / "fabric-v3-retirement-work-evidence.py").read_text()
 CONTRACT = (ROOT.parent / "contracts/real-host-acceptance-evidence.md").read_text()
 SPEC = importlib.util.spec_from_file_location("guest_control", ROOT / "fabric-v3-guest-control.py")
 assert SPEC and SPEC.loader
@@ -82,16 +83,37 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("does not use VXLAN or WireGuard", CONTRACT)
         self.assertIn("python3 \"$ROOT_DIR/tests/fabric-v3-guest-control-regression.py\"", DRIVER)
         guard = DRIVER.index("fabric-v3-guest-control-regression.py")
-        provisioning = DRIVER.index("virsh -c qemu:///system net-info")
+        self.assertIn("fabric-v3-management-network-regression.py", DRIVER)
+        self.assertIn("fabric-v3-provider-state-observer-regression.py", DRIVER)
+        self.assertIn("fabric-v3-retirement-work-evidence-regression.py", DRIVER)
+        self.assertIn("fabric-v3-retirement-result-regression.py", DRIVER)
+        self.assertIn("fabric-v3-evidence-archive-regression.py", DRIVER)
+        self.assertIn('fabric-v3-retirement-result.py"', DRIVER)
+        self.assertIn('fabric-v3-evidence-archive.py"', DRIVER)
+        provisioning = DRIVER.index("virsh -c qemu:///system net-define")
         self.assertLess(guard, provisioning)
-        self.assertIn('merge-base HEAD "$ACCEPTED_HARNESS_BASE"', DRIVER)
-        self.assertIn('PRODUCT_SHA=1c2d20f6618ea0549428285641865788e7416662', DRIVER)
-        self.assertIn('PRODUCT_TREE=6667b03cae6f218aad16d141b3037ff4cccd39c0', DRIVER)
+        self.assertIn('merge-base HEAD "$PRODUCT_SHA"', DRIVER)
+        self.assertIn('git -C "$ROOT_DIR" status --porcelain', DRIVER)
+        self.assertIn('PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e', DRIVER)
+        self.assertIn('PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871', DRIVER)
+        self.assertIn('MANAGEMENT-NETWORK PREPROVISION INVENTORY PASS', DRIVER)
+        inventory_record = DRIVER.index('>>"$EVIDENCE/environment/inventory.tsv"', DRIVER.index('for host in a b c; do', DRIVER.index(': >"$KNOWN_HOSTS"')))
+        virt_install = DRIVER.index('virt-install --connect qemu:///system --name "$domain"', inventory_record)
+        self.assertLess(inventory_record, virt_install)
+
+    def test_authentication_header_is_redacted_and_raw_file_excluded_from_archive(self):
+        self.assertIn('"$EVIDENCE/api/auth.headers.raw"', DRIVER)
+        self.assertIn("destination.write_text(re.sub", DRIVER)
+        self.assertIn("raw.unlink()", DRIVER)
+        archive_helper = (ROOT / "fabric-v3-evidence-archive.py").read_text()
+        self.assertIn('"api/auth.headers.raw"', archive_helper)
 
     def test_departure_micro_gate_stops_before_full_campaign_phases(self):
         self.assertIn('CAMPAIGN_MODE="${1:-full}"', DRIVER)
-        self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" departure-micro/a-to-b-before-c-delete.txt', DRIVER)
-        self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[c]}" departure-micro/a-to-c-before-c-delete.txt', DRIVER)
+        self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" before-departure/traffic/a-to-b.txt', DRIVER)
+        self.assertIn('guest_control_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" before-departure/traffic/b-to-a.txt', DRIVER)
+        self.assertIn('guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[c]}" before-departure/traffic/a-to-c.txt', DRIVER)
+        self.assertIn('guest_control_command c "ping -c 1 -W 4 ${TENANT_IP[a]}" before-departure/traffic/c-to-a.txt', DRIVER)
         self.assertIn('dhcp,departure-micro}', DRIVER)
         self.assertIn('$(guest_failure_class DATAPLANE_DEFECT)', DRIVER)
         self.assertIn('pre-delete-work-history.json', DRIVER)
@@ -102,7 +124,12 @@ class GuestControlRegression(unittest.TestCase):
         self.assertLess(full_mode, remove_c)
         self.assertLess(history_capture, delete_request)
         self.assertLess(remove_c, delete_request)
-        self.assertIn("assert all(latest[h] and latest[h]['action']=='Apply' and latest[h]['state']=='succeeded'", DRIVER)
+        self.assertIn('fabric-v3-retirement-work-evidence.py" before', DRIVER)
+        self.assertIn('row["action"] != "Apply" or row["state"] != "succeeded"', RETIREMENT_EVIDENCE)
+        self.assertIn('"latest_apply_by_host": {host: command_evidence(latest[host])', RETIREMENT_EVIDENCE)
+        self.assertIn('verify_c_provider_absence "$realm_id" "PROVIDER_ABSENCE_DEFECT" "$EVIDENCE/c-delete/provider-absence"', DRIVER)
+        self.assertIn('verify_c_provider_absence "$realm_id" "DURABLE_RECOVERY_DEFECT" "$EVIDENCE/restart/provider-absence"', DRIVER)
+        self.assertIn('provider-state-observer.py', DRIVER)
 
     def test_controller_restart_uses_the_frozen_product_binary(self):
         restart = DRIVER[DRIVER.index("# Controller restart while A/B/C are alive."):]
@@ -135,8 +162,24 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("host-$host-dnsmasq-processes.txt", DRIVER)
         self.assertIn("run not in processes", DRIVER)
         self.assertIn("foreign libvirt domain inventory changed", DRIVER)
+        self.assertIn('"$ROOT_DIR/tests/fabric-v3-management-network.py" cleanup', DRIVER)
+        self.assertIn("verify-cleanup", DRIVER)
         self.assertNotIn("virsh net-destroy", DRIVER)
         self.assertNotIn("nft flush ruleset", DRIVER)
+
+    def test_management_network_is_run_owned_and_removed_before_pass(self):
+        self.assertIn('NETWORK=""', DRIVER)
+        self.assertIn('O3K_FABRIC_V3_LIBVIRT_NETWORK', DRIVER)
+        self.assertIn('"$ROOT_DIR/tests/fabric-v3-management-network.py" plan', DRIVER)
+        self.assertIn('"$ROOT_DIR/tests/fabric-v3-management-network.py" verify-created', DRIVER)
+        self.assertIn('"$ROOT_DIR/tests/fabric-v3-management-network.py" verify-cleanup', DRIVER)
+        self.assertIn('cleanup_management_network || fail', DRIVER)
+        self.assertLess(
+            DRIVER.index('cleanup_management_network || fail'),
+            DRIVER.rindex('--evidence-dir "$EVIDENCE"'),
+        )
+        self.assertIn('libvirt-domains-before.txt', DRIVER)
+        self.assertIn('EVIDENCE_ARCHIVE_SIDECAR=', DRIVER)
 
     def test_server_teardown_poll_distinguishes_http_absence_and_is_bounded(self):
         poll = DRIVER[DRIVER.index("servers_remaining=1"):DRIVER.index('for id in "${PORT_IDS[@]}"; do')]
