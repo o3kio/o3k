@@ -249,7 +249,9 @@ class AgentReadinessRegression(unittest.TestCase):
         start = DRIVER.index('wait_for_survivor_compute_agents() {')
         end = DRIVER.index('\n}\n', start)
         readiness_function = DRIVER[start:end]
-        self.assertIn('/operator/diagnostics/providers?limit=200', readiness_function)
+        self.assertIn('$BASE/o3k/v1/operator/diagnostics/providers?limit=200', readiness_function)
+        self.assertNotIn('$BASE/operator/diagnostics/providers?limit=200', readiness_function)
+        self.assertIn('provider diagnostics returned an HTTP client error', readiness_function)
         self.assertIn('fabric-v3-agent-readiness.py', readiness_function)
         self.assertIn('--controller-log "$EVIDENCE/restart/startup-recovery/o3kd.log"', readiness_function)
         self.assertIn('--controller-start "$EVIDENCE/restart/startup-recovery/controller-start.json"', readiness_function)
