@@ -444,7 +444,7 @@ mod tests {
             public_key: "A".repeat(43) + "=",
             underlay_endpoint: "192.0.2.10:65001".to_owned(),
             fabric_transport_ip: "198.18.0.1".parse().expect("transport ip"),
-            provider_version: "fabric-linux-v0.1.6".to_owned(),
+            provider_version: "fabric-linux-v0.2.0".to_owned(),
             fabric_generation: 3,
             underlay_mtu: 1500,
             fabric_mtu: 1440,

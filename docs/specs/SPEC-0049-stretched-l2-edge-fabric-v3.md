@@ -30,9 +30,9 @@ Related normative sources:
 - [real-host acceptance evidence contract](../../contracts/real-host-acceptance-evidence.md)
 - Shared implementation authority: [o3kio/fabric](https://github.com/o3kio/fabric) —
   provider contract
-  [`contracts/fabric-provider-v1.md`](https://github.com/o3kio/fabric/blob/65d06a34f36144df14bfbec0d414b31e6304eafe/contracts/fabric-provider-v1.md)
+  [`contracts/fabric-provider-v2.md`](https://github.com/o3kio/fabric/blob/b15c2cc977a9b53fcae805b9837e0781297d6e24/contracts/fabric-provider-v2.md)
   and change control
-  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/65d06a34f36144df14bfbec0d414b31e6304eafe/docs/change-control.md)
+  [`docs/change-control.md`](https://github.com/o3kio/fabric/blob/b15c2cc977a9b53fcae805b9837e0781297d6e24/docs/change-control.md)
 
 ## Purpose and governance gate
 
