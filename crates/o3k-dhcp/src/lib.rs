@@ -397,13 +397,21 @@ impl DhcpService {
     }
 
     /// Clears the persisted network configuration after the last binding was
-    /// removed. The flat DHCP bridge is single-subnet per occupied lifetime;
-    /// once no bindings remain, the bridge returns to unbound state so a
-    /// future attachment with a different subnet can bind. The conflict guard
-    /// is unchanged while any binding exists.
+    /// removed and its serving supervisor was stopped. The flat DHCP bridge is
+    /// single-subnet per occupied lifetime; once no bindings remain, the
+    /// bridge returns to unbound state so a future attachment with a
+    /// different subnet can bind. The conflict guard is unchanged while any
+    /// binding exists. The managed config file is removed as part of the same
+    /// repeatable cleanup so it cannot retain stale host bindings after the
+    /// durable service state is cleared.
     pub fn clear_configuration(&mut self) -> Result<(), DhcpError> {
         self.state.config = None;
-        self.persist()
+        self.persist()?;
+        match fs::remove_file(self.managed_config_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(DhcpError::Storage(error)),
+        }
     }
 
     pub fn render_config(&self) -> Result<String, DhcpError> {
@@ -681,11 +689,24 @@ mod tests {
             service.configure(conflicting.clone()),
             Err(DhcpError::InvalidConfig)
         ));
+        let rendered_config = service.write_config()?;
+        assert!(
+            fs::read_to_string(&rendered_config)
+                .map_err(DhcpError::Storage)?
+                .contains("dhcp-host=")
+        );
         // Once the last binding is removed and the configuration cleared, the
-        // bridge is unbound again and a different subnet may bind.
+        // bridge is unbound again and a different subnet may bind. Its old
+        // rendered config must also be removed so a restart cannot reuse it.
         service.remove_binding("p1")?;
         service.clear_configuration()?;
         assert!(service.configuration().is_none());
+        assert!(!rendered_config.exists());
+        // Clearing is repeatable when durable state is already empty but a
+        // prior attempt left the managed file behind.
+        fs::write(&rendered_config, "stale owned config\n").map_err(DhcpError::Storage)?;
+        service.clear_configuration()?;
+        assert!(!rendered_config.exists());
         service.configure(conflicting)?;
         Ok(())
     }

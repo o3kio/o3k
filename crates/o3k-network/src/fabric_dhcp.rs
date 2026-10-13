@@ -351,9 +351,10 @@ impl RealmRuntime {
         for port_id in existing {
             self.service.remove_binding_and_lease(&port_id)?;
         }
-        if self.service.configuration().is_some() {
-            self.service.clear_configuration()?;
-        }
+        // Clear the managed file even when durable state already says the
+        // configuration is absent. A prior attempt may have persisted that
+        // state but failed to unlink the rendered file.
+        self.service.clear_configuration()?;
         self.release_gateway_address()?;
         Ok(())
     }
@@ -1098,6 +1099,22 @@ mod tests {
             authority_a
                 .observe_removed(&after_a_departure, 2)
                 .expect("observe authority withdrawal")
+        );
+        let authority_a_config = root
+            .join("a")
+            .join(original.realm_id.to_string())
+            .join("dnsmasq.conf");
+        assert!(
+            !authority_a_config.exists(),
+            "withdrawn authority must not retain its rendered dnsmasq config"
+        );
+        fs::write(&authority_a_config, "stale owned config\n").expect("simulate leftover config");
+        authority_a
+            .remove(&after_a_departure, 2)
+            .expect("retry withdrawn authority cleanup");
+        assert!(
+            !authority_a_config.exists(),
+            "withdrawal retry must remove a stale config after state is already empty"
         );
         let address_state: serde_json::Value = serde_json::from_slice(
             &fs::read(root.join("a/fake-ip-state.json")).expect("read withdrawn address"),

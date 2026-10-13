@@ -157,6 +157,10 @@ fn free_address() -> Result<SocketAddr, Error> {
 
 fn proc_starttime(pid: u32) -> Result<u64, Error> {
     let text = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    parse_proc_starttime(&text)
+}
+
+fn parse_proc_starttime(text: &str) -> Result<u64, Error> {
     let after = text.rsplit_once(") ").ok_or("malformed /proc stat")?.1;
     after
         .split_whitespace()
@@ -164,6 +168,16 @@ fn proc_starttime(pid: u32) -> Result<u64, Error> {
         .ok_or("missing proc starttime")?
         .parse()
         .map_err(Into::into)
+}
+
+fn process_instance_gone(pid: u32, expected_starttime: u64) -> Result<bool, Error> {
+    let path = format!("/proc/{pid}/stat");
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(parse_proc_starttime(&text)? != expected_starttime)
 }
 
 fn proc_exe(pid: u32) -> Result<PathBuf, Error> {
@@ -212,6 +226,19 @@ fn listener_owner(address: SocketAddr, pid: u32, starttime: u64) -> Result<Value
     Ok(
         json!({"socket": address.to_string(), "owner": {"pid": pid, "proc_starttime": starttime}, "owned": true, "ss": text.lines().filter(|line| line.contains(&needle)).collect::<Vec<_>>() }),
     )
+}
+
+fn listener_present(address: SocketAddr) -> Result<bool, Error> {
+    let output = Command::new("ss").args(["-ltnH"]).output()?;
+    if !output.status.success() {
+        return Err("ss failed while checking listener absence".into());
+    }
+    let local_suffix = format!(":{}", address.port());
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        line.split_whitespace()
+            .nth(3)
+            .is_some_and(|local_address| local_address.ends_with(&local_suffix))
+    }))
 }
 
 struct Evidence {
@@ -584,6 +611,42 @@ async fn wait_state(
     }
 }
 
+async fn wait_server_api_state(
+    client: &reqwest::Client,
+    address: SocketAddr,
+    token: &str,
+    id: Uuid,
+    state: &str,
+    timeout: Duration,
+) -> Result<(), Error> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let response = client
+            .get(format!("http://{address}/o3k/v1/compute/servers/{id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        if status.is_success() {
+            let observed = body["status"]["state"]
+                .as_str()
+                .or_else(|| body["server"]["status"]["state"].as_str())
+                .unwrap_or_default();
+            if observed.eq_ignore_ascii_case(state) {
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "server {id} did not reach API state {state}; last status {status}: {body}"
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 struct TestOwnedProbe {
     store: Option<o3k_store::unified::O3kStore>,
 }
@@ -660,6 +723,21 @@ async fn pp5_1035_test_probe_must_close_across_restart_boundary() -> Result<(), 
     assert!(probe.is_alive());
     probe.close();
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn pp5_1035_setup_absence_proof_checks_process_identity_and_listener_port() -> Result<(), Error> {
+    let pid = std::process::id();
+    let starttime = proc_starttime(pid)?;
+    assert!(!process_instance_gone(pid, starttime)?);
+    assert!(process_instance_gone(pid, starttime + 1)?);
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    assert!(listener_present(address)?);
+    drop(listener);
+    assert!(!listener_present(address)?);
     Ok(())
 }
 
@@ -885,9 +963,11 @@ async fn run_iteration(
     let waiter = sync.join("waiter");
     let orphan_checkpoint = sync.join("orphan-checkpoint.json");
     let bootstrap_cleanup_failure = root.join("bootstrap-cleanup-failure");
+    let setup_cleanup_failure = root.join("setup-process-cleanup-failure");
     let old_cleanup_failure = root.join("old-process-cleanup-failure");
     let replacement_cleanup_failure = root.join("replacement-cleanup-failure");
     fs::remove_file(&bootstrap_cleanup_failure).ok();
+    fs::remove_file(&setup_cleanup_failure).ok();
     fs::remove_file(&old_cleanup_failure).ok();
     fs::remove_file(&replacement_cleanup_failure).ok();
     fs::remove_file(&old_endpoint_release_gate).ok();
@@ -997,7 +1077,7 @@ async fn run_iteration(
             })
             .await?;
     }
-    let old_child = start_o3kd(
+    let setup_child = start_o3kd(
         root,
         backend,
         http,
@@ -1007,17 +1087,19 @@ async fn run_iteration(
         None,
         None,
         None,
-        true,
+        false,
         &tls,
         run_id,
     )?;
-    let mut child = ChildCleanupGuard::new(old_child, old_cleanup_failure);
-    let _ready_old = wait_ready(child.child_mut()?, http, control, Duration::from_secs(20)).await?;
-    let old_pid = child.id()?;
-    let old_start = proc_starttime(old_pid)?;
-    let old_exe = proc_exe(old_pid)?;
-    let old_digest = file_sha256(&old_exe)?;
-    let old_listeners = json!({"http": listener_owner(http, old_pid, old_start)?, "control": listener_owner(control, old_pid, old_start)?});
+    let mut setup = ChildCleanupGuard::new(setup_child, setup_cleanup_failure);
+    let _ready_setup =
+        wait_ready(setup.child_mut()?, http, control, Duration::from_secs(20)).await?;
+    let setup_pid = setup.id()?;
+    let setup_start = proc_starttime(setup_pid)?;
+    let setup_exe = proc_exe(setup_pid)?;
+    let setup_digest = file_sha256(&setup_exe)?;
+    let setup_listeners = json!({"http": listener_owner(http, setup_pid, setup_start)?, "control": listener_owner(control, setup_pid, setup_start)?});
+    evidence.set("setup_process", json!({"pid": setup_pid, "proc_starttime": setup_start, "executable_path": setup_exe, "executable_sha256": setup_digest, "listeners": setup_listeners, "controller_id": old_controller.0, "controller_epoch": old_controller.1}));
     let intended = BTreeMap::from([
         (String::from("O3K_PP5_RUN_ID"), run_id.to_owned()),
         (
@@ -1051,14 +1133,6 @@ async fn run_iteration(
             String::from("4000"),
         );
     }
-    let effective = proc_env(old_pid)?;
-    evidence.set("old", json!({"pid": old_pid, "proc_starttime": old_start, "executable_path": old_exe, "executable_sha256": old_digest, "cmdline_digest": proc_cmdline_digest(old_pid)?, "state_root": root, "http_address": http, "control_address": control, "listeners": old_listeners, "controller_id": old_controller.0, "controller_epoch": old_controller.1}));
-    evidence.set("environment", env_value_map(&intended, &effective));
-    evidence.checkpoint("old_process_verified")?;
-    let mut old_environment = env_value_map(&intended, &effective);
-    old_environment["secret_presence"] = Value::Object(secret_presence(old_pid)?);
-    evidence.set("old_environment", old_environment);
-
     let admin_token = token(&client, http, "admin", BOOTSTRAP_PASSWORD, "admin").await?;
     let foreign_token = token(
         &client,
@@ -1130,17 +1204,6 @@ async fn run_iteration(
     evidence.set("foreign", json!({"project":FOREIGN_PROJECT_ID,"port_id":foreign_port_id,"network_id":foreign_network,"subnet_id":foreign_subnet,"attachment_id":"not-applicable-in-fake-provider-topology","before":foreign_port,"after":foreign_port,"changed":false}));
     evidence.checkpoint("prepared")?;
 
-    store_operation(
-        evidence,
-        "old_daemon_running_probe_open",
-        "connect_test_owned_probe",
-        backend,
-        false,
-        Some(old_pid),
-        None,
-    );
-    let mut probe = TestOwnedProbe::new(backend.connect().await?);
-    let quota_baseline = quota_usage(&client, http, &admin_token).await?;
     let (server_id, _) = create_native(
         &client,
         http,
@@ -1149,18 +1212,13 @@ async fn run_iteration(
         &network_id,
     )
     .await?;
-    wait_state(
-        &probe,
+    wait_server_api_state(
+        &client,
+        http,
+        &admin_token,
         server_id,
         "ACTIVE",
         Duration::from_secs(30),
-        &mut StoreDiagnostics {
-            evidence,
-            backend,
-            old_pid: Some(old_pid),
-            new_pid: None,
-            phase: "pre_restart_server_active",
-        },
     )
     .await?;
     let owned_before = ports(&client, http, &admin_token)
@@ -1174,13 +1232,40 @@ async fn run_iteration(
         .ok_or("owned endpoint missing")?;
     let endpoint_id = owned_before["id"].as_str().ok_or("endpoint id")?.to_owned();
     let endpoint_uuid = Uuid::parse_str(&endpoint_id)?;
+
+    // Finish all API fixture writes, then stop and prove the setup daemon is
+    // gone before opening the direct store. `O3kStore::connect` runs migration
+    // and canonical-state checks, so it must not open beside the daemon's API
+    // writer during fixture construction. The interrupted-delete daemon below
+    // is started only after this one-time direct fixture write completes.
+    evidence.checkpoint("setup_server_active")?;
+    stop_process(setup.child_mut()?)?;
+    let setup_gone = process_instance_gone(setup_pid, setup_start)?;
+    let setup_http_listener_gone = !listener_present(http)?;
+    let setup_control_listener_gone = !listener_present(control)?;
+    evidence.set("setup_process_stopped", json!({"pid":setup_pid,"process_gone":setup_gone,"http_listener_gone":setup_http_listener_gone,"control_listener_gone":setup_control_listener_gone}));
+    if !setup_gone || !setup_http_listener_gone || !setup_control_listener_gone {
+        return Err("setup daemon did not fully stop before opening the test-owned store".into());
+    }
+    setup.disarm();
+
     store_operation(
         evidence,
-        "pre_restart_fixture_binding",
+        "setup_daemon_stopped_probe_open",
+        "connect_test_owned_probe",
+        backend,
+        false,
+        None,
+        None,
+    );
+    let mut probe = TestOwnedProbe::new(backend.connect().await?);
+    store_operation(
+        evidence,
+        "setup_daemon_stopped_fixture_binding",
         "update_port_binding",
         backend,
         probe.is_alive(),
-        Some(old_pid),
+        None,
         None,
     );
     probe
@@ -1192,6 +1277,57 @@ async fn run_iteration(
             Some("bound"),
         )
         .await?;
+
+    let old_child = start_o3kd(
+        root,
+        backend,
+        http,
+        control,
+        &log,
+        (&old_controller.0, &old_controller.1),
+        None,
+        None,
+        None,
+        true,
+        &tls,
+        run_id,
+    )?;
+    let mut child = ChildCleanupGuard::new(old_child, old_cleanup_failure);
+    let readiness_old =
+        wait_ready(child.child_mut()?, http, control, Duration::from_secs(20)).await?;
+    let old_pid = child.id()?;
+    let old_start = proc_starttime(old_pid)?;
+    let old_exe = proc_exe(old_pid)?;
+    let old_digest = file_sha256(&old_exe)?;
+    let old_listeners = json!({"http": listener_owner(http, old_pid, old_start)?, "control": listener_owner(control, old_pid, old_start)?});
+    let effective = proc_env(old_pid)?;
+    evidence.set("old", json!({"pid": old_pid, "proc_starttime": old_start, "executable_path": old_exe, "executable_sha256": old_digest, "cmdline_digest": proc_cmdline_digest(old_pid)?, "state_root": root, "http_address": http, "control_address": control, "listeners": old_listeners, "controller_id": old_controller.0, "controller_epoch": old_controller.1}));
+    evidence.set("environment", env_value_map(&intended, &effective));
+    let mut old_environment = env_value_map(&intended, &effective);
+    old_environment["secret_presence"] = Value::Object(secret_presence(old_pid)?);
+    evidence.set("old_environment", old_environment);
+    evidence.set("readiness", readiness_old);
+    evidence.checkpoint("old_process_verified")?;
+
+    // The probe was fully initialized while the setup daemon was stopped. It
+    // is read-only during the interrupted old-daemon window and is closed
+    // before SIGKILL; no store connect/migration or fixture write races that
+    // daemon's request path.
+    wait_state(
+        &probe,
+        server_id,
+        "ACTIVE",
+        Duration::from_secs(30),
+        &mut StoreDiagnostics {
+            evidence,
+            backend,
+            old_pid: Some(old_pid),
+            new_pid: None,
+            phase: "old_daemon_reconstructed_server_active",
+        },
+    )
+    .await?;
+    let quota_baseline = quota_usage(&client, http, &admin_token).await?;
     let fixed_ip = owned_before["fixed_ips"][0]["ip_address"]
         .as_str()
         .ok_or("fixed ip")?
@@ -1953,6 +2089,7 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
                 .to_owned();
             let cleanup_failures = [
                 "bootstrap-cleanup-failure",
+                "setup-process-cleanup-failure",
                 "old-process-cleanup-failure",
                 "replacement-cleanup-failure",
             ]
