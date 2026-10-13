@@ -3405,6 +3405,87 @@ mod dispatcher_tests {
         Ok(())
     }
 
+    struct HttpFabricBindingExpectation<'a> {
+        project_id: &'a str,
+        network_id: &'a str,
+        realm_id: Uuid,
+        port_id: Uuid,
+        host_id: &'a str,
+        agent_id: &'a str,
+        agent_epoch: &'a str,
+    }
+
+    async fn wait_for_http_fabric_binding_convergence(
+        network: &o3k_network::NetworkService,
+        store: &o3k_store::unified::O3kStore,
+        expected: HttpFabricBindingExpectation<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::DurableStore as _;
+
+        let network_id = Uuid::parse_str(expected.network_id)?;
+        let mut last_state = String::from("Fabric binding has not converged");
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let port = network
+                    .get_port_for_project(expected.project_id, expected.port_id)
+                    .await?;
+                let realms = network
+                    .list_canonical_realms_for_project(expected.project_id, network_id)
+                    .await?;
+                let active_realm = realms
+                    .iter()
+                    .find(|realm| realm.id == expected.realm_id && realm.state == "active");
+                let history = store.list_network_plan_work_history().await?;
+                let latest = latest_realm_host_work(history, expected.realm_id)
+                    .map_err(std::io::Error::other)?
+                    .remove(expected.host_id);
+                let latest_state = latest.as_ref().map(|work| {
+                    format!(
+                        "action={:?}, generation={:?}, state={:?}, agent={}/{}, command={}",
+                        work.command.action,
+                        work.command
+                            .plan
+                            .resource_generations
+                            .get(&expected.realm_id),
+                        work.record.state,
+                        work.record.target_agent_id,
+                        work.record.target_agent_epoch,
+                        work.record.command_id,
+                    )
+                });
+                last_state = format!(
+                    "port={{host:{:?}, state:{:?}}}; active_realm_generation={:?}; latest_host_work={latest_state:?}",
+                    port.binding_host,
+                    port.binding_state,
+                    active_realm.map(|realm| realm.generation),
+                );
+                if port.binding_host.as_deref() == Some(expected.host_id)
+                    && port.binding_state.as_deref() == Some("bound")
+                    && let Some(realm) = active_realm
+                    && let Some(work) = latest.as_ref()
+                    && work.command.action == o3k_network::NetworkPlanAction::Apply
+                    && work.record.state == o3k_store::NetworkPlanWorkState::Succeeded
+                    && work.record.target_agent_id == expected.agent_id
+                    && work.record.target_agent_epoch == expected.agent_epoch
+                    && work
+                        .command
+                        .plan
+                        .resource_generations
+                        .get(&expected.realm_id)
+                        == Some(&realm.generation)
+                {
+                    return Ok::<(), Box<dyn std::error::Error>>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            format!("Fabric binding did not durably converge before server deletion: {last_state}")
+        })??;
+        Ok(())
+    }
+
     async fn wait_for_http_fabric_plan(
         logs: &BTreeMap<String, Arc<std::sync::Mutex<Vec<o3k_network::NodeNetworkPlan>>>>,
         agent_id: &str,
@@ -4634,6 +4715,20 @@ mod dispatcher_tests {
             .to_owned();
         wait_for_server_create_convergence(&app, store.as_ref(), &token, &restarted_server_id)
             .await?;
+        wait_for_http_fabric_binding_convergence(
+            &network,
+            store.as_ref(),
+            HttpFabricBindingExpectation {
+                project_id: "project-a",
+                network_id: &network_id,
+                realm_id,
+                port_id: Uuid::parse_str(&restart_port_id)?,
+                host_id: "compute-d",
+                agent_id: "network-agent-d",
+                agent_epoch: "network-epoch-d",
+            },
+        )
+        .await?;
         let d_work = store.list_network_plan_work_history().await?;
         assert!(
             d_work.iter().any(|work| {
