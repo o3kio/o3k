@@ -10,7 +10,7 @@ CAMPAIGN_MODE="${1:-full}"
 if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
   ACCEPTANCE_GATE="FABRIC V3 DURABLE HOST RETIREMENT MICROGATE"
 else
-  ACCEPTANCE_GATE="FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE"
+  ACCEPTANCE_GATE="FABRIC V3 NESTED CONFORMANCE GATE A"
 fi
 PRODUCT_SHA=15c7c11d0c46c0e79577da33cfb317a328e933fd
 PRODUCT_TREE=c21e0a214f47870de40139d52a6bed64d087b36b
@@ -29,6 +29,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage-test.py" \
   || { echo "HARNESS_GAP: ownership-safe domain cleanup regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-host-preflight-test.py" \
   || { echo "HARNESS_GAP: live libvirt/address preflight regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-three-host-gate-regression.py" \
+  || { echo "HARNESS_GAP: provider nested-gate ownership regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-retirement-evidence-test.py" \
   || { echo "HARNESS_GAP: durable retirement evidence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-agent-readiness-regression.py" \
@@ -45,6 +47,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" \
   || { echo "HARNESS_GAP: shared Fabric namespace evidence regression failed" >&2; exit 1; }
 bash -n "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" \
   || { echo "HARNESS_GAP: durable retirement observer syntax failed" >&2; exit 1; }
+bash -n "$ROOT_DIR/tests/fabric-v3-three-host-gate.sh" \
+  || { echo "HARNESS_GAP: provider nested-gate shell syntax failed" >&2; exit 1; }
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 BASE_IMAGE_SHA=612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354
 PROBE_BASE_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
@@ -873,6 +877,17 @@ if ! command -v cargo >/dev/null 2>&1; then
   fi
 fi
 for tool in cargo curl openssl python3 virsh virt-install qemu-img guestfish virt-ls lsinitramfs cpio gzip genisoimage ssh ssh-keygen ssh-keyscan scp ip wg tcpdump sha256sum tar timeout bridge hostnamectl; do need "$tool"; done
+if [[ "$CAMPAIGN_MODE" == full ]]; then
+  for tool in gcc busybox file; do need "$tool"; done
+  [[ "$(file -b "$(command -v busybox)")" == *"statically linked"* ]] \
+    || fail "Gate A requires a statically linked BusyBox for the minimal guest initrd" "ENVIRONMENT_GAP"
+  if gcc -static -O2 "$ROOT_DIR/tests/fabric-v3-spoof-guest.c" -o /dev/null \
+      >"$EVIDENCE/environment/spoof-guest-static-link-preflight.txt" 2>&1; then
+    echo "static anti-spoof guest build: PASS" >>"$EVIDENCE/environment/spoof-guest-static-link-preflight.txt"
+  else
+    fail "Gate A anti-spoof guest cannot be statically linked on this runner" "ENVIRONMENT_GAP"
+  fi
+fi
 [[ $EUID -eq 0 ]] || fail "campaign must run as root to provision nested libvirt guests" "ENVIRONMENT_GAP"
 [[ -c /dev/kvm ]] || fail "/dev/kvm unavailable" "ENVIRONMENT_GAP"
 [[ -r "$BASE_IMAGE" ]] || fail "base image unreadable: $BASE_IMAGE" "ENVIRONMENT_GAP"
@@ -989,6 +1004,11 @@ CARGO_TARGET_DIR="$PRODUCT_SOURCE_DIR/target" cargo build --release --all-featur
   -p o3kd -p o3k-compute-bin -p o3k-network-bin \
   >"$EVIDENCE/environment/build.log" 2>&1 \
   || fail "frozen product binaries failed to build" "HARNESS_GAP"
+CARGO_TARGET_DIR="$PRODUCT_SOURCE_DIR/target" cargo build --release --all-features \
+  --manifest-path "$PRODUCT_SOURCE_DIR/Cargo.toml" \
+  -p o3k-network --example fabric-regression-3host-helper \
+  >"$EVIDENCE/environment/fabric-provider-helper-build.log" 2>&1 \
+  || fail "frozen product Fabric provider gate helper failed to build" "HARNESS_GAP"
 for binary in o3kd o3k-compute-bin o3k-network-bin; do
   [[ -x "$PRODUCT_SOURCE_DIR/target/release/$binary" ]] || fail "missing frozen binary $binary" "HARNESS_GAP"
   sha256sum "$PRODUCT_SOURCE_DIR/target/release/$binary" >>"$EVIDENCE/environment/runtime-assets.sha256"
@@ -1134,7 +1154,8 @@ for host in a b c; do
     # Ubuntu may run libvirtd on demand through systemd sockets and let the
     # daemon exit while idle. Exercise the actual qemu:///system API instead
     # of requiring the monolithic service process to remain active.
-    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && command -v tcpdump >/dev/null && test -c /dev/kvm && sudo virsh -c qemu:///system list --all >/dev/null 2>&1' >/dev/null 2>&1; then
+    # shellcheck disable=SC2016 # uname must expand on the remote guest.
+    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && command -v tcpdump >/dev/null && command -v qemu-system-x86_64 >/dev/null && test -r "/boot/vmlinuz-$(uname -r)" && test -c /dev/kvm && sudo virsh -c qemu:///system list --all >/dev/null 2>&1' >/dev/null 2>&1; then
       packages_ready=1
       break
     fi
@@ -2815,6 +2836,49 @@ for host,row in latest.items():
     assert row is not None and row['action']=='Remove' and row['state'].lower()=='succeeded' \
         and row['local_host']==host and row['outcome'], (host,row)
 PY
+# The provider-level SPEC-0049 matrix runs only after supported API teardown
+# proves that the O3K agent-owned realm and shared transport namespace are clean.
+# It uses a distinct provider root and run identity on these same fresh guests.
+if [[ "$CAMPAIGN_MODE" == full ]]; then
+  PROVIDER_GATE_RUN_ID="ga-$(printf '%s' "$RUN_ID" | sha256sum | cut -c1-20)"
+  for host in a b c; do
+    case "$host" in
+      a) key="$WG_A" ;;
+      b) key="$WG_B" ;;
+      c) key="$WG_C" ;;
+    esac
+    printf '%s\n' "$key" >"$EVIDENCE/management/wireguard-host-$host.pub"
+    chmod 0600 "$EVIDENCE/management/wireguard-host-$host.pub"
+  done
+  mkdir -p "$EVIDENCE/provider-gate"
+  if ! env \
+      FABRIC_V3_3H_RUN_ID="$PROVIDER_GATE_RUN_ID" \
+      FABRIC_V3_3H_HELPER_BIN="$PRODUCT_SOURCE_DIR/target/release/examples/fabric-regression-3host-helper" \
+      FABRIC_V3_3H_HOST_A_IP="${MGMT_IP[a]}" \
+      FABRIC_V3_3H_HOST_B_IP="${MGMT_IP[b]}" \
+      FABRIC_V3_3H_HOST_C_IP="${MGMT_IP[c]}" \
+      FABRIC_V3_3H_KEY_A="$SSH_KEY" \
+      FABRIC_V3_3H_KEY_B="$SSH_KEY" \
+      FABRIC_V3_3H_KEY_C="$SSH_KEY" \
+      FABRIC_V3_3H_KNOWN_HOSTS_FILE="$KNOWN_HOSTS" \
+      FABRIC_V3_3H_HOST_A_PUBLIC_KEY_FILE="$EVIDENCE/management/wireguard-host-a.pub" \
+      FABRIC_V3_3H_HOST_B_PUBLIC_KEY_FILE="$EVIDENCE/management/wireguard-host-b.pub" \
+      FABRIC_V3_3H_HOST_C_PUBLIC_KEY_FILE="$EVIDENCE/management/wireguard-host-c.pub" \
+      FABRIC_V3_3H_EVIDENCE_DIR="$EVIDENCE/provider-gate" \
+      bash "$ROOT_DIR/tests/fabric-v3-three-host-gate.sh" \
+      >"$EVIDENCE/provider-gate/stdout.txt" \
+      2>"$EVIDENCE/provider-gate/stderr.txt"; then
+    provider_classification="$(sed -n 's/^FIRST FAILURE classification=\([^ ]*\).*/\1/p' \
+      "$EVIDENCE/provider-gate/stderr.txt" | tail -1)"
+    case "$provider_classification" in
+      ENVIRONMENT_GAP|HARNESS_GAP|PROVIDER_CONFORMANCE_DEFECT|CLEANUP_DEFECT|FOREIGN_STATE_DEFECT) ;;
+      *) provider_classification=HARNESS_GAP ;;
+    esac
+    fail "nested Fabric provider conformance failed; see provider-gate evidence" "$provider_classification"
+  fi
+  printf '%s\n' "$PROVIDER_GATE_RUN_ID" >"$EVIDENCE/provider-gate/run-id.txt"
+fi
+
 # Remove only the three exact fresh compute guests after proving their API
 # resources and server domains are gone. Then compare the physical libvirt
 # inventory to the pre-run inventory to detect any foreign-domain mutation.
@@ -2849,5 +2913,5 @@ cat >"$EVIDENCE/result.json" <<JSON
 {"result":"PASS","acceptance_gate":"$ACCEPTANCE_GATE","run_id":"$RUN_ID","product_sha":"$PRODUCT_SHA","product_tree":"$PRODUCT_TREE","harness_sha":"$(git -C "$ROOT_DIR" rev-parse HEAD)","fabric_domain_id":"$FABRIC_DOMAIN_ID","servers":["${SERVER_IDS[0]}","${SERVER_IDS[1]}","${SERVER_IDS[2]}"],"teardown":"PASS"}
 JSON
 if [[ "$CAMPAIGN_MODE" == full ]]; then
-  echo "FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE: PASS"
+  echo "FABRIC V3 NESTED CONFORMANCE — GATE A: PASS"
 fi

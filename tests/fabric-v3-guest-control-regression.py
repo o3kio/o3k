@@ -250,7 +250,7 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('"acceptance_gate":"$ACCEPTANCE_GATE"', DRIVER)
         self.assertIn('echo "FABRIC V3 DURABLE HOST RETIREMENT MICROGATE: PASS"', DRIVER)
         self.assertIn('echo "FABRIC V3 DURABLE HOST RETIREMENT MICROGATE: FAIL"', DRIVER)
-        self.assertIn('if [[ "$CAMPAIGN_MODE" == full ]]; then\n  echo "FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE: PASS"', DRIVER)
+        self.assertIn('if [[ "$CAMPAIGN_MODE" == full ]]; then\n  echo "FABRIC V3 NESTED CONFORMANCE — GATE A: PASS"', DRIVER)
         self.assertIn('before-departure/traffic/a-to-b-icmp.txt', DRIVER)
         self.assertIn('before-departure/traffic/b-to-a-icmp.txt', DRIVER)
         self.assertIn('before-departure/traffic/a-to-c-icmp.txt', DRIVER)
