@@ -601,6 +601,28 @@ mod tests {
             mtu: None,
         })
     }
+
+    #[cfg(unix)]
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    // Keep a real child handle even when the simulated old agent's supervisor
+    // is forgotten. Adoption signals the process; the test must still reap it.
+    #[cfg(unix)]
+    struct TestChild(Child);
+
+    #[cfg(unix)]
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
     #[test]
     fn renders_fixed_bindings_and_rejects_collisions() -> Result<(), DhcpError> {
         let mut service = service()?;
@@ -757,6 +779,88 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_fixtures_are_immutable_executables() -> Result<(), DhcpError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        for name in [
+            "fake-dnsmasq.sh",
+            "fake-dnsmasq-adopt.sh",
+            "fake-dnsmasq-argv.sh",
+            "dies-after-spawn.sh",
+            "rejects-config.sh",
+        ] {
+            let path = fixture(name);
+            let metadata = fs::symlink_metadata(&path).map_err(DhcpError::Storage)?;
+            assert!(
+                metadata.is_file(),
+                "fixture must remain a regular file: {path:?}"
+            );
+            assert_ne!(metadata.permissions().mode() & 0o111, 0);
+            assert!(path.ends_with(format!("tests/fixtures/{name}")));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn long_lived_fixtures_do_not_spawn_unowned_descendants() -> Result<(), DhcpError> {
+        for name in [
+            "fake-dnsmasq.sh",
+            "fake-dnsmasq-adopt.sh",
+            "fake-dnsmasq-argv.sh",
+            "rejects-config.sh",
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("o3k-dhcp-fixture-{}", uuid::Uuid::now_v7()));
+            fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
+            let mut child = TestChild(
+                Command::new(fixture(name))
+                    .arg(format!(
+                        "--conf-file={}",
+                        root.join("dnsmasq.conf").display()
+                    ))
+                    .arg(format!("--pid-file={}", root.join("dnsmasq.pid").display()))
+                    .arg("--keep-in-foreground")
+                    .spawn()
+                    .map_err(DhcpError::Storage)?,
+            );
+            let pid = child.0.id();
+            let starttime = process_starttime(pid as i32).ok_or(DhcpError::CommandFailed)?;
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(child.0.try_wait().map_err(DhcpError::Storage)?.is_none());
+                let descendants = fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+                    .map_err(DhcpError::Storage)?;
+                let comm =
+                    fs::read_to_string(format!("/proc/{pid}/comm")).map_err(DhcpError::Storage)?;
+                if comm.trim() == "sleep" {
+                    assert!(
+                        descendants.trim().is_empty(),
+                        "{name} leaked child PIDs: {descendants}"
+                    );
+                    break;
+                }
+                for descendant in descendants.split_whitespace() {
+                    if let Ok(comm) = fs::read_to_string(format!("/proc/{descendant}/comm")) {
+                        assert_ne!(
+                            comm.trim(),
+                            "sleep",
+                            "{name} spawned unowned sleep PID {descendant}"
+                        );
+                    }
+                }
+                assert!(Instant::now() < deadline, "{name} never replaced its shell");
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            drop(child);
+            assert_ne!(process_starttime(pid as i32), Some(starttime));
+            fs::remove_dir_all(root).map_err(DhcpError::Storage)?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn configuration_survives_reopen() -> Result<(), DhcpError> {
         let root = std::env::temp_dir().join(format!("o3k-dhcp-reopen-{}", uuid::Uuid::now_v7()));
@@ -772,19 +876,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn supervisor_is_nonblocking_restartable_and_owned() -> Result<(), DhcpError> {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = std::env::temp_dir().join(format!(
             "o3k-dhcp-supervisor-{}-{}",
             std::process::id(),
             uuid::Uuid::now_v7()
         ));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
-        let binary = root.join("fake-dnsmasq.sh");
-        fs::write(&binary, "#!/bin/sh\ntrap 'exit 0' TERM INT HUP\nsleep 30\n")
-            .map_err(DhcpError::Storage)?;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
-            .map_err(DhcpError::Storage)?;
+        let binary = fixture("fake-dnsmasq.sh");
 
         let mut service = DhcpService::open(&root)?;
         service.configure(config()?)?;
@@ -848,26 +946,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn supervisor_can_be_adopted_after_agent_restart() -> Result<(), DhcpError> {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = std::env::temp_dir().join(format!(
             "o3k-dhcp-adopt-{}-{}",
             std::process::id(),
             uuid::Uuid::now_v7()
         ));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
-        let binary = root.join("fake-dnsmasq.sh");
-        fs::write(
-            &binary,
-            "#!/bin/sh\nif [ \"$1\" = \"--test\" ]; then exit 0; fi\nfor arg in \"$@\"; do case \"$arg\" in --pid-file=*) echo $$ > \"${arg#--pid-file=}\";; esac; done\ntrap 'exit 0' TERM INT HUP\nsleep 30\n",
-        )
-        .map_err(DhcpError::Storage)?;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
-            .map_err(DhcpError::Storage)?;
+        let binary = fixture("fake-dnsmasq-adopt.sh");
 
         let mut service = DhcpService::open(&root)?;
         service.configure(config()?)?;
-        let supervisor = service.start(&binary)?;
+        let mut supervisor = service.start(&binary)?;
         let pid_file = supervisor.pid_file.clone();
         let identity_file = supervisor.identity_file.clone();
         let deadline = Instant::now() + LIVENESS_GRACE;
@@ -878,6 +967,11 @@ mod tests {
             pid_file.exists(),
             "dnsmasq must publish its pidfile before adoption"
         );
+        let mut original_child =
+            TestChild(supervisor.child.take().ok_or(DhcpError::CommandFailed)?);
+        let original_pid = original_child.0.id();
+        let original_starttime =
+            process_starttime(original_pid as i32).ok_or(DhcpError::CommandFailed)?;
         std::mem::forget(supervisor);
 
         let reopened = DhcpService::open(&root)?;
@@ -886,6 +980,11 @@ mod tests {
             .ok_or(DhcpError::CommandFailed)?;
         assert!(adopted.is_running()?);
         adopted.stop()?;
+        original_child.0.wait().map_err(DhcpError::Storage)?;
+        assert_ne!(
+            process_starttime(original_pid as i32),
+            Some(original_starttime)
+        );
         assert!(!pid_file.exists());
         assert!(!identity_file.exists());
         fs::remove_dir_all(root).map_err(DhcpError::Storage)?;
@@ -895,8 +994,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn start_fails_closed_when_child_dies_after_spawn() -> Result<(), DhcpError> {
-        use std::os::unix::fs::PermissionsExt;
-
         let root =
             std::env::temp_dir().join(format!("o3k-dhcp-early-death-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
@@ -909,14 +1006,7 @@ mod tests {
         // `sleep 0.2` can overrun the window and flake this assertion (issue
         // #1044), which is a test-setup margin problem, not a production
         // budget bug.
-        let binary = root.join("dies-after-spawn.sh");
-        fs::write(
-            &binary,
-            "#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$arg\" = \"--test\" ] && exit 0\ndone\nsleep 0.02\nexit 1\n",
-        )
-        .map_err(DhcpError::Storage)?;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
-            .map_err(DhcpError::Storage)?;
+        let binary = fixture("dies-after-spawn.sh");
 
         let mut service = DhcpService::open(&root)?;
         service.configure(config()?)?;
@@ -932,8 +1022,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn start_fails_closed_when_config_probe_rejects() -> Result<(), DhcpError> {
-        use std::os::unix::fs::PermissionsExt;
-
         let root =
             std::env::temp_dir().join(format!("o3k-dhcp-test-reject-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
@@ -941,14 +1029,7 @@ mod tests {
         // 2.90 does for `start,end,static`) must fail the start before any
         // serving process is spawned. Without the preflight the serving
         // process stays alive and the start succeeds, so this fails pre-fix.
-        let binary = root.join("rejects-config.sh");
-        fs::write(
-            &binary,
-            "#!/bin/sh\n[ \"$1\" = \"--test\" ] && exit 1\ntrap 'exit 0' TERM INT HUP\nsleep 30\n",
-        )
-        .map_err(DhcpError::Storage)?;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
-            .map_err(DhcpError::Storage)?;
+        let binary = fixture("rejects-config.sh");
 
         let mut service = DhcpService::open(&root)?;
         service.configure(config()?)?;
@@ -963,23 +1044,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn spawn_uses_equals_form_for_path_options() -> Result<(), DhcpError> {
-        use std::os::unix::fs::PermissionsExt;
+    fn argv_fixture_probe_does_not_publish_serving_arguments() -> Result<(), DhcpError> {
+        let root =
+            std::env::temp_dir().join(format!("o3k-dhcp-probe-argv-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
+        let status = Command::new(fixture("fake-dnsmasq-argv.sh"))
+            .arg("--test")
+            .arg(format!(
+                "--conf-file={}",
+                root.join("dnsmasq.conf").display()
+            ))
+            .status()
+            .map_err(DhcpError::Storage)?;
+        assert!(status.success());
+        assert!(
+            !root.join("argv.txt").exists(),
+            "probe arguments must not satisfy serving readiness"
+        );
+        fs::remove_dir_all(root).map_err(DhcpError::Storage)?;
+        Ok(())
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn spawn_uses_equals_form_for_path_options() -> Result<(), DhcpError> {
         let root = std::env::temp_dir().join(format!("o3k-dhcp-argv-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
         let argv_file = root.join("argv.txt");
-        let binary = root.join("fake-dnsmasq-argv.sh");
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ntrap 'exit 0' TERM INT HUP\nfor arg in \"$@\"; do\n  [ \"$arg\" = \"--test\" ] && exit 0\ndone\nsleep 30\n",
-                argv_file.display()
-            ),
-        )
-        .map_err(DhcpError::Storage)?;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
-            .map_err(DhcpError::Storage)?;
+        let binary = fixture("fake-dnsmasq-argv.sh");
 
         let mut service = DhcpService::open(&root)?;
         service.configure(config()?)?;
@@ -1004,6 +1096,15 @@ mod tests {
         assert!(
             args.iter().any(|arg| arg.starts_with("--pid-file=")),
             "expected --pid-file=<path> in argv, got {args:?}"
+        );
+        let expected_pid = format!("--pid-file={}", supervisor.pid_file.display());
+        assert_eq!(
+            args,
+            [
+                expected_config.as_str(),
+                expected_pid.as_str(),
+                "--keep-in-foreground"
+            ]
         );
         supervisor.stop()?;
 
