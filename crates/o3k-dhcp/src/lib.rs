@@ -601,6 +601,13 @@ mod tests {
             mtu: None,
         })
     }
+
+    #[cfg(unix)]
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
     #[test]
     fn renders_fixed_bindings_and_rejects_collisions() -> Result<(), DhcpError> {
         let mut service = service()?;
@@ -757,6 +764,30 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_fixtures_are_immutable_executables() -> Result<(), DhcpError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        for name in [
+            "fake-dnsmasq.sh",
+            "fake-dnsmasq-adopt.sh",
+            "fake-dnsmasq-argv.sh",
+            "dies-after-spawn.sh",
+            "rejects-config.sh",
+        ] {
+            let path = fixture(name);
+            let metadata = fs::metadata(&path).map_err(DhcpError::Storage)?;
+            assert!(
+                metadata.is_file(),
+                "fixture must remain a regular file: {path:?}"
+            );
+            assert_ne!(metadata.permissions().mode() & 0o111, 0);
+            assert!(path.ends_with(format!("tests/fixtures/{name}")));
+        }
+        Ok(())
+    }
+
     #[test]
     fn configuration_survives_reopen() -> Result<(), DhcpError> {
         let root = std::env::temp_dir().join(format!("o3k-dhcp-reopen-{}", uuid::Uuid::now_v7()));
@@ -772,19 +803,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn supervisor_is_nonblocking_restartable_and_owned() -> Result<(), DhcpError> {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = std::env::temp_dir().join(format!(
             "o3k-dhcp-supervisor-{}-{}",
             std::process::id(),
             uuid::Uuid::now_v7()
         ));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
-        let binary = root.join("fake-dnsmasq.sh");
-        fs::write(&binary, "#!/bin/sh\ntrap 'exit 0' TERM INT HUP\nsleep 30\n")
-            .map_err(DhcpError::Storage)?;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
-            .map_err(DhcpError::Storage)?;
+        let binary = fixture("fake-dnsmasq.sh");
 
         let mut service = DhcpService::open(&root)?;
         service.configure(config()?)?;
@@ -848,22 +873,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn supervisor_can_be_adopted_after_agent_restart() -> Result<(), DhcpError> {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = std::env::temp_dir().join(format!(
             "o3k-dhcp-adopt-{}-{}",
             std::process::id(),
             uuid::Uuid::now_v7()
         ));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
-        let binary = root.join("fake-dnsmasq.sh");
-        fs::write(
-            &binary,
-            "#!/bin/sh\nif [ \"$1\" = \"--test\" ]; then exit 0; fi\nfor arg in \"$@\"; do case \"$arg\" in --pid-file=*) echo $$ > \"${arg#--pid-file=}\";; esac; done\ntrap 'exit 0' TERM INT HUP\nsleep 30\n",
-        )
-        .map_err(DhcpError::Storage)?;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
-            .map_err(DhcpError::Storage)?;
+        let binary = fixture("fake-dnsmasq-adopt.sh");
 
         let mut service = DhcpService::open(&root)?;
         service.configure(config()?)?;
@@ -895,8 +911,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn start_fails_closed_when_child_dies_after_spawn() -> Result<(), DhcpError> {
-        use std::os::unix::fs::PermissionsExt;
-
         let root =
             std::env::temp_dir().join(format!("o3k-dhcp-early-death-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
@@ -909,14 +923,7 @@ mod tests {
         // `sleep 0.2` can overrun the window and flake this assertion (issue
         // #1044), which is a test-setup margin problem, not a production
         // budget bug.
-        let binary = root.join("dies-after-spawn.sh");
-        fs::write(
-            &binary,
-            "#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$arg\" = \"--test\" ] && exit 0\ndone\nsleep 0.02\nexit 1\n",
-        )
-        .map_err(DhcpError::Storage)?;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
-            .map_err(DhcpError::Storage)?;
+        let binary = fixture("dies-after-spawn.sh");
 
         let mut service = DhcpService::open(&root)?;
         service.configure(config()?)?;
@@ -932,8 +939,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn start_fails_closed_when_config_probe_rejects() -> Result<(), DhcpError> {
-        use std::os::unix::fs::PermissionsExt;
-
         let root =
             std::env::temp_dir().join(format!("o3k-dhcp-test-reject-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
@@ -941,14 +946,7 @@ mod tests {
         // 2.90 does for `start,end,static`) must fail the start before any
         // serving process is spawned. Without the preflight the serving
         // process stays alive and the start succeeds, so this fails pre-fix.
-        let binary = root.join("rejects-config.sh");
-        fs::write(
-            &binary,
-            "#!/bin/sh\n[ \"$1\" = \"--test\" ] && exit 1\ntrap 'exit 0' TERM INT HUP\nsleep 30\n",
-        )
-        .map_err(DhcpError::Storage)?;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
-            .map_err(DhcpError::Storage)?;
+        let binary = fixture("rejects-config.sh");
 
         let mut service = DhcpService::open(&root)?;
         service.configure(config()?)?;
@@ -964,22 +962,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_uses_equals_form_for_path_options() -> Result<(), DhcpError> {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = std::env::temp_dir().join(format!("o3k-dhcp-argv-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
         let argv_file = root.join("argv.txt");
-        let binary = root.join("fake-dnsmasq-argv.sh");
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ntrap 'exit 0' TERM INT HUP\nfor arg in \"$@\"; do\n  [ \"$arg\" = \"--test\" ] && exit 0\ndone\nsleep 30\n",
-                argv_file.display()
-            ),
-        )
-        .map_err(DhcpError::Storage)?;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
-            .map_err(DhcpError::Storage)?;
+        let binary = fixture("fake-dnsmasq-argv.sh");
 
         let mut service = DhcpService::open(&root)?;
         service.configure(config()?)?;
