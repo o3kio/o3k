@@ -1954,6 +1954,16 @@ cp "$EVIDENCE/before-departure/durable-work/pre-delete-work-history.json" \
   "$EVIDENCE/endpoint-removal/pre-delete-work-history.json"
 cp "$EVIDENCE/before-departure/durable-work/pre-delete-work-history.json" \
   "$EVIDENCE/c-delete/retirement-obligation/prior-apply-evidence.json"
+C_TRANSPORT_IP="$(python3 - "$EVIDENCE/before-departure/plans/host-c-fabric-plan.json" <<'PY'
+import json,sys
+plan=json.load(open(sys.argv[1]))
+transport=plan.get("local_fabric_transport_ip")
+if not transport:
+    raise SystemExit("host-c transport address missing from pre-departure plan")
+print(transport)
+PY
+)" || fail "pre-departure host-C transport address unavailable" "HARNESS_GAP"
+[[ -n "$C_TRANSPORT_IP" ]] || fail "pre-departure host-C transport address is empty" "HARNESS_GAP"
 if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
   python3 - "$EVIDENCE/before-departure/traffic" "$EVIDENCE/api/port-c.response.json" <<'PY' \
     || fail "canonical pre-delete traffic evidence is incomplete" "HARNESS_GAP"
@@ -2264,7 +2274,7 @@ PY
 done
 python3 "$ROOT_DIR/tests/fabric-v3-retirement-work-evidence.py" survivors \
   "$realm_id" "$EVIDENCE/endpoint-removal" "$EVIDENCE/endpoint-removal" \
-  "$EVIDENCE/endpoint-removal" "$EVIDENCE/endpoint-removal" "${PORT_IDS[2]}" \
+  "$EVIDENCE/endpoint-removal" "$EVIDENCE/endpoint-removal" "${PORT_IDS[2]}" "$C_TRANSPORT_IP" \
   "$EVIDENCE/endpoint-removal/survivor-state.json" \
   || fail "C local state or A/B participant/HER convergence is invalid" "SURVIVOR_RECONCILIATION_DEFECT"
 guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
@@ -2384,7 +2394,7 @@ PYVX
     done
     if (( state_read )) && python3 "$ROOT_DIR/tests/fabric-v3-retirement-work-evidence.py" survivors \
         "$realm_id" "$EVIDENCE/restart/plans" "$EVIDENCE/restart/plans" "$EVIDENCE/restart/plans" \
-        "$EVIDENCE/restart/plans" "${PORT_IDS[2]}" "$EVIDENCE/restart/plans/survivor-state.json" \
+        "$EVIDENCE/restart/plans" "${PORT_IDS[2]}" "$C_TRANSPORT_IP" "$EVIDENCE/restart/plans/survivor-state.json" \
         2>"$EVIDENCE/restart/startup-recovery/survivor-validation-error.txt"; then
       restart_converged=1
       break

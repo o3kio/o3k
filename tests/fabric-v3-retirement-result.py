@@ -242,7 +242,7 @@ def build_result(
             "directory_generation": survivors.get("directory_generation"),
             "participants": survivors.get("participants"),
             "her": {host: item.get("her") for host, item in survivors.get("survivors", {}).items()},
-            "stale_c_her": False,
+            "stale_c_her": survivors.get("stale_c_her") is False,
             "traffic": "PASS",
         },
         "controller_restart": {

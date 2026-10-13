@@ -342,6 +342,7 @@ def verify_survivors(
     fdb_dir: pathlib.Path,
     journals_dir: pathlib.Path,
     c_endpoint: str,
+    c_transport_ip: str,
 ) -> dict[str, Any]:
     expected_hosts = {"host-a", "host-b"}
     generation: int | None = None
@@ -377,10 +378,20 @@ def verify_survivors(
         if flood != expected_ips:
             raise ValueError(f"survivor runtime HER differs on {host}: {flood}/{expected_ips}")
         fdb_text = (fdb_dir / f"host-{host[-1]}-her-fdb.txt").read_text()
+        fdb_lines = [line for line in fdb_text.splitlines() if " dst " in line]
+        fdb_destinations = []
+        for line in fdb_lines:
+            destination_fields = line.split(" dst ", 1)[1].split()
+            if not destination_fields:
+                raise ValueError(f"malformed runtime FDB row on {host}: missing dst value")
+            fdb_destinations.append((line, destination_fields[0]))
+        stale_c_rows = [line for line, destination in fdb_destinations if destination == c_transport_ip]
+        if stale_c_rows:
+            raise ValueError(f"runtime FDB retains retired host C transport {c_transport_ip}: {stale_c_rows}")
         fdb_ips = {
-            line.split(" dst ", 1)[1].split()[0]
-            for line in fdb_text.splitlines()
-            if line.startswith("00:00:00:00:00:00 ") and " dst " in line
+            destination
+            for line, destination in fdb_destinations
+            if line.startswith("00:00:00:00:00:00 ")
         }
         if fdb_ips != expected_ips:
             raise ValueError(f"survivor runtime FDB differs on {host}: {fdb_ips}/{expected_ips}")
@@ -420,6 +431,7 @@ def verify_survivors(
         "participants": sorted(expected_hosts),
         "survivors": result,
         "retired_host_c_absent": True,
+        "stale_c_her": False,
         "c_latest_agent_command": {
             key: c_commands[-1].get(key)
             for key in ("command_id", "operation_id", "idempotency_key", "action", "status")
@@ -461,9 +473,9 @@ def main(args: list[str]) -> None:
     elif mode == "after-restart" and len(args) == 5:
         result = verify_after_restart(pathlib.Path(args[1]), args[2], int(args[3]))
         pathlib.Path(args[4]).write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
-    elif mode == "survivors" and len(args) == 8:
-        result = verify_survivors(args[1], *(pathlib.Path(arg) for arg in args[2:6]), args[6])
-        pathlib.Path(args[7]).write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
+    elif mode == "survivors" and len(args) == 9:
+        result = verify_survivors(args[1], *(pathlib.Path(arg) for arg in args[2:6]), args[6], args[7])
+        pathlib.Path(args[8]).write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     else:
         raise ValueError("usage: before DB REALM PLANS OWNERSHIP FDB OUT | order DB REALM BEFORE OUT | after-restart DB REALM ROWID OUT")
 

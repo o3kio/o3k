@@ -176,10 +176,24 @@ class RetirementWorkEvidenceRegression(unittest.TestCase):
                         "status": "Succeeded"}]},
         )
         result = evidence.verify_survivors(
-            "realm-1", plans, ownership, fdb, journals, "port-c"
+            "realm-1", plans, ownership, fdb, journals, "port-c", "198.51.100.33"
         )
         self.assertEqual(result["participants"], ["host-a", "host-b"])
         self.assertEqual(result["survivors"]["host-a"]["transport_ips"], ["198.51.100.22"])
+        for suffix in ("a", "b"):
+            path = fdb / f"host-{suffix}-her-fdb.txt"
+            path.write_text(path.read_text() + "aa:bb:cc:dd:ee:ff dst 198.51.100.33 self\n")
+        with self.assertRaisesRegex(ValueError, "retired host C transport"):
+            evidence.verify_survivors(
+                "realm-1", plans, ownership, fdb, journals, "port-c", "198.51.100.33"
+            )
+        for suffix in ("a", "b"):
+            path = fdb / f"host-{suffix}-her-fdb.txt"
+            path.write_text(path.read_text().replace("dst 198.51.100.33 self", "dst "))
+        with self.assertRaisesRegex(ValueError, "missing dst value"):
+            evidence.verify_survivors(
+                "realm-1", plans, ownership, fdb, journals, "port-c", "198.51.100.33"
+            )
 
     def test_survivors_reject_generation_that_did_not_advance(self) -> None:
         self.test_survivors_use_observed_transport_addresses_and_advance_generation()
@@ -193,6 +207,7 @@ class RetirementWorkEvidenceRegression(unittest.TestCase):
                 pathlib.Path(self.temp.name) / "fdb",
                 pathlib.Path(self.temp.name) / "journals",
                 "port-c",
+                "198.51.100.33",
             )
 
 
