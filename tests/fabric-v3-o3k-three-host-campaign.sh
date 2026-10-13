@@ -8,10 +8,10 @@ source "$ROOT_DIR/tests/fabric-v3-host-slot.sh"
 CAMPAIGN_MODE="${1:-full}"
 [[ "$CAMPAIGN_MODE" == full || "$CAMPAIGN_MODE" == departure-micro ]] \
   || { echo "HARNESS_GAP: unsupported campaign mode: $CAMPAIGN_MODE" >&2; exit 1; }
-PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
-PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871
+PRODUCT_SHA=2193e50f6fb72dccf2bd8be5968eb8c178220809
+PRODUCT_TREE=72e739f8c1fcd841aac535f3e8686679ebd8254a
 PRODUCT_REMOTE_NAME=origin
-PRODUCT_REMOTE_REF=refs/heads/main
+PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-survivor-fdb-retirement
 # Guard the accepted control contract and exact, committed harness lineage
 # before creating evidence or guests.
 [[ -f "$ROOT_DIR/contracts/real-host-acceptance-evidence.md" ]] \
@@ -19,9 +19,9 @@ PRODUCT_REMOTE_REF=refs/heads/main
 [[ "$(git -C "$ROOT_DIR" merge-base HEAD "$PRODUCT_SHA" 2>/dev/null || true)" == "$PRODUCT_SHA" ]] \
   || { echo "HARNESS_GAP: frozen product candidate is not an ancestor of this harness" >&2; exit 1; }
 product_remote_line="$(git -C "$ROOT_DIR" ls-remote --exit-code --refs "$PRODUCT_REMOTE_NAME" "$PRODUCT_REMOTE_REF" 2>/dev/null)" \
-  || { echo "HARNESS_GAP: protected product ref is not remotely visible" >&2; exit 1; }
+  || { echo "HARNESS_GAP: frozen product candidate ref is not remotely visible" >&2; exit 1; }
 [[ "$product_remote_line" == "$PRODUCT_SHA"$'\t'"$PRODUCT_REMOTE_REF" ]] \
-  || { echo "HARNESS_GAP: protected product ref does not resolve to the frozen candidate" >&2; exit 1; }
+  || { echo "HARNESS_GAP: product candidate ref does not resolve to the frozen SHA" >&2; exit 1; }
 PRODUCT_REMOTE_SHA="${product_remote_line%%$'\t'*}"
 [[ -z "$(git -C "$ROOT_DIR" status --porcelain 2>/dev/null)" ]] \
   || { echo "HARNESS_GAP: campaign harness source is not a clean committed tree" >&2; exit 1; }
