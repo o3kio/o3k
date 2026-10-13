@@ -28,6 +28,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-management-network-regression.py" \
   || { echo "HARNESS_GAP: management-network allocation regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-provider-state-observer-regression.py" \
   || { echo "HARNESS_GAP: provider-state observer regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-provider-dhcp-withdrawal-regression.py" \
+  || { echo "HARNESS_GAP: DHCP withdrawal tombstone regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-retirement-work-evidence-regression.py" \
   || { echo "HARNESS_GAP: retirement-work evidence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-retirement-result-regression.py" \
@@ -174,7 +176,7 @@ PYARGV
     status="$(field status <"$output")"
     [[ "$status" == absent ]] || fail "C run-owned provider link remains after Remove: $name" "$failure_class"
   }
-  local tap_name object_name field_name vxlan_host_veth
+  local tap_name object_name field_name vxlan_host_veth dhcp_root tombstone_path
   tap_name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tap"])' "$source")"
   expect_link_absent "$tap_name" "$output_dir/c-tap.json"
   for field_name in bridge host_veth public_host_veth; do
@@ -213,16 +215,29 @@ PYVXOBJECT
   fi
   ssh_vm "${MGMT_IP[c]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" \
     >"$output_dir/ownership.json" || fail "C ownership state unavailable after Remove" "ENVIRONMENT_GAP"
-  invoke_observer tree "$output_dir/dhcp-tree.json" \
-    --path "/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$realm_id"
-  python3 - "$output_dir/ownership.json" "$realm_id" "${PORT_IDS[2]}" "$output_dir/dhcp-tree.json" <<'PYABSENT' \
-    || fail "C provider ownership or local DHCP state remains after Remove" "$failure_class"
-import json,sys
-state=json.load(open(sys.argv[1])); realm=sys.argv[2]; endpoint=sys.argv[3]
-assert realm not in state.get('realms',{}),state.get('realms',{})
-assert all(endpoint not in item.get('endpoint_taps',{}) and endpoint not in item.get('pending_endpoint_taps',{}) for item in state.get('realms',{}).values()),state.get('realms',{})
-tree=json.load(open(sys.argv[4])); assert not tree.get('files'),tree
-PYABSENT
+  dhcp_root="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp/fabric/$realm_id"
+  tombstone_path="$dhcp_root/fabric-dhcp-ownership.json"
+  invoke_observer tree "$output_dir/dhcp-tree.json" --path "$dhcp_root"
+  invoke_observer path "$output_dir/dhcp-tombstone-path.json" --path "$tombstone_path"
+  [[ "$(field status <"$output_dir/dhcp-tombstone-path.json")" == present \
+    && "$(field kind <"$output_dir/dhcp-tombstone-path.json")" == file ]] \
+    || fail "C DHCP withdrawal tombstone is absent or not a regular file" "$failure_class"
+  ssh_vm "${MGMT_IP[c]}" "sudo cat -- '$tombstone_path'" \
+    >"$output_dir/dhcp-tombstone.json" \
+    || fail "C DHCP withdrawal tombstone could not be read" "ENVIRONMENT_GAP"
+  python3 "$ROOT_DIR/tests/fabric-v3-provider-dhcp-withdrawal.py" \
+    --tree "$output_dir/dhcp-tree.json" \
+    --ownership "$output_dir/ownership.json" \
+    --tombstone "$output_dir/dhcp-tombstone.json" \
+    --remove-row "$EVIDENCE/endpoint-removal/c-remove-work-row-final-state.json" \
+    --agent-journal "$EVIDENCE/endpoint-removal/host-c-command-journal.json" \
+    --endpoint-id "${PORT_IDS[2]}" \
+    --output "$output_dir/dhcp-withdrawal-validation.json" \
+    || fail "C DHCP withdrawal tombstone or active-state absence is invalid" "$failure_class"
+  invoke_observer process "$output_dir/dnsmasq-processes.json" \
+    --executable dnsmasq --argv-contains "$dhcp_root/"
+  [[ "$(field status <"$output_dir/dnsmasq-processes.json")" == absent ]] \
+    || fail "C run-owned dnsmasq process remains after Remove" "$failure_class"
   printf '{"endpoint_tap_absent":true,"realm_links_absent":true,"realm_namespace_absent":true,"vxlan_absent":true,"fabric_plan_absent":true,"anti_spoof_absent":true,"local_dhcp_state_absent":true}\n' \
     >"$output_dir/result.json"
 }

@@ -40,7 +40,9 @@ class EvidenceArchiveRegression(unittest.TestCase):
                 "environment/product-source/secret.txt": "PRODUCT_SOURCE_SENTINEL\n",
                 "controller-data/o3k.sqlite": "DATABASE_SENTINEL\n",
                 "before-departure/plans/host-a-fabric-plan.json":
-                    '{"ingress_owner_token":"JSON_TOKEN_SENTINEL","note":"Bearer JSON_BEARER_SENTINEL","generation":3}\n',
+                    '{"ingress_owner_token":"JSON_TOKEN_SENTINEL","accessToken":"CAMEL_ACCESS_TOKEN_SENTINEL",'
+                    '"refreshToken":"CAMEL_REFRESH_TOKEN_SENTINEL","clientSecret":"CAMEL_SECRET_SENTINEL",'
+                    '"privateKey":"CAMEL_PRIVATE_KEY_SENTINEL","note":"Bearer JSON_BEARER_SENTINEL","generation":3}\n',
                 "diagnostics/accidental-token.txt": "token=TEXT_TOKEN_SENTINEL\n",
                 "diagnostics/malformed.json": '{"token":"MALFORMED_JSON_SENTINEL"\n',
                 "result.json": '{"result":"FAIL"}\n',
@@ -85,6 +87,9 @@ class EvidenceArchiveRegression(unittest.TestCase):
                 b'"note": "[REDACTED]"',
                 member_contents["campaign-run/before-departure/plans/host-a-fabric-plan.json"],
             )
+            redacted_plan = member_contents["campaign-run/before-departure/plans/host-a-fabric-plan.json"]
+            for key in (b"accessToken", b"refreshToken", b"clientSecret", b"privateKey"):
+                self.assertIn(key + b'": "[REDACTED]"', redacted_plan)
             for excluded in archive_module.EXCLUDED_PATHS:
                 self.assertFalse(
                     any(name == f"campaign-run/{excluded}" or name.startswith(f"campaign-run/{excluded}/") for name in names),
@@ -105,6 +110,10 @@ class EvidenceArchiveRegression(unittest.TestCase):
                 b"PCAP_SENTINEL",
                 b"DHCP_PCAP_SENTINEL",
                 b"JSON_TOKEN_SENTINEL",
+                b"CAMEL_ACCESS_TOKEN_SENTINEL",
+                b"CAMEL_REFRESH_TOKEN_SENTINEL",
+                b"CAMEL_SECRET_SENTINEL",
+                b"CAMEL_PRIVATE_KEY_SENTINEL",
                 b"JSON_BEARER_SENTINEL",
                 b"TEXT_TOKEN_SENTINEL",
                 b"MALFORMED_JSON_SENTINEL",

@@ -112,6 +112,52 @@ def observe_path(path: pathlib.Path, lstat: Callable[[str], os.stat_result] = os
     }
 
 
+def observe_process(
+    executable: str,
+    argv_contains: str,
+    proc_root: pathlib.Path = pathlib.Path("/proc"),
+) -> dict[str, Any]:
+    executable = _safe_name(executable, "process executable")
+    if not argv_contains or "\x00" in argv_contains:
+        raise ObservationError("owned_process_inventory", "invalid process ownership path")
+    try:
+        entries = sorted(item for item in proc_root.iterdir() if item.name.isdecimal())
+    except OSError as exc:
+        raise ObservationError("owned_process_inventory", type(exc).__name__, exc.errno) from exc
+
+    matching: list[dict[str, Any]] = []
+    needle = os.fsencode(argv_contains)
+    for entry in entries:
+        try:
+            process_executable = entry.joinpath("exe").readlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ObservationError("owned_process_inventory", type(exc).__name__, exc.errno) from exc
+        normalized = str(process_executable).removesuffix(" (deleted)")
+        if pathlib.PurePosixPath(normalized).name != executable:
+            continue
+        try:
+            command_line = entry.joinpath("cmdline").read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ObservationError("owned_process_inventory", type(exc).__name__, exc.errno) from exc
+        if not command_line:
+            raise ObservationError("owned_process_inventory", "matching process has empty command line")
+        matching.append({"pid": int(entry.name), "owned": needle in command_line})
+
+    owned_pids = sorted(item["pid"] for item in matching if item["owned"])
+    return {
+        "status": "present" if owned_pids else "absent",
+        "command_class": "owned_process_inventory",
+        "executable": executable,
+        "matching_process_count": len(matching),
+        "owned_process_count": len(owned_pids),
+        "owned_pids": owned_pids,
+    }
+
+
 def parse_namespace_list(returncode: int, stdout: str, stderr: str, name: str) -> dict[str, Any]:
     name = _safe_name(name, "namespace name")
     if returncode:
@@ -186,6 +232,9 @@ def main() -> int:
     namespace.add_argument("--name", required=True)
     path = actions.add_parser("path")
     path.add_argument("--path", required=True, type=pathlib.Path)
+    process = actions.add_parser("process")
+    process.add_argument("--executable", required=True)
+    process.add_argument("--argv-contains", required=True)
     tree = actions.add_parser("tree")
     tree.add_argument("--path", required=True, type=pathlib.Path)
     args = parser.parse_args()
@@ -196,6 +245,8 @@ def main() -> int:
             result = observe_namespace(args.name)
         elif args.action == "path":
             result = observe_path(args.path)
+        elif args.action == "process":
+            result = observe_process(args.executable, args.argv_contains)
         else:
             result = observe_tree(args.path)
         print(json.dumps(result, sort_keys=True))

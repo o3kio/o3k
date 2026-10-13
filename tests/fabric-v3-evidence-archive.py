@@ -25,7 +25,7 @@ EXCLUDED_PATHS = {
 }
 
 SENSITIVE_FIELD = re.compile(
-    r"(?:^|_)(?:token|secret|password|passwd|credential|credentials|private_key|authorization|api_key)(?:$|_)",
+    r"(?:token|secret|password|passwd|credential|credentials|privatekey|authorization|apikey)$",
     re.IGNORECASE,
 )
 EXCLUDED_SUFFIXES = (".pcap", ".pcapng", ".pem", ".key", ".log")
@@ -54,7 +54,9 @@ def _excluded(relative: pathlib.PurePosixPath) -> bool:
 def _redact_json(value: object) -> object:
     if isinstance(value, dict):
         return {
-            key: "[REDACTED]" if SENSITIVE_FIELD.search(str(key)) else _redact_json(item)
+            key: "[REDACTED]"
+            if SENSITIVE_FIELD.search(re.sub(r"[^a-z0-9]", "", str(key).lower()))
+            else _redact_json(item)
             for key, item in value.items()
         }
     if isinstance(value, list):

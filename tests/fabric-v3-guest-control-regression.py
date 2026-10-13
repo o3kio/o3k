@@ -85,6 +85,7 @@ class GuestControlRegression(unittest.TestCase):
         guard = DRIVER.index("fabric-v3-guest-control-regression.py")
         self.assertIn("fabric-v3-management-network-regression.py", DRIVER)
         self.assertIn("fabric-v3-provider-state-observer-regression.py", DRIVER)
+        self.assertIn("fabric-v3-provider-dhcp-withdrawal-regression.py", DRIVER)
         self.assertIn("fabric-v3-retirement-work-evidence-regression.py", DRIVER)
         self.assertIn("fabric-v3-retirement-result-regression.py", DRIVER)
         self.assertIn("fabric-v3-evidence-archive-regression.py", DRIVER)
@@ -166,6 +167,27 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn("C durable Realm plan remains after Remove", DRIVER)
         self.assertIn("C port did not reach an unbound DOWN tombstone", DRIVER)
         self.assertIn("A/B failed after C removal", DRIVER)
+
+    def test_c_dhcp_absence_allows_only_matching_withdrawn_tombstone(self):
+        start = DRIVER.index("verify_c_provider_absence() {")
+        end = DRIVER.index("\nfield() {", start)
+        verifier = DRIVER[start:end]
+        self.assertIn("fabric-dhcp-ownership.json", verifier)
+        self.assertIn('sudo cat --', verifier)
+        self.assertIn("fabric-v3-provider-dhcp-withdrawal.py", verifier)
+        self.assertIn('c-remove-work-row-final-state.json', verifier)
+        self.assertIn('host-c-command-journal.json', verifier)
+        self.assertIn("dnsmasq-processes.json", verifier)
+        self.assertIn("run-owned dnsmasq process remains after Remove", verifier)
+        withdrawal = (ROOT / "fabric-v3-provider-dhcp-withdrawal.py").read_text()
+        self.assertIn('"pending": False', withdrawal)
+        self.assertIn('"withdrawn": True', withdrawal)
+        self.assertIn('"dhcp_enabled": False', withdrawal)
+        self.assertIn('"directory_generation": directory_generation', withdrawal)
+        self.assertIn('"binding_generation": binding_generation', withdrawal)
+        observer = (ROOT / "fabric-v3-provider-state-observer.py").read_text()
+        self.assertIn("observe_process", observer)
+        self.assertIn('process.add_argument("--executable"', observer)
 
     def test_teardown_checks_fabric_and_dhcp_owned_state_without_global_cleanup(self):
         self.assertIn("run-owned-provider-objects.json", DRIVER)

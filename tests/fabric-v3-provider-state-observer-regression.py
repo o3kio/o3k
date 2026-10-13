@@ -68,6 +68,47 @@ class ProviderStateObserverRegression(unittest.TestCase):
             with self.assertRaisesRegex(observer.ObservationError, "not a directory"):
                 observer.observe_tree(path)
 
+    def test_process_observer_matches_absolute_dnsmasq_executable_and_run_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            proc = pathlib.Path(directory)
+            process = proc / "123"
+            process.mkdir()
+            (process / "exe").symlink_to("/usr/sbin/dnsmasq")
+            (process / "cmdline").write_bytes(
+                b"/usr/sbin/dnsmasq\0--conf-file=/var/lib/o3k/run/network/dhcp/dnsmasq.conf\0"
+            )
+            result = observer.observe_process(
+                "dnsmasq", "/var/lib/o3k/run/network/dhcp", proc
+            )
+            self.assertEqual(result["status"], "present")
+            self.assertEqual(result["owned_pids"], [123])
+
+    def test_foreign_dnsmasq_process_is_not_misclassified_as_run_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            proc = pathlib.Path(directory)
+            process = proc / "456"
+            process.mkdir()
+            (process / "exe").symlink_to("/usr/sbin/dnsmasq")
+            (process / "cmdline").write_bytes(
+                b"/usr/sbin/dnsmasq\0--conf-file=/etc/dnsmasq.conf\0"
+            )
+            result = observer.observe_process(
+                "dnsmasq", "/var/lib/o3k/run/network/dhcp", proc
+            )
+            self.assertEqual(result["status"], "absent")
+            self.assertEqual(result["matching_process_count"], 1)
+            self.assertEqual(result["owned_process_count"], 0)
+
+    def test_matching_process_with_unreadable_identity_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            proc = pathlib.Path(directory)
+            process = proc / "789"
+            process.mkdir()
+            (process / "exe").symlink_to("/usr/sbin/dnsmasq")
+            (process / "cmdline").write_bytes(b"")
+            with self.assertRaisesRegex(observer.ObservationError, "empty command line"):
+                observer.observe_process("dnsmasq", "/var/lib/o3k/run/network/dhcp", proc)
+
 
 if __name__ == "__main__":
     unittest.main()
