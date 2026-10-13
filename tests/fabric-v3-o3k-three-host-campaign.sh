@@ -1785,9 +1785,9 @@ for host in a b c; do
     "$EVIDENCE/before-departure/plans/host-$host-ownership.json"
   cp "$EVIDENCE/endpoint-removal/host-$host-plan-before.json" \
     "$EVIDENCE/before-departure/plans/host-$host-fabric-plan.json"
-  fabric_ns="$(python3 - "$EVIDENCE/endpoint-removal/host-$host-ownership-before.json" "$realm_id" <<'PYNS'
+  fabric_ns="$(python3 - "$EVIDENCE/endpoint-removal/host-$host-ownership-before.json" <<'PYNS'
 import json,sys
-print(json.load(open(sys.argv[1]))['realms'][sys.argv[2]]['namespace'])
+print(json.load(open(sys.argv[1]))['fabric']['namespace'])
 PYNS
 )" || fail "pre-delete namespace identity unavailable on $host" "OWNERSHIP_DEFECT"
   vxlan_interface="$(python3 - "$EVIDENCE/endpoint-removal/host-$host-ownership-before.json" "$realm_id" <<'PYVXLAN'
@@ -1795,9 +1795,15 @@ import json,sys
 print(json.load(open(sys.argv[1]))['realms'][sys.argv[2]]['vxlan']['interface'])
 PYVXLAN
 )" || fail "pre-delete VXLAN identity unavailable on $host" "OWNERSHIP_DEFECT"
+  [[ "$fabric_ns" =~ ^[a-zA-Z0-9_.-]{1,15}$ ]] \
+    || fail "invalid shared Fabric namespace identity on $host" "OWNERSHIP_DEFECT"
+  fdb_status=0
   ssh_vm "$address" "sudo ip netns exec '$fabric_ns' bridge fdb show dev '$vxlan_interface'" \
     >"$EVIDENCE/before-departure/plans/host-$host-her-fdb.txt" \
-    || fail "pre-delete HER/FDB observation unavailable on $host" "ENVIRONMENT_GAP"
+    2>"$EVIDENCE/before-departure/plans/host-$host-her-fdb.stderr.txt" || fdb_status=$?
+  printf '%s\n' "$fdb_status" >"$EVIDENCE/before-departure/plans/host-$host-her-fdb.exit-status.txt"
+  (( fdb_status == 0 )) \
+    || fail "pre-delete HER/FDB observation failed on $host (ssh exit $fdb_status)" "HARNESS_GAP"
 done
 python3 "$ROOT_DIR/tests/fabric-v3-retirement-work-evidence.py" before \
   "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" \

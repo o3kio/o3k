@@ -136,6 +136,18 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('"$PRODUCT_SOURCE_DIR/target/release/o3kd"', restart)
         self.assertNotIn('"$ROOT_DIR/target/release/o3kd"', restart)
 
+    def test_predelete_vxlan_fdb_observer_uses_shared_fabric_namespace(self):
+        departure = DRIVER.index("# Remove C only through the supported API")
+        start = DRIVER.index("fabric_ns=\"$(python3", departure)
+        end = DRIVER.index("done\npython3 \"$ROOT_DIR/tests/fabric-v3-retirement-work-evidence.py\" before", start)
+        observer = DRIVER[start:end]
+        self.assertIn("['fabric']['namespace']", observer)
+        self.assertNotIn("['realms'][sys.argv[2]]['namespace']", observer)
+        self.assertIn("ip netns exec '$fabric_ns' bridge fdb show dev '$vxlan_interface'", observer)
+        self.assertIn("host-$host-her-fdb.stderr.txt", observer)
+        self.assertIn("host-$host-her-fdb.exit-status.txt", observer)
+        self.assertIn('"HARNESS_GAP"', observer)
+
     def test_mandatory_packet_phases_use_guest_control_abstraction(self):
         self.assertNotIn("console_command", DRIVER)
         self.assertNotIn('virsh console', DRIVER)
