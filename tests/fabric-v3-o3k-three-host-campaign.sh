@@ -23,6 +23,8 @@ HOST_PREFLIGHT="$ROOT_DIR/tests/fabric-v3-host-preflight.py"
   || { echo "HARNESS_GAP: accepted real-host evidence contract is missing" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-guest-control-regression.py" \
   || { echo "HARNESS_GAP: guest-control acceptance regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-campaign-result-test.py" \
+  || { echo "HARNESS_GAP: campaign cleanup result regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage-test.py" \
   || { echo "HARNESS_GAP: ownership-safe domain cleanup regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-host-preflight-test.py" \
@@ -784,22 +786,36 @@ pathlib.Path(manifest).write_text(json.dumps(m,sort_keys=True,indent=2)+'\n')
 PYFINAL
     python3 - "$EVIDENCE/result.json" "$EVIDENCE/manifest.json" "$EVIDENCE/teardown/cleanup-status.json" \
       "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$CAMPAIGN_FAILURE" "$CLASSIFICATION" \
-      "$cleanup_problem" "$cleanup_failure" "$cleanup_classification" "$ACCEPTANCE_GATE" <<'PYRESULT'
+      "$cleanup_problem" "$cleanup_failure" "$cleanup_classification" "$ACCEPTANCE_GATE" \
+      "$ROOT_DIR/tests" <<'PYRESULT'
 import json,pathlib,sys
-result_path,manifest_path,status_path,run,product,tree,original_failure,original_classification,cleanup_problem,cleanup_failure,cleanup_classification,acceptance_gate=sys.argv[1:]
+result_path,manifest_path,status_path,run,product,tree,original_failure,original_classification,cleanup_problem,cleanup_failure,cleanup_classification,acceptance_gate,helper_dir=sys.argv[1:]
 path=pathlib.Path(result_path)
 try: result=json.loads(path.read_text())
 except (OSError,json.JSONDecodeError): result={}
 try: cleanup=json.loads(pathlib.Path(status_path).read_text())
 except (OSError,json.JSONDecodeError): cleanup={}
 result.update({'acceptance_gate':acceptance_gate,'run_id':run,'product_sha':product,'product_tree':tree,'cleanup':cleanup})
+sys.path.insert(0, helper_dir)
+try:
+    from fabric_v3_campaign_result import cleanup_predicates_pass
+    cleanup_predicates_satisfied=cleanup_predicates_pass(cleanup)
+except Exception as exc:
+    cleanup_predicate_error=type(exc).__name__
+    cleanup_predicates_satisfied=False
+else:
+    cleanup_predicate_error=None
 if original_failure:
     result['result']='FAIL'; result['first_failure']=original_failure
     result['classification']=original_classification or 'HARNESS_GAP'
 elif cleanup_problem=='1':
     result['result']='FAIL'; result['first_failure']=cleanup_failure
     result['classification']=cleanup_classification or 'CLEANUP_DEFECT'
-elif result.get('result')=='PASS' and any(value not in ('PASS','NOT_APPLICABLE') for value in cleanup.values()):
+elif result.get('result')=='PASS' and cleanup_predicate_error:
+    result['result']='FAIL'; result['first_failure']='cleanup predicate validator is unavailable'
+    result['classification']='HARNESS_GAP'; result['failed_operation']='validate_cleanup_predicates'
+    result['diagnostic']=cleanup_predicate_error
+elif result.get('result')=='PASS' and not cleanup_predicates_satisfied:
     result['result']='FAIL'; result['first_failure']='cleanup evidence did not satisfy all required predicates'
     result['classification']='CLEANUP_DEFECT'
 elif result.get('result')!='PASS':
