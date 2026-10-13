@@ -95,12 +95,16 @@ class GuestControlRegression(unittest.TestCase):
         self.assertLess(guard, provisioning)
         self.assertIn('merge-base HEAD "$PRODUCT_SHA"', DRIVER)
         self.assertIn('git -C "$ROOT_DIR" status --porcelain', DRIVER)
-        self.assertIn('PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e', DRIVER)
-        self.assertIn('PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871', DRIVER)
+        self.assertIn('PRODUCT_SHA=d7335166563d28084fbad5ac7f5d0f0e07e000a4', DRIVER)
+        self.assertIn('PRODUCT_TREE=d5b75b5674009d8c135218556aa2177371e489a3', DRIVER)
+        self.assertIn('PRODUCT_REMOTE_REF=refs/heads/fabric-v3-retirement-product-candidate', DRIVER)
+        self.assertIn('product_remote_visible', DRIVER)
         self.assertIn('MANAGEMENT-NETWORK PREPROVISION INVENTORY PASS', DRIVER)
         inventory_record = DRIVER.index('>>"$EVIDENCE/environment/inventory.tsv"', DRIVER.index('for host in a b c; do', DRIVER.index(': >"$KNOWN_HOSTS"')))
         virt_install = DRIVER.index('virt-install --connect qemu:///system --name "$domain"', inventory_record)
         self.assertLess(inventory_record, virt_install)
+        remote_visibility = DRIVER.index('ls-remote origin "$PRODUCT_REMOTE_REF"')
+        self.assertLess(remote_visibility, provisioning)
 
     def test_authentication_header_is_redacted_and_raw_file_excluded_from_archive(self):
         self.assertIn('"$EVIDENCE/api/auth.headers.raw"', DRIVER)

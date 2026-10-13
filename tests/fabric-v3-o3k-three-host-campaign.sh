@@ -8,8 +8,9 @@ source "$ROOT_DIR/tests/fabric-v3-host-slot.sh"
 CAMPAIGN_MODE="${1:-full}"
 [[ "$CAMPAIGN_MODE" == full || "$CAMPAIGN_MODE" == departure-micro ]] \
   || { echo "HARNESS_GAP: unsupported campaign mode: $CAMPAIGN_MODE" >&2; exit 1; }
-PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
-PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871
+PRODUCT_SHA=d7335166563d28084fbad5ac7f5d0f0e07e000a4
+PRODUCT_TREE=d5b75b5674009d8c135218556aa2177371e489a3
+PRODUCT_REMOTE_REF=refs/heads/fabric-v3-retirement-product-candidate
 # Guard the accepted control contract and exact, committed harness lineage
 # before creating evidence or guests.
 [[ -f "$ROOT_DIR/contracts/real-host-acceptance-evidence.md" ]] \
@@ -464,19 +465,34 @@ for tool in cargo curl openssl python3 virsh virt-install qemu-img guestfish vir
 [[ -c /dev/kvm ]] || fail "/dev/kvm unavailable" "ENVIRONMENT_GAP"
 [[ -r "$BASE_IMAGE" ]] || fail "base image unreadable: $BASE_IMAGE" "ENVIRONMENT_GAP"
 [[ "$(git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}")" == "$PRODUCT_TREE" ]] || fail "frozen product source tree mismatch" "HARNESS_GAP"
+if ! product_remote_sha="$(git -C "$ROOT_DIR" ls-remote origin "$PRODUCT_REMOTE_REF" | awk 'NR==1 {print $1}')"; then
+  fail "could not verify the frozen product candidate is visible on origin" "HARNESS_GAP"
+fi
+[[ "$product_remote_sha" == "$PRODUCT_SHA" ]] \
+  || fail "origin candidate ref does not point to the frozen product SHA" "HARNESS_GAP"
 url_port "$API_PORT" || fail "API port is occupied: $API_PORT" "ENVIRONMENT_GAP"
 url_port "$CONTROL_PORT" || fail "compute control port is occupied: $CONTROL_PORT" "ENVIRONMENT_GAP"
 git -C "$ROOT_DIR" rev-parse HEAD >"$EVIDENCE/environment/harness_sha.txt"
 git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}' >"$EVIDENCE/environment/harness_tree.txt"
 git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA" >"$EVIDENCE/environment/product_sha.txt"
 git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}" >"$EVIDENCE/environment/product_tree.txt"
+python3 - "$EVIDENCE/environment/product-remote-visibility.json" "$PRODUCT_REMOTE_REF" "$product_remote_sha" "$PRODUCT_SHA" <<'PYREMOTE'
+import json,sys
+path,ref,remote_sha,candidate_sha=sys.argv[1:]
+with open(path,'w') as output:
+    json.dump({'remote_ref':ref,'remote_sha':remote_sha,'candidate_sha':candidate_sha,
+               'remote_visible':remote_sha==candidate_sha},output,sort_keys=True,indent=2)
+    output.write('\n')
+PYREMOTE
 hostnamectl >"$EVIDENCE/environment/physical-host.txt" 2>&1 || hostname >"$EVIDENCE/environment/physical-host.txt"
 date -u +%FT%TZ >"$EVIDENCE/started_at_utc.txt"
-python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" "$PRODUCT_SHA" "$(git -C "$ROOT_DIR" merge-base HEAD "$PRODUCT_SHA")" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" "$FABRIC_DOMAIN_ID" "$PROJECT_ID" <<'PYMANIFEST'
+python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" "$PRODUCT_SHA" "$(git -C "$ROOT_DIR" merge-base HEAD "$PRODUCT_SHA")" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" "$FABRIC_DOMAIN_ID" "$PROJECT_ID" "$PRODUCT_REMOTE_REF" "$product_remote_sha" <<'PYMANIFEST'
 import json,pathlib,sys
-path,run,product,product_tree,harness,harness_tree,product_base,merge_base,started,physical,fabric_domain,project=sys.argv[1:]
+path,run,product,product_tree,harness,harness_tree,product_base,merge_base,started,physical,fabric_domain,project,product_remote_ref,product_remote_sha=sys.argv[1:]
 doc={"result":"IN_PROGRESS","run_id":run,"product_sha":product,"product_tree":product_tree,
      "harness_sha":harness,"harness_tree":harness_tree,
+     "product_remote_ref":product_remote_ref,"product_remote_sha":product_remote_sha,
+     "product_remote_visible":product_remote_sha==product,
      "harness_product_base_sha":product_base,"harness_product_merge_base":merge_base,
      "started_at_utc":pathlib.Path(started).read_text().strip(),
      "physical_host_identity":pathlib.Path(physical).read_text(errors='replace').strip(),
