@@ -2841,15 +2841,6 @@ PY
 # It uses a distinct provider root and run identity on these same fresh guests.
 if [[ "$CAMPAIGN_MODE" == full ]]; then
   PROVIDER_GATE_RUN_ID="ga-$(printf '%s' "$RUN_ID" | sha256sum | cut -c1-20)"
-  for host in a b c; do
-    case "$host" in
-      a) key="$WG_A" ;;
-      b) key="$WG_B" ;;
-      c) key="$WG_C" ;;
-    esac
-    printf '%s\n' "$key" >"$EVIDENCE/management/wireguard-host-$host.pub"
-    chmod 0600 "$EVIDENCE/management/wireguard-host-$host.pub"
-  done
   mkdir -p "$EVIDENCE/provider-gate"
   if ! env \
       FABRIC_V3_3H_RUN_ID="$PROVIDER_GATE_RUN_ID" \
@@ -2861,9 +2852,6 @@ if [[ "$CAMPAIGN_MODE" == full ]]; then
       FABRIC_V3_3H_KEY_B="$SSH_KEY" \
       FABRIC_V3_3H_KEY_C="$SSH_KEY" \
       FABRIC_V3_3H_KNOWN_HOSTS_FILE="$KNOWN_HOSTS" \
-      FABRIC_V3_3H_HOST_A_PUBLIC_KEY_FILE="$EVIDENCE/management/wireguard-host-a.pub" \
-      FABRIC_V3_3H_HOST_B_PUBLIC_KEY_FILE="$EVIDENCE/management/wireguard-host-b.pub" \
-      FABRIC_V3_3H_HOST_C_PUBLIC_KEY_FILE="$EVIDENCE/management/wireguard-host-c.pub" \
       FABRIC_V3_3H_EVIDENCE_DIR="$EVIDENCE/provider-gate" \
       bash "$ROOT_DIR/tests/fabric-v3-three-host-gate.sh" \
       >"$EVIDENCE/provider-gate/stdout.txt" \

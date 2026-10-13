@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import re
 
 
 ROOT = Path(__file__).resolve().parent
@@ -17,6 +18,14 @@ CAMPAIGN_TEXT = CAMPAIGN.read_text()
 
 
 class ThreeHostGateRegression(unittest.TestCase):
+    def _extract_function(self, name: str) -> str:
+        match = re.search(
+            rf"(?ms)^{re.escape(name)}\(\) \{{.*?^\}}\n",
+            GATE_TEXT,
+        )
+        self.assertIsNotNone(match, name)
+        return match.group(0)
+
     def run_gate_preflight(self, overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory(prefix="fabric-gate-regression-") as evidence_dir:
             env = os.environ.copy()
@@ -47,6 +56,22 @@ class ThreeHostGateRegression(unittest.TestCase):
                 timeout=10,
             )
 
+    def test_packet_path_records_each_probe_and_preserves_capture_on_failure(self):
+        self.assertIn("record_packet_probe a1", GATE_TEXT)
+        self.assertIn("record_packet_probe a2", GATE_TEXT)
+        self.assertIn("record_packet_probe b1", GATE_TEXT)
+        self.assertIn("record_packet_probe b2", GATE_TEXT)
+        self.assertIn('local base="$EVIDENCE_DIR/traffic/packet-path/$label"', GATE_TEXT)
+        self.assertIn('>"$base.stdout"', GATE_TEXT)
+        self.assertIn('>"$base.stderr"', GATE_TEXT)
+        self.assertIn('>"$base.status"', GATE_TEXT)
+        self.assertIn('PACKET_FAILED_OPERATION', GATE_TEXT)
+        self.assertIn('failed_operation_exit_code', GATE_TEXT)
+        self.assertIn('preserve_packet_capture', GATE_TEXT)
+        self.assertIn('underlay-packet-path.txt', GATE_TEXT)
+        self.assertIn('PACKET_CAPTURE_PID=""', GATE_TEXT)
+        self.assertIn('PACKET_CAPTURE_REMOTE=""', GATE_TEXT)
+
     def test_provider_resources_and_remote_tools_are_run_scoped(self):
         self.assertIn('REMOTE_TMP_ROOT="/tmp/o3k-fabric-v3-three-host-${FABRIC_V3_3H_RUN_ID}"', GATE_TEXT)
         self.assertIn('RUN_ROOT="/var/lib/o3k-fabric-v3-three-host/${FABRIC_V3_3H_RUN_ID}"', GATE_TEXT)
@@ -58,6 +83,235 @@ class ThreeHostGateRegression(unittest.TestCase):
         self.assertNotIn('/tmp/fabric-v3-', GATE_TEXT.replace('mktemp -d /tmp/fabric-v3-qemu-initrd.XXXXXX', ''))
         self.assertIn('remote_output="$REMOTE_TMP_ROOT/$output"', GATE_TEXT)
         self.assertIn('"$EVIDENCE_DIR/result.json"', GATE_TEXT)
+
+    def test_provider_gate_provisions_and_verifies_fresh_run_root_wireguard_identity(self):
+        self.assertIn("prepare_fresh_wireguard_identity host-a", GATE_TEXT)
+        self.assertIn("prepare_fresh_wireguard_identity host-b", GATE_TEXT)
+        self.assertIn("prepare_fresh_wireguard_identity host-c", GATE_TEXT)
+        self.assertIn("test -e '$RUN_ROOT' || sudo test -L '$RUN_ROOT'", GATE_TEXT)
+        self.assertIn("wireguard-private.key", GATE_TEXT)
+        self.assertIn("verify_wireguard_identity host-a", GATE_TEXT)
+        self.assertIn("verify_wireguard_identity host-b", GATE_TEXT)
+        self.assertIn("verify_wireguard_identity host-c", GATE_TEXT)
+        self.assertIn("ip netns exec o3k-fabric wg show o3k-wg public-key", GATE_TEXT)
+        self.assertNotIn("cat \"$HOST_A_PUBLIC_KEY_FILE\"", GATE_TEXT)
+        self.assertNotIn('AK="$(cat "$HOST_A_PUBLIC_KEY_FILE")"', GATE_TEXT)
+        self.assertIn('AK="$(prepare_fresh_wireguard_identity', GATE_TEXT)
+        self.assertIn('"$BK" "$CK"', GATE_TEXT)
+        self.assertIn('"$AK" "$CK"', GATE_TEXT)
+        self.assertIn('"$AK" "$BK"', GATE_TEXT)
+
+    def test_wireguard_identity_uses_backend_root_and_rejects_symlinks(self):
+        # LinuxFabricConfig::for_root(RUN_ROOT) owns this exact file.  A
+        # network/fabric-provider copy is a different identity and can make
+        # the provider gate pass its setup while the live interface uses
+        # another key.
+        self.assertIn("$RUN_ROOT/wireguard-private.key", GATE_TEXT)
+        self.assertNotIn("$RUN_ROOT/network/fabric/fabric-provider/wireguard-private.key", GATE_TEXT)
+        self.assertIn("test -L '$RUN_ROOT'", GATE_TEXT)
+        self.assertIn("test ! -L", GATE_TEXT)
+        self.assertIn("stat -c %u:%a", GATE_TEXT)
+
+    def test_wireguard_verification_is_scoped_to_exact_namespace_and_interface(self):
+        self.assertIn(
+            "ip netns exec o3k-fabric wg show o3k-wg public-key",
+            GATE_TEXT,
+        )
+        self.assertIn(
+            "ip netns exec o3k-fabric wg show o3k-wg peers",
+            GATE_TEXT,
+        )
+        self.assertNotIn("wg show all public-key", GATE_TEXT)
+        self.assertNotIn("wg show all peers", GATE_TEXT)
+
+    def test_wireguard_prepare_executes_remote_shell_and_derives_real_key(self):
+        prepare = self._extract_function("prepare_fresh_wireguard_identity")
+        with tempfile.TemporaryDirectory(prefix="fabric-gate-wg-") as tmp:
+            root = Path(tmp) / "run"
+            fake_python = Path(tmp) / "python3"
+            fake_python.write_text("#!/usr/bin/env bash\nif [[ $1 == -c ]]; then exit 0; fi\nexec /usr/bin/python3 \"$@\"\n")
+            fake_python.chmod(0o755)
+            fake_wg = Path(tmp) / "wg"
+            fake_wg.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -Eeuo pipefail\n"
+                "case ${1:-} in\n"
+                "  genkey) printf 'TEST_PRIVATE_KEY\\n' ;;\n"
+                "  pubkey) read -r key; [[ $key == TEST_PRIVATE_KEY ]] && printf 'TEST_PUBLIC_KEY\\n' || exit 9 ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n"
+            )
+            fake_wg.chmod(0o755)
+            script = f"""
+set -Eeuo pipefail
+PATH={tmp}:$PATH
+RUN_ROOT={root!s}
+sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '0:600\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
+export -f sudo
+ssh_host() {{ shift 3; bash -c "$1"; }}
+{prepare}
+pub=$(prepare_fresh_wireguard_identity host-a 192.0.2.10 /tmp/key)
+test -f "$RUN_ROOT/wireguard-private.key"
+test "$(stat -c '%u %a %F' "$RUN_ROOT/wireguard-private.key")" = "$(id -u) 600 regular file"
+test "$pub" = TEST_PUBLIC_KEY
+test -n "$pub"
+test "$(cat "$RUN_ROOT/wireguard-private.key")" = TEST_PRIVATE_KEY
+! grep -Fq TEST_PRIVATE_KEY <<<"$pub"
+"""
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wireguard_prepare_rejects_symlink_run_root_and_key(self):
+        prepare = self._extract_function("prepare_fresh_wireguard_identity")
+        with tempfile.TemporaryDirectory(prefix="fabric-gate-wg-link-") as tmp:
+            root = Path(tmp) / "run"
+            target = Path(tmp) / "target"
+            target.mkdir()
+            root.symlink_to(target, target_is_directory=True)
+            script = f"""
+set -Eeuo pipefail
+RUN_ROOT={root!s}
+sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '0:600\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
+export -f sudo
+ssh_host() {{ shift 3; bash -c "$1"; }}
+{prepare}
+set +e
+prepare_fresh_wireguard_identity host-a 192.0.2.10 /tmp/key
+status=$?
+set -e
+test "$status" -ne 0
+"""
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wireguard_verify_rejects_wrong_live_public_key_and_extra_peer(self):
+        verify = self._extract_function("verify_wireguard_identity")
+        with tempfile.TemporaryDirectory(prefix="fabric-gate-wg-verify-") as tmp:
+            fake_ip = Path(tmp) / "ip"
+            fake_ip.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ $* == *'public-key' ]]; then [[ ${FAKE_GOOD:-0} == 1 || ${FAKE_GOOD:-0} == 2 ]] && printf '%s\\n' EXPECTED || printf '%s\\n' WRONG; else [[ ${FAKE_GOOD:-0} == 1 ]] && printf 'PEER-A\\nPEER-B\\n' || printf 'PEER-A\\nPEER-B\\nEXTRA\\n'; fi\n"
+            )
+            fake_ip.chmod(0o755)
+            script = f"""
+set -Eeuo pipefail
+PATH={tmp}:$PATH
+sudo() {{ "$@"; }}
+export -f sudo
+ssh_host() {{ shift 3; bash -c "$1"; }}
+{verify}
+set +e
+verify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED PEER-A PEER-B
+status=$?
+set -e
+test "$status" -ne 0
+"""
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            control = script.split("set +e\n", 1)[0] + "export FAKE_GOOD=1\nverify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED PEER-A PEER-B\n"
+            control_result = subprocess.run(["bash", "-c", control], capture_output=True, text=True, check=False)
+            self.assertEqual(control_result.returncode, 0, control_result.stderr)
+
+            peer_only = script.split("set +e\n", 1)[0] + "export FAKE_GOOD=2\nset +e\nverify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED PEER-A PEER-B\nstatus=$?\nset -e\ntest \"$status\" -ne 0\n"
+            peer_result = subprocess.run(["bash", "-c", peer_only], capture_output=True, text=True, check=False, timeout=10)
+            self.assertEqual(peer_result.returncode, 0, peer_result.stderr)
+
+    def test_wireguard_prepare_fails_closed_on_generation_error(self):
+        prepare = self._extract_function("prepare_fresh_wireguard_identity")
+        with tempfile.TemporaryDirectory(prefix="fabric-gate-wg-gen-") as tmp:
+            root = Path(tmp) / "run"
+            fake_wg = Path(tmp) / "wg"
+            fake_wg.write_text("#!/usr/bin/env bash\nexit 17\n")
+            fake_wg.chmod(0o755)
+            script = f"""
+set -Eeuo pipefail
+PATH={tmp}:$PATH
+RUN_ROOT={root!s}
+sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '0:600\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
+export -f sudo
+ssh_host() {{ shift 3; bash -c "$1"; }}
+{prepare}
+set +e
+prepare_fresh_wireguard_identity host-a 192.0.2.10 /tmp/key
+status=$?
+set -e
+test "$status" -ne 0
+"""
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wireguard_prepare_fails_closed_on_wrong_owner_or_mode(self):
+        prepare = self._extract_function("prepare_fresh_wireguard_identity")
+        with tempfile.TemporaryDirectory(prefix="fabric-gate-wg-stat-") as tmp:
+            root = Path(tmp) / "run"
+            script = f"""
+set -Eeuo pipefail
+RUN_ROOT={root!s}
+sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '1000:644\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
+export -f sudo
+ssh_host() {{ shift 3; bash -c "$1"; }}
+{prepare}
+set +e
+prepare_fresh_wireguard_identity host-a 192.0.2.10 /tmp/key
+status=$?
+set -e
+test "$status" -ne 0
+"""
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_packet_capture_has_bounded_owned_wait_and_preserves_primary_error(self):
+        # The capture process must be tied to this run and reaped.  kill -0
+        # alone is not a wait and can mistake a zombie or a reused PID for a
+        # still-running capture.
+        self.assertIn("timeout 12", GATE_TEXT)
+        self.assertIn("wait", GATE_TEXT)
+        self.assertIn("PACKET_CAPTURE_PID", GATE_TEXT)
+        self.assertIn("PACKET_CAPTURE_FAILURE_OPERATION", GATE_TEXT)
+
+    def test_packet_capture_wait_and_failure_preserve_primary_probe(self):
+        record = self._extract_function("record_packet_probe")
+        preserve = self._extract_function("preserve_packet_capture")
+        with tempfile.TemporaryDirectory(prefix="fabric-gate-packet-") as tmp:
+            evidence = Path(tmp) / "evidence"
+            script = f"""
+set -Eeuo pipefail
+EVIDENCE_DIR={evidence!s}
+PACKET_FAILED_OPERATION=primary_probe
+PACKET_FAILED_EXIT_CODE=23
+PACKET_CAPTURE_PID=owned-capture
+PACKET_CAPTURE_REMOTE=remote-capture
+PACKET_CAPTURE_HOST=host-a
+PACKET_CAPTURE_IP=192.0.2.10
+PACKET_CAPTURE_KEY=/tmp/key
+capture_remote_file() {{ return 19; }}
+ssh_host() {{ shift 3; bash -c "$1"; }}
+{record}
+{preserve}
+if record_packet_probe a1 host-a 192.0.2.10 /tmp/key 'printf out; printf err >&2; exit 23'; then
+    record_status=0
+else
+    record_status=$?
+fi
+test "$record_status" -eq 23
+test "$PACKET_FAILED_OPERATION" = packet_probe_a1
+test "$PACKET_FAILED_EXIT_CODE" -eq 23
+sleep 0.01 & PACKET_CAPTURE_LOCAL_PID=$!
+if preserve_packet_capture; then
+    preserve_status=0
+else
+    preserve_status=$?
+fi
+test "$preserve_status" -ne 0
+test "$PACKET_CAPTURE_FAILURE_OPERATION" = packet_capture_retrieval
+test "$PACKET_FAILED_OPERATION" = packet_probe_a1
+test "$(cat "$EVIDENCE_DIR/traffic/packet-path/a1.status")" = 23
+grep -Fq out "$EVIDENCE_DIR/traffic/packet-path/a1.stdout"
+grep -Fq err "$EVIDENCE_DIR/traffic/packet-path/a1.stderr"
+"""
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_provider_gate_requires_distinct_ipv4_addresses_and_strict_host_keys(self):
         self.assertIn("ipaddress.ip_address(value)", GATE_TEXT)

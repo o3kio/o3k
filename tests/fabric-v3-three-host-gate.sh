@@ -15,9 +15,6 @@ set -Eeuo pipefail
 : "${FABRIC_V3_3H_KEY_B:?set host-b ssh key}"
 : "${FABRIC_V3_3H_KEY_C:?set host-c ssh key}"
 : "${FABRIC_V3_3H_KNOWN_HOSTS_FILE:?set the run-owned SSH known-hosts file}"
-: "${FABRIC_V3_3H_HOST_A_PUBLIC_KEY_FILE:?set host-a WireGuard public key file}"
-: "${FABRIC_V3_3H_HOST_B_PUBLIC_KEY_FILE:?set host-b WireGuard public key file}"
-: "${FABRIC_V3_3H_HOST_C_PUBLIC_KEY_FILE:?set host-c WireGuard public key file}"
 : "${FABRIC_V3_3H_EVIDENCE_DIR:?set the run-owned provider-gate evidence directory}"
 
 [[ "$FABRIC_V3_3H_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] \
@@ -43,19 +40,41 @@ REMOTE_HELPER="$REMOTE_TMP_ROOT/fabric-regression-3host-helper"
 SSH_OPTS=(-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
     -o "UserKnownHostsFile=$FABRIC_V3_3H_KNOWN_HOSTS_FILE")
 FOREIGN_CANARY="f3c$(printf '%x' "$BASHPID")"
-HOST_A_PUBLIC_KEY_FILE="$FABRIC_V3_3H_HOST_A_PUBLIC_KEY_FILE"
-HOST_B_PUBLIC_KEY_FILE="$FABRIC_V3_3H_HOST_B_PUBLIC_KEY_FILE"
-HOST_C_PUBLIC_KEY_FILE="$FABRIC_V3_3H_HOST_C_PUBLIC_KEY_FILE"
 GATE_PHASE=preflight
 GATE_CLASSIFICATION=HARNESS_GAP
 FOREIGN_CANARY_CREATED=0
 QEMU_ROOT=""
 QEMU_ARCHIVE=""
+PACKET_CAPTURE_PID=""
+PACKET_CAPTURE_LOCAL_PID=""
+PACKET_CAPTURE_REMOTE=""
+PACKET_CAPTURE_HOST=""
+PACKET_CAPTURE_IP=""
+PACKET_CAPTURE_KEY=""
+PACKET_FAILED_OPERATION=""
+PACKET_FAILED_EXIT_CODE=""
+PACKET_FAILED_OBSERVER_TYPE=""
+PACKET_FAILED_COMMAND_CLASS=""
+PACKET_CAPTURE_PRESERVE_STATUS=0
+PACKET_CAPTURE_FAILURE_OPERATION=""
+GATE_OPERATION=""
 
 ssh_host() {
     local host="$1" ip="$2" key="$3"
     shift 3
     sudo ssh "${SSH_OPTS[@]}" -i "$key" "$REMOTE_USER@$ip" "$@"
+}
+
+prepare_fresh_wireguard_identity() {
+    local host="$1" ip="$2" key="$3"
+    ssh_host "$host" "$ip" "$key" \
+        "set -e; parent=\$(dirname '$RUN_ROOT'); sudo test ! -L \"\$parent\"; if ! sudo test -e \"\$parent\"; then sudo install -d -m 0755 \"\$parent\"; fi; sudo python3 -c 'import os,stat,sys; s=os.lstat(sys.argv[1]); assert stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and not (s.st_mode & 0o022)' \"\$parent\"; if sudo test -e '$RUN_ROOT' || sudo test -L '$RUN_ROOT'; then exit 1; fi; sudo install -d -m 0700 '$RUN_ROOT'; sudo sh -c 'umask 077; wg genkey > \"$RUN_ROOT/wireguard-private.key\"'; sudo chmod 0600 '$RUN_ROOT/wireguard-private.key'; sudo test -f '$RUN_ROOT/wireguard-private.key'; sudo test ! -L '$RUN_ROOT/wireguard-private.key'; sudo test \"\$(sudo stat -c %u:%a '$RUN_ROOT/wireguard-private.key')\" = 0:600; sudo sh -c 'wg pubkey < \"$RUN_ROOT/wireguard-private.key\"'"
+}
+
+verify_wireguard_identity() {
+    local host="$1" ip="$2" key="$3" expected="$4" peer_one="$5" peer_two="$6"
+    ssh_host "$host" "$ip" "$key" \
+        "set -e; actual=\$(sudo ip netns exec o3k-fabric wg show o3k-wg public-key); test \"\$actual\" = '$expected'; peers_raw=\$(sudo ip netns exec o3k-fabric wg show o3k-wg peers); peers=\$(printf '%s\\n' \"\$peers_raw\" | sort); expected_peers=\$(printf '%s\\n' '$peer_one' '$peer_two' | sort); test \"\$peers\" = \"\$expected_peers\""
 }
 
 finish_gate() {
@@ -64,9 +83,21 @@ finish_gate() {
     local cleanup_status=0
     trap - EXIT
     set +e
+    if (( PACKET_CAPTURE_PRESERVE_STATUS != 0 )); then
+        status=1
+        cleanup_status=1
+    fi
     if (( original_status != 0 )); then
         printf 'FIRST FAILURE classification=%s phase=%s exit_code=%s\n' \
             "$GATE_CLASSIFICATION" "$GATE_PHASE" "$original_status" >&2
+    fi
+    if [[ -n "$PACKET_CAPTURE_PID$PACKET_CAPTURE_REMOTE" ]]; then
+        if ! preserve_packet_capture; then
+            PACKET_CAPTURE_PRESERVE_STATUS=1
+            printf 'CLEANUP FAILURE phase=packet_capture_preservation\n' >&2
+            status=1
+            cleanup_status=1
+        fi
     fi
     if (( FOREIGN_CANARY_CREATED )); then
         if ! ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
@@ -104,9 +135,10 @@ finish_gate() {
         fi
         python3 - "$EVIDENCE_DIR/result.json" "$FABRIC_V3_3H_RUN_ID" \
             "$failure_classification" "$failure_phase" "$failure_code" \
-            "$cleanup_status" <<'PYFAIL' || true
+            "$cleanup_status" "${PACKET_FAILED_OPERATION:-$GATE_OPERATION}" "${PACKET_FAILED_EXIT_CODE:-}" \
+            "$PACKET_FAILED_OBSERVER_TYPE" "$PACKET_FAILED_COMMAND_CLASS" "$PACKET_CAPTURE_PRESERVE_STATUS" "$PACKET_CAPTURE_FAILURE_OPERATION" <<'PYFAIL' || true
 import json,pathlib,sys
-path,run,classification,phase,code,cleanup_status=sys.argv[1:]
+path,run,classification,phase,code,cleanup_status,failed_operation,failed_operation_code,observer_type,command_class,capture_preserve_status,capture_failure_operation=sys.argv[1:]
 pathlib.Path(path).write_text(json.dumps({
     "artifact_type":"fabric-v3-provider-gate",
     "run_id":run,
@@ -115,12 +147,59 @@ pathlib.Path(path).write_text(json.dumps({
     "failed_phase":phase,
     "exit_code":int(code),
     "cleanup_status":int(cleanup_status),
+    "failed_operation": failed_operation or None,
+    "failed_operation_exit_code": int(failed_operation_code) if failed_operation_code else None,
+    "failed_observer_type": observer_type or None,
+    "failed_command_class": command_class or None,
+    "packet_capture_preserve_status": int(capture_preserve_status),
+    "packet_capture_failure_operation": capture_failure_operation or None,
 },sort_keys=True,indent=2)+"\n")
 PYFAIL
     fi
     exit "$status"
 }
 trap finish_gate EXIT
+
+record_packet_probe() {
+    local label="$1" host="$2" ip="$3" key="$4" command="$5"
+    local base="$EVIDENCE_DIR/traffic/packet-path/$label"
+    mkdir -p "$(dirname "$base")"
+    set +e
+    ssh_host "$host" "$ip" "$key" "$command" >"$base.stdout" 2>"$base.stderr"
+    local status=$?
+    set -e
+    printf '%s\n' "$status" >"$base.status"
+    if (( status != 0 )); then
+        PACKET_FAILED_OPERATION="packet_probe_$label"
+        PACKET_FAILED_EXIT_CODE="$status"
+        PACKET_FAILED_OBSERVER_TYPE="sudo_ssh"
+        PACKET_FAILED_COMMAND_CLASS="network_namespace_ping_and_neighbor_probe"
+    fi
+    return "$status"
+}
+
+preserve_packet_capture() {
+    local status=0
+    if [[ -n "$PACKET_CAPTURE_PID" ]]; then
+        if ! wait "$PACKET_CAPTURE_LOCAL_PID"; then
+            status=1
+            PACKET_CAPTURE_PRESERVE_STATUS=1
+            PACKET_CAPTURE_FAILURE_OPERATION="packet_capture_wait"
+        fi
+        PACKET_CAPTURE_PID=""
+        PACKET_CAPTURE_LOCAL_PID=""
+    fi
+    if [[ -n "$PACKET_CAPTURE_REMOTE" ]]; then
+        if ! capture_remote_file "$PACKET_CAPTURE_HOST" "$PACKET_CAPTURE_IP" "$PACKET_CAPTURE_KEY" \
+            "$PACKET_CAPTURE_REMOTE" traffic/packet-path/underlay-packet-path.txt; then
+            status=1
+            PACKET_CAPTURE_PRESERVE_STATUS=1
+            PACKET_CAPTURE_FAILURE_OPERATION="packet_capture_retrieval"
+        fi
+        PACKET_CAPTURE_REMOTE=""
+    fi
+    return "$status"
+}
 
 capture_remote_file() {
     local host="$1" ip="$2" key="$3" remote_path="$4" artifact_path="$5"
@@ -203,9 +282,19 @@ finish_wireguard_underlay_capture() {
 GATE_PHASE=copy_run_tools
 GATE_CLASSIFICATION=HARNESS_GAP
 copy_helper
-AK="$(cat "$HOST_A_PUBLIC_KEY_FILE")"
-BK="$(cat "$HOST_B_PUBLIC_KEY_FILE")"
-CK="$(cat "$HOST_C_PUBLIC_KEY_FILE")"
+GATE_PHASE=wireguard_identity_prepare
+GATE_CLASSIFICATION=HARNESS_GAP
+GATE_OPERATION=wireguard_identity_prepare
+GATE_OPERATION=wireguard_identity_prepare_host_a
+AK="$(prepare_fresh_wireguard_identity host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A")"
+GATE_OPERATION=wireguard_identity_prepare_host_b
+BK="$(prepare_fresh_wireguard_identity host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B")"
+GATE_OPERATION=wireguard_identity_prepare_host_c
+CK="$(prepare_fresh_wireguard_identity host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C")"
+[[ "$AK" =~ ^[A-Za-z0-9+/]{43}=$ && "$BK" =~ ^[A-Za-z0-9+/]{43}=$ && "$CK" =~ ^[A-Za-z0-9+/]{43}=$ ]]
+printf '%s\n' "$AK" >"$EVIDENCE_DIR/wireguard-host-a-public.key"
+printf '%s\n' "$BK" >"$EVIDENCE_DIR/wireguard-host-b-public.key"
+printf '%s\n' "$CK" >"$EVIDENCE_DIR/wireguard-host-c-public.key"
 existing_host_a_links="$(ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" 'sudo ip -o link show')"
 if grep -Eq "^[0-9]+: ${FOREIGN_CANARY}:" <<<"$existing_host_a_links"; then
     echo "fabric-v3-three-host-gate: foreign canary name collision: $FOREIGN_CANARY" >&2
@@ -224,6 +313,22 @@ GATE_CLASSIFICATION=PROVIDER_CONFORMANCE_DEFECT
 apply_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" host-b "$FABRIC_V3_3H_HOST_B_IP" "$BK" host-c "$FABRIC_V3_3H_HOST_C_IP" "$CK"
 apply_host host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" host-a "$FABRIC_V3_3H_HOST_A_IP" "$AK" host-c "$FABRIC_V3_3H_HOST_C_IP" "$CK"
 apply_host host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" host-a "$FABRIC_V3_3H_HOST_A_IP" "$AK" host-b "$FABRIC_V3_3H_HOST_B_IP" "$BK"
+GATE_PHASE=wireguard_identity_verify
+GATE_OPERATION=wireguard_identity_verify
+verify_wireguard_identity host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" "$AK" "$BK" "$CK"
+verify_wireguard_identity host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" "$BK" "$AK" "$CK"
+verify_wireguard_identity host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" "$CK" "$AK" "$BK"
+GATE_OPERATION=wireguard_identity_observation
+ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
+    "set -e; sudo ip netns exec o3k-fabric wg show o3k-wg public-key; sudo ip netns exec o3k-fabric wg show o3k-wg peers" \
+    >"$EVIDENCE_DIR/wireguard-host-a-runtime.txt"
+ssh_host host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" \
+    "set -e; sudo ip netns exec o3k-fabric wg show o3k-wg public-key; sudo ip netns exec o3k-fabric wg show o3k-wg peers" \
+    >"$EVIDENCE_DIR/wireguard-host-b-runtime.txt"
+ssh_host host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" \
+    "set -e; sudo ip netns exec o3k-fabric wg show o3k-wg public-key; sudo ip netns exec o3k-fabric wg show o3k-wg peers" \
+    >"$EVIDENCE_DIR/wireguard-host-c-runtime.txt"
+GATE_OPERATION=""
 
 attach_endpoint "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" a1 o3k-b-a1000000 10.0.0.10 02:00:00:00:a1:01
 attach_endpoint "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" a2 o3k-b-a1000000 10.0.0.20 02:00:00:00:a1:02
@@ -232,25 +337,54 @@ attach_endpoint "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" b2 o3k-b-b100000
 
 GATE_PHASE=packet_path_and_wireguard
 GATE_CLASSIFICATION=PROVIDER_CONFORMANCE_DEFECT
+GATE_OPERATION=underlay_route_lookup
 # Capture WireGuard transport packets on host-a's physical/nested underlay
 # while the tenant ping traverses the overlay. The decoded capture must show
 # only host transport addresses and UDP/65001, never tenant source addresses.
 underlay_dev="$(ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
-    "ip -4 route get '$FABRIC_V3_3H_HOST_B_IP' | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p'")"
+    "ip -4 route get '$FABRIC_V3_3H_HOST_B_IP' | sed -n 's/.* dev \\([^ ]*\\).*/\1/p'")"
 [[ -n "$underlay_dev" ]]
+[[ "$underlay_dev" =~ ^[[:alnum:]_.-]+$ ]]
+GATE_OPERATION=packet_capture_start
+PACKET_CAPTURE_HOST="host-a"
+PACKET_CAPTURE_IP="$FABRIC_V3_3H_HOST_A_IP"
+PACKET_CAPTURE_KEY="$FABRIC_V3_3H_KEY_A"
+PACKET_CAPTURE_REMOTE="$REMOTE_TMP_ROOT/underlay-packet-path.txt"
+mkdir -p "$EVIDENCE_DIR/traffic/packet-path"
 ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
-    "sudo timeout 12 tcpdump -nn -l -i '$underlay_dev' 'udp port 65001' -c 4 >'$REMOTE_TMP_ROOT/underlay-packet-path.txt' 2>&1" & cap_underlay=$!
-sleep 1
+    "sudo timeout 12 tcpdump -nn -l -i '$underlay_dev' 'udp port 65001' -c 4 >'$PACKET_CAPTURE_REMOTE' 2>&1" \
+    >"$EVIDENCE_DIR/traffic/packet-path/capture-ssh.stdout" \
+    2>"$EVIDENCE_DIR/traffic/packet-path/capture-ssh.stderr" &
+PACKET_CAPTURE_LOCAL_PID=$!
+PACKET_FAILED_OPERATION="packet_capture_start"
+PACKET_CAPTURE_PID="$PACKET_CAPTURE_LOCAL_PID"
+if ! ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
+    "for attempt in \$(seq 1 20); do sudo test -e '$PACKET_CAPTURE_REMOTE' && exit 0; sleep 0.1; done; exit 1" \
+    >/dev/null 2>"$EVIDENCE_DIR/traffic/packet-path/capture-ready.stderr"; then
+    PACKET_FAILED_OPERATION="packet_capture_readiness"
+    PACKET_FAILED_EXIT_CODE=1
+    PACKET_FAILED_OBSERVER_TYPE="sudo_ssh"
+    PACKET_FAILED_COMMAND_CLASS="underlay_tcpdump_readiness_observation"
+    if ! preserve_packet_capture; then PACKET_CAPTURE_PRESERVE_STATUS=1; fi
+    exit 1
+fi
+GATE_OPERATION=""
 
-ssh_host A1 "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" 'sudo ip netns exec o3k-ep-a1 ping -c 3 -W 2 10.0.0.20 >/dev/null && sudo ip netns exec o3k-ep-a1 ip neigh show 10.0.0.20'
-ssh_host A2 "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" 'sudo ip netns exec o3k-ep-a2 ping -c 3 -W 2 10.0.0.10 >/dev/null && sudo ip netns exec o3k-ep-a2 ip neigh show 10.0.0.10'
-ssh_host B1 "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" 'sudo ip netns exec o3k-ep-b1 ping -c 3 -W 2 10.0.0.20 >/dev/null && sudo ip netns exec o3k-ep-b1 ip neigh show 10.0.0.20'
-ssh_host B2 "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" 'sudo ip netns exec o3k-ep-b2 ping -c 3 -W 2 10.0.0.10 >/dev/null && sudo ip netns exec o3k-ep-b2 ip neigh show 10.0.0.10'
-wait "$cap_underlay" || true
-capture_remote_file host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
-    "$REMOTE_TMP_ROOT/underlay-packet-path.txt" "traffic/underlay-packet-path.txt"
-ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
-    "grep -q '4 packets captured' '$REMOTE_TMP_ROOT/underlay-packet-path.txt'; ! grep -q '10\\.0\\.0\\.' '$REMOTE_TMP_ROOT/underlay-packet-path.txt'; grep -Fq '$FABRIC_V3_3H_HOST_A_IP' '$REMOTE_TMP_ROOT/underlay-packet-path.txt'; grep -Fq '$FABRIC_V3_3H_HOST_B_IP' '$REMOTE_TMP_ROOT/underlay-packet-path.txt'"
+record_packet_probe a1 host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" 'sudo ip netns exec o3k-ep-a1 ping -c 3 -W 2 10.0.0.20 && sudo ip netns exec o3k-ep-a1 ip neigh show 10.0.0.20' || { if ! preserve_packet_capture; then PACKET_CAPTURE_PRESERVE_STATUS=1; fi; exit 1; }
+record_packet_probe a2 host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" 'sudo ip netns exec o3k-ep-a2 ping -c 3 -W 2 10.0.0.10 && sudo ip netns exec o3k-ep-a2 ip neigh show 10.0.0.10' || { if ! preserve_packet_capture; then PACKET_CAPTURE_PRESERVE_STATUS=1; fi; exit 1; }
+record_packet_probe b1 host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" 'sudo ip netns exec o3k-ep-b1 ping -c 3 -W 2 10.0.0.20 && sudo ip netns exec o3k-ep-b1 ip neigh show 10.0.0.20' || { if ! preserve_packet_capture; then PACKET_CAPTURE_PRESERVE_STATUS=1; fi; exit 1; }
+record_packet_probe b2 host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" 'sudo ip netns exec o3k-ep-b2 ping -c 3 -W 2 10.0.0.10 && sudo ip netns exec o3k-ep-b2 ip neigh show 10.0.0.10' || { if ! preserve_packet_capture; then PACKET_CAPTURE_PRESERVE_STATUS=1; fi; exit 1; }
+preserve_packet_capture
+PACKET_FAILED_OPERATION="packet_capture_validation"
+if ! grep -q '4 packets captured' "$EVIDENCE_DIR/traffic/packet-path/underlay-packet-path.txt" \
+    || grep -q '10\.0\.0\.' "$EVIDENCE_DIR/traffic/packet-path/underlay-packet-path.txt" \
+    || ! grep -Fq "$FABRIC_V3_3H_HOST_A_IP" "$EVIDENCE_DIR/traffic/packet-path/underlay-packet-path.txt" \
+    || ! grep -Fq "$FABRIC_V3_3H_HOST_B_IP" "$EVIDENCE_DIR/traffic/packet-path/underlay-packet-path.txt"; then
+    PACKET_FAILED_EXIT_CODE=1
+    exit 1
+fi
+PACKET_FAILED_OPERATION=""
+PACKET_FAILED_EXIT_CODE=""
 echo "fabric-v3-three-host-gate: underlay-wireguard-only=passed interface=$underlay_dev"
 
 # Near-boundary traffic must cross at the derived tenant MTU. The next byte
