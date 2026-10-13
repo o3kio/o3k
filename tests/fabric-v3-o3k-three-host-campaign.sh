@@ -147,11 +147,39 @@ wait_for_survivor_compute_agents() {
     provider_http="$(curl --silent --show-error --fail --max-time 10 \
       -H "x-auth-token: $TOKEN" \
       -o "$attempt_dir/providers.json" -w '%{http_code}' \
-      "$BASE/operator/diagnostics/providers?limit=200" \
+      "$BASE/o3k/v1/operator/diagnostics/providers?limit=200" \
       2>"$attempt_dir/providers.stderr")" && provider_rc=0 || provider_rc=$?
     [[ -s "$attempt_dir/providers.json" ]] || printf '{"items":[]}\n' >"$attempt_dir/providers.json"
     printf '{"command_class":"read_operator_provider_diagnostics","exit_code":%s,"http_status":"%s"}\n' \
       "$provider_rc" "${provider_http:-000}" >"$attempt_dir/providers.command.json"
+    if [[ "${provider_http:-000}" =~ ^4[0-9][0-9]$ ]]; then
+      python3 - "$root/result.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" \
+        "$provider_http" "$provider_rc" <<'PYREADINESSHTTP'
+import json,pathlib,sys
+target,run_id,product_sha,product_tree,http_status,exit_code=sys.argv[1:]
+pathlib.Path(target).write_text(json.dumps({
+    "artifact_type":"fabric-v3-compute-agent-readiness",
+    "phase":"post-controller-restart-before-supported-teardown",
+    "status":"failed",
+    "classification":"HARNESS_GAP",
+    "failed_operation":"read_operator_provider_diagnostics",
+    "diagnostic":"provider diagnostics returned an HTTP client error",
+    "observer_type":"api_observation",
+    "command_class":"read_operator_provider_diagnostics",
+    "exit_code":int(exit_code),
+    "http_status":int(http_status),
+    "run_id":run_id,
+    "product_sha":product_sha,
+    "product_tree":product_tree,
+    "attempts":1,
+    "final_attempt_artifacts":[
+        "attempts/attempt-001/providers.command.json",
+        "attempts/attempt-001/providers.stderr",
+    ],
+},sort_keys=True,indent=2)+"\n")
+PYREADINESSHTTP
+      return 1
+    fi
 
     for host in a b; do
       address="${MGMT_IP[$host]}"
