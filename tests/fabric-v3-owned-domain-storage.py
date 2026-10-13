@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import stat
 import sys
 import xml.etree.ElementTree as ET
 
@@ -28,14 +30,31 @@ def matches_owned_domain(xml: str, name: str, uuid: str, disk: str, seed: str) -
     for device in disks:
         kind = device.get("device")
         source = device.find("source")
-        if kind not in {"disk", "cdrom"} or source is None:
+        if kind not in {"disk", "cdrom"} or device.get("type") != "file" or source is None:
             return False
-        if source.attrib.keys() != {"file"}:
+        if "file" not in source.attrib:
+            return False
+        unexpected = source.attrib.keys() - {"file", "index"}
+        if unexpected:
+            return False
+        index = source.get("index")
+        if index is not None and not index.isdecimal():
             return False
         if kind in sources:
             return False
         sources[kind] = source.attrib["file"]
     return sources == {"disk": disk, "cdrom": seed}
+
+
+def safe_owned_storage_path(path: str) -> bool:
+    """Allow an exact run path to be absent or a regular file, never a link/device."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode)
 
 
 def main() -> int:
@@ -46,7 +65,8 @@ def main() -> int:
     parser.add_argument("seed")
     args = parser.parse_args()
     xml = sys.stdin.read()
-    return 0 if matches_owned_domain(xml, args.name, args.uuid, args.disk, args.seed) else 1
+    safe_paths = safe_owned_storage_path(args.disk) and safe_owned_storage_path(args.seed)
+    return 0 if safe_paths and matches_owned_domain(xml, args.name, args.uuid, args.disk, args.seed) else 1
 
 
 if __name__ == "__main__":
