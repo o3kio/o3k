@@ -12,11 +12,10 @@ if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
 else
   ACCEPTANCE_GATE="FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE"
 fi
-PRODUCT_SHA=5d8e3002c18b063b1ca328ed3e3a096ac6fe8ed7
-PRODUCT_TREE=7cbb507e08e4fce5902186ba23e6d9faf5616892
-PRODUCT_PROTECTED_MAIN_BASE=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
-PRODUCT_EXPECTED_PARENT_COMMITS="d7335166563d28084fbad5ac7f5d0f0e07e000a4"
-PRODUCT_REMOTE_REF=refs/heads/fix/fabric-v3-dhcp-cleanup
+PRODUCT_SHA=15c7c11d0c46c0e79577da33cfb317a328e933fd
+PRODUCT_TREE=c21e0a214f47870de40139d52a6bed64d087b36b
+ACCEPTED_HARNESS_BASE=108b0550cec916d86723bcdeb21a3175b126319d
+PRODUCT_REMOTE_REF=refs/heads/main
 HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-successor-harness
 HOST_PREFLIGHT="$ROOT_DIR/tests/fabric-v3-host-preflight.py"
 # Guard the acceptance control contract before creating evidence or guests.
@@ -30,6 +29,8 @@ python3 "$ROOT_DIR/tests/fabric-v3-host-preflight-test.py" \
   || { echo "HARNESS_GAP: live libvirt/address preflight regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-retirement-evidence-test.py" \
   || { echo "HARNESS_GAP: durable retirement evidence regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-agent-readiness-regression.py" \
+  || { echo "HARNESS_GAP: post-restart compute-agent readiness regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" \
   || { echo "HARNESS_GAP: durable server-delete evidence regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-port-detach-evidence-test.py" \
@@ -188,6 +189,146 @@ start_compute_agent() {
   ssh_vm "$address" "sudo bash -c 'nohup env O3K_COMPUTE_DATA_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute O3K_COMPUTE_CONTROL_ENDPOINT=https://$HOST_MGMT_IP:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_HOST_LABEL=host-$host O3K_COMPUTE_TLS_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute/tls O3K_COMPUTE_HEALTH_ADDR=0.0.0.0:$health_port O3K_COMPUTE_MAX_DISK_GB=30 O3K_COMPUTE_NETWORK_EXTERNAL=1 O3K_COMPUTE_NETWORK_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/ownership O3K_COMPUTE_BRIDGE_NAME=o3k-br0 O3K_COMPUTE_DHCP_BINARY=/usr/sbin/dnsmasq O3K_COMPUTE_FABRIC_HOST_ID=host-$host O3K_COMPUTE_FABRIC_STATE_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric RUST_LOG=info /usr/local/bin/o3k-compute-bin >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.log 2>&1 </dev/null & echo \$! >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.pid'"
 }
 api() { curl --silent --show-error --fail-with-body --max-time 30 -H "x-auth-token: $TOKEN" "$@"; }
+wait_for_current_compute_agents() {
+  local artifact_key="$1" phase="$2" controller_log="$3" controller_start="$4"
+  shift 4
+  local root="$EVIDENCE/restart/$artifact_key"
+  local ready_streak=0 started_at="$SECONDS" attempt attempt_name attempt_dir
+  local host health_port address ready_rc validation validation_rc required_hosts_csv=""
+  (( $# > 0 )) || return 2
+  for host in "$@"; do
+    if [[ -n "$required_hosts_csv" ]]; then required_hosts_csv+=,; fi
+    required_hosts_csv+="host-$host"
+  done
+  mkdir -p "$root/attempts"
+  for attempt in $(seq 1 120); do
+    printf -v attempt_name 'attempt-%03d' "$attempt"
+    attempt_dir="$root/attempts/$attempt_name"
+    mkdir -p "$attempt_dir"
+
+    for host in "$@"; do
+      address="${MGMT_IP[$host]}"
+      case "$host" in
+        a) health_port=19101 ;;
+        b) health_port=19102 ;;
+        c) health_port=19103 ;;
+        *) return 2 ;;
+      esac
+      if ssh_vm "$address" "sudo curl --silent --show-error --fail --max-time 5 http://127.0.0.1:$health_port/readyz" \
+          >"$attempt_dir/host-$host-ready.json" 2>"$attempt_dir/host-$host-ready.stderr"; then
+        ready_rc=0
+      else
+        ready_rc=$?
+        printf '{}\n' >"$attempt_dir/host-$host-ready.json"
+      fi
+      printf '{"command_class":"read_host_%s_compute_agent_readyz","observer_type":"runner_executable_guest_readyz","resource_class":"compute_agent","exit_code":%s}\n' \
+        "$host" "$ready_rc" >"$attempt_dir/host-$host-ready.command.json"
+    done
+
+    validation="$attempt_dir/validation.json"
+    if python3 "$ROOT_DIR/tests/fabric-v3-agent-readiness.py" validate \
+        --manifest "$EVIDENCE/manifest.json" \
+        --ready-a "$attempt_dir/host-a-ready.json" \
+        --ready-b "$attempt_dir/host-b-ready.json" \
+        --ready-c "$attempt_dir/host-c-ready.json" \
+        --required-hosts "$required_hosts_csv" \
+        --phase "$phase" \
+        --controller-log "$controller_log" \
+        --controller-start "$controller_start" \
+        --consecutive-observations "$((ready_streak + 1))" \
+        --output "$validation" >"$attempt_dir/validation.stdout" 2>"$attempt_dir/validation.stderr"; then
+      printf '{"command_class":"validate_compute_agent_readiness","observer_type":"runner_executable_local_validator","resource_class":"compute_agent","exit_code":0}\n' \
+        >"$attempt_dir/validation.command.json"
+      ready_streak=$((ready_streak + 1))
+      if (( ready_streak >= 2 )); then
+        python3 - "$validation" "$root/result.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" \
+          "$attempt" "$started_at" "$SECONDS" <<'PYREADINESS'
+import json,pathlib,sys
+source,target,run_id,product_sha,product_tree,attempt,started,finished=sys.argv[1:]
+result=json.loads(pathlib.Path(source).read_text())
+result.update({
+    "status":"passed",
+    "classification":None,
+    "failed_operation":None,
+    "run_id":run_id,
+    "product_sha":product_sha,
+    "product_tree":product_tree,
+    "attempts":int(attempt),
+    "elapsed_seconds":int(finished)-int(started),
+    "consecutive_observations_required":2,
+    "observation_artifacts":[
+        f"attempts/attempt-{int(attempt)-1:03d}/validation.json",
+        f"attempts/attempt-{int(attempt):03d}/validation.json",
+    ],
+})
+pathlib.Path(target).write_text(json.dumps(result,sort_keys=True,indent=2)+"\n")
+PYREADINESS
+        return 0
+      fi
+    else
+      validation_rc=$?
+      printf '{"command_class":"validate_compute_agent_readiness","observer_type":"runner_executable_local_validator","resource_class":"compute_agent","exit_code":%s}\n' \
+        "$validation_rc" >"$attempt_dir/validation.command.json"
+      ready_streak=0
+    fi
+    (( attempt == 120 )) || sleep 1
+  done
+
+  python3 - "$root/result.json" "$root/attempts/attempt-120" \
+    "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$phase" <<'PYREADINESSFAIL'
+import json,pathlib,sys
+target,attempt_dir,run_id,product_sha,product_tree,phase=sys.argv[1:]
+attempt_dir=pathlib.Path(attempt_dir)
+try:
+    final=json.loads((attempt_dir/'validation.json').read_text())
+except (OSError,ValueError):
+    final={}
+commands={}
+for host in ('a','b','c'):
+    path=attempt_dir/f'host-{host}-ready.command.json'
+    if path.exists():
+        try: commands[f'host-{host}']=json.loads(path.read_text())
+        except (OSError,ValueError): commands[f'host-{host}']={"command_class":f"read_host_{host}_compute_agent_readyz","exit_code":None}
+validation_command=attempt_dir/'validation.command.json'
+if validation_command.exists():
+    try: commands['validator']=json.loads(validation_command.read_text())
+    except (OSError,ValueError): commands['validator']={"command_class":"validate_compute_agent_readiness","exit_code":None}
+pathlib.Path(target).write_text(json.dumps({
+    "artifact_type":"fabric-v3-compute-agent-readiness",
+    "phase":phase,
+    "status":"failed",
+    "classification":"HARNESS_GAP",
+    "failed_operation":final.get("failed_operation") or "wait_for_two_consecutive_compute_agent_observations",
+    "diagnostic":final.get("diagnostic") or "required compute agents did not report current identities and post-restart registrations within 120 seconds",
+    "observer_type":final.get("observer_type") or "runner_executable_guest_readyz+controller_log",
+    "resource_class":"compute_agent",
+    "required_hosts":final.get("required_hosts", []),
+    "final_observation":{
+        "diagnostic":final.get("diagnostic"),
+        "agents":final.get("agents", []),
+    },
+    "subprocess_observations":commands,
+    "run_id":run_id,
+    "product_sha":product_sha,
+    "product_tree":product_tree,
+    "attempts":120,
+    "consecutive_observations_required":2,
+    "final_attempt_artifacts":["attempts/attempt-120/validation.json"] + [
+        f"attempts/attempt-120/host-{host}-ready.command.json"
+        for host in ('a','b','c') if f'host-{host}' in commands
+    ] + (["attempts/attempt-120/validation.command.json"] if 'validator' in commands else []),
+},sort_keys=True,indent=2)+"\n")
+PYREADINESSFAIL
+  return 1
+}
+wait_for_survivor_compute_agents() {
+  wait_for_current_compute_agents \
+    "compute-agent-readiness" \
+    "post-controller-restart-after-retirement" \
+    "$EVIDENCE/restart/startup-recovery/o3kd.log" \
+    "$EVIDENCE/restart/startup-recovery/controller-start.json" \
+    a b
+}
 capture_c_remove_work_row() {
   local realm_id="$1"
   python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" \
@@ -725,22 +866,24 @@ git -C "$ROOT_DIR" fetch --no-tags origin main \
   2>"$EVIDENCE/environment/protected-main-fetch.stderr" \
   || fail "could not refresh protected main for candidate ancestry proof" "HARNESS_GAP"
 protected_main_tip="$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)"
-[[ "$protected_main_tip" == "$PRODUCT_PROTECTED_MAIN_BASE" ]] \
-  || fail "protected main no longer matches the frozen product successor base" "HARNESS_GAP"
-[[ "$PRODUCT_SHA" != "$protected_main_tip" ]] \
-  || fail "frozen product candidate must be the validated successor commit" "HARNESS_GAP"
-git -C "$ROOT_DIR" merge-base --is-ancestor "$protected_main_tip" "$PRODUCT_SHA" \
-  || fail "frozen product successor is not descended from its protected-main base" "HARNESS_GAP"
+[[ "$protected_main_tip" == "$PRODUCT_SHA" ]] \
+  || fail "protected main no longer matches the frozen product candidate" "HARNESS_GAP"
+[[ "$(git -C "$ROOT_DIR" rev-parse "$protected_main_tip^{tree}")" == "$PRODUCT_TREE" ]] \
+  || fail "protected main tree differs from the frozen product candidate" "HARNESS_GAP"
 product_remote_sha="$(git -C "$ROOT_DIR" ls-remote origin "$PRODUCT_REMOTE_REF" | awk 'NR==1 {print $1}')"
 [[ "$product_remote_sha" == "$PRODUCT_SHA" ]] \
-  || fail "frozen product successor is not remotely visible at the exact SHA" "HARNESS_GAP"
+  || fail "frozen protected-main candidate is not remotely visible at the exact SHA" "HARNESS_GAP"
 git -C "$ROOT_DIR" fetch --no-tags origin "$HARNESS_REMOTE_REF" \
   >"$EVIDENCE/environment/harness-ref-fetch.stdout" \
   2>"$EVIDENCE/environment/harness-ref-fetch.stderr" \
   || fail "frozen harness successor ref is not remotely visible" "HARNESS_GAP"
 [[ "$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)" == "$(git -C "$ROOT_DIR" rev-parse HEAD)" ]] \
   || fail "remote harness ref does not match the running harness commit" "HARNESS_GAP"
-[[ -z "$(git -C "$ROOT_DIR" status --porcelain=v1)" ]] \
+git -C "$ROOT_DIR" merge-base --is-ancestor "$PRODUCT_SHA" HEAD \
+  || fail "harness does not descend from the frozen product candidate" "HARNESS_GAP"
+git -C "$ROOT_DIR" merge-base --is-ancestor "$ACCEPTED_HARNESS_BASE" HEAD \
+  || fail "accepted retirement harness ancestry is missing" "HARNESS_GAP"
+[[ -z "$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all)" ]] \
   || fail "harness source tree has uncommitted changes" "HARNESS_GAP"
 git -C "$ROOT_DIR" fetch --no-tags origin "$PRODUCT_REMOTE_REF" \
   >"$EVIDENCE/environment/product-ref-fetch.stdout" \
@@ -749,8 +892,6 @@ git -C "$ROOT_DIR" fetch --no-tags origin "$PRODUCT_REMOTE_REF" \
 [[ "$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)" == "$PRODUCT_SHA" ]] \
   || fail "remote product successor ref does not match the frozen candidate SHA" "HARNESS_GAP"
 product_parents="$(git -C "$ROOT_DIR" show -s --format=%P "$PRODUCT_SHA")"
-[[ "$product_parents" == "$PRODUCT_EXPECTED_PARENT_COMMITS" ]] \
-  || fail "product successor ancestry differs from the recorded candidate lineage" "HARNESS_GAP"
 url_port "$API_PORT" || fail "API port is occupied: $API_PORT" "ENVIRONMENT_GAP"
 url_port "$CONTROL_PORT" || fail "compute control port is occupied: $CONTROL_PORT" "ENVIRONMENT_GAP"
 python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
@@ -784,18 +925,17 @@ git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}" >"$EVIDENCE/environment/produ
 printf '%s\n' "$product_parents" >"$EVIDENCE/environment/product_parent_commits.txt"
 hostnamectl >"$EVIDENCE/environment/physical-host.txt" 2>&1 || hostname >"$EVIDENCE/environment/physical-host.txt"
 date -u +%FT%TZ >"$EVIDENCE/started_at_utc.txt"
-python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" "$FABRIC_DOMAIN_ID" "$protected_main_tip" "$PRODUCT_REMOTE_REF" "$HARNESS_REMOTE_REF" "$PRODUCT_PROTECTED_MAIN_BASE" "$product_parents" <<'PYMANIFEST'
+python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" "$FABRIC_DOMAIN_ID" "$protected_main_tip" "$PRODUCT_REMOTE_REF" "$HARNESS_REMOTE_REF" "$ACCEPTED_HARNESS_BASE" "$product_parents" <<'PYMANIFEST'
 import json,pathlib,sys
-path,run,product,product_tree,harness,harness_tree,started,physical,fabric_domain_id,protected_main,product_ref,harness_ref,protected_main_base,product_parents=sys.argv[1:]
+path,run,product,product_tree,harness,harness_tree,started,physical,fabric_domain_id,protected_main,product_ref,harness_ref,accepted_harness_base,product_parents=sys.argv[1:]
 doc={"result":"IN_PROGRESS","run_id":run,"product_sha":product,"product_tree":product_tree,
      "harness_sha":harness,"harness_tree":harness_tree,
      "protected_main_at_run":protected_main,
      "product_remote_visible":True,"product_remote_ref":product_ref,
      "harness_remote_visible":True,"harness_remote_ref":harness_ref,
+     "accepted_harness_base":accepted_harness_base,
      "product_parent_commits":product_parents.split(),
-     "product_lineage":{"protected_main_base":protected_main_base,
-                         "candidate_is_protected_main":product==protected_main,
-                         "candidate_is_successor":product!=protected_main},
+     "product_lineage":{"candidate_is_protected_main":product==protected_main},
      "fabric_domain_id":fabric_domain_id,
      "started_at_utc":pathlib.Path(started).read_text().strip(),
      "physical_host_identity":pathlib.Path(physical).read_text(errors='replace').strip()}
@@ -824,7 +964,7 @@ git -C "$ROOT_DIR" worktree add --detach "$PRODUCT_SOURCE_DIR" "$PRODUCT_SHA" \
 [[ "$(git -C "$PRODUCT_SOURCE_DIR" rev-parse HEAD)" == "$PRODUCT_SHA" \
   && "$(git -C "$PRODUCT_SOURCE_DIR" rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]] \
   || fail "detached product worktree identity differs from the manifest" "HARNESS_GAP"
-git -C "$PRODUCT_SOURCE_DIR" status --porcelain -- bins crates Cargo.toml Cargo.lock \
+git -C "$PRODUCT_SOURCE_DIR" status --porcelain=v1 --untracked-files=all \
   >"$EVIDENCE/environment/product-source-status.txt"
 [[ ! -s "$EVIDENCE/environment/product-source-status.txt" ]] \
   || fail "frozen product source worktree is dirty" "PRODUCT_DEFECT"
@@ -1591,6 +1731,9 @@ addresses=(manifest.parent/'environment/management-addresses.txt').read_text().s
 data['management_addresses']={line.split('=',1)[0].split('-')[-1]:line.split('=',1)[1] for line in addresses}
 data['stable_host_ids']={h:f'host-{h}' for h in 'abc'}
 data['compute_agent_ids']={h:f'compute-agent-{h}' for h in 'abc'}
+data['compute_agents']={f'host-{h}':{'agent_id':f'compute-agent-{h}',
+    'agent_epoch':json.loads((manifest.parent/f'management/compute-{h}-ready.json').read_text())['agent_epoch']}
+    for h in 'abc'}
 data['network_agent_ids']={h:f'network-agent-{h}' for h in 'abc'}
 data['guest_control']='PASS A/B/C; host-local IPv6 link-local SSH; local Realm bridge scoped; Fabric namespace capture empty'
 data['control_channel_capabilities']=caps['mechanisms']
@@ -2004,9 +2147,19 @@ PY
 # Controller restart while A/B/C are alive. No tenant/API mutation wakes
 # reconciliation; all six tenant flows are rerun after agents reconnect.
 kill -TERM "$O3KD_PID"; wait "$O3KD_PID" 2>/dev/null || true; O3KD_PID=""
+controller_start_requested_at="$(date -u +%FT%T.%NZ)"
 "$PRODUCT_SOURCE_DIR/target/release/o3kd" --listen-addr "$HOST_MGMT_IP:$API_PORT" --data-dir "$EVIDENCE/controller-data" --log-filter info >"$EVIDENCE/restart/o3kd.log" 2>&1 & O3KD_PID=$!
+printf '{"new_controller_pid":"%s","start_requested_at_utc":"%s","api_mutation_during_recovery":false}\n' \
+  "$O3KD_PID" "$controller_start_requested_at" >"$EVIDENCE/restart/startup-recovery/controller-start.json"
 for _ in $(seq 1 120); do curl -fsS "$BASE/healthz" >/dev/null 2>&1 && break; kill -0 "$O3KD_PID" 2>/dev/null || fail "controller restart failed" "DURABLE_RECONCILIATION_GAP"; sleep 1; done
 curl -fsS "$BASE/readyz" >"$EVIDENCE/restart/ready.json" || fail "controller did not become ready after restart" "DURABLE_RECONCILIATION_GAP"
+wait_for_current_compute_agents \
+  "pre-retirement-compute-agent-readiness" \
+  "post-controller-restart-before-retirement" \
+  "$EVIDENCE/restart/o3kd.log" \
+  "$EVIDENCE/restart/startup-recovery/controller-start.json" \
+  a b c \
+  || fail "A/B/C compute-agent identities did not register after controller restart; see restart/pre-retirement-compute-agent-readiness/result.json" "HARNESS_GAP"
 for pair in a:b b:a a:c c:a b:c c:b; do
   from="${pair%%:*}"; to="${pair##*:}"
   guest_control_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "restart/$from-to-$to.txt" || fail "post-controller-restart ICMP $from->$to failed" "$(guest_failure_class DURABLE_RECONCILIATION_GAP)"
@@ -2237,11 +2390,20 @@ ssh_vm "${MGMT_IP[c]}" 'sudo nft list ruleset' >"$EVIDENCE/endpoint-removal/c-nf
   || fail "C anti-spoof pre-removal state unavailable" "ENVIRONMENT_GAP"
 delete_started_at="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
 printf '%s\n' "$delete_started_at" >"$EVIDENCE/c-delete/operation/request-started-at-utc.txt"
-delete_status="$(curl --silent --show-error --max-time 60 -D "$EVIDENCE/c-delete/operation/response-headers.txt" \
-  -o "$EVIDENCE/c-delete/operation/response-body.txt" -w '%{http_code}' -X DELETE \
-  "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN")" \
-  || fail "supported server C deletion request failed" "CLEANUP_DEFECT"
+if delete_status="$(curl --silent --show-error --max-time 60 -D "$EVIDENCE/c-delete/operation/response-headers.txt" \
+    -o "$EVIDENCE/c-delete/operation/response-body.txt" -w '%{http_code}' -X DELETE \
+    "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" \
+    2>"$EVIDENCE/c-delete/operation/curl.stderr")"; then
+  delete_curl_exit=0
+else
+  delete_curl_exit=$?
+  delete_status="${delete_status:-000}"
+fi
 printf '%s\n' "$delete_status" >"$EVIDENCE/c-delete/operation/http-status.txt"
+printf '{"command_class":"supported_compute_server_delete","observer_type":"api_observation","resource_class":"compute_server","http_status":"%s","exit_code":%s}\n' \
+  "$delete_status" "${delete_curl_exit:-1}" >"$EVIDENCE/c-delete/operation/command.json"
+[[ "$delete_curl_exit" == 0 ]] \
+  || fail "supported C deletion transport failed (HTTP $delete_status; see c-delete/operation/response-body.txt and command.json)" "CLEANUP_DEFECT"
 [[ "$delete_status" == 204 ]] || fail "supported server C deletion returned HTTP $delete_status" "CLEANUP_DEFECT"
 if python3 "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" \
   "$EVIDENCE/controller-data/o3k.sqlite" "${SERVER_IDS[2]}" "$delete_started_at" "$delete_status" \
