@@ -10,14 +10,23 @@ CAMPAIGN_MODE="${1:-full}"
   || { echo "HARNESS_GAP: unsupported campaign mode: $CAMPAIGN_MODE" >&2; exit 1; }
 PRODUCT_SHA=adaf6168b124111ee62bf53f6eaf6e0f6cab155e
 PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871
+PRODUCT_REMOTE_NAME=origin
+PRODUCT_REMOTE_REF=refs/heads/main
 # Guard the accepted control contract and exact, committed harness lineage
 # before creating evidence or guests.
 [[ -f "$ROOT_DIR/contracts/real-host-acceptance-evidence.md" ]] \
   || { echo "HARNESS_GAP: accepted real-host evidence contract is missing" >&2; exit 1; }
 [[ "$(git -C "$ROOT_DIR" merge-base HEAD "$PRODUCT_SHA" 2>/dev/null || true)" == "$PRODUCT_SHA" ]] \
   || { echo "HARNESS_GAP: frozen product candidate is not an ancestor of this harness" >&2; exit 1; }
+product_remote_line="$(git -C "$ROOT_DIR" ls-remote --exit-code --refs "$PRODUCT_REMOTE_NAME" "$PRODUCT_REMOTE_REF" 2>/dev/null)" \
+  || { echo "HARNESS_GAP: protected product ref is not remotely visible" >&2; exit 1; }
+[[ "$product_remote_line" == "$PRODUCT_SHA"$'\t'"$PRODUCT_REMOTE_REF" ]] \
+  || { echo "HARNESS_GAP: protected product ref does not resolve to the frozen candidate" >&2; exit 1; }
+PRODUCT_REMOTE_SHA="${product_remote_line%%$'\t'*}"
 [[ -z "$(git -C "$ROOT_DIR" status --porcelain 2>/dev/null)" ]] \
   || { echo "HARNESS_GAP: campaign harness source is not a clean committed tree" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-candidate-pin-regression.py" \
+  || { echo "HARNESS_GAP: frozen product candidate pin regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-guest-control-regression.py" \
   || { echo "HARNESS_GAP: guest-control acceptance regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-agent-readiness-regression.py" \
@@ -378,6 +387,8 @@ git -C "$ROOT_DIR" rev-parse HEAD >"$EVIDENCE/environment/harness_sha.txt"
 git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}' >"$EVIDENCE/environment/harness_tree.txt"
 git -C "$ROOT_DIR" merge-base HEAD "$PRODUCT_SHA" >"$EVIDENCE/environment/harness-product-merge-base.txt"
 printf '%s\n' "$PRODUCT_SHA" >"$EVIDENCE/environment/harness-product-base.txt"
+printf '%s\t%s\t%s\n' "$PRODUCT_REMOTE_NAME" "$PRODUCT_REMOTE_REF" "$PRODUCT_REMOTE_SHA" \
+  >"$EVIDENCE/environment/product-remote-visible.tsv"
 cp "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" "$EVIDENCE/environment/campaign-driver.sh"
 cp "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" "$EVIDENCE/environment/owned-domain-storage-check.py"
 cp "$ROOT_DIR/tests/fabric-v3-host-slot.sh" "$EVIDENCE/environment/host-slot-helper.sh"
@@ -391,6 +402,7 @@ cp "$ROOT_DIR/tests/fabric-v3-retirement-result.py" "$EVIDENCE/environment/retir
 cp "$ROOT_DIR/tests/fabric-v3-management-network.py" "$EVIDENCE/environment/management-network-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-provider-state-observer.py" "$EVIDENCE/environment/provider-state-observer.py"
 cp "$ROOT_DIR/tests/fabric-v3-evidence-archive.py" "$EVIDENCE/environment/evidence-archive-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-candidate-pin-regression.py" "$EVIDENCE/environment/candidate-pin-regression.py"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" >"$EVIDENCE/environment/owned-domain-storage-check.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-host-slot.sh" >"$EVIDENCE/environment/host-slot-helper.sha256"
@@ -402,6 +414,7 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-result.py" >"$EVIDENCE/environme
 sha256sum "$ROOT_DIR/tests/fabric-v3-management-network.py" >"$EVIDENCE/environment/management-network-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-provider-state-observer.py" >"$EVIDENCE/environment/provider-state-observer.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-evidence-archive.py" >"$EVIDENCE/environment/evidence-archive-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-candidate-pin-regression.py" >"$EVIDENCE/environment/candidate-pin-regression.sha256"
 
 cleanup_on_success() {
   local rc=$?
@@ -587,6 +600,15 @@ doc={"result":"IN_PROGRESS","run_id":run,"product_sha":product,"product_tree":pr
      "fabric_domain_id":fabric_domain,"tenant_project_id":project}
 pathlib.Path(path).write_text(json.dumps(doc,sort_keys=True,indent=2)+'\n')
 PYMANIFEST
+python3 - "$EVIDENCE/manifest.json" "$PRODUCT_REMOTE_NAME" "$PRODUCT_REMOTE_REF" "$PRODUCT_REMOTE_SHA" <<'PYREMOTE'
+import json,pathlib,sys
+path,remote_name,remote_ref,remote_sha=sys.argv[1:]
+manifest=json.loads(pathlib.Path(path).read_text())
+manifest["product_remote_name"]=remote_name
+manifest["product_remote_ref"]=remote_ref
+manifest["product_remote_sha"]=remote_sha
+pathlib.Path(path).write_text(json.dumps(manifest,sort_keys=True,indent=2)+"\n")
+PYREMOTE
 sha256sum "$BASE_IMAGE" >"$EVIDENCE/environment/base-image.sha256"
 [[ "$(awk '{print $1}' "$EVIDENCE/environment/base-image.sha256")" == "$BASE_IMAGE_SHA" ]] || fail "base image checksum mismatch" "ENVIRONMENT_GAP"
 PROBE_BASE_IMAGE="$EVIDENCE/environment/cirros-0.6.3-x86_64-disk.img"
