@@ -20,6 +20,8 @@ PRODUCT_TREE=194863fc49735a9d30e16fd03afa498e91c6d871
   || { echo "HARNESS_GAP: campaign harness source is not a clean committed tree" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-guest-control-regression.py" \
   || { echo "HARNESS_GAP: guest-control acceptance regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-agent-readiness-regression.py" \
+  || { echo "HARNESS_GAP: restart agent-readiness regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage-test.py" \
   || { echo "HARNESS_GAP: ownership-safe domain cleanup regression failed" >&2; exit 1; }
 bash "$ROOT_DIR/tests/fabric-v3-host-slot-regression.sh" \
@@ -131,6 +133,114 @@ start_compute_agent() {
   ssh_vm "$address" "sudo bash -c 'nohup env O3K_COMPUTE_DATA_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute O3K_COMPUTE_CONTROL_ENDPOINT=https://$HOST_MGMT_IP:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_HOST_LABEL=host-$host O3K_COMPUTE_TLS_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute/tls O3K_COMPUTE_HEALTH_ADDR=0.0.0.0:$health_port O3K_COMPUTE_MAX_DISK_GB=30 O3K_COMPUTE_NETWORK_EXTERNAL=1 O3K_COMPUTE_NETWORK_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/ownership O3K_COMPUTE_BRIDGE_NAME=o3k-br0 O3K_COMPUTE_DHCP_BINARY=/usr/sbin/dnsmasq O3K_COMPUTE_FABRIC_HOST_ID=host-$host O3K_COMPUTE_FABRIC_STATE_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric RUST_LOG=info /usr/local/bin/o3k-compute-bin >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.log 2>&1 </dev/null & echo \$! >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.pid'"
 }
 api() { curl --silent --show-error --fail-with-body --max-time 30 -H "x-auth-token: $TOKEN" "$@"; }
+wait_for_survivor_compute_agents() {
+  local root="$EVIDENCE/restart/compute-agent-readiness"
+  local ready_streak=0 started_at="$SECONDS" attempt attempt_name attempt_dir
+  local provider_http provider_rc host health_port address ready_rc now_ms validation
+  mkdir -p "$root/attempts"
+  for attempt in $(seq 1 120); do
+    printf -v attempt_name 'attempt-%03d' "$attempt"
+    attempt_dir="$root/attempts/$attempt_name"
+    mkdir -p "$attempt_dir"
+
+    provider_http="$(curl --silent --show-error --fail --max-time 10 \
+      -H "x-auth-token: $TOKEN" \
+      -o "$attempt_dir/providers.json" -w '%{http_code}' \
+      "$BASE/operator/diagnostics/providers?limit=200" \
+      2>"$attempt_dir/providers.stderr")" && provider_rc=0 || provider_rc=$?
+    [[ -s "$attempt_dir/providers.json" ]] || printf '{"items":[]}\n' >"$attempt_dir/providers.json"
+    printf '{"command_class":"read_operator_provider_diagnostics","exit_code":%s,"http_status":"%s"}\n' \
+      "$provider_rc" "${provider_http:-000}" >"$attempt_dir/providers.command.json"
+
+    for host in a b; do
+      address="${MGMT_IP[$host]}"
+      case "$host" in a) health_port=19101 ;; b) health_port=19102 ;; esac
+      if ssh_vm "$address" "sudo curl --silent --show-error --fail --max-time 5 http://127.0.0.1:$health_port/readyz" \
+          >"$attempt_dir/host-$host-ready.json" 2>"$attempt_dir/host-$host-ready.stderr"; then
+        ready_rc=0
+      else
+        ready_rc=$?
+        printf '{}\n' >"$attempt_dir/host-$host-ready.json"
+      fi
+      printf '{"command_class":"read_host_%s_compute_agent_readyz","exit_code":%s}\n' \
+        "$host" "$ready_rc" >"$attempt_dir/host-$host-ready.command.json"
+    done
+
+    now_ms="$(date +%s%3N)"
+    validation="$attempt_dir/validation.json"
+    if python3 "$ROOT_DIR/tests/fabric-v3-agent-readiness.py" validate \
+        --manifest "$EVIDENCE/manifest.json" \
+        --providers "$attempt_dir/providers.json" \
+        --ready-a "$attempt_dir/host-a-ready.json" \
+        --ready-b "$attempt_dir/host-b-ready.json" \
+        --controller-log "$EVIDENCE/restart/startup-recovery/o3kd.log" \
+        --controller-start "$EVIDENCE/restart/startup-recovery/controller-start.json" \
+        --now-ms "$now_ms" \
+        --consecutive-observations "$((ready_streak + 1))" \
+        --output "$validation"; then
+      ready_streak=$((ready_streak + 1))
+      if (( ready_streak >= 2 )); then
+        python3 - "$validation" "$root/result.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" \
+          "$attempt" "$started_at" "$SECONDS" <<'PYREADINESS'
+import json,pathlib,sys
+source,target,run_id,product_sha,product_tree,attempt,started,finished=sys.argv[1:]
+result=json.loads(pathlib.Path(source).read_text())
+result.update({
+    "status":"passed",
+    "classification":None,
+    "failed_operation":None,
+    "run_id":run_id,
+    "product_sha":product_sha,
+    "product_tree":product_tree,
+    "attempts":int(attempt),
+    "elapsed_seconds":int(finished)-int(started),
+    "consecutive_observations_required":2,
+    "observation_artifacts":[
+        f"attempts/attempt-{int(attempt)-1:03d}/validation.json",
+        f"attempts/attempt-{int(attempt):03d}/validation.json",
+    ],
+})
+pathlib.Path(target).write_text(json.dumps(result,sort_keys=True,indent=2)+"\n")
+PYREADINESS
+        return 0
+      fi
+    else
+      ready_streak=0
+    fi
+    (( attempt == 120 )) || sleep 1
+  done
+
+  python3 - "$root/result.json" "$root/attempts/attempt-120/validation.json" \
+    "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" <<'PYREADINESSFAIL'
+import json,pathlib,sys
+target,final_validation,run_id,product_sha,product_tree=sys.argv[1:]
+try:
+    final=json.loads(pathlib.Path(final_validation).read_text())
+except (OSError,ValueError):
+    final={}
+pathlib.Path(target).write_text(json.dumps({
+    "artifact_type":"fabric-v3-compute-agent-readiness",
+    "phase":"post-controller-restart-before-supported-teardown",
+    "status":"failed",
+    "classification":"HARNESS_GAP",
+    "failed_operation":final.get("failed_operation") or "wait_for_two_consecutive_compute_agent_observations",
+    "diagnostic":"survivor compute agents did not become current and healthy within 120 seconds",
+    "observer_type":final.get("observer_type") or "api_observation+runner_executable_guest_readyz",
+    "run_id":run_id,
+    "product_sha":product_sha,
+    "product_tree":product_tree,
+    "attempts":120,
+    "consecutive_observations_required":2,
+    "final_attempt_artifacts":[
+        "attempts/attempt-120/validation.json",
+        "attempts/attempt-120/providers.command.json",
+        "attempts/attempt-120/host-a-ready.command.json",
+        "attempts/attempt-120/host-b-ready.command.json",
+    ],
+},sort_keys=True,indent=2)+"\n")
+PYREADINESSFAIL
+  return 1
+}
 capture_c_remove_work_row() {
   local realm_id="$1"
   python3 "$ROOT_DIR/tests/fabric-v3-retirement-work-evidence.py" observe-remove \
@@ -2186,12 +2296,13 @@ PYPID
   printf '{"old_controller_pid":"%s","old_controller_start_identity":"%s","wait_status":%s,"old_process_gone":true,"observed_at_utc":"%s"}\n' \
     "$old_controller_pid" "$old_controller_start_identity" "$controller_wait_status" "$(date -u +%FT%T.%NZ)" \
     >"$EVIDENCE/restart/startup-recovery/controller-stop-observed.json"
+  controller_start_requested_at="$(date -u +%FT%T.%NZ)"
   "$PRODUCT_SOURCE_DIR/target/release/o3kd" --listen-addr "$HOST_MGMT_IP:$API_PORT" \
     --data-dir "$EVIDENCE/controller-data" --log-filter info \
     >"$EVIDENCE/restart/startup-recovery/o3kd.log" 2>&1 &
   O3KD_PID=$!
   printf '{"new_controller_pid":"%s","start_requested_at_utc":"%s","api_mutation_during_recovery":false}\n' \
-    "$O3KD_PID" "$(date -u +%FT%T.%NZ)" >"$EVIDENCE/restart/startup-recovery/controller-start.json"
+    "$O3KD_PID" "$controller_start_requested_at" >"$EVIDENCE/restart/startup-recovery/controller-start.json"
   ready=0
   for _ in $(seq 1 120); do
     if curl -fsS "$BASE/healthz" >"$EVIDENCE/restart/startup-recovery/health.json" 2>/dev/null; then ready=1; break; fi
@@ -2285,6 +2396,8 @@ PYVX
     || fail "A/B canonical ARP observation failed after controller restart" "HARNESS_GAP"
   grep -Fqi "${TENANT_MAC[b]}" "$EVIDENCE/restart/traffic/a-to-b-canonical-arp.txt" \
     || fail "A/B canonical ARP MAC changed after controller restart" "DURABLE_RECOVERY_DEFECT"
+  wait_for_survivor_compute_agents \
+    || fail "survivor compute-agent identities did not re-register after controller restart; see restart/compute-agent-readiness/result.json" "HARNESS_GAP"
   printf '{"controller_restarted":true,"desired_participants":["host-a","host-b"],"c_apply_recreated":false,"c_provider_state_absent":true,"a_to_b":"PASS","b_to_a":"PASS","canonical_arp":"PASS"}\n' \
     >"$EVIDENCE/restart/startup-recovery/result.json"
 fi
