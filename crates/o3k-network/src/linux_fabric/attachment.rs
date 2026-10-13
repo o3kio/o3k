@@ -516,6 +516,7 @@ mod tests {
                     attachments: BTreeMap::new(),
                     endpoint_taps,
                     pending_endpoint_taps: BTreeMap::new(),
+                    pending_endpoint_macs: Default::default(),
                     policy_generation: plan.policy_generation,
                     policy_fingerprint: String::new(),
                     anti_spoof_generation: plan.directory_generation,

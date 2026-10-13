@@ -206,6 +206,163 @@ pub struct LinuxFabricBackend {
     pub(crate) shared: Option<shared_provider::SharedFabricAdapter>,
 }
 impl LinuxFabricBackend {
+    fn record_pending_endpoint_macs(
+        &mut self,
+        previous: Option<&NamespacedRoutedFabricPlan>,
+        current: &NamespacedRoutedFabricPlan,
+    ) -> Result<(), LinuxFabricError> {
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        let Some(realm) = self.state.realms.get_mut(&current.realm_id) else {
+            return Err(LinuxFabricError::CorruptState);
+        };
+        let current_macs: BTreeSet<String> = current
+            .directory
+            .entries
+            .iter()
+            .map(|entry| entry.mac.to_ascii_lowercase())
+            .collect();
+        realm.pending_endpoint_macs.extend(
+            previous
+                .directory
+                .entries
+                .iter()
+                .map(|entry| entry.mac.to_ascii_lowercase())
+                .filter(|mac| !current_macs.contains(mac)),
+        );
+        store_state(&self.state_path, &self.state)
+    }
+
+    /// Withdraw canonical endpoint MACs that disappeared from a realm
+    /// directory.  The shared Fabric provider only receives transport-peer
+    /// identity, so endpoint ownership must be enforced at this O3K boundary.
+    /// Only MACs removed from this realm and absent from every other live
+    /// realm are eligible; observed rows are checked before each deletion.
+    fn withdraw_removed_endpoint_macs(
+        &self,
+        previous: Option<&NamespacedRoutedFabricPlan>,
+        current: &NamespacedRoutedFabricPlan,
+        namespace: &str,
+        vxlan: &str,
+    ) -> Result<(), LinuxFabricError> {
+        let current_macs: BTreeSet<String> = current
+            .directory
+            .entries
+            .iter()
+            .map(|entry| entry.mac.to_ascii_lowercase())
+            .collect();
+        let foreign_macs: BTreeSet<String> = self
+            .plans
+            .values()
+            .filter(|plan| plan.realm_id != current.realm_id)
+            .flat_map(|plan| {
+                plan.directory
+                    .entries
+                    .iter()
+                    .map(|entry| entry.mac.to_ascii_lowercase())
+            })
+            .collect();
+        let removed: BTreeSet<String> = previous
+            .map(|previous| {
+                previous
+                    .directory
+                    .entries
+                    .iter()
+                    .map(|entry| entry.mac.to_ascii_lowercase())
+                    .filter(|mac| !current_macs.contains(mac) && !foreign_macs.contains(mac))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let pending = self
+            .state
+            .realms
+            .get(&current.realm_id)
+            .map(|realm| realm.pending_endpoint_macs.clone())
+            .unwrap_or_default();
+        let removed = removed
+            .union(&pending)
+            .filter(|mac| !current_macs.contains(*mac) && !foreign_macs.contains(*mac))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for mac in removed {
+            let (success, listing) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns", "exec", namespace, "bridge", "fdb", "show", "dev", vxlan,
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            if !success {
+                return Err(LinuxFabricError::CommandFailed);
+            }
+            for line in listing.lines() {
+                if line
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|observed| observed.eq_ignore_ascii_case(&mac))
+                {
+                    let tokens: Vec<&str> = line.split_whitespace().collect();
+                    if tokens.iter().any(|token| {
+                        matches!(
+                            *token,
+                            "permanent" | "static" | "extern_learn" | "extern_valid"
+                        )
+                    }) {
+                        return Err(LinuxFabricError::ForeignState);
+                    }
+                    let mut delete_args = vec![
+                        "netns", "exec", namespace, "bridge", "fdb", "del", &mac, "dev", vxlan,
+                    ];
+                    if let Some(index) = tokens.iter().position(|token| *token == "dst") {
+                        let destination = tokens
+                            .get(index + 1)
+                            .ok_or(LinuxFabricError::CorruptState)?;
+                        delete_args.extend(["dst", destination]);
+                    } else if let Some(index) = tokens.iter().position(|token| *token == "master") {
+                        if tokens.get(index + 1).is_none() {
+                            return Err(LinuxFabricError::CorruptState);
+                        }
+                        // `master` is a flag, not an argument. The bridge
+                        // identity is already proven by the verified device
+                        // scope and namespace.
+                        let _ = index;
+                        delete_args.push("master");
+                    } else {
+                        return Err(LinuxFabricError::ForeignState);
+                    }
+                    if !self
+                        .command
+                        .run("ip", &delete_args)
+                        .map_err(LinuxFabricError::Storage)?
+                    {}
+                }
+            }
+            let (success, after) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns", "exec", namespace, "bridge", "fdb", "show", "dev", vxlan,
+                    ],
+                )
+                .map_err(LinuxFabricError::Storage)?;
+            if !success {
+                return Err(LinuxFabricError::CommandFailed);
+            }
+            if after.lines().any(|line| {
+                line.split_whitespace()
+                    .next()
+                    .is_some_and(|observed| observed.eq_ignore_ascii_case(&mac))
+            }) {
+                return Err(LinuxFabricError::CommandFailed);
+            }
+        }
+        Ok(())
+    }
+
     pub fn open(config: LinuxFabricConfig) -> Result<Self, LinuxFabricError> {
         config.validate()?;
         let state_path = config.root.join("ownership.json");
@@ -415,6 +572,13 @@ impl LinuxFabricBackend {
                 {
                     return Err(LinuxFabricError::CorruptState);
                 }
+            }
+            if ownership
+                .pending_endpoint_macs
+                .iter()
+                .any(|mac| !valid_mac(mac))
+            {
+                return Err(LinuxFabricError::CorruptState);
             }
             if ownership.policy_generation == 0 && !ownership.policy_fingerprint.is_empty() {
                 return Err(LinuxFabricError::CorruptState);
@@ -639,6 +803,8 @@ impl FabricBackend for LinuxFabricBackend {
     fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), FabricError> {
         Self::validate_policy_plan(plan)?;
         Self::validate_public_plan(plan)?;
+        let previous_plan = self.plans.get(&plan.realm_id).cloned();
+        self.record_pending_endpoint_macs(previous_plan.as_ref(), plan)?;
         if self.shared.is_none() {
             self.ensure_fabric(plan)?;
         }
@@ -682,6 +848,16 @@ impl FabricBackend for LinuxFabricBackend {
                     ],
                 )
                 .map_err(LinuxFabricError::Storage)?;
+            self.withdraw_removed_endpoint_macs(
+                previous_plan.as_ref(),
+                plan,
+                &self.config.fabric_namespace,
+                &owned.vxlan_name,
+            )?;
+            if let Some(realm) = self.state.realms.get_mut(&plan.realm_id) {
+                realm.pending_endpoint_macs.clear();
+                store_state(&self.state_path, &self.state)?;
+            }
             let bridge_observed = self
                 .command
                 .output("ip", &["-d", "link", "show", "dev", bridge.as_str()])
@@ -1222,6 +1398,402 @@ mod tests {
     struct FakeCommand {
         calls: Mutex<Vec<(String, Vec<String>)>>,
         namespace_exists: bool,
+    }
+
+    struct FdbCommand {
+        calls: Mutex<Vec<(String, Vec<String>)>>,
+        listing: String,
+        delete_succeeds: bool,
+        delete_removes: bool,
+    }
+
+    impl LinuxFabricCommand for FdbCommand {
+        fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)> {
+            self.calls.lock().expect("calls").push((
+                program.to_owned(),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ));
+            if args
+                .windows(4)
+                .any(|window| window == ["bridge", "fdb", "show", "dev"])
+            {
+                let deleted = self
+                    .calls
+                    .lock()
+                    .expect("calls")
+                    .iter()
+                    .any(|(_, call)| call.windows(2).any(|window| window == ["fdb", "del"]));
+                return Ok((
+                    true,
+                    if deleted && self.delete_removes {
+                        String::new()
+                    } else {
+                        self.listing.clone()
+                    },
+                ));
+            }
+            Ok((true, String::new()))
+        }
+
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<bool> {
+            self.calls.lock().expect("calls").push((
+                program.to_owned(),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ));
+            Ok(self.delete_succeeds)
+        }
+
+        fn run_with_input(
+            &self,
+            _program: &str,
+            _args: &[&str],
+            _input: &[u8],
+        ) -> io::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn removed_endpoint_master_row_uses_master_flag_and_exact_mac_ownership() {
+        let root = std::env::temp_dir().join(format!("o3k-fdb-master-{}", Uuid::now_v7()));
+        let command = Arc::new(FdbCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: "02:00:00:00:00:12 master o3k-b-test\n".to_owned(),
+            delete_succeeds: true,
+            delete_removes: true,
+        });
+        let mut backend = LinuxFabricBackend::with_command(
+            LinuxFabricConfig::for_root(&root),
+            Arc::clone(&command) as Arc<dyn LinuxFabricCommand>,
+        )
+        .expect("backend");
+        let previous = plan_with_endpoint_host(Uuid::from_u128(12), "host-a");
+        let mut current = previous.clone();
+        current.directory.entries.clear();
+        current.directory_generation = 3;
+        current.directory.directory_generation = 3;
+        let realm = backend.realm_ownership(&current);
+        backend.state.realms.insert(current.realm_id, realm);
+        backend
+            .withdraw_removed_endpoint_macs(
+                Some(&previous),
+                &current,
+                "o3k-fabric",
+                "o3k-vxlan-test",
+            )
+            .expect("owned master row removed");
+        let calls = command.calls.lock().expect("calls");
+        assert!(calls.iter().any(|(_, args)| {
+            args.windows(2).any(|window| window == ["fdb", "del"])
+                && args.last() == Some(&"master".to_owned())
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn removed_endpoint_permanent_row_is_preserved_fail_closed() {
+        let root = std::env::temp_dir().join(format!("o3k-fdb-permanent-{}", Uuid::now_v7()));
+        let command = Arc::new(FdbCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: "02:00:00:00:00:12 master o3k-b-test permanent\n".to_owned(),
+            delete_succeeds: true,
+            delete_removes: false,
+        });
+        let mut backend = LinuxFabricBackend::with_command(
+            LinuxFabricConfig::for_root(&root),
+            Arc::clone(&command) as Arc<dyn LinuxFabricCommand>,
+        )
+        .expect("backend");
+        let previous = plan_with_endpoint_host(Uuid::from_u128(12), "host-a");
+        let mut current = previous.clone();
+        current.directory.entries.clear();
+        let realm = backend.realm_ownership(&current);
+        backend.state.realms.insert(current.realm_id, realm);
+        assert!(matches!(
+            backend.withdraw_removed_endpoint_macs(
+                Some(&previous),
+                &current,
+                "o3k-fabric",
+                "o3k-vxlan-test"
+            ),
+            Err(LinuxFabricError::ForeignState)
+        ));
+        let calls = command.calls.lock().expect("calls");
+        assert!(
+            !calls
+                .iter()
+                .any(|(_, args)| args.windows(2).any(|window| window == ["fdb", "del"])),
+            "foreign row was not deleted"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_endpoint_mac_delete_fails_closed() {
+        let root = std::env::temp_dir().join(format!("o3k-fdb-delete-failure-{}", Uuid::now_v7()));
+        let command = Arc::new(FdbCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: "02:00:00:00:00:12 master o3k-b-test\n".to_owned(),
+            delete_succeeds: false,
+            delete_removes: false,
+        });
+        let mut backend = LinuxFabricBackend::with_command(
+            LinuxFabricConfig::for_root(&root),
+            Arc::clone(&command) as Arc<dyn LinuxFabricCommand>,
+        )
+        .expect("backend");
+        let previous = plan_with_endpoint_host(Uuid::from_u128(12), "host-a");
+        let mut current = previous.clone();
+        current.directory.entries.clear();
+        let realm = backend.realm_ownership(&current);
+        backend.state.realms.insert(current.realm_id, realm);
+        assert!(matches!(
+            backend.withdraw_removed_endpoint_macs(
+                Some(&previous),
+                &current,
+                "o3k-fabric",
+                "o3k-vxlan-test"
+            ),
+            Err(LinuxFabricError::CommandFailed)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_endpoint_mac_delete_accepts_observed_absence() {
+        let root = std::env::temp_dir().join(format!("o3k-fdb-delete-unknown-{}", Uuid::now_v7()));
+        let command = Arc::new(FdbCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: "02:00:00:00:00:12 master o3k-b-test\n".to_owned(),
+            delete_succeeds: false,
+            delete_removes: true,
+        });
+        let mut backend = LinuxFabricBackend::with_command(
+            LinuxFabricConfig::for_root(&root),
+            Arc::clone(&command) as Arc<dyn LinuxFabricCommand>,
+        )
+        .expect("backend");
+        let previous = plan_with_endpoint_host(Uuid::from_u128(12), "host-a");
+        let mut current = previous.clone();
+        current.directory.entries.clear();
+        let realm = backend.realm_ownership(&current);
+        backend.state.realms.insert(current.realm_id, realm);
+        backend
+            .withdraw_removed_endpoint_macs(
+                Some(&previous),
+                &current,
+                "o3k-fabric",
+                "o3k-vxlan-test",
+            )
+            .expect("readback proves absence despite unknown delete result");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pending_endpoint_mac_intent_survives_reopen() {
+        let root = std::env::temp_dir().join(format!("o3k-fdb-pending-reopen-{}", Uuid::now_v7()));
+        let command: Arc<dyn LinuxFabricCommand> = Arc::new(FdbCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+            delete_succeeds: true,
+            delete_removes: true,
+        });
+        let config = LinuxFabricConfig::for_root(&root);
+        let mut backend = LinuxFabricBackend::with_command(config.clone(), Arc::clone(&command))
+            .expect("backend");
+        let previous = plan_with_endpoint_host(Uuid::from_u128(12), "host-a");
+        backend.persist_plan(&previous).expect("previous plan");
+        let mut current = previous.clone();
+        current.directory.entries.clear();
+        backend.persist_plan(&current).expect("current plan");
+        backend
+            .state
+            .realms
+            .insert(current.realm_id, backend.realm_ownership(&current));
+        backend
+            .record_pending_endpoint_macs(Some(&previous), &current)
+            .expect("durable intent");
+        drop(backend);
+        let reopened = LinuxFabricBackend::with_command(config, command).expect("reopen");
+        assert!(
+            reopened
+                .state
+                .realms
+                .get(&current.realm_id)
+                .expect("realm")
+                .pending_endpoint_macs
+                .contains("02:00:00:00:00:12")
+        );
+        let retry_command = Arc::new(FdbCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: "02:00:00:00:00:12 master o3k-b-test\n".to_owned(),
+            delete_succeeds: true,
+            delete_removes: true,
+        });
+        let retry = LinuxFabricBackend::with_command(
+            LinuxFabricConfig::for_root(&root),
+            Arc::clone(&retry_command) as Arc<dyn LinuxFabricCommand>,
+        )
+        .expect("reopen for retry");
+        let mut reduced = previous.clone();
+        reduced.directory.entries.clear();
+        retry
+            .withdraw_removed_endpoint_macs(None, &reduced, "o3k-fabric", "o3k-vxlan-test")
+            .expect("pending MAC retry");
+        assert!(
+            retry_command
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .any(|(_, args)| { args.windows(2).any(|window| window == ["fdb", "del"]) })
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_post_observation_retains_pending_intent() {
+        let root = std::env::temp_dir().join(format!("o3k-fdb-pending-failure-{}", Uuid::now_v7()));
+        let command = Arc::new(FdbCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: "02:00:00:00:00:12 master o3k-b-test\n".to_owned(),
+            delete_succeeds: false,
+            delete_removes: false,
+        });
+        let mut backend = LinuxFabricBackend::with_command(
+            LinuxFabricConfig::for_root(&root),
+            Arc::clone(&command) as Arc<dyn LinuxFabricCommand>,
+        )
+        .expect("backend");
+        let previous = plan_with_endpoint_host(Uuid::from_u128(12), "host-a");
+        let mut current = previous.clone();
+        current.directory.entries.clear();
+        backend.persist_plan(&current).expect("plan");
+        backend
+            .state
+            .realms
+            .insert(current.realm_id, backend.realm_ownership(&current));
+        backend
+            .record_pending_endpoint_macs(Some(&previous), &current)
+            .expect("intent");
+        assert!(
+            backend
+                .withdraw_removed_endpoint_macs(None, &current, "o3k-fabric", "o3k-vxlan-test")
+                .is_err()
+        );
+        assert!(
+            backend
+                .state
+                .realms
+                .get(&current.realm_id)
+                .expect("realm")
+                .pending_endpoint_macs
+                .contains("02:00:00:00:00:12")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reactivated_endpoint_mac_is_not_withdrawn() {
+        let root = std::env::temp_dir().join(format!("o3k-fdb-reactivated-{}", Uuid::now_v7()));
+        let command = Arc::new(FdbCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: "02:00:00:00:00:12 master o3k-b-test\n".to_owned(),
+            delete_succeeds: true,
+            delete_removes: true,
+        });
+        let mut backend = LinuxFabricBackend::with_command(
+            LinuxFabricConfig::for_root(&root),
+            Arc::clone(&command) as Arc<dyn LinuxFabricCommand>,
+        )
+        .expect("backend");
+        let previous = plan_with_endpoint_host(Uuid::from_u128(12), "host-a");
+        let plan = previous.clone();
+        let mut realm = backend.realm_ownership(&plan);
+        realm
+            .pending_endpoint_macs
+            .insert("02:00:00:00:00:12".to_owned());
+        backend.state.realms.insert(plan.realm_id, realm);
+        backend
+            .withdraw_removed_endpoint_macs(Some(&previous), &plan, "o3k-fabric", "o3k-vxlan-test")
+            .expect("unchanged MAC");
+        assert!(
+            !command
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .any(|(_, args)| args.windows(2).any(|window| window == ["fdb", "del"])),
+            "reactivated MAC was deleted"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mac_owned_by_another_realm_is_preserved() {
+        let root = std::env::temp_dir().join(format!("o3k-fdb-cross-realm-{}", Uuid::now_v7()));
+        let command = Arc::new(FdbCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: "02:00:00:00:00:12 master o3k-b-test\n".to_owned(),
+            delete_succeeds: true,
+            delete_removes: true,
+        });
+        let mut backend = LinuxFabricBackend::with_command(
+            LinuxFabricConfig::for_root(&root),
+            Arc::clone(&command) as Arc<dyn LinuxFabricCommand>,
+        )
+        .expect("backend");
+        let previous = plan_with_endpoint_host(Uuid::from_u128(12), "host-a");
+        let mut current = previous.clone();
+        current.realm_id = Uuid::from_u128(13);
+        current.directory.entries.clear();
+        backend.plans.insert(Uuid::from_u128(14), previous.clone());
+        backend.plans.insert(current.realm_id, current.clone());
+        let realm = backend.realm_ownership(&current);
+        backend.state.realms.insert(current.realm_id, realm);
+        backend
+            .withdraw_removed_endpoint_macs(
+                Some(&previous),
+                &current,
+                "o3k-fabric",
+                "o3k-vxlan-test",
+            )
+            .expect("foreign MAC preserved");
+        assert!(
+            !command
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .any(|(_, args)| args.windows(2).any(|window| window == ["fdb", "del"])),
+            "foreign MAC was deleted"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn malformed_pending_endpoint_mac_fails_loaded_state_validation() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-fdb-malformed-pending-{}", Uuid::now_v7()));
+        let command = Arc::new(FdbCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+            delete_succeeds: true,
+            delete_removes: true,
+        });
+        let mut backend =
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
+                .expect("backend");
+        let plan = plan_with_endpoint_host(Uuid::from_u128(12), "host-a");
+        backend.persist_plan(&plan).expect("plan");
+        let mut realm = backend.realm_ownership(&plan);
+        realm.pending_endpoint_macs.insert("not-a-mac".to_owned());
+        backend.state.realms.insert(plan.realm_id, realm);
+        assert!(matches!(
+            backend.validate_loaded_state(),
+            Err(LinuxFabricError::CorruptState)
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     impl LinuxFabricCommand for FakeCommand {

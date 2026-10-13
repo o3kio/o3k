@@ -25,6 +25,7 @@ impl super::LinuxFabricBackend {
             attachments: BTreeMap::new(),
             endpoint_taps: BTreeMap::new(),
             pending_endpoint_taps: BTreeMap::new(),
+            pending_endpoint_macs: BTreeSet::new(),
             policy_generation: 0,
             policy_fingerprint: String::new(),
             anti_spoof_generation: 0,
