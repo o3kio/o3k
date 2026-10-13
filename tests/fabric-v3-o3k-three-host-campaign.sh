@@ -136,49 +136,12 @@ api() { curl --silent --show-error --fail-with-body --max-time 30 -H "x-auth-tok
 wait_for_survivor_compute_agents() {
   local root="$EVIDENCE/restart/compute-agent-readiness"
   local ready_streak=0 started_at="$SECONDS" attempt attempt_name attempt_dir
-  local provider_http provider_rc host health_port address ready_rc now_ms validation
+  local host health_port address ready_rc validation
   mkdir -p "$root/attempts"
   for attempt in $(seq 1 120); do
     printf -v attempt_name 'attempt-%03d' "$attempt"
     attempt_dir="$root/attempts/$attempt_name"
     mkdir -p "$attempt_dir"
-
-    provider_http="$(curl --silent --show-error --fail --max-time 10 \
-      -H "x-auth-token: $TOKEN" \
-      -o "$attempt_dir/providers.json" -w '%{http_code}' \
-      "$BASE/o3k/v1/operator/diagnostics/providers?limit=200" \
-      2>"$attempt_dir/providers.stderr")" && provider_rc=0 || provider_rc=$?
-    [[ -s "$attempt_dir/providers.json" ]] || printf '{"items":[]}\n' >"$attempt_dir/providers.json"
-    printf '{"command_class":"read_operator_provider_diagnostics","exit_code":%s,"http_status":"%s"}\n' \
-      "$provider_rc" "${provider_http:-000}" >"$attempt_dir/providers.command.json"
-    if [[ "${provider_http:-000}" =~ ^4[0-9][0-9]$ ]]; then
-      python3 - "$root/result.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" \
-        "$provider_http" "$provider_rc" <<'PYREADINESSHTTP'
-import json,pathlib,sys
-target,run_id,product_sha,product_tree,http_status,exit_code=sys.argv[1:]
-pathlib.Path(target).write_text(json.dumps({
-    "artifact_type":"fabric-v3-compute-agent-readiness",
-    "phase":"post-controller-restart-before-supported-teardown",
-    "status":"failed",
-    "classification":"HARNESS_GAP",
-    "failed_operation":"read_operator_provider_diagnostics",
-    "diagnostic":"provider diagnostics returned an HTTP client error",
-    "observer_type":"api_observation",
-    "command_class":"read_operator_provider_diagnostics",
-    "exit_code":int(exit_code),
-    "http_status":int(http_status),
-    "run_id":run_id,
-    "product_sha":product_sha,
-    "product_tree":product_tree,
-    "attempts":1,
-    "final_attempt_artifacts":[
-        "attempts/attempt-001/providers.command.json",
-        "attempts/attempt-001/providers.stderr",
-    ],
-},sort_keys=True,indent=2)+"\n")
-PYREADINESSHTTP
-      return 1
-    fi
 
     for host in a b; do
       address="${MGMT_IP[$host]}"
@@ -194,16 +157,13 @@ PYREADINESSHTTP
         "$host" "$ready_rc" >"$attempt_dir/host-$host-ready.command.json"
     done
 
-    now_ms="$(date +%s%3N)"
     validation="$attempt_dir/validation.json"
     if python3 "$ROOT_DIR/tests/fabric-v3-agent-readiness.py" validate \
         --manifest "$EVIDENCE/manifest.json" \
-        --providers "$attempt_dir/providers.json" \
         --ready-a "$attempt_dir/host-a-ready.json" \
         --ready-b "$attempt_dir/host-b-ready.json" \
         --controller-log "$EVIDENCE/restart/startup-recovery/o3kd.log" \
         --controller-start "$EVIDENCE/restart/startup-recovery/controller-start.json" \
-        --now-ms "$now_ms" \
         --consecutive-observations "$((ready_streak + 1))" \
         --output "$validation"; then
       ready_streak=$((ready_streak + 1))
@@ -252,8 +212,12 @@ pathlib.Path(target).write_text(json.dumps({
     "status":"failed",
     "classification":"HARNESS_GAP",
     "failed_operation":final.get("failed_operation") or "wait_for_two_consecutive_compute_agent_observations",
-    "diagnostic":"survivor compute agents did not become current and healthy within 120 seconds",
-    "observer_type":final.get("observer_type") or "api_observation+runner_executable_guest_readyz",
+    "diagnostic":"survivor compute agents did not report current identities and post-restart registrations within 120 seconds",
+    "observer_type":final.get("observer_type") or "runner_executable_guest_readyz+controller_log",
+    "final_observation":{
+        "diagnostic":final.get("diagnostic"),
+        "agents":final.get("agents", []),
+    },
     "run_id":run_id,
     "product_sha":product_sha,
     "product_tree":product_tree,
@@ -261,7 +225,6 @@ pathlib.Path(target).write_text(json.dumps({
     "consecutive_observations_required":2,
     "final_attempt_artifacts":[
         "attempts/attempt-120/validation.json",
-        "attempts/attempt-120/providers.command.json",
         "attempts/attempt-120/host-a-ready.command.json",
         "attempts/attempt-120/host-b-ready.command.json",
     ],

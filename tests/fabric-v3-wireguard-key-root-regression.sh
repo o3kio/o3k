@@ -17,8 +17,8 @@ import sys
 root, installer_path, campaign_path, capture_path = sys.argv[1:]
 installer, campaign, capture = map(lambda p: pathlib.Path(p).read_text(),
                                    (installer_path, campaign_path, capture_path))
-product_sha = 'adaf6168b124111ee62bf53f6eaf6e0f6cab155e'
-product_tree = '194863fc49735a9d30e16fd03afa498e91c6d871'
+product_sha = 'd7335166563d28084fbad5ac7f5d0f0e07e000a4'
+product_tree = 'd5b75b5674009d8c135218556aa2177371e489a3'
 assert f'PRODUCT_SHA={product_sha}' in campaign
 assert f'PRODUCT_TREE={product_tree}' in campaign
 dhcp_realizer = subprocess.run(
