@@ -28,6 +28,13 @@ RESTART_SPEC.loader.exec_module(restart_readiness)
 
 
 class GuestControlRegression(unittest.TestCase):
+    def test_retirement_preserves_pre_and_post_restart_survivor_fdb_captures(self):
+        pre = '"$EVIDENCE/restart/survivor-fdb-pre-restart/host-$host.txt"'
+        post = '"$EVIDENCE/restart/survivor-fdb-post-restart/host-$host.txt"'
+        self.assertIn(pre, RETIREMENT)
+        self.assertIn(post, RETIREMENT)
+        self.assertLess(RETIREMENT.index(pre), RETIREMENT.index(post))
+
     def test_restart_readiness_requires_new_controller_session_and_exact_agent_epochs(self):
         log = "\n".join(
             [

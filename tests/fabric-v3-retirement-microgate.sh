@@ -244,6 +244,14 @@ PY
     || fail "post-removal ARP did not resolve to B's canonical MAC" "SURVIVOR_RECONCILIATION_DEFECT"
 
   if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
+    # Keep the raw survivor FDB observed before the controller restart.  The
+    # validator below intentionally reuses survivor-convergence/ for the
+    # reconstructed post-restart snapshot, so preserve both observations.
+    for host in a b; do
+      mkdir -p "$EVIDENCE/restart/survivor-fdb-pre-restart"
+      cp "$EVIDENCE/survivor-convergence/host-$host/fdb.txt" \
+        "$EVIDENCE/restart/survivor-fdb-pre-restart/host-$host.txt"
+    done
     old_controller_pid="$O3KD_PID"
     cp "$EVIDENCE/c-delete/remove-command/c-remove-command.json" \
       "$EVIDENCE/c-delete/remove-command/c-remove-command-before-restart.json"
@@ -440,6 +448,9 @@ PY
       for host in a b; do
         capture_survivor_host "$host" \
           || fail "post-restart survivor observation failed on host-$host" "ENVIRONMENT_GAP"
+        mkdir -p "$EVIDENCE/restart/survivor-fdb-post-restart"
+        cp "$EVIDENCE/survivor-convergence/host-$host/fdb.txt" \
+          "$EVIDENCE/restart/survivor-fdb-post-restart/host-$host.txt"
       done
       capture_c_remove_work_row "$realm_id" >"$EVIDENCE/c-delete/remove-command/c-remove-command-state.txt" \
         || fail "post-restart C retirement work observation failed" "HARNESS_GAP"

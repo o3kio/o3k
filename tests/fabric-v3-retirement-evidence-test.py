@@ -32,6 +32,7 @@ class RetirementEvidenceTests(unittest.TestCase):
         ):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         self._write("before-departure/plans/host-a.json", {"directory_generation": 4})
+        self._write("canonical/endpoints.csv", "server,host,tenant_ip,guest_mac\nA,host-a,10.77.0.2,02:65:4f:e7:5f:60\nB,host-b,10.77.0.3,02:65:4f:e7:5f:61\nC,host-c,10.77.0.4,02:65:4f:e7:5f:62\n")
         self._write("environment/fabric-identities.json", [
             {"host_id": f"host-{host}", "fabric_transport_ip": f"100.64.3.{index}"}
             for index, host in enumerate("abc", 1)
@@ -119,6 +120,25 @@ class RetirementEvidenceTests(unittest.TestCase):
         )
         with self.assertRaises(evidence.SurvivorReconciliationDefect):
             evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
+
+    def test_departed_host_mac_master_row_is_rejected_on_each_survivor(self):
+        for host in ("host-a", "host-b"):
+            path = self.root / f"survivor-convergence/{host}/fdb.txt"
+            peer_ip = "100.64.3.2" if host == "host-a" else "100.64.3.1"
+            path.write_text(
+                f"00:00:00:00:00:00 dst {peer_ip} self permanent\n"
+                "02:65:4f:e7:5f:62 master br-fabric permanent\n"
+            )
+            with self.subTest(host=host):
+                with self.assertRaises(evidence.SurvivorReconciliationDefect):
+                    evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
+            path.write_text(f"00:00:00:00:00:00 dst {peer_ip} self permanent\n")
+
+    def test_blank_fdb_lines_are_ignored(self):
+        path = self.root / "survivor-convergence/host-a/fdb.txt"
+        path.write_text("\n  \n00:00:00:00:00:00 dst 100.64.3.2 self permanent\n")
+        result = evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
+        self.assertFalse(result["stale_c_her"])
 
     def test_learned_departing_host_fdb_cli_status_is_distinct(self):
         path = self.root / "survivor-convergence/host-a/fdb.txt"

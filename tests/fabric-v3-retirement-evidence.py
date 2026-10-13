@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import datetime
 import json
 from pathlib import Path
@@ -29,6 +30,11 @@ def validate(root: Path, realm: str, ports: list[str]) -> dict[str, Any]:
     before = _read(root / "before-departure/plans/host-a.json")
     before_generation = int(before["directory_generation"])
     identities = _read(root / "environment/fabric-identities.json")
+    canonical = {}
+    with (root / "canonical/endpoints.csv").open(newline="") as stream:
+        for row in csv.DictReader(stream):
+            canonical[row["host"]] = row["guest_mac"].lower()
+    departing_mac = canonical["host-c"]
     transport = {entry["host_id"]: entry["fabric_transport_ip"] for entry in identities}
     assert set(transport) >= {"host-a", "host-b", "host-c"}, transport
 
@@ -100,14 +106,23 @@ def validate(root: Path, realm: str, ports: list[str]) -> dict[str, Any]:
         departing_ip = transport["host-c"]
         learned_departing = [
             line for line in fdb
+            if line.strip() and line.split(maxsplit=1)[0].lower() == departing_mac
+        ]
+        learned_departing_transport = [
+            line for line in fdb
             if " dst " in line
             and line.split(" dst ", 1)[1].split()[0] == departing_ip
             and line.split()[0].lower() != "00:00:00:00:00:00"
         ]
         if learned_departing:
             raise SurvivorReconciliationDefect(
-                f"{host} survivor FDB retains learned departing host {departing_ip}: "
+                f"{host} survivor FDB retains departing host MAC {departing_mac}: "
                 f"{learned_departing}"
+            )
+        if learned_departing_transport:
+            raise SurvivorReconciliationDefect(
+                f"{host} survivor FDB retains learned departing host {departing_ip}: "
+                f"{learned_departing_transport}"
             )
         assert destinations == {expected_peer_ip}, (host, destinations, fdb)
 
