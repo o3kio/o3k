@@ -850,6 +850,31 @@ impl TestOwnedProbe {
         Ok(())
     }
 
+    async fn observe_owned_endpoint_during_paused_delete(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<o3k_store::PortRecord, Error> {
+        if !self.daemon_running || !self.delete_paused {
+            return Err(
+                "direct endpoint observation requires the old daemon's paused delete window".into(),
+            );
+        }
+        let endpoint = self
+            .store()?
+            .get_port(project_id, endpoint_id)
+            .await?
+            .ok_or("owned endpoint disappeared before SIGKILL")?;
+        if endpoint.project_id != project_id
+            || !o3k_network::is_server_owned_endpoint_name(project_id, &endpoint.name)
+        {
+            return Err(
+                "direct endpoint observation did not match run-owned endpoint identity".into(),
+            );
+        }
+        Ok(endpoint)
+    }
+
     fn mark_daemon_stopped(&mut self) -> Result<(), Error> {
         if !self.daemon_running {
             return Err("test daemon is not marked running".into());
@@ -1014,6 +1039,65 @@ async fn pp5_1035_test_probe_must_close_across_restart_boundary() -> Result<(), 
     probe.mark_reconstruction_observed()?;
     probe.reopen(&backend).await?;
     assert!(probe.is_alive());
+    probe.close();
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pp5_1035_paused_delete_endpoint_observation_uses_only_the_owned_store_probe()
+-> Result<(), Error> {
+    let root = std::env::temp_dir().join(format!("o3k-pp5-paused-endpoint-{}", Uuid::now_v7()));
+    fs::create_dir_all(&root)?;
+    let backend = Backend::Sqlite(root.join("o3k.sqlite"));
+    let mut probe = TestOwnedProbe::new();
+    probe.open_while_daemon_stopped(&backend).await?;
+
+    let endpoint_id = Uuid::now_v7();
+    let network_id = Uuid::now_v7();
+    probe
+        .store()?
+        .insert_network(&o3k_store::NetworkRecord {
+            id: network_id,
+            name: "pp5-restart-observation".to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            status: "ACTIVE".to_owned(),
+        })
+        .await?;
+    let endpoint = o3k_store::PortRecord {
+        id: endpoint_id,
+        network_id,
+        subnet_id: None,
+        project_id: PROJECT_ID.to_owned(),
+        name: format!("o3k-server:{PROJECT_ID}:pp5-restart-observation"),
+        mac_address: "02:00:00:00:00:01".to_owned(),
+        fixed_ip: "192.0.2.10".parse()?,
+        status: "ACTIVE".to_owned(),
+        binding_host: Some("pp5-compute-agent".to_owned()),
+        binding_state: Some("bound".to_owned()),
+        binding_generation: 1,
+    };
+    probe.store()?.insert_port(&endpoint).await?;
+
+    probe.mark_daemon_started()?;
+    assert!(
+        probe
+            .observe_owned_endpoint_during_paused_delete(PROJECT_ID, &endpoint_id)
+            .await
+            .is_err()
+    );
+    probe.mark_delete_paused()?;
+    let observed = probe
+        .observe_owned_endpoint_during_paused_delete(PROJECT_ID, &endpoint_id)
+        .await?;
+    assert_eq!(observed.id, endpoint_id);
+    assert_eq!(observed.project_id, PROJECT_ID);
+    assert_eq!(observed.binding_state.as_deref(), Some("bound"));
+    assert_eq!(
+        observed.fixed_ip,
+        "192.0.2.10".parse::<std::net::Ipv4Addr>()?
+    );
+
     probe.close();
     fs::remove_dir_all(root)?;
     Ok(())
@@ -1642,13 +1726,10 @@ async fn run_iteration(
         .to_owned();
     let quota_before = quota_usage(&client, http, &admin_token).await?;
     let delete_key = format!("pp5-delete-{fixture}");
-    let (delete_tx, delete_rx) = tokio::sync::oneshot::channel();
     let client_delete = client.clone();
     let token_delete = admin_token.clone();
-    tokio::spawn(async move {
-        let result =
-            delete_native(&client_delete, http, &token_delete, server_id, &delete_key).await;
-        let _ = delete_tx.send(result);
+    let delete_task = tokio::spawn(async move {
+        let _ = delete_native(&client_delete, http, &token_delete, server_id, &delete_key).await;
     });
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut terminal = false;
@@ -1687,23 +1768,24 @@ async fn run_iteration(
     if !terminal {
         return Err("terminal delete window not observed".into());
     }
+    let pause_log_needle = if backend.is_postgres() {
+        "test-only fault pause before-endpoint-release engaged; awaiting release gate"
+    } else {
+        "test-only fault pause before-endpoint-release engaged"
+    };
+    let pause_engaged = wait_log(&log, pause_log_needle, Duration::from_secs(10)).await?;
+    let endpoint_release_pause_started = Instant::now();
+    probe.mark_delete_paused()?;
     let stale_lease = if backend.is_postgres() {
         // The terminal delete path holds the local orphan-repair lock while
         // this run-scoped gate is closed. Claim the durable lease during that
         // known interval, before the queued scheduled pass can enter the lock
         // and race the fixture. Release the gate only after recording owner.
-        let pause_engaged = wait_log(
-            &log,
-            "test-only fault pause before-endpoint-release engaged; awaiting release gate",
-            Duration::from_secs(10),
-        )
-        .await?;
         if old_endpoint_release_gate.exists() {
             return Err(
                 "old daemon endpoint-release gate unexpectedly opened before lease seeding".into(),
             );
         }
-        probe.mark_delete_paused()?;
         let outcome = probe
             .acquire_repair_lease_during_paused_delete(
                 backend,
@@ -1733,11 +1815,27 @@ async fn run_iteration(
     } else {
         None
     };
-    let owned_endpoint = ports(&client, http, &admin_token)
-        .await?
-        .into_iter()
-        .find(|port| port["id"] == endpoint_id)
-        .ok_or("owned endpoint disappeared before SIGKILL")?;
+    // The old daemon is deliberately paused inside endpoint release here.
+    // Observe the durable row through the already-open read probe; an HTTP
+    // request can queue behind lifecycle work and outlive the bounded pause,
+    // allowing scheduled repair to release the endpoint before SIGKILL.
+    store_operation(
+        evidence,
+        "pre_restart_terminal_endpoint_observation",
+        "get_owned_port_directly",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        None,
+    );
+    let owned_endpoint = probe
+        .observe_owned_endpoint_during_paused_delete(PROJECT_ID, &endpoint_uuid)
+        .await?;
+    if owned_endpoint.fixed_ip.to_string() != fixed_ip {
+        return Err(
+            "direct endpoint observation fixed IP differs from the pre-delete API snapshot".into(),
+        );
+    }
     store_operation(
         evidence,
         "pre_restart_operation_observation",
@@ -1747,7 +1845,7 @@ async fn run_iteration(
         Some(old_pid),
         None,
     );
-    let mut operation_id = probe
+    let delete_operation = probe
         .store()?
         .list_canonical_operations_page(PROJECT_ID, None, 100)
         .await?
@@ -1755,23 +1853,58 @@ async fn run_iteration(
         .find(|operation| {
             operation.resource_id.as_deref() == Some(&server_id.to_string())
                 && operation.action.to_ascii_lowercase().contains("delete")
-        })
-        .map(|operation| operation.id.to_string());
-    if operation_id.is_none() {
-        let delete_response = tokio::time::timeout(Duration::from_secs(90), delete_rx)
-            .await
-            .map_err(|_| "delete response timeout")?
-            .map_err(|_| "delete response channel closed")??;
-        operation_id = delete_response["operation_id"]
-            .as_str()
-            .or_else(|| delete_response["operation"]["id"].as_str())
-            .map(str::to_owned);
+        });
+    let delete_operation =
+        delete_operation.ok_or("terminal delete has no durable canonical operation record")?;
+    if delete_operation.state != o3k_store::OperationState::Succeeded {
+        return Err(format!(
+            "terminal delete canonical operation is not Succeeded: {:?}",
+            delete_operation.state
+        )
+        .into());
     }
-    let operation_id = operation_id.ok_or("delete response missing durable operation id")?;
+    let operation_id = delete_operation.id.to_string();
     if backend.is_postgres() && old_endpoint_release_gate.exists() {
         return Err("old daemon endpoint-release gate opened before SIGKILL".into());
     }
-    evidence.set("terminal_state", json!({"server_id":server_id,"delete_operation_id":operation_id,"project_id":PROJECT_ID,"endpoint_id":endpoint_id,"operation_state":"Succeeded","resource_state":"DELETED","owned_endpoint_present":true,"endpoint":{"ownership":owned_endpoint["project_id"],"project":PROJECT_ID,"binding":{"device_id":owned_endpoint["device_id"],"device_owner":owned_endpoint["device_owner"],"status":owned_endpoint["status"]},"ip":fixed_ip}}));
+    if backend.is_postgres() {
+        if log_has(
+            &log,
+            "test-only fault pause before-endpoint-release release gate timed out",
+        ) {
+            return Err("old daemon endpoint-release pause timed out before SIGKILL".into());
+        }
+        let elapsed = endpoint_release_pause_started.elapsed();
+        evidence.set(
+            "endpoint_release_pause_window",
+            json!({"gate_still_closed": true, "elapsed_ms": elapsed.as_millis()}),
+        );
+    }
+    evidence.set(
+        "terminal_state",
+        json!({
+            "server_id": server_id,
+            "delete_operation_id": operation_id,
+            "project_id": PROJECT_ID,
+            "endpoint_id": endpoint_id,
+            "operation_state": "Succeeded",
+            "resource_state": "DELETED",
+            "owned_endpoint_present": true,
+            "endpoint": {
+                "ownership": owned_endpoint.project_id,
+                "project": PROJECT_ID,
+                "binding": {
+                    "host": owned_endpoint.binding_host,
+                    "state": owned_endpoint.binding_state,
+                    "generation": owned_endpoint.binding_generation,
+                },
+                "status": owned_endpoint.status,
+                "ip": owned_endpoint.fixed_ip,
+                "mac": owned_endpoint.mac_address,
+                "name": owned_endpoint.name,
+            }
+        }),
+    );
     evidence.checkpoint("terminal_state_observed")?;
     evidence.checkpoint("endpoint_present")?;
     // No fixture or direct observation pool may overlap the restart boundary.
@@ -1795,6 +1928,8 @@ async fn run_iteration(
     let kill_at = now();
     kill_process(child.child_mut()?)?;
     let _ = child.child_mut()?.wait();
+    delete_task.abort();
+    let _ = delete_task.await;
     let old_gone = process_instance_gone(old_pid, old_start)?;
     let old_http_listener_gone = !listener_present(http)?;
     let old_control_listener_gone = !listener_present(control)?;

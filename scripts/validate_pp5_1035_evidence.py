@@ -118,8 +118,31 @@ def validate_artifact(artifact: dict[str, Any], expected_sha: str | None = None)
     if _get(artifact, "terminal_state", "resource_state") != "DELETED":
         raise ValidationError("resource is not DELETED")
     _bool(artifact, "terminal_state", "owned_endpoint_present")
-    for field in ("ownership", "project", "binding", "ip"):
+    endpoint = _get(artifact, "terminal_state", "endpoint")
+    for field in ("ownership", "project", "binding", "ip", "mac", "name", "status"):
         _nonempty(artifact, "terminal_state", "endpoint", field)
+    if (
+        endpoint["ownership"] != endpoint["project"]
+        or endpoint["project"] != artifact["terminal_state"]["project_id"]
+    ):
+        raise ValidationError("terminal endpoint ownership does not match its project")
+    if not isinstance(endpoint["name"], str) or not endpoint["name"].startswith("o3k-server:"):
+        raise ValidationError("terminal endpoint is not server-owned")
+    binding = endpoint["binding"]
+    if not isinstance(binding, dict):
+        raise ValidationError("terminal endpoint binding is not an object")
+    for field in ("host", "state", "generation"):
+        if field not in binding:
+            raise ValidationError(f"missing terminal endpoint binding.{field}")
+    if binding["host"] is not None and not isinstance(binding["host"], str):
+        raise ValidationError("terminal endpoint binding host is invalid")
+    if binding["state"] is not None and (
+        not isinstance(binding["state"], str)
+        or binding["state"] not in {"binding", "bound", "down", "error"}
+    ):
+        raise ValidationError("terminal endpoint binding state is invalid")
+    if type(binding["generation"]) is not int or binding["generation"] < 0:
+        raise ValidationError("terminal endpoint binding generation is invalid")
     _nonempty(artifact, "kill", "signal")
     if _get(artifact, "kill", "signal") != "SIGKILL":
         raise ValidationError("wrong kill signal")

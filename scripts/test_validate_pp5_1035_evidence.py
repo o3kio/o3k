@@ -24,7 +24,7 @@ def valid_artifact() -> dict:
         "timestamps": {"started_at": "t", "completed_at": "t"},
         "old": {"pid": 101, "proc_starttime": 202, "executable_path": "/bin/o3kd", "executable_sha256": "c" * 64, "cmdline_digest": "d" * 64, "state_root": "/tmp/run", "listeners": {"http": listener(), "control": listener()}},
         "new": {"pid": 103, "proc_starttime": 204, "executable_path": "/bin/o3kd", "executable_sha256": "c" * 64, "cmdline_digest": "d" * 64, "state_root": "/tmp/run", "listeners": {"http": {"socket": "127.0.0.1:1", "owner": {"pid": 103, "proc_starttime": 204}, "owned": True}, "control": {"socket": "127.0.0.1:1", "owner": {"pid": 103, "proc_starttime": 204}, "owned": True}}},
-        "terminal_state": {"server_id": "s", "delete_operation_id": "op", "project_id": "p", "endpoint_id": "e", "operation_state": "Succeeded", "resource_state": "DELETED", "owned_endpoint_present": True, "endpoint": {"ownership": "p", "project": "p", "binding": {"status": "ACTIVE"}, "ip": "192.0.2.3"}},
+        "terminal_state": {"server_id": "s", "delete_operation_id": "op", "project_id": "p", "endpoint_id": "e", "operation_state": "Succeeded", "resource_state": "DELETED", "owned_endpoint_present": True, "endpoint": {"ownership": "p", "project": "p", "binding": {"host": "compute-a", "state": "bound", "generation": 1}, "status": "ACTIVE", "ip": "192.0.2.3", "mac": "02:00:00:00:00:01", "name": "o3k-server:p:run"}},
         "kill": {"signal": "SIGKILL", "timestamp": "t", "old_process_gone": True, "old_http_listener_gone": True, "old_control_listener_gone": True},
         "environment": {"intended": {"RUN": "run"}, "effective": {"RUN": "run"}, "secret_presence": {"PASSWORD": True}, "match": True},
         "readiness": {"status": 200, "body_sha256": "e" * 64, "served_by_new": True},
@@ -98,6 +98,28 @@ class ValidatorMutationTests(unittest.TestCase):
             validate_artifact(artifact)
         artifact = valid_artifact()
         del artifact["orphan_checkpoint"]["binding_state"]
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+
+    def test_terminal_endpoint_binding_must_be_durable_and_server_owned(self) -> None:
+        artifact = valid_artifact()
+        artifact["terminal_state"]["endpoint"]["binding"]["state"] = "unbound"
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+        artifact = valid_artifact()
+        artifact["terminal_state"]["endpoint"]["name"] = "caller-port"
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+        artifact = valid_artifact()
+        artifact["terminal_state"]["endpoint"]["binding"].pop("generation")
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+        artifact = valid_artifact()
+        artifact["terminal_state"]["endpoint"]["binding"]["state"] = []
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+        artifact = valid_artifact()
+        artifact["terminal_state"]["endpoint"]["binding"]["generation"] = True
         with self.assertRaises(ValidationError):
             validate_artifact(artifact)
 
