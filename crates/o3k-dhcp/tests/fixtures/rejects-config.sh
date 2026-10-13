@@ -1,4 +1,4 @@
 #!/bin/sh
 [ "$1" = "--test" ] && exit 1
-trap 'exit 0' TERM INT HUP
-sleep 30
+# Replace the shell so the supervisor owns the only long-lived process.
+exec sleep 30
