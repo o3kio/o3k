@@ -127,7 +127,12 @@ class ThreeHostGateRegression(unittest.TestCase):
         self.assertIn('"statically linked"', CAMPAIGN_TEXT)
         self.assertIn('gcc -static -O2 "$ROOT_DIR/tests/fabric-v3-spoof-guest.c" -o /dev/null', CAMPAIGN_TEXT)
         self.assertIn('command -v qemu-system-x86_64 >/dev/null', CAMPAIGN_TEXT)
-        self.assertIn('test -r "/boot/vmlinuz-$(uname -r)"', CAMPAIGN_TEXT)
+
+    def test_nested_guest_bootstrap_uses_available_qemu_and_root_private_kernel_observer(self):
+        self.assertIn("  - qemu-system-x86\n", CAMPAIGN_TEXT)
+        self.assertNotIn("  - qemu-kvm\n", CAMPAIGN_TEXT)
+        self.assertIn('sudo -n test -r "/boot/vmlinuz-$(uname -r)"', CAMPAIGN_TEXT)
+        self.assertNotIn('&& test -r "/boot/vmlinuz-$(uname -r)"', CAMPAIGN_TEXT)
 
     def test_provider_guest_source_is_independent_of_invocation_directory(self):
         self.assertIn('gcc -static -O2 "$SCRIPT_ROOT/fabric-v3-spoof-guest.c"', GATE_TEXT)

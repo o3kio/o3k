@@ -1105,7 +1105,7 @@ disable_root: true
 ssh_pwauth: false
 package_update: true
 packages:
-  - qemu-kvm
+  - qemu-system-x86
   - libvirt-daemon-system
   - libvirt-clients
   - qemu-utils
@@ -1155,7 +1155,7 @@ for host in a b c; do
     # daemon exit while idle. Exercise the actual qemu:///system API instead
     # of requiring the monolithic service process to remain active.
     # shellcheck disable=SC2016 # uname must expand on the remote guest.
-    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && command -v tcpdump >/dev/null && command -v qemu-system-x86_64 >/dev/null && test -r "/boot/vmlinuz-$(uname -r)" && test -c /dev/kvm && sudo virsh -c qemu:///system list --all >/dev/null 2>&1' >/dev/null 2>&1; then
+    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && command -v tcpdump >/dev/null && command -v qemu-system-x86_64 >/dev/null && sudo -n test -r "/boot/vmlinuz-$(uname -r)" && test -c /dev/kvm && sudo -n virsh -c qemu:///system list --all >/dev/null 2>&1' >/dev/null 2>&1; then
       packages_ready=1
       break
     fi
