@@ -11,12 +11,16 @@ def normalized(path: Path, excluded: set[str]) -> list[str]:
     text = path.read_text()
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as error:
+        if path.suffix == ".json":
+            raise ValueError(f"malformed JSON observation: {path}") from error
         payload = None
     if isinstance(payload, list):
         rows = []
         for row in payload:
-            if not isinstance(row, dict) or row.get("ifname") in excluded or row.get("dev") in excluded:
+            if not isinstance(row, dict):
+                raise ValueError(f"non-object FDB row: {path}")
+            if row.get("ifname") in excluded or row.get("dev") in excluded:
                 continue
             rows.append(json.dumps(row, sort_keys=True, separators=(",", ":")))
         return sorted(rows)
@@ -47,15 +51,18 @@ def compare_namespaces(before: Path, after: Path, excluded: set[str]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--before", type=Path, required=True)
-    parser.add_argument("--after", type=Path, required=True)
+    parser.add_argument("--before", type=Path)
+    parser.add_argument("--after", type=Path)
     parser.add_argument("--owned-device", action="append", default=[])
     parser.add_argument("--before-namespaces", type=Path)
     parser.add_argument("--after-namespaces", type=Path)
     parser.add_argument("--owned-namespace", action="append", default=[])
     args = parser.parse_args()
     try:
-        compare(args.before, args.after, set(args.owned_device))
+        if bool(args.before) != bool(args.after):
+            raise ValueError("both FDB observations are required")
+        if args.before:
+            compare(args.before, args.after, set(args.owned_device))
         if bool(args.before_namespaces) != bool(args.after_namespaces):
             raise ValueError("both namespace observations are required")
         if args.before_namespaces:

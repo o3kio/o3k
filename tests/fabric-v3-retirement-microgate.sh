@@ -35,8 +35,10 @@ run_retirement_microgate() {
 import json,sys
 state=json.load(open(sys.argv[1]))
 for realm in state.get('realms', {}).values():
-    device=realm.get('vxlan', {}).get('interface')
-    if device: print(device)
+    vxlan=realm.get('vxlan', {})
+    for device in (vxlan.get('interface'), vxlan.get('bridge'), vxlan.get('fabric_veth'),
+                   *(item.get('interface') for item in realm.get('endpoint_taps', {}).values())):
+        if device: print(device)
 PYDEV
     )
     python3 "$ROOT_DIR/tests/fabric-v3-foreign-fdb.py" \
@@ -503,8 +505,10 @@ PY
 import json,sys
 state=json.load(open(sys.argv[1]))
 for realm in state.get('realms', {}).values():
-    device=realm.get('vxlan', {}).get('interface')
-    if device: print(device)
+    vxlan=realm.get('vxlan', {})
+    for device in (vxlan.get('interface'), vxlan.get('bridge'), vxlan.get('fabric_veth'),
+                   *(item.get('interface') for item in realm.get('endpoint_taps', {}).values())):
+        if device: print(device)
 PYDEV
         )
         python3 "$ROOT_DIR/tests/fabric-v3-foreign-fdb.py" \

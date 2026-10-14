@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import json
+import subprocess
 
 SPEC = importlib.util.spec_from_file_location("foreign_fdb", Path(__file__).with_name("fabric-v3-foreign-fdb.py"))
 assert SPEC and SPEC.loader
@@ -59,6 +60,25 @@ class ForeignFdbTests(unittest.TestCase):
         after = self.write("ns-after", "foreign-b\n")
         with self.assertRaises(AssertionError):
             foreign_fdb.compare_namespaces(before, after, set())
+
+    def test_malformed_json_and_non_object_rows_fail_closed(self):
+        malformed = self.write("bad.json", "not-json")
+        valid = self.write("valid.json", "[]")
+        with self.assertRaises(ValueError):
+            foreign_fdb.compare(malformed, valid, set())
+        non_object = self.write("rows.json", json.dumps(["bad"]))
+        with self.assertRaises(ValueError):
+            foreign_fdb.compare(non_object, valid, set())
+
+    def test_namespace_only_cli_invocation_succeeds(self):
+        before = self.write("cli-before", "foreign\nrun\n")
+        after = self.write("cli-after", "run\nforeign\n")
+        result = subprocess.run(
+            ["python3", str(Path(__file__).with_name("fabric-v3-foreign-fdb.py")),
+             "--before-namespaces", str(before), "--after-namespaces", str(after),
+             "--owned-namespace", "run"], check=False,
+        )
+        self.assertEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":
