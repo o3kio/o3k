@@ -91,7 +91,16 @@ class ForeignFdbTests(unittest.TestCase):
 
     def test_cli_without_comparison_fails_closed(self):
         result = subprocess.run(["python3", str(Path(__file__).with_name("fabric-v3-foreign-fdb.py"))], check=False)
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 2)
+
+    def test_cli_distinguishes_observation_error_from_mutation(self):
+        script = str(Path(__file__).with_name("fabric-v3-foreign-fdb.py"))
+        missing = subprocess.run(["python3", script, "--before", str(self.root / "missing"), "--after", str(self.root / "after")], check=False)
+        self.assertEqual(missing.returncode, 2)
+        before = self.write("changed-before", "aa dev eth0 master br0\n")
+        after = self.write("changed-after", "bb dev eth0 master br0\n")
+        changed = subprocess.run(["python3", script, "--before", str(before), "--after", str(after)], check=False)
+        self.assertEqual(changed.returncode, 1)
 
 
 if __name__ == "__main__":

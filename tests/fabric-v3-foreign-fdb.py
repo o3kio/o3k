@@ -80,9 +80,12 @@ def main() -> int:
             compare_namespaces(args.before_namespaces, args.after_namespaces, set(args.owned_namespace))
         if not args.before and not args.before_namespaces:
             raise ValueError("at least one comparison is required")
-    except (AssertionError, FileNotFoundError, ValueError) as error:
+    except AssertionError as error:
         print(f"foreign FDB mismatch: {error}")
         return 1
+    except (FileNotFoundError, OSError, ValueError) as error:
+        print(f"foreign FDB observation error: {error}")
+        return 2
     return 0
 
 
