@@ -51,7 +51,8 @@ import json,sys
 state=json.load(open(sys.argv[1]))
 for realm in state.get('realms', {}).values():
     vxlan=realm.get('vxlan', {})
-    for device in (vxlan.get('interface'), vxlan.get('bridge'), vxlan.get('fabric_veth'),
+    for device in (realm.get('bridge'), realm.get('host_veth'), realm.get('public_host_veth'),
+                   vxlan.get('interface'), vxlan.get('bridge'), vxlan.get('host_veth'), vxlan.get('fabric_veth'),
                    *(item.get('interface') for item in realm.get('endpoint_taps', {}).values())):
         if device: print(device)
 PYDEV
@@ -546,7 +547,8 @@ import json,sys
 state=json.load(open(sys.argv[1]))
 for realm in state.get('realms', {}).values():
     vxlan=realm.get('vxlan', {})
-    for device in (vxlan.get('interface'), vxlan.get('bridge'), vxlan.get('fabric_veth'),
+    for device in (realm.get('bridge'), realm.get('host_veth'), realm.get('public_host_veth'),
+                   vxlan.get('interface'), vxlan.get('bridge'), vxlan.get('host_veth'), vxlan.get('fabric_veth'),
                    *(item.get('interface') for item in realm.get('endpoint_taps', {}).values())):
         if device: print(device)
 PYDEV
