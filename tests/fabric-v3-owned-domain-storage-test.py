@@ -33,6 +33,21 @@ class OwnedDomainStorageTest(unittest.TestCase):
     def test_exact_run_owned_disk_and_seed_are_accepted(self):
         self.assertTrue(self.matches(self.xml()))
 
+    def test_libvirt_source_indices_do_not_invalidate_exact_run_owned_paths(self):
+        xml = self.xml().replace('file="/images/run-compute-a.qcow2"',
+                                 'file="/images/run-compute-a.qcow2" index="2"')
+        xml = xml.replace('file="/images/run-compute-a-seed.iso"',
+                          'file="/images/run-compute-a-seed.iso" index="1"')
+        self.assertTrue(self.matches(xml))
+
+    def test_unexpected_source_attributes_or_non_numeric_index_are_rejected(self):
+        extra = self.xml().replace('file="/images/run-compute-a.qcow2"',
+                                   'file="/images/run-compute-a.qcow2" dev="/dev/sda"')
+        invalid_index = self.xml().replace('file="/images/run-compute-a.qcow2"',
+                                           'file="/images/run-compute-a.qcow2" index="disk"')
+        self.assertFalse(self.matches(extra))
+        self.assertFalse(self.matches(invalid_index))
+
     def test_additional_disk_is_rejected(self):
         self.assertFalse(
             self.matches(

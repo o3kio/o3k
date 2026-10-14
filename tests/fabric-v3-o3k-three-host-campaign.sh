@@ -7,18 +7,48 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CAMPAIGN_MODE="${1:-full}"
 [[ "$CAMPAIGN_MODE" == full || "$CAMPAIGN_MODE" == departure-micro ]] \
   || { echo "HARNESS_GAP: unsupported campaign mode: $CAMPAIGN_MODE" >&2; exit 1; }
-PRODUCT_SHA=f7df49067bd5c7a23135292a3234d9e51be0cf92
-PRODUCT_TREE=1b193969041e46c71adf9d4351e44df974b44c7e
-ACCEPTED_HARNESS_BASE=d41e40ae89531a08e4bf015f1626d5d2f9f5746b
+if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
+  ACCEPTANCE_GATE="FABRIC V3 DURABLE HOST RETIREMENT MICROGATE"
+else
+  ACCEPTANCE_GATE="FABRIC V3 NESTED CONFORMANCE GATE A"
+fi
+PRODUCT_SHA=93dce08291893fe220cbb87d81d44f01659a0482
+PRODUCT_TREE=7bf2c53b48be68f1ef6d27a927548d2a54c07ccc
+ACCEPTED_HARNESS_BASE=76f0e71a02b7521f3731a693627462dd3c856153
+PRODUCT_REMOTE_REF=refs/heads/main
+HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-successor-harness
+HOST_PREFLIGHT="$ROOT_DIR/tests/fabric-v3-host-preflight.py"
 # Guard the acceptance control contract before creating evidence or guests.
 [[ -f "$ROOT_DIR/contracts/real-host-acceptance-evidence.md" ]] \
   || { echo "HARNESS_GAP: accepted real-host evidence contract is missing" >&2; exit 1; }
-[[ "$(git -C "$ROOT_DIR" merge-base HEAD "$ACCEPTED_HARNESS_BASE" 2>/dev/null || true)" == "$ACCEPTED_HARNESS_BASE" ]] \
-  || { echo "HARNESS_GAP: accepted guest-control lineage is absent" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-guest-control-regression.py" \
   || { echo "HARNESS_GAP: guest-control acceptance regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-campaign-result-test.py" \
+  || { echo "HARNESS_GAP: campaign cleanup result regression failed" >&2; exit 1; }
 python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage-test.py" \
   || { echo "HARNESS_GAP: ownership-safe domain cleanup regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-host-preflight-test.py" \
+  || { echo "HARNESS_GAP: live libvirt/address preflight regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-three-host-gate-regression.py" \
+  || { echo "HARNESS_GAP: provider nested-gate ownership regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-retirement-evidence-test.py" \
+  || { echo "HARNESS_GAP: durable retirement evidence regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-agent-readiness-regression.py" \
+  || { echo "HARNESS_GAP: post-restart compute-agent readiness regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" \
+  || { echo "HARNESS_GAP: durable server-delete evidence regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-port-detach-evidence-test.py" \
+  || { echo "HARNESS_GAP: durable port-detach evidence regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-dhcp-teardown-evidence-test.py" \
+  || { echo "HARNESS_GAP: Fabric DHCP teardown regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence-test.py" \
+  || { echo "HARNESS_GAP: canonical endpoint retention evidence regression failed" >&2; exit 1; }
+python3 "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" \
+  || { echo "HARNESS_GAP: shared Fabric namespace evidence regression failed" >&2; exit 1; }
+bash -n "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" \
+  || { echo "HARNESS_GAP: durable retirement observer syntax failed" >&2; exit 1; }
+bash -n "$ROOT_DIR/tests/fabric-v3-three-host-gate.sh" \
+  || { echo "HARNESS_GAP: provider nested-gate shell syntax failed" >&2; exit 1; }
 BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"
 BASE_IMAGE_SHA=612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354
 PROBE_BASE_URL=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
@@ -51,8 +81,11 @@ TOKEN=""
 O3KD_PID=""
 DHCP_CAPTURE_PID=""
 DHCP_CAPTURE_HOST=""
+DHCP_CAPTURE_CLEANUP_STATUS=NOT_APPLICABLE
 CAMPAIGN_FAILURE=""
 CLASSIFICATION=""
+CAMPAIGN_TEARDOWN_PASS=0
+API_TEARDOWN_VERIFIED=0
 FRESH_DOMAINS=()
 SERVER_IDS=()
 PORT_IDS=()
@@ -71,16 +104,237 @@ fail() {
 }
 
 need() { command -v "$1" >/dev/null 2>&1 || fail "required command missing: $1"; }
+select_management_addresses() {
+  local snapshot="$1" output="$2"
+  sudo -n true || return 1
+  # Only live ARP probing needs CAP_NET_RAW. Keep the driver and evidence-file
+  # ownership with the unprivileged runner; sudo writes JSON to inherited stdout.
+  sudo -n python3 "$HOST_PREFLIGHT" select \
+    --snapshot "$snapshot" --output /dev/stdout | tee "$output" >/dev/null
+}
+[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || fail "run ID is not safe for ownership-scoped paths" "HARNESS_GAP"
 ssh_opts=(-i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" -o ConnectTimeout=8)
 # The destination is local shell data; ssh intentionally expands remote command arguments client-side.
 # shellcheck disable=SC2029
 ssh_vm() { local address="$1"; shift; ssh "${ssh_opts[@]}" "$SSH_USER@$address" "$@"; }
 scp_vm() { local address="$1"; shift; scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$@" "$SSH_USER@$address:"; }
+assert_remote_link_absent() {
+  local host="$1" name="$2" output="$3" address="${MGMT_IP[$1]}" remote rc
+  [[ "$name" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || fail "invalid interface identity in provider ownership: $name" "OWNERSHIP_DEFECT"
+  remote="sudo python3 -c 'import pathlib,sys; sys.exit(10 if pathlib.Path(\"/sys/class/net\",sys.argv[1]).exists() else 0)' '$name'"
+  if ssh_vm "$address" "$remote" >"$output.raw" 2>&1; then
+    printf '{"host":"host-%s","namespace":"%s","interface":"%s","result":"absent","observer":"ssh+sudo+ip-link"}\n' \
+      "$host" "root" "$name" >"$output"
+  else
+    rc=$?
+    if (( rc == 10 )); then
+      printf '{"host":"host-%s","namespace":"%s","interface":"%s","result":"present","observer":"ssh+sudo+ip-link"}\n' \
+        "$host" "root" "$name" >"$output"
+      fail "provider-owned interface remains on host-$host: $name" "PROVIDER_ABSENCE_DEFECT"
+    fi
+    fail "could not observe interface absence on host-$host ($name), ssh_exit=$rc" "ENVIRONMENT_GAP"
+  fi
+  rm -f -- "$output.raw"
+}
+assert_remote_path_absent() {
+  local host="$1" path="$2" output="$3" address="${MGMT_IP[$1]}" remote rc
+  [[ "$path" == "/var/lib/o3k-fabric-v3/$RUN_ID/"* ]] \
+    || fail "refusing to inspect a non-run-owned provider path: $path" "OWNERSHIP_DEFECT"
+  remote="sudo python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); print(\"present\" if p.exists() else \"absent\"); sys.exit(10 if p.exists() else 0)' '$path'"
+  if ssh_vm "$address" "$remote" >"$output" 2>&1; then
+    [[ "$(tail -n 1 "$output")" == absent ]] \
+      || fail "provider-owned path unexpectedly present on host-$host: $path" "PROVIDER_ABSENCE_DEFECT"
+  else
+    rc=$?
+    if (( rc == 10 )); then
+      fail "provider-owned path unexpectedly present on host-$host: $path" "PROVIDER_ABSENCE_DEFECT"
+    fi
+    fail "could not observe path absence on host-$host ($path), ssh_exit=$rc" "ENVIRONMENT_GAP"
+  fi
+}
+stop_controller() {
+  local pid="$O3KD_PID"
+  [[ -n "$pid" ]] || return 0
+  kill -TERM "$pid" 2>/dev/null || return 1
+  for _ in $(seq 1 30); do
+    if [[ ! -r "/proc/$pid/stat" ]] || [[ "$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)" == Z ]]; then
+      break
+    fi
+    sleep 1
+  done
+  if [[ -r "/proc/$pid/stat" ]] && [[ "$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)" != Z ]]; then return 1; fi
+  wait "$pid" 2>/dev/null || true
+  [[ ! -e "/proc/$pid" ]] || return 1
+  O3KD_PID=""
+  return 0
+}
+capture_survivor_host() {
+  local host="$1" address="${MGMT_IP[$1]}" directory="$EVIDENCE/survivor-convergence/host-$1" namespace vxlan_interface
+  mkdir -p "$directory"
+  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" \
+    >"$directory/ownership.json" || return 1
+  vxlan_interface="$(python3 - "$directory/ownership.json" "$REALM_ID" <<'PYSURVIVOR'
+import json,sys
+print(json.load(open(sys.argv[1]))['realms'][sys.argv[2]]['vxlan']['interface'])
+PYSURVIVOR
+)" || return 1
+  namespace="$(python3 - "$directory/ownership.json" <<'PYSURVIVORNS'
+import json,sys
+print(json.load(open(sys.argv[1]))['fabric']['namespace'])
+PYSURVIVORNS
+)" || return 1
+  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$REALM_ID.json" \
+    >"$directory/plan.json" || return 1
+  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json" \
+    >"$directory/command-journal.json" || return 1
+  ssh_vm "$address" "sudo ip netns exec '$namespace' bridge fdb show dev '$vxlan_interface'" \
+    >"$directory/fdb.txt" || return 1
+}
 start_compute_agent() {
   local host="$1" health_port="$2" address="${MGMT_IP[$1]}"
   ssh_vm "$address" "sudo bash -c 'nohup env O3K_COMPUTE_DATA_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute O3K_COMPUTE_CONTROL_ENDPOINT=https://$HOST_MGMT_IP:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_HOST_LABEL=host-$host O3K_COMPUTE_TLS_DIR=/var/lib/o3k-fabric-v3/$RUN_ID/compute/tls O3K_COMPUTE_HEALTH_ADDR=0.0.0.0:$health_port O3K_COMPUTE_MAX_DISK_GB=30 O3K_COMPUTE_NETWORK_EXTERNAL=1 O3K_COMPUTE_NETWORK_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/ownership O3K_COMPUTE_BRIDGE_NAME=o3k-br0 O3K_COMPUTE_DHCP_BINARY=/usr/sbin/dnsmasq O3K_COMPUTE_FABRIC_HOST_ID=host-$host O3K_COMPUTE_FABRIC_STATE_ROOT=/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric RUST_LOG=info /usr/local/bin/o3k-compute-bin >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.log 2>&1 </dev/null & echo \$! >/var/lib/o3k-fabric-v3/$RUN_ID/compute/agent.pid'"
 }
 api() { curl --silent --show-error --fail-with-body --max-time 30 -H "x-auth-token: $TOKEN" "$@"; }
+wait_for_current_compute_agents() {
+  local artifact_key="$1" phase="$2" controller_log="$3" controller_start="$4"
+  shift 4
+  local root="$EVIDENCE/restart/$artifact_key"
+  local ready_streak=0 started_at="$SECONDS" attempt attempt_name attempt_dir
+  local host health_port address ready_rc validation validation_rc required_hosts_csv=""
+  (( $# > 0 )) || return 2
+  for host in "$@"; do
+    if [[ -n "$required_hosts_csv" ]]; then required_hosts_csv+=,; fi
+    required_hosts_csv+="host-$host"
+  done
+  mkdir -p "$root/attempts"
+  for attempt in $(seq 1 120); do
+    printf -v attempt_name 'attempt-%03d' "$attempt"
+    attempt_dir="$root/attempts/$attempt_name"
+    mkdir -p "$attempt_dir"
+
+    for host in "$@"; do
+      address="${MGMT_IP[$host]}"
+      case "$host" in
+        a) health_port=19101 ;;
+        b) health_port=19102 ;;
+        c) health_port=19103 ;;
+        *) return 2 ;;
+      esac
+      if ssh_vm "$address" "sudo curl --silent --show-error --fail --max-time 5 http://127.0.0.1:$health_port/readyz" \
+          >"$attempt_dir/host-$host-ready.json" 2>"$attempt_dir/host-$host-ready.stderr"; then
+        ready_rc=0
+      else
+        ready_rc=$?
+        printf '{}\n' >"$attempt_dir/host-$host-ready.json"
+      fi
+      printf '{"command_class":"read_host_%s_compute_agent_readyz","observer_type":"runner_executable_guest_readyz","resource_class":"compute_agent","exit_code":%s}\n' \
+        "$host" "$ready_rc" >"$attempt_dir/host-$host-ready.command.json"
+    done
+
+    validation="$attempt_dir/validation.json"
+    if python3 "$ROOT_DIR/tests/fabric-v3-agent-readiness.py" validate \
+        --manifest "$EVIDENCE/manifest.json" \
+        --ready-a "$attempt_dir/host-a-ready.json" \
+        --ready-b "$attempt_dir/host-b-ready.json" \
+        --ready-c "$attempt_dir/host-c-ready.json" \
+        --required-hosts "$required_hosts_csv" \
+        --phase "$phase" \
+        --controller-log "$controller_log" \
+        --controller-start "$controller_start" \
+        --consecutive-observations "$((ready_streak + 1))" \
+        --output "$validation" >"$attempt_dir/validation.stdout" 2>"$attempt_dir/validation.stderr"; then
+      printf '{"command_class":"validate_compute_agent_readiness","observer_type":"runner_executable_local_validator","resource_class":"compute_agent","exit_code":0}\n' \
+        >"$attempt_dir/validation.command.json"
+      ready_streak=$((ready_streak + 1))
+      if (( ready_streak >= 2 )); then
+        python3 - "$validation" "$root/result.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" \
+          "$attempt" "$started_at" "$SECONDS" <<'PYREADINESS'
+import json,pathlib,sys
+source,target,run_id,product_sha,product_tree,attempt,started,finished=sys.argv[1:]
+result=json.loads(pathlib.Path(source).read_text())
+result.update({
+    "status":"passed",
+    "classification":None,
+    "failed_operation":None,
+    "run_id":run_id,
+    "product_sha":product_sha,
+    "product_tree":product_tree,
+    "attempts":int(attempt),
+    "elapsed_seconds":int(finished)-int(started),
+    "consecutive_observations_required":2,
+    "observation_artifacts":[
+        f"attempts/attempt-{int(attempt)-1:03d}/validation.json",
+        f"attempts/attempt-{int(attempt):03d}/validation.json",
+    ],
+})
+pathlib.Path(target).write_text(json.dumps(result,sort_keys=True,indent=2)+"\n")
+PYREADINESS
+        return 0
+      fi
+    else
+      validation_rc=$?
+      printf '{"command_class":"validate_compute_agent_readiness","observer_type":"runner_executable_local_validator","resource_class":"compute_agent","exit_code":%s}\n' \
+        "$validation_rc" >"$attempt_dir/validation.command.json"
+      ready_streak=0
+    fi
+    (( attempt == 120 )) || sleep 1
+  done
+
+  python3 - "$root/result.json" "$root/attempts/attempt-120" \
+    "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$phase" <<'PYREADINESSFAIL'
+import json,pathlib,sys
+target,attempt_dir,run_id,product_sha,product_tree,phase=sys.argv[1:]
+attempt_dir=pathlib.Path(attempt_dir)
+try:
+    final=json.loads((attempt_dir/'validation.json').read_text())
+except (OSError,ValueError):
+    final={}
+commands={}
+for host in ('a','b','c'):
+    path=attempt_dir/f'host-{host}-ready.command.json'
+    if path.exists():
+        try: commands[f'host-{host}']=json.loads(path.read_text())
+        except (OSError,ValueError): commands[f'host-{host}']={"command_class":f"read_host_{host}_compute_agent_readyz","exit_code":None}
+validation_command=attempt_dir/'validation.command.json'
+if validation_command.exists():
+    try: commands['validator']=json.loads(validation_command.read_text())
+    except (OSError,ValueError): commands['validator']={"command_class":"validate_compute_agent_readiness","exit_code":None}
+pathlib.Path(target).write_text(json.dumps({
+    "artifact_type":"fabric-v3-compute-agent-readiness",
+    "phase":phase,
+    "status":"failed",
+    "classification":"HARNESS_GAP",
+    "failed_operation":final.get("failed_operation") or "wait_for_two_consecutive_compute_agent_observations",
+    "diagnostic":final.get("diagnostic") or "required compute agents did not report current identities and post-restart registrations within 120 seconds",
+    "observer_type":final.get("observer_type") or "runner_executable_guest_readyz+controller_log",
+    "resource_class":"compute_agent",
+    "required_hosts":final.get("required_hosts", []),
+    "final_observation":{
+        "diagnostic":final.get("diagnostic"),
+        "agents":final.get("agents", []),
+    },
+    "subprocess_observations":commands,
+    "run_id":run_id,
+    "product_sha":product_sha,
+    "product_tree":product_tree,
+    "attempts":120,
+    "consecutive_observations_required":2,
+    "final_attempt_artifacts":["attempts/attempt-120/validation.json"] + [
+        f"attempts/attempt-120/host-{host}-ready.command.json"
+        for host in ('a','b','c') if f'host-{host}' in commands
+    ] + (["attempts/attempt-120/validation.command.json"] if 'validator' in commands else []),
+},sort_keys=True,indent=2)+"\n")
+PYREADINESSFAIL
+  return 1
+}
+wait_for_survivor_compute_agents() {
+  wait_for_current_compute_agents \
+    "compute-agent-readiness" \
+    "post-controller-restart-after-retirement" \
+    "$EVIDENCE/restart/startup-recovery/o3kd.log" \
+    "$EVIDENCE/restart/startup-recovery/controller-start.json" \
+    a b
+}
 capture_c_remove_work_row() {
   local realm_id="$1"
   python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" \
@@ -89,41 +343,80 @@ capture_c_remove_work_row() {
 import hashlib,json,pathlib,sqlite3,sys
 database,realm_id,out_path,history_path=sys.argv[1:]
 out=pathlib.Path(out_path); history=pathlib.Path(history_path)
-result={"found":False}
-try:
-    db=sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3)
-    db.row_factory=sqlite3.Row
-    rows=db.execute("SELECT command_id,operation_id,target_host_id,target_agent_id,target_agent_epoch,fingerprint_sha256,snapshot,state,revision,outcome,created_at,updated_at FROM network_plan_work WHERE target_host_id='host-c' ORDER BY updated_at DESC,created_at DESC,command_id").fetchall()
-    matches=[]
-    for row in rows:
-        command=json.loads(bytes(row["snapshot"]))
-        plan=command.get("plan",{})
-        fabric=plan.get("fabric",{}) if isinstance(plan,dict) else {}
-        if command.get("action")=="Remove" and fabric.get("realm_id")==realm_id:
-            outcome=row["outcome"]
-            matches.append({
-                "command_id":row["command_id"],"operation_id":row["operation_id"],
-                "target_host_id":row["target_host_id"],"target_agent_id":row["target_agent_id"],
-                "target_agent_epoch":row["target_agent_epoch"],"action":"Remove","realm_id":realm_id,
-                "directory_generation":plan.get("directory_generation"),
-                "binding_generation":plan.get("binding_generation"),
-                "fabric_generation":plan.get("fabric_generation"),
-                "fingerprint_sha256":row["fingerprint_sha256"],
-                "snapshot_sha256":hashlib.sha256(bytes(row["snapshot"])).hexdigest(),
-                "state":row["state"],"revision":row["revision"],
-                "outcome":bytes(outcome).decode("utf-8",errors="replace") if outcome is not None else None,
-                "created_at":row["created_at"],"updated_at":row["updated_at"]})
-    if matches: result={"found":True,**matches[0]}
-except (sqlite3.Error,ValueError,TypeError,KeyError):
-    result={"found":False}
+db=sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3)
+db.row_factory=sqlite3.Row
+rows=db.execute("SELECT rowid AS insertion_order,* FROM network_plan_work WHERE target_host_id='host-c' ORDER BY rowid DESC").fetchall()
+matches=[]
+for row in rows:
+    raw=bytes(row["snapshot"]); command=json.loads(raw)
+    plan=command.get("plan",{}); fabric=plan.get("fabric",{}) if isinstance(plan,dict) else {}
+    if command.get("action")=="Remove" and fabric.get("realm_id")==realm_id:
+        outcome=row["outcome"]
+        directory=fabric.get("directory",{}) if isinstance(fabric,dict) else {}
+        participants=sorted({entry.get("selected_host") for entry in directory.get("entries",[]) if entry.get("selected_host")})
+        her_peers=sorted({peer.get("host_id") for peer in fabric.get("peers",[]) if peer.get("host_id")})
+        matches.append({
+            "insertion_order":row["insertion_order"],"command_id":row["command_id"],
+            "operation_id":row["operation_id"],"idempotency_key":row["idempotency_key"],
+            "controller_id":row["controller_id"],"controller_epoch":row["controller_epoch"],
+            "target_host_id":row["target_host_id"],"target_agent_id":row["target_agent_id"],
+            "target_agent_epoch":row["target_agent_epoch"],"action":"Remove","realm_id":realm_id,
+            "directory_generation":fabric.get("directory_generation"),
+            "local_host":fabric.get("local_host"),
+            "binding_generation":fabric.get("encapsulation",{}).get("binding_generation"),
+            "fabric_generation":fabric.get("local_fabric_generation"),
+            "participants":participants,"her_peers":her_peers,
+            "realm_generation":plan.get("resource_generations",{}).get(realm_id),
+            "fingerprint_sha256":row["fingerprint_sha256"],
+            "snapshot_sha256":hashlib.sha256(raw).hexdigest(),"state":row["state"],
+            "revision":row["revision"],
+            "outcome":bytes(outcome).decode("utf-8",errors="replace") if outcome is not None else None,
+            "created_at":row["created_at"],"updated_at":row["updated_at"]})
+result={"found":bool(matches), "matches":matches, **(matches[0] if matches else {})}
 out.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n")
 if result.get("found"):
-    line=json.dumps({k:result.get(k) for k in ("command_id","state","revision","updated_at")},sort_keys=True)
+    line=json.dumps({k:result.get(k) for k in ("insertion_order","command_id","operation_id","target_agent_epoch","state","revision","updated_at")},sort_keys=True)
     previous=history.read_text().splitlines() if history.exists() else []
     if not previous or previous[-1]!=line:
         with history.open("a") as stream: stream.write(line+"\n")
 print(result.get("state", ""))
 PYWORK
+}
+capture_realm_work_history() {
+  local realm_id="$1" output="$2"
+  python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" "$output" <<'PYHISTORY'
+import json,pathlib,sqlite3,sys
+database,realm_id,output=sys.argv[1:]
+db=sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3); db.row_factory=sqlite3.Row
+rows=db.execute("SELECT rowid AS insertion_order,* FROM network_plan_work ORDER BY rowid").fetchall()
+history=[]
+for row in rows:
+    raw=bytes(row['snapshot']); command=json.loads(raw); plan=command.get('plan',{})
+    fabric=plan.get('fabric',{}) if isinstance(plan,dict) else {}
+    if fabric.get('realm_id')!=realm_id: continue
+    directory=fabric.get('directory',{}) if isinstance(fabric,dict) else {}
+    participants=sorted({entry.get('selected_host') for entry in directory.get('entries',[]) if entry.get('selected_host')})
+    her_peers=sorted({peer.get('host_id') for peer in fabric.get('peers',[]) if peer.get('host_id')})
+    outcome=row['outcome']
+    history.append({'insertion_order':row['insertion_order'],'command_id':row['command_id'],
+        'operation_id':row['operation_id'],'idempotency_key':row['idempotency_key'],
+        'controller_id':row['controller_id'],'controller_epoch':row['controller_epoch'],
+        'target_host_id':row['target_host_id'],'target_agent_id':row['target_agent_id'],
+        'target_agent_epoch':row['target_agent_epoch'],'action':command.get('action'),
+        'realm_id':fabric.get('realm_id'),'directory_generation':fabric.get('directory_generation'),
+        'binding_generation':fabric.get('encapsulation',{}).get('binding_generation'),
+        'fabric_generation':fabric.get('local_fabric_generation'),
+        'participants':participants,'her_peers':her_peers,
+        'realm_generation':plan.get('resource_generations',{}).get(realm_id),
+        'state':row['state'],'revision':row['revision'],
+        'outcome':bytes(outcome).decode('utf-8',errors='replace') if outcome is not None else None,
+        'created_at':row['created_at'],'updated_at':row['updated_at']})
+terminals={'succeeded','failed'}
+result={'realm_id':realm_id,'history':history,
+    'unresolved':[item for item in history if item['state'] not in terminals],
+    'terminal_failures':[item for item in history if item['state']=='failed']}
+pathlib.Path(output).write_text(json.dumps(result,sort_keys=True,indent=2)+'\n')
+PYHISTORY
 }
 field() { python3 -c 'import json,sys
 v=json.load(sys.stdin)
@@ -150,29 +443,109 @@ if [[ -z "${O3K_FABRIC_V3_CONTROL_PORT:-}" ]]; then
 fi
 
 [[ ! -e "$EVIDENCE" && ! -L "$EVIDENCE" ]] || fail "evidence path already exists: $EVIDENCE" "HARNESS_GAP"
-mkdir -p "$EVIDENCE"/{environment,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown,topology/{plans,ownership,fdb,wireguard,links,nft-before,nft-after},a,b,dhcp,departure-micro}
+mkdir -p "$EVIDENCE"/{environment,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown,topology/{plans,ownership,fdb,wireguard,links,nft-before,nft-after},a,b,dhcp,departure-micro,before-departure/{plans,durable-work,host-a,host-b,host-c,traffic},c-delete/{operation,port,retirement-obligation,remove-command,agent-journal},provider-absence/host-c/{ownership,links,fdb,nft},survivor-convergence/{host-a,host-b,plans,fdb,traffic},restart/{startup-recovery,durable-work,plans,traffic}}
 chmod 0700 "$EVIDENCE"
 [[ ! -e "$EVIDENCE/.o3k-fabric-v3-owned" ]] || fail "evidence path collision"
 printf 'o3k-fabric-v3-campaign-v1\nrun=%s\nprefix=%s\n' "$RUN_ID" "$PREFIX" >"$EVIDENCE/.o3k-fabric-v3-owned"
 chmod 0600 "$EVIDENCE/.o3k-fabric-v3-owned"
 git -C "$ROOT_DIR" rev-parse HEAD >"$EVIDENCE/environment/harness_sha.txt"
 git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}' >"$EVIDENCE/environment/harness_tree.txt"
-git -C "$ROOT_DIR" merge-base HEAD "$ACCEPTED_HARNESS_BASE" >"$EVIDENCE/environment/accepted-harness-merge-base.txt"
-printf '%s\n' "$ACCEPTED_HARNESS_BASE" >"$EVIDENCE/environment/accepted-harness-base.txt"
+git -C "$ROOT_DIR" branch --show-current >"$EVIDENCE/environment/harness_branch.txt"
+git -C "$ROOT_DIR" branch -r --contains HEAD >"$EVIDENCE/environment/harness-remote-visibility.txt"
 cp "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" "$EVIDENCE/environment/campaign-driver.sh"
+cp "$HOST_PREFLIGHT" "$EVIDENCE/environment/host-preflight-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-host-preflight-test.py" "$EVIDENCE/environment/host-preflight-test.py"
 cp "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" "$EVIDENCE/environment/owned-domain-storage-check.py"
 cp "$ROOT_DIR/tests/fabric-v3-build-probe-image.sh" "$EVIDENCE/environment/build-probe-image.sh"
 cp "$ROOT_DIR/tests/fabric-v3-guest-control.py" "$EVIDENCE/environment/guest-control-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-install-agent-host.sh" "$EVIDENCE/environment/install-agent-host.sh"
 cp "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" "$EVIDENCE/environment/boundary-capture-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-retirement-evidence.py" "$EVIDENCE/environment/retirement-evidence-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-retirement-evidence-test.py" "$EVIDENCE/environment/retirement-evidence-test.py"
+cp "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" "$EVIDENCE/environment/delete-operation-evidence-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence-test.py" "$EVIDENCE/environment/delete-operation-evidence-test.py"
+cp "$ROOT_DIR/tests/fabric-v3-port-detach-evidence.py" "$EVIDENCE/environment/port-detach-evidence-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-port-detach-evidence-test.py" "$EVIDENCE/environment/port-detach-evidence-test.py"
+cp "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace.py" "$EVIDENCE/environment/shared-fabric-namespace-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" "$EVIDENCE/environment/shared-fabric-namespace-test.py"
+cp "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence.py" "$EVIDENCE/environment/canonical-endpoint-retention-evidence-helper.py"
+cp "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence-test.py" "$EVIDENCE/environment/canonical-endpoint-retention-evidence-test.py"
+cp "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" "$EVIDENCE/environment/retirement-microgate-helper.sh"
 sha256sum "$ROOT_DIR/tests/fabric-v3-o3k-three-host-campaign.sh" >"$EVIDENCE/environment/driver.sha256"
+sha256sum "$HOST_PREFLIGHT" >"$EVIDENCE/environment/host-preflight-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-evidence.py" >"$EVIDENCE/environment/retirement-evidence-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" >"$EVIDENCE/environment/delete-operation-evidence-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-port-detach-evidence.py" >"$EVIDENCE/environment/port-detach-evidence-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace.py" >"$EVIDENCE/environment/shared-fabric-namespace-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" >"$EVIDENCE/environment/shared-fabric-namespace-test.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence.py" >"$EVIDENCE/environment/canonical-endpoint-retention-evidence-helper.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence-test.py" >"$EVIDENCE/environment/canonical-endpoint-retention-evidence-test.sha256"
+sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" >"$EVIDENCE/environment/retirement-microgate-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" >"$EVIDENCE/environment/owned-domain-storage-check.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" >"$EVIDENCE/environment/boundary-capture-helper.sha256"
 
+refresh_image_store_pool() {
+  local output="$1"
+  python3 - "$IMAGE_STORE" "$output" <<'PYPOOL'
+import json,pathlib,subprocess,sys,xml.etree.ElementTree as ET
+image_store=pathlib.Path(sys.argv[1]).resolve(strict=False)
+output=pathlib.Path(sys.argv[2])
+result={'image_store':str(image_store),'observer':'libvirt_pool_path_match','status':'FAIL'}
+def run(*args):
+    return subprocess.run(['virsh','-c','qemu:///system',*args],check=True,capture_output=True,text=True).stdout
+try:
+    matches=[]
+    for name in (line.strip() for line in run('pool-list','--all','--name').splitlines() if line.strip()):
+        root=ET.fromstring(run('pool-dumpxml',name))
+        path=root.findtext('./target/path')
+        if path and pathlib.Path(path).resolve(strict=False)==image_store:
+            matches.append(name)
+    if len(matches)>1:
+        raise RuntimeError('multiple libvirt pools target the exact campaign image store')
+    if not matches:
+        result.update({'status':'NOT_APPLICABLE','reason':'no libvirt pool targets the campaign image store'})
+    else:
+        pool=matches[0]
+        info=run('pool-info',pool)
+        state=next((line.split(':',1)[1].strip().lower() for line in info.splitlines()
+                    if line.lstrip().startswith('State:')), '')
+        result.update({'pool':pool,'pool_state':state})
+        if state not in {'running','active'}:
+            result.update({'status':'NOT_APPLICABLE','reason':'matching image store pool is inactive'})
+        else:
+            completed=subprocess.run(['virsh','-c','qemu:///system','pool-refresh',pool],capture_output=True,text=True)
+            result.update({'command_class':'refresh_exact_image_store_pool','exit_code':completed.returncode,
+                           'status':'PASS' if completed.returncode==0 else 'FAIL'})
+            if completed.returncode:
+                result['diagnostic']=completed.stderr.strip()[:500]
+except (OSError,subprocess.SubprocessError,ET.ParseError,RuntimeError) as error:
+    result.update({'status':'FAIL','diagnostic':f'{type(error).__name__}: {error}'[:500]})
+output.write_text(json.dumps(result,sort_keys=True,indent=2)+'\n')
+if result['status']=='FAIL':
+    raise SystemExit(1)
+PYPOOL
+}
+
 cleanup_on_success() {
-  local rc=$?
-  if declare -F stop_dhcp_capture >/dev/null 2>&1; then stop_dhcp_capture || true; fi
+  local rc=$? api_ok=-1 guest_ok=-1 controller_ok=-1 host_snapshot_ok=-1 foreign_ok=-1 capture_ok=-1 pool_refresh_ok=-1
+  local cleanup_problem=0 cleanup_classification="" cleanup_failure=""
+  trap - EXIT
+  if declare -F stop_dhcp_capture >/dev/null 2>&1 && [[ "$DHCP_CAPTURE_CLEANUP_STATUS" == PENDING ]]; then
+    if stop_dhcp_capture; then capture_ok=1; else
+      capture_ok=0
+      cleanup_problem=1
+      cleanup_classification=CLEANUP_DEFECT
+      cleanup_failure="run-owned DHCP capture process could not be stopped and collected"
+    fi
+  elif [[ "$DHCP_CAPTURE_CLEANUP_STATUS" == PASS ]]; then
+    capture_ok=1
+  elif [[ "$DHCP_CAPTURE_CLEANUP_STATUS" == FAIL ]]; then
+    capture_ok=0
+    cleanup_problem=1
+    cleanup_classification=CLEANUP_DEFECT
+    cleanup_failure="run-owned DHCP capture cleanup failed"
+  fi
   cleanup_owned_api_resource() {
     local label="$1" path="$2" attempt delete_status get_status request_timeout
     local deadline=$((SECONDS + 120))
@@ -197,57 +570,88 @@ cleanup_on_success() {
   }
   if [[ -f "$EVIDENCE/.o3k-fabric-v3-owned" ]] && grep -Fqx "run=$RUN_ID" "$EVIDENCE/.o3k-fabric-v3-owned"; then
     date -u +%FT%TZ >"$EVIDENCE/ended_at_utc.txt"
-    if [[ ! -f "$EVIDENCE/result.json" ]]; then
-      python3 - "$EVIDENCE/result.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$CAMPAIGN_FAILURE" "$CLASSIFICATION" <<'PY'
-import json,sys
-path,run,product,tree,failure,classification=sys.argv[1:]
-json.dump({"result":"FAIL","run_id":run,"product_sha":product,"product_tree":tree,"first_failure":failure,"classification":classification or "HARNESS_GAP"},open(path,"w"),sort_keys=True,indent=2)
-print(file=open(path,"a"))
-PY
-    fi
     # Remove any API resources created before a stop-at-first-failure. The
     # reverse order and run-generated IDs keep this on the supported API path.
     if [[ -n "$TOKEN" && -n "$BASE" ]] \
       && { (( rc != 0 )) || [[ "${CAMPAIGN_TEARDOWN_PASS:-0}" != 1 ]]; }; then
+      api_ok=1
       : >"$EVIDENCE/teardown/failure-api-cleanup.txt"
       for ((i=${#SERVER_IDS[@]}-1; i>=0; i--)); do
         [[ -n "${SERVER_IDS[i]}" ]] || continue
-        cleanup_owned_api_resource "server-${SERVER_IDS[i]}" "/v2.1/$PROJECT_ID/servers/${SERVER_IDS[i]}" || true
+        cleanup_owned_api_resource "server-${SERVER_IDS[i]}" "/v2.1/$PROJECT_ID/servers/${SERVER_IDS[i]}" || api_ok=0
       done
       for ((i=${#PORT_IDS[@]}-1; i>=0; i--)); do
         [[ -n "${PORT_IDS[i]}" ]] || continue
-        cleanup_owned_api_resource "port-${PORT_IDS[i]}" "/v2.0/ports/${PORT_IDS[i]}" || true
+        cleanup_owned_api_resource "port-${PORT_IDS[i]}" "/v2.0/ports/${PORT_IDS[i]}" || api_ok=0
       done
-      [[ -z "$SUBNET_ID" ]] || cleanup_owned_api_resource "subnet-$SUBNET_ID" "/v2.0/subnets/$SUBNET_ID" || true
-      [[ -z "$NETWORK_ID" ]] || cleanup_owned_api_resource "network-$NETWORK_ID" "/v2.0/networks/$NETWORK_ID" || true
-      [[ -z "$IMAGE_ID" ]] || cleanup_owned_api_resource "image-$IMAGE_ID" "/v2/images/$IMAGE_ID" || true
+      [[ -z "$SUBNET_ID" ]] || cleanup_owned_api_resource "subnet-$SUBNET_ID" "/v2.0/subnets/$SUBNET_ID" || api_ok=0
+      [[ -z "$NETWORK_ID" ]] || cleanup_owned_api_resource "network-$NETWORK_ID" "/v2.0/networks/$NETWORK_ID" || api_ok=0
+      [[ -z "$IMAGE_ID" ]] || cleanup_owned_api_resource "image-$IMAGE_ID" "/v2/images/$IMAGE_ID" || api_ok=0
+      if (( api_ok )); then
+        printf 'PASS\n' >"$EVIDENCE/teardown/api-resource-cleanup-status.txt"
+      else
+        printf 'FAIL\n' >"$EVIDENCE/teardown/api-resource-cleanup-status.txt"
+        cleanup_problem=1
+        cleanup_classification=CLEANUP_DEFECT
+        cleanup_failure="run-owned API resource cleanup did not converge"
+      fi
+    elif [[ "${CAMPAIGN_TEARDOWN_PASS:-0}" == 1 && "${API_TEARDOWN_VERIFIED:-0}" == 1 ]]; then
+      api_ok=1
+      printf 'PASS\n' >"$EVIDENCE/teardown/api-resource-cleanup-status.txt"
+    elif [[ -n "$TOKEN" && -n "$BASE" ]]; then
+      # No resource IDs means provisioning did not create an API-owned resource.
+      if (( ${#SERVER_IDS[@]} == 0 && ${#PORT_IDS[@]} == 0 )) \
+        && [[ -z "$SUBNET_ID" && -z "$NETWORK_ID" && -z "$IMAGE_ID" ]]; then
+        api_ok=1
+        printf 'PASS (no run-owned API resources had been created)\n' \
+          >"$EVIDENCE/teardown/api-resource-cleanup-status.txt"
+      else
+        printf 'FAIL (API teardown was not verified)\n' >"$EVIDENCE/teardown/api-resource-cleanup-status.txt"
+        cleanup_problem=1
+        cleanup_classification=CLEANUP_DEFECT
+        cleanup_failure="run-owned API resource teardown was not verified"
+      fi
+    else
+      printf 'NOT_APPLICABLE (API campaign had not started)\n' \
+        >"$EVIDENCE/teardown/api-resource-cleanup-status.txt"
     fi
     # Always clean run-created compute guests after evidence has been captured.
     # A domain is eligible only when its inventory UUID, name, XML, disk and
     # seed paths all exactly match this run's ownership record.
     if [[ -s "$EVIDENCE/environment/inventory.tsv" ]]; then
+      guest_ok=1
       : >"$EVIDENCE/teardown/owned-domain-cleanup.txt"
       for domain in "${FRESH_DOMAINS[@]}"; do
         if [[ ! "$domain" =~ ^${PREFIX}-compute-[abc]$ ]]; then continue; fi
         expected_uuid="$(awk -F '\t' -v n="$domain" '$2==n{print $5}' "$EVIDENCE/environment/inventory.tsv")"
-        actual_uuid="$(virsh -c qemu:///system domuuid "$domain" 2>/dev/null || true)"
-        if [[ -z "$actual_uuid" ]]; then
-          printf 'ALREADY_REMOVED %s uuid=%s\n' "$domain" "$expected_uuid" \
-            >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
-          continue
-        fi
-        xml="$(virsh -c qemu:///system dumpxml "$domain" 2>/dev/null || true)"
         role="${domain##*-}"
         disk="$IMAGE_STORE/$PREFIX-compute-$role.qcow2"
         seed="$IMAGE_STORE/$PREFIX-compute-$role-seed.iso"
+        actual_uuid="$(virsh -c qemu:///system domuuid "$domain" 2>/dev/null || true)"
+        if [[ -z "$actual_uuid" ]]; then
+          if [[ -n "$expected_uuid" && ! -L "$disk" && ! -L "$seed" ]]; then
+            [[ ! -f "$disk" ]] || rm -- "$disk"
+            [[ ! -f "$seed" ]] || rm -- "$seed"
+            printf 'ABSENT_DOMAIN_REMOVED_PARTIAL_STORAGE %s uuid=%s disk=%s seed=%s\n' \
+              "$domain" "$expected_uuid" "$disk" "$seed" \
+              >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          else
+            printf 'CLEANUP_FAILED absent domain has unowned storage identity %s uuid=%s\n' \
+              "$domain" "$expected_uuid" >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+            guest_ok=0
+          fi
+          continue
+        fi
+        xml="$(virsh -c qemu:///system dumpxml "$domain" 2>/dev/null || true)"
         if [[ -z "$expected_uuid" || "$actual_uuid" != "$expected_uuid" ]] \
           || ! python3 "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" \
             "$domain" "$expected_uuid" "$disk" "$seed" <<<"$xml" \
           || [[ -L "$disk" || -L "$seed" || ! -f "$disk" || ! -f "$seed" ]]; then
-          printf 'PRESERVED ownership check failed for %s\n' "$domain" >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          printf 'CLEANUP_FAILED ownership check failed for %s\n' "$domain" >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          guest_ok=0
           continue
         fi
-        virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1 || true
+        if virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1; then :; fi
         if virsh -c qemu:///system undefine "$domain" >/dev/null 2>&1; then
           if rm -- "$disk" "$seed"; then
             printf 'REMOVED %s uuid=%s disk=%s seed=%s\n' "$domain" "$expected_uuid" "$disk" "$seed" \
@@ -256,24 +660,193 @@ PY
             printf 'CLEANUP_FAILED storage %s uuid=%s disk=%s seed=%s\n' \
               "$domain" "$expected_uuid" "$disk" "$seed" \
               >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+            guest_ok=0
           fi
         else
           printf 'CLEANUP_FAILED %s uuid=%s\n' "$domain" "$expected_uuid" \
             >>"$EVIDENCE/teardown/owned-domain-cleanup.txt"
+          guest_ok=0
         fi
       done
     fi
-    if [[ -n "$O3KD_PID" ]]; then kill -TERM "$O3KD_PID" 2>/dev/null || true; wait "$O3KD_PID" 2>/dev/null || true; fi
+    if [[ -n "$O3KD_PID" ]]; then
+      controller_ok=1
+      if ! stop_controller; then
+        controller_ok=0
+        kill -KILL "$O3KD_PID" 2>/dev/null || true
+        wait "$O3KD_PID" 2>/dev/null || true
+        printf 'controller required forced termination during evidence cleanup\n' \
+          >>"$EVIDENCE/teardown/controller-stop-failure.txt"
+        O3KD_PID=""
+      fi
+    fi
+    if (( ${#FRESH_DOMAINS[@]} > 0 )); then
+      if refresh_image_store_pool "$EVIDENCE/teardown/image-store-pool-refresh.json" \
+          >"$EVIDENCE/teardown/image-store-pool-refresh.stdout" \
+          2>"$EVIDENCE/teardown/image-store-pool-refresh.stderr"; then
+        pool_refresh_ok=1
+      else
+        pool_refresh_ok=0
+        cleanup_problem=1
+        cleanup_classification=CLEANUP_DEFECT
+        cleanup_failure="the exact libvirt image-store pool inventory could not be refreshed after owned storage cleanup"
+      fi
+    fi
+    if [[ -s "$EVIDENCE/environment/host-inventory-before.json" ]]; then
+      if python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
+          --output "$EVIDENCE/teardown/host-inventory-after-cleanup.json" \
+          >"$EVIDENCE/teardown/host-inventory-after-cleanup.stdout" \
+          2>"$EVIDENCE/teardown/host-inventory-after-cleanup.stderr"; then
+        host_snapshot_ok=1
+        owned_ip_args=()
+        for address in "${MGMT_IP[a]:-}" "${MGMT_IP[b]:-}" "${MGMT_IP[c]:-}"; do
+          [[ -z "$address" ]] || owned_ip_args+=(--owned-ip "$address")
+        done
+        if python3 "$HOST_PREFLIGHT" compare \
+          --before "$EVIDENCE/environment/host-inventory-before.json" \
+          --after "$EVIDENCE/teardown/host-inventory-after-cleanup.json" \
+          "${owned_ip_args[@]}" \
+          >"$EVIDENCE/teardown/foreign-state-after-cleanup.json" \
+          2>"$EVIDENCE/teardown/foreign-state-after-cleanup.stderr"; then
+          foreign_ok=1
+        else
+          foreign_ok=0
+          cleanup_problem=1
+          cleanup_classification=OWNERSHIP_DEFECT
+          cleanup_failure="foreign host inventory changed or could not be compared after cleanup"
+        fi
+      else
+        host_snapshot_ok=0
+        cleanup_problem=1
+        cleanup_classification=CLEANUP_DEFECT
+        cleanup_failure="post-cleanup host inventory could not be captured"
+      fi
+    fi
+    if (( guest_ok == 1 )); then
+      if [[ -s "$EVIDENCE/teardown/owned-domain-cleanup.txt" ]] \
+        && grep -q '^CLEANUP_FAILED' "$EVIDENCE/teardown/owned-domain-cleanup.txt"; then guest_ok=0; fi
+      for domain in "${FRESH_DOMAINS[@]}"; do
+        [[ ! "$domain" =~ ^${PREFIX}-compute-[abc]$ ]] && continue
+        if virsh -c qemu:///system dominfo "$domain" >/dev/null 2>&1; then guest_ok=0; fi
+        role="${domain##*-}"
+        if [[ -e "$IMAGE_STORE/$PREFIX-compute-$role.qcow2" || -L "$IMAGE_STORE/$PREFIX-compute-$role.qcow2" \
+          || -e "$IMAGE_STORE/$PREFIX-compute-$role-seed.iso" || -L "$IMAGE_STORE/$PREFIX-compute-$role-seed.iso" ]]; then
+          guest_ok=0
+        fi
+      done
+    fi
+    if (( guest_ok == 0 )); then
+      cleanup_problem=1
+      [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
+      [[ -n "$cleanup_failure" ]] || cleanup_failure="run-owned guest or storage cleanup did not complete"
+    fi
+    if (( controller_ok == 0 )); then
+      cleanup_problem=1
+      [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
+      [[ -n "$cleanup_failure" ]] || cleanup_failure="controller required forced termination during cleanup"
+    fi
+    if (( pool_refresh_ok == 0 )); then
+      cleanup_problem=1
+      [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
+      [[ -n "$cleanup_failure" ]] || cleanup_failure="the exact libvirt image-store pool inventory could not be refreshed after owned storage cleanup"
+    fi
+    if (( host_snapshot_ok == 0 )) && [[ -s "$EVIDENCE/environment/host-inventory-before.json" ]]; then
+      cleanup_problem=1
+      [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
+      [[ -n "$cleanup_failure" ]] || cleanup_failure="post-cleanup host inventory is unavailable"
+    fi
+    python3 - "$EVIDENCE/teardown/cleanup-status.json" "$api_ok" "$guest_ok" \
+      "$controller_ok" "$host_snapshot_ok" "$foreign_ok" "$capture_ok" "$pool_refresh_ok" \
+      "$ACCEPTANCE_GATE" <<'PYSTATUS'
+import json,sys
+path,api,guests,controller,host,foreign,capture,pool_refresh,acceptance_gate=sys.argv[1:]
+def status(value): return 'PASS' if value=='1' else ('FAIL' if value=='0' else 'NOT_APPLICABLE')
+value={
+  'acceptance_gate': acceptance_gate,
+  'api_resources': status(api),
+  'owned_guests_and_storage': status(guests),
+  'controller_process': status(controller),
+  'post_cleanup_host_inventory': status(host),
+  'foreign_state_unchanged': status(foreign),
+  'run_owned_dhcp_capture': status(capture),
+  'image_store_pool_refresh': status(pool_refresh),
+}
+json.dump(value,open(path,'w'),sort_keys=True,indent=2); open(path,'a').write('\n')
+PYSTATUS
+    # Remove exact run-owned credentials and staged agent material after all
+    # observers have finished; the archive contains fingerprints only.
+    rm -f -- "$SSH_KEY" "$PROBE_KEY" "$EVIDENCE/management/known_hosts"
+    rm -rf -- "$TLS_DIR/certs" "$STAGE"
     python3 - "$EVIDENCE/manifest.json" "$EVIDENCE/result.json" "$EVIDENCE/ended_at_utc.txt" <<'PYFINAL'
 import json,pathlib,sys
 manifest,result,ended=sys.argv[1:]
 m=json.loads(pathlib.Path(manifest).read_text()) if pathlib.Path(manifest).exists() else {}
-r=json.loads(pathlib.Path(result).read_text())
+try: r=json.loads(pathlib.Path(result).read_text())
+except (OSError,json.JSONDecodeError): r={}
 m.update(result=r.get('result','FAIL'),ended_at_utc=pathlib.Path(ended).read_text().strip())
-for key in ('first_failure','classification','harness_sha','harness_tree','product_sha','product_tree'):
+for key in ('acceptance_gate','first_failure','classification','harness_sha','harness_tree','product_sha','product_tree'):
     if key in r: m[key]=r[key]
 pathlib.Path(manifest).write_text(json.dumps(m,sort_keys=True,indent=2)+'\n')
 PYFINAL
+    python3 - "$EVIDENCE/result.json" "$EVIDENCE/manifest.json" "$EVIDENCE/teardown/cleanup-status.json" \
+      "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$CAMPAIGN_FAILURE" "$CLASSIFICATION" \
+      "$cleanup_problem" "$cleanup_failure" "$cleanup_classification" "$ACCEPTANCE_GATE" \
+      "$ROOT_DIR/tests" <<'PYRESULT'
+import json,pathlib,sys
+result_path,manifest_path,status_path,run,product,tree,original_failure,original_classification,cleanup_problem,cleanup_failure,cleanup_classification,acceptance_gate,helper_dir=sys.argv[1:]
+path=pathlib.Path(result_path)
+try: result=json.loads(path.read_text())
+except (OSError,json.JSONDecodeError): result={}
+try: cleanup=json.loads(pathlib.Path(status_path).read_text())
+except (OSError,json.JSONDecodeError): cleanup={}
+result.update({'acceptance_gate':acceptance_gate,'run_id':run,'product_sha':product,'product_tree':tree,'cleanup':cleanup})
+sys.path.insert(0, helper_dir)
+try:
+    from fabric_v3_campaign_result import cleanup_predicates_pass
+    cleanup_predicates_satisfied=cleanup_predicates_pass(cleanup)
+except Exception as exc:
+    cleanup_predicate_error=type(exc).__name__
+    cleanup_predicates_satisfied=False
+else:
+    cleanup_predicate_error=None
+if original_failure:
+    result['result']='FAIL'; result['first_failure']=original_failure
+    result['classification']=original_classification or 'HARNESS_GAP'
+elif cleanup_problem=='1':
+    result['result']='FAIL'; result['first_failure']=cleanup_failure
+    result['classification']=cleanup_classification or 'CLEANUP_DEFECT'
+elif result.get('result')=='PASS' and cleanup_predicate_error:
+    result['result']='FAIL'; result['first_failure']='cleanup predicate validator is unavailable'
+    result['classification']='HARNESS_GAP'; result['failed_operation']='validate_cleanup_predicates'
+    result['diagnostic']=cleanup_predicate_error
+elif result.get('result')=='PASS' and not cleanup_predicates_satisfied:
+    result['result']='FAIL'; result['first_failure']='cleanup evidence did not satisfy all required predicates'
+    result['classification']='CLEANUP_DEFECT'
+elif result.get('result')!='PASS':
+    result.setdefault('result','FAIL')
+    result.setdefault('first_failure','campaign exited without a passing terminal result')
+    result.setdefault('classification','HARNESS_GAP')
+path.write_text(json.dumps(result,sort_keys=True,indent=2)+'\n')
+manifest_path=pathlib.Path(manifest_path)
+manifest=json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+manifest.update({'acceptance_gate':acceptance_gate,'result':result['result'],'cleanup':cleanup})
+if result.get('first_failure'): manifest['first_failure']=result['first_failure']
+if result.get('classification'): manifest['classification']=result['classification']
+manifest_path.write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n')
+PYRESULT
+    if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
+      result_status="$(python3 - "$EVIDENCE/result.json" <<'PYSTATUS'
+import json,pathlib,sys
+try: print(json.loads(pathlib.Path(sys.argv[1]).read_text()).get('result','FAIL'))
+except (OSError,json.JSONDecodeError): print('FAIL')
+PYSTATUS
+)"
+      if [[ "$result_status" == PASS ]]; then
+        echo "FABRIC V3 DURABLE HOST RETIREMENT MICROGATE: PASS"
+      else
+        echo "FABRIC V3 DURABLE HOST RETIREMENT MICROGATE: FAIL"
+      fi
+    fi
   tar --exclude="$(basename "$EVIDENCE")/management/campaign_ed25519" \
       --exclude="$(basename "$EVIDENCE")/management/probe_ed25519" \
       --exclude="$(basename "$EVIDENCE")/management/tls/certs" \
@@ -288,6 +861,11 @@ PYFINAL
   if [[ -d "$PRODUCT_SOURCE_DIR" && -e "$PRODUCT_SOURCE_DIR/.git" ]]; then
     git -C "$ROOT_DIR" worktree remove --force "$PRODUCT_SOURCE_DIR" >/dev/null 2>&1 || true
   fi
+  if (( rc == 0 )) && [[ "${CAMPAIGN_TEARDOWN_PASS:-0}" != 1 ]]; then
+    exit 1
+  fi
+  if (( rc == 0 )) && (( cleanup_problem )); then exit 1; fi
+  exit "$rc"
 }
 trap cleanup_on_success EXIT
 
@@ -299,24 +877,97 @@ if ! command -v cargo >/dev/null 2>&1; then
   fi
 fi
 for tool in cargo curl openssl python3 virsh virt-install qemu-img guestfish virt-ls lsinitramfs cpio gzip genisoimage ssh ssh-keygen ssh-keyscan scp ip wg tcpdump sha256sum tar timeout bridge hostnamectl; do need "$tool"; done
+if [[ "$CAMPAIGN_MODE" == full ]]; then
+  for tool in gcc busybox file; do need "$tool"; done
+  [[ "$(file -b "$(command -v busybox)")" == *"statically linked"* ]] \
+    || fail "Gate A requires a statically linked BusyBox for the minimal guest initrd" "ENVIRONMENT_GAP"
+  if gcc -static -O2 "$ROOT_DIR/tests/fabric-v3-spoof-guest.c" -o /dev/null \
+      >"$EVIDENCE/environment/spoof-guest-static-link-preflight.txt" 2>&1; then
+    echo "static anti-spoof guest build: PASS" >>"$EVIDENCE/environment/spoof-guest-static-link-preflight.txt"
+  else
+    fail "Gate A anti-spoof guest cannot be statically linked on this runner" "ENVIRONMENT_GAP"
+  fi
+fi
 [[ $EUID -eq 0 ]] || fail "campaign must run as root to provision nested libvirt guests" "ENVIRONMENT_GAP"
 [[ -c /dev/kvm ]] || fail "/dev/kvm unavailable" "ENVIRONMENT_GAP"
 [[ -r "$BASE_IMAGE" ]] || fail "base image unreadable: $BASE_IMAGE" "ENVIRONMENT_GAP"
 [[ "$(git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}")" == "$PRODUCT_TREE" ]] || fail "frozen product source tree mismatch" "HARNESS_GAP"
+git -C "$ROOT_DIR" fetch --no-tags origin main \
+  >"$EVIDENCE/environment/protected-main-fetch.stdout" \
+  2>"$EVIDENCE/environment/protected-main-fetch.stderr" \
+  || fail "could not refresh protected main for candidate ancestry proof" "HARNESS_GAP"
+protected_main_tip="$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)"
+[[ "$protected_main_tip" == "$PRODUCT_SHA" ]] \
+  || fail "protected main no longer matches the frozen product candidate" "HARNESS_GAP"
+[[ "$(git -C "$ROOT_DIR" rev-parse "$protected_main_tip^{tree}")" == "$PRODUCT_TREE" ]] \
+  || fail "protected main tree differs from the frozen product candidate" "HARNESS_GAP"
+product_remote_sha="$(git -C "$ROOT_DIR" ls-remote origin "$PRODUCT_REMOTE_REF" | awk 'NR==1 {print $1}')"
+[[ "$product_remote_sha" == "$PRODUCT_SHA" ]] \
+  || fail "frozen protected-main candidate is not remotely visible at the exact SHA" "HARNESS_GAP"
+git -C "$ROOT_DIR" fetch --no-tags origin "$HARNESS_REMOTE_REF" \
+  >"$EVIDENCE/environment/harness-ref-fetch.stdout" \
+  2>"$EVIDENCE/environment/harness-ref-fetch.stderr" \
+  || fail "frozen harness successor ref is not remotely visible" "HARNESS_GAP"
+[[ "$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)" == "$(git -C "$ROOT_DIR" rev-parse HEAD)" ]] \
+  || fail "remote harness ref does not match the running harness commit" "HARNESS_GAP"
+git -C "$ROOT_DIR" merge-base --is-ancestor "$PRODUCT_SHA" HEAD \
+  || fail "harness does not descend from the frozen product candidate" "HARNESS_GAP"
+git -C "$ROOT_DIR" merge-base --is-ancestor "$ACCEPTED_HARNESS_BASE" HEAD \
+  || fail "accepted retirement harness ancestry is missing" "HARNESS_GAP"
+[[ -z "$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all)" ]] \
+  || fail "harness source tree has uncommitted changes" "HARNESS_GAP"
+git -C "$ROOT_DIR" fetch --no-tags origin "$PRODUCT_REMOTE_REF" \
+  >"$EVIDENCE/environment/product-ref-fetch.stdout" \
+  2>"$EVIDENCE/environment/product-ref-fetch.stderr" \
+  || fail "frozen product successor ref is not remotely visible" "HARNESS_GAP"
+[[ "$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)" == "$PRODUCT_SHA" ]] \
+  || fail "remote product successor ref does not match the frozen candidate SHA" "HARNESS_GAP"
+product_parents="$(git -C "$ROOT_DIR" show -s --format=%P "$PRODUCT_SHA")"
 url_port "$API_PORT" || fail "API port is occupied: $API_PORT" "ENVIRONMENT_GAP"
 url_port "$CONTROL_PORT" || fail "compute control port is occupied: $CONTROL_PORT" "ENVIRONMENT_GAP"
+python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
+  --output "$EVIDENCE/environment/host-inventory-before.json" \
+  >"$EVIDENCE/environment/host-inventory-before.stdout" \
+  2>"$EVIDENCE/environment/host-inventory-before.stderr" \
+  || fail "could not capture the pre-run libvirt/network inventory" "ENVIRONMENT_GAP"
+select_management_addresses \
+  "$EVIDENCE/environment/host-inventory-before.json" \
+  "$EVIDENCE/environment/management-address-selection.json" \
+  2>"$EVIDENCE/environment/management-address-selection.stderr" \
+  || fail "fewer than three safe management addresses could be proved" "ENVIRONMENT_GAP"
+mapfile -t selected_addresses < <(python3 - "$EVIDENCE/environment/management-address-selection.json" <<'PYADDR'
+import json,sys
+for address in json.load(open(sys.argv[1]))['selected']:
+    print(address)
+PYADDR
+)
+((${#selected_addresses[@]} == 3)) || fail "management preflight did not select exactly three addresses" "ENVIRONMENT_GAP"
+gateway="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gateway"])' "$EVIDENCE/environment/management-address-selection.json")"
+python3 - "$EVIDENCE/environment/host-inventory-before.json" <<'PYDOMAINS' >"$EVIDENCE/environment/libvirt-domains-before.txt"
+import json,sys
+for domain in json.load(open(sys.argv[1]))['domains']:
+    print(domain['name'])
+PYDOMAINS
+sort -o "$EVIDENCE/environment/libvirt-domains-before.txt" "$EVIDENCE/environment/libvirt-domains-before.txt"
 git -C "$ROOT_DIR" rev-parse HEAD >"$EVIDENCE/environment/harness_sha.txt"
 git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}' >"$EVIDENCE/environment/harness_tree.txt"
 git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA" >"$EVIDENCE/environment/product_sha.txt"
 git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}" >"$EVIDENCE/environment/product_tree.txt"
+printf '%s\n' "$product_parents" >"$EVIDENCE/environment/product_parent_commits.txt"
 hostnamectl >"$EVIDENCE/environment/physical-host.txt" 2>&1 || hostname >"$EVIDENCE/environment/physical-host.txt"
 date -u +%FT%TZ >"$EVIDENCE/started_at_utc.txt"
-python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" "$ACCEPTED_HARNESS_BASE" "$(git -C "$ROOT_DIR" merge-base HEAD "$ACCEPTED_HARNESS_BASE")" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" <<'PYMANIFEST'
+python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" "$FABRIC_DOMAIN_ID" "$protected_main_tip" "$PRODUCT_REMOTE_REF" "$HARNESS_REMOTE_REF" "$ACCEPTED_HARNESS_BASE" "$product_parents" <<'PYMANIFEST'
 import json,pathlib,sys
-path,run,product,product_tree,harness,harness_tree,accepted_base,merge_base,started,physical=sys.argv[1:]
+path,run,product,product_tree,harness,harness_tree,started,physical,fabric_domain_id,protected_main,product_ref,harness_ref,accepted_harness_base,product_parents=sys.argv[1:]
 doc={"result":"IN_PROGRESS","run_id":run,"product_sha":product,"product_tree":product_tree,
      "harness_sha":harness,"harness_tree":harness_tree,
-     "accepted_harness_base":accepted_base,"harness_merge_base":merge_base,
+     "protected_main_at_run":protected_main,
+     "product_remote_visible":True,"product_remote_ref":product_ref,
+     "harness_remote_visible":True,"harness_remote_ref":harness_ref,
+     "accepted_harness_base":accepted_harness_base,
+     "product_parent_commits":product_parents.split(),
+     "product_lineage":{"candidate_is_protected_main":product==protected_main},
+     "fabric_domain_id":fabric_domain_id,
      "started_at_utc":pathlib.Path(started).read_text().strip(),
      "physical_host_identity":pathlib.Path(physical).read_text(errors='replace').strip()}
 pathlib.Path(path).write_text(json.dumps(doc,sort_keys=True,indent=2)+'\n')
@@ -344,7 +995,7 @@ git -C "$ROOT_DIR" worktree add --detach "$PRODUCT_SOURCE_DIR" "$PRODUCT_SHA" \
 [[ "$(git -C "$PRODUCT_SOURCE_DIR" rev-parse HEAD)" == "$PRODUCT_SHA" \
   && "$(git -C "$PRODUCT_SOURCE_DIR" rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]] \
   || fail "detached product worktree identity differs from the manifest" "HARNESS_GAP"
-git -C "$PRODUCT_SOURCE_DIR" status --porcelain -- bins crates Cargo.toml Cargo.lock \
+git -C "$PRODUCT_SOURCE_DIR" status --porcelain=v1 --untracked-files=all \
   >"$EVIDENCE/environment/product-source-status.txt"
 [[ ! -s "$EVIDENCE/environment/product-source-status.txt" ]] \
   || fail "frozen product source worktree is dirty" "PRODUCT_DEFECT"
@@ -353,6 +1004,11 @@ CARGO_TARGET_DIR="$PRODUCT_SOURCE_DIR/target" cargo build --release --all-featur
   -p o3kd -p o3k-compute-bin -p o3k-network-bin \
   >"$EVIDENCE/environment/build.log" 2>&1 \
   || fail "frozen product binaries failed to build" "HARNESS_GAP"
+CARGO_TARGET_DIR="$PRODUCT_SOURCE_DIR/target" cargo build --release --all-features \
+  --manifest-path "$PRODUCT_SOURCE_DIR/Cargo.toml" \
+  -p o3k-network --example fabric-regression-3host-helper \
+  >"$EVIDENCE/environment/fabric-provider-helper-build.log" 2>&1 \
+  || fail "frozen product Fabric provider gate helper failed to build" "HARNESS_GAP"
 for binary in o3kd o3k-compute-bin o3k-network-bin; do
   [[ -x "$PRODUCT_SOURCE_DIR/target/release/$binary" ]] || fail "missing frozen binary $binary" "HARNESS_GAP"
   sha256sum "$PRODUCT_SOURCE_DIR/target/release/$binary" >>"$EVIDENCE/environment/runtime-assets.sha256"
@@ -362,9 +1018,33 @@ echo "Running accepted QEMU storage preflight"
 O3K_QEMU_PREFLIGHT_RUN_ID="$RUN_ID" bash "$ROOT_DIR/tests/fabric-v3-qemu-storage-preflight.sh" >"$EVIDENCE/environment/qemu-storage-preflight.txt" 2>&1 || fail "QEMU storage preflight failed" "ENVIRONMENT_GAP"
 
 virsh -c qemu:///system net-info "$NETWORK" >"$EVIDENCE/environment/libvirt-network.txt" 2>&1 || fail "libvirt management network unavailable" "ENVIRONMENT_GAP"
-virsh -c qemu:///system list --all --name | sed '/^$/d' | sort >"$EVIDENCE/environment/libvirt-domains-before.txt"
 net_active="$(awk -F': *' '/^Active:/{print $2}' "$EVIDENCE/environment/libvirt-network.txt")"
 [[ "$net_active" == yes ]] || fail "libvirt management network is inactive" "ENVIRONMENT_GAP"
+python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
+  --output "$EVIDENCE/environment/host-inventory-after-preflight.json" \
+  >"$EVIDENCE/environment/host-inventory-after-preflight.stdout" \
+  2>"$EVIDENCE/environment/host-inventory-after-preflight.stderr" \
+  || fail "could not capture host inventory after QEMU preflight" "ENVIRONMENT_GAP"
+if ! python3 "$HOST_PREFLIGHT" compare \
+    --before "$EVIDENCE/environment/host-inventory-before.json" \
+    --after "$EVIDENCE/environment/host-inventory-after-preflight.json" \
+    >"$EVIDENCE/environment/qemu-preflight-inventory-comparison.json"; then
+  fail "QEMU preflight did not restore the exact pre-run host inventory" "CLEANUP_DEFECT"
+fi
+select_management_addresses \
+  "$EVIDENCE/environment/host-inventory-after-preflight.json" \
+  "$EVIDENCE/environment/management-address-selection-recheck.json" \
+  2>"$EVIDENCE/environment/management-address-selection-recheck.stderr" \
+  || fail "management address selection is no longer collision-safe" "ENVIRONMENT_GAP"
+python3 - "$EVIDENCE/environment/management-address-selection.json" \
+  "$EVIDENCE/environment/management-address-selection-recheck.json" <<'PY' \
+  || fail "management address selection changed during preflight" "ENVIRONMENT_GAP"
+import json,sys
+before,after=(json.load(open(path)) for path in sys.argv[1:])
+assert before['network']==after['network']
+assert before['gateway']==after['gateway']
+assert before['selected']==after['selected'], (before['selected'],after['selected'])
+PY
 BRIDGE="$(virsh -c qemu:///system net-dumpxml "$NETWORK" | sed -n "s/.*bridge name='\([^']*\)'.*/\1/p" | head -1)"
 [[ -n "$BRIDGE" ]] || fail "cannot identify management bridge" "ENVIRONMENT_GAP"
 HOST_MGMT_IP="$(ip -4 -o addr show dev "$BRIDGE" | awk '{split($4,a,"/"); print a[1]; exit}')"
@@ -381,38 +1061,10 @@ ssh-keygen -lf "$PROBE_KEY.pub" >"$EVIDENCE/management/probe-key-fingerprint.txt
 chmod 0600 "$PROBE_KEY"; chmod 0644 "$PROBE_KEY.pub"
 : >"$KNOWN_HOSTS"; chmod 0600 "$KNOWN_HOSTS"
 
-gateway="$(virsh -c qemu:///system net-dumpxml "$NETWORK" | sed -n "s/.*ip address='\([0-9.]*\)'.*/\1/p" | head -1)"
-[[ -n "$gateway" ]] || fail "cannot identify management gateway" "ENVIRONMENT_GAP"
-declare -A reserved_addresses=() defined_macs=()
-for address_file in "$EVIDENCE_ROOT"/fabric-v3-minimal-three-host-*/environment/management-addresses.txt; do
-  [[ -f "$address_file" ]] || continue
-  while IFS='=' read -r _ address; do
-    [[ "$address" =~ ^192\.168\.122\.[0-9]+$ ]] && reserved_addresses[$address]=1
-  done <"$address_file"
-done
-while IFS= read -r domain; do
-  [[ -n "$domain" ]] || continue
-  while IFS= read -r mac; do
-    [[ "$mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] && defined_macs["${mac,,}"]=1
-  done < <(virsh -c qemu:///system domiflist "$domain" 2>/dev/null | awk 'NR > 2 {print tolower($5)}')
-done < <(virsh -c qemu:///system list --all --name)
-available_octets=()
-for octet in $(seq 201 239); do
-  address="192.168.122.$octet"
-  mac="52:54:00:fa:$(printf '%02x' "$((octet / 256))"):$(printf '%02x' "$((octet % 256))")"
-  [[ -n "${reserved_addresses[$address]:-}" ]] && continue
-  [[ -n "${defined_macs[$mac]:-}" ]] && continue
-  ip neigh show dev "$BRIDGE" | grep -Fq "$address" && continue
-  virsh -c qemu:///system net-dhcp-leases "$NETWORK" | grep -Fq "$address" && continue
-  timeout 2 bash -c "</dev/tcp/$address/$SSH_PORT" >/dev/null 2>&1 && continue
-  available_octets+=("$octet")
-  ((${#available_octets[@]} == 3)) && break
-done
-((${#available_octets[@]} == 3)) || fail "fewer than three unused management addresses in 192.168.122.201-239" "ENVIRONMENT_GAP"
 for index in 0 1 2; do
   host="${HOSTS[$index]}"
-  octet="${available_octets[$index]}"
-  address="192.168.122.$octet"
+  address="${selected_addresses[$index]}"
+  octet="${address##*.}"
   MGMT_OCTET[$host]="$octet"
   MGMT_IP[$host]="$address"
   MGMT_MAC[$host]="52:54:00:fa:$(printf '%02x' "$((octet / 256))"):$(printf '%02x' "$((octet % 256))")"
@@ -432,8 +1084,12 @@ for host in a b c; do
   if virsh -c qemu:///system dominfo "$domain" >/dev/null 2>&1; then fail "fresh domain name collision: $domain" "ENVIRONMENT_GAP"; fi
   disk="$IMAGE_STORE/$PREFIX-compute-$host.qcow2"; seed="$IMAGE_STORE/$PREFIX-compute-$host-seed.iso"; ws="$EVIDENCE/environment/seed-$host"
   [[ ! -e "$disk" && ! -e "$seed" ]] || fail "fresh guest disk/seed collision for $host" "ENVIRONMENT_GAP"
-  mkdir -m 0700 "$ws"
+  domain_uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  FRESH_DOMAINS+=("$domain")
   mac="${MGMT_MAC[$host]}"
+  printf '%s\t%s\t%s\t%s\t%s\n' "compute-$host" "$domain" "$address" "$mac" "$domain_uuid" \
+    >>"$EVIDENCE/environment/inventory.tsv"
+  mkdir -m 0700 "$ws"
   cat >"$ws/user-data" <<EOF
 #cloud-config
 hostname: compute-$host
@@ -449,7 +1105,7 @@ disable_root: true
 ssh_pwauth: false
 package_update: true
 packages:
-  - qemu-kvm
+  - qemu-system-x86
   - libvirt-daemon-system
   - libvirt-clients
   - qemu-utils
@@ -476,9 +1132,9 @@ EOF
   genisoimage -quiet -output "$seed" -volid cidata -joliet -rock "$ws/user-data" "$ws/meta-data" "$ws/network-config" || fail "seed ISO creation failed for $host" "HARNESS_GAP"
   qemu-img create -q -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$disk" 16G || fail "overlay creation failed for $host" "ENVIRONMENT_GAP"
   chgrp kvm "$disk" "$seed"; chmod 0640 "$disk" "$seed"
-  virt-install --connect qemu:///system --name "$domain" --uuid "$(python3 -c 'import uuid; print(uuid.uuid4())')" --import --ram "$ram_mib" --vcpus "$vcpus" --cpu host-passthrough --disk "path=$disk,format=qcow2,bus=virtio" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --graphics none --noautoconsole --quiet || fail "libvirt failed to create fresh compute guest $host" "ENVIRONMENT_GAP"
-  FRESH_DOMAINS+=("$domain")
-  printf '%s\t%s\t%s\t%s\t%s\n' "compute-$host" "$domain" "$address" "$mac" "$(virsh -c qemu:///system domuuid "$domain")" >>"$EVIDENCE/environment/inventory.tsv"
+  virt-install --connect qemu:///system --name "$domain" --uuid "$domain_uuid" --import --ram "$ram_mib" --vcpus "$vcpus" --cpu host-passthrough --disk "path=$disk,format=qcow2,bus=virtio" --disk "path=$seed,device=cdrom" --network "network=$NETWORK,model=virtio,mac=$mac" --os-variant ubuntu24.04 --graphics none --noautoconsole --quiet || fail "libvirt failed to create fresh compute guest $host" "ENVIRONMENT_GAP"
+  [[ "$(virsh -c qemu:///system domuuid "$domain")" == "$domain_uuid" ]] \
+    || fail "created compute guest UUID did not match the registered ownership record" "OWNERSHIP_DEFECT"
 done
 
 for host in a b c; do
@@ -498,7 +1154,8 @@ for host in a b c; do
     # Ubuntu may run libvirtd on demand through systemd sockets and let the
     # daemon exit while idle. Exercise the actual qemu:///system API instead
     # of requiring the monolithic service process to remain active.
-    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && command -v tcpdump >/dev/null && test -c /dev/kvm && sudo virsh -c qemu:///system list --all >/dev/null 2>&1' >/dev/null 2>&1; then
+    # shellcheck disable=SC2016 # uname must expand on the remote guest.
+    if ssh_vm "$address" 'command -v virsh >/dev/null && command -v wg >/dev/null && command -v bridge >/dev/null && command -v nft >/dev/null && command -v tcpdump >/dev/null && command -v qemu-system-x86_64 >/dev/null && sudo -n test -r "/boot/vmlinuz-$(uname -r)" && test -c /dev/kvm && sudo -n virsh -c qemu:///system list --all >/dev/null 2>&1' >/dev/null 2>&1; then
       packages_ready=1
       break
     fi
@@ -534,10 +1191,16 @@ cp "$TLS_DIR/certs/agents/controller-network/agent.pem" "$STAGE/controller-netwo
 cp "$TLS_DIR/certs/agents/controller-network/agent-key.pem" "$STAGE/controller-network-key.pem"
 
 for host in a b c; do
-  octet="${MGMT_OCTET[$host]}"; address="${MGMT_IP[$host]}"
+  address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo install -d -o o3k -g o3k -m 0700 /tmp/$RUN_ID-stage"
   scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$STAGE"/* "$SSH_USER@$address:/tmp/$RUN_ID-stage/"
-  ssh_vm "$address" "sudo bash /tmp/$RUN_ID-stage/install-agent-host.sh $host $octet $RUN_ID /tmp/$RUN_ID-stage" >"$EVIDENCE/management/install-$host.log" 2>&1 || fail "network agent installation failed on compute-$host" "ENVIRONMENT_GAP"
+  if ! ssh_vm "$address" "sudo bash /tmp/$RUN_ID-stage/install-agent-host.sh $host $RUN_ID /tmp/$RUN_ID-stage" \
+    >"$EVIDENCE/management/install-$host.log" 2>&1; then
+    if grep -Fq 'invalid host identity' "$EVIDENCE/management/install-$host.log"; then
+      fail "agent installer rejected the collision-safe selected management address" "HARNESS_GAP"
+    fi
+    fail "network agent installation failed on compute-$host; see install-$host.log" "ENVIRONMENT_GAP"
+  fi
   scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" "$PROBE_KEY" "$SSH_USER@$address:/tmp/$RUN_ID-probe-key"
   ssh_vm "$address" "sudo install -d -o root -g root -m 0700 /var/lib/o3k-fabric-v3/$RUN_ID/control && sudo install -o root -g root -m 0600 /tmp/$RUN_ID-probe-key /var/lib/o3k-fabric-v3/$RUN_ID/control/probe_ed25519 && sudo python3 -c 'import pathlib; pathlib.Path(\"/tmp/$RUN_ID-probe-key\").unlink()'"
   case "$host" in a) health_port=19101;; b) health_port=19102;; c) health_port=19103;; esac
@@ -586,6 +1249,8 @@ SIGNING_KEY="$(openssl rand -hex 48)"
 FABRIC_HOST_IDENTITIES="$(cat "$EVIDENCE/environment/fabric-identities.json")"
 install -d -m 0700 "$EVIDENCE/controller-data"
 export O3K_PROVIDER=agent O3K_DATA_DIR="$EVIDENCE/controller-data" O3K_CONTROLLER_ID="controller-$RUN_ID" O3K_CONTROLLER_EPOCH="controller-epoch-1" O3K_BOOTSTRAP_PASSWORD="campaign-$RUN_ID" O3K_TOKEN_SIGNING_KEY="$SIGNING_KEY"
+INITIAL_CONTROLLER_ID="$O3K_CONTROLLER_ID"
+INITIAL_CONTROLLER_EPOCH="$O3K_CONTROLLER_EPOCH"
 export O3K_FABRIC_DOMAIN_ID="$FABRIC_DOMAIN_ID" O3K_FABRIC_HOST_IDENTITIES="$FABRIC_HOST_IDENTITIES" O3K_NETWORK_AGENT_DIRECTORY="$DIRECTORY"
 export O3K_NETWORK_AGENT_CA="$TLS_DIR/certs/ca.pem" O3K_NETWORK_AGENT_CLIENT_CERT="$TLS_DIR/certs/agents/controller-network/agent.pem" O3K_NETWORK_AGENT_CLIENT_KEY="$TLS_DIR/certs/agents/controller-network/agent-key.pem"
 export O3K_COMPUTE_CONTROL_ADDR="0.0.0.0:$CONTROL_PORT" O3K_COMPUTE_SERVER_CERTIFICATE="$TLS_DIR/certs/server.pem" O3K_COMPUTE_SERVER_PRIVATE_KEY="$TLS_DIR/certs/server-key.pem" O3K_COMPUTE_CLIENT_CA="$TLS_DIR/certs/ca.pem" O3K_COMPUTE_AUTHORIZED_AGENTS="$AUTHORIZED"
@@ -622,7 +1287,10 @@ assert capacity["a"]==capacity["b"]+1 and capacity["b"]==capacity["c"], capacity
 print(json.dumps({"scheduler_capacity_score":capacity},sort_keys=True))
 PY
 
-curl -fsS -X POST "$BASE/v3/auth/tokens" -H 'content-type: application/json' -D "$EVIDENCE/api/auth.headers" -o "$EVIDENCE/api/auth.body" --data "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"admin\",\"password\":\"campaign-$RUN_ID\"}}},\"scope\":{\"project\":{\"name\":\"admin\"}}}}" || fail "supported HTTP authentication failed" "SUPPORTED_API_GAP"
+auth_status="$(curl --silent --show-error --max-time 30 -X POST "$BASE/v3/auth/tokens" -H 'content-type: application/json' -D "$EVIDENCE/api/auth.headers" -o /dev/null -w '%{http_code}' --data "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"admin\",\"password\":\"campaign-$RUN_ID\"}}},\"scope\":{\"project\":{\"name\":\"admin\"}}}}")" \
+  || fail "supported HTTP authentication request failed" "SUPPORTED_API_GAP"
+[[ "$auth_status" == 201 ]] || fail "supported HTTP authentication returned HTTP $auth_status" "SUPPORTED_API_GAP"
+printf 'HTTP %s; response body intentionally omitted\n' "$auth_status" >"$EVIDENCE/api/auth.body"
 TOKEN="$(awk 'tolower($1)=="x-subject-token:"{print $2}' "$EVIDENCE/api/auth.headers" | tr -d '\r')"
 [[ -n "$TOKEN" ]] || fail "authentication returned no token" "SUPPORTED_API_GAP"
 python3 - "$EVIDENCE/api/auth.headers" <<'PY'
@@ -678,6 +1346,7 @@ start_dhcp_capture() {
   DHCP_CAPTURE_PID="$(ssh_vm "$address" "sudo cat '$remote_capture/tcpdump.pid'")"
   [[ "$DHCP_CAPTURE_PID" =~ ^[0-9]+$ ]] || fail "run-owned DHCP packet capture did not start" "HARNESS_GAP"
   DHCP_CAPTURE_HOST=a
+  DHCP_CAPTURE_CLEANUP_STATUS=PENDING
   ssh_vm "$address" "sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline && sudo cat /proc/$DHCP_CAPTURE_PID/cmdline | tr '\\0' ' '" >"$EVIDENCE/attachments/dhcp-capture-command.txt" \
     || fail "DHCP capture process identity could not be observed" "HARNESS_GAP"
   grep -Fq "$remote_capture/dora.pcap" "$EVIDENCE/attachments/dhcp-capture-command.txt" \
@@ -687,24 +1356,77 @@ start_dhcp_capture() {
 }
 
 stop_dhcp_capture() {
-  [[ -n "$DHCP_CAPTURE_PID" && "$DHCP_CAPTURE_HOST" == a ]] || return 0
+  if [[ -z "$DHCP_CAPTURE_PID" ]]; then
+    [[ "$DHCP_CAPTURE_CLEANUP_STATUS" != PENDING ]] || return 1
+    return 0
+  fi
+  [[ "$DHCP_CAPTURE_HOST" == a ]] || { DHCP_CAPTURE_CLEANUP_STATUS=FAIL; return 1; }
   local address="${MGMT_IP[a]:-}" remote_capture local_capture
-  [[ -n "$address" ]] || return 0
+  [[ -n "$address" ]] || { DHCP_CAPTURE_CLEANUP_STATUS=FAIL; return 1; }
   remote_capture="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp-capture"
   local_capture="$EVIDENCE/attachments/dhcp-dora.pcap"
-  ssh_vm "$address" "if sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline && sudo cat /proc/$DHCP_CAPTURE_PID/cmdline | tr '\\0' ' ' | grep -Fq '$remote_capture/dora.pcap' && sudo test \"\$(sudo cat /proc/$DHCP_CAPTURE_PID/comm)\" = tcpdump; then sudo kill -INT '$DHCP_CAPTURE_PID'; fi" >/dev/null 2>&1 || true
-  for _ in $(seq 1 20); do
-    ssh_vm "$address" "sudo test -e /proc/$DHCP_CAPTURE_PID" >/dev/null 2>&1 || break
+  if ! ssh_vm "$address" "if sudo test -r /proc/$DHCP_CAPTURE_PID/cmdline; then sudo cat /proc/$DHCP_CAPTURE_PID/cmdline | tr '\\0' ' ' | grep -Fq '$remote_capture/dora.pcap' || exit 42; test \"\$(sudo cat /proc/$DHCP_CAPTURE_PID/comm)\" = tcpdump || exit 43; sudo kill -INT '$DHCP_CAPTURE_PID'; fi" \
+      >"$EVIDENCE/attachments/dhcp-capture-stop-command.txt" 2>&1; then
+    printf 'capture_stop_command=FAIL\n' >"$EVIDENCE/attachments/dhcp-capture-stop-status.txt"
+    DHCP_CAPTURE_CLEANUP_STATUS=FAIL
+    return 1
+  fi
+  local process_state
+  for _ in $(seq 1 30); do
+    if ! process_state="$(ssh_vm "$address" "sudo sh -c 'if test -e /proc/$DHCP_CAPTURE_PID; then printf PRESENT; else printf ABSENT; fi'")"; then
+      printf 'capture_process=UNKNOWN observer=ssh_sudo_proc exit_status=unavailable\n' >"$EVIDENCE/attachments/dhcp-capture-stop-status.txt"
+      DHCP_CAPTURE_CLEANUP_STATUS=FAIL
+      return 1
+    fi
+    [[ "$process_state" == PRESENT || "$process_state" == ABSENT ]] || {
+      printf 'capture_process=UNKNOWN observer_output=%s\n' "$process_state" >"$EVIDENCE/attachments/dhcp-capture-stop-status.txt"
+      DHCP_CAPTURE_CLEANUP_STATUS=FAIL
+      return 1
+    }
+    [[ "$process_state" == ABSENT ]] && break
     sleep 1
   done
-  if ssh_vm "$address" "sudo test -f '$remote_capture/dora.pcap'" >/dev/null 2>&1; then
-    ssh_vm "$address" "sudo cp '$remote_capture/dora.pcap' /tmp/$RUN_ID-dhcp-dora.pcap && sudo chown '$SSH_USER:$SSH_USER' /tmp/$RUN_ID-dhcp-dora.pcap && sudo chmod 0600 /tmp/$RUN_ID-dhcp-dora.pcap" >/dev/null 2>&1 || true
-    scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+  if [[ "$process_state" != ABSENT ]]; then
+    printf 'capture_process=STILL_RUNNING pid=%s\n' "$DHCP_CAPTURE_PID" >"$EVIDENCE/attachments/dhcp-capture-stop-status.txt"
+    DHCP_CAPTURE_CLEANUP_STATUS=FAIL
+    return 1
+  fi
+  printf 'capture_process=ABSENT pid=%s\n' "$DHCP_CAPTURE_PID" >"$EVIDENCE/attachments/dhcp-capture-stop-status.txt"
+  local capture_file_state
+  if ! capture_file_state="$(ssh_vm "$address" "sudo python3 -c 'import pathlib,sys; print(\"PRESENT\" if pathlib.Path(sys.argv[1]).is_file() else \"ABSENT\")' '$remote_capture/dora.pcap'")"; then
+    printf 'capture_file=UNKNOWN observer=ssh_sudo_python exit_status=unavailable\n' >>"$EVIDENCE/attachments/dhcp-capture-stop-status.txt"
+    DHCP_CAPTURE_CLEANUP_STATUS=FAIL
+    return 1
+  fi
+  if [[ "$capture_file_state" == PRESENT ]]; then
+    if ! ssh_vm "$address" "sudo cp '$remote_capture/dora.pcap' /tmp/$RUN_ID-dhcp-dora.pcap && sudo chown '$SSH_USER:$SSH_USER' /tmp/$RUN_ID-dhcp-dora.pcap && sudo chmod 0600 /tmp/$RUN_ID-dhcp-dora.pcap" \
+        >"$EVIDENCE/attachments/dhcp-capture-copy-command.txt" 2>&1; then
+      DHCP_CAPTURE_CLEANUP_STATUS=FAIL
+      return 1
+    fi
+    if ! scp -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
       -o "UserKnownHostsFile=$KNOWN_HOSTS" "$SSH_USER@$address:/tmp/$RUN_ID-dhcp-dora.pcap" \
-      "$local_capture" >/dev/null 2>&1 || true
-    ssh_vm "$address" "sudo rm -f /tmp/$RUN_ID-dhcp-dora.pcap; sudo cat '$remote_capture/tcpdump.log'" >"$EVIDENCE/attachments/dhcp-tcpdump.log" 2>/dev/null || true
+      "$local_capture" >"$EVIDENCE/attachments/dhcp-capture-copy-scp.stdout" \
+      2>"$EVIDENCE/attachments/dhcp-capture-copy-scp.stderr"; then
+      DHCP_CAPTURE_CLEANUP_STATUS=FAIL
+      return 1
+    fi
+    if ! ssh_vm "$address" "sudo rm -f /tmp/$RUN_ID-dhcp-dora.pcap && sudo cat '$remote_capture/tcpdump.log'" \
+        >"$EVIDENCE/attachments/dhcp-tcpdump.log" 2>"$EVIDENCE/attachments/dhcp-tcpdump-log.stderr"; then
+      DHCP_CAPTURE_CLEANUP_STATUS=FAIL
+      return 1
+    fi
+  elif [[ "$capture_file_state" == ABSENT ]]; then
+    printf 'capture_file=ABSENT (capture stopped before packet evidence was produced)\n' \
+      >>"$EVIDENCE/attachments/dhcp-capture-stop-status.txt"
+  else
+    printf 'capture_file=UNKNOWN observer_output=%s\n' "$capture_file_state" \
+      >>"$EVIDENCE/attachments/dhcp-capture-stop-status.txt"
+    DHCP_CAPTURE_CLEANUP_STATUS=FAIL
+    return 1
   fi
   DHCP_CAPTURE_PID=""
+  DHCP_CAPTURE_CLEANUP_STATUS=PASS
 }
 
 create_server() {
@@ -1046,6 +1768,9 @@ addresses=(manifest.parent/'environment/management-addresses.txt').read_text().s
 data['management_addresses']={line.split('=',1)[0].split('-')[-1]:line.split('=',1)[1] for line in addresses}
 data['stable_host_ids']={h:f'host-{h}' for h in 'abc'}
 data['compute_agent_ids']={h:f'compute-agent-{h}' for h in 'abc'}
+data['compute_agents']={f'host-{h}':{'agent_id':f'compute-agent-{h}',
+    'agent_epoch':json.loads((manifest.parent/f'management/compute-{h}-ready.json').read_text())['agent_epoch']}
+    for h in 'abc'}
 data['network_agent_ids']={h:f'network-agent-{h}' for h in 'abc'}
 data['guest_control']='PASS A/B/C; host-local IPv6 link-local SSH; local Realm bridge scoped; Fabric namespace capture empty'
 data['control_channel_capabilities']=caps['mechanisms']
@@ -1070,7 +1795,7 @@ if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" == 1 ]]; then
   # capture, then take fresh ownership/plan-derived topology and verify HER and
   # WireGuard before observing one bounded B retry window.
   for host in a b c; do guest_control_preflight "$host"; done
-  stop_dhcp_capture
+  stop_dhcp_capture || fail "run-owned DHCP packet capture failed to stop or collect" "CLEANUP_DEFECT"
   [[ -s "$EVIDENCE/attachments/dhcp-dora.pcap" ]] \
     || fail "server A DHCP packet capture is absent before the B boundary run" "HARNESS_GAP"
   tcpdump -nn -e -tt -vvv -r "$EVIDENCE/attachments/dhcp-dora.pcap" 'udp and (port 67 or port 68)' \
@@ -1231,7 +1956,7 @@ pathlib.Path(output).write_text(f'guest_mac={mac}\ncanonical_fixed_ip={address}\
 PYIP
 done
 
-stop_dhcp_capture
+stop_dhcp_capture || fail "run-owned DHCP packet capture failed to stop or collect" "CLEANUP_DEFECT"
 [[ -s "$EVIDENCE/attachments/dhcp-dora.pcap" ]] \
   || fail "DHCP capture is empty" "DATAPLANE_DEFECT"
 REALM_ID="$(python3 - "$EVIDENCE/attachments/server-a-provider-ownership.json" "${PORT_IDS[0]}" <<'PY'
@@ -1338,10 +2063,21 @@ guest_failure_class() {
 }
 
 if [[ "$CAMPAIGN_MODE" == departure-micro ]]; then
-  guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" departure-micro/a-to-b-before-c-delete.txt \
+  guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" before-departure/traffic/a-to-b-icmp.txt \
     || fail "micro-gate baseline A->B ICMP failed" "$(guest_failure_class DATAPLANE_DEFECT)"
-  guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[c]}" departure-micro/a-to-c-before-c-delete.txt \
+  guest_control_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" before-departure/traffic/b-to-a-icmp.txt \
+    || fail "micro-gate baseline B->A ICMP failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+  guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[c]}" before-departure/traffic/a-to-c-icmp.txt \
     || fail "micro-gate baseline A->C ICMP failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+  guest_control_command c "ping -c 1 -W 4 ${TENANT_IP[a]}" before-departure/traffic/c-to-a-icmp.txt \
+    || fail "micro-gate baseline C->A ICMP failed" "$(guest_failure_class DATAPLANE_DEFECT)"
+  guest_control_command a "ip neigh flush to ${TENANT_IP[b]} || true" before-departure/traffic/a-to-b-neighbor-flush.txt \
+    || fail "could not clear A's cached B neighbor before canonical ARP proof" "HARNESS_GAP"
+  guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]} && ip neigh show to ${TENANT_IP[b]}" \
+    before-departure/traffic/a-to-b-canonical-arp.txt \
+    || fail "A could not resolve B's canonical remote ARP entry" "DATAPLANE_DEFECT"
+  grep -Fqi "${TENANT_MAC[b]}" "$EVIDENCE/before-departure/traffic/a-to-b-canonical-arp.txt" \
+    || fail "A's remote ARP entry did not resolve to B's canonical MAC" "DATAPLANE_DEFECT"
 fi
 
 if [[ "$CAMPAIGN_MODE" == full ]]; then
@@ -1448,9 +2184,19 @@ PY
 # Controller restart while A/B/C are alive. No tenant/API mutation wakes
 # reconciliation; all six tenant flows are rerun after agents reconnect.
 kill -TERM "$O3KD_PID"; wait "$O3KD_PID" 2>/dev/null || true; O3KD_PID=""
+controller_start_requested_at="$(date -u +%FT%T.%NZ)"
 "$PRODUCT_SOURCE_DIR/target/release/o3kd" --listen-addr "$HOST_MGMT_IP:$API_PORT" --data-dir "$EVIDENCE/controller-data" --log-filter info >"$EVIDENCE/restart/o3kd.log" 2>&1 & O3KD_PID=$!
+printf '{"new_controller_pid":"%s","start_requested_at_utc":"%s","api_mutation_during_recovery":false}\n' \
+  "$O3KD_PID" "$controller_start_requested_at" >"$EVIDENCE/restart/startup-recovery/controller-start.json"
 for _ in $(seq 1 120); do curl -fsS "$BASE/healthz" >/dev/null 2>&1 && break; kill -0 "$O3KD_PID" 2>/dev/null || fail "controller restart failed" "DURABLE_RECONCILIATION_GAP"; sleep 1; done
 curl -fsS "$BASE/readyz" >"$EVIDENCE/restart/ready.json" || fail "controller did not become ready after restart" "DURABLE_RECONCILIATION_GAP"
+wait_for_current_compute_agents \
+  "pre-retirement-compute-agent-readiness" \
+  "post-controller-restart-before-retirement" \
+  "$EVIDENCE/restart/o3kd.log" \
+  "$EVIDENCE/restart/startup-recovery/controller-start.json" \
+  a b c \
+  || fail "A/B/C compute-agent identities did not register after controller restart; see restart/pre-retirement-compute-agent-readiness/result.json" "HARNESS_GAP"
 for pair in a:b b:a a:c c:a b:c c:b; do
   from="${pair%%:*}"; to="${pair##*:}"
   guest_control_command "$from" "ping -c 1 -W 4 ${TENANT_IP[$to]}" "restart/$from-to-$to.txt" || fail "post-controller-restart ICMP $from->$to failed" "$(guest_failure_class DURABLE_RECONCILIATION_GAP)"
@@ -1524,6 +2270,7 @@ fi
 realm_id="$REALM_ID"
 api "$BASE/v2.0/ports/${PORT_IDS[2]}" >"$EVIDENCE/endpoint-removal/port-c-before.json" \
   || fail "C port unavailable before removal" "SUPPORTED_API_GAP"
+cp "$EVIDENCE/endpoint-removal/port-c-before.json" "$EVIDENCE/before-departure/host-c/port.json"
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" \
@@ -1532,26 +2279,139 @@ for host in a b c; do
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json" \
     >"$EVIDENCE/endpoint-removal/host-$host-plan-before.json" \
     || fail "pre-removal Fabric plan unavailable on $host" "OWNERSHIP_DEFECT"
+  cp "$EVIDENCE/endpoint-removal/host-$host-ownership-before.json" "$EVIDENCE/before-departure/host-$host/ownership.json"
+  cp "$EVIDENCE/endpoint-removal/host-$host-plan-before.json" "$EVIDENCE/before-departure/plans/host-$host.json"
 done
+python3 - "$EVIDENCE/endpoint-removal" "$realm_id" "${PORT_IDS[@]}" <<'PY' \
+  || fail "pre-delete canonical participant/HER state is not a healthy three-host Realm" "SURVIVOR_RECONCILIATION_DEFECT"
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]); realm=sys.argv[2]; endpoints=sys.argv[3:]
+assert len(endpoints)==3
+expected={endpoint:f'host-{host}' for endpoint,host in zip(endpoints,'abc')}
+plans={}
+summary={}
+for host in 'abc':
+    owner=json.loads((root/f'host-{host}-ownership-before.json').read_text())
+    assert realm in owner.get('realms',{}), (host,realm,owner.get('realms',{}).keys())
+    local=owner['realms'][realm]
+    plan=json.loads((root/f'host-{host}-plan-before.json').read_text())
+    assert plan.get('realm_id')==realm and plan.get('local_host')==f'host-{host}', (host,plan)
+    directory=plan.get('directory',{}).get('entries',[])
+    observed={entry.get('endpoint_id'):entry.get('selected_host') for entry in directory}
+    assert observed==expected, (host,observed,expected)
+    peers={peer.get('host_id') for peer in plan.get('peers',[])}
+    assert peers==set(f'host-{other}' for other in 'abc' if other!=host), (host,peers)
+    assert int(plan.get('directory_generation',0))==int(local.get('directory_generation',-1)), (host,plan,local)
+    assert int(plan.get('local_fabric_generation',0))==int(local.get('local_fabric_generation',-1)), (host,plan,local)
+    vxlan=local.get('vxlan') or {}
+    assert int(plan.get('encapsulation',{}).get('binding_generation',0))==int(vxlan.get('binding_generation',-1)), (host,plan,vxlan)
+    assert local.get('endpoint_taps') and not local.get('pending_endpoint_taps'), (host,local)
+    plans[host]=plan
+    summary[host]={"local_host":plan['local_host'],"participants":sorted(set(observed.values())),
+        "HER_peers":sorted(peers),"directory_generation":plan['directory_generation'],
+        "binding_generation":plan['encapsulation']['binding_generation'],
+        "local_fabric_generation":plan['local_fabric_generation'],
+        "vni":plan['encapsulation']['provider_segment_id']}
+assert len({summary[h]['vni'] for h in 'abc'})==1, summary
+pathlib.Path(root/'pre-delete-plan-summary.json').write_text(json.dumps({"realm_id":realm,
+    "hosts":summary},sort_keys=True,indent=2)+'\n')
+PY
 python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" \
-  "$EVIDENCE/endpoint-removal/pre-delete-work-history.json" <<'PY' \
-  || fail "pre-delete durable work history unavailable or C is not currently applied" "DURABLE_RECONCILIATION_GAP"
+  "$EVIDENCE/endpoint-removal/pre-delete-work-history.json" \
+  "$EVIDENCE/endpoint-removal/pre-delete-plan-summary.json" <<'PY' \
+  || fail "pre-delete durable Apply state or shared Realm generation is not current across A/B/C" "SURVIVOR_RECONCILIATION_DEFECT"
 import json,pathlib,sqlite3,sys
-path,realm,out=sys.argv[1:]
+path,realm,out,summary_path=sys.argv[1:]
 db=sqlite3.connect(f"file:{path}?mode=ro",uri=True,timeout=3); db.row_factory=sqlite3.Row
-rows=db.execute("SELECT command_id,target_host_id,snapshot,state,revision,updated_at FROM network_plan_work WHERE target_host_id IN ('host-a','host-b','host-c') ORDER BY updated_at,command_id").fetchall()
+rows=db.execute("SELECT rowid AS insertion_order,* FROM network_plan_work WHERE target_host_id IN ('host-a','host-b','host-c') ORDER BY rowid").fetchall()
 history={host:[] for host in ('host-a','host-b','host-c')}
 for row in rows:
-    command=json.loads(bytes(row['snapshot'])); plan=command.get('plan',{})
+    raw=bytes(row['snapshot']); command=json.loads(raw); plan=command.get('plan',{})
     fabric=plan.get('fabric',{}) if isinstance(plan,dict) else {}
     if fabric.get('realm_id')!=realm: continue
-    history[row['target_host_id']].append({'command_id':row['command_id'],'action':command.get('action'),
-        'state':row['state'],'revision':row['revision'],'updated_at':row['updated_at'],
-        'directory_generation':plan.get('directory_generation'),'binding_generation':plan.get('binding_generation'),
-        'fabric_generation':plan.get('fabric_generation')})
+    outcome=row['outcome']
+    history[row['target_host_id']].append({'insertion_order':row['insertion_order'],
+        'command_id':row['command_id'],'operation_id':row['operation_id'],
+        'idempotency_key':row['idempotency_key'],'controller_id':row['controller_id'],
+        'controller_epoch':row['controller_epoch'],'target_host_id':row['target_host_id'],
+        'target_agent_id':row['target_agent_id'],'target_agent_epoch':row['target_agent_epoch'],
+        'action':command.get('action'),'realm_id':fabric.get('realm_id'),
+        'directory_generation':fabric.get('directory_generation'),
+        'local_host':fabric.get('local_host'),
+        'binding_generation':fabric.get('encapsulation',{}).get('binding_generation'),
+        'fabric_generation':fabric.get('local_fabric_generation'),
+        'participants':sorted({entry.get('selected_host') for entry in fabric.get('directory',{}).get('entries',[])}),
+        'her_peers':sorted({peer.get('host_id') for peer in fabric.get('peers',[])}),
+        'realm_generation':plan.get('resource_generations',{}).get(realm),
+        'state':row['state'],'revision':row['revision'],
+        'outcome':bytes(outcome).decode('utf-8',errors='replace') if outcome is not None else None,
+        'created_at':row['created_at'],'updated_at':row['updated_at']})
 latest={host:(items[-1] if items else None) for host,items in history.items()}
+# Persist the raw durable work observation before evaluating predicates so an
+# unsuccessful pre-delete check still has enough evidence to diagnose.
+pathlib.Path(out).write_text(json.dumps({'realm_id':realm,'status':'observed_before_predicate_checks',
+    'history':history,'latest':latest,'c_prior_apply':latest['host-c']},sort_keys=True,indent=2)+'\n')
 assert all(latest[h] and latest[h]['action']=='Apply' and latest[h]['state']=='succeeded' for h in history),latest
-pathlib.Path(out).write_text(json.dumps({'realm_id':realm,'history':history,'latest':latest},sort_keys=True,indent=2)+'\n')
+assert all(latest[h]['target_agent_id']==f'network-agent-{h[-1]}' for h in history),latest
+realm_generations={latest[h]['realm_generation'] for h in history}
+assert len(realm_generations)==1 and None not in realm_generations,latest
+expected_participants=['host-a','host-b','host-c']
+summary=json.loads(pathlib.Path(summary_path).read_text())
+for host in history:
+    suffix=host[-1]
+    assert latest[host]['participants']==expected_participants,latest[host]
+    assert latest[host]['her_peers']==[peer for peer in expected_participants if peer!=host],latest[host]
+    assert latest[host]['directory_generation']==summary['hosts'][suffix]['directory_generation'],(latest[host],summary['hosts'][suffix])
+    summary['hosts'][suffix]['realm_generation']=latest[host]['realm_generation']
+summary['realm_generation']=next(iter(realm_generations))
+pathlib.Path(summary_path).write_text(json.dumps(summary,sort_keys=True,indent=2)+'\n')
+pathlib.Path(out).write_text(json.dumps({'realm_id':realm,'history':history,'latest':latest,
+    'c_prior_apply':latest['host-c']},sort_keys=True,indent=2)+'\n')
+PY
+cp "$EVIDENCE/endpoint-removal/pre-delete-work-history.json" "$EVIDENCE/before-departure/durable-work/history.json"
+cp "$EVIDENCE/endpoint-removal/pre-delete-work-history.json" "$EVIDENCE/c-delete/retirement-obligation/c-prior-apply.json"
+python3 - "$EVIDENCE" "$RUN_ID" "$INITIAL_CONTROLLER_ID" "$INITIAL_CONTROLLER_EPOCH" "$FABRIC_DOMAIN_ID" <<'PY' \
+  || fail "retirement manifest could not bind the live host and controller identities" "HARNESS_GAP"
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]); run,controller_id,controller_epoch,fabric_domain_id=sys.argv[2:]
+manifest_path=root/'manifest.json'; manifest=json.loads(manifest_path.read_text())
+assert manifest.get('fabric_domain_id')==fabric_domain_id, manifest.get('fabric_domain_id')
+summary=json.loads((root/'endpoint-removal/pre-delete-plan-summary.json').read_text())
+work=json.loads((root/'endpoint-removal/pre-delete-work-history.json').read_text())
+identities=json.loads((root/'environment/fabric-identities.json').read_text())
+inventory={}
+for line in (root/'environment/inventory.tsv').read_text().splitlines():
+    role,domain,address,mac,guest_uuid=line.split('\t')
+    inventory[role[-1]]={'domain':domain,'guest_uuid':guest_uuid,'management_ip':address,'management_mac':mac}
+hosts={}
+for host in 'abc':
+    baseline=(root/f'environment/baseline-compute-{host}.txt').read_text()
+    values={line.split('=',1)[0]:line.split('=',1)[1] for line in baseline.splitlines()
+            if '=' in line and line.split('=',1)[0] in {'boot_id','kernel','os'}}
+    ready=json.loads((root/f'management/compute-{host}-ready.json').read_text())
+    latest=work['latest'][f'host-{host}']
+    provider=next(item for item in identities if item['host_id']==f'host-{host}')
+    assert ready.get('agent_id')==f'compute-agent-{host}' and ready.get('agent_epoch'), ready
+    assert latest.get('target_agent_id')==f'network-agent-{host}' and latest.get('target_agent_epoch'), latest
+    assert values.get('boot_id') and values.get('kernel'), values
+    hosts[f'host-{host}']={
+        **inventory[host], 'kernel':values['kernel'],'boot_id':values['boot_id'],
+        'compute_agent_id':ready['agent_id'],'compute_agent_epoch':ready['agent_epoch'],
+        'network_agent_id':latest['target_agent_id'],'network_agent_epoch':latest['target_agent_epoch'],
+        'stable_host_id':provider['host_id'],'fabric_generation':provider['fabric_generation'],
+        'local_fabric_generation':summary['hosts'][host]['local_fabric_generation']}
+assert len({value['guest_uuid'] for value in hosts.values()})==3, hosts
+assert len({value['management_ip'] for value in hosts.values()})==3, hosts
+assert len({value['boot_id'] for value in hosts.values()})==3, hosts
+assert len({value['compute_agent_id'] for value in hosts.values()})==3, hosts
+assert len({value['network_agent_id'] for value in hosts.values()})==3, hosts
+assert len({value['stable_host_id'] for value in hosts.values()})==3, hosts
+assert all(value['compute_agent_epoch'] and value['network_agent_epoch'] for value in hosts.values()), hosts
+manifest.update({'database_backend':'sqlite','controller':{'identity':controller_id,'epoch':controller_epoch},
+    'fabric_domain_id':fabric_domain_id,'realm_id':summary['realm_id'],
+    'vni':summary['hosts']['a']['vni'],'realm_generation':summary['realm_generation'],
+    'hosts':hosts})
+manifest_path.write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n')
 PY
 python3 - "$EVIDENCE/endpoint-removal/host-c-ownership-before.json" "$realm_id" "${PORT_IDS[2]}" <<'PY' >"$EVIDENCE/endpoint-removal/c-owned-objects.json" \
   || fail "C endpoint or local Realm ownership missing before removal" "OWNERSHIP_DEFECT"
@@ -1565,108 +2425,133 @@ print()
 PY
 ssh_vm "${MGMT_IP[c]}" 'sudo nft list ruleset' >"$EVIDENCE/endpoint-removal/c-nft-before.txt" \
   || fail "C anti-spoof pre-removal state unavailable" "ENVIRONMENT_GAP"
-curl --fail --silent --show-error --max-time 60 -X DELETE "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" >"$EVIDENCE/endpoint-removal/server-c-delete.txt" || fail "supported server C deletion failed" "CLEANUP_DEFECT"
+delete_started_at="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+printf '%s\n' "$delete_started_at" >"$EVIDENCE/c-delete/operation/request-started-at-utc.txt"
+if delete_status="$(curl --silent --show-error --max-time 60 -D "$EVIDENCE/c-delete/operation/response-headers.txt" \
+    -o "$EVIDENCE/c-delete/operation/response-body.txt" -w '%{http_code}' -X DELETE \
+    "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" \
+    2>"$EVIDENCE/c-delete/operation/curl.stderr")"; then
+  delete_curl_exit=0
+else
+  delete_curl_exit=$?
+  delete_status="${delete_status:-000}"
+fi
+printf '%s\n' "$delete_status" >"$EVIDENCE/c-delete/operation/http-status.txt"
+printf '{"command_class":"supported_compute_server_delete","observer_type":"api_observation","resource_class":"compute_server","http_status":"%s","exit_code":%s}\n' \
+  "$delete_status" "${delete_curl_exit:-1}" >"$EVIDENCE/c-delete/operation/command.json"
+[[ "$delete_curl_exit" == 0 ]] \
+  || fail "supported C deletion transport failed (HTTP $delete_status; see c-delete/operation/response-body.txt and command.json)" "CLEANUP_DEFECT"
+[[ "$delete_status" == 204 ]] || fail "supported server C deletion returned HTTP $delete_status" "CLEANUP_DEFECT"
+if python3 "$ROOT_DIR/tests/fabric-v3-delete-operation-evidence.py" \
+  "$EVIDENCE/controller-data/o3k.sqlite" "${SERVER_IDS[2]}" "$delete_started_at" "$delete_status" \
+  "$EVIDENCE/c-delete/operation/audit-terminal-state.json"; then
+  :
+else
+  evidence_status=$?
+  if [[ "$evidence_status" == 2 ]]; then
+    fail "supported C deletion evidence source could not be read safely" "HARNESS_GAP"
+  fi
+  fail "supported C deletion lacks successful durable lifecycle and audit records" "CLEANUP_DEFECT"
+fi
+cp "$EVIDENCE/c-delete/operation/audit-terminal-state.json" "$EVIDENCE/endpoint-removal/server-c-delete.txt"
 printf 'observed_at_utc,state,revision,command_id\n' >"$EVIDENCE/endpoint-removal/c-remove-work-row-observations.csv"
-printf 'attempt,server_absent,ownership_and_plans_converged\n' >"$EVIDENCE/endpoint-removal/convergence-attempts.csv"
+printf 'attempt,server_absent,c_remove_found,c_remove_state\n' >"$EVIDENCE/endpoint-removal/convergence-attempts.csv"
 converged=0
 for attempt in $(seq 1 120); do
   server_absent=0
   server_status="$(curl --silent --show-error --max-time 10 -o "$EVIDENCE/endpoint-removal/server-c-final.json" \
       -w '%{http_code}' "$BASE/v2.1/$PROJECT_ID/servers/${SERVER_IDS[2]}" -H "x-auth-token: $TOKEN" || true)"
   [[ "$server_status" == 404 ]] && server_absent=1
-  port_status="$(curl --silent --show-error --max-time 10 -o "$EVIDENCE/endpoint-removal/port-c-current.json" \
-      -w '%{http_code}' "$BASE/v2.0/ports/${PORT_IDS[2]}" -H "x-auth-token: $TOKEN" || true)"
-  durable_state="$(capture_c_remove_work_row "$realm_id")"
-  if [[ "$port_status" == 200 && "$(python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); print(x.get("found",False))' "$EVIDENCE/endpoint-removal/c-remove-work-row.json")" == True ]]; then
+  durable_state="$(capture_c_remove_work_row "$realm_id")" \
+    || fail "read_c_remove_durable_work_history failed" "HARNESS_GAP"
+  remove_found="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("found",False))' "$EVIDENCE/endpoint-removal/c-remove-work-row.json")"
+  if [[ "$remove_found" == True ]]; then
     printf '%s,%s,%s,%s\n' "$(date -u +%FT%TZ)" "$durable_state" \
       "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("revision",""))' "$EVIDENCE/endpoint-removal/c-remove-work-row.json")" \
       "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("command_id",""))' "$EVIDENCE/endpoint-removal/c-remove-work-row.json")" \
       >>"$EVIDENCE/endpoint-removal/c-remove-work-row-observations.csv"
   fi
-  state_ready=1
-  for host in a b c; do
-    address="${MGMT_IP[$host]}"
-    if ! ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" \
-        >"$EVIDENCE/endpoint-removal/host-$host-ownership.json.tmp" 2>>"$EVIDENCE/endpoint-removal/state-read-errors.txt"; then
-      state_ready=0
-    else
-      mv "$EVIDENCE/endpoint-removal/host-$host-ownership.json.tmp" "$EVIDENCE/endpoint-removal/host-$host-ownership.json"
-    fi
-  done
-  plans_ready=0
-  if (( state_ready )); then
-    realm_a="$(python3 - "$EVIDENCE/endpoint-removal/host-a-ownership.json" "${PORT_IDS[0]}" <<'PY' 2>/dev/null || true
-import json,sys
-x=json.load(open(sys.argv[1])); matches=[rid for rid,r in x.get('realms',{}).items() if sys.argv[2] in r.get('endpoint_taps',{})]
-assert len(matches)==1
-print(matches[0])
-PY
-)"
-    realm_b="$(python3 - "$EVIDENCE/endpoint-removal/host-b-ownership.json" "${PORT_IDS[1]}" <<'PY' 2>/dev/null || true
-import json,sys
-x=json.load(open(sys.argv[1])); matches=[rid for rid,r in x.get('realms',{}).items() if sys.argv[2] in r.get('endpoint_taps',{})]
-assert len(matches)==1
-print(matches[0])
-PY
-)"
-    if [[ -n "$realm_a" && -n "$realm_b" ]] \
-      && ssh_vm "${MGMT_IP[a]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_a.json" \
-          >"$EVIDENCE/endpoint-removal/host-a-fabric-plan.json.tmp" 2>>"$EVIDENCE/endpoint-removal/state-read-errors.txt" \
-      && ssh_vm "${MGMT_IP[b]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_b.json" \
-          >"$EVIDENCE/endpoint-removal/host-b-fabric-plan.json.tmp" 2>>"$EVIDENCE/endpoint-removal/state-read-errors.txt"; then
-      mv "$EVIDENCE/endpoint-removal/host-a-fabric-plan.json.tmp" "$EVIDENCE/endpoint-removal/host-a-fabric-plan.json"
-      mv "$EVIDENCE/endpoint-removal/host-b-fabric-plan.json.tmp" "$EVIDENCE/endpoint-removal/host-b-fabric-plan.json"
-      if python3 - "$EVIDENCE/endpoint-removal" "${PORT_IDS[0]}" "${PORT_IDS[1]}" "${PORT_IDS[2]}" <<'PY'
-import json,pathlib,sys
-root=pathlib.Path(sys.argv[1]); a,b,c=sys.argv[2:]
-for host in ('a','b','c'):
-    state=json.loads((root/f'host-{host}-ownership.json').read_text())
-    assert all(c not in realm.get('endpoint_taps',{}) for realm in state.get('realms',{}).values()), host
-for host,endpoint in (('a',a),('b',b)):
-    state=json.loads((root/f'host-{host}-ownership.json').read_text())
-    matches=[realm for realm in state.get('realms',{}).values() if endpoint in realm.get('endpoint_taps',{})]
-    assert len(matches)==1, (host,endpoint)
-    plan=json.loads((root/f'host-{host}-fabric-plan.json').read_text())
-    participants={entry['selected_host'] for entry in plan.get('directory',{}).get('entries',[])}
-    assert participants=={'host-a','host-b'}, (host,participants)
-PY
-      then plans_ready=1; fi
-    fi
-  fi
-  printf '%s,%s,%s\n' "$attempt" "$server_absent" "$plans_ready" >>"$EVIDENCE/endpoint-removal/convergence-attempts.csv"
-  if (( server_absent && plans_ready )); then converged=1; break; fi
+  printf '%s,%s,%s,%s\n' "$attempt" "$server_absent" "$remove_found" "$durable_state" \
+    >>"$EVIDENCE/endpoint-removal/convergence-attempts.csv"
+  if (( server_absent )) && [[ "$remove_found" == True && "$durable_state" == succeeded ]]; then converged=1; break; fi
   sleep 1
 done
-(( converged )) || fail "C deletion did not converge to A/B-only Fabric ownership within 120 seconds" "CLEANUP_DEFECT"
+if (( ! converged )); then
+  remove_found="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("found",False))' "$EVIDENCE/endpoint-removal/c-remove-work-row.json" 2>/dev/null || echo false)"
+  if [[ "$remove_found" != True ]]; then
+    fail "C server deletion reached terminal absence without a durable C Remove obligation" "DURABLE_RETIREMENT_DEFECT"
+  fi
+  remove_state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("state",""))' "$EVIDENCE/endpoint-removal/c-remove-work-row.json")"
+  if [[ "$remove_state" != succeeded ]]; then
+    fail "C Remove did not reach successful observed completion on network-agent-c within 120 seconds (state=$remove_state)" "REMOVE_DISPATCH_DEFECT"
+  fi
+  fail "server C deletion did not reach API absence within 120 seconds" "CLEANUP_DEFECT"
+fi
+cp "$EVIDENCE/endpoint-removal/c-remove-work-row.json" "$EVIDENCE/c-delete/remove-command/c-remove-command.json"
+python3 - "$EVIDENCE/endpoint-removal/pre-delete-work-history.json" \
+  "$EVIDENCE/endpoint-removal/c-remove-work-row.json" \
+  "$EVIDENCE/c-delete/retirement-obligation/c-durable-obligation.json" <<'PY' \
+  || fail "durable C retirement obligation does not follow C's latest successful Apply" "DURABLE_RETIREMENT_DEFECT"
+import json,pathlib,sys
+before=json.load(open(sys.argv[1])); remove=json.load(open(sys.argv[2])); prior=before['c_prior_apply']
+assert prior['action']=='Apply' and prior['state']=='succeeded', prior
+assert remove.get('found') and remove.get('action')=='Remove' and remove.get('state')=='succeeded', remove
+assert remove.get('target_host_id')=='host-c' and remove.get('target_agent_id')=='network-agent-c', remove
+assert remove.get('local_host')=='host-c', remove
+assert int(remove['insertion_order'])>int(prior['insertion_order']), (prior,remove)
+assert remove.get('target_agent_epoch') and remove.get('operation_id') and remove.get('idempotency_key'), remove
+assert remove.get('realm_generation') is not None, remove
+pathlib.Path(sys.argv[3]).write_text(json.dumps({'latest_c_apply':prior,
+    'durable_retirement_obligation_detected':True,'c_remove':remove,
+    'ordering':'C Apply history precedes durable C Remove'},sort_keys=True,indent=2)+'\n')
+PY
 api "$BASE/v2.0/ports/${PORT_IDS[2]}" >"$EVIDENCE/endpoint-removal/port-c-after.json" \
-  || fail "C port tombstone unavailable after server deletion" "CLEANUP_DEFECT"
+  || fail "C port tombstone unavailable after server deletion" "PORT_STATUS_DEFECT"
+cp "$EVIDENCE/endpoint-removal/port-c-after.json" "$EVIDENCE/c-delete/port/api-after.json"
 python3 - "$EVIDENCE/endpoint-removal/port-c-after.json" <<'PY' \
-  || fail "C port did not reach an unbound DOWN tombstone" "CLEANUP_DEFECT"
+  || fail "C port did not reach an unbound DOWN tombstone" "PORT_STATUS_DEFECT"
 import json,sys
 obj=json.load(open(sys.argv[1])); port=obj.get('port',obj)
 assert port.get('status')=='DOWN', port
 assert not port.get('device_id'), port
+assert not port.get('binding:host_id'), port
 PY
-capture_c_remove_work_row "$realm_id" >"$EVIDENCE/endpoint-removal/c-remove-work-row-final-state.txt"
+if python3 "$ROOT_DIR/tests/fabric-v3-port-detach-evidence.py" \
+  "$EVIDENCE/controller-data/o3k.sqlite" "${PORT_IDS[2]}" \
+  "$EVIDENCE/c-delete/port/durable-after.json"; then
+  :
+else
+  durable_port_status=$?
+  if (( durable_port_status == 1 )); then
+    fail "C port durable binding tombstone is not unbound DOWN" "PORT_STATUS_DEFECT"
+  fi
+  fail "C port durable binding observation unavailable" "HARNESS_GAP"
+fi
+capture_c_remove_work_row "$realm_id" >"$EVIDENCE/endpoint-removal/c-remove-work-row-final-state.txt" \
+  || fail "final C Remove durable work read failed" "HARNESS_GAP"
 ssh_vm "${MGMT_IP[c]}" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json" \
   >"$EVIDENCE/endpoint-removal/host-c-command-journal.json" \
-  || fail "C Remove command journal unavailable" "CLEANUP_DEFECT"
+  || fail "C Remove command journal unavailable" "REMOVE_DISPATCH_DEFECT"
+cp "$EVIDENCE/endpoint-removal/host-c-command-journal.json" "$EVIDENCE/c-delete/agent-journal/network-agent-c.json"
 ssh_vm "${MGMT_IP[c]}" "sudo tail -n 500 /var/lib/o3k-fabric-v3/$RUN_ID/network/agent.log" \
   >"$EVIDENCE/endpoint-removal/host-c-network-agent.log" \
-  || fail "C network-agent removal log unavailable" "CLEANUP_DEFECT"
+  || fail "C network-agent removal log unavailable" "REMOVE_DISPATCH_DEFECT"
+cp "$EVIDENCE/endpoint-removal/host-c-network-agent.log" "$EVIDENCE/c-delete/agent-journal/network-agent-c.log"
 python3 - "$EVIDENCE/endpoint-removal/c-remove-work-row.json" \
   "$EVIDENCE/endpoint-removal/host-c-command-journal.json" "$realm_id" <<'PY' \
-  || fail "C Remove was not durably dispatched, admitted, and observed successful" "CLEANUP_DEFECT"
+  || fail "C Remove was not durably dispatched, admitted, and observed successful" "REMOVE_DISPATCH_DEFECT"
 import json,sys
 row_path,journal_path,realm=sys.argv[1:]
 row=json.load(open(row_path)); assert row.get('found') and row.get('state')=='succeeded', row
 assert row.get('target_host_id')=='host-c' and row.get('target_agent_id')=='network-agent-c', row
 assert row.get('action')=='Remove' and row.get('realm_id')==realm, row
+assert row.get('local_host')=='host-c', row
 journal=json.load(open(journal_path))
 matches=[p for p in journal.get('plans',[]) if p.get('action')=='Remove' and p.get('plan',{}).get('fabric',{}).get('realm_id')==realm]
 assert matches, 'executor journal has no C Remove'
 command=matches[-1]
 assert command.get('target',{}).get('agent_id')=='network-agent-c', command
+assert command.get('plan',{}).get('fabric',{}).get('local_host')=='host-c', command
 assert command.get('status')=='Succeeded', command
 assert command.get('command_id')==row.get('command_id'), (command,row)
 print(json.dumps({k:command.get(k) for k in ('command_id','operation_id','action','target','status')},sort_keys=True,indent=2))
@@ -1722,51 +2607,8 @@ ssh_vm "${MGMT_IP[c]}" 'sudo nft list ruleset' >"$EVIDENCE/endpoint-removal/c-nf
 if grep -Fqi "${TENANT_MAC[c]}" "$EVIDENCE/endpoint-removal/c-nft-after.txt"; then
   fail "C endpoint anti-spoof state remains after Remove" "CLEANUP_DEFECT"
 fi
-for host in a b c; do
-  address="${MGMT_IP[$host]}"
-  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" \
-    >"$EVIDENCE/endpoint-removal/host-$host-ownership.json" \
-    || fail "post-C-removal ownership unavailable on $host" "OWNERSHIP_DEFECT"
-done
-for host in a b; do
-  address="${MGMT_IP[$host]}"
-  ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/executor/accepted-network-plans.json" \
-    >"$EVIDENCE/endpoint-removal/host-$host-command-journal.json" \
-    || fail "post-removal Apply journal unavailable on $host" "CLEANUP_DEFECT"
-  vxlan_interface="$(python3 - "$EVIDENCE/endpoint-removal/host-$host-ownership.json" "$realm_id" <<'PY'
-import json,sys
-print(json.load(open(sys.argv[1]))['realms'][sys.argv[2]]['vxlan']['interface'])
-PY
-)"
-  ssh_vm "$address" "sudo ip netns exec o3k-fabric bridge fdb show dev '$vxlan_interface'" \
-    >"$EVIDENCE/endpoint-removal/host-$host-her-fdb.txt" \
-    || fail "post-removal HER FDB unavailable on $host" "ENVIRONMENT_GAP"
-done
-python3 - "$EVIDENCE/endpoint-removal" "$realm_id" "${PORT_IDS[2]}" <<'PY' \
-  || fail "C local state or A/B participant/HER convergence is invalid" "CLEANUP_DEFECT"
-import json,pathlib,sys
-root=pathlib.Path(sys.argv[1]); realm=sys.argv[2]; endpoint=sys.argv[3]
-for host in ('a','b','c'):
-    state=json.loads((root/f'host-{host}-ownership.json').read_text())
-    assert all(endpoint not in r.get('endpoint_taps',{}) and endpoint not in r.get('pending_endpoint_taps',{}) for r in state.get('realms',{}).values()), host
-assert realm not in json.loads((root/'host-c-ownership.json').read_text()).get('realms',{}), 'C keeps a local Realm realization'
-for host,peer in (('a','100.64.3.2'),('b','100.64.3.1')):
-    state=json.loads((root/f'host-{host}-ownership.json').read_text()); fabric=state['realms'][realm]
-    peers=fabric['vxlan']['flood_peers']; assert peers==[peer], (host,peers)
-    plan=json.loads((root/f'host-{host}-fabric-plan.json').read_text())
-    entries=plan.get('directory',{}).get('entries',[])
-    assert {e['selected_host'] for e in entries}=={'host-a','host-b'}, (host,entries)
-    before=json.loads((root/f'host-{host}-plan-before.json').read_text())
-    assert int(plan['directory_generation'])>int(before['directory_generation']), (host,before,plan)
-    fdb=(root/f'host-{host}-her-fdb.txt').read_text().splitlines()
-    destinations={line.split('dst ',1)[1].split()[0] for line in fdb if line.startswith('00:00:00:00:00:00 ') and ' dst ' in line}
-    assert destinations=={peer}, (host,destinations,fdb)
-    journal=json.loads((root/f'host-{host}-command-journal.json').read_text())
-    apply=[p for p in journal.get('plans',[]) if p.get('action')=='Apply' and p.get('plan',{}).get('fabric',{}).get('realm_id')==realm and p.get('target',{}).get('agent_id')==f'network-agent-{host}']
-    assert apply and apply[-1].get('status')=='Succeeded', (host,apply[-1] if apply else None)
-PY
-guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" endpoint-removal/a-to-b.txt || fail "A/B failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
-guest_control_command b "ping -c 1 -W 4 ${TENANT_IP[a]}" endpoint-removal/b-to-a.txt || fail "B/A failed after C removal" "$(guest_failure_class DATAPLANE_DEFECT)"
+source "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh"
+run_retirement_microgate "$REALM_ID"
 
 # Supported API teardown; provider state is never manually repaired/deleted.
 python3 - "$EVIDENCE/endpoint-removal" "$EVIDENCE/teardown/run-owned-provider-objects.json" "$REALM_ID" <<'PY' \
@@ -1826,6 +2668,41 @@ for id in "${PORT_IDS[@]}"; do curl --fail --silent --show-error --max-time 30 -
 curl --fail --silent --show-error --max-time 30 -X DELETE "$BASE/v2.0/subnets/$SUBNET_ID" -H "x-auth-token: $TOKEN" >"$EVIDENCE/teardown/subnet-delete.txt" || fail "supported subnet delete failed" "CLEANUP_DEFECT"
 curl --fail --silent --show-error --max-time 30 -X DELETE "$BASE/v2.0/networks/$NETWORK_ID" -H "x-auth-token: $TOKEN" >"$EVIDENCE/teardown/network-delete.txt" || fail "supported network delete failed" "CLEANUP_DEFECT"
 curl --fail --silent --show-error --max-time 30 -X DELETE "$BASE/v2/images/$IMAGE_ID" -H "x-auth-token: $TOKEN" >"$EVIDENCE/teardown/image-delete.txt" || fail "supported image delete failed" "CLEANUP_DEFECT"
+verify_api_resource_absent() {
+  local label="$1" path="$2" status attempt output="$EVIDENCE/teardown/api-absence-$1.txt"
+  for attempt in $(seq 1 60); do
+    if ! status="$(curl --silent --show-error --max-time 20 -o "$output.body" -w '%{http_code}' \
+      "$BASE$path" -H "x-auth-token: $TOKEN")"; then
+      fail "could not observe supported API absence for $label" "CLEANUP_DEFECT"
+    fi
+    printf '%s\t%s\n' "$attempt" "$status" >>"$output"
+    if [[ "$status" == 404 ]]; then
+      printf 'PASS\n' >>"$output"
+      rm -f -- "$output.body"
+      return 0
+    fi
+    [[ "$status" == 200 ]] \
+      || fail "unexpected HTTP $status while proving API absence for $label" "CLEANUP_DEFECT"
+    sleep 2
+  done
+  fail "run-owned API resource remains after supported teardown: $label" "CLEANUP_DEFECT"
+}
+: >"$EVIDENCE/teardown/api-resource-absence.txt"
+for id in "${SERVER_IDS[@]}"; do
+  verify_api_resource_absent "server-$id" "/v2.1/$PROJECT_ID/servers/$id"
+  printf 'server\t%s\tabsent\n' "$id" >>"$EVIDENCE/teardown/api-resource-absence.txt"
+done
+for id in "${PORT_IDS[@]}"; do
+  verify_api_resource_absent "port-$id" "/v2.0/ports/$id"
+  printf 'port\t%s\tabsent\n' "$id" >>"$EVIDENCE/teardown/api-resource-absence.txt"
+done
+verify_api_resource_absent "subnet-$SUBNET_ID" "/v2.0/subnets/$SUBNET_ID"
+printf 'subnet\t%s\tabsent\n' "$SUBNET_ID" >>"$EVIDENCE/teardown/api-resource-absence.txt"
+verify_api_resource_absent "network-$NETWORK_ID" "/v2.0/networks/$NETWORK_ID"
+printf 'network\t%s\tabsent\n' "$NETWORK_ID" >>"$EVIDENCE/teardown/api-resource-absence.txt"
+verify_api_resource_absent "image-$IMAGE_ID" "/v2/images/$IMAGE_ID"
+printf 'image\t%s\tabsent\n' "$IMAGE_ID" >>"$EVIDENCE/teardown/api-resource-absence.txt"
+API_TEARDOWN_VERIFIED=1
 for host in a b c; do
   address="${MGMT_IP[$host]}"
   ssh_vm "$address" 'sudo virsh -c qemu:///system list --all --name' >"$EVIDENCE/teardown/host-$host-domains.txt"
@@ -1836,19 +2713,45 @@ for host in a b c; do
     fi
   done
   ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json 2>/dev/null || true" >"$EVIDENCE/teardown/host-$host-ownership.json"
-  ssh_vm "$address" "sudo find /var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp -maxdepth 3 -type f -print 2>/dev/null | sort" \
-    >"$EVIDENCE/teardown/host-$host-dhcp-files.txt"
-  ssh_vm "$address" "sudo find /var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp -name state.json -type f -print -exec cat {} \; 2>/dev/null" \
-    >"$EVIDENCE/teardown/host-$host-dhcp-state.txt"
-  ssh_vm "$address" "sudo find /var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp -name fabric-dhcp-ownership.json -type f -print -exec cat {} \; 2>/dev/null" \
-    >"$EVIDENCE/teardown/host-$host-dhcp-ownership.txt"
-  ssh_vm "$address" 'sudo pgrep -a dnsmasq || true' >"$EVIDENCE/teardown/host-$host-dnsmasq-processes.txt"
+  dhcp_root="/var/lib/o3k-fabric-v3/$RUN_ID/network/dhcp"
+  ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 3 -printf '%y\\t%p\\t%s\\n' 2>/dev/null || sudo test ! -e '$dhcp_root'" \
+    >"$EVIDENCE/teardown/host-$host-dhcp-files.txt" \
+    || fail "could not capture run-owned DHCP filesystem inventory on host-$host" "ENVIRONMENT_GAP"
+  ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 3 -name state.json -type f -print -exec cat {} \; 2>/dev/null || sudo test ! -e '$dhcp_root'" \
+    >"$EVIDENCE/teardown/host-$host-dhcp-state.txt" \
+    || fail "could not capture DHCP service state on host-$host" "ENVIRONMENT_GAP"
+  ssh_vm "$address" "sudo find '$dhcp_root' -maxdepth 3 -name fabric-dhcp-ownership.json -type f -print -exec cat {} \; 2>/dev/null || sudo test ! -e '$dhcp_root'" \
+    >"$EVIDENCE/teardown/host-$host-dhcp-ownership.txt" \
+    || fail "could not capture DHCP ownership tombstone on host-$host" "ENVIRONMENT_GAP"
+  if ! ssh_vm "$address" "sudo -n true || exit 125; if sudo -n pgrep -a dnsmasq; then exit 0; else status=\$?; if [ \"\$status\" -eq 1 ]; then exit 0; else exit \"\$status\"; fi; fi" \
+    >"$EVIDENCE/teardown/host-$host-dnsmasq-processes.txt"; then
+    fail "could not observe dnsmasq process state on host-$host" "ENVIRONMENT_GAP"
+  fi
+  if ! ssh_vm "$address" "sudo python3 - '$RUN_ID' '$realm_id'" \
+    >"$EVIDENCE/teardown/host-$host-dhcp-rendered-files.json" <<'PYDHCPFILES'
+import json,pathlib,sys
+run,realm=sys.argv[1:]
+root=pathlib.Path('/var/lib/o3k-fabric-v3')/run/'network/dhcp/fabric'/realm
+result={}
+for name in ('dnsmasq.conf','dnsmasq.leases'):
+    path=root/name
+    if path.is_symlink():
+        result[name]={'symlink':True}
+    elif path.is_file():
+        result[name]=path.read_text()
+    else:
+        result[name]=None
+json.dump(result,sys.stdout,sort_keys=True); print()
+PYDHCPFILES
+  then
+    fail "could not capture rendered DHCP file state on host-$host" "ENVIRONMENT_GAP"
+  fi
   ssh_vm "$address" 'sudo ip -j -d link; sudo ip netns list; sudo bridge -j fdb; sudo nft list ruleset' \
     >"$EVIDENCE/teardown/host-$host-runtime-after.txt" \
     || fail "post-teardown provider runtime snapshot failed on host-$host" "ENVIRONMENT_GAP"
 done
 python3 - "$EVIDENCE/teardown" "$RUN_ID" "$EVIDENCE/teardown/run-owned-provider-objects.json" <<'PY' \
-  || fail "run-owned Fabric/DHCP provider state leaked after teardown" "CLEANUP_DEFECT"
+  || fail "run-owned Fabric provider state remains after teardown" "CLEANUP_DEFECT"
 import json,pathlib,re,sys
 root=pathlib.Path(sys.argv[1]); run=sys.argv[2]; expected=json.loads(pathlib.Path(sys.argv[3]).read_text())
 for path in root.glob('host-*-ownership.json'):
@@ -1860,21 +2763,110 @@ for host,record in expected.items():
     for name in record['endpoint_taps']+record['links']:
         assert not re.search(rf'(?m)^\s*\d+:\s+{re.escape(name)}(?:@|:|\s)',runtime), (host,name)
     assert record['namespace'] not in runtime, (host,record['namespace'])
-    dhcp=(root/f'host-{host}-dhcp-state.txt').read_text()
-    states=re.findall(r'(?m)^\{.*?^\}',dhcp,re.S)
-    for state in states:
-        parsed=json.loads(state)
-        assert parsed.get('config') is None and not parsed.get('bindings'), (host,parsed)
-    ownership=(root/f'host-{host}-dhcp-ownership.txt').read_text()
-    dhcp_owners=re.findall(r'(?m)^\{.*?^\}',ownership,re.S)
-    for owner in dhcp_owners:
-        parsed=json.loads(owner)
-        assert parsed.get('withdrawn') is True and parsed.get('pending') is False, (host,parsed)
-    owned=(root/f'host-{host}-dhcp-files.txt').read_text()
-    assert f'/var/lib/o3k-fabric-v3/{run}/network/dhcp/' not in owned or 'state.json' in owned, (host,owned)
     processes=(root/f'host-{host}-dnsmasq-processes.txt').read_text()
-    assert run not in processes, (host,processes)
+    assert run not in processes, (host,'run-owned dnsmasq process remains')
 PY
+for host in a b c; do
+  expected_config="-"
+  [[ "$host" != a ]] || expected_config="$EVIDENCE/attachments/dhcp-authority.conf"
+  if python3 "$ROOT_DIR/tests/fabric_v3_dhcp_teardown_evidence.py" \
+    "$RUN_ID" "$realm_id" "$host" \
+    "$EVIDENCE/teardown/host-$host-dhcp-files.txt" \
+    "$EVIDENCE/teardown/host-$host-dhcp-state.txt" \
+    "$EVIDENCE/teardown/host-$host-dhcp-ownership.txt" \
+    "$EVIDENCE/teardown/host-$host-dhcp-rendered-files.json" \
+    "$expected_config" \
+    >"$EVIDENCE/teardown/host-$host-dhcp-teardown-observation.json" \
+    2>"$EVIDENCE/teardown/host-$host-dhcp-teardown-observation.stderr"; then
+    :
+  else
+    evidence_status=$?
+    case "$evidence_status" in
+      1) fail "run-owned DHCP provider state remains after teardown on host-$host" "CLEANUP_DEFECT" ;;
+      2) fail "DHCP teardown observation is incomplete on host-$host; see host-$host-dhcp-teardown-observation.stderr" "HARNESS_GAP" ;;
+      *) fail "DHCP teardown validator exited unexpectedly ($evidence_status) on host-$host" "HARNESS_GAP" ;;
+    esac
+  fi
+done
+date -u +%FT%TZ >"$EVIDENCE/teardown/provider-absence-observed-at.txt"
+python3 - "$EVIDENCE/controller-data/o3k.sqlite" "$realm_id" "$NETWORK_ID" \
+  "$EVIDENCE/teardown/provider-absence-observed-at.txt" \
+  "$EVIDENCE/teardown/final-durable-state.json" <<'PY' \
+  || fail "canonical Realm/VNI/work teardown did not converge after provider absence" "CLEANUP_DEFECT"
+import json,pathlib,sqlite3,sys
+database,realm_id,network_id,absence_path,output=sys.argv[1:]
+db=sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3)
+db.row_factory=sqlite3.Row
+def rows(sql,*args): return [dict(row) for row in db.execute(sql,args).fetchall()]
+realms=rows("SELECT id,network_id,state,generation FROM canonical_address_realms WHERE id=?",realm_id)
+endpoints=rows("SELECT id,realm_id,state FROM canonical_endpoints WHERE realm_id=? ORDER BY id",realm_id)
+pools=rows("SELECT id,realm_id,state FROM canonical_address_pools WHERE realm_id=? ORDER BY id",realm_id)
+bindings=rows("SELECT fabric_domain_id,realm_id,provider_kind,provider_segment_id,binding_generation,state FROM canonical_realm_encapsulation_bindings WHERE realm_id=? ORDER BY fabric_domain_id",realm_id)
+network=rows("SELECT id,state,generation FROM canonical_networks WHERE id=?",network_id)
+work=[]
+for row in db.execute("SELECT rowid AS insertion_order,command_id,target_host_id,target_agent_id,target_agent_epoch,state,revision,outcome,snapshot,created_at,updated_at FROM network_plan_work ORDER BY rowid"):
+    command=json.loads(bytes(row['snapshot']))
+    fabric=(command.get('plan') or {}).get('fabric') or {}
+    if fabric.get('realm_id')!=realm_id: continue
+    outcome=bytes(row['outcome']).decode('utf-8',errors='replace') if row['outcome'] is not None else None
+    work.append({'insertion_order':row['insertion_order'],'command_id':row['command_id'],
+        'target_host_id':row['target_host_id'],'target_agent_id':row['target_agent_id'],
+        'target_agent_epoch':row['target_agent_epoch'],'action':command.get('action'),
+        'local_host':fabric.get('local_host'),'state':row['state'],'revision':row['revision'],
+        'outcome':outcome,'created_at':row['created_at'],'updated_at':row['updated_at']})
+unresolved=[row for row in work if row['state'].lower() not in {'succeeded','failed'}]
+latest={}
+for host in ('host-a','host-b','host-c'):
+    matches=[row for row in work if row['target_host_id']==host]
+    latest[host]=max(matches,key=lambda row:row['insertion_order']) if matches else None
+result={'database_backend':'sqlite','provider_absence_observed_at':pathlib.Path(absence_path).read_text().strip(),
+    'realm_id':realm_id,'network_id':network_id,'canonical_realm_rows':realms,
+    'canonical_endpoint_rows':endpoints,'canonical_pool_rows':pools,
+    'canonical_network_rows':network,'encapsulation_bindings':bindings,
+    'network_plan_work':work,'unresolved_network_plan_work':unresolved,
+    'latest_remove_by_host':latest,'vni_binding_released_after_provider_absence':not bindings}
+pathlib.Path(output).write_text(json.dumps(result,sort_keys=True,indent=2)+'\n')
+assert not realms, realms
+assert not endpoints, endpoints
+assert not pools, pools
+assert not bindings, bindings
+assert not network, network
+assert not unresolved, unresolved
+for host,row in latest.items():
+    assert row is not None and row['action']=='Remove' and row['state'].lower()=='succeeded' \
+        and row['local_host']==host and row['outcome'], (host,row)
+PY
+# The provider-level SPEC-0049 matrix runs only after supported API teardown
+# proves that the O3K agent-owned realm and shared transport namespace are clean.
+# It uses a distinct provider root and run identity on these same fresh guests.
+if [[ "$CAMPAIGN_MODE" == full ]]; then
+  PROVIDER_GATE_RUN_ID="ga-$(printf '%s' "$RUN_ID" | sha256sum | cut -c1-20)"
+  mkdir -p "$EVIDENCE/provider-gate"
+  if ! env \
+      FABRIC_V3_3H_RUN_ID="$PROVIDER_GATE_RUN_ID" \
+      FABRIC_V3_3H_HELPER_BIN="$PRODUCT_SOURCE_DIR/target/release/examples/fabric-regression-3host-helper" \
+      FABRIC_V3_3H_HOST_A_IP="${MGMT_IP[a]}" \
+      FABRIC_V3_3H_HOST_B_IP="${MGMT_IP[b]}" \
+      FABRIC_V3_3H_HOST_C_IP="${MGMT_IP[c]}" \
+      FABRIC_V3_3H_KEY_A="$SSH_KEY" \
+      FABRIC_V3_3H_KEY_B="$SSH_KEY" \
+      FABRIC_V3_3H_KEY_C="$SSH_KEY" \
+      FABRIC_V3_3H_KNOWN_HOSTS_FILE="$KNOWN_HOSTS" \
+      FABRIC_V3_3H_EVIDENCE_DIR="$EVIDENCE/provider-gate" \
+      bash "$ROOT_DIR/tests/fabric-v3-three-host-gate.sh" \
+      >"$EVIDENCE/provider-gate/stdout.txt" \
+      2>"$EVIDENCE/provider-gate/stderr.txt"; then
+    provider_classification="$(sed -n 's/^FIRST FAILURE classification=\([^ ]*\).*/\1/p' \
+      "$EVIDENCE/provider-gate/stderr.txt" | tail -1)"
+    case "$provider_classification" in
+      ENVIRONMENT_GAP|HARNESS_GAP|PROVIDER_CONFORMANCE_DEFECT|CLEANUP_DEFECT|FOREIGN_STATE_DEFECT) ;;
+      *) provider_classification=HARNESS_GAP ;;
+    esac
+    fail "nested Fabric provider conformance failed; see provider-gate evidence" "$provider_classification"
+  fi
+  printf '%s\n' "$PROVIDER_GATE_RUN_ID" >"$EVIDENCE/provider-gate/run-id.txt"
+fi
+
 # Remove only the three exact fresh compute guests after proving their API
 # resources and server domains are gone. Then compare the physical libvirt
 # inventory to the pre-run inventory to detect any foreign-domain mutation.
@@ -1906,6 +2898,8 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/g
 CAMPAIGN_TEARDOWN_PASS=1
 
 cat >"$EVIDENCE/result.json" <<JSON
-{"result":"PASS","run_id":"$RUN_ID","product_sha":"$PRODUCT_SHA","product_tree":"$PRODUCT_TREE","harness_sha":"$(git -C "$ROOT_DIR" rev-parse HEAD)","fabric_domain_id":"$FABRIC_DOMAIN_ID","servers":["${SERVER_IDS[0]}","${SERVER_IDS[1]}","${SERVER_IDS[2]}"],"teardown":"PASS"}
+{"result":"PASS","acceptance_gate":"$ACCEPTANCE_GATE","run_id":"$RUN_ID","product_sha":"$PRODUCT_SHA","product_tree":"$PRODUCT_TREE","harness_sha":"$(git -C "$ROOT_DIR" rev-parse HEAD)","fabric_domain_id":"$FABRIC_DOMAIN_ID","servers":["${SERVER_IDS[0]}","${SERVER_IDS[1]}","${SERVER_IDS[2]}"],"teardown":"PASS"}
 JSON
-echo "FABRIC V3 O3K MINIMAL THREE-HOST MILESTONE: PASS"
+if [[ "$CAMPAIGN_MODE" == full ]]; then
+  echo "FABRIC V3 NESTED CONFORMANCE — GATE A: PASS"
+fi
