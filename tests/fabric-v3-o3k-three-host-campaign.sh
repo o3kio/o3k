@@ -1169,6 +1169,13 @@ for host in a b c; do
     || fail "foreign FDB baseline collection failed for compute-$host" "ENVIRONMENT_GAP"
   ssh_vm "$address" 'sudo ip netns list' >"$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt" \
     || fail "foreign namespace baseline collection failed for compute-$host" "ENVIRONMENT_GAP"
+  mkdir -p "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces"
+  while IFS= read -r namespace; do
+    [[ "$namespace" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "invalid baseline namespace identity" "HARNESS_GAP"
+    ssh_vm "$address" "sudo ip netns exec '$namespace' bridge -j fdb show" \
+      >"$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces/$namespace.json" \
+      || fail "foreign namespace FDB baseline failed for $host/$namespace" "ENVIRONMENT_GAP"
+  done < <(awk '{print $1}' "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt")
   echo "compute-$host management PASS $address domain=$domain"
 done
 ssh-keygen -lf "$KNOWN_HOSTS" >"$EVIDENCE/management/known-hosts-fingerprints.txt"

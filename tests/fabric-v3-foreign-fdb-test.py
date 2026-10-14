@@ -69,6 +69,15 @@ class ForeignFdbTests(unittest.TestCase):
         non_object = self.write("rows.json", json.dumps(["bad"]))
         with self.assertRaises(ValueError):
             foreign_fdb.compare(non_object, valid, set())
+        for content in ("null", "{}"):
+            non_list = self.write("non-list.json", content)
+            with self.assertRaises(ValueError):
+                foreign_fdb.compare(non_list, valid, set())
+
+    def test_json_set_like_fields_are_order_insensitive(self):
+        before = self.write("flags-before.json", json.dumps([{"dev": "eth0", "flags": ["self", "permanent"]}]))
+        after = self.write("flags-after.json", json.dumps([{"flags": ["permanent", "self"], "dev": "eth0"}]))
+        foreign_fdb.compare(before, after, set())
 
     def test_namespace_only_cli_invocation_succeeds(self):
         before = self.write("cli-before", "foreign\nrun\n")
@@ -79,6 +88,10 @@ class ForeignFdbTests(unittest.TestCase):
              "--owned-namespace", "run"], check=False,
         )
         self.assertEqual(result.returncode, 0)
+
+    def test_cli_without_comparison_fails_closed(self):
+        result = subprocess.run(["python3", str(Path(__file__).with_name("fabric-v3-foreign-fdb.py"))], check=False)
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

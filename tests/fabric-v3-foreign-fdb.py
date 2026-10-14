@@ -9,20 +9,31 @@ from pathlib import Path
 
 def normalized(path: Path, excluded: set[str]) -> list[str]:
     text = path.read_text()
+    parsed_json = False
     try:
         payload = json.loads(text)
+        parsed_json = True
     except json.JSONDecodeError as error:
         if path.suffix == ".json":
             raise ValueError(f"malformed JSON observation: {path}") from error
         payload = None
-    if isinstance(payload, list):
+    if parsed_json:
+        if not isinstance(payload, list):
+            raise ValueError(f"FDB observation is not a JSON list: {path}")
+        def canonical(value):
+            if isinstance(value, dict):
+                return {key: canonical(item) for key, item in sorted(value.items())}
+            if isinstance(value, list):
+                values = [canonical(item) for item in value]
+                return sorted(values, key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+            return value
         rows = []
         for row in payload:
             if not isinstance(row, dict):
                 raise ValueError(f"non-object FDB row: {path}")
             if row.get("ifname") in excluded or row.get("dev") in excluded:
                 continue
-            rows.append(json.dumps(row, sort_keys=True, separators=(",", ":")))
+            rows.append(json.dumps(canonical(row), sort_keys=True, separators=(",", ":")))
         return sorted(rows)
     rows = [" ".join(line.split()) for line in text.splitlines() if line.strip()]
     rows = [line for line in rows if not any(f" dev {device} " in f" {line} " for device in excluded)]
@@ -67,6 +78,8 @@ def main() -> int:
             raise ValueError("both namespace observations are required")
         if args.before_namespaces:
             compare_namespaces(args.before_namespaces, args.after_namespaces, set(args.owned_namespace))
+        if not args.before and not args.before_namespaces:
+            raise ValueError("at least one comparison is required")
     except (AssertionError, FileNotFoundError, ValueError) as error:
         print(f"foreign FDB mismatch: {error}")
         return 1

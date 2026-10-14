@@ -29,6 +29,21 @@ run_retirement_microgate() {
     ssh_vm "${MGMT_IP[$host]}" 'sudo ip netns list' \
       >"$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces.txt" \
       || fail "foreign namespace post-retirement observation failed on host-$host" "ENVIRONMENT_GAP"
+    mkdir -p "$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces"
+    while IFS= read -r namespace; do
+      [[ "$namespace" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "invalid observed namespace identity" "HARNESS_GAP"
+      awk -v expected="$namespace" '$1 == expected { found=1 } END { exit found ? 0 : 1 }' \
+        "$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces.txt" \
+        || fail "baseline namespace disappeared after retirement: $host/$namespace" "OWNERSHIP_DEFECT"
+      ssh_vm "${MGMT_IP[$host]}" "sudo ip netns exec '$namespace' bridge -j fdb show" \
+        >"$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces/$namespace.json" \
+        || fail "foreign namespace FDB observation failed for $host/$namespace" "ENVIRONMENT_GAP"
+      python3 "$ROOT_DIR/tests/fabric-v3-foreign-fdb.py" \
+        --before "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces/$namespace.json" \
+        --after "$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces/$namespace.json" \
+        >"$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces/$namespace-comparison.txt" 2>&1 \
+        || fail "foreign namespace FDB changed after retirement: $host/$namespace" "OWNERSHIP_DEFECT"
+    done < <(awk '{print $1}' "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt")
     devices=()
     while IFS= read -r device; do devices+=(--owned-device "$device"); done < <(
       python3 - "$EVIDENCE/before-departure/host-$host/ownership.json" <<'PYDEV'
@@ -50,11 +65,21 @@ PYDEV
     run_namespace="$(python3 - "$EVIDENCE/before-departure/host-$host/ownership.json" <<'PYNS'
 import json,sys
 state=json.load(open(sys.argv[1]))
-print(state.get('fabric', {}).get('namespace', ''))
+namespaces={state.get('fabric', {}).get('namespace', '')}
+for realm in state.get('realms', {}).values():
+    namespaces.add(realm.get('namespace', ''))
+    namespaces.add(realm.get('fabric_namespace', ''))
+    vxlan=realm.get('vxlan')
+    if isinstance(vxlan, dict):
+        namespaces.add(vxlan.get('namespace', ''))
+for namespace in sorted(namespace for namespace in namespaces if namespace):
+    print(namespace)
 PYNS
 )"
     namespace_args=()
-    [[ -z "$run_namespace" ]] || namespace_args+=(--owned-namespace "$run_namespace")
+    while IFS= read -r namespace; do
+      [[ -z "$namespace" ]] || namespace_args+=(--owned-namespace "$namespace")
+    done <<<"$run_namespace"
     python3 "$ROOT_DIR/tests/fabric-v3-foreign-fdb.py" \
       --before-namespaces "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt" \
       --after-namespaces "$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces.txt" \
@@ -499,6 +524,21 @@ PY
         ssh_vm "${MGMT_IP[$host]}" 'sudo ip netns list' \
           >"$EVIDENCE/restart/foreign-fdb/host-$host-namespaces.txt" \
           || fail "post-restart foreign namespace observation failed on host-$host" "ENVIRONMENT_GAP"
+        mkdir -p "$EVIDENCE/restart/foreign-fdb/host-$host-namespaces"
+        while IFS= read -r namespace; do
+          [[ "$namespace" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "invalid post-restart namespace identity" "HARNESS_GAP"
+      awk -v expected="$namespace" '$1 == expected { found=1 } END { exit found ? 0 : 1 }' \
+        "$EVIDENCE/restart/foreign-fdb/host-$host-namespaces.txt" \
+            || fail "baseline namespace disappeared after restart: $host/$namespace" "OWNERSHIP_DEFECT"
+          ssh_vm "${MGMT_IP[$host]}" "sudo ip netns exec '$namespace' bridge -j fdb show" \
+            >"$EVIDENCE/restart/foreign-fdb/host-$host-namespaces/$namespace.json" \
+            || fail "foreign namespace FDB restart observation failed for $host/$namespace" "ENVIRONMENT_GAP"
+          python3 "$ROOT_DIR/tests/fabric-v3-foreign-fdb.py" \
+            --before "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces/$namespace.json" \
+            --after "$EVIDENCE/restart/foreign-fdb/host-$host-namespaces/$namespace.json" \
+            >"$EVIDENCE/restart/foreign-fdb/host-$host-namespaces/$namespace-comparison.txt" 2>&1 \
+            || fail "foreign namespace FDB changed after controller restart: $host/$namespace" "OWNERSHIP_DEFECT"
+        done < <(awk '{print $1}' "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt")
         devices=()
         while IFS= read -r device; do devices+=(--owned-device "$device"); done < <(
           python3 - "$EVIDENCE/before-departure/host-$host/ownership.json" <<'PYDEV'
@@ -517,6 +557,19 @@ PYDEV
           "${devices[@]}" \
           >"$EVIDENCE/restart/foreign-fdb/host-$host-comparison.txt" 2>&1 \
           || fail "foreign FDB state changed after controller restart" "OWNERSHIP_DEFECT"
+        namespace_args=()
+        while IFS= read -r namespace; do
+          [[ -z "$namespace" ]] || namespace_args+=(--owned-namespace "$namespace")
+        done < <(python3 - "$EVIDENCE/before-departure/host-$host/ownership.json" <<'PYNS'
+import json,sys
+state=json.load(open(sys.argv[1])); names={state.get('fabric', {}).get('namespace', '')}
+for realm in state.get('realms', {}).values():
+    names.update((realm.get('namespace', ''), realm.get('fabric_namespace', '')))
+    vxlan=realm.get('vxlan')
+    if isinstance(vxlan, dict): names.add(vxlan.get('namespace', ''))
+for name in sorted(name for name in names if name): print(name)
+PYNS
+        )
         python3 "$ROOT_DIR/tests/fabric-v3-foreign-fdb.py" \
           --before-namespaces "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt" \
           --after-namespaces "$EVIDENCE/restart/foreign-fdb/host-$host-namespaces.txt" \
