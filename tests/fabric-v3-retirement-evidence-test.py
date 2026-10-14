@@ -74,7 +74,8 @@ class RetirementEvidenceTests(unittest.TestCase):
                 ]},
                 "peers": [{"host_id": peer}],
             })
-            self._write(f"survivor-convergence/{host}/fdb.txt", f"00:00:00:00:00:00 dst {peer_ip} self permanent\n")
+            peer_mac = "02:65:4f:e7:5f:61" if host == "host-a" else "02:65:4f:e7:5f:60"
+            self._write(f"survivor-convergence/{host}/fdb.txt", f"{peer_mac} dst {peer_ip} self permanent\n00:00:00:00:00:00 dst {peer_ip} self permanent\n")
             self._write(f"survivor-convergence/{host}/command-journal.json", {"plans": [{
                 "action": "Apply", "status": "Succeeded",
                 "plan": {"fabric": {"realm_id": "realm"}},
@@ -132,11 +133,12 @@ class RetirementEvidenceTests(unittest.TestCase):
             with self.subTest(host=host):
                 with self.assertRaises(evidence.SurvivorReconciliationDefect):
                     evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
-            path.write_text(f"00:00:00:00:00:00 dst {peer_ip} self permanent\n")
+            peer_mac = "02:65:4f:e7:5f:61" if host == "host-a" else "02:65:4f:e7:5f:60"
+            path.write_text(f"{peer_mac} dst {peer_ip} self permanent\n00:00:00:00:00:00 dst {peer_ip} self permanent\n")
 
     def test_blank_fdb_lines_are_ignored(self):
         path = self.root / "survivor-convergence/host-a/fdb.txt"
-        path.write_text("\n  \n00:00:00:00:00:00 dst 100.64.3.2 self permanent\n")
+        path.write_text("\n  \n02:65:4f:e7:5f:61 dst 100.64.3.2 self permanent\n00:00:00:00:00:00 dst 100.64.3.2 self permanent\n")
         result = evidence.validate(self.root, "realm", ["port-a", "port-b", "port-c"])
         self.assertFalse(result["stale_c_her"])
 

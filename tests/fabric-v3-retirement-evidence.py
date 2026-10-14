@@ -124,6 +124,10 @@ def validate(root: Path, realm: str, ports: list[str]) -> dict[str, Any]:
                 f"{host} survivor FDB retains learned departing host {departing_ip}: "
                 f"{learned_departing_transport}"
             )
+        expected_peer_mac = canonical[peer]
+        assert any(line.strip().lower().startswith(expected_peer_mac) for line in fdb), (
+            host, expected_peer_mac, fdb
+        )
         assert destinations == {expected_peer_ip}, (host, destinations, fdb)
 
         journal = _read(directory / f"{host}/command-journal.json")

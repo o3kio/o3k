@@ -443,7 +443,7 @@ if [[ -z "${O3K_FABRIC_V3_CONTROL_PORT:-}" ]]; then
 fi
 
 [[ ! -e "$EVIDENCE" && ! -L "$EVIDENCE" ]] || fail "evidence path already exists: $EVIDENCE" "HARNESS_GAP"
-mkdir -p "$EVIDENCE"/{environment,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown,topology/{plans,ownership,fdb,wireguard,links,nft-before,nft-after},a,b,dhcp,departure-micro,before-departure/{plans,durable-work,host-a,host-b,host-c,traffic},c-delete/{operation,port,retirement-obligation,remove-command,agent-journal},provider-absence/host-c/{ownership,links,fdb,nft},survivor-convergence/{host-a,host-b,plans,fdb,traffic},restart/{startup-recovery,durable-work,plans,traffic}}
+mkdir -p "$EVIDENCE"/{environment/foreign-fdb-before,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown,topology/{plans,ownership,fdb,wireguard,links,nft-before,nft-after},a,b,dhcp,departure-micro,before-departure/{plans,durable-work,host-a,host-b,host-c,traffic},c-delete/{operation,port,retirement-obligation,remove-command,agent-journal},provider-absence/host-c/{ownership,links,fdb,nft},survivor-convergence/{host-a,host-b,plans,fdb,traffic},restart/{startup-recovery,durable-work,plans,traffic}}
 chmod 0700 "$EVIDENCE"
 [[ ! -e "$EVIDENCE/.o3k-fabric-v3-owned" ]] || fail "evidence path collision"
 printf 'o3k-fabric-v3-campaign-v1\nrun=%s\nprefix=%s\n' "$RUN_ID" "$PREFIX" >"$EVIDENCE/.o3k-fabric-v3-owned"
@@ -1165,6 +1165,8 @@ for host in a b c; do
   # The remote $PRETTY_NAME expansion is required for guest OS identification.
   # shellcheck disable=SC2016
   ssh_vm "$address" 'printf "boot_id="; cat /proc/sys/kernel/random/boot_id; printf "kernel="; uname -r; printf "os="; . /etc/os-release; echo "$PRETTY_NAME"; ip -j link; ip -j route; bridge -j link; bridge -j fdb; (wg show || true); (sudo nft list ruleset || true); (sudo find /var/lib/o3k-fabric-v3 -maxdepth 5 -type f -print 2>/dev/null || true); sudo virsh list --all --name' >"$EVIDENCE/environment/baseline-compute-$host.txt" || fail "baseline collection failed for compute-$host" "ENVIRONMENT_GAP"
+  ssh_vm "$address" 'sudo bridge -j fdb show' >"$EVIDENCE/environment/foreign-fdb-before/host-$host.json" \
+    || fail "foreign FDB baseline collection failed for compute-$host" "ENVIRONMENT_GAP"
   echo "compute-$host management PASS $address domain=$domain"
 done
 ssh-keygen -lf "$KNOWN_HOSTS" >"$EVIDENCE/management/known-hosts-fingerprints.txt"
