@@ -127,7 +127,7 @@ class RetirementEvidenceTests(unittest.TestCase):
             peer_ip = "100.64.3.2" if host == "host-a" else "100.64.3.1"
             path.write_text(
                 f"00:00:00:00:00:00 dst {peer_ip} self permanent\n"
-                "02:65:4f:e7:5f:62 master br-fabric permanent\n"
+                "02:65:4f:e7:5f:62 dev vxlan master br-fabric permanent\n"
             )
             with self.subTest(host=host):
                 with self.assertRaises(evidence.SurvivorReconciliationDefect):
