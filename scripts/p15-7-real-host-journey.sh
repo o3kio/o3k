@@ -2556,7 +2556,7 @@ api_get /operator/diagnostics/capacity initial-capacity-diagnostics >"$WORK_ROOT
 api_get /services initial-services >"$WORK_ROOT/services.json"
 api_get /resource-types initial-resource-types >"$WORK_ROOT/resource-types.json"
 if ! python3 - "$WORK_ROOT/blocks.json" "$WORK_ROOT/providers.json" "$BOOTSTRAP_AGENT_ID" \
-  "${BLOCK_IDS[block-a]}" "$PP5_PHASE" "$ARTIFACT_DIR/pp5-lane-journey-initial-state.json" \
+  "${BLOCK_IDS[block-a]:-}" "$PP5_PHASE" "$ARTIFACT_DIR/pp5-lane-journey-initial-state.json" \
   "${O3K_PP5_LANE_PRECONDITIONS:-$ARTIFACT_DIR/pp5-lane-preconditions.json}" <<'PY'
 import json, pathlib, sys
 blocks_path, providers_path, bootstrap_id, block_a_id, phase, output, guard_path = sys.argv[1:]

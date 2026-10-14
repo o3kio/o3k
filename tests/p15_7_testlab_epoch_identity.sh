@@ -59,6 +59,10 @@ source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 assert 'for required_agent in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do' in source
 assert 'for agent_id in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do' in source
 assert 'canonical capacity/replacement identities unavailable' not in source
+assert '"${BLOCK_IDS[block-a]:-}" "$PP5_PHASE"' in source
 PY
+# S1 has no child block-a identity. With nounset enabled, the optional
+# identity passed to the common initial-state writer must still expand safely.
+[[ -z "$(bash -uc 'declare -A BLOCK_IDS=(); printf "%s" "${BLOCK_IDS[block-a]:-}"')" ]]
 
 echo "P15.7 TestLab epoch identity guards PASS"
