@@ -8,13 +8,20 @@ ADR-0186, SPEC-0049, and the real-host acceptance evidence contract. O3K Network
 remains canonical; the shared Fabric provider owns bounded Linux realization.
 There is no OpenStack adapter, database, public API, product, or authority change.
 
-The frozen product is `dc2f9ce11fecf3a1152e089e518aa1530744b00d`, tree
+The prior acceptance candidate was `dc2f9ce11fecf3a1152e089e518aa1530744b00d`, tree
 `f79da735797150d83c3dd8af1b651d5023ef0f9b`. Its production
 `SharedFabricAdapter::open` uses `<backend-root>/fabric-provider`. The gate
 incorrectly prepared keys directly under `<backend-root>`, and a regression
 asserted that incorrect location. The historical failed result stays immutable;
 it did not capture runtime keys/peers, so its exact comparison failure remains
 unobserved.
+
+The current protected-main candidate for a fresh campaign is
+`ebee6fc609c84eb2ab8a8e19af13897a8294f1dd`, tree
+`66f9997e34486e2fef972b2971737be2a6c7ee4c`. PR #1077 changed the locked
+Rustls versions only; runtime behavior is unchanged, but new evidence must
+still identify the exact protected merge commit. Historical evidence remains
+bound to the candidate recorded by its original manifest.
 
 Bounded execution scope:
 
