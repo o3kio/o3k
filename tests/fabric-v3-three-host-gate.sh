@@ -58,6 +58,10 @@ PACKET_FAILED_COMMAND_CLASS=""
 PACKET_CAPTURE_PRESERVE_STATUS=0
 PACKET_CAPTURE_FAILURE_OPERATION=""
 GATE_OPERATION=""
+GATE_OPERATION_EXIT_CODE=""
+GATE_OBSERVER_TYPE=""
+GATE_COMMAND_CLASS=""
+GATE_FAILED_HOST=""
 
 ssh_host() {
     local host="$1" ip="$2" key="$3"
@@ -68,13 +72,66 @@ ssh_host() {
 prepare_fresh_wireguard_identity() {
     local host="$1" ip="$2" key="$3"
     ssh_host "$host" "$ip" "$key" \
-        "set -e; parent=\$(dirname '$RUN_ROOT'); sudo test ! -L \"\$parent\"; if ! sudo test -e \"\$parent\"; then sudo install -d -m 0755 \"\$parent\"; fi; sudo python3 -c 'import os,stat,sys; s=os.lstat(sys.argv[1]); assert stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and not (s.st_mode & 0o022)' \"\$parent\"; if sudo test -e '$RUN_ROOT' || sudo test -L '$RUN_ROOT'; then exit 1; fi; sudo install -d -m 0700 '$RUN_ROOT'; sudo sh -c 'umask 077; wg genkey > \"$RUN_ROOT/wireguard-private.key\"'; sudo chmod 0600 '$RUN_ROOT/wireguard-private.key'; sudo test -f '$RUN_ROOT/wireguard-private.key'; sudo test ! -L '$RUN_ROOT/wireguard-private.key'; sudo test \"\$(sudo stat -c %u:%a '$RUN_ROOT/wireguard-private.key')\" = 0:600; sudo sh -c 'wg pubkey < \"$RUN_ROOT/wireguard-private.key\"'"
+        "set -e; parent=\$(dirname '$RUN_ROOT'); sudo test ! -L \"\$parent\"; if ! sudo test -e \"\$parent\"; then sudo install -d -m 0755 \"\$parent\"; fi; sudo python3 -c 'import os,stat,sys; s=os.lstat(sys.argv[1]); assert stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and not (s.st_mode & 0o022)' \"\$parent\"; if sudo test -e '$RUN_ROOT' || sudo test -L '$RUN_ROOT'; then exit 1; fi; sudo install -d -m 0700 '$RUN_ROOT' '$RUN_ROOT/fabric-provider'; sudo sh -c 'umask 077; wg genkey > \"$RUN_ROOT/fabric-provider/wireguard-private.key\"'; sudo chmod 0600 '$RUN_ROOT/fabric-provider/wireguard-private.key'; sudo test -f '$RUN_ROOT/fabric-provider/wireguard-private.key'; sudo test ! -L '$RUN_ROOT/fabric-provider/wireguard-private.key'; sudo test \"\$(sudo stat -c %u:%a:%F '$RUN_ROOT/fabric-provider/wireguard-private.key')\" = '0:600:regular file'; sudo sh -c 'wg pubkey < \"$RUN_ROOT/fabric-provider/wireguard-private.key\"'"
 }
 
 verify_wireguard_identity() {
-    local host="$1" ip="$2" key="$3" expected="$4" peer_one="$5" peer_two="$6"
-    ssh_host "$host" "$ip" "$key" \
-        "set -e; actual=\$(sudo ip netns exec o3k-fabric wg show o3k-wg public-key); test \"\$actual\" = '$expected'; peers_raw=\$(sudo ip netns exec o3k-fabric wg show o3k-wg peers); peers=\$(printf '%s\\n' \"\$peers_raw\" | sort); expected_peers=\$(printf '%s\\n' '$peer_one' '$peer_two' | sort); test \"\$peers\" = \"\$expected_peers\""
+    local host="$1" ip="$2" key="$3" expected="$4"
+    shift 4
+    local -a expected_peers=("$@")
+    local base="$EVIDENCE_DIR/wireguard-$host" status
+    if (( ${#expected_peers[@]} < 1 || ${#expected_peers[@]} > 2 )); then
+        GATE_CLASSIFICATION=HARNESS_GAP
+        GATE_FAILED_HOST="$host"
+        GATE_OPERATION="wireguard_expected_peers_validate_${host//-/_}"
+        GATE_OPERATION_EXIT_CODE=2
+        GATE_OBSERVER_TYPE=local_input_validation
+        GATE_COMMAND_CLASS=wireguard_expected_peer_contract_validation
+        return 2
+    fi
+    GATE_FAILED_HOST="$host"
+    GATE_CLASSIFICATION=HARNESS_GAP
+    GATE_OBSERVER_TYPE=ssh_sudo_read_only
+    GATE_COMMAND_CLASS=wireguard_public_identity_observation
+    GATE_OPERATION="wireguard_public_key_observe_${host//-/_}"
+    if ssh_host "$host" "$ip" "$key" \
+        "sudo timeout 15s ip netns exec o3k-fabric wg show o3k-wg public-key" \
+        >"$base-runtime-public.key" 2>"$base-public-key-observer.stderr"; then
+        GATE_OPERATION_EXIT_CODE=0
+    else
+        GATE_OPERATION_EXIT_CODE=$?
+        return "$GATE_OPERATION_EXIT_CODE"
+    fi
+    GATE_OPERATION="wireguard_peers_observe_${host//-/_}"
+    if ssh_host "$host" "$ip" "$key" \
+        "sudo timeout 15s ip netns exec o3k-fabric wg show o3k-wg peers" \
+        >"$base-runtime-peers.txt" 2>"$base-peers-observer.stderr"; then
+        GATE_OPERATION_EXIT_CODE=0
+    else
+        GATE_OPERATION_EXIT_CODE=$?
+        return "$GATE_OPERATION_EXIT_CODE"
+    fi
+    # Both public observations are preserved before the first assertion.
+    GATE_OPERATION="wireguard_identity_compare_${host//-/_}"
+    GATE_OBSERVER_TYPE=local_evidence_comparison
+    GATE_COMMAND_CLASS=wireguard_public_identity_compare
+    if python3 "$SCRIPT_ROOT/fabric-v3-wireguard-identity.py" \
+        "$host" "$expected" "${expected_peers[@]}" \
+        "$base-runtime-public.key" "$base-runtime-peers.txt" "$base-identity.json"; then
+        GATE_OPERATION_EXIT_CODE=0
+    else
+        status=$?
+        GATE_OPERATION_EXIT_CODE="$status"
+        if (( status == 1 )); then
+            GATE_CLASSIFICATION=PROVIDER_CONFORMANCE_DEFECT
+        fi
+        return "$status"
+    fi
+    GATE_FAILED_HOST=""
+    GATE_OPERATION=""
+    GATE_OPERATION_EXIT_CODE=""
+    GATE_OBSERVER_TYPE=""
+    GATE_COMMAND_CLASS=""
 }
 
 finish_gate() {
@@ -135,10 +192,17 @@ finish_gate() {
         fi
         python3 - "$EVIDENCE_DIR/result.json" "$FABRIC_V3_3H_RUN_ID" \
             "$failure_classification" "$failure_phase" "$failure_code" \
-            "$cleanup_status" "${PACKET_FAILED_OPERATION:-$GATE_OPERATION}" "${PACKET_FAILED_EXIT_CODE:-}" \
-            "$PACKET_FAILED_OBSERVER_TYPE" "$PACKET_FAILED_COMMAND_CLASS" "$PACKET_CAPTURE_PRESERVE_STATUS" "$PACKET_CAPTURE_FAILURE_OPERATION" <<'PYFAIL' || true
+            "$cleanup_status" "${PACKET_FAILED_OPERATION:-$GATE_OPERATION}" "${PACKET_FAILED_EXIT_CODE:-$GATE_OPERATION_EXIT_CODE}" \
+            "${PACKET_FAILED_OBSERVER_TYPE:-$GATE_OBSERVER_TYPE}" "${PACKET_FAILED_COMMAND_CLASS:-$GATE_COMMAND_CLASS}" "$PACKET_CAPTURE_PRESERVE_STATUS" "$PACKET_CAPTURE_FAILURE_OPERATION" "$GATE_FAILED_HOST" <<'PYFAIL' || true
 import json,pathlib,sys
-path,run,classification,phase,code,cleanup_status,failed_operation,failed_operation_code,observer_type,command_class,capture_preserve_status,capture_failure_operation=sys.argv[1:]
+path,run,classification,phase,code,cleanup_status,failed_operation,failed_operation_code,observer_type,command_class,capture_preserve_status,capture_failure_operation,failed_host=sys.argv[1:]
+identity_path=pathlib.Path(path).parent / f"wireguard-{failed_host}-identity.json"
+identity=None
+if failed_host in {"host-a", "host-b", "host-c"} and identity_path.is_file():
+    try:
+        identity=json.loads(identity_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
 pathlib.Path(path).write_text(json.dumps({
     "artifact_type":"fabric-v3-provider-gate",
     "run_id":run,
@@ -147,6 +211,8 @@ pathlib.Path(path).write_text(json.dumps({
     "failed_phase":phase,
     "exit_code":int(code),
     "cleanup_status":int(cleanup_status),
+    "failed_host": failed_host or None,
+    "wireguard_identity_evidence": identity,
     "failed_operation": failed_operation or None,
     "failed_operation_exit_code": int(failed_operation_code) if failed_operation_code else None,
     "failed_observer_type": observer_type or None,
@@ -315,20 +381,11 @@ apply_host host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" host-a "$FABRI
 apply_host host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" host-a "$FABRIC_V3_3H_HOST_A_IP" "$AK" host-b "$FABRIC_V3_3H_HOST_B_IP" "$BK"
 GATE_PHASE=wireguard_identity_verify
 GATE_OPERATION=wireguard_identity_verify
-verify_wireguard_identity host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" "$AK" "$BK" "$CK"
+# Realm A is hosted by A/B and Realm B by B/C. Thus the aggregate host-fabric
+# peer set is B on A, A+C on B, and B on C; nonparticipants are not peers.
+verify_wireguard_identity host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" "$AK" "$BK"
 verify_wireguard_identity host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" "$BK" "$AK" "$CK"
-verify_wireguard_identity host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" "$CK" "$AK" "$BK"
-GATE_OPERATION=wireguard_identity_observation
-ssh_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" \
-    "set -e; sudo ip netns exec o3k-fabric wg show o3k-wg public-key; sudo ip netns exec o3k-fabric wg show o3k-wg peers" \
-    >"$EVIDENCE_DIR/wireguard-host-a-runtime.txt"
-ssh_host host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" \
-    "set -e; sudo ip netns exec o3k-fabric wg show o3k-wg public-key; sudo ip netns exec o3k-fabric wg show o3k-wg peers" \
-    >"$EVIDENCE_DIR/wireguard-host-b-runtime.txt"
-ssh_host host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" \
-    "set -e; sudo ip netns exec o3k-fabric wg show o3k-wg public-key; sudo ip netns exec o3k-fabric wg show o3k-wg peers" \
-    >"$EVIDENCE_DIR/wireguard-host-c-runtime.txt"
-GATE_OPERATION=""
+verify_wireguard_identity host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" "$CK" "$BK"
 
 attach_endpoint "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" a1 o3k-b-a1000000 10.0.0.10 02:00:00:00:a1:01
 attach_endpoint "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" a2 o3k-b-a1000000 10.0.0.20 02:00:00:00:a1:02
