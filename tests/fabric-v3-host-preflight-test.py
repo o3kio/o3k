@@ -14,6 +14,12 @@ SPEC.loader.exec_module(preflight)
 
 
 class HostPreflightTests(unittest.TestCase):
+    def gateway_observation(self, *args):
+        self.assertEqual(args, ("ip", "-j", "-4", "address", "show", "dev", "virbr0"))
+        return json.dumps([{"ifname": "virbr0", "addr_info": [
+            {"family": "inet", "local": "192.168.122.1", "prefixlen": 24}
+        ]}])
+
     def test_virsh_name_rows_are_trimmed_and_empty_rows_ignored(self):
         self.assertEqual(preflight._names("default     \nforeign      \n\n"), ["default", "foreign"])
 
@@ -32,7 +38,8 @@ class HostPreflightTests(unittest.TestCase):
             "neighbors": [{"dst": "192.168.122.102", "state": "FAILED"}],
             "domains": [],
         }
-        with patch.object(preflight, "_arp_in_use", return_value=False):
+        with patch.object(preflight, "_run", side_effect=self.gateway_observation), \
+                patch.object(preflight, "_arp_in_use", return_value=False):
             selected = preflight.select_addresses(snapshot)
         self.assertEqual(selected["selected"], [
             "192.168.122.105", "192.168.122.104", "192.168.122.103"
@@ -57,7 +64,8 @@ class HostPreflightTests(unittest.TestCase):
         def arp(_interface, _source_ip, _source_mac, target, _timeout=0.25):
             return str(target) == "192.168.122.105"
 
-        with patch.object(preflight, "_arp_in_use", side_effect=arp):
+        with patch.object(preflight, "_run", side_effect=self.gateway_observation), \
+                patch.object(preflight, "_arp_in_use", side_effect=arp):
             selected = preflight.select_addresses(snapshot)
         self.assertEqual(selected["selected"], [
             "192.168.122.104", "192.168.122.103", "192.168.122.102"
