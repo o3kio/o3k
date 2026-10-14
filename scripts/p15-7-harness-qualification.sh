@@ -20,6 +20,8 @@ actual_sha="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 }
 
 bash -n "$ROOT_DIR/scripts/p15-7-real-host-journey.sh"
+bash -n "$ROOT_DIR/scripts/p15-7-workload-image-marker.sh"
+bash -n "$ROOT_DIR/tests/p15_7_workload_image_marker.sh"
 python3 -m py_compile \
   "$ROOT_DIR/scripts/p15-7-crash-evidence.py" \
   "$ROOT_DIR/scripts/p15-7-campaign-lock.py" \
@@ -34,6 +36,7 @@ bash "$ROOT_DIR/tests/p15_7_contention_cleanup_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_api_read_retry_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_capacity_diagnostic_guards.sh"
 bash "$ROOT_DIR/tests/p15_7_scale_composition_guards.sh"
+bash "$ROOT_DIR/tests/p15_7_workload_image_marker.sh"
 bash "$ROOT_DIR/tests/p15_7_ssh_readiness_bounds.sh"
 python3 "$ROOT_DIR/tests/test_p15_7_maintenance_diagnostics.py"
 bash "$ROOT_DIR/tests/pp5_focused_lane_guards.sh"

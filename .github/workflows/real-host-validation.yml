@@ -888,6 +888,7 @@ jobs:
           O3K_PROVIDER: agent
           O3K_P15_7_OPERATOR_TOKEN_FILE: ${{ runner.temp }}/o3k-p15-7-operator-${{ github.run_id }}.token
           O3K_P15_7_PHASE: ${{ inputs.lane || 'integrated' }}
+          O3K_P15_7_WORKLOAD_IMAGE_PHASE: pp5
           # The early preflight launches the self-contained authority.  The
           # journey performs the short-lived canonical federation exchange
           # immediately before privileged work; no bearer token is placed in

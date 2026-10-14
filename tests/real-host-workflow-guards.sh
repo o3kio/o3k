@@ -978,6 +978,7 @@ assert "env.PP5_LANE == 'harness-microgate' || env.PP5_LANE == 's1-boundary'" in
 assert "scripts/pp5-protected-harness-microgate.py run" in microgate_step
 selected_lane = text.split("      - name: Run selected PP.5 acceptance lane\n", 1)[1].split("\n      - name:", 1)[0]
 assert "env.PP5_LANE != 's1-boundary' || steps.pp5_harness_microgate.outcome == 'success'" in selected_lane
+assert "O3K_P15_7_WORKLOAD_IMAGE_PHASE: pp5" in selected_lane
 host_image = text.split("      - name: Prepare pinned P15.7 VM host image\n", 1)[1].split("\n      - name:", 1)[0]
 assert "env.PP5_LANE != 's1-boundary' || steps.pp5_harness_microgate.outcome == 'success'" in host_image
 assert "--generic-cleanup" in microgate_step and "--campaign-binding" in microgate_step
@@ -986,6 +987,11 @@ assert "--microgate-artifact" in microgate_step
 assert "--openstack-venv \"${O3K_OPENSTACK_VENV}\"" in microgate_step
 pp5_image_step = text.split("      - name: Prepare fresh PP.5 TestLab image\n", 1)[1].split("\n      - name:", 1)[0]
 assert "env.PP5_LANE != 'harness-microgate'" in pp5_image_step
+assert 'phase=pp5\\n' in pp5_image_step
+assert 'phase=generic\\n' not in pp5_image_step
+generic_image_step = text.split("      - name: Prepare fresh generic TestLab image\n", 1)[1].split("\n      - name:", 1)[0]
+assert 'phase=generic\\n' in generic_image_step
+assert 'phase=pp5\\n' not in generic_image_step
 pp5_bootstrap_step = text.split("      - name: Bootstrap fresh PP.5 lane TestLab\n", 1)[1].split("\n      - name:", 1)[0]
 assert "env.PP5_LANE == 'harness-microgate' || steps.pp5_image.outcome == 'success'" in pp5_bootstrap_step
 assert "unset O3K_TESTLAB_ADDITIONAL_AGENT_IDS" in pp5_bootstrap_step
