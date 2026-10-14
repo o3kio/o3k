@@ -23,9 +23,10 @@ WORK_ROOT="${RUNNER_TEMP:-/tmp}/o3k-p15-7-journey-$RUN_ID"
 HOST_IMAGE="${O3K_P15_7_HOST_IMAGE_PATH:-}"
 HOST_IMAGE_SHA256="${O3K_P15_7_HOST_IMAGE_SHA256:-}"
 # The pinned Ubuntu image boots the genuine compute hosts. Workloads use the
-# separately verified, run-scoped generic TestLab image. Keeping these image
-# roles distinct avoids uploading the much larger host image through the
-# compatibility image API while preserving the host-image digest gate.
+# separately verified, run-scoped image for the active TestLab epoch. Keeping
+# these image roles distinct avoids uploading the much larger host image
+# through the compatibility image API while preserving the host-image digest
+# gate.
 WORKLOAD_IMAGE="${O3K_TESTLAB_IMAGE_PATH:-}"
 O3K_TESTLAB_IMAGE_PATH="$WORKLOAD_IMAGE"
 WORKLOAD_IMAGE_MARKER="${WORKLOAD_IMAGE}.o3k-owned"
@@ -177,10 +178,16 @@ die() {
   exit 1
 }
 source "$ROOT_DIR/scripts/p15-7-crash-evidence-state.sh"
+source "$ROOT_DIR/scripts/p15-7-workload-image-marker.sh"
 PP5_PHASE="${O3K_P15_7_PHASE:-integrated}"
 case "${PP5_PHASE}" in
   integrated|s5-scale|1035-crash-recovery|host-maintenance|s1-boundary|s2-boundary) ;;
   *) die "unsupported PP.5 phase: ${PP5_PHASE}" ;;
+esac
+WORKLOAD_IMAGE_PHASE="${O3K_P15_7_WORKLOAD_IMAGE_PHASE:-generic}"
+case "${WORKLOAD_IMAGE_PHASE}" in
+  generic|pp5) ;;
+  *) die "harness workload image phase is unsupported: ${WORKLOAD_IMAGE_PHASE}" ;;
 esac
 RUN_CRASH=false
 RUN_MAINTENANCE=false
@@ -1199,14 +1206,9 @@ LAST_SUCCESSFUL_CHECKPOINT="source_verified"
 [[ "$HOST_IMAGE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || die "pinned VM image digest required"
 printf '%s  %s\n' "$HOST_IMAGE_SHA256" "$HOST_IMAGE" | sha256sum --check --strict --status || die "VM image digest mismatch"
 [[ -n "$WORKLOAD_IMAGE" && -f "$WORKLOAD_IMAGE" && ! -L "$WORKLOAD_IMAGE" ]] || die "owned workload image unavailable"
-[[ -f "$WORKLOAD_IMAGE_MARKER" && ! -L "$WORKLOAD_IMAGE_MARKER" ]] \
-  || die "owned workload image marker unavailable"
-grep -Fqx 'o3k-disposable-image-v1' "$WORKLOAD_IMAGE_MARKER" \
-  || die "owned workload image marker is invalid"
-grep -Fqx 'phase=generic' "$WORKLOAD_IMAGE_MARKER" \
-  || die "owned workload image phase marker is invalid"
-grep -Fqx "run=$RUN_ID" "$WORKLOAD_IMAGE_MARKER" \
-  || die "owned workload image marker run mismatch"
+p15_7_verify_disposable_image_marker \
+  "$WORKLOAD_IMAGE_MARKER" "$RUN_ID" "$WORKLOAD_IMAGE_PHASE" \
+  || die "harness workload image marker or phase is invalid"
 python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" verify-marker \
   --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_SHA" >/dev/null \
   || die "owned TestLab marker failed privileged verification"
