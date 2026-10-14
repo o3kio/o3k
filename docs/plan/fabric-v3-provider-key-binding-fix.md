@@ -16,12 +16,17 @@ asserted that incorrect location. The historical failed result stays immutable;
 it did not capture runtime keys/peers, so its exact comparison failure remains
 unobserved.
 
-The current protected-main candidate for a fresh campaign is
+The frozen product source candidate for a fresh campaign is
 `ebee6fc609c84eb2ab8a8e19af13897a8294f1dd`, tree
 `66f9997e34486e2fef972b2971737be2a6c7ee4c`. PR #1077 changed the locked
-Rustls versions only; runtime behavior is unchanged, but new evidence must
-still identify the exact protected merge commit. Historical evidence remains
-bound to the candidate recorded by its original manifest.
+Rustls versions only; runtime behavior is unchanged. The harness rebind PR
+adds only reviewed test/evidence files, so the protected `main` commit may
+advance after the candidate is frozen. At campaign preflight, the candidate
+must be an ancestor of protected `main`, and the protected `main` tree must
+match the exact reviewed harness tree. The manifest records both protected-main
+identity and the detached product SHA/tree; product binaries are built only
+from the detached product candidate. Historical evidence remains bound to the
+candidate recorded by its original manifest.
 
 Bounded execution scope:
 

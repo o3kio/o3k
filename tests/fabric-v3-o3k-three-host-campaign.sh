@@ -15,7 +15,7 @@ fi
 PRODUCT_SHA=ebee6fc609c84eb2ab8a8e19af13897a8294f1dd
 PRODUCT_TREE=66f9997e34486e2fef972b2971737be2a6c7ee4c
 ACCEPTED_HARNESS_BASE=76f0e71a02b7521f3731a693627462dd3c856153
-PRODUCT_REMOTE_REF=refs/heads/main
+PROTECTED_MAIN_REMOTE_REF=refs/heads/main
 HARNESS_REMOTE_REF=refs/heads/fabric-v3-retirement-successor-harness
 HOST_PREFLIGHT="$ROOT_DIR/tests/fabric-v3-host-preflight.py"
 # Guard the acceptance control contract before creating evidence or guests.
@@ -1026,18 +1026,20 @@ fi
 [[ -c /dev/kvm ]] || fail "/dev/kvm unavailable" "ENVIRONMENT_GAP"
 [[ -r "$BASE_IMAGE" ]] || fail "base image unreadable: $BASE_IMAGE" "ENVIRONMENT_GAP"
 [[ "$(git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}")" == "$PRODUCT_TREE" ]] || fail "frozen product source tree mismatch" "HARNESS_GAP"
-git -C "$ROOT_DIR" fetch --no-tags origin main \
+git -C "$ROOT_DIR" fetch --no-tags origin "$PROTECTED_MAIN_REMOTE_REF" \
   >"$EVIDENCE/environment/protected-main-fetch.stdout" \
   2>"$EVIDENCE/environment/protected-main-fetch.stderr" \
   || fail "could not refresh protected main for candidate ancestry proof" "HARNESS_GAP"
 protected_main_tip="$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)"
-[[ "$protected_main_tip" == "$PRODUCT_SHA" ]] \
-  || fail "protected main no longer matches the frozen product candidate" "HARNESS_GAP"
-[[ "$(git -C "$ROOT_DIR" rev-parse "$protected_main_tip^{tree}")" == "$PRODUCT_TREE" ]] \
-  || fail "protected main tree differs from the frozen product candidate" "HARNESS_GAP"
-product_remote_sha="$(git -C "$ROOT_DIR" ls-remote origin "$PRODUCT_REMOTE_REF" | awk 'NR==1 {print $1}')"
-[[ "$product_remote_sha" == "$PRODUCT_SHA" ]] \
-  || fail "frozen protected-main candidate is not remotely visible at the exact SHA" "HARNESS_GAP"
+protected_main_remote_tip="$(git -C "$ROOT_DIR" ls-remote origin "$PROTECTED_MAIN_REMOTE_REF" | awk 'NR==1 {print $1}')"
+[[ "$protected_main_remote_tip" == "$protected_main_tip" ]] \
+  || fail "protected main changed during candidate identity preflight" "HARNESS_GAP"
+protected_main_tree="$(git -C "$ROOT_DIR" rev-parse "$protected_main_tip^{tree}")"
+harness_tree="$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')"
+git -C "$ROOT_DIR" merge-base --is-ancestor "$PRODUCT_SHA" "$protected_main_tip" \
+  || fail "frozen product candidate is not an ancestor of protected main" "HARNESS_GAP"
+[[ "$protected_main_tree" == "$harness_tree" ]] \
+  || fail "protected main source tree differs from the exact reviewed harness tree" "HARNESS_GAP"
 git -C "$ROOT_DIR" fetch --no-tags origin "$HARNESS_REMOTE_REF" \
   >"$EVIDENCE/environment/harness-ref-fetch.stdout" \
   2>"$EVIDENCE/environment/harness-ref-fetch.stderr" \
@@ -1050,12 +1052,6 @@ git -C "$ROOT_DIR" merge-base --is-ancestor "$ACCEPTED_HARNESS_BASE" HEAD \
   || fail "accepted retirement harness ancestry is missing" "HARNESS_GAP"
 [[ -z "$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all)" ]] \
   || fail "harness source tree has uncommitted changes" "HARNESS_GAP"
-git -C "$ROOT_DIR" fetch --no-tags origin "$PRODUCT_REMOTE_REF" \
-  >"$EVIDENCE/environment/product-ref-fetch.stdout" \
-  2>"$EVIDENCE/environment/product-ref-fetch.stderr" \
-  || fail "frozen product successor ref is not remotely visible" "HARNESS_GAP"
-[[ "$(git -C "$ROOT_DIR" rev-parse FETCH_HEAD)" == "$PRODUCT_SHA" ]] \
-  || fail "remote product successor ref does not match the frozen candidate SHA" "HARNESS_GAP"
 product_parents="$(git -C "$ROOT_DIR" show -s --format=%P "$PRODUCT_SHA")"
 url_port "$API_PORT" || fail "API port is occupied: $API_PORT" "ENVIRONMENT_GAP"
 url_port "$CONTROL_PORT" || fail "compute control port is occupied: $CONTROL_PORT" "ENVIRONMENT_GAP"
@@ -1090,17 +1086,20 @@ git -C "$ROOT_DIR" rev-parse "$PRODUCT_SHA^{tree}" >"$EVIDENCE/environment/produ
 printf '%s\n' "$product_parents" >"$EVIDENCE/environment/product_parent_commits.txt"
 hostnamectl >"$EVIDENCE/environment/physical-host.txt" 2>&1 || hostname >"$EVIDENCE/environment/physical-host.txt"
 date -u +%FT%TZ >"$EVIDENCE/started_at_utc.txt"
-python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" "$FABRIC_DOMAIN_ID" "$protected_main_tip" "$PRODUCT_REMOTE_REF" "$HARNESS_REMOTE_REF" "$ACCEPTED_HARNESS_BASE" "$product_parents" <<'PYMANIFEST'
+python3 - "$EVIDENCE/manifest.json" "$RUN_ID" "$PRODUCT_SHA" "$PRODUCT_TREE" "$(git -C "$ROOT_DIR" rev-parse HEAD)" "$harness_tree" "$EVIDENCE/started_at_utc.txt" "$EVIDENCE/environment/physical-host.txt" "$FABRIC_DOMAIN_ID" "$protected_main_tip" "$protected_main_tree" "$PROTECTED_MAIN_REMOTE_REF" "$HARNESS_REMOTE_REF" "$ACCEPTED_HARNESS_BASE" "$product_parents" <<'PYMANIFEST'
 import json,pathlib,sys
-path,run,product,product_tree,harness,harness_tree,started,physical,fabric_domain_id,protected_main,product_ref,harness_ref,accepted_harness_base,product_parents=sys.argv[1:]
+path,run,product,product_tree,harness,harness_tree,started,physical,fabric_domain_id,protected_main,protected_main_tree,protected_main_ref,harness_ref,accepted_harness_base,product_parents=sys.argv[1:]
 doc={"result":"IN_PROGRESS","run_id":run,"product_sha":product,"product_tree":product_tree,
      "harness_sha":harness,"harness_tree":harness_tree,
      "protected_main_at_run":protected_main,
-     "product_remote_visible":True,"product_remote_ref":product_ref,
+     "protected_main_tree_at_run":protected_main_tree,
+     "protected_main_remote_ref":protected_main_ref,
+     "product_reachable_from_protected_main":True,
      "harness_remote_visible":True,"harness_remote_ref":harness_ref,
      "accepted_harness_base":accepted_harness_base,
      "product_parent_commits":product_parents.split(),
-     "product_lineage":{"candidate_is_protected_main":product==protected_main},
+     "product_lineage":{"candidate_is_ancestor_of_protected_main":True,
+                         "protected_main_tree_matches_harness":protected_main_tree==harness_tree},
      "fabric_domain_id":fabric_domain_id,
      "started_at_utc":pathlib.Path(started).read_text().strip(),
      "physical_host_identity":pathlib.Path(physical).read_text(errors='replace').strip()}
