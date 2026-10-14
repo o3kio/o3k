@@ -30,7 +30,10 @@ def matches_owned_domain(xml: str, name: str, uuid: str, disk: str, seed: str) -
         source = device.find("source")
         if kind not in {"disk", "cdrom"} or source is None:
             return False
-        if source.attrib.keys() != {"file"}:
+        source_keys = set(source.attrib)
+        if "file" not in source_keys or source_keys - {"file", "index"}:
+            return False
+        if "index" in source.attrib and not source.attrib["index"].isdigit():
             return False
         if kind in sources:
             return False

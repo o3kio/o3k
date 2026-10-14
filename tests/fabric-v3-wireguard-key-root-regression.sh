@@ -17,7 +17,7 @@ import sys
 root, installer_path, campaign_path, capture_path = sys.argv[1:]
 installer, campaign, capture = map(lambda p: pathlib.Path(p).read_text(),
                                    (installer_path, campaign_path, capture_path))
-product_sha = 'f7df49067bd5c7a23135292a3234d9e51be0cf92'
+product_sha = '9cdaa4a43aaedec9d2be65170af118b7ca2ced83'
 assert f'PRODUCT_SHA={product_sha}' in campaign
 dhcp_realizer = subprocess.run(
     ['git', '-C', root, 'show', f'{product_sha}:crates/o3k-network/src/fabric_dhcp.rs'],
@@ -28,11 +28,9 @@ assert re.search(r'provider_key_dir="\$fabric_root/fabric-provider"', installer)
 assert re.search(r'O3K_NETWORK_FABRIC_ROOT="\$fabric_root"', installer)
 assert re.search(r'private_key="\$provider_key_dir/wireguard-private\.key"', installer)
 assert re.search(r'public_key="\$provider_key_dir/wireguard-public\.key"', installer)
-octet_pattern = re.search(r'\$octet" =~ \^\(([^)]*)\)\$', installer)
-assert octet_pattern, 'installer management octet guard is missing'
-octet_re = re.compile(f'(?:{octet_pattern.group(1)})')
-assert all(octet_re.fullmatch(str(value)) for value in (201, 208, 219, 229, 239))
-assert not any(octet_re.fullmatch(str(value)) for value in (200, 240))
+assert 'host="$1"; run="$2"; stage="$3"' in installer
+assert '$octet' not in installer, 'installer must not constrain safely selected management addresses'
+assert 'install-agent-host.sh $host $RUN_ID /tmp/$RUN_ID-stage' in campaign
 assert 'network/fabric/fabric-provider/wireguard-public.key' in campaign
 assert 'network/fabric-provider/wireguard-public.key' not in campaign
 assert 'wireguard_identity_check' in capture
