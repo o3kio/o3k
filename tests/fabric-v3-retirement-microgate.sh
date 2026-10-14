@@ -3,6 +3,14 @@
 # Sourced by the frozen-candidate campaign driver after supported deletion of
 # server C. All reads below are observations; resource mutation remains on the
 # supported API lifecycle in the caller.
+fdb_compare_failure() {
+  local status=$? message=$1
+  if [[ "$status" -eq 2 ]]; then
+    fail "$message" "HARNESS_GAP"
+  fi
+  fail "$message" "OWNERSHIP_DEFECT"
+}
+
 run_retirement_microgate() {
   local realm_id="$1" namespace_name address host object_name fabric_namespace namespace_state
   local convergence_deadline survivor_converged poll old_controller_pid new_controller_pid recovery_ready code evidence_status
@@ -34,7 +42,7 @@ run_retirement_microgate() {
       [[ "$namespace" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "invalid observed namespace identity" "HARNESS_GAP"
       awk -v expected="$namespace" '$1 == expected { found=1 } END { exit found ? 0 : 1 }' \
         "$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces.txt" \
-        || fail "baseline namespace disappeared after retirement: $host/$namespace" "OWNERSHIP_DEFECT"
+        || fdb_compare_failure "baseline namespace disappeared after retirement: $host/$namespace"
       ssh_vm "${MGMT_IP[$host]}" "sudo ip netns exec '$namespace' bridge -j fdb show" \
         >"$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces/$namespace.json" \
         || fail "foreign namespace FDB observation failed for $host/$namespace" "ENVIRONMENT_GAP"
@@ -42,7 +50,7 @@ run_retirement_microgate() {
         --before "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces/$namespace.json" \
         --after "$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces/$namespace.json" \
         >"$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces/$namespace-comparison.txt" 2>&1 \
-        || fail "foreign namespace FDB changed after retirement: $host/$namespace" "OWNERSHIP_DEFECT"
+        || fdb_compare_failure "foreign namespace FDB changed after retirement: $host/$namespace"
     done < <(awk '{print $1}' "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt")
     devices=()
     while IFS= read -r device; do devices+=(--owned-device "$device"); done < <(
@@ -62,7 +70,7 @@ PYDEV
       --after "$EVIDENCE/foreign-fdb-after-retirement/host-$host.json" \
       "${devices[@]}" \
       >"$EVIDENCE/foreign-fdb-after-retirement/host-$host-comparison.txt" 2>&1 \
-      || fail "foreign FDB state changed outside run-owned Realm interfaces" "OWNERSHIP_DEFECT"
+      || fdb_compare_failure "foreign FDB state changed outside run-owned Realm interfaces"
     run_namespace="$(python3 - "$EVIDENCE/before-departure/host-$host/ownership.json" <<'PYNS'
 import json,sys
 state=json.load(open(sys.argv[1]))
@@ -86,7 +94,7 @@ PYNS
       --after-namespaces "$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces.txt" \
       "${namespace_args[@]}" \
       >>"$EVIDENCE/foreign-fdb-after-retirement/host-$host-comparison.txt" 2>&1 \
-      || fail "foreign namespace state changed after C retirement" "OWNERSHIP_DEFECT"
+      || fdb_compare_failure "foreign namespace state changed after C retirement"
   done
 
   ssh_vm "${MGMT_IP[c]}" 'sudo ip -j -d link show' \
@@ -530,7 +538,7 @@ PY
           [[ "$namespace" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "invalid post-restart namespace identity" "HARNESS_GAP"
       awk -v expected="$namespace" '$1 == expected { found=1 } END { exit found ? 0 : 1 }' \
         "$EVIDENCE/restart/foreign-fdb/host-$host-namespaces.txt" \
-            || fail "baseline namespace disappeared after restart: $host/$namespace" "OWNERSHIP_DEFECT"
+            || fdb_compare_failure "baseline namespace disappeared after restart: $host/$namespace"
           ssh_vm "${MGMT_IP[$host]}" "sudo ip netns exec '$namespace' bridge -j fdb show" \
             >"$EVIDENCE/restart/foreign-fdb/host-$host-namespaces/$namespace.json" \
             || fail "foreign namespace FDB restart observation failed for $host/$namespace" "ENVIRONMENT_GAP"
@@ -538,7 +546,7 @@ PY
             --before "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces/$namespace.json" \
             --after "$EVIDENCE/restart/foreign-fdb/host-$host-namespaces/$namespace.json" \
             >"$EVIDENCE/restart/foreign-fdb/host-$host-namespaces/$namespace-comparison.txt" 2>&1 \
-            || fail "foreign namespace FDB changed after controller restart: $host/$namespace" "OWNERSHIP_DEFECT"
+            || fdb_compare_failure "foreign namespace FDB changed after controller restart: $host/$namespace"
         done < <(awk '{print $1}' "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt")
         devices=()
         while IFS= read -r device; do devices+=(--owned-device "$device"); done < <(
@@ -558,7 +566,7 @@ PYDEV
           --after "$EVIDENCE/restart/foreign-fdb/host-$host.json" \
           "${devices[@]}" \
           >"$EVIDENCE/restart/foreign-fdb/host-$host-comparison.txt" 2>&1 \
-          || fail "foreign FDB state changed after controller restart" "OWNERSHIP_DEFECT"
+          || fdb_compare_failure "foreign FDB state changed after controller restart"
         namespace_args=()
         while IFS= read -r namespace; do
           [[ -z "$namespace" ]] || namespace_args+=(--owned-namespace "$namespace")
@@ -577,7 +585,7 @@ PYNS
           --after-namespaces "$EVIDENCE/restart/foreign-fdb/host-$host-namespaces.txt" \
           "${namespace_args[@]}" \
           >>"$EVIDENCE/restart/foreign-fdb/host-$host-comparison.txt" 2>&1 \
-          || fail "foreign namespace state changed after controller restart" "OWNERSHIP_DEFECT"
+          || fdb_compare_failure "foreign namespace state changed after controller restart"
       done
       capture_c_remove_work_row "$realm_id" >"$EVIDENCE/c-delete/remove-command/c-remove-command-state.txt" \
         || fail "post-restart C retirement work observation failed" "HARNESS_GAP"
