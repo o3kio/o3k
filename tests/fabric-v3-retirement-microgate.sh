@@ -26,6 +26,9 @@ run_retirement_microgate() {
     ssh_vm "${MGMT_IP[$host]}" 'sudo bridge -j fdb show' \
       >"$EVIDENCE/foreign-fdb-after-retirement/host-$host.json" \
       || fail "foreign FDB post-retirement observation failed on host-$host" "ENVIRONMENT_GAP"
+    ssh_vm "${MGMT_IP[$host]}" 'sudo ip netns list' \
+      >"$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces.txt" \
+      || fail "foreign namespace post-retirement observation failed on host-$host" "ENVIRONMENT_GAP"
     devices=()
     while IFS= read -r device; do devices+=(--owned-device "$device"); done < <(
       python3 - "$EVIDENCE/before-departure/host-$host/ownership.json" <<'PYDEV'
@@ -42,6 +45,20 @@ PYDEV
       "${devices[@]}" \
       >"$EVIDENCE/foreign-fdb-after-retirement/host-$host-comparison.txt" 2>&1 \
       || fail "foreign FDB state changed outside run-owned Realm interfaces" "OWNERSHIP_DEFECT"
+    run_namespace="$(python3 - "$EVIDENCE/before-departure/host-$host/ownership.json" <<'PYNS'
+import json,sys
+state=json.load(open(sys.argv[1]))
+print(state.get('fabric', {}).get('namespace', ''))
+PYNS
+)"
+    namespace_args=()
+    [[ -z "$run_namespace" ]] || namespace_args+=(--owned-namespace "$run_namespace")
+    python3 "$ROOT_DIR/tests/fabric-v3-foreign-fdb.py" \
+      --before-namespaces "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt" \
+      --after-namespaces "$EVIDENCE/foreign-fdb-after-retirement/host-$host-namespaces.txt" \
+      "${namespace_args[@]}" \
+      >>"$EVIDENCE/foreign-fdb-after-retirement/host-$host-comparison.txt" 2>&1 \
+      || fail "foreign namespace state changed after C retirement" "OWNERSHIP_DEFECT"
   done
 
   ssh_vm "${MGMT_IP[c]}" 'sudo ip -j -d link show' \
@@ -477,6 +494,9 @@ PY
         ssh_vm "${MGMT_IP[$host]}" 'sudo bridge -j fdb show' \
           >"$EVIDENCE/restart/foreign-fdb/host-$host.json" \
           || fail "post-restart foreign FDB observation failed on host-$host" "ENVIRONMENT_GAP"
+        ssh_vm "${MGMT_IP[$host]}" 'sudo ip netns list' \
+          >"$EVIDENCE/restart/foreign-fdb/host-$host-namespaces.txt" \
+          || fail "post-restart foreign namespace observation failed on host-$host" "ENVIRONMENT_GAP"
         devices=()
         while IFS= read -r device; do devices+=(--owned-device "$device"); done < <(
           python3 - "$EVIDENCE/before-departure/host-$host/ownership.json" <<'PYDEV'
@@ -493,6 +513,12 @@ PYDEV
           "${devices[@]}" \
           >"$EVIDENCE/restart/foreign-fdb/host-$host-comparison.txt" 2>&1 \
           || fail "foreign FDB state changed after controller restart" "OWNERSHIP_DEFECT"
+        python3 "$ROOT_DIR/tests/fabric-v3-foreign-fdb.py" \
+          --before-namespaces "$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt" \
+          --after-namespaces "$EVIDENCE/restart/foreign-fdb/host-$host-namespaces.txt" \
+          "${namespace_args[@]}" \
+          >>"$EVIDENCE/restart/foreign-fdb/host-$host-comparison.txt" 2>&1 \
+          || fail "foreign namespace state changed after controller restart" "OWNERSHIP_DEFECT"
       done
       capture_c_remove_work_row "$realm_id" >"$EVIDENCE/c-delete/remove-command/c-remove-command-state.txt" \
         || fail "post-restart C retirement work observation failed" "HARNESS_GAP"

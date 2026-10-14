@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+import json
 
 SPEC = importlib.util.spec_from_file_location("foreign_fdb", Path(__file__).with_name("fabric-v3-foreign-fdb.py"))
 assert SPEC and SPEC.loader
@@ -39,9 +40,25 @@ class ForeignFdbTests(unittest.TestCase):
         after = self.write("after", "bb dev vxlan0 master br0\n")
         foreign_fdb.compare(before, after, {"vxlan0"})
 
+    def test_bridge_json_ordering_and_device_exclusion_are_semantic(self):
+        before = self.write("json-before", json.dumps([{"mac": "aa", "ifname": "eth0"}, {"mac": "old", "ifname": "vxlan0"}]))
+        after = self.write("json-after", json.dumps([{"ifname": "vxlan0", "mac": "new"}, {"ifname": "eth0", "mac": "aa"}]))
+        foreign_fdb.compare(before, after, {"vxlan0"})
+
     def test_missing_scope_fails(self):
         with self.assertRaises(FileNotFoundError):
             foreign_fdb.compare(self.root / "missing", self.root / "after", set())
+
+    def test_namespace_ordering_and_run_scope_are_normalized(self):
+        before = self.write("ns-before", "foreign-a\nrun-fabric\n")
+        after = self.write("ns-after", "run-fabric\nforeign-a\n")
+        foreign_fdb.compare_namespaces(before, after, {"run-fabric"})
+
+    def test_foreign_namespace_change_fails(self):
+        before = self.write("ns-before", "foreign-a\n")
+        after = self.write("ns-after", "foreign-b\n")
+        with self.assertRaises(AssertionError):
+            foreign_fdb.compare_namespaces(before, after, set())
 
 
 if __name__ == "__main__":

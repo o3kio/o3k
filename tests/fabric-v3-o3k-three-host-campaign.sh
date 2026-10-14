@@ -1167,6 +1167,8 @@ for host in a b c; do
   ssh_vm "$address" 'printf "boot_id="; cat /proc/sys/kernel/random/boot_id; printf "kernel="; uname -r; printf "os="; . /etc/os-release; echo "$PRETTY_NAME"; ip -j link; ip -j route; bridge -j link; bridge -j fdb; (wg show || true); (sudo nft list ruleset || true); (sudo find /var/lib/o3k-fabric-v3 -maxdepth 5 -type f -print 2>/dev/null || true); sudo virsh list --all --name' >"$EVIDENCE/environment/baseline-compute-$host.txt" || fail "baseline collection failed for compute-$host" "ENVIRONMENT_GAP"
   ssh_vm "$address" 'sudo bridge -j fdb show' >"$EVIDENCE/environment/foreign-fdb-before/host-$host.json" \
     || fail "foreign FDB baseline collection failed for compute-$host" "ENVIRONMENT_GAP"
+  ssh_vm "$address" 'sudo ip netns list' >"$EVIDENCE/environment/foreign-fdb-before/host-$host-namespaces.txt" \
+    || fail "foreign namespace baseline collection failed for compute-$host" "ENVIRONMENT_GAP"
   echo "compute-$host management PASS $address domain=$domain"
 done
 ssh-keygen -lf "$KNOWN_HOSTS" >"$EVIDENCE/management/known-hosts-fingerprints.txt"

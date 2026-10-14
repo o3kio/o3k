@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 
 def normalized(path: Path, excluded: set[str]) -> list[str]:
-    rows = []
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if line and not any(f" dev {device} " in f" {line} " for device in excluded):
-            rows.append(" ".join(line.split()))
+    text = path.read_text()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, list):
+        rows = []
+        for row in payload:
+            if not isinstance(row, dict) or row.get("ifname") in excluded or row.get("dev") in excluded:
+                continue
+            rows.append(json.dumps(row, sort_keys=True, separators=(",", ":")))
+        return sorted(rows)
+    rows = [" ".join(line.split()) for line in text.splitlines() if line.strip()]
+    rows = [line for line in rows if not any(f" dev {device} " in f" {line} " for device in excluded)]
     return sorted(rows)
 
 
@@ -22,15 +32,35 @@ def compare(before: Path, after: Path, excluded: set[str]) -> None:
         raise AssertionError({"before": normalized(before, excluded), "after": normalized(after, excluded)})
 
 
+def namespaces(path: Path, excluded: set[str]) -> list[str]:
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return sorted(line.split()[0] for line in path.read_text().splitlines() if line.strip()
+                  and line.split()[0] not in excluded)
+
+
+def compare_namespaces(before: Path, after: Path, excluded: set[str]) -> None:
+    old, new = namespaces(before, excluded), namespaces(after, excluded)
+    if old != new:
+        raise AssertionError({"before": old, "after": new})
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--before", type=Path, required=True)
     parser.add_argument("--after", type=Path, required=True)
     parser.add_argument("--owned-device", action="append", default=[])
+    parser.add_argument("--before-namespaces", type=Path)
+    parser.add_argument("--after-namespaces", type=Path)
+    parser.add_argument("--owned-namespace", action="append", default=[])
     args = parser.parse_args()
     try:
         compare(args.before, args.after, set(args.owned_device))
-    except (AssertionError, FileNotFoundError) as error:
+        if bool(args.before_namespaces) != bool(args.after_namespaces):
+            raise ValueError("both namespace observations are required")
+        if args.before_namespaces:
+            compare_namespaces(args.before_namespaces, args.after_namespaces, set(args.owned_namespace))
+    except (AssertionError, FileNotFoundError, ValueError) as error:
         print(f"foreign FDB mismatch: {error}")
         return 1
     return 0
