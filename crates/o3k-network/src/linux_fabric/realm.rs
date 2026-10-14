@@ -25,6 +25,7 @@ impl super::LinuxFabricBackend {
             attachments: BTreeMap::new(),
             endpoint_taps: BTreeMap::new(),
             pending_endpoint_taps: BTreeMap::new(),
+            pending_endpoint_macs: BTreeSet::new(),
             policy_generation: 0,
             policy_fingerprint: String::new(),
             anti_spoof_generation: 0,
@@ -49,6 +50,7 @@ impl super::LinuxFabricBackend {
             ownership.attachments = existing.attachments.clone();
             ownership.endpoint_taps = existing.endpoint_taps.clone();
             ownership.pending_endpoint_taps = existing.pending_endpoint_taps.clone();
+            ownership.pending_endpoint_macs = existing.pending_endpoint_macs.clone();
             ownership.policy_generation = existing.policy_generation;
             ownership.policy_fingerprint = existing.policy_fingerprint.clone();
             ownership.anti_spoof_generation = existing.anti_spoof_generation;
@@ -82,20 +84,28 @@ impl super::LinuxFabricBackend {
         // If state says we own this realm but the bridge is gone (e.g. after a
         // crash or test fabric-interruption), clean up stale state so the
         // creation block below runs and recreates everything from scratch.
+        let mut recreate_with_pending_intent = false;
         if self.state.realms.contains_key(&plan.realm_id) {
             let (bridge_exists, _) = self
                 .command
                 .output("ip", &["link", "show", "dev", &ownership.bridge])
                 .map_err(LinuxFabricError::Storage)?;
             if !bridge_exists {
-                let _ = self
-                    .command
-                    .run("ip", &["netns", "delete", &ownership.namespace]);
-                self.state.realms.remove(&plan.realm_id);
-                store_state(&self.state_path, &self.state)?;
+                if !ownership.pending_endpoint_macs.is_empty() {
+                    // Preserve the durable obligation throughout recreation.
+                    // The creation checks below reject residual/foreign state;
+                    // shared-provider withdrawal still observes MAC absence.
+                    recreate_with_pending_intent = true;
+                } else {
+                    let _ = self
+                        .command
+                        .run("ip", &["netns", "delete", &ownership.namespace]);
+                    self.state.realms.remove(&plan.realm_id);
+                    store_state(&self.state_path, &self.state)?;
+                }
             }
         }
-        if !self.state.realms.contains_key(&plan.realm_id) {
+        if recreate_with_pending_intent || !self.state.realms.contains_key(&plan.realm_id) {
             let (exists, _) = self
                 .command
                 .output("ip", &["netns", "exec", &ownership.namespace, "true"])

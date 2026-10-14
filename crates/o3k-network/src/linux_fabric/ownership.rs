@@ -61,6 +61,11 @@ pub(crate) struct RealmOwnership {
     pub(crate) endpoint_taps: BTreeMap<Uuid, EndpointTapOwnership>,
     #[serde(default)]
     pub(crate) pending_endpoint_taps: BTreeMap<Uuid, EndpointTapOwnership>,
+    /// Canonical endpoint MACs removed from the last accepted directory but
+    /// not yet observed absent from the provider FDB. Retained across a
+    /// crash so retirement cannot lose its cleanup obligation.
+    #[serde(default)]
+    pub(crate) pending_endpoint_macs: BTreeSet<String>,
     #[serde(default)]
     pub(crate) policy_generation: u64,
     #[serde(default)]
