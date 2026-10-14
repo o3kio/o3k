@@ -8,6 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-$ROOT_DIR/target/real-host-workflow-artifacts}"
 EVIDENCE_FILE="${O3K_P15_7_EVIDENCE_FILE:-$ARTIFACT_DIR/p15-7-scale-composition-evidence.json}"
 RUN_ID="${GITHUB_RUN_ID:-local-$$}"
+TESTLAB_RUN_ID="${O3K_TESTLAB_RUN_ID:-$RUN_ID}"
 SOURCE_SHA="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-}}"
 PREFLIGHT_ARTIFACT="${O3K_P15_7_PREFLIGHT_ARTIFACT:-$ARTIFACT_DIR/p15-7-protected-preflight.json}"
 CHECKOUT_HEAD="${O3K_P15_7_CHECKOUT_HEAD:-}"
@@ -17,7 +18,7 @@ PROFILE="${O3K_P15_7_PROFILE:-small-edge-cloud}"
 DIAGNOSTIC_ONLY="${O3K_P15_7_DIAGNOSTIC_ONLY:-false}"
 AUTHORITY_MODE="${O3K_P15_7_AUTHORITY_MODE:-testlab-keycloak}"
 KEYCLOAK_AUTHORITY_SCRIPT="${O3K_P15_7_KEYCLOAK_AUTHORITY_SCRIPT:-$ROOT_DIR/scripts/p15-7-keycloak-authority.sh}"
-STATE_ROOT="${O3K_TESTLAB_STATE_ROOT:-/var/lib/o3k-testlab/$RUN_ID}"
+STATE_ROOT="${O3K_TESTLAB_STATE_ROOT:-/var/lib/o3k-testlab/$TESTLAB_RUN_ID}"
 TLS_ROOT="$STATE_ROOT/tls"
 WORK_ROOT="${RUNNER_TEMP:-/tmp}/o3k-p15-7-journey-$RUN_ID"
 HOST_IMAGE="${O3K_P15_7_HOST_IMAGE_PATH:-}"
@@ -132,9 +133,18 @@ O3K_FAULT_ENV_VALUE="${O3K_P15_7_FAULT_PAUSE_MS:-45000}"
 # bootstrap BuildingBlock counts toward every scale tier under the
 # eligibility rule recorded in the evidence.
 BOOTSTRAP_AGENT_ID=""
+observe_protected_testlab_state() {
+  local operation="${1:-}"
+  case "$operation" in
+    verify-marker|bootstrap-agent-id) ;;
+    *) echo "unsupported protected TestLab observation" >&2; return 2 ;;
+  esac
+  python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" "$operation" \
+    --state-root "$STATE_ROOT" --run-id "$TESTLAB_RUN_ID" --source-sha "$SOURCE_SHA"
+}
 classify_failure() {
   case "${1:-}" in
-    *harness*|*epoch*|*precondition*) echo harness_gap ;;
+    *harness*|*epoch*|*precondition*|*TestLab*marker*|*testlab*marker*) echo harness_gap ;;
     # Match the most specific crash/repair terms before the generic
     # "source" pattern: the word "resource" contains the substring
     # "source", so the old ordering misclassified
@@ -197,6 +207,8 @@ case "${PP5_PHASE}" in
   host-maintenance) RUN_MAINTENANCE=true ;;
 esac
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "run id is unsafe"
+[[ "$TESTLAB_RUN_ID" =~ ^([0-9]+|local-[0-9]+)(-(generic|pp5))?$ ]] \
+  || die "TestLab epoch identity is invalid"
 [[ "$DIAGNOSTIC_ONLY" == true || "$DIAGNOSTIC_ONLY" == false ]] || die "diagnostic mode is invalid"
 if [[ "$DIAGNOSTIC_ONLY" == true ]]; then
   [[ "$EVIDENCE_FILE" != "$ARTIFACT_DIR/p15-7-scale-composition-evidence.json" ]] \
@@ -416,8 +428,7 @@ rejoin_bootstrap_agent() {
   # bootstrap-disposable-testlab.sh uses, reusing the durable TLS identity the
   # canonical bootstrap already recorded.
   local agent_id enrollment_token agent_epoch vcpus memory_mb join_attempt init_output
-  agent_id="$(python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" bootstrap-agent-id \
-    --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_SHA")" \
+  agent_id="$(observe_protected_testlab_state bootstrap-agent-id)" \
     || die "cannot read the protected bootstrap compute identity"
   [[ "$agent_id" =~ ^[A-Za-z0-9._-]+$ ]] || die "bootstrap agent identity is unavailable"
   init_output="$WORK_ROOT/bootstrap-rejoin-init.json"
@@ -1209,9 +1220,8 @@ printf '%s  %s\n' "$HOST_IMAGE_SHA256" "$HOST_IMAGE" | sha256sum --check --stric
 p15_7_verify_disposable_image_marker \
   "$WORKLOAD_IMAGE_MARKER" "$RUN_ID" "$WORKLOAD_IMAGE_PHASE" \
   || die "harness workload image marker or phase is invalid"
-python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" verify-marker \
-  --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_SHA" >/dev/null \
-  || die "owned TestLab marker failed privileged verification"
+observe_protected_testlab_state verify-marker >/dev/null \
+  || die "TestLab ownership marker failed privileged verification"
 [[ -f "$TLS_ROOT/ca.pem" ]] || die "owned TestLab TLS unavailable"
 sudo -n test -d "$LIBVIRT_IMAGE_ROOT" && sudo -n test ! -L "$LIBVIRT_IMAGE_ROOT" \
   || die "libvirt image root unavailable"
@@ -1240,8 +1250,7 @@ done
 # state the canonical bootstrap recorded. It is matched by identity (never by
 # display name or a hardcoded assumption) when the scale checkpoints decide
 # which BuildingBlock is the bootstrap block.
-BOOTSTRAP_AGENT_ID="$(python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" bootstrap-agent-id \
-  --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_SHA" 2>/dev/null || true)"
+BOOTSTRAP_AGENT_ID="$(observe_protected_testlab_state bootstrap-agent-id 2>/dev/null || true)"
 [[ "$BOOTSTRAP_AGENT_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "bootstrap agent identity is unavailable"
 if [[ "$POSTGRES_MODE" == external ]]; then
   # Consume a required, operator-owned endpoint. Fail closed on a missing or
@@ -3176,8 +3185,7 @@ if [[ -z "$REPLAY_JOIN_FILE" && "$DRAIN_AGENT" == "$BOOTSTRAP_AGENT_ID" ]]; then
   # placeholder exercises it.
   [[ -s "$STATE_ROOT/tls/agent.pem" && -s "$STATE_ROOT/tls/agent-id" ]] \
     || die "bootstrap agent identity unavailable for drained-agent replay probe"
-  [[ "$(python3 "$ROOT_DIR/scripts/pp5-protected-state-observer.py" bootstrap-agent-id \
-      --state-root "$STATE_ROOT" --run-id "$RUN_ID" --source-sha "$SOURCE_SHA" 2>/dev/null)" == "$BOOTSTRAP_AGENT_ID" ]] \
+  [[ "$(observe_protected_testlab_state bootstrap-agent-id 2>/dev/null)" == "$BOOTSTRAP_AGENT_ID" ]] \
     || die "bootstrap agent identity does not match the drained host"
   REPLAY_JOIN_FILE="$WORK_ROOT/compute-agent-replay-join.json"
   # The certificate is public material (the journey stages block agent certs

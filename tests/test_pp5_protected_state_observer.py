@@ -26,6 +26,14 @@ class ProtectedStateObserverTests(unittest.TestCase):
     def setUp(self) -> None:
         self.run_calls: list[list[str]] = []
 
+    def test_expected_state_root_tracks_generic_and_pp5_epoch_ids(self) -> None:
+        self.assertEqual(OBSERVER.expected_state_root("12345-generic"),
+                         pathlib.Path("/var/lib/o3k-testlab/12345-generic"))
+        self.assertEqual(OBSERVER.expected_state_root("12345-pp5"),
+                         pathlib.Path("/var/lib/o3k-testlab/12345-pp5"))
+        self.assertEqual(OBSERVER.expected_state_root("12345"),
+                         pathlib.Path("/var/lib/o3k-testlab/12345"))
+
     def successful_run(self, command: list[str], *_args, **_kwargs):
         self.run_calls.append(command)
         if "stat" in command:
