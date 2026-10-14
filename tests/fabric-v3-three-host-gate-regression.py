@@ -98,9 +98,36 @@ class ThreeHostGateRegression(unittest.TestCase):
         self.assertNotIn("cat \"$HOST_A_PUBLIC_KEY_FILE\"", GATE_TEXT)
         self.assertNotIn('AK="$(cat "$HOST_A_PUBLIC_KEY_FILE")"', GATE_TEXT)
         self.assertIn('AK="$(prepare_fresh_wireguard_identity', GATE_TEXT)
-        self.assertIn('"$BK" "$CK"', GATE_TEXT)
-        self.assertIn('"$AK" "$CK"', GATE_TEXT)
-        self.assertIn('"$AK" "$BK"', GATE_TEXT)
+        self.assertIn(
+            'apply_host host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" '
+            'host-b "$FABRIC_V3_3H_HOST_B_IP" "$BK" host-c "$FABRIC_V3_3H_HOST_C_IP" "$CK"',
+            GATE_TEXT,
+        )
+        self.assertIn(
+            'apply_host host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" '
+            'host-a "$FABRIC_V3_3H_HOST_A_IP" "$AK" host-c "$FABRIC_V3_3H_HOST_C_IP" "$CK"',
+            GATE_TEXT,
+        )
+        self.assertIn(
+            'apply_host host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" '
+            'host-a "$FABRIC_V3_3H_HOST_A_IP" "$AK" host-b "$FABRIC_V3_3H_HOST_B_IP" "$BK"',
+            GATE_TEXT,
+        )
+
+    def test_wireguard_peer_expectations_follow_realm_participation(self):
+        self.assertIn(
+            'verify_wireguard_identity host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" "$AK" "$BK"',
+            GATE_TEXT,
+        )
+        self.assertIn(
+            'verify_wireguard_identity host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" '
+            '"$BK" "$AK" "$CK"',
+            GATE_TEXT,
+        )
+        self.assertIn(
+            'verify_wireguard_identity host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" "$CK" "$BK"',
+            GATE_TEXT,
+        )
 
     def test_wireguard_identity_matches_production_shared_provider_root(self):
         adapter = (ROOT.parent / "crates/o3k-network/src/linux_fabric/shared_provider.rs").read_text()
@@ -193,7 +220,16 @@ test "$status" -ne 0
                 "#!/usr/bin/env bash\n"
                 "[[ ${FAKE_GOOD:-0} == 5 ]] && exit 23\n"
                 "[[ ${FAKE_GOOD:-0} == 6 && $* == *peers* ]] && exit 24\n"
-                "if [[ $* == *'public-key' ]]; then [[ ${FAKE_GOOD:-0} != 0 ]] && printf '%s\\n' EXPECTED || printf '%s\\n' WRONG; else case ${FAKE_GOOD:-0} in 1) printf 'PEER-A\\nPEER-B\\n';; 3) printf 'PEER-A\\n';; 4) printf 'PEER-A\\nPEER-A\\nPEER-B\\n';; *) printf 'PEER-A\\nPEER-B\\nEXTRA\\n';; esac; fi\n"
+                "if [[ $* == *'public-key' ]]; then\n"
+                "    [[ ${FAKE_GOOD:-0} != 0 ]] && printf '%s\\n' EXPECTED || printf '%s\\n' WRONG\n"
+                "else\n"
+                "    case ${FAKE_GOOD:-0} in\n"
+                "        1) printf 'PEER-A\\nPEER-C\\n' ;;\n"
+                "        3) printf 'PEER-A\\n' ;;\n"
+                "        4) printf 'PEER-A\\nPEER-A\\nPEER-C\\n' ;;\n"
+                "        *) printf 'PEER-A\\nPEER-C\\nEXTRA\\n' ;;\n"
+                "    esac\n"
+                "fi\n"
             )
             fake_ip.chmod(0o755)
             script = f"""
@@ -207,51 +243,78 @@ export -f sudo
 ssh_host() {{ shift 3; bash -c "$1"; }}
 {verify}
 set +e
-verify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED PEER-A PEER-B
+verify_wireguard_identity host-b 192.0.2.11 /tmp/key EXPECTED PEER-A PEER-C
 status=$?
 set -e
 test "$status" -ne 0
 """
             result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
-            evidence = json.loads((Path(tmp) / "wireguard-host-a-identity.json").read_text())
+            evidence = json.loads((Path(tmp) / "wireguard-host-b-identity.json").read_text())
             self.assertEqual(evidence["status"], "failed")
             self.assertFalse(evidence["local_public_key_matches"])
             self.assertEqual(evidence["unexpected_peers"], ["EXTRA"])
-            self.assertTrue((Path(tmp) / "wireguard-host-a-runtime-public.key").exists())
-            self.assertTrue((Path(tmp) / "wireguard-host-a-runtime-peers.txt").exists())
+            self.assertTrue((Path(tmp) / "wireguard-host-b-runtime-public.key").exists())
+            self.assertTrue((Path(tmp) / "wireguard-host-b-runtime-peers.txt").exists())
 
-            control = script.split("set +e\n", 1)[0] + "export FAKE_GOOD=1\nverify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED PEER-A PEER-B\n"
-            control_result = subprocess.run(["bash", "-c", control], capture_output=True, text=True, check=False)
+            control = (
+                script.split("set +e\n", 1)[0]
+                + "export FAKE_GOOD=1\n"
+                + "verify_wireguard_identity host-b 192.0.2.11 /tmp/key EXPECTED PEER-A PEER-C\n"
+            )
+            control_result = subprocess.run(
+                ["bash", "-c", control], capture_output=True, text=True, check=False
+            )
             self.assertEqual(control_result.returncode, 0, control_result.stderr)
-            evidence = json.loads((Path(tmp) / "wireguard-host-a-identity.json").read_text())
+            evidence = json.loads((Path(tmp) / "wireguard-host-b-identity.json").read_text())
             self.assertEqual(evidence["status"], "passed")
 
-            peer_only = script.split("set +e\n", 1)[0] + "export FAKE_GOOD=2\nset +e\nverify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED PEER-A PEER-B\nstatus=$?\nset -e\ntest \"$status\" -ne 0\n"
-            peer_result = subprocess.run(["bash", "-c", peer_only], capture_output=True, text=True, check=False, timeout=10)
+            peer_only = (
+                script.split("set +e\n", 1)[0]
+                + "export FAKE_GOOD=2\nset +e\n"
+                + "verify_wireguard_identity host-b 192.0.2.11 /tmp/key EXPECTED PEER-A PEER-C\n"
+                + "status=$?\nset -e\ntest \"$status\" -ne 0\n"
+            )
+            peer_result = subprocess.run(
+                ["bash", "-c", peer_only], capture_output=True, text=True, check=False, timeout=10
+            )
             self.assertEqual(peer_result.returncode, 0, peer_result.stderr)
-            evidence = json.loads((Path(tmp) / "wireguard-host-a-identity.json").read_text())
+            evidence = json.loads((Path(tmp) / "wireguard-host-b-identity.json").read_text())
             self.assertTrue(evidence["local_public_key_matches"])
             self.assertEqual(evidence["unexpected_peers"], ["EXTRA"])
-            for mode, missing, duplicates in ((3, ["PEER-B"], []), (4, [], ["PEER-A"])):
+            for mode, missing, duplicates in ((3, ["PEER-C"], []), (4, [], ["PEER-A"])):
                 varied = peer_only.replace("FAKE_GOOD=2", f"FAKE_GOOD={mode}")
                 outcome = subprocess.run(["bash", "-c", varied], capture_output=True, text=True, timeout=10)
                 self.assertEqual(outcome.returncode, 0, outcome.stderr)
-                evidence = json.loads((Path(tmp) / "wireguard-host-a-identity.json").read_text())
+                evidence = json.loads((Path(tmp) / "wireguard-host-b-identity.json").read_text())
                 self.assertEqual(evidence["missing_peers"], missing)
                 self.assertEqual(evidence["duplicate_peers"], duplicates)
             failed_read = peer_only.replace("FAKE_GOOD=2", "FAKE_GOOD=5")
-            failed_read += 'test "$GATE_OPERATION" = wireguard_public_key_observe_host_a\ntest "$GATE_OPERATION_EXIT_CODE" = 23\ntest "$GATE_FAILED_HOST" = host-a\n'
+            failed_read += (
+                'test "$GATE_OPERATION" = wireguard_public_key_observe_host_b\n'
+                'test "$GATE_OPERATION_EXIT_CODE" = 23\n'
+                'test "$GATE_FAILED_HOST" = host-b\n'
+            )
             outcome = subprocess.run(["bash", "-c", failed_read], capture_output=True, text=True, timeout=10)
             self.assertEqual(outcome.returncode, 0, outcome.stderr)
             failed_peers = peer_only.replace("FAKE_GOOD=2", "FAKE_GOOD=6")
-            failed_peers += 'test "$GATE_OPERATION" = wireguard_peers_observe_host_a\ntest "$GATE_OPERATION_EXIT_CODE" = 24\ntest "$GATE_CLASSIFICATION" = HARNESS_GAP\n'
+            failed_peers += (
+                'test "$GATE_OPERATION" = wireguard_peers_observe_host_b\n'
+                'test "$GATE_OPERATION_EXIT_CODE" = 24\n'
+                'test "$GATE_CLASSIFICATION" = HARNESS_GAP\n'
+            )
             outcome = subprocess.run(["bash", "-c", failed_peers], capture_output=True, text=True, timeout=10)
             self.assertEqual(outcome.returncode, 0, outcome.stderr)
             # Exercise the real EXIT reporter, not a reconstructed result fixture.
             initial = GATE_TEXT.split("GATE_PHASE=preflight\n", 1)[1].split("ssh_host()", 1)[0]
             reporter = self._extract_function("finish_gate")
-            failed_gate = script.split("set +e\n", 1)[0] + initial + reporter + "\ntrap finish_gate EXIT\nGATE_PHASE=wireguard_identity_verify\nverify_wireguard_identity host-b 192.0.2.11 /tmp/key EXPECTED PEER-A PEER-B\n"
+            failed_gate = (
+                script.split("set +e\n", 1)[0]
+                + initial
+                + reporter
+                + "\ntrap finish_gate EXIT\nGATE_PHASE=wireguard_identity_verify\n"
+                + "verify_wireguard_identity host-b 192.0.2.11 /tmp/key EXPECTED PEER-A PEER-B\n"
+            )
             outcome = subprocess.run(["bash", "-c", failed_gate], capture_output=True, text=True, timeout=10)
             self.assertEqual(outcome.returncode, 1, outcome.stderr)
             result = json.loads((Path(tmp) / "result.json").read_text())
@@ -262,6 +325,94 @@ test "$status" -ne 0
             self.assertEqual(result["classification"], "PROVIDER_CONFORMANCE_DEFECT")
             self.assertIn("local_public_key_mismatch", result["wireguard_identity_evidence"]["failed_predicates"])
             self.assertNotIn("TEST_PRIVATE_KEY", json.dumps(result))
+
+    def test_wireguard_verify_accepts_one_exact_peer_and_rejects_unexpected_realm_peer(self):
+        verify = self._extract_function("verify_wireguard_identity")
+        with tempfile.TemporaryDirectory(prefix="fabric-gate-wg-single-peer-") as tmp:
+            fake_ip = Path(tmp) / "ip"
+            fake_ip.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ $* == *'public-key' ]]; then printf 'EXPECTED\\n'; "
+                "elif [[ ${FAKE_MODE:-good} == extra ]]; then printf 'PEER-B\\nPEER-C\\n'; "
+                "else printf 'PEER-B\\n'; fi\n"
+            )
+            fake_ip.chmod(0o755)
+            script = f"""
+set -Eeuo pipefail
+PATH={tmp}:$PATH
+SCRIPT_ROOT={ROOT}
+EVIDENCE_DIR={tmp}
+FABRIC_V3_3H_RUN_ID=regression-single-peer
+sudo() {{ "$@"; }}
+export -f sudo
+ssh_host() {{ shift 3; bash -c "$1"; }}
+{verify}
+FAKE_MODE=good verify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED PEER-B
+FAKE_MODE=extra
+export FAKE_MODE
+set +e
+verify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED PEER-B
+status=$?
+set -e
+test "$status" -eq 1
+python3 - {tmp!s}/wireguard-host-a-identity.json <<'PY'
+import json,sys
+from pathlib import Path
+evidence=json.loads(Path(sys.argv[1]).read_text())
+assert evidence["expected_peers"] == ["PEER-B"]
+assert evidence["unexpected_peers"] == ["PEER-C"]
+assert evidence["classification"] == "PROVIDER_CONFORMANCE_DEFECT"
+PY
+"""
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, check=False, timeout=10
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wireguard_verify_rejects_invalid_expected_peer_count_with_operation_diagnostics(self):
+        verify = self._extract_function("verify_wireguard_identity")
+        initial = GATE_TEXT.split("GATE_PHASE=preflight\n", 1)[1].split("ssh_host()", 1)[0]
+        reporter = self._extract_function("finish_gate")
+
+        for peer_args in ("", "PEER-A PEER-B PEER-C"):
+            with self.subTest(peer_args=peer_args), tempfile.TemporaryDirectory(
+                prefix="fabric-gate-wg-invalid-peer-count-"
+            ) as tmp:
+                script = f"""
+set -Eeuo pipefail
+SCRIPT_ROOT={ROOT}
+EVIDENCE_DIR={tmp}
+FABRIC_V3_3H_RUN_ID=regression-invalid-peer-count
+{verify}
+{initial}{reporter}
+trap finish_gate EXIT
+GATE_PHASE=wireguard_identity_verify
+set +e
+verify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED {peer_args}
+status=$?
+set -e
+test "$status" -eq 2
+test "$GATE_CLASSIFICATION" = HARNESS_GAP
+test "$GATE_OPERATION" = wireguard_expected_peers_validate_host_a
+test "$GATE_OPERATION_EXIT_CODE" = 2
+test "$GATE_OBSERVER_TYPE" = local_input_validation
+test "$GATE_COMMAND_CLASS" = wireguard_expected_peer_contract_validation
+exit "$status"
+"""
+                result = subprocess.run(
+                    ["bash", "-c", script], capture_output=True, text=True, check=False, timeout=10
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                evidence = json.loads((Path(tmp) / "result.json").read_text())
+                self.assertEqual(evidence["classification"], "HARNESS_GAP")
+                self.assertEqual(
+                    evidence["failed_operation"], "wireguard_expected_peers_validate_host_a"
+                )
+                self.assertEqual(evidence["failed_operation_exit_code"], 2)
+                self.assertEqual(evidence["failed_observer_type"], "local_input_validation")
+                self.assertEqual(
+                    evidence["failed_command_class"], "wireguard_expected_peer_contract_validation"
+                )
 
     def test_wireguard_prepare_fails_closed_on_generation_error(self):
         prepare = self._extract_function("prepare_fresh_wireguard_identity")
@@ -284,7 +435,9 @@ status=$?
 set -e
 test "$status" -ne 0
 """
-            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, timeout=10)
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, check=False, timeout=10
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_identity_comparator_rejects_invalid_inputs_and_missing_evidence(self):
@@ -295,7 +448,7 @@ test "$status" -ne 0
             output = Path(tmp) / "identity.json"
             args = ["host-a", "EXPECTED", "PEER-A", "PEER-B",
                     str(public_path), str(peers_path), str(output)]
-            for invalid in ([], args, ["wrong-host", *args[1:]],
+            for invalid in ([], ["wrong-host", *args[1:]],
                             [*args[:3], "PEER-A", *args[4:]]):
                 result = subprocess.run(["python3", str(comparator), *invalid],
                                         capture_output=True, text=True, timeout=10)
@@ -312,6 +465,58 @@ test "$status" -ne 0
                 self.assertEqual(evidence["failed_predicates"], ["local_public_key_mismatch"])
                 self.assertEqual(evidence["classification"], "PROVIDER_CONFORMANCE_DEFECT")
                 self.assertNotIn("private", json.dumps(evidence))
+
+    def test_identity_comparator_accepts_exact_single_peer_and_rejects_missing_or_extra_peer(self):
+        comparator = ROOT / "fabric-v3-wireguard-identity.py"
+        with tempfile.TemporaryDirectory(prefix="fabric-single-peer-identity-") as tmp:
+            public_path = Path(tmp) / "public.txt"
+            peers_path = Path(tmp) / "peers.txt"
+            output = Path(tmp) / "identity.json"
+            public_path.write_text("EXPECTED\n")
+            peers_path.write_text("PEER-B\n")
+            args = ["host-a", "EXPECTED", "PEER-B", str(public_path), str(peers_path), str(output)]
+
+            result = subprocess.run(
+                ["python3", str(comparator), *args], capture_output=True, text=True, timeout=10
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            evidence = json.loads(output.read_text())
+            self.assertEqual(evidence["expected_peers"], ["PEER-B"])
+            self.assertEqual(evidence["observed_peers"], ["PEER-B"])
+
+            peers_path.write_text("PEER-B\nPEER-C\n")
+            result = subprocess.run(
+                ["python3", str(comparator), *args], capture_output=True, text=True, timeout=10
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            evidence = json.loads(output.read_text())
+            self.assertEqual(evidence["unexpected_peers"], ["PEER-C"])
+            self.assertEqual(evidence["classification"], "PROVIDER_CONFORMANCE_DEFECT")
+
+            peers_path.write_text("")
+            result = subprocess.run(
+                ["python3", str(comparator), *args], capture_output=True, text=True, timeout=10
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            evidence = json.loads(output.read_text())
+            self.assertEqual(evidence["missing_peers"], ["PEER-B"])
+
+            peers_path.write_text("PEER-A\nPEER-C\n")
+            two_peer_args = [
+                "host-b",
+                "EXPECTED",
+                "PEER-A",
+                "PEER-C",
+                str(public_path),
+                str(peers_path),
+                str(output),
+            ]
+            result = subprocess.run(
+                ["python3", str(comparator), *two_peer_args], capture_output=True, text=True, timeout=10
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            evidence = json.loads(output.read_text())
+            self.assertEqual(evidence["expected_peers"], ["PEER-A", "PEER-C"])
 
     def test_wireguard_prepare_fails_closed_on_wrong_owner_or_mode(self):
         prepare = self._extract_function("prepare_fresh_wireguard_identity")

@@ -45,16 +45,31 @@ def compare(host: str, expected: str, peers: list[str], public: str, observed: s
 
 
 def main(arguments: list[str]) -> int:
-    if len(arguments) != 7:
-        print("HARNESS_GAP: expected host, public key, two peers, two observations, output", file=sys.stderr)
+    if len(arguments) not in {6, 7}:
+        print(
+            "HARNESS_GAP: expected host, public key, one or two peers, two observations, output",
+            file=sys.stderr,
+        )
         return 2
-    host, public, peer_one, peer_two, public_path, peers_path, output = arguments
-    if host not in {"host-a", "host-b", "host-c"} or peer_one == peer_two:
+    host, public = arguments[:2]
+    peers = arguments[2:-3]
+    public_path, peers_path, output = arguments[-3:]
+    if (
+        host not in {"host-a", "host-b", "host-c"}
+        or not 1 <= len(peers) <= 2
+        or any(not peer for peer in peers)
+        or len(set(peers)) != len(peers)
+    ):
         print("HARNESS_GAP: invalid expected WireGuard identity", file=sys.stderr)
         return 2
     try:
-        result = compare(host, public, [peer_one, peer_two],
-                         Path(public_path).read_text(), Path(peers_path).read_text())
+        result = compare(
+            host,
+            public,
+            peers,
+            Path(public_path).read_text(),
+            Path(peers_path).read_text(),
+        )
         Path(output).write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     except OSError:
         print(f"HARNESS_GAP: public identity evidence unavailable for {host}", file=sys.stderr)

@@ -76,8 +76,19 @@ prepare_fresh_wireguard_identity() {
 }
 
 verify_wireguard_identity() {
-    local host="$1" ip="$2" key="$3" expected="$4" peer_one="$5" peer_two="$6"
+    local host="$1" ip="$2" key="$3" expected="$4"
+    shift 4
+    local -a expected_peers=("$@")
     local base="$EVIDENCE_DIR/wireguard-$host" status
+    if (( ${#expected_peers[@]} < 1 || ${#expected_peers[@]} > 2 )); then
+        GATE_CLASSIFICATION=HARNESS_GAP
+        GATE_FAILED_HOST="$host"
+        GATE_OPERATION="wireguard_expected_peers_validate_${host//-/_}"
+        GATE_OPERATION_EXIT_CODE=2
+        GATE_OBSERVER_TYPE=local_input_validation
+        GATE_COMMAND_CLASS=wireguard_expected_peer_contract_validation
+        return 2
+    fi
     GATE_FAILED_HOST="$host"
     GATE_CLASSIFICATION=HARNESS_GAP
     GATE_OBSERVER_TYPE=ssh_sudo_read_only
@@ -105,7 +116,7 @@ verify_wireguard_identity() {
     GATE_OBSERVER_TYPE=local_evidence_comparison
     GATE_COMMAND_CLASS=wireguard_public_identity_compare
     if python3 "$SCRIPT_ROOT/fabric-v3-wireguard-identity.py" \
-        "$host" "$expected" "$peer_one" "$peer_two" \
+        "$host" "$expected" "${expected_peers[@]}" \
         "$base-runtime-public.key" "$base-runtime-peers.txt" "$base-identity.json"; then
         GATE_OPERATION_EXIT_CODE=0
     else
@@ -370,9 +381,11 @@ apply_host host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" host-a "$FABRI
 apply_host host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" host-a "$FABRIC_V3_3H_HOST_A_IP" "$AK" host-b "$FABRIC_V3_3H_HOST_B_IP" "$BK"
 GATE_PHASE=wireguard_identity_verify
 GATE_OPERATION=wireguard_identity_verify
-verify_wireguard_identity host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" "$AK" "$BK" "$CK"
+# Realm A is hosted by A/B and Realm B by B/C. Thus the aggregate host-fabric
+# peer set is B on A, A+C on B, and B on C; nonparticipants are not peers.
+verify_wireguard_identity host-a "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" "$AK" "$BK"
 verify_wireguard_identity host-b "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" "$BK" "$AK" "$CK"
-verify_wireguard_identity host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" "$CK" "$AK" "$BK"
+verify_wireguard_identity host-c "$FABRIC_V3_3H_HOST_C_IP" "$FABRIC_V3_3H_KEY_C" "$CK" "$BK"
 
 attach_endpoint "$FABRIC_V3_3H_HOST_A_IP" "$FABRIC_V3_3H_KEY_A" a1 o3k-b-a1000000 10.0.0.10 02:00:00:00:a1:01
 attach_endpoint "$FABRIC_V3_3H_HOST_B_IP" "$FABRIC_V3_3H_KEY_B" a2 o3k-b-a1000000 10.0.0.20 02:00:00:00:a1:02
