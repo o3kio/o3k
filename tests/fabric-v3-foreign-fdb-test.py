@@ -51,9 +51,20 @@ class ForeignFdbTests(unittest.TestCase):
             foreign_fdb.compare(self.root / "missing", self.root / "after", set())
 
     def test_namespace_ordering_and_run_scope_are_normalized(self):
-        before = self.write("ns-before", "foreign-a\nrun-fabric\n")
-        after = self.write("ns-after", "run-fabric\nforeign-a\n")
+        before = self.write("ns-before", "foreign-a (id: 4026532000)\nrun-fabric (id: 4026532001)\n")
+        after = self.write("ns-after", "run-fabric (id: 4026532001)\nforeign-a (id: 4026532000)\n")
         foreign_fdb.compare_namespaces(before, after, {"run-fabric"})
+
+        wrong = self.write("ns-wrong", "foreign-a (id: 4026532000)\nother (id: 4026532001)\n")
+        with self.assertRaises(AssertionError):
+            foreign_fdb.compare_namespaces(before, wrong, {"run-fabric"})
+
+    def test_shell_first_field_accepts_annotated_namespace(self):
+        command = "awk -v expected=foreign-a '$1 == expected { found=1 } END { exit found ? 0 : 1 }'"
+        result = subprocess.run(["bash", "-c", command], input="foreign-a (id: 4026532000)\n", text=True, check=False)
+        self.assertEqual(result.returncode, 0)
+        result = subprocess.run(["bash", "-c", command], input="other (id: 4026532000)\n", text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
 
     def test_foreign_namespace_change_fails(self):
         before = self.write("ns-before", "foreign-a\n")

@@ -8,7 +8,10 @@ fdb_compare_failure() {
   if [[ "$status" -eq 2 ]]; then
     fail "$message" "HARNESS_GAP"
   fi
-  fail "$message" "OWNERSHIP_DEFECT"
+  if [[ "$status" -eq 1 ]]; then
+    fail "$message" "OWNERSHIP_DEFECT"
+  fi
+  fail "$message" "HARNESS_GAP"
 }
 
 run_retirement_microgate() {
