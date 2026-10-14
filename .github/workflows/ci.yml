@@ -110,10 +110,8 @@ jobs:
         run: bash tests/workflow-validation.sh actionlint
       - name: Test protected real-host workflow guards
         run: bash tests/real-host-workflow-guards.sh
-      - name: Test Fabric campaign cleanup result predicates
-        run: python3 tests/fabric-v3-campaign-result-test.py
-      - name: Test Fabric nested Gate A ownership and sequencing
-        run: python3 tests/fabric-v3-three-host-gate-regression.py
+      - name: Test Fabric acceptance harness regressions
+        run: bash tests/fabric-v3-harness-regressions.sh
       - name: Test protected checkout recovery boundary
         run: bash tests/p15_7_checkout_recovery.sh
       - name: Test protected P15.7 authority preflight

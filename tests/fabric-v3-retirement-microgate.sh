@@ -210,14 +210,19 @@ PY
       >"$EVIDENCE/provider-absence/host-c/${host}-dhcp-state.json" <<'PYDHCP'
 import json,pathlib,sys
 run,realm=sys.argv[1:]; root=pathlib.Path('/var/lib/o3k-fabric-v3')/run/'network/dhcp/fabric'/realm
-result={'root_exists':root.exists(),'root_is_symlink':root.is_symlink(),'files':{}}
+if any(path.is_symlink() for path in (root, *root.parents)):
+    raise SystemExit('protected DHCP root contains a symlink')
+result={'root_exists':root.exists(),'root_is_symlink':False,'files':{}}
 for name in ('state.json','fabric-dhcp-ownership.json','gateway-address-ownership.json','dnsmasq.conf','dnsmasq.leases'):
     path=root/name
     if path.is_symlink(): result['files'][name]={'symlink':True}; continue
+    if path.exists() and not path.is_file(): raise SystemExit('protected DHCP path is not a regular file')
     if not path.is_file(): result['files'][name]=None; continue
     text=path.read_text()
     try: result['files'][name]=json.loads(text)
-    except json.JSONDecodeError: result['files'][name]={'text':text}
+    except json.JSONDecodeError:
+        if name.endswith('.json'): raise
+        result['files'][name]={'text':text}
 json.dump(result,sys.stdout,sort_keys=True,indent=2); print()
 PYDHCP
     then
@@ -736,22 +741,76 @@ PY
     assert_remote_path_absent c "/var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/plans/$realm_id.json" \
       "$EVIDENCE/restart/startup-recovery/host-c-plan-absence.txt"
     ssh_vm "${MGMT_IP[c]}" 'sudo python3 -' "$RUN_ID" "$realm_id" \
-      >"$EVIDENCE/restart/startup-recovery/host-c-dhcp-state.json" <<'PYDHCPRESTART'
+      >"$EVIDENCE/restart/startup-recovery/host-c-dhcp-state.json" <<'PYDHCPRESTART' \
+      || fail "post-restart C DHCP observation failed" "HARNESS_GAP"
 import json,pathlib,sys
 run,realm=sys.argv[1:]; root=pathlib.Path('/var/lib/o3k-fabric-v3')/run/'network/dhcp/fabric'/realm
-result={'root_exists':root.exists(),'files':{}}
-for name in ('state.json','fabric-dhcp-ownership.json'):
+if any(path.is_symlink() for path in (root, *root.parents)):
+    raise SystemExit('protected DHCP root contains a symlink')
+result={'root_exists':root.exists(),'root_is_symlink':False,'files':{}}
+for name in ('state.json','fabric-dhcp-ownership.json','dnsmasq.conf','dnsmasq.leases'):
     path=root/name
-    result['files'][name]=json.loads(path.read_text()) if path.is_file() else None
+    if path.is_symlink(): result['files'][name]={'symlink':True}; continue
+    if path.exists() and not path.is_file(): raise SystemExit('protected DHCP path is not a regular file')
+    if not path.is_file(): result['files'][name]=None; continue
+    text=path.read_text()
+    try: result['files'][name]=json.loads(text)
+    except json.JSONDecodeError:
+        if name.endswith('.json'): raise
+        result['files'][name]={'text':text}
 json.dump(result,sys.stdout,sort_keys=True,indent=2); print()
 PYDHCPRESTART
-    python3 - "$EVIDENCE/restart/startup-recovery/host-c-dhcp-state.json" "${PORT_IDS[2]}" <<'PY' \
+    # Re-observe the authority as well as the departed host after restart.  A
+    # C tombstone alone cannot prove that the controller did not resurrect C's
+    # binding or stale rendered authority configuration.
+    ssh_vm "${MGMT_IP[a]}" 'sudo python3 -' "$RUN_ID" "$realm_id" \
+      >"$EVIDENCE/restart/startup-recovery/host-a-dhcp-state.json" <<'PYDHCPRESTARTA' \
+      || fail "post-restart authority DHCP observation failed" "HARNESS_GAP"
+import json,pathlib,sys
+run,realm=sys.argv[1:]; root=pathlib.Path('/var/lib/o3k-fabric-v3')/run/'network/dhcp/fabric'/realm
+if any(path.is_symlink() for path in (root, *root.parents)):
+    raise SystemExit('protected DHCP root contains a symlink')
+result={'root_exists':root.exists(),'root_is_symlink':False,'files':{}}
+for name in ('state.json','fabric-dhcp-ownership.json','dnsmasq.conf','dnsmasq.leases'):
+    path=root/name
+    if path.is_symlink(): result['files'][name]={'symlink':True}; continue
+    if path.exists() and not path.is_file(): raise SystemExit('protected DHCP path is not a regular file')
+    if not path.is_file(): result['files'][name]=None; continue
+    text=path.read_text()
+    try: result['files'][name]=json.loads(text)
+    except json.JSONDecodeError:
+        if name.endswith('.json'): raise
+        result['files'][name]={'text':text}
+json.dump(result,sys.stdout,sort_keys=True,indent=2); print()
+PYDHCPRESTARTA
+    python3 - "$EVIDENCE/restart/startup-recovery/host-a-dhcp-state.json" \
+      "$EVIDENCE/restart/startup-recovery/host-c-dhcp-state.json" \
+      "${PORT_IDS[0]}" "${PORT_IDS[1]}" "${PORT_IDS[2]}" "${TENANT_MAC[a]}" "${TENANT_MAC[b]}" "${TENANT_MAC[c]}" \
+      "${TENANT_IP[a]}" "${TENANT_IP[b]}" "${TENANT_IP[c]}" <<'PY' \
       || fail "controller restart restored C DHCP allocation state" "DURABLE_RECOVERY_DEFECT"
 import json,sys
-state=json.load(open(sys.argv[1])); values=state['files']; data=values.get('state.json') or {}; owner=values.get('fabric-dhcp-ownership.json')
-assert sys.argv[2] not in (data.get('bindings') or {}), data
+authority=json.load(open(sys.argv[1])); departing=json.load(open(sys.argv[2])); a_port,b_port,c_port=sys.argv[3:6]
+mac_a,mac_b,mac_c,ip_a,ip_b,ip_c=(value.lower() for value in sys.argv[6:12])
+assert authority.get('root_is_symlink') is False and departing.get('root_is_symlink') is False
+required={'state.json','fabric-dhcp-ownership.json','dnsmasq.conf','dnsmasq.leases'}
+assert required <= authority['files'].keys() and required <= departing['files'].keys()
+assert not any(isinstance(value,dict) and value.get('symlink') is True for evidence in (authority,departing) for value in evidence['files'].values()), 'protected DHCP file is a symlink'
+authority_files=authority['files']; authority_state=authority_files.get('state.json') or {}
+assert c_port not in (authority_state.get('bindings') or {}), authority_state
+assert c_port not in {row.get('port_id') for row in (authority_state.get('bindings') or {}).values()}, authority_state
+assert a_port in (authority_state.get('bindings') or {}) and b_port in (authority_state.get('bindings') or {}), authority_state
+authority_config=authority_files.get('dnsmasq.conf')
+assert isinstance(authority_config, dict) and 'text' in authority_config, authority_files
+config_text=authority_config['text'].lower()
+bindings={tuple(line.split('=',1)[1].split(',')) for line in config_text.splitlines() if line.startswith('dhcp-host=')}
+assert bindings == {(mac_a,ip_a),(mac_b,ip_b)}, 'authority DHCP bindings differ from surviving endpoints'
+assert mac_c not in config_text, 'departed MAC remains in authority config'
+data=departing['files'].get('state.json') or {}; owner=departing['files'].get('fabric-dhcp-ownership.json')
+assert c_port not in (data.get('bindings') or {}), data
 assert not data.get('bindings') and data.get('config') is None, data
 assert owner is not None and owner.get('withdrawn') is True and owner.get('pending') is False, owner
+assert departing['files'].get('dnsmasq.conf') is None, departing
+assert departing['files'].get('dnsmasq.leases') is None, departing
 PY
     guest_control_command a "ping -c 1 -W 4 ${TENANT_IP[b]}" restart/traffic/a-to-b-icmp.txt \
       || fail "A/B traffic failed after post-retirement controller restart" "DURABLE_RECOVERY_DEFECT"

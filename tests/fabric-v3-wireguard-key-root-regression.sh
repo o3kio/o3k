@@ -17,7 +17,7 @@ import sys
 root, installer_path, campaign_path, capture_path = sys.argv[1:]
 installer, campaign, capture = map(lambda p: pathlib.Path(p).read_text(),
                                    (installer_path, campaign_path, capture_path))
-product_sha = '93dce08291893fe220cbb87d81d44f01659a0482'
+product_sha = '9cdaa4a43aaedec9d2be65170af118b7ca2ced83'
 assert f'PRODUCT_SHA={product_sha}' in campaign
 dhcp_realizer = subprocess.run(
     ['git', '-C', root, 'show', f'{product_sha}:crates/o3k-network/src/fabric_dhcp.rs'],

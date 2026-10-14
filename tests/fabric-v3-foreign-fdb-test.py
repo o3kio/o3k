@@ -104,6 +104,18 @@ class ForeignFdbTests(unittest.TestCase):
         result = subprocess.run(["python3", str(Path(__file__).with_name("fabric-v3-foreign-fdb.py"))], check=False)
         self.assertEqual(result.returncode, 2)
 
+    def test_non_utf8_observation_is_harness_error(self):
+        before = self.root / "undecodable.json"
+        before.write_bytes(b"\xff")
+        after = self.write("empty.json", "[]")
+        result = subprocess.run(
+            ["python3", str(Path(__file__).with_name("fabric-v3-foreign-fdb.py")),
+             "--before", str(before), "--after", str(after)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_cli_distinguishes_observation_error_from_mutation(self):
         script = str(Path(__file__).with_name("fabric-v3-foreign-fdb.py"))
         missing = subprocess.run(["python3", script, "--before", str(self.root / "missing"), "--after", str(self.root / "after")], check=False)

@@ -41,6 +41,16 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('foreign FDB state changed outside run-owned Realm interfaces', RETIREMENT)
         self.assertIn('fabric-v3-foreign-fdb.py', RETIREMENT)
 
+    def test_post_restart_dhcp_checks_authority_and_departed_rendered_state(self):
+        capture = RETIREMENT.index('host-a-dhcp-state.json')
+        validation = RETIREMENT.index('authority_config=authority_files.get', capture)
+        traffic = RETIREMENT.index('restart/traffic/a-to-b-icmp.txt')
+        self.assertLess(capture, validation)
+        self.assertLess(validation, traffic)
+        self.assertIn('mac_c not in config_text', RETIREMENT)
+        self.assertIn('a_port in (authority_state.get', RETIREMENT)
+        self.assertIn("departing['files'].get('dnsmasq.conf') is None", RETIREMENT)
+
     def test_restart_readiness_requires_new_controller_session_and_exact_agent_epochs(self):
         log = "\n".join(
             [

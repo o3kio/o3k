@@ -83,9 +83,19 @@ try:
         command = 'set -o pipefail\n' + check
         result = subprocess.run(['bash', '-c', command], env=test_env,
                                 capture_output=True, timeout=5)
-        assert result.returncode == 0, (
-            f'live environment check {index + 1} falsely rejected an exact match '
-            f'(exit {result.returncode})')
+        if result.returncode != 0:
+            # Record observer outcomes only; never retain or print /proc values.
+            observer_status = {}
+            for label, prefix in (('runner_read', []), ('sudo_read_only', ['sudo', '-n'])):
+                observed = subprocess.run(
+                    prefix + ['cat', f'/proc/{process.pid}/environ'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                observer_status[label] = observed.returncode
+            raise AssertionError(
+                f'live environment check {index + 1} falsely rejected an exact match '
+                f'(exit {result.returncode}; operation=verify_process_environment; '
+                f'pid_alive={process.poll() is None}; observers={observer_status}; '
+                f'stderr_present={bool(result.stderr)})')
         assert not result.stdout, 'environment verifier printed matched values'
         wrong = dict(test_env)
         for field in ('STATE_ROOT', 'CRASH_REPAIR_RELEASE_FILE',
