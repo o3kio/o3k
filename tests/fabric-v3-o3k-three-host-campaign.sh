@@ -62,7 +62,9 @@ if [[ "$DHCP_BOUNDARY_DIAGNOSTIC" == 1 ]]; then
 else
   EVIDENCE="$EVIDENCE_ROOT/fabric-v3-minimal-three-host-$RUN_ID"
 fi
-IMAGE_STORE="${O3K_FABRIC_V3_IMAGE_STORE:-/var/lib/libvirt/images}"
+IMAGE_STORE_ROOT="${O3K_FABRIC_V3_IMAGE_STORE:-/var/lib/libvirt/images}"
+IMAGE_STORE="${IMAGE_STORE_ROOT}/o3k-p15-7-${RUN_ID}"
+IMAGE_STORE_POOL="o3k-p15-7-${RUN_ID}"
 NETWORK="${O3K_FABRIC_V3_LIBVIRT_NETWORK:-default}"
 SSH_USER=o3k
 SSH_PORT=22
@@ -87,6 +89,9 @@ CLASSIFICATION=""
 CAMPAIGN_TEARDOWN_PASS=0
 API_TEARDOWN_VERIFIED=0
 FRESH_DOMAINS=()
+IMAGE_STORE_DIR_CREATED=0
+IMAGE_STORE_POOL_DEFINE_ATTEMPTED=0
+IMAGE_STORE_POOL_DEFINED=0
 SERVER_IDS=()
 PORT_IDS=()
 NETWORK_ID=""
@@ -459,6 +464,7 @@ cp "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" "$EVIDENCE/environment/ow
 cp "$ROOT_DIR/tests/fabric-v3-build-probe-image.sh" "$EVIDENCE/environment/build-probe-image.sh"
 cp "$ROOT_DIR/tests/fabric-v3-guest-control.py" "$EVIDENCE/environment/guest-control-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-install-agent-host.sh" "$EVIDENCE/environment/install-agent-host.sh"
+cp "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" "$EVIDENCE/environment/libvirt-storage-pool-helper.sh"
 cp "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" "$EVIDENCE/environment/boundary-capture-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-retirement-evidence.py" "$EVIDENCE/environment/retirement-evidence-helper.py"
 cp "$ROOT_DIR/tests/fabric-v3-retirement-evidence-test.py" "$EVIDENCE/environment/retirement-evidence-test.py"
@@ -481,44 +487,78 @@ sha256sum "$ROOT_DIR/tests/fabric-v3-shared-fabric-namespace-test.py" >"$EVIDENC
 sha256sum "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence.py" >"$EVIDENCE/environment/canonical-endpoint-retention-evidence-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-canonical-endpoint-retention-evidence-test.py" >"$EVIDENCE/environment/canonical-endpoint-retention-evidence-test.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-retirement-microgate.sh" >"$EVIDENCE/environment/retirement-microgate-helper.sha256"
+sha256sum "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" >"$EVIDENCE/environment/libvirt-storage-pool-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-owned-domain-storage.py" >"$EVIDENCE/environment/owned-domain-storage-check.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-guest-control.py" >"$EVIDENCE/environment/guest-control-helper.sha256"
 sha256sum "$ROOT_DIR/tests/fabric-v3-remote-dhcp-boundary-capture.py" >"$EVIDENCE/environment/boundary-capture-helper.sha256"
 
+prepare_campaign_image_store() {
+  local qemu_group
+  [[ "$IMAGE_STORE_ROOT" == /* && -d "$IMAGE_STORE_ROOT" && ! -L "$IMAGE_STORE_ROOT" \
+    && "$IMAGE_STORE_ROOT" != *..* ]] \
+    || fail "libvirt image root is unavailable or unsafe" "ENVIRONMENT_GAP"
+  IMAGE_STORE_ROOT="$(realpath -e -- "$IMAGE_STORE_ROOT")" \
+    || fail "libvirt image root cannot be resolved" "ENVIRONMENT_GAP"
+  IMAGE_STORE="$IMAGE_STORE_ROOT/o3k-p15-7-$RUN_ID"
+  IMAGE_STORE_POOL="o3k-p15-7-$RUN_ID"
+  O3K_P15_7_LIBVIRT_IMAGE_ROOT="$IMAGE_STORE_ROOT" \
+    bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$IMAGE_STORE" \
+    || fail "run-owned libvirt storage pool already exists or is ambiguous" "ENVIRONMENT_GAP"
+  [[ ! -e "$IMAGE_STORE" && ! -L "$IMAGE_STORE" ]] \
+    || fail "run-owned libvirt storage directory already exists" "ENVIRONMENT_GAP"
+  qemu_group="$(id -gn libvirt-qemu 2>/dev/null || true)"
+  [[ -n "$qemu_group" ]] || fail "libvirt QEMU group is unavailable" "ENVIRONMENT_GAP"
+  sudo -n install -d -o root -g "$qemu_group" -m 0711 "$IMAGE_STORE" \
+    || fail "cannot create run-owned libvirt storage directory" "ENVIRONMENT_GAP"
+  IMAGE_STORE_DIR_CREATED=1
+  IMAGE_STORE_POOL_DEFINE_ATTEMPTED=1
+  O3K_P15_7_LIBVIRT_IMAGE_ROOT="$IMAGE_STORE_ROOT" \
+    bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$IMAGE_STORE" \
+    || fail "cannot define exact run-owned libvirt storage pool" "ENVIRONMENT_GAP"
+  IMAGE_STORE_POOL_DEFINED=1
+  python3 - "$EVIDENCE/environment/libvirt-image-store.json" "$RUN_ID" "$IMAGE_STORE_POOL" \
+    "$IMAGE_STORE_ROOT" "$IMAGE_STORE" <<'PYPOOLIDENTITY'
+import json,pathlib,sys
+target,run_id,pool,root,path=sys.argv[1:]
+pathlib.Path(target).write_text(json.dumps({
+    "status":"PASS",
+    "run_id":run_id,
+    "pool":pool,
+    "pool_target":path,
+    "image_root":root,
+    "shared_base_image_is_outside_run_pool":True,
+    "observer":"exact_run_owned_p15_7_libvirt_pool",
+},sort_keys=True,indent=2)+"\n")
+PYPOOLIDENTITY
+}
+
 refresh_image_store_pool() {
   local output="$1"
-  python3 - "$IMAGE_STORE" "$output" <<'PYPOOL'
+  python3 - "$IMAGE_STORE" "$IMAGE_STORE_POOL" "$output" <<'PYPOOL'
 import json,pathlib,subprocess,sys,xml.etree.ElementTree as ET
 image_store=pathlib.Path(sys.argv[1]).resolve(strict=False)
-output=pathlib.Path(sys.argv[2])
-result={'image_store':str(image_store),'observer':'libvirt_pool_path_match','status':'FAIL'}
+pool_name=sys.argv[2]
+output=pathlib.Path(sys.argv[3])
+result={'image_store':str(image_store),'pool':pool_name,'observer':'exact_run_owned_libvirt_pool','status':'FAIL'}
 def run(*args):
     return subprocess.run(['virsh','-c','qemu:///system',*args],check=True,capture_output=True,text=True).stdout
 try:
-    matches=[]
-    for name in (line.strip() for line in run('pool-list','--all','--name').splitlines() if line.strip()):
-        root=ET.fromstring(run('pool-dumpxml',name))
-        path=root.findtext('./target/path')
-        if path and pathlib.Path(path).resolve(strict=False)==image_store:
-            matches.append(name)
-    if len(matches)>1:
-        raise RuntimeError('multiple libvirt pools target the exact campaign image store')
-    if not matches:
-        result.update({'status':'NOT_APPLICABLE','reason':'no libvirt pool targets the campaign image store'})
-    else:
-        pool=matches[0]
-        info=run('pool-info',pool)
-        state=next((line.split(':',1)[1].strip().lower() for line in info.splitlines()
-                    if line.lstrip().startswith('State:')), '')
-        result.update({'pool':pool,'pool_state':state})
-        if state not in {'running','active'}:
-            result.update({'status':'NOT_APPLICABLE','reason':'matching image store pool is inactive'})
-        else:
-            completed=subprocess.run(['virsh','-c','qemu:///system','pool-refresh',pool],capture_output=True,text=True)
-            result.update({'command_class':'refresh_exact_image_store_pool','exit_code':completed.returncode,
-                           'status':'PASS' if completed.returncode==0 else 'FAIL'})
-            if completed.returncode:
-                result['diagnostic']=completed.stderr.strip()[:500]
+    root=ET.fromstring(run('pool-dumpxml',pool_name))
+    path=root.findtext('./target/path')
+    if root.tag!='pool' or root.get('type')!='dir' or root.findtext('./name')!=pool_name \
+            or not path or pathlib.Path(path).resolve(strict=False)!=image_store:
+        raise RuntimeError('exact run-owned pool identity does not match the campaign image store')
+    info=run('pool-info',pool_name)
+    state=next((line.split(':',1)[1].strip().lower() for line in info.splitlines()
+                if line.lstrip().startswith('State:')), '')
+    result.update({'pool':pool_name,'pool_state':state})
+    if state not in {'running','active'}:
+        raise RuntimeError('exact run-owned campaign image pool is not active')
+    completed=subprocess.run(['virsh','-c','qemu:///system','pool-refresh',pool_name],capture_output=True,text=True)
+    result.update({'command_class':'refresh_exact_run_owned_pool','exit_code':completed.returncode,
+                   'status':'PASS' if completed.returncode==0 else 'FAIL'})
+    if completed.returncode:
+        result['diagnostic']=completed.stderr.strip()[:500]
 except (OSError,subprocess.SubprocessError,ET.ParseError,RuntimeError) as error:
     result.update({'status':'FAIL','diagnostic':f'{type(error).__name__}: {error}'[:500]})
 output.write_text(json.dumps(result,sort_keys=True,indent=2)+'\n')
@@ -527,8 +567,86 @@ if result['status']=='FAIL':
 PYPOOL
 }
 
+cleanup_campaign_image_store() {
+  local output="$1" status=PASS diagnostic="" cleanup_exit_code="NOT_RUN" entries
+  if (( IMAGE_STORE_POOL_DEFINED )); then
+    if ! campaign_pool_has_no_domain_references "$EVIDENCE/teardown/image-store-domain-reference-check.txt"; then
+      status=FAIL
+      diagnostic="a libvirt domain may still reference the run-owned image store"
+    elif [[ ! -f "$IMAGE_STORE/.o3k-p15-7-pool-owned" || -L "$IMAGE_STORE/.o3k-p15-7-pool-owned" ]]; then
+      status=FAIL
+      diagnostic="run-owned pool marker is missing or unsafe"
+    else
+      entries="$(find "$IMAGE_STORE" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" || entries=UNAVAILABLE
+      if [[ "$entries" != .o3k-p15-7-pool-owned ]]; then
+        status=FAIL
+        diagnostic="unexpected storage remains in the run-owned pool directory"
+      else
+        if O3K_P15_7_LIBVIRT_IMAGE_ROOT="$IMAGE_STORE_ROOT" \
+            bash "$ROOT_DIR/scripts/p15-7-libvirt-storage-pool.sh" cleanup "$RUN_ID" "$IMAGE_STORE"; then
+          cleanup_exit_code=0
+        else
+          cleanup_exit_code=$?
+          status=FAIL
+          diagnostic="exact run-owned libvirt pool cleanup command failed"
+        fi
+      fi
+    fi
+  elif (( IMAGE_STORE_POOL_DEFINE_ATTEMPTED )); then
+    local pools
+    if ! pools="$(virsh -c qemu:///system pool-list --all --name 2>/dev/null | sed 's/[[:space:]]*$//')"; then
+      status=FAIL
+      diagnostic="cannot determine whether a partially defined run pool exists"
+    elif grep -Fxq -- "$IMAGE_STORE_POOL" <<<"$pools"; then
+      status=FAIL
+      diagnostic="pool definition failed after the exact pool name appeared; preserving ambiguous state"
+    fi
+  fi
+  if [[ "$status" == PASS ]] && (( IMAGE_STORE_DIR_CREATED )); then
+    if [[ -L "$IMAGE_STORE" ]] || ! rmdir -- "$IMAGE_STORE" 2>/dev/null; then
+      status=FAIL
+      diagnostic="run-owned image directory was not empty after pool cleanup"
+    fi
+  fi
+  python3 - "$output" "$status" "$RUN_ID" "$IMAGE_STORE_POOL" "$IMAGE_STORE" "$diagnostic" "$cleanup_exit_code" <<'PYPOOLCLEANUP'
+import json,pathlib,sys
+target,status,run_id,pool,path,diagnostic,exit_code=sys.argv[1:]
+record={"status":status,"run_id":run_id,"pool":pool,"pool_target":path,
+        "observer":"exact_run_owned_p15_7_libvirt_pool_cleanup",
+        "command_class":"cleanup_exact_run_owned_libvirt_pool",
+        "exit_code":None if exit_code=="NOT_RUN" else int(exit_code)}
+if diagnostic: record["diagnostic"]=diagnostic
+pathlib.Path(target).write_text(json.dumps(record,sort_keys=True,indent=2)+"\n")
+PYPOOLCLEANUP
+  [[ "$status" == PASS ]]
+}
+
+campaign_pool_has_no_domain_references() {
+  local output="$1" listing domain xml status=PASS
+  : >"$output"
+  if ! listing="$(virsh -c qemu:///system list --all --name 2>/dev/null)"; then
+    printf 'status=FAIL operation=list_all_domains\n' >"$output"
+    return 1
+  fi
+  while IFS= read -r domain; do
+    [[ -n "$domain" ]] || continue
+    if ! xml="$(virsh -c qemu:///system dumpxml "$domain" 2>/dev/null)"; then
+      printf 'status=FAIL operation=dumpxml domain=%s\n' "$domain" >>"$output"
+      status=FAIL
+      continue
+    fi
+    if grep -Fq -- "$IMAGE_STORE/" <<<"$xml"; then
+      printf 'status=REFERENCED domain=%s\n' "$domain" >>"$output"
+      status=REFERENCED
+    else
+      printf 'status=ABSENT domain=%s\n' "$domain" >>"$output"
+    fi
+  done <<<"$listing"
+  [[ "$status" == PASS ]]
+}
+
 cleanup_on_success() {
-  local rc=$? api_ok=-1 guest_ok=-1 controller_ok=-1 host_snapshot_ok=-1 foreign_ok=-1 capture_ok=-1 pool_refresh_ok=-1
+  local rc=$? api_ok=-1 guest_ok=-1 controller_ok=-1 host_snapshot_ok=-1 foreign_ok=-1 capture_ok=-1 pool_refresh_ok=-1 pool_cleanup_ok=-1
   local cleanup_problem=0 cleanup_classification="" cleanup_failure=""
   trap - EXIT
   if declare -F stop_dhcp_capture >/dev/null 2>&1 && [[ "$DHCP_CAPTURE_CLEANUP_STATUS" == PENDING ]]; then
@@ -692,6 +810,16 @@ cleanup_on_success() {
         cleanup_failure="the exact libvirt image-store pool inventory could not be refreshed after owned storage cleanup"
       fi
     fi
+    if cleanup_campaign_image_store "$EVIDENCE/teardown/image-store-pool-cleanup.json" \
+        >"$EVIDENCE/teardown/image-store-pool-cleanup.stdout" \
+        2>"$EVIDENCE/teardown/image-store-pool-cleanup.stderr"; then
+      pool_cleanup_ok=1
+    else
+      pool_cleanup_ok=0
+      cleanup_problem=1
+      [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
+      [[ -n "$cleanup_failure" ]] || cleanup_failure="the exact run-owned libvirt image pool or directory could not be cleaned"
+    fi
     if [[ -s "$EVIDENCE/environment/host-inventory-before.json" ]]; then
       if python3 "$HOST_PREFLIGHT" snapshot --network "$NETWORK" \
           --output "$EVIDENCE/teardown/host-inventory-after-cleanup.json" \
@@ -712,8 +840,8 @@ cleanup_on_success() {
         else
           foreign_ok=0
           cleanup_problem=1
-          cleanup_classification=OWNERSHIP_DEFECT
-          cleanup_failure="foreign host inventory changed or could not be compared after cleanup"
+          [[ -n "$cleanup_classification" ]] || cleanup_classification=OWNERSHIP_DEFECT
+          [[ -n "$cleanup_failure" ]] || cleanup_failure="foreign host inventory changed or could not be compared after cleanup"
         fi
       else
         host_snapshot_ok=0
@@ -750,16 +878,21 @@ cleanup_on_success() {
       [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
       [[ -n "$cleanup_failure" ]] || cleanup_failure="the exact libvirt image-store pool inventory could not be refreshed after owned storage cleanup"
     fi
+    if (( pool_cleanup_ok == 0 )); then
+      cleanup_problem=1
+      [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
+      [[ -n "$cleanup_failure" ]] || cleanup_failure="the exact run-owned libvirt image pool or directory could not be cleaned"
+    fi
     if (( host_snapshot_ok == 0 )) && [[ -s "$EVIDENCE/environment/host-inventory-before.json" ]]; then
       cleanup_problem=1
       [[ -n "$cleanup_classification" ]] || cleanup_classification=CLEANUP_DEFECT
       [[ -n "$cleanup_failure" ]] || cleanup_failure="post-cleanup host inventory is unavailable"
     fi
     python3 - "$EVIDENCE/teardown/cleanup-status.json" "$api_ok" "$guest_ok" \
-      "$controller_ok" "$host_snapshot_ok" "$foreign_ok" "$capture_ok" "$pool_refresh_ok" \
+      "$controller_ok" "$host_snapshot_ok" "$foreign_ok" "$capture_ok" "$pool_refresh_ok" "$pool_cleanup_ok" \
       "$ACCEPTANCE_GATE" <<'PYSTATUS'
 import json,sys
-path,api,guests,controller,host,foreign,capture,pool_refresh,acceptance_gate=sys.argv[1:]
+path,api,guests,controller,host,foreign,capture,pool_refresh,pool_cleanup,acceptance_gate=sys.argv[1:]
 def status(value): return 'PASS' if value=='1' else ('FAIL' if value=='0' else 'NOT_APPLICABLE')
 value={
   'acceptance_gate': acceptance_gate,
@@ -770,6 +903,7 @@ value={
   'foreign_state_unchanged': status(foreign),
   'run_owned_dhcp_capture': status(capture),
   'image_store_pool_refresh': status(pool_refresh),
+  'run_owned_image_store_pool_cleanup': status(pool_cleanup),
 }
 json.dump(value,open(path,'w'),sort_keys=True,indent=2); open(path,'a').write('\n')
 PYSTATUS
@@ -1071,6 +1205,8 @@ for index in 0 1 2; do
 done
 printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_IP[a]}" "${MGMT_IP[b]}" "${MGMT_IP[c]}" >"$EVIDENCE/environment/management-addresses.txt"
 printf 'compute-a=%s\ncompute-b=%s\ncompute-c=%s\n' "${MGMT_MAC[a]}" "${MGMT_MAC[b]}" "${MGMT_MAC[c]}" >"$EVIDENCE/environment/management-macs.txt"
+
+prepare_campaign_image_store
 
 for host in a b c; do
   octet="${MGMT_OCTET[$host]}"; domain="$PREFIX-compute-$host"; address="${MGMT_IP[$host]}"

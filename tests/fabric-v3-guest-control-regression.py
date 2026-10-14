@@ -423,19 +423,68 @@ class GuestControlRegression(unittest.TestCase):
         self.assertNotIn("virsh net-destroy", DRIVER)
         self.assertNotIn("nft flush ruleset", DRIVER)
 
-    def test_cleanup_refreshes_only_the_libvirt_pool_for_run_image_store(self):
+    def test_campaign_uses_run_owned_image_pool_before_guest_storage_creation(self):
+        self.assertIn('IMAGE_STORE_ROOT="${O3K_FABRIC_V3_IMAGE_STORE:-/var/lib/libvirt/images}"', DRIVER)
+        self.assertIn('IMAGE_STORE="$IMAGE_STORE_ROOT/o3k-p15-7-$RUN_ID"', DRIVER)
+        self.assertIn('IMAGE_STORE_POOL="o3k-p15-7-$RUN_ID"', DRIVER)
+        setup_start = DRIVER.index("prepare_campaign_image_store() {")
+        setup_end = DRIVER.index("\n}\n\nrefresh_image_store_pool()", setup_start)
+        setup = DRIVER[setup_start:setup_end]
+        self.assertIn('p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$IMAGE_STORE"', setup)
+        self.assertIn('install -d -o root -g "$qemu_group" -m 0711 "$IMAGE_STORE"', setup)
+        define = setup.index('p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$IMAGE_STORE"')
+        self.assertLess(setup.index("assert-absent"), define)
+        self.assertLess(setup.index("IMAGE_STORE_DIR_CREATED=1"), define)
+        self.assertLess(define, setup.index("IMAGE_STORE_POOL_DEFINED=1"))
+        provision = DRIVER.index('prepare_campaign_image_store\n\nfor host in a b c; do\n  octet=')
+        qemu_img = DRIVER.index('qemu-img create -q -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$disk"')
+        virt_install = DRIVER.index('virt-install --connect qemu:///system --name "$domain"')
+        self.assertLess(provision, qemu_img)
+        self.assertLess(qemu_img, virt_install)
+        self.assertIn('BASE_IMAGE="${O3K_FABRIC_V3_BASE_IMAGE:-/var/lib/libvirt/images/noble-server-cloudimg-amd64.img}"', DRIVER)
+        self.assertIn('"shared_base_image_is_outside_run_pool":True', setup)
+        self.assertNotIn('pool-destroy images', DRIVER)
+        self.assertNotIn('pool-undefine images', DRIVER)
+
+    def test_campaign_pool_cleanup_is_exact_and_follows_owned_storage_removal(self):
+        start = DRIVER.index("cleanup_campaign_image_store() {")
+        end = DRIVER.index("\n}\n\ncampaign_pool_has_no_domain_references()", start)
+        cleanup = DRIVER[start:end]
+        self.assertIn('p15-7-libvirt-storage-pool.sh" cleanup "$RUN_ID" "$IMAGE_STORE"', cleanup)
+        self.assertIn('campaign_pool_has_no_domain_references', cleanup)
+        self.assertIn('rmdir -- "$IMAGE_STORE"', cleanup)
+        self.assertNotIn('rm -rf', cleanup)
+        self.assertLess(cleanup.index('campaign_pool_has_no_domain_references'), cleanup.index('p15-7-libvirt-storage-pool.sh" cleanup'))
+        self.assertLess(cleanup.index('pool marker is missing or unsafe'), cleanup.index('p15-7-libvirt-storage-pool.sh" cleanup'))
+        self.assertLess(cleanup.index('unexpected storage remains in the run-owned pool directory'), cleanup.index('p15-7-libvirt-storage-pool.sh" cleanup'))
+        trap = DRIVER[DRIVER.index('cleanup_on_success() {'):DRIVER.index('\n}\ntrap cleanup_on_success EXIT')]
+        disk_removal = trap.index('rm -- "$disk" "$seed"')
+        pool_cleanup = trap.index('if cleanup_campaign_image_store "$EVIDENCE/teardown/image-store-pool-cleanup.json"')
+        host_snapshot = trap.index('snapshot --network "$NETWORK"')
+        self.assertLess(disk_removal, pool_cleanup)
+        self.assertLess(pool_cleanup, host_snapshot)
+        self.assertIn("'run_owned_image_store_pool_cleanup': status(pool_cleanup)", trap)
+
+    def test_cleanup_refreshes_only_the_exact_run_owned_pool_before_cleanup(self):
         start = DRIVER.index("refresh_image_store_pool() {")
-        end = DRIVER.index("\n}\n\ncleanup_on_success()", start)
+        end = DRIVER.index("\n}\n\ncleanup_campaign_image_store()", start)
         observer = DRIVER[start:end]
         self.assertIn("pool-dumpxml", observer)
-        self.assertIn("pathlib.Path(path).resolve(strict=False)==image_store", observer)
-        self.assertIn("pool-refresh',pool", observer)
-        self.assertIn("multiple libvirt pools target the exact campaign image store", observer)
+        self.assertIn("root.findtext('./name')!=pool_name", observer)
+        self.assertIn("pathlib.Path(path).resolve(strict=False)!=image_store", observer)
+        self.assertIn("pool-refresh',pool_name", observer)
+        self.assertIn("refresh_exact_run_owned_pool", observer)
         self.assertIn("'image_store_pool_refresh': status(pool_refresh)", DRIVER)
+        self.assertIn('"command_class":"cleanup_exact_run_owned_libvirt_pool"', DRIVER)
+        self.assertIn('libvirt-storage-pool-helper.sh"', DRIVER)
+        self.assertIn('libvirt-storage-pool-helper.sha256"', DRIVER)
         self.assertNotIn("pool-refresh --all", DRIVER)
         refresh = DRIVER.index('refresh_image_store_pool "$EVIDENCE/teardown/image-store-pool-refresh.json"')
         inventory = DRIVER.index('snapshot --network "$NETWORK" \\\n          --output "$EVIDENCE/teardown/host-inventory-after-cleanup.json"')
         self.assertLess(refresh, inventory)
+        pool_cleanup = DRIVER.index('if cleanup_campaign_image_store "$EVIDENCE/teardown/image-store-pool-cleanup.json"')
+        self.assertLess(refresh, pool_cleanup)
+        self.assertLess(pool_cleanup, inventory)
 
     def test_server_teardown_poll_distinguishes_http_absence_and_is_bounded(self):
         poll = DRIVER[DRIVER.index("servers_remaining=1"):DRIVER.index('for id in "${PORT_IDS[@]}"; do')]
