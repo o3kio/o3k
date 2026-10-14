@@ -18,6 +18,19 @@ assert doc["source_sha"] == "0123456789abcdef0123456789abcdef01234567"
 assert doc["target_resource_ids"] == {"server_id": "server-a", "endpoint_id": "endpoint-a"}
 assert "password" not in json.dumps(doc).lower()
 PY
+python3 "$ROOT_DIR/scripts/write_p15_7-failure-artifact.py" \
+  "$WORK_DIR/harness-gap.json" "$SHA" run-b journey harness_gap \
+  source_verified "required journey agent identity unavailable" \
+  "phase-required identity material is missing" "" "" pending unchanged \
+  "phase-scoped harness identity prerequisite is missing"
+python3 - "$WORK_DIR/harness-gap.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc["status"] == "failed"
+assert doc["failure_class"] == "harness_gap"
+assert doc["phase"] == "journey"
+assert "phase-scoped harness identity prerequisite" in doc["message"]
+PY
 if python3 "$ROOT_DIR/scripts/write_p15_7-failure-artifact.py" \
     "$WORK_DIR/bad.json" not-a-sha run-a crash unknown "" x y s e pending unknown msg >/dev/null 2>&1; then
   echo "invalid failure artifact SHA was accepted" >&2

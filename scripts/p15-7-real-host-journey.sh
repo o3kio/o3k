@@ -144,7 +144,7 @@ observe_protected_testlab_state() {
 }
 classify_failure() {
   case "${1:-}" in
-    *harness*|*epoch*|*precondition*|*TestLab*marker*|*testlab*marker*) echo harness_gap ;;
+    *harness*|*epoch*|*precondition*|*TestLab*marker*|*testlab*marker*|*journey\ agent*) echo harness_gap ;;
     # Match the most specific crash/repair terms before the generic
     # "source" pattern: the word "resource" contains the substring
     # "source", so the old ordering misclassified
@@ -162,6 +162,16 @@ classify_failure() {
     *cleanup*|*residue*|*foreign*) echo cleanup ;;
     *operation*|*resource*|*quota*|*allocation*) echo product_correctness ;;
     *) echo unknown ;;
+  esac
+}
+required_child_agent_ids() {
+  case "${1:-}" in
+    s1-boundary) return 0 ;;
+    s2-boundary) printf '%s\n' block-a ;;
+    integrated|s5-scale|1035-crash-recovery|host-maintenance)
+      printf '%s\n' block-a block-b block-c block-d block-e
+      ;;
+    *) return 2 ;;
   esac
 }
 write_failure_artifact() {
@@ -194,6 +204,12 @@ case "${PP5_PHASE}" in
   integrated|s5-scale|1035-crash-recovery|host-maintenance|s1-boundary|s2-boundary) ;;
   *) die "unsupported PP.5 phase: ${PP5_PHASE}" ;;
 esac
+REQUIRED_CHILD_AGENT_IDS=()
+required_agent_output="$(required_child_agent_ids "$PP5_PHASE")" \
+  || die "unsupported PP.5 child-agent requirements: ${PP5_PHASE}"
+if [[ -n "$required_agent_output" ]]; then
+  mapfile -t REQUIRED_CHILD_AGENT_IDS <<<"$required_agent_output"
+fi
 WORKLOAD_IMAGE_PHASE="${O3K_P15_7_WORKLOAD_IMAGE_PHASE:-generic}"
 case "${WORKLOAD_IMAGE_PHASE}" in
   generic|pp5) ;;
@@ -1240,11 +1256,11 @@ sudo -n install -o root -g "$LIBVIRT_QEMU_GROUP" -m 0640 "$HOST_IMAGE" "$BASE_IM
   || die "cannot stage pinned VM image for libvirt"
 printf '%s  %s\n' "$HOST_IMAGE_SHA256" "$BASE_IMAGE" |
   sudo -n sha256sum --check --strict --status || die "staged VM image digest mismatch"
-for required_agent in block-a block-b block-c block-d block-e; do
+for required_agent in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do
   sudo -n test -f "$TLS_ROOT/agents/$required_agent/agent.pem" \
-    || die "canonical capacity/replacement identities unavailable"
+    || die "required journey agent identity unavailable for ${PP5_PHASE}: ${required_agent}"
   sudo -n test ! -L "$TLS_ROOT/agents/$required_agent/agent.pem" \
-    || die "canonical agent certificate is a symlink: $required_agent"
+    || die "required journey agent certificate is a symlink: $required_agent"
 done
 # The bootstrap compute-agent's canonical identity comes from the durable TLS
 # state the canonical bootstrap recorded. It is matched by identity (never by
@@ -1352,9 +1368,11 @@ elif [[ "$POSTGRES_MODE" == disposable ]]; then
   [[ -n "$BACKEND_EFFECTIVE" ]] || BACKEND_EFFECTIVE="sqlite"
   BACKEND_PROOF_METHOD="o3kd_env_backend_configuration"
 fi
-for agent_id in block-a block-b block-c block-d block-e; do
-  sudo -n install -m 0644 "$TLS_ROOT/agents/$agent_id/agent.pem" "$WORK_ROOT/$agent_id.pem" || die "cannot read canonical certificate: $agent_id"
-  sudo -n install -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0600 "$TLS_ROOT/agents/$agent_id/agent-key.pem" "$WORK_ROOT/$agent_id-key.pem" || die "cannot read canonical private key: $agent_id"
+for agent_id in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do
+  sudo -n install -m 0644 "$TLS_ROOT/agents/$agent_id/agent.pem" "$WORK_ROOT/$agent_id.pem" \
+    || die "required journey agent certificate unavailable for ${PP5_PHASE}: ${agent_id}"
+  sudo -n install -o "$RUNNER_UID" -g "$RUNNER_GID" -m 0600 "$TLS_ROOT/agents/$agent_id/agent-key.pem" "$WORK_ROOT/$agent_id-key.pem" \
+    || die "required journey agent key unavailable for ${PP5_PHASE}: ${agent_id}"
 done
 
 declare -a DOMAINS=() UUIDS=() OVERLAYS=() SEEDS=() SERIALS=() IPS=()

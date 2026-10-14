@@ -802,7 +802,9 @@ for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block
                  "capture-p15-7-provision-diagnostics.py", "p15-7-provisioning-diagnostics.json", "REPLAY_JOIN_FILE",
                  "REPLAY_JOIN_BY_AGENT[$DRAIN_AGENT]", "compute-agent-replay-join.json",
                  "for agent in block-a block-b block-c block-d block-e; do",
-                 "for required_agent in block-a block-b block-c block-d block-e; do",
+                 "required_child_agent_ids() {", "REQUIRED_CHILD_AGENT_IDS=()",
+                 'for required_agent in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do',
+                 'for agent_id in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do',
                  "initial eligible Ready count is not exactly five",
                  "post-replacement eligible Ready count is not exactly five",
                  "peak concurrent Ready count is below five",
@@ -1125,7 +1127,7 @@ assert 'p15_7_verify_disposable_image_marker' in journey
 assert "grep -Fqx 'phase=generic'" not in journey
 assert 'die "harness workload image marker or phase is invalid"' in journey
 failure_classifier = journey.split("classify_failure() {", 1)[1].split("\n}", 1)[0]
-assert '*harness*|*epoch*|*precondition*|*TestLab*marker*|*testlab*marker*) echo harness_gap ;;' in failure_classifier
+assert '*harness*|*epoch*|*precondition*|*TestLab*marker*|*testlab*marker*|*journey\\ agent*) echo harness_gap ;;' in failure_classifier
 marker_guard = Path(sys.argv[1]).parents[1].joinpath("scripts/p15-7-workload-image-marker.sh").read_text(encoding="utf-8")
 assert 'case "$expected_phase" in' in marker_guard
 assert "araf_projection_prerequisite_missing" not in journey
