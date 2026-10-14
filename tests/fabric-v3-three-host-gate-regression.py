@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -101,16 +102,16 @@ class ThreeHostGateRegression(unittest.TestCase):
         self.assertIn('"$AK" "$CK"', GATE_TEXT)
         self.assertIn('"$AK" "$BK"', GATE_TEXT)
 
-    def test_wireguard_identity_uses_backend_root_and_rejects_symlinks(self):
-        # LinuxFabricConfig::for_root(RUN_ROOT) owns this exact file.  A
-        # network/fabric-provider copy is a different identity and can make
-        # the provider gate pass its setup while the live interface uses
-        # another key.
-        self.assertIn("$RUN_ROOT/wireguard-private.key", GATE_TEXT)
-        self.assertNotIn("$RUN_ROOT/network/fabric/fabric-provider/wireguard-private.key", GATE_TEXT)
+    def test_wireguard_identity_matches_production_shared_provider_root(self):
+        adapter = (ROOT.parent / "crates/o3k-network/src/linux_fabric/shared_provider.rs").read_text()
+        backend = (ROOT.parent / "crates/o3k-network/src/linux_fabric/mod.rs").read_text()
+        self.assertIn('let root = config.root.join("fabric-provider");', adapter)
+        self.assertIn('SharedFabricAdapter::open(&config)', backend)
+        self.assertIn("$RUN_ROOT/fabric-provider/wireguard-private.key", GATE_TEXT)
+        self.assertNotIn("$RUN_ROOT/wireguard-private.key", GATE_TEXT)
         self.assertIn("test -L '$RUN_ROOT'", GATE_TEXT)
         self.assertIn("test ! -L", GATE_TEXT)
-        self.assertIn("stat -c %u:%a", GATE_TEXT)
+        self.assertIn("stat -c %u:%a:%F", GATE_TEXT)
 
     def test_wireguard_verification_is_scoped_to_exact_namespace_and_interface(self):
         self.assertIn(
@@ -146,16 +147,16 @@ class ThreeHostGateRegression(unittest.TestCase):
 set -Eeuo pipefail
 PATH={tmp}:$PATH
 RUN_ROOT={root!s}
-sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '0:600\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
+sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '0:600:regular file\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
 export -f sudo
 ssh_host() {{ shift 3; bash -c "$1"; }}
 {prepare}
 pub=$(prepare_fresh_wireguard_identity host-a 192.0.2.10 /tmp/key)
-test -f "$RUN_ROOT/wireguard-private.key"
-test "$(stat -c '%u %a %F' "$RUN_ROOT/wireguard-private.key")" = "$(id -u) 600 regular file"
+test -f "$RUN_ROOT/fabric-provider/wireguard-private.key"
+test "$(stat -c '%u %a %F' "$RUN_ROOT/fabric-provider/wireguard-private.key")" = "$(id -u) 600 regular file"
 test "$pub" = TEST_PUBLIC_KEY
 test -n "$pub"
-test "$(cat "$RUN_ROOT/wireguard-private.key")" = TEST_PRIVATE_KEY
+test "$(cat "$RUN_ROOT/fabric-provider/wireguard-private.key")" = TEST_PRIVATE_KEY
 ! grep -Fq TEST_PRIVATE_KEY <<<"$pub"
 """
             result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
@@ -171,7 +172,7 @@ test "$(cat "$RUN_ROOT/wireguard-private.key")" = TEST_PRIVATE_KEY
             script = f"""
 set -Eeuo pipefail
 RUN_ROOT={root!s}
-sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '0:600\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
+sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '0:600:regular file\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
 export -f sudo
 ssh_host() {{ shift 3; bash -c "$1"; }}
 {prepare}
@@ -190,12 +191,17 @@ test "$status" -ne 0
             fake_ip = Path(tmp) / "ip"
             fake_ip.write_text(
                 "#!/usr/bin/env bash\n"
-                "if [[ $* == *'public-key' ]]; then [[ ${FAKE_GOOD:-0} == 1 || ${FAKE_GOOD:-0} == 2 ]] && printf '%s\\n' EXPECTED || printf '%s\\n' WRONG; else [[ ${FAKE_GOOD:-0} == 1 ]] && printf 'PEER-A\\nPEER-B\\n' || printf 'PEER-A\\nPEER-B\\nEXTRA\\n'; fi\n"
+                "[[ ${FAKE_GOOD:-0} == 5 ]] && exit 23\n"
+                "[[ ${FAKE_GOOD:-0} == 6 && $* == *peers* ]] && exit 24\n"
+                "if [[ $* == *'public-key' ]]; then [[ ${FAKE_GOOD:-0} != 0 ]] && printf '%s\\n' EXPECTED || printf '%s\\n' WRONG; else case ${FAKE_GOOD:-0} in 1) printf 'PEER-A\\nPEER-B\\n';; 3) printf 'PEER-A\\n';; 4) printf 'PEER-A\\nPEER-A\\nPEER-B\\n';; *) printf 'PEER-A\\nPEER-B\\nEXTRA\\n';; esac; fi\n"
             )
             fake_ip.chmod(0o755)
             script = f"""
 set -Eeuo pipefail
 PATH={tmp}:$PATH
+SCRIPT_ROOT={ROOT}
+EVIDENCE_DIR={tmp}
+FABRIC_V3_3H_RUN_ID=regression-key
 sudo() {{ "$@"; }}
 export -f sudo
 ssh_host() {{ shift 3; bash -c "$1"; }}
@@ -208,14 +214,54 @@ test "$status" -ne 0
 """
             result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
+            evidence = json.loads((Path(tmp) / "wireguard-host-a-identity.json").read_text())
+            self.assertEqual(evidence["status"], "failed")
+            self.assertFalse(evidence["local_public_key_matches"])
+            self.assertEqual(evidence["unexpected_peers"], ["EXTRA"])
+            self.assertTrue((Path(tmp) / "wireguard-host-a-runtime-public.key").exists())
+            self.assertTrue((Path(tmp) / "wireguard-host-a-runtime-peers.txt").exists())
 
             control = script.split("set +e\n", 1)[0] + "export FAKE_GOOD=1\nverify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED PEER-A PEER-B\n"
             control_result = subprocess.run(["bash", "-c", control], capture_output=True, text=True, check=False)
             self.assertEqual(control_result.returncode, 0, control_result.stderr)
+            evidence = json.loads((Path(tmp) / "wireguard-host-a-identity.json").read_text())
+            self.assertEqual(evidence["status"], "passed")
 
             peer_only = script.split("set +e\n", 1)[0] + "export FAKE_GOOD=2\nset +e\nverify_wireguard_identity host-a 192.0.2.10 /tmp/key EXPECTED PEER-A PEER-B\nstatus=$?\nset -e\ntest \"$status\" -ne 0\n"
             peer_result = subprocess.run(["bash", "-c", peer_only], capture_output=True, text=True, check=False, timeout=10)
             self.assertEqual(peer_result.returncode, 0, peer_result.stderr)
+            evidence = json.loads((Path(tmp) / "wireguard-host-a-identity.json").read_text())
+            self.assertTrue(evidence["local_public_key_matches"])
+            self.assertEqual(evidence["unexpected_peers"], ["EXTRA"])
+            for mode, missing, duplicates in ((3, ["PEER-B"], []), (4, [], ["PEER-A"])):
+                varied = peer_only.replace("FAKE_GOOD=2", f"FAKE_GOOD={mode}")
+                outcome = subprocess.run(["bash", "-c", varied], capture_output=True, text=True, timeout=10)
+                self.assertEqual(outcome.returncode, 0, outcome.stderr)
+                evidence = json.loads((Path(tmp) / "wireguard-host-a-identity.json").read_text())
+                self.assertEqual(evidence["missing_peers"], missing)
+                self.assertEqual(evidence["duplicate_peers"], duplicates)
+            failed_read = peer_only.replace("FAKE_GOOD=2", "FAKE_GOOD=5")
+            failed_read += 'test "$GATE_OPERATION" = wireguard_public_key_observe_host_a\ntest "$GATE_OPERATION_EXIT_CODE" = 23\ntest "$GATE_FAILED_HOST" = host-a\n'
+            outcome = subprocess.run(["bash", "-c", failed_read], capture_output=True, text=True, timeout=10)
+            self.assertEqual(outcome.returncode, 0, outcome.stderr)
+            failed_peers = peer_only.replace("FAKE_GOOD=2", "FAKE_GOOD=6")
+            failed_peers += 'test "$GATE_OPERATION" = wireguard_peers_observe_host_a\ntest "$GATE_OPERATION_EXIT_CODE" = 24\ntest "$GATE_CLASSIFICATION" = HARNESS_GAP\n'
+            outcome = subprocess.run(["bash", "-c", failed_peers], capture_output=True, text=True, timeout=10)
+            self.assertEqual(outcome.returncode, 0, outcome.stderr)
+            # Exercise the real EXIT reporter, not a reconstructed result fixture.
+            initial = GATE_TEXT.split("GATE_PHASE=preflight\n", 1)[1].split("ssh_host()", 1)[0]
+            reporter = self._extract_function("finish_gate")
+            failed_gate = script.split("set +e\n", 1)[0] + initial + reporter + "\ntrap finish_gate EXIT\nGATE_PHASE=wireguard_identity_verify\nverify_wireguard_identity host-b 192.0.2.11 /tmp/key EXPECTED PEER-A PEER-B\n"
+            outcome = subprocess.run(["bash", "-c", failed_gate], capture_output=True, text=True, timeout=10)
+            self.assertEqual(outcome.returncode, 1, outcome.stderr)
+            result = json.loads((Path(tmp) / "result.json").read_text())
+            self.assertEqual(result["failed_host"], "host-b")
+            self.assertEqual(result["failed_operation"], "wireguard_identity_compare_host_b")
+            self.assertEqual(result["failed_operation_exit_code"], 1)
+            self.assertEqual(result["failed_observer_type"], "local_evidence_comparison")
+            self.assertEqual(result["classification"], "PROVIDER_CONFORMANCE_DEFECT")
+            self.assertIn("local_public_key_mismatch", result["wireguard_identity_evidence"]["failed_predicates"])
+            self.assertNotIn("TEST_PRIVATE_KEY", json.dumps(result))
 
     def test_wireguard_prepare_fails_closed_on_generation_error(self):
         prepare = self._extract_function("prepare_fresh_wireguard_identity")
@@ -228,7 +274,7 @@ test "$status" -ne 0
 set -Eeuo pipefail
 PATH={tmp}:$PATH
 RUN_ROOT={root!s}
-sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '0:600\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
+sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '0:600:regular file\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
 export -f sudo
 ssh_host() {{ shift 3; bash -c "$1"; }}
 {prepare}
@@ -241,6 +287,32 @@ test "$status" -ne 0
             result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_identity_comparator_rejects_invalid_inputs_and_missing_evidence(self):
+        comparator = ROOT / "fabric-v3-wireguard-identity.py"
+        with tempfile.TemporaryDirectory(prefix="fabric-public-identity-") as tmp:
+            public_path = Path(tmp) / "public.txt"
+            peers_path = Path(tmp) / "peers.txt"
+            output = Path(tmp) / "identity.json"
+            args = ["host-a", "EXPECTED", "PEER-A", "PEER-B",
+                    str(public_path), str(peers_path), str(output)]
+            for invalid in ([], args, ["wrong-host", *args[1:]],
+                            [*args[:3], "PEER-A", *args[4:]]):
+                result = subprocess.run(["python3", str(comparator), *invalid],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("HARNESS_GAP", result.stderr)
+                self.assertFalse(output.exists())
+            peers_path.write_text("PEER-B\nPEER-A\n")
+            for malformed in ("", "EXPECTED\nEXTRA\n", " EXPECTED\n"):
+                public_path.write_text(malformed)
+                result = subprocess.run(["python3", str(comparator), *args],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                evidence = json.loads(output.read_text())
+                self.assertEqual(evidence["failed_predicates"], ["local_public_key_mismatch"])
+                self.assertEqual(evidence["classification"], "PROVIDER_CONFORMANCE_DEFECT")
+                self.assertNotIn("private", json.dumps(evidence))
+
     def test_wireguard_prepare_fails_closed_on_wrong_owner_or_mode(self):
         prepare = self._extract_function("prepare_fresh_wireguard_identity")
         with tempfile.TemporaryDirectory(prefix="fabric-gate-wg-stat-") as tmp:
@@ -248,7 +320,7 @@ test "$status" -ne 0
             script = f"""
 set -Eeuo pipefail
 RUN_ROOT={root!s}
-sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '1000:644\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
+sudo() {{ if [[ $1 == stat ]]; then if [[ $* == *%u:%a* ]]; then printf '1000:644:regular file\\n'; else printf '0\\n'; fi; else "$@"; fi; }}
 export -f sudo
 ssh_host() {{ shift 3; bash -c "$1"; }}
 {prepare}
