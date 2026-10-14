@@ -12,34 +12,6 @@ run_retirement_microgate() {
   local -A expected_compute_agent_ids=()
   local -a registration_agent_args=()
 
-  mkdir -p "$EVIDENCE/foreign-fdb-after-retirement"
-  for host in a b c; do
-    ssh_vm "${MGMT_IP[$host]}" 'sudo bridge -j fdb show' \
-      >"$EVIDENCE/foreign-fdb-after-retirement/host-$host.json" \
-      || fail "foreign FDB post-retirement observation failed on host-$host" "ENVIRONMENT_GAP"
-  done
-  python3 - "$EVIDENCE" <<'PY' \
-    || fail "foreign FDB state changed outside run-owned Realm interfaces" "OWNERSHIP_DEFECT"
-import json, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-for host in "abc":
-    before = json.loads((root / f"environment/foreign-fdb-before/host-{host}.json").read_text())
-    after = json.loads((root / f"foreign-fdb-after-retirement/host-{host}.json").read_text())
-    ownership = json.loads((root / f"before-departure/host-{host}/ownership.json").read_text())
-    run_devs = {
-        realm.get("vxlan", {}).get("interface")
-        for realm in ownership.get("realms", {}).values()
-        if realm.get("vxlan", {}).get("interface")
-    }
-    foreign_before = [row for row in before if row.get("ifname") not in run_devs]
-    foreign_after = [row for row in after if row.get("ifname") not in run_devs]
-    assert foreign_before == foreign_after, {"host": host, "before": foreign_before, "after": foreign_after}
-    (root / f"foreign-fdb-after-retirement/host-{host}-comparison.json").write_text(
-        json.dumps({"run_owned_interfaces": sorted(run_devs), "foreign_before": foreign_before,
-                    "foreign_after": foreign_after, "unchanged": True}, sort_keys=True, indent=2) + "\n"
-    )
-PY
-
   for host in a b c; do
     address="${MGMT_IP[$host]}"
     ssh_vm "$address" "sudo cat /var/lib/o3k-fabric-v3/$RUN_ID/network/fabric/ownership.json" \
@@ -48,6 +20,29 @@ PY
   done
   cp "$EVIDENCE/endpoint-removal/host-c-ownership.json" \
     "$EVIDENCE/provider-absence/host-c/ownership/ownership.json"
+
+  mkdir -p "$EVIDENCE/foreign-fdb-after-retirement"
+  for host in a b c; do
+    ssh_vm "${MGMT_IP[$host]}" 'sudo bridge -j fdb show' \
+      >"$EVIDENCE/foreign-fdb-after-retirement/host-$host.json" \
+      || fail "foreign FDB post-retirement observation failed on host-$host" "ENVIRONMENT_GAP"
+    devices=()
+    while IFS= read -r device; do devices+=(--owned-device "$device"); done < <(
+      python3 - "$EVIDENCE/before-departure/host-$host/ownership.json" <<'PYDEV'
+import json,sys
+state=json.load(open(sys.argv[1]))
+for realm in state.get('realms', {}).values():
+    device=realm.get('vxlan', {}).get('interface')
+    if device: print(device)
+PYDEV
+    )
+    python3 "$ROOT_DIR/tests/fabric-v3-foreign-fdb.py" \
+      --before "$EVIDENCE/environment/foreign-fdb-before/host-$host.json" \
+      --after "$EVIDENCE/foreign-fdb-after-retirement/host-$host.json" \
+      "${devices[@]}" \
+      >"$EVIDENCE/foreign-fdb-after-retirement/host-$host-comparison.txt" 2>&1 \
+      || fail "foreign FDB state changed outside run-owned Realm interfaces" "OWNERSHIP_DEFECT"
+  done
 
   ssh_vm "${MGMT_IP[c]}" 'sudo ip -j -d link show' \
     >"$EVIDENCE/provider-absence/host-c/links/root-links.json" \
@@ -479,6 +474,25 @@ PY
         mkdir -p "$EVIDENCE/restart/survivor-fdb-post-restart"
         cp "$EVIDENCE/survivor-convergence/host-$host/fdb.txt" \
           "$EVIDENCE/restart/survivor-fdb-post-restart/host-$host.txt"
+        ssh_vm "${MGMT_IP[$host]}" 'sudo bridge -j fdb show' \
+          >"$EVIDENCE/restart/foreign-fdb/host-$host.json" \
+          || fail "post-restart foreign FDB observation failed on host-$host" "ENVIRONMENT_GAP"
+        devices=()
+        while IFS= read -r device; do devices+=(--owned-device "$device"); done < <(
+          python3 - "$EVIDENCE/before-departure/host-$host/ownership.json" <<'PYDEV'
+import json,sys
+state=json.load(open(sys.argv[1]))
+for realm in state.get('realms', {}).values():
+    device=realm.get('vxlan', {}).get('interface')
+    if device: print(device)
+PYDEV
+        )
+        python3 "$ROOT_DIR/tests/fabric-v3-foreign-fdb.py" \
+          --before "$EVIDENCE/environment/foreign-fdb-before/host-$host.json" \
+          --after "$EVIDENCE/restart/foreign-fdb/host-$host.json" \
+          "${devices[@]}" \
+          >"$EVIDENCE/restart/foreign-fdb/host-$host-comparison.txt" 2>&1 \
+          || fail "foreign FDB state changed after controller restart" "OWNERSHIP_DEFECT"
       done
       capture_c_remove_work_row "$realm_id" >"$EVIDENCE/c-delete/remove-command/c-remove-command-state.txt" \
         || fail "post-restart C retirement work observation failed" "HARNESS_GAP"

@@ -443,7 +443,7 @@ if [[ -z "${O3K_FABRIC_V3_CONTROL_PORT:-}" ]]; then
 fi
 
 [[ ! -e "$EVIDENCE" && ! -L "$EVIDENCE" ]] || fail "evidence path already exists: $EVIDENCE" "HARNESS_GAP"
-mkdir -p "$EVIDENCE"/{environment/foreign-fdb-before,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart,compute-agent-restart,endpoint-removal,teardown,topology/{plans,ownership,fdb,wireguard,links,nft-before,nft-after},a,b,dhcp,departure-micro,before-departure/{plans,durable-work,host-a,host-b,host-c,traffic},c-delete/{operation,port,retirement-obligation,remove-command,agent-journal},provider-absence/host-c/{ownership,links,fdb,nft},survivor-convergence/{host-a,host-b,plans,fdb,traffic},restart/{startup-recovery,durable-work,plans,traffic}}
+mkdir -p "$EVIDENCE"/{environment/foreign-fdb-before,management,api,canonical,plans,attachments,compute-a,compute-b,compute-c,arp,icmp,tcp,udp,wireguard,vxlan,restart/{foreign-fdb,startup-recovery,durable-work,plans,traffic},compute-agent-restart,endpoint-removal,teardown,topology/{plans,ownership,fdb,wireguard,links,nft-before,nft-after},a,b,dhcp,departure-micro,before-departure/{plans,durable-work,host-a,host-b,host-c,traffic},c-delete/{operation,port,retirement-obligation,remove-command,agent-journal},provider-absence/host-c/{ownership,links,fdb,nft},survivor-convergence/{host-a,host-b,plans,fdb,traffic}}
 chmod 0700 "$EVIDENCE"
 [[ ! -e "$EVIDENCE/.o3k-fabric-v3-owned" ]] || fail "evidence path collision"
 printf 'o3k-fabric-v3-campaign-v1\nrun=%s\nprefix=%s\n' "$RUN_ID" "$PREFIX" >"$EVIDENCE/.o3k-fabric-v3-owned"

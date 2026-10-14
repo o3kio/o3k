@@ -39,7 +39,7 @@ class GuestControlRegression(unittest.TestCase):
         self.assertIn('environment/foreign-fdb-before/host-$host.json', DRIVER)
         self.assertIn('foreign-fdb-after-retirement/host-$host.json', RETIREMENT)
         self.assertIn('foreign FDB state changed outside run-owned Realm interfaces', RETIREMENT)
-        self.assertIn('"unchanged": True', RETIREMENT)
+        self.assertIn('fabric-v3-foreign-fdb.py', RETIREMENT)
 
     def test_restart_readiness_requires_new_controller_session_and_exact_agent_epochs(self):
         log = "\n".join(
