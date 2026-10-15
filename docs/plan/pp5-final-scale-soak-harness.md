@@ -10,6 +10,44 @@ development-foundation evidence unchanged. The scale/soak lanes are
 no acceptance result is claimed. This deferral does not block PP.5 development
 foundation work or waive the tiers from eventual final acceptance.
 
+## Agent plan for this PR closeout
+
+- Issue: #974, PP.5 scale/soak evidence preparation.
+- Profile: O3K small-edge real-host/TestLab evidence. The scale/soak gates stay
+  `DEFERRED_BY_POLICY` and are not prerequisites for continuing the development
+  foundation.
+- Canonical domains: Compute and Capacity lifecycle, with Network used by the
+  eventual traffic/isolation evidence.
+- Compatibility edge: existing Nova-compatible lifecycle observations only;
+  no public API or compatibility-profile change.
+- Authority: O3K owns tenant identity, placement, lifecycle, and durable work;
+  libvirt/agents remain execution providers. This PR does not mutate either.
+- Expected files: PP.5 policy/entry scripts, their regression guards, the
+  evidence contract tests, the PP.5 plan, and the PR description. The existing
+  release-verification report changes are reviewed as part of this branch and
+  remain limited to release verification; no product source or release version
+  changes are planned.
+- Contracts: PP.5 evidence validation remains fail-closed. A policy disposition
+  is a non-acceptance status record and cannot satisfy an acceptance row.
+- Public references: accepted PP.5 task contract, repository-owned APIs and
+  harnesses, ADR-0162, ADR-0163, SPEC-0024, SPEC-0022, and
+  `compatibility/product-profiles.yaml`. No third-party implementation is used.
+- Operations/database: no tenant operation, TestLab bootstrap, database
+  provisioning, release publication, or campaign is executed by the deferred
+  entrypoints. Future evidence requires a unique run-owned PostgreSQL identity.
+- Cross-service workflow: no new product workflow or compensation behavior;
+  existing supported teardown remains the eventual campaign contract.
+- Evidence tier: harness policy/contract regressions only. No real-host,
+  scale, soak, or release evidence is claimed.
+- Tests first: verify each tier's exact argument contract, machine-readable
+  deferral, non-mutation, and rejection by the acceptance validator; then run
+  contract, shell, workflow, and workspace checks.
+- Non-goals: publishing a release, enabling or dispatching any scale/soak lane,
+  changing product behavior, or making deferred tiers prerequisites for the
+  PP.5 development foundation.
+- Uncertainty: protected real-host capacity and trusted observation provenance
+  remain unproven until policy permits the future campaigns.
+
 ## Profile and authority
 
 - Profile: protected O3K small-edge real-host/TestLab evidence.
@@ -28,7 +66,9 @@ foundation work or waive the tiers from eventual final acceptance.
 
 - `scripts/pp5_scale_tier.sh` and `scripts/pp5_soak.sh` validate requested
   tier parameters and stop at a shared `DEFERRED_BY_POLICY` boundary before
-  creating evidence or changing TestLab state.
+  creating evidence or changing TestLab state. They emit a machine-readable
+  disposition on stdout with `acceptance_result=NOT_RUN`; that record is not a
+  campaign artifact and the acceptance validator rejects it.
 - `scripts/p15-7-real-host-journey.sh` rejects legacy scale/soak phase requests
   at the same pre-mutation policy boundary; accepted S1/S2/S5 and foundation
   lanes retain their existing behavior.
@@ -95,13 +135,14 @@ contract and policy boundary only; it does not establish runtime evidence.
   spacing; lifecycle observation artifact binding; and exact scale-baseline
   binding for K-min/K-full.
 - Shell and workflow regressions prove the deferred policy boundary runs before
-  campaign state changes. This PR deliberately does not dispatch protected
-  lanes. Widen scope only if the existing real-host journey cannot prove an exact
-  eligible-host cardinality, if its lifecycle stages assume a fixed five-host
-  set, if the bootstrap cannot install the verified archive, or if the
-  protected runner cannot own a restartable PostgreSQL process for the full
-  soak. Any such widening stays in harness/workflow code; product changes
-  require a separate demonstrated defect and successor candidate.
+  campaign state changes, check the disposition schema, and verify the
+  acceptance validator rejects it. This PR deliberately does not dispatch
+  protected lanes. Widen scope only if the existing real-host journey cannot
+  prove an exact eligible-host cardinality, if its lifecycle stages assume a
+  fixed five-host set, if the bootstrap cannot install the verified archive,
+  or if the protected runner cannot own a restartable PostgreSQL process for
+  the full soak. Any such widening stays in harness/workflow code; product
+  changes require a separate demonstrated defect and successor candidate.
 - Known boundary: local tests prove evidence parsing and fail-closed command
   selection, not nested KVM capacity, authenticated joins, release
   authenticity, PostgreSQL process restart, or elapsed soak duration. Those
