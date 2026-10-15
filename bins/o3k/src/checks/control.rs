@@ -260,7 +260,9 @@ mod tests {
             check_controller_session(&ctx).await,
             check_work_fencing(&ctx).await,
         ] {
-            let json = serde_json::to_string(&check).expect("check serializes");
+            let serialized = serde_json::to_string(&check);
+            assert!(serialized.is_ok(), "check serialization failed");
+            let json = serialized.unwrap_or_default();
             assert!(!json.contains(sentinel));
             let report = crate::output::Report {
                 version: "test".to_owned(),
