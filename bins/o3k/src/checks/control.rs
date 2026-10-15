@@ -103,47 +103,67 @@ pub(crate) async fn readyz_response(ctx: &Context) -> Result<HttpResponse, Strin
 
 /// `controller.session`: checks that the controller session is active and valid.
 pub async fn check_controller_session(ctx: &Context) -> Check {
-    let url = format!("http://{}/readyz", ctx.listen_addr);
-    match ctx.http.get(&url).await {
-        Ok(response) if response.status == 200 => Check::new(
+    match ctx
+        .db
+        .active_controller_sessions(&ctx.database_path(), ctx.is_postgres(), ctx.database_url())
+        .await
+    {
+        Ok(count) if count > 0 => Check::new(
             "controller.session",
             Category::Control,
             CheckStatus::Pass,
-            "controller session active and healthy",
+            format!("observed {count} active controller session(s) in coordination store"),
         ),
-        Ok(response) => Check::new(
+        Ok(_) => Check::new(
             "controller.session",
             Category::Control,
-            CheckStatus::Warn,
-            format!("controller session reports HTTP {}", response.status),
+            CheckStatus::Fail,
+            "coordination store has no active controller session",
         )
         .with_actions(o3kd_actions()),
         Err(error) => Check::new(
             "controller.session",
             Category::Control,
             CheckStatus::Fail,
-            format!("controller session unreachable: {error}"),
+            "controller session authority is unreadable",
         )
+        .with_details(error)
         .with_actions(o3kd_actions()),
     }
 }
 
 /// `controller.work_fencing`: checks that work leases and fencing tokens are active and coordinated.
 pub async fn check_work_fencing(ctx: &Context) -> Check {
-    if ctx.is_postgres() {
-        return Check::new(
+    match ctx
+        .db
+        .active_work_leases(&ctx.database_path(), ctx.is_postgres(), ctx.database_url())
+        .await
+    {
+        Ok(leases) if leases.iter().all(|lease| lease.fencing_token > 0) => Check::new(
             "controller.work_fencing",
             Category::Control,
             CheckStatus::Pass,
-            "work lease fencing enabled via PostgreSQL coordination store",
-        );
+            format!(
+                "observed {} active work lease(s) with fencing tokens",
+                leases.len()
+            ),
+        ),
+        Ok(_) => Check::new(
+            "controller.work_fencing",
+            Category::Control,
+            CheckStatus::Fail,
+            "coordination store contains an invalid work fencing token",
+        )
+        .with_actions(o3kd_actions()),
+        Err(error) => Check::new(
+            "controller.work_fencing",
+            Category::Control,
+            CheckStatus::Fail,
+            "work fencing authority is unreadable",
+        )
+        .with_details(error)
+        .with_actions(o3kd_actions()),
     }
-    Check::new(
-        "controller.work_fencing",
-        Category::Control,
-        CheckStatus::Pass,
-        "work lease fencing enabled via local coordination store",
-    )
 }
 
 #[cfg(test)]
@@ -193,5 +213,40 @@ mod tests {
         let check = check_readyz(&context(http)).await;
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.summary.contains("not ready"));
+    }
+
+    #[tokio::test]
+    async fn controller_session_fails_without_durable_active_session() {
+        let mut db = FakeDb::healthy();
+        db.active_sessions = Ok(0);
+        let check = check_controller_session(&context_with(
+            FakeExec::healthy(),
+            FakeHttp::healthy(),
+            db,
+            true,
+            true,
+        ))
+        .await;
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.summary.contains("no active"));
+    }
+
+    #[tokio::test]
+    async fn work_fencing_fails_on_invalid_durable_token() {
+        let mut db = FakeDb::healthy();
+        db.work_leases = Ok(vec![crate::db::WorkLeaseRow {
+            work_key: "operation-1".to_owned(),
+            fencing_token: 0,
+        }]);
+        let check = check_work_fencing(&context_with(
+            FakeExec::healthy(),
+            FakeHttp::healthy(),
+            db,
+            true,
+            true,
+        ))
+        .await;
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.summary.contains("invalid"));
     }
 }

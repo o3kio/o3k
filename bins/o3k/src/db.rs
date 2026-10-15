@@ -5,7 +5,7 @@
 
 use crate::context::{DoctorDb, sanitize_error};
 use async_trait::async_trait;
-use sqlx::Row;
+use sqlx::{Connection, Row};
 use std::path::Path;
 use std::time::Duration;
 
@@ -63,6 +63,13 @@ pub struct PortRow {
     pub status: String,
 }
 
+/// One currently unexpired durable work lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkLeaseRow {
+    pub work_key: String,
+    pub fencing_token: i64,
+}
+
 /// Real [`DoctorDb`] implementation: a single-connection read-only SQLite
 /// pool opened per query. Any SQL or connection failure becomes a short
 /// sanitized error string; SQL parameters are never included in messages.
@@ -87,6 +94,23 @@ impl SqlxDoctorDb {
         pool.acquire()
             .await
             .map_err(|error| sanitize_error(&format!("database is not readable: {error}")))
+    }
+
+    async fn postgres_connection(
+        url: &str,
+    ) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, String> {
+        let options = url
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .map_err(|_| "PostgreSQL coordination store is not configured".to_owned())?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect_with(options)
+            .await
+            .map_err(|_| "PostgreSQL coordination store is unavailable".to_owned())?;
+        pool.acquire()
+            .await
+            .map_err(|_| "PostgreSQL coordination store is unavailable".to_owned())
     }
 }
 
@@ -260,5 +284,266 @@ impl DoctorDb for SqlxDoctorDb {
                 status: row.get("status"),
             })
             .collect())
+    }
+
+    async fn active_controller_sessions(
+        &self,
+        path: &Path,
+        use_postgres: bool,
+        postgres_url: Option<&str>,
+    ) -> Result<u64, String> {
+        if use_postgres {
+            let Some(url) = postgres_url else {
+                return Err("PostgreSQL coordination store URL is missing".to_owned());
+            };
+            let mut connection = Self::postgres_connection(url).await?;
+            let mut transaction = connection
+                .begin()
+                .await
+                .map_err(|_| "PostgreSQL coordination store is unavailable".to_owned())?;
+            sqlx::query("SET TRANSACTION READ ONLY")
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| "PostgreSQL coordination store is unavailable".to_owned())?;
+            sqlx::query("SET LOCAL statement_timeout = 10000")
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| "PostgreSQL coordination store is unavailable".to_owned())?;
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM controller_sessions \
+                 WHERE state = 'Active' AND lease_until >= NOW()",
+            )
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| "PostgreSQL controller session query failed".to_owned())?;
+            return Ok(count as u64);
+        }
+        let mut connection = Self::read_only_connection(path).await?;
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM controller_sessions \
+             WHERE state = 'Active' AND lease_until >= datetime('now')",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|error| sanitize_error(&format!("controller session query failed: {error}")))?;
+        Ok(count as u64)
+    }
+
+    async fn active_work_leases(
+        &self,
+        path: &Path,
+        use_postgres: bool,
+        postgres_url: Option<&str>,
+    ) -> Result<Vec<WorkLeaseRow>, String> {
+        if use_postgres {
+            let Some(url) = postgres_url else {
+                return Err("PostgreSQL coordination store URL is missing".to_owned());
+            };
+            let mut connection = Self::postgres_connection(url).await?;
+            let mut transaction = connection
+                .begin()
+                .await
+                .map_err(|_| "PostgreSQL coordination store is unavailable".to_owned())?;
+            sqlx::query("SET TRANSACTION READ ONLY")
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| "PostgreSQL coordination store is unavailable".to_owned())?;
+            sqlx::query("SET LOCAL statement_timeout = 10000")
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| "PostgreSQL coordination store is unavailable".to_owned())?;
+            let rows = sqlx::query(
+                "SELECT work_key, fencing_token FROM work_leases \
+                 WHERE lease_until >= NOW() ORDER BY work_key",
+            )
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|_| "PostgreSQL work lease query failed".to_owned())?;
+            return Ok(rows
+                .into_iter()
+                .map(|row| WorkLeaseRow {
+                    work_key: row.get("work_key"),
+                    fencing_token: row.get("fencing_token"),
+                })
+                .collect());
+        }
+        let mut connection = Self::read_only_connection(path).await?;
+        let rows = sqlx::query(
+            "SELECT work_key, fencing_token FROM work_leases \
+             WHERE lease_until >= datetime('now') ORDER BY work_key",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|error| sanitize_error(&format!("work lease query failed: {error}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| WorkLeaseRow {
+                work_key: row.get("work_key"),
+                fencing_token: row.get("fencing_token"),
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::DoctorDb;
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn coordination_queries_observe_active_and_expired_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "o3k-doctor-coordination-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = sqlx::SqlitePool::connect_with(options)
+            .await
+            .expect("create test db");
+        for statement in [
+            "CREATE TABLE controller_sessions (controller_id TEXT NOT NULL, controller_epoch TEXT NOT NULL, lease_until TEXT NOT NULL, state TEXT NOT NULL)",
+            "CREATE TABLE work_leases (work_key TEXT PRIMARY KEY, fencing_token INTEGER NOT NULL, lease_until TEXT NOT NULL)",
+            "INSERT INTO controller_sessions VALUES ('active', 'epoch', datetime('now', '+1 hour'), 'Active')",
+            "INSERT INTO controller_sessions VALUES ('expired', 'epoch', datetime('now', '-1 hour'), 'Active')",
+            "INSERT INTO work_leases VALUES ('active', 7, datetime('now', '+1 hour'))",
+            "INSERT INTO work_leases VALUES ('expired', 9, datetime('now', '-1 hour'))",
+            "INSERT INTO work_leases VALUES ('invalid', 0, datetime('now', '+1 hour'))",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("seed coordination tables");
+        }
+        pool.close().await;
+
+        let db = SqlxDoctorDb;
+        assert_eq!(
+            db.active_controller_sessions(&path, false, None)
+                .await
+                .unwrap(),
+            1
+        );
+        let leases = db.active_work_leases(&path, false, None).await.unwrap();
+        assert_eq!(leases.len(), 2);
+        assert_eq!(leases[0].work_key, "active");
+        assert_eq!(leases[0].fencing_token, 7);
+        assert_eq!(leases[1].work_key, "invalid");
+        assert_eq!(leases[1].fencing_token, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn postgres_selection_requires_url_and_never_falls_back_to_sqlite() {
+        let db = SqlxDoctorDb;
+        let path = std::env::temp_dir().join("o3k-doctor-must-not-open-sqlite.sqlite");
+        let result = db.active_controller_sessions(&path, true, None).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("missing PostgreSQL URL must fail closed")
+                .contains("URL is missing")
+        );
+    }
+
+    /// Run explicitly against a disposable database with:
+    /// `O3K_DOCTOR_POSTGRES_URL=postgres://.../o3k_doctor_test cargo test -p o3k
+    /// --lib db::tests::postgres_coordination_queries -- --ignored --nocapture`.
+    /// The marker in the database name prevents accidental use of a real cloud DB.
+    #[tokio::test]
+    #[ignore = "requires an explicitly provisioned disposable PostgreSQL database"]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn postgres_coordination_queries() {
+        let url = std::env::var("O3K_DOCTOR_POSTGRES_URL")
+            .expect("O3K_DOCTOR_POSTGRES_URL is required for this ignored test");
+        let options = url
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("valid PostgreSQL URL");
+        let database = options.get_database().unwrap_or_default();
+        assert!(
+            database.contains("o3k_doctor"),
+            "refusing PostgreSQL database without o3k_doctor marker"
+        );
+        let schema = format!(
+            "o3k_doctor_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect to disposable PostgreSQL");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&pool)
+            .await
+            .expect("create isolated schema");
+        let isolated_url = if url.contains('?') {
+            format!("{url}&options=-csearch_path%3D{schema}")
+        } else {
+            format!("{url}?options=-csearch_path%3D{schema}")
+        };
+        let isolated_options = isolated_url
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("isolated PostgreSQL URL");
+        let isolated_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(isolated_options)
+            .await
+            .expect("connect to isolated schema");
+        for statement in [
+            "CREATE TABLE controller_sessions (controller_id VARCHAR(64) NOT NULL, controller_epoch VARCHAR(64) NOT NULL, lease_until TIMESTAMPTZ NOT NULL, state VARCHAR(32) NOT NULL)",
+            "CREATE TABLE work_leases (work_key VARCHAR(255) PRIMARY KEY, fencing_token BIGINT NOT NULL, lease_until TIMESTAMPTZ NOT NULL)",
+            "INSERT INTO controller_sessions VALUES ('active', 'epoch', NOW() + INTERVAL '1 hour', 'Active')",
+            "INSERT INTO controller_sessions VALUES ('expired', 'epoch', NOW() - INTERVAL '1 hour', 'Active')",
+            "INSERT INTO work_leases VALUES ('active', 7, NOW() + INTERVAL '1 hour')",
+            "INSERT INTO work_leases VALUES ('expired', 9, NOW() - INTERVAL '1 hour')",
+            "INSERT INTO work_leases VALUES ('invalid', 0, NOW() + INTERVAL '1 hour')",
+        ] {
+            sqlx::query(statement)
+                .execute(&isolated_pool)
+                .await
+                .expect("seed PostgreSQL");
+        }
+        isolated_pool.close().await;
+
+        let db = SqlxDoctorDb;
+        assert_eq!(
+            db.active_controller_sessions(Path::new("unused"), true, Some(&isolated_url))
+                .await
+                .expect("active session query"),
+            1
+        );
+        let leases = db
+            .active_work_leases(Path::new("unused"), true, Some(&isolated_url))
+            .await
+            .expect("active lease query");
+        assert_eq!(leases.len(), 2);
+        assert_eq!(leases[0].work_key, "active");
+        assert_eq!(leases[0].fencing_token, 7);
+        assert_eq!(leases[1].work_key, "invalid");
+        assert_eq!(leases[1].fencing_token, 0);
+
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .expect("drop isolated schema");
+        pool.close().await;
+        let error = db
+            .active_controller_sessions(Path::new("unused"), true, Some(&isolated_url))
+            .await
+            .expect_err("missing schema must fail");
+        assert!(error.contains("query failed"));
+        assert!(!error.contains("://"));
     }
 }
