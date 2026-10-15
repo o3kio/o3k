@@ -110,7 +110,9 @@ generation or equivalent consistency token. For PostgreSQL, the dump snapshot
 is correlated with that generation. If database, config, bootstrap/trust and
 release metadata cannot be proven to belong to the common cut, backup fails.
 The mechanism for acquiring/releasing this quiescence is an architecture
-approval item.
+approval item. A backup-specific generation is evidence metadata only; it does
+not add a durable canonical authority. The implementation reuses accepted
+Operation/controller coordination or keeps the token within the backup run.
 
 A live `.sqlite` file copy is never a supported snapshot method. If the
 implementation cannot prove a stable quiescence point, it must reject the
@@ -157,7 +159,10 @@ re-enrollment checks pass.
 
 ## 5. Backup publication and retry
 
-The writer persists a durable backup operation identity before beginning. It
+The writer persists a durable backup operation identity before beginning. If
+exposed as a control-plane operation, it reuses canonical Operation authority;
+otherwise its protected journal is procedural recovery metadata only, not a
+cloud resource/lifecycle authority. It
 creates a private staging directory on the destination filesystem, writes and
 fsyncs payload members, verifies digests/authentication and database
 integrity, writes the manifest and commit marker, fsyncs the directory, then

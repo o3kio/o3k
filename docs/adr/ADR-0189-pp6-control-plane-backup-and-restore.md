@@ -39,8 +39,11 @@ backup/restore operations recover.
    reconciliation/provider dispatch, in-flight Operations, and lease renewal,
    and binds each database/file member to one recorded consistency generation.
    The exact pause, drain, unknown-outcome, and resume protocol is a human
-   decision. Raw copying of a live database file is unsupported; backup fails
-   if it cannot prove a common cut.
+   decision. The consistency generation is artifact evidence only, not new
+   canonical state or an authority. The mechanism must reuse accepted
+   Operation/controller coordination or remain in the backup run context; it
+   must not create a parallel lifecycle authority. Raw copying of a live
+   database file is unsupported; backup fails if it cannot prove a common cut.
 4. The manifest binds source O3K release/version and source SHA, deployment
    profile, store backend/version, schema version and migration identity,
    installation identity, snapshot method/time, inventory and digests for all
@@ -67,9 +70,12 @@ backup/restore operations recover.
    target is rejected. Existing external provider state is not modified by
    restore.
 8. Restore records durable phases and operation identity before side effects.
-   After a crash, it observes target state and resumes safely or stops in an
-   explicit recoverable failure state. It never blindly repeats a possibly
-   completed destructive operation.
+   If the operation is surfaced through the control plane, it uses the existing
+   canonical Operation authority. Otherwise its protected journal is procedural
+   recovery metadata only and cannot define cloud desired/observed state. After
+   a crash, it observes target state and resumes safely or stops in an explicit
+   recoverable failure state. It never blindly repeats a possibly completed
+   destructive operation.
 9. Before serving mutations or dispatching reconciliation after restore, the
    control plane must establish current controller ownership/fencing and
    prevent pre-restore leases/epochs from authorizing work. The exact identity
