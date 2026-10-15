@@ -7236,6 +7236,144 @@ mod dispatcher_tests {
     #[tokio::test]
     async fn production_mtls_unknown_final_removal_is_not_superseded()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _postgres_test_guard = production_mtls_postgres_test_guard().await;
+        let root = std::env::temp_dir().join(format!("o3kd-mtls-unknown-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root)?;
+        let store = if let Ok(database_url) = std::env::var("O3K_DATABASE_URL") {
+            o3k_store::conformance::assert_destructive_postgres_test_database(&database_url)
+                .map_err(|error| format!("unsafe recovery test database: {error}"))?;
+            let postgres = o3k_store::PostgresStore::connect(&database_url).await?;
+            postgres.clean_tables_for_testing().await?;
+            Arc::new(o3k_store::unified::O3kStore::Postgres(postgres))
+        } else {
+            Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?)
+        };
+        let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
+        let network =
+            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
+                .await?;
+        let historical = durable_removal_command(store.as_ref()).await?;
+        let command: o3k_network::NetworkPlanCommand =
+            serde_json::from_slice(&historical.snapshot)?;
+        let realm_key = format!("fabric-realm:{}", Uuid::from_u128(800));
+        let controller_id = o3k_store::ControllerId::new("controller");
+        let controller_epoch = o3k_store::ControllerEpoch::new("epoch-1");
+        let realm_lease = match store
+            .acquire_work_lease(
+                &realm_key,
+                "fabric_reconciliation",
+                &controller_id,
+                &controller_epoch,
+                FABRIC_REALM_LEASE_TTL,
+            )
+            .await?
+        {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                return Err("test realm unexpectedly busy".into());
+            }
+        };
+        // The seeded row models a command whose admission outcome was lost.
+        // Send that exact durable successor through the production dispatcher
+        // and mTLS service; the controlled provider reports an ambiguous
+        // remove outcome so the agent journal remains unknown.
+        let registry = Arc::new(o3k_compute_agent::NodeRegistry::default());
+        registry
+            .register(&o3k_compute_agent::proto::RegisterRequest {
+                agent_id: "agent-c".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                software_version: "test".to_owned(),
+                host_label: "compute-c".to_owned(),
+                supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+                capabilities: Some(o3k_compute_agent::proto::Capabilities::default()),
+            })
+            .await?;
+        let realizer = MtlSRecoveryRealizer {
+            unknown_remove: true,
+            ..MtlSRecoveryRealizer::default()
+        };
+        let removals = realizer.removals.clone();
+        let service_executor = o3k_network::NetworkPlanExecutor::open(
+            root.join("agent-journal"),
+            o3k_network::NetworkAgentIdentity {
+                agent_id: "agent-c".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+            },
+            o3k_network::NetworkControllerLease {
+                controller_id: String::new(),
+                controller_epoch: String::new(),
+                fencing_token: 0,
+            },
+        )?;
+        let service =
+            o3k_network_bin::agent::NetworkAgentService::new_dynamic(service_executor, realizer)?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = start_mtls_network_agent(listener, service).await?;
+        let dispatcher = Arc::new(mtls_dispatcher(address, store.clone(), None));
+        let dispatch_result = dispatcher
+            .dispatch_existing_successor(command.clone(), historical.command_id.clone())
+            .await?;
+        assert_eq!(dispatch_result, o3k_network::NetworkPlanStatus::Unknown);
+        let admitted = store.get_network_plan_work(&historical.command_id).await?;
+        assert_eq!(
+            admitted.state,
+            o3k_store::NetworkPlanWorkState::UnknownOutcome
+        );
+        assert_eq!(removals.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert!(
+            store
+                .relinquish_work_lease_preserving_fence(
+                    &realm_key,
+                    &controller_id,
+                    &controller_epoch,
+                    realm_lease.fencing_token,
+                )
+                .await?
+        );
+
+        let dispatcher_trait: Arc<dyn o3k_network::NetworkPlanDispatcher> = dispatcher;
+        let reconciler = FabricRealmReconciler {
+            network,
+            coordination: store.clone(),
+            durable: store.clone(),
+            registry,
+            dispatcher: dispatcher_trait,
+            controller: o3k_network::NetworkControllerLease {
+                controller_id: "controller".to_owned(),
+                controller_epoch: "epoch-1".to_owned(),
+                fencing_token: 0,
+            },
+            fabric_domain_id: Uuid::from_u128(990),
+            network_external_realm_id: None,
+            public_allocator: None,
+            reconciliation_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+        };
+        recover_fabric_state(&reconciler, store.as_ref()).await;
+        let after_recovery = store.get_network_plan_work(&historical.command_id).await?;
+        assert_eq!(
+            after_recovery.state,
+            o3k_store::NetworkPlanWorkState::UnknownOutcome
+        );
+        assert_eq!(
+            store.list_unresolved_network_plan_work().await?.len(),
+            1,
+            "unknown admitted final removal must remain unresolved without a successor"
+        );
+        assert_eq!(
+            removals.load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "observation of unknown removal must not repeat provider mutation"
+        );
+        server.abort();
+        let _ = server.await;
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn production_mtls_unknown_final_removal_store_reopen_sqlite()
+    -> Result<(), Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!("o3kd-mtls-unknown-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root)?;
         let sqlite_path = root.join("control-plane.sqlite");
@@ -7327,9 +7465,9 @@ mod dispatcher_tests {
                 .await?
         );
 
-        // Restart the control-plane store after the provider has durably
-        // recorded UnknownOutcome. The agent journal and mTLS service remain
-        // alive, but all controller-side handles are rebuilt from the file.
+        // Reopen the file-backed SQLite store after the provider has durably
+        // recorded UnknownOutcome. This exercises store/adapter reopen; it does
+        // not claim a full o3kd process restart or lease reacquisition.
         drop(dispatcher);
         drop(network_repository);
         drop(network);
