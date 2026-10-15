@@ -3,11 +3,104 @@
 Status: engineering audit for PP.6 #975; not acceptance evidence or a
 certification.
 
-Baseline: protected `main` `c5197f845b81058bc769b52a0c97329211ff9454`
-(2026-10-15). Profile scope is the PP.6 bounded O3K Demo/Small Edge profiles;
+Baseline: protected `main` `0712245ec372616d5c039bcf3dc989341db5f397`
+(2026-10-16). Profile scope is the PP.6 bounded O3K Demo/Small Edge profiles;
 SQLite remains the minimal TestLab/default profile and PostgreSQL the
 production-oriented persistence profile. This audit does not claim PP.5 or
 PP.6 completion.
+
+## Dated implementation status
+
+Status recorded 2026-10-16 against protected `main`
+`0712245ec372616d5c039bcf3dc989341db5f397`:
+
+- The decision packet is open as [PR #1091](https://github.com/o3kio/o3k/pull/1091)
+  at `2c307ebddc59534fce4b59046497f97816c53b86`. ADR-0189 and SPEC-0050
+  remain proposals pending explicit human architecture/security acceptance;
+  the PR does not authorize production backup/restore or PKI implementation.
+  All seven protected checks are successful at this exact head; GitHub review
+  and approval remain absent, and there is no merge.
+- The SQLite lock-cancellation slice is open as [PR #1092](https://github.com/o3kio/o3k/pull/1092)
+  at `84a12abc69ecd189dda84ca18b5797e6fa87d64f`. Its focused test passes
+  locally; exact-head independent review is clean, all seven protected checks
+  are successful, but GitHub approval is absent and there is no merge. It is
+  evidence for one SQLite lock/busy cancellation/retry case, not the complete
+  #1089 matrix.
+- The diagnostics projection slice is open as [PR #1093](https://github.com/o3kio/o3k/pull/1093)
+  at current head `ff14561d57e10378a943d54d6e77e7d56f278b74`. The prior head
+  `d46ab58517a543d29309de8546597081d2898400` failed protected Clippy; this
+  head contains the targeted fix without changing the reviewed product
+  behavior. One protected check is in progress and six have completed
+  successfully; GitHub review/approval is absent, and exact-head review
+  remains pending. Local evidence covers SQLite and
+  PostgreSQL 16.15. The HIGH raw-error leakage and MEDIUM unbounded
+  active-lease findings apply to the older reviewed head
+  `22c3dc5983f480580789be8c9e5840c8d2a43c5b` and are not asserted against
+  this current head.
+- The combined readiness-diagnostics slice is open as [PR #1096](https://github.com/o3kio/o3k/pull/1096)
+  at `b73c19ac8d0826656b81dad85fa70d1146ee7100`. It validates combined
+  control-plane `healthz`/`readyz` and compute-agent `readyz` JSON. Exact-head
+  review is clean, all seven protected checks are successful, and GitHub
+  approval remains pending.
+- The operator runbook slice is open as [PR #1097](https://github.com/o3kio/o3k/pull/1097)
+  at `48c6b2dde1d4342ca51d891e6b3df782680cd162`. Independent review is
+  clean; all seven protected checks are successful and GitHub review/approval
+  is absent.
+- #1084, #1085, #1086 and #1087 remain open and blocked on explicit human
+  acceptance of the proposed backup/restore and trust-recovery decisions.
+  #1089 remains open. Its second SQLite unavailable-store slice is [PR #1095](https://github.com/o3kio/o3k/pull/1095)
+  at `00588e3901deef520408631ced1c1a203e631ff0`; independent review is
+  clean at the exact head, all seven protected checks are successful, and
+  there is no GitHub approval or merge.
+  #1095 covers only the missing-parent fail-closed path; its local tests and
+  checks pass and it does not complete the #1089 matrix. The #1089
+  unknown-outcome test was withheld after independent HIGH findings and remains
+  a gap while a stronger mTLS/file-backed case is developed. The pressure audit
+  found no defensible canonical `SQLITE_FULL` test because the write fit in
+  allocated pages; forcing growth would require filler-table injection, so it
+  provides no PR or evidence claim. An audit of #640 found no safe independent
+  PP.6.4 implementation slice.
+- The separate file-backed SQLite store/adapter reopen regression is open as
+  [PR #1099](https://github.com/o3kio/o3k/pull/1099) at current head
+  `daf144e4aee50531949d3d9fae6c4d7d78a18bc9`, which fixes the teardown
+  finding. It exercises the existing production mTLS unknown-outcome path with
+  two targeted tests; local targeted test, package Clippy, formatting and diff
+  checks pass. Exact-head independent review is clean; protected CI has
+  started, with installer-negative, OCI identity smoke and Tempest passing,
+  while Rust, Mock Cinder, araf convergence and supply-chain remain in
+  progress. The PostgreSQL-selected test remains retained but was not run
+  locally because `O3K_DATABASE_URL` was absent.
+- The scoped test-support/API replay evidence is open as [PR #1100](https://github.com/o3kio/o3k/pull/1100)
+  at `4449368c90e1c8b7731fb87f25611cde9fe24d55` (tree
+  `360acbdb192549eb2541642a724ae637201728af`). Its two-file change has local
+  targeted-test, Clippy, formatting and diff-check validation; at that exact
+  head protected CI is pending/in progress, exact-head independent review is
+  clean, and GitHub review/approval is absent.
+- The targeted diagnostics remediation is open as [PR #1101](https://github.com/o3kio/o3k/pull/1101)
+  at `509d1ef009380b5877b5eb7b24888955a35b72ad`. Its package test, Clippy
+  and formatting checks pass locally; exact-head independent review is clean,
+  all seven protected CI checks are successful, and GitHub review/approval
+  remains absent.
+- The bounded support-bundle contract proposal is open as [PR #1102](https://github.com/o3kio/o3k/pull/1102)
+  at `d7d33655c2c899a8bae66f79c1ff6fa6d86243c7`. It adds Proposed SPEC-0051
+  and its schema without runtime implementation; protected CI is mixed
+  (one check in progress and six successful), and GitHub review/approval is
+  absent.
+- The PostgreSQL outage/reconnect evidence slice is open as [PR #1103](https://github.com/o3kio/o3k/pull/1103)
+  at current head `100928c03b63c3882c13f3067131f089a8a5183c`. The prior head
+  `14e93d45eba4912fafdb3a0a2080e60f42ee7cc5` failed its required PostgreSQL
+  outage lane with `ConnectionReset`. The fix has all seven protected checks
+  queued, including the real PostgreSQL lane; local formatting, package check,
+  targeted Clippy, YAML parse and diff checks pass. Docker port mapping still
+  prevents the local PostgreSQL lane, so local evidence is not PASS. Exact-head
+  independent review is clean. Protected CI has Rust, Mock Cinder and
+  supply-chain in progress; installer-negative has passed; araf convergence,
+  OCI identity smoke and Tempest are queued. GitHub review/approval is absent.
+- PP.6.4 child issue [#1098](https://github.com/o3kio/o3k/issues/1098) is open
+  under parent #975. Implementation is gated on accepted ADR-0189/SPEC-0050
+  and dependent #1084–#1086; #640 remains its rollback/crash-recovery authority.
+- PP.5 remains acceptance-pending with its deferred campaigns unchanged, and
+  PP.7 remains unauthorized.
 
 ## Summary
 
