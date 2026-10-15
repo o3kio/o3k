@@ -70,6 +70,24 @@ pub struct WorkLeaseRow {
     pub fencing_token: i64,
 }
 
+/// Maximum number of leases doctor will materialize for one bounded report.
+/// The query fetches one additional row so an overflow fails closed instead
+/// of making a truncated prefix appear healthy.
+const MAX_ACTIVE_WORK_LEASES: usize = 1_024;
+
+fn bounded_work_leases(rows: Vec<sqlx::sqlite::SqliteRow>) -> Result<Vec<WorkLeaseRow>, String> {
+    if rows.len() > MAX_ACTIVE_WORK_LEASES {
+        return Err("work fencing authority returned too many active leases".to_owned());
+    }
+    Ok(rows
+        .into_iter()
+        .map(|row| WorkLeaseRow {
+            work_key: row.get("work_key"),
+            fencing_token: row.get("fencing_token"),
+        })
+        .collect())
+}
+
 /// Real [`DoctorDb`] implementation: a single-connection read-only SQLite
 /// pool opened per query. Any SQL or connection failure becomes a short
 /// sanitized error string; SQL parameters are never included in messages.
@@ -352,13 +370,17 @@ impl DoctorDb for SqlxDoctorDb {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|_| "PostgreSQL coordination store is unavailable".to_owned())?;
-            let rows = sqlx::query(
+            let rows = sqlx::query(&format!(
                 "SELECT work_key, fencing_token FROM work_leases \
-                 WHERE lease_until >= NOW() ORDER BY work_key",
-            )
+                 WHERE lease_until >= NOW() ORDER BY work_key LIMIT {}",
+                MAX_ACTIVE_WORK_LEASES + 1
+            ))
             .fetch_all(&mut *transaction)
             .await
             .map_err(|_| "PostgreSQL work lease query failed".to_owned())?;
+            if rows.len() > MAX_ACTIVE_WORK_LEASES {
+                return Err("work fencing authority returned too many active leases".to_owned());
+            }
             return Ok(rows
                 .into_iter()
                 .map(|row| WorkLeaseRow {
@@ -368,20 +390,15 @@ impl DoctorDb for SqlxDoctorDb {
                 .collect());
         }
         let mut connection = Self::read_only_connection(path).await?;
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             "SELECT work_key, fencing_token FROM work_leases \
-             WHERE lease_until >= datetime('now') ORDER BY work_key",
-        )
+             WHERE lease_until >= datetime('now') ORDER BY work_key LIMIT {}",
+            MAX_ACTIVE_WORK_LEASES + 1
+        ))
         .fetch_all(&mut *connection)
         .await
         .map_err(|error| sanitize_error(&format!("work lease query failed: {error}")))?;
-        Ok(rows
-            .into_iter()
-            .map(|row| WorkLeaseRow {
-                work_key: row.get("work_key"),
-                fencing_token: row.get("fencing_token"),
-            })
-            .collect())
+        bounded_work_leases(rows)
     }
 }
 
@@ -436,6 +453,46 @@ mod tests {
         assert_eq!(leases[0].fencing_token, 7);
         assert_eq!(leases[1].work_key, "invalid");
         assert_eq!(leases[1].fencing_token, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn active_work_leases_overflow_fails_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "o3k-doctor-work-lease-overflow-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = sqlx::SqlitePool::connect_with(options)
+            .await
+            .expect("create overflow database");
+        sqlx::query(
+            "CREATE TABLE work_leases (work_key TEXT PRIMARY KEY, fencing_token INTEGER NOT NULL, lease_until TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create work leases");
+        for index in 0..=MAX_ACTIVE_WORK_LEASES {
+            sqlx::query("INSERT INTO work_leases VALUES (?, 1, datetime('now', '+1 hour'))")
+                .bind(format!("lease-{index}"))
+                .execute(&pool)
+                .await
+                .expect("insert active lease");
+        }
+        pool.close().await;
+
+        let result = SqlxDoctorDb.active_work_leases(&path, false, None).await;
+        assert_eq!(
+            result.expect_err("overflow must fail closed"),
+            "work fencing authority returned too many active leases"
+        );
         let _ = std::fs::remove_file(path);
     }
 

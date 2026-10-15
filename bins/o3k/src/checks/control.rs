@@ -121,13 +121,12 @@ pub async fn check_controller_session(ctx: &Context) -> Check {
             "coordination store has no active controller session",
         )
         .with_actions(o3kd_actions()),
-        Err(error) => Check::new(
+        Err(_) => Check::new(
             "controller.session",
             Category::Control,
             CheckStatus::Fail,
             "controller session authority is unreadable",
         )
-        .with_details(error)
         .with_actions(o3kd_actions()),
     }
 }
@@ -155,13 +154,12 @@ pub async fn check_work_fencing(ctx: &Context) -> Check {
             "coordination store contains an invalid work fencing token",
         )
         .with_actions(o3kd_actions()),
-        Err(error) => Check::new(
+        Err(_) => Check::new(
             "controller.work_fencing",
             Category::Control,
             CheckStatus::Fail,
             "work fencing authority is unreadable",
         )
-        .with_details(error)
         .with_actions(o3kd_actions()),
     }
 }
@@ -248,5 +246,29 @@ mod tests {
         .await;
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.summary.contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn coordination_errors_do_not_escape_into_json_or_human_output() {
+        let sentinel = "postgres://doctor:secret@db.example.invalid/o3k";
+        let mut db = FakeDb::healthy();
+        db.active_sessions = Err(sentinel.to_owned());
+        db.work_leases = Err(sentinel.to_owned());
+        let ctx = context_with(FakeExec::healthy(), FakeHttp::healthy(), db, true, true);
+
+        for check in [
+            check_controller_session(&ctx).await,
+            check_work_fencing(&ctx).await,
+        ] {
+            let json = serde_json::to_string(&check).expect("check serializes");
+            assert!(!json.contains(sentinel));
+            let report = crate::output::Report {
+                version: "test".to_owned(),
+                overall_status: crate::output::OverallStatus::Unhealthy,
+                timestamp: "2026-01-01T00:00:00Z".to_owned(),
+                checks: vec![check],
+            };
+            assert!(!report.render_human().contains(sentinel));
+        }
     }
 }
