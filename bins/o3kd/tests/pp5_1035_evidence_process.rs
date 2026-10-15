@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -28,6 +28,7 @@ const FOREIGN_PASSWORD: &str = "pp5-interrupted-delete-foreign-password";
 const TOKEN_SIGNING_KEY: &str = "pp5-interrupted-delete-signing-key-0123456789abcdef";
 const FLAVOR_ID: &str = "00000000-0000-0000-0000-000000000001";
 const FAULT_ENV: &str = "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS";
+const MAX_CONTROLLER_IDENTITY_BYTES: usize = 64;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -115,14 +116,13 @@ impl PgFixture {
         }))
     }
 
-    async fn dispose(self) {
-        let Ok(pool) = PgPoolOptions::new()
+    async fn dispose(self) -> Result<(), Error> {
+        let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&self.admin_url)
-            .await
-        else {
-            return;
-        };
+            .await?;
+        // Attempt to terminate sessions, but still attempt the FORCE drop if
+        // this diagnostic step fails; the drop is the cleanup authority.
         let _ = sqlx::query(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
              WHERE datname = $1 AND pid <> pg_backend_pid()",
@@ -130,10 +130,12 @@ impl PgFixture {
         .bind(&self.database)
         .execute(&pool)
         .await;
-        let _ = sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
+        let drop_result = sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
             .execute(&pool)
             .await;
         pool.close().await;
+        drop_result?;
+        Ok(())
     }
 }
 
@@ -153,6 +155,29 @@ fn file_sha256(path: &Path) -> Result<String, Error> {
 
 fn free_address() -> Result<SocketAddr, Error> {
     Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?)
+}
+
+fn is_run_owned_server_endpoint(port: &Value) -> bool {
+    port["project_id"].as_str() == Some(PROJECT_ID)
+        && port["name"]
+            .as_str()
+            .is_some_and(|name| o3k_network::is_server_owned_endpoint_name(PROJECT_ID, name))
+}
+
+#[test]
+fn teardown_endpoint_count_ignores_foreign_server_owned_names() {
+    assert!(is_run_owned_server_endpoint(
+        &json!({"project_id": PROJECT_ID, "name": format!("o3k-server:{PROJECT_ID}:run")})
+    ));
+    assert!(!is_run_owned_server_endpoint(
+        &json!({"project_id": FOREIGN_PROJECT_ID, "name": format!("o3k-server:{FOREIGN_PROJECT_ID}:foreign")})
+    ));
+    assert!(!is_run_owned_server_endpoint(
+        &json!({"project_id": FOREIGN_PROJECT_ID, "name": format!("o3k-server:{PROJECT_ID}:spoof")})
+    ));
+    assert!(!is_run_owned_server_endpoint(
+        &json!({"project_id": PROJECT_ID, "name": "caller-port"})
+    ));
 }
 
 fn proc_starttime(pid: u32) -> Result<u64, Error> {
@@ -353,6 +378,7 @@ fn start_o3kd(
     tls: &(PathBuf, PathBuf, PathBuf),
     run_id: &str,
 ) -> Result<Child, Error> {
+    validate_controller_identity(controller.0, controller.1)?;
     let log_file = OpenOptions::new().create(true).append(true).open(log)?;
     let log_copy = log_file.try_clone()?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_o3kd"));
@@ -450,6 +476,29 @@ fn start_o3kd(
     Ok(child)
 }
 
+fn controller_identity(prefix: &str, run_id: &str) -> (String, String) {
+    (
+        format!("{prefix}-{run_id}"),
+        format!("{prefix}-epoch-{run_id}"),
+    )
+}
+
+fn validate_controller_identity(controller_id: &str, controller_epoch: &str) -> Result<(), Error> {
+    for (field, value) in [
+        ("controller ID", controller_id),
+        ("controller epoch", controller_epoch),
+    ] {
+        if value.len() > MAX_CONTROLLER_IDENTITY_BYTES {
+            return Err(format!(
+                "test fixture {field} is {} bytes; store limit is {MAX_CONTROLLER_IDENTITY_BYTES}",
+                value.len()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn kill_process(child: &mut Child) -> Result<(), Error> {
     let status = Command::new("kill")
         .args(["-KILL", &child.id().to_string()])
@@ -465,6 +514,9 @@ async fn wait_ready(
     http: SocketAddr,
     control: SocketAddr,
     timeout: Duration,
+    log: &Path,
+    phase: &'static str,
+    operation: &'static str,
 ) -> Result<Value, Error> {
     let client = reqwest::Client::new();
     let deadline = Instant::now() + timeout;
@@ -474,23 +526,213 @@ async fn wait_ready(
                 listener_owner(http, child.id(), start),
                 listener_owner(control, child.id(), start),
             )
-            && let Ok(response) = client.get(format!("http://{http}/readyz")).send().await
-            && response.status() == reqwest::StatusCode::OK
         {
-            let status = response.status().as_u16();
-            let body = response.text().await?;
-            return Ok(
-                json!({"status": status, "body_sha256": sha256(body.as_bytes()), "timestamp": now(), "served_by_new": true}),
-            );
+            let request_deadline = tokio::time::Instant::from_std(deadline);
+            if let Ok(Ok(response)) = tokio::time::timeout_at(
+                request_deadline,
+                client.get(format!("http://{http}/readyz")).send(),
+            )
+            .await
+                && response.status() == reqwest::StatusCode::OK
+                && let Ok(Ok(body)) =
+                    tokio::time::timeout_at(request_deadline, response.text()).await
+            {
+                let status = reqwest::StatusCode::OK.as_u16();
+                return Ok(
+                    json!({"status": status, "body_sha256": sha256(body.as_bytes()), "timestamp": now(), "served_by_new": true}),
+                );
+            }
         }
         if let Some(status) = child.try_wait()? {
-            return Err(format!("o3kd exited during readiness: {status}").into());
+            let diagnostic = json!({
+                "phase": phase,
+                "status": "failed",
+                "failed_operation": operation,
+                "observer_type": "test_process_and_bounded_log",
+                "resource_class": "daemon_startup",
+                "command_class": "o3kd_process",
+                "process_id": child.id(),
+                "exit_code": status.code(),
+                "http_listener_present": listener_present(http).ok(),
+                "control_listener_present": listener_present(control).ok(),
+                "startup_log": startup_log_tail(log),
+            });
+            return Err(format!(
+                "o3kd exited during readiness: {status}; diagnostic={}",
+                serde_json::to_string(&diagnostic)?
+            )
+            .into());
         }
         if Instant::now() >= deadline {
-            return Err("replacement did not become ready with both listeners owned".into());
+            let diagnostic = json!({
+                "phase": phase,
+                "status": "failed",
+                "failed_operation": operation,
+                "failure_cause": "readiness_timeout",
+                "observer_type": "test_process_and_bounded_log",
+                "resource_class": "daemon_startup",
+                "command_class": "o3kd_process",
+                "process_id": child.id(),
+                "exit_code": null,
+                "http_listener_present": listener_present(http).ok(),
+                "control_listener_present": listener_present(control).ok(),
+                "startup_log": startup_log_tail(log),
+            });
+            return Err(format!(
+                "o3kd did not become ready before timeout; diagnostic={}",
+                serde_json::to_string(&diagnostic)?
+            )
+            .into());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+fn startup_log_tail(path: &Path) -> Value {
+    const MAX_BYTES: u64 = 16 * 1024;
+
+    let result = (|| -> Result<(Vec<u8>, bool), Error> {
+        let mut file = File::open(path)?;
+        let length = file.metadata()?.len();
+        let offset = length.saturating_sub(MAX_BYTES);
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::with_capacity(MAX_BYTES as usize);
+        file.take(MAX_BYTES).read_to_end(&mut bytes)?;
+        Ok((bytes, offset > 0))
+    })();
+
+    match result {
+        Ok((bytes, truncated)) => {
+            let raw = String::from_utf8_lossy(&bytes);
+            let tail = raw
+                .lines()
+                .rev()
+                .take(32)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(redact_startup_log_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            json!({
+                "read_status": "ok",
+                "truncated": truncated,
+                "tail_bytes": bytes.len(),
+                "tail_sha256": sha256(&bytes),
+                "tail": tail,
+            })
+        }
+        Err(error) => json!({
+            "read_status": "failed",
+            "diagnostic": error.to_string(),
+        }),
+    }
+}
+
+fn redact_startup_log_line(line: &str) -> String {
+    let mut redacted = line
+        .replace(BOOTSTRAP_PASSWORD, "[REDACTED]")
+        .replace(FOREIGN_PASSWORD, "[REDACTED]")
+        .replace(TOKEN_SIGNING_KEY, "[REDACTED]");
+
+    // Startup errors can include a PostgreSQL connection URL. Keep the
+    // diagnostic context while withholding any authority or query secrets.
+    for scheme in ["postgres://", "postgresql://"] {
+        let mut search_from = 0;
+        while let Some(relative_start) = redacted[search_from..].find(scheme) {
+            let start = search_from + relative_start;
+            let end = redacted[start..]
+                .find(char::is_whitespace)
+                .map_or(redacted.len(), |relative_end| start + relative_end);
+            redacted.replace_range(start..end, "[REDACTED_POSTGRES_URL]");
+            search_from = start + "[REDACTED_POSTGRES_URL]".len();
+            if search_from >= redacted.len() {
+                break;
+            }
+        }
+    }
+    redacted
+}
+
+#[test]
+fn startup_log_diagnostic_redacts_credentials() {
+    let line = format!(
+        "database startup failed password={BOOTSTRAP_PASSWORD} url=postgresql://db-user:db-password@db.invalid/o3k?sslkey=private-key"
+    );
+    let redacted = redact_startup_log_line(&line);
+
+    assert!(redacted.contains("database startup failed"));
+    assert!(redacted.contains("[REDACTED]"));
+    assert!(redacted.contains("[REDACTED_POSTGRES_URL]"));
+    assert!(!redacted.contains(BOOTSTRAP_PASSWORD));
+    assert!(!redacted.contains("db-password"));
+    assert!(!redacted.contains("private-key"));
+}
+
+#[tokio::test]
+async fn readiness_timeout_records_redacted_startup_diagnostics() -> Result<(), Error> {
+    let root = std::env::temp_dir().join(format!("o3k-pp5-startup-diagnostic-{}", Uuid::now_v7()));
+    fs::create_dir_all(&root)?;
+    let log = root.join("o3kd.log");
+    fs::write(
+        &log,
+        format!(
+            "database startup failed password={BOOTSTRAP_PASSWORD} url=postgresql://db-user:db-password@db.invalid/o3k?sslkey=private-key\n"
+        ),
+    )?;
+    let mut child = Command::new("sleep").arg("5").spawn()?;
+    let outcome = wait_ready(
+        &mut child,
+        free_address()?,
+        free_address()?,
+        Duration::from_millis(100),
+        &log,
+        "replacement_daemon_startup",
+        "wait_replacement_readiness",
+    )
+    .await;
+    stop_process(&mut child)?;
+    let diagnostic = match outcome {
+        Err(error) => error.to_string(),
+        Ok(_) => {
+            return Err("process without readiness listeners unexpectedly became ready".into());
+        }
+    };
+    assert!(diagnostic.contains("replacement_daemon_startup"));
+    assert!(diagnostic.contains("wait_replacement_readiness"));
+    assert!(diagnostic.contains("readiness_timeout"));
+    assert!(diagnostic.contains("database startup failed"));
+    assert!(!diagnostic.contains(BOOTSTRAP_PASSWORD));
+    assert!(!diagnostic.contains("db-password"));
+    assert!(!diagnostic.contains("private-key"));
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn postgres_run_controller_identities_fit_store_bound() -> Result<(), Error> {
+    let run_id = format!("postgres-{}", Uuid::now_v7().simple());
+    let fixture_setup = controller_identity("fixture-setup", &run_id);
+    assert!(fixture_setup.0.len() <= MAX_CONTROLLER_IDENTITY_BYTES);
+    assert!(fixture_setup.1.len() <= MAX_CONTROLLER_IDENTITY_BYTES);
+    validate_controller_identity(&fixture_setup.0, &fixture_setup.1)?;
+
+    let previous_run_id = format!("postgres-{}", Uuid::now_v7());
+    let previous_fixture_setup = controller_identity("fixture-setup", &previous_run_id);
+    assert_eq!(
+        previous_fixture_setup.1.len(),
+        MAX_CONTROLLER_IDENTITY_BYTES + 1
+    );
+    assert!(
+        validate_controller_identity(&previous_fixture_setup.0, &previous_fixture_setup.1).is_err()
+    );
+
+    let boundary_value = "x".repeat(MAX_CONTROLLER_IDENTITY_BYTES);
+    validate_controller_identity(&boundary_value, &boundary_value)?;
+    let oversized_value = "x".repeat(MAX_CONTROLLER_IDENTITY_BYTES + 1);
+    assert!(validate_controller_identity(&oversized_value, "epoch").is_err());
+    assert!(validate_controller_identity("controller", &oversized_value).is_err());
+    Ok(())
 }
 
 async fn token(
@@ -649,11 +891,138 @@ async fn wait_server_api_state(
 
 struct TestOwnedProbe {
     store: Option<o3k_store::unified::O3kStore>,
+    initialized: bool,
+    daemon_running: bool,
+    delete_paused: bool,
+    reconstruction_observed: bool,
 }
 
 impl TestOwnedProbe {
-    fn new(store: o3k_store::unified::O3kStore) -> Self {
-        Self { store: Some(store) }
+    fn new() -> Self {
+        Self {
+            store: None,
+            initialized: false,
+            daemon_running: false,
+            delete_paused: false,
+            reconstruction_observed: false,
+        }
+    }
+
+    async fn open_while_daemon_stopped(&mut self, backend: &Backend) -> Result<(), Error> {
+        if self.daemon_running {
+            return Err("test-owned probe must open only while o3kd is stopped".into());
+        }
+        if self.is_alive() {
+            return Err("test-owned probe is already open".into());
+        }
+        self.store = Some(backend.connect().await?);
+        self.initialized = true;
+        Ok(())
+    }
+
+    fn mark_daemon_started(&mut self) -> Result<(), Error> {
+        if self.daemon_running {
+            return Err("test daemon is already marked running".into());
+        }
+        if !self.initialized {
+            return Err("test-owned probe must be initialized before daemon startup".into());
+        }
+        self.daemon_running = true;
+        self.delete_paused = false;
+        Ok(())
+    }
+
+    fn mark_delete_paused(&mut self) -> Result<(), Error> {
+        if !self.daemon_running {
+            return Err("delete pause requires a running daemon".into());
+        }
+        self.delete_paused = true;
+        Ok(())
+    }
+
+    async fn observe_owned_endpoint_during_paused_delete(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<o3k_store::PortRecord, Error> {
+        if !self.daemon_running || !self.delete_paused {
+            return Err(
+                "direct endpoint observation requires the old daemon's paused delete window".into(),
+            );
+        }
+        let endpoint = self
+            .store()?
+            .get_port(project_id, endpoint_id)
+            .await?
+            .ok_or("owned endpoint disappeared before SIGKILL")?;
+        if endpoint.project_id != project_id
+            || !o3k_network::is_server_owned_endpoint_name(project_id, &endpoint.name)
+        {
+            return Err(
+                "direct endpoint observation did not match run-owned endpoint identity".into(),
+            );
+        }
+        Ok(endpoint)
+    }
+
+    fn mark_daemon_stopped(&mut self) -> Result<(), Error> {
+        if !self.daemon_running {
+            return Err("test daemon is not marked running".into());
+        }
+        self.daemon_running = false;
+        self.delete_paused = false;
+        Ok(())
+    }
+
+    async fn update_port_binding_fixture(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        host: &str,
+        state: &str,
+    ) -> Result<(), Error> {
+        if self.daemon_running {
+            return Err(
+                "test fixture writes are forbidden while an o3kd daemon may own a write transaction"
+                    .into(),
+            );
+        }
+        self.store()?
+            .update_port_binding(project_id, endpoint_id, Some(host), Some(state))
+            .await?;
+        Ok(())
+    }
+
+    async fn acquire_repair_lease_during_paused_delete(
+        &self,
+        backend: &Backend,
+        controller_id: &o3k_store::ControllerId,
+        controller_epoch: &o3k_store::ControllerEpoch,
+    ) -> Result<o3k_store::LeaseAcquireOutcome, Error> {
+        if !self.daemon_running || !self.delete_paused {
+            return Err(
+                "concurrent repair lease seeding requires the old daemon's paused delete window"
+                    .into(),
+            );
+        }
+        if !backend.is_postgres() {
+            return Err("concurrent repair lease seeding is PostgreSQL-only".into());
+        }
+
+        // This is the one intentional direct write while a daemon is running:
+        // the PostgreSQL test holds a competing durable lease during the
+        // old daemon's explicitly paused delete window. Other fixture writes
+        // remain forbidden until the daemon is stopped.
+        Ok(self
+            .store()?
+            .acquire_work_lease(
+                "server-endpoint-orphan-repair",
+                "repair",
+                controller_id,
+                controller_epoch,
+                Duration::from_secs(12),
+            )
+            .await?)
     }
 
     fn is_alive(&self) -> bool {
@@ -681,7 +1050,20 @@ impl TestOwnedProbe {
         if self.is_alive() {
             return Err("test-owned probe must be closed before opening a fresh pool".into());
         }
+        if !self.daemon_running || !self.reconstruction_observed {
+            return Err(
+                "fresh probe may open only after replacement reconstruction is observed".into(),
+            );
+        }
         self.store = Some(backend.connect().await?);
+        Ok(())
+    }
+
+    fn mark_reconstruction_observed(&mut self) -> Result<(), Error> {
+        if !self.daemon_running {
+            return Err("replacement daemon must be running at reconstruction observation".into());
+        }
+        self.reconstruction_observed = true;
         Ok(())
     }
 }
@@ -713,14 +1095,99 @@ async fn pp5_1035_test_probe_must_close_across_restart_boundary() -> Result<(), 
     let root = std::env::temp_dir().join(format!("o3k-pp5-probe-lifecycle-{}", Uuid::now_v7()));
     fs::create_dir_all(&root)?;
     let backend = Backend::Sqlite(root.join("o3k.sqlite"));
-    let mut probe = TestOwnedProbe::new(backend.connect().await?);
+    let mut probe = TestOwnedProbe::new();
+    probe.open_while_daemon_stopped(&backend).await?;
     assert!(probe.is_alive());
     assert!(probe.require_closed_at_restart().is_err());
+    probe.mark_daemon_started()?;
+    let fixture_write = probe
+        .update_port_binding_fixture(PROJECT_ID, &Uuid::now_v7(), "pp5-compute-agent", "bound")
+        .await;
+    let fixture_write_error = fixture_write
+        .err()
+        .ok_or("fixture write while the daemon runs did not fail closed")?;
+    assert!(fixture_write_error.to_string().contains("forbidden"));
+    probe.mark_delete_paused()?;
+    assert!(
+        probe
+            .acquire_repair_lease_during_paused_delete(
+                &backend,
+                &o3k_store::ControllerId::new("test-controller"),
+                &o3k_store::ControllerEpoch::new("test-epoch"),
+            )
+            .await
+            .is_err()
+    );
     probe.close();
     probe.require_closed_at_restart()?;
     assert!(!probe.is_alive());
+    probe.mark_daemon_stopped()?;
+    probe.open_while_daemon_stopped(&backend).await?;
+    probe.close();
+    probe.mark_daemon_started()?;
+    assert!(probe.reopen(&backend).await.is_err());
+    probe.mark_reconstruction_observed()?;
     probe.reopen(&backend).await?;
     assert!(probe.is_alive());
+    probe.close();
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pp5_1035_paused_delete_endpoint_observation_uses_only_the_owned_store_probe()
+-> Result<(), Error> {
+    let root = std::env::temp_dir().join(format!("o3k-pp5-paused-endpoint-{}", Uuid::now_v7()));
+    fs::create_dir_all(&root)?;
+    let backend = Backend::Sqlite(root.join("o3k.sqlite"));
+    let mut probe = TestOwnedProbe::new();
+    probe.open_while_daemon_stopped(&backend).await?;
+
+    let endpoint_id = Uuid::now_v7();
+    let network_id = Uuid::now_v7();
+    probe
+        .store()?
+        .insert_network(&o3k_store::NetworkRecord {
+            id: network_id,
+            name: "pp5-restart-observation".to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            status: "ACTIVE".to_owned(),
+        })
+        .await?;
+    let endpoint = o3k_store::PortRecord {
+        id: endpoint_id,
+        network_id,
+        subnet_id: None,
+        project_id: PROJECT_ID.to_owned(),
+        name: format!("o3k-server:{PROJECT_ID}:pp5-restart-observation"),
+        mac_address: "02:00:00:00:00:01".to_owned(),
+        fixed_ip: "192.0.2.10".parse()?,
+        status: "ACTIVE".to_owned(),
+        binding_host: Some("pp5-compute-agent".to_owned()),
+        binding_state: Some("bound".to_owned()),
+        binding_generation: 1,
+    };
+    probe.store()?.insert_port(&endpoint).await?;
+
+    probe.mark_daemon_started()?;
+    assert!(
+        probe
+            .observe_owned_endpoint_during_paused_delete(PROJECT_ID, &endpoint_id)
+            .await
+            .is_err()
+    );
+    probe.mark_delete_paused()?;
+    let observed = probe
+        .observe_owned_endpoint_during_paused_delete(PROJECT_ID, &endpoint_id)
+        .await?;
+    assert_eq!(observed.id, endpoint_id);
+    assert_eq!(observed.project_id, PROJECT_ID);
+    assert_eq!(observed.binding_state.as_deref(), Some("bound"));
+    assert_eq!(
+        observed.fixed_ip,
+        "192.0.2.10".parse::<std::net::Ipv4Addr>()?
+    );
+
     probe.close();
     fs::remove_dir_all(root)?;
     Ok(())
@@ -972,13 +1439,14 @@ async fn run_iteration(
     fs::remove_file(&replacement_cleanup_failure).ok();
     fs::remove_file(&old_endpoint_release_gate).ok();
     File::create(&release)?;
-    let old_controller = (format!("old-{run_id}"), format!("old-epoch-{run_id}"));
+    let old_controller = controller_identity("old", run_id);
     // The operator diagnostics route is deliberately system-scoped.  Seed a
     // run-local system project/role assignment before the evidence process is
     // started, then let the real IAM snapshot load it during startup.  This
     // keeps the proof on the production authentication path without a test
     // authorization bypass.
     {
+        evidence.checkpoint("bootstrap_daemon_startup")?;
         let bootstrap_child = start_o3kd(
             root,
             backend,
@@ -999,6 +1467,9 @@ async fn run_iteration(
             http,
             control,
             Duration::from_secs(20),
+            &log,
+            "bootstrap_daemon_startup",
+            "wait_bootstrap_readiness",
         )
         .await?;
         // Finish the bootstrap process before opening the same SQLite file for
@@ -1077,6 +1548,7 @@ async fn run_iteration(
             })
             .await?;
     }
+    evidence.checkpoint("fixture_setup_daemon_startup")?;
     let setup_child = start_o3kd(
         root,
         backend,
@@ -1092,8 +1564,16 @@ async fn run_iteration(
         run_id,
     )?;
     let mut setup = ChildCleanupGuard::new(setup_child, setup_cleanup_failure);
-    let _ready_setup =
-        wait_ready(setup.child_mut()?, http, control, Duration::from_secs(20)).await?;
+    let _ready_setup = wait_ready(
+        setup.child_mut()?,
+        http,
+        control,
+        Duration::from_secs(20),
+        &log,
+        "fixture_setup_daemon_startup",
+        "wait_fixture_setup_readiness",
+    )
+    .await?;
     let setup_pid = setup.id()?;
     let setup_start = proc_starttime(setup_pid)?;
     let setup_exe = proc_exe(setup_pid)?;
@@ -1258,7 +1738,8 @@ async fn run_iteration(
         None,
         None,
     );
-    let mut probe = TestOwnedProbe::new(backend.connect().await?);
+    let mut probe = TestOwnedProbe::new();
+    probe.open_while_daemon_stopped(backend).await?;
     store_operation(
         evidence,
         "setup_daemon_stopped_fixture_binding",
@@ -1269,15 +1750,10 @@ async fn run_iteration(
         None,
     );
     probe
-        .store()?
-        .update_port_binding(
-            PROJECT_ID,
-            &endpoint_uuid,
-            Some("pp5-compute-agent"),
-            Some("bound"),
-        )
+        .update_port_binding_fixture(PROJECT_ID, &endpoint_uuid, "pp5-compute-agent", "bound")
         .await?;
 
+    evidence.checkpoint("old_daemon_startup")?;
     let old_child = start_o3kd(
         root,
         backend,
@@ -1293,8 +1769,17 @@ async fn run_iteration(
         run_id,
     )?;
     let mut child = ChildCleanupGuard::new(old_child, old_cleanup_failure);
-    let readiness_old =
-        wait_ready(child.child_mut()?, http, control, Duration::from_secs(20)).await?;
+    let readiness_old = wait_ready(
+        child.child_mut()?,
+        http,
+        control,
+        Duration::from_secs(20),
+        &log,
+        "old_daemon_startup",
+        "wait_old_daemon_readiness",
+    )
+    .await?;
+    probe.mark_daemon_started()?;
     let old_pid = child.id()?;
     let old_start = proc_starttime(old_pid)?;
     let old_exe = proc_exe(old_pid)?;
@@ -1334,13 +1819,13 @@ async fn run_iteration(
         .to_owned();
     let quota_before = quota_usage(&client, http, &admin_token).await?;
     let delete_key = format!("pp5-delete-{fixture}");
-    let (delete_tx, delete_rx) = tokio::sync::oneshot::channel();
     let client_delete = client.clone();
     let token_delete = admin_token.clone();
-    tokio::spawn(async move {
-        let result =
-            delete_native(&client_delete, http, &token_delete, server_id, &delete_key).await;
-        let _ = delete_tx.send(result);
+    // JoinSet aborts any still-running request if an earlier assertion exits
+    // this function, so the test cannot leave a detached delete task behind.
+    let mut delete_task = tokio::task::JoinSet::new();
+    delete_task.spawn(async move {
+        let _ = delete_native(&client_delete, http, &token_delete, server_id, &delete_key).await;
     });
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut terminal = false;
@@ -1379,30 +1864,29 @@ async fn run_iteration(
     if !terminal {
         return Err("terminal delete window not observed".into());
     }
+    let pause_log_needle = if backend.is_postgres() {
+        "test-only fault pause before-endpoint-release engaged; awaiting release gate"
+    } else {
+        "test-only fault pause before-endpoint-release engaged"
+    };
+    let pause_engaged = wait_log(&log, pause_log_needle, Duration::from_secs(10)).await?;
+    let endpoint_release_pause_started = Instant::now();
+    probe.mark_delete_paused()?;
     let stale_lease = if backend.is_postgres() {
         // The terminal delete path holds the local orphan-repair lock while
         // this run-scoped gate is closed. Claim the durable lease during that
         // known interval, before the queued scheduled pass can enter the lock
         // and race the fixture. Release the gate only after recording owner.
-        let pause_engaged = wait_log(
-            &log,
-            "test-only fault pause before-endpoint-release engaged; awaiting release gate",
-            Duration::from_secs(10),
-        )
-        .await?;
         if old_endpoint_release_gate.exists() {
             return Err(
                 "old daemon endpoint-release gate unexpectedly opened before lease seeding".into(),
             );
         }
-        let coordination = backend.connect().await?;
-        let outcome = coordination
-            .acquire_work_lease(
-                "server-endpoint-orphan-repair",
-                "repair",
+        let outcome = probe
+            .acquire_repair_lease_during_paused_delete(
+                backend,
                 &o3k_store::ControllerId::new(old_controller.0.clone()),
                 &o3k_store::ControllerEpoch::new(old_controller.1.clone()),
-                Duration::from_secs(12),
             )
             .await?;
         let lease = match outcome {
@@ -1427,11 +1911,27 @@ async fn run_iteration(
     } else {
         None
     };
-    let owned_endpoint = ports(&client, http, &admin_token)
-        .await?
-        .into_iter()
-        .find(|port| port["id"] == endpoint_id)
-        .ok_or("owned endpoint disappeared before SIGKILL")?;
+    // The old daemon is deliberately paused inside endpoint release here.
+    // Observe the durable row through the already-open read probe; an HTTP
+    // request can queue behind lifecycle work and outlive the bounded pause,
+    // allowing scheduled repair to release the endpoint before SIGKILL.
+    store_operation(
+        evidence,
+        "pre_restart_terminal_endpoint_observation",
+        "get_owned_port_directly",
+        backend,
+        probe.is_alive(),
+        Some(old_pid),
+        None,
+    );
+    let owned_endpoint = probe
+        .observe_owned_endpoint_during_paused_delete(PROJECT_ID, &endpoint_uuid)
+        .await?;
+    if owned_endpoint.fixed_ip.to_string() != fixed_ip {
+        return Err(
+            "direct endpoint observation fixed IP differs from the pre-delete API snapshot".into(),
+        );
+    }
     store_operation(
         evidence,
         "pre_restart_operation_observation",
@@ -1441,7 +1941,7 @@ async fn run_iteration(
         Some(old_pid),
         None,
     );
-    let mut operation_id = probe
+    let delete_operation = probe
         .store()?
         .list_canonical_operations_page(PROJECT_ID, None, 100)
         .await?
@@ -1449,23 +1949,58 @@ async fn run_iteration(
         .find(|operation| {
             operation.resource_id.as_deref() == Some(&server_id.to_string())
                 && operation.action.to_ascii_lowercase().contains("delete")
-        })
-        .map(|operation| operation.id.to_string());
-    if operation_id.is_none() {
-        let delete_response = tokio::time::timeout(Duration::from_secs(90), delete_rx)
-            .await
-            .map_err(|_| "delete response timeout")?
-            .map_err(|_| "delete response channel closed")??;
-        operation_id = delete_response["operation_id"]
-            .as_str()
-            .or_else(|| delete_response["operation"]["id"].as_str())
-            .map(str::to_owned);
+        });
+    let delete_operation =
+        delete_operation.ok_or("terminal delete has no durable canonical operation record")?;
+    if delete_operation.state != o3k_store::OperationState::Succeeded {
+        return Err(format!(
+            "terminal delete canonical operation is not Succeeded: {:?}",
+            delete_operation.state
+        )
+        .into());
     }
-    let operation_id = operation_id.ok_or("delete response missing durable operation id")?;
+    let operation_id = delete_operation.id.to_string();
     if backend.is_postgres() && old_endpoint_release_gate.exists() {
         return Err("old daemon endpoint-release gate opened before SIGKILL".into());
     }
-    evidence.set("terminal_state", json!({"server_id":server_id,"delete_operation_id":operation_id,"project_id":PROJECT_ID,"endpoint_id":endpoint_id,"operation_state":"Succeeded","resource_state":"DELETED","owned_endpoint_present":true,"endpoint":{"ownership":owned_endpoint["project_id"],"project":PROJECT_ID,"binding":{"device_id":owned_endpoint["device_id"],"device_owner":owned_endpoint["device_owner"],"status":owned_endpoint["status"]},"ip":fixed_ip}}));
+    if backend.is_postgres() {
+        if log_has(
+            &log,
+            "test-only fault pause before-endpoint-release release gate timed out",
+        ) {
+            return Err("old daemon endpoint-release pause timed out before SIGKILL".into());
+        }
+        let elapsed = endpoint_release_pause_started.elapsed();
+        evidence.set(
+            "endpoint_release_pause_window",
+            json!({"gate_still_closed": true, "elapsed_ms": elapsed.as_millis()}),
+        );
+    }
+    evidence.set(
+        "terminal_state",
+        json!({
+            "server_id": server_id,
+            "delete_operation_id": operation_id,
+            "project_id": PROJECT_ID,
+            "endpoint_id": endpoint_id,
+            "operation_state": "Succeeded",
+            "resource_state": "DELETED",
+            "owned_endpoint_present": true,
+            "endpoint": {
+                "ownership": owned_endpoint.project_id,
+                "project": PROJECT_ID,
+                "binding": {
+                    "host": owned_endpoint.binding_host,
+                    "state": owned_endpoint.binding_state,
+                    "generation": owned_endpoint.binding_generation,
+                },
+                "status": owned_endpoint.status,
+                "ip": owned_endpoint.fixed_ip,
+                "mac": owned_endpoint.mac_address,
+                "name": owned_endpoint.name,
+            }
+        }),
+    );
     evidence.checkpoint("terminal_state_observed")?;
     evidence.checkpoint("endpoint_present")?;
     // No fixture or direct observation pool may overlap the restart boundary.
@@ -1489,18 +2024,23 @@ async fn run_iteration(
     let kill_at = now();
     kill_process(child.child_mut()?)?;
     let _ = child.child_mut()?.wait();
-    let old_gone = proc_starttime(old_pid).is_err();
-    let kill = json!({"signal":"SIGKILL","timestamp":kill_at,"old_process_gone":old_gone,"old_http_listener_gone":!listener_owner(http, old_pid, old_start).is_ok(),"old_control_listener_gone":!listener_owner(control, old_pid, old_start).is_ok()});
+    delete_task.abort_all();
+    let _ = delete_task.join_next().await;
+    let old_gone = process_instance_gone(old_pid, old_start)?;
+    let old_http_listener_gone = !listener_present(http)?;
+    let old_control_listener_gone = !listener_present(control)?;
+    let kill = json!({"signal":"SIGKILL","timestamp":kill_at,"old_process_gone":old_gone,"old_http_listener_gone":old_http_listener_gone,"old_control_listener_gone":old_control_listener_gone});
     evidence.set("kill", kill);
     evidence.checkpoint("sigkill_sent")?;
     evidence.checkpoint("old_process_gone")?;
-    if !old_gone {
-        return Err("old process still represents old starttime".into());
+    if !old_gone || !old_http_listener_gone || !old_control_listener_gone {
+        return Err("old daemon process or listener remained after SIGKILL".into());
     }
+    probe.mark_daemon_stopped()?;
     fs::remove_file(&old_endpoint_release_gate).ok();
     child.disarm();
 
-    let new_controller = (format!("new-{run_id}"), format!("new-epoch-{run_id}"));
+    let new_controller = controller_identity("new", run_id);
     fs::remove_file(&release).ok();
     store_operation(
         evidence,
@@ -1511,6 +2051,7 @@ async fn run_iteration(
         Some(old_pid),
         None,
     );
+    evidence.checkpoint("replacement_daemon_startup")?;
     let replacement_child = start_o3kd(
         root,
         backend,
@@ -1546,8 +2087,12 @@ async fn run_iteration(
         new_http,
         new_control,
         Duration::from_secs(20),
+        &log,
+        "replacement_daemon_startup",
+        "wait_replacement_readiness",
     )
     .await?;
+    probe.mark_daemon_started()?;
     let new_listeners = json!({"http": listener_owner(new_http, new_pid, new_start)?, "control": listener_owner(new_control, new_pid, new_start)?});
     let effective_new = proc_env(new_pid)?;
     let intended_new = BTreeMap::from([
@@ -1647,6 +2192,7 @@ async fn run_iteration(
         Duration::from_secs(30),
     )
     .await?;
+    probe.mark_reconstruction_observed()?;
     // `/readyz` means the composition is serving requests, while this
     // run-owned checkpoint proves replacement reconstruction has reached the
     // pre-mutation repair boundary.  Open a direct store pool only after that
@@ -1971,13 +2517,11 @@ async fn run_iteration(
     let owned_endpoints = ports(&client, new_http, &admin_token)
         .await?
         .into_iter()
-        .filter(|port| {
-            port["name"]
-                .as_str()
-                .is_some_and(|name| name.starts_with("o3k-server:"))
-        })
+        .filter(is_run_owned_server_endpoint)
         .count();
+    probe.close();
     stop_process(replacement.child_mut()?)?;
+    probe.mark_daemon_stopped()?;
     replacement.disarm();
     fs::remove_file(&release).ok();
     fs::remove_file(&waiter).ok();
@@ -2123,34 +2667,67 @@ async fn pp5_1035_postgres_restart_takes_over_lease_and_reconstructs_endpoint() 
     let Some(fixture) = PgFixture::new().await? else {
         return Ok(());
     };
-    let run_id = format!("postgres-{}", Uuid::now_v7());
-    let root = std::env::temp_dir().join(format!("o3k-pp5-evidence-{run_id}"));
-    fs::create_dir_all(&root)?;
-    let artifact = root.join("pp5-1035-postgres-restart-evidence.json");
-    let source_sha = git_sha().unwrap_or_else(|_| "0".repeat(40));
-    let harness_digest = file_sha256(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/pp5_1035_evidence_process.rs")
-            .as_path(),
-    )?;
-    let mut evidence = Evidence::new(artifact, &run_id, &source_sha, &harness_digest)?;
-    let backend = Backend::Postgres(fixture.url.clone());
-    let result = run_iteration(&mut evidence, &root, &run_id, &backend).await;
-    let completion = match result {
-        Ok(()) => evidence.complete(),
-        Err(error) => {
-            let phase = evidence
-                .data
-                .get("current_phase")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned();
-            let _ = evidence.fail(&phase, &error.to_string());
-            Err(error)
+    let mut evidence_slot = None;
+    let result = async {
+        // Preserve a unique per-run identity while keeping the longer fixture
+        // controller epoch below the store's VARCHAR(64) bound.
+        let run_id = format!("postgres-{}", Uuid::now_v7().simple());
+        let root = std::env::temp_dir().join(format!("o3k-pp5-evidence-{run_id}"));
+        fs::create_dir_all(&root)?;
+        let artifact = root.join("pp5-1035-postgres-restart-evidence.json");
+        let source_sha = git_sha()?;
+        let harness_digest = file_sha256(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/pp5_1035_evidence_process.rs")
+                .as_path(),
+        )?;
+        evidence_slot = Some(Evidence::new(
+            artifact,
+            &run_id,
+            &source_sha,
+            &harness_digest,
+        )?);
+        let evidence = evidence_slot
+            .as_mut()
+            .ok_or("PostgreSQL evidence artifact was not initialized")?;
+        let backend = Backend::Postgres(fixture.url.clone());
+        let result = run_iteration(evidence, &root, &run_id, &backend).await;
+        match result {
+            Ok(()) => evidence.complete(),
+            Err(error) => {
+                let phase = evidence
+                    .data
+                    .get("current_phase")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let _ = evidence.fail(&phase, &error.to_string());
+                Err(error)
+            }
         }
-    };
-    fixture.dispose().await;
-    completion
+    }
+    .await;
+    let cleanup = fixture.dispose().await;
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup_error) => {
+            let diagnostic = match &result {
+                Ok(()) => format!("PostgreSQL fixture cleanup failed: {cleanup_error}"),
+                Err(error) => {
+                    format!("{error}; PostgreSQL fixture cleanup failed: {cleanup_error}")
+                }
+            };
+            if let Some(evidence) = evidence_slot.as_mut() {
+                if result.is_ok() {
+                    let _ = evidence.fail("postgres_fixture_cleanup", &diagnostic);
+                } else {
+                    evidence.set("cleanup_failure", json!(cleanup_error.to_string()));
+                    let _ = evidence.write();
+                }
+            }
+            Err(diagnostic.into())
+        }
+    }
 }
 
 fn git_sha() -> Result<String, Error> {
