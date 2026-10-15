@@ -149,7 +149,33 @@ Reviewers must decide or approve the proposal for:
     credential replacement, and out-of-band fencing of any surviving source
     controller;
 12. archive member/count/size/path-depth limits and authenticated payload
-    encoding details.
+    encoding details;
+13. failure recovery after controller startup, including stopping/fencing
+    dispatch and resolving in-flight canonical Operations without treating an
+    already activated target as a pre-activation quarantine.
+
+## Decision worksheet for implementation readiness
+
+The following are bounded recommendations for review. They are not accepted
+decisions and do not authorize production implementation. An approving
+architecture/security review should record the selected option and any
+conditions in this ADR before #1084 implementation begins.
+
+| Decision | Recommended bounded choice | Approval still required |
+| --- | --- | --- |
+| PostgreSQL snapshot format and restore privilege policy | PostgreSQL 16 `pg_dump` custom format (`-Fc`) as one opaque regular-file member; restore with the matching supported `pg_restore` into a newly provisioned empty O3K database. The approved invocation must use `--exit-on-error`, `--no-owner`, and `--no-acl`, or a reviewed equivalent that demonstrably enforces the ownership/ACL policy; if the tool cannot enforce it, fail before mutation. Restore only with an installation-provisioned, least-privilege database role and an approved extension/object allowlist. A restore error or unknown outcome after target mutation and before `STARTED` enters `FAILED_RECOVERABLE`; the target stays inactive and quarantined. It is discarded/recreated or recovered only by an approved idempotent path. Activate only after complete restore, integrity, privilege, and migration validation. Do not use `PGDATA` copies or cluster-wide `pg_dumpall`. | Confirm tool/version policy, extension/object allowlist, database ownership, exact role privileges, and least-privilege target-role provisioning. Artifact data must not mutate roles, passwords, tablespaces, ownership, or ACLs beyond approved object policy. |
+| SQLite snapshot primitive | Reuse `SqliteStore::backup_to_file` and its `VACUUM INTO` behavior after the accepted SQLite WAL/checkpoint and consistency boundary has been proven. | Confirm the operation can be coordinated with config, bootstrap/trust material, API writes, workers, provider dispatch, and lease activity; the existing store primitive alone is not that barrier. |
+| Public operator surface | Keep the first implementation slice internal, with no CLI or API addition. Revisit an `o3k` operator command only under a reviewed interface contract. | No public command, flags, confirmation behavior, or output format is accepted by this proposal. |
+| Signing and encryption | Keep the backup authentication/encryption profile undecided. Use a backup-specific trust/key lifecycle, separate from release signing keys, and require externally protected operator key recovery. | Select algorithms, envelope fields, canonical authenticated encoding, nonce/key-wrapping rules, trust distribution and rotation, issuer-key recovery, and secret inclusion policy. The release Ed25519 key is not a backup key. |
+| Restore activation | Require a fresh runtime controller identity/epoch and an approved source-controller stop or out-of-band fencing step before enabling writes or provider dispatch. Never restore lease ownership as active. | Define stable site identity versus runtime identity, the fencing proof, lease reacquisition, PKI readiness, and the first reconciliation gate. |
+| Restore journal and target reservation | Keep journal data outside the target database and bind it to the target identity and artifact digest; fail closed on ambiguous or conflicting state. | Select protected location, owner/authentication, exclusive reservation, crash cleanup, and recovery behavior for unknown filesystem/database outcomes. |
+| Outer artifact and limits | Use a single regular-file artifact with a closed member allowlist as the starting candidate; authenticate member metadata before extraction or target mutation. | Select encoding/compression and numeric limits for member count, path depth, member and aggregate sizes, compression ratio, and staging capacity. Reject unsupported entries before extraction. |
+
+These recommendations narrow review but do not establish a common consistency
+cut or settle cryptographic/security semantics. The first implementation PR
+remains blocked until the applicable rows above and approval items 1–13 are
+resolved. Existing implementation can be audited and tests can be planned,
+but code must not infer approval from this worksheet.
 
 Production implementation must not begin until the security-sensitive items
 and any public CLI contract have accepted human review. If approved, the first

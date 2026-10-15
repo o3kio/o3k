@@ -145,6 +145,26 @@ implicitly. The production lane uses a real isolated PostgreSQL instance and
 fails if the configured database/tooling is unavailable. A skipped test is
 not a pass.
 
+For human review, the bounded default recommendation is PostgreSQL 16 custom
+format (`pg_dump -Fc`) as one opaque regular-file member, restored with the
+matching supported `pg_restore` into a fresh empty database and configured to
+stop on the first error. Stop-on-error does not make restore atomic. Any
+restore error or unknown outcome after target mutation enters
+`FAILED_RECOVERABLE`; the target remains inactive and quarantined. It is
+discarded and recreated or recovered only by an approved idempotent path.
+Activation requires complete restore plus integrity, privilege, and migration
+validation. The approved restore invocation must use `--no-owner` and
+`--no-acl`, or a reviewed equivalent that demonstrably suppresses
+artifact-controlled ownership and ACL application. If the supported tool path
+cannot enforce that policy, restore fails before target mutation. Restore also
+uses an installation-provisioned least-privilege database role and an
+approved extension/object allowlist. The artifact must not mutate roles,
+passwords, tablespaces, ownership, or ACLs beyond that approved policy. The
+artifact does not provision cluster-global roles, passwords, tablespaces, or
+grants. This is a recommendation only: the exact tool/version, extension,
+object, role, and ownership policy remains subject to ADR-0189 approval and is
+not an implementation contract yet.
+
 The O3K artifact reader treats a PostgreSQL dump as opaque, integrity-checked
 member bytes; it does not recursively extract PostgreSQL-native archive
 members. A trusted, version-checked PostgreSQL tool consumes the member in its
@@ -258,7 +278,11 @@ target-specific journal. Proposed states are:
 ```text
 PREFLIGHTED -> STAGING -> DATABASE_RESTORED -> FILES_RESTORED
 -> FENCED -> STARTED -> RECONCILED -> COMMITTED
-                         \-> FAILED_RECOVERABLE
+  any phase after first target mutation and before STARTED
+    -> FAILED_RECOVERABLE (inactive quarantine)
+  failure after STARTED and before COMMITTED
+    -> existing controller/Operation recovery; exact stop/fence transition
+       requires ADR-0189 approval
 ```
 
 The journal binds operation ID, backup ID/digest, source and target identities,
@@ -269,6 +293,18 @@ assumes a timed-out command failed. A mismatch or ambiguous foreign-state
 observation stops activation and reports a bounded recovery action. The
 precise placement/location of the restore journal and the fencing phase is
 subject to approval.
+
+`FAILED_RECOVERABLE` is only the pre-activation quarantine state for partial
+or unknown restore outcomes after target mutation and before `STARTED`. Durable
+journal state marks the target inactive and blocks API writes, provider
+dispatch, and reuse by a new restore. Recovery requires verified
+discard/recreation or a separately approved idempotent recovery path; phase
+labels alone do not prove target integrity. A failure after `STARTED` must not
+be relabeled as pre-activation quarantine: the controller must stop or fence
+new dispatch, preserve canonical Operation state, and resolve unknown outcomes
+through the accepted observe-before-retry behavior. The exact stop/fence and
+restart transition is a human approval item in ADR-0189; the restore design
+does not define an alternate Operation or lifecycle authority.
 
 ## 8. Operator interface
 
@@ -289,6 +325,19 @@ profiles that are claimed:
 - fresh disposable host restoration and restart/reconciliation;
 - crash/restart at every declared backup and restore phase, including retry
   after a lost response for each filesystem/database/fencing side effect;
+- PostgreSQL restore failure after partial target writes and a lost restore
+  result leave the database inactive/quarantined; unsafe reuse and activation
+  are rejected, while discard/recreate or an approved idempotent recovery path
+  is verified;
+- failures after `STARTED` stop/fence new provider dispatch through the
+  approved controller recovery path, preserve canonical in-flight Operation
+  identities, and require observe-before-retry before provider mutation;
+- PostgreSQL restore runs without artifact-controlled ownership/ACL changes,
+  role/password/tablespace mutation, or unapproved extensions/object classes;
+  the exact supported `pg_restore` invocation (or reviewed equivalent) is
+  verified, and a tool path that cannot enforce the policy fails before target
+  mutation; negative fixtures are rejected or the restricted restore role is
+  proven unable to apply them;
 - corruption, truncation, tamper/authentication, missing member, version,
   profile, backend, schema and migration mismatch rejection;
 - archive duplicate-name, traversal, link/device entry, sparse-file, limit and
