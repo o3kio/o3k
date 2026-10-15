@@ -2069,7 +2069,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_delete_returns_operation() {
-        let (router, _, provider, _) = setup().await;
+        let (router, store, provider, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {
@@ -2093,6 +2093,7 @@ mod native_compute_tests {
         provider
             .set_failure(FailureInjection::Timeout)
             .expect("set failure");
+        let delete_dispatches_before_timeout = provider.delete_dispatch_count();
 
         // DELETE → 202 Accepted
         let (status, delete_json) = exec(
@@ -2103,6 +2104,22 @@ mod native_compute_tests {
         assert_eq!(status, StatusCode::ACCEPTED);
         let operation_id = delete_json["operation_id"].as_str().unwrap().to_owned();
         assert!(!delete_json["complete"].as_bool().unwrap());
+        let provider_instances_after_timeout = provider.instance_count();
+        let delete_dispatches_after_timeout = provider.delete_dispatch_count();
+        assert_eq!(provider_instances_after_timeout, 0);
+        assert_eq!(
+            delete_dispatches_after_timeout,
+            delete_dispatches_before_timeout + 1,
+            "the initial timeout must dispatch exactly one provider delete"
+        );
+        let durable_operation = store
+            .get_operation(Uuid::parse_str(&operation_id).expect("operation UUID"))
+            .await
+            .expect("durable timeout operation");
+        assert_eq!(
+            durable_operation.state,
+            o3k_store::OperationState::UnknownOutcome
+        );
 
         // GET /operations/{id} shows the delete
         let (status, op) = exec(router, authed(&format!("/operations/{operation_id}"), "a")).await;
@@ -2121,6 +2138,26 @@ mod native_compute_tests {
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(replay["operation_id"], operation_id);
+        assert_eq!(provider.instance_count(), provider_instances_after_timeout);
+        assert_eq!(
+            provider.delete_dispatch_count(),
+            delete_dispatches_after_timeout,
+            "idempotent HTTP replay must not redispatch provider delete"
+        );
+
+        // A timeout is an unknown provider outcome: replaying the operator
+        // request must return the durable operation without creating another
+        // canonical resource or exposing a password field.
+        let canonical = store
+            .list_resources("project-a", "compute_instance")
+            .await
+            .expect("canonical resources after timeout replay");
+        assert_eq!(canonical.len(), 1);
+        assert_eq!(canonical[0].id.to_string(), resource_id);
+        let operation = exec(router, authed(&format!("/operations/{operation_id}"), "a")).await;
+        assert_eq!(operation.0, StatusCode::OK);
+        assert_eq!(operation.1["id"], operation_id);
+        assert!(operation.1.get("password").is_none());
     }
 
     #[tokio::test]
