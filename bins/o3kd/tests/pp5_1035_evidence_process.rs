@@ -116,25 +116,23 @@ impl PgFixture {
         }))
     }
 
-    async fn dispose(self) {
-        let Ok(pool) = PgPoolOptions::new()
+    async fn dispose(self) -> Result<(), Error> {
+        let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&self.admin_url)
-            .await
-        else {
-            return;
-        };
+            .await?;
         let _ = sqlx::query(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
              WHERE datname = $1 AND pid <> pg_backend_pid()",
         )
         .bind(&self.database)
         .execute(&pool)
-        .await;
-        let _ = sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
+        .await?;
+        sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
             .execute(&pool)
-            .await;
+            .await?;
         pool.close().await;
+        Ok(())
     }
 }
 
@@ -502,14 +500,22 @@ async fn wait_ready(
                 listener_owner(http, child.id(), start),
                 listener_owner(control, child.id(), start),
             )
-            && let Ok(response) = client.get(format!("http://{http}/readyz")).send().await
-            && response.status() == reqwest::StatusCode::OK
         {
-            let status = response.status().as_u16();
-            let body = response.text().await?;
-            return Ok(
-                json!({"status": status, "body_sha256": sha256(body.as_bytes()), "timestamp": now(), "served_by_new": true}),
-            );
+            let request_deadline = tokio::time::Instant::from_std(deadline);
+            if let Ok(Ok(response)) = tokio::time::timeout_at(
+                request_deadline,
+                client.get(format!("http://{http}/readyz")).send(),
+            )
+            .await
+                && response.status() == reqwest::StatusCode::OK
+                && let Ok(Ok(body)) =
+                    tokio::time::timeout_at(request_deadline, response.text()).await
+            {
+                let status = reqwest::StatusCode::OK.as_u16();
+                return Ok(
+                    json!({"status": status, "body_sha256": sha256(body.as_bytes()), "timestamp": now(), "served_by_new": true}),
+                );
+            }
         }
         if let Some(status) = child.try_wait()? {
             let diagnostic = json!({
@@ -532,7 +538,25 @@ async fn wait_ready(
             .into());
         }
         if Instant::now() >= deadline {
-            return Err("replacement did not become ready with both listeners owned".into());
+            let diagnostic = json!({
+                "phase": phase,
+                "status": "failed",
+                "failed_operation": operation,
+                "failure_cause": "readiness_timeout",
+                "observer_type": "test_process_and_bounded_log",
+                "resource_class": "daemon_startup",
+                "command_class": "o3kd_process",
+                "process_id": child.id(),
+                "exit_code": null,
+                "http_listener_present": listener_present(http).ok(),
+                "control_listener_present": listener_present(control).ok(),
+                "startup_log": startup_log_tail(log),
+            });
+            return Err(format!(
+                "o3kd did not become ready before timeout; diagnostic={}",
+                serde_json::to_string(&diagnostic)?
+            )
+            .into());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -617,6 +641,46 @@ fn startup_log_diagnostic_redacts_credentials() {
     assert!(!redacted.contains(BOOTSTRAP_PASSWORD));
     assert!(!redacted.contains("db-password"));
     assert!(!redacted.contains("private-key"));
+}
+
+#[tokio::test]
+async fn readiness_timeout_records_redacted_startup_diagnostics() -> Result<(), Error> {
+    let root = std::env::temp_dir().join(format!("o3k-pp5-startup-diagnostic-{}", Uuid::now_v7()));
+    fs::create_dir_all(&root)?;
+    let log = root.join("o3kd.log");
+    fs::write(
+        &log,
+        format!(
+            "database startup failed password={BOOTSTRAP_PASSWORD} url=postgresql://db-user:db-password@db.invalid/o3k?sslkey=private-key\n"
+        ),
+    )?;
+    let mut child = Command::new("sleep").arg("5").spawn()?;
+    let outcome = wait_ready(
+        &mut child,
+        free_address()?,
+        free_address()?,
+        Duration::from_millis(100),
+        &log,
+        "replacement_daemon_startup",
+        "wait_replacement_readiness",
+    )
+    .await;
+    stop_process(&mut child)?;
+    let diagnostic = match outcome {
+        Err(error) => error.to_string(),
+        Ok(_) => {
+            return Err("process without readiness listeners unexpectedly became ready".into());
+        }
+    };
+    assert!(diagnostic.contains("replacement_daemon_startup"));
+    assert!(diagnostic.contains("wait_replacement_readiness"));
+    assert!(diagnostic.contains("readiness_timeout"));
+    assert!(diagnostic.contains("database startup failed"));
+    assert!(!diagnostic.contains(BOOTSTRAP_PASSWORD));
+    assert!(!diagnostic.contains("db-password"));
+    assert!(!diagnostic.contains("private-key"));
+    fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]
@@ -1356,6 +1420,7 @@ async fn run_iteration(
     // keeps the proof on the production authentication path without a test
     // authorization bypass.
     {
+        evidence.checkpoint("bootstrap_daemon_startup")?;
         let bootstrap_child = start_o3kd(
             root,
             backend,
@@ -1457,6 +1522,7 @@ async fn run_iteration(
             })
             .await?;
     }
+    evidence.checkpoint("fixture_setup_daemon_startup")?;
     let setup_child = start_o3kd(
         root,
         backend,
@@ -1661,6 +1727,7 @@ async fn run_iteration(
         .update_port_binding_fixture(PROJECT_ID, &endpoint_uuid, "pp5-compute-agent", "bound")
         .await?;
 
+    evidence.checkpoint("old_daemon_startup")?;
     let old_child = start_o3kd(
         root,
         backend,
@@ -1728,7 +1795,10 @@ async fn run_iteration(
     let delete_key = format!("pp5-delete-{fixture}");
     let client_delete = client.clone();
     let token_delete = admin_token.clone();
-    let delete_task = tokio::spawn(async move {
+    // JoinSet aborts any still-running request if an earlier assertion exits
+    // this function, so the test cannot leave a detached delete task behind.
+    let mut delete_task = tokio::task::JoinSet::new();
+    delete_task.spawn(async move {
         let _ = delete_native(&client_delete, http, &token_delete, server_id, &delete_key).await;
     });
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -1928,8 +1998,8 @@ async fn run_iteration(
     let kill_at = now();
     kill_process(child.child_mut()?)?;
     let _ = child.child_mut()?.wait();
-    delete_task.abort();
-    let _ = delete_task.await;
+    delete_task.abort_all();
+    let _ = delete_task.join_next().await;
     let old_gone = process_instance_gone(old_pid, old_start)?;
     let old_http_listener_gone = !listener_present(http)?;
     let old_control_listener_gone = !listener_present(control)?;
@@ -1955,6 +2025,7 @@ async fn run_iteration(
         Some(old_pid),
         None,
     );
+    evidence.checkpoint("replacement_daemon_startup")?;
     let replacement_child = start_o3kd(
         root,
         backend,
@@ -2574,36 +2645,67 @@ async fn pp5_1035_postgres_restart_takes_over_lease_and_reconstructs_endpoint() 
     let Some(fixture) = PgFixture::new().await? else {
         return Ok(());
     };
-    // Preserve a unique per-run identity while keeping the longer fixture
-    // controller epoch below the store's VARCHAR(64) bound.
-    let run_id = format!("postgres-{}", Uuid::now_v7().simple());
-    let root = std::env::temp_dir().join(format!("o3k-pp5-evidence-{run_id}"));
-    fs::create_dir_all(&root)?;
-    let artifact = root.join("pp5-1035-postgres-restart-evidence.json");
-    let source_sha = git_sha().unwrap_or_else(|_| "0".repeat(40));
-    let harness_digest = file_sha256(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/pp5_1035_evidence_process.rs")
-            .as_path(),
-    )?;
-    let mut evidence = Evidence::new(artifact, &run_id, &source_sha, &harness_digest)?;
-    let backend = Backend::Postgres(fixture.url.clone());
-    let result = run_iteration(&mut evidence, &root, &run_id, &backend).await;
-    let completion = match result {
-        Ok(()) => evidence.complete(),
-        Err(error) => {
-            let phase = evidence
-                .data
-                .get("current_phase")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned();
-            let _ = evidence.fail(&phase, &error.to_string());
-            Err(error)
+    let mut evidence_slot = None;
+    let result = async {
+        // Preserve a unique per-run identity while keeping the longer fixture
+        // controller epoch below the store's VARCHAR(64) bound.
+        let run_id = format!("postgres-{}", Uuid::now_v7().simple());
+        let root = std::env::temp_dir().join(format!("o3k-pp5-evidence-{run_id}"));
+        fs::create_dir_all(&root)?;
+        let artifact = root.join("pp5-1035-postgres-restart-evidence.json");
+        let source_sha = git_sha()?;
+        let harness_digest = file_sha256(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/pp5_1035_evidence_process.rs")
+                .as_path(),
+        )?;
+        evidence_slot = Some(Evidence::new(
+            artifact,
+            &run_id,
+            &source_sha,
+            &harness_digest,
+        )?);
+        let evidence = evidence_slot
+            .as_mut()
+            .ok_or("PostgreSQL evidence artifact was not initialized")?;
+        let backend = Backend::Postgres(fixture.url.clone());
+        let result = run_iteration(evidence, &root, &run_id, &backend).await;
+        match result {
+            Ok(()) => evidence.complete(),
+            Err(error) => {
+                let phase = evidence
+                    .data
+                    .get("current_phase")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let _ = evidence.fail(&phase, &error.to_string());
+                Err(error)
+            }
         }
-    };
-    fixture.dispose().await;
-    completion
+    }
+    .await;
+    let cleanup = fixture.dispose().await;
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup_error) => {
+            let diagnostic = match &result {
+                Ok(()) => format!("PostgreSQL fixture cleanup failed: {cleanup_error}"),
+                Err(error) => {
+                    format!("{error}; PostgreSQL fixture cleanup failed: {cleanup_error}")
+                }
+            };
+            if let Some(evidence) = evidence_slot.as_mut() {
+                if result.is_ok() {
+                    let _ = evidence.fail("postgres_fixture_cleanup", &diagnostic);
+                } else {
+                    evidence.set("cleanup_failure", json!(cleanup_error.to_string()));
+                    let _ = evidence.write();
+                }
+            }
+            Err(diagnostic.into())
+        }
+    }
 }
 
 fn git_sha() -> Result<String, Error> {

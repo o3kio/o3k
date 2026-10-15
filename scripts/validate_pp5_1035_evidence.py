@@ -74,6 +74,8 @@ def validate_artifact(artifact: dict[str, Any], expected_sha: str | None = None)
     source_sha = _nonempty(artifact, "source_sha")
     if not isinstance(source_sha, str) or not SHA_RE.fullmatch(source_sha):
         raise ValidationError("invalid source_sha")
+    if source_sha == "0" * 40:
+        raise ValidationError("source_sha is unset")
     if expected_sha is not None and source_sha != expected_sha:
         raise ValidationError("source_sha does not match expected SHA")
     harness = _nonempty(artifact, "harness_digest")
@@ -121,12 +123,20 @@ def validate_artifact(artifact: dict[str, Any], expected_sha: str | None = None)
     endpoint = _get(artifact, "terminal_state", "endpoint")
     for field in ("ownership", "project", "binding", "ip", "mac", "name", "status"):
         _nonempty(artifact, "terminal_state", "endpoint", field)
-    if (
-        endpoint["ownership"] != endpoint["project"]
-        or endpoint["project"] != artifact["terminal_state"]["project_id"]
+    project_id = artifact["terminal_state"]["project_id"]
+    if not all(
+        isinstance(value, str) and value
+        for value in (project_id, endpoint["ownership"], endpoint["project"])
     ):
+        raise ValidationError("terminal endpoint project identity is invalid")
+    if endpoint["ownership"] != endpoint["project"] or endpoint["project"] != project_id:
         raise ValidationError("terminal endpoint ownership does not match its project")
-    if not isinstance(endpoint["name"], str) or not endpoint["name"].startswith("o3k-server:"):
+    server_name_prefix = f"o3k-server:{endpoint['project']}:"
+    if (
+        not isinstance(endpoint["name"], str)
+        or not endpoint["name"].startswith(server_name_prefix)
+        or not endpoint["name"][len(server_name_prefix) :]
+    ):
         raise ValidationError("terminal endpoint is not server-owned")
     binding = endpoint["binding"]
     if not isinstance(binding, dict):
@@ -134,7 +144,9 @@ def validate_artifact(artifact: dict[str, Any], expected_sha: str | None = None)
     for field in ("host", "state", "generation"):
         if field not in binding:
             raise ValidationError(f"missing terminal endpoint binding.{field}")
-    if binding["host"] is not None and not isinstance(binding["host"], str):
+    if binding["host"] is not None and (
+        not isinstance(binding["host"], str) or not binding["host"]
+    ):
         raise ValidationError("terminal endpoint binding host is invalid")
     if binding["state"] is not None and (
         not isinstance(binding["state"], str)

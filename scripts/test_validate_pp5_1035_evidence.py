@@ -72,6 +72,10 @@ class ValidatorMutationTests(unittest.TestCase):
         artifact = valid_artifact()
         with self.assertRaises(ValidationError):
             validate_artifact(artifact, "f" * 40)
+        artifact = valid_artifact()
+        artifact["source_sha"] = "0" * 40
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
         artifact = valid_artifact(); artifact["status"] = "failed"
         with self.assertRaises(ValidationError):
             validate_artifact(artifact)
@@ -104,6 +108,18 @@ class ValidatorMutationTests(unittest.TestCase):
     def test_terminal_endpoint_binding_must_be_durable_and_server_owned(self) -> None:
         artifact = valid_artifact()
         artifact["terminal_state"]["endpoint"]["binding"]["state"] = "unbound"
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+        artifact = valid_artifact()
+        artifact["terminal_state"]["endpoint"]["binding"]["host"] = []
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+        artifact = valid_artifact()
+        artifact["terminal_state"]["endpoint"]["name"] = "o3k-server:another-project:server"
+        with self.assertRaises(ValidationError):
+            validate_artifact(artifact)
+        artifact = valid_artifact()
+        artifact["terminal_state"]["endpoint"]["name"] = f"o3k-server:{artifact['terminal_state']['project_id']}:"
         with self.assertRaises(ValidationError):
             validate_artifact(artifact)
         artifact = valid_artifact()
