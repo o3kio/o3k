@@ -127,6 +127,13 @@ def validate(
     if not isinstance(pp5_phase, str) or not pp5_phase.strip():
         fail(errors, "pp5_phase must be recorded in the artifact (legacy artifacts must be re-validated explicitly)")
     crash_phase_selected = pp5_phase in ("integrated", "1035-crash-recovery")
+    expected_scale_count = {
+        "s3-scale": 3,
+        "s5-scale": 5,
+        "s10-scale": 10,
+        "s20-scale": 20,
+    }.get(pp5_phase, 5)
+    replacement_agent = f"block-{chr(ord('a') + expected_scale_count - 1)}"
 
     execution = mapping(root.get("execution"), "execution", errors)
     if execution is not None:
@@ -148,9 +155,10 @@ def validate(
         # Placement ResourceProvider) + provider Enabled + Ready
         # BuildingBlocks with no recorded drain blockers — enumerated over
         # EVERY BuildingBlock, including the bootstrap block. Exactly five
-        # eligible Ready blocks are required initially and finally; six
-        # distinct compute identities (bootstrap + block-a..block-e) are
-        # enrolled across the run; block-e is the replacement. Any evidence
+        # eligible Ready blocks are required initially and finally; one more
+        # distinct compute identity than the tier size is enrolled across the
+        # run (bootstrap plus initial children and a replacement); the last
+        # child identity is the replacement. Any evidence
         # that excludes the bootstrap block from the eligible set by label
         # filtering is rejected: the eligibility derivation must be recorded
         # per block in the checkpoints.
@@ -162,8 +170,8 @@ def validate(
             fail(errors, "scale_composition.duplicate_identities must be false")
         if not isinstance(scale.get("drained_agent"), str) or not scale["drained_agent"].strip():
             fail(errors, "scale_composition.drained_agent must be explicit")
-        if scale.get("replacement_agent") != "block-e":
-            fail(errors, "scale_composition.replacement_agent must be block-e")
+        if scale.get("replacement_agent") != replacement_agent:
+            fail(errors, f"scale_composition.replacement_agent must be {replacement_agent}")
         bootstrap = mapping(scale.get("bootstrap"), "scale_composition.bootstrap", errors)
         bootstrap_agent = ""
         bootstrap_block = ""
@@ -180,8 +188,8 @@ def validate(
             if enrolled.get("distinct") is not True:
                 fail(errors, "scale_composition.enrolled_identities.distinct must be true")
             count = enrolled.get("count")
-            if not isinstance(count, int) or count < 6:
-                fail(errors, "scale_composition.enrolled_identities.count must be at least 6 (bootstrap + block-a..block-e)")
+            if not isinstance(count, int) or count != expected_scale_count + 1:
+                fail(errors, "scale_composition.enrolled_identities.count must equal tier hosts plus one replacement identity")
             for field in ("agents", "block_ids"):
                 values = enrolled.get(field)
                 if not isinstance(values, list) or not values:
@@ -201,8 +209,8 @@ def validate(
         bootstrap_removed = isinstance(drained_agent, str) and drained_agent == bootstrap_agent
         for name, minimum in (
             ("initial_concurrent_ready", None),
-            ("peak_concurrent_ready", 5),
-            ("final_concurrent_ready", 5),
+            ("peak_concurrent_ready", expected_scale_count),
+            ("final_concurrent_ready", expected_scale_count),
         ):
             section = mapping(scale.get(name), f"scale_composition.{name}", errors)
             if section is None:
@@ -210,8 +218,8 @@ def validate(
             count = section.get("count")
             if not isinstance(count, int):
                 fail(errors, f"scale_composition.{name}.count must be an integer")
-            elif minimum is None and count != 5:
-                fail(errors, f"scale_composition.{name}.count must be exactly 5")
+            elif minimum is None and count != expected_scale_count:
+                fail(errors, f"scale_composition.{name}.count must be exactly {expected_scale_count}")
             elif minimum is not None and count < minimum:
                 fail(errors, f"scale_composition.{name}.count must be at least {minimum}")
             # Identity lists are mandatory for the observed initial/final
@@ -290,10 +298,10 @@ def validate(
                 observed = checkpoint.get("eligible_ready_count")
                 if not isinstance(observed, int) or observed != eligible:
                     fail(errors, f"{cname}.eligible_ready_count must equal the number of placement-eligible blocks")
-                if phase == "initial-scale-checkpoint" and observed != 5:
-                    fail(errors, f"{cname}.eligible_ready_count must be exactly 5")
-                if phase == "post-replacement" and observed != 5:
-                    fail(errors, f"{cname}.eligible_ready_count must be exactly 5")
+                if phase == "initial-scale-checkpoint" and observed != expected_scale_count:
+                    fail(errors, f"{cname}.eligible_ready_count must be exactly {expected_scale_count}")
+                if phase == "post-replacement" and observed != expected_scale_count:
+                    fail(errors, f"{cname}.eligible_ready_count must be exactly {expected_scale_count}")
             missing_phases = sorted(set(REQUIRED_CHECKPOINT_PHASES) - seen_phases)
             if missing_phases:
                 fail(errors, "scale_composition.checkpoints missing required phase(s): " + ", ".join(missing_phases))
@@ -604,8 +612,8 @@ def validate(
             if ready is not None and ready.get("succeeded") is not True:
                 fail(errors, "journey.host_maintenance.returned_to_ready.succeeded must be true (Draining->Ready is a canonical operator transition)")
             final_count = maintenance.get("final_eligible_ready_count")
-            if not isinstance(final_count, int) or final_count != 5:
-                fail(errors, "journey.host_maintenance.final_eligible_ready_count must be exactly 5 after the ready transition")
+            if not isinstance(final_count, int) or final_count != expected_scale_count:
+                fail(errors, f"journey.host_maintenance.final_eligible_ready_count must be exactly {expected_scale_count} after the ready transition")
         transient = journey.get("transient_failures")
         if not isinstance(transient, list):
             fail(errors, "journey.transient_failures must be a list (empty when nothing was observed)")

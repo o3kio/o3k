@@ -165,12 +165,13 @@ cmp -- "$ROOT_DIR/packaging/get-o3k.sh" "$INSTALL_SH" \
   || { echo "install.sh release asset drifted from packaging/get-o3k.sh after copy" >&2; exit 1; }
 INSTALLER_SHA256="$(sha256sum "$INSTALL_SH" | awk '{print $1}')"
 COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+SOURCE_TREE="$(git -C "$ROOT_DIR" rev-parse HEAD^{tree})"
 WORKFLOW="${GITHUB_WORKFLOW:-local}"
 # The manifest is written BEFORE SHA256SUMS so the final bundle verification
 # covers the installer record too. schema_version is the max migration prefix
 # computed above; upgrade_from.min_version is the operator-declared fence.
-printf '{"version":"%s","profile":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","schema_version":"%s","upgrade_from":{"min_version":"%s"}}\n' \
-  "$VERSION" "$PROFILE" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" \
+printf '{"version":"%s","profile":"%s","source_commit":"%s","source_tree":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","schema_version":"%s","upgrade_from":{"min_version":"%s"}}\n' \
+  "$VERSION" "$PROFILE" "$COMMIT" "$SOURCE_TREE" "$WORKFLOW" "$INSTALLER_SHA256" \
   "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" >"$OUT_DIR/manifest.json"
 (cd "$OUT_DIR" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 bash "$ROOT_DIR/packaging/verify-release-bundle.sh" "$OUT_DIR"

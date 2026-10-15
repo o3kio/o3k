@@ -90,6 +90,8 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          export RELEASE_SOURCE_COMMIT="$(git rev-parse HEAD)"
+          export RELEASE_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')"
           packaging/verify-release-sigstore.sh "$RELEASE_TAG" dist
 
       - name: Publish immutable GitHub prerelease
