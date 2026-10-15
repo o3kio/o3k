@@ -226,6 +226,13 @@ jobs:
         run: bash tests/helm-lint-and-template.sh
       - name: Test Kubernetes deployment version consistency
         run: bash tests/kubernetes-version-consistency.sh
+      - name: Required PP.6 PostgreSQL outage/reconnect evidence
+        run: |
+          set -euo pipefail
+          command -v docker
+          docker version
+          docker image inspect postgres:16.4 >/dev/null
+          cargo test -p o3k-store --test postgres_outage -- --ignored --nocapture
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Architecture boundary check
