@@ -20,7 +20,16 @@ pub async fn check_healthz(ctx: &Context) -> Check {
             .with_actions(o3kd_actions());
         }
     };
-    if response.status == 200 && response.body.contains("ok") {
+    let healthy_status = serde_json::from_str::<serde_json::Value>(&response.body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(|status| status == "ok")
+        })
+        .unwrap_or(false);
+    if response.status == 200 && healthy_status {
         return Check::new(
             "control.healthz",
             Category::Control,
@@ -172,6 +181,22 @@ mod tests {
     async fn healthz_passes_on_200_ok() {
         let check = check_healthz(&context(FakeHttp::healthy())).await;
         assert_eq!(check.status, CheckStatus::Pass);
+    }
+
+    #[tokio::test]
+    async fn healthz_does_not_accept_not_ok_body_with_http_200() {
+        let mut http = FakeHttp::healthy();
+        http.with(
+            "GET http://127.0.0.1:8080/healthz",
+            Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: "{\"status\":\"not_ok\"}".to_owned(),
+            }),
+        );
+        let check = check_healthz(&context(http)).await;
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.summary.contains("unexpected healthz"));
     }
 
     #[tokio::test]
