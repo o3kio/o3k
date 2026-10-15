@@ -135,7 +135,9 @@
     },
     "state_inventory": {
       "type": "array",
-      "minItems": 1,
+      "description": "All nine v1 control-plane inventory families are required for both currently enumerated profiles; absence of data is represented by a valid empty family payload, not omission.",
+      "minItems": 9,
+      "maxItems": 9,
       "uniqueItems": true,
       "items": {
         "type": "string",
@@ -159,7 +161,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "size_bytes", "sha256", "media_type", "encrypted"],
+        "required": ["name", "size_bytes", "sha256", "media_type", "encrypted", "consistency_generation"],
         "properties": {
           "name": {
             "type": "string",
@@ -173,7 +175,13 @@
             "description": "SHA-256 digest of the encrypted member bytes"
           },
           "media_type": { "type": "string", "minLength": 1, "maxLength": 128 },
-          "encrypted": { "const": true }
+          "encrypted": { "const": true },
+          "consistency_generation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          }
         }
       }
     },
@@ -213,7 +221,9 @@
     },
     "excluded_state": {
       "type": "array",
-      "minItems": 1,
+      "description": "All five excluded state families are declared in v1 for both currently enumerated profiles.",
+      "minItems": 5,
+      "maxItems": 5,
       "uniqueItems": true,
       "items": {
         "type": "string",

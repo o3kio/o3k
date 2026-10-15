@@ -60,14 +60,18 @@ not chosen by this proposed contract. The authentication operation signs a
 canonical encoding of the manifest with the `authentication.signature` field
 omitted; the verifier must reject non-canonical encodings and duplicate JSON
 keys before signature verification. This avoids a self-referential signature
-field. Member digests cover ciphertext bytes; authentication binds those
-digests together with all manifest fields, encryption parameters and format
-identity. After decryption, the consumer also validates database integrity
-and any accepted plaintext digest. The encryption/authentication algorithms,
+field. Each member's byte length and SHA-256 cover its ciphertext bytes;
+authentication binds those values together with all manifest fields,
+encryption parameters and format identity. After decryption, the consumer also
+validates database integrity and any accepted plaintext digest. The
+encryption/authentication algorithms,
 nonce and key-wrapping rules, canonical encoding, trust store, and rotation
 behavior remain security approval items. A consumer fails closed on any
 algorithm or key not explicitly configured as supported; it never trusts an
-artifact's key identifier by itself.
+artifact's key identifier by itself. The proposed schema does not yet define
+the per-member nonce/tag/envelope fields; the human-approved cryptographic
+profile must define those fields and their authenticated encoding before the
+schema can be treated as an implementable contract.
 
 The artifact reader validates archive structure before extraction. It rejects
 duplicate member names, absolute paths, empty/dot/path-traversal segments,
@@ -87,6 +91,14 @@ ASCII-safe canonical form and validates key identifiers only against an
 operator-selected trust configuration, never by trusting the artifact's key
 ID. The proposed manifest's `source_sha` is the exact 40-character Git commit
 object ID; artifact and member digests are SHA-256 values.
+
+For format v1, the same nine control-plane inventory families and five external
+exclusion families are mandatory for both currently enumerated profiles.
+Profile data that has no rows is represented by an empty valid payload rather
+than omitting the family. Each member carries the top-level consistency
+generation, and semantic validation requires exact equality. Duplicate member
+names are rejected by an explicit name-set check; JSON Schema `uniqueItems`
+alone is not sufficient because it compares complete objects.
 
 ## 3. Consistency and backend behavior
 
@@ -132,6 +144,14 @@ artifact-supplied global roles, passwords and grants are never applied
 implicitly. The production lane uses a real isolated PostgreSQL instance and
 fails if the configured database/tooling is unavailable. A skipped test is
 not a pass.
+
+The O3K artifact reader treats a PostgreSQL dump as opaque, integrity-checked
+member bytes; it does not recursively extract PostgreSQL-native archive
+members. A trusted, version-checked PostgreSQL tool consumes the member in its
+native format under the selected resource limits. If directory format is
+selected, each directory member is separately enumerated and authenticated by
+the O3K manifest. Outer bundle path/link/device/archive defenses do not replace
+validation of the native dump by PostgreSQL tools.
 
 The PostgreSQL transaction snapshot is internally consistent. A coordinated
 daemon quiescence is still required to align the database with O3K-owned
@@ -204,8 +224,15 @@ authenticated, durably written, and is not canonical tenant or control-plane
 state. Conflicting, missing, stale, replayed or tampered journals fail closed
 and require explicit recovery rather than implicit restart.
 
-Restore stages decrypted files privately, validates them, and restores into an
-empty O3K-owned database target. Nonempty/foreign data, wrong installation
+Restore prefers streaming decrypted database content directly into the
+reserved empty O3K-owned database target where the reviewed backend/tooling
+path supports it safely. If plaintext staging is required, it must use a
+private owner-only directory with no-follow creation, restrictive permissions
+and umask, bounded lifetime and capacity, and crash cleanup or quarantine
+whose completion can be verified. It must fail closed if the implementation
+cannot prove the staging path is private or its cleanup disposition is safe.
+Decrypted file members follow the same protected staging rules and are
+validated before install. Nonempty/foreign data, wrong installation
 identity, unknown profile/schema/version, or unavailable keys fail before
 destructive mutation. It never deletes, imports, or reconciles external VM,
 network, or storage objects during artifact restore.
@@ -266,6 +293,12 @@ profiles that are claimed:
   profile, backend, schema and migration mismatch rejection;
 - archive duplicate-name, traversal, link/device entry, sparse-file, limit and
   decompression-bomb rejection before extraction;
+- distinct duplicate-member-name rejection even when duplicate entries have
+  otherwise different metadata, and per-member consistency-generation match;
+- owner-only plaintext staging permissions, cleanup after normal and crash
+  paths, and fail-closed behavior when safe cleanup cannot be established;
+- opaque PostgreSQL custom/directory dump member handling with real isolated
+  PostgreSQL restore and no recursive extraction by the O3K bundle reader;
 - safe retry and unknown outcome observation;
 - PostgreSQL role/privilege least-privilege restoration and rejection of
   artifact-supplied global privilege changes;
