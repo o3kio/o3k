@@ -566,6 +566,15 @@ prompts live under `docs/prompts/p15/`.
 
 ## PP — Production Phase (umbrella #968)
 
+**Current phase state (2026-10-15):** PP.4 Core is complete; PP.5 (#974) remains
+open, with affordable engineering/correctness work continuing and expensive
+scale, endurance, and physical-deployment acceptance deferred by policy; PP.6
+(#975) is the next active engineering phase; PP.7 (#976) is final certification
+and is not yet authorized. Deferral leaves the affected PP.5 gates mandatory
+and `ACCEPTANCE_PENDING`; it is neither PASS nor waiver. No release publication,
+stable-release claim, or production certification follows from this sequence.
+See [the accepted PP execution strategy](pp/PRODUCTION_FIRST_SEQUENCE.md).
+
 P15 is complete: the protected certification run 35365369016 passed the P15.7
 scale/composition convergence gate at the exact completion SHA 096e4679.
 The Production Phase turns that foundation into a shippable, installable
@@ -598,43 +607,34 @@ product baseline:
   reboot, uninstall/reinstall, purge/reinstall, foreign-state preservation,
   zero secret leakage. The Araf side publishes the release bundle and OCI
   tarballs (o3kio/araf#114). No Araf production/HA claim.
-- **PP.4 (#973) — O3K Demo/Core Acceptance**: **NOT PROVEN**. The
-  release-blocking core gate is native-first and covers fresh Ubuntu 24.04 and
-  Debian 12 campaigns against exact published O3K artifacts: public one-line
-  install and verification, canonical init/join, one BuildingBlock,
-  Placement/topology, bounded native network, real libvirt/KVM and guest boot,
-  native workload lifecycle, bounded OpenStack CLI lifecycle, an unmodified
-  pinned Horizon compatibility witness, reboot/rerun/reset/reinstall/purge,
-  foreign-state preservation, and secret scanning. Native creation precedes
-  compatibility observation and both interfaces must prove one canonical
-  resource. Historical Araf evidence remains under `docs/evidence/pp4/` and is
-  not deleted or rewritten.
-- **PP.4A (#1029) — Araf Native Console Certification**: independently
-  certifies the separately versioned Araf native next-generation O3K dashboard
-  (strict CSP, JSON Schema runtime, CSRF, OIDC/session, tenant/operator
-  separation, native browser create/inspect/lifecycle/delete, reboot/recovery,
-  and required OS matrix). Araf is not an O3K readiness authority. PP.4A is
-  required before PP.7 can certify an Araf-integrated Edge-v1 product, but it
-  does not block PP.4 Core or PP.5.
+- **PP.4 (#973) — O3K Demo/Core Acceptance**: **COMPLETE**. The final bounded
+  Ubuntu 24.04 and Debian 12 campaigns passed from exact published artifacts;
+  see #973 for the accepted source and evidence. This does not claim PP.5,
+  production readiness, or a stable release.
+- **Araf (#1029)** is post-stable client certification and is not a PP.7 or
+  PP.5 dependency for the O3K Core claim. An O3K + Araf claim requires its own
+  accepted evidence.
 
-Dependency rebaseline:
+PP execution dependency:
 
 ```text
-PP.4 Core (#973)
-   |
-   +------> PP.5 (#974)
-   |
-PP.4A Araf (#1029)
-   |
-PP.5 + PP.6 (#975) + PP.4A
-   |
-   v
-PP.7 final certification (#976)
+PP.4 Core (#973) COMPLETE
+       ├────────> PP.5 (#974) ───┐
+       └────────> PP.6 (#975) ───┼──> PP.7 final certification (#976)
+                                 │    only after all mandatory PP.5 and PP.6
+                                 │    evidence exists and passes review
+                                 └──> PP.5 may remain open while PP.6 proceeds
 ```
 
-Horizon is an external OpenStack compatibility witness, not the O3K
-dashboard, not an authority, and not a product dependency. See
-`docs/pp/PP4_REBASELINE.md`. PP.5 must not start during this rebaseline task.
+PP.5 remains open until every mandatory acceptance gate passes, including the
+currently deferred S3/S10/S20, K-min/K-full, and physical-deployment acceptance
+work. `ENGINEERING_COMPLETE`, `DEFERRED_BY_POLICY`, `ACCEPTANCE_PENDING`, and
+`CERTIFIED` describe different states; see
+`docs/pp/PRODUCTION_FIRST_SEQUENCE.md`. PP.6 engineering may proceed while
+PP.5 acceptance is pending. PP.7 final certification is not yet authorized.
+
+Horizon is an external OpenStack compatibility witness, not the O3K dashboard
+or an authority.
 
 PP.0 freezes definitions only: no production-readiness, GA, HA, live
 migration, automatic evacuation, or proven 1–20-host-scale claims.
