@@ -142,11 +142,15 @@ The following invariants are mandatory and machine-checkable:
 - `collection.sources` contains only `diagnostics` and `audit`, each at most
   once; `diagnostics` maps to the top-level `diagnostics` member and `audit`
   maps exactly to `failure_evidence.audit`;
+- `collection.sources` contains exactly one entry for each of `diagnostics`
+  and `audit`; a `complete` disposition requires both entries and both status
+  values to be `complete`;
 - `status: complete` requires the mapped payload member to be present and
   valid; `status: unavailable` or `not_configured` requires the mapped member
   to be `null` and requires a non-null bounded `reason_category`;
-- `status: partial` requires a matching payload member and a non-null bounded
-  reason category;
+- `status: partial` requires a non-null, schema-valid mapped payload member
+  and a non-null bounded reason category. A null partial payload is invalid;
+  null is reserved for `unavailable` and `not_configured`;
 - `collection.disposition: complete` requires every listed source to be
   `complete`; any other source status requires `partial`;
 - `completed_at` is greater than or equal to `started_at`, and every
