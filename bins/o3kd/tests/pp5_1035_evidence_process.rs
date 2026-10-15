@@ -121,17 +121,20 @@ impl PgFixture {
             .max_connections(1)
             .connect(&self.admin_url)
             .await?;
+        // Attempt to terminate sessions, but still attempt the FORCE drop if
+        // this diagnostic step fails; the drop is the cleanup authority.
         let _ = sqlx::query(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
              WHERE datname = $1 AND pid <> pg_backend_pid()",
         )
         .bind(&self.database)
         .execute(&pool)
-        .await?;
-        sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
+        .await;
+        let drop_result = sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
             .execute(&pool)
-            .await?;
+            .await;
         pool.close().await;
+        drop_result?;
         Ok(())
     }
 }
@@ -152,6 +155,29 @@ fn file_sha256(path: &Path) -> Result<String, Error> {
 
 fn free_address() -> Result<SocketAddr, Error> {
     Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?)
+}
+
+fn is_run_owned_server_endpoint(port: &Value) -> bool {
+    port["project_id"].as_str() == Some(PROJECT_ID)
+        && port["name"]
+            .as_str()
+            .is_some_and(|name| o3k_network::is_server_owned_endpoint_name(PROJECT_ID, name))
+}
+
+#[test]
+fn teardown_endpoint_count_ignores_foreign_server_owned_names() {
+    assert!(is_run_owned_server_endpoint(
+        &json!({"project_id": PROJECT_ID, "name": format!("o3k-server:{PROJECT_ID}:run")})
+    ));
+    assert!(!is_run_owned_server_endpoint(
+        &json!({"project_id": FOREIGN_PROJECT_ID, "name": format!("o3k-server:{FOREIGN_PROJECT_ID}:foreign")})
+    ));
+    assert!(!is_run_owned_server_endpoint(
+        &json!({"project_id": FOREIGN_PROJECT_ID, "name": format!("o3k-server:{PROJECT_ID}:spoof")})
+    ));
+    assert!(!is_run_owned_server_endpoint(
+        &json!({"project_id": PROJECT_ID, "name": "caller-port"})
+    ));
 }
 
 fn proc_starttime(pid: u32) -> Result<u64, Error> {
@@ -2491,11 +2517,7 @@ async fn run_iteration(
     let owned_endpoints = ports(&client, new_http, &admin_token)
         .await?
         .into_iter()
-        .filter(|port| {
-            port["name"]
-                .as_str()
-                .is_some_and(|name| name.starts_with("o3k-server:"))
-        })
+        .filter(is_run_owned_server_endpoint)
         .count();
     probe.close();
     stop_process(replacement.child_mut()?)?;
