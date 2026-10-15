@@ -62,7 +62,9 @@ an administrative action.
 
 ## First checks when a service is unavailable
 
-Collect only bounded, redacted observations:
+Collect only bounded observations and review/redact them before sharing. In
+particular, `systemctl status` includes recent journal lines, so its output
+must be inspected for secrets or provider payloads before it leaves the host:
 
 ```sh
 sudo systemctl status --no-pager o3kd.service o3k-compute.service
