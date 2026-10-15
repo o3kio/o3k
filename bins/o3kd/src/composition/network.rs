@@ -3085,6 +3085,29 @@ mod dispatcher_tests {
         reconcilers: Vec<tokio::task::JoinHandle<()>>,
     }
 
+    struct ReopenTestCleanup {
+        server: Option<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>>,
+        root: std::path::PathBuf,
+    }
+
+    impl ReopenTestCleanup {
+        async fn stop(&mut self) {
+            if let Some(server) = self.server.take() {
+                server.abort();
+                let _ = server.await;
+            }
+        }
+    }
+
+    impl Drop for ReopenTestCleanup {
+        fn drop(&mut self) {
+            if let Some(server) = self.server.take() {
+                server.abort();
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
     impl TestTaskOwnership {
         fn new() -> Self {
             Self {
@@ -7439,6 +7462,10 @@ mod dispatcher_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let server = start_mtls_network_agent(listener, service).await?;
+        let mut cleanup = ReopenTestCleanup {
+            server: Some(server),
+            root: root.clone(),
+        };
         let dispatcher = Arc::new(mtls_dispatcher(address, store.clone(), None));
         let dispatch_result = dispatcher
             .dispatch_existing_successor(command.clone(), historical.command_id.clone())
@@ -7511,9 +7538,7 @@ mod dispatcher_tests {
             1,
             "observation of unknown removal must not repeat provider mutation"
         );
-        server.abort();
-        let _ = server.await;
-        let _ = std::fs::remove_dir_all(root);
+        cleanup.stop().await;
         Ok(())
     }
 
