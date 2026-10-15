@@ -45,7 +45,7 @@ outside the allowlist. The manifest binds:
 - snapshot mechanism and whether the daemon/write path was quiesced;
 - inventory of canonical resource and state families included;
 - artifact member names, lengths and digests;
-- encryption and detached authentication metadata, algorithm identifiers,
+- encryption and authentication metadata, algorithm identifiers,
   key/trust identifiers and format version;
 - explicit excluded external-state families.
 
@@ -60,7 +60,33 @@ not chosen by this proposed contract. The authentication operation signs a
 canonical encoding of the manifest with the `authentication.signature` field
 omitted; the verifier must reject non-canonical encodings and duplicate JSON
 keys before signature verification. This avoids a self-referential signature
-field. The canonical encoding and format details remain subject to approval.
+field. Member digests cover ciphertext bytes; authentication binds those
+digests together with all manifest fields, encryption parameters and format
+identity. After decryption, the consumer also validates database integrity
+and any accepted plaintext digest. The encryption/authentication algorithms,
+nonce and key-wrapping rules, canonical encoding, trust store, and rotation
+behavior remain security approval items. A consumer fails closed on any
+algorithm or key not explicitly configured as supported; it never trusts an
+artifact's key identifier by itself.
+
+The artifact reader validates archive structure before extraction. It rejects
+duplicate member names, absolute paths, empty/dot/path-traversal segments,
+symlinks, hard links, devices, FIFOs and unsupported sparse/compressed forms.
+Extraction uses an owner-checked destination and no-follow file creation; it
+never follows links from an archive. Member count, path depth, per-member size,
+aggregate ciphertext/plaintext size, compression ratio and staging-space limits
+must be selected before implementation. Exceeding any configured limit fails
+before target mutation.
+
+JSON Schema validation is only the syntactic first pass. A semantic validator
+also rejects duplicate member names and migration versions, requires the
+backend-appropriate snapshot method, verifies the profile/backend combination,
+and checks that the state inventory and members cover the complete
+profile-required inventory. It validates identifiers using the approved
+ASCII-safe canonical form and validates key identifiers only against an
+operator-selected trust configuration, never by trusting the artifact's key
+ID. The proposed manifest's `source_sha` is the exact 40-character Git commit
+object ID; artifact and member digests are SHA-256 values.
 
 ## 3. Consistency and backend behavior
 
@@ -76,6 +102,16 @@ Use the existing SQLite WAL/integrity policy and supported snapshot API:
    and migration identity;
 5. package config/bootstrap material from the same quiesced interval.
 
+The quiescence protocol covers API writes and background workers, including
+reconciliation/provider dispatch and lease renewal. It drains in-flight
+Operations to a known boundary or records them as unresolved/unknown with
+stable operation identity. Every captured member is bound to one quiescence
+generation or equivalent consistency token. For PostgreSQL, the dump snapshot
+is correlated with that generation. If database, config, bootstrap/trust and
+release metadata cannot be proven to belong to the common cut, backup fails.
+The mechanism for acquiring/releasing this quiescence is an architecture
+approval item.
+
 A live `.sqlite` file copy is never a supported snapshot method. If the
 implementation cannot prove a stable quiescence point, it must reject the
 backup rather than label an inconsistent multi-file capture as committed.
@@ -86,9 +122,14 @@ Use the supported PostgreSQL version and a transaction-consistent database
 dump (`pg_dump` custom/directory format or another approved native mechanism)
 with a fresh target restore path. Record server version, dump tool version,
 database/schema identity, extensions, role/ownership expectations and applied
-migrations. Validate the restored database before activation. The production
-lane uses a real isolated PostgreSQL instance and fails if the configured
-database/tooling is unavailable. A skipped test is not a pass.
+migrations. Validate the restored database before activation. Database dumps
+do not restore cluster roles or global privileges. The restored target uses a
+least-privilege role provisioned from trusted installation configuration,
+unless security review accepts a separate allowlisted role mechanism;
+artifact-supplied global roles, passwords and grants are never applied
+implicitly. The production lane uses a real isolated PostgreSQL instance and
+fails if the configured database/tooling is unavailable. A skipped test is
+not a pass.
 
 The PostgreSQL transaction snapshot is internally consistent. A coordinated
 daemon quiescence is still required to align the database with O3K-owned
@@ -110,6 +151,9 @@ host and are never included. Recovery of the control-plane issuer private key
 or a CA replacement/re-enrollment journey is unresolved until human security
 review selects the supported custody and trust-transition model. Restore fails
 closed if the trust material needed for the chosen recovery route is missing.
+Database restoration and activation are distinct: the restored database stays
+inactive until the accepted PKI issuer/trust recovery or replacement and
+re-enrollment checks pass.
 
 ## 5. Backup publication and retry
 
@@ -126,6 +170,13 @@ staging/final path and validates it before deciding whether to resume, return
 the committed result, quarantine an incomplete artifact, or fail on a content
 conflict. It does not overwrite an artifact with a different digest.
 
+Each durable side effect has a deterministic step identity bound to the backup
+or restore operation and target. A timeout triggers observation of the step's
+actual result before retry; publication, database restore, journal transition
+and fencing are never repeated solely because the caller received no response.
+The final destination and staging path are exclusively reserved and rechecked
+immediately before publication to close preflight races.
+
 ## 6. Fresh-host restore
 
 Restore is an explicit operator action against a fresh O3K-owned installation
@@ -139,6 +190,15 @@ validates:
 - required decryption key and trust/issuer material availability;
 - absence of an active conflicting controller or restore operation.
 
+Preflight acquires an exclusive reservation for the target and repeats
+ownership and emptiness checks immediately before mutation. The approved
+mechanism prevents another process/controller from populating the target
+between those checks. The protected restore journal binds operation ID, source
+artifact digest, target installation/database identity and phase; it is
+authenticated, durably written, and is not canonical tenant or control-plane
+state. Conflicting, missing, stale, replayed or tampered journals fail closed
+and require explicit recovery rather than implicit restart.
+
 Restore stages decrypted files privately, validates them, and restores into an
 empty O3K-owned database target. Nonempty/foreign data, wrong installation
 identity, unknown profile/schema/version, or unavailable keys fail before
@@ -146,12 +206,17 @@ destructive mutation. It never deletes, imports, or reconciles external VM,
 network, or storage objects during artifact restore.
 
 Exact site identity preservation versus regeneration on host replacement is a
-human decision. Controller runtime identity must not permit a stale process to
-resume work after restore. Before API writes or provider dispatch resume, the
-restored control plane must establish a current fencing epoch/lease and make
-old ownership invalid. How the single-controller profiles perform that
-transition is an ADR-0189 approval item. Normal post-activation reconciliation
-uses SPEC-0008 observe-before-retry behavior and existing canonical authorities.
+human decision. The approved identity map distinguishes stable site/resource
+identities from host/controller runtime identities and credentials, specifies
+credential regeneration and prevents accidental mutation of the source site.
+Controller runtime identity must not permit a stale process to resume work
+after restore. Before API writes or provider dispatch resume, the restored
+control plane establishes current exclusive ownership/fencing and invalidates
+old ownership. A local restore journal alone does not fence a surviving source
+process. The single-controller fencing mechanism, including source-host stop
+or out-of-band fencing behavior, is an ADR-0189 approval item. Normal
+post-activation reconciliation uses SPEC-0008 observe-before-retry behavior
+and existing canonical authorities.
 
 ## 7. Restore state and crash recovery
 
@@ -165,7 +230,8 @@ PREFLIGHTED -> STAGING -> DATABASE_RESTORED -> FILES_RESTORED
 ```
 
 The journal binds operation ID, backup ID/digest, source and target identities,
-and phase. Every external side effect is preceded by durable intent. On restart,
+deterministic step IDs and phase. Every external side effect is preceded by
+durable intent. On restart,
 the runner observes the target and repeats only idempotent steps; it never
 assumes a timed-out command failed. A mismatch or ambiguous foreign-state
 observation stops activation and reports a bounded recovery action. The
@@ -189,17 +255,31 @@ profiles that are claimed:
 - SQLite live-write/WAL consistency, restore and canonical inventory parity;
 - real isolated PostgreSQL dump/restore under concurrent writes;
 - fresh disposable host restoration and restart/reconciliation;
-- crash/restart at every declared backup and restore phase;
+- crash/restart at every declared backup and restore phase, including retry
+  after a lost response for each filesystem/database/fencing side effect;
 - corruption, truncation, tamper/authentication, missing member, version,
   profile, backend, schema and migration mismatch rejection;
+- archive duplicate-name, traversal, link/device entry, sparse-file, limit and
+  decompression-bomb rejection before extraction;
 - safe retry and unknown outcome observation;
-- issuer/trust/secret recovery and secret-safe output;
+- PostgreSQL role/privilege least-privilege restoration and rejection of
+  artifact-supplied global privilege changes;
+- issuer/trust/secret recovery and secret-safe output; database-restored but
+  unactivated is not a successful control-plane restore;
 - foreign target and external provider state preservation;
+- race attempts that populate backup/restore targets after preflight but before
+  publish/restore;
 - zero unowned mutations before and after reconciliation.
 
 Every result binds source SHA, test/harness SHA, release artifact digest,
 profile, backend/server/tool version, migration identity, backup digest,
 destination/host identity, and machine-readable verdict. Required PostgreSQL
 tests fail closed when PostgreSQL is absent or unreachable.
+
+Diagnostics, errors and evidence use bounded structured error codes and
+allowlisted safe fields. They redact PostgreSQL URLs, credentials, tokens,
+private keys, enrollment secrets, raw provider payloads, sensitive filesystem
+paths, key-provider exception text and unfiltered exception chains. Secret
+scans cover successful and failing backup/restore paths.
 
 See `docs/pp/PP6_GAP_ANALYSIS.md` for the ordered executable matrix.

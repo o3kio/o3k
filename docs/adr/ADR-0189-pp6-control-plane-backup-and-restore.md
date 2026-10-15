@@ -3,6 +3,7 @@
 Status: Proposed — requires human architecture and security approval before
 implementation
 Date: 2026-10-15
+Affected-services: cloud-kernel, deployment, identity, governance
 Parent: PP.6 #975; general rollback/backup authority #640
 Related: ADR-0163, ADR-0167, ADR-0182, SPEC-0008, SPEC-0024, SPEC-0047
 
@@ -34,7 +35,12 @@ backup/restore operations recover.
    SQLite checkpoint plus `VACUUM INTO`; PostgreSQL consistent dump using the
    supported `pg_dump`/restore tooling. Cross-file configuration, release,
    identity, and trust material is captured at a coordinated control-plane
-   quiescence point. Raw copying of a live database file is unsupported.
+   quiescence point. That point accounts for API writes, background jobs,
+   reconciliation/provider dispatch, in-flight Operations, and lease renewal,
+   and binds each database/file member to one recorded consistency generation.
+   The exact pause, drain, unknown-outcome, and resume protocol is a human
+   decision. Raw copying of a live database file is unsupported; backup fails
+   if it cannot prove a common cut.
 4. The manifest binds source O3K release/version and source SHA, deployment
    profile, store backend/version, schema version and migration identity,
    installation identity, snapshot method/time, inventory and digests for all
@@ -50,7 +56,11 @@ backup/restore operations recover.
    operator-managed encryption key whose recovery is outside the backup
    artifact. The concrete key-wrapping and issuer-key recovery mechanism
    remains an explicit security approval item; no encryption key is generated
-   from a public installation identifier or stored beside the artifact.
+   from a public installation identifier or stored beside the artifact. The
+   authenticated metadata binds the canonical manifest, every payload
+   ciphertext digest, encryption parameters, and format identity. Archive
+   limits, supported entry types, and safe no-follow extraction rules must be
+   chosen before implementation.
 7. Restore targets a fresh O3K-owned installation/data target. Preflight
    validates artifact authenticity, compatibility, profile/backend/schema,
    destination ownership and emptiness before mutation. A foreign or nonempty
@@ -69,6 +79,14 @@ backup/restore operations recover.
     provider action follows normal authorization, ownership, operation, and
     observe-before-retry contracts. Backup/restore creates no new resource,
     placement, topology, or lifecycle authority.
+
+PostgreSQL database dumps do not by themselves define restoration of cluster
+roles, passwords, or global privileges. Whether a minimal target role is
+recreated from trusted installation configuration or by another allowlisted
+mechanism requires security review; artifact-supplied global roles and
+privileges must not be applied implicitly. PKI readiness is a hard activation
+gate: restored database state remains inactive until the approved issuer/trust
+recovery or re-enrollment path passes its checks.
 
 ## Scope
 
@@ -115,6 +133,17 @@ Reviewers must decide or approve the proposal for:
 6. crash-safe phases, retries, target ownership/emptiness and foreign-state
    rejection;
 7. whether to add a host-operator CLI and its confirmation/output contract.
+8. quiescence generation and how API writes, background work, provider
+   dispatch, in-flight Operations, and leases are paused, drained, or
+   classified;
+9. PostgreSQL role/privilege restoration and least-privilege target creation;
+10. restore-journal protection, exclusive target reservation, and crash
+    recovery after ambiguous filesystem/database outcomes;
+11. installation/site identity preservation or regeneration, controller
+    credential replacement, and out-of-band fencing of any surviving source
+    controller;
+12. archive member/count/size/path-depth limits and authenticated payload
+    encoding details.
 
 Production implementation must not begin until the security-sensitive items
 and any public CLI contract have accepted human review. If approved, the first
