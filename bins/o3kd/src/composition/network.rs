@@ -6690,11 +6690,9 @@ mod dispatcher_tests {
             Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?)
         };
         let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
-        let network = o3k_network::NetworkService::open_for_test(
-            root.join("network"),
-            network_repository.clone(),
-        )
-        .await?;
+        let network =
+            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
+                .await?;
         let historical = durable_removal_command(store.as_ref()).await?;
         let registry = Arc::new(o3k_compute_agent::NodeRegistry::default());
         registry
@@ -6900,11 +6898,9 @@ mod dispatcher_tests {
             Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?)
         };
         let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
-        let network = o3k_network::NetworkService::open_for_test(
-            root.join("network"),
-            network_repository.clone(),
-        )
-        .await?;
+        let network =
+            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
+                .await?;
         let historical = durable_removal_command(store.as_ref()).await?;
         let registry = Arc::new(o3k_compute_agent::NodeRegistry::default());
         registry
