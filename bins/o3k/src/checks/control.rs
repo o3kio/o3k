@@ -223,4 +223,22 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.summary.contains("unexpected readyz"));
     }
+
+    #[tokio::test]
+    async fn readyz_rejects_malformed_or_non_string_status_body() {
+        for body in [r#"{"status":true}"#, "not-json"] {
+            let mut http = FakeHttp::healthy();
+            http.with(
+                "GET http://127.0.0.1:8080/readyz",
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: body.to_owned(),
+                }),
+            );
+            let check = check_readyz(&context(http)).await;
+            assert_eq!(check.status, CheckStatus::Warn, "body: {body}");
+            assert!(check.summary.contains("unexpected readyz"));
+        }
+    }
 }
