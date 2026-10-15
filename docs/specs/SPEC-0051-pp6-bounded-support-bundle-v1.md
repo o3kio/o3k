@@ -83,19 +83,20 @@ Its top-level fields are:
 | --- | --- |
 | `schema_version` | Constant `v1`. |
 | `generated_at` | RFC3339 time at which collection began. |
-| `source` | Exact source commit or release identity, when available. |
+| `source` | Immutable source provenance: a 40/64-character commit digest or `release:<name>@<40/64-character digest>`. This is informational binding for evidence; transport acceptance does not itself verify the digest. |
 | `profile` | Bounded product/deployment profile identifier. |
 | `backend` | Backend kind (`sqlite` or `postgresql`) and safe server-version label, if known. |
-| `diagnostics` | Existing SPEC-0045 v1 projections, or a source status if unavailable. |
+| `diagnostics` | Existing SPEC-0045 v1 projections, or `null` when unavailable/not configured. |
 | `failure_evidence` | At most 50 bounded Audit events; Operations are absent in v1. |
 | `collection` | Per-source status, observation times, partial/error categories, and bounds. |
 | `redacted` | Constant `true`. |
 
-`failure_evidence` contains at most 50 Audit events and no Operation items in
-v1, ordered newest first by event timestamp and then stable event ID. The
-default and maximum lookback window is 24 hours. A caller cannot request an
-unbounded window or increase the bound. Audit events are the only system-wide
-failure source in v1.
+`failure_evidence.audit` contains at most 50 Audit events and no Operation
+items in v1, ordered newest first by event timestamp and then stable event ID.
+The default and maximum lookback window is 24 hours. A caller cannot request
+an unbounded window or increase the bound. Audit events are the only
+system-wide failure source in v1. `failure_evidence.audit` is `null` when the
+Audit source is unavailable or not configured.
 
 Each Audit item may contain only:
 
@@ -138,11 +139,12 @@ the omitted source by bounded category, never by raw exception text.
 The following invariants are mandatory and machine-checkable:
 
 - `collection.sources` contains each source name at most once;
-- every source named in `collection.sources` has a matching top-level payload
-  member, except `operations`, which is absent in v1;
-- `status: complete` requires the matching payload member to be present and
-  valid; `status: unavailable` or `not_configured` requires that member to be
-  absent or `null` and requires a non-null bounded `reason_category`;
+- `collection.sources` contains only `diagnostics` and `audit`, each at most
+  once; `diagnostics` maps to the top-level `diagnostics` member and `audit`
+  maps exactly to `failure_evidence.audit`;
+- `status: complete` requires the mapped payload member to be present and
+  valid; `status: unavailable` or `not_configured` requires the mapped member
+  to be `null` and requires a non-null bounded `reason_category`;
 - `status: partial` requires a matching payload member and a non-null bounded
   reason category;
 - `collection.disposition: complete` requires every listed source to be
