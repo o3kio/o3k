@@ -34,5 +34,35 @@ PY
 # shellcheck disable=SC1090
 source <(sed -n '/^classify_failure() {/,/^}/p' "$JOURNEY")
 [[ "$(classify_failure 'TestLab ownership marker failed privileged verification')" == harness_gap ]]
+[[ "$(classify_failure 'required journey agent identity unavailable for s1-boundary: block-a')" == harness_gap ]]
+
+# Boundary tiers use only the agent identities included by their exact
+# topology. S1 has no child agent; S2 has one; scale/recovery lanes use the
+# full child set required by their journey.
+agent_requirements="$(sed -n '/^required_child_agent_ids() {/,/^}/p' "$JOURNEY")"
+[[ -n "$agent_requirements" ]] || { echo "journey child-agent requirements helper is missing" >&2; exit 1; }
+# shellcheck disable=SC1090
+source <(printf '%s\n' "$agent_requirements")
+[[ "$(required_child_agent_ids s1-boundary)" == "" ]]
+[[ "$(required_child_agent_ids s2-boundary)" == "block-a" ]]
+for lane in s5-scale 1035-crash-recovery host-maintenance integrated; do
+  [[ "$(required_child_agent_ids "$lane")" == $'block-a\nblock-b\nblock-c\nblock-d\nblock-e' ]]
+done
+if required_child_agent_ids unsupported-lane >/dev/null; then
+  echo "unsupported lane returned child-agent requirements" >&2
+  exit 1
+fi
+
+python3 - "$JOURNEY" <<'PY'
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+assert 'for required_agent in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do' in source
+assert 'for agent_id in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do' in source
+assert 'canonical capacity/replacement identities unavailable' not in source
+assert '"${BLOCK_IDS[block-a]:-}" "$PP5_PHASE"' in source
+PY
+# S1 has no child block-a identity. With nounset enabled, the optional
+# identity passed to the common initial-state writer must still expand safely.
+[[ -z "$(bash -uc 'declare -A BLOCK_IDS=(); printf "%s" "${BLOCK_IDS[block-a]:-}"')" ]]
 
 echo "P15.7 TestLab epoch identity guards PASS"

@@ -104,6 +104,7 @@ def main() -> int:
     if not run_id or not failure_class or not phase:
         return fail("failure artifact requires run identity, phase and class")
     allowed = {
+        "harness_gap",
         "runner_preflight",
         "source_checkout",
         "postgres_prerequisite",
