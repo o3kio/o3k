@@ -60,7 +60,7 @@ pub async fn check_readyz(ctx: &Context) -> Check {
             .with_actions(o3kd_actions());
         }
     };
-    if response.status == 200 && response.body.contains("ready") {
+    if response.status == 200 && readyz_body_is_ready(&response.body) {
         return Check::new(
             "control.readyz",
             Category::Control,
@@ -92,6 +92,19 @@ pub async fn check_readyz(ctx: &Context) -> Check {
         format!("curl -s {url}"),
         "systemctl status o3kd".to_owned(),
     ])
+}
+
+fn readyz_body_is_ready(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("ready")
 }
 
 /// Re-runs the readiness probe for other checks that branch on its result
@@ -193,5 +206,21 @@ mod tests {
         let check = check_readyz(&context(http)).await;
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.summary.contains("not ready"));
+    }
+
+    #[tokio::test]
+    async fn readyz_does_not_accept_not_ready_body_with_http_200() {
+        let mut http = FakeHttp::healthy();
+        http.with(
+            "GET http://127.0.0.1:8080/readyz",
+            Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: r#"{"status":"not_ready"}"#.to_owned(),
+            }),
+        );
+        let check = check_readyz(&context(http)).await;
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.summary.contains("unexpected readyz"));
     }
 }
