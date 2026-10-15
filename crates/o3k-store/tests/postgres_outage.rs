@@ -10,7 +10,7 @@ use o3k_store::{DurableStore, OperationRecord, OperationState, PostgresStore, Re
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
 use std::time::Duration;
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, timeout, timeout_at};
 use uuid::Uuid;
 
 struct DisposablePostgres {
@@ -126,6 +126,39 @@ impl DisposablePostgres {
         .await;
         ready.map_err(|_| "docker PostgreSQL readiness timed out".into())
     }
+    async fn connect_ready(&self) -> Result<PostgresStore, Box<dyn std::error::Error>> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut last_transient_error = String::from("unknown");
+        loop {
+            let attempt = match timeout_at(deadline, PostgresStore::connect(&self.url())).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return Err(format!(
+                        "PostgreSQL recovery connection timed out; last error: {}",
+                        last_transient_error
+                    )
+                    .into());
+                }
+            };
+            match attempt {
+                Ok(store) => return Ok(store),
+                Err(error) if is_transient_connect_error(&error) => {
+                    last_transient_error = error.to_string();
+                    if timeout_at(deadline, sleep(Duration::from_millis(250)))
+                        .await
+                        .is_err()
+                    {
+                        return Err(format!(
+                            "PostgreSQL recovery connection timed out; last error: {}",
+                            last_transient_error
+                        )
+                        .into());
+                    }
+                }
+                Err(error) => return Err(error.to_string().into()),
+            }
+        }
+    }
     fn url(&self) -> String {
         format!(
             "postgres://127.0.0.1:{}/postgres?connect_timeout=2",
@@ -193,6 +226,15 @@ impl DisposablePostgres {
         }
     }
 }
+
+fn is_transient_connect_error(error: &o3k_store::StoreError) -> bool {
+    matches!(
+        error,
+        o3k_store::StoreError::Database(sqlx::Error::Io(_))
+            | o3k_store::StoreError::Database(sqlx::Error::PoolTimedOut)
+    )
+}
+
 impl Drop for DisposablePostgres {
     fn drop(&mut self) {
         if let Err(error) = self.stop_and_remove() {
@@ -245,7 +287,7 @@ async fn postgres_outage_fails_bounded_and_reconnect_preserves_canonical_state()
     assert!(!rendered.contains("postgres://"));
     assert!(!rendered.contains("127.0.0.1"));
     cluster.start_again().await?;
-    let recovered = PostgresStore::connect(&url).await?;
+    let recovered = cluster.connect_ready().await?;
     assert_eq!(
         recovered.get_operation(operation_id).await?.state,
         OperationState::Succeeded
