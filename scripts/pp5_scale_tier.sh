@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/pp5-policy.sh"
+
 # A scale tier is deliberately unavailable until the repository has a native
 # producer for the complete PP.5 runtime evidence contract.  In particular,
 # the existing P15.7 journey is not sufficient: it does not observe the full
@@ -42,4 +45,4 @@ esac
 [[ -n "$hosts" ]] || hosts="$expected_hosts"
 [[ "$hosts" == "$expected_hosts" ]] || die "$tier requires exactly $expected_hosts eligible hosts"
 
-die 'native exact-release scale producer is unavailable; no TestLab or evidence state was changed'
+pp5_deferred_lane "$tier" || exit "$?"

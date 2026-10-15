@@ -267,7 +267,9 @@ def write_observation(root: pathlib.Path, prefix: str, name: str, payload: dict,
     directory.mkdir(parents=True, exist_ok=True)
     common = {"run_id": doc["run"]["id"], "source_sha": doc["source"]["sha"],
               "source_tree": doc["source"]["tree"], "harness_sha": doc["harness"]["sha"],
-              "harness_tree": doc["harness"]["tree"], "tier": doc["tier"]}
+              "harness_tree": doc["harness"]["tree"],
+              "workflow_sha": doc["run"]["workflow_sha"],
+              "database_identity": doc["database"]["identity"], "tier": doc["tier"]}
     path = directory / f"{name}.json"
     raw = json.dumps({**common, **payload}, sort_keys=True).encode()
     path.write_bytes(raw)
@@ -358,25 +360,88 @@ def add_gate_observation_artifacts(gate: str, observations: dict, doc: dict,
                                           "probes": probes}, doc)
 
 
+def write_soak_samples(doc: dict, root: pathlib.Path, samples: list[dict] | None = None) -> bytes:
+    if samples is None:
+        samples = [json.loads(line) for line in doc.pop("_samples_bytes").decode().splitlines()]
+    directory = root / "observations" / doc["tier"] / "soak-samples"
+    directory.mkdir(parents=True, exist_ok=True)
+    common = {"run_id": doc["run"]["id"], "source_sha": doc["source"]["sha"],
+              "source_tree": doc["source"]["tree"], "harness_sha": doc["harness"]["sha"],
+              "harness_tree": doc["harness"]["tree"], "workflow_sha": doc["run"]["workflow_sha"],
+              "database_identity": doc["database"]["identity"], "tier": doc["tier"]}
+    for index, sample in enumerate(samples):
+        sample.pop("observation_evidence", None)
+        observed = dict(sample)
+        raw_output = json.dumps(observed, sort_keys=True, separators=(",", ":"))
+        capture = {
+            "schema": "o3k.pp5-soak-sample-observation.v1", "resource_class": "soak_runtime_sample",
+            "observer_types": sorted(contract.SOAK_SAMPLE_OBSERVER_TYPES),
+            "command_class": "pp5_soak_sample", "sample_index": index,
+            "captured_at": sample["timestamp"], "elapsed_seconds": sample["elapsed_seconds"],
+            "exit_code": 0, "raw_output": raw_output,
+            "raw_output_sha256": hashlib.sha256(raw_output.encode()).hexdigest(),
+            "observed": observed, **common,
+        }
+        path = directory / f"{index:06d}.json"
+        raw = json.dumps(capture, sort_keys=True).encode()
+        path.write_bytes(raw)
+        sample["observation_evidence"] = {
+            "path": path.relative_to(root).as_posix(), "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    serialized = "".join(json.dumps(item, sort_keys=True) + "\n" for item in samples).encode()
+    doc["soak"]["samples"]["sha256"] = hashlib.sha256(serialized).hexdigest()
+    return serialized
+
+
+def persist_soak_samples(doc: dict, root: pathlib.Path, samples: list[dict]) -> bytes:
+    raw = write_soak_samples(doc, root, samples)
+    (root / doc["soak"]["samples"]["path"]).write_bytes(raw)
+    return raw
+
+
 def write_gate_artifacts(doc: dict, root: pathlib.Path, prefix: str = ".") -> None:
     tier = doc["tier"]
     prefix_path = pathlib.Path() if prefix == "." else pathlib.Path(prefix)
-    gate_dir = root / prefix_path / "gates" / tier
+    local_root = root / prefix_path
+    gate_dir = local_root / "gates" / tier
     gate_dir.mkdir(parents=True, exist_ok=True)
     common = {"run_id": doc["run"]["id"], "source_sha": doc["source"]["sha"],
               "source_tree": doc["source"]["tree"], "harness_sha": doc["harness"]["sha"],
-              "harness_tree": doc["harness"]["tree"], "tier": tier}
+              "harness_tree": doc["harness"]["tree"], "workflow_sha": doc["run"]["workflow_sha"],
+              "database_identity": doc["database"]["identity"], "tier": tier}
     for gate in contract.LIFECYCLE_GATES:
         observations = gate_observations(gate, doc)
         add_gate_observation_artifacts(gate, observations, doc, root, prefix)
+        captured_observations = {key: value for key, value in observations.items()
+                                 if not key.endswith("_evidence")}
+        output = json.dumps(captured_observations, sort_keys=True, separators=(",", ":"))
+        observation_capture = {
+            "schema": "o3k.pp5-lifecycle-observation.v1", "gate": gate,
+            "resource_class": contract.GATE_RESOURCE_CLASSES[gate],
+            "observer_type": sorted(contract.GATE_OBSERVER_TYPES[gate])[0],
+            "command_class": f"pp5_gate_{gate}", "captured_at": "2026-10-15T00:00:00Z",
+            "exit_code": 0, "raw_output": output,
+            "raw_output_sha256": hashlib.sha256(output.encode()).hexdigest(),
+            "observed": captured_observations, **common,
+        }
+        capture_dir = gate_dir / "observations"
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        capture_path = capture_dir / f"{gate}.json"
+        capture_raw = json.dumps(observation_capture, sort_keys=True).encode()
+        capture_path.write_bytes(capture_raw)
+        capture_ref = {"path": capture_path.relative_to(local_root).as_posix(),
+                       "sha256": hashlib.sha256(capture_raw).hexdigest()}
         payload = {"schema": "o3k.pp5-scale-soak-gate.v1", "gate": gate,
-                   "status": "passed", **common, "observations": observations}
+                   "status": "passed", **common, "observations": observations,
+                   "observation_capture_evidence": capture_ref}
         raw = json.dumps(payload, sort_keys=True).encode()
         path = gate_dir / f"{gate}.json"
         path.write_bytes(raw)
         doc["lifecycle"][gate]["evidence"] = {
-            "path": path.relative_to(root).as_posix(), "sha256": hashlib.sha256(raw).hexdigest(),
+            "path": path.relative_to(local_root).as_posix(), "sha256": hashlib.sha256(raw).hexdigest(),
         }
+    if tier in contract.SOAKS:
+        doc["_samples_bytes"] = write_soak_samples(doc, root)
 
 
 def write_soak_observations(doc: dict, root: pathlib.Path) -> None:
@@ -438,9 +503,6 @@ def attach_scale_baseline(doc: dict, root: pathlib.Path) -> None:
     baseline["database"]["identity"] = f"o3k_pp5_{scale.lower()}_{baseline['run']['id']}"
     baseline["resource_baseline"]["postgres"]["database_identity"] = baseline["database"]["identity"]
     write_gate_artifacts(baseline, root, "scale-baseline")
-    for gate in contract.LIFECYCLE_GATES:
-        evidence = baseline["lifecycle"][gate]["evidence"]
-        evidence["path"] = str(pathlib.PurePosixPath(evidence["path"]).relative_to("scale-baseline"))
     baseline_raw = json.dumps(baseline, sort_keys=True).encode()
     baseline_path = root / "scale-baseline" / "run.json"
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
@@ -455,7 +517,7 @@ def attach_scale_baseline(doc: dict, root: pathlib.Path) -> None:
 
 
 class ContractTests(unittest.TestCase):
-    def validate(self, tier: str, mutate=None) -> None:
+    def validate(self, tier: str, mutate=None, artifact_mutate=None) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             doc = base(tier)
@@ -466,6 +528,8 @@ class ContractTests(unittest.TestCase):
                 (root / "samples.jsonl").write_bytes(raw)
                 attach_scale_baseline(doc, root)
                 write_soak_observations(doc, root)
+            if artifact_mutate:
+                artifact_mutate(doc, root)
             if mutate:
                 mutate(doc)
             contract.validate_run(doc, tier, root, SOURCE, TREE, SOURCE, TREE, ".")
@@ -473,6 +537,30 @@ class ContractTests(unittest.TestCase):
     def rejected(self, tier: str, mutate, expected: str) -> None:
         with self.assertRaisesRegex(contract.ContractError, expected):
             self.validate(tier, mutate)
+
+    def mutate_gate_artifact(self, doc: dict, root: pathlib.Path, gate: str, mutate) -> None:
+        reference = doc["lifecycle"][gate]["evidence"]
+        path = root / reference["path"]
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        mutate(artifact)
+        raw = json.dumps(artifact, sort_keys=True).encode()
+        path.write_bytes(raw)
+        reference["sha256"] = hashlib.sha256(raw).hexdigest()
+
+    def mutate_gate_capture(self, doc: dict, root: pathlib.Path, gate: str, mutate) -> None:
+        gate_reference = doc["lifecycle"][gate]["evidence"]
+        gate_path = root / gate_reference["path"]
+        artifact = json.loads(gate_path.read_text(encoding="utf-8"))
+        capture_reference = artifact["observation_capture_evidence"]
+        capture_path = root / capture_reference["path"]
+        capture = json.loads(capture_path.read_text(encoding="utf-8"))
+        mutate(capture)
+        capture_raw = json.dumps(capture, sort_keys=True).encode()
+        capture_path.write_bytes(capture_raw)
+        capture_reference["sha256"] = hashlib.sha256(capture_raw).hexdigest()
+        gate_raw = json.dumps(artifact, sort_keys=True).encode()
+        gate_path.write_bytes(gate_raw)
+        gate_reference["sha256"] = hashlib.sha256(gate_raw).hexdigest()
 
     def test_scale_tiers_accept_exact_observed_eligibility(self) -> None:
         for tier in contract.SCALE_HOSTS:
@@ -550,6 +638,110 @@ class ContractTests(unittest.TestCase):
         self.rejected("S3", lambda doc: doc.update(owned_leaks=False), "integer zero")
         self.rejected("S3", lambda doc: doc.update(foreign_mutations=False), "integer zero")
 
+    def test_lifecycle_gate_requires_bound_observation_capture(self) -> None:
+        self.validate("S3")
+        self.rejected("S3", lambda doc: doc["source"].update(sha="f" * 40), "expected candidate")
+
+        def remove_capture(artifact):
+            artifact.pop("observation_capture_evidence")
+        with self.assertRaisesRegex(contract.ContractError, "observation_capture_evidence evidence reference"):
+            self.validate("S3", artifact_mutate=lambda doc, root:
+                          self.mutate_gate_artifact(doc, root, "placement", remove_capture))
+
+    def test_lifecycle_capture_must_match_summary_observations(self) -> None:
+        def mismatch(capture):
+            capture["observed"]["real_workloads_created"] = False
+        with self.assertRaisesRegex(contract.ContractError, "does not match the lifecycle summary"):
+            self.validate("S3", artifact_mutate=lambda doc, root:
+                          self.mutate_gate_capture(doc, root, "placement", mismatch))
+
+    def test_lifecycle_capture_is_bound_to_exact_campaign_source(self) -> None:
+        def mismatch(capture):
+            capture["source_sha"] = "f" * 40
+        with self.assertRaisesRegex(contract.ContractError, "source_sha differs from the campaign"):
+            self.validate("S3", artifact_mutate=lambda doc, root:
+                          self.mutate_gate_capture(doc, root, "placement", mismatch))
+
+    def test_lifecycle_capture_rejects_summary_without_matching_capture(self) -> None:
+        def mismatch(artifact):
+            artifact["observations"]["real_workloads_created"] = False
+        with self.assertRaisesRegex(contract.ContractError, "does not match the lifecycle summary"):
+            self.validate("S3", artifact_mutate=lambda doc, root:
+                          self.mutate_gate_artifact(doc, root, "placement", mismatch))
+
+    def test_lifecycle_capture_rejects_bad_raw_output_digest(self) -> None:
+        def mismatch(capture):
+            capture["raw_output_sha256"] = "0" * 64
+        with self.assertRaisesRegex(contract.ContractError, "raw_output_sha256 does not match"):
+            self.validate("S3", artifact_mutate=lambda doc, root:
+                          self.mutate_gate_capture(doc, root, "canonical_topology", mismatch))
+
+    def test_lifecycle_capture_rejects_boolean_exit_code(self) -> None:
+        def mismatch(capture):
+            capture["exit_code"] = False
+        with self.assertRaisesRegex(contract.ContractError, "exit_code must be integer zero"):
+            self.validate("S3", artifact_mutate=lambda doc, root:
+                          self.mutate_gate_capture(doc, root, "canonical_topology", mismatch))
+
+    def test_lifecycle_capture_uses_strict_json_types(self) -> None:
+        def mismatch(capture):
+            capture["observed"]["owned_resources_remaining"] = False
+        with self.assertRaisesRegex(contract.ContractError, "does not match the lifecycle summary"):
+            self.validate("S3", artifact_mutate=lambda doc, root:
+                          self.mutate_gate_capture(doc, root, "supported_teardown", mismatch))
+
+    def test_lifecycle_capture_rejects_wrong_observer(self) -> None:
+        def mismatch(capture):
+            capture["observer_type"] = "fixture_only"
+        with self.assertRaisesRegex(contract.ContractError, "observer_type is invalid"):
+            self.validate("S3", artifact_mutate=lambda doc, root:
+                          self.mutate_gate_capture(doc, root, "canonical_topology", mismatch))
+
+    def test_lifecycle_capture_is_a_separate_digest_bound_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            doc = base("S3")
+            doc["run"]["evidence_root"] = "."
+            write_gate_artifacts(doc, root)
+            reference = doc["lifecycle"]["placement"]["evidence"]
+            gate_path = root / reference["path"]
+            gate = json.loads(gate_path.read_text(encoding="utf-8"))
+            capture_ref = gate["observation_capture_evidence"]
+            self.assertNotEqual(capture_ref["path"], reference["path"])
+            self.assertTrue((root / capture_ref["path"]).is_file())
+
+    def test_soak_samples_require_separate_bound_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            doc = base("K-min")
+            doc["run"]["evidence_root"] = "."
+            write_gate_artifacts(doc, root)
+            samples = [json.loads(line) for line in doc.pop("_samples_bytes").decode().splitlines()]
+            samples[0].pop("observation_evidence")
+            raw = "".join(json.dumps(item, sort_keys=True) + "\n" for item in samples).encode()
+            (root / "samples.jsonl").write_bytes(raw)
+            doc["soak"]["samples"]["sha256"] = hashlib.sha256(raw).hexdigest()
+            attach_scale_baseline(doc, root)
+            write_soak_observations(doc, root)
+            with self.assertRaisesRegex(contract.ContractError, "evidence reference must be an object"):
+                contract.validate_run(doc, "K-min", root, SOURCE)
+
+    def test_soak_sample_cannot_diverge_from_bound_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            doc = base("K-min")
+            doc["run"]["evidence_root"] = "."
+            write_gate_artifacts(doc, root)
+            samples = [json.loads(line) for line in doc.pop("_samples_bytes").decode().splitlines()]
+            samples[0]["o3kd_fd_count"] = 2
+            raw = "".join(json.dumps(item, sort_keys=True) + "\n" for item in samples).encode()
+            (root / "samples.jsonl").write_bytes(raw)
+            doc["soak"]["samples"]["sha256"] = hashlib.sha256(raw).hexdigest()
+            attach_scale_baseline(doc, root)
+            write_soak_observations(doc, root)
+            with self.assertRaisesRegex(contract.ContractError, "does not match the soak sample"):
+                contract.validate_run(doc, "K-min", root, SOURCE)
+
     def test_missing_lifecycle_event_rejected(self) -> None:
         self.rejected("S3", lambda doc: doc["lifecycle"].update(postgres_restart="not_run"), "lifecycle gate")
 
@@ -619,9 +811,7 @@ class ContractTests(unittest.TestCase):
             samples = [json.loads(line) for line in doc.pop("_samples_bytes").decode().splitlines()]
             for index, sample in enumerate(samples):
                 sample["o3kd_fd_count"] = 10 + index * 10
-            raw = "".join(json.dumps(item, sort_keys=True) + "\n" for item in samples).encode()
-            (root / "samples.jsonl").write_bytes(raw)
-            doc["soak"]["samples"]["sha256"] = hashlib.sha256(raw).hexdigest()
+            persist_soak_samples(doc, root, samples)
             attach_scale_baseline(doc, root)
             write_soak_observations(doc, root)
             with self.assertRaisesRegex(contract.ContractError, "sustained resource growth o3kd_fd_count"):
@@ -658,9 +848,7 @@ class ContractTests(unittest.TestCase):
             write_gate_artifacts(doc, root)
             samples = [json.loads(line) for line in doc.pop("_samples_bytes").decode().splitlines()]
             samples[0]["compute_agents"].pop()
-            raw = "".join(json.dumps(item, sort_keys=True) + "\n" for item in samples).encode()
-            (root / "samples.jsonl").write_bytes(raw)
-            doc["soak"]["samples"]["sha256"] = hashlib.sha256(raw).hexdigest()
+            persist_soak_samples(doc, root, samples)
             attach_scale_baseline(doc, root)
             write_soak_observations(doc, root)
             with self.assertRaisesRegex(contract.ContractError, "must cover every eligible host"):
@@ -676,9 +864,7 @@ class ContractTests(unittest.TestCase):
             for index, sample in enumerate(samples):
                 for agent in sample["compute_agents"]:
                     agent["rss_bytes"] = index * 32 * 1024 * 1024
-            raw = "".join(json.dumps(item, sort_keys=True) + "\n" for item in samples).encode()
-            (root / "samples.jsonl").write_bytes(raw)
-            doc["soak"]["samples"]["sha256"] = hashlib.sha256(raw).hexdigest()
+            persist_soak_samples(doc, root, samples)
             attach_scale_baseline(doc, root)
             write_soak_observations(doc, root)
             with self.assertRaisesRegex(contract.ContractError, "sustained resource growth agent_rss_bytes"):

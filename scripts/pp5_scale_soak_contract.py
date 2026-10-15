@@ -26,6 +26,64 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAC_ADDRESS = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 SCALE_HOSTS = {"S3": 3, "S10": 10, "S20": 20}
 SOAKS = {"K-min": ("S10", 7200), "K-full": ("S20", 43200)}
+
+GATE_RESOURCE_CLASSES = {
+    "release_install": "release_artifact",
+    "control_plane_init": "control_plane",
+    "authenticated_joins": "capacity_topology",
+    "canonical_topology": "capacity_topology",
+    "placement": "compute_placement",
+    "capacity_change": "compute_capacity",
+    "drain": "building_block_lifecycle",
+    "placement_rejection": "compute_placement",
+    "resident_blocker": "building_block_lifecycle",
+    "remove": "building_block_lifecycle",
+    "replacement": "building_block_lifecycle",
+    "control_plane_restart": "control_plane_process",
+    "postgres_restart": "postgres_process",
+    "identity_reconstruction": "capacity_identity",
+    "projection_convergence": "capacity_projection",
+    "fabric_networking": "fabric_network",
+    "tenant_isolation": "tenant_network_security",
+    "mtu": "network_mtu",
+    "endpoint_lifecycle": "network_endpoint",
+    "agent_restart": "agent_process",
+    "durable_work_recovery": "durable_work",
+    "quota_allocation": "quota_allocation",
+    "supported_teardown": "owned_resources",
+    "owned_leaks_zero": "owned_resources",
+    "foreign_state_unchanged": "foreign_inventory",
+}
+GATE_OBSERVER_TYPES = {
+    "release_install": {"release_verifier"},
+    "control_plane_init": {"authenticated_api", "protected_runner_command"},
+    "authenticated_joins": {"authenticated_api", "capacity_api"},
+    "canonical_topology": {"capacity_api"},
+    "placement": {"authenticated_api", "capacity_api"},
+    "capacity_change": {"capacity_api"},
+    "drain": {"capacity_api"},
+    "placement_rejection": {"authenticated_api", "capacity_api"},
+    "resident_blocker": {"capacity_api", "authenticated_api"},
+    "remove": {"capacity_api"},
+    "replacement": {"capacity_api", "authenticated_api"},
+    "control_plane_restart": {"host_procfs_read_only", "authenticated_api"},
+    "postgres_restart": {"host_procfs_read_only", "postgresql_read_only"},
+    "identity_reconstruction": {"capacity_api"},
+    "projection_convergence": {"capacity_api", "authenticated_api"},
+    "fabric_networking": {"packet_probe"},
+    "tenant_isolation": {"packet_probe", "host_network_read_only"},
+    "mtu": {"packet_probe"},
+    "endpoint_lifecycle": {"authenticated_api", "provider_api"},
+    "agent_restart": {"host_procfs_read_only", "agent_api"},
+    "durable_work_recovery": {"durable_work_api", "authenticated_api"},
+    "quota_allocation": {"capacity_api", "authenticated_api"},
+    "supported_teardown": {"authenticated_api", "host_inventory_read_only"},
+    "owned_leaks_zero": {"host_inventory_read_only"},
+    "foreign_state_unchanged": {"host_inventory_read_only"},
+}
+SOAK_SAMPLE_OBSERVER_TYPES = {
+    "authenticated_api", "durable_work_api", "host_procfs_read_only", "postgresql_read_only",
+}
 LIFECYCLE_GATES = (
     "release_install", "control_plane_init", "authenticated_joins",
     "canonical_topology", "placement", "capacity_change", "drain",
@@ -138,6 +196,16 @@ def finite_number(value: Any, name: str, minimum: float = 0) -> float:
     return float(value)
 
 
+def strict_json_equal(left: Any, right: Any, name: str) -> bool:
+    """Compare JSON values without Python's bool/int equivalence (False == 0)."""
+    try:
+        left_json = json.dumps(left, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        right_json = json.dumps(right, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise ContractError(f"{name} must contain finite JSON values") from error
+    return left_json == right_json
+
+
 def artifact_path(root: pathlib.Path, value: Any, digest: Any, field: str) -> pathlib.Path:
     require(isinstance(value, str) and value, f"{field}.path must be non-empty")
     relative = pathlib.PurePosixPath(value)
@@ -186,6 +254,8 @@ def validate_bound_observation(
         ("source_tree", document["source"]["tree"]),
         ("harness_sha", document["harness"]["sha"]),
         ("harness_tree", document["harness"]["tree"]),
+        ("workflow_sha", document["run"]["workflow_sha"]),
+        ("database_identity", document["database"]["identity"]),
         ("tier", tier),
     ):
         require(artifact.get(key) == expected, f"{name} {key} differs from the campaign")
@@ -427,7 +497,8 @@ def validate_capture(row: dict[str, Any], name: str) -> None:
     require(isinstance(row.get("command_class"), str)
             and re.fullmatch(r"[a-z][a-z0-9_.-]{1,63}", row["command_class"]) is not None,
             f"{name}.command_class is invalid")
-    require(row.get("exit_code") == 0, f"{name}.exit_code must be zero")
+    require(is_int(row.get("exit_code")) and row["exit_code"] == 0,
+            f"{name}.exit_code must be integer zero")
     raw_output = row.get("raw_output")
     require(isinstance(raw_output, str) and raw_output, f"{name}.raw_output must be retained")
     require(hashlib.sha256(raw_output.encode("utf-8")).hexdigest() == row.get("raw_output_sha256"),
@@ -839,6 +910,33 @@ def validate_gate_observations(
         fact("foreign_mutations", 0)
 
 
+def validate_lifecycle_observation_capture(
+    artifact: dict[str, Any], gate: str, observations: dict[str, Any],
+    document: dict[str, Any], tier: str, root: pathlib.Path,
+) -> None:
+    """Require a separate retained capture for every lifecycle gate."""
+    name = f"lifecycle.{gate}.observation_capture_evidence"
+    capture = validate_bound_observation(
+        root, artifact.get("observation_capture_evidence"), name,
+        "o3k.pp5-lifecycle-observation.v1", document, tier)
+    require(capture.get("gate") == gate, f"{name} gate identity mismatch")
+    require(capture.get("resource_class") == GATE_RESOURCE_CLASSES.get(gate),
+            f"{name} resource_class is invalid")
+    require(capture.get("observer_type") in GATE_OBSERVER_TYPES.get(gate, set()),
+            f"{name} observer_type is invalid")
+    require(capture.get("command_class") == f"pp5_gate_{gate}", f"{name} command_class is invalid")
+    validate_capture(capture, name)
+    try:
+        captured_observations = json.loads(capture["raw_output"])
+    except json.JSONDecodeError as error:
+        raise ContractError(f"{name}.raw_output must be JSON observations") from error
+    require(isinstance(captured_observations, dict), f"{name}.raw_output must be an object")
+    summary = {key: value for key, value in observations.items() if not key.endswith("_evidence")}
+    require(strict_json_equal(capture.get("observed"), captured_observations, name) and
+            strict_json_equal(captured_observations, summary, name),
+            f"{name} does not match the lifecycle summary observations")
+
+
 def validate_lifecycle(document: dict[str, Any], root: pathlib.Path, expected_hosts: int) -> None:
     lifecycle = object_at(document, "lifecycle")
     missing = [field for field in LIFECYCLE_GATES
@@ -865,6 +963,8 @@ def validate_lifecycle(document: dict[str, Any], root: pathlib.Path, expected_ho
                 artifact.get("harness_tree") == document["harness"]["tree"],
                 f"lifecycle.{gate} evidence harness identity mismatch")
         require(artifact.get("tier") == document["tier"], f"lifecycle.{gate} evidence tier mismatch")
+        validate_lifecycle_observation_capture(
+            artifact, gate, observations, document, document["tier"], root)
         validate_gate_observations(gate, observations, initial_ids, final_ids, expected_hosts,
                                    document["release"], document["database"]["identity"],
                                    root, document, document["tier"])
@@ -911,6 +1011,40 @@ def read_jsonl(root: pathlib.Path, reference: Any, name: str) -> list[dict[str, 
         raise ContractError(f"{name} artifact is not valid JSONL") from error
     require(bool(rows), f"{name} artifact has no samples")
     return rows
+
+
+def validate_soak_sample_capture(
+    sample: dict[str, Any], index: int, root: pathlib.Path,
+    document: dict[str, Any], tier: str,
+) -> None:
+    name = f"soak.samples[{index}].observation_evidence"
+    capture = validate_bound_observation(
+        root, sample.get("observation_evidence"), name,
+        "o3k.pp5-soak-sample-observation.v1", document, tier)
+    require(capture.get("resource_class") == "soak_runtime_sample",
+            f"{name} resource_class is invalid")
+    observers = capture.get("observer_types")
+    require(isinstance(observers, list) and all(isinstance(observer, str) for observer in observers) and
+            len(observers) == len(set(observers)) and set(observers) == SOAK_SAMPLE_OBSERVER_TYPES,
+            f"{name} observer_types must cover the required independent sources")
+    require(capture.get("command_class") == "pp5_soak_sample",
+            f"{name} command_class is invalid")
+    require(is_int(capture.get("sample_index")) and capture.get("sample_index") == index,
+            f"{name} sample_index differs from the JSONL record")
+    capture_elapsed = finite_number(capture.get("elapsed_seconds"), f"{name}.elapsed_seconds")
+    sample_elapsed = finite_number(sample.get("elapsed_seconds"), f"{name}.sample.elapsed_seconds")
+    require(capture_elapsed == sample_elapsed and
+            capture.get("captured_at") == sample.get("timestamp"),
+            f"{name} timing differs from the JSONL record")
+    validate_capture(capture, name)
+    try:
+        observed = json.loads(capture["raw_output"])
+    except json.JSONDecodeError as error:
+        raise ContractError(f"{name}.raw_output must be JSON observations") from error
+    summary = {key: value for key, value in sample.items() if key != "observation_evidence"}
+    require(strict_json_equal(capture.get("observed"), observed, name) and
+            strict_json_equal(observed, summary, name),
+            f"{name} does not match the soak sample")
 
 
 def check_sustained_growth(samples: list[dict[str, Any]], key: str, absolute: int, fraction: float) -> dict[str, Any]:
@@ -986,6 +1120,7 @@ def validate_soak(
     previous = -1.0
     previous_counters: dict[str, int] = {}
     for index, sample in enumerate(samples):
+        validate_soak_sample_capture(sample, index, root, document, tier)
         for field in SOAK_SAMPLE_FIELDS:
             value = sample.get(field)
             if field == "elapsed_seconds":

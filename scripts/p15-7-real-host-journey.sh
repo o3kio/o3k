@@ -5,6 +5,15 @@ set -Eeuo pipefail
 # repository-owned driver performs real joins and fails closed on missing
 # evidence boundaries.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REQUESTED_PHASE="${O3K_P15_7_PHASE:-integrated}"
+case "$REQUESTED_PHASE" in
+  s3-scale|s10-scale|s20-scale|k-min|k-full)
+    # This older journey cannot produce the complete PP.5 scale/soak evidence.
+    # Enforce the policy before creating evidence roots or touching TestLab.
+    source "$ROOT_DIR/scripts/pp5-policy.sh"
+    pp5_deferred_lane "$REQUESTED_PHASE" || exit "$?"
+    ;;
+esac
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-$ROOT_DIR/target/real-host-workflow-artifacts}"
 EVIDENCE_FILE="${O3K_P15_7_EVIDENCE_FILE:-$ARTIFACT_DIR/p15-7-scale-composition-evidence.json}"
 RUN_ID="${GITHUB_RUN_ID:-local-$$}"
@@ -144,6 +153,7 @@ observe_protected_testlab_state() {
 }
 classify_failure() {
   case "${1:-}" in
+    *EVIDENCE_GAP*|*"evidence gap"*) echo evidence_gap ;;
     *harness*|*epoch*|*precondition*|*TestLab*marker*|*testlab*marker*|*journey\ agent*) echo harness_gap ;;
     # Match the most specific crash/repair terms before the generic
     # "source" pattern: the word "resource" contains the substring
@@ -210,6 +220,7 @@ source "$ROOT_DIR/scripts/p15-7-crash-evidence-state.sh"
 source "$ROOT_DIR/scripts/p15-7-workload-image-marker.sh"
 PP5_PHASE="${O3K_P15_7_PHASE:-integrated}"
 case "${PP5_PHASE}" in
+  k-min|k-full) die "unsupported PP.5 phase: ${PP5_PHASE}" ;;
   integrated|s5-scale|s3-scale|s10-scale|s20-scale|1035-crash-recovery|host-maintenance|s1-boundary|s2-boundary) ;;
   *) die "unsupported PP.5 phase: ${PP5_PHASE}" ;;
 esac

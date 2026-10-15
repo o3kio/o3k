@@ -54,52 +54,6 @@ IDENTITY="https://github.com/o3kio/o3k/.github/workflows/release.yml@refs/tags/$
 echo "verified keyless O3K release: $TAG ($IDENTITY)"
 
 if [[ -n "$REPORT_FILE" ]]; then
-  python3 - "$REPORT_FILE" "$VERSION_NO_V" "$TAG" "$COMMIT" "$TREE" "$IDENTITY" <<'PY'
-import json
-import os
-import pathlib
-import re
-import sys
-import tempfile
-
-path = pathlib.Path(sys.argv[1])
-version, tag, commit, tree, identity = sys.argv[2:]
-if not path.is_absolute() or path.exists() or path.is_symlink():
-    raise SystemExit("verification report path must be an unused absolute path")
-if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", version):
-    raise SystemExit("verified release version is malformed")
-for value in (commit, tree):
-    if not re.fullmatch(r"[0-9a-f]{40}", value):
-        raise SystemExit("verified source identity is malformed")
-report = {
-    "schema": "o3k.release-verification.v1",
-    "status": "passed",
-    "version": version,
-    "tag": tag,
-    "source_commit": commit,
-    "source_tree": tree,
-    "workflow_identity": identity,
-    "signature": "passed",
-    "transparency": "passed",
-}
-path.parent.mkdir(parents=True, exist_ok=True)
-fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-try:
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        json.dump(report, stream, sort_keys=True)
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    # A hard link creates the final name without replacing an unexpected file
-    # that raced the initial existence check.
-    os.link(temporary, path)
-    os.unlink(temporary)
-except BaseException:
-    try:
-        os.unlink(temporary)
-    except FileNotFoundError:
-        pass
-    raise
-PY
+  python3 "$ROOT_DIR/packaging/write_release_verification_report.py" \
+    "$REPORT_FILE" "$VERSION_NO_V" "$TAG" "$COMMIT" "$TREE"
 fi

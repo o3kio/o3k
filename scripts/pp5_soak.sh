@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/pp5-policy.sh"
+
 usage() {
   echo "usage: $0 --tier K-min|K-full --scale 10|20 --duration-seconds N --state-dir DIR --samples FILE --events FILE" >&2
   exit 2
@@ -32,4 +35,4 @@ done
 # evidence.  A repository-owned producer must own the PostgreSQL process,
 # supported API churn, resource sampling, and cleanup before this lane can run.
 # Exit before creating directories, truncating files, or changing TestLab state.
-fail 'native PP.5 soak producer is unavailable; no state or evidence was changed'
+pp5_deferred_lane "$tier" || exit "$?"

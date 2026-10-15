@@ -64,8 +64,12 @@ expected = {
     "source_commit": sys.argv[4],
     "source_tree": sys.argv[5],
     "workflow_identity": sys.argv[6],
-    "signature": "passed",
-    "transparency": "passed",
+    "checks": {
+        "provenance": "passed",
+        "signature": "passed",
+        "source_identity": "passed",
+        "transparency": "passed",
+    },
 }
 if report != expected:
     raise SystemExit("Sigstore verifier structured report does not match the requested release identity")
@@ -171,7 +175,9 @@ if verifier_report.get("schema") != "o3k.release-verification.v1" or verifier_re
 if (verifier_report.get("version") != version or verifier_report.get("tag") != f"v{version}"
         or verifier_report.get("source_commit") != source or verifier_report.get("source_tree") != source_tree
         or verifier_report.get("workflow_identity") != verified_identity
-        or verifier_report.get("signature") != "passed" or verifier_report.get("transparency") != "passed"):
+        or verifier_report.get("checks") != {
+            "provenance": "passed", "signature": "passed",
+            "source_identity": "passed", "transparency": "passed"}):
     raise SystemExit("release verifier structured report differs from the requested release")
 
 provenance_assets = provenance.get("assets")

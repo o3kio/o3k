@@ -17,14 +17,13 @@ chmod +x "$tmp/journey"
 for pair in S3:3 S10:10 S20:20; do
   tier="${pair%%:*}"
   hosts="${pair##*:}"
-  if output="$(env -i PATH="$PATH" O3K_PP5_SCALE_JOURNEY="$tmp/journey" \
+  status=0
+  output="$(env -i PATH="$PATH" O3K_PP5_SCALE_JOURNEY="$tmp/journey" \
     O3K_PP5_EVIDENCE_ROOT="$tmp/evidence-$tier" \
-    "$SCRIPT" --tier "$tier" --hosts "$hosts" 2>&1)"; then
-    echo "unsupported $tier producer unexpectedly passed" >&2
-    exit 1
-  fi
-  grep -Fq 'classification=EVIDENCE_GAP' <<<"$output"
-  grep -Fq 'no TestLab or evidence state was changed' <<<"$output"
+    "$SCRIPT" --tier "$tier" --hosts "$hosts" 2>&1)" || status=$?
+  [[ "$status" == 3 ]] || { echo "$tier did not stop at policy boundary (exit $status)" >&2; exit 1; }
+  grep -Fq 'status=DEFERRED_BY_POLICY' <<<"$output"
+  grep -Fq 'no campaign or evidence state was changed' <<<"$output"
   test ! -e "$tmp/evidence-$tier"
 done
 

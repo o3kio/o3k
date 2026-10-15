@@ -41,4 +41,23 @@ assert selection < bootstrap
 assert "unsupported PP.5 lane" in text[selection:bootstrap]
 PY
 
+
+POLICY="${ROOT_DIR}/scripts/pp5-policy.sh"
+test -x "${POLICY}"
+for script in "${ROOT_DIR}/scripts/pp5_scale_tier.sh" "${ROOT_DIR}/scripts/pp5_soak.sh"; do
+  grep -Fq 'pp5-policy.sh' "${script}"
+  grep -Fq 'pp5_deferred_lane' "${script}"
+done
+journey="${ROOT_DIR}/scripts/p15-7-real-host-journey.sh"
+python3 - "${journey}" <<'PY'
+import pathlib
+import sys
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+policy = text.index('pp5_deferred_lane "$REQUESTED_PHASE"')
+artifact_setup = text.index('ARTIFACT_DIR=')
+assert policy < artifact_setup, "legacy P15 scale/soak requests must defer before artifact setup"
+for lane in ("s3-scale", "s10-scale", "s20-scale", "k-min", "k-full"):
+    assert lane in text[:artifact_setup], f"legacy journey does not guard {lane} before setup"
+PY
+
 echo "PP.5 scale/soak workflow guards: PASS"
