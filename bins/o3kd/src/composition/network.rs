@@ -6690,9 +6690,11 @@ mod dispatcher_tests {
             Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?)
         };
         let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
-        let network =
-            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
-                .await?;
+        let network = o3k_network::NetworkService::open_for_test(
+            root.join("network"),
+            network_repository.clone(),
+        )
+        .await?;
         let historical = durable_removal_command(store.as_ref()).await?;
         let registry = Arc::new(o3k_compute_agent::NodeRegistry::default());
         registry
@@ -6898,9 +6900,11 @@ mod dispatcher_tests {
             Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?)
         };
         let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
-        let network =
-            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
-                .await?;
+        let network = o3k_network::NetworkService::open_for_test(
+            root.join("network"),
+            network_repository.clone(),
+        )
+        .await?;
         let historical = durable_removal_command(store.as_ref()).await?;
         let registry = Arc::new(o3k_compute_agent::NodeRegistry::default());
         registry
@@ -7232,22 +7236,17 @@ mod dispatcher_tests {
     #[tokio::test]
     async fn production_mtls_unknown_final_removal_is_not_superseded()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _postgres_test_guard = production_mtls_postgres_test_guard().await;
         let root = std::env::temp_dir().join(format!("o3kd-mtls-unknown-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root)?;
-        let store = if let Ok(database_url) = std::env::var("O3K_DATABASE_URL") {
-            o3k_store::conformance::assert_destructive_postgres_test_database(&database_url)
-                .map_err(|error| format!("unsafe recovery test database: {error}"))?;
-            let postgres = o3k_store::PostgresStore::connect(&database_url).await?;
-            postgres.clean_tables_for_testing().await?;
-            Arc::new(o3k_store::unified::O3kStore::Postgres(postgres))
-        } else {
-            Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?)
-        };
+        let sqlite_path = root.join("control-plane.sqlite");
+        let store =
+            Arc::new(o3k_store::unified::O3kStore::connect_sqlite_file(&sqlite_path).await?);
         let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
-        let network =
-            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
-                .await?;
+        let network = o3k_network::NetworkService::open_for_test(
+            root.join("network"),
+            network_repository.clone(),
+        )
+        .await?;
         let historical = durable_removal_command(store.as_ref()).await?;
         let command: o3k_network::NetworkPlanCommand =
             serde_json::from_slice(&historical.snapshot)?;
@@ -7328,6 +7327,22 @@ mod dispatcher_tests {
                 .await?
         );
 
+        // Restart the control-plane store after the provider has durably
+        // recorded UnknownOutcome. The agent journal and mTLS service remain
+        // alive, but all controller-side handles are rebuilt from the file.
+        drop(dispatcher);
+        drop(network_repository);
+        drop(network);
+        drop(store);
+        let store =
+            Arc::new(o3k_store::unified::O3kStore::connect_sqlite_file(&sqlite_path).await?);
+        let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
+        let network = o3k_network::NetworkService::open_for_test(
+            root.join("network"),
+            network_repository.clone(),
+        )
+        .await?;
+        let dispatcher = Arc::new(mtls_dispatcher(address, store.clone(), None));
         let dispatcher_trait: Arc<dyn o3k_network::NetworkPlanDispatcher> = dispatcher;
         let reconciler = FabricRealmReconciler {
             network,
@@ -7347,6 +7362,7 @@ mod dispatcher_tests {
         };
         recover_fabric_state(&reconciler, store.as_ref()).await;
         let after_recovery = store.get_network_plan_work(&historical.command_id).await?;
+        assert_eq!(after_recovery.command_id, historical.command_id);
         assert_eq!(
             after_recovery.state,
             o3k_store::NetworkPlanWorkState::UnknownOutcome
