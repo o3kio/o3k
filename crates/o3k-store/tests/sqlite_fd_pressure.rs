@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::{error::Error, fs::File, path::PathBuf, process::Command};
+use std::{error::Error, fs::File, path::PathBuf, time::Duration};
 
 use o3k_store::{
     DurableStore, OperationRecord, OperationState, ResourceRecord, StoreError, testkit,
@@ -55,7 +55,7 @@ async fn sqlite_store_recovers_after_child_file_descriptor_exhaustion() -> Resul
     store.insert_operation(&operation).await?;
     drop(store);
 
-    let status = Command::new("prlimit")
+    let mut child = tokio::process::Command::new("prlimit")
         .args(["--nofile=64:64", "--"])
         .arg(std::env::current_exe()?)
         .args([
@@ -66,7 +66,9 @@ async fn sqlite_store_recovers_after_child_file_descriptor_exhaustion() -> Resul
         .env(CHILD_ENV, "1")
         .env(DATABASE_ENV, &database)
         .env(OPERATION_ENV, operation.id.to_string())
-        .status()?;
+        .kill_on_drop(true)
+        .spawn()?;
+    let status = tokio::time::timeout(Duration::from_secs(30), child.wait()).await??;
     assert!(
         status.success(),
         "low-file-descriptor child failed: {status}"
