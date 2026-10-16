@@ -581,44 +581,62 @@ mod tests {
             "INSERT INTO work_leases VALUES ('invalid', 'active', 'epoch', 0, NOW() + INTERVAL '1 hour')",
             "INSERT INTO work_leases VALUES ('orphan', 'missing', 'old-epoch', 11, NOW() + INTERVAL '1 hour')",
         ] {
-            sqlx::query(statement)
-                .execute(&isolated_pool)
-                .await
-                .expect("seed PostgreSQL");
+            if let Err(error) = sqlx::query(statement).execute(&isolated_pool).await {
+                isolated_pool.close().await;
+                let _ = sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+                    .execute(&pool)
+                    .await;
+                pool.close().await;
+                panic!("seed PostgreSQL: {error}");
+            }
         }
         isolated_pool.close().await;
 
         let db = SqlxDoctorDb;
-        assert_eq!(
-            db.active_controller_sessions(Path::new("unused"), true, Some(&isolated_url))
+        let query_result = async {
+            let sessions = db
+                .active_controller_sessions(Path::new("unused"), true, Some(&isolated_url))
                 .await
-                .expect("active session query"),
-            1
-        );
-        let leases = db
-            .active_work_leases(Path::new("unused"), true, Some(&isolated_url))
-            .await
-            .expect("active lease query");
-        assert_eq!(leases.len(), 3);
-        assert_eq!(leases[0].work_key, "active");
-        assert_eq!(leases[0].fencing_token, 7);
-        assert!(leases[0].owner_session_active);
-        assert_eq!(leases[1].work_key, "invalid");
-        assert_eq!(leases[1].fencing_token, 0);
-        assert!(leases[1].owner_session_active);
-        assert_eq!(leases[2].work_key, "orphan");
-        assert!(!leases[2].owner_session_active);
+                .map_err(|error| format!("active session query: {error}"))?;
+            if sessions != 1 {
+                return Err(format!("expected one active session, got {sessions}"));
+            }
+            let leases = db
+                .active_work_leases(Path::new("unused"), true, Some(&isolated_url))
+                .await
+                .map_err(|error| format!("active lease query: {error}"))?;
+            let expected = [
+                ("active", 7, true),
+                ("invalid", 0, true),
+                ("orphan", 11, false),
+            ];
+            if leases.len() != expected.len()
+                || leases
+                    .iter()
+                    .zip(expected)
+                    .any(|(lease, (key, token, owner_active))| {
+                        lease.work_key != key
+                            || lease.fencing_token != token
+                            || lease.owner_session_active != owner_active
+                    })
+            {
+                return Err(format!("unexpected lease projection: {leases:?}"));
+            }
+            Ok(())
+        }
+        .await;
 
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        let cleanup_result = sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
             .execute(&pool)
-            .await
-            .expect("drop isolated schema");
+            .await;
         pool.close().await;
+        assert!(cleanup_result.is_ok(), "isolated schema cleanup failed");
         let error = db
             .active_controller_sessions(Path::new("unused"), true, Some(&isolated_url))
             .await
             .expect_err("missing schema must fail");
         assert!(error.contains("query failed"));
         assert!(!error.contains("://"));
+        query_result.expect("PostgreSQL coordination projection");
     }
 }
