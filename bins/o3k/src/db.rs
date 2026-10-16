@@ -73,6 +73,13 @@ pub struct WorkLeaseRow {
     pub owner_session_active: bool,
 }
 
+/// Successful and failed rows recorded in PostgreSQL `_sqlx_migrations`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MigrationCounts {
+    pub applied: u64,
+    pub failed: u64,
+}
+
 /// Maximum number of leases doctor will materialize for one bounded report.
 /// The query fetches one additional row so an overflow fails closed instead
 /// of making a truncated prefix appear healthy.
@@ -118,6 +125,26 @@ impl SqlxDoctorDb {
         pool.acquire()
             .await
             .map_err(|error| sanitize_error(&format!("database is not readable: {error}")))
+    }
+
+    /// A READ ONLY transaction with a bounded statement timeout, so doctor
+    /// can neither write nor hold the store for long.
+    async fn postgres_read_only(
+        connection: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    ) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, String> {
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| "PostgreSQL store is unavailable".to_owned())?;
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| "PostgreSQL store is unavailable".to_owned())?;
+        sqlx::query("SET LOCAL statement_timeout = 10000")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| "PostgreSQL store is unavailable".to_owned())?;
+        Ok(transaction)
     }
 
     async fn postgres_connection(
@@ -308,6 +335,32 @@ impl DoctorDb for SqlxDoctorDb {
                 status: row.get("status"),
             })
             .collect())
+    }
+
+    async fn postgres_reachable(&self, url: &str) -> Result<(), String> {
+        let mut connection = Self::postgres_connection(url).await?;
+        let mut transaction = Self::postgres_read_only(&mut connection).await?;
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| "PostgreSQL store is unavailable".to_owned())?;
+        Ok(())
+    }
+
+    async fn postgres_migration_counts(&self, url: &str) -> Result<MigrationCounts, String> {
+        let mut connection = Self::postgres_connection(url).await?;
+        let mut transaction = Self::postgres_read_only(&mut connection).await?;
+        let (applied, failed) = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT COUNT(*) FILTER (WHERE success), COUNT(*) FILTER (WHERE NOT success) \
+             FROM _sqlx_migrations",
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| "PostgreSQL migration state query failed".to_owned())?;
+        Ok(MigrationCounts {
+            applied: u64::try_from(applied).unwrap_or(0),
+            failed: u64::try_from(failed).unwrap_or(0),
+        })
     }
 
     async fn active_controller_sessions(
@@ -532,6 +585,129 @@ mod tests {
     /// Run explicitly against a disposable database with:
     /// `O3K_DOCTOR_POSTGRES_URL=postgres://.../o3k_doctor_test cargo test -p o3k
     /// --lib db::tests::postgres_coordination_queries -- --ignored --nocapture`.
+    /// Store-health queries behind `database.accessible` and
+    /// `database.integrity` on PostgreSQL, against sqlx's real
+    /// `_sqlx_migrations` layout in an isolated schema.
+    #[tokio::test]
+    #[ignore = "requires an explicitly provisioned disposable PostgreSQL database"]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn postgres_store_health_queries() -> Result<(), String> {
+        let url = std::env::var("O3K_DOCTOR_POSTGRES_URL")
+            .expect("O3K_DOCTOR_POSTGRES_URL is required for this ignored test");
+        let options = url
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("valid PostgreSQL URL");
+        assert!(
+            options
+                .get_database()
+                .unwrap_or_default()
+                .contains("o3k_doctor"),
+            "refusing PostgreSQL database without o3k_doctor marker"
+        );
+        let schema = format!(
+            "o3k_doctor_health_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect to disposable PostgreSQL");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&pool)
+            .await
+            .expect("create isolated schema");
+        let isolated_url = if url.contains('?') {
+            format!("{url}&options=-csearch_path%3D{schema}")
+        } else {
+            format!("{url}?options=-csearch_path%3D{schema}")
+        };
+        let db = SqlxDoctorDb;
+        let result = async {
+            db.postgres_reachable(&isolated_url)
+                .await
+                .map_err(|error| format!("reachable: {error}"))?;
+            let missing = db
+                .postgres_migration_counts(&isolated_url)
+                .await
+                .expect_err("a schema without _sqlx_migrations must fail");
+            if missing.contains("://") {
+                return Err("missing migration table error was not sanitized".to_owned());
+            }
+            let table = format!("{schema}._sqlx_migrations");
+            for statement in [
+                format!(
+                    "CREATE TABLE {table} (version BIGINT PRIMARY KEY, description TEXT NOT NULL, \
+                     installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, \
+                     checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)"
+                ),
+                format!(
+                    "INSERT INTO {table} (version, description, success, checksum, execution_time) \
+                     VALUES (1, 'one', TRUE, decode('00', 'hex'), 1), \
+                     (2, 'two', TRUE, decode('00', 'hex'), 1)"
+                ),
+            ] {
+                sqlx::query(&statement)
+                    .execute(&pool)
+                    .await
+                    .map_err(|error| format!("seed: {error}"))?;
+            }
+            let counts = db
+                .postgres_migration_counts(&isolated_url)
+                .await
+                .map_err(|error| format!("migration counts: {error}"))?;
+            if counts
+                != (MigrationCounts {
+                    applied: 2,
+                    failed: 0,
+                })
+            {
+                return Err(format!("unexpected clean counts: {counts:?}"));
+            }
+            sqlx::query(&format!(
+                "INSERT INTO {table} (version, description, success, checksum, execution_time) \
+                 VALUES (3, 'three', FALSE, decode('00', 'hex'), 1)"
+            ))
+            .execute(&pool)
+            .await
+            .map_err(|error| format!("seed failed migration: {error}"))?;
+            let counts = db
+                .postgres_migration_counts(&isolated_url)
+                .await
+                .map_err(|error| format!("migration counts: {error}"))?;
+            if counts
+                != (MigrationCounts {
+                    applied: 2,
+                    failed: 1,
+                })
+            {
+                return Err(format!("unexpected counts with a failed row: {counts:?}"));
+            }
+            Ok(())
+        }
+        .await;
+        let cleanup = sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await;
+        pool.close().await;
+        cleanup.map_err(|_| "isolated schema cleanup failed".to_owned())?;
+
+        // An address with nothing listening must be reported as unavailable,
+        // without echoing the URL.
+        let unreachable = db
+            .postgres_reachable("postgres://o3k:doctor-secret@127.0.0.1:1/o3k_doctor_none")
+            .await
+            .expect_err("nothing listens on port 1");
+        if unreachable.contains("doctor-secret") || unreachable.contains("://") {
+            return Err(format!("unreachable error leaked the URL: {unreachable}"));
+        }
+        result
+    }
+
     /// The marker in the database name prevents accidental use of a real cloud DB.
     #[tokio::test]
     #[ignore = "requires an explicitly provisioned disposable PostgreSQL database"]

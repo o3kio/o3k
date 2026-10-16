@@ -7,7 +7,8 @@
 
 use crate::context::{DoctorDb, Exec, HttpClient, HttpResponse, UnitState};
 use crate::db::{
-    AllocationRow, EpochRow, InstanceRow, InventoryRow, PortRow, ProviderRow, WorkLeaseRow,
+    AllocationRow, EpochRow, InstanceRow, InventoryRow, MigrationCounts, PortRow, ProviderRow,
+    WorkLeaseRow,
 };
 use async_trait::async_trait;
 use std::collections::BTreeMap;
@@ -440,6 +441,8 @@ pub struct FakeDb {
     pub work_leases: Result<Vec<WorkLeaseRow>, String>,
     /// When set, every row read below fails with this backend error text.
     pub read_error: Option<String>,
+    pub postgres_reachable: Result<(), String>,
+    pub postgres_migrations: Result<MigrationCounts, String>,
 }
 
 impl Default for FakeDb {
@@ -456,6 +459,11 @@ impl Default for FakeDb {
             active_sessions: Ok(1),
             work_leases: Ok(Vec::new()),
             read_error: None,
+            postgres_reachable: Ok(()),
+            postgres_migrations: Ok(MigrationCounts {
+                applied: 1,
+                failed: 0,
+            }),
         }
     }
 }
@@ -530,6 +538,11 @@ impl FakeDb {
             active_sessions: Ok(1),
             work_leases: Ok(Vec::new()),
             read_error: None,
+            postgres_reachable: Ok(()),
+            postgres_migrations: Ok(MigrationCounts {
+                applied: 1,
+                failed: 0,
+            }),
         }
     }
 }
@@ -584,6 +597,14 @@ impl DoctorDb for FakeDb {
             return Err(error.clone());
         }
         Ok(self.ports.clone())
+    }
+
+    async fn postgres_reachable(&self, _url: &str) -> Result<(), String> {
+        self.postgres_reachable.clone()
+    }
+
+    async fn postgres_migration_counts(&self, _url: &str) -> Result<MigrationCounts, String> {
+        self.postgres_migrations.clone()
     }
 
     async fn active_controller_sessions(

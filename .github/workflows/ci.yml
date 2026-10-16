@@ -352,10 +352,10 @@ jobs:
           O3K_DATABASE_URL: postgres://o3k:password@127.0.0.1:5432/o3k_endpoint_test_ci
           O3K_TEST_DATABASE_PURPOSE: endpoint
         run: cargo test -p o3kd --all-features --lib pp4_endpoint_lifecycle -- --ignored --nocapture
-      - name: O3K doctor PostgreSQL coordination authority (mandatory)
+      - name: O3K doctor PostgreSQL coordination authority and store health (mandatory)
         env:
           O3K_DOCTOR_POSTGRES_URL: postgres://o3k:password@127.0.0.1:5432/o3k_doctor_test_ci
-        run: cargo test -p o3k --lib db::tests::postgres_coordination_queries -- --ignored --nocapture
+        run: cargo test -p o3k --lib db::tests::postgres_ -- --ignored --nocapture
       - name: P12.7 cross-process native replay conformance (mandatory)
         # Independently-spawned runtimes share only the durable store, so the
         # canonical replay authority is proven durable rather than process-local.
