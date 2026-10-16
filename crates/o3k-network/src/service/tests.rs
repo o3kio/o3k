@@ -1930,6 +1930,114 @@ async fn invalid_cidr_exhaustion_and_project_isolation_are_enforced()
 }
 
 #[tokio::test]
+async fn exhausted_network_pool_preserves_state_and_allows_retry_after_release()
+-> Result<(), Box<dyn std::error::Error>> {
+    use o3k_store::QuotaRepository;
+
+    let path = root("pool-exhaustion-retry");
+    let _ = fs::remove_dir_all(&path);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open_for_test(&path, store.clone()).await?;
+    let project_auth = auth("project-pool-pressure");
+    let quota_scope =
+        OwnershipScope::project(ScopeId::new_unchecked("project-pool-pressure"), None, None);
+    let network = service
+        .create_network(&project_auth, "small-pool".to_owned())
+        .await?;
+    let subnet = service
+        .create_subnet(
+            &project_auth,
+            network.id,
+            "single-address".to_owned(),
+            "192.0.2.0/30".to_owned(),
+            None,
+            Some(Ipv4Addr::new(192, 0, 2, 2)),
+            Some(Ipv4Addr::new(192, 0, 2, 2)),
+        )
+        .await?;
+    let original = service
+        .create_port(&project_auth, network.id, "original".to_owned())
+        .await?;
+    let ports_before = service.list_ports(&project_auth).await?;
+    let canonical_before = service
+        .list_canonical_endpoints(&project_auth, subnet.id)
+        .await?;
+    let quota_before = store
+        .get_usage(&quota_scope, &LimitKey::network_ports())
+        .await?
+        .in_use;
+    assert_eq!(ports_before.len(), 1);
+    assert_eq!(canonical_before.len(), 1);
+    assert_eq!(quota_before, 1);
+
+    for name in ["exhausted-first", "exhausted-retry"] {
+        assert!(matches!(
+            service
+                .create_port(&project_auth, network.id, name.to_owned())
+                .await,
+            Err(NetworkError::PoolExhausted)
+        ));
+        assert_eq!(
+            service.list_ports(&project_auth).await?,
+            ports_before,
+            "failed allocation must leave the project's port projection unchanged"
+        );
+        assert_eq!(
+            service
+                .list_canonical_endpoints(&project_auth, subnet.id)
+                .await?,
+            canonical_before,
+            "failed allocation must leave canonical endpoint state unchanged"
+        );
+        assert_eq!(
+            store
+                .get_usage(&quota_scope, &LimitKey::network_ports())
+                .await?
+                .in_use,
+            quota_before,
+            "failed allocation must release its quota reservation"
+        );
+    }
+
+    service.delete_port(&project_auth, original.id).await?;
+    assert!(
+        service
+            .list_canonical_endpoints(&project_auth, subnet.id)
+            .await?
+            .is_empty(),
+        "deleting the owned port must remove its canonical endpoint"
+    );
+    assert_eq!(
+        store
+            .get_usage(&quota_scope, &LimitKey::network_ports())
+            .await?
+            .in_use,
+        0,
+        "deleting the owned port must release its quota"
+    );
+    let replacement = service
+        .create_port(&project_auth, network.id, "replacement".to_owned())
+        .await?;
+    assert_eq!(replacement.fixed_ip, original.fixed_ip);
+    assert_eq!(service.list_ports(&project_auth).await?.len(), 1);
+    let canonical_after_retry = service
+        .list_canonical_endpoints(&project_auth, subnet.id)
+        .await?;
+    assert_eq!(canonical_after_retry.len(), 1);
+    assert_eq!(canonical_after_retry[0].id, replacement.id);
+    assert_eq!(
+        store
+            .get_usage(&quota_scope, &LimitKey::network_ports())
+            .await?
+            .in_use,
+        1
+    );
+
+    fs::remove_dir_all(path)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn network_quota_enforcement_and_isolation() -> Result<(), Box<dyn std::error::Error>> {
     use o3k_store::QuotaRepository;
 
