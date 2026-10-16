@@ -17,10 +17,10 @@ Signal sources:
 | --- | --- | --- | --- |
 | API surface | `services` lifecycle status (SPEC-0045 §5) | `control.healthz`, `control.readyz` (JSON `status` parsed), `cloud.api_discovery` | No request latency or error-rate signal: `o3kd` has no `/metrics` surface (ADR-0182 E2D-11). |
 | Operations / reconciliation | Not projected: Operation/Audit correlation is a SPEC-0045 §9 non-goal | `controller.work_fencing` (work leases and fencing tokens) | No operation backlog, reconciliation lag or failure-rate signal. The durable Audit path (SPEC-0042) remains the correlation channel. |
-| Store / backend | `summary.control_plane` from active `controller_sessions` leases | SQLite: `database.accessible`, `database.integrity` (`quick_check`), `database.wal_mode`, `database.permissions`. PostgreSQL: `database.accessible` (read-only `SELECT 1`), `database.integrity` (no failed `_sqlx_migrations` rows), `database.permissions`; `controller.session` and `controller.work_fencing` read both backends. | On PostgreSQL, `compute.*` placement checks and `cloud.testvm_status` are not applicable: they read the SQLite file only. |
+| Store / backend | `summary.control_plane` from active `controller_sessions` leases | SQLite: `database.accessible`, `database.integrity` (`quick_check`), `database.wal_mode`, `database.permissions`. PostgreSQL: `database.accessible` (read-only `SELECT 1`), `database.integrity` (no failed `_sqlx_migrations` rows), `database.permissions`; `controller.session` and `controller.work_fencing` read both backends. | On PostgreSQL, `compute.agent_epoch`, `compute.agent_capabilities`, `compute.placement_consistent` and `cloud.testvm_status` are not applicable: they read the SQLite file only. |
 | Placement | `providers` (availability and capacity per provider), `capacity` (aggregate dimensions) | `compute.placement_consistent`, `compute.agent_capabilities` (SQLite only) | No Placement signal from doctor on PostgreSQL. |
 | Topology / BuildingBlocks | `summary.locations` (configured regions and availability domains) | None | No BuildingBlock signal in either source. |
-| Agents | `providers` availability and observation time (`AgentNodeRegistry`) | `compute.agent_registered`, `compute.agent_epoch`, `services.compute_unit`, `libvirt.*`, `security.tls_identity`; `o3k-compute` serves its own `/metrics` | None beyond the metrics gap above. |
+| Agents | `providers` availability and observation time (`AgentNodeRegistry`) | `compute.agent_registered`, `compute.agent_epoch` (SQLite only), `services.compute_unit`, `libvirt.*`, `security.tls_identity`; `o3k-compute` serves its own `/metrics` | On PostgreSQL, doctor has no agent-epoch signal. |
 | Upgrade | None | `release.version`, `release.binary_set_consistent`, `release.binary_hashes`, `release.ownership_manifest`, `release.upgrade_state`, `release.backup_available` | `release.backup_available` covers the local upgrade rollback backup only, not PP.6 backup/restore. |
 | Backup / restore | None | None | Gated: ADR-0189/SPEC-0050 are Proposed and #1084–#1086 have no implementation. |
 | PKI | None | `security.tls_identity` (mounted identity and fingerprint) | Renewal, expiry, revocation and replacement state are gated on #1087. |
@@ -31,7 +31,7 @@ Signal sources:
 - **Diagnostics:** errors carry only bounded categories and the caller's
   request ID (#1130).
 - **Doctor database checks:** driver text is withheld for the `database.*`
-  checks (#1101) and for every canonical row read, plus PostgreSQL
+  checks (#1130) and for every canonical row read, plus PostgreSQL
   reachability and migration queries (`pp6/decision-followups` branch).
 - **`o3kd` configuration errors:** never echo a positional argument
   (`pp6/decision-followups` branch).

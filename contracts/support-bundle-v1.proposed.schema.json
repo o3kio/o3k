@@ -13,8 +13,10 @@
     "source_payload_status_agreement",
     "truncation_requires_partial_source",
     "complete_requires_complete_source",
+    "generated_at_equals_started_at",
     "timestamps_within_collection_interval",
-    "serialized_utf8_size_bounds"
+    "serialized_utf8_size_bounds",
+    "safe_identity_revalidation_of_imported_diagnostics"
   ],
   "type": "object",
   "additionalProperties": false,
@@ -112,7 +114,7 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         {
-          "pattern": "^release:[A-Za-z0-9._-]+@[0-9a-f]{40,64}$"
+          "pattern": "^release:[A-Za-z0-9._-]+@(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         }
       ]
     },

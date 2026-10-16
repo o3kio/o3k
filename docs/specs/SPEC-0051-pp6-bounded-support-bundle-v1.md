@@ -86,7 +86,7 @@ Its top-level fields are:
 | --- | --- |
 | `schema_version` | Constant `v1`. |
 | `generated_at` | RFC3339 time at which collection began. |
-| `source` | Immutable source provenance: a 40/64-character commit digest or `release:<name>@<40/64-character digest>`. This is informational binding for evidence; transport acceptance does not itself verify the digest. |
+| `source` | Object whose `identity` is the immutable source provenance: a 40- or 64-character commit digest, or `release:<name>@<40- or 64-character digest>`. This is informational binding for evidence; transport acceptance does not itself verify the digest. |
 | `profile` | Bounded product/deployment profile identifier. |
 | `backend` | Backend kind (`sqlite` or `postgresql`) and safe server-version label, if known. |
 | `diagnostics` | Existing SPEC-0045 v1 projections, or `null` when unavailable/not configured. |
@@ -143,9 +143,12 @@ The following invariants are mandatory and machine-checkable:
   false` requires `omitted_count: 0`;
 - `collection.disposition: complete` requires the source to be `complete`;
   any other source status requires `partial`;
-- `completed_at` is greater than or equal to `started_at`, and every
-  `observed_at` lies within the collection interval unless the source marks
-  it `null`;
+- `generated_at` equals `collection.started_at`;
+- `collection.completed_at` is greater than or equal to
+  `collection.started_at`, and every `collection.sources[].observed_at` lies
+  within the collection interval unless it is `null`. Observation times
+  imported from the diagnostics projection keep their own freshness
+  semantics and may predate the collection;
 - serialized UTF-8 response size is at most 256 KiB, and the diagnostics
   source payload is at most 64 KiB;
 - the response has no cursor or caller-supplied filter fields.
@@ -227,6 +230,9 @@ The human architecture/security reviewer must explicitly accept:
   that classification;
 - deferring Audit and Operation evidence to a later version (§6), and the
   truncation semantics in §3;
+- how backend server versions are normalized into the `safe_version`
+  label (for example PostgreSQL's `16.4 (Debian 16.4-1.pgdg120+2)`, whose
+  parentheses the label grammar rejects);
 - whether source/profile/backend identity may include a release version and
   safe PostgreSQL server-version label.
 
