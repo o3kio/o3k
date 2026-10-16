@@ -91,7 +91,7 @@ impl Cluster {
                     cluster.port
                 );
                 loop {
-                    if let Ok(mut connection) = PgConnection::connect(&admin_url).await {
+                    if let Ok(connection) = PgConnection::connect(&admin_url).await {
                         connection.close().await?;
                         break;
                     }
