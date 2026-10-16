@@ -68,7 +68,7 @@ fn auth_context(scope_id: &str, scope_kind: ScopeKind, roles: &[&str]) -> AuthCo
         1,
         2,
         "audit-test",
-        "request-test",
+        ISSUER_REQUEST_ID,
         None,
     )
 }
@@ -151,8 +151,13 @@ impl DiagnosticsReader for FakeDiagnosticsReader {
     }
 }
 
-/// Correlation ID sent on every test request; handlers must echo it.
-const REQUEST_ID: &str = "pp6-diagnostics-correlation";
+/// Request ID baked into the TestIssuer's AuthContext.
+const ISSUER_REQUEST_ID: &str = "request-test";
+
+/// Correlation ID sent as `x-request-id` on every test request; handlers must
+/// echo it. It must differ from `ISSUER_REQUEST_ID` so correlation assertions
+/// prove the header value is propagated rather than the issuer default.
+const REQUEST_ID: &str = "pp6-query-correlation";
 
 fn router() -> Result<axum::Router, Box<dyn std::error::Error>> {
     router_with_diagnostics_reader(Some(Arc::new(FakeDiagnosticsReader)))
@@ -354,6 +359,7 @@ async fn unavailable_diagnostics_authority_returns_request_correlation_without_d
 
 #[tokio::test]
 async fn native_diagnostics_query_errors_are_correlated_and_redacted() -> TestResult {
+    assert_ne!(REQUEST_ID, ISSUER_REQUEST_ID);
     // `eA` is the unpadded URL-safe encoding of one ASCII `x` byte.
     let oversized_cursor = "eA".repeat(513);
     for endpoint in [
@@ -383,6 +389,7 @@ async fn native_diagnostics_query_errors_are_correlated_and_redacted() -> TestRe
 
 #[tokio::test]
 async fn native_diagnostics_malformed_limit_is_authorized_before_validation() -> TestResult {
+    assert_ne!(REQUEST_ID, ISSUER_REQUEST_ID);
     for (endpoint, code) in [
         (
             "/o3k/v1/operator/diagnostics/services?limit=abc",
