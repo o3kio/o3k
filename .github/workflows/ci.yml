@@ -245,7 +245,7 @@ jobs:
       - name: Validate PP.6 PostgreSQL server pressure evidence
         run: |
           set -euo pipefail
-          jq -e '.schema == "o3k.pp6.postgres-server-pressure.v1" and .profile == "o3k-small-edge-v1" and (.schema_migration_identity | startswith("o3k-store-sqlx-migrations:")) and (.source_head | length == 40) and (.source_tree | length == 40) and (.execution_head | length == 40) and (.execution_tree | length == 40) and .observed_sqlstate == "53300" and .cleanup == "passed" and .foreign_state == "preserved_no_foreign_resources_touched" and .artifact_secret_scan.status == "passed" and .disposition == "PASS" and .canonical_retry == "passed"' "$O3K_PP6_PG_EVIDENCE_PATH"
+          jq -e '.schema == "o3k.pp6.postgres-server-pressure.v1" and .profile == "o3k-small-edge-v1" and (.schema_migration_identity | startswith("o3k-store-sqlx-migrations:")) and (.source_head | length == 40) and (.source_tree | length == 40) and (.execution_head | length == 40) and (.execution_tree | length == 40) and .held_session_count == 5 and .raw_admission_attempts == 1 and .store_admission_attempts == 1 and .raw_admission_timeout_seconds == 5 and .store_admission_timeout_seconds == 5 and .recovery_timeout_seconds == 15 and .observed_sqlstate == "53300" and .cleanup == "passed" and .foreign_state == "preserved_no_foreign_resources_touched" and .artifact_secret_scan.status == "passed" and .disposition == "PASS" and .canonical_retry == "passed"' "$O3K_PP6_PG_EVIDENCE_PATH"
       - name: Upload PP.6 PostgreSQL server pressure evidence
         if: ${{ success() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
