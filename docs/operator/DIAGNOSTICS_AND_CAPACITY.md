@@ -17,6 +17,16 @@ unauthorized caller cannot learn deployment configuration. A configured reader
 failure returns a bounded Problem Details response with a request correlation
 identifier.
 
+Successful diagnostics responses do not carry a request identifier. Send your
+own `X-Request-Id` header on every diagnostics request and record it with the
+response. The value must be 1-128 characters of ASCII letters, digits, `.`,
+`_`, `:`, or `-`; any other value is ignored and the server generates its own
+identifier. Authentication failures, `403` authorization denials, and
+configured-reader failures (`503` unavailable, `500` corrupt) echo the
+identifier as `request_id` in the Problem Details body. Invalid `limit` or
+`cursor` (`400`) and the `503` returned when no diagnostics reader is
+configured do not include it, so keep your own record.
+
 Use the native API prefix:
 
 | Method and path | Use |
@@ -88,8 +98,9 @@ stale; partial provider failure is degraded.
 
 1. Confirm the request uses a System-scoped operator identity. A `403` is an
    authorization or scope problem; do not infer backend health from it.
-2. Read the summary and record its request identifier, evaluated timestamp,
-   aggregate status, control-plane status, and service/provider counts.
+2. Read the summary and record the `X-Request-Id` you sent, the evaluated
+   timestamp, aggregate status, control-plane status, and service/provider
+   counts.
 3. Read the services page with a bounded limit. Check lifecycle state, status,
    observed time, controller readiness, protocol compatibility, and reason.
 4. Read the providers page with a bounded limit. Check provider status,
@@ -101,8 +112,9 @@ stale; partial provider failure is degraded.
 6. If the source is stale or unknown, check the agent/controller heartbeat and
    restart/reconnect path, then query again after a fresh observation. Do not
    retry a mutation merely because a diagnostic read was stale.
-7. If the source is unavailable or corrupt, preserve the response request ID
-   and use the canonical service, operation, audit, store, and reconciliation
+7. If the source is unavailable or corrupt, preserve the `request_id` from the
+   error response (it echoes your `X-Request-Id` when one was accepted) and
+   use the canonical service, operation, audit, store, and reconciliation
    diagnostics appropriate to the owning subsystem. A diagnostics HTTP 500
    means the durable diagnostic/capacity state was corrupt; it is not proof
    that a provider mutation occurred.
