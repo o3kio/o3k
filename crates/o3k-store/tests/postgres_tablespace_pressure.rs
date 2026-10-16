@@ -41,17 +41,17 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
         .fetch_one(&mut admin)
         .await
         .expect("server version");
-    let migration_version: Option<i64> =
-        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success = true")
-            .fetch_one(&mut admin)
-            .await
-            .expect("migration identity");
     let ts = format!("o3k_pressure_{}", Uuid::now_v7().simple());
     let filler = format!("o3k_pressure_filler_{}", Uuid::now_v7().simple());
     let ident = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     let store = PostgresStore::connect(&url)
         .await
         .expect("store and migrations");
+    let migration_version: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success = true")
+            .fetch_one(&mut admin)
+            .await
+            .expect("migration identity");
     sqlx::query(&format!(
         "CREATE TABLESPACE {} LOCATION '{}'",
         ident(&ts),
