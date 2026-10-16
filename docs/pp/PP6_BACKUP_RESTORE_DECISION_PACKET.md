@@ -70,6 +70,35 @@ cryptographic, key recovery, lease/fencing, numeric-limit, PostgreSQL privilege,
 or recovery transition detail is still open. A PR merge or approval without
 this decision record does not satisfy #1084–#1087's architecture/security gate.
 
+## Required decision worksheet
+
+The following is the minimum machine-checkable content of the human review
+record. The values in the right column are the packet's preferred bounded
+defaults; they are recommendations until a named architecture and security
+approver records accept, amend, or reject them. A blank, `TBD`, or generic
+provider name does not satisfy the gate.
+
+| Decision | Record these exact fields | Preferred value to accept or amend |
+| --- | --- | --- |
+| D1 | Envelope version; canonicalization; cipher; nonce size/source; AAD fields; signature algorithm/domain; cleartext fields; duplicate-key/nonce rule | `v1`; RFC 8785; AES-256-GCM; 96-bit CSPRNG nonce per member; member name/length/format-context AAD; Ed25519 over domain-separated canonical manifest plus ciphertext digests; only format/algorithm/key references/member metadata clear; reject duplicate keys/nonces |
+| D2 | Named KMS/HSM/provider; wrapping and signing APIs; three key IDs; verification trust-root distribution; recovery authority/quorum; rotation overlap/retention; outage disposition | External operator-managed KMS/HSM; separate content-wrap, artifact-sign, journal-sign keys; provider-side signing; two-person break-glass; new trust accepted before use; old decrypt/verify keys retained for all retained artifacts; unavailable provider blocks backup/restore |
+| D3 | Issuer continuity/replacement choice; recovery authority; agent re-enrollment proof; revocation retention; old-credential disposition | Replace controller issuer after restore; fresh trust ceremony; all agents re-enroll; durable revocations retained; old credentials rejected; no private agent or issuer key export |
+| D4–D5 | Admission/drain states; barrier owner/epoch; generation token; operation classes; unknown handling; release/resume transition | API writes closed; reconciliation/provider dispatch paused; eligible work drained; unresolved work recorded as `recorded_unknown`; same owner/epoch retained; barrier change discards staging; resume only after commit or safe abort |
+| D6 | Stable/regenerated identity map with table/column or artifact-member references | Preserve site ID, resource IDs, scopes, provider mappings, bootstrap principal, audit and revocations; regenerate controller sessions, leases, controller credentials and host-local agent credentials |
+| D7 | Trusted fencing actor per profile; evidence source; source-unreachable disposition; target ownership proof | Trusted operator plus independent power/network isolation evidence for SQLite; independently administered host/power/network fence and fresh DB ownership epoch for PostgreSQL; unreachable source leaves target inactive |
+| D8 | Journal directory/filesystem; owner/mode; lock primitive; fsync/rename guarantees; journal signature trust root; stale-lock authority; phase transition table | Dedicated owner-only recovery directory on an approved local filesystem; exclusive lock; fsync file and directory before publication; trusted journal-signing root; named operator performs stale-lock recovery; phases exactly as D8, with ambiguous state quarantined |
+| D9 | Member allowlist; link/device/sparse policy; max members; max depth; per-member/aggregate limits; staging reserve; publication filesystem | No links/devices/sparse entries; 64 members; depth 8; 1 GiB/member; 4 GiB aggregate plaintext; 8 GiB staging reserve; same-filesystem atomic publication; no compression in v1 |
+| D10 | PostgreSQL version/tools; restore role; database/schema grants; extension allowlist; migration/object inventory revision; owner/ACL policy | PostgreSQL 16; `pg_dump -Fc`/`pg_restore --exit-on-error --no-owner --no-acl`; installation-provisioned non-superuser schema owner; no extension allowlist; exact migration-derived O3K schema objects only; no roles/globals/passwords/ACLs/tablespaces/ownership from artifact |
+| D11 | Post-STARTED stop/fence action; known-partial vs unknown transition; retry/observe rule; discard authority | Stop/fence new dispatch; preserve Operation IDs; known partial → inactive `FAILED_RECOVERABLE`; unknown/lock loss/conflict → `QUARANTINED`; observe before retry; only verified discard/recreation → `DISCARDED`; no in-place repair in v1 |
+| D12 | Whether public interface is needed; if yes, action/resource/auth/idempotency/error/confirmation contract | No CLI/API in #1084–#1086; any later interface requires a separate accepted contract |
+| D13 | Complete repository/table/member inventory revision, including `audit_events`; schema/migration identity; excluded external state; pre-mutation rejection rules | One accepted inventory covering all nine families, including empty repositories and every `audit_events` row; reject missing/extra/unknown entries, schema mismatch, unknown migration, nonempty/foreign target, missing trust or unproven fencing; exclude external VM/storage payloads |
+
+The approver must copy the completed worksheet, including any amendments, into
+the ADR-0189 decision record and the SPEC-0050 status/decision section. The
+record must identify each approver's role, approval date, and the exact commit
+or document revision reviewed. “Accepted in principle”, “implementation will
+decide”, and “covered by PR review” are explicitly non-acceptance dispositions.
+
 ## Current implementation status
 
 No security-sensitive backup/restore or issuer-key implementation is authorized
