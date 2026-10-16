@@ -306,7 +306,7 @@ pub struct DiagnosticsPage<T> {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiagnosticsQuery {
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub limit: Option<String>,
     #[serde(default)]
     pub cursor: Option<String>,
 }
@@ -315,11 +315,13 @@ impl DiagnosticsQuery {
     /// Validates and bounds `limit`, returning the requested page size.
     #[allow(clippy::result_large_err)]
     pub fn page_size(&self) -> Result<usize, Response> {
-        match self.limit {
+        match self.limit.as_deref() {
             None => Ok(DEFAULT_PAGE_SIZE),
-            Some(0) => Ok(DEFAULT_PAGE_SIZE),
-            Some(limit) if limit <= MAX_PAGE_SIZE => Ok(limit),
-            Some(_) => Err(ProblemDetails::new(ErrorCode::BadRequest).into_response()),
+            Some(limit) => match limit.parse::<usize>() {
+                Ok(0) => Ok(DEFAULT_PAGE_SIZE),
+                Ok(limit) if limit <= MAX_PAGE_SIZE => Ok(limit),
+                _ => Err(ProblemDetails::new(ErrorCode::BadRequest).into_response()),
+            },
         }
     }
 
@@ -662,12 +664,12 @@ mod tests {
     #[test]
     fn page_size_is_bounded() {
         let ok = DiagnosticsQuery {
-            limit: Some(200),
+            limit: Some("200".to_owned()),
             cursor: None,
         };
         assert_eq!(ok.page_size().ok(), Some(200));
         let too_large = DiagnosticsQuery {
-            limit: Some(201),
+            limit: Some("201".to_owned()),
             cursor: None,
         };
         assert!(too_large.page_size().is_err());
