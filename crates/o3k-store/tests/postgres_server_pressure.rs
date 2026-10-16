@@ -227,7 +227,7 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
     eprintln!("checkpoint:store-recovered");
     let id = resource_id;
     let prior = sqlx::query("SELECT COUNT(*) AS count FROM resources WHERE id = $1")
-        .bind(id)
+        .bind(id.to_string())
         .fetch_one(store.pool())
         .await?;
     assert_eq!(prior.get::<i64, _>("count"), 0);
@@ -244,7 +244,7 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         })
         .await?;
     let row = sqlx::query("SELECT COUNT(*) AS count FROM resources WHERE id = $1")
-        .bind(id)
+        .bind(id.to_string())
         .fetch_one(store.pool())
         .await?;
     assert_eq!(row.get::<i64, _>("count"), 1);
