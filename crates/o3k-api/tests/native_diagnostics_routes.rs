@@ -8,7 +8,7 @@
 //! leaks node identity, agent epoch, or credential material.
 
 use axum::body::{Body, to_bytes};
-use http::{Request, StatusCode};
+use http::{Method, Request, StatusCode};
 use o3k_kernel::{
     AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ScopeKind, UserPrincipal,
 };
@@ -169,9 +169,18 @@ fn router() -> Result<axum::Router, Box<dyn std::error::Error>> {
 }
 
 async fn get(uri: &str, token: &str) -> Result<(StatusCode, String), Box<dyn std::error::Error>> {
+    request(Method::GET, uri, token).await
+}
+
+async fn request(
+    method: Method,
+    uri: &str,
+    token: &str,
+) -> Result<(StatusCode, String), Box<dyn std::error::Error>> {
     let response = router()?
         .oneshot(
             Request::builder()
+                .method(method)
                 .uri(uri)
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())?,
@@ -232,6 +241,24 @@ async fn native_diagnostics_routes_system_operator_reaches_all_endpoints_without
         }
         for secret in secrets {
             assert!(!body.contains(secret), "{secret:?} leaked into {uri}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_diagnostics_routes_are_read_only_for_mutating_methods() -> TestResult {
+    // SPEC-0045 exposes a read-only projection.  Exercise the production
+    // router with every common mutation verb so a future route change cannot
+    // accidentally turn diagnostics into a write surface.
+    for uri in ENDPOINTS {
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            let (status, body) = request(method.clone(), uri, "operator-token").await?;
+            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {uri}");
+            assert!(
+                body.is_empty(),
+                "mutation response exposed a body: {method} {uri}"
+            );
         }
     }
     Ok(())
