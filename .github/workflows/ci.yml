@@ -33,14 +33,21 @@ jobs:
       - name: Validate fail-closed WAL evidence validator
         run: python3 scripts/validate_postgres_wal_pressure_evidence.py --self-test
       - name: Exercise real PostgreSQL WAL exhaustion and restart recovery
-        run: bash tests/postgres-wal-pressure.sh
+        run: |
+          set -euo pipefail
+          bash tests/postgres-wal-pressure.sh
+          python3 -I scripts/validate_pp6_evidence.py --case postgres-wal-pressure \
+            target/pp6/postgres-wal-pressure-evidence.json \
+            --envelope target/pp6/postgres-wal-pressure-evidence.envelope.json
       - name: Upload PostgreSQL WAL pressure evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: postgres-wal-pressure-evidence
           if-no-files-found: warn
-          path: target/pp6/postgres-wal-pressure-evidence.json
+          path: |
+            target/pp6/postgres-wal-pressure-evidence.json
+            target/pp6/postgres-wal-pressure-evidence.envelope.json
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -109,6 +116,8 @@ jobs:
         # against locally-generated fixtures. It needs no real PP.5 campaign
         # artifact, so an ordinary local dev / unit-test run is never blocked.
         run: bash tests/pp5_evidence_validation.sh
+      - name: Validate PP.6 evidence normalizer fail-closed guards
+        run: python3 -I scripts/validate_pp6_evidence.py --self-test
       - name: Validate PP.5 small-edge teardown ownership
         run: bash tests/pp5-small-edge-campaign-ownership.sh
       - name: Validate destructive PostgreSQL test database guards
@@ -280,12 +289,16 @@ jobs:
           docker version
           docker image inspect postgres:16.4 >/dev/null
           cargo test -p o3k-store --test postgres_outage -- --ignored --nocapture
+          python3 -I scripts/validate_pp6_evidence.py --case postgres-outage "$O3K_PP6_PG_EVIDENCE_PATH" \
+            --envelope "${O3K_PP6_PG_EVIDENCE_PATH%.json}.envelope.json"
       - name: Upload PP.6 PostgreSQL outage evidence
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pp6-postgres-outage-evidence
-          path: ${{ runner.temp }}/pp6-postgres-outage.json
+          path: |
+            ${{ runner.temp }}/pp6-postgres-outage.json
+            ${{ runner.temp }}/pp6-postgres-outage.envelope.json
           if-no-files-found: error
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -309,12 +322,16 @@ jobs:
         run: |
           set -euo pipefail
           jq -e '.schema == "o3k.pp6.postgres-server-pressure.v1" and .profile == "o3k-small-edge-v1" and (.schema_migration_identity | startswith("o3k-store-sqlx-migrations:")) and (.source_head | length == 40) and (.source_tree | length == 40) and (.execution_head | length == 40) and (.execution_tree | length == 40) and .held_session_count == 5 and .raw_admission_attempts == 1 and .store_admission_attempts == 1 and .raw_admission_timeout_seconds == 5 and .store_admission_timeout_seconds == 15 and .recovery_timeout_seconds == 15 and .observed_sqlstate == "53300" and .cleanup == "passed" and .foreign_state.status == "not_exercised" and .foreign_state.reason == "store-only lane invokes no provider or external-state operations" and .artifact_secret_scan.status == "passed" and .disposition == "PASS" and .canonical_retry == "passed"' "$O3K_PP6_PG_EVIDENCE_PATH"
+          python3 -I scripts/validate_pp6_evidence.py --case postgres-server-pressure "$O3K_PP6_PG_EVIDENCE_PATH" \
+            --envelope "${O3K_PP6_PG_EVIDENCE_PATH%.json}.envelope.json"
       - name: Upload PP.6 PostgreSQL server pressure evidence
         if: ${{ success() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pp6-postgres-server-pressure-evidence
-          path: ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
+          path: |
+            ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
+            ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.envelope.json
           if-no-files-found: error
       - name: Architecture boundary check
         run: python3 scripts/check-architecture-boundaries.py
@@ -339,13 +356,19 @@ jobs:
         env:
           O3K_PP6_PG_EVIDENCE_PATH: ${{ runner.temp }}/pp6-postgres-resource-pressure.json
           O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: cargo test -p o3k-store --test postgres_resource_pressure --all-features -- --ignored --nocapture
+        run: |
+          set -euo pipefail
+          cargo test -p o3k-store --test postgres_resource_pressure --all-features -- --ignored --nocapture
+          python3 -I scripts/validate_pp6_evidence.py --case postgres-resource-pressure "$O3K_PP6_PG_EVIDENCE_PATH" \
+            --envelope "${O3K_PP6_PG_EVIDENCE_PATH%.json}.envelope.json"
       - name: Upload PP.6 PostgreSQL resource-pressure evidence
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pp6-postgres-resource-pressure-evidence
-          path: ${{ runner.temp }}/pp6-postgres-resource-pressure.json
+          path: |
+            ${{ runner.temp }}/pp6-postgres-resource-pressure.json
+            ${{ runner.temp }}/pp6-postgres-resource-pressure.envelope.json
           if-no-files-found: error
       - name: Endpoint-lifecycle 1035 PostgreSQL conformance (mandatory)
         env:
@@ -364,14 +387,20 @@ jobs:
         env:
           O3K_SQLITE_PRESSURE_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
           O3K_SQLITE_PRESSURE_EVIDENCE_PATH: ${{ runner.temp }}/pp6-sqlite-disk-pressure.json
-        run: bash tests/sqlite-disk-pressure.sh
+        run: |
+          set -euo pipefail
+          bash tests/sqlite-disk-pressure.sh
+          python3 -I scripts/validate_pp6_evidence.py --case sqlite-disk-pressure "$O3K_SQLITE_PRESSURE_EVIDENCE_PATH" \
+            --envelope "${O3K_SQLITE_PRESSURE_EVIDENCE_PATH%.json}.envelope.json"
       - name: Upload PP.6 SQLite filesystem-pressure evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pp6-sqlite-disk-pressure
           if-no-files-found: warn
-          path: ${{ runner.temp }}/pp6-sqlite-disk-pressure.json
+          path: |
+            ${{ runner.temp }}/pp6-sqlite-disk-pressure.json
+            ${{ runner.temp }}/pp6-sqlite-disk-pressure.envelope.json
       - name: Emit exact-source binary build manifest (preparation for artifact pipeline)
         # Safest useful preparation for the follow-up pre-built-artifact pipeline:
         # record the exact commit and sha256 of the two protected-run binaries so

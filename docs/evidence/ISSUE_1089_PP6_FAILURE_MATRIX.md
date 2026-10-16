@@ -41,9 +41,9 @@ Each row names the test or CI lane that exercises a case and its state:
 
 | Criterion | State | Notes |
 | --- | --- | --- |
-| 3. Bounded error identity, canonical invariants, safe retry per case | Partial | Asserted per test above. Not yet recorded in one machine-readable result per case. |
+| 3. Bounded error identity, canonical invariants, safe retry per case | Partial | Asserted per test above. The six evidence lanes also write one normalized `o3k.pp6.evidence.v1` envelope per run (this branch); the per-case assertions themselves stay in each lane's own artifact. |
 | 4. No unowned mutation and foreign-state preservation under interruption/retry | Partial | The store-pressure lanes record `foreign_state` as not exercised: they invoke no provider. Provider-backed interruption cases are the unknown-outcome and interrupted-delete tests above. |
-| 5. Secret checks and run binding (source, harness, backend/version, profile, fixture) | Partial | Each lane binds a source commit and scans its own artifact, but the six lanes use different evidence formats and not all record profile or fixture identity. A shared evidence schema is the remaining work. |
+| 5. Secret checks and run binding (source, harness, backend/version, profile, fixture) | This branch | `scripts/validate_pp6_evidence.py` maps each of the six lanes onto one envelope binding case, passing disposition, source (and execution) commit, backend kind and version, product profile (`o3k-small-edge-v1` or `o3k-demo-v1`), fixture identity and foreign state, and scans the full artifact for credential shapes. CI runs it after every lane and uploads the envelope. Validated against real artifacts from the client-pool, SQLite WAL and PostgreSQL WAL lanes. |
 | 6. PostgreSQL cases fail, never silently pass, when the backend is unavailable | Met for the lanes | Each lane provisions or requires its PostgreSQL instance and fails without it: an `expect` on `O3K_DATABASE_URL`, a `docker` error, or `tests/postgres-wal-pressure.sh` exiting before emitting evidence. |
 
 ## Remaining work for #1089
@@ -51,4 +51,3 @@ Each row names the test or CI lane that exercises a case and its state:
 1. Merge #1132, then the lock/busy row is covered.
 2. Backup destination cases, once ADR-0189/SPEC-0050 are accepted and #1084 exists.
 3. Memory and file-descriptor pressure are not covered.
-4. One shared evidence schema for all lanes (criteria 3 and 5), including profile and fixture identity.

@@ -93,12 +93,16 @@ jobs:
             ((tostring | test("postgres://|postgresql://|password[=:]|BEGIN[[:space:]]+.*PRIVATE KEY|private[_-]?key"; "i")) | not)
           ' "$O3K_PG_PRESSURE_ARTIFACT"
           sha256sum "$O3K_PG_PRESSURE_ARTIFACT"
+          python3 -I scripts/validate_pp6_evidence.py --case postgres-tablespace-pressure "$O3K_PG_PRESSURE_ARTIFACT" \
+            --envelope "$RUNNER_TEMP/pp6-postgres-tablespace-pressure.envelope.json"
       - name: Upload evidence
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pp6-postgres-tablespace-pressure
-          path: ${{ env.O3K_PG_PRESSURE_ARTIFACT }}
+          path: |
+            ${{ env.O3K_PG_PRESSURE_ARTIFACT }}
+            ${{ runner.temp }}/pp6-postgres-tablespace-pressure.envelope.json
           if-no-files-found: error
       - name: Checked cleanup
         if: always()
