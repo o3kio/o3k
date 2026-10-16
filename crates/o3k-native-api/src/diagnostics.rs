@@ -420,7 +420,9 @@ pub async fn summary(auth: BearerAuth, State(state): State<NativeApiState>) -> R
             .into_response();
     }
     let Some(reader) = state.diagnostics_reader.as_ref() else {
-        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+        return ProblemDetails::new(ErrorCode::NotAvailable)
+            .with_request_id(auth.0.request_id().to_owned())
+            .into_response();
     };
     match reader.summary().await {
         Ok(summary) => Json(summary).into_response(),
@@ -441,7 +443,9 @@ pub async fn services(
             .into_response();
     }
     let Some(reader) = state.diagnostics_reader.as_ref() else {
-        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+        return ProblemDetails::new(ErrorCode::NotAvailable)
+            .with_request_id(auth.0.request_id().to_owned())
+            .into_response();
     };
     let limit = match query.page_size() {
         Ok(limit) => limit,
@@ -470,7 +474,9 @@ pub async fn providers(
             .into_response();
     }
     let Some(reader) = state.diagnostics_reader.as_ref() else {
-        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+        return ProblemDetails::new(ErrorCode::NotAvailable)
+            .with_request_id(auth.0.request_id().to_owned())
+            .into_response();
     };
     let limit = match query.page_size() {
         Ok(limit) => limit,
@@ -495,7 +501,9 @@ pub async fn capacity(auth: BearerAuth, State(state): State<NativeApiState>) -> 
             .into_response();
     }
     let Some(reader) = state.diagnostics_reader.as_ref() else {
-        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+        return ProblemDetails::new(ErrorCode::NotAvailable)
+            .with_request_id(auth.0.request_id().to_owned())
+            .into_response();
     };
     match reader.capacity().await {
         Ok(capacity) => Json(capacity).into_response(),

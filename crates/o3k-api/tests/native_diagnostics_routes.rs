@@ -151,12 +151,15 @@ impl DiagnosticsReader for FakeDiagnosticsReader {
     }
 }
 
+/// Correlation ID sent on every test request; handlers must echo it.
+const REQUEST_ID: &str = "pp6-diagnostics-correlation";
+
 fn router() -> Result<axum::Router, Box<dyn std::error::Error>> {
-    router_with_diagnostics_reader(Arc::new(FakeDiagnosticsReader))
+    router_with_diagnostics_reader(Some(Arc::new(FakeDiagnosticsReader)))
 }
 
 fn router_with_diagnostics_reader(
-    diagnostics_reader: Arc<dyn DiagnosticsReader>,
+    diagnostics_reader: Option<Arc<dyn DiagnosticsReader>>,
 ) -> Result<axum::Router, Box<dyn std::error::Error>> {
     let native = o3k_native_api::NativeApiState::new(
         None,
@@ -169,8 +172,11 @@ fn router_with_diagnostics_reader(
         None,
         None,
         None,
-    )?
-    .with_diagnostics_reader(diagnostics_reader)
+    )?;
+    let native = match diagnostics_reader {
+        Some(reader) => native.with_diagnostics_reader(reader),
+        None => native,
+    }
     .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
     Ok(o3k_api::router_with_state(
         o3k_api::AppState::new().with_native_api(native),
@@ -191,6 +197,7 @@ async fn get_from_router(
             Request::builder()
                 .uri(uri)
                 .header("authorization", format!("Bearer {token}"))
+                .header("x-request-id", REQUEST_ID)
                 .body(Body::empty())?,
         )
         .await?;
@@ -301,7 +308,7 @@ async fn native_diagnostics_get_routes_call_only_their_read_projection() -> Test
     let reader = Arc::new(CountingDiagnosticsReader {
         reads: reads.clone(),
     });
-    let router = router_with_diagnostics_reader(reader)?;
+    let router = router_with_diagnostics_reader(Some(reader))?;
 
     for (index, uri) in ENDPOINTS.into_iter().enumerate() {
         let (status, _) = get_from_router(router.clone(), uri, "operator-token").await?;
@@ -311,6 +318,26 @@ async fn native_diagnostics_get_routes_call_only_their_read_projection() -> Test
             assert_eq!(count.load(Ordering::SeqCst), expected, "{uri}");
             count.store(0, Ordering::SeqCst);
         }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_diagnostics_authority_returns_request_correlation_without_details()
+-> TestResult {
+    for uri in ENDPOINTS {
+        let (status, body) =
+            get_from_router(router_with_diagnostics_reader(None)?, uri, "operator-token").await?;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+        let value: Value = serde_json::from_str(&body)?;
+        assert_eq!(value["code"], "NOT_AVAILABLE", "{uri}");
+        assert_eq!(value["request_id"], REQUEST_ID, "{uri}");
+        assert!(value.get("detail").is_none(), "{uri}");
+        assert!(!body.contains("secret"), "secret detail leaked into {uri}");
+        assert!(
+            !body.contains("password"),
+            "credential detail leaked into {uri}"
+        );
     }
     Ok(())
 }
