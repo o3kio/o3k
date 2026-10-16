@@ -48,11 +48,15 @@ jobs:
           source_sha='${{ github.event.pull_request.head.sha || github.sha }}'
           source_tree="$(git cat-file commit "$source_sha" | awk 'NR == 1 { print $2 }')"
           test "${#source_tree}" -eq 40
+          export O3K_SOURCE_SHA="$source_sha" O3K_SOURCE_TREE="$source_tree"
           echo "O3K_SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
           echo "O3K_SOURCE_TREE=$source_tree" >> "$GITHUB_ENV"
-          echo "O3K_EXECUTION_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          execution_sha="$(git rev-parse HEAD)"
           execution_tree="$(git cat-file commit HEAD | awk 'NR == 1 { print $2 }')"
           test "${#execution_tree}" -eq 40
+          export O3K_EXECUTION_SHA="$execution_sha" O3K_EXECUTION_TREE="$execution_tree"
+          test -n "$O3K_SOURCE_SHA" -a -n "$O3K_SOURCE_TREE" -a -n "$O3K_EXECUTION_SHA" -a -n "$O3K_EXECUTION_TREE"
+          echo "O3K_EXECUTION_SHA=$execution_sha" >> "$GITHUB_ENV"
           echo "O3K_EXECUTION_TREE=$execution_tree" >> "$GITHUB_ENV"
           cargo test --locked -p o3k-store --test postgres_tablespace_pressure --all-features -- --ignored --nocapture
       - name: Validate source-bound evidence
