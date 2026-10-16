@@ -912,6 +912,12 @@ mod tests {
             .await
             .expect("expired session");
         tokio::time::sleep(Duration::from_secs(2)).await;
+        let before = store
+            .list_active_controller_sessions()
+            .await
+            .expect("sessions before diagnostics reads");
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].controller_id, ControllerId::new("active"));
         let adapter = diagnostics_adapter(store.clone());
 
         let status = adapter.control_plane_status().await;
@@ -924,21 +930,26 @@ mod tests {
         assert_eq!(control_plane.status, DiagnosticStatus::Healthy);
         assert_eq!(control_plane.active_sessions, 1);
 
-        // Diagnostics reads must not drain, renew, or otherwise mutate leases.
-        let sessions = store
+        // Diagnostics reads must not drain, renew, or otherwise mutate leases:
+        // the full session rows, including heartbeat and lease deadline, must
+        // be unchanged.
+        let after = store
             .list_active_controller_sessions()
             .await
-            .expect("sessions");
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].controller_id, ControllerId::new("active"));
+            .expect("sessions after diagnostics reads");
+        assert_eq!(after, before);
     }
 
     #[tokio::test]
     async fn control_plane_read_failure_is_unavailable_and_summary_is_bounded() {
-        let path = std::env::temp_dir().join(format!(
-            "o3k-diagnostics-read-failure-{}.db",
+        // Use a private directory so SQLite -wal/-shm side files are removed
+        // together with the database.
+        let dir = std::env::temp_dir().join(format!(
+            "o3k-diagnostics-read-failure-{}",
             uuid::Uuid::now_v7()
         ));
+        std::fs::create_dir(&dir).expect("test database directory");
+        let path = dir.join("diagnostics.db");
         let store = Arc::new(O3kStore::connect_sqlite_file(&path).await.expect("store"));
         let external = SqlitePoolOptions::new()
             .max_connections(1)
@@ -965,7 +976,7 @@ mod tests {
         );
         drop(adapter);
         drop(store);
-        std::fs::remove_file(&path).expect("test database cleanup");
+        std::fs::remove_dir_all(&dir).expect("test database cleanup");
     }
 
     fn inventory(
