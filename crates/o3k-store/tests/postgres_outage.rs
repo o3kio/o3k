@@ -242,6 +242,10 @@ impl DisposablePostgres {
         if inspect.status.success() {
             return Err(format!("docker container {id} still exists after removal").into());
         }
+        let inspect_error = String::from_utf8_lossy(&inspect.stderr);
+        if !inspect_confirms_absent(&inspect_error) {
+            return Err("docker inspect failed while verifying container absence".into());
+        }
         Ok(())
     }
     fn stop_and_remove(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -262,6 +266,20 @@ impl DisposablePostgres {
             (None, Err(remove_error)) => Err(remove_error),
         }
     }
+}
+
+fn inspect_confirms_absent(stderr: &str) -> bool {
+    stderr.contains("No such object:")
+}
+
+#[test]
+fn container_cleanup_requires_explicit_docker_not_found_result() {
+    assert!(inspect_confirms_absent("Error: No such object: deadbeef"));
+    assert!(!inspect_confirms_absent(
+        "Cannot connect to the Docker daemon"
+    ));
+    assert!(!inspect_confirms_absent("permission denied"));
+    assert!(!inspect_confirms_absent(""));
 }
 
 fn is_transient_connect_error(error: &o3k_store::StoreError) -> bool {
