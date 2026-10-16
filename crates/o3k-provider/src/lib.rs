@@ -418,6 +418,7 @@ struct FakeState {
     last_attached_device: Option<BlockDeviceAttachment>,
     last_create_request: Option<CreateInstanceRequest>,
     create_calls: usize,
+    delete_dispatches: usize,
     inspect_dispatches: usize,
     last_inspect_provider_instance_id: Option<String>,
 }
@@ -450,6 +451,7 @@ impl FakeComputeProvider {
                 last_attached_device: None,
                 last_create_request: None,
                 create_calls: 0,
+                delete_dispatches: 0,
                 inspect_dispatches: 0,
                 last_inspect_provider_instance_id: None,
             })),
@@ -521,6 +523,17 @@ impl FakeComputeProvider {
         self.inner
             .lock()
             .map(|state| state.instances.len())
+            .unwrap_or_default()
+    }
+
+    /// Returns the number of delete requests dispatched to the fake provider.
+    /// This test-support counter includes idempotent replays and absent-resource
+    /// checks, so callers can distinguish provider redispatch from durable replay.
+    #[must_use]
+    pub fn delete_dispatch_count(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|state| state.delete_dispatches)
             .unwrap_or_default()
     }
 
@@ -817,6 +830,7 @@ impl ComputeProvider for FakeComputeProvider {
         request: DeleteInstanceRequest,
     ) -> Result<Operation, ProviderError> {
         let mut state = self.lock()?;
+        state.delete_dispatches += 1;
         let fingerprint = Self::delete_fingerprint(&request);
         if let Some((operation_id, original)) = state.idempotency.get(&request.idempotency_key) {
             if original != &fingerprint {
