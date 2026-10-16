@@ -48,61 +48,71 @@ impl Cluster {
             .into());
         }
         let id = String::from_utf8(out.stdout)?.trim().to_owned();
-        let cluster = Self {
+        let mut cluster = Self {
             id,
             port,
             removed: false,
         };
-        timeout(Duration::from_secs(45), async {
-            loop {
-                let ready = Command::new("docker")
-                    .args([
-                        "exec",
-                        &cluster.id,
-                        "pg_isready",
-                        "-U",
-                        "admin",
-                        "-d",
-                        "postgres",
-                    ])
-                    .output();
-                if ready.map(|o| o.status.success()).unwrap_or(false) {
-                    break;
+        let startup: Result<(), Box<dyn std::error::Error>> = async {
+            timeout(Duration::from_secs(45), async {
+                loop {
+                    let ready = Command::new("docker")
+                        .args([
+                            "exec",
+                            &cluster.id,
+                            "pg_isready",
+                            "-U",
+                            "admin",
+                            "-d",
+                            "postgres",
+                        ])
+                        .output();
+                    if ready.map(|o| o.status.success()).unwrap_or(false) {
+                        break;
+                    }
+                    sleep(Duration::from_millis(250)).await;
                 }
-                sleep(Duration::from_millis(250)).await;
-            }
-        })
-        .await
-        .map_err(|_| "PostgreSQL in-container readiness timed out")?;
-        timeout(Duration::from_secs(10), async {
-            loop {
-                if TcpStream::connect(("127.0.0.1", cluster.port)).is_ok() {
-                    break;
+            })
+            .await
+            .map_err(|_| "PostgreSQL in-container readiness timed out")?;
+            timeout(Duration::from_secs(10), async {
+                loop {
+                    if TcpStream::connect(("127.0.0.1", cluster.port)).is_ok() {
+                        break;
+                    }
+                    sleep(Duration::from_millis(250)).await;
                 }
-                sleep(Duration::from_millis(250)).await;
+            })
+            .await
+            .map_err(|_| "PostgreSQL host TCP readiness timed out")?;
+            let role = Command::new("docker")
+                .args([
+                    "exec",
+                    &cluster.id,
+                    "psql",
+                    "-U",
+                    "admin",
+                    "-d",
+                    "postgres",
+                    "-c",
+                    "CREATE ROLE o3k LOGIN",
+                ])
+                .output()?;
+            if !role.status.success() {
+                return Err(format!(
+                    "could not create non-superuser test role: {}",
+                    String::from_utf8_lossy(&role.stderr)
+                )
+                .into());
             }
-        })
-        .await
-        .map_err(|_| "PostgreSQL host TCP readiness timed out")?;
-        let role = Command::new("docker")
-            .args([
-                "exec",
-                &cluster.id,
-                "psql",
-                "-U",
-                "admin",
-                "-d",
-                "postgres",
-                "-c",
-                "CREATE ROLE o3k LOGIN",
-            ])
-            .output()?;
-        if !role.status.success() {
-            return Err(format!(
-                "could not create non-superuser test role: {}",
-                String::from_utf8_lossy(&role.stderr)
-            )
-            .into());
+            Ok(())
+        }
+        .await;
+        if let Err(error) = startup {
+            cluster
+                .remove_checked()
+                .map_err(|cleanup| format!("{error}; PostgreSQL cleanup failed: {cleanup}"))?;
+            return Err(error);
         }
         Ok(cluster)
     }
@@ -221,8 +231,13 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
     let evidence_path = std::env::var("O3K_PP6_PG_EVIDENCE_PATH")?;
     let source_head = std::env::var("O3K_PP6_SOURCE_HEAD_SHA")?;
     let source_tree = std::env::var("O3K_PP6_SOURCE_TREE_SHA")?;
+    let execution_head = std::env::var("O3K_PP6_EXECUTION_HEAD_SHA")?;
+    let execution_tree = std::env::var("O3K_PP6_EXECUTION_TREE_SHA")?;
     if source_head.is_empty() || source_tree.is_empty() {
         return Err("source-bound evidence requires non-empty source and tree SHA".into());
+    }
+    if execution_head.is_empty() || execution_tree.is_empty() {
+        return Err("execution-bound evidence requires non-empty execution and tree SHA".into());
     }
     let mut cluster = cluster;
     cluster.remove_checked()?;
@@ -242,6 +257,8 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         "harness": "disposable-docker-postgres-16.4",
         "source_head": source_head,
         "source_tree": source_tree,
+        "execution_head": execution_head,
+        "execution_tree": execution_tree,
         "server_version": version,
         "container_parameters": ["max_connections=6", "superuser_reserved_connections=1"],
         "os_release": os_release,
