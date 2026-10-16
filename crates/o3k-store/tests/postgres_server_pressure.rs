@@ -215,7 +215,12 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         .expect_err("PostgresStore unexpectedly connected while server slots were exhausted");
     assert_eq!(store_error.to_string(), "database error");
     eprintln!("checkpoint:store-failed");
-    drop(held.pop());
+    // The exhaustion assertion proves server admission failure. Recovery must
+    // restore the full non-superuser budget because PostgresStore initializes
+    // a larger lazy pool than the single slot left by one released session.
+    for connection in held.drain(..) {
+        connection.close().await?;
+    }
     let store = timeout(Duration::from_secs(15), PostgresStore::connect(&url))
         .await
         .map_err(|_| "PostgresStore reconnect timed out after capacity recovery")??;
