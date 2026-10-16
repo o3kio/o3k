@@ -573,12 +573,13 @@ mod tests {
             .expect("connect to isolated schema");
         for statement in [
             "CREATE TABLE controller_sessions (controller_id VARCHAR(64) NOT NULL, controller_epoch VARCHAR(64) NOT NULL, lease_until TIMESTAMPTZ NOT NULL, state VARCHAR(32) NOT NULL)",
-            "CREATE TABLE work_leases (work_key VARCHAR(255) PRIMARY KEY, fencing_token BIGINT NOT NULL, lease_until TIMESTAMPTZ NOT NULL)",
+            "CREATE TABLE work_leases (work_key VARCHAR(255) PRIMARY KEY, owner_controller_id VARCHAR(64) NOT NULL, owner_controller_epoch VARCHAR(64) NOT NULL, fencing_token BIGINT NOT NULL, lease_until TIMESTAMPTZ NOT NULL)",
             "INSERT INTO controller_sessions VALUES ('active', 'epoch', NOW() + INTERVAL '1 hour', 'Active')",
             "INSERT INTO controller_sessions VALUES ('expired', 'epoch', NOW() - INTERVAL '1 hour', 'Active')",
-            "INSERT INTO work_leases VALUES ('active', 7, NOW() + INTERVAL '1 hour')",
-            "INSERT INTO work_leases VALUES ('expired', 9, NOW() - INTERVAL '1 hour')",
-            "INSERT INTO work_leases VALUES ('invalid', 0, NOW() + INTERVAL '1 hour')",
+            "INSERT INTO work_leases VALUES ('active', 'active', 'epoch', 7, NOW() + INTERVAL '1 hour')",
+            "INSERT INTO work_leases VALUES ('expired', 'expired', 'epoch', 9, NOW() - INTERVAL '1 hour')",
+            "INSERT INTO work_leases VALUES ('invalid', 'active', 'epoch', 0, NOW() + INTERVAL '1 hour')",
+            "INSERT INTO work_leases VALUES ('orphan', 'missing', 'old-epoch', 11, NOW() + INTERVAL '1 hour')",
         ] {
             sqlx::query(statement)
                 .execute(&isolated_pool)
@@ -598,11 +599,15 @@ mod tests {
             .active_work_leases(Path::new("unused"), true, Some(&isolated_url))
             .await
             .expect("active lease query");
-        assert_eq!(leases.len(), 2);
+        assert_eq!(leases.len(), 3);
         assert_eq!(leases[0].work_key, "active");
         assert_eq!(leases[0].fencing_token, 7);
+        assert!(leases[0].owner_session_active);
         assert_eq!(leases[1].work_key, "invalid");
         assert_eq!(leases[1].fencing_token, 0);
+        assert!(leases[1].owner_session_active);
+        assert_eq!(leases[2].work_key, "orphan");
+        assert!(!leases[2].owner_session_active);
 
         sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
             .execute(&pool)
