@@ -26,7 +26,7 @@ required = (
     "scripts/lvm-testlab-profile.sh provision",
     "scripts/lvm-testlab-profile.sh cleanup",
     "if: always()",
-    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607af02",
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
 )
 for needle in required:
     assert needle in text, needle
