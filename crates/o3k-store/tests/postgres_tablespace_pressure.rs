@@ -40,7 +40,7 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
     .await
     .expect("tablespace");
     sqlx::query(&format!(
-        "CREATE TABLE {} (payload bytea) TABLESPACE {}",
+        "CREATE TABLE {} (payload bytea STORAGE PLAIN) TABLESPACE {}",
         ident(&filler),
         ident(&ts)
     ))
