@@ -67,7 +67,10 @@ pub struct PortRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkLeaseRow {
     pub work_key: String,
+    pub owner_controller_id: String,
+    pub owner_controller_epoch: String,
     pub fencing_token: i64,
+    pub owner_session_active: bool,
 }
 
 /// Maximum number of leases doctor will materialize for one bounded report.
@@ -83,7 +86,10 @@ fn bounded_work_leases(rows: Vec<sqlx::sqlite::SqliteRow>) -> Result<Vec<WorkLea
         .into_iter()
         .map(|row| WorkLeaseRow {
             work_key: row.get("work_key"),
+            owner_controller_id: row.get("owner_controller_id"),
+            owner_controller_epoch: row.get("owner_controller_epoch"),
             fencing_token: row.get("fencing_token"),
+            owner_session_active: row.get("owner_session_active"),
         })
         .collect())
 }
@@ -371,8 +377,10 @@ impl DoctorDb for SqlxDoctorDb {
                 .await
                 .map_err(|_| "PostgreSQL coordination store is unavailable".to_owned())?;
             let rows = sqlx::query(&format!(
-                "SELECT work_key, fencing_token FROM work_leases \
-                 WHERE lease_until >= NOW() ORDER BY work_key LIMIT {}",
+                "SELECT l.work_key, l.owner_controller_id, l.owner_controller_epoch, l.fencing_token, \
+                        EXISTS (SELECT 1 FROM controller_sessions s WHERE s.controller_id = l.owner_controller_id \
+                          AND s.controller_epoch = l.owner_controller_epoch AND s.state = 'Active' AND s.lease_until >= NOW()) AS owner_session_active \
+                 FROM work_leases l WHERE l.lease_until >= NOW() ORDER BY l.work_key LIMIT {}",
                 MAX_ACTIVE_WORK_LEASES + 1
             ))
             .fetch_all(&mut *transaction)
@@ -385,14 +393,19 @@ impl DoctorDb for SqlxDoctorDb {
                 .into_iter()
                 .map(|row| WorkLeaseRow {
                     work_key: row.get("work_key"),
+                    owner_controller_id: row.get("owner_controller_id"),
+                    owner_controller_epoch: row.get("owner_controller_epoch"),
                     fencing_token: row.get("fencing_token"),
+                    owner_session_active: row.get("owner_session_active"),
                 })
                 .collect());
         }
         let mut connection = Self::read_only_connection(path).await?;
         let rows = sqlx::query(&format!(
-            "SELECT work_key, fencing_token FROM work_leases \
-             WHERE lease_until >= datetime('now') ORDER BY work_key LIMIT {}",
+            "SELECT l.work_key, l.owner_controller_id, l.owner_controller_epoch, l.fencing_token, \
+                    EXISTS (SELECT 1 FROM controller_sessions s WHERE s.controller_id = l.owner_controller_id \
+                      AND s.controller_epoch = l.owner_controller_epoch AND s.state = 'Active' AND s.lease_until >= datetime('now')) AS owner_session_active \
+             FROM work_leases l WHERE l.lease_until >= datetime('now') ORDER BY l.work_key LIMIT {}",
             MAX_ACTIVE_WORK_LEASES + 1
         ))
         .fetch_all(&mut *connection)
@@ -426,12 +439,12 @@ mod tests {
             .expect("create test db");
         for statement in [
             "CREATE TABLE controller_sessions (controller_id TEXT NOT NULL, controller_epoch TEXT NOT NULL, lease_until TEXT NOT NULL, state TEXT NOT NULL)",
-            "CREATE TABLE work_leases (work_key TEXT PRIMARY KEY, fencing_token INTEGER NOT NULL, lease_until TEXT NOT NULL)",
+            "CREATE TABLE work_leases (work_key TEXT PRIMARY KEY, owner_controller_id TEXT NOT NULL, owner_controller_epoch TEXT NOT NULL, fencing_token INTEGER NOT NULL, lease_until TEXT NOT NULL)",
             "INSERT INTO controller_sessions VALUES ('active', 'epoch', datetime('now', '+1 hour'), 'Active')",
             "INSERT INTO controller_sessions VALUES ('expired', 'epoch', datetime('now', '-1 hour'), 'Active')",
-            "INSERT INTO work_leases VALUES ('active', 7, datetime('now', '+1 hour'))",
-            "INSERT INTO work_leases VALUES ('expired', 9, datetime('now', '-1 hour'))",
-            "INSERT INTO work_leases VALUES ('invalid', 0, datetime('now', '+1 hour'))",
+            "INSERT INTO work_leases VALUES ('active', 'active', 'epoch', 7, datetime('now', '+1 hour'))",
+            "INSERT INTO work_leases VALUES ('expired', 'expired', 'epoch', 9, datetime('now', '-1 hour'))",
+            "INSERT INTO work_leases VALUES ('invalid', 'active', 'epoch', 0, datetime('now', '+1 hour'))",
         ] {
             sqlx::query(statement)
                 .execute(&pool)
@@ -474,13 +487,13 @@ mod tests {
             .await
             .expect("create overflow database");
         sqlx::query(
-            "CREATE TABLE work_leases (work_key TEXT PRIMARY KEY, fencing_token INTEGER NOT NULL, lease_until TEXT NOT NULL)",
+            "CREATE TABLE work_leases (work_key TEXT PRIMARY KEY, owner_controller_id TEXT NOT NULL, owner_controller_epoch TEXT NOT NULL, fencing_token INTEGER NOT NULL, lease_until TEXT NOT NULL)",
         )
         .execute(&pool)
         .await
         .expect("create work leases");
         for index in 0..=MAX_ACTIVE_WORK_LEASES {
-            sqlx::query("INSERT INTO work_leases VALUES (?, 1, datetime('now', '+1 hour'))")
+            sqlx::query("INSERT INTO work_leases VALUES (?, 'controller', 'epoch', 1, datetime('now', '+1 hour'))")
                 .bind(format!("lease-{index}"))
                 .execute(&pool)
                 .await
