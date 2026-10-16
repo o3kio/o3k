@@ -7,7 +7,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, State, rejection::JsonRejection},
     response::{IntoResponse, Response},
 };
 use o3k_kernel::{
@@ -18,6 +18,14 @@ use serde::{Deserialize, Serialize};
 
 pub const ACTION_READ: &str = "ReadCloudProfile";
 pub const ACTION_MANAGE: &str = "ManageCloudProfile";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositionWriteError {
+    BadRequest,
+    Conflict,
+    NotAvailable,
+    Internal,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CloudProfileView {
@@ -41,7 +49,7 @@ pub trait CompositionReader: Send + Sync {
         profile: CloudProfile,
         expected_generation: Option<u64>,
         auth: &AuthContext,
-    ) -> Result<CloudProfile, String>;
+    ) -> Result<CloudProfile, CompositionWriteError>;
     async fn reconcile(
         &self,
         profile_id: &str,
@@ -98,12 +106,26 @@ pub async fn put(
     auth: BearerAuth,
     State(state): State<NativeApiState>,
     Path(id): Path<String>,
-    Json(request): Json<ProfileWrite>,
+    body: Result<Json<ProfileWrite>, JsonRejection>,
 ) -> Response {
-    let correlation = uuid::Uuid::now_v7().to_string();
+    let correlation = auth.0.request_id().to_owned();
     if !authorize(&state, &auth.0, ACTION_MANAGE) {
         return error(ErrorCode::Forbidden, &correlation);
     }
+    let Json(request) = match body {
+        Ok(request) => request,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                "unprocessable request",
+            )
+                .into_response();
+        }
+    };
     if request.profile.profile_id != id {
         return error(ErrorCode::BadRequest, &correlation);
     }
@@ -123,7 +145,10 @@ pub async fn put(
             }),
         )
             .into_response(),
-        Err(_) => error(ErrorCode::Conflict, &correlation),
+        Err(CompositionWriteError::BadRequest) => error(ErrorCode::BadRequest, &correlation),
+        Err(CompositionWriteError::Conflict) => error(ErrorCode::Conflict, &correlation),
+        Err(CompositionWriteError::NotAvailable) => error(ErrorCode::NotAvailable, &correlation),
+        Err(CompositionWriteError::Internal) => error(ErrorCode::InternalError, &correlation),
     }
 }
 
