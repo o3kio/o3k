@@ -287,6 +287,18 @@ jobs:
         # Independently-spawned runtimes share only the durable store, so the
         # canonical replay authority is proven durable rather than process-local.
         run: cargo test -p o3kd --test p12_7_cross_process_replay --all-features -- --ignored --nocapture
+      - name: PP.6 real SQLite WAL filesystem-pressure evidence (mandatory)
+        env:
+          O3K_SQLITE_PRESSURE_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          O3K_SQLITE_PRESSURE_EVIDENCE_PATH: ${{ runner.temp }}/pp6-sqlite-disk-pressure.json
+        run: bash tests/sqlite-disk-pressure.sh
+      - name: Upload PP.6 SQLite filesystem-pressure evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pp6-sqlite-disk-pressure
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/pp6-sqlite-disk-pressure.json
       - name: Emit exact-source binary build manifest (preparation for artifact pipeline)
         # Safest useful preparation for the follow-up pre-built-artifact pipeline:
         # record the exact commit and sha256 of the two protected-run binaries so
