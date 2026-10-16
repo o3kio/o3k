@@ -43,7 +43,16 @@ pub async fn check_agent_registered(ctx: &Context) -> Check {
             .with_actions(compute_actions());
         }
     };
-    if response.status == 200 && response.body.contains("ready") {
+    let ready_status = serde_json::from_str::<serde_json::Value>(&response.body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(|status| status == "ready")
+        })
+        .unwrap_or(false);
+    if response.status == 200 && ready_status {
         let agent_id = serde_json::from_str::<serde_json::Value>(&response.body)
             .ok()
             .and_then(|value| {
@@ -424,6 +433,23 @@ mod tests {
             check_agent_registered(&context(FakeExec::healthy(), http, FakeDb::healthy())).await;
         assert_eq!(check.status, CheckStatus::Pass);
         assert!(check.summary.contains("compute-agent"));
+    }
+
+    #[tokio::test]
+    async fn agent_registered_does_not_accept_not_ready_body_with_http_200() {
+        let mut http = FakeHttp::healthy();
+        http.with(
+            "GET http://127.0.0.1:9100/readyz",
+            Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: "{\"status\":\"not_ready\",\"agent_id\":\"compute-agent\"}".to_owned(),
+            }),
+        );
+        let check =
+            check_agent_registered(&context(FakeExec::healthy(), http, FakeDb::healthy())).await;
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.summary.contains("unexpected compute readiness"));
     }
 
     #[tokio::test]
