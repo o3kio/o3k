@@ -530,7 +530,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires an explicitly provisioned disposable PostgreSQL database"]
     #[allow(clippy::expect_used, clippy::unwrap_used)]
-    async fn postgres_coordination_queries() {
+    async fn postgres_coordination_queries() -> Result<(), String> {
         let url = std::env::var("O3K_DOCTOR_POSTGRES_URL")
             .expect("O3K_DOCTOR_POSTGRES_URL is required for this ignored test");
         let options = url
@@ -577,8 +577,8 @@ mod tests {
                     .execute(&pool)
                     .await;
                 pool.close().await;
-                assert!(cleanup.is_ok(), "isolated schema cleanup failed");
-                panic!("connect to isolated schema: {error}");
+                cleanup.map_err(|_| "isolated schema cleanup failed".to_owned())?;
+                return Err(format!("connect to isolated schema: {error}"));
             }
         };
         for statement in [
@@ -593,11 +593,17 @@ mod tests {
         ] {
             if let Err(error) = sqlx::query(statement).execute(&isolated_pool).await {
                 isolated_pool.close().await;
-                let _ = sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+                if let Err(cleanup_error) = sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
                     .execute(&pool)
-                    .await;
+                    .await
+                {
+                    pool.close().await;
+                    return Err(format!(
+                        "seed PostgreSQL: {error}; cleanup failed: {cleanup_error}"
+                    ));
+                }
                 pool.close().await;
-                panic!("seed PostgreSQL: {error}");
+                return Err(format!("seed PostgreSQL: {error}"));
             }
         }
         isolated_pool.close().await;
@@ -640,13 +646,15 @@ mod tests {
             .execute(&pool)
             .await;
         pool.close().await;
-        assert!(cleanup_result.is_ok(), "isolated schema cleanup failed");
+        cleanup_result.map_err(|_| "isolated schema cleanup failed".to_owned())?;
         let error = db
             .active_controller_sessions(Path::new("unused"), true, Some(&isolated_url))
             .await
             .expect_err("missing schema must fail");
-        assert!(error.contains("query failed"));
-        assert!(!error.contains("://"));
-        query_result.expect("PostgreSQL coordination projection");
+        if !error.contains("query failed") || error.contains("://") {
+            return Err("schema removal query result was not sanitized".to_owned());
+        }
+        query_result.map_err(|error| format!("PostgreSQL coordination projection: {error}"))?;
+        Ok(())
     }
 }
