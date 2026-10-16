@@ -85,6 +85,9 @@ check_fixture "SQL in Compute runtime" 1 "SQL ARCHITECTURE VIOLATION" \
 echo "Test 8: imported SQL query -> FAIL"
 check_fixture "imported SQL query" 1 "SQL ARCHITECTURE VIOLATION" \
     $'use sqlx::query;\nfn z_query() { query("SELECT 1"); }' "crates/o3k-kernel/src"
+echo "Test 8a: SQL import after blank lines reports the use line -> FAIL"
+check_fixture "SQL import line number" 1 "SQL ARCHITECTURE VIOLATION: crates/o3k-kernel/src/z_guard_test_fixture.rs:3" \
+    $'\n\nuse sqlx::query;\nfn z_query() { query("SELECT 1"); }' "crates/o3k-kernel/src"
 echo "Test 9: aliased SQL query -> FAIL"
 check_fixture "aliased SQL query" 1 "SQL ARCHITECTURE VIOLATION" \
     $'use sqlx::query as q;\nfn z_query() { q("SELECT 1"); }' "crates/o3k-kernel/src"
@@ -183,6 +186,9 @@ check_fixture "bare Command::new" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
 echo "Test 18: std Command alias import -> FAIL"
 check_fixture "std Command alias import" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'use std::process::Command as HostCommand;\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 18a: Command import after blank lines reports the use line -> FAIL"
+check_fixture "Command import line number" 1 "HOST EXECUTION ARCHITECTURE VIOLATION: crates/o3k-kernel/src/z_guard_test_fixture.rs:3" \
+    $'\n\nuse std::process::Command as HostCommand;\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
 echo "Test 19: std grouped Command alias import -> FAIL"
 check_fixture "std grouped Command alias import" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'use std::process::{Command as HostCommand, Stdio};\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
@@ -207,7 +213,9 @@ check_fixture "Command after cfg(test)" 1 "HOST EXECUTION ARCHITECTURE VIOLATION
 echo "Test 26: SQL after #[cfg(test)] -> FAIL"
 check_fixture "SQL after cfg(test)" 1 "SQL ARCHITECTURE VIOLATION" \
     $'#[cfg(test)] mod tests {}\nfn production_after_tests() { sqlx::query("SELECT 1"); }' "crates/o3k-kernel/src"
-
+echo "Test 26n: SQL after cfg(test) module containing an 'n' char literal -> FAIL"
+check_fixture "SQL after cfg(test) with 'n' char literal" 1 "SQL ARCHITECTURE VIOLATION: crates/o3k-kernel/src/z_guard_test_fixture.rs:5" \
+    $'#[cfg(test)]\nmod tests {\n    fn chars() -> [char; 2] { [\'n\',\'{\'] }\n}\nfn production_after_tests() { sqlx::query("SELECT 1"); }' "crates/o3k-kernel/src"
 echo "Test 26a: SQL inside cfg(test) module -> ACCEPT"
 check_fixture "SQL inside cfg(test) module" 0 "" \
     $'#[cfg(test)]\nmod tests {\n    fn test_query() { sqlx::query("SELECT 1"); }\n}' "crates/o3k-kernel/src"

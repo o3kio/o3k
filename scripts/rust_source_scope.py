@@ -3,6 +3,12 @@
 import re
 from pathlib import Path
 
+# An `r` that does not open a raw string is ordinary code, so it does not
+# end the run (identifiers such as `return` or `Err` stay on the fast path).
+_PLAIN_CODE_RUN = re.compile(r"(?:[^/'\"r]|r(?!#*\"))+")
+_CHAR_LITERAL = re.compile(r"'(?:\\.|[^'\\\n])'")
+_RAW_STRING_OPEN = re.compile(r'r(#+)?"')
+
 
 class RustLexState:
     """Small Rust-aware lexer for cfg(test) item and module scope tracking."""
@@ -13,6 +19,17 @@ class RustLexState:
         self.raw_hashes = None
 
     def code(self, line):
+        # Fast path: outside any comment/string, a line without quote or
+        # comment characters is all code.  Most lines take this path.
+        if (
+            not self.block_comment_depth
+            and self.quote is None
+            and self.raw_hashes is None
+            and '"' not in line
+            and "'" not in line
+            and "/" not in line
+        ):
+            return line
         output = []
         i = 0
         while i < len(line):
@@ -44,13 +61,20 @@ class RustLexState:
                 else:
                     i += 1
                 continue
+            # Copy ordinary code up to the next character that can open a
+            # comment, string, char literal or raw string.
+            plain = _PLAIN_CODE_RUN.match(line, i)
+            if plain:
+                output.append(plain.group(0))
+                i = plain.end()
+                continue
             if line.startswith("//", i):
                 break
             if line.startswith("/*", i):
                 self.block_comment_depth = 1
                 i += 2
                 continue
-            if line[i] == "'" and not re.match(r"'(?:\\.|[^'\\n])'", line[i:]):
+            if line[i] == "'" and not _CHAR_LITERAL.match(line, i):
                 output.append(line[i])
                 i += 1
                 continue
@@ -59,7 +83,7 @@ class RustLexState:
                 i += 1
                 continue
             if line[i] == "r":
-                match = re.match(r'r(#+)?"', line[i:])
+                match = _RAW_STRING_OPEN.match(line, i)
                 if match:
                     self.raw_hashes = len(match.group(1) or "")
                     i += len(match.group(0))

@@ -14,6 +14,7 @@ reviewed separately before the guard can be pointed at it.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -69,6 +70,20 @@ def rust_source_files() -> list[Path]:
     return files
 
 
+@functools.cache
+def _production_source(path: Path) -> tuple[tuple[str, ...], str]:
+    """Return (lines, source) with test-only lines blanked, computed once per run.
+
+    The result is cached and shared by every guard, so the lines are returned
+    as an immutable tuple.
+    """
+    rel = str(path.relative_to(REPO_ROOT))
+    lines = path.read_text(encoding="utf-8").splitlines()
+    test_lines = classify_rust_lines(lines, dedicated_test=is_dedicated_test_file(rel))
+    production_lines = tuple("" if is_test else line for line, is_test in zip(lines, test_lines))
+    return production_lines, "\n".join(production_lines)
+
+
 def _load_baseline(name: str) -> dict | None:
     """Load a baseline JSON file from the immutable baseline directory."""
     path = BASELINE_DIR / name
@@ -94,9 +109,14 @@ SQL_PATTERNS = [
     r"sqlx::query_builder::QueryBuilder\b",
     rf"sqlx::(?:prelude::)?{SQL_CAPABILITY_NAMES}\b",
 ]
+# check_sql_boundary skips lines without "sqlx::" before running these
+# patterns, so each pattern must begin with that literal.
+if not all(pat.startswith("sqlx::") for pat in SQL_PATTERNS):
+    raise RuntimeError('every SQL_PATTERNS entry must begin with "sqlx::"')
+SQL_PATTERNS_COMPILED = [re.compile(pat) for pat in SQL_PATTERNS]
 
 SQL_IMPORT_PATTERN = re.compile(
-    r"^\s*use\s+sqlx::(?:"
+    r"^[ \t]*use\s+sqlx::(?:"
     + rf"(?:{SQL_API_NAMES}|{SQL_CAPABILITY_NAMES})"
     + r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?"
     + r"|\{[^;]*\b"
@@ -106,12 +126,12 @@ SQL_IMPORT_PATTERN = re.compile(
 )
 
 SQL_NESTED_IMPORT_PATTERN = re.compile(
-    r"^\s*use\s+sqlx::(?:"
+    r"^[ \t]*use\s+sqlx::(?:"
     r"query_builder::QueryBuilder"
     r"|prelude::(?:Executor|Execute|AnyExecutor)"
     r")(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;"
-    r"|^\s*use\s+sqlx::prelude::\*\s*;"
-    r"|^\s*use\s+sqlx::\*\s*;",
+    r"|^[ \t]*use\s+sqlx::prelude::\*\s*;"
+    r"|^[ \t]*use\s+sqlx::\*\s*;",
     re.MULTILINE | re.DOTALL,
 )
 
@@ -151,13 +171,11 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
         if approved:
             continue
 
-        lines = path.read_text(encoding="utf-8").splitlines()
-        test_lines = classify_rust_lines(
-            lines, dedicated_test=is_dedicated_test_file(rel)
-        )
-        production_lines = ["" if is_test else line for line, is_test in zip(lines, test_lines)]
-        source = "\n".join(production_lines)
+        production_lines, source = _production_source(path)
 
+        # Import patterns anchor with `^[ \t]*`, not `^\s*`: `\s*` would cross
+        # newlines, backtrack quadratically over blanked test lines, and report
+        # the first preceding blank line instead of the `use` line.
         for import_pattern in (SQL_IMPORT_PATTERN, SQL_NESTED_IMPORT_PATTERN):
             for match in import_pattern.finditer(source):
                 line_number = source.count("\n", 0, match.start()) + 1
@@ -170,8 +188,11 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
                 )
 
         for i, line in enumerate(production_lines, 1):
-            for pat in SQL_PATTERNS:
-                if re.search(pat, line):
+            # Every SQL_PATTERNS entry begins with the literal "sqlx::".
+            if "sqlx::" not in line:
+                continue
+            for compiled in SQL_PATTERNS_COMPILED:
+                if compiled.search(line):
                     stripped = line.strip()
                     if stripped.startswith("//") or stripped.startswith("/*"):
                         continue
@@ -179,7 +200,7 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
                         continue
                     errors.append(
                         f"SQL ARCHITECTURE VIOLATION: {rel}:{i}\n"
-                        f"  pattern: {pat}\n"
+                        f"  pattern: {compiled.pattern}\n"
                         f"  code: {stripped[:100]}\n"
                         "  SQL belongs in an explicit persistence, database diagnostic, "
                         "or upgrade boundary."
@@ -202,19 +223,20 @@ HOST_CMD_PATTERNS = [
     (r'\bspawn_host_command\s*\(', "host command wrapper"),
     (r"(?<![A-Za-z0-9_])Command::new\(", "std::process::Command / tokio::process::Command"),
 ]
+HOST_CMD_PATTERNS_COMPILED = [(re.compile(pat), name) for pat, name in HOST_CMD_PATTERNS]
 
 HOST_IMPORT_PATTERNS = [
     (re.compile(
-        r"^\s*use\s+(?:std|tokio)::process::Command"
+        r"^[ \t]*use\s+(?:std|tokio)::process::Command"
         r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;",
         re.MULTILINE | re.DOTALL,
     ), "process Command import"),
     (re.compile(
-        r"^\s*use\s+(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;",
+        r"^[ \t]*use\s+(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;",
         re.MULTILINE | re.DOTALL,
     ), "process Command grouped import"),
     (re.compile(
-        r"^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
+        r"^[ \t]*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
         r"(?:std|tokio)::process::Command\s*;",
         re.MULTILINE | re.DOTALL,
     ), "process Command type alias"),
@@ -283,43 +305,37 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
         if is_test_or_example(rel):
             continue
 
-        lines = path.read_text(encoding="utf-8").splitlines()
-        test_lines = classify_rust_lines(
-            lines, dedicated_test=is_dedicated_test_file(rel)
-        )
-        production_lines = ["" if is_test else line for line, is_test in zip(lines, test_lines)]
-        source = "\n".join(production_lines)
-        command_aliases = _host_command_aliases(source)
+        approved = any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS)
+        production_lines, source = _production_source(path)
+        shell_alias_patterns = [
+            re.compile(rf"\b{re.escape(alias)}\s*::new\(\s*[\"'](?:sh|bash)[\"']")
+            for alias in _host_command_aliases(source) - {"Command"}
+        ]
 
-        for pattern, name in HOST_IMPORT_PATTERNS:
-            for match in pattern.finditer(source):
-                if any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS):
-                    continue
-                line_number = source.count("\n", 0, match.start()) + 1
-                errors.append(
-                    f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
-                    f"  command: {name}\n"
-                    f"  code: {match.group(0).strip()[:120]}\n"
-                    "  Host execution belongs in an explicit execution adapter."
-                )
+        if not approved:
+            for pattern, name in HOST_IMPORT_PATTERNS:
+                for match in pattern.finditer(source):
+                    line_number = source.count("\n", 0, match.start()) + 1
+                    errors.append(
+                        f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
+                        f"  command: {name}\n"
+                        f"  code: {match.group(0).strip()[:120]}\n"
+                        "  Host execution belongs in an explicit execution adapter."
+                    )
 
         for i, line in enumerate(production_lines, 1):
             stripped = line.strip()
             if not stripped.startswith("//"):
-                for alias in command_aliases - {"Command"}:
-                    shell_alias = re.search(
-                        rf"\b{re.escape(alias)}\s*::new\(\s*[\"'](?:sh|bash)[\"']",
-                        line,
-                    )
-                    if shell_alias:
+                for shell_alias in shell_alias_patterns:
+                    if shell_alias.search(line):
                         errors.append(
                             f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{i}\n"
                             "  command: aliased shell command (forbidden)\n"
                             f"  code: {stripped[:120]}"
                         )
                         break
-            for pat, name in HOST_CMD_PATTERNS:
-                if re.search(pat, line):
+            for compiled, name in HOST_CMD_PATTERNS_COMPILED:
+                if compiled.search(line):
                     stripped = line.strip()
                     if stripped.startswith("//"):
                         continue
@@ -333,7 +349,7 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
                             f"  code: {stripped[:120]}"
                         )
                         break
-                    if not any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS):
+                    if not approved:
                         errors.append(
                             f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{i}\n"
                             f"  command: {name}\n"
