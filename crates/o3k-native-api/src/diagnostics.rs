@@ -368,6 +368,15 @@ fn diagnostics_error(error: DiagnosticsError, request_id: &str) -> Response {
         .into_response()
 }
 
+fn query_error(code: ErrorCode, request_id: &str) -> Response {
+    // Query validation happens after authentication and authorization. Keep
+    // the same correlation contract as authority failures without exposing
+    // parser details or echoed query data.
+    ProblemDetails::new(code)
+        .with_request_id(request_id.to_owned())
+        .into_response()
+}
+
 /// Port implemented by the production `o3kd` composition.
 ///
 /// Implementations must project canonical authority only. They must never
@@ -445,11 +454,11 @@ pub async fn services(
     };
     let limit = match query.page_size() {
         Ok(limit) => limit,
-        Err(response) => return response,
+        Err(_) => return query_error(ErrorCode::BadRequest, auth.0.request_id()),
     };
     let after = match query.after_id() {
         Ok(after) => after,
-        Err(response) => return response,
+        Err(_) => return query_error(ErrorCode::InvalidCursor, auth.0.request_id()),
     };
     match reader.services(limit, after.as_deref()).await {
         Ok(page) => Json(page).into_response(),
@@ -474,11 +483,11 @@ pub async fn providers(
     };
     let limit = match query.page_size() {
         Ok(limit) => limit,
-        Err(response) => return response,
+        Err(_) => return query_error(ErrorCode::BadRequest, auth.0.request_id()),
     };
     let after = match query.after_id() {
         Ok(after) => after,
-        Err(response) => return response,
+        Err(_) => return query_error(ErrorCode::InvalidCursor, auth.0.request_id()),
     };
     match reader.providers(limit, after.as_deref()).await {
         Ok(page) => Json(page).into_response(),

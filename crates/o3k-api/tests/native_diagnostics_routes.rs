@@ -174,6 +174,7 @@ async fn get(uri: &str, token: &str) -> Result<(StatusCode, String), Box<dyn std
             Request::builder()
                 .uri(uri)
                 .header("authorization", format!("Bearer {token}"))
+                .header("x-request-id", "request-test")
                 .body(Body::empty())?,
         )
         .await?;
@@ -232,6 +233,32 @@ async fn native_diagnostics_routes_system_operator_reaches_all_endpoints_without
         }
         for secret in secrets {
             assert!(!body.contains(secret), "{secret:?} leaked into {uri}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_diagnostics_query_errors_are_correlated_and_redacted() -> TestResult {
+    // `eA` is the unpadded URL-safe encoding of one ASCII `x` byte.
+    let oversized_cursor = "eA".repeat(513);
+    for endpoint in [
+        "/o3k/v1/operator/diagnostics/services",
+        "/o3k/v1/operator/diagnostics/providers",
+    ] {
+        for (query, code) in [
+            ("?limit=201", "BAD_REQUEST"),
+            ("?cursor=", "INVALID_CURSOR"),
+            ("?cursor=not-base64", "INVALID_CURSOR"),
+            (&format!("?cursor={oversized_cursor}"), "INVALID_CURSOR"),
+        ] {
+            let (status, body) = get(&format!("{endpoint}{query}"), "operator-token").await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint}{query}");
+            let value: Value = serde_json::from_str(&body)?;
+            assert_eq!(value["code"], code);
+            assert_eq!(value["request_id"], "request-test");
+            assert!(value.get("detail").is_none());
+            assert!(!body.contains("not-base64"));
         }
     }
     Ok(())
