@@ -85,6 +85,22 @@ impl Cluster {
             })
             .await
             .map_err(|_| "PostgreSQL host TCP readiness timed out")?;
+            timeout(Duration::from_secs(15), async {
+                let admin_url = format!(
+                    "postgres://admin@127.0.0.1:{}/postgres?connect_timeout=2",
+                    cluster.port
+                );
+                loop {
+                    if let Ok(mut connection) = PgConnection::connect(&admin_url).await {
+                        connection.close().await?;
+                        break;
+                    }
+                    sleep(Duration::from_millis(250)).await;
+                }
+                Ok::<(), sqlx::Error>(())
+            })
+            .await
+            .map_err(|_| "PostgreSQL authenticated host readiness timed out")??;
             let role = Command::new("docker")
                 .args([
                     "exec",
