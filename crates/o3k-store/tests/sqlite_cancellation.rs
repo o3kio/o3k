@@ -179,6 +179,12 @@ async fn cancelled_lifecycle_write_releases_the_sqlite_writer_lock() -> Result<(
     assert_eq!(unchanged.state, OperationState::Pending);
     assert_eq!(unchanged.attempt, 0);
     assert_eq!(unchanged.started_at, None);
+    assert_eq!(unchanged.finished_at, None);
+    assert_eq!(unchanged.error, None);
+    assert_eq!(
+        store.get_operation(operation_id).await?.state,
+        OperationState::Pending
+    );
     let running = store
         .update_canonical_operation_lifecycle(operation_id, &running_update()?)
         .await?;
