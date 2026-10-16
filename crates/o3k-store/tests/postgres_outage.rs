@@ -141,7 +141,7 @@ impl DisposablePostgres {
         let mut last_transient_error = String::from("unknown");
         loop {
             let url = format!(
-                "postgres://127.0.0.1:{}/postgres?connect_timeout=2",
+                "postgres://postgres@127.0.0.1:{}/postgres?connect_timeout=2",
                 self.port
             );
             let attempt = match timeout_at(deadline, PostgresStore::connect(&url)).await {
