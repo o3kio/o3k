@@ -148,7 +148,7 @@ impl DiagnosticsReader for FakeDiagnosticsReader {
     }
 }
 
-fn router() -> Result<axum::Router, Box<dyn std::error::Error>> {
+fn router_with_reader(include_reader: bool) -> Result<axum::Router, Box<dyn std::error::Error>> {
     let native = o3k_native_api::NativeApiState::new(
         None,
         o3k_native_api::pagination::CursorConfig::default(),
@@ -160,12 +160,20 @@ fn router() -> Result<axum::Router, Box<dyn std::error::Error>> {
         None,
         None,
         None,
-    )?
-    .with_diagnostics_reader(Arc::new(FakeDiagnosticsReader))
+    )?;
+    let native = if include_reader {
+        native.with_diagnostics_reader(Arc::new(FakeDiagnosticsReader))
+    } else {
+        native
+    }
     .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
     Ok(o3k_api::router_with_state(
         o3k_api::AppState::new().with_native_api(native),
     ))
+}
+
+fn router() -> Result<axum::Router, Box<dyn std::error::Error>> {
+    router_with_reader(true)
 }
 
 async fn get(uri: &str, token: &str) -> Result<(StatusCode, String), Box<dyn std::error::Error>> {
@@ -174,6 +182,24 @@ async fn get(uri: &str, token: &str) -> Result<(StatusCode, String), Box<dyn std
             Request::builder()
                 .uri(uri)
                 .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 8192).await?;
+    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+async fn get_without_reader(
+    uri: &str,
+    token: &str,
+) -> Result<(StatusCode, String), Box<dyn std::error::Error>> {
+    let response = router_with_reader(false)?
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-request-id", "pp6-diagnostics-correlation")
                 .body(Body::empty())?,
         )
         .await?;
@@ -233,6 +259,25 @@ async fn native_diagnostics_routes_system_operator_reaches_all_endpoints_without
         for secret in secrets {
             assert!(!body.contains(secret), "{secret:?} leaked into {uri}");
         }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_diagnostics_authority_returns_request_correlation_without_details()
+-> TestResult {
+    for uri in ENDPOINTS {
+        let (status, body) = get_without_reader(uri, "operator-token").await?;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+        let value: Value = serde_json::from_str(&body)?;
+        assert_eq!(value["code"], "NOT_AVAILABLE", "{uri}");
+        assert_eq!(value["request_id"], "pp6-diagnostics-correlation", "{uri}");
+        assert!(value.get("detail").is_none(), "{uri}");
+        assert!(!body.contains("secret"), "secret detail leaked into {uri}");
+        assert!(
+            !body.contains("password"),
+            "credential detail leaked into {uri}"
+        );
     }
     Ok(())
 }
