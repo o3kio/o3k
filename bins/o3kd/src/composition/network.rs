@@ -3132,8 +3132,35 @@ mod dispatcher_tests {
         }
     }
 
-    async fn production_mtls_postgres_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        PRODUCTION_MTLS_POSTGRES_TEST_LOCK.lock().await
+    /// Held for a whole recovery test. The mutex serializes these tests within
+    /// one process; the connection holds the shared `o3k-shared-test-database`
+    /// advisory lock so that their table reset cannot interleave with other
+    /// destructive PostgreSQL test groups in separate test processes.
+    struct ProductionMtlsPostgresTestGuard {
+        _process: tokio::sync::MutexGuard<'static, ()>,
+        _database: Option<sqlx::postgres::PgConnection>,
+    }
+
+    async fn production_mtls_postgres_test_guard() -> ProductionMtlsPostgresTestGuard {
+        use sqlx::Connection as _;
+
+        let process = PRODUCTION_MTLS_POSTGRES_TEST_LOCK.lock().await;
+        let database = match std::env::var("O3K_DATABASE_URL") {
+            Ok(database_url) => {
+                let mut connection = sqlx::postgres::PgConnection::connect(&database_url)
+                    .await
+                    .expect("connect to the configured PostgreSQL test database");
+                o3k_store::conformance::acquire_shared_postgres_test_database_lock(&mut connection)
+                    .await
+                    .expect("acquire the shared PostgreSQL test-database advisory lock");
+                Some(connection)
+            }
+            Err(_) => None,
+        };
+        ProductionMtlsPostgresTestGuard {
+            _process: process,
+            _database: database,
+        }
     }
 
     /// A test compute execution boundary that asks the same production
