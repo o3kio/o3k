@@ -7,7 +7,8 @@
 
 use crate::context::{DoctorDb, Exec, HttpClient, HttpResponse, UnitState};
 use crate::db::{
-    AllocationRow, EpochRow, InstanceRow, InventoryRow, PortRow, ProviderRow, WorkLeaseRow,
+    AllocationRow, EpochRow, InstanceRow, InventoryRow, MigrationCounts, PortRow, ProviderRow,
+    WorkLeaseRow,
 };
 use async_trait::async_trait;
 use std::collections::BTreeMap;
@@ -438,6 +439,12 @@ pub struct FakeDb {
     pub ports: Vec<PortRow>,
     pub active_sessions: Result<u64, String>,
     pub work_leases: Result<Vec<WorkLeaseRow>, String>,
+    /// When set, row reads fail with this backend error text: every read,
+    /// or only the one named by `read_error_only`.
+    pub read_error: Option<String>,
+    pub read_error_only: Option<&'static str>,
+    pub postgres_reachable: Result<(), String>,
+    pub postgres_migrations: Result<MigrationCounts, String>,
 }
 
 impl Default for FakeDb {
@@ -453,11 +460,27 @@ impl Default for FakeDb {
             ports: Vec::new(),
             active_sessions: Ok(1),
             work_leases: Ok(Vec::new()),
+            read_error: None,
+            read_error_only: None,
+            postgres_reachable: Ok(()),
+            postgres_migrations: Ok(MigrationCounts {
+                applied: 1,
+                failed: 0,
+            }),
         }
     }
 }
 
 impl FakeDb {
+    /// The configured read error for `read`, if that read should fail.
+    fn read_failure(&self, read: &str) -> Option<String> {
+        let error = self.read_error.as_ref()?;
+        match self.read_error_only {
+            Some(only) if only != read => None,
+            _ => Some(error.clone()),
+        }
+    }
+
     /// A fake whose placement/instance state is consistent and healthy.
     #[must_use]
     pub fn healthy() -> Self {
@@ -526,6 +549,13 @@ impl FakeDb {
             ports: Vec::new(),
             active_sessions: Ok(1),
             work_leases: Ok(Vec::new()),
+            read_error: None,
+            read_error_only: None,
+            postgres_reachable: Ok(()),
+            postgres_migrations: Ok(MigrationCounts {
+                applied: 1,
+                failed: 0,
+            }),
         }
     }
 }
@@ -541,27 +571,53 @@ impl DoctorDb for FakeDb {
     }
 
     async fn placement_providers(&self, _path: &Path) -> Result<Vec<ProviderRow>, String> {
+        if let Some(error) = self.read_failure("placement_providers") {
+            return Err(error);
+        }
         Ok(self.providers.clone())
     }
 
     async fn placement_inventories(&self, _path: &Path) -> Result<Vec<InventoryRow>, String> {
+        if let Some(error) = self.read_failure("placement_inventories") {
+            return Err(error);
+        }
         Ok(self.inventories.clone())
     }
 
     async fn live_allocation_resources(&self, _path: &Path) -> Result<Vec<AllocationRow>, String> {
+        if let Some(error) = self.read_failure("live_allocation_resources") {
+            return Err(error);
+        }
         Ok(self.allocations.clone())
     }
 
     async fn latest_epochs(&self, _path: &Path) -> Result<Vec<EpochRow>, String> {
+        if let Some(error) = self.read_failure("latest_epochs") {
+            return Err(error);
+        }
         Ok(self.epochs.clone())
     }
 
     async fn compute_instances(&self, _path: &Path) -> Result<Vec<InstanceRow>, String> {
+        if let Some(error) = self.read_failure("compute_instances") {
+            return Err(error);
+        }
         Ok(self.instances.clone())
     }
 
     async fn network_ports(&self, _path: &Path) -> Result<Vec<PortRow>, String> {
+        if let Some(error) = self.read_failure("network_ports") {
+            return Err(error);
+        }
         Ok(self.ports.clone())
+    }
+
+    async fn postgres_reachable(&self, _url: &str) -> Result<(), String> {
+        self.postgres_reachable.clone()
+    }
+
+    async fn postgres_migration_counts(&self, _url: &str) -> Result<MigrationCounts, String> {
+        self.postgres_migrations.clone()
     }
 
     async fn active_controller_sessions(

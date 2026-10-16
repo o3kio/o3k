@@ -126,6 +126,11 @@ surface.
 
 ## Human approval required
 
+Proposed amendments A1–A9 (2026-10-16) to the D1–D13 recommendations are listed
+in [the decision packet](../pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md#proposed-amendments-2026-10-16).
+They are not accepted; reviewers record accept, amend or reject for each one
+in this ADR.
+
 Reviewers must decide or approve the proposal for:
 
 1. manifest identity, canonical state inventory, consistency boundary, and

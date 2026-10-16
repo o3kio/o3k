@@ -139,7 +139,8 @@ async fn postgres_pool_exhaustion_preserves_resource_row_state_and_retry() {
         },
         "harness": {
             "test": "postgres_pool_exhaustion_preserves_resource_row_state_and_retry",
-            "profile": "SPEC-0024 bounded PostgreSQL",
+            "profile": "o3k-small-edge-v1",
+            "persistence_contract": "SPEC-0024 bounded PostgreSQL",
             "schema": "o3k-store migrations_postgres",
             "server_version": metadata.get::<String, _>("server_version"),
             "database": metadata.get::<String, _>("database_name"),
@@ -152,7 +153,10 @@ async fn postgres_pool_exhaustion_preserves_resource_row_state_and_retry() {
             "resource_rows_before": 1,
             "resource_rows_after_retry": 2,
             "resource_rows_after_cleanup": 0,
-            "foreign_state": "untouched; only purpose-scoped O3K resource rows were inspected",
+            "foreign_state": {
+                "status": "not_exercised",
+                "reason": "store-only lane invokes no provider or external-state operations; only purpose-scoped O3K resource rows were inspected"
+            },
             "redaction": "no DSN, credential or secret emitted"
         },
         "cleanup": {"database_rows": "PASS", "advisory_lock_held": true}

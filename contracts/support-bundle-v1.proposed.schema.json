@@ -1,0 +1,409 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/proposed/support-bundle-v1.schema.json",
+  "title": "O3K PP.6 bounded redacted support bundle v1",
+  "description": "Proposed, read-only, bounded support projection (v1: diagnostics and identity only; no Audit or Operation evidence). This contract is not accepted until the associated architecture/security decisions are recorded. See SPEC-0051.",
+  "x-o3k-status": "proposed",
+  "x-o3k-transport": "GET /o3k/v1/operator/support-bundle",
+  "x-o3k-authorization": "operator:ReadSupportBundle on operator/support-bundle; User principal; operator role; effective System scope",
+  "x-o3k-max-serialized-bytes": 262144,
+  "x-o3k-max-source-bytes": 65536,
+  "x-o3k-post-validation": [
+    "single_diagnostics_source",
+    "source_payload_status_agreement",
+    "truncation_requires_partial_source",
+    "complete_requires_complete_source",
+    "generated_at_equals_started_at",
+    "timestamps_within_collection_interval",
+    "serialized_utf8_size_bounds",
+    "safe_identity_revalidation_of_imported_diagnostics"
+  ],
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "source",
+    "profile",
+    "backend",
+    "diagnostics",
+    "collection",
+    "redacted"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "v1"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/provenance_identity"
+        }
+      }
+    },
+    "profile": {
+      "$ref": "#/$defs/safe_identity"
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "sqlite",
+            "postgresql"
+          ]
+        },
+        "server_version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/safe_version"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "diagnostics": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/diagnostics"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "collection": {
+      "$ref": "#/$defs/collection"
+    },
+    "redacted": {
+      "const": true
+    }
+  },
+  "$defs": {
+    "safe_identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
+    },
+    "provenance_identity": {
+      "type": "string",
+      "minLength": 40,
+      "maxLength": 128,
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        {
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "pattern": "^release:[A-Za-z0-9._-]+@(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        }
+      ]
+    },
+    "safe_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+:/ -]{0,127}$"
+    },
+    "reason_category": {
+      "enum": [
+        "not_configured",
+        "never_observed",
+        "observation_stale",
+        "heartbeat_lost",
+        "administratively_disabled",
+        "draining",
+        "readiness_failed",
+        "protocol_incompatible",
+        "dependency_unavailable",
+        "reported_unhealthy",
+        "capacity_source_unavailable",
+        "unsupported",
+        "source_malformed",
+        "source_oversized",
+        "source_truncated",
+        "source_timeout",
+        "schema_mismatch",
+        "redaction_failed"
+      ]
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "services",
+        "providers",
+        "capacity"
+      ],
+      "properties": {
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "evaluated_at_unix_ms",
+            "status",
+            "counts",
+            "control_plane",
+            "locations"
+          ],
+          "properties": {
+            "version": {
+              "const": "v1"
+            },
+            "evaluated_at_unix_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "status": {
+              "enum": [
+                "healthy",
+                "degraded",
+                "unavailable",
+                "stale",
+                "unknown"
+              ]
+            },
+            "counts": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "services",
+                "providers"
+              ],
+              "properties": {
+                "services": {
+                  "$ref": "https://o3k.io/contracts/native-diagnostics-v1.schema.json#/definitions/componentCounts"
+                },
+                "providers": {
+                  "$ref": "https://o3k.io/contracts/native-diagnostics-v1.schema.json#/definitions/componentCounts"
+                }
+              }
+            },
+            "control_plane": {
+              "anyOf": [
+                {
+                  "$ref": "https://o3k.io/contracts/native-diagnostics-v1.schema.json#/definitions/controlPlane"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "locations": {
+              "$ref": "https://o3k.io/contracts/native-diagnostics-v1.schema.json#/definitions/locationDiagnostics"
+            }
+          }
+        },
+        "services": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "items",
+            "has_more",
+            "omitted_count",
+            "next_cursor"
+          ],
+          "properties": {
+            "items": {
+              "type": "array",
+              "maxItems": 200,
+              "items": {
+                "$ref": "https://o3k.io/contracts/native-diagnostics-v1.schema.json#/definitions/service"
+              }
+            },
+            "has_more": {
+              "type": "boolean"
+            },
+            "omitted_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "next_cursor": {
+              "const": null
+            }
+          },
+          "if": {
+            "properties": {
+              "has_more": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "omitted_count": {
+                "minimum": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "omitted_count": {
+                "const": 0
+              }
+            }
+          }
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "items",
+            "has_more",
+            "omitted_count",
+            "next_cursor"
+          ],
+          "properties": {
+            "items": {
+              "type": "array",
+              "maxItems": 200,
+              "items": {
+                "$ref": "https://o3k.io/contracts/native-diagnostics-v1.schema.json#/definitions/provider"
+              }
+            },
+            "has_more": {
+              "type": "boolean"
+            },
+            "omitted_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "next_cursor": {
+              "const": null
+            }
+          },
+          "if": {
+            "properties": {
+              "has_more": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "omitted_count": {
+                "minimum": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "omitted_count": {
+                "const": 0
+              }
+            }
+          }
+        },
+        "capacity": {
+          "$ref": "https://o3k.io/contracts/native-diagnostics-v1.schema.json#/definitions/capacity"
+        }
+      }
+    },
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "disposition",
+        "started_at",
+        "completed_at",
+        "sources"
+      ],
+      "properties": {
+        "disposition": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "allOf": [
+            {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "const": "diagnostics"
+                  }
+                }
+              }
+            }
+          ],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "status"
+            ],
+            "properties": {
+              "name": {
+                "const": "diagnostics"
+              },
+              "status": {
+                "enum": [
+                  "complete",
+                  "partial",
+                  "unavailable",
+                  "not_configured"
+                ]
+              },
+              "observed_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "reason_category": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/reason_category"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

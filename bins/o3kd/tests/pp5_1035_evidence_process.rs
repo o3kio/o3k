@@ -1891,8 +1891,27 @@ async fn run_iteration(
             .await?;
         let lease = match outcome {
             o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
-            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
-                return Err("old controller could not seed the short PostgreSQL repair lease while the terminal delete held the local repair lock".into());
+            o3k_store::LeaseAcquireOutcome::Busy {
+                owner_controller_id,
+                owner_controller_epoch,
+                fencing_token,
+                lease_created_at,
+                lease_until,
+            } => {
+                // Report the holder so an intermittent failure can be
+                // attributed: the old daemon's own scheduled pass, or another
+                // owner.
+                let held_by_old_daemon = owner_controller_id.0 == old_controller.0
+                    && owner_controller_epoch.0 == old_controller.1;
+                return Err(format!(
+                    "old controller could not seed the short PostgreSQL repair lease while the \
+                     terminal delete held the local repair lock: lease busy, held_by_old_daemon=\
+                     {held_by_old_daemon}, owner={owner_controller_id:?}, epoch=\
+                     {owner_controller_epoch:?}, fencing_token={fencing_token:?}, created_at=\
+                     {lease_created_at}, lease_until={lease_until}, paused_for_ms={}",
+                    endpoint_release_pause_started.elapsed().as_millis()
+                )
+                .into());
             }
         };
         evidence.set(

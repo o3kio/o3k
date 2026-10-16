@@ -137,6 +137,21 @@ echo "Test 13: SQL path-prefix collision -> FAIL"
 check_fixture "SQL path-prefix collision" 1 "SQL ARCHITECTURE VIOLATION" \
     'pub fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-store/src" "postgres-extra.rs"
 
+echo "Test 13a: SQL import after another statement on the same line -> FAIL"
+check_fixture "SQL import after another statement" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use std::fmt; use sqlx::query;\nfn z_query() { query("SELECT 1"); }' "crates/o3k-kernel/src"
+echo "Test 13b: SQL import with a leading :: path -> FAIL"
+check_fixture "SQL import with leading ::" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use ::sqlx::query;\nfn z_query() { query("SELECT 1"); }' "crates/o3k-kernel/src"
+echo "Test 13c: SQL import inside a block -> FAIL"
+check_fixture "SQL import inside a block" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'fn z_query() { use sqlx::query; query("SELECT 1"); }' "crates/o3k-kernel/src"
+echo "Test 13d: SQL import text inside a comment -> ACCEPT"
+check_fixture "SQL import text inside a comment" 0 "" \
+    $'// call order; use sqlx::query; is forbidden here\npub fn z_ok() {}' "crates/o3k-kernel/src"
+echo "Test 13e: raw SQL after a pub use on the same line -> FAIL"
+check_fixture "raw SQL after pub use on one line" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'pub use std::fmt; fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-kernel/src"
 echo "Test 14: forbidden architecture paths are not approved -> PASS"
 python3 - "$GUARD" <<'PY'
 import runpy
@@ -174,6 +189,25 @@ assert any(path_is_or_below("crates/o3k-image/src/execution.rs", allowed) for al
 print("  PASS: forbidden architecture paths remain unapproved")
 PY
 
+echo "Test 14a: SQL line prefilter only accepts patterns with a literal prefix -> PASS"
+python3 - "$GUARD" <<'PY'
+import runpy
+import sys
+
+policy = runpy.run_path(sys.argv[1])
+requires = policy["requires_literal_prefix"]
+for pattern in policy["SQL_PATTERNS"]:
+    assert requires(pattern, "sqlx::"), pattern
+assert requires(r"sqlx::(?:query|raw_sql)\b", "sqlx::")
+for pattern in (
+    r"sqlx::query\b|PgPool::connect",
+    r"sqlx::?query",
+    r"(?:sqlx::query)",
+    r"query\b",
+):
+    assert not requires(pattern, "sqlx::"), pattern
+print("  PASS: literal-prefix check rejects alternation and quantified prefixes")
+PY
 echo "Test 15: multiline std grouped Command import -> FAIL"
 check_fixture "multiline std grouped Command import" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'use std::process::{\n    Command as HostCommand,\n    Stdio,\n};\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
@@ -207,6 +241,18 @@ check_fixture "fully qualified Command::new" 1 "HOST EXECUTION ARCHITECTURE VIOL
 echo "Test 24: tokio qualified Command::new -> FAIL"
 check_fixture "tokio qualified Command::new" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _x = tokio::process::Command::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 24a: aliased Command import after another statement -> FAIL"
+check_fixture "aliased Command import after another statement" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
+    $'use std::fmt; use std::process::Command as HostCommand;\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 24b: aliased Command import with a leading :: path -> FAIL"
+check_fixture "aliased Command import with leading ::" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
+    $'use ::std::process::Command as HostCommand;\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 24c: public Command type alias with a leading :: path -> FAIL"
+check_fixture "public Command type alias" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
+    $'pub type HostCommand = ::std::process::Command;\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 24d: Command import text inside a comment -> ACCEPT"
+check_fixture "Command import text inside a comment" 0 "" \
+    $'// e.g. { use std::process::Command; }\npub fn z_ok() {}' "crates/o3k-kernel/src"
 echo "Test 25: Command::new after #[cfg(test)] -> FAIL"
 check_fixture "Command after cfg(test)" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'#[cfg(test)] mod tests {}\nfn production_after_tests() { let _ = Command::new("ls"); }' "crates/o3k-kernel/src"

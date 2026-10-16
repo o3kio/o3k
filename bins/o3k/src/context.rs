@@ -3,7 +3,8 @@
 //! deterministically testable without root or shell shims.
 
 use crate::db::{
-    AllocationRow, EpochRow, InstanceRow, InventoryRow, PortRow, ProviderRow, WorkLeaseRow,
+    AllocationRow, EpochRow, InstanceRow, InventoryRow, MigrationCounts, PortRow, ProviderRow,
+    WorkLeaseRow,
 };
 use async_trait::async_trait;
 use std::collections::BTreeMap;
@@ -150,6 +151,10 @@ pub trait DoctorDb: Send + Sync {
     async fn compute_instances(&self, path: &Path) -> Result<Vec<InstanceRow>, String>;
     /// All rows of `network_ports`.
     async fn network_ports(&self, path: &Path) -> Result<Vec<PortRow>, String>;
+    /// A read-only `SELECT 1` against the configured PostgreSQL store.
+    async fn postgres_reachable(&self, url: &str) -> Result<(), String>;
+    /// Successful and failed rows in PostgreSQL `_sqlx_migrations`.
+    async fn postgres_migration_counts(&self, url: &str) -> Result<MigrationCounts, String>;
     /// Count of currently active controller sessions in the durable authority.
     async fn active_controller_sessions(
         &self,
