@@ -13,7 +13,10 @@ use o3k_kernel::{
     AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ScopeKind, UserPrincipal,
 };
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tower::ServiceExt;
 
 use o3k_native_api::diagnostics::{
@@ -149,6 +152,12 @@ impl DiagnosticsReader for FakeDiagnosticsReader {
 }
 
 fn router() -> Result<axum::Router, Box<dyn std::error::Error>> {
+    router_with_diagnostics_reader(Arc::new(FakeDiagnosticsReader))
+}
+
+fn router_with_diagnostics_reader(
+    diagnostics_reader: Arc<dyn DiagnosticsReader>,
+) -> Result<axum::Router, Box<dyn std::error::Error>> {
     let native = o3k_native_api::NativeApiState::new(
         None,
         o3k_native_api::pagination::CursorConfig::default(),
@@ -161,7 +170,7 @@ fn router() -> Result<axum::Router, Box<dyn std::error::Error>> {
         None,
         None,
     )?
-    .with_diagnostics_reader(Arc::new(FakeDiagnosticsReader))
+    .with_diagnostics_reader(diagnostics_reader)
     .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
     Ok(o3k_api::router_with_state(
         o3k_api::AppState::new().with_native_api(native),
@@ -169,7 +178,15 @@ fn router() -> Result<axum::Router, Box<dyn std::error::Error>> {
 }
 
 async fn get(uri: &str, token: &str) -> Result<(StatusCode, String), Box<dyn std::error::Error>> {
-    let response = router()?
+    get_from_router(router()?, uri, token).await
+}
+
+async fn get_from_router(
+    router: axum::Router,
+    uri: &str,
+    token: &str,
+) -> Result<(StatusCode, String), Box<dyn std::error::Error>> {
+    let response = router
         .oneshot(
             Request::builder()
                 .uri(uri)
@@ -232,6 +249,67 @@ async fn native_diagnostics_routes_system_operator_reaches_all_endpoints_without
         }
         for secret in secrets {
             assert!(!body.contains(secret), "{secret:?} leaked into {uri}");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct DiagnosticsReadCounts([AtomicUsize; 4]);
+
+struct CountingDiagnosticsReader {
+    reads: Arc<DiagnosticsReadCounts>,
+}
+
+#[async_trait::async_trait]
+impl DiagnosticsReader for CountingDiagnosticsReader {
+    async fn summary(&self) -> Result<DiagnosticsSummary, DiagnosticsError> {
+        self.reads.0[0].fetch_add(1, Ordering::SeqCst);
+        FakeDiagnosticsReader.summary().await
+    }
+
+    async fn services(
+        &self,
+        limit: usize,
+        after: Option<&str>,
+    ) -> Result<DiagnosticsPage<ServiceDiagnostics>, DiagnosticsError> {
+        self.reads.0[1].fetch_add(1, Ordering::SeqCst);
+        FakeDiagnosticsReader.services(limit, after).await
+    }
+
+    async fn providers(
+        &self,
+        limit: usize,
+        after: Option<&str>,
+    ) -> Result<DiagnosticsPage<ProviderDiagnostics>, DiagnosticsError> {
+        self.reads.0[2].fetch_add(1, Ordering::SeqCst);
+        FakeDiagnosticsReader.providers(limit, after).await
+    }
+
+    async fn capacity(&self) -> Result<CapacityDiagnostics, DiagnosticsError> {
+        self.reads.0[3].fetch_add(1, Ordering::SeqCst);
+        FakeDiagnosticsReader.capacity().await
+    }
+}
+
+#[tokio::test]
+async fn native_diagnostics_get_routes_call_only_their_read_projection() -> TestResult {
+    // SPEC-0045 exposes diagnostics as a read-only projection. Exercise the
+    // production router and ensure each GET reaches only its matching reader
+    // operation, with no cross-route or repeated projection calls.
+    let reads = Arc::new(DiagnosticsReadCounts::default());
+    let reader = Arc::new(CountingDiagnosticsReader {
+        reads: reads.clone(),
+    });
+    let router = router_with_diagnostics_reader(reader)?;
+
+    for (index, uri) in ENDPOINTS.into_iter().enumerate() {
+        let (status, _) = get_from_router(router.clone(), uri, "operator-token").await?;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        for (read_index, count) in reads.0.iter().enumerate() {
+            let expected = usize::from(read_index == index);
+            assert_eq!(count.load(Ordering::SeqCst), expected, "{uri}");
+            count.store(0, Ordering::SeqCst);
         }
     }
     Ok(())
