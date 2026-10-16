@@ -17,6 +17,30 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  postgres-wal-pressure:
+    name: PostgreSQL WAL exhaustion and recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
+      - name: Install PostgreSQL store build prerequisites
+        timeout-minutes: 10
+        run: scripts/ci/apt-provision.sh install protobuf-compiler pkg-config
+      - name: Validate fail-closed WAL evidence validator
+        run: python3 scripts/validate_postgres_wal_pressure_evidence.py --self-test
+      - name: Exercise real PostgreSQL WAL exhaustion and restart recovery
+        run: bash tests/postgres-wal-pressure.sh
+      - name: Upload PostgreSQL WAL pressure evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: postgres-wal-pressure-evidence
+          if-no-files-found: warn
+          path: target/pp6/postgres-wal-pressure-evidence.json
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -244,8 +268,54 @@ jobs:
         run: bash tests/helm-lint-and-template.sh
       - name: Test Kubernetes deployment version consistency
         run: bash tests/kubernetes-version-consistency.sh
+      - name: Required PP.6 PostgreSQL outage/reconnect evidence
+        # Includes compiling the test binary on a cold cache.
+        timeout-minutes: 20
+        env:
+          O3K_PP6_PG_EVIDENCE_PATH: ${{ runner.temp }}/pp6-postgres-outage.json
+          O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          command -v docker
+          docker version
+          docker image inspect postgres:16.4 >/dev/null
+          cargo test -p o3k-store --test postgres_outage -- --ignored --nocapture
+      - name: Upload PP.6 PostgreSQL outage evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pp6-postgres-outage-evidence
+          path: ${{ runner.temp }}/pp6-postgres-outage.json
+          if-no-files-found: error
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test required PP.6 PostgreSQL server connection pressure
+        env:
+          O3K_PP6_PG_EVIDENCE_PATH: ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
+          O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          source_tree_sha="$(git cat-file commit "$O3K_PP6_SOURCE_HEAD_SHA" | awk '$1 == "tree" { print $2; exit }')"
+          export O3K_PP6_SOURCE_TREE_SHA="$source_tree_sha"
+          execution_head_sha="$(git rev-parse HEAD)"
+          export O3K_PP6_EXECUTION_HEAD_SHA="$execution_head_sha"
+          execution_tree_sha="$(git cat-file commit "$execution_head_sha" | awk '$1 == "tree" { print $2; exit }')"
+          export O3K_PP6_EXECUTION_TREE_SHA="$execution_tree_sha"
+          cargo test -p o3k-store --test postgres_server_pressure --all-features -- --ignored --nocapture
+          test -s "$O3K_PP6_PG_EVIDENCE_PATH"
+      - name: Validate PP.6 PostgreSQL server pressure evidence
+        env:
+          O3K_PP6_PG_EVIDENCE_PATH: ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
+        run: |
+          set -euo pipefail
+          jq -e '.schema == "o3k.pp6.postgres-server-pressure.v1" and .profile == "o3k-small-edge-v1" and (.schema_migration_identity | startswith("o3k-store-sqlx-migrations:")) and (.source_head | length == 40) and (.source_tree | length == 40) and (.execution_head | length == 40) and (.execution_tree | length == 40) and .held_session_count == 5 and .raw_admission_attempts == 1 and .store_admission_attempts == 1 and .raw_admission_timeout_seconds == 5 and .store_admission_timeout_seconds == 5 and .recovery_timeout_seconds == 15 and .observed_sqlstate == "53300" and .cleanup == "passed" and .foreign_state.status == "not_exercised" and .foreign_state.reason == "store-only lane invokes no provider or external-state operations" and .artifact_secret_scan.status == "passed" and .disposition == "PASS" and .canonical_retry == "passed"' "$O3K_PP6_PG_EVIDENCE_PATH"
+      - name: Upload PP.6 PostgreSQL server pressure evidence
+        if: ${{ success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pp6-postgres-server-pressure-evidence
+          path: ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
+          if-no-files-found: error
       - name: Architecture boundary check
         run: python3 scripts/check-architecture-boundaries.py
       - name: Maintainability architecture guardrails
@@ -267,6 +337,18 @@ jobs:
         run: cargo test --workspace --all-features
       - name: P12.4 PostgreSQL conformance (mandatory)
         run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --ignored --nocapture
+      - name: PP.6 PostgreSQL resource-pressure evidence (mandatory)
+        env:
+          O3K_PP6_PG_EVIDENCE_PATH: ${{ runner.temp }}/pp6-postgres-resource-pressure.json
+          O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: cargo test -p o3k-store --test postgres_resource_pressure --all-features -- --ignored --nocapture
+      - name: Upload PP.6 PostgreSQL resource-pressure evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pp6-postgres-resource-pressure-evidence
+          path: ${{ runner.temp }}/pp6-postgres-resource-pressure.json
+          if-no-files-found: error
       - name: Endpoint-lifecycle 1035 PostgreSQL conformance (mandatory)
         env:
           O3K_DATABASE_URL: postgres://o3k:password@127.0.0.1:5432/o3k_endpoint_test_ci
@@ -280,6 +362,18 @@ jobs:
         # Independently-spawned runtimes share only the durable store, so the
         # canonical replay authority is proven durable rather than process-local.
         run: cargo test -p o3kd --test p12_7_cross_process_replay --all-features -- --ignored --nocapture
+      - name: PP.6 real SQLite WAL filesystem-pressure evidence (mandatory)
+        env:
+          O3K_SQLITE_PRESSURE_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          O3K_SQLITE_PRESSURE_EVIDENCE_PATH: ${{ runner.temp }}/pp6-sqlite-disk-pressure.json
+        run: bash tests/sqlite-disk-pressure.sh
+      - name: Upload PP.6 SQLite filesystem-pressure evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pp6-sqlite-disk-pressure
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/pp6-sqlite-disk-pressure.json
       - name: Emit exact-source binary build manifest (preparation for artifact pipeline)
         # Safest useful preparation for the follow-up pre-built-artifact pipeline:
         # record the exact commit and sha256 of the two protected-run binaries so
