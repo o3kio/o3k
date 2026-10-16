@@ -333,8 +333,6 @@ jobs:
           name: nextest-junit
           if-no-files-found: warn
           path: target/nextest/pr/junit.xml
-      - name: Test
-        run: cargo test --workspace --all-features
       - name: P12.4 PostgreSQL conformance (mandatory)
         run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --ignored --nocapture
       - name: PP.6 PostgreSQL resource-pressure evidence (mandatory)
@@ -467,6 +465,47 @@ jobs:
             target/testlab-artifacts/result.json
             target/testlab-artifacts/sbom.spdx.json
             target/testlab-artifacts/SHA256SUMS
+  # ADR-0133's required Rust test command, in its own job so it runs in
+  # parallel with the nextest lane instead of after it. Its in-process run
+  # keeps coverage of tests that share process-global state.
+  cargo-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16.4
+        env:
+          POSTGRES_USER: o3k
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: o3k_workspace_test_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U o3k -d o3k_workspace_test_ci"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      O3K_DATABASE_URL: postgres://o3k:password@127.0.0.1:5432/o3k_workspace_test_ci
+      O3K_TEST_DATABASE_PURPOSE: workspace
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
+      - name: Install Rust test prerequisites
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          scripts/ci/apt-provision.sh install \
+            protobuf-compiler libvirt-dev pkg-config python3-yaml qemu-utils sqlite3 tgt
+      - name: Refresh cached libvirt bindings
+        run: cargo clean -p virt-sys
+      - name: Test
+        run: cargo test --workspace --all-features
   # ISSUE #907 integrated production-profile northbound convergence gate. The
   # orchestrator provisions a disposable PostgreSQL 16.4, reuses the pinned
   # Keycloak fixture via tests/p12-iam-7-real-idp.sh's AFTER_HOOK, and runs the

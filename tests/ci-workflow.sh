@@ -24,6 +24,20 @@ assert "run: bash tests/p13_1_provider_harness.sh" in text
 assert "run: bash tests/openapi-governance.sh" in text
 assert "run: bash tests/toolchain-evidence.sh" in text
 assert "run: cargo test --workspace --all-features\n" in text
+# ADR-0133: the all-features cargo test runs in its own job with the native
+# libvirt link prerequisites and the shared PostgreSQL workspace database.
+cargo_test_job = re.search(r"^  cargo-test:\n((?:    .*\n|\n)*)", text, re.MULTILINE)
+assert cargo_test_job, "cargo-test job missing"
+cargo_test_body = cargo_test_job.group(1)
+for needle in (
+    "run: cargo test --workspace --all-features\n",
+    "libvirt-dev pkg-config",
+    "run: cargo clean -p virt-sys\n",
+    "image: postgres:16.4",
+    "O3K_TEST_DATABASE_PURPOSE: workspace",
+):
+    assert needle in cargo_test_body, needle
+assert text.count("run: cargo test --workspace --all-features\n") == 1
 # Every workflow that provides a required status check must run for merge
 # queue groups, or the queue waits forever on the missing check.
 for required_check_workflow in ("ci.yml", "component-cinder-mock.yml"):
