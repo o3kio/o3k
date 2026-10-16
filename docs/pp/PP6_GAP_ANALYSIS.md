@@ -120,11 +120,13 @@ are implementation and CI observations, not acceptance or merge decisions.
   product claim.
 - PostgreSQL server pressure [#1114](https://github.com/o3kio/o3k/pull/1114)
   is currently at `a2ee310064039779348e443935a5d7f736842a07`; a prior workflow
-  failure remains recorded on the PR and a fresh protected run is pending.
+  failure remains recorded on the PR and the fresh protected run is in
+  progress.
   No PostgreSQL pressure PASS is claimed.
 - Read-only diagnostics routes [#1115](https://github.com/o3kio/o3k/pull/1115)
   is currently at `7e342171710172b454afe776a0be853b9bc45525`. Focused tests and
-  independent review are clear; exact-head protected CI is pending. The slice
+  independent review are clear; exact-head protected CI is in progress. The
+  slice
   proves route read-only behavior only and does not create a support-bundle
   contract or complete diagnostics acceptance.
 
