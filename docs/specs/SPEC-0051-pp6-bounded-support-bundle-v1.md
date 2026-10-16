@@ -221,20 +221,31 @@ No implementation may claim complete metrics/OTLP coverage, backup/restore
 state, PKI state, or upgrade state from this contract. Those fields require
 their own accepted authorities and must be added as narrow schema amendments.
 
-## 8. Open decisions required before acceptance
+## 8. Approval revision submitted 2026-10-17
 
-The human architecture/security reviewer must explicitly accept:
+The following concrete recommendations replace the open-ended choices above.
+They are **pending**, not accepted. SPEC-0051 and its schema remain Proposed,
+and this section does not authorize runtime implementation.
 
-- `operator:ReadSupportBundle`, System scope, and action/resource naming;
-- the non-mandatory invocation-Audit classification and any future change to
-  that classification;
-- deferring Audit and Operation evidence to a later version (§6), and the
-  truncation semantics in §3;
-- how backend server versions are normalized into the `safe_version`
-  label (for example PostgreSQL's `16.4 (Debian 16.4-1.pgdg120+2)`, whose
-  parentheses the label grammar rejects);
-- whether source/profile/backend identity may include a release version and
-  safe PostgreSQL server-version label.
+| Decision | Recommendation submitted for approval | Security/operational effect | Required authority and unresolved dependency |
+| --- | --- | --- | --- |
+| Authorization and transport | Accept `operator:ReadSupportBundle` on `operator/support-bundle`, authenticated `User`, `operator` role, effective System scope, and the GET route specified in §1. Resolve authorization before reading configuration or source availability. | Limits disclosure to System operators and avoids revealing source health to denied callers. | Architecture and security: `senolcolak`, separate decisions pending. Approve the action/resource names and System-scope policy. |
+| Read and Audit classification | Accept §1's read-only behavior and classification as a successful read that does not require a durable Audit event. Keep bundle content and source failures out of Audit and ordinary logs. Any later classification change requires a separate accepted amendment. | Avoids turning a read into canonical state mutation or copying sensitive failure material into Audit. | Architecture and security: `senolcolak`, separate decisions pending. Approve the non-mandatory invocation-Audit classification. |
+| Sources and truncation | Accept diagnostics plus static process identity as the only v1 sources. Defer Audit and Operation evidence under §6. Keep the first 200 service/provider entries in existing projection order; enforce the 64 KiB diagnostics-source and 256 KiB complete-response limits; report omissions as `partial`/`source_truncated` with exact omitted counts and no cursor. | Prevents unbounded/system-wide queries and keeps data within explicit disclosure and response bounds. | Architecture and security: `senolcolak`, separate decisions pending. Approve source omission, ordering, item/byte limits, and partial semantics. |
+| Backend version normalization | For PostgreSQL, accept a leading `<major>.<minor>` token only when it is followed by end-of-input, ASCII whitespace, or `(`; expose just that token (for example `16.4` from `16.4 (Debian 16.4-1.pgdg120+2)`). For SQLite, require the linked runtime's entire version to match `<major>.<minor>.<patch>`. Each component is 1–3 ASCII decimal digits; otherwise return `null`. The schema's `safe_version` pattern enforces the output grammar. | Removes vendor/build suffixes and prevents backend-provided strings from carrying arbitrary text. | Architecture and security: `senolcolak`, separate decisions pending. Approve parsing/null behavior and the schema pattern. |
+| Provenance and profile identity | Accept `source.identity` as either a 40/64-character lowercase commit digest or `release:<name>@<digest>` as already constrained by the schema. Accept only the configured product-profile identifier under `safe_identity`; backend kind remains the fixed `sqlite`/`postgresql` enum. Do not expose hostnames, paths, arbitrary release metadata, or caller-provided labels. | Provides source/profile binding without exposing host-local or operator-controlled strings. | Architecture and security: `senolcolak`, separate decisions pending. Approve the source and profile identity forms. |
 
-Until those decisions are recorded, this document and its schema remain
-Proposed and do not authorize runtime implementation.
+The user designated `senolcolak` as both the architecture authority and the
+independent security authority for this PP.6 approval. The decisions must be
+recorded separately by role against the exact reviewed revision. A GitHub PR
+approval alone is not the decision record.
+
+| Role | Named reviewer | Decision | Date | Exact revision reviewed |
+| --- | --- | --- | --- | --- |
+| Architecture authority | senolcolak | **PENDING** | — | Source commit to be recorded |
+| Independent security authority | senolcolak | **PENDING** | — | Source commit to be recorded |
+
+After both role decisions are recorded, the contract may be marked Accepted and
+the proposed schema finalized through its protected review. Until then, neither
+this contract nor its schema authorizes the support-bundle
+runtime implementation.
