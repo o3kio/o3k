@@ -130,7 +130,11 @@ impl DisposablePostgres {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut last_transient_error = String::from("unknown");
         loop {
-            let attempt = match timeout_at(deadline, PostgresStore::connect(&self.url())).await {
+            let url = format!(
+                "postgres://127.0.0.1:{}/postgres?connect_timeout=2",
+                self.port
+            );
+            let attempt = match timeout_at(deadline, PostgresStore::connect(&url)).await {
                 Ok(result) => result,
                 Err(_) => {
                     return Err(format!(
@@ -158,12 +162,6 @@ impl DisposablePostgres {
                 Err(error) => return Err(error.to_string().into()),
             }
         }
-    }
-    fn url(&self) -> String {
-        format!(
-            "postgres://127.0.0.1:{}/postgres?connect_timeout=2",
-            self.port
-        )
     }
     fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.running {
@@ -248,8 +246,10 @@ impl Drop for DisposablePostgres {
 async fn postgres_outage_fails_bounded_and_reconnect_preserves_canonical_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut cluster = DisposablePostgres::start().await?;
-    let url = cluster.url();
-    let store = PostgresStore::connect(&url).await?;
+    let store = cluster
+        .connect_ready()
+        .await
+        .map_err(|error| format!("initial PostgreSQL store connection failed: {error}"))?;
     let resource_id = Uuid::now_v7();
     let operation_id = Uuid::now_v7();
     store
