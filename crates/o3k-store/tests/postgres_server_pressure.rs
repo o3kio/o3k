@@ -111,7 +111,7 @@ impl Cluster {
                     "-d",
                     "postgres",
                     "-c",
-                    "CREATE ROLE o3k LOGIN",
+                    "CREATE ROLE o3k LOGIN; GRANT USAGE, CREATE ON SCHEMA public TO o3k",
                 ])
                 .output()?;
             if !role.status.success() {
@@ -186,6 +186,9 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         .await?;
     version_connection.close().await?;
     eprintln!("checkpoint:version");
+    let preflight_store = PostgresStore::connect(&url).await?;
+    preflight_store.pool().close().await;
+    eprintln!("checkpoint:store-preflight");
     let mut held = Vec::new();
     for _ in 0..5 {
         held.push(PgConnection::connect(&url).await?);
