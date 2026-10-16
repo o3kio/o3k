@@ -1,6 +1,6 @@
 # Installation and service health
 
-This runbook covers the evidenced O3K TestLab installation path and the
+This runbook covers the O3K TestLab one-line installation path and the
 read-only health checks provided by the installed services. It applies to the
 `libvirt` profile on Ubuntu 24.04 or Debian 12, x86_64. These are the supported
 platform boundaries documented by the installer; other distributions,
@@ -19,6 +19,13 @@ On a clean supported host, run the published installer as root:
 ```sh
 curl -sfL https://get.o3k.io | sudo sh -
 ```
+
+This default path is not itself evidenced for the currently pinned release.
+The fresh-host evidence recorded in
+[`docs/status/current-state.yaml`](../status/current-state.yaml) covers PP.2
+on the published `v0.4.0-rc.5` release assets (Ubuntu 24.04 and Debian 12,
+`o3k-demo-v1` single-host scope). Later pinned release candidates are not yet
+evidenced by a fresh-host campaign.
 
 The installer is pinned to one release. It does not select a moving `latest`
 channel or fall back to a source checkout. For a reproducible installation,
@@ -56,7 +63,7 @@ checks. Its machine-readable shape is defined by
 
 The doctor command never repairs the installation. It uses read-only database
 access and state queries. Exit status `0` means healthy; status `1` means a
-warning or unhealthy result; status `2` means a usage or configuration error.
+warning or unhealthy result; status `2` means a usage or internal error.
 Inspect the reported check ID, summary, and recommended action before taking
 an administrative action.
 
