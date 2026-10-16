@@ -4,6 +4,8 @@ Status: approval packet for #975, #640, and implementation issues #1084–#1086.
 This packet proposes decisions; it does not accept ADR-0189 or SPEC-0050 and
 does not authorize implementation. The reviewer must record an explicit
 decision against each item below in ADR-0189 and update SPEC-0050 accordingly.
+PR review eligibility is governed separately by repository branch protection;
+approving this packet does not accept those architecture/security decisions.
 
 Profile: single-site `o3k-demo-v1` SQLite where retained and
 `o3k-small-edge-v1` PostgreSQL 16. External VM disks, external storage payloads
