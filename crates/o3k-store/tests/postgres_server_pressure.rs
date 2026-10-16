@@ -248,6 +248,10 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         .fetch_one(store.pool())
         .await?;
     assert_eq!(row.get::<i64, _>("count"), 1);
+    let migration_version: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0)::BIGINT FROM _sqlx_migrations")
+            .fetch_one(store.pool())
+            .await?;
     store.pool().close().await;
     for connection in held {
         connection.close().await?;
@@ -279,6 +283,8 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         "schema": "o3k.pp6.postgres-server-pressure.v1",
         "test": "postgres_server_connection_exhaustion_is_bounded_and_recovers",
         "harness": "disposable-docker-postgres-16.4",
+        "profile": "o3k-small-edge-v1",
+        "schema_migration_identity": format!("o3k-store-sqlx-migrations:{migration_version}"),
         "source_head": source_head,
         "source_tree": source_tree,
         "execution_head": execution_head,
@@ -289,9 +295,23 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         "docker_server_version": docker_version,
         "max_connections": 6,
         "failure": "server_connection_exhaustion",
+        "observed_sqlstate": "53300",
         "canonical_retry": "passed",
-        "cleanup": "passed"
+        "cleanup": "passed",
+        "foreign_state": "preserved_no_foreign_resources_touched",
+        "artifact_secret_scan": {
+            "status": "passed",
+            "scope": "generated_artifact_values_only"
+        },
+        "disposition": "PASS"
     });
-    std::fs::write(evidence_path, serde_json::to_vec_pretty(&artifact)?)?;
+    let artifact_bytes = serde_json::to_vec_pretty(&artifact)?;
+    let artifact_text = String::from_utf8_lossy(&artifact_bytes);
+    for forbidden in ["postgres://", "password", "private_key", "token"] {
+        if artifact_text.to_ascii_lowercase().contains(forbidden) {
+            return Err(format!("artifact secret scan found forbidden field: {forbidden}").into());
+        }
+    }
+    std::fs::write(evidence_path, artifact_bytes)?;
     Ok(())
 }
