@@ -11,6 +11,14 @@ use std::{
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
+/// Bound for a single raw connection, which the server rejects immediately.
+const RAW_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
+/// PostgresStore retries admission until its own 5 s pool acquire timeout, so
+/// the outer bound must be longer or the two timers race.
+const STORE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound for reconnecting once capacity is restored.
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+
 struct Cluster {
     id: String,
     port: u16,
@@ -194,7 +202,7 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         held.push(PgConnection::connect(&url).await?);
     }
     eprintln!("checkpoint:held");
-    let exhausted = timeout(Duration::from_secs(5), PgConnection::connect(&url))
+    let exhausted = timeout(RAW_ADMISSION_TIMEOUT, PgConnection::connect(&url))
         .await
         .map_err(|_| "raw server admission did not fail within bounded timeout")?
         .expect_err("server must reject beyond max_connections");
@@ -205,9 +213,7 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
     assert_eq!(code.as_deref(), Some("53300"));
     eprintln!("checkpoint:raw");
     let resource_id = Uuid::now_v7();
-    // PostgresStore retries admission until its own 5 s pool acquire timeout,
-    // so the outer bound must be longer or the two timers race.
-    let store_attempt = timeout(Duration::from_secs(15), PostgresStore::connect(&url)).await;
+    let store_attempt = timeout(STORE_ADMISSION_TIMEOUT, PostgresStore::connect(&url)).await;
     assert!(
         store_attempt.is_ok(),
         "store connection admission hung under server pressure"
@@ -223,7 +229,7 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
     for connection in held.drain(..) {
         connection.close().await?;
     }
-    let store = timeout(Duration::from_secs(15), PostgresStore::connect(&url))
+    let store = timeout(RECOVERY_TIMEOUT, PostgresStore::connect(&url))
         .await
         .map_err(|_| "PostgresStore reconnect timed out after capacity recovery")??;
     eprintln!("checkpoint:store-recovered");
@@ -294,9 +300,9 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         "held_session_count": 5,
         "raw_admission_attempts": 1,
         "store_admission_attempts": 1,
-        "raw_admission_timeout_seconds": 5,
-        "store_admission_timeout_seconds": 5,
-        "recovery_timeout_seconds": 15,
+        "raw_admission_timeout_seconds": RAW_ADMISSION_TIMEOUT.as_secs(),
+        "store_admission_timeout_seconds": STORE_ADMISSION_TIMEOUT.as_secs(),
+        "recovery_timeout_seconds": RECOVERY_TIMEOUT.as_secs(),
         "failure": "server_connection_exhaustion",
         "observed_sqlstate": "53300",
         "canonical_retry": "passed",
