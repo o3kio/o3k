@@ -1,10 +1,11 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::time::Duration;
+use std::{fs::OpenOptions, io::Write, process::Command, time::Duration};
 
 use o3k_store::{DurableStore, PostgresStore, ResourceRecord, StoreError};
+use serde_json::json;
 use sqlx::{
-    Connection,
+    Connection, Row,
     postgres::{PgConnection, PgPoolOptions},
 };
 use uuid::Uuid;
@@ -98,5 +99,86 @@ async fn postgres_pool_exhaustion_preserves_resource_row_state_and_retry() {
             .len(),
         2
     );
+    store
+        .clean_tables_for_testing()
+        .await
+        .expect("clean the purpose-scoped database after the retry");
+    assert!(
+        store
+            .list_resources("pp65-pressure", "compute_instance")
+            .await
+            .expect("verify scoped resource cleanup")
+            .is_empty(),
+        "purpose-scoped resource rows must be empty after cleanup"
+    );
+
+    let metadata = sqlx::query(
+        "SELECT current_database() AS database_name, current_schema() AS schema_name, version() AS server_version",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("read PostgreSQL evidence metadata");
+    let source_commit = git_output(&["rev-parse", "HEAD"]);
+    let source_tree = git_output(&["rev-parse", "HEAD^{tree}"]);
+    let change_head = std::env::var("O3K_PP6_SOURCE_HEAD_SHA")
+        .expect("O3K_PP6_SOURCE_HEAD_SHA must bind evidence to the PR head");
+    let change_tree = git_output(&["rev-parse", &format!("{change_head}^{{tree}}")]);
+    let evidence_path = std::env::var("O3K_PP6_PG_EVIDENCE_PATH")
+        .expect("O3K_PP6_PG_EVIDENCE_PATH must identify the evidence output");
+    let evidence = json!({
+        "evidence_schema": "o3k.pp6.postgres-resource-pressure.v1",
+        "disposition": "PASS",
+        "source": {
+            "repository": std::env::var("GITHUB_REPOSITORY").expect("GITHUB_REPOSITORY"),
+            "checkout_commit": source_commit,
+            "checkout_tree": source_tree,
+            "change_head_commit": change_head,
+            "change_head_tree": change_tree,
+            "run_id": std::env::var("GITHUB_RUN_ID").expect("GITHUB_RUN_ID"),
+            "run_attempt": std::env::var("GITHUB_RUN_ATTEMPT").expect("GITHUB_RUN_ATTEMPT")
+        },
+        "harness": {
+            "test": "postgres_pool_exhaustion_preserves_resource_row_state_and_retry",
+            "profile": "SPEC-0024 bounded PostgreSQL",
+            "schema": "o3k-store migrations_postgres",
+            "server_version": metadata.get::<String, _>("server_version"),
+            "database": metadata.get::<String, _>("database_name"),
+            "schema_name": metadata.get::<String, _>("schema_name"),
+            "pool_max_connections": 1,
+            "acquire_timeout_ms": 100
+        },
+        "observations": {
+            "exhaustion_error": "database error / sqlx PoolTimedOut",
+            "resource_rows_before": 1,
+            "resource_rows_after_retry": 2,
+            "resource_rows_after_cleanup": 0,
+            "foreign_state": "untouched; only purpose-scoped O3K resource rows were inspected",
+            "redaction": "no DSN, credential or secret emitted"
+        },
+        "cleanup": {"database_rows": "PASS", "advisory_lock_held": true}
+    });
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(evidence_path)
+        .expect("create evidence file atomically");
+    serde_json::to_writer_pretty(&mut file, &evidence).expect("write evidence JSON");
+    file.write_all(b"\n").expect("terminate evidence JSON");
+    file.sync_all().expect("sync evidence JSON");
     pool.close().await;
+}
+
+fn git_output(args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .output()
+        .expect("run git for evidence identity");
+    assert!(
+        output.status.success(),
+        "git evidence identity command failed"
+    );
+    String::from_utf8(output.stdout)
+        .expect("git evidence identity is UTF-8")
+        .trim()
+        .to_owned()
 }
