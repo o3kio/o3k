@@ -430,7 +430,16 @@ impl SqliteStore {
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
             .acquire_timeout(Duration::from_secs(5))
-            .after_release(|connection, _| Box::pin(release_abandoned_transaction(connection)))
+            .after_release(move |connection, _| {
+                Box::pin(async move {
+                    let clean = release_abandoned_transaction(connection).await?;
+                    // The in-memory store lives on its only connection;
+                    // closing it would discard the whole database, so keep
+                    // it after the rollback attempt even if its state could
+                    // not be confirmed.
+                    Ok(clean || is_memory)
+                })
+            })
             .connect_with(options)
             .await
             .map_err(StoreError::Database)?;

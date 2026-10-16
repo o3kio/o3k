@@ -60,7 +60,14 @@ async fn independent_writer_can_lock(
             transaction.rollback().await.map_err(StoreError::Database)?;
             true
         }
-        Err(_) => false,
+        // Only SQLite lock contention means "could not lock"; any other error
+        // is a fixture failure, not a held writer lock.
+        Err(sqlx::Error::Database(error))
+            if matches!(error.code().as_deref(), Some("5") | Some("517")) =>
+        {
+            false
+        }
+        Err(error) => return Err(StoreError::Database(error)),
     };
     writer.close().await;
     Ok(locked)
