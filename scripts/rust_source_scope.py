@@ -3,7 +3,9 @@
 import re
 from pathlib import Path
 
-_PLAIN_CODE_RUN = re.compile(r"[^/'\"r]+")
+# An `r` that does not open a raw string is ordinary code, so it does not
+# end the run (identifiers such as `return` or `Err` stay on the fast path).
+_PLAIN_CODE_RUN = re.compile(r"(?:[^/'\"r]|r(?!#*\"))+")
 _CHAR_LITERAL = re.compile(r"'(?:\\.|[^'\\\n])'")
 _RAW_STRING_OPEN = re.compile(r'r(#+)?"')
 

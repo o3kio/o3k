@@ -71,12 +71,13 @@ def rust_source_files() -> list[Path]:
 
 
 @functools.cache
-def _production_source(path: Path, rel: str) -> tuple[tuple[str, ...], str]:
+def _production_source(path: Path) -> tuple[tuple[str, ...], str]:
     """Return (lines, source) with test-only lines blanked, computed once per run.
 
     The result is cached and shared by every guard, so the lines are returned
     as an immutable tuple.
     """
+    rel = str(path.relative_to(REPO_ROOT))
     lines = path.read_text(encoding="utf-8").splitlines()
     test_lines = classify_rust_lines(lines, dedicated_test=is_dedicated_test_file(rel))
     production_lines = tuple("" if is_test else line for line, is_test in zip(lines, test_lines))
@@ -170,7 +171,7 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
         if approved:
             continue
 
-        production_lines, source = _production_source(path, rel)
+        production_lines, source = _production_source(path)
 
         # Import patterns anchor with `^[ \t]*`, not `^\s*`: `\s*` would cross
         # newlines, backtrack quadratically over blanked test lines, and report
@@ -305,23 +306,22 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
             continue
 
         approved = any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS)
-        production_lines, source = _production_source(path, rel)
+        production_lines, source = _production_source(path)
         shell_alias_patterns = [
             re.compile(rf"\b{re.escape(alias)}\s*::new\(\s*[\"'](?:sh|bash)[\"']")
             for alias in _host_command_aliases(source) - {"Command"}
         ]
 
-        for pattern, name in HOST_IMPORT_PATTERNS:
-            if approved:
-                continue
-            for match in pattern.finditer(source):
-                line_number = source.count("\n", 0, match.start()) + 1
-                errors.append(
-                    f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
-                    f"  command: {name}\n"
-                    f"  code: {match.group(0).strip()[:120]}\n"
-                    "  Host execution belongs in an explicit execution adapter."
-                )
+        if not approved:
+            for pattern, name in HOST_IMPORT_PATTERNS:
+                for match in pattern.finditer(source):
+                    line_number = source.count("\n", 0, match.start()) + 1
+                    errors.append(
+                        f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
+                        f"  command: {name}\n"
+                        f"  code: {match.group(0).strip()[:120]}\n"
+                        "  Host execution belongs in an explicit execution adapter."
+                    )
 
         for i, line in enumerate(production_lines, 1):
             stripped = line.strip()
