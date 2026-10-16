@@ -18,6 +18,19 @@ fn database_error_details(operation: &str) -> String {
     )
 }
 
+/// SQLite's `quick_check` result is backend-controlled text and may contain
+/// page details or injected secrets. Classify it without copying that text
+/// into operator output; the summary already identifies the failed check.
+fn sqlite_integrity_details(result: &str) -> &'static str {
+    if result.trim().is_empty() {
+        "SQLite quick_check returned an empty non-ok result; inspect the o3kd journal for the backend-specific cause"
+    } else if result.lines().count() > 1 {
+        "SQLite quick_check returned a multi-line integrity failure; inspect the o3kd journal for the backend-specific cause"
+    } else {
+        "SQLite quick_check returned a non-ok integrity result; inspect the o3kd journal for the backend-specific cause"
+    }
+}
+
 /// `database.accessible`: the database file must exist and open read-only.
 pub async fn check_accessible(ctx: &Context) -> Check {
     if ctx.is_postgres() {
@@ -91,7 +104,7 @@ pub async fn check_integrity(ctx: &Context) -> Check {
             CheckStatus::Fail,
             "corrupt SQLite database",
         )
-        .with_details(format!("PRAGMA quick_check reported: {result}"))
+        .with_details(sqlite_integrity_details(&result))
         .with_actions(vec![
             "journalctl -u o3kd -n 100".to_owned(),
             "back up the database file before any operator action".to_owned(),
@@ -341,7 +354,32 @@ mod tests {
         let check = check_integrity(&context(FakeExec::healthy(), db)).await;
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.summary.contains("corrupt"));
+        assert!(
+            check
+                .details
+                .as_deref()
+                .is_some_and(|details| details.contains("multi-line"))
+        );
         assert!(!check.recommended_actions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn integrity_non_ok_result_is_secret_safe_and_classified() {
+        let sentinel = "sqlite://user:sentinel-secret@db.example/control";
+        let mut db = FakeDb::healthy();
+        db.quick_check = Ok(format!("*** {sentinel} ***"));
+
+        let check = check_integrity(&context(FakeExec::healthy(), db)).await;
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(
+            check.details.as_deref(),
+            Some(
+                "SQLite quick_check returned a non-ok integrity result; inspect the o3kd journal for the backend-specific cause"
+            )
+        );
+        let json = serde_json::to_string(&check).expect("check serializes");
+        assert!(!json.contains(sentinel));
     }
 
     #[tokio::test]
