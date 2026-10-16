@@ -28,6 +28,9 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
     let ts = format!("o3k_pressure_{}", Uuid::now_v7().simple());
     let filler = format!("o3k_pressure_filler_{}", Uuid::now_v7().simple());
     let ident = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    let store = PostgresStore::connect(&url)
+        .await
+        .expect("store and migrations");
     sqlx::query(&format!(
         "CREATE TABLESPACE {} LOCATION '{}'",
         ident(&ts),
@@ -51,7 +54,6 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
     .execute(&mut admin)
     .await
     .expect("resource tablespace");
-    let store = PostgresStore::connect(&url).await.expect("store");
     let project = format!("pp6-pressure-{}", Uuid::now_v7());
     let baseline = Uuid::now_v7();
     store
