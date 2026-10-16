@@ -7421,6 +7421,10 @@ mod dispatcher_tests {
     async fn production_mtls_unknown_final_removal_store_reopen_sqlite()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!("o3kd-mtls-unknown-{}", Uuid::now_v7()));
+        let mut cleanup = ReopenTestCleanup {
+            server: None,
+            root: root.clone(),
+        };
         std::fs::create_dir_all(&root)?;
         let sqlite_path = root.join("control-plane.sqlite");
         let store =
@@ -7488,11 +7492,7 @@ mod dispatcher_tests {
             o3k_network_bin::agent::NetworkAgentService::new_dynamic(service_executor, realizer)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
-        let server = start_mtls_network_agent(listener, service).await?;
-        let mut cleanup = ReopenTestCleanup {
-            server: Some(server),
-            root: root.clone(),
-        };
+        cleanup.server = Some(start_mtls_network_agent(listener, service).await?);
         let dispatcher = Arc::new(mtls_dispatcher(address, store.clone(), None));
         let dispatch_result = dispatcher
             .dispatch_existing_successor(command.clone(), historical.command_id.clone())
