@@ -9,6 +9,28 @@ use crate::output::{Category, Check, CheckStatus};
 /// or concurrency compared to WAL.
 const DEGRADED_JOURNAL_MODES: [&str; 5] = ["delete", "truncate", "persist", "memory", "off"];
 
+/// Database driver errors can include connection URLs, usernames, or other
+/// credentials. Keep the check actionable without projecting backend detail
+/// into either doctor output format.
+fn database_error_details(operation: &str) -> String {
+    format!(
+        "{operation} failed; inspect the o3kd service and journal for the backend-specific cause"
+    )
+}
+
+/// SQLite's `quick_check` result is backend-controlled text and may contain
+/// page details or injected secrets. Classify it without copying that text
+/// into operator output; the summary already identifies the failed check.
+fn sqlite_integrity_details(result: &str) -> &'static str {
+    if result.trim().is_empty() {
+        "SQLite quick_check returned an empty non-ok result; inspect the o3kd journal for the backend-specific cause"
+    } else if result.lines().count() > 1 {
+        "SQLite quick_check returned a multi-line integrity failure; inspect the o3kd journal for the backend-specific cause"
+    } else {
+        "SQLite quick_check returned a non-ok integrity result; inspect the o3kd journal for the backend-specific cause"
+    }
+}
+
 /// `database.accessible`: the database file must exist and open read-only.
 pub async fn check_accessible(ctx: &Context) -> Check {
     if ctx.is_postgres() {
@@ -39,13 +61,13 @@ pub async fn check_accessible(ctx: &Context) -> Check {
             CheckStatus::Pass,
             "database file is present and readable",
         ),
-        Err(error) => Check::new(
+        Err(_error) => Check::new(
             "database.accessible",
             Category::Database,
             CheckStatus::Fail,
             "database not readable",
         )
-        .with_details(error)
+        .with_details(database_error_details("database access"))
         .with_actions(o3kd_actions()),
     }
 }
@@ -82,18 +104,19 @@ pub async fn check_integrity(ctx: &Context) -> Check {
             CheckStatus::Fail,
             "corrupt SQLite database",
         )
-        .with_details(format!("PRAGMA quick_check reported: {result}"))
+        .with_details(sqlite_integrity_details(&result))
         .with_actions(vec![
             "journalctl -u o3kd -n 100".to_owned(),
             "back up the database file before any operator action".to_owned(),
         ]),
-        Err(error) => internal_failure(
+        Err(_error) => Check::new(
             "database.integrity",
             Category::Database,
-            "SQLite integrity",
-            &error,
-            o3kd_actions(),
-        ),
+            CheckStatus::Fail,
+            "SQLite integrity check unavailable",
+        )
+        .with_details(database_error_details("SQLite integrity check"))
+        .with_actions(o3kd_actions()),
     }
 }
 
@@ -144,13 +167,13 @@ pub async fn check_wal_mode(ctx: &Context) -> Check {
             format!("unexpected journal mode {mode}"),
         )
         .with_actions(o3kd_actions()),
-        Err(error) => Check::new(
+        Err(_error) => Check::new(
             "database.wal_mode",
             Category::Database,
             CheckStatus::Fail,
             "journal mode is unreadable",
         )
-        .with_details(error)
+        .with_details(database_error_details("SQLite journal mode query"))
         .with_actions(o3kd_actions()),
     }
 }
@@ -289,6 +312,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inaccessible_database_error_is_secret_safe_in_json_and_human_output() {
+        let sentinel = "postgres://user:sentinel-secret@db.example/o3k";
+        let mut db = FakeDb::healthy();
+        db.journal_mode = Err(sentinel.to_owned());
+        db.quick_check = Err(sentinel.to_owned());
+
+        let ctx = context(FakeExec::healthy(), db);
+        let checks = vec![
+            check_accessible(&ctx).await,
+            check_integrity(&ctx).await,
+            check_wal_mode(&ctx).await,
+        ];
+        assert!(checks.iter().all(|check| check.status == CheckStatus::Fail));
+        assert!(
+            checks
+                .iter()
+                .all(|check| !check.recommended_actions.is_empty())
+        );
+
+        let report = crate::output::Report {
+            version: "test".to_owned(),
+            overall_status: crate::output::OverallStatus::Unhealthy,
+            timestamp: "2026-01-01T00:00:00Z".to_owned(),
+            checks,
+        };
+        let serialized = serde_json::to_string(&report);
+        assert!(serialized.is_ok());
+        let json = serialized.unwrap_or_default();
+        let human = report.render_human();
+        assert!(!json.contains(sentinel));
+        assert!(!human.contains(sentinel));
+    }
+
+    #[tokio::test]
     async fn integrity_fails_when_corrupt() {
         let mut db = FakeDb::healthy();
         db.quick_check = Ok(
@@ -297,7 +354,34 @@ mod tests {
         let check = check_integrity(&context(FakeExec::healthy(), db)).await;
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.summary.contains("corrupt"));
+        assert!(
+            check
+                .details
+                .as_deref()
+                .is_some_and(|details| details.contains("multi-line"))
+        );
         assert!(!check.recommended_actions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn integrity_non_ok_result_is_secret_safe_and_classified() {
+        let sentinel = "sqlite://user:sentinel-secret@db.example/control";
+        let mut db = FakeDb::healthy();
+        db.quick_check = Ok(format!("*** {sentinel} ***"));
+
+        let check = check_integrity(&context(FakeExec::healthy(), db)).await;
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(
+            check.details.as_deref(),
+            Some(
+                "SQLite quick_check returned a non-ok integrity result; inspect the o3kd journal for the backend-specific cause"
+            )
+        );
+        let serialized = serde_json::to_string(&check);
+        assert!(serialized.is_ok(), "check serialization failed");
+        let json = serialized.unwrap_or_default();
+        assert!(!json.contains(sentinel));
     }
 
     #[tokio::test]

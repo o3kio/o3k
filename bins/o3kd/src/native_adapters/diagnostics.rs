@@ -796,6 +796,12 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
 mod tests {
     use super::*;
     use o3k_provider::{AgentCapabilities, AgentEpochLease};
+    use o3k_store::{
+        ControllerEpoch, ControllerId, ControllerSession, ControllerState as StoreControllerState,
+        CoordinationRepository,
+    };
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::time::Duration;
 
     #[allow(clippy::type_complexity)]
     struct FakeAgents {
@@ -870,6 +876,107 @@ mod tests {
         Arc::new(FakeAgents {
             nodes: Arc::new(tokio::sync::Mutex::new(nodes)),
         })
+    }
+
+    fn controller_session(id: &str) -> ControllerSession {
+        ControllerSession {
+            controller_id: ControllerId::new(id),
+            controller_epoch: ControllerEpoch::new(format!("{id}-epoch")),
+            started_at: "2026-01-01T00:00:00Z".to_owned(),
+            heartbeat_at: "2026-01-01T00:00:00Z".to_owned(),
+            lease_until: "2026-01-01T00:01:00Z".to_owned(),
+            software_version: "test".to_owned(),
+            source_commit: "test".to_owned(),
+            state: StoreControllerState::Active,
+        }
+    }
+
+    fn diagnostics_adapter(store: Arc<O3kStore>) -> DiagnosticsReaderAdapter {
+        DiagnosticsReaderAdapter::new(
+            Arc::new(RwLock::new(ManifestRegistry::new())),
+            fake_agents(HashMap::new()),
+            store,
+            o3k_kernel::LocationRegistry::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn control_plane_status_and_summary_distinguish_active_and_expired_sessions() {
+        let store = Arc::new(O3kStore::connect_sqlite_memory().await.expect("store"));
+        store
+            .register_controller_session(&controller_session("active"), Duration::from_secs(60))
+            .await
+            .expect("active session");
+        store
+            .register_controller_session(&controller_session("expired"), Duration::from_secs(1))
+            .await
+            .expect("expired session");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let before = store
+            .list_active_controller_sessions()
+            .await
+            .expect("sessions before diagnostics reads");
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].controller_id, ControllerId::new("active"));
+        let adapter = diagnostics_adapter(store.clone());
+
+        let status = adapter.control_plane_status().await;
+        assert_eq!(status.status, DiagnosticStatus::Healthy);
+        assert_eq!(status.active_sessions, 1);
+        assert!(status.observed_at_unix_ms.is_some());
+
+        let summary = adapter.summary().await.expect("summary");
+        let control_plane = summary.control_plane.expect("control-plane status");
+        assert_eq!(control_plane.status, DiagnosticStatus::Healthy);
+        assert_eq!(control_plane.active_sessions, 1);
+
+        // Diagnostics reads must not drain, renew, or otherwise mutate leases:
+        // the full session rows, including heartbeat and lease deadline, must
+        // be unchanged.
+        let after = store
+            .list_active_controller_sessions()
+            .await
+            .expect("sessions after diagnostics reads");
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn control_plane_read_failure_is_unavailable_and_summary_is_bounded() {
+        // Use a private directory so SQLite -wal/-shm side files are removed
+        // together with the database.
+        let dir = std::env::temp_dir().join(format!(
+            "o3k-diagnostics-read-failure-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir(&dir).expect("test database directory");
+        let path = dir.join("diagnostics.db");
+        let store = Arc::new(O3kStore::connect_sqlite_file(&path).await.expect("store"));
+        let external = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}", path.display()))
+            .await
+            .expect("external setup connection");
+        sqlx::query("DROP TABLE controller_sessions")
+            .execute(&external)
+            .await
+            .expect("corrupt only coordination read authority");
+        external.close().await;
+        let adapter = diagnostics_adapter(store.clone());
+        let status = adapter.control_plane_status().await;
+        assert_eq!(status.status, DiagnosticStatus::Unavailable);
+        assert_eq!(status.reason, Some(DiagnosticReason::DependencyUnavailable));
+        assert_eq!(status.active_sessions, 0);
+
+        let summary = adapter.summary().await.expect("summary");
+        let control_plane = summary.control_plane.expect("control-plane status");
+        assert_eq!(control_plane.status, DiagnosticStatus::Unavailable);
+        assert_eq!(
+            control_plane.reason,
+            Some(DiagnosticReason::DependencyUnavailable)
+        );
+        drop(adapter);
+        drop(store);
+        std::fs::remove_dir_all(&dir).expect("test database cleanup");
     }
 
     fn inventory(

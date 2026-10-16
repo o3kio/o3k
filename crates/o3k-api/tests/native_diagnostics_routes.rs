@@ -8,7 +8,7 @@
 //! leaks node identity, agent epoch, or credential material.
 
 use axum::body::{Body, to_bytes};
-use http::{Request, StatusCode};
+use http::{Method, Request, StatusCode};
 use o3k_kernel::{
     AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ScopeKind, UserPrincipal,
 };
@@ -68,7 +68,7 @@ fn auth_context(scope_id: &str, scope_kind: ScopeKind, roles: &[&str]) -> AuthCo
         1,
         2,
         "audit-test",
-        "request-test",
+        ISSUER_REQUEST_ID,
         None,
     )
 }
@@ -151,12 +151,20 @@ impl DiagnosticsReader for FakeDiagnosticsReader {
     }
 }
 
+/// Request ID baked into the TestIssuer's AuthContext.
+const ISSUER_REQUEST_ID: &str = "request-test";
+
+/// Correlation ID sent as `x-request-id` on every test request; handlers must
+/// echo it. It must differ from `ISSUER_REQUEST_ID` so correlation assertions
+/// prove the header value is propagated rather than the issuer default.
+const REQUEST_ID: &str = "pp6-query-correlation";
+
 fn router() -> Result<axum::Router, Box<dyn std::error::Error>> {
-    router_with_diagnostics_reader(Arc::new(FakeDiagnosticsReader))
+    router_with_diagnostics_reader(Some(Arc::new(FakeDiagnosticsReader)))
 }
 
 fn router_with_diagnostics_reader(
-    diagnostics_reader: Arc<dyn DiagnosticsReader>,
+    diagnostics_reader: Option<Arc<dyn DiagnosticsReader>>,
 ) -> Result<axum::Router, Box<dyn std::error::Error>> {
     let native = o3k_native_api::NativeApiState::new(
         None,
@@ -169,8 +177,11 @@ fn router_with_diagnostics_reader(
         None,
         None,
         None,
-    )?
-    .with_diagnostics_reader(diagnostics_reader)
+    )?;
+    let native = match diagnostics_reader {
+        Some(reader) => native.with_diagnostics_reader(reader),
+        None => native,
+    }
     .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
     Ok(o3k_api::router_with_state(
         o3k_api::AppState::new().with_native_api(native),
@@ -186,11 +197,22 @@ async fn get_from_router(
     uri: &str,
     token: &str,
 ) -> Result<(StatusCode, String), Box<dyn std::error::Error>> {
+    request_from_router(router, Method::GET, uri, token).await
+}
+
+async fn request_from_router(
+    router: axum::Router,
+    method: Method,
+    uri: &str,
+    token: &str,
+) -> Result<(StatusCode, String), Box<dyn std::error::Error>> {
     let response = router
         .oneshot(
             Request::builder()
+                .method(method)
                 .uri(uri)
                 .header("authorization", format!("Bearer {token}"))
+                .header("x-request-id", REQUEST_ID)
                 .body(Body::empty())?,
         )
         .await?;
@@ -301,7 +323,7 @@ async fn native_diagnostics_get_routes_call_only_their_read_projection() -> Test
     let reader = Arc::new(CountingDiagnosticsReader {
         reads: reads.clone(),
     });
-    let router = router_with_diagnostics_reader(reader)?;
+    let router = router_with_diagnostics_reader(Some(reader))?;
 
     for (index, uri) in ENDPOINTS.into_iter().enumerate() {
         let (status, _) = get_from_router(router.clone(), uri, "operator-token").await?;
@@ -310,6 +332,128 @@ async fn native_diagnostics_get_routes_call_only_their_read_projection() -> Test
             let expected = usize::from(read_index == index);
             assert_eq!(count.load(Ordering::SeqCst), expected, "{uri}");
             count.store(0, Ordering::SeqCst);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_diagnostics_authority_returns_request_correlation_without_details()
+-> TestResult {
+    for uri in ENDPOINTS {
+        let (status, body) =
+            get_from_router(router_with_diagnostics_reader(None)?, uri, "operator-token").await?;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+        let value: Value = serde_json::from_str(&body)?;
+        assert_eq!(value["code"], "NOT_AVAILABLE", "{uri}");
+        assert_eq!(value["request_id"], REQUEST_ID, "{uri}");
+        assert!(value.get("detail").is_none(), "{uri}");
+        assert!(!body.contains("secret"), "secret detail leaked into {uri}");
+        assert!(
+            !body.contains("password"),
+            "credential detail leaked into {uri}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_diagnostics_query_errors_are_correlated_and_redacted() -> TestResult {
+    assert_ne!(REQUEST_ID, ISSUER_REQUEST_ID);
+    // `eA` is the unpadded URL-safe encoding of one ASCII `x` byte.
+    let oversized_cursor = "eA".repeat(513);
+    for endpoint in [
+        "/o3k/v1/operator/diagnostics/services",
+        "/o3k/v1/operator/diagnostics/providers",
+    ] {
+        for (query, code) in [
+            ("?limit=201", "BAD_REQUEST"),
+            ("?cursor=", "INVALID_CURSOR"),
+            ("?cursor=not-base64", "INVALID_CURSOR"),
+            (&format!("?cursor={oversized_cursor}"), "INVALID_CURSOR"),
+            ("?limit=1&limit=2", "BAD_REQUEST"),
+            ("?cursor=YQ&cursor=Yg", "INVALID_CURSOR"),
+            ("?%6cimit=201", "BAD_REQUEST"),
+        ] {
+            let (status, body) = get(&format!("{endpoint}{query}"), "operator-token").await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint}{query}");
+            let value: Value = serde_json::from_str(&body)?;
+            assert_eq!(value["code"], code);
+            assert_eq!(value["request_id"], REQUEST_ID);
+            assert!(value.get("detail").is_none());
+            assert!(!body.contains("not-base64"));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_diagnostics_malformed_limit_is_authorized_before_validation() -> TestResult {
+    assert_ne!(REQUEST_ID, ISSUER_REQUEST_ID);
+    for (endpoint, code) in [
+        (
+            "/o3k/v1/operator/diagnostics/services?limit=abc",
+            "BAD_REQUEST",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/providers?limit=abc",
+            "BAD_REQUEST",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/services?limit=1&limit=2",
+            "BAD_REQUEST",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/providers?limit=1&limit=2",
+            "BAD_REQUEST",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/services?cursor=YQ&cursor=Yg",
+            "INVALID_CURSOR",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/providers?cursor=YQ&cursor=Yg",
+            "INVALID_CURSOR",
+        ),
+    ] {
+        let (status, body) = get(endpoint, "tenant-token").await?;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{endpoint}");
+        let value: Value = serde_json::from_str(&body)?;
+        assert_eq!(value["code"], "FORBIDDEN");
+
+        let (status, body) = get(endpoint, "operator-token").await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint}");
+        let value: Value = serde_json::from_str(&body)?;
+        assert_eq!(value["code"], code);
+        assert_eq!(value["request_id"], REQUEST_ID);
+        assert!(value.get("detail").is_none());
+        assert!(!body.contains("abc"));
+    }
+    for endpoint in [
+        "/o3k/v1/operator/diagnostics/services?%63ursor=cHJvdmlkZXItNDI",
+        "/o3k/v1/operator/diagnostics/providers?%63ursor=cHJvdmlkZXItNDI",
+    ] {
+        let (status, body) = get(endpoint, "operator-token").await?;
+        assert_eq!(status, StatusCode::OK, "{endpoint}");
+        assert!(body.contains("items"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_diagnostics_routes_are_read_only_for_mutating_methods() -> TestResult {
+    // SPEC-0045 exposes a read-only projection.  Exercise the production
+    // router with every common mutation verb so a future route change cannot
+    // accidentally turn diagnostics into a write surface.
+    for uri in ENDPOINTS {
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            let (status, body) =
+                request_from_router(router()?, method.clone(), uri, "operator-token").await?;
+            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {uri}");
+            assert!(
+                body.is_empty(),
+                "mutation response exposed a body: {method} {uri}"
+            );
         }
     }
     Ok(())
