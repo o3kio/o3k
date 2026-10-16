@@ -136,6 +136,35 @@ GitHub approvals and applicable exact-head evidence remain outstanding across
 the open PRs. PP.5 #1081 remains untouched and ACCEPTANCE_PENDING; deferred
 physical campaigns remain deferred; PP.7 #976 remains unauthorized.
 
+## Current CI refresh
+
+Verified against GitHub after the preceding snapshot; this section supersedes
+older point-in-time status wording above without deleting that history.
+
+- #1101 `f76acabcf8fa63c7e498e63a9d6f630dc1266a90`, #1106
+  `8c1bfbe6cc6fbeb9d93258710dda88687d828bf6`, #1107
+  `6facf37832a6b1fe742aa9c0df4e0510b7da3e38`, and #1108
+  `fcddeaf526c44516ef0d894e7d681cb87d63b5af` each have all seven protected
+  checks passing. Their focused or independent review state does not replace
+  required GitHub approval; none has an approval recorded.
+- #1111 `8bca9e7fbac36190c33358596af8b45695c10415`, #1112
+  `6ea517025d178c4247ec38ed12d454532aecb5ea`, and #1113
+  `6effcd795663216bca3e7cb7ad28ad5689842af3` each have all seven protected
+  checks passing. #1111 is one PostgreSQL pool-pressure case; #1112 is an
+  in-memory network-service exhaustion case; #1113 is a bounded fake-provider
+  native-storage lifecycle case and is not real LVM or native-volume evidence.
+- #1114 `a2ee310064039779348e443935a5d7f736842a07` has Rust and supply-chain
+  still in progress; the other protected checks pass. The fresh run is not a
+  PostgreSQL pressure PASS.
+- #1115 `7e342171710172b454afe776a0be853b9bc45525` has Rust, Mock Cinder, and
+  supply-chain still in progress; the other protected checks pass. The fresh
+  run is not diagnostics acceptance evidence yet.
+
+All listed PRs remain open and unmerged without GitHub approval. ADR-0189,
+SPEC-0050, and SPEC-0051 remain Proposed. PP.5 #1081 remains untouched and
+ACCEPTANCE_PENDING, deferred physical campaigns remain deferred, and PP.7
+remains unauthorized.
+
 ## Summary
 
 PP.6 can proceed while the S3/S10/S20, K-min/K-full, and physical-deployment
