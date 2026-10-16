@@ -104,6 +104,36 @@ GitHub state; every listed PR is open and unmerged, with no GitHub approval.
   `Capacity` result; it does not prove real LVM capacity detection. #1089 remains
   partial.
 
+## Post-snapshot status refresh
+
+Recorded against the current open PR state after the preceding snapshot; these
+are implementation and CI observations, not acceptance or merge decisions.
+
+- Doctor durable controller authority [#1093](https://github.com/o3kio/o3k/pull/1093)
+  at `f9c3844dfb9d4d8e9b7099a2c34f23f486016f73` now has all seven protected
+  checks passing. It remains open without GitHub approval and does not by
+  itself establish full diagnostics acceptance.
+- Native storage capacity rejection [#1113](https://github.com/o3kio/o3k/pull/1113)
+  at `6effcd795663216bca3e7cb7ad28ad5689842af3` has all seven exact-head
+  protected checks passing. The result remains a bounded fake-provider
+  lifecycle test and is not real storage-capacity evidence or a native-volume
+  product claim.
+- PostgreSQL server pressure [#1114](https://github.com/o3kio/o3k/pull/1114)
+  is currently at `a2ee310064039779348e443935a5d7f736842a07`; a prior workflow
+  failure remains recorded on the PR and a fresh protected run is pending.
+  No PostgreSQL pressure PASS is claimed.
+- Read-only diagnostics routes [#1115](https://github.com/o3kio/o3k/pull/1115)
+  is currently at `7e342171710172b454afe776a0be853b9bc45525`. Focused tests and
+  independent review are clear; exact-head protected CI is pending. The slice
+  proves route read-only behavior only and does not create a support-bundle
+  contract or complete diagnostics acceptance.
+
+ADR-0189/SPEC-0050 remain Proposed, SPEC-0051 support-bundle work remains
+Proposed, and no backup/restore or PKI production implementation is authorized.
+GitHub approvals and applicable exact-head evidence remain outstanding across
+the open PRs. PP.5 #1081 remains untouched and ACCEPTANCE_PENDING; deferred
+physical campaigns remain deferred; PP.7 #976 remains unauthorized.
+
 ## Summary
 
 PP.6 can proceed while the S3/S10/S20, K-min/K-full, and physical-deployment
