@@ -10,9 +10,10 @@ use super::{
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{
-    Row, SqlitePool,
+    Connection, Row, SqlitePool,
     sqlite::{
-        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
+        SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions, SqliteRow,
+        SqliteSynchronous,
     },
 };
 #[cfg(unix)]
@@ -390,6 +391,24 @@ pub(super) async fn update_agent_command_once_sqlite(
     store.get_agent_command(command_id).await
 }
 
+/// Store writes start with a raw `BEGIN IMMEDIATE`, which sqlx does not track.
+/// If the caller cancels a write, its connection can return to the pool inside
+/// an open transaction: a `BEGIN IMMEDIATE` still waiting on the busy timeout
+/// keeps running on the connection's worker and takes the writer lock after the
+/// caller has gone (#1126). The release hook runs after any statement still in
+/// flight on the connection, so it rolls back whatever was abandoned. A
+/// connection whose transaction state cannot be confirmed is closed, not reused.
+async fn release_abandoned_transaction(
+    connection: &mut SqliteConnection,
+) -> Result<bool, sqlx::Error> {
+    let rolled_back_or_idle = match sqlx::query("ROLLBACK").execute(&mut *connection).await {
+        Ok(_) => true,
+        Err(sqlx::Error::Database(error)) => error.message().contains("no transaction is active"),
+        Err(_) => false,
+    };
+    Ok(rolled_back_or_idle && !connection.is_in_transaction())
+}
+
 impl SqliteStore {
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
         let is_memory = database_url == "sqlite::memory:" || database_url == "sqlite://:memory:";
@@ -411,6 +430,7 @@ impl SqliteStore {
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
             .acquire_timeout(Duration::from_secs(5))
+            .after_release(|connection, _| Box::pin(release_abandoned_transaction(connection)))
             .connect_with(options)
             .await
             .map_err(StoreError::Database)?;
@@ -2657,5 +2677,53 @@ impl DurableStore for SqliteStore {
 impl ComputeRepository for SqliteStore {
     async fn list_resources_by_kind(&self, kind: &str) -> Result<Vec<ResourceRecord>, StoreError> {
         self.list_resources_by_kind(kind).await
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod release_tests {
+    use super::release_abandoned_transaction;
+    use sqlx::{Connection, sqlite::SqliteConnection};
+
+    #[tokio::test]
+    async fn release_keeps_idle_connection_and_rolls_back_open_transaction() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open in-memory SQLite connection");
+        assert!(
+            release_abandoned_transaction(&mut connection)
+                .await
+                .expect("release idle connection"),
+            "an idle connection must be returned to the pool, not discarded"
+        );
+
+        sqlx::query("CREATE TABLE release_probe (id INTEGER)")
+            .execute(&mut connection)
+            .await
+            .expect("create probe table");
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut connection)
+            .await
+            .expect("start untracked transaction");
+        sqlx::query("INSERT INTO release_probe (id) VALUES (1)")
+            .execute(&mut connection)
+            .await
+            .expect("write inside untracked transaction");
+        assert!(
+            release_abandoned_transaction(&mut connection)
+                .await
+                .expect("release connection with open transaction"),
+            "a rolled-back connection is clean and may be reused"
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM release_probe")
+            .fetch_one(&mut connection)
+            .await
+            .expect("count probe rows");
+        assert_eq!(rows, 0, "the abandoned write must be rolled back");
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut connection)
+            .await
+            .expect("a new transaction can start after release");
     }
 }
