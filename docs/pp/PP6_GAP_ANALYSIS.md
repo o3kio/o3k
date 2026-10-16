@@ -136,10 +136,14 @@ GitHub approvals and applicable exact-head evidence remain outstanding across
 the open PRs. PP.5 #1081 remains untouched and ACCEPTANCE_PENDING; deferred
 physical campaigns remain deferred; PP.7 #976 remains unauthorized.
 
-## Current CI refresh
+## Current CI refresh — point-in-time snapshot
 
-Verified against GitHub after the preceding snapshot; this section supersedes
-older point-in-time status wording above without deleting that history.
+Verified against GitHub at `2026-10-16 02:36:46 UTC` (the commit time of
+`f8f9bfe5cced76b3bba9992eb66e7ee5650e1f79`). Every detailed check status in
+this section is a point-in-time observation at that timestamp, not a live
+status claim; later transitions belong in the corresponding PR or issue
+history. This section supersedes older point-in-time status wording above
+without deleting that history.
 
 - #1101 `f76acabcf8fa63c7e498e63a9d6f630dc1266a90`, #1106
   `8c1bfbe6cc6fbeb9d93258710dda88687d828bf6`, #1107
