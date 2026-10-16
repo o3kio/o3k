@@ -228,6 +228,22 @@ jobs:
         run: bash tests/kubernetes-version-consistency.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test required PP.6 PostgreSQL server connection pressure
+        env:
+          O3K_PP6_PG_EVIDENCE_PATH: ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
+        run: |
+          set -euo pipefail
+          export O3K_PP6_SOURCE_HEAD_SHA="$(git rev-parse HEAD)"
+          export O3K_PP6_SOURCE_TREE_SHA="$(git rev-parse HEAD^{tree})"
+          cargo test -p o3k-store --test postgres_server_pressure --all-features -- --ignored --nocapture
+          test -s "$O3K_PP6_PG_EVIDENCE_PATH"
+      - name: Upload PP.6 PostgreSQL server pressure evidence
+        if: ${{ success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pp6-postgres-server-pressure-evidence
+          path: ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
+          if-no-files-found: error
       - name: Architecture boundary check
         run: python3 scripts/check-architecture-boundaries.py
       - name: Maintainability architecture guardrails
