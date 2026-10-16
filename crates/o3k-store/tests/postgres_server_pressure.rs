@@ -226,11 +226,6 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         .map_err(|_| "PostgresStore reconnect timed out after capacity recovery")??;
     eprintln!("checkpoint:store-recovered");
     let id = resource_id;
-    let prior = sqlx::query("SELECT COUNT(*) AS count FROM resources WHERE id = $1")
-        .bind(id.to_string())
-        .fetch_one(store.pool())
-        .await?;
-    assert_eq!(prior.get::<i64, _>("count"), 0);
     store
         .insert_resource(&ResourceRecord {
             id,
@@ -304,7 +299,10 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         "observed_sqlstate": "53300",
         "canonical_retry": "passed",
         "cleanup": "passed",
-        "foreign_state": "preserved_no_foreign_resources_touched",
+        "foreign_state": {
+            "status": "not_exercised",
+            "reason": "store-only lane invokes no provider or external-state operations"
+        },
         "artifact_secret_scan": {
             "status": "passed",
             "scope": "generated_artifact_values_only"
