@@ -202,7 +202,10 @@ async fn sqlite_store_fails_atomically_when_real_wal_filesystem_is_full()
         "baseline_resource_and_operation_unchanged": true,
         "integrity_check": integrity,
         "observed_error": pressure_error,
-        "foreign_state_mutated": false,
+        "foreign_state": {
+            "status": "not_exercised",
+            "reason": "store-only lane does not invoke provider or external-state operations"
+        },
         "cleanup": "harness-managed isolated mount and loopback image; awaiting harness confirmation"
     });
     let mut evidence_file = fs::OpenOptions::new()

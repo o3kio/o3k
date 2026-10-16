@@ -95,12 +95,17 @@ if test_status == 0 and cleanup_result == "PASS":
         "test": "o3k-store::sqlite_store_fails_atomically_when_real_wal_filesystem_is_full",
         "failed_resource_id_absent": True,
         "baseline_resource_and_operation_unchanged": True,
-        "foreign_state_mutated": False,
         "cleanup_result": "PASS",
     }
     for key, expected in required.items():
         if report.get(key) != expected:
             raise SystemExit(f"SQLite pressure evidence missing/invalid {key}: {report.get(key)!r}")
+    foreign_state = report.get("foreign_state")
+    if foreign_state != {
+        "status": "not_exercised",
+        "reason": "store-only lane does not invoke provider or external-state operations",
+    }:
+        raise SystemExit(f"SQLite pressure evidence has invalid foreign-state scope: {foreign_state!r}")
     if report.get("observed_error", {}).get("category") != "SQLITE_FULL":
         raise SystemExit("SQLite pressure evidence did not classify SQLITE_FULL")
     for key in (
