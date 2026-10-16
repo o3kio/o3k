@@ -10,6 +10,7 @@ use o3k_domain::{
     VolumeState,
 };
 use o3k_identity::{BootstrapConfig, Secret, TokenService};
+use o3k_kernel::{KernelError, LifecycleMeteringObserver};
 use o3k_provider::FakeComputeProvider;
 use o3k_storage::{
     PreparedAttachment, StorageAttachmentObservation, StorageAttachmentRequest, StorageProvider,
@@ -19,7 +20,10 @@ use o3k_storage::{
 use o3k_store::{DurableStore, StorageRepository, VolumeRecord, testkit::TestStore};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tower::ServiceExt;
@@ -30,6 +34,8 @@ const PROJECT: &str = "eba29e2d-53de-461d-ae91-ede7402713cb";
 struct RecoveryProvider {
     volumes: Mutex<BTreeMap<Uuid, StorageVolumeObservation>>,
     observations_owned: Mutex<bool>,
+    create_error: Option<StorageProviderError>,
+    inspect_calls: AtomicUsize,
 }
 
 impl Default for RecoveryProvider {
@@ -37,6 +43,8 @@ impl Default for RecoveryProvider {
         Self {
             volumes: Mutex::default(),
             observations_owned: Mutex::new(true),
+            create_error: None,
+            inspect_calls: AtomicUsize::default(),
         }
     }
 }
@@ -60,6 +68,9 @@ impl StorageProvider for RecoveryProvider {
             owned: true,
             available: true,
         };
+        if let Some(error) = &self.create_error {
+            return Err(error.clone());
+        }
         self.volumes
             .lock()
             .map_err(|_| StorageProviderError::CommandFailed)?
@@ -71,6 +82,7 @@ impl StorageProvider for RecoveryProvider {
         &self,
         request: &StorageVolumeRequest,
     ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        self.inspect_calls.fetch_add(1, Ordering::SeqCst);
         let mut observation = self
             .volumes
             .lock()
@@ -150,6 +162,35 @@ impl StorageProvider for RecoveryProvider {
     }
 }
 
+#[derive(Default)]
+struct CountingMeter(AtomicUsize);
+
+#[async_trait]
+impl LifecycleMeteringObserver for CountingMeter {
+    async fn observe_resource_state(
+        &self,
+        _kind: &str,
+        _project_id: &str,
+        _resource_id: &str,
+        _observed_state: &str,
+    ) -> Result<(), KernelError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn observe_allocation(
+        &self,
+        _meter_key: &str,
+        _project_id: &str,
+        _resource_id: &str,
+        _quantity: u64,
+        _consuming: bool,
+    ) -> Result<(), KernelError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 async fn token(app: &axum::Router) -> Result<String, Box<dyn std::error::Error>> {
     let body = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
     let response = app
@@ -185,6 +226,63 @@ async fn store() -> Result<Arc<TestStore>, Box<dyn std::error::Error>> {
     )
     .await?;
     Ok(store)
+}
+
+#[tokio::test]
+async fn native_volume_capacity_failure_is_durable_and_skips_follow_up_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = store().await?;
+    let volume_id = VolumeId::new();
+    let requested = VolumeRecord {
+        volume: Volume {
+            id: volume_id,
+            project_id: PROJECT.into(),
+            name: "capacity-limited".into(),
+            description: String::new(),
+            metadata: Default::default(),
+            availability_zone: None,
+            size_bytes: 1024 * 1024 * 1024,
+            volume_type: "lvm".into(),
+            backend_id: "local".into(),
+            execution_scope: StorageExecutionScope::Host("local".into()),
+            state: VolumeState::Requested,
+            generation: 1,
+            operation_id: None,
+            provider_reference: None,
+        },
+        created_at: "2026-08-28T00:00:00.000".into(),
+    };
+    store.insert_volume(&requested).await?;
+
+    let provider = Arc::new(RecoveryProvider {
+        create_error: Some(StorageProviderError::Capacity),
+        ..RecoveryProvider::default()
+    });
+    let meter = Arc::new(CountingMeter::default());
+    let observer: Arc<dyn LifecycleMeteringObserver> = meter.clone();
+    let result = o3k_api::realize_native_volume_create(
+        store.clone(),
+        provider.clone(),
+        requested.clone(),
+        Some(&observer),
+    )
+    .await;
+
+    let error = match result {
+        Ok(_) => return Err("capacity failure must be surfaced".into()),
+        Err(error) => error,
+    };
+    assert_eq!(error, "storage capacity is unavailable");
+    let failed = store
+        .get_volume(volume_id.as_uuid())
+        .await?
+        .ok_or("failed volume row must remain durable")?;
+    assert_eq!(failed.volume.state, VolumeState::Error);
+    assert_eq!(failed.volume.generation, requested.volume.generation + 2);
+    assert_eq!(failed.volume.provider_reference, None);
+    assert_eq!(provider.inspect_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(meter.0.load(Ordering::SeqCst), 0);
+    Ok(())
 }
 
 #[tokio::test]
