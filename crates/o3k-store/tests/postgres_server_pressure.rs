@@ -205,7 +205,9 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
     assert_eq!(code.as_deref(), Some("53300"));
     eprintln!("checkpoint:raw");
     let resource_id = Uuid::now_v7();
-    let store_attempt = timeout(Duration::from_secs(5), PostgresStore::connect(&url)).await;
+    // PostgresStore retries admission until its own 5 s pool acquire timeout,
+    // so the outer bound must be longer or the two timers race.
+    let store_attempt = timeout(Duration::from_secs(15), PostgresStore::connect(&url)).await;
     assert!(
         store_attempt.is_ok(),
         "store connection admission hung under server pressure"
