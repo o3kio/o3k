@@ -8,7 +8,7 @@
 //! leaks node identity, agent epoch, or credential material.
 
 use axum::body::{Body, to_bytes};
-use http::{Request, StatusCode};
+use http::{Method, Request, StatusCode};
 use o3k_kernel::{
     AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ScopeKind, UserPrincipal,
 };
@@ -192,9 +192,19 @@ async fn get_from_router(
     uri: &str,
     token: &str,
 ) -> Result<(StatusCode, String), Box<dyn std::error::Error>> {
+    request_from_router(router, Method::GET, uri, token).await
+}
+
+async fn request_from_router(
+    router: axum::Router,
+    method: Method,
+    uri: &str,
+    token: &str,
+) -> Result<(StatusCode, String), Box<dyn std::error::Error>> {
     let response = router
         .oneshot(
             Request::builder()
+                .method(method)
                 .uri(uri)
                 .header("authorization", format!("Bearer {token}"))
                 .header("x-request-id", REQUEST_ID)
@@ -419,6 +429,25 @@ async fn native_diagnostics_malformed_limit_is_authorized_before_validation() ->
         let (status, body) = get(endpoint, "operator-token").await?;
         assert_eq!(status, StatusCode::OK, "{endpoint}");
         assert!(body.contains("items"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_diagnostics_routes_are_read_only_for_mutating_methods() -> TestResult {
+    // SPEC-0045 exposes a read-only projection.  Exercise the production
+    // router with every common mutation verb so a future route change cannot
+    // accidentally turn diagnostics into a write surface.
+    for uri in ENDPOINTS {
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            let (status, body) =
+                request_from_router(router()?, method.clone(), uri, "operator-token").await?;
+            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {uri}");
+            assert!(
+                body.is_empty(),
+                "mutation response exposed a body: {method} {uri}"
+            );
+        }
     }
     Ok(())
 }
