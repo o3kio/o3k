@@ -129,9 +129,20 @@ async fn sqlite_lock_timeout_cancellation_precedes_mutation_and_retry_is_safe()
         ),
     )
     .await;
+    // SqliteStore's production busy timeout is deliberately longer than this
+    // test's cancellation budget, so the normal result is the bounded caller
+    // timeout. If the connection-level timeout is ever made shorter, only
+    // SQLite's documented lock-contention codes are acceptable.
+    let lock_timeout_classified = match &blocked {
+        Err(_) => true,
+        Ok(Err(StoreError::Database(sqlx::Error::Database(error)))) => {
+            matches!(error.code().as_deref(), Some("5") | Some("517"))
+        }
+        Ok(Err(_)) | Ok(Ok(_)) => false,
+    };
     assert!(
-        blocked.is_err(),
-        "the held writer lock must time out before mutation"
+        lock_timeout_classified,
+        "blocked operation returned an unexpected result: {blocked:?}"
     );
     let unchanged = store.get_canonical_operation(operation_id).await?;
     assert_eq!(unchanged.state, OperationState::Pending);
