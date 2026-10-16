@@ -210,7 +210,9 @@ check_fixture "Command after cfg(test)" 1 "HOST EXECUTION ARCHITECTURE VIOLATION
 echo "Test 26: SQL after #[cfg(test)] -> FAIL"
 check_fixture "SQL after cfg(test)" 1 "SQL ARCHITECTURE VIOLATION" \
     $'#[cfg(test)] mod tests {}\nfn production_after_tests() { sqlx::query("SELECT 1"); }' "crates/o3k-kernel/src"
-
+echo "Test 26n: SQL after cfg(test) module containing an 'n' char literal -> FAIL"
+check_fixture "SQL after cfg(test) with 'n' char literal" 1 "SQL ARCHITECTURE VIOLATION: crates/o3k-kernel/src/z_guard_test_fixture.rs:5" \
+    $'#[cfg(test)]\nmod tests {\n    fn chars() -> [char; 2] { [\'n\',\'{\'] }\n}\nfn production_after_tests() { sqlx::query("SELECT 1"); }' "crates/o3k-kernel/src"
 echo "Test 26a: SQL inside cfg(test) module -> ACCEPT"
 check_fixture "SQL inside cfg(test) module" 0 "" \
     $'#[cfg(test)]\nmod tests {\n    fn test_query() { sqlx::query("SELECT 1"); }\n}' "crates/o3k-kernel/src"

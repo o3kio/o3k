@@ -4,6 +4,8 @@ import re
 from pathlib import Path
 
 _PLAIN_CODE_RUN = re.compile(r"[^/'\"r]+")
+_CHAR_LITERAL = re.compile(r"'(?:\\.|[^'\\\n])'")
+_RAW_STRING_OPEN = re.compile(r'r(#+)?"')
 
 
 class RustLexState:
@@ -70,7 +72,7 @@ class RustLexState:
                 self.block_comment_depth = 1
                 i += 2
                 continue
-            if line[i] == "'" and not re.match(r"'(?:\\.|[^'\\\n])'", line[i:]):
+            if line[i] == "'" and not _CHAR_LITERAL.match(line, i):
                 output.append(line[i])
                 i += 1
                 continue
@@ -79,7 +81,7 @@ class RustLexState:
                 i += 1
                 continue
             if line[i] == "r":
-                match = re.match(r'r(#+)?"', line[i:])
+                match = _RAW_STRING_OPEN.match(line, i)
                 if match:
                     self.raw_hashes = len(match.group(1) or "")
                     i += len(match.group(0))

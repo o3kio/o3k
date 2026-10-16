@@ -71,11 +71,15 @@ def rust_source_files() -> list[Path]:
 
 
 @functools.cache
-def _production_source(path: Path, rel: str) -> tuple[list[str], str]:
-    """Return (lines, source) with test-only lines blanked, computed once per run."""
+def _production_source(path: Path, rel: str) -> tuple[tuple[str, ...], str]:
+    """Return (lines, source) with test-only lines blanked, computed once per run.
+
+    The result is cached and shared by every guard, so the lines are returned
+    as an immutable tuple.
+    """
     lines = path.read_text(encoding="utf-8").splitlines()
     test_lines = classify_rust_lines(lines, dedicated_test=is_dedicated_test_file(rel))
-    production_lines = ["" if is_test else line for line, is_test in zip(lines, test_lines)]
+    production_lines = tuple("" if is_test else line for line, is_test in zip(lines, test_lines))
     return production_lines, "\n".join(production_lines)
 
 
