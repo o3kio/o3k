@@ -438,6 +438,8 @@ pub struct FakeDb {
     pub ports: Vec<PortRow>,
     pub active_sessions: Result<u64, String>,
     pub work_leases: Result<Vec<WorkLeaseRow>, String>,
+    /// When set, every row read below fails with this backend error text.
+    pub read_error: Option<String>,
 }
 
 impl Default for FakeDb {
@@ -453,6 +455,7 @@ impl Default for FakeDb {
             ports: Vec::new(),
             active_sessions: Ok(1),
             work_leases: Ok(Vec::new()),
+            read_error: None,
         }
     }
 }
@@ -526,6 +529,7 @@ impl FakeDb {
             ports: Vec::new(),
             active_sessions: Ok(1),
             work_leases: Ok(Vec::new()),
+            read_error: None,
         }
     }
 }
@@ -541,26 +545,44 @@ impl DoctorDb for FakeDb {
     }
 
     async fn placement_providers(&self, _path: &Path) -> Result<Vec<ProviderRow>, String> {
+        if let Some(error) = &self.read_error {
+            return Err(error.clone());
+        }
         Ok(self.providers.clone())
     }
 
     async fn placement_inventories(&self, _path: &Path) -> Result<Vec<InventoryRow>, String> {
+        if let Some(error) = &self.read_error {
+            return Err(error.clone());
+        }
         Ok(self.inventories.clone())
     }
 
     async fn live_allocation_resources(&self, _path: &Path) -> Result<Vec<AllocationRow>, String> {
+        if let Some(error) = &self.read_error {
+            return Err(error.clone());
+        }
         Ok(self.allocations.clone())
     }
 
     async fn latest_epochs(&self, _path: &Path) -> Result<Vec<EpochRow>, String> {
+        if let Some(error) = &self.read_error {
+            return Err(error.clone());
+        }
         Ok(self.epochs.clone())
     }
 
     async fn compute_instances(&self, _path: &Path) -> Result<Vec<InstanceRow>, String> {
+        if let Some(error) = &self.read_error {
+            return Err(error.clone());
+        }
         Ok(self.instances.clone())
     }
 
     async fn network_ports(&self, _path: &Path) -> Result<Vec<PortRow>, String> {
+        if let Some(error) = &self.read_error {
+            return Err(error.clone());
+        }
         Ok(self.ports.clone())
     }
 

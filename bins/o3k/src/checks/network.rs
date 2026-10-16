@@ -7,7 +7,8 @@
 //! with the kernel start time recorded in `<pidfile>.owner`).
 
 use crate::checks::{
-    compute_actions, internal_failure, not_libvirt_profile, profile_not_applicable,
+    compute_actions, database_read_failure, internal_failure, not_libvirt_profile,
+    profile_not_applicable,
 };
 use crate::context::Context;
 use crate::output::{Category, Check, CheckStatus};
@@ -402,12 +403,11 @@ pub async fn check_ownership_records(ctx: &Context) -> Check {
     };
     let instances = match ctx.db.compute_instances(&ctx.database_path()).await {
         Ok(instances) => instances,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "network.ownership_records",
                 Category::Network,
                 "compute instances",
-                &error,
                 compute_actions(),
             );
         }

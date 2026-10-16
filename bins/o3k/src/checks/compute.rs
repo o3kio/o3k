@@ -2,7 +2,7 @@
 //! readiness probe, and the agent's self-reported epoch.
 
 use crate::checks::{
-    compute_actions, internal_failure, not_libvirt_profile, profile_not_applicable,
+    compute_actions, database_read_failure, not_libvirt_profile, profile_not_applicable,
 };
 use crate::context::Context;
 use crate::output::{Category, Check, CheckStatus};
@@ -160,12 +160,11 @@ pub async fn check_agent_epoch(ctx: &Context) -> Check {
     }
     let epochs = match ctx.db.latest_epochs(&ctx.database_path()).await {
         Ok(epochs) => epochs,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.agent_epoch",
                 Category::Compute,
                 "persisted agent epochs",
-                &error,
                 compute_actions(),
             );
         }
@@ -241,12 +240,11 @@ pub async fn check_agent_capabilities(ctx: &Context) -> Check {
     }
     let providers = match ctx.db.placement_providers(&ctx.database_path()).await {
         Ok(providers) => providers,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.agent_capabilities",
                 Category::Compute,
                 "placement providers",
-                &error,
                 compute_actions(),
             );
         }
@@ -261,12 +259,11 @@ pub async fn check_agent_capabilities(ctx: &Context) -> Check {
     }
     let inventories = match ctx.db.placement_inventories(&ctx.database_path()).await {
         Ok(inventories) => inventories,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.agent_capabilities",
                 Category::Compute,
                 "placement inventories",
-                &error,
                 compute_actions(),
             );
         }
@@ -323,12 +320,11 @@ pub async fn check_placement_consistent(ctx: &Context) -> Check {
     }
     let providers = match ctx.db.placement_providers(&ctx.database_path()).await {
         Ok(providers) => providers,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.placement_consistent",
                 Category::Compute,
                 "placement providers",
-                &error,
                 compute_actions(),
             );
         }
@@ -343,24 +339,22 @@ pub async fn check_placement_consistent(ctx: &Context) -> Check {
     }
     let inventories = match ctx.db.placement_inventories(&ctx.database_path()).await {
         Ok(inventories) => inventories,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.placement_consistent",
                 Category::Compute,
                 "placement inventories",
-                &error,
                 compute_actions(),
             );
         }
     };
     let allocations = match ctx.db.live_allocation_resources(&ctx.database_path()).await {
         Ok(allocations) => allocations,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.placement_consistent",
                 Category::Compute,
                 "live allocation sums",
-                &error,
                 compute_actions(),
             );
         }

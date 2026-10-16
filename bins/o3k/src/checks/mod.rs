@@ -38,6 +38,29 @@ pub fn internal_failure(
     .with_actions(actions)
 }
 
+/// Converts a failed read-only store query into a FAIL without copying the
+/// backend error text, which can carry connection details or stored values.
+#[must_use]
+pub fn database_read_failure(
+    id: &str,
+    category: Category,
+    what: &str,
+    actions: Vec<String>,
+) -> Check {
+    Check::new(
+        id,
+        category,
+        CheckStatus::Fail,
+        format!("internal error while checking {what}: database read failed"),
+    )
+    .with_details(
+        "the doctor's read-only database query failed; the backend error text is \
+         withheld because it can contain connection details. Review the database.* \
+         checks for the database path and permissions.",
+    )
+    .with_actions(actions)
+}
+
 /// Standard read-only actions for the control-plane daemon.
 #[must_use]
 pub fn o3kd_actions() -> Vec<String> {
@@ -95,4 +118,55 @@ pub fn profile_not_applicable(id: &str, category: Category) -> Check {
         CheckStatus::NotApplicable,
         "the compute agent is not part of this installation profile",
     )
+}
+
+#[cfg(test)]
+mod database_read_redaction_tests {
+    use crate::output::{CheckStatus, OverallStatus, Report};
+    use crate::testutil::{FakeDb, FakeExec, FakeHttp, context_with};
+
+    /// Every check that reads canonical rows must report a failed read without
+    /// copying the backend error text, in both JSON and human output.
+    #[tokio::test]
+    async fn failed_row_reads_are_secret_safe_in_json_and_human_output() {
+        let sentinel = "postgres://user:sentinel-secret@db.example/o3k: relation leaked";
+        let db = FakeDb {
+            read_error: Some(sentinel.to_owned()),
+            ..FakeDb::healthy()
+        };
+        let ctx = context_with(FakeExec::healthy(), FakeHttp::healthy(), db, true, true);
+
+        let checks = vec![
+            super::compute::check_agent_epoch(&ctx).await,
+            super::compute::check_agent_capabilities(&ctx).await,
+            super::compute::check_placement_consistent(&ctx).await,
+            super::cloud::check_testvm_status(&ctx).await,
+            super::network::check_ownership_records(&ctx).await,
+            super::libvirt::check_domains_consistent(&ctx).await,
+        ];
+        for check in &checks {
+            assert_eq!(check.status, CheckStatus::Fail, "{}", check.id);
+            assert!(
+                check.summary.contains("database read failed"),
+                "{} did not reach its database read: {}",
+                check.id,
+                check.summary
+            );
+            assert!(!check.recommended_actions.is_empty(), "{}", check.id);
+        }
+
+        let report = Report {
+            version: "test".to_owned(),
+            overall_status: OverallStatus::Unhealthy,
+            timestamp: "2026-01-01T00:00:00Z".to_owned(),
+            checks,
+        };
+        let json = serde_json::to_string(&report).unwrap_or_default();
+        let human = report.render_human();
+        assert!(!json.is_empty());
+        for leaked in ["sentinel-secret", "postgres://", "relation leaked"] {
+            assert!(!json.contains(leaked), "JSON output leaked {leaked}");
+            assert!(!human.contains(leaked), "human output leaked {leaked}");
+        }
+    }
 }
