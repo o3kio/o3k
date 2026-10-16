@@ -116,11 +116,19 @@ async fn child_case() -> Result<(), Box<dyn Error>> {
 
     let recovered = testkit::open_file(&database).await?;
     let resource = recovered.get_resource(resource_id).await?;
-    assert_eq!(resource.generation, 1);
-    assert_eq!(resource.observed_generation, 0);
-    assert_eq!(resource.desired_state, "ACTIVE");
-    assert_eq!(resource.observed_state, "UNKNOWN");
-    assert_eq!(resource.provider_id, None);
+    assert_eq!(
+        resource,
+        ResourceRecord {
+            id: resource_id,
+            kind: "compute:server".to_owned(),
+            project_id: "pp6-fd-pressure".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "ACTIVE".to_owned(),
+            observed_state: "UNKNOWN".to_owned(),
+            provider_id: None,
+        }
+    );
     let operation = recovered.get_operation(operation_id).await?;
     assert_eq!(operation.state, OperationState::Pending);
     assert_eq!(operation.error_category, None);
