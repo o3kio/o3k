@@ -260,6 +260,7 @@ jobs:
       - name: Test Kubernetes deployment version consistency
         run: bash tests/kubernetes-version-consistency.sh
       - name: Required PP.6 PostgreSQL outage/reconnect evidence
+        timeout-minutes: 5
         env:
           O3K_PP6_PG_EVIDENCE_PATH: ${{ runner.temp }}/pp6-postgres-outage.json
           O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
