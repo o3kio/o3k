@@ -4,9 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
 
 permissions:
   contents: read
+
+# A newer push to the same PR supersedes the in-flight run.  Runs on main and
+# merge-queue groups get a unique group, so they are never cancelled or
+# replaced while pending.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust:
@@ -245,8 +253,10 @@ jobs:
           name: nextest-junit
           if-no-files-found: warn
           path: target/nextest/pr/junit.xml
-      - name: Test
-        run: cargo test --workspace --all-features
+      - name: Test doctests
+        # nextest above already runs every lib, bin and integration test;
+        # only doctests remain for the cargo test lane.
+        run: cargo test --workspace --all-features --doc
       - name: P12.4 PostgreSQL conformance (mandatory)
         run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --ignored --nocapture
       - name: Endpoint-lifecycle 1035 PostgreSQL conformance (mandatory)

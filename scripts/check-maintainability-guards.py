@@ -69,6 +69,23 @@ def rust_source_files() -> list[Path]:
     return files
 
 
+_PRODUCTION_SOURCE_CACHE: dict[Path, tuple[list[str], str]] = {}
+
+
+def _production_source(path: Path, rel: str) -> tuple[list[str], str]:
+    """Return (lines, source) with test-only lines blanked, computed once per run."""
+    cached = _PRODUCTION_SOURCE_CACHE.get(path)
+    if cached is None:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        test_lines = classify_rust_lines(
+            lines, dedicated_test=is_dedicated_test_file(rel)
+        )
+        production_lines = ["" if is_test else line for line, is_test in zip(lines, test_lines)]
+        cached = (production_lines, "\n".join(production_lines))
+        _PRODUCTION_SOURCE_CACHE[path] = cached
+    return cached
+
+
 def _load_baseline(name: str) -> dict | None:
     """Load a baseline JSON file from the immutable baseline directory."""
     path = BASELINE_DIR / name
@@ -94,6 +111,7 @@ SQL_PATTERNS = [
     r"sqlx::query_builder::QueryBuilder\b",
     rf"sqlx::(?:prelude::)?{SQL_CAPABILITY_NAMES}\b",
 ]
+SQL_PATTERNS_COMPILED = [(pat, re.compile(pat)) for pat in SQL_PATTERNS]
 
 SQL_IMPORT_PATTERN = re.compile(
     r"^\s*use\s+sqlx::(?:"
@@ -151,12 +169,11 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
         if approved:
             continue
 
-        lines = path.read_text(encoding="utf-8").splitlines()
-        test_lines = classify_rust_lines(
-            lines, dedicated_test=is_dedicated_test_file(rel)
-        )
-        production_lines = ["" if is_test else line for line, is_test in zip(lines, test_lines)]
-        source = "\n".join(production_lines)
+        production_lines, source = _production_source(path, rel)
+        # Every SQL pattern requires the literal "sqlx::"; skipping files
+        # without it also avoids slow `^\s*` scans over blanked test lines.
+        if "sqlx::" not in source:
+            continue
 
         for import_pattern in (SQL_IMPORT_PATTERN, SQL_NESTED_IMPORT_PATTERN):
             for match in import_pattern.finditer(source):
@@ -170,8 +187,11 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
                 )
 
         for i, line in enumerate(production_lines, 1):
-            for pat in SQL_PATTERNS:
-                if re.search(pat, line):
+            # Every SQL_PATTERNS entry begins with the literal "sqlx::".
+            if "sqlx::" not in line:
+                continue
+            for pat, compiled in SQL_PATTERNS_COMPILED:
+                if compiled.search(line):
                     stripped = line.strip()
                     if stripped.startswith("//") or stripped.startswith("/*"):
                         continue
@@ -202,6 +222,10 @@ HOST_CMD_PATTERNS = [
     (r'\bspawn_host_command\s*\(', "host command wrapper"),
     (r"(?<![A-Za-z0-9_])Command::new\(", "std::process::Command / tokio::process::Command"),
 ]
+# Each per-line host pattern, including the aliased shell check, needs one of
+# these literals ("sh" also covers "bash"); other lines cannot match.
+HOST_CMD_REQUIRED_LITERALS = ("sh", "run(", "output(", "Command::new(", "spawn_host_command")
+HOST_CMD_PATTERNS_COMPILED = [(re.compile(pat), name) for pat, name in HOST_CMD_PATTERNS]
 
 HOST_IMPORT_PATTERNS = [
     (re.compile(
@@ -283,15 +307,14 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
         if is_test_or_example(rel):
             continue
 
-        lines = path.read_text(encoding="utf-8").splitlines()
-        test_lines = classify_rust_lines(
-            lines, dedicated_test=is_dedicated_test_file(rel)
-        )
-        production_lines = ["" if is_test else line for line, is_test in zip(lines, test_lines)]
-        source = "\n".join(production_lines)
+        production_lines, source = _production_source(path, rel)
         command_aliases = _host_command_aliases(source)
 
-        for pattern, name in HOST_IMPORT_PATTERNS:
+        # Each HOST_IMPORT_PATTERNS entry requires "process::Command" or
+        # "process::{"; skipping other files avoids slow `^\s*` scans.
+        has_process_import = "process::Command" in source or "process::{" in source
+        import_patterns = HOST_IMPORT_PATTERNS if has_process_import else ()
+        for pattern, name in import_patterns:
             for match in pattern.finditer(source):
                 if any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS):
                     continue
@@ -304,6 +327,8 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
                 )
 
         for i, line in enumerate(production_lines, 1):
+            if not any(literal in line for literal in HOST_CMD_REQUIRED_LITERALS):
+                continue
             stripped = line.strip()
             if not stripped.startswith("//"):
                 for alias in command_aliases - {"Command"}:
@@ -318,8 +343,8 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
                             f"  code: {stripped[:120]}"
                         )
                         break
-            for pat, name in HOST_CMD_PATTERNS:
-                if re.search(pat, line):
+            for compiled, name in HOST_CMD_PATTERNS_COMPILED:
+                if compiled.search(line):
                     stripped = line.strip()
                     if stripped.startswith("//"):
                         continue
