@@ -566,11 +566,21 @@ mod tests {
         let isolated_options = isolated_url
             .parse::<sqlx::postgres::PgConnectOptions>()
             .expect("isolated PostgreSQL URL");
-        let isolated_pool = sqlx::postgres::PgPoolOptions::new()
+        let isolated_pool = match sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_with(isolated_options)
             .await
-            .expect("connect to isolated schema");
+        {
+            Ok(pool) => pool,
+            Err(error) => {
+                let cleanup = sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+                    .execute(&pool)
+                    .await;
+                pool.close().await;
+                assert!(cleanup.is_ok(), "isolated schema cleanup failed");
+                panic!("connect to isolated schema: {error}");
+            }
+        };
         for statement in [
             "CREATE TABLE controller_sessions (controller_id VARCHAR(64) NOT NULL, controller_epoch VARCHAR(64) NOT NULL, lease_until TIMESTAMPTZ NOT NULL, state VARCHAR(32) NOT NULL)",
             "CREATE TABLE work_leases (work_key VARCHAR(255) PRIMARY KEY, owner_controller_id VARCHAR(64) NOT NULL, owner_controller_epoch VARCHAR(64) NOT NULL, fencing_token BIGINT NOT NULL, lease_until TIMESTAMPTZ NOT NULL)",
