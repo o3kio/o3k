@@ -114,14 +114,17 @@ pub async fn put(
     }
     let Json(request) = match body {
         Ok(request) => request,
-        Err(_) => {
+        // Keep axum's status (400 syntax, 415 content type, 422 data) so this
+        // route matches the rest of the native surface, but never echo the
+        // rejection text: serde messages can quote request input.
+        Err(rejection) => {
             return (
-                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                rejection.status(),
                 [(
                     axum::http::header::CONTENT_TYPE,
                     "text/plain; charset=utf-8",
                 )],
-                "unprocessable request",
+                "invalid request body",
             )
                 .into_response();
         }

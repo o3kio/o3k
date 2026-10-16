@@ -61,7 +61,11 @@ impl o3k_native_api::composition::CompositionReader for CloudProfileAdapter {
             .upsert_cloud_profile_with_audit(&record, expected, &audit)
             .await
             .map_err(|error| match error {
-                StoreError::StaleGeneration => WriteError::Conflict,
+                // A reused generation collides on the audit event id; that is
+                // a client conflict, not a server fault.
+                StoreError::StaleGeneration | StoreError::AuditEventConflict => {
+                    WriteError::Conflict
+                }
                 StoreError::Database(_) | StoreError::Migration(_) => WriteError::NotAvailable,
                 _ => WriteError::Internal,
             })?;
@@ -186,9 +190,7 @@ mod tests {
         (profile, audit)
     }
 
-    #[tokio::test]
-    async fn rejected_cloud_profile_writes_preserve_profile_and_audit() {
-        let store = Arc::new(O3kStore::connect_sqlite_memory().await.unwrap());
+    fn cloud_profile_app(store: Arc<O3kStore>) -> axum::Router {
         let registry = Arc::new(RwLock::new(ManifestRegistry::new()));
         let state = NativeApiState::new(
             None,
@@ -200,27 +202,36 @@ mod tests {
         )
         .unwrap()
         .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()))
-        .with_composition_reader(Arc::new(CloudProfileAdapter {
-            store: store.clone(),
-            registry,
-        }));
-        let app = router(state);
+        .with_composition_reader(Arc::new(CloudProfileAdapter { store, registry }));
+        router(state)
+    }
+
+    async fn put_profile(
+        app: &axum::Router,
+        body: String,
+        content_type: Option<&str>,
+    ) -> axum::response::Response {
+        let mut request = Request::builder()
+            .method("PUT")
+            .uri("/operator/cloud-profiles/default")
+            .header("authorization", "Bearer test-operator")
+            .header("x-request-id", "cloud-profile-test-request");
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        app.clone()
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejected_cloud_profile_writes_preserve_profile_and_audit() {
+        let store = Arc::new(O3kStore::connect_sqlite_memory().await.unwrap());
+        let app = cloud_profile_app(store.clone());
         let send = |body: String| {
             let app = app.clone();
-            async move {
-                app.oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/operator/cloud-profiles/default")
-                        .header("authorization", "Bearer test-operator")
-                        .header("x-request-id", "cloud-profile-test-request")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-            }
+            async move { put_profile(&app, body, Some("application/json")).await }
         };
 
         let initial = json!({"profile": valid_profile(), "expected_generation": null});
@@ -229,10 +240,7 @@ mod tests {
         let baseline = snapshot(&store).await;
 
         let malformed = send("{ malformed INPUT-SECRET-MARKER".to_owned()).await;
-        assert_eq!(
-            malformed.status(),
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY
-        );
+        assert_eq!(malformed.status(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(
             malformed
                 .headers()
@@ -298,5 +306,81 @@ mod tests {
         let problem: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(problem["request_id"], "cloud-profile-test-request");
         assert_eq!(snapshot(&store).await, baseline);
+
+        let response = put_profile(
+            &app,
+            json!({"profile": valid_profile(), "expected_generation": 1, "note": "INPUT-SECRET-MARKER"})
+                .to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("INPUT-SECRET-MARKER"));
+        assert_eq!(snapshot(&store).await, baseline);
+
+        // Re-sending the current generation passes the generation check but
+        // reuses the audit event id: a client conflict, not a server fault.
+        let response =
+            send(json!({"profile": valid_profile(), "expected_generation": 1}).to_string()).await;
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let problem: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["request_id"], "cloud-profile-test-request");
+        assert_eq!(snapshot(&store).await, baseline);
+    }
+
+    #[tokio::test]
+    async fn cloud_profile_write_reports_unavailable_store_as_503() {
+        use sqlx::Connection as _;
+
+        let dir = std::env::temp_dir().join(format!("o3k-cloud-profile-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.sqlite");
+        let store = Arc::new(O3kStore::connect_sqlite_file(&path).await.unwrap());
+        let app = cloud_profile_app(store.clone());
+        let initial = json!({"profile": valid_profile(), "expected_generation": null});
+        let response = put_profile(&app, initial.to_string(), Some("application/json")).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        // Make the store fail with a database error on the next write.
+        let mut external = sqlx::SqliteConnection::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE cloud_profiles")
+            .execute(&mut external)
+            .await
+            .unwrap();
+        external.close().await.unwrap();
+
+        let mut next = valid_profile();
+        next.generation = 2;
+        let response = put_profile(
+            &app,
+            json!({"profile": next, "expected_generation": 1}).to_string(),
+            Some("application/json"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let problem: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["request_id"], "cloud-profile-test-request");
+        assert!(!String::from_utf8_lossy(&body).contains("cloud_profiles"));
+
+        drop(app);
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
