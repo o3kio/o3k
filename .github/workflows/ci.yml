@@ -234,7 +234,7 @@ jobs:
           O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          export O3K_PP6_SOURCE_TREE_SHA="$(git rev-parse \"${O3K_PP6_SOURCE_HEAD_SHA}^{tree}\")"
+          export O3K_PP6_SOURCE_TREE_SHA="$(git rev-parse "${O3K_PP6_SOURCE_HEAD_SHA}^{tree}")"
           export O3K_PP6_EXECUTION_HEAD_SHA="$(git rev-parse HEAD)"
           export O3K_PP6_EXECUTION_TREE_SHA="$(git rev-parse HEAD^{tree})"
           cargo test -p o3k-store --test postgres_server_pressure --all-features -- --ignored --nocapture
