@@ -10,6 +10,18 @@ fn url() -> String {
     env::var("O3K_DATABASE_URL").expect("O3K_DATABASE_URL")
 }
 
+fn incompressible_desired_state() -> String {
+    let mut state = 0x9e37_79b9_u32;
+    let mut payload = String::with_capacity(524_299);
+    for _ in 0..262_144 {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        payload.push_str(&format!("{:08x}", state));
+    }
+    format!(r#"{{"payload":"{payload}"}}"#)
+}
+
 #[tokio::test]
 #[ignore = "requires the run-owned constrained PostgreSQL tablespace lane"]
 async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
@@ -117,6 +129,7 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
         "expected disk-full tablespace error"
     );
     let failed = Uuid::now_v7();
+    let pressure_desired_state = incompressible_desired_state();
     let store_error = store
         .insert_resource(&ResourceRecord {
             id: failed,
@@ -124,12 +137,12 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
             project_id: project.clone(),
             generation: 1,
             observed_generation: 1,
-            desired_state: "{}".into(),
+            desired_state: pressure_desired_state,
             observed_state: "ACTIVE".into(),
             provider_id: None,
         })
         .await
-        .expect_err("canonical write must fail under tablespace pressure");
+        .expect_err("canonical TOAST write must fail under tablespace pressure");
     let rendered = store_error.to_string();
     assert!(!rendered.contains(&url), "store error leaked database URL");
     assert!(rendered.len() <= 512, "store error is unbounded");
