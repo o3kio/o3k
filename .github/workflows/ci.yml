@@ -249,6 +249,8 @@ jobs:
         run: cargo test --workspace --all-features
       - name: P12.4 PostgreSQL conformance (mandatory)
         run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --ignored --nocapture
+      - name: PP.6 PostgreSQL resource-pressure evidence (mandatory)
+        run: cargo test -p o3k-store --test postgres_resource_pressure --all-features -- --ignored --nocapture
       - name: Endpoint-lifecycle 1035 PostgreSQL conformance (mandatory)
         env:
           O3K_DATABASE_URL: postgres://o3k:password@127.0.0.1:5432/o3k_endpoint_test_ci
