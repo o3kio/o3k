@@ -104,19 +104,59 @@ SQL_API_NAMES = (
 )
 SQL_CAPABILITY_NAMES = r"(?:Executor|Execute|AnyExecutor)"
 
+# Start of a `use` declaration: at line start or after `;`, `{`, `}` or an
+# attribute's `]` on the same line, with optional `pub`/`pub(...)` visibility
+# and an optional leading `::` on the path.
+USE_DECLARATION = r"(?:^|(?<=[;{}\]]))[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?use\s+(?:::)?"
+USE_LINE = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+)?use\s")
+
 SQL_PATTERNS = [
     rf"sqlx::{SQL_API_NAMES}(?:!|\b)",
     r"sqlx::query_builder::QueryBuilder\b",
     rf"sqlx::(?:prelude::)?{SQL_CAPABILITY_NAMES}\b",
 ]
+
+
+def requires_literal_prefix(pattern: str, prefix: str) -> bool:
+    """Whether every match of `pattern` must start with the literal `prefix`.
+
+    Conservative: the pattern must begin with `prefix`, the prefix must not be
+    followed by a quantifier, and the pattern must have no top-level
+    alternation (which would let a branch match without the prefix).
+    """
+    if not pattern.startswith(prefix):
+        return False
+    if pattern[len(prefix):len(prefix) + 1] in ("?", "*", "+", "{"):
+        return False
+    depth = 0
+    escaped = False
+    in_class = False
+    for char in pattern:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "|" and depth == 0:
+            return False
+    return True
+
+
 # check_sql_boundary skips lines without "sqlx::" before running these
-# patterns, so each pattern must begin with that literal.
-if not all(pat.startswith("sqlx::") for pat in SQL_PATTERNS):
-    raise RuntimeError('every SQL_PATTERNS entry must begin with "sqlx::"')
+# patterns, so every match of each pattern must contain that literal.
+if not all(requires_literal_prefix(pat, "sqlx::") for pat in SQL_PATTERNS):
+    raise RuntimeError('every SQL_PATTERNS match must begin with the literal "sqlx::"')
 SQL_PATTERNS_COMPILED = [re.compile(pat) for pat in SQL_PATTERNS]
 
 SQL_IMPORT_PATTERN = re.compile(
-    r"^[ \t]*use\s+sqlx::(?:"
+    USE_DECLARATION + r"sqlx::(?:"
     + rf"(?:{SQL_API_NAMES}|{SQL_CAPABILITY_NAMES})"
     + r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?"
     + r"|\{[^;]*\b"
@@ -126,12 +166,12 @@ SQL_IMPORT_PATTERN = re.compile(
 )
 
 SQL_NESTED_IMPORT_PATTERN = re.compile(
-    r"^[ \t]*use\s+sqlx::(?:"
+    USE_DECLARATION + r"sqlx::(?:"
     r"query_builder::QueryBuilder"
     r"|prelude::(?:Executor|Execute|AnyExecutor)"
     r")(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;"
-    r"|^[ \t]*use\s+sqlx::prelude::\*\s*;"
-    r"|^[ \t]*use\s+sqlx::\*\s*;",
+    r"|" + USE_DECLARATION + r"sqlx::prelude::\*\s*;"
+    r"|" + USE_DECLARATION + r"sqlx::\*\s*;",
     re.MULTILINE | re.DOTALL,
 )
 
@@ -196,7 +236,7 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
                     stripped = line.strip()
                     if stripped.startswith("//") or stripped.startswith("/*"):
                         continue
-                    if stripped.startswith("use "):
+                    if USE_LINE.match(stripped):
                         continue
                     errors.append(
                         f"SQL ARCHITECTURE VIOLATION: {rel}:{i}\n"
@@ -227,32 +267,32 @@ HOST_CMD_PATTERNS_COMPILED = [(re.compile(pat), name) for pat, name in HOST_CMD_
 
 HOST_IMPORT_PATTERNS = [
     (re.compile(
-        r"^[ \t]*use\s+(?:std|tokio)::process::Command"
+        USE_DECLARATION + r"(?:std|tokio)::process::Command"
         r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;",
         re.MULTILINE | re.DOTALL,
     ), "process Command import"),
     (re.compile(
-        r"^[ \t]*use\s+(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;",
+        USE_DECLARATION + r"(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;",
         re.MULTILINE | re.DOTALL,
     ), "process Command grouped import"),
     (re.compile(
-        r"^[ \t]*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
-        r"(?:std|tokio)::process::Command\s*;",
+        r"(?:^|(?<=[;{}\]]))[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
+        r"(?:::)?(?:std|tokio)::process::Command\s*;",
         re.MULTILINE | re.DOTALL,
     ), "process Command type alias"),
 ]
 
 HOST_COMMAND_ALIAS_PATTERN = re.compile(
-    r"use\s+(?:std|tokio)::process::Command"
+    r"use\s+(?:::)?(?:std|tokio)::process::Command"
     r"(?:\s+as\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*))?\s*;"
 )
 HOST_COMMAND_GROUP_PATTERN = re.compile(
-    r"use\s+(?:std|tokio)::process::\{(?P<body>[^;]*)\}\s*;",
+    r"use\s+(?:::)?(?:std|tokio)::process::\{(?P<body>[^;]*)\}\s*;",
     re.DOTALL,
 )
 HOST_COMMAND_TYPE_ALIAS_PATTERN = re.compile(
     r"type\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
-    r"(?:std|tokio)::process::Command\s*;"
+    r"(?:::)?(?:std|tokio)::process::Command\s*;"
 )
 
 
