@@ -1,0 +1,107 @@
+name: PP.6 PostgreSQL tablespace pressure
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-tablespace-pressure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - name: Start run-owned constrained PostgreSQL
+        id: postgres
+        env:
+          PG_CONTAINER: o3k-pp6-tablespace-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          sudo -n docker run --detach --rm --name "$PG_CONTAINER" \
+            --label "o3k.owner=pp6-1089" --label "o3k.run=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --tmpfs /var/lib/postgresql/pressure:rw,size=32m,mode=1777 \
+            --publish 127.0.0.1::5432 \
+            --env POSTGRES_USER=o3k --env POSTGRES_PASSWORD=pp6-pressure \
+            --env POSTGRES_DB=o3k_pressure_ci postgres:16.4
+          for _attempt in $(seq 1 60); do
+            if sudo -n docker exec "$PG_CONTAINER" pg_isready -U o3k -d o3k_pressure_ci >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "${ready:-false}" = true
+          port="$(sudo -n docker port "$PG_CONTAINER" 5432/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
+          test -n "$port"
+          sudo -n docker exec "$PG_CONTAINER" sh -ceu 'mkdir -p /var/lib/postgresql/pressure/o3k && chown postgres:postgres /var/lib/postgresql/pressure/o3k'
+          {
+            printf 'O3K_DATABASE_URL=postgres://o3k:pp6-pressure@127.0.0.1:%s/o3k_pressure_ci\n' "$port"
+            printf 'O3K_PG_PRESSURE_TABLESPACE_PATH=/var/lib/postgresql/pressure/o3k\n'
+            printf 'O3K_PG_PRESSURE_ARTIFACT=%s/pp6-postgres-tablespace-pressure.json\n' "$RUNNER_TEMP"
+          } >> "$GITHUB_ENV"
+      - name: Run mandatory real PostgreSQL pressure lane
+        run: |
+          set -euo pipefail
+          source_sha='${{ github.event.pull_request.head.sha || github.sha }}'
+          source_tree="$(git cat-file commit "$source_sha" | awk 'NR == 1 { print $2 }')"
+          test "${#source_tree}" -eq 40
+          export O3K_SOURCE_SHA="$source_sha" O3K_SOURCE_TREE="$source_tree"
+          {
+            echo "O3K_SOURCE_SHA=$source_sha"
+            echo "O3K_SOURCE_TREE=$source_tree"
+          } >> "$GITHUB_ENV"
+          execution_sha="$(git rev-parse HEAD)"
+          execution_tree="$(git cat-file commit HEAD | awk 'NR == 1 { print $2 }')"
+          test "${#execution_tree}" -eq 40
+          export O3K_EXECUTION_SHA="$execution_sha" O3K_EXECUTION_TREE="$execution_tree"
+          test -n "$O3K_SOURCE_SHA" -a -n "$O3K_SOURCE_TREE" -a -n "$O3K_EXECUTION_SHA" -a -n "$O3K_EXECUTION_TREE"
+          {
+            echo "O3K_EXECUTION_SHA=$execution_sha"
+            echo "O3K_EXECUTION_TREE=$execution_tree"
+          } >> "$GITHUB_ENV"
+          cargo test --locked -p o3k-store --test postgres_tablespace_pressure --all-features -- --ignored --nocapture
+      - name: Validate source-bound evidence
+        run: |
+          set -euo pipefail
+          test -s "$O3K_PG_PRESSURE_ARTIFACT"
+          jq -e '
+            .schema == "o3k.pp6.postgres-tablespace-pressure.v1" and
+            .harness.name == "crates/o3k-store/tests/postgres_tablespace_pressure.rs" and
+            .harness.test == "postgres_tablespace_pressure_preserves_canonical_state_and_retries" and
+            .harness.evidence_tier == "real-isolated-postgresql" and
+            .profile == "o3k-small-edge-v1" and
+            (.source_sha | length == 40) and (.source_tree | length == 40) and
+            (.execution_sha | length == 40) and (.execution_tree | length == 40) and
+            (.os | length > 0) and (.postgres_server_version | startswith("PostgreSQL ")) and
+            (.schema_migration.table == "_sqlx_migrations") and (.schema_migration.max_successful_version != null) and
+            .pressure.tablespace_size_bytes == 33554432 and .pressure.row_payload_bytes == 32768 and
+            .pressure.max_inserts == 4096 and .pressure.storage == "EXTERNAL" and
+            .sqlstate == "53100" and .cleanup == "PASS" and
+            .foreign_state.status == "not_exercised" and
+            .foreign_state.reason == "store-only lane does not invoke provider or external-state operations" and
+            (.secret_scan | startswith("PASS (artifact field scan")) and .final_disposition == "PASS" and .wal_pressure_claimed == false and
+            ((tostring | test("postgres://|postgresql://|password[=:]|BEGIN[[:space:]]+.*PRIVATE KEY|private[_-]?key"; "i")) | not)
+          ' "$O3K_PG_PRESSURE_ARTIFACT"
+          sha256sum "$O3K_PG_PRESSURE_ARTIFACT"
+      - name: Upload evidence
+        if: success()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: pp6-postgres-tablespace-pressure
+          path: ${{ env.O3K_PG_PRESSURE_ARTIFACT }}
+          if-no-files-found: error
+      - name: Checked cleanup
+        if: always()
+        env:
+          PG_CONTAINER: o3k-pp6-tablespace-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if sudo -n docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
+            sudo -n docker rm --force "$PG_CONTAINER"
+          fi
+          if sudo -n docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then exit 1; fi
