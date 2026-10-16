@@ -300,6 +300,7 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
         if is_test_or_example(rel):
             continue
 
+        approved = any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS)
         production_lines, source = _production_source(path, rel)
         shell_alias_patterns = [
             re.compile(rf"\b{re.escape(alias)}\s*::new\(\s*[\"'](?:sh|bash)[\"']")
@@ -307,9 +308,9 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
         ]
 
         for pattern, name in HOST_IMPORT_PATTERNS:
+            if approved:
+                continue
             for match in pattern.finditer(source):
-                if any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS):
-                    continue
                 line_number = source.count("\n", 0, match.start()) + 1
                 errors.append(
                     f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
@@ -344,7 +345,7 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
                             f"  code: {stripped[:120]}"
                         )
                         break
-                    if not any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS):
+                    if not approved:
                         errors.append(
                             f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{i}\n"
                             f"  command: {name}\n"

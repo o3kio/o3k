@@ -70,7 +70,7 @@ class RustLexState:
                 self.block_comment_depth = 1
                 i += 2
                 continue
-            if line[i] == "'" and not re.match(r"'(?:\\.|[^'\\n])'", line[i:]):
+            if line[i] == "'" and not re.match(r"'(?:\\.|[^'\\\n])'", line[i:]):
                 output.append(line[i])
                 i += 1
                 continue

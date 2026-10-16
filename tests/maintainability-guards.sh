@@ -85,6 +85,9 @@ check_fixture "SQL in Compute runtime" 1 "SQL ARCHITECTURE VIOLATION" \
 echo "Test 8: imported SQL query -> FAIL"
 check_fixture "imported SQL query" 1 "SQL ARCHITECTURE VIOLATION" \
     $'use sqlx::query;\nfn z_query() { query("SELECT 1"); }' "crates/o3k-kernel/src"
+echo "Test 8a: SQL import after blank lines reports the use line -> FAIL"
+check_fixture "SQL import line number" 1 "SQL ARCHITECTURE VIOLATION: crates/o3k-kernel/src/z_guard_test_fixture.rs:3" \
+    $'\n\nuse sqlx::query;\nfn z_query() { query("SELECT 1"); }' "crates/o3k-kernel/src"
 echo "Test 9: aliased SQL query -> FAIL"
 check_fixture "aliased SQL query" 1 "SQL ARCHITECTURE VIOLATION" \
     $'use sqlx::query as q;\nfn z_query() { q("SELECT 1"); }' "crates/o3k-kernel/src"

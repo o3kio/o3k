@@ -55,6 +55,10 @@ jobs:
           fi
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Merge-queue refs are short-lived; saving their caches only evicts
+          # reusable main/PR caches.
+          save-if: ${{ github.event_name != 'merge_group' }}
       - name: Install protobuf compiler and compatibility-test parser
         timeout-minutes: 10
         run: |
@@ -373,6 +377,10 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Merge-queue refs are short-lived; saving their caches only evicts
+          # reusable main/PR caches.
+          save-if: ${{ github.event_name != 'merge_group' }}
       - name: Install build prerequisites
         timeout-minutes: 10
         run: scripts/ci/apt-provision.sh install protobuf-compiler pkg-config python3-yaml sqlite3

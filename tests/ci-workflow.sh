@@ -32,8 +32,11 @@ for required_check_workflow in ("ci.yml", "component-cinder-mock.yml"):
     )
     triggers = re.search(r"^on:\n((?:[ \t]+.*\n|\n)*)", workflow_text, re.MULTILINE)
     assert triggers and re.search(r"^  merge_group:", triggers.group(1), re.MULTILINE), required_check_workflow
-    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow_text, required_check_workflow
-    assert "github.event_name == 'pull_request' && github.ref || github.run_id" in workflow_text, required_check_workflow
+    # Concurrency must be workflow-level so it governs every job in the run.
+    concurrency = re.search(r"^concurrency:\n((?:[ \t]+.*\n)*)", workflow_text, re.MULTILINE)
+    assert concurrency, required_check_workflow
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in concurrency.group(1), required_check_workflow
+    assert "github.event_name == 'pull_request' && github.ref || github.run_id" in concurrency.group(1), required_check_workflow
 assert "POSTGRES_DB: o3k_workspace_test_ci" in text
 assert "O3K_TEST_DATABASE_PURPOSE: workspace" in text
 assert "Prepare separate endpoint PostgreSQL test database" in text
