@@ -81,7 +81,9 @@ jobs:
             (.schema_migration.table == "_sqlx_migrations") and (.schema_migration.max_successful_version != null) and
             .pressure.tablespace_size_bytes == 33554432 and .pressure.row_payload_bytes == 32768 and
             .pressure.max_inserts == 4096 and .pressure.storage == "EXTERNAL" and
-            .sqlstate == "53100" and .cleanup == "PASS" and .foreign_state == "preserved; no foreign resources mutated" and
+            .sqlstate == "53100" and .cleanup == "PASS" and
+            .foreign_state.status == "not_exercised" and
+            .foreign_state.reason == "store-only lane does not invoke provider or external-state operations" and
             (.secret_scan | startswith("PASS (artifact field scan")) and .final_disposition == "PASS" and .wal_pressure_claimed == false and
             ((tostring | test("postgres://|postgresql://|password[=:]|BEGIN[[:space:]]+.*PRIVATE KEY|private[_-]?key"; "i")) | not)
           ' "$O3K_PG_PRESSURE_ARTIFACT"
