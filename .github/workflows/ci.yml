@@ -48,10 +48,16 @@ jobs:
           set -euo pipefail
           workspace_db=o3k_workspace_test_ci
           endpoint_db=o3k_endpoint_test_ci
+          doctor_db=o3k_doctor_test_ci
           [[ "$workspace_db" != "$endpoint_db" ]]
+          [[ "$doctor_db" != "$workspace_db" && "$doctor_db" != "$endpoint_db" ]]
           if ! psql -h 127.0.0.1 -U o3k -d "$workspace_db" -tAc \
             "SELECT 1 FROM pg_database WHERE datname = '$endpoint_db'" | grep -qx 1; then
             createdb -h 127.0.0.1 -U o3k "$endpoint_db"
+          fi
+          if ! psql -h 127.0.0.1 -U o3k -d "$workspace_db" -tAc \
+            "SELECT 1 FROM pg_database WHERE datname = '$doctor_db'" | grep -qx 1; then
+            createdb -h 127.0.0.1 -U o3k "$doctor_db"
           fi
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -266,6 +272,10 @@ jobs:
           O3K_DATABASE_URL: postgres://o3k:password@127.0.0.1:5432/o3k_endpoint_test_ci
           O3K_TEST_DATABASE_PURPOSE: endpoint
         run: cargo test -p o3kd --all-features --lib pp4_endpoint_lifecycle -- --ignored --nocapture
+      - name: O3K doctor PostgreSQL coordination authority (mandatory)
+        env:
+          O3K_DOCTOR_POSTGRES_URL: postgres://o3k:password@127.0.0.1:5432/o3k_doctor_test_ci
+        run: cargo test -p o3k --lib db::tests::postgres_coordination_queries -- --ignored --nocapture
       - name: P12.7 cross-process native replay conformance (mandatory)
         # Independently-spawned runtimes share only the durable store, so the
         # canonical replay authority is proven durable rather than process-local.

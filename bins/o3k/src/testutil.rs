@@ -6,7 +6,9 @@
 #![cfg(test)]
 
 use crate::context::{DoctorDb, Exec, HttpClient, HttpResponse, UnitState};
-use crate::db::{AllocationRow, EpochRow, InstanceRow, InventoryRow, PortRow, ProviderRow};
+use crate::db::{
+    AllocationRow, EpochRow, InstanceRow, InventoryRow, PortRow, ProviderRow, WorkLeaseRow,
+};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -434,6 +436,8 @@ pub struct FakeDb {
     pub epochs: Vec<EpochRow>,
     pub instances: Vec<InstanceRow>,
     pub ports: Vec<PortRow>,
+    pub active_sessions: Result<u64, String>,
+    pub work_leases: Result<Vec<WorkLeaseRow>, String>,
 }
 
 impl Default for FakeDb {
@@ -447,6 +451,8 @@ impl Default for FakeDb {
             epochs: Vec::new(),
             instances: Vec::new(),
             ports: Vec::new(),
+            active_sessions: Ok(1),
+            work_leases: Ok(Vec::new()),
         }
     }
 }
@@ -518,6 +524,8 @@ impl FakeDb {
                 observed_state: "active".to_owned(),
             }],
             ports: Vec::new(),
+            active_sessions: Ok(1),
+            work_leases: Ok(Vec::new()),
         }
     }
 }
@@ -554,6 +562,24 @@ impl DoctorDb for FakeDb {
 
     async fn network_ports(&self, _path: &Path) -> Result<Vec<PortRow>, String> {
         Ok(self.ports.clone())
+    }
+
+    async fn active_controller_sessions(
+        &self,
+        _path: &Path,
+        _use_postgres: bool,
+        _postgres_url: Option<&str>,
+    ) -> Result<u64, String> {
+        self.active_sessions.clone()
+    }
+
+    async fn active_work_leases(
+        &self,
+        _path: &Path,
+        _use_postgres: bool,
+        _postgres_url: Option<&str>,
+    ) -> Result<Vec<WorkLeaseRow>, String> {
+        self.work_leases.clone()
     }
 }
 

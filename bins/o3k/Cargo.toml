@@ -16,7 +16,7 @@ clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlx = { workspace = true, default-features = false, features = ["runtime-tokio", "sqlite"] }
+sqlx = { workspace = true, default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
 tokio = { workspace = true, features = ["time"] }
 
 [lib]

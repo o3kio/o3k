@@ -125,26 +125,29 @@ pub(crate) async fn readyz_response(ctx: &Context) -> Result<HttpResponse, Strin
 
 /// `controller.session`: checks that the controller session is active and valid.
 pub async fn check_controller_session(ctx: &Context) -> Check {
-    let url = format!("http://{}/readyz", ctx.listen_addr);
-    match ctx.http.get(&url).await {
-        Ok(response) if response.status == 200 => Check::new(
+    match ctx
+        .db
+        .active_controller_sessions(&ctx.database_path(), ctx.is_postgres(), ctx.database_url())
+        .await
+    {
+        Ok(count) if count > 0 => Check::new(
             "controller.session",
             Category::Control,
             CheckStatus::Pass,
-            "controller session active and healthy",
+            format!("observed {count} active controller session(s) in coordination store"),
         ),
-        Ok(response) => Check::new(
-            "controller.session",
-            Category::Control,
-            CheckStatus::Warn,
-            format!("controller session reports HTTP {}", response.status),
-        )
-        .with_actions(o3kd_actions()),
-        Err(error) => Check::new(
+        Ok(_) => Check::new(
             "controller.session",
             Category::Control,
             CheckStatus::Fail,
-            format!("controller session unreachable: {error}"),
+            "coordination store has no active controller session",
+        )
+        .with_actions(o3kd_actions()),
+        Err(_) => Check::new(
+            "controller.session",
+            Category::Control,
+            CheckStatus::Fail,
+            "controller session authority is unreadable",
         )
         .with_actions(o3kd_actions()),
     }
@@ -152,20 +155,41 @@ pub async fn check_controller_session(ctx: &Context) -> Check {
 
 /// `controller.work_fencing`: checks that work leases and fencing tokens are active and coordinated.
 pub async fn check_work_fencing(ctx: &Context) -> Check {
-    if ctx.is_postgres() {
-        return Check::new(
+    match ctx
+        .db
+        .active_work_leases(&ctx.database_path(), ctx.is_postgres(), ctx.database_url())
+        .await
+    {
+        Ok(leases)
+            if leases
+                .iter()
+                .all(|lease| lease.fencing_token > 0 && lease.owner_session_active) =>
+        {
+            Check::new(
+                "controller.work_fencing",
+                Category::Control,
+                CheckStatus::Pass,
+                format!(
+                    "observed {} active work lease(s) with fencing tokens",
+                    leases.len()
+                ),
+            )
+        }
+        Ok(_) => Check::new(
             "controller.work_fencing",
             Category::Control,
-            CheckStatus::Pass,
-            "work lease fencing enabled via PostgreSQL coordination store",
-        );
+            CheckStatus::Fail,
+            "coordination store contains an invalid or orphaned work lease",
+        )
+        .with_actions(o3kd_actions()),
+        Err(_) => Check::new(
+            "controller.work_fencing",
+            Category::Control,
+            CheckStatus::Fail,
+            "work fencing authority is unreadable",
+        )
+        .with_actions(o3kd_actions()),
     }
-    Check::new(
-        "controller.work_fencing",
-        Category::Control,
-        CheckStatus::Pass,
-        "work lease fencing enabled via local coordination store",
-    )
 }
 
 #[cfg(test)]
@@ -264,6 +288,92 @@ mod tests {
             let check = check_readyz(&context(http)).await;
             assert_eq!(check.status, CheckStatus::Warn, "body: {body}");
             assert!(check.summary.contains("unexpected readyz"));
+        }
+    }
+
+    #[tokio::test]
+    async fn controller_session_fails_without_durable_active_session() {
+        let mut db = FakeDb::healthy();
+        db.active_sessions = Ok(0);
+        let check = check_controller_session(&context_with(
+            FakeExec::healthy(),
+            FakeHttp::healthy(),
+            db,
+            true,
+            true,
+        ))
+        .await;
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.summary.contains("no active"));
+    }
+
+    #[tokio::test]
+    async fn work_fencing_fails_on_invalid_durable_token() {
+        let mut db = FakeDb::healthy();
+        db.work_leases = Ok(vec![crate::db::WorkLeaseRow {
+            work_key: "operation-1".to_owned(),
+            owner_controller_id: "controller-1".to_owned(),
+            owner_controller_epoch: "epoch-1".to_owned(),
+            fencing_token: 0,
+            owner_session_active: true,
+        }]);
+        let check = check_work_fencing(&context_with(
+            FakeExec::healthy(),
+            FakeHttp::healthy(),
+            db,
+            true,
+            true,
+        ))
+        .await;
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.summary.contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn work_fencing_fails_on_orphaned_lease_owner() {
+        let mut db = FakeDb::healthy();
+        db.work_leases = Ok(vec![crate::db::WorkLeaseRow {
+            work_key: "operation-1".to_owned(),
+            owner_controller_id: "stale-controller".to_owned(),
+            owner_controller_epoch: "old-epoch".to_owned(),
+            fencing_token: 7,
+            owner_session_active: false,
+        }]);
+        let check = check_work_fencing(&context_with(
+            FakeExec::healthy(),
+            FakeHttp::healthy(),
+            db,
+            true,
+            true,
+        ))
+        .await;
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.summary.contains("orphaned"));
+    }
+
+    #[tokio::test]
+    async fn coordination_errors_do_not_escape_into_json_or_human_output() {
+        let sentinel = "postgres://doctor:secret@db.example.invalid/o3k";
+        let mut db = FakeDb::healthy();
+        db.active_sessions = Err(sentinel.to_owned());
+        db.work_leases = Err(sentinel.to_owned());
+        let ctx = context_with(FakeExec::healthy(), FakeHttp::healthy(), db, true, true);
+
+        for check in [
+            check_controller_session(&ctx).await,
+            check_work_fencing(&ctx).await,
+        ] {
+            let serialized = serde_json::to_string(&check);
+            assert!(serialized.is_ok(), "check serialization failed");
+            let json = serialized.unwrap_or_default();
+            assert!(!json.contains(sentinel));
+            let report = crate::output::Report {
+                version: "test".to_owned(),
+                overall_status: crate::output::OverallStatus::Unhealthy,
+                timestamp: "2026-01-01T00:00:00Z".to_owned(),
+                checks: vec![check],
+            };
+            assert!(!report.render_human().contains(sentinel));
         }
     }
 }
