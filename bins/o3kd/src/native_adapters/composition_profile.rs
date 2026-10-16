@@ -35,6 +35,11 @@ impl o3k_native_api::composition::CompositionReader for CloudProfileAdapter {
         use o3k_native_api::composition::CompositionWriteError as WriteError;
 
         profile.validate().map_err(|_| WriteError::BadRequest)?;
+        // Both stores persist the generation as a signed 64-bit integer; a
+        // larger client value is a bad request, not a store fault.
+        if i64::try_from(profile.generation).is_err() {
+            return Err(WriteError::BadRequest);
+        }
         let record = CloudProfileRecord::from_profile(&profile, now())
             .map_err(|_| WriteError::BadRequest)?;
         let audit = AuditEventRecord {
@@ -324,6 +329,13 @@ mod tests {
         assert!(!String::from_utf8_lossy(&body).contains("INPUT-SECRET-MARKER"));
         assert_eq!(snapshot(&store).await, baseline);
 
+        let mut oversized = valid_profile();
+        oversized.generation = u64::MAX;
+        let response =
+            send(json!({"profile": oversized, "expected_generation": 1}).to_string()).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(snapshot(&store).await, baseline);
+
         // Re-sending the current generation passes the generation check but
         // reuses the audit event id: a client conflict, not a server fault.
         let response =
@@ -341,8 +353,15 @@ mod tests {
     async fn cloud_profile_write_reports_unavailable_store_as_503() {
         use sqlx::Connection as _;
 
+        struct RemoveOnDrop(std::path::PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
         let dir = std::env::temp_dir().join(format!("o3k-cloud-profile-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _cleanup = RemoveOnDrop(dir.clone());
         let path = dir.join("store.sqlite");
         let store = Arc::new(O3kStore::connect_sqlite_file(&path).await.unwrap());
         let app = cloud_profile_app(store.clone());
@@ -381,6 +400,5 @@ mod tests {
 
         drop(app);
         drop(store);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

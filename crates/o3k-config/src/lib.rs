@@ -327,6 +327,15 @@ impl PartialConfig {
     }
 
     fn from_cli(args: &[String]) -> Result<Self, ConfigError> {
+        fn is_option_name(option: &str) -> bool {
+            option.strip_prefix("--").is_some_and(|name| {
+                name.len() <= 64
+                    && name.starts_with(|c: char| c.is_ascii_lowercase())
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            })
+        }
         let mut result = Self::default();
         let mut args = args.iter().skip(1);
         while let Some(argument) = args.next() {
@@ -396,7 +405,10 @@ impl PartialConfig {
                 option if option == "--help" || option == "-h" => {
                     return Err(ConfigError::UnknownOption(option.to_owned()));
                 }
-                option if option.starts_with('-') => {
+                // Echo only something shaped like an option name. Any other
+                // dash-prefixed argument may be the tail of a secret split by
+                // the shell, so its value is withheld.
+                option if is_option_name(option) => {
                     return Err(ConfigError::UnknownOption(option.to_owned()));
                 }
                 _ => return Err(ConfigError::UnexpectedArgument),
@@ -726,6 +738,35 @@ mod tests {
         assert!(matches!(result, Err(ConfigError::UnexpectedArgument)));
         let rendered = format!("{:?} {}", result, ConfigError::UnexpectedArgument);
         assert!(!rendered.contains("part2-secret"));
+    }
+
+    #[test]
+    fn dash_prefixed_argument_is_rejected_without_keeping_its_value() {
+        for secret_tail in ["-Xsecret", "--Secret!", "--a=b"] {
+            let result = Config::from_sources(
+                [
+                    "o3kd".to_owned(),
+                    "--bootstrap-password=part1".to_owned(),
+                    secret_tail.to_owned(),
+                ],
+                Vec::new(),
+            );
+            let rendered = format!("{result:?}");
+            assert!(!rendered.contains("secret"), "{rendered}");
+            assert!(!rendered.contains("Secret"), "{rendered}");
+        }
+        let mistyped = Config::from_sources(
+            [
+                "o3kd".to_owned(),
+                "--databse-url=postgres://o3k:secret@db/o3k".to_owned(),
+            ],
+            Vec::new(),
+        );
+        assert!(matches!(
+            mistyped,
+            Err(ConfigError::UnknownOption(ref option)) if option == "--databse-url"
+        ));
+        assert!(!format!("{mistyped:?}").contains("secret"));
     }
 
     #[test]

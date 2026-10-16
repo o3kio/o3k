@@ -582,9 +582,6 @@ mod tests {
         );
     }
 
-    /// Run explicitly against a disposable database with:
-    /// `O3K_DOCTOR_POSTGRES_URL=postgres://.../o3k_doctor_test cargo test -p o3k
-    /// --lib db::tests::postgres_coordination_queries -- --ignored --nocapture`.
     /// Store-health queries behind `database.accessible` and
     /// `database.integrity` on PostgreSQL, against sqlx's real
     /// `_sqlx_migrations` layout in an isolated schema.
@@ -631,10 +628,14 @@ mod tests {
             db.postgres_reachable(&isolated_url)
                 .await
                 .map_err(|error| format!("reachable: {error}"))?;
-            let missing = db
-                .postgres_migration_counts(&isolated_url)
-                .await
-                .expect_err("a schema without _sqlx_migrations must fail");
+            let missing = match db.postgres_migration_counts(&isolated_url).await {
+                Ok(counts) => {
+                    return Err(format!(
+                        "a schema without _sqlx_migrations must fail, got {counts:?}"
+                    ));
+                }
+                Err(error) => error,
+            };
             if missing.contains("://") {
                 return Err("missing migration table error was not sanitized".to_owned());
             }
@@ -708,6 +709,9 @@ mod tests {
         result
     }
 
+    /// Run explicitly against a disposable database with:
+    /// `O3K_DOCTOR_POSTGRES_URL=postgres://.../o3k_doctor_test cargo test -p o3k
+    /// --lib db::tests::postgres_coordination_queries -- --ignored --nocapture`.
     /// The marker in the database name prevents accidental use of a real cloud DB.
     #[tokio::test]
     #[ignore = "requires an explicitly provisioned disposable PostgreSQL database"]

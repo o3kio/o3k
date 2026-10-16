@@ -130,29 +130,48 @@ mod database_read_redaction_tests {
     #[tokio::test]
     async fn failed_row_reads_are_secret_safe_in_json_and_human_output() {
         let sentinel = "postgres://user:sentinel-secret@db.example/o3k: relation leaked";
-        let db = FakeDb {
-            read_error: Some(sentinel.to_owned()),
-            ..FakeDb::healthy()
-        };
-        let ctx = context_with(FakeExec::healthy(), FakeHttp::healthy(), db, true, true);
-
-        let checks = vec![
-            super::compute::check_agent_epoch(&ctx).await,
-            super::compute::check_agent_capabilities(&ctx).await,
-            super::compute::check_placement_consistent(&ctx).await,
-            super::cloud::check_testvm_status(&ctx).await,
-            super::network::check_ownership_records(&ctx).await,
-            super::libvirt::check_domains_consistent(&ctx).await,
+        // Every canonical row read a check performs, failed one at a time, so
+        // a later read in a check is reached after the earlier ones succeed.
+        let reads: [(&str, &str); 9] = [
+            ("compute.agent_epoch", "latest_epochs"),
+            ("compute.agent_capabilities", "placement_providers"),
+            ("compute.agent_capabilities", "placement_inventories"),
+            ("compute.placement_consistent", "placement_providers"),
+            ("compute.placement_consistent", "placement_inventories"),
+            ("compute.placement_consistent", "live_allocation_resources"),
+            ("cloud.testvm_status", "compute_instances"),
+            ("network.ownership_records", "compute_instances"),
+            ("libvirt.domains_consistent", "compute_instances"),
         ];
-        for check in &checks {
-            assert_eq!(check.status, CheckStatus::Fail, "{}", check.id);
+        let mut checks = Vec::new();
+        for (id, read) in reads {
+            let db = FakeDb {
+                read_error: Some(sentinel.to_owned()),
+                read_error_only: Some(read),
+                ..FakeDb::healthy()
+            };
+            let ctx = context_with(FakeExec::healthy(), FakeHttp::healthy(), db, true, true);
+            let check = match id {
+                "compute.agent_epoch" => super::compute::check_agent_epoch(&ctx).await,
+                "compute.agent_capabilities" => {
+                    super::compute::check_agent_capabilities(&ctx).await
+                }
+                "compute.placement_consistent" => {
+                    super::compute::check_placement_consistent(&ctx).await
+                }
+                "cloud.testvm_status" => super::cloud::check_testvm_status(&ctx).await,
+                "network.ownership_records" => super::network::check_ownership_records(&ctx).await,
+                _ => super::libvirt::check_domains_consistent(&ctx).await,
+            };
+            assert_eq!(check.id, id);
+            assert_eq!(check.status, CheckStatus::Fail, "{id} / {read}");
             assert!(
                 check.summary.contains("database read failed"),
-                "{} did not reach its database read: {}",
-                check.id,
+                "{id} did not reach its {read} read: {}",
                 check.summary
             );
-            assert!(!check.recommended_actions.is_empty(), "{}", check.id);
+            assert!(!check.recommended_actions.is_empty(), "{id} / {read}");
+            checks.push(check);
         }
 
         let report = Report {

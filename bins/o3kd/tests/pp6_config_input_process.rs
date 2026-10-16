@@ -57,6 +57,16 @@ fn run_o3kd(
         command.env(key, value);
     }
     let mut child = command.spawn()?;
+    // Drain stderr while the child runs, so a large error output cannot
+    // fill the pipe and block it.
+    let mut pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("stderr was not captured"))?;
+    let reader = thread::spawn(move || {
+        let mut stderr = String::new();
+        io::Read::read_to_string(&mut pipe, &mut stderr).map(|_| stderr)
+    });
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -69,10 +79,9 @@ fn run_o3kd(
         }
         thread::sleep(Duration::from_millis(20));
     };
-    let mut stderr = String::new();
-    if let Some(mut pipe) = child.stderr.take() {
-        io::Read::read_to_string(&mut pipe, &mut stderr)?;
-    }
+    let stderr = reader
+        .join()
+        .map_err(|_| io::Error::other("stderr reader panicked"))??;
     Ok((status, stderr))
 }
 
@@ -149,6 +158,18 @@ fn positional_secret_fragment_is_not_echoed() -> TestResult {
     let fragment = format!("part2-{SENTINEL}");
     assert_fails_closed(
         "positional",
+        |data| data_dir_args(data, &["--bootstrap-password=part1", &fragment]),
+        &[],
+        "UnexpectedArgument",
+    )
+}
+
+#[test]
+fn dash_prefixed_secret_fragment_is_not_echoed() -> TestResult {
+    // The tail of an unquoted password may also start with a dash.
+    let fragment = format!("-X{SENTINEL}");
+    assert_fails_closed(
+        "dash-prefixed",
         |data| data_dir_args(data, &["--bootstrap-password=part1", &fragment]),
         &[],
         "UnexpectedArgument",
