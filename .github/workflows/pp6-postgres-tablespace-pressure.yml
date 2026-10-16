@@ -69,7 +69,22 @@ jobs:
         run: |
           set -euo pipefail
           test -s "$O3K_PG_PRESSURE_ARTIFACT"
-          jq -e '.schema == "o3k.pp6.postgres-tablespace-pressure.v1" and (.source_sha | length == 40) and (.source_tree | length == 40) and (.execution_sha | length == 40) and (.execution_tree | length == 40) and .sqlstate == "53100" and .cleanup == "PASS" and .wal_pressure_claimed == false' "$O3K_PG_PRESSURE_ARTIFACT"
+          jq -e '
+            .schema == "o3k.pp6.postgres-tablespace-pressure.v1" and
+            .harness.name == "crates/o3k-store/tests/postgres_tablespace_pressure.rs" and
+            .harness.test == "postgres_tablespace_pressure_preserves_canonical_state_and_retries" and
+            .harness.evidence_tier == "real-isolated-postgresql" and
+            .profile == "o3k-small-edge-v1" and
+            (.source_sha | length == 40) and (.source_tree | length == 40) and
+            (.execution_sha | length == 40) and (.execution_tree | length == 40) and
+            (.os | length > 0) and (.postgres_server_version | startswith("PostgreSQL ")) and
+            (.schema_migration.table == "_sqlx_migrations") and (.schema_migration.max_successful_version != null) and
+            .pressure.tablespace_size_bytes == 33554432 and .pressure.row_payload_bytes == 32768 and
+            .pressure.max_inserts == 4096 and .pressure.storage == "EXTERNAL" and
+            .sqlstate == "53100" and .cleanup == "PASS" and .foreign_state == "preserved; no foreign resources mutated" and
+            (.secret_scan | startswith("PASS (artifact field scan")) and .final_disposition == "PASS" and .wal_pressure_claimed == false and
+            ((tostring | test("postgres://|postgresql://|password[=:]|BEGIN[[:space:]]+.*PRIVATE KEY|private[_-]?key"; "i")) | not)
+          ' "$O3K_PG_PRESSURE_ARTIFACT"
           sha256sum "$O3K_PG_PRESSURE_ARTIFACT"
       - name: Upload evidence
         if: success()

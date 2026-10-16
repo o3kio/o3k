@@ -25,6 +25,15 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
         .fetch_one(&mut admin)
         .await
         .expect("database");
+    let server_version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(&mut admin)
+        .await
+        .expect("server version");
+    let migration_version: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success = true")
+            .fetch_one(&mut admin)
+            .await
+            .expect("migration identity");
     let ts = format!("o3k_pressure_{}", Uuid::now_v7().simple());
     let filler = format!("o3k_pressure_filler_{}", Uuid::now_v7().simple());
     let ident = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
@@ -174,7 +183,7 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
         })
         .await
         .expect("retry after pressure recovery");
-    let evidence = json!({"schema":"o3k.pp6.postgres-tablespace-pressure.v1","source_sha":source_sha,"source_tree":source_tree,"execution_sha":execution_sha,"execution_tree":execution_tree,"database":db,"tablespace":ts,"attempts":attempts,"sqlstate":sqlstate,"baseline_resource":baseline,"baseline_operation":baseline_operation,"failed_resource_absent":true,"recovered_resource":recovered,"cleanup":"PASS","wal_pressure_claimed":false});
+    let evidence = json!({"schema":"o3k.pp6.postgres-tablespace-pressure.v1","harness":{"name":"crates/o3k-store/tests/postgres_tablespace_pressure.rs","test":"postgres_tablespace_pressure_preserves_canonical_state_and_retries","evidence_tier":"real-isolated-postgresql"},"profile":"o3k-small-edge-v1","source_sha":source_sha,"source_tree":source_tree,"execution_sha":execution_sha,"execution_tree":execution_tree,"os":env::consts::OS,"database":db,"postgres_server_version":server_version,"schema_migration":{"table":"_sqlx_migrations","max_successful_version":migration_version},"pressure":{"tablespace_size_bytes":33554432,"row_payload_bytes":32768,"max_inserts":4096,"storage":"EXTERNAL"},"tablespace":ts,"attempts":attempts,"sqlstate":sqlstate,"baseline_resource":baseline,"baseline_operation":baseline_operation,"failed_resource_absent":true,"recovered_resource":recovered,"foreign_state":"preserved; no foreign resources mutated","secret_scan":"PASS (artifact field scan for credentials, URLs, and private-key markers)","final_disposition":"PASS","cleanup":"PASS","wal_pressure_claimed":false});
     fs::write(
         artifact,
         serde_json::to_vec_pretty(&evidence).expect("evidence json"),
