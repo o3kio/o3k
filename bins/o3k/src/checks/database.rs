@@ -378,7 +378,9 @@ mod tests {
                 "SQLite quick_check returned a non-ok integrity result; inspect the o3kd journal for the backend-specific cause"
             )
         );
-        let json = serde_json::to_string(&check).expect("check serializes");
+        let serialized = serde_json::to_string(&check);
+        assert!(serialized.is_ok(), "check serialization failed");
+        let json = serialized.unwrap_or_default();
         assert!(!json.contains(sentinel));
     }
 
