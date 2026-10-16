@@ -487,6 +487,12 @@ mod tests {
             .await
             .expect("create overflow database");
         sqlx::query(
+            "CREATE TABLE controller_sessions (controller_id TEXT NOT NULL, controller_epoch TEXT NOT NULL, lease_until TEXT NOT NULL, state TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create controller sessions");
+        sqlx::query(
             "CREATE TABLE work_leases (work_key TEXT PRIMARY KEY, owner_controller_id TEXT NOT NULL, owner_controller_epoch TEXT NOT NULL, fencing_token INTEGER NOT NULL, lease_until TEXT NOT NULL)",
         )
         .execute(&pool)
