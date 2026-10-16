@@ -257,6 +257,33 @@ jobs:
           if-no-files-found: error
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test required PP.6 PostgreSQL server connection pressure
+        env:
+          O3K_PP6_PG_EVIDENCE_PATH: ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
+          O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          source_tree_sha="$(git cat-file commit "$O3K_PP6_SOURCE_HEAD_SHA" | awk '$1 == "tree" { print $2; exit }')"
+          export O3K_PP6_SOURCE_TREE_SHA="$source_tree_sha"
+          execution_head_sha="$(git rev-parse HEAD)"
+          export O3K_PP6_EXECUTION_HEAD_SHA="$execution_head_sha"
+          execution_tree_sha="$(git cat-file commit "$execution_head_sha" | awk '$1 == "tree" { print $2; exit }')"
+          export O3K_PP6_EXECUTION_TREE_SHA="$execution_tree_sha"
+          cargo test -p o3k-store --test postgres_server_pressure --all-features -- --ignored --nocapture
+          test -s "$O3K_PP6_PG_EVIDENCE_PATH"
+      - name: Validate PP.6 PostgreSQL server pressure evidence
+        env:
+          O3K_PP6_PG_EVIDENCE_PATH: ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
+        run: |
+          set -euo pipefail
+          jq -e '.schema == "o3k.pp6.postgres-server-pressure.v1" and .profile == "o3k-small-edge-v1" and (.schema_migration_identity | startswith("o3k-store-sqlx-migrations:")) and (.source_head | length == 40) and (.source_tree | length == 40) and (.execution_head | length == 40) and (.execution_tree | length == 40) and .held_session_count == 5 and .raw_admission_attempts == 1 and .store_admission_attempts == 1 and .raw_admission_timeout_seconds == 5 and .store_admission_timeout_seconds == 5 and .recovery_timeout_seconds == 15 and .observed_sqlstate == "53300" and .cleanup == "passed" and .foreign_state == "preserved_no_foreign_resources_touched" and .artifact_secret_scan.status == "passed" and .disposition == "PASS" and .canonical_retry == "passed"' "$O3K_PP6_PG_EVIDENCE_PATH"
+      - name: Upload PP.6 PostgreSQL server pressure evidence
+        if: ${{ success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pp6-postgres-server-pressure-evidence
+          path: ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
+          if-no-files-found: error
       - name: Architecture boundary check
         run: python3 scripts/check-architecture-boundaries.py
       - name: Maintainability architecture guardrails
