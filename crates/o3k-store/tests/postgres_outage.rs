@@ -113,7 +113,17 @@ impl DisposablePostgres {
         let ready = timeout(Duration::from_secs(30), async {
             loop {
                 let result = Command::new("docker")
-                    .args(["exec", &self.id, "pg_isready", "-U", "postgres"])
+                    .args([
+                        "exec",
+                        &self.id,
+                        "pg_isready",
+                        "-h",
+                        "127.0.0.1",
+                        "-p",
+                        "5432",
+                        "-U",
+                        "postgres",
+                    ])
                     .output();
                 if result.map(|r| r.status.success()).unwrap_or(false)
                     && TcpStream::connect(("127.0.0.1", self.port)).is_ok()
@@ -159,7 +169,13 @@ impl DisposablePostgres {
                         .into());
                     }
                 }
-                Err(error) => return Err(error.to_string().into()),
+                Err(error) => {
+                    let sqlstate = safe_sqlstate(&error).unwrap_or_else(|| "none".to_owned());
+                    return Err(format!(
+                        "PostgreSQL recovery connection failed (sqlstate={sqlstate})"
+                    )
+                    .into());
+                }
             }
         }
     }
@@ -231,6 +247,15 @@ fn is_transient_connect_error(error: &o3k_store::StoreError) -> bool {
         o3k_store::StoreError::Database(sqlx::Error::Io(_))
             | o3k_store::StoreError::Database(sqlx::Error::PoolTimedOut)
     )
+}
+
+fn safe_sqlstate(error: &o3k_store::StoreError) -> Option<String> {
+    match error {
+        o3k_store::StoreError::Database(sqlx::Error::Database(database)) => {
+            database.code().map(|code| code.into_owned())
+        }
+        _ => None,
+    }
 }
 
 impl Drop for DisposablePostgres {
