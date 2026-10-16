@@ -18,6 +18,8 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
     let artifact = env::var("O3K_PG_PRESSURE_ARTIFACT").expect("artifact path");
     let source_sha = env::var("O3K_SOURCE_SHA").expect("source sha");
     let source_tree = env::var("O3K_SOURCE_TREE").expect("source tree");
+    let execution_sha = env::var("O3K_EXECUTION_SHA").expect("execution sha");
+    let execution_tree = env::var("O3K_EXECUTION_TREE").expect("execution tree");
     let mut admin = PgConnection::connect(&url).await.expect("connect");
     let db: String = sqlx::query_scalar("SELECT current_database()")
         .fetch_one(&mut admin)
@@ -65,9 +67,10 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
         })
         .await
         .expect("baseline");
+    let baseline_operation = Uuid::now_v7();
     store
         .insert_operation(&OperationRecord {
-            id: Uuid::now_v7(),
+            id: baseline_operation,
             resource_id: baseline,
             kind: "pressure:baseline".into(),
             state: OperationState::Succeeded,
@@ -135,6 +138,13 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
             .iter()
             .any(|row| row.id == baseline)
     );
+    let baseline_operation_after = store
+        .get_operation(baseline_operation)
+        .await
+        .expect("baseline operation lookup");
+    assert_eq!(baseline_operation_after.resource_id, baseline);
+    assert_eq!(baseline_operation_after.state, OperationState::Succeeded);
+    assert_eq!(baseline_operation_after.kind, "pressure:baseline");
 
     sqlx::query(&format!("DROP TABLE {}", ident(&filler)))
         .execute(&mut admin)
@@ -162,7 +172,7 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
         })
         .await
         .expect("retry after pressure recovery");
-    let evidence = json!({"schema":"o3k.pp6.postgres-tablespace-pressure.v1","source_sha":source_sha,"source_tree":source_tree,"database":db,"tablespace":ts,"attempts":attempts,"sqlstate":sqlstate,"baseline_resource":baseline,"failed_resource_absent":true,"recovered_resource":recovered,"cleanup":"PASS","wal_pressure_claimed":false});
+    let evidence = json!({"schema":"o3k.pp6.postgres-tablespace-pressure.v1","source_sha":source_sha,"source_tree":source_tree,"execution_sha":execution_sha,"execution_tree":execution_tree,"database":db,"tablespace":ts,"attempts":attempts,"sqlstate":sqlstate,"baseline_resource":baseline,"baseline_operation":baseline_operation,"failed_resource_absent":true,"recovered_resource":recovered,"cleanup":"PASS","wal_pressure_claimed":false});
     fs::write(
         artifact,
         serde_json::to_vec_pretty(&evidence).expect("evidence json"),

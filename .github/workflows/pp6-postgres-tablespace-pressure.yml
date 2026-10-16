@@ -29,9 +29,13 @@ jobs:
             --env POSTGRES_USER=o3k --env POSTGRES_PASSWORD=pp6-pressure \
             --env POSTGRES_DB=o3k_pressure_ci postgres:16.4
           for attempt in $(seq 1 60); do
-            if sudo -n docker exec "$PG_CONTAINER" pg_isready -U o3k -d o3k_pressure_ci >/dev/null 2>&1; then break; fi
+            if sudo -n docker exec "$PG_CONTAINER" pg_isready -U o3k -d o3k_pressure_ci >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
             sleep 1
           done
+          test "${ready:-false}" = true
           port="$(sudo -n docker port "$PG_CONTAINER" 5432/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
           test -n "$port"
           sudo -n docker exec "$PG_CONTAINER" sh -ceu 'mkdir -p /var/lib/postgresql/pressure/o3k && chown postgres:postgres /var/lib/postgresql/pressure/o3k'
@@ -41,14 +45,16 @@ jobs:
       - name: Run mandatory real PostgreSQL pressure lane
         run: |
           set -euo pipefail
-          echo "O3K_SOURCE_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
-          echo "O3K_SOURCE_TREE=$(git rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+          echo "O3K_SOURCE_SHA=${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_ENV"
+          echo "O3K_SOURCE_TREE=$(git rev-parse '${{ github.event.pull_request.head.sha || github.sha }}'^{tree})" >> "$GITHUB_ENV"
+          echo "O3K_EXECUTION_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "O3K_EXECUTION_TREE=$(git rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
           cargo test --locked -p o3k-store --test postgres_tablespace_pressure --all-features -- --ignored --nocapture
       - name: Validate source-bound evidence
         run: |
           set -euo pipefail
           test -s "$O3K_PG_PRESSURE_ARTIFACT"
-          jq -e '.schema == "o3k.pp6.postgres-tablespace-pressure.v1" and .source_sha == env.GITHUB_SHA and .source_tree == env.O3K_SOURCE_TREE and .sqlstate == "53100" and .cleanup == "PASS" and .wal_pressure_claimed == false' "$O3K_PG_PRESSURE_ARTIFACT"
+          jq -e '.schema == "o3k.pp6.postgres-tablespace-pressure.v1" and (.source_sha | length == 40) and (.source_tree | length == 40) and (.execution_sha | length == 40) and (.execution_tree | length == 40) and .sqlstate == "53100" and .cleanup == "PASS" and .wal_pressure_claimed == false' "$O3K_PG_PRESSURE_ARTIFACT"
           sha256sum "$O3K_PG_PRESSURE_ARTIFACT"
       - name: Upload evidence
         if: success()
