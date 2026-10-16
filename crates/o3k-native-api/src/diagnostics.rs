@@ -11,7 +11,7 @@
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{RawQuery, State},
     response::{IntoResponse, Response},
 };
 use base64::Engine as _;
@@ -306,20 +306,68 @@ pub struct DiagnosticsPage<T> {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiagnosticsQuery {
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub limit: Option<String>,
     #[serde(default)]
     pub cursor: Option<String>,
 }
 
 impl DiagnosticsQuery {
+    fn decode_form_component(value: &str) -> Result<String, ErrorCode> {
+        let bytes = value.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'+' => decoded.push(b' '),
+                b'%' if index + 2 < bytes.len() => {
+                    let high = (bytes[index + 1] as char).to_digit(16);
+                    let low = (bytes[index + 2] as char).to_digit(16);
+                    match (high, low) {
+                        (Some(high), Some(low)) => decoded.push((high * 16 + low) as u8),
+                        _ => return Err(ErrorCode::BadRequest),
+                    }
+                    index += 2;
+                }
+                b'%' => return Err(ErrorCode::BadRequest),
+                byte => decoded.push(byte),
+            }
+            index += 1;
+        }
+        String::from_utf8(decoded).map_err(|_| ErrorCode::BadRequest)
+    }
+
+    fn from_raw_query(raw: Option<&str>) -> Result<Self, ErrorCode> {
+        let mut limit = None;
+        let mut cursor = None;
+        for pair in raw
+            .unwrap_or_default()
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+        {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            let key = Self::decode_form_component(key)?;
+            let value = Self::decode_form_component(value)?;
+            match key.as_str() {
+                "limit" if limit.is_none() => limit = Some(value),
+                "limit" => return Err(ErrorCode::BadRequest),
+                "cursor" if cursor.is_none() => cursor = Some(value),
+                "cursor" => return Err(ErrorCode::InvalidCursor),
+                _ => {}
+            }
+        }
+        Ok(Self { limit, cursor })
+    }
+
     /// Validates and bounds `limit`, returning the requested page size.
     #[allow(clippy::result_large_err)]
     pub fn page_size(&self) -> Result<usize, Response> {
-        match self.limit {
+        match self.limit.as_deref() {
             None => Ok(DEFAULT_PAGE_SIZE),
-            Some(0) => Ok(DEFAULT_PAGE_SIZE),
-            Some(limit) if limit <= MAX_PAGE_SIZE => Ok(limit),
-            Some(_) => Err(ProblemDetails::new(ErrorCode::BadRequest).into_response()),
+            Some(limit) => match limit.parse::<usize>() {
+                Ok(0) => Ok(DEFAULT_PAGE_SIZE),
+                Ok(limit) if limit <= MAX_PAGE_SIZE => Ok(limit),
+                _ => Err(ProblemDetails::new(ErrorCode::BadRequest).into_response()),
+            },
         }
     }
 
@@ -363,6 +411,15 @@ fn diagnostics_error(error: DiagnosticsError, request_id: &str) -> Response {
         DiagnosticsError::Unavailable => ErrorCode::NotAvailable,
         DiagnosticsError::Corrupt => ErrorCode::InternalError,
     };
+    ProblemDetails::new(code)
+        .with_request_id(request_id.to_owned())
+        .into_response()
+}
+
+fn query_error(code: ErrorCode, request_id: &str) -> Response {
+    // Query validation happens after authentication and authorization. Keep
+    // the same correlation contract as authority failures without exposing
+    // parser details or echoed query data.
     ProblemDetails::new(code)
         .with_request_id(request_id.to_owned())
         .into_response()
@@ -432,7 +489,7 @@ pub async fn summary(auth: BearerAuth, State(state): State<NativeApiState>) -> R
 
 pub async fn services(
     auth: BearerAuth,
-    Query(query): Query<DiagnosticsQuery>,
+    RawQuery(raw_query): RawQuery,
     State(state): State<NativeApiState>,
 ) -> Response {
     // Authorization precedes the authority-presence check so an unauthorized
@@ -442,6 +499,10 @@ pub async fn services(
             .with_request_id(auth.0.request_id().to_owned())
             .into_response();
     }
+    let query = match DiagnosticsQuery::from_raw_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(code) => return query_error(code, auth.0.request_id()),
+    };
     let Some(reader) = state.diagnostics_reader.as_ref() else {
         return ProblemDetails::new(ErrorCode::NotAvailable)
             .with_request_id(auth.0.request_id().to_owned())
@@ -449,11 +510,11 @@ pub async fn services(
     };
     let limit = match query.page_size() {
         Ok(limit) => limit,
-        Err(response) => return response,
+        Err(_) => return query_error(ErrorCode::BadRequest, auth.0.request_id()),
     };
     let after = match query.after_id() {
         Ok(after) => after,
-        Err(response) => return response,
+        Err(_) => return query_error(ErrorCode::InvalidCursor, auth.0.request_id()),
     };
     match reader.services(limit, after.as_deref()).await {
         Ok(page) => Json(page).into_response(),
@@ -463,7 +524,7 @@ pub async fn services(
 
 pub async fn providers(
     auth: BearerAuth,
-    Query(query): Query<DiagnosticsQuery>,
+    RawQuery(raw_query): RawQuery,
     State(state): State<NativeApiState>,
 ) -> Response {
     // Authorization precedes the authority-presence check so an unauthorized
@@ -473,6 +534,10 @@ pub async fn providers(
             .with_request_id(auth.0.request_id().to_owned())
             .into_response();
     }
+    let query = match DiagnosticsQuery::from_raw_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(code) => return query_error(code, auth.0.request_id()),
+    };
     let Some(reader) = state.diagnostics_reader.as_ref() else {
         return ProblemDetails::new(ErrorCode::NotAvailable)
             .with_request_id(auth.0.request_id().to_owned())
@@ -480,11 +545,11 @@ pub async fn providers(
     };
     let limit = match query.page_size() {
         Ok(limit) => limit,
-        Err(response) => return response,
+        Err(_) => return query_error(ErrorCode::BadRequest, auth.0.request_id()),
     };
     let after = match query.after_id() {
         Ok(after) => after,
-        Err(response) => return response,
+        Err(_) => return query_error(ErrorCode::InvalidCursor, auth.0.request_id()),
     };
     match reader.providers(limit, after.as_deref()).await {
         Ok(page) => Json(page).into_response(),
@@ -661,12 +726,12 @@ mod tests {
     #[test]
     fn page_size_is_bounded() {
         let ok = DiagnosticsQuery {
-            limit: Some(200),
+            limit: Some("200".to_owned()),
             cursor: None,
         };
         assert_eq!(ok.page_size().ok(), Some(200));
         let too_large = DiagnosticsQuery {
-            limit: Some(201),
+            limit: Some("201".to_owned()),
             cursor: None,
         };
         assert!(too_large.page_size().is_err());
