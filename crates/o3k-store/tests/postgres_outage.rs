@@ -7,6 +7,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use o3k_store::{DurableStore, OperationRecord, OperationState, PostgresStore, ResourceRecord};
+use serde_json::json;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
 use std::time::Duration;
@@ -179,6 +182,26 @@ impl DisposablePostgres {
             }
         }
     }
+    fn server_version(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let output = Command::new("docker")
+            .args([
+                "exec",
+                &self.id,
+                "psql",
+                "-At",
+                "-U",
+                "postgres",
+                "-d",
+                "postgres",
+                "-c",
+                "SHOW server_version",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err("unable to observe PostgreSQL server version".into());
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    }
     fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.running {
             return Ok(());
@@ -270,6 +293,11 @@ impl Drop for DisposablePostgres {
 #[ignore = "required Docker PostgreSQL outage lane; invoke with --ignored"]
 async fn postgres_outage_fails_bounded_and_reconnect_preserves_canonical_state()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_commit = git_output(&["rev-parse", "HEAD"])?;
+    let source_tree = git_output(&["rev-parse", "HEAD^{tree}"])?;
+    let change_head_commit = std::env::var("O3K_PP6_SOURCE_HEAD_SHA")?;
+    let change_head_tree = git_output(&["rev-parse", &format!("{change_head_commit}^{{tree}}")])?;
+    let evidence_path = std::env::var("O3K_PP6_PG_EVIDENCE_PATH")?;
     let mut cluster = DisposablePostgres::start().await?;
     let store = cluster
         .connect_ready()
@@ -309,8 +337,9 @@ async fn postgres_outage_fails_bounded_and_reconnect_preserves_canonical_state()
         .await?
         .expect_err("outage query must fail");
     let rendered = error.to_string();
-    assert!(!rendered.contains("postgres://"));
-    assert!(!rendered.contains("127.0.0.1"));
+    let redaction_passed = !rendered.contains("postgres://") && !rendered.contains("127.0.0.1");
+    assert!(redaction_passed, "outage error exposed connection details");
+    let outage_failure_observed = true;
     cluster.start_again().await?;
     let recovered = cluster.connect_ready().await?;
     assert_eq!(
@@ -321,6 +350,69 @@ async fn postgres_outage_fails_bounded_and_reconnect_preserves_canonical_state()
         recovered.get_resource(resource_id).await?.desired_state,
         "ACTIVE"
     );
+    let database_version = cluster.server_version()?;
     cluster.stop_and_remove()?;
+    if !cluster.removed {
+        return Err("owned PostgreSQL container cleanup was not verified".into());
+    }
+    let migration_versions = sqlx::migrate!("./migrations_postgres")
+        .iter()
+        .map(|migration| migration.version)
+        .collect::<Vec<_>>();
+    let migration_count = migration_versions.len();
+    let latest_migration_version = migration_versions.last().copied();
+    let evidence = json!({
+        "evidence_schema": "o3k.pp6.postgres-outage.v1",
+        "disposition": "PASS",
+        "source": {
+            "repository": std::env::var("GITHUB_REPOSITORY")?,
+            "checkout_commit": source_commit,
+            "checkout_tree": source_tree,
+            "change_head_commit": change_head_commit,
+            "change_head_tree": change_head_tree,
+            "run_id": std::env::var("GITHUB_RUN_ID")?,
+            "run_attempt": std::env::var("GITHUB_RUN_ATTEMPT")?
+        },
+        "harness": {
+            "test": "o3k-store::postgres_outage::postgres_outage_fails_bounded_and_reconnect_preserves_canonical_state",
+            "package": "o3k-store",
+            "profile": "o3k-small-edge-v1",
+            "host_os": std::env::consts::OS,
+            "host_arch": std::env::consts::ARCH,
+            "backend_image": "postgres:16.4",
+            "backend_version": database_version,
+            "migration_count": migration_count,
+            "latest_migration_version": latest_migration_version
+        },
+        "fixture": {
+            "container_id": cluster.id,
+            "resource_id": resource_id,
+            "operation_id": operation_id
+        },
+        "observed": {
+            "canonical_resource_persisted_before_outage": true,
+            "canonical_operation_persisted_before_outage": true,
+            "bounded_outage_failure_observed": outage_failure_observed,
+            "connection_details_redacted": redaction_passed,
+            "resource_and_operation_preserved_after_reconnect": true,
+            "owned_container_removed_and_absence_verified": cluster.removed,
+            "foreign_state_mutation_tested": false
+        }
+    });
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(evidence_path)?;
+    serde_json::to_writer_pretty(&mut file, &evidence)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
     Ok(())
+}
+
+fn git_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("git").args(args).output()?;
+    if !output.status.success() {
+        return Err(format!("git {:?} failed", args).into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }

@@ -227,12 +227,22 @@ jobs:
       - name: Test Kubernetes deployment version consistency
         run: bash tests/kubernetes-version-consistency.sh
       - name: Required PP.6 PostgreSQL outage/reconnect evidence
+        env:
+          O3K_PP6_PG_EVIDENCE_PATH: ${{ runner.temp }}/pp6-postgres-outage.json
+          O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           command -v docker
           docker version
           docker image inspect postgres:16.4 >/dev/null
           cargo test -p o3k-store --test postgres_outage -- --ignored --nocapture
+      - name: Upload PP.6 PostgreSQL outage evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pp6-postgres-outage-evidence
+          path: ${{ runner.temp }}/pp6-postgres-outage.json
+          if-no-files-found: error
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Architecture boundary check
