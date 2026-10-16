@@ -312,6 +312,30 @@ pub struct DiagnosticsQuery {
 }
 
 impl DiagnosticsQuery {
+    fn decode_form_component(value: &str) -> Result<String, ErrorCode> {
+        let bytes = value.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'+' => decoded.push(b' '),
+                b'%' if index + 2 < bytes.len() => {
+                    let high = (bytes[index + 1] as char).to_digit(16);
+                    let low = (bytes[index + 2] as char).to_digit(16);
+                    match (high, low) {
+                        (Some(high), Some(low)) => decoded.push((high * 16 + low) as u8),
+                        _ => return Err(ErrorCode::BadRequest),
+                    }
+                    index += 2;
+                }
+                b'%' => return Err(ErrorCode::BadRequest),
+                byte => decoded.push(byte),
+            }
+            index += 1;
+        }
+        String::from_utf8(decoded).map_err(|_| ErrorCode::BadRequest)
+    }
+
     fn from_raw_query(raw: Option<&str>) -> Result<Self, ErrorCode> {
         let mut limit = None;
         let mut cursor = None;
@@ -321,10 +345,12 @@ impl DiagnosticsQuery {
             .filter(|pair| !pair.is_empty())
         {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            match key {
-                "limit" if limit.is_none() => limit = Some(value.to_owned()),
+            let key = Self::decode_form_component(key)?;
+            let value = Self::decode_form_component(value)?;
+            match key.as_str() {
+                "limit" if limit.is_none() => limit = Some(value),
                 "limit" => return Err(ErrorCode::BadRequest),
-                "cursor" if cursor.is_none() => cursor = Some(value.to_owned()),
+                "cursor" if cursor.is_none() => cursor = Some(value),
                 "cursor" => return Err(ErrorCode::InvalidCursor),
                 _ => {}
             }

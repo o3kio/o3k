@@ -253,6 +253,7 @@ async fn native_diagnostics_query_errors_are_correlated_and_redacted() -> TestRe
             (&format!("?cursor={oversized_cursor}"), "INVALID_CURSOR"),
             ("?limit=1&limit=2", "BAD_REQUEST"),
             ("?cursor=YQ&cursor=Yg", "INVALID_CURSOR"),
+            ("?%6cimit=201", "BAD_REQUEST"),
         ] {
             let (status, body) = get(&format!("{endpoint}{query}"), "operator-token").await?;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint}{query}");
@@ -306,6 +307,14 @@ async fn native_diagnostics_malformed_limit_is_authorized_before_validation() ->
         assert_eq!(value["request_id"], "request-test");
         assert!(value.get("detail").is_none());
         assert!(!body.contains("abc"));
+    }
+    for endpoint in [
+        "/o3k/v1/operator/diagnostics/services?%63ursor=cHJvdmlkZXItNDI",
+        "/o3k/v1/operator/diagnostics/providers?%63ursor=cHJvdmlkZXItNDI",
+    ] {
+        let (status, body) = get(endpoint, "operator-token").await?;
+        assert_eq!(status, StatusCode::OK, "{endpoint}");
+        assert!(body.contains("items"));
     }
     Ok(())
 }
