@@ -11,7 +11,7 @@
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{RawQuery, State},
     response::{IntoResponse, Response},
 };
 use base64::Engine as _;
@@ -312,6 +312,26 @@ pub struct DiagnosticsQuery {
 }
 
 impl DiagnosticsQuery {
+    fn from_raw_query(raw: Option<&str>) -> Result<Self, ErrorCode> {
+        let mut limit = None;
+        let mut cursor = None;
+        for pair in raw
+            .unwrap_or_default()
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+        {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            match key {
+                "limit" if limit.is_none() => limit = Some(value.to_owned()),
+                "limit" => return Err(ErrorCode::BadRequest),
+                "cursor" if cursor.is_none() => cursor = Some(value.to_owned()),
+                "cursor" => return Err(ErrorCode::InvalidCursor),
+                _ => {}
+            }
+        }
+        Ok(Self { limit, cursor })
+    }
+
     /// Validates and bounds `limit`, returning the requested page size.
     #[allow(clippy::result_large_err)]
     pub fn page_size(&self) -> Result<usize, Response> {
@@ -441,7 +461,7 @@ pub async fn summary(auth: BearerAuth, State(state): State<NativeApiState>) -> R
 
 pub async fn services(
     auth: BearerAuth,
-    Query(query): Query<DiagnosticsQuery>,
+    RawQuery(raw_query): RawQuery,
     State(state): State<NativeApiState>,
 ) -> Response {
     // Authorization precedes the authority-presence check so an unauthorized
@@ -451,6 +471,10 @@ pub async fn services(
             .with_request_id(auth.0.request_id().to_owned())
             .into_response();
     }
+    let query = match DiagnosticsQuery::from_raw_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(code) => return query_error(code, auth.0.request_id()),
+    };
     let Some(reader) = state.diagnostics_reader.as_ref() else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
@@ -470,7 +494,7 @@ pub async fn services(
 
 pub async fn providers(
     auth: BearerAuth,
-    Query(query): Query<DiagnosticsQuery>,
+    RawQuery(raw_query): RawQuery,
     State(state): State<NativeApiState>,
 ) -> Response {
     // Authorization precedes the authority-presence check so an unauthorized
@@ -480,6 +504,10 @@ pub async fn providers(
             .with_request_id(auth.0.request_id().to_owned())
             .into_response();
     }
+    let query = match DiagnosticsQuery::from_raw_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(code) => return query_error(code, auth.0.request_id()),
+    };
     let Some(reader) = state.diagnostics_reader.as_ref() else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };

@@ -251,6 +251,8 @@ async fn native_diagnostics_query_errors_are_correlated_and_redacted() -> TestRe
             ("?cursor=", "INVALID_CURSOR"),
             ("?cursor=not-base64", "INVALID_CURSOR"),
             (&format!("?cursor={oversized_cursor}"), "INVALID_CURSOR"),
+            ("?limit=1&limit=2", "BAD_REQUEST"),
+            ("?cursor=YQ&cursor=Yg", "INVALID_CURSOR"),
         ] {
             let (status, body) = get(&format!("{endpoint}{query}"), "operator-token").await?;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint}{query}");
@@ -266,9 +268,31 @@ async fn native_diagnostics_query_errors_are_correlated_and_redacted() -> TestRe
 
 #[tokio::test]
 async fn native_diagnostics_malformed_limit_is_authorized_before_validation() -> TestResult {
-    for endpoint in [
-        "/o3k/v1/operator/diagnostics/services?limit=abc",
-        "/o3k/v1/operator/diagnostics/providers?limit=abc",
+    for (endpoint, code) in [
+        (
+            "/o3k/v1/operator/diagnostics/services?limit=abc",
+            "BAD_REQUEST",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/providers?limit=abc",
+            "BAD_REQUEST",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/services?limit=1&limit=2",
+            "BAD_REQUEST",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/providers?limit=1&limit=2",
+            "BAD_REQUEST",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/services?cursor=YQ&cursor=Yg",
+            "INVALID_CURSOR",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/providers?cursor=YQ&cursor=Yg",
+            "INVALID_CURSOR",
+        ),
     ] {
         let (status, body) = get(endpoint, "tenant-token").await?;
         assert_eq!(status, StatusCode::FORBIDDEN, "{endpoint}");
@@ -278,7 +302,7 @@ async fn native_diagnostics_malformed_limit_is_authorized_before_validation() ->
         let (status, body) = get(endpoint, "operator-token").await?;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint}");
         let value: Value = serde_json::from_str(&body)?;
-        assert_eq!(value["code"], "BAD_REQUEST");
+        assert_eq!(value["code"], code);
         assert_eq!(value["request_id"], "request-test");
         assert!(value.get("detail").is_none());
         assert!(!body.contains("abc"));
