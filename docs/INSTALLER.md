@@ -278,6 +278,16 @@ No new admin password, TLS identities, users, services, networks, images, or
 
 ## Upgrade and rollback
 
+The upgrade state machine and CLI are implemented and covered by the `o3k`
+unit tests, but this repository does not yet contain the required exact
+published-artifact, fresh-host, or interrupted real-host acceptance evidence.
+Accordingly, `o3k upgrade` and `o3k rollback` are engineering interfaces under
+validation, not a certified production upgrade or rollback procedure. Do not
+use them as evidence for PostgreSQL recovery, fresh-host restore, HA, arbitrary
+downgrade, or tenant VM/storage disaster recovery. Until the applicable
+release-gate evidence is accepted, use a clean supported installation for the
+published TestLab profile and preserve the existing installation for review.
+
 The `o3k` operator CLI owns upgrades; the one-line installer never upgrades an
 existing installation (see the fence below). After the first install, every
 journey runs from the installed binary:
@@ -330,6 +340,16 @@ gate; the release checks (`release.binary_set_consistent`,
 `release.backup_available`, `release.upgrade_state`) report mixed-version
 installs, a missing backup on an otherwise healthy install, and interrupted
 upgrade state.
+
+Troubleshooting boundary: after a process or service restart, run
+`sudo o3k doctor --json` and retain its output with the release and upgrade
+state files for diagnosis. A warning or unhealthy result is not proof that an
+upgrade or rollback completed; inspect the reported phase and follow the exact
+recovery command printed by the CLI. If the state is `FAILED_UPGRADE`, do not
+delete the state or backup files and do not retry a destructive command until
+the recorded rollback has been observed. A successful `doctor` run only
+describes the current local installation; it does not prove external provider
+state or guest/storage recovery.
 
 Installer fence: `curl -sfL https://get.o3k.io | sudo sh -` never
 auto-upgrades an existing install. On a host with an installed release, the
