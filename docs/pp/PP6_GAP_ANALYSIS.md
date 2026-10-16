@@ -18,19 +18,20 @@ GitHub state; every listed PR is open and unmerged, with no GitHub approval.
 - Decision packet [#1091](https://github.com/o3kio/o3k/pull/1091): head
   `b8ddd03551ef2984ac70acef3fa1f5febe6236d4`, tree
   `c488afc005c37d77e659f21e92087ab1b78df51a`; independent review is clear and
-  all seven protected checks are queued. ADR-0189/SPEC-0050 remain Proposed,
-  so #1084–#1087 are blocked.
+  all seven protected checks pass. GitHub approval remains absent.
+  ADR-0189/SPEC-0050 remain Proposed, so #1084–#1087 are blocked.
 - SQLite lock/busy slice [#1092](https://github.com/o3kio/o3k/pull/1092):
   `580829150a5c0e9a2131e7967c7ca449db714aed`, tree
   `b19fb0085958ca7301ca8c5a93c7c4b41de16d03`; installer, OCI and Tempest
   checks pass, remaining protected checks are in progress. Focused local test
   and independent review pass; this is one #1089 case only.
 - Authority doctor [#1093](https://github.com/o3kio/o3k/pull/1093):
-  `59b655e5bb214a02d339496a910bf255a1c75593`, tree
-  `cf0ab71d6ad6bda27db08f09b6fc659a38b76e10`; the prior head's Clippy failure
-  and skipped PostgreSQL test are not evidence. Current exact-head protected CI,
-  including the required PostgreSQL lane, is in progress. Independent review is
-  clear, the PR body is corrected, and GitHub approval remains absent.
+  `f9c3844dfb9d4d8e9b7099a2c34f23f486016f73`, tree
+  `2438fd6047c2d7c406f609a9bec910f66778f9dc`; a missing `controller_sessions`
+  fixture table that caused the earlier exact-head Rust failure is fixed.
+  Focused overflow and adjacent coordination-query tests pass locally; two
+  independent reviews are clear. Six protected checks pass and Rust is in
+  progress; GitHub approval remains absent.
 - Readiness diagnostics [#1096](https://github.com/o3kio/o3k/pull/1096):
   `b73c19ac8d0826656b81dad85fa70d1146ee7100`, tree
   `1a5ebdeab8b5c6814f12b46236c5408968317331`; all protected checks pass.
@@ -61,9 +62,12 @@ GitHub state; every listed PR is open and unmerged, with no GitHub approval.
   `856ab2a14331aae0068799aec2ce440aa17b2f33`.
 - PostgreSQL outage/reconnect [#1103](https://github.com/o3kio/o3k/pull/1103):
   `9f6420e662c885837458e3e799bf64752ef40bc5`, tree
-  `d2dfe87737f88131fbf8c78167a37f63af0902fd`; six protected checks pass and
-  Rust is in progress. Local Docker PostgreSQL readiness failed, so no local
-  PostgreSQL pass is claimed; independent review is clean.
+  `d2dfe87737f88131fbf8c78167a37f63af0902fd`; all seven protected checks and
+  the required real PostgreSQL outage/reconnect evidence step pass. Evidence
+  artifact `12018522281` has SHA-256
+  `6aef46ec1f3124b00af83d7875465ba1264e7127eeee593b611e72ff12177aad`.
+  GitHub approval remains absent; this proves only the scoped outage/reconnect
+  case.
 - Diagnostics correlation [#1105](https://github.com/o3kio/o3k/pull/1105),
   `1abf308ee67fb28d075935226f16b9d7ee1d2b44`, and CloudProfile error
   classification [#1106](https://github.com/o3kio/o3k/pull/1106),
@@ -81,6 +85,24 @@ GitHub state; every listed PR is open and unmerged, with no GitHub approval.
   under #975 and remains partial, governed by #640. It cannot claim
   PostgreSQL or fresh-host recovery before the approved backup/restore design.
   PP.5 remains ACCEPTANCE_PENDING and PP.7 remains unauthorized.
+- PostgreSQL pool exhaustion [#1111](https://github.com/o3kio/o3k/pull/1111):
+  `8bca9e7fbac36190c33358596af8b45695c10415`, tree
+  `9d5126ab83a726b1b0f1c31d659ce961d3fca93f`; six protected checks pass and
+  Rust, including the required real PostgreSQL lane, is in progress. The local
+  disposable PostgreSQL attempt failed at container connectivity and produced
+  no evidence artifact. Independent review is clear; approval is absent.
+- Network pool exhaustion [#1112](https://github.com/o3kio/o3k/pull/1112):
+  `6ea517025d178c4247ec38ed12d454532aecb5ea`, tree
+  `a167a4bad4e8ef5e4881d3541de44cafcaddd838`; six protected checks pass and
+  Rust is in progress. Package tests and independent review pass; evidence is
+  limited to the in-memory NetworkService store. Approval is absent.
+- Native storage capacity rejection [#1113](https://github.com/o3kio/o3k/pull/1113):
+  `6effcd795663216bca3e7cb7ad28ad5689842af3`, tree
+  `bd2284f322afd32079066bdd04058f5426bb7d54`; package tests and Clippy pass,
+  exact-head protected checks and independent GitHub review are in progress.
+  This fake-provider test proves durable lifecycle handling after a known
+  `Capacity` result; it does not prove real LVM capacity detection. #1089 remains
+  partial.
 
 ## Summary
 
