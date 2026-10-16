@@ -43,7 +43,9 @@ applicable implementation starts.
 | D12 Public interface | **Accept as written.** #1084–#1086 add no unapproved public CLI or API. A required operator interface needs a separate accepted contract defining target selection, confirmation, idempotency, status, machine errors, exit behavior, authorization, and redaction before implementation. | Prevents undocumented destructive operations and unreviewed authorization surface. The restore flow must not be exposed through an implementation-only command. | Architecture and security: senolcolak, separate decisions pending. Operator invocation/API contract is an explicit dependency for exact-artifact operational acceptance; no interface is authorized by this packet. |
 | D13 Canonical inventory and compatibility | **Accept as written.** Restore one complete control-plane store image at exact release/schema/migration identity. Commit a machine-readable inventory mapping every durable repository registration to tables, including empty repositories and every `audit_events` row. Cover resource/ownership, operations/reconciliation, placement, topology, IAM/security scope, bootstrap/enrollment/revocation, and O3K-owned configuration/release metadata. Reject missing, extra, or unknown entries; schema or migration mismatch; missing trust; foreign/nonempty target; or unproven fencing before canonical mutation. Exclude external VM/storage payloads and provider-owned lifecycle. | Prevents selective restore from creating cross-repository inconsistency and avoids claiming recovery of externally owned state. | Architecture and security: senolcolak, separate decisions pending. Inventory baseline must be generated from accepted migrations/store registrations and human accepted; CI drift check follows that baseline. |
 
-## A1–A9 — amendment dispositions
+## Proposed amendments (2026-10-16)
+
+### A1–A9 — amendment dispositions
 
 Each status below is a **proposed disposition**, not an accepted amendment.
 Review status remains **PENDING** for architecture and security.
