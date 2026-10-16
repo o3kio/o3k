@@ -113,7 +113,7 @@ SQL_PATTERNS = [
 # patterns, so each pattern must begin with that literal.
 if not all(pat.startswith("sqlx::") for pat in SQL_PATTERNS):
     raise RuntimeError('every SQL_PATTERNS entry must begin with "sqlx::"')
-SQL_PATTERNS_COMPILED = [(pat, re.compile(pat)) for pat in SQL_PATTERNS]
+SQL_PATTERNS_COMPILED = [re.compile(pat) for pat in SQL_PATTERNS]
 
 SQL_IMPORT_PATTERN = re.compile(
     r"^[ \t]*use\s+sqlx::(?:"
@@ -191,7 +191,7 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
             # Every SQL_PATTERNS entry begins with the literal "sqlx::".
             if "sqlx::" not in line:
                 continue
-            for pat, compiled in SQL_PATTERNS_COMPILED:
+            for compiled in SQL_PATTERNS_COMPILED:
                 if compiled.search(line):
                     stripped = line.strip()
                     if stripped.startswith("//") or stripped.startswith("/*"):
@@ -200,7 +200,7 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
                         continue
                     errors.append(
                         f"SQL ARCHITECTURE VIOLATION: {rel}:{i}\n"
-                        f"  pattern: {pat}\n"
+                        f"  pattern: {compiled.pattern}\n"
                         f"  code: {stripped[:100]}\n"
                         "  SQL belongs in an explicit persistence, database diagnostic, "
                         "or upgrade boundary."

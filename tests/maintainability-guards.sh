@@ -186,6 +186,9 @@ check_fixture "bare Command::new" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
 echo "Test 18: std Command alias import -> FAIL"
 check_fixture "std Command alias import" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'use std::process::Command as HostCommand;\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 18a: Command import after blank lines reports the use line -> FAIL"
+check_fixture "Command import line number" 1 "HOST EXECUTION ARCHITECTURE VIOLATION: crates/o3k-kernel/src/z_guard_test_fixture.rs:3" \
+    $'\n\nuse std::process::Command as HostCommand;\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
 echo "Test 19: std grouped Command alias import -> FAIL"
 check_fixture "std grouped Command alias import" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'use std::process::{Command as HostCommand, Stdio};\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
