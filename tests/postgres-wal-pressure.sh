@@ -178,7 +178,12 @@ cleanup() {
     write_evidence "$run_state"
   fi
   if [[ "$run_state" == "passed" ]]; then
-    python3 "$root_dir/scripts/validate_postgres_wal_pressure_evidence.py" "$evidence_output" || status=1
+    if ! python3 "$root_dir/scripts/validate_postgres_wal_pressure_evidence.py" "$evidence_output"; then
+      status=1
+      run_state="failed"
+      write_evidence "$run_state"
+      echo "PostgreSQL WAL pressure evidence: failed validation ($evidence_output)" >&2
+    fi
     if [[ "$status" -eq 0 ]]; then echo "PostgreSQL WAL pressure evidence: PASS ($evidence_output)"; fi
   else
     echo "PostgreSQL WAL pressure evidence: $run_state ($evidence_output)" >&2

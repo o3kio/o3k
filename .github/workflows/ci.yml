@@ -25,7 +25,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
       - name: Install PostgreSQL store build prerequisites
+        timeout-minutes: 10
         run: scripts/ci/apt-provision.sh install protobuf-compiler pkg-config
       - name: Validate fail-closed WAL evidence validator
         run: python3 scripts/validate_postgres_wal_pressure_evidence.py --self-test
