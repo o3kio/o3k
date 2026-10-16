@@ -13,9 +13,10 @@ Related accepted sources:
 Related authority: [#944](https://github.com/o3kio/o3k/issues/944) owns operator documentation. This proposal does not accept or amend ADR-0189 or SPEC-0050.
 
 This proposal defines the smallest supportability artifact needed by PP.6. It
-is a read-only, bounded projection assembled from existing canonical
-diagnostics, Audit, and public Operation authorities. It does not create a
-second health, Operation, Audit, identity, or persistence authority.
+is a read-only, bounded projection assembled from the existing canonical
+diagnostics authority and static process identity. Version 1 carries no Audit
+or Operation evidence (§2, §6). It does not create a second health, Operation,
+Audit, identity, or persistence authority.
 
 ## 1. Proposed access and output surface
 
@@ -28,7 +29,7 @@ Authorization must be resolved before checking source availability.
 This proposal selects one transport: a native API response at
 `GET /o3k/v1/operator/support-bundle`. It is not a local doctor artifact or
 an archive download. The machine-readable response is defined by
-`contracts/support-bundle-v1.schema.json`.
+`contracts/support-bundle-v1.proposed.schema.json`.
 
 The route must authenticate the bearer token and authorize
 `operator:ReadSupportBundle` against `operator/support-bundle` with effective
@@ -36,19 +37,18 @@ System scope before reading configuration, opening a store, checking source
 availability, or constructing any response. The policy must register the
 accepted principal kind (`User`), required `operator` role, and
 `require_ownership: false`; a project-scoped caller is denied even when its
-role string is `operator`. Query parameters cannot broaden the fixed
-24-hour/50-item bounds. An unauthorized request has the same `Forbidden`
+role string is `operator`. The route accepts no query parameters. An
+unauthorized request has the same `Forbidden`
 response regardless of whether any source is configured or healthy.
 
 Generation is read-only. It must not write the canonical store, change
 Operation or Audit state, call provider mutation APIs, alter leases/fences,
 start or stop services, or create temporary files outside an implementation's
-explicitly reserved output path. If generation is exposed through a privileged
-API. The route invocation is not mandatory Audit evidence under SPEC-0042: it
-is a successful read and does not change control-plane state. Ordinary
-tracing may occur after the response is safely assembled, but bundle contents
-and source failures must never enter Audit. A future change to this
-classification requires an accepted amendment.
+explicitly reserved output path. The route invocation is not mandatory Audit
+evidence under SPEC-0042: it is a successful read and does not change
+control-plane state. Ordinary tracing may occur after the response is safely
+assembled, but bundle contents and source failures must never enter Audit. A
+future change to this classification requires an accepted amendment.
 
 ## 2. Source authority and allowlist
 
@@ -58,9 +58,12 @@ The bundle may include only these sources:
    and capacity projections. These retain their existing status vocabulary,
    freshness rules, authorization-independent source semantics, and schema
    version.
-2. SPEC-0042 Audit pages, queried with a bounded System/operator query. Only
-   the fields listed in §3 may cross the bundle boundary. Audit remains the
-   authority for event identity and correlation.
+2. No Audit events in v1. The existing `DurableAuditRepository::page` port
+   returns events for one effective scope, in ascending `event_id` order, with
+   a single optional outcome filter, so it cannot express a system-wide,
+   newest-first view of failures. Audit `reason_category` values are also
+   free-form at their call sites, and some carry raw error text. Audit
+   evidence is deferred to a later version under the conditions in §6.
 3. No Operation rows in v1. System-wide Operation collection is omitted until
    a separate accepted query/action contract exists. The lower-level
    `OperationRecord` is never a source.
@@ -68,15 +71,15 @@ The bundle may include only these sources:
    process. These are labels, not health authority.
 
 Provider logs, tracing spans, environment/config files, raw SQL, database
-   diagnostics, filesystem walks, shell output, arbitrary controller output,
-   tenant payloads, and provider APIs are excluded. A source that cannot
-   produce the allowlisted projection is represented by a bounded source
-   status and reason; it is never substituted with raw data.
+diagnostics, filesystem walks, shell output, arbitrary controller output,
+tenant payloads, and provider APIs are excluded. A source that cannot produce
+the allowlisted projection is represented by a bounded source status and
+reason; it is never substituted with raw data.
 
 ## 3. Machine-readable payload
 
 The normative shape proposed by this document is
-[`support-bundle-v1.schema.json`](../../contracts/support-bundle-v1.schema.json).
+[`support-bundle-v1.proposed.schema.json`](../../contracts/support-bundle-v1.proposed.schema.json).
 Its top-level fields are:
 
 | Field | Meaning |
@@ -87,33 +90,21 @@ Its top-level fields are:
 | `profile` | Bounded product/deployment profile identifier. |
 | `backend` | Backend kind (`sqlite` or `postgresql`) and safe server-version label, if known. |
 | `diagnostics` | Existing SPEC-0045 v1 projections, or `null` when unavailable/not configured. |
-| `failure_evidence` | At most 50 bounded Audit events; Operations are absent in v1. |
 | `collection` | Per-source status, observation times, partial/error categories, and bounds. |
 | `redacted` | Constant `true`. |
 
-`failure_evidence.audit` contains at most 50 Audit events and no Operation
-items in v1, ordered newest first by event timestamp and then stable event ID.
-The default and maximum lookback window is 24 hours. A caller cannot request
-an unbounded window or increase the bound. Audit events are the only
-system-wide failure source in v1. `failure_evidence.audit` is `null` when the
-Audit source is unavailable or not configured.
+Version 1 has no `failure_evidence` member: it carries neither Audit events nor
+Operation items. Provider operation IDs, provider error text, and store-level
+`error_message` are never included.
 
-Each Audit item may contain only:
-
-`event_id`, `timestamp`, `request_id`, `audit_id`, `service`, `action`,
-`resource_type`, `resource_id`, `operation_id`, `outcome`, and
-`reason_category`.
-
-`principal_id`, `principal_kind`, `effective_scope`, and `owner_scope` are
-omitted from the exported bundle by default. They require a future accepted
-privacy decision. Public resource IDs and correlation IDs remain bounded and
-are included only to make an operator failure actionable.
-
-No Operation item is emitted. A future amendment may add Operation summaries
-only after it defines a system-scoped query port, action/resource policy,
-scope and filter binding, integrity-protected cursor semantics, and a
-secret-safe reason-category projection. Provider operation IDs, provider
-error text, and store-level `error_message` are never included.
+The `diagnostics.services` and `diagnostics.providers` lists are bounded to
+200 items each. When a list has more entries, or when including every entry
+would exceed the 64 KiB source bound, the collector keeps the first entries in
+the order of the existing SPEC-0045 projection, sets `has_more: true` and
+`omitted_count` to the number of entries left out, and marks the diagnostics
+source `partial` with reason category `source_truncated`. `next_cursor` is
+always `null`: the bundle is not pageable. When nothing is omitted,
+`has_more` is `false` and `omitted_count` is `0`.
 
 ## 4. Mixed-time and partial collection semantics
 
@@ -124,8 +115,8 @@ records the end of collection. Consumers must treat fields from different
 sources as observations from a bounded interval, not as one consistent instant.
 
 Each source has one of `complete`, `partial`, `unavailable`, or `not_configured`.
-An unavailable Audit or diagnostics source does not make the whole artifact a
-successful complete bundle: the top-level disposition is `partial` and the
+An unavailable or truncated diagnostics source does not make the whole artifact
+a successful complete bundle: the top-level disposition is `partial` and the
 source carries one bounded reason category. The artifact may still be useful
 for troubleshooting. Authorization failure occurs before collection and does
 not reveal source status.
@@ -138,26 +129,25 @@ the omitted source by bounded category, never by raw exception text.
 
 The following invariants are mandatory and machine-checkable:
 
-- `collection.sources` contains each source name at most once;
-- `collection.sources` contains only `diagnostics` and `audit`, each at most
-  once; `diagnostics` maps to the top-level `diagnostics` member and `audit`
-  maps exactly to `failure_evidence.audit`;
-- `collection.sources` contains exactly one entry for each of `diagnostics`
-  and `audit`; a `complete` disposition requires both entries and both status
-  values to be `complete`;
+- `collection.sources` contains exactly one entry, named `diagnostics`, which
+  maps to the top-level `diagnostics` member;
 - `status: complete` requires the mapped payload member to be present and
-  valid; `status: unavailable` or `not_configured` requires the mapped member
-  to be `null` and requires a non-null bounded `reason_category`;
+  valid, with `has_more: false` on both lists; `status: unavailable` or
+  `not_configured` requires the mapped member to be `null` and requires a
+  non-null bounded `reason_category`;
 - `status: partial` requires a non-null, schema-valid mapped payload member
   and a non-null bounded reason category. A null partial payload is invalid;
   null is reserved for `unavailable` and `not_configured`;
-- `collection.disposition: complete` requires every listed source to be
-  `complete`; any other source status requires `partial`;
+- `has_more: true` on either list requires `omitted_count >= 1` and
+  `status: partial` with `reason_category: source_truncated`; `has_more:
+  false` requires `omitted_count: 0`;
+- `collection.disposition: complete` requires the source to be `complete`;
+  any other source status requires `partial`;
 - `completed_at` is greater than or equal to `started_at`, and every
   `observed_at` lies within the collection interval unless the source marks
   it `null`;
-- serialized UTF-8 response size is at most 256 KiB, each source payload is at
-  most 64 KiB, and `failure_evidence.audit` contains at most 50 items;
+- serialized UTF-8 response size is at most 256 KiB, and the diagnostics
+  source payload is at most 64 KiB;
 - the response has no cursor or caller-supplied filter fields.
 
 The implementation validator must enforce these invariants after schema
@@ -182,21 +172,27 @@ device paths, shell output, stack traces, exception chains, or unbounded
 tenant data. The redaction boundary is structural: excluded fields must not
 be collected and then filtered from a generic map.
 
-## 6. Authorized query port
+## 6. Deferred failure-evidence sources
 
-The Audit source must call the existing
-`DurableAuditRepository::page(&AuditQuery)` port through the production
-`AuditReader`/adapter boundary. The route constructs a fixed System/operator
-scope query with a fixed 24-hour window, failure-relevant outcome filters,
-`limit <= 50`, and the repository's integrity-protected cursor semantics. The
-collector must not call SQLite/PostgreSQL repositories directly, bypass scope
-checks, issue unbounded queries, or construct a cursor itself.
+Audit and Operation evidence are out of scope for v1. A later amendment may add
+an Audit source only after all of the following are accepted:
 
-There is no Operation source in this version. A future Operation source must
-use a new accepted system-scoped query port with the same route
-authorization, fixed filter binding, page bound, and cursor integrity
-requirements; it may not widen the existing project-scoped
-`list_canonical_operations_page` port.
+1. a new system-scoped Audit query port, through the production
+   `AuditReader`/adapter boundary, that returns events across scopes newest
+   first, accepts a set of failure-relevant outcomes, and keeps the
+   repository's integrity-protected cursor semantics, with a fixed 24-hour
+   window and at most 50 items;
+2. a defined mapping from Audit `reason_category` values to the bundle's
+   bounded reason vocabulary, with unmapped values exported as `null`;
+3. removal of raw error text from Audit `reason_category` call sites, so no
+   Audit field can carry exception or provider text.
+
+A future Operation source must use a new accepted system-scoped query port with
+the same route authorization, fixed filter binding, page bound, and cursor
+integrity requirements; it may not widen the existing project-scoped
+`list_canonical_operations_page` port. The collector must never call
+SQLite/PostgreSQL repositories directly, bypass scope checks, issue unbounded
+queries, or construct a cursor itself.
 
 ## 7. Evidence and acceptance clauses
 
@@ -205,9 +201,9 @@ claimed PostgreSQL profile where infrastructure exists:
 
 1. schema validation for complete and partial artifacts;
 2. System/operator authorization and denial for tenant/project callers;
-3. bounded Audit queries and stable newest-first output;
-4. absence of system-wide Operation output until the separate query contract
-   is present;
+3. truncation of the services and providers lists, with `has_more`,
+   `omitted_count` and a `partial` source, at both the item and byte bounds;
+4. absence of Audit and Operation output;
 5. success, unavailable, malformed, oversized, and timeout source behavior;
 6. mixed-time metadata and truthful partial disposition;
 7. redaction tests seeded with sentinel credentials, tokens, keys, URLs,
@@ -229,9 +225,8 @@ The human architecture/security reviewer must explicitly accept:
 - `operator:ReadSupportBundle`, System scope, and action/resource naming;
 - the non-mandatory invocation-Audit classification and any future change to
   that classification;
-- inclusion of public resource and correlation IDs;
-- whether any principal/scope identifiers may be exported;
-- the bounded Operation query needed for system-wide Operation summaries;
+- deferring Audit and Operation evidence to a later version (§6), and the
+  truncation semantics in §3;
 - whether source/profile/backend identity may include a release version and
   safe PostgreSQL server-version label.
 
