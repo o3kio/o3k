@@ -3,19 +3,34 @@
 use std::time::Duration;
 
 use o3k_store::{DurableStore, PostgresStore, ResourceRecord, StoreError};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{
+    Connection,
+    postgres::{PgConnection, PgPoolOptions},
+};
 use uuid::Uuid;
 
 fn database_url() -> String {
     std::env::var("O3K_DATABASE_URL").expect("O3K_DATABASE_URL must be set")
 }
 
+async fn acquire_database_guard(url: &str) -> PgConnection {
+    let mut connection = PgConnection::connect(url)
+        .await
+        .expect("connect to the shared PostgreSQL test database");
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+        .execute(&mut connection)
+        .await
+        .expect("acquire the shared PostgreSQL test-database advisory lock");
+    connection
+}
+
 #[tokio::test]
 #[ignore = "requires the isolated CI PostgreSQL service"]
-async fn postgres_pool_exhaustion_preserves_canonical_state_and_retry() {
+async fn postgres_pool_exhaustion_preserves_resource_row_state_and_retry() {
     let url = database_url();
     o3k_store::conformance::assert_destructive_postgres_test_database(&url)
         .expect("destructive PostgreSQL test database must have the expected purpose");
+    let _database_guard = acquire_database_guard(&url).await;
 
     let pool = PgPoolOptions::new()
         .max_connections(1)
