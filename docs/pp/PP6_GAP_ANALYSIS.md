@@ -26,11 +26,11 @@ GitHub state; every listed PR is open and unmerged, with no GitHub approval.
   checks pass, remaining protected checks are in progress. Focused local test
   and independent review pass; this is one #1089 case only.
 - Authority doctor [#1093](https://github.com/o3kio/o3k/pull/1093):
-  `6f998060a0d19671fda5efaa153adbd9b92f158d`, tree
-  `a6ff28bb2d71011b9a308f89d3306e6dcb5cebb2`; Mock Cinder is in progress and
-  other protected checks are queued. Local SQLite tests pass; PostgreSQL was
-  unavailable locally, so no PostgreSQL pass is claimed. Independent review is
-  clean.
+  `59b655e5bb214a02d339496a910bf255a1c75593`, tree
+  `cf0ab71d6ad6bda27db08f09b6fc659a38b76e10`; the prior head's Clippy failure
+  and skipped PostgreSQL test are not evidence. Current exact-head protected CI,
+  including the required PostgreSQL lane, is in progress. Independent review is
+  clear, the PR body is corrected, and GitHub approval remains absent.
 - Readiness diagnostics [#1096](https://github.com/o3kio/o3k/pull/1096):
   `b73c19ac8d0826656b81dad85fa70d1146ee7100`, tree
   `1a5ebdeab8b5c6814f12b46236c5408968317331`; all protected checks pass.
