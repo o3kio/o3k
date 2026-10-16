@@ -24,9 +24,16 @@ assert "run: bash tests/p13_1_provider_harness.sh" in text
 assert "run: bash tests/openapi-governance.sh" in text
 assert "run: bash tests/toolchain-evidence.sh" in text
 assert "run: cargo test --workspace --all-features\n" in text
-assert "  merge_group:\n" in text
-assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in text
-assert "github.event_name == 'pull_request' && github.ref || github.run_id" in text
+# Every workflow that provides a required status check must run for merge
+# queue groups, or the queue waits forever on the missing check.
+for required_check_workflow in ("ci.yml", "component-cinder-mock.yml"):
+    workflow_text = (pathlib.Path(sys.argv[1]).parent / required_check_workflow).read_text(
+        encoding="utf-8"
+    )
+    triggers = re.search(r"^on:\n((?:[ \t]+.*\n|\n)*)", workflow_text, re.MULTILINE)
+    assert triggers and re.search(r"^  merge_group:", triggers.group(1), re.MULTILINE), required_check_workflow
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow_text, required_check_workflow
+    assert "github.event_name == 'pull_request' && github.ref || github.run_id" in workflow_text, required_check_workflow
 assert "POSTGRES_DB: o3k_workspace_test_ci" in text
 assert "O3K_TEST_DATABASE_PURPOSE: workspace" in text
 assert "Prepare separate endpoint PostgreSQL test database" in text

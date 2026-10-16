@@ -111,7 +111,7 @@ if not all(pat.startswith("sqlx::") for pat in SQL_PATTERNS):
 SQL_PATTERNS_COMPILED = [(pat, re.compile(pat)) for pat in SQL_PATTERNS]
 
 SQL_IMPORT_PATTERN = re.compile(
-    r"^\s*use\s+sqlx::(?:"
+    r"^[ \t]*use\s+sqlx::(?:"
     + rf"(?:{SQL_API_NAMES}|{SQL_CAPABILITY_NAMES})"
     + r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?"
     + r"|\{[^;]*\b"
@@ -121,19 +121,13 @@ SQL_IMPORT_PATTERN = re.compile(
 )
 
 SQL_NESTED_IMPORT_PATTERN = re.compile(
-    r"^\s*use\s+sqlx::(?:"
+    r"^[ \t]*use\s+sqlx::(?:"
     r"query_builder::QueryBuilder"
     r"|prelude::(?:Executor|Execute|AnyExecutor)"
     r")(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;"
-    r"|^\s*use\s+sqlx::prelude::\*\s*;"
-    r"|^\s*use\s+sqlx::\*\s*;",
+    r"|^[ \t]*use\s+sqlx::prelude::\*\s*;"
+    r"|^[ \t]*use\s+sqlx::\*\s*;",
     re.MULTILINE | re.DOTALL,
-)
-
-# (pattern, literal that every match of the pattern contains)
-SQL_IMPORT_PATTERNS = (
-    (SQL_IMPORT_PATTERN, "sqlx::"),
-    (SQL_NESTED_IMPORT_PATTERN, "sqlx::"),
 )
 
 # SQL-owning implementation boundaries.  Keep this list path-aware: a path
@@ -174,11 +168,10 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
 
         production_lines, source = _production_source(path, rel)
 
-        for import_pattern, required_literal in SQL_IMPORT_PATTERNS:
-            # Skipping files without the literal avoids slow `^\s*` scans
-            # over long runs of blanked test lines.
-            if required_literal not in source:
-                continue
+        # Import patterns anchor with `^[ \t]*`, not `^\s*`: `\s*` would cross
+        # newlines, backtrack quadratically over blanked test lines, and report
+        # the first preceding blank line instead of the `use` line.
+        for import_pattern in (SQL_IMPORT_PATTERN, SQL_NESTED_IMPORT_PATTERN):
             for match in import_pattern.finditer(source):
                 line_number = source.count("\n", 0, match.start()) + 1
                 errors.append(
@@ -227,22 +220,21 @@ HOST_CMD_PATTERNS = [
 ]
 HOST_CMD_PATTERNS_COMPILED = [(re.compile(pat), name) for pat, name in HOST_CMD_PATTERNS]
 
-# (pattern, name, literal that every match of the pattern contains)
 HOST_IMPORT_PATTERNS = [
     (re.compile(
-        r"^\s*use\s+(?:std|tokio)::process::Command"
+        r"^[ \t]*use\s+(?:std|tokio)::process::Command"
         r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;",
         re.MULTILINE | re.DOTALL,
-    ), "process Command import", "process::Command"),
+    ), "process Command import"),
     (re.compile(
-        r"^\s*use\s+(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;",
+        r"^[ \t]*use\s+(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;",
         re.MULTILINE | re.DOTALL,
-    ), "process Command grouped import", "process::{"),
+    ), "process Command grouped import"),
     (re.compile(
-        r"^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
+        r"^[ \t]*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
         r"(?:std|tokio)::process::Command\s*;",
         re.MULTILINE | re.DOTALL,
-    ), "process Command type alias", "process::Command"),
+    ), "process Command type alias"),
 ]
 
 HOST_COMMAND_ALIAS_PATTERN = re.compile(
@@ -309,13 +301,12 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
             continue
 
         production_lines, source = _production_source(path, rel)
-        command_aliases = _host_command_aliases(source)
+        shell_alias_patterns = [
+            re.compile(rf"\b{re.escape(alias)}\s*::new\(\s*[\"'](?:sh|bash)[\"']")
+            for alias in _host_command_aliases(source) - {"Command"}
+        ]
 
-        for pattern, name, required_literal in HOST_IMPORT_PATTERNS:
-            # Skipping files without the literal avoids slow `^\s*` scans
-            # over long runs of blanked test lines.
-            if required_literal not in source:
-                continue
+        for pattern, name in HOST_IMPORT_PATTERNS:
             for match in pattern.finditer(source):
                 if any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS):
                     continue
@@ -330,12 +321,8 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
         for i, line in enumerate(production_lines, 1):
             stripped = line.strip()
             if not stripped.startswith("//"):
-                for alias in command_aliases - {"Command"}:
-                    shell_alias = re.search(
-                        rf"\b{re.escape(alias)}\s*::new\(\s*[\"'](?:sh|bash)[\"']",
-                        line,
-                    )
-                    if shell_alias:
+                for shell_alias in shell_alias_patterns:
+                    if shell_alias.search(line):
                         errors.append(
                             f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{i}\n"
                             "  command: aliased shell command (forbidden)\n"
