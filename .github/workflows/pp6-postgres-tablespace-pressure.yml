@@ -2,10 +2,15 @@ name: PP.6 PostgreSQL tablespace pressure
 
 on:
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   postgres-tablespace-pressure:
@@ -81,16 +86,16 @@ jobs:
             (.schema_migration.table == "_sqlx_migrations") and (.schema_migration.max_successful_version != null) and
             .pressure.tablespace_size_bytes == 33554432 and .pressure.row_payload_bytes == 32768 and
             .pressure.max_inserts == 4096 and .pressure.storage == "EXTERNAL" and
-            .sqlstate == "53100" and .cleanup == "PASS" and
+            .sqlstate == "53100" and .in_database_cleanup == "PASS" and
             .foreign_state.status == "not_exercised" and
             .foreign_state.reason == "store-only lane does not invoke provider or external-state operations" and
-            (.secret_scan | startswith("PASS (artifact field scan")) and .final_disposition == "PASS" and .wal_pressure_claimed == false and
+            (.in_harness_secret_scan | startswith("PASS (serialized artifact scanned")) and .final_disposition == "PASS" and .wal_pressure_claimed == false and
             ((tostring | test("postgres://|postgresql://|password[=:]|BEGIN[[:space:]]+.*PRIVATE KEY|private[_-]?key"; "i")) | not)
           ' "$O3K_PG_PRESSURE_ARTIFACT"
           sha256sum "$O3K_PG_PRESSURE_ARTIFACT"
       - name: Upload evidence
         if: success()
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pp6-postgres-tablespace-pressure
           path: ${{ env.O3K_PG_PRESSURE_ARTIFACT }}

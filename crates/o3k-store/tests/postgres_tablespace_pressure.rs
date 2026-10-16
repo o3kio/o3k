@@ -1,6 +1,8 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use o3k_store::{DurableStore, OperationRecord, OperationState, PostgresStore, ResourceRecord};
+use o3k_store::{
+    DurableStore, OperationRecord, OperationState, PostgresStore, ResourceRecord, StoreError,
+};
 use serde_json::json;
 use sqlx::{Connection, postgres::PgConnection};
 use std::{env, fs};
@@ -143,6 +145,14 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
         })
         .await
         .expect_err("canonical TOAST write must fail under tablespace pressure");
+    match &store_error {
+        StoreError::Database(sqlx::Error::Database(database_error)) => assert_eq!(
+            database_error.code().as_deref(),
+            Some("53100"),
+            "canonical write must fail with PostgreSQL disk-full SQLSTATE"
+        ),
+        other => panic!("unexpected canonical write error under tablespace pressure: {other}"),
+    }
     let rendered = store_error.to_string();
     assert_eq!(
         rendered, "database error",
@@ -200,7 +210,27 @@ async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
         })
         .await
         .expect("retry after pressure recovery");
-    let evidence = json!({"schema":"o3k.pp6.postgres-tablespace-pressure.v1","harness":{"name":"crates/o3k-store/tests/postgres_tablespace_pressure.rs","test":"postgres_tablespace_pressure_preserves_canonical_state_and_retries","evidence_tier":"real-isolated-postgresql"},"profile":"o3k-small-edge-v1","source_sha":source_sha,"source_tree":source_tree,"execution_sha":execution_sha,"execution_tree":execution_tree,"os":env::consts::OS,"database":db,"postgres_server_version":server_version,"schema_migration":{"table":"_sqlx_migrations","max_successful_version":migration_version},"pressure":{"tablespace_size_bytes":33554432,"row_payload_bytes":32768,"max_inserts":4096,"storage":"EXTERNAL"},"tablespace":ts,"attempts":attempts,"sqlstate":sqlstate,"baseline_resource":baseline,"baseline_operation":baseline_operation,"failed_resource_absent":true,"recovered_resource":recovered,"foreign_state":{"status":"not_exercised","reason":"store-only lane does not invoke provider or external-state operations"},"secret_scan":"PASS (artifact field scan for credentials, URLs, and key-material markers)","final_disposition":"PASS","cleanup":"PASS","wal_pressure_claimed":false});
+    let mut evidence = json!({"schema":"o3k.pp6.postgres-tablespace-pressure.v1","harness":{"name":"crates/o3k-store/tests/postgres_tablespace_pressure.rs","test":"postgres_tablespace_pressure_preserves_canonical_state_and_retries","evidence_tier":"real-isolated-postgresql"},"profile":"o3k-small-edge-v1","source_sha":source_sha,"source_tree":source_tree,"execution_sha":execution_sha,"execution_tree":execution_tree,"os":env::consts::OS,"database":db,"postgres_server_version":server_version,"schema_migration":{"table":"_sqlx_migrations","max_successful_version":migration_version},"pressure":{"tablespace_size_bytes":33554432,"row_payload_bytes":32768,"max_inserts":4096,"storage":"EXTERNAL"},"tablespace":ts,"attempts":attempts,"sqlstate":sqlstate,"baseline_resource":baseline,"baseline_operation":baseline_operation,"failed_resource_absent":true,"recovered_resource":recovered,"foreign_state":{"status":"not_exercised","reason":"store-only lane does not invoke provider or external-state operations"},"final_disposition":"PASS","in_database_cleanup":"PASS","wal_pressure_claimed":false});
+    let scanned = serde_json::to_string(&evidence)
+        .expect("evidence json")
+        .to_ascii_lowercase();
+    for forbidden in [
+        "postgres://",
+        "postgresql://",
+        "password=",
+        "password:",
+        "private key",
+        "private_key",
+        "private-key",
+    ] {
+        assert!(
+            !scanned.contains(forbidden),
+            "artifact secret scan found forbidden marker: {forbidden}"
+        );
+    }
+    evidence["in_harness_secret_scan"] = json!(
+        "PASS (serialized artifact scanned for credential URLs, password assignments, and key-material markers before write)"
+    );
     fs::write(
         artifact,
         serde_json::to_vec_pretty(&evidence).expect("evidence json"),
