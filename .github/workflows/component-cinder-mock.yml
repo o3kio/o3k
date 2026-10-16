@@ -7,6 +7,12 @@ on:
     branches: [ main ]
   merge_group:
 
+# Match CI: a newer push to the same PR supersedes the in-flight run, while
+# main and merge-queue runs get a unique group and are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   cinder-mock:
     name: Mock Cinder Component Test (not a real Cinder deployment)

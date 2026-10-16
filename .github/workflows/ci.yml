@@ -253,10 +253,8 @@ jobs:
           name: nextest-junit
           if-no-files-found: warn
           path: target/nextest/pr/junit.xml
-      - name: Test doctests
-        # nextest above already runs every lib, bin and integration test;
-        # only doctests remain for the cargo test lane.
-        run: cargo test --workspace --all-features --doc
+      - name: Test
+        run: cargo test --workspace --all-features
       - name: P12.4 PostgreSQL conformance (mandatory)
         run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --ignored --nocapture
       - name: Endpoint-lifecycle 1035 PostgreSQL conformance (mandatory)

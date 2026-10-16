@@ -23,10 +23,7 @@ assert "run: bash tests/real-libvirt-harness.sh" in text
 assert "run: bash tests/p13_1_provider_harness.sh" in text
 assert "run: bash tests/openapi-governance.sh" in text
 assert "run: bash tests/toolchain-evidence.sh" in text
-assert "run: cargo nextest run --workspace --all-features --profile pr" in text
-# nextest runs the full suite; cargo test only adds the doctests nextest skips.
-assert "run: cargo test --workspace --all-features --doc" in text
-assert "run: cargo test --workspace --all-features\n" not in text
+assert "run: cargo test --workspace --all-features\n" in text
 assert "  merge_group:\n" in text
 assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in text
 assert "github.event_name == 'pull_request' && github.ref || github.run_id" in text

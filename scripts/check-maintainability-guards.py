@@ -14,6 +14,7 @@ reviewed separately before the guard can be pointed at it.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -69,21 +70,13 @@ def rust_source_files() -> list[Path]:
     return files
 
 
-_PRODUCTION_SOURCE_CACHE: dict[Path, tuple[list[str], str]] = {}
-
-
+@functools.cache
 def _production_source(path: Path, rel: str) -> tuple[list[str], str]:
     """Return (lines, source) with test-only lines blanked, computed once per run."""
-    cached = _PRODUCTION_SOURCE_CACHE.get(path)
-    if cached is None:
-        lines = path.read_text(encoding="utf-8").splitlines()
-        test_lines = classify_rust_lines(
-            lines, dedicated_test=is_dedicated_test_file(rel)
-        )
-        production_lines = ["" if is_test else line for line, is_test in zip(lines, test_lines)]
-        cached = (production_lines, "\n".join(production_lines))
-        _PRODUCTION_SOURCE_CACHE[path] = cached
-    return cached
+    lines = path.read_text(encoding="utf-8").splitlines()
+    test_lines = classify_rust_lines(lines, dedicated_test=is_dedicated_test_file(rel))
+    production_lines = ["" if is_test else line for line, is_test in zip(lines, test_lines)]
+    return production_lines, "\n".join(production_lines)
 
 
 def _load_baseline(name: str) -> dict | None:
@@ -111,6 +104,10 @@ SQL_PATTERNS = [
     r"sqlx::query_builder::QueryBuilder\b",
     rf"sqlx::(?:prelude::)?{SQL_CAPABILITY_NAMES}\b",
 ]
+# check_sql_boundary skips lines without "sqlx::" before running these
+# patterns, so each pattern must begin with that literal.
+if not all(pat.startswith("sqlx::") for pat in SQL_PATTERNS):
+    raise RuntimeError('every SQL_PATTERNS entry must begin with "sqlx::"')
 SQL_PATTERNS_COMPILED = [(pat, re.compile(pat)) for pat in SQL_PATTERNS]
 
 SQL_IMPORT_PATTERN = re.compile(
@@ -131,6 +128,12 @@ SQL_NESTED_IMPORT_PATTERN = re.compile(
     r"|^\s*use\s+sqlx::prelude::\*\s*;"
     r"|^\s*use\s+sqlx::\*\s*;",
     re.MULTILINE | re.DOTALL,
+)
+
+# (pattern, literal that every match of the pattern contains)
+SQL_IMPORT_PATTERNS = (
+    (SQL_IMPORT_PATTERN, "sqlx::"),
+    (SQL_NESTED_IMPORT_PATTERN, "sqlx::"),
 )
 
 # SQL-owning implementation boundaries.  Keep this list path-aware: a path
@@ -170,12 +173,12 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
             continue
 
         production_lines, source = _production_source(path, rel)
-        # Every SQL pattern requires the literal "sqlx::"; skipping files
-        # without it also avoids slow `^\s*` scans over blanked test lines.
-        if "sqlx::" not in source:
-            continue
 
-        for import_pattern in (SQL_IMPORT_PATTERN, SQL_NESTED_IMPORT_PATTERN):
+        for import_pattern, required_literal in SQL_IMPORT_PATTERNS:
+            # Skipping files without the literal avoids slow `^\s*` scans
+            # over long runs of blanked test lines.
+            if required_literal not in source:
+                continue
             for match in import_pattern.finditer(source):
                 line_number = source.count("\n", 0, match.start()) + 1
                 errors.append(
@@ -222,26 +225,24 @@ HOST_CMD_PATTERNS = [
     (r'\bspawn_host_command\s*\(', "host command wrapper"),
     (r"(?<![A-Za-z0-9_])Command::new\(", "std::process::Command / tokio::process::Command"),
 ]
-# Each per-line host pattern, including the aliased shell check, needs one of
-# these literals ("sh" also covers "bash"); other lines cannot match.
-HOST_CMD_REQUIRED_LITERALS = ("sh", "run(", "output(", "Command::new(", "spawn_host_command")
 HOST_CMD_PATTERNS_COMPILED = [(re.compile(pat), name) for pat, name in HOST_CMD_PATTERNS]
 
+# (pattern, name, literal that every match of the pattern contains)
 HOST_IMPORT_PATTERNS = [
     (re.compile(
         r"^\s*use\s+(?:std|tokio)::process::Command"
         r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;",
         re.MULTILINE | re.DOTALL,
-    ), "process Command import"),
+    ), "process Command import", "process::Command"),
     (re.compile(
         r"^\s*use\s+(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;",
         re.MULTILINE | re.DOTALL,
-    ), "process Command grouped import"),
+    ), "process Command grouped import", "process::{"),
     (re.compile(
         r"^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
         r"(?:std|tokio)::process::Command\s*;",
         re.MULTILINE | re.DOTALL,
-    ), "process Command type alias"),
+    ), "process Command type alias", "process::Command"),
 ]
 
 HOST_COMMAND_ALIAS_PATTERN = re.compile(
@@ -310,11 +311,11 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
         production_lines, source = _production_source(path, rel)
         command_aliases = _host_command_aliases(source)
 
-        # Each HOST_IMPORT_PATTERNS entry requires "process::Command" or
-        # "process::{"; skipping other files avoids slow `^\s*` scans.
-        has_process_import = "process::Command" in source or "process::{" in source
-        import_patterns = HOST_IMPORT_PATTERNS if has_process_import else ()
-        for pattern, name in import_patterns:
+        for pattern, name, required_literal in HOST_IMPORT_PATTERNS:
+            # Skipping files without the literal avoids slow `^\s*` scans
+            # over long runs of blanked test lines.
+            if required_literal not in source:
+                continue
             for match in pattern.finditer(source):
                 if any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS):
                     continue
@@ -327,8 +328,6 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
                 )
 
         for i, line in enumerate(production_lines, 1):
-            if not any(literal in line for literal in HOST_CMD_REQUIRED_LITERALS):
-                continue
             stripped = line.strip()
             if not stripped.startswith("//"):
                 for alias in command_aliases - {"Command"}:
