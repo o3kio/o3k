@@ -1,6 +1,7 @@
 # PP.6 backup and restore decision packet
 
 Status: approval packet for #975, #640, and implementation issues #1084–#1086.
+<!-- Keep ADR-0189 and SPEC-0050 Proposed until named approvers record their decisions there; PR review alone is not acceptance. -->
 This packet proposes decisions; it does not accept ADR-0189 or SPEC-0050 and
 does not authorize implementation. The reviewer must record an explicit
 decision against each item below in ADR-0189 and update SPEC-0050 accordingly.
