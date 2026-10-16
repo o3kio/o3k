@@ -146,6 +146,12 @@ check_fixture "SQL import with leading ::" 1 "SQL ARCHITECTURE VIOLATION" \
 echo "Test 13c: SQL import inside a block -> FAIL"
 check_fixture "SQL import inside a block" 1 "SQL ARCHITECTURE VIOLATION" \
     $'fn z_query() { use sqlx::query; query("SELECT 1"); }' "crates/o3k-kernel/src"
+echo "Test 13d: SQL import text inside a comment -> ACCEPT"
+check_fixture "SQL import text inside a comment" 0 "" \
+    $'// call order; use sqlx::query; is forbidden here\npub fn z_ok() {}' "crates/o3k-kernel/src"
+echo "Test 13e: raw SQL after a pub use on the same line -> FAIL"
+check_fixture "raw SQL after pub use on one line" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'pub use std::fmt; fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-kernel/src"
 echo "Test 14: forbidden architecture paths are not approved -> PASS"
 python3 - "$GUARD" <<'PY'
 import runpy
@@ -244,6 +250,9 @@ check_fixture "aliased Command import with leading ::" 1 "HOST EXECUTION ARCHITE
 echo "Test 24c: public Command type alias with a leading :: path -> FAIL"
 check_fixture "public Command type alias" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'pub type HostCommand = ::std::process::Command;\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 24d: Command import text inside a comment -> ACCEPT"
+check_fixture "Command import text inside a comment" 0 "" \
+    $'// e.g. { use std::process::Command; }\npub fn z_ok() {}' "crates/o3k-kernel/src"
 echo "Test 25: Command::new after #[cfg(test)] -> FAIL"
 check_fixture "Command after cfg(test)" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'#[cfg(test)] mod tests {}\nfn production_after_tests() { let _ = Command::new("ls"); }' "crates/o3k-kernel/src"

@@ -34,8 +34,12 @@ SECRET_PATTERNS = {
     "url_with_password": re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@\"]+:[^@\s\"]+@", re.IGNORECASE),
     "private_key_pem": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     "secret_valued_field": re.compile(
-        r'"(?:[A-Za-z0-9]+_)*(?:password|passwd|secret|token|api_key|private_key)"\s*:\s*"[^"]+"',
+        r'"[A-Za-z0-9_]*(?:password|passwd|secret|token|api_?key|private_?key)"\s*:\s*"[^"]+"',
         re.IGNORECASE,
+    ),
+    # libpq keyword/value DSNs and environment assignments (password=, PGPASSWORD=).
+    "password_assignment": re.compile(
+        r"(?:password|passwd)\s*[=:]\s*[^\s\"',}\]]", re.IGNORECASE
     ),
     "bearer_token": re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{20,}", re.IGNORECASE),
 }
@@ -43,6 +47,7 @@ SECRET_PATTERNS = {
 # Per-lane field mapping. Paths are dotted keys into the lane artifact.
 CASES = {
     "postgres-outage": {
+        "harness": "harness.test",
         "lane_schema": ("evidence_schema", "o3k.pp6.postgres-outage.v1"),
         "disposition": ("disposition", "PASS"),
         "source": "source.change_head_commit",
@@ -53,6 +58,7 @@ CASES = {
         "foreign_state": ("tested_flag", "observed.foreign_state_mutation_tested"),
     },
     "postgres-resource-pressure": {
+        "harness": "harness.test",
         "lane_schema": ("evidence_schema", "o3k.pp6.postgres-resource-pressure.v1"),
         "disposition": ("disposition", "PASS"),
         "source": "source.change_head_commit",
@@ -63,6 +69,7 @@ CASES = {
         "foreign_state": ("object", "observations.foreign_state"),
     },
     "postgres-server-pressure": {
+        "harness": "test",
         "lane_schema": ("schema", "o3k.pp6.postgres-server-pressure.v1"),
         "disposition": ("disposition", "PASS"),
         "source": "source_head",
@@ -73,6 +80,7 @@ CASES = {
         "foreign_state": ("object", "foreign_state"),
     },
     "postgres-tablespace-pressure": {
+        "harness": "harness.test",
         "lane_schema": ("schema", "o3k.pp6.postgres-tablespace-pressure.v1"),
         "disposition": ("final_disposition", "PASS"),
         "source": "source_sha",
@@ -83,16 +91,20 @@ CASES = {
         "foreign_state": ("object", "foreign_state"),
     },
     "postgres-wal-pressure": {
+        "harness": "harness.path",
         "lane_schema": None,
         "disposition": ("disposition", "passed"),
-        "source": "source.commit",
-        "execution": None,
+        # The lane records only the commit it executed; CI passes the
+        # change head explicitly with --source-commit.
+        "source": None,
+        "execution": "source.commit",
         "backend": ("postgresql", "environment.postgres_server_version"),
         "profile": "profile",
         "fixture": ["environment.postgres_image_id", "environment.wal_filesystem"],
         "foreign_state": ("object", "foreign_state"),
     },
     "sqlite-disk-pressure": {
+        "harness": "test",
         "lane_schema": None,
         "disposition": ("disposition", "PASS"),
         "source": "source_commit",
@@ -154,12 +166,21 @@ def foreign_state(document: object, mapping: tuple[str, str]) -> dict:
 
 
 def scan_secrets(text: str) -> None:
-    found = [name for name, pattern in SECRET_PATTERNS.items() if pattern.search(text)]
+    # Also scan with JSON string escapes undone, so JSON embedded in a string
+    # value is checked like the outer document.
+    candidates = (text, text.replace('\\"', '"'))
+    found = [
+        name
+        for name, pattern in SECRET_PATTERNS.items()
+        if any(pattern.search(candidate) for candidate in candidates)
+    ]
     if found:
         raise EvidenceError(f"artifact contains credential-shaped content: {', '.join(found)}")
 
 
-def build_envelope(case: str, text: str, artifact_name: str) -> dict:
+def build_envelope(
+    case: str, text: str, artifact_name: str, source_commit: str | None = None
+) -> dict:
     if case not in CASES:
         raise EvidenceError(f"unknown case: {case}")
     spec = CASES[case]
@@ -186,6 +207,17 @@ def build_envelope(case: str, text: str, artifact_name: str) -> dict:
             f"{spec['profile']} must be {PROFILE_BY_BACKEND[backend_kind]} for {backend_kind}"
         )
     fixture = {path: required(document, path) for path in spec["fixture"]}
+    harness = required(document, spec["harness"])
+    if not isinstance(harness, str):
+        raise EvidenceError(f"{spec['harness']} must be a string")
+    if spec["source"] is None:
+        if source_commit is None or not COMMIT.match(source_commit):
+            raise EvidenceError(f"{case} needs --source-commit with the change head commit")
+        change_commit = source_commit
+    else:
+        if source_commit is not None:
+            raise EvidenceError(f"{case} records its own source commit; drop --source-commit")
+        change_commit = commit(document, spec["source"])
     scan_secrets(text)
     return {
         "schema": SCHEMA,
@@ -193,9 +225,10 @@ def build_envelope(case: str, text: str, artifact_name: str) -> dict:
         "case": case,
         "disposition": "PASS",
         "source": {
-            "commit": commit(document, spec["source"]),
+            "commit": change_commit,
             "execution_commit": commit(document, spec["execution"]) if spec["execution"] else None,
         },
+        "harness": harness,
         "backend": {"kind": backend_kind, "version": version},
         "profile": profile,
         "fixture": fixture,
@@ -225,7 +258,9 @@ def _sample(case: str) -> dict:
     if spec["lane_schema"]:
         _set(document, *spec["lane_schema"])
     _set(document, *spec["disposition"])
-    _set(document, spec["source"], "a" * 40)
+    if spec["source"]:
+        _set(document, spec["source"], "a" * 40)
+    _set(document, spec["harness"], "harness-identity")
     if spec["execution"]:
         _set(document, spec["execution"], "b" * 40)
     backend_kind, version_path = spec["backend"]
@@ -244,17 +279,21 @@ def _sample(case: str) -> dict:
 def self_test() -> None:
     for case, spec in CASES.items():
         good = _sample(case)
-        envelope = build_envelope(case, json.dumps(good), "sample.json")
+        override = None if spec["source"] else "c" * 40
+        envelope = build_envelope(case, json.dumps(good), "sample.json", override)
         assert envelope["case"] == case and envelope["disposition"] == "PASS", case
+        assert envelope["source"]["commit"] == (override or "a" * 40), case
 
         def mutated(change):
             document = json.loads(json.dumps(good))
             change(document)
             return json.dumps(document)
 
+        commit_path = spec["source"] or spec["execution"]
         failing = {
             "failed disposition": mutated(lambda d: _set(d, spec["disposition"][0], "FAIL")),
-            "short commit": mutated(lambda d: _set(d, spec["source"], "abc")),
+            "short commit": mutated(lambda d: _set(d, commit_path, "abc")),
+            "missing harness": mutated(lambda d: _set(d, spec["harness"], "")),
             "wrong profile": mutated(lambda d: _set(d, spec["profile"], "SPEC-0024 bounded")),
             "missing fixture": mutated(lambda d: _set(d, spec["fixture"][0], "")),
             "credential url": mutated(
@@ -264,6 +303,14 @@ def self_test() -> None:
                 lambda d: _set(d, spec["fixture"][0], "-----BEGIN PRIVATE KEY-----")
             ),
             "secret field": mutated(lambda d: d.__setitem__("db_password", "hunter2")),
+            "camel secret field": mutated(lambda d: d.__setitem__("dbPassword", "hunter2")),
+            "libpq dsn": mutated(
+                lambda d: _set(d, spec["fixture"][0], "host=127.0.0.1 user=o3k password=hunter2")
+            ),
+            "pgpassword": mutated(lambda d: _set(d, spec["fixture"][0], "PGPASSWORD=hunter2")),
+            "escaped json secret": mutated(
+                lambda d: _set(d, spec["fixture"][0], json.dumps({"password": "hunter2"}))
+            ),
         }
         if spec["foreign_state"][0] == "object":
             failing["foreign state claim"] = mutated(
@@ -275,13 +322,30 @@ def self_test() -> None:
             )
         for label, text in failing.items():
             try:
-                build_envelope(case, text, "sample.json")
+                build_envelope(case, text, "sample.json", override)
             except EvidenceError:
                 continue
             raise AssertionError(f"{case}: {label} was accepted")
     # Descriptive scan text and a postgres URL without a password are fine.
     scan_secrets('{"in_harness_secret_scan": "PASS (password assignments scanned)",'
-                 ' "dsn_shape": "postgres://o3k@127.0.0.1/o3k"}')
+                 ' "dsn_shape": "postgres://o3k@127.0.0.1/o3k",'
+                 ' "artifact_secret_scan": {"status": "passed"}}')
+    # --source-commit is required exactly when the lane does not record one.
+    wal = json.dumps(_sample("postgres-wal-pressure"))
+    for bad in (None, "short"):
+        try:
+            build_envelope("postgres-wal-pressure", wal, "x.json", bad)
+        except EvidenceError:
+            continue
+        raise AssertionError(f"postgres-wal-pressure accepted source commit {bad!r}")
+    try:
+        build_envelope(
+            "postgres-outage", json.dumps(_sample("postgres-outage")), "x.json", "c" * 40
+        )
+    except EvidenceError:
+        pass
+    else:
+        raise AssertionError("an override was accepted for a lane that records its source")
     try:
         build_envelope("unknown-case", "{}", "x.json")
     except EvidenceError:
@@ -303,6 +367,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--case", choices=sorted(CASES))
     parser.add_argument("artifact", nargs="?")
     parser.add_argument("--envelope", help="write the normalized envelope here")
+    parser.add_argument(
+        "--source-commit",
+        help="change head commit, for lanes that record only the executed commit",
+    )
     args = parser.parse_args(argv)
     if args.self_test:
         self_test()
@@ -311,7 +379,9 @@ def main(argv: list[str]) -> int:
         parser.error("--case and ARTIFACT are required")
     artifact = Path(args.artifact)
     try:
-        envelope = build_envelope(args.case, artifact.read_text(encoding="utf-8"), artifact.name)
+        envelope = build_envelope(
+            args.case, artifact.read_text(encoding="utf-8"), artifact.name, args.source_commit
+        )
     except (OSError, EvidenceError) as error:
         print(f"PP.6 evidence for {args.case}: FAIL: {error}", file=sys.stderr)
         return 1

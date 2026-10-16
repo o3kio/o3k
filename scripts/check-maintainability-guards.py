@@ -25,7 +25,7 @@ from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from rust_source_scope import classify_rust_lines, is_dedicated_test_file
+from rust_source_scope import RustLexState, classify_rust_lines, is_dedicated_test_file
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -71,17 +71,28 @@ def rust_source_files() -> list[Path]:
 
 
 @functools.cache
-def _production_source(path: Path) -> tuple[tuple[str, ...], str]:
-    """Return (lines, source) with test-only lines blanked, computed once per run.
+def _production_source(path: Path) -> tuple[tuple[str, ...], str, str]:
+    """Return (lines, source, code) with test-only lines blanked, once per run.
 
-    The result is cached and shared by every guard, so the lines are returned
-    as an immutable tuple.
+    `code` is `source` with comments and string-literal contents removed, one
+    output line per input line, so declaration patterns can neither match
+    text inside a comment or string nor shift line numbers. The result is
+    cached and shared by every guard, so the lines are an immutable tuple.
     """
     rel = str(path.relative_to(REPO_ROOT))
     lines = path.read_text(encoding="utf-8").splitlines()
     test_lines = classify_rust_lines(lines, dedicated_test=is_dedicated_test_file(rel))
+    lexer = RustLexState()
+    code_lines = [lexer.code(line) for line in lines]
     production_lines = tuple("" if is_test else line for line, is_test in zip(lines, test_lines))
-    return production_lines, "\n".join(production_lines)
+    production_code = ("" if is_test else code for code, is_test in zip(code_lines, test_lines))
+    return production_lines, "\n".join(production_lines), "\n".join(production_code)
+
+
+def _match_lines(source: str, match: re.Match[str]) -> range:
+    """1-based line numbers covered by a regex match in `source`."""
+    first = source.count("\n", 0, match.start()) + 1
+    return range(first, first + match.group(0).count("\n") + 1)
 
 
 def _load_baseline(name: str) -> dict | None:
@@ -108,7 +119,6 @@ SQL_CAPABILITY_NAMES = r"(?:Executor|Execute|AnyExecutor)"
 # attribute's `]` on the same line, with optional `pub`/`pub(...)` visibility
 # and an optional leading `::` on the path.
 USE_DECLARATION = r"(?:^|(?<=[;{}\]]))[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?use\s+(?:::)?"
-USE_LINE = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+)?use\s")
 
 SQL_PATTERNS = [
     rf"sqlx::{SQL_API_NAMES}(?:!|\b)",
@@ -211,14 +221,18 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
         if approved:
             continue
 
-        production_lines, source = _production_source(path)
+        production_lines, _source, code = _production_source(path)
 
         # Import patterns anchor with `^[ \t]*`, not `^\s*`: `\s*` would cross
         # newlines, backtrack quadratically over blanked test lines, and report
-        # the first preceding blank line instead of the `use` line.
+        # the first preceding blank line instead of the `use` line. They run on
+        # comment- and string-free code so commented examples do not match.
+        import_lines: set[int] = set()
         for import_pattern in (SQL_IMPORT_PATTERN, SQL_NESTED_IMPORT_PATTERN):
-            for match in import_pattern.finditer(source):
-                line_number = source.count("\n", 0, match.start()) + 1
+            for match in import_pattern.finditer(code):
+                covered = _match_lines(code, match)
+                import_lines.update(covered)
+                line_number = covered.start
                 errors.append(
                     f"SQL ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
                     "  pattern: raw sqlx query/execution capability import\n"
@@ -236,7 +250,8 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
                     stripped = line.strip()
                     if stripped.startswith("//") or stripped.startswith("/*"):
                         continue
-                    if USE_LINE.match(stripped):
+                    # Already reported once by an import pattern above.
+                    if i in import_lines:
                         continue
                     errors.append(
                         f"SQL ARCHITECTURE VIOLATION: {rel}:{i}\n"
@@ -346,16 +361,19 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
             continue
 
         approved = any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS)
-        production_lines, source = _production_source(path)
+        # Declarations are matched on comment- and string-free code; the
+        # per-line checks below keep the raw lines, since shell detection
+        # needs string literals.
+        production_lines, _source, code = _production_source(path)
         shell_alias_patterns = [
             re.compile(rf"\b{re.escape(alias)}\s*::new\(\s*[\"'](?:sh|bash)[\"']")
-            for alias in _host_command_aliases(source) - {"Command"}
+            for alias in _host_command_aliases(code) - {"Command"}
         ]
 
         if not approved:
             for pattern, name in HOST_IMPORT_PATTERNS:
-                for match in pattern.finditer(source):
-                    line_number = source.count("\n", 0, match.start()) + 1
+                for match in pattern.finditer(code):
+                    line_number = _match_lines(code, match).start
                     errors.append(
                         f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
                         f"  command: {name}\n"
