@@ -12,10 +12,13 @@ SPEC-0024 database support, SPEC-0008 operation semantics, or ADR-0167
 deployment authority. The proposal is not implementation or acceptance
 evidence.
 
-Proposed amendments A1–A9 (2026-10-16), including an offline v1 backup and
-profile-tiered key custody, are listed in
+Proposed amendments A1–A9 (2026-10-16), including offline v1 backup and
+operator-held offline keys for both profiles, are listed in
 [the decision packet](../pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md#proposed-amendments-2026-10-16).
-This specification text is unchanged until those amendments are accepted.
+The refinements below incorporate the recommendations in
+[review comment 6239123579](https://github.com/o3kio/o3k/issues/975#issuecomment-6239123579).
+They remain Proposed; the comment expressly records neither required role
+decision and does not authorize implementation.
 
 ## 1. Goals and exclusions
 
@@ -87,6 +90,19 @@ aggregate ciphertext/plaintext size, compression ratio and staging-space limits
 must be selected before implementation. Exceeding any configured limit fails
 before target mutation.
 
+The revised D9/A7 recommendation is 64 members, depth 8, paths at most 1024
+UTF-8 bytes, 1 GiB per member, 4 GiB aggregate plaintext, a 16 MiB manifest,
+64 MiB format overhead and a 5 GiB complete artifact, without outer
+compression. The 1 GiB member cap includes the entire SQLite snapshot or
+PostgreSQL custom dump. Reserve `max(2 × measured source bytes + 1 GiB, 6 GiB)`
+as an enforced staging quota; the proposed reserve cap is **9 GiB**, not
+8 GiB, so a 4 GiB source can reserve its full computed need. Fail before
+capture when the full reserve is unavailable or exceeds the cap; never lower
+it to fit. Representative SQLite/PostgreSQL source, member, artifact and peak
+temporary/encryption measurements are still required before accepting these
+values. The proposed schema remains incomplete and cannot authorize runtime
+use of these bounds or the cryptographic profile by itself.
+
 JSON Schema validation is only the syntactic first pass. A semantic validator
 also rejects duplicate member names and migration versions, requires the
 backend-appropriate snapshot method, verifies the profile/backend combination,
@@ -106,6 +122,17 @@ names are rejected by an explicit name-set check; JSON Schema `uniqueItems`
 alone is not sufficient because it compares complete objects.
 
 ## 3. Consistency and backend behavior
+
+### Proposed common offline boundary
+
+Stop every store-opening O3K process and hold an exclusive data-directory
+startup/store-access lock through capture, offline signing and verified
+publication or safe abort. Every daemon, CLI and maintenance path opening the
+store must participate before any store initialization, readiness, worker,
+lease or provider activity. The current storage execution lock does not
+implement this invariant. Tests must race ordinary CLI/store access and
+supervisor restart against capture. Measure controller downtime, including
+signing, and workload data-plane continuity independently for each profile.
 
 ### SQLite profile
 
@@ -153,9 +180,9 @@ not a pass.
 For human review, the bounded default recommendation is PostgreSQL 16 custom
 format (`pg_dump -Fc`) as one opaque regular-file member, restored with the
 matching supported `pg_restore` into a fresh empty database and configured to
-stop on the first error. Stop-on-error does not make restore atomic. Any
-restore error or unknown outcome after target mutation enters
-`FAILED_RECOVERABLE`; the target remains inactive and quarantined. It is
+stop on the first error. Stop-on-error does not make restore atomic. A known
+partial restore error after target mutation enters `FAILED_RECOVERABLE`; an
+unknown outcome enters `QUARANTINED`. The target remains inactive in both cases. It is
 discarded and recreated or recovered only by an approved idempotent path.
 Activation requires complete restore plus integrity, privilege, and migration
 validation. The approved restore invocation must use `--no-owner` and
@@ -183,6 +210,32 @@ daemon quiescence is still required to align the database with O3K-owned
 configuration and protected bootstrap/trust files. PostgreSQL support does not
 imply HA or Kubernetes HA.
 
+For the offline recommendation, preventing O3K writer-role login and proving
+there are no remaining O3K writer sessions are mandatory independently of
+local daemon shutdown or local locks. This must cover controllers on other
+hosts and every permitted writer path. An uninspectable session set,
+remaining writer, new writer connection or loss of exclusion prevents capture.
+Exact privileges and the exclusion/recovery procedure remain approval items.
+
+Before any archive SQL executes, run unfiltered `pg_restore --list` without
+connecting to the target and validate the complete TOC against the trusted
+exact-migration inventory through a version-pinned normalization/classification
+policy. Account for every entry as an expected migration-owned object, expected
+data entry, explicitly allowlisted PostgreSQL/tool-generated entry, or forbidden
+entry. Pin that generated-entry allowlist and inventory mapping. Reject missing,
+unknown, duplicate and forbidden entries rather than silently filtering them
+into an apparently valid subset. Inert archive owner metadata cannot authorize
+ownership SQL; `--no-owner` and `--no-acl` remain mandatory and do not waive
+inventory validation. TOC
+matching alone cannot validate executable function bodies, triggers or default
+expressions under otherwise approved names. An approved pre-execution
+definition policy is also required; post-restore catalog comparison cannot
+undo code already executed. Then independently compare the restored catalog,
+definitions, privileges and migration identity before activation. Exact grants,
+inventory revision and definition-validation mechanism remain PENDING. The
+PostgreSQL 16 [pg_restore documentation](https://www.postgresql.org/docs/16/app-pgrestore.html)
+describes this distinction between archive listing and executable SQL.
+
 ## 4. Sensitive material, IAM and PKI
 
 All database payload and included sensitive files are encrypted before
@@ -202,6 +255,15 @@ Database restoration and activation are distinct: the restored database stays
 inactive until the accepted PKI issuer/trust recovery or replacement and
 re-enrollment checks pass.
 
+The D2/D3 recommendation uses distinct offline recovery, artifact-signing and
+journal/evidence keys; issuer replacement and agent re-enrollment are proposed
+for activation. Private recovery/signing keys never move to the controller,
+target or backup destination. Exact custodian identities, protected storage
+locations, cryptsetup/workstation versions, rotation/retention schedule and
+finite signing deadline remain PENDING in ADR-0189 or its referenced protected
+custody record. Public documents must not disclose secrets or sensitive media
+locations.
+
 ## 5. Backup publication and retry
 
 The writer persists a durable backup operation identity before beginning. If
@@ -214,6 +276,18 @@ integrity, writes the manifest and commit marker, fsyncs the directory, then
 atomically publishes the completed artifact. `COMMITTED` is visible only after
 all checks and durable publication finish. A failed or interrupted staging
 artifact is not selectable as a backup.
+
+Under D2, every backup requires a human offline signing round-trip. Persist a
+request bound to the D1 exact manifest/member-digest signature input, nonce/ID,
+site/artifact and key identity. Transfer it to the disconnected exact-release
+signing workstation for operator context confirmation, then return a detached
+response. Verify the trusted key, exact request/input and signature before
+fsync and publication. Signing timeout, cancellation or mismatched response
+cannot publish a backup. Retain private encrypted staging or safely abort;
+resume only the same request and immutable content after re-proving exclusion.
+The offline lock and staging reservation cover the signing wait, so unattended
+or scheduled backup is unsupported in v1. Tool/transport and deadline still
+require explicit acceptance.
 
 Retry uses the same operation/backup identity. It observes the existing
 staging/final path and validates it before deciding whether to resume, return
@@ -275,16 +349,38 @@ or out-of-band fencing behavior, is an ADR-0189 approval item. Normal
 post-activation reconciliation uses SPEC-0008 observe-before-retry behavior
 and existing canonical authorities.
 
+The revised D7 recommendation selects independent Redfish/BMC power-off as the
+initial backend. Observe from a trusted recovery host independent of the
+source, validate per-site BMC TLS trust and source serial, and bind source,
+site, target, actor, certificate fingerprint and timestamps in evidence signed
+by the D2 offline Ed25519 journal/evidence key. The target recovery verifier
+uses a separately installed non-revoked public key. Evidence must be at most
+five minutes old and a fresh authenticated BMC power-off observation is required
+before activation; a signature is not BMC hardware-signed telemetry or a
+substitute for independent exclusion. Reject stale, replayed, altered,
+unavailable or identity-mismatched evidence. No network-isolation backend is
+implicitly approved. Demo/TestLab without independent fencing is limited to
+capture and verify; fresh-host activation remains unsupported.
+
+Point-in-time power-off evidence is insufficient for lasting exclusion. Before
+activation, D3 issuer replacement and rejection of source credentials at every
+agent/API/provider verifier, fresh target ownership epoch and PostgreSQL
+target-only writer access must be proven. Retain independent source exclusion;
+neither lease expiry nor a signed assertion permits the source to resume.
+
 ## 7. Restore state and crash recovery
 
 Restore records durable progress outside the target DB in a protected,
 target-specific journal. Proposed states are:
 
 ```text
-PREFLIGHTED -> STAGING -> DATABASE_RESTORED -> FILES_RESTORED
--> FENCED -> STARTED -> RECONCILED -> COMMITTED
-  any phase after first target mutation and before STARTED
-    -> FAILED_RECOVERABLE (inactive quarantine)
+PREFLIGHTED -> SOURCE_FENCED -> TARGET_RESERVED -> STAGING
+-> DATABASE_RESTORED -> FILES_RESTORED -> TARGET_FENCED
+-> STARTED -> RECONCILED -> COMMITTED
+  safe abort before canonical mutation -> ABORTED
+  known partial mutation before STARTED -> FAILED_RECOVERABLE (inactive)
+  unknown outcome, lock loss or conflict -> QUARANTINED
+  verified discard/recreation only -> DISCARDED
   failure after STARTED and before COMMITTED
     -> existing controller/Operation recovery; exact stop/fence transition
        requires ADR-0189 approval
@@ -299,8 +395,41 @@ observation stops activation and reports a bounded recovery action. The
 precise placement/location of the restore journal and the fencing phase is
 subject to approval.
 
-`FAILED_RECOVERABLE` is only the pre-activation quarantine state for partial
-or unknown restore outcomes after target mutation and before `STARTED`. Durable
+The revised D8 recommendation uses a dedicated `o3k:o3k` directory (0700;
+files 0600) outside the target database on verified local ext4, compatible with
+the packaged service user. Reject network/overlay/ephemeral journal storage.
+Create reserved files with `O_EXCL`/`O_NOFOLLOW` under an owner-checked
+directory. The target-reservation lock and D4 startup/store-access lock are
+distinct: retain reservation through terminal state and require a reviewed
+continuous startup-guard handoff to the intended controller before `STARTED`.
+No release-then-start race, unrelated supervisor startup or implicit bypass is
+permitted. Exact handoff and crash behavior remain PENDING.
+
+Each forward phase requires a detached offline Ed25519 journal/evidence-key
+signature over the exact sequence, previous signed-record hash, request
+nonce/ID, operation/artifact/site/source/target and phase. Persist the request
+before transfer to the disconnected signing workstation and confirm its
+displayed context there. Persist accepted records with file fsync, same-directory
+atomic rename and parent-directory fsync. Lost responses retry only the exact
+pending request; stale/replayed/forked/skipped transitions fail closed. A
+successful restore needs roughly ten human signing round-trips, including
+`STARTED`, `RECONCILED` and `COMMITTED` while the controller runs. Signing
+attests journal bytes, not database integrity against a target-root attacker.
+
+If signing is unavailable, separate unsigned `QUARANTINED` or pre-start
+`FAILED_RECOVERABLE` stop markers may only deny progress. They are untrusted
+forensic metadata outside the signed chain, not authenticated phase changes.
+Presence blocks progress; absence proves nothing. They cannot authorize
+mutation, activation, retry, deletion, discard or reuse. If owner/lock safety
+prevents persistence, preserve the last signed state and pending request,
+report the failure and require inspection rather than writing a conflicting
+journal. Clearing a marker requires a fresh signed recovery disposition after
+complete revalidation. Startup must not infer success from a missing marker,
+free lock or old signed phase.
+
+`FAILED_RECOVERABLE` is only the pre-activation state for known partial restore
+outcomes after target mutation and before `STARTED`; unknown outcomes remain
+`QUARANTINED`. Durable
 journal state marks the target inactive and blocks API writes, provider
 dispatch, and reuse by a new restore. Recovery requires verified
 discard/recreation or a separately approved idempotent recovery path; phase
@@ -320,13 +449,21 @@ restore preflight/execute behavior, required confirmation, status/error JSON,
 exit codes, idempotency key, and secret-redaction rules. The contract must not
 advertise restore support before profile-specific evidence passes.
 
+D12/A8 recommend making that separately approved exact-release operator
+invocation and #944 runbook explicit prerequisites for operational recovery
+acceptance. Reject the proposed withdrawal/deferral of this dependency. This
+specification accepts no command names, flags or exit codes. The release
+binary, immutable artifact and supported invocation must be exercised together
+on a fresh disposable host, including interrupted/lost-response retry.
+
 ## 9. Validation and acceptance
 
 Before a PP.6 backup/restore claim, evidence is required for both persistence
 profiles that are claimed:
 
 - SQLite live-write/WAL consistency, restore and canonical inventory parity;
-- real isolated PostgreSQL dump/restore under concurrent writes;
+- real isolated PostgreSQL dump/restore with attempted concurrent writes
+  rejected by the offline writer exclusion;
 - fresh disposable host restoration and restart/reconciliation;
 - crash/restart at every declared backup and restore phase, including retry
   after a lost response for each filesystem/database/fencing side effect;
@@ -362,6 +499,17 @@ profiles that are claimed:
 - race attempts that populate backup/restore targets after preflight but before
   publish/restore;
 - zero unowned mutations before and after reconciliation.
+
+The review amendments additionally require focused negative evidence for all
+store-opening CLI/maintenance/startup paths and remote PostgreSQL writer
+exclusion; offline signing timeout/request mismatch and interruption;
+independent BMC/identity/freshness failure and old-source credential rejection;
+service-user journal permissions, unsigned marker denial-only semantics,
+startup-guard handoff and lost-lock/signing-response recovery; exact 4 GiB/9 GiB
+capacity boundaries and the single database-member cap; pre-execution TOC and
+same-name executable-definition drift; and the approved exact-release operator
+invocation. These are required test cases, not tests executed or passed by
+this proposed document revision.
 
 Every result binds source SHA, test/harness SHA, release artifact digest,
 profile, backend/server/tool version, migration identity, backup digest,
