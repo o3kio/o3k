@@ -355,6 +355,8 @@ def self_test() -> None:
     not_run = _sample("sqlite-memory-pressure")
     not_run.update({"disposition": "NOT_RUN", "reason": "capability unavailable", "source_tree": "a" * 40, "execution_tree": "b" * 40})
     assert build_envelope("sqlite-memory-pressure", json.dumps(not_run), "not-run.json")["disposition"] == "NOT_RUN"
+    not_run["disposition"] = "INFRASTRUCTURE_BLOCKED"
+    assert build_envelope("sqlite-memory-pressure", json.dumps(not_run), "blocked.json")["disposition"] == "INFRASTRUCTURE_BLOCKED"
     for value in ("postgres://user:password@host/db", "-----BEGIN PRIVATE KEY-----"):
         bad = dict(not_run)
         bad["reason"] = value
