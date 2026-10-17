@@ -10,7 +10,7 @@ if ! command -v docker >/dev/null || ! docker info --format '{{.CgroupVersion}}'
 EOF
   python3 - "$out" <<'PY'
 import json, sys
-p=sys.argv[1]; d=json.load(open(p)); d["disposition"]="INFRASTRUCTURE_BLOCKED"; d["secret_scan"]={"status":"passed","scope":"full artifact text"}; json.dump(d,open(p,"w"),sort_keys=True); open(p,"a").write("\n")
+p=sys.argv[1]; d=json.load(open(p)); d["disposition"]="INFRASTRUCTURE_BLOCKED"; d["secret_scan"]={"status":"pending","scope":"validator scans full artifact"}; json.dump(d,open(p,"w"),sort_keys=True); open(p,"a").write("\n")
 PY
   echo "INFRASTRUCTURE_BLOCKED: Docker or cgroup v2 capability unavailable; wrote $out"
   exit 0
@@ -21,7 +21,7 @@ target_dir="$(mktemp -d)"
 image_id="$(docker image inspect rust:1.97.1-bookworm --format '{{.Id}}' 2>/dev/null || true)"
 if [[ -z "$image_id" ]]; then
   source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
-  printf '%s\n' "{\"schema\":\"o3k.pp6.sqlite-memory-pressure.v1\",\"case\":\"sqlite-memory-pressure\",\"harness\":\"sqlite_memory_pressure_kills_only_child_and_replays_operation\",\"source_commit\":\"$source_commit\",\"source_tree\":\"$source_tree\",\"execution_commit\":\"$source_commit\",\"execution_tree\":\"$source_tree\",\"profile\":\"o3k-demo-v1\",\"disposition\":\"INFRASTRUCTURE_BLOCKED\",\"reason\":\"pinned image unavailable\",\"foreign_state\":{\"status\":\"not_exercised\",\"reason\":\"setup did not run\"},\"secret_scan\":{\"status\":\"passed\",\"scope\":\"full artifact text\"}}" > "$out"
+  printf '%s\n' "{\"schema\":\"o3k.pp6.sqlite-memory-pressure.v1\",\"case\":\"sqlite-memory-pressure\",\"harness\":\"sqlite_memory_pressure_kills_only_child_and_replays_operation\",\"source_commit\":\"$source_commit\",\"source_tree\":\"$source_tree\",\"execution_commit\":\"$source_commit\",\"execution_tree\":\"$source_tree\",\"profile\":\"o3k-demo-v1\",\"disposition\":\"INFRASTRUCTURE_BLOCKED\",\"reason\":\"pinned image unavailable\",\"foreign_state\":{\"status\":\"not_exercised\",\"reason\":\"setup did not run\"},\"secret_scan\":{\"status\":\"pending\",\"scope\":\"validator scans full artifact\"}}" > "$out"
   exit 0
 fi
 version_file="$(dirname "$out")/.sqlite-version.$$"
@@ -30,7 +30,7 @@ trap cleanup EXIT
 blocked() {
   local reason="$1" source_commit source_tree
   source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
-  printf '%s\n' "{\"schema\":\"o3k.pp6.sqlite-memory-pressure.v1\",\"case\":\"sqlite-memory-pressure\",\"harness\":\"sqlite_memory_pressure_kills_only_child_and_replays_operation\",\"source_commit\":\"$source_commit\",\"source_tree\":\"$source_tree\",\"execution_commit\":\"$source_commit\",\"execution_tree\":\"$source_tree\",\"profile\":\"o3k-demo-v1\",\"disposition\":\"INFRASTRUCTURE_BLOCKED\",\"reason\":\"$reason\",\"foreign_state\":{\"status\":\"not_exercised\",\"reason\":\"setup did not run\"},\"secret_scan\":{\"status\":\"passed\",\"scope\":\"full artifact text\"}}" > "$out.provisional"
+  printf '%s\n' "{\"schema\":\"o3k.pp6.sqlite-memory-pressure.v1\",\"case\":\"sqlite-memory-pressure\",\"harness\":\"sqlite_memory_pressure_kills_only_child_and_replays_operation\",\"source_commit\":\"$source_commit\",\"source_tree\":\"$source_tree\",\"execution_commit\":\"$source_commit\",\"execution_tree\":\"$source_tree\",\"profile\":\"o3k-demo-v1\",\"disposition\":\"INFRASTRUCTURE_BLOCKED\",\"reason\":\"$reason\",\"foreign_state\":{\"status\":\"not_exercised\",\"reason\":\"setup did not run\"},\"secret_scan\":{\"status\":\"pending\",\"scope\":\"validator scans full artifact\"}}" > "$out.provisional"
   python3 - "$out.provisional" <<'PY'
 import json,sys
 json.load(open(sys.argv[1]))
