@@ -5,6 +5,15 @@ set -Eeuo pipefail
 # repository-owned driver performs real joins and fails closed on missing
 # evidence boundaries.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REQUESTED_PHASE="${O3K_P15_7_PHASE:-integrated}"
+case "$REQUESTED_PHASE" in
+  s3-scale|s10-scale|s20-scale|k-min|k-full)
+    # This older journey cannot produce the complete PP.5 scale/soak evidence.
+    # Enforce the policy before creating evidence roots or touching TestLab.
+    source "$ROOT_DIR/scripts/pp5-policy.sh"
+    pp5_deferred_lane "$REQUESTED_PHASE" || exit "$?"
+    ;;
+esac
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-$ROOT_DIR/target/real-host-workflow-artifacts}"
 EVIDENCE_FILE="${O3K_P15_7_EVIDENCE_FILE:-$ARTIFACT_DIR/p15-7-scale-composition-evidence.json}"
 RUN_ID="${GITHUB_RUN_ID:-local-$$}"
@@ -144,6 +153,7 @@ observe_protected_testlab_state() {
 }
 classify_failure() {
   case "${1:-}" in
+    *EVIDENCE_GAP*|*"evidence gap"*) echo evidence_gap ;;
     *harness*|*epoch*|*precondition*|*TestLab*marker*|*testlab*marker*|*journey\ agent*) echo harness_gap ;;
     # Match the most specific crash/repair terms before the generic
     # "source" pattern: the word "resource" contains the substring
@@ -165,11 +175,20 @@ classify_failure() {
   esac
 }
 required_child_agent_ids() {
+  local phase="${1:-}" scale="${O3K_P15_7_SCALE_HOSTS:-5}" children index
+  local -a ids=()
   case "${1:-}" in
     s1-boundary) return 0 ;;
     s2-boundary) printf '%s\n' block-a ;;
-    integrated|s5-scale|1035-crash-recovery|host-maintenance)
-      printf '%s\n' block-a block-b block-c block-d block-e
+    integrated|s5-scale|s3-scale|s10-scale|s20-scale|1035-crash-recovery|host-maintenance)
+      [[ "$scale" =~ ^([3-9]|1[0-9]|20)$ ]] || return 2
+      # Include every initially joined child and the later replacement so its
+      # fresh authenticated identity is provisioned before the campaign.
+      children="$scale"
+      for ((index = 0; index < children; index++)); do
+        ids+=("block-$(printf '%b' "\\$(printf '%03o' $((97 + index)))")")
+      done
+      printf '%s\n' "${ids[@]}"
       ;;
     *) return 2 ;;
   esac
@@ -201,9 +220,22 @@ source "$ROOT_DIR/scripts/p15-7-crash-evidence-state.sh"
 source "$ROOT_DIR/scripts/p15-7-workload-image-marker.sh"
 PP5_PHASE="${O3K_P15_7_PHASE:-integrated}"
 case "${PP5_PHASE}" in
-  integrated|s5-scale|1035-crash-recovery|host-maintenance|s1-boundary|s2-boundary) ;;
+  k-min|k-full) die "unsupported PP.5 phase: ${PP5_PHASE}" ;;
+  integrated|s5-scale|s3-scale|s10-scale|s20-scale|1035-crash-recovery|host-maintenance|s1-boundary|s2-boundary) ;;
   *) die "unsupported PP.5 phase: ${PP5_PHASE}" ;;
 esac
+SCALE_HOSTS="${O3K_P15_7_SCALE_HOSTS:-5}"
+case "$PP5_PHASE" in
+  s3-scale) [[ "$SCALE_HOSTS" == 3 ]] || die "S3 requires exactly three requested eligible hosts" ;;
+  s10-scale) [[ "$SCALE_HOSTS" == 10 ]] || die "S10 requires exactly ten requested eligible hosts" ;;
+  s20-scale) [[ "$SCALE_HOSTS" == 20 ]] || die "S20 requires exactly twenty requested eligible hosts" ;;
+esac
+[[ "$SCALE_HOSTS" =~ ^([3-9]|1[0-9]|20)$ ]] || die "scale host count must be between 3 and 20"
+declare -a SCALE_CHILD_IDS=()
+for ((scale_index = 0; scale_index < SCALE_HOSTS - 1; scale_index++)); do
+  SCALE_CHILD_IDS+=("block-$(printf '%b' "\\$(printf '%03o' $((97 + scale_index)))")")
+done
+REPLACEMENT_AGENT_ID="block-$(printf '%b' "\\$(printf '%03o' $((97 + SCALE_HOSTS - 1)))")"
 REQUIRED_CHILD_AGENT_IDS=()
 required_agent_output="$(required_child_agent_ids "$PP5_PHASE")" \
   || die "unsupported PP.5 child-agent requirements: ${PP5_PHASE}"
@@ -219,6 +251,7 @@ RUN_CRASH=false
 RUN_MAINTENANCE=false
 case "${PP5_PHASE}" in
   integrated) RUN_CRASH=true; RUN_MAINTENANCE=true ;;
+  s3-scale|s10-scale|s20-scale) RUN_MAINTENANCE=true ;;
   1035-crash-recovery) RUN_CRASH=true ;;
   host-maintenance) RUN_MAINTENANCE=true ;;
 esac
@@ -1055,8 +1088,8 @@ capture_workload_failure_diagnostics() {
     "$API/operations/$operation_id" 2>/dev/null || true)"
   chmod 0600 "$WORK_ROOT/${workload_label}-state.raw.json" "$WORK_ROOT/${workload_label}-operation.raw.json" 2>/dev/null || true
   index=0
-  for agent in block-a block-b block-c block-d block-e; do
-    ip="${IPS[$index]:-}"
+  for agent in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do
+    ip="${AGENT_IPS[$agent]:-}"
     if [[ "$ip" =~ ^[0-9.]+$ ]]; then
       ssh_vm "$ip" "sudo grep -F '$operation_id' /var/log/o3k-compute.log 2>/dev/null | tail -n 80" \
         >"$WORK_ROOT/agent-$agent-events.raw.jsonl" 2>/dev/null || true
@@ -1089,7 +1122,7 @@ capture_workload_failure_diagnostics() {
   fi
   chmod 0600 "$WORK_ROOT/agent-compute-agent-events.raw.jsonl" "$WORK_ROOT/agent-compute-agent-message-probe.raw.jsonl" "$WORK_ROOT/agent-compute-agent-log-probe.raw" 2>/dev/null || true
   workload_domain="$(domain_name_for_resource "$workload_id")"
-  capture_host_state block-a "${IPS[0]:-}" "$workload_domain"
+  capture_host_state block-a "${AGENT_IPS[block-a]:-}" "$workload_domain"
   if [[ "$workload_id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
     runner_domain="$workload_domain"
     capture_host_state compute-agent "" "$runner_domain"
@@ -1376,7 +1409,7 @@ for agent_id in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do
 done
 
 declare -a DOMAINS=() UUIDS=() OVERLAYS=() SEEDS=() SERIALS=() IPS=()
-declare -A BLOCK_IDS=()
+declare -A BLOCK_IDS=() VM_INDEX=() AGENT_IPS=()
 OS_IMAGE_ID="" OS_KEYPAIR_NAME="" OS_NETWORK_ID="" OS_SUBNET_ID="" OS_PORT_A_ID="" OS_PORT_B_ID="" OS_FLAVOR_ID=""
 OS_WORKLOAD_A="" OS_WORKLOAD_B="" OS_WORKLOAD_C="" OS_WORKLOAD_D="" OS_WORKLOAD_M=""
 # Run-scoped objects the #1035 crash-injection and #1033 maintenance legs
@@ -2060,7 +2093,21 @@ install_agent() {
 
 register_vm() {
   local id="$1" d="o3k-p15-7-$RUN_ID-$1" overlay="$LIBVIRT_STORAGE_ROOT/$1.qcow2" seed="$LIBVIRT_STORAGE_ROOT/$1-seed.iso" serial="$LIBVIRT_STORAGE_ROOT/$1-serial.log"
+  [[ -z "${VM_INDEX[$id]:-}" ]] || die "duplicate run-owned VM registration: $id"
+  VM_INDEX[$id]="${#DOMAINS[@]}"
   DOMAINS+=("$d"); UUIDS+=(""); OVERLAYS+=("$overlay"); SEEDS+=("$seed"); SERIALS+=("$serial")
+}
+record_vm_provision_result() {
+  local id="$1" index="${VM_INDEX[$1]:-}" ip uuid
+  [[ "$index" =~ ^[0-9]+$ ]] || die "run-owned VM index is missing: $id"
+  [[ -s "$WORK_ROOT/$id-ip" && -s "$WORK_ROOT/$id-uuid" ]] || die "VM provisioning result missing: $id"
+  ip="$(<"$WORK_ROOT/$id-ip")"
+  uuid="$(<"$WORK_ROOT/$id-uuid")"
+  [[ "$ip" =~ ^[0-9.]+$ && "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] \
+    || die "VM provisioning identity is malformed: $id"
+  AGENT_IPS[$id]="$ip"
+  IPS[$index]="$ip"
+  UUIDS[$index]="$uuid"
 }
 provision_vms_bounded() {
   local id pid rc=0 status index=0
@@ -2088,11 +2135,8 @@ provision_vms_bounded() {
       && P15_PROVISION_DIAGNOSTICS_CAPTURED=true
     die "bounded VM provisioning failed; inspect p15-7-provisioning-diagnostics.json"
   fi
-  IPS=()
   for id in "$@"; do
-    [[ -s "$WORK_ROOT/$id-ip" && -s "$WORK_ROOT/$id-uuid" ]] || die "VM provisioning result missing: $id"
-    IPS+=("$(<"$WORK_ROOT/$id-ip")")
-    UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/$id-uuid")"
+    record_vm_provision_result "$id"
   done
 }
 run_checkpoint_path_diagnostic() {
@@ -2115,13 +2159,16 @@ case "$PP5_PHASE" in
     # Add one independently booted compute guest to establish the first
     # two-host topology transition.
     provision_vms_bounded block-a
-    join_block block-a "${IPS[0]}"
-    install_agent block-a "${IPS[0]}"
+    join_block block-a "${AGENT_IPS[block-a]}"
+    install_agent block-a "${AGENT_IPS[block-a]}"
     ;;
   *)
-    provision_vms_bounded block-a block-b
-    join_block block-a "${IPS[0]}"; join_block block-b "${IPS[1]}"
-    install_agent block-a "${IPS[0]}"; install_agent block-b "${IPS[1]}"
+    provision_vms_bounded "${SCALE_CHILD_IDS[0]}" "${SCALE_CHILD_IDS[1]}"
+    for scale_index in 0 1; do
+      scale_agent="${SCALE_CHILD_IDS[$scale_index]}"
+      join_block "$scale_agent" "${AGENT_IPS[$scale_agent]}"
+      install_agent "$scale_agent" "${AGENT_IPS[$scale_agent]}"
+    done
     ;;
 esac
 # BuildingBlock lifecycle and operator diagnostics are deliberately
@@ -2614,12 +2661,6 @@ if [[ "$PP5_PHASE" == s1-boundary ]]; then
   : # Exact bootstrap-only topology and zero allocations were checked above.
 elif [[ "$PP5_PHASE" == s2-boundary ]]; then
   : # Exact bootstrap-plus-block-a topology and zero allocations were checked above.
-else
-python3 - "$WORK_ROOT/blocks.json" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" <<'PY'
-import json,sys
-ids={x.get('block',{}).get('id') for x in json.load(open(sys.argv[1]))}
-assert sys.argv[2] in ids and sys.argv[3] in ids and len(ids)>=2
-PY
 fi
 
 # Araf is an optional external consumer, never an O3K/TestLab dependency.  If
@@ -2783,55 +2824,40 @@ if [[ "$PP5_PHASE" == s1-boundary || "$PP5_PHASE" == s2-boundary ]]; then
   exit 0
 fi
 
-# Add a third genuine VM/block before any drain. Capacity must grow in the
-# canonical diagnostics projection; a second logical object on one host is not
-# sufficient evidence.
-register_vm block-c; provision_vm block-c
-IPS+=("$(<"$WORK_ROOT/block-c-ip")")
-UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/block-c-uuid")"
-join_block block-c "${IPS[2]}"; install_agent block-c "${IPS[2]}"
-CAPACITY_AFTER_ADD=""
-for _ in $(seq 1 60); do
-  api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-after-add.json" || true
-  CAPACITY_AFTER_ADD="$(capacity_total "$WORK_ROOT/capacity-after-add.json" 2>/dev/null || true)"
-  [[ "$CAPACITY_AFTER_ADD" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_ADD" -gt "$CAPACITY_BEFORE" ]] && break
-  sleep 2
+# Add every remaining genuine child host. Each authenticated join must raise
+# the canonical capacity projection before another host is admitted.
+for ((scale_index = 2; scale_index < ${#SCALE_CHILD_IDS[@]}; scale_index++)); do
+  scale_agent="${SCALE_CHILD_IDS[$scale_index]}"
+  CAPACITY_BEFORE_JOIN=""
+  for _ in $(seq 1 60); do
+    api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-before-$scale_agent.json" || true
+    CAPACITY_BEFORE_JOIN="$(capacity_total "$WORK_ROOT/capacity-before-$scale_agent.json" 2>/dev/null || true)"
+    [[ "$CAPACITY_BEFORE_JOIN" =~ ^[1-9][0-9]*$ ]] && break
+    sleep 2
+  done
+  [[ "$CAPACITY_BEFORE_JOIN" =~ ^[1-9][0-9]*$ ]] \
+    || die "canonical capacity baseline is unavailable before joining $scale_agent"
+  provision_vms_bounded "$scale_agent"
+  join_block "$scale_agent" "${AGENT_IPS[$scale_agent]}"
+  install_agent "$scale_agent" "${AGENT_IPS[$scale_agent]}"
+  CAPACITY_AFTER_JOIN=""
+  for _ in $(seq 1 60); do
+    api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-after-$scale_agent.json" || true
+    CAPACITY_AFTER_JOIN="$(capacity_total "$WORK_ROOT/capacity-after-$scale_agent.json" 2>/dev/null || true)"
+    [[ "$CAPACITY_AFTER_JOIN" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_JOIN" -gt "$CAPACITY_BEFORE_JOIN" ]] && break
+    sleep 2
+  done
+  [[ "$CAPACITY_AFTER_JOIN" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_JOIN" -gt "$CAPACITY_BEFORE_JOIN" ]] \
+    || die "Placement capacity did not grow after enrolling $scale_agent"
 done
-[[ "$CAPACITY_AFTER_ADD" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_ADD" -gt "$CAPACITY_BEFORE" ]] \
-  || die "Placement capacity did not grow after adding a genuine block"
 
-# A fourth genuine child VM completes the initial S5 topology: the bootstrap
-# compute-agent (genuine Small Edge capacity by product design, SPEC-0048
-# §4.1/§5) plus block-a..block-d must yield EXACTLY five placement-eligible
-# Ready BuildingBlocks. Every join is validated against the settled capacity
-# baseline of the CURRENT topology measured before that join; comparing the
-# new total against the pre-join fleet is what makes growth observable.
-register_vm block-d; provision_vm block-d
-IPS+=("$(<"$WORK_ROOT/block-d-ip")")
-UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/block-d-uuid")"
-join_block block-d "${IPS[3]}"; install_agent block-d "${IPS[3]}"
-CAPACITY_AFTER_D=""
-for _ in $(seq 1 60); do
-  api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-after-d.json" || true
-  CAPACITY_AFTER_D="$(capacity_total "$WORK_ROOT/capacity-after-d.json" 2>/dev/null || true)"
-  [[ "$CAPACITY_AFTER_D" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_D" -gt "$CAPACITY_AFTER_ADD" ]] && break
-  sleep 2
+INITIAL_CHILD_BLOCK_IDS=""
+for scale_agent in "${SCALE_CHILD_IDS[@]}"; do
+  INITIAL_CHILD_BLOCK_IDS+="${INITIAL_CHILD_BLOCK_IDS:+,}${BLOCK_IDS[$scale_agent]}"
 done
-[[ "$CAPACITY_AFTER_D" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_D" -gt "$CAPACITY_AFTER_ADD" ]] \
-  || die "Placement capacity did not grow after enrolling the fourth block"
-
-# Eligibility-based initial scale checkpoint: enumerate every canonical
-# BuildingBlock — bootstrap block included, identified by the TLS agent
-# identity — and require the eligible Ready set to be EXACTLY five. Scale
-# cardinality is canonical compute-capable + Placement-eligible + Ready
-# BuildingBlocks (see record_scale_checkpoint), never VM count, configured
-# ids, host labels, or block-* name prefixes. The drain below only shrinks
-# the topology; block-e later restores the same eligible concurrency after
-# the drain/remove/replacement cycle.
-INITIAL_READY_COUNT="$(record_scale_checkpoint initial-scale-checkpoint 5 "" \
-  "${BLOCK_IDS[block-a]},${BLOCK_IDS[block-b]},${BLOCK_IDS[block-c]},${BLOCK_IDS[block-d]}")" \
-  || die "initial eligible Ready count is not exactly five"
-[[ "$INITIAL_READY_COUNT" == 5 ]] || die "initial eligible Ready count is not exactly five"
+INITIAL_READY_COUNT="$(record_scale_checkpoint initial-scale-checkpoint "$SCALE_HOSTS" "" \
+  "$INITIAL_CHILD_BLOCK_IDS")" || die "initial eligible Ready count is not exactly $SCALE_HOSTS"
+[[ "$INITIAL_READY_COUNT" == "$SCALE_HOSTS" ]] || die "initial eligible Ready count is not exactly $SCALE_HOSTS"
 # The bootstrap block's canonical id, resolved from the checkpoint evidence.
 # Placement truth selects the drain target; when that target IS the bootstrap
 # block its removal legitimately erases the bootstrap identity from every
@@ -2890,18 +2916,18 @@ DRAIN_ID="$(python3 "$ROOT_DIR/scripts/resolve-p15-7-placement-block.py" \
   "$WORK_ROOT/blocks.json" "$DRAIN_AGENT")" \
   || die "workload A placement host has no unique ready canonical block/provider mapping"
 
-# Pre-drain checkpoint: the eligible topology is still exactly five. Workload
+# Pre-drain checkpoint: the eligible topology is still at the requested
+# scale. Workload
 # residency is not an eligibility signal — drain blockers are derived at the
 # drain transition itself, so a resident workload never changes this count.
-record_scale_checkpoint pre-drain 5 "" \
-  "${BLOCK_IDS[block-a]},${BLOCK_IDS[block-b]},${BLOCK_IDS[block-c]},${BLOCK_IDS[block-d]}" \
-  >/dev/null || die "pre-drain eligible Ready count is not exactly five"
+record_scale_checkpoint pre-drain "$SCALE_HOSTS" "" "$INITIAL_CHILD_BLOCK_IDS" \
+  >/dev/null || die "pre-drain eligible Ready count is not exactly $SCALE_HOSTS"
 # The surviving initial child identities after the (not yet issued) removal;
 # Placement may legitimately have hosted workload A on the bootstrap agent, in
 # which case all four children survive and the drain/remove targets the
 # bootstrap block instead.
 SURVIVOR_IDS=""
-for survivor in block-a block-b block-c block-d; do
+for survivor in "${SCALE_CHILD_IDS[@]}"; do
   [[ "${BLOCK_IDS[$survivor]}" == "$DRAIN_ID" ]] && continue
   SURVIVOR_IDS+="${BLOCK_IDS[$survivor]},"
 done
@@ -3000,9 +3026,10 @@ PY
 
 # Post-drain checkpoint: the drained block is no longer placement-eligible
 # (state "draining", its Placement provider is closed to new work), so the
-# eligible Ready set is exactly four until the replacement joins.
-record_scale_checkpoint post-drain 4 "" "$SURVIVOR_IDS" \
-  >/dev/null || die "post-drain eligible Ready count is not exactly four"
+# eligible Ready set is one below the requested scale until replacement joins.
+POST_DRAIN_EXPECT=$((SCALE_HOSTS - 1))
+record_scale_checkpoint post-drain "$POST_DRAIN_EXPECT" "" "$SURVIVOR_IDS" \
+  >/dev/null || die "post-drain eligible Ready count is not exactly $POST_DRAIN_EXPECT"
 
 # A second constrained workload must still converge, and the drained provider
 # must not be selected.  The OpenStack host projection is the public placement
@@ -3119,28 +3146,27 @@ if workload_blockers:
     raise SystemExit("deleted workload still reported as a workload drain blocker")
 PY
 
-# Remove the drained block, then provision the fifth child VM and enroll its
-# new identity (block-e) as the replacement. block-e's shared-array slot is
-# appended last so block-a..block-d keep their stable indices ([0..3]);
-# block-e is fixed at [4].
+# Remove the drained block, then provision a new child VM identity as the
+# replacement. It is appended after the initial guests so all initial VM
+# array indexes remain stable for cleanup and reboot observations.
 REMOVE_GEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["block"]["generation"])' "$WORK_ROOT/drain.json")"
 operator_curl "$API/operator/building-blocks/$DRAIN_ID/actions/remove" -X POST -H 'Content-Type: application/json' -d "{\"expected_generation\":$REMOVE_GEN}" >"$WORK_ROOT/remove.json" || die "block removal failed"
 [[ "$DRAIN_ID" != "$BOOTSTRAP_BLOCK_ID" ]] || BOOTSTRAP_REMOVED=true
 POST_REMOVE_BOOTSTRAP_EXPECT=present
 [[ "$BOOTSTRAP_REMOVED" == true ]] && POST_REMOVE_BOOTSTRAP_EXPECT=absent
 # Post-remove checkpoint: the removed identity is absent from the canonical
-# topology and the eligible Ready set is exactly four (the surviving initial
+# topology and the eligible Ready set is one below target (the surviving initial
 # identities — children, or children plus the bootstrap block when a child
 # was drained).
-record_scale_checkpoint post-remove 4 "$DRAIN_ID" "$SURVIVOR_IDS" \
+record_scale_checkpoint post-remove "$POST_DRAIN_EXPECT" "$DRAIN_ID" "$SURVIVOR_IDS" \
   "$POST_REMOVE_BOOTSTRAP_EXPECT" \
-  >/dev/null || die "post-remove eligible Ready count is not exactly four"
+  >/dev/null || die "post-remove eligible Ready count is not exactly $POST_DRAIN_EXPECT"
 # Settle the post-removal topology before enrolling the replacement. The
 # baseline must describe the CURRENT topology; reading the total only after
 # block-e joins would compare the new total against itself and could never
 # observe growth. The canonical aggregate retains a removed provider's durable
 # inventory rows, so the settled baseline is observed honestly from the
-# diagnostics projection and block-e must push the total above it.
+# diagnostics projection and the replacement must push the total above it.
 CAPACITY_AFTER_REMOVE=""
 for _ in $(seq 1 60); do
   api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-after-remove.json" || true
@@ -3150,34 +3176,35 @@ for _ in $(seq 1 60); do
 done
 [[ "$CAPACITY_AFTER_REMOVE" =~ ^[1-9][0-9]*$ ]] \
   || die "Placement capacity was not honest after removing the drained block"
-register_vm block-e; provision_vm block-e
-IPS+=("$(<"$WORK_ROOT/block-e-ip")")
-UUIDS[$((${#IPS[@]} - 1))]="$(<"$WORK_ROOT/block-e-uuid")"
-join_block block-e "${IPS[4]}"; install_agent block-e "${IPS[4]}"
-CAPACITY_AFTER_E=""
+register_vm "$REPLACEMENT_AGENT_ID"; provision_vm "$REPLACEMENT_AGENT_ID"
+record_vm_provision_result "$REPLACEMENT_AGENT_ID"
+REPLACEMENT_INDEX="${VM_INDEX[$REPLACEMENT_AGENT_ID]}"
+join_block "$REPLACEMENT_AGENT_ID" "${AGENT_IPS[$REPLACEMENT_AGENT_ID]}"
+install_agent "$REPLACEMENT_AGENT_ID" "${AGENT_IPS[$REPLACEMENT_AGENT_ID]}"
+CAPACITY_AFTER_REPLACEMENT=""
 for _ in $(seq 1 60); do
-  api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-after-e.json" || true
-  CAPACITY_AFTER_E="$(capacity_total "$WORK_ROOT/capacity-after-e.json" 2>/dev/null || true)"
-  [[ "$CAPACITY_AFTER_E" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_E" -gt "$CAPACITY_AFTER_REMOVE" ]] && break
+  api_get /operator/diagnostics/capacity >"$WORK_ROOT/capacity-after-replacement.json" || true
+  CAPACITY_AFTER_REPLACEMENT="$(capacity_total "$WORK_ROOT/capacity-after-replacement.json" 2>/dev/null || true)"
+  [[ "$CAPACITY_AFTER_REPLACEMENT" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_REPLACEMENT" -gt "$CAPACITY_AFTER_REMOVE" ]] && break
   sleep 2
 done
-[[ "$CAPACITY_AFTER_E" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_E" -gt "$CAPACITY_AFTER_REMOVE" ]] \
+[[ "$CAPACITY_AFTER_REPLACEMENT" =~ ^[1-9][0-9]*$ && "$CAPACITY_AFTER_REPLACEMENT" -gt "$CAPACITY_AFTER_REMOVE" ]] \
   || die "Placement capacity did not grow after enrolling the replacement block"
-# Final S5 topology checkpoint: the eligible Ready set must be EXACTLY five
-# again — the surviving initial identities plus block-e — with the drained
+# Final topology checkpoint: the eligible Ready set must return to the exact
+# requested count — the surviving initial identities plus the replacement — with the drained
 # identity absent and no duplicate BuildingBlock or ResourceProvider identity
-# anywhere in the canonical topology.  When Placement selected the bootstrap
+# anywhere in the canonical topology. When Placement selected the bootstrap
 # block as the drain target, the bootstrap identity legitimately stays
-# removed and block-e takes its eligible slot (Case A scale semantics).
-FINAL_READY_COUNT="$(record_scale_checkpoint post-replacement 5 "$DRAIN_ID" \
-  "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" "$POST_REMOVE_BOOTSTRAP_EXPECT")" \
-  || die "post-replacement eligible Ready count is not exactly five"
-[[ "$FINAL_READY_COUNT" == 5 ]] || die "post-replacement eligible Ready count is not exactly five"
+# removed and the replacement takes its eligible slot (Case A scale semantics).
+FINAL_READY_COUNT="$(record_scale_checkpoint post-replacement "$SCALE_HOSTS" "$DRAIN_ID" \
+  "$SURVIVOR_IDS,${BLOCK_IDS[$REPLACEMENT_AGENT_ID]}" "$POST_REMOVE_BOOTSTRAP_EXPECT")" \
+  || die "post-replacement eligible Ready count is not exactly $SCALE_HOSTS"
+[[ "$FINAL_READY_COUNT" == "$SCALE_HOSTS" ]] || die "post-replacement eligible Ready count is not exactly $SCALE_HOSTS"
 PEAK_CONCURRENT_READY="$INITIAL_READY_COUNT"
 if [[ "$FINAL_READY_COUNT" -gt "$PEAK_CONCURRENT_READY" ]]; then
   PEAK_CONCURRENT_READY="$FINAL_READY_COUNT"
 fi
-[[ "$PEAK_CONCURRENT_READY" -ge 5 ]] || die "peak concurrent Ready count is below five"
+[[ "$PEAK_CONCURRENT_READY" -ge "$SCALE_HOSTS" ]] || die "peak concurrent Ready count is below requested scale"
 
 # Real negative probes: these requests must be rejected by the production API.
 # The axum JSON extractor rejects the credential-less body (missing required
@@ -3277,14 +3304,14 @@ else
   for _ in $(seq 1 60); do sudo -n docker exec "$PG_CONTAINER" pg_isready -U o3k -d o3k_test >/dev/null 2>&1 && break; sleep 1; done
   sudo -n docker exec "$PG_CONTAINER" pg_isready -U o3k -d o3k_test >/dev/null 2>&1 || die "PostgreSQL did not recover"
 fi
-# Post-reboot checkpoint: the orderly control-plane restart and the
-# PostgreSQL fault gate must not change the eligible topology — still exactly
-# five (bootstrap + survivors + block-e), drained identity still absent.
-record_scale_checkpoint post-reboot 5 "$DRAIN_ID" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
+# Post-reboot checkpoint: restarts must not change the requested eligible
+# topology, and the drained identity must remain absent.
+record_scale_checkpoint post-reboot "$SCALE_HOSTS" "$DRAIN_ID" \
+  "$SURVIVOR_IDS,${BLOCK_IDS[$REPLACEMENT_AGENT_ID]}" \
   "$POST_REMOVE_BOOTSTRAP_EXPECT" \
-  >/dev/null || die "post-reboot eligible Ready count is not exactly five"
+  >/dev/null || die "post-reboot eligible Ready count is not exactly $SCALE_HOSTS"
 STREAM_REQUIRED_PROVIDERS=""
-for provider in compute-agent block-a block-b block-c block-d block-e; do
+for provider in "compute-agent" "${REQUIRED_CHILD_AGENT_IDS[@]}"; do
   [[ "$provider" == "$DRAIN_AGENT" ]] && continue
   STREAM_REQUIRED_PROVIDERS+="${STREAM_REQUIRED_PROVIDERS:+,}$provider"
 done
@@ -4329,9 +4356,10 @@ persist_crash_checkpoint completed passed \
   caller_supplied_preserved "$CALLER_SUPPLIED_PRESERVED" foreign_preserved "$FOREIGN_PRESERVED" \
   contending_create_request_accepted true contending_create_bound_ms "$CONTENDING_CREATE_BOUND_MS" \
   repair_pause_released_after_create_start "$CRASH_REPAIR_PAUSE_RELEASED_AFTER_CREATE"
-record_scale_checkpoint post-crash-repair 5 "" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
+record_scale_checkpoint post-crash-repair "$SCALE_HOSTS" "" \
+  "$SURVIVOR_IDS,${BLOCK_IDS[$REPLACEMENT_AGENT_ID]}" \
   "$POST_REMOVE_BOOTSTRAP_EXPECT" \
-  >/dev/null || die "post-crash-repair eligible Ready count is not exactly five"
+  >/dev/null || die "post-crash-repair eligible Ready count is not exactly $SCALE_HOSTS"
 fi
 
 if [[ "${RUN_MAINTENANCE}" != true ]]; then
@@ -4339,7 +4367,7 @@ if [[ "${RUN_MAINTENANCE}" != true ]]; then
 fi
 
 # ── #1033 host-maintenance leg ─────────────────────────────────────────────
-# Planned maintenance on one eligible child hypervisor (block-e), per the
+# Planned maintenance on one eligible replacement child hypervisor, per the
 # accepted contract in docs/operations/pp5-host-maintenance.md: drain it, show
 # new placement is rejected there, resolve the (empty) blocker set, reboot the
 # child domain from the outer host, and prove canonical identity preservation
@@ -4350,10 +4378,10 @@ fi
 # which is a harness anti-hang control for minimal images and never a product
 # path.
 MAINT_EVIDENCE_FILE="$ARTIFACT_DIR/p15-7-host-maintenance-evidence.json"
-MAINT_ID="${BLOCK_IDS[block-e]}"
-MAINT_UUID="${UUIDS[4]}"
-MAINT_DOMAIN="${DOMAINS[4]}"
-MAINT_SERIAL="${SERIALS[4]}"
+MAINT_ID="${BLOCK_IDS[$REPLACEMENT_AGENT_ID]}"
+MAINT_UUID="${UUIDS[$REPLACEMENT_INDEX]}"
+MAINT_DOMAIN="${DOMAINS[$REPLACEMENT_INDEX]}"
+MAINT_SERIAL="${SERIALS[$REPLACEMENT_INDEX]}"
 MAINT_PROVIDER_IDS_BEFORE=""
 MAINT_EXEC_IDENTITY_BEFORE=""
 MAINT_DRAIN_BLOCKERS_EMPTY=false
@@ -4450,7 +4478,7 @@ OS_WORKLOAD_M=""
 # Planned host reboot from the outer host, then wait bounded for the child to
 # return. The address is re-resolved through the MAC-bound resolver on every
 # retry (a DHCP lease is not liveness proof).
-MAINT_BOOT_ID_BEFORE="$(readiness_probe block-e "maintenance-boot-id-before" "${IPS[4]}" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
+MAINT_BOOT_ID_BEFORE="$(readiness_probe "$REPLACEMENT_AGENT_ID" "maintenance-boot-id-before" "${AGENT_IPS[$REPLACEMENT_AGENT_ID]}" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
 [[ "$MAINT_BOOT_ID_BEFORE" =~ ^[0-9a-fA-F-]{36}$ ]] || die "could not capture maintenance guest boot identity before reboot"
 MAINT_BOOT_ID_BEFORE_MS="$(date +%s%3N)"
 python3 - "$ARTIFACT_DIR/maintenance-boot-identity-before.json" "$RUN_ID" "$SOURCE_SHA" "$MAINT_ID" "$MAINT_EXEC_IDENTITY_BEFORE" "$MAINT_UUID" "$MAINT_BOOT_ID_BEFORE" "$MAINT_BOOT_ID_BEFORE_MS" <<'PY'
@@ -4463,9 +4491,9 @@ pathlib.Path(out).write_text(json.dumps({"run_id": run_id, "source_sha": source_
 PY
 MAINT_REBOOT_REQUEST_MS="$(date +%s%3N)"
 virsh -c qemu:///system reboot "$MAINT_UUID" >/dev/null || die "maintenance child reboot failed"
-MAINT_IP_AFTER="$(wait_vm_rebooted "$MAINT_DOMAIN" "$MAINT_UUID" "$(<"$WORK_ROOT/block-e-mac")" "$MAINT_SERIAL" block-e "$MAINT_BOOT_ID_BEFORE")" \
+MAINT_IP_AFTER="$(wait_vm_rebooted "$MAINT_DOMAIN" "$MAINT_UUID" "$(<"$WORK_ROOT/$REPLACEMENT_AGENT_ID-mac")" "$MAINT_SERIAL" "$REPLACEMENT_AGENT_ID" "$MAINT_BOOT_ID_BEFORE")" \
   || die "maintenance child did not become SSH-reachable after reboot"
-MAINT_BOOT_ID_AFTER="$(readiness_probe block-e "maintenance-boot-id-after" "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
+MAINT_BOOT_ID_AFTER="$(readiness_probe "$REPLACEMENT_AGENT_ID" "maintenance-boot-id-after" "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n' || true)"
 [[ "$MAINT_BOOT_ID_AFTER" =~ ^[0-9a-fA-F-]{36}$ && "$MAINT_BOOT_ID_AFTER" != "$MAINT_BOOT_ID_BEFORE" ]] \
   || die "maintenance guest boot identity did not change after reboot"
 MAINT_BOOT_ID_AFTER_MS="$(date +%s%3N)"
@@ -4484,7 +4512,7 @@ ssh_vm "$MAINT_IP_AFTER" "sudo cloud-init status --wait" >/dev/null 2>&1 || true
 # host shutdown posture — see docs/operations/pp5-host-maintenance.md), so the
 # journey models the operator restarting the host service after maintenance:
 # same agent id, same TLS identity, same data directory.
-ssh_vm "$MAINT_IP_AFTER" "sudo pkill -x o3k-compute || true; sudo sh -c 'RUST_LOG=$COMPUTE_LOG_FILTER O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=block-e-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup /usr/local/bin/o3k-compute >/var/log/o3k-compute.log 2>&1 &'" \
+ssh_vm "$MAINT_IP_AFTER" "sudo pkill -x o3k-compute || true; sudo sh -c 'RUST_LOG=$COMPUTE_LOG_FILTER O3K_COMPUTE_CONTROL_ENDPOINT=https://o3k-control-plane:$CONTROL_PORT O3K_COMPUTE_SERVER_NAME=o3k-control-plane O3K_COMPUTE_TLS_DIR=/etc/o3k/tls O3K_COMPUTE_DATA_DIR=/var/lib/o3k-compute O3K_COMPUTE_HOST_LABEL=${REPLACEMENT_AGENT_ID}-host O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:19101 O3K_COMPUTE_MAX_DISK_GB=10 nohup /usr/local/bin/o3k-compute >/var/log/o3k-compute.log 2>&1 &'" \
   || die "maintenance agent restart failed"
 for _ in $(seq 1 90); do ssh_vm "$MAINT_IP_AFTER" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 && break; sleep 2; done
 ssh_vm "$MAINT_IP_AFTER" curl -fsS http://127.0.0.1:19101/readyz >/dev/null 2>&1 || die "maintenance agent did not become ready after reboot"
@@ -4572,10 +4600,11 @@ PY
 done
 [[ "$MAINT_PROVIDER_STATE" == Enabled ]] || die "maintenance block provider did not reopen after the ready transition"
 MAINT_RETURNED_TO_READY=true
-MAINT_FINAL_ELIGIBLE="$(record_scale_checkpoint post-maintenance 5 "" "$SURVIVOR_IDS,${BLOCK_IDS[block-e]}" \
+MAINT_FINAL_ELIGIBLE="$(record_scale_checkpoint post-maintenance "$SCALE_HOSTS" "" \
+  "$SURVIVOR_IDS,${BLOCK_IDS[$REPLACEMENT_AGENT_ID]}" \
   "$POST_REMOVE_BOOTSTRAP_EXPECT")" \
-  || die "post-maintenance eligible Ready count is not exactly five"
-[[ "$MAINT_FINAL_ELIGIBLE" == 5 ]] || die "post-maintenance eligible Ready count is not exactly five"
+  || die "post-maintenance eligible Ready count is not exactly $SCALE_HOSTS"
+[[ "$MAINT_FINAL_ELIGIBLE" == "$SCALE_HOSTS" ]] || die "post-maintenance eligible Ready count is not exactly $SCALE_HOSTS"
 python3 - "$MAINT_EVIDENCE_FILE" "$MAINT_ID" "$MAINT_EXEC_IDENTITY_BEFORE" "$MAINT_PROVIDER_IDS_BEFORE" \
   "$MAINT_DRAIN_BLOCKERS_EMPTY" "$MAINT_PLACEMENT_REJECTED" "$MAINT_AGENT_RECONNECTED" "$MAINT_IDENTITY_PRESERVED" \
   "$MAINT_RETURNED_TO_READY" "$MAINT_FINAL_ELIGIBLE" "$MAINT_BOOT_ID_BEFORE" "$MAINT_BOOT_ID_AFTER" <<'PY'
@@ -4667,17 +4696,25 @@ assert_owned_domains_absent
 [[ ! -e "$SSH_KEY" && ! -e "$KNOWN_HOSTS" ]] || die "owned journey files remain after cleanup"
 JOURNEY_END_MS="$(date +%s%3N)"
 
-PYTHONPATH="$ROOT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 - "$EVIDENCE_FILE" "$ARTIFACT_DIR" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" "$POSTGRES_MODE" "$POSTGRES_SERVER_VERSION" "$POSTGRES_REDACTED_ENDPOINT" "$POSTGRES_SCHEMA_PREPARED" "$INITIAL_READY_COUNT" "$FINAL_READY_COUNT" "$PEAK_CONCURRENT_READY" "$DRAIN_AGENT" "$BOOTSTRAP_AGENT_ID" "${BLOCK_IDS[block-a]}" "${BLOCK_IDS[block-b]}" "${BLOCK_IDS[block-c]}" "${BLOCK_IDS[block-d]}" "${BLOCK_IDS[block-e]}" "$BACKEND_EFFECTIVE" "$BACKEND_PROOF_METHOD" "$BACKEND_PROOF_POOL_SESSIONS" "$BACKEND_PROOF_SEVER_OBSERVED" "$BACKEND_PROOF_RECOVERY_OBSERVED" "$PREFLIGHT_ARTIFACT" "$CHECKOUT_HEAD" "$TREE_CLEAN" "$HARNESS_DIGEST" "$PP5_PHASE" <<'PY'
+CHILD_BLOCK_IDS_CSV=""
+for scale_agent in "${SCALE_CHILD_IDS[@]}" "$REPLACEMENT_AGENT_ID"; do
+  CHILD_BLOCK_ID="${BLOCK_IDS[$scale_agent]:-}"
+  [[ "$CHILD_BLOCK_ID" =~ ^[0-9a-fA-F-]{36}$ ]] \
+    || die "canonical BuildingBlock missing from final scale evidence: $scale_agent"
+  CHILD_BLOCK_IDS_CSV+="${CHILD_BLOCK_IDS_CSV:+,}${CHILD_BLOCK_ID}"
+done
+
+PYTHONPATH="$ROOT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 - "$EVIDENCE_FILE" "$ARTIFACT_DIR" "$SOURCE_SHA" "$PROFILE" "${#DOMAINS[@]}" "$JOURNEY_START_MS" "$JOURNEY_END_MS" "$CROSS_TENANT_CONCEALMENT" "$ARAF_STATUS" "$ARAF_REASON" "$DIAGNOSTIC_ONLY" "$POSTGRES_MODE" "$POSTGRES_SERVER_VERSION" "$POSTGRES_REDACTED_ENDPOINT" "$POSTGRES_SCHEMA_PREPARED" "$INITIAL_READY_COUNT" "$FINAL_READY_COUNT" "$PEAK_CONCURRENT_READY" "$DRAIN_AGENT" "$BOOTSTRAP_AGENT_ID" "$CHILD_BLOCK_IDS_CSV" "$BACKEND_EFFECTIVE" "$BACKEND_PROOF_METHOD" "$BACKEND_PROOF_POOL_SESSIONS" "$BACKEND_PROOF_SEVER_OBSERVED" "$BACKEND_PROOF_RECOVERY_OBSERVED" "$PREFLIGHT_ARTIFACT" "$CHECKOUT_HEAD" "$TREE_CLEAN" "$HARNESS_DIGEST" "$PP5_PHASE" <<'PY'
 from p15_7_scale_semantics import validate_bootstrap_scale_membership
-import json,pathlib,sys
-path=pathlib.Path(sys.argv[1]); artifact=pathlib.Path(sys.argv[2]); sha=sys.argv[3].lower(); profile=sys.argv[4]; blocks=int(sys.argv[5]); start=int(sys.argv[6]); end=int(sys.argv[7]); cross_tenant=sys.argv[8] == "true"; araf_status=sys.argv[9]; araf_reason=sys.argv[10]; diagnostic_only=sys.argv[11] == "true"; postgres_mode=sys.argv[12]; postgres_version=sys.argv[13]; postgres_endpoint=sys.argv[14]; postgres_schema=sys.argv[15] == "true"; initial_ready=int(sys.argv[16]); final_ready=int(sys.argv[17]); peak_ready=int(sys.argv[18]); drain_agent=sys.argv[19]; bootstrap_agent=sys.argv[20]; child_block_ids=sys.argv[21:26]; backend_effective=sys.argv[26]; backend_proof_method=sys.argv[27]; backend_proof={"status":"passed","method":backend_proof_method}; pool_sessions=sys.argv[28]; preflight_path=pathlib.Path(sys.argv[31]); checkout_head=sys.argv[32].lower(); tree_clean=sys.argv[33] == "true"; harness_digest=sys.argv[34]; pp5_phase=sys.argv[35]
+import json,pathlib,re,sys
+path=pathlib.Path(sys.argv[1]); artifact=pathlib.Path(sys.argv[2]); sha=sys.argv[3].lower(); profile=sys.argv[4]; blocks=int(sys.argv[5]); start=int(sys.argv[6]); end=int(sys.argv[7]); cross_tenant=sys.argv[8] == "true"; araf_status=sys.argv[9]; araf_reason=sys.argv[10]; diagnostic_only=sys.argv[11] == "true"; postgres_mode=sys.argv[12]; postgres_version=sys.argv[13]; postgres_endpoint=sys.argv[14]; postgres_schema=sys.argv[15] == "true"; initial_ready=int(sys.argv[16]); final_ready=int(sys.argv[17]); peak_ready=int(sys.argv[18]); drain_agent=sys.argv[19]; bootstrap_agent=sys.argv[20]; child_block_ids=sys.argv[21].split(",") if sys.argv[21] else []; backend_effective=sys.argv[22]; backend_proof_method=sys.argv[23]; backend_proof={"status":"passed","method":backend_proof_method}; pool_sessions=sys.argv[24]; preflight_path=pathlib.Path(sys.argv[27]); checkout_head=sys.argv[28].lower(); tree_clean=sys.argv[29] == "true"; harness_digest=sys.argv[30]; pp5_phase=sys.argv[31]
 preflight=json.loads(preflight_path.read_text(encoding="utf-8"))
 if checkout_head != sha or preflight.get("checkout_head") != sha or tree_clean is not True or preflight.get("git_tree_clean") is not True or len(harness_digest) != 64 or preflight.get("harness_inputs_sha256") != harness_digest:
     raise SystemExit("preflight identity is missing or does not match the journey source")
 if postgres_mode == "external":
     backend_proof["pool_sessions_observed"]=int(pool_sessions) if pool_sessions.isdigit() else None
-    backend_proof["proxy_sever_unhealthy_observed"]=sys.argv[29] == "true"
-    backend_proof["recovery_observed"]=sys.argv[30] == "true"
+    backend_proof["proxy_sever_unhealthy_observed"]=sys.argv[25] == "true"
+    backend_proof["recovery_observed"]=sys.argv[26] == "true"
 
 CHECKPOINT_PHASES=["initial-scale-checkpoint","pre-drain","post-drain","post-remove","post-replacement","post-reboot","post-crash-repair","post-maintenance"]
 # The #1035 crash leg runs only in phases that select it (integrated and
@@ -4723,11 +4760,13 @@ try:
         initial_checkpoint, final_checkpoint, bootstrap_block_id, drain_agent, bootstrap_agent)
 except ValueError as error:
     raise SystemExit(str(error)) from error
-child_agents=["block-a","block-b","block-c","block-d","block-e"]
+child_agents=[f"block-{chr(ord('a') + index)}" for index in range(blocks)]
+if len(child_block_ids) != blocks or any(not re.fullmatch(r"[0-9a-fA-F-]{36}", item) for item in child_block_ids):
+    raise SystemExit("each initial/replacement child must have one canonical BuildingBlock ID")
 enrolled_agents=[bootstrap_agent]+child_agents
 enrolled_block_ids=[bootstrap_block_id]+list(child_block_ids)
-if len(set(enrolled_block_ids)) != 6 or len(set(enrolled_agents)) != 6:
-    raise SystemExit("enrolled canonical identities across the run must be six and distinct")
+if len(set(enrolled_block_ids)) != blocks + 1 or len(set(enrolled_agents)) != blocks + 1:
+    raise SystemExit("enrolled canonical identities across the run must be unique")
 
 def load_fragment(name):
     return json.loads((artifact / name).read_text(encoding="utf-8"))
@@ -4753,19 +4792,19 @@ doc={
   "counting_rule":"eligible_ready",
   "eligibility_rule":ELIGIBILITY_RULE,
   "bootstrap":{"agent_id":bootstrap_agent,"block_id":bootstrap_block_id},
-  "enrolled_identities":{"count":6,"distinct":True,"agents":enrolled_agents,"block_ids":enrolled_block_ids},
+  "enrolled_identities":{"count":len(enrolled_agents),"distinct":True,"agents":enrolled_agents,"block_ids":enrolled_block_ids},
   "initial_concurrent_ready":{"count":initial_ready,"agents":initial_projection["agents"],"block_ids":initial_projection["block_ids"]},
-  "peak_concurrent_ready":{"count":peak_ready,"minimum":5,"met":peak_ready>=5},
+  "peak_concurrent_ready":{"count":peak_ready,"minimum":initial_ready,"met":peak_ready>=initial_ready},
   "final_concurrent_ready":{"count":final_ready,"agents":final_projection["agents"],"block_ids":final_projection["block_ids"]},
   "checkpoints":checkpoints,
-  "drained_agent":drain_agent,"replacement_agent":"block-e","duplicate_identities":False},
+  "drained_agent":drain_agent,"replacement_agent":f"block-{chr(ord('a') + blocks - 1)}","duplicate_identities":False},
  "database_ownership":{"mode":postgres_mode,"effective_backend":backend_effective,"backend_proof":backend_proof,"server_version":postgres_version or None,"redacted_endpoint":postgres_endpoint,"schema_prepared":postgres_schema,"fault_injection":("run-owned_proxy_sever_restore" if postgres_mode == "external" else "docker_restart"),"managed":postgres_mode=="disposable"},
  "journey":{"fresh_deployment":passed(),"init":passed(),"multiple_authenticated_joins":{"status":"passed","count":blocks,"each_authenticated":True},"topology":passed(),"capacity":passed(),"constrained_placement":passed(),"add_block_capacity_growth":passed(),"drain":{"status":"passed","no_new_placement":True,"blockers_observed":True,"evacuation_claimed":False,"blocker_requery":drain_blocker_requery},"remove_rejoin_replace":passed(),"restart_recovery":passed(),"crash_injection_repair":crash_repair,"host_maintenance":host_maintenance,"transient_failures":transient_failures,"projections_convergent":{"native":passed(),"openstack":passed(),"araf":{"required":False,"status":araf_status,"reason":araf_reason}}},
  "network_observation":{"child_vms":child_vms,"all_ssh_proven":True,
    "resolver_contract":"freshest valid owned DHCP lease for the expected MAC; cross-MAC and gateway addresses rejected; SSH is the liveness proof"},
  "security_negatives":{"unauthenticated_join_rejected":True,"replay_join_rejected":True,"cross_tenant_concealment":cross_tenant,"foreign_state_preserved":True},
  "restart_recovery":{"status":"passed","canonical_state_survived":True,"postgres":True,"sqlite_parity":True},
- "bootstrap_timing":{"measured":end>start,"duration_ms":end-start,"excludes_preprovisioned_external_work":True,"sample_count":1,"boundary":"fresh o3kd through five authenticated block joins","claim_scope":"profile-specific-measurement-only"},
+ "bootstrap_timing":{"measured":end>start,"duration_ms":end-start,"excludes_preprovisioned_external_work":True,"sample_count":1,"boundary":f"fresh o3kd through {blocks} authenticated child joins including replacement","claim_scope":"profile-specific-measurement-only"},
  "leak_check":{"status":"passed","owned_leaks":0,"owned_inconsistencies":0,"foreign_state_changes":0},
  "defect_ledger":{"status":"passed","blockers":0,"high":0,"medium":0},
  "claim_validation":{"status":"passed","sources":["README.md","docs/ROADMAP.md","docs/status/current-state.yaml","compatibility/product-profiles.yaml","docs/compatibility/matrix.yaml","docs/architecture/p15-e2d-gap-register.md"],"unsupported_claims_preserved":True,"claims":["profile-specific protected P15.7 scale/composition convergence"]}}

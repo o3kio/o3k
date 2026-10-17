@@ -490,10 +490,17 @@ asserts exactly five eligible Ready BuildingBlocks initially and finally.
 | 5-host first installation | **provisioning proven** — 5 genuine nested-KVM hosts up with `/dev/kvm`, `svm`, 2 vCPU / ~1967 MiB, SSH reachable |
 | 5-eligible-host O3K lifecycle journey (S5) | **protected S5 lane passed** on source `d3628c6f4dd3f694889f712583b5f438418a02d8` (run `37155032743`); the boundary-lane successor must rerun S5 before combining results for one candidate SHA |
 | S1/S2 non-soak boundary smokes | protected lanes implemented; nested-host execution pending on the exact candidate SHA |
-| declared tiers `S3`/`S10`/`S20`, `K-min`/`K-full` | not started (S1/S2 and S5 do not replace these tiers) |
+| declared tiers `S3`/`S10`/`S20`, `K-min`/`K-full` | `DEFERRED_BY_POLICY` (unrun; S1/S2 and S5 do not replace these tiers and no PASS is claimed) |
 | #1033 host-reboot contract | **decided and documented** (`docs/operations/pp5-host-maintenance.md`); S5 maintenance journey not yet run |
 
 ### 12.3.1 PP.5 acceptance lanes
+
+Policy status: S3/S10/S20 and K-min/K-full are `DEFERRED_BY_POLICY` in the
+current harness work. They have not run and do not block continuation of the
+PP.5 development foundation. This deferral is not a PASS and does not remove
+these tiers from the requirements for eventual PP.5 final acceptance. The
+strict evidence validator continues to reject missing, incomplete, or
+inconsistent tier evidence.
 
 The protected runner has independently classified S1/S2 boundary-smoke, S5
 foundation, and crash/maintenance lanes; the final campaign bundle separately

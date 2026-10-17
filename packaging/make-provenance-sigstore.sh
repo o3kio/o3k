@@ -33,8 +33,22 @@ if not isinstance(value, str) or len(value) != 40:
 print(value)
 PY
 )"
+MANIFEST_TREE="$(python3 - "$BUNDLE_DIR/manifest.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    value = json.load(stream).get("source_tree")
+if not isinstance(value, str) or len(value) != 40:
+    raise SystemExit("manifest source_tree is missing")
+print(value)
+PY
+)"
 [[ "$COMMIT" == "$MANIFEST_COMMIT" ]] || {
   echo "provenance source drift: HEAD is $COMMIT but manifest records $MANIFEST_COMMIT" >&2
+  exit 1
+}
+SOURCE_TREE="$(git -C "$ROOT_DIR" rev-parse HEAD^{tree})"
+[[ "$SOURCE_TREE" == "$MANIFEST_TREE" ]] || {
+  echo "provenance source tree drift: HEAD is $SOURCE_TREE but manifest records $MANIFEST_TREE" >&2
   exit 1
 }
 
@@ -47,9 +61,9 @@ WORKFLOW="${GITHUB_WORKFLOW:-O3K protected release workflow}"
 # manifest then includes provenance.json, avoiding the circular "provenance
 # lists the digest of the manifest that lists provenance" dependency.  The
 # signed digest manifest is the byte-level binding for provenance itself.
-python3 - "$VERSION" "$COMMIT" "$WORKFLOW" "$SIGNED_AT" <<'PY'
+python3 - "$VERSION" "$COMMIT" "$SOURCE_TREE" "$WORKFLOW" "$SIGNED_AT" <<'PY'
 import hashlib, json, pathlib, sys
-version, commit, workflow, signed_at = sys.argv[1:5]
+version, commit, source_tree, workflow, signed_at = sys.argv[1:6]
 assets = [
     "install.sh",
     f"o3k-{version.removeprefix('v')}-linux-x86_64.tar.gz",
@@ -66,6 +80,7 @@ doc = {
     "artifact_type": "o3k-release-provenance",
     "release": version,
     "source_commit": commit,
+    "source_tree": source_tree,
     "signature_scheme": "sigstore-keyless",
     "oidc_issuer": "https://token.actions.githubusercontent.com",
     "repository": "o3kio/o3k",
@@ -94,5 +109,5 @@ for asset in \
 done
 
 python3 "$ROOT_DIR/packaging/validate-sigstore-provenance.py" \
-  provenance.json "$ROOT_DIR/packaging/trust-policy.yaml" "$VERSION" "$COMMIT"
+  provenance.json "$ROOT_DIR/packaging/trust-policy.yaml" "$VERSION" "$COMMIT" "$SOURCE_TREE"
 echo "sigstore provenance material written to $DIST_ROOT (Cosign signing is required next)"

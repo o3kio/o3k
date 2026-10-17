@@ -15,6 +15,7 @@ RUN_ID="${O3K_TESTLAB_RUN_ID:-${GITHUB_RUN_ID:-local-$$}}"
 # O3K source binding is therefore authoritative when supplied; this keeps the
 # bootstrap's checkout check aligned with the protected P15.7 target.
 SOURCE_COMMIT="${O3K_P15_7_SOURCE_SHA:-${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}}"
+RELEASE_BUNDLE_DIR="${O3K_TESTLAB_RELEASE_BUNDLE_DIR:-}"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflow-artifacts}"
 [[ "$RUN_ID" =~ ^[0-9]+(-generic|-pp5)?$|^local-[0-9]+(-generic|-pp5)?$ ]] \
   || { echo "disposable TestLab bootstrap failed: invalid workflow run id" >&2; exit 1; }
@@ -294,7 +295,7 @@ trap failure_cleanup EXIT
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
 [[ "$BRIDGE_NAME" =~ ^[A-Za-z0-9_-]{1,15}$ ]] || fail "invalid compute bridge name"
-for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps nproc usermod gpasswd setpriv nohup setsid; do
+for command in openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps nproc usermod gpasswd setpriv nohup setsid; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"
 done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required"
@@ -302,6 +303,28 @@ sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" || fail "account lock directory is 
 actual_source_commit="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf 'unavailable')"
 [[ "$actual_source_commit" == "$SOURCE_COMMIT" ]] \
   || fail "checkout is not immutable (expected=${SOURCE_COMMIT} actual=${actual_source_commit} root=${ROOT_DIR})"
+if [[ -n "$RELEASE_BUNDLE_DIR" ]]; then
+  [[ "$RELEASE_BUNDLE_DIR" == /* && "$RELEASE_BUNDLE_DIR" != *..* && ! -L "$RELEASE_BUNDLE_DIR" \
+    && -d "$RELEASE_BUNDLE_DIR" ]] || fail "verified release bundle path is unsafe"
+  [[ -f "$RELEASE_BUNDLE_DIR/manifest.json" && ! -L "$RELEASE_BUNDLE_DIR/manifest.json" ]] \
+    || fail "verified release bundle manifest is missing"
+  bundle_source="$(python3 - "$RELEASE_BUNDLE_DIR/manifest.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    value = json.load(stream).get("source_commit")
+if not isinstance(value, str):
+    raise SystemExit(1)
+print(value)
+PY
+)" || fail "verified release bundle manifest is invalid"
+  [[ "$bundle_source" == "$SOURCE_COMMIT" ]] || fail "release bundle source does not match candidate"
+  for binary in o3kd o3k o3k-compute; do
+    [[ -f "$RELEASE_BUNDLE_DIR/bin/$binary" && ! -L "$RELEASE_BUNDLE_DIR/bin/$binary" \
+      && -x "$RELEASE_BUNDLE_DIR/bin/$binary" ]] || fail "verified release bundle lacks executable $binary"
+  done
+else
+  command -v cargo >/dev/null 2>&1 || fail "cargo is unavailable for source build"
+fi
 
 GITHUB_RUN_ID="$RUN_ID" RUNNER_TEMP="$RUNNER_TEMP" O3K_TESTLAB_STATE_BASE="$SERVICE_STATE_BASE" \
   bash "$ROOT_DIR/scripts/cleanup-stale-testlab-processes.sh" || true
@@ -510,14 +533,20 @@ python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable afte
 command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable after dependency setup"
 pkg-config --exists libvirt 2>/dev/null || fail "libvirt development files are unavailable after dependency setup"
 command -v protoc >/dev/null 2>&1 || fail "protobuf compiler is unavailable after dependency setup"
-cargo build --locked --release --bin o3kd --bin o3k
-# virt-sys deliberately tolerates a missing pkg-config probe for docs builds;
-# make the runtime link explicit after the host preflight proves libvirt exists.
-RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
-  cargo build --locked --release --features libvirt --bin o3k-compute-bin
-sudo -n install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
-sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k" "$STATE_ROOT/bin/o3k"
-sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
+if [[ -n "$RELEASE_BUNDLE_DIR" ]]; then
+  sudo -n install -m 0755 "$RELEASE_BUNDLE_DIR/bin/o3kd" "$STATE_ROOT/bin/o3kd"
+  sudo -n install -m 0755 "$RELEASE_BUNDLE_DIR/bin/o3k" "$STATE_ROOT/bin/o3k"
+  sudo -n install -m 0755 "$RELEASE_BUNDLE_DIR/bin/o3k-compute" "$STATE_ROOT/bin/o3k-compute"
+else
+  cargo build --locked --release --bin o3kd --bin o3k
+  # virt-sys deliberately tolerates a missing pkg-config probe for docs builds;
+  # make the runtime link explicit after the host preflight proves libvirt exists.
+  RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
+    cargo build --locked --release --features libvirt --bin o3k-compute-bin
+  sudo -n install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
+  sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k" "$STATE_ROOT/bin/o3k"
+  sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
+fi
 extra_agent_ids=()
 extra_agent_ids_csv=
 if [[ -n "${O3K_TESTLAB_ADDITIONAL_AGENT_IDS:-}" ]]; then
