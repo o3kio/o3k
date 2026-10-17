@@ -128,15 +128,18 @@ surface.
 
 Proposed amendments A1–A9 (2026-10-16) to the D1–D13 recommendations are listed
 in [the decision packet](../pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md#proposed-amendments-2026-10-16).
-They are not accepted; reviewers record accept, amend or reject for each one
-in this ADR.
+Architecture proposal acceptance is recorded below. Independent security
+acceptance and unresolved implementation conditions remain pending; this ADR
+remains Proposed.
 
-### Review amendments awaiting acceptance (2026-10-17)
+### Review amendments (2026-10-17)
 
 [Review comment 6239123579](https://github.com/o3kio/o3k/issues/975#issuecomment-6239123579)
 expressly records recommendations, not architecture or independent security
-acceptance. The existing packet incorporates the following proposed changes;
-all decisions and this ADR remain **PENDING / Proposed**:
+acceptance. The existing packet incorporates the following proposal changes,
+subsequently accepted by architecture at the revision recorded below.
+Independent security and unresolved conditions remain **PENDING**; this ADR
+remains **Proposed**:
 
 - **D2:** every backup requires a human detached-signature round-trip to the
   disconnected signing workstation. Verify the exact persisted request and
@@ -200,9 +203,32 @@ The requested reviewers remain senolcolak for architecture and zoorpha for
 security review. Zoorpha authored #1136/#1137, so author review of that material
 cannot satisfy independent security acceptance. A qualified, authorized
 reviewer independent of the proposals and implementation must be designated,
-with qualification/role and independence basis recorded. Both explicit role
-decisions must reference the exact amended source; no approval is inferred
-from this review comment or a protected documentation merge.
+with qualification/role and independence basis recorded. Each role decision
+must reference the exact amended source; no acceptance is inferred from the
+review-analysis comment or a protected documentation merge.
+
+### Architecture decision recorded (2026-10-17)
+
+- **Authority:** senolcolak.
+- **Decision:** architecture proposal **ACCEPTED**, including the stated
+  conditions, for the amended D1–D13/A1–A9 packet, this ADR and SPEC-0050 at
+  `610f914b4c25112f67798402db8b83c9caf0cf55`.
+- **Decision evidence:** [explicit “accept” comment 6239984922](https://github.com/o3kio/o3k/issues/975#issuecomment-6239984922),
+  responding to [exact-revision request 6239743723](https://github.com/o3kio/o3k/issues/975#issuecomment-6239743723).
+  The [separate PR review](https://github.com/o3kio/o3k/pull/1143#pullrequestreview-5559773466)
+  pins that reviewed source; PR approval alone is not contract acceptance.
+- **Remaining conditions:** the decision supplies no missing custody/tool/deadline
+  values (D2), startup-handoff contract (D8), deployment-specific BMC capability
+  and authority (D7), measured artifact/staging evidence (D9), PostgreSQL
+  grants/inventory/definition policy (D10), or operator interface/runbook (D12).
+  Existing D4 exclusion and evidence requirements remain mandatory. Unresolved
+  values, capabilities and evidence require explicit applicable reviewer
+  resolution; none may be invented by implementation.
+- **Independent security:** unassigned / **PENDING**. No independent security
+  decision is recorded by the architecture comment or by the proposal author.
+- **Normative status:** this ADR, SPEC-0050 and the artifact schema remain
+  **Proposed**. No normative acceptance revision or #1084 implementation is
+  authorized. SPEC-0051 technical acceptance remains a separate decision.
 
 ### Decisions to record
 
@@ -236,17 +262,18 @@ Reviewers must decide or approve the proposal for:
 
 ## Decision worksheet for implementation readiness
 
-The following are bounded recommendations for review. They are not accepted
-decisions and do not authorize production implementation. An approving
-architecture/security review should record the selected option and any
-conditions in this ADR before #1084 implementation begins.
+The following bounded recommendations have architecture proposal acceptance
+at the revision above, retaining all stated conditions. They do not authorize
+production implementation. Independent security acceptance and resolution of
+the outstanding parameters/evidence must be recorded in this ADR before #1084
+implementation begins.
 
 | Decision | Recommended bounded choice | Approval still required |
 | --- | --- | --- |
 | PostgreSQL snapshot format and restore privilege policy | PostgreSQL 16 `pg_dump` custom format (`-Fc`) as one opaque regular-file member; restore with the matching supported `pg_restore` into a newly provisioned empty O3K database. The approved invocation must use `--exit-on-error`, `--no-owner`, and `--no-acl`, or a reviewed equivalent that demonstrably enforces the ownership/ACL policy; if the tool cannot enforce it, fail before mutation. Restore only with an installation-provisioned, least-privilege database role and an approved extension/object allowlist. A known partial restore error before `STARTED` enters `FAILED_RECOVERABLE`; an unknown outcome enters `QUARANTINED`. The target stays inactive in both cases. It is discarded/recreated or recovered only by an approved idempotent path. Activate only after complete restore, integrity, privilege, and migration validation. Do not use `PGDATA` copies or cluster-wide `pg_dumpall`. | Confirm tool/version policy, extension/object allowlist, database ownership, exact role privileges, and least-privilege target-role provisioning. Artifact data must not mutate roles, passwords, tablespaces, ownership, or ACLs beyond approved object policy. |
 | SQLite snapshot primitive | Reuse `SqliteStore::backup_to_file` and its `VACUUM INTO` behavior after the accepted SQLite WAL/checkpoint and consistency boundary has been proven. | Confirm the operation can be coordinated with config, bootstrap/trust material, API writes, workers, provider dispatch, and lease activity; the existing store primitive alone is not that barrier. |
 | Public operator surface | Keep the first implementation slice internal, with no CLI or API addition. Revisit an `o3k` operator command only under a reviewed interface contract. | No public command, flags, confirmation behavior, or output format is accepted by this proposal. |
-| Signing and encryption | Review the exact D1/D2 profile and offline detached-signature workflow in the decision packet, separate from release signing keys, with externally protected operator key recovery. Unattended backup is unsupported. | Accept or amend the proposed encoding, cryptographic profile, custody, tool versions, rotation/revocation and finite signing deadline; none is accepted here. The release Ed25519 key is not a backup key. |
+| Signing and encryption | Review the exact D1/D2 profile and offline detached-signature workflow in the decision packet, separate from release signing keys, with externally protected operator key recovery. Unattended backup is unsupported. | Accept or amend the proposed encoding, cryptographic profile, custody, tool versions, rotation/revocation and finite signing deadline; architecture proposal acceptance does not settle missing values or independent security review. The release Ed25519 key is not a backup key. |
 | Restore activation | Review D3/D7 independent Redfish/BMC exclusion plus issuer replacement, rejection of old-source credentials, fresh target epoch and target-only PostgreSQL writer access. Never restore lease ownership as active. | Accept the profile restriction without BMC, exact evidence custody/verifier and deployment capability, PKI readiness and first reconciliation gate. |
 | Restore journal and target reservation | Review D8 service-user ownership, offline signed transitions and separate denial-only failure markers. Keep target reservation distinct from startup exclusion through commit. | Accept exact path, filesystem, signing/transfer and controlled startup handoff, stale-operation recovery authority and unknown-outcome handling. |
 | Outer artifact and limits | Review D9/A7 regular-file allowlist with no outer compression, 1 GiB member/4 GiB aggregate bounds and the full staging formula with a 9 GiB reservation cap. Authenticate before extraction or mutation. | Accept only after representative member/artifact/peak-space measurements; reject unsupported entries and never truncate the computed reservation. |

@@ -17,8 +17,15 @@ operator-held offline keys for both profiles, are listed in
 [the decision packet](../pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md#proposed-amendments-2026-10-16).
 The refinements below incorporate the recommendations in
 [review comment 6239123579](https://github.com/o3kio/o3k/issues/975#issuecomment-6239123579).
-They remain Proposed; the comment expressly records neither required role
-decision and does not authorize implementation.
+That review comment expressly records neither required role decision.
+Subsequently, senolcolak [accepted the architecture proposal](https://github.com/o3kio/o3k/issues/975#issuecomment-6239984922)
+at `610f914b4c25112f67798402db8b83c9caf0cf55`, responding to the
+[exact-revision request](https://github.com/o3kio/o3k/issues/975#issuecomment-6239743723).
+See [ADR-0189's separate role record](../adr/ADR-0189-pp6-control-plane-backup-and-restore.md#architecture-decision-recorded-2026-10-17).
+Acceptance retains the proposal's unresolved conditions; it supplies no missing
+values or evidence. Independent security remains unassigned/PENDING. This
+specification and its artifact schema remain **Proposed** and do not authorize
+implementation.
 
 ## 1. Goals and exclusions
 
