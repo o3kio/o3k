@@ -73,20 +73,25 @@ assert 'docker_cgroup_version="$(docker info --format \'{{.CgroupVersion}}\'' in
 assert '"$docker_cgroup_version" != "2"' in memory_harness
 
 # Docker Engine's CgroupVersion field is "2" on cgroup v2, not "cgroup2".
-# Exercise only the harness preflight with a Docker stub: the cgroup-v2 case
-# advances to the pinned-image check (which is deliberately unavailable), and
-# the cgroup-v1 case blocks before even checking for an image. Neither case
-# starts a container or runs the pressure operation.
+# Exercise only the harness preflight with a Docker stub: cgroup v2 advances to
+# pulling the pinned image and inspecting it, while cgroup v1 blocks first.
+# The stub never creates a container or runs the pressure operation.
 with tempfile.TemporaryDirectory(prefix="pp6-memory-preflight-") as directory:
     root = pathlib.Path(directory)
     docker_bin = root / "bin"
     docker_bin.mkdir()
     docker_stub = docker_bin / "docker"
+    pull_probe = root / "pull-probe"
     image_probe = root / "image-probe"
     docker_stub.write_text(
         """#!/usr/bin/env bash
 set -euo pipefail
 if [[ $1 == info ]]; then printf '%s\\n' "$MOCK_DOCKER_CGROUP_VERSION"; exit 0; fi
+if [[ $1 == pull ]]; then
+  [[ "$*" == *"rust@sha256:408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6"* ]]
+  touch "$MOCK_PULL_PROBE"
+  exit "${MOCK_PULL_STATUS:-0}"
+fi
 if [[ $1 == image && $2 == inspect ]]; then touch "$MOCK_IMAGE_PROBE"; exit 1; fi
 echo 'unexpected docker invocation' >&2; exit 97
 """,
@@ -94,7 +99,7 @@ echo 'unexpected docker invocation' >&2; exit 97
     )
     docker_stub.chmod(0o755)
 
-    def run_preflight(version: str, label: str) -> tuple[dict, bool]:
+    def run_preflight(version: str, label: str, pull_status: str = "0") -> tuple[dict, bool, bool]:
         runner_temp = root / label
         env = os.environ.copy()
         env.update(
@@ -102,22 +107,34 @@ echo 'unexpected docker invocation' >&2; exit 97
                 "PATH": f"{docker_bin}:{env['PATH']}",
                 "RUNNER_TEMP": str(runner_temp),
                 "MOCK_DOCKER_CGROUP_VERSION": version,
+                "MOCK_PULL_PROBE": str(pull_probe),
                 "MOCK_IMAGE_PROBE": str(image_probe),
+                "MOCK_PULL_STATUS": pull_status,
             }
         )
         subprocess.run(["bash", str(memory_harness_path)], env=env, check=True, capture_output=True, text=True)
         artifact = json.loads((runner_temp / "pp6-sqlite-memory-pressure.json").read_text())
-        return artifact, image_probe.exists()
+        return artifact, pull_probe.exists(), image_probe.exists()
 
-    artifact, image_was_probed = run_preflight("2", "cgroup-v2")
+    artifact, image_was_pulled, image_was_probed = run_preflight("2", "cgroup-v2")
     assert artifact["disposition"] == "INFRASTRUCTURE_BLOCKED"
-    assert artifact["reason"] == "pinned image unavailable"
+    assert artifact["reason"] == "pinned image inspect failed after pull"
+    assert image_was_pulled, "cgroup v2 must provision the exact immutable image first"
     assert image_was_probed, "Docker Engine cgroup version 2 was incorrectly rejected"
+    pull_probe.unlink()
     image_probe.unlink()
 
-    artifact, image_was_probed = run_preflight("1", "cgroup-v1")
+    artifact, image_was_pulled, image_was_probed = run_preflight("2", "image-pull-blocked", "1")
+    assert artifact["disposition"] == "INFRASTRUCTURE_BLOCKED"
+    assert artifact["reason"] == "pinned image pull failed"
+    assert image_was_pulled, "image pull failure must be reported after a real pull attempt"
+    assert not image_was_probed, "failed image pull must block before image inspection or setup"
+    pull_probe.unlink()
+
+    artifact, image_was_pulled, image_was_probed = run_preflight("1", "cgroup-v1")
     assert artifact["disposition"] == "INFRASTRUCTURE_BLOCKED"
     assert artifact["reason"] == "Docker or cgroup v2 capability unavailable"
+    assert not image_was_pulled, "cgroup v1 must block before image setup"
     assert not image_was_probed, "cgroup v1 must block before container/image setup"
 assert "validate_pp6_evidence.py --case postgres-tablespace-pressure " in tablespace_text
 # Every workflow that provides a required status check must run for merge

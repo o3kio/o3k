@@ -24,6 +24,17 @@ container="o3k-pp6-memory-${RANDOM}-${RANDOM}"
 container_active=0
 target_dir="$(mktemp -d)"
 mkdir -p "$target_dir/shared"
+blocked() {
+  local reason="$1" source_commit source_tree
+  source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
+  printf '%s\n' "{\"schema\":\"o3k.pp6.sqlite-memory-pressure.v1\",\"case\":\"sqlite-memory-pressure\",\"harness\":\"sqlite_memory_pressure_kills_only_child_and_replays_operation\",\"source_commit\":\"$source_commit\",\"source_tree\":\"$source_tree\",\"execution_commit\":\"$source_commit\",\"execution_tree\":\"$source_tree\",\"profile\":\"o3k-demo-v1\",\"disposition\":\"INFRASTRUCTURE_BLOCKED\",\"reason\":\"$reason\",\"foreign_state\":{\"status\":\"not_exercised\",\"reason\":\"setup did not run\"},\"secret_scan\":{\"status\":\"pending\",\"scope\":\"validator scans full artifact\"}}" > "$out.provisional"
+  python3 - "$out.provisional" <<'PY'
+import json,sys
+json.load(open(sys.argv[1]))
+PY
+  mv -- "$out.provisional" "$out"
+  exit 0
+}
 cleanup_resources() {
   local s=0
   if (( container_active )); then
@@ -47,24 +58,14 @@ cleanup() {
   exit "$s"
 }
 trap cleanup EXIT
-image_id="$(docker image inspect rust:1.97.1-bookworm --format '{{.Id}}' 2>/dev/null || true)"
-if [[ -z "$image_id" ]]; then
-  container_active=0
-  source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
-  printf '%s\n' "{\"schema\":\"o3k.pp6.sqlite-memory-pressure.v1\",\"case\":\"sqlite-memory-pressure\",\"harness\":\"sqlite_memory_pressure_kills_only_child_and_replays_operation\",\"source_commit\":\"$source_commit\",\"source_tree\":\"$source_tree\",\"execution_commit\":\"$source_commit\",\"execution_tree\":\"$source_tree\",\"profile\":\"o3k-demo-v1\",\"disposition\":\"INFRASTRUCTURE_BLOCKED\",\"reason\":\"pinned image unavailable\",\"foreign_state\":{\"status\":\"not_exercised\",\"reason\":\"setup did not run\"},\"secret_scan\":{\"status\":\"pending\",\"scope\":\"validator scans full artifact\"}}" > "$out"
-  exit 0
+image_ref='rust@sha256:408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6'
+if ! docker pull --platform linux/amd64 "$image_ref" >/dev/null; then
+  blocked 'pinned image pull failed'
 fi
-blocked() {
-  local reason="$1" source_commit source_tree
-  source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
-  printf '%s\n' "{\"schema\":\"o3k.pp6.sqlite-memory-pressure.v1\",\"case\":\"sqlite-memory-pressure\",\"harness\":\"sqlite_memory_pressure_kills_only_child_and_replays_operation\",\"source_commit\":\"$source_commit\",\"source_tree\":\"$source_tree\",\"execution_commit\":\"$source_commit\",\"execution_tree\":\"$source_tree\",\"profile\":\"o3k-demo-v1\",\"disposition\":\"INFRASTRUCTURE_BLOCKED\",\"reason\":\"$reason\",\"foreign_state\":{\"status\":\"not_exercised\",\"reason\":\"setup did not run\"},\"secret_scan\":{\"status\":\"pending\",\"scope\":\"validator scans full artifact\"}}" > "$out.provisional"
-  python3 - "$out.provisional" <<'PY'
-import json,sys
-json.load(open(sys.argv[1]))
-PY
-  mv -- "$out.provisional" "$out"
-  exit 0
-}
+image_id="$(docker image inspect "$image_ref" --format '{{.Id}}' 2>/dev/null || true)"
+if [[ -z "$image_id" ]]; then
+  blocked 'pinned image inspect failed after pull'
+fi
 docker run --rm --name "${container}-builder" -v "$root:/o3k" -v "$target_dir:/o3k/target" -w /o3k "$image_id" \
   cargo test --locked -p o3k-store --test sqlite_memory_pressure --all-features --no-run
 host_bin="$(find "$target_dir/debug/deps" -maxdepth 1 -type f -name 'sqlite_memory_pressure-*' ! -name '*.d' | head -n 1)"
@@ -126,7 +127,7 @@ if ! cleanup_resources; then
 fi
 provisional="$out.provisional"
 cat >"$provisional" <<EOF
-{"schema":"o3k.pp6.sqlite-memory-pressure.v1","case":"sqlite-memory-pressure","harness":"sqlite_memory_pressure_kills_only_child_and_replays_operation","source_commit":"$source_commit","source_tree":"$source_tree","execution_commit":"$execution_commit","execution_tree":"$execution_tree","profile":"o3k-demo-v1","sqlite_version":"$sqlite_version","rust_version":"$rust_version","container_id":"$docker_id","image_id":"$image_id","cgroup_memory_max":"268435456","swap_max":"0","timeout_seconds":60,"child_exit_status":$child_status,"oom_kill_count":$((after_oom-before_oom)),"child_only":true,"canonical_retry":"store-only-terminal-transition","foreign_state":{"status":"not_exercised","reason":"store-only lane invokes no provider or external-state operations"},"secret_scan":"PASS","cleanup":"PASS","scope":"store-only; provider retry and foreign state not exercised","disposition":"PASS"}
+{"schema":"o3k.pp6.sqlite-memory-pressure.v1","case":"sqlite-memory-pressure","harness":"sqlite_memory_pressure_kills_only_child_and_replays_operation","source_commit":"$source_commit","source_tree":"$source_tree","execution_commit":"$execution_commit","execution_tree":"$execution_tree","profile":"o3k-demo-v1","sqlite_version":"$sqlite_version","rust_version":"$rust_version","container_id":"$docker_id","image_ref":"$image_ref","image_id":"$image_id","cgroup_memory_max":"268435456","swap_max":"0","timeout_seconds":60,"child_exit_status":$child_status,"oom_kill_count":$((after_oom-before_oom)),"child_only":true,"canonical_retry":"store-only-terminal-transition","foreign_state":{"status":"not_exercised","reason":"store-only lane invokes no provider or external-state operations"},"secret_scan":"PASS","cleanup":"PASS","scope":"store-only; provider retry and foreign state not exercised","disposition":"PASS"}
 EOF
 python3 - "$provisional" <<'PY'
 import json, re, sys
