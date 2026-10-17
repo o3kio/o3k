@@ -114,6 +114,17 @@ CASES = {
         "fixture": ["filesystem_type", "filesystem_size_bytes", "evidence_tier"],
         "foreign_state": ("object", "foreign_state"),
     },
+    "sqlite-memory-pressure": {
+        "harness": "harness",
+        "lane_schema": ("schema", "o3k.pp6.sqlite-memory-pressure.v1"),
+        "disposition": ("disposition", "PASS"),
+        "source": "source_commit",
+        "execution": "execution_commit",
+        "backend": ("sqlite", "sqlite_version"),
+        "profile": "profile",
+        "fixture": ["container_id", "image_ref", "image_id", "cgroup_memory_max", "oom_kill_count"],
+        "foreign_state": ("object", "foreign_state"),
+    },
 }
 
 
@@ -195,7 +206,22 @@ def build_envelope(
         if lookup(document, key) != expected:
             raise EvidenceError(f"{key} must be {expected}")
     key, passing = spec["disposition"]
-    if lookup(document, key) != passing:
+    actual_disposition = lookup(document, key)
+    if case == "sqlite-memory-pressure" and actual_disposition in {"NOT_RUN", "INFRASTRUCTURE_BLOCKED"}:
+        source_tree = required(document, "source_tree")
+        execution_tree = required(document, "execution_tree")
+        if not isinstance(source_tree, str) or not COMMIT.match(source_tree) or not isinstance(execution_tree, str) or not COMMIT.match(execution_tree):
+            raise EvidenceError("NOT_RUN source/execution trees must be full commit ids")
+        scan_secrets(text)
+        return {
+            "schema": SCHEMA, "issue": ISSUE, "case": case,
+            "disposition": actual_disposition, "reason": required(document, "reason"),
+            "source": {"commit": commit(document, "source_commit"), "tree": source_tree, "execution_commit": commit(document, "execution_commit"), "execution_tree": execution_tree},
+            "harness": required(document, "harness"), "profile": required(document, "profile"),
+            "foreign_state": foreign_state(document, spec["foreign_state"]),
+            "secret_scan": {"status": "passed", "scope": "full artifact text", "patterns": sorted(SECRET_PATTERNS)},
+        }
+    if actual_disposition != passing:
         raise EvidenceError(f"{key} is not the passing value {passing!r}")
     backend_kind, version_path = spec["backend"]
     version = required(document, version_path)
@@ -207,6 +233,10 @@ def build_envelope(
             f"{spec['profile']} must be {PROFILE_BY_BACKEND[backend_kind]} for {backend_kind}"
         )
     fixture = {path: required(document, path) for path in spec["fixture"]}
+    if case == "sqlite-memory-pressure":
+        image_ref = fixture["image_ref"]
+        if not isinstance(image_ref, str) or not re.fullmatch(r"rust@sha256:[0-9a-f]{64}", image_ref):
+            raise EvidenceError("image_ref must identify the immutable official Rust image digest")
     harness = required(document, spec["harness"])
     if not isinstance(harness, str):
         raise EvidenceError(f"{spec['harness']} must be a string")
@@ -268,6 +298,8 @@ def _sample(case: str) -> dict:
     _set(document, spec["profile"], PROFILE_BY_BACKEND[backend_kind])
     for path in spec["fixture"]:
         _set(document, path, "fixture-value")
+    if case == "sqlite-memory-pressure":
+        _set(document, "image_ref", "rust@sha256:" + "a" * 64)
     kind, path = spec["foreign_state"]
     if kind == "tested_flag":
         _set(document, path, False)
@@ -312,6 +344,8 @@ def self_test() -> None:
                 lambda d: _set(d, spec["fixture"][0], json.dumps({"password": "hunter2"}))
             ),
         }
+        if case == "sqlite-memory-pressure":
+            failing["mutable image tag"] = mutated(lambda d: _set(d, "image_ref", "rust:1.97.1-bookworm"))
         if spec["foreign_state"][0] == "object":
             failing["foreign state claim"] = mutated(
                 lambda d: _set(d, spec["foreign_state"][1], "untouched")
@@ -326,6 +360,20 @@ def self_test() -> None:
             except EvidenceError:
                 continue
             raise AssertionError(f"{case}: {label} was accepted")
+    not_run = _sample("sqlite-memory-pressure")
+    not_run.update({"disposition": "NOT_RUN", "reason": "capability unavailable", "source_tree": "a" * 40, "execution_tree": "b" * 40})
+    assert build_envelope("sqlite-memory-pressure", json.dumps(not_run), "not-run.json")["disposition"] == "NOT_RUN"
+    not_run["disposition"] = "INFRASTRUCTURE_BLOCKED"
+    assert build_envelope("sqlite-memory-pressure", json.dumps(not_run), "blocked.json")["disposition"] == "INFRASTRUCTURE_BLOCKED"
+    for value in ("postgres://user:password@host/db", "-----BEGIN PRIVATE KEY-----"):
+        bad = dict(not_run)
+        bad["reason"] = value
+        try:
+            build_envelope("sqlite-memory-pressure", json.dumps(bad), "not-run.json")
+        except EvidenceError:
+            pass
+        else:
+            raise AssertionError("credential-bearing NOT_RUN was accepted")
     # Descriptive scan text and a postgres URL without a password are fine.
     scan_secrets('{"in_harness_secret_scan": "PASS (password assignments scanned)",'
                  ' "dsn_shape": "postgres://o3k@127.0.0.1/o3k",'
@@ -387,7 +435,7 @@ def main(argv: list[str]) -> int:
         return 1
     if args.envelope:
         Path(args.envelope).write_text(json.dumps(envelope, indent=2) + "\n", encoding="utf-8")
-    print(f"PP.6 evidence for {args.case}: PASS ({artifact.name})")
+    print(f"PP.6 evidence for {args.case}: {envelope['disposition']} ({artifact.name})")
     return 0
 
 
