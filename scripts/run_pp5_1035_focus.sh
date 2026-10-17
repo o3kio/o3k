@@ -40,6 +40,9 @@ if [[ -n "$(git status --porcelain)" ]]; then
   echo "refusing PP.5 #1035 focused run: worktree must be clean" >&2
   exit 78
 fi
+capability_dir=$(mktemp -d "${TMPDIR:-/tmp}/o3k-pp5-1035-capability.XXXXXX")
+chmod 700 "$capability_dir"
+trap 'rm -rf "$capability_dir"' EXIT
 manifest=${O3K_PP5_1035_MANIFEST:-"bins/o3kd/target/pp5/pp5-1035-focused-manifest.json"}
 manifest="${repo_root}/${manifest#./}"
 mkdir -p "$(dirname "$manifest")"
@@ -51,14 +54,43 @@ import uuid
 print(uuid.uuid7() if hasattr(uuid, "uuid7") else uuid.uuid4())
 PY
 )
+  capability_token=$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+)
+  capability_file="${capability_dir}/${run_id}.cap"
+  python3 - "$capability_file" "$run_id" "$source_sha" "$capability_token" <<'PY'
+import os, sys
+path, run_id, source_sha, token = sys.argv[1:]
+content = (
+    f"version=1\nlane=sqlite-restart\nrun_id={run_id}\nsource_sha={source_sha}\n"
+    f"token={token}\n"
+)
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    with os.fdopen(fd, "w", encoding="ascii") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+finally:
+    directory = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+PY
   artifact="${repo_root}/bins/o3kd/target/pp5/${run_id}/pp5-1035-restart-evidence.json"
   echo "focused PP.5 #1035 run ${iteration}/5: ${run_id}"
   O3K_PP5_1035_RUN_ID="$run_id" \
   O3K_PP5_1035_SOURCE_SHA="$source_sha" \
   O3K_PP5_1035_EVIDENCE_FILE="$artifact" \
-  O3K_PP5_1035_RUNNER_MARKER=RUN_OWNED_SQLITE_LOCALHOST_1035 \
+  O3K_PP5_1035_CAPABILITY_ROOT="$capability_dir" \
+  O3K_PP5_1035_CAPABILITY_FILE="$capability_file" \
+  O3K_PP5_1035_CAPABILITY_TOKEN="$capability_token" \
   env -u O3K_DATABASE_URL -u O3K_DATABASE_BACKEND -u O3K_TEST_DATABASE_PURPOSE \
     cargo test -p o3kd --test pp5_1035_evidence_process --all-features pp5_1035_restart_writes_fail_closed_evidence -- --ignored --nocapture
+  rm -f "$capability_file"
   python3 scripts/validate_pp5_1035_evidence.py "$artifact" --source-sha "$source_sha"
   artifacts+=("$artifact")
 done
