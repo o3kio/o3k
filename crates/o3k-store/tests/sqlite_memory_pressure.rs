@@ -134,6 +134,9 @@ async fn child_case(
         store.get_operation(operation_id).await?.state,
         OperationState::Pending
     );
+    if let Some(path) = std::env::var_os("O3K_MEMORY_PRESSURE_PHASE_PATH") {
+        std::fs::write(path, "allocation-phase-ready\n")?;
+    }
     let mut allocations = Vec::new();
     loop {
         allocations.push(vec![0_u8; 16 * 1024 * 1024]);

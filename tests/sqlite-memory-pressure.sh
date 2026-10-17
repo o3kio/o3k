@@ -25,7 +25,7 @@ if [[ -z "$image_id" ]]; then
   exit 0
 fi
 version_file="$(dirname "$out")/.sqlite-version.$$"
-cleanup() { local s=$?; trap - EXIT; docker rm -f "$container" >/dev/null 2>&1 || s=1; rm -rf "$target_dir" || s=1; rm -f "$version_file" "$out.provisional" || s=1; exit "$s"; }
+cleanup() { local s=$?; trap - EXIT; docker rm -f "$container" >/dev/null 2>&1 || s=1; rm -rf "$target_dir" || s=1; rm -f "$version_file" "$out.provisional" "$(dirname "$out")/.memory-phase.$$" || s=1; exit "$s"; }
 trap cleanup EXIT
 blocked() {
   local reason="$1" source_commit source_tree
@@ -42,6 +42,7 @@ docker run --rm --name "${container}-builder" -v "$root:/o3k" -v "$target_dir:/o
   cargo test --locked -p o3k-store --test sqlite_memory_pressure --all-features --no-run
 host_bin="$(find "$target_dir/debug/deps" -maxdepth 1 -type f -name 'sqlite_memory_pressure-*' ! -name '*.d' | head -n 1)"
 [[ -x "$host_bin" ]] || { echo 'FAIL: unable to build memory-pressure test binary' >&2; exit 1; }
+# The disposable child cgroup has a hard 256 MiB cap and zero swap.
 docker run -d --name "$container" --memory=256m --memory-swap=256m \
   -v "$root:/o3k:ro" -v "$target_dir:/o3k/target:ro" -v "$(dirname "$out"):/evidence" -w /o3k "$image_id" \
   sleep 120 >/dev/null
@@ -49,9 +50,10 @@ before_events="$(docker exec "$container" cat /sys/fs/cgroup/memory.events)"
 docker_id="$(docker inspect --format '{{.Id}}' "$container")"
 [[ "$(docker exec "$container" cat /sys/fs/cgroup/memory.max)" == 268435456 ]] || blocked 'memory.max not enforced'
 [[ "$(docker exec "$container" cat /sys/fs/cgroup/memory.swap.max)" == 0 ]] || blocked 'memory.swap.max not enforced'
-timeout 60s docker exec "$container" env O3K_MEMORY_PRESSURE_VERSION_PATH="/evidence/.sqlite-version.$$" \
+timeout 60s docker exec "$container" env O3K_MEMORY_PRESSURE_VERSION_PATH="/evidence/.sqlite-version.$$" O3K_MEMORY_PRESSURE_PHASE_PATH="/evidence/.memory-phase.$$" \
   "/o3k/target/debug/deps/$(basename "$host_bin")" --exact sqlite_memory_pressure_kills_only_child_and_replays_operation --nocapture
 events="$(docker exec "$container" cat /sys/fs/cgroup/memory.events 2>/dev/null || true)"
+[[ -f "$(dirname "$out")/.memory-phase.$$" ]] || blocked 'allocation phase marker missing'
 before_oom="$(awk '$1 == "oom_kill" {print $2}' <<<"$before_events")"
 after_oom="$(awk '$1 == "oom_kill" {print $2}' <<<"$events")"
 [[ "$before_oom" =~ ^[0-9]+$ && "$after_oom" =~ ^[0-9]+$ && $((after_oom-before_oom)) == 1 ]] || { echo "FAIL: expected oom_kill delta 1; before=$before_events after=$events" >&2; exit 1; }
