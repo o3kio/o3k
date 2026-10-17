@@ -1339,6 +1339,19 @@ mod tests {
         );
         assert_eq!(status, DiagnosticStatus::Unknown);
         assert_eq!(reason, None);
+
+        let (status, reason) = provider_status(
+            Some(&snapshot(
+                "provider-a",
+                AgentAvailability::Available,
+                AgentAdministrativeState::Enabled,
+            )),
+            "Enabled",
+            Some(i64::MIN),
+            i64::MAX,
+        );
+        assert_eq!(status, DiagnosticStatus::Stale);
+        assert_eq!(reason, Some(DiagnosticReason::ObservationStale));
     }
 
     #[test]
