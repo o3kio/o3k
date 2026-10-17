@@ -24,10 +24,12 @@ cleanup_resources() {
   local s=0
   if (( container_active )); then
     if ! docker inspect "$container" >/dev/null 2>&1; then
-      return 1
+      s=1
+    elif ! docker rm -f "$container" >/dev/null 2>&1; then
+      s=1
+    else
+      container_active=0
     fi
-    docker rm -f "$container" >/dev/null 2>&1 || s=1
-    container_active=0
   fi
   rm -rf "$target_dir" || s=1
   [[ -z "$version_file" ]] || rm -f "$version_file" || s=1
