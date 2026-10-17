@@ -120,8 +120,14 @@ fn provider_status(
     {
         return (DiagnosticStatus::Degraded, Some(DiagnosticReason::Draining));
     }
+    // A future observation is malformed clock data.  Treat it as unknown
+    // rather than allowing subtraction to overflow or declaring the provider
+    // healthy from an observation that has not happened yet.
+    if observed.is_some_and(|observed| observed > now) {
+        return (DiagnosticStatus::Unknown, None);
+    }
     if snap.availability == AgentAvailability::Unavailable {
-        if observed.is_some_and(|observed| now - observed > AGENT_LEASE_MS) {
+        if observed.is_some_and(|observed| now.saturating_sub(observed) > AGENT_LEASE_MS) {
             return (
                 DiagnosticStatus::Stale,
                 Some(DiagnosticReason::HeartbeatLost),
@@ -132,7 +138,7 @@ fn provider_status(
             Some(DiagnosticReason::HeartbeatLost),
         );
     }
-    if observed.is_some_and(|observed| now - observed > AGENT_LEASE_MS) {
+    if observed.is_some_and(|observed| now.saturating_sub(observed) > AGENT_LEASE_MS) {
         return (
             DiagnosticStatus::Stale,
             Some(DiagnosticReason::ObservationStale),
@@ -750,7 +756,18 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
                 DiagnosticStatus::Unknown,
                 Some(DiagnosticReason::NeverObserved),
             )
-        } else if max_observed.is_none() || now - max_observed.unwrap_or(now) > AGENT_LEASE_MS {
+        } else if max_observed.is_some_and(|observed| observed > now) {
+            // Future observations indicate a clock or corrupt-authority
+            // failure; fail closed instead of treating them as fresh.
+            (
+                DiagnosticStatus::Unknown,
+                Some(DiagnosticReason::NeverObserved),
+            )
+        } else if max_observed.is_none()
+            || max_observed.is_some_and(|observed| {
+                observed <= now && now.saturating_sub(observed) > AGENT_LEASE_MS
+            })
+        {
             // Durable last-known values without any fresh agent observation are
             // never reported healthy (covers process restart before
             // re-observation, and a fleet that has stopped reporting).
@@ -1340,6 +1357,36 @@ mod tests {
         );
         assert_eq!(status, DiagnosticStatus::Unknown);
         assert_eq!(reason, Some(DiagnosticReason::NeverObserved));
+    }
+
+    #[test]
+    fn provider_status_future_observation_fails_closed() {
+        let now = 1_000_i64;
+        let (status, reason) = provider_status(
+            Some(&snapshot(
+                "provider-a",
+                AgentAvailability::Available,
+                AgentAdministrativeState::Enabled,
+            )),
+            "Enabled",
+            Some(now + 1),
+            now,
+        );
+        assert_eq!(status, DiagnosticStatus::Unknown);
+        assert_eq!(reason, None);
+
+        let (status, reason) = provider_status(
+            Some(&snapshot(
+                "provider-a",
+                AgentAvailability::Unavailable,
+                AgentAdministrativeState::Enabled,
+            )),
+            "Enabled",
+            Some(i64::MAX),
+            i64::MIN,
+        );
+        assert_eq!(status, DiagnosticStatus::Unknown);
+        assert_eq!(reason, None);
     }
 
     #[test]
