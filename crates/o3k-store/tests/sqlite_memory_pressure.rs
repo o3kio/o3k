@@ -1,6 +1,9 @@
 #![cfg(target_os = "linux")]
 
-use std::{error::Error, path::PathBuf};
+use std::{
+    error::Error,
+    path::{Path, PathBuf},
+};
 
 use o3k_store::{DurableStore, OperationRecord, OperationState, ResourceRecord, testkit};
 use uuid::Uuid;
@@ -27,7 +30,7 @@ async fn sqlite_memory_pressure_kills_only_child_and_replays_operation()
 }
 
 async fn setup(
-    database: &PathBuf,
+    database: &Path,
     resource_id: Uuid,
     operation_id: Uuid,
 ) -> Result<(), Box<dyn Error>> {
@@ -59,7 +62,7 @@ async fn setup(
 }
 
 async fn recover(
-    database: &PathBuf,
+    database: &Path,
     resource_id: Uuid,
     operation_id: Uuid,
 ) -> Result<(), Box<dyn Error>> {

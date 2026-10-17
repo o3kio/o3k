@@ -77,7 +77,7 @@ run_harness() {
     env O3K_MEMORY_PRESSURE_MODE="$mode" O3K_MEMORY_PRESSURE_DB="$db_path" \
       O3K_MEMORY_PRESSURE_VERSION_PATH=/shared/sqlite-version \
       O3K_MEMORY_PRESSURE_PHASE_PATH=/shared/allocation-phase \
-      "$binary" --exact sqlite_memory_pressure_kills_only_child_and_replays_operation --nocapture
+      "$binary" --ignored --exact sqlite_memory_pressure_kills_only_child_and_replays_operation --nocapture
 }
 run_harness setup
 if ! docker run -d --name "$container" --memory=256m --memory-swap=256m \
@@ -94,7 +94,7 @@ docker_id="$(docker inspect --format '{{.Id}}' "$container")"
 set +e
 timeout 60s docker exec "$container" env O3K_MEMORY_PRESSURE_MODE=allocate \
   O3K_MEMORY_PRESSURE_DB="$db_path" O3K_MEMORY_PRESSURE_PHASE_PATH=/shared/allocation-phase \
-  "$binary" --exact sqlite_memory_pressure_kills_only_child_and_replays_operation --nocapture
+  "$binary" --ignored --exact sqlite_memory_pressure_kills_only_child_and_replays_operation --nocapture
 child_status=$?
 set -e
 [[ "$child_status" == 137 ]] || { echo "FAIL: expected allocator SIGKILL status 137; got $child_status" >&2; exit 1; }

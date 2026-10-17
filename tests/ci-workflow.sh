@@ -58,6 +58,12 @@ memory_lane = text.split("- name: PP.6 bounded SQLite memory-pressure evidence",
 assert "bash tests/sqlite-memory-pressure.sh" in memory_lane
 assert "validate_pp6_evidence.py --case sqlite-memory-pressure" in memory_lane
 assert "if [[" not in memory_lane, "memory evidence validation must also run for NOT_RUN"
+memory_harness = (pathlib.Path(sys.argv[1]).parent.parent.parent / "tests/sqlite-memory-pressure.sh").read_text(
+    encoding="utf-8"
+)
+assert memory_harness.count("--ignored --exact sqlite_memory_pressure_kills_only_child_and_replays_operation") == 2, (
+    "setup/recovery and allocator invocations must explicitly select the ignored pressure test"
+)
 assert "validate_pp6_evidence.py --case postgres-tablespace-pressure " in tablespace_text
 # Every workflow that provides a required status check must run for merge
 # queue groups, or the queue waits forever on the missing check.
