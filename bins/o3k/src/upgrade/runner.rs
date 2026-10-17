@@ -108,6 +108,36 @@ impl SystemUpgradeIo {
         PathBuf::from(name)
     }
 
+    /// A crash after the binary switch leaves the installed manifest at the
+    /// target version while the durable upgrade state still points at the
+    /// next phase.  Permit only that narrowly validated resume case; ordinary
+    /// same-version invocations remain fenced by `UpgradeFence`.
+    fn allows_same_version_resume(&self, target: &ReleaseVersion) -> bool {
+        let Ok(Some(state)) = UpgradeState::load(&self.state_file) else {
+            return false;
+        };
+        if state.target_version != *target
+            || state.phase < crate::upgrade::state::UpgradePhase::BackupCreated
+            || state.backup_id.is_none()
+        {
+            return false;
+        }
+        let manifest = self
+            .backup_dir
+            .join(state.backup_id.as_deref().unwrap_or_default())
+            .join("backup.json");
+        std::fs::read(manifest)
+            .ok()
+            .and_then(|bytes| BackupManifest::validate(&bytes).ok())
+            .is_some_and(|backup| {
+                backup.backup_id == state.backup_id.unwrap_or_default()
+                    && backup.source_version == state.source_version
+                    && backup.target_version == state.target_version
+                    && state.source_version < state.target_version
+                    && state.source_version.channel() == state.target_version.channel()
+            })
+    }
+
     /// Installed share directory (`<prefix>/share/o3k`).
     #[must_use]
     fn share_dir(&self) -> PathBuf {
@@ -1307,15 +1337,29 @@ impl UpgradeIo for SystemUpgradeIo {
             .and_then(|fence| fence.get("min_version"))
             .and_then(serde_json::Value::as_str);
         let installed = self.read_installed_manifest().await?;
+        let installed_version = installed.version.clone();
         let fence = UpgradeFence::from_manifest_values(
-            installed.version,
+            installed_version,
             target.clone(),
             &installed.profile,
             target_profile,
             min_version,
         );
         if let Err(kind) = fence.and_then(|fence| fence.decide()) {
-            return cleanup(kind.to_string());
+            let resume_fence_ok = kind == crate::upgrade::fence::FenceError::SameVersion
+                && installed.profile == target_profile
+                && min_version
+                    .and_then(|value| value.parse::<ReleaseVersion>().ok())
+                    .is_none_or(|minimum| {
+                        UpgradeState::load(&self.state_file)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|state| state.source_version >= minimum)
+                    })
+                && self.allows_same_version_resume(target);
+            if !resume_fence_ok {
+                return cleanup(kind.to_string());
+            }
         }
         // SHA256SUMS coverage: exactly the extracted regular files.
         if let Err(error) = self.verify_sums_coverage(&bundle_dir) {
