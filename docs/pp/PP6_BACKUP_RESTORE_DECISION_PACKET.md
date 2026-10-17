@@ -207,6 +207,9 @@ completion, alter PP.5, or authorize PP.7.
 | Architecture authority | senolcolak | **Proposal ACCEPTED; stated conditions retained** ([decision](https://github.com/o3kio/o3k/issues/975#issuecomment-6239984922)) | 2026-10-17 | `610f914b4c25112f67798402db8b83c9caf0cf55` |
 | Independent security authority | **Unassigned; must be distinct from architecture authority** | **PENDING** | — | This packet revision and source commit to be recorded |
 
+Later technical amendments do not inherit acceptance from the recorded
+revision; they require explicit applicable reviewer decisions.
+
 Architecture proposal acceptance covers D1–D13/A1–A9 as amended at the recorded
 revision. Independent security must still explicitly accept, amend or reject
 the applicable recommendations; missing parameters and evidence require their
