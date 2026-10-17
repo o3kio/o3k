@@ -196,18 +196,17 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
     eprintln!("checkpoint:version");
     let preflight_store = PostgresStore::connect(&url).await?;
     let baseline_id = Uuid::now_v7();
-    preflight_store
-        .insert_resource(&ResourceRecord {
-            id: baseline_id,
-            kind: "pp6_server_pressure_baseline".into(),
-            project_id: "pp6".into(),
-            generation: 1,
-            observed_generation: 1,
-            desired_state: "ACTIVE".into(),
-            observed_state: "ACTIVE".into(),
-            provider_id: None,
-        })
-        .await?;
+    let baseline = ResourceRecord {
+        id: baseline_id,
+        kind: "pp6_server_pressure_baseline".into(),
+        project_id: "pp6".into(),
+        generation: 1,
+        observed_generation: 1,
+        desired_state: "ACTIVE".into(),
+        observed_state: "ACTIVE".into(),
+        provider_id: None,
+    };
+    preflight_store.insert_resource(&baseline).await?;
     preflight_store.pool().close().await;
     eprintln!("checkpoint:store-preflight");
     let mut held = Vec::new();
@@ -246,14 +245,12 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         .await
         .map_err(|_| "PostgresStore reconnect timed out after capacity recovery")??;
     eprintln!("checkpoint:store-recovered");
-    let baseline_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM resources WHERE id = $1 AND kind = 'pp6_server_pressure_baseline'",
-    )
-    .bind(baseline_id.to_string())
-    .fetch_one(store.pool())
-    .await?;
+    let preserved = store
+        .list_resources("pp6", "pp6_server_pressure_baseline")
+        .await?;
     assert_eq!(
-        baseline_count, 1,
+        preserved,
+        vec![baseline],
         "failed admission must preserve canonical state"
     );
     let id = resource_id;
