@@ -354,6 +354,9 @@ def self_test() -> None:
             failing["missing canonical baseline assertion"] = mutated(
                 lambda d: d.pop("canonical_baseline_preserved")
             )
+            failing["failed canonical baseline assertion"] = mutated(
+                lambda d: _set(d, "canonical_baseline_preserved", "failed")
+            )
         if spec["foreign_state"][0] == "object":
             failing["foreign state claim"] = mutated(
                 lambda d: _set(d, spec["foreign_state"][1], "untouched")
