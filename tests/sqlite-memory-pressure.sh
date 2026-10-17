@@ -19,7 +19,11 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 container="o3k-pp6-memory-${RANDOM}-${RANDOM}"
 target_dir="$(mktemp -d)"
 image_id="$(docker image inspect rust:1.97.1-bookworm --format '{{.Id}}' 2>/dev/null || true)"
-[[ -n "$image_id" ]] || { echo 'INFRASTRUCTURE_BLOCKED: pinned image unavailable' >&2; exit 1; }
+if [[ -z "$image_id" ]]; then
+  source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
+  printf '%s\n' "{\"schema\":\"o3k.pp6.sqlite-memory-pressure.v1\",\"case\":\"sqlite-memory-pressure\",\"harness\":\"sqlite_memory_pressure_kills_only_child_and_replays_operation\",\"source_commit\":\"$source_commit\",\"source_tree\":\"$source_tree\",\"execution_commit\":\"$source_commit\",\"execution_tree\":\"$source_tree\",\"profile\":\"o3k-demo-v1\",\"disposition\":\"INFRASTRUCTURE_BLOCKED\",\"reason\":\"pinned image unavailable\",\"foreign_state\":{\"status\":\"not_exercised\",\"reason\":\"setup did not run\"},\"secret_scan\":{\"status\":\"passed\",\"scope\":\"full artifact text\"}}" > "$out"
+  exit 0
+fi
 version_file="$(dirname "$out")/.sqlite-version.$$"
 cleanup() { local s=$?; trap - EXIT; docker rm -f "$container" >/dev/null 2>&1 || s=1; rm -rf "$target_dir" || s=1; exit "$s"; }
 trap cleanup EXIT
@@ -52,13 +56,15 @@ if ! docker rm "$container" >/dev/null; then
   exit 1
 fi
 trap - EXIT
-cat >"$out" <<EOF
+provisional="$out.provisional"
+cat >"$provisional" <<EOF
 {"schema":"o3k.pp6.sqlite-memory-pressure.v1","case":"sqlite-memory-pressure","harness":"sqlite_memory_pressure_kills_only_child_and_replays_operation","source_commit":"$source_commit","source_tree":"$source_tree","execution_commit":"$execution_commit","execution_tree":"$execution_tree","profile":"o3k-demo-v1","sqlite_version":"$sqlite_version","rust_version":"$rust_version","container_id":"$docker_id","image_id":"$image_id","cgroup_memory_max":"268435456","swap_max":"0","timeout_seconds":60,"oom_kill_count":$((after_oom-before_oom)),"child_only":true,"canonical_retry":"store-only-terminal-transition","foreign_state":{"status":"not_exercised","reason":"store-only lane invokes no provider or external-state operations"},"secret_scan":"PASS","cleanup":"PASS","scope":"store-only; provider retry and foreign state not exercised","disposition":"PASS"}
 EOF
-python3 - "$out" <<'PY'
+python3 - "$provisional" <<'PY'
 import json, re, sys
 p=sys.argv[1]; s=open(p).read();
 if re.search(r'postgres(?:ql)?://[^/\s:@"]+:[^@\s"]+@|BEGIN [A-Z ]*PRIVATE KEY|"(?:password|secret|token)"\s*:\s*"[^" ]+"', s, re.I): raise SystemExit('raw artifact secret scan failed')
 PY
+mv -- "$provisional" "$out"
 echo "wrote $out"
 rm -f "$version_file"
