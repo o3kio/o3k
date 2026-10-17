@@ -131,6 +131,81 @@ in [the decision packet](../pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md#proposed-am
 They are not accepted; reviewers record accept, amend or reject for each one
 in this ADR.
 
+### Review amendments awaiting acceptance (2026-10-17)
+
+[Review comment 6239123579](https://github.com/o3kio/o3k/issues/975#issuecomment-6239123579)
+expressly records recommendations, not architecture or independent security
+acceptance. The existing packet incorporates the following proposed changes;
+all decisions and this ADR remain **PENDING / Proposed**:
+
+- **D2:** every backup requires a human detached-signature round-trip to the
+  disconnected signing workstation. Verify the exact persisted request and
+  D1 signing input before fsync and publication; abort safely or resume only
+  the exact request after interruption. Unattended/scheduled backup is outside
+  v1. Custodian identities, protected media locations, cryptsetup/workstation
+  versions, rotation/retention schedule and finite signing timeout are still
+  PENDING. Reference a protected custody record; do not publish secret material
+  or sensitive storage locations in this ADR.
+- **D4:** every O3K process opening the store, including CLI and maintenance
+  paths, must honor the same startup/store-access lock. The existing storage
+  execution lock is not this invariant. Stopping local daemons and taking a
+  local lock is insufficient for PostgreSQL: preventing O3K writer-role login
+  and proving no writer sessions remain, including remote controllers, are
+  mandatory before capture.
+- **D7:** recommend independently administered Redfish/BMC power-off, with
+  per-site TLS trust, source serial binding, at most five-minute evidence age
+  and a fresh authenticated observation before activation. The D2 offline
+  Ed25519 journal/evidence key signs the record; the target recovery verifier
+  uses its separately installed public trust anchor. Evidence collection must
+  be independent of the source host. Demo/TestLab without independent fencing
+  is limited to capture/verify; fresh-host activation is unsupported. D3 issuer
+  replacement and old-source credential rejection at every verifier, plus
+  target-only PostgreSQL writer access, are lasting activation gates in
+  addition to independent source exclusion. Neither a signature nor lease
+  expiry substitutes for that exclusion.
+- **D8/A6:** recommend an `o3k:o3k` owner-only recovery directory (0700; files
+  0600), consistent with the packaged service identity, on verified local
+  ext4. Use distinct target-reservation and startup/store-access locks; retain
+  reservation through commit and require a reviewed continuous startup-lock
+  handoff to the intended controller before `STARTED`. Forward journal records
+  require offline signing, including reconciliation and commit while the
+  controller runs: roughly ten signing round-trips. Separate unsigned failure
+  markers may only deny progress. They cannot modify the signed chain or
+  authorize mutation, activation, recovery, discard or reuse. When safe marker
+  persistence is impossible, preserve prior signed state and pending intent,
+  report failure and require inspection. Signing does not defend the target
+  database against a target-root attacker. Exact handoff, signing/transfer,
+  filesystem versions and recovery authority remain PENDING.
+- **D9/A7:** retain the proposed 4 GiB aggregate plaintext bound and raise the
+  reservation cap to **9 GiB**, so `max(2 × measured source bytes + 1 GiB,
+  6 GiB)` can reserve 9 GiB at that bound. Never truncate the reservation. The
+  1 GiB per-member cap applies to the whole SQLite snapshot and the whole
+  PostgreSQL custom dump. Representative peak-space measurements remain
+  PENDING; these proposed numbers are not measured acceptance evidence.
+- **D10:** validate the complete unfiltered `pg_restore --list` inventory
+  before executing archive SQL, classifying all expected object/data entries
+  and explicitly allowlisted tool-generated entries under a version-pinned
+  mapping to the migration inventory. Then independently validate the restored
+  catalog, definitions and privileges. A matching TOC name does not prove a
+  function, trigger or default expression is safe; the exact-release
+  pre-execution definition policy, grants and inventory revision remain
+  PENDING. Unknown entries must be rejected, not silently filtered out.
+- **D12/A8:** recommend rejecting the withdrawal/deferral of the interface
+  dependency. An approved exact-release operator invocation and #944 runbook
+  are prerequisites for operational recovery acceptance. Command names,
+  flags, exit codes and public CLI/API behavior require their own reviewed
+  contract; none are approved here.
+
+The requested reviewers remain senolcolak for architecture and zoorpha for
+security review. Zoorpha authored #1136/#1137, so author review of that material
+cannot satisfy independent security acceptance. A qualified, authorized
+reviewer independent of the proposals and implementation must be designated,
+with qualification/role and independence basis recorded. Both explicit role
+decisions must reference the exact amended source; no approval is inferred
+from this review comment or a protected documentation merge.
+
+### Decisions to record
+
 Reviewers must decide or approve the proposal for:
 
 1. manifest identity, canonical state inventory, consistency boundary, and
@@ -168,13 +243,13 @@ conditions in this ADR before #1084 implementation begins.
 
 | Decision | Recommended bounded choice | Approval still required |
 | --- | --- | --- |
-| PostgreSQL snapshot format and restore privilege policy | PostgreSQL 16 `pg_dump` custom format (`-Fc`) as one opaque regular-file member; restore with the matching supported `pg_restore` into a newly provisioned empty O3K database. The approved invocation must use `--exit-on-error`, `--no-owner`, and `--no-acl`, or a reviewed equivalent that demonstrably enforces the ownership/ACL policy; if the tool cannot enforce it, fail before mutation. Restore only with an installation-provisioned, least-privilege database role and an approved extension/object allowlist. A restore error or unknown outcome after target mutation and before `STARTED` enters `FAILED_RECOVERABLE`; the target stays inactive and quarantined. It is discarded/recreated or recovered only by an approved idempotent path. Activate only after complete restore, integrity, privilege, and migration validation. Do not use `PGDATA` copies or cluster-wide `pg_dumpall`. | Confirm tool/version policy, extension/object allowlist, database ownership, exact role privileges, and least-privilege target-role provisioning. Artifact data must not mutate roles, passwords, tablespaces, ownership, or ACLs beyond approved object policy. |
+| PostgreSQL snapshot format and restore privilege policy | PostgreSQL 16 `pg_dump` custom format (`-Fc`) as one opaque regular-file member; restore with the matching supported `pg_restore` into a newly provisioned empty O3K database. The approved invocation must use `--exit-on-error`, `--no-owner`, and `--no-acl`, or a reviewed equivalent that demonstrably enforces the ownership/ACL policy; if the tool cannot enforce it, fail before mutation. Restore only with an installation-provisioned, least-privilege database role and an approved extension/object allowlist. A known partial restore error before `STARTED` enters `FAILED_RECOVERABLE`; an unknown outcome enters `QUARANTINED`. The target stays inactive in both cases. It is discarded/recreated or recovered only by an approved idempotent path. Activate only after complete restore, integrity, privilege, and migration validation. Do not use `PGDATA` copies or cluster-wide `pg_dumpall`. | Confirm tool/version policy, extension/object allowlist, database ownership, exact role privileges, and least-privilege target-role provisioning. Artifact data must not mutate roles, passwords, tablespaces, ownership, or ACLs beyond approved object policy. |
 | SQLite snapshot primitive | Reuse `SqliteStore::backup_to_file` and its `VACUUM INTO` behavior after the accepted SQLite WAL/checkpoint and consistency boundary has been proven. | Confirm the operation can be coordinated with config, bootstrap/trust material, API writes, workers, provider dispatch, and lease activity; the existing store primitive alone is not that barrier. |
 | Public operator surface | Keep the first implementation slice internal, with no CLI or API addition. Revisit an `o3k` operator command only under a reviewed interface contract. | No public command, flags, confirmation behavior, or output format is accepted by this proposal. |
-| Signing and encryption | Keep the backup authentication/encryption profile undecided. Use a backup-specific trust/key lifecycle, separate from release signing keys, and require externally protected operator key recovery. | Select algorithms, envelope fields, canonical authenticated encoding, nonce/key-wrapping rules, trust distribution and rotation, issuer-key recovery, and secret inclusion policy. The release Ed25519 key is not a backup key. |
-| Restore activation | Require a fresh runtime controller identity/epoch and an approved source-controller stop or out-of-band fencing step before enabling writes or provider dispatch. Never restore lease ownership as active. | Define stable site identity versus runtime identity, the fencing proof, lease reacquisition, PKI readiness, and the first reconciliation gate. |
-| Restore journal and target reservation | Keep journal data outside the target database and bind it to the target identity and artifact digest; fail closed on ambiguous or conflicting state. | Select protected location, owner/authentication, exclusive reservation, crash cleanup, and recovery behavior for unknown filesystem/database outcomes. |
-| Outer artifact and limits | Use a single regular-file artifact with a closed member allowlist as the starting candidate; authenticate member metadata before extraction or target mutation. | Select encoding/compression and numeric limits for member count, path depth, member and aggregate sizes, compression ratio, and staging capacity. Reject unsupported entries before extraction. |
+| Signing and encryption | Review the exact D1/D2 profile and offline detached-signature workflow in the decision packet, separate from release signing keys, with externally protected operator key recovery. Unattended backup is unsupported. | Accept or amend the proposed encoding, cryptographic profile, custody, tool versions, rotation/revocation and finite signing deadline; none is accepted here. The release Ed25519 key is not a backup key. |
+| Restore activation | Review D3/D7 independent Redfish/BMC exclusion plus issuer replacement, rejection of old-source credentials, fresh target epoch and target-only PostgreSQL writer access. Never restore lease ownership as active. | Accept the profile restriction without BMC, exact evidence custody/verifier and deployment capability, PKI readiness and first reconciliation gate. |
+| Restore journal and target reservation | Review D8 service-user ownership, offline signed transitions and separate denial-only failure markers. Keep target reservation distinct from startup exclusion through commit. | Accept exact path, filesystem, signing/transfer and controlled startup handoff, stale-operation recovery authority and unknown-outcome handling. |
+| Outer artifact and limits | Review D9/A7 regular-file allowlist with no outer compression, 1 GiB member/4 GiB aggregate bounds and the full staging formula with a 9 GiB reservation cap. Authenticate before extraction or mutation. | Accept only after representative member/artifact/peak-space measurements; reject unsupported entries and never truncate the computed reservation. |
 
 These recommendations narrow review but do not establish a common consistency
 cut or settle cryptographic/security semantics. The first implementation PR
@@ -182,11 +257,12 @@ remains blocked until the applicable rows above and approval items 1–13 are
 resolved. Existing implementation can be audited and tests can be planned,
 but code must not infer approval from this worksheet.
 
-Production implementation must not begin until the security-sensitive items
-and any public CLI contract have accepted human review. If approved, the first
-implementation slice is internal manifest validation and SQLite backup
-publication/verification, with no CLI/API and no PostgreSQL behavior in that
-PR.
+Production implementation must not begin until the applicable security and
+architecture decisions have accepted human review. The first authorized slice
+proves store-startup exclusion and a consistent SQLite cut, followed by
+manifest validation and backup publication/verification. It adds no public
+CLI/API or PostgreSQL adapter. A separately accepted operator interface is
+required before exposing that surface or claiming operational recovery.
 
 ## Evidence required before claiming PP.6 support
 
