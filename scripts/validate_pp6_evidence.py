@@ -207,7 +207,7 @@ def build_envelope(
             raise EvidenceError(f"{key} must be {expected}")
     key, passing = spec["disposition"]
     actual_disposition = lookup(document, key)
-    if case == "sqlite-memory-pressure" and actual_disposition == "NOT_RUN":
+    if case == "sqlite-memory-pressure" and actual_disposition in {"NOT_RUN", "INFRASTRUCTURE_BLOCKED"}:
         source_tree = required(document, "source_tree")
         execution_tree = required(document, "execution_tree")
         if not isinstance(source_tree, str) or not COMMIT.match(source_tree) or not isinstance(execution_tree, str) or not COMMIT.match(execution_tree):
@@ -215,7 +215,7 @@ def build_envelope(
         scan_secrets(text)
         return {
             "schema": SCHEMA, "issue": ISSUE, "case": case,
-            "disposition": "NOT_RUN", "reason": required(document, "reason"),
+            "disposition": actual_disposition, "reason": required(document, "reason"),
             "source": {"commit": commit(document, "source_commit"), "tree": source_tree, "execution_commit": commit(document, "execution_commit"), "execution_tree": execution_tree},
             "harness": required(document, "harness"), "profile": required(document, "profile"),
             "foreign_state": foreign_state(document, spec["foreign_state"]),
