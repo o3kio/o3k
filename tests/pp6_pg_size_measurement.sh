@@ -7,14 +7,30 @@ psql() { command psql -X --no-password "$@" 2>/dev/null; }
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 out_dir=${1:?provide a new private output directory}
 git -C "$repo_root" diff --quiet HEAD -- || { printf 'tracked source is dirty\n' >&2; exit 2; }
+migration_dirs=(crates/o3k-store/migrations crates/o3k-store/migrations_postgres)
+[[ -z "$(git -C "$repo_root" status --porcelain --untracked-files=all -- "${migration_dirs[@]}")" && -z "$(git -C "$repo_root" ls-files --others -- "${migration_dirs[@]}")" ]] || {
+  printf 'migration inputs differ from committed source\n' >&2; exit 2;
+}
+for f in "$repo_root"/crates/o3k-store/migrations{,_postgres}/*.sql; do
+  [[ -f "$f" && ! -L "$f" ]] || { printf 'migration must be a regular committed file\n' >&2; exit 2; }
+done
 if [[ -e "$out_dir" ]]; then printf 'output directory already exists: %s\n' "$out_dir" >&2; exit 2; fi
 mkdir "$out_dir"; chmod 700 "$out_dir"
 db="o3k_pp6_measure_$(date +%s)_$RANDOM"
-db_url=$(python3 - "$O3K_ADMIN_URL" "$db" <<'PY'
+printf '%s\n' "$db" >"$out_dir/database.name"
+stage=connection_preflight
+trap 'printf "measurement_failed stage=%s\n" "$stage" >&2' ERR
+trap 'exit 130' INT
+trap 'exit 143' TERM
+db_url=$(python3 - "$db" <<'PY'
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-import sys
-u = urlsplit(sys.argv[1]); q = [(k,v) for k,v in parse_qsl(u.query, keep_blank_values=True) if k.lower() != "dbname"]
-print(urlunsplit((u.scheme, u.netloc, "/" + sys.argv[2], urlencode(q), u.fragment)))
+import os, sys
+u = urlsplit(os.environ["O3K_ADMIN_URL"])
+pairs = parse_qsl(u.query, keep_blank_values=True)
+if u.scheme not in {"postgres", "postgresql"} or u.fragment or u.password is not None or any(k.lower() in {"password", "sslpassword"} for k, _ in pairs):
+    sys.exit("use a password-free PostgreSQL URI with PGPASSFILE or PGPASSWORD")
+q = [(k,v) for k,v in pairs if k.lower() != "dbname"]
+print(urlunsplit((u.scheme, u.netloc, "/" + sys.argv[1], urlencode(q), u.fragment)))
 PY
 )
 server_version=$(psql "$O3K_ADMIN_URL" -Atqc 'show server_version')
@@ -32,16 +48,20 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+stage=create_database
 psql "$O3K_ADMIN_URL" -v ON_ERROR_STOP=1 -q -c "CREATE DATABASE \"$db\""
 created=true
 owner=$(psql "$O3K_ADMIN_URL" -Atqc "select pg_get_userbyid(datdba) from pg_database where datname='$db'")
 admin_user=$(psql "$O3K_ADMIN_URL" -Atqc 'select current_user')
 [[ "$owner" == "$admin_user" ]]
 [[ "$(psql "$db_url" -Atqc 'select current_database()')" == "$db" ]]
+stage=postgres_migrations
 for f in "$repo_root"/crates/o3k-store/migrations_postgres/*.sql; do psql "$db_url" -v ON_ERROR_STOP=1 -q -f "$f" >>"$out_dir/migrations.log" 2>&1; done
 pg_database_bytes=$(psql "$db_url" -Atqc 'select pg_database_size(current_database())')
+stage=postgres_dump
 dump="$out_dir/control-plane.dump"
 /usr/bin/time -f 'elapsed_seconds=%e peak_kib=%M' -o "$out_dir/pg_dump.time" pg_dump --no-password --format=custom --no-owner --no-acl --file="$dump" "$db_url" 2>/dev/null
+stage=sqlite_fixture
 sqlite="$out_dir/o3k.sqlite"
 for f in "$repo_root"/crates/o3k-store/migrations/*.sql; do sqlite3 "$sqlite" <"$f" >>"$out_dir/sqlite.log" 2>&1; done
 sqlite_check=$(sqlite3 "$sqlite" 'pragma integrity_check;'); sqlite_source_bytes=$(stat -c %s "$sqlite")
@@ -60,9 +80,11 @@ sqlite_count=$(printf '%s\n' "$repo_root"/crates/o3k-store/migrations/*.sql | wc
 snapshot_bytes=$(stat -c %s "$sqlite_snapshot")
 available=$(df -B1 --output=avail "$out_dir" | tail -1 | tr -d ' ')
 [[ "$sqlite_check" == ok ]]
+stage=cleanup
 # Successful cleanup is part of the result, never a later best-effort promise.
 cleanup
 created=false
+stage=publish_result
 python3 - "$out_dir/result.json" "$source_head" "$source_tree" "$server_version" "$dump_version" "$restore_version" "$pg_count" "$pg_database_bytes" "$dump_bytes" "$dump_sha" "$toc_sha" "$sqlite_count" "$sqlite_source_bytes" "$snapshot_bytes" "$sqlite_check" "$available" <<'PYRESULT'
 import json, os, sys
 path = sys.argv[1]

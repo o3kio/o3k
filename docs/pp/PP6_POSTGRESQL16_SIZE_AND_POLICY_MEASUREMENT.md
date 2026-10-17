@@ -15,7 +15,7 @@ pg_dump (PostgreSQL) 16.15
 ```
 
 The server was local and accepting connections. A uniquely named disposable
-database (`pp6_measure_<epoch>`) owned by the local `postgres` administrator
+database (`o3k_pp6_measure_<epoch>_<random>`) owned by the local `postgres` administrator
 was created, populated, dumped, and dropped. No existing O3K database was
 modified. The PostgreSQL fixture applied all 36 files in
 `crates/o3k-store/migrations_postgres/` (77 public tables) with
@@ -45,7 +45,7 @@ before reserving space.
 
 The bounded default should remain PostgreSQL 16 custom format (`pg_dump -Fc`)
 as one opaque authenticated member, consumed only by the matching PostgreSQL
-16 `pg_restore`. The supported restore invocation is where `--no-owner
+16 `pg_restore`. The proposed restore invocation is where `--no-owner
 --no-acl --exit-on-error` applies; `pg_dump` itself accepts the first two flags
 but not `--exit-on-error`. Capture should record server version, dump tool version,
 database identity, schema identity, extension inventory, migration identity,
@@ -72,34 +72,40 @@ This is a recommendation for ADR-0189/SPEC-0050 review, not an accepted
 security policy. Human approval is still required before implementation relies
 on it.
 
-## Reproducible commands
+## Reproducible measurement
 
-The PostgreSQL measurement is rerunnable with
-`tests/pp6_pg_size_measurement.sh`; it applied every migration file, then ran:
-
-```sh
-for f in crates/o3k-store/migrations_postgres/*.sql; do
-  psql "$O3K_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
-done
-pg_dump --format=custom --no-owner --no-acl --file=control-plane.dump "$O3K_DATABASE_URL"
-pg_restore --list control-plane.dump
-```
-
-The SQLite measurement applied every migration, then ran:
+This is a repository evidence harness, not an accepted public backup command.
+Run it only against a disposable PostgreSQL 16 service with an administrator
+permitted to create and drop its own fixture database. Supply a password-free
+PostgreSQL URI in `O3K_ADMIN_URL`; use a protected `PGPASSFILE` or `PGPASSWORD`
+for authentication. Do not put passwords in a URI or shell history.
 
 ```sh
-for f in crates/o3k-store/migrations/*.sql; do sqlite3 o3k.sqlite < "$f"; done
-sqlite3 o3k.sqlite 'pragma integrity_check; pragma wal_checkpoint(truncate)'
-sqlite3 o3k.sqlite 'vacuum into "snapshot.sqlite"'
+# O3K_ADMIN_URL and authentication are supplied securely by the environment.
+bash tests/pp6_pg_size_measurement.sh /private/new-pp6-measurement
 ```
 
-Credentials and URLs are placeholders; no secret-bearing raw command log is
-committed. A machine-readable run from the clean worktree recorded source
-head `699355e89005cdbe5975c297f9fef4df54db578c`, source tree
-`d8c21721f303159d0d4c2f820e048baaec9737f8`, dump SHA-256
-`eca394ffda613c69bf7eb2523bd5f71109bf2dee12202c2ecef82a0ec7c5fdc2`, and
-TOC-list SHA-256
-`892c546b542a392ad49e2c5b811dad7a74e98904e8ba119c4f019684b66826f2`.
+The output directory must not exist. The checkout must have no tracked changes,
+and both migration directories must contain only committed regular SQL files.
+The script verifies server and tool major version 16, creates a uniquely named
+database, confirms its owner and connected database before applying migrations,
+produces a native dump, measures a SQLite snapshot, and drops its database
+before publishing `result.json`. It rejects a query-parameter database override.
+The result binds the committed source head/tree and native dump/list digests;
+it explicitly excludes the SQLx ledger and encrypted-artifact acceptance.
+
+On failure, `measurement_failed stage=...` identifies the bounded stage without
+including SQL, connection URLs or credentials. Raw PostgreSQL stderr is
+suppressed; the failure classification is intentionally less detailed than a
+server administrator's diagnostics. The private output contains native state
+and must be handled and removed as sensitive evidence.
+
+INT/TERM attempt normal cleanup. SIGKILL, host failure or lost infrastructure
+can leave a fixture database. An interrupted run has no successful result.
+The private `database.name` identifies the generated target for administrator
+inspection: verify its owner and that it belongs to this run before removing
+it using the normal PostgreSQL administrative process. Never drop databases by
+prefix alone. Preserve or remove the output directory explicitly after review.
 
 ## Evidence limits and next requirement
 
