@@ -118,6 +118,8 @@ impl SystemUpgradeIo {
         };
         if state.target_version != *target
             || state.phase < crate::upgrade::state::UpgradePhase::BackupCreated
+            || crate::upgrade::state::is_terminal(state.phase)
+            || state.phase == crate::upgrade::state::UpgradePhase::Committed
             || state.backup_id.is_none()
         {
             return false;
@@ -1980,6 +1982,9 @@ dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd  ./docs/readme.
             download_base: DEFAULT_DOWNLOAD_BASE.to_owned(),
         };
         assert!(io.allows_same_version_resume(&target));
+        state.phase = crate::upgrade::state::UpgradePhase::Committed;
+        state.persist(&io.state_file).unwrap();
+        assert!(!io.allows_same_version_resume(&target));
         std::fs::write(dir.join("backup.json"), b"{}").unwrap();
         assert!(!io.allows_same_version_resume(&target));
         let _ = std::fs::remove_dir_all(root);
