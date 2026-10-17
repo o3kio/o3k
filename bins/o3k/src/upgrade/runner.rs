@@ -1939,6 +1939,53 @@ dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd  ./docs/readme.
     }
 
     #[test]
+    fn same_version_resume_requires_matching_durable_backup() {
+        let root = std::env::temp_dir().join(format!("o3k-resume-fence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let state_file = root.join("state.json");
+        let backup_dir = root.join("backups");
+        let source: ReleaseVersion = "0.2.0-alpha.2".parse().unwrap();
+        let target: ReleaseVersion = "0.3.0-alpha.1".parse().unwrap();
+        let backup_id = "backup-1";
+        let mut state = UpgradeState::discovered(source.clone(), target.clone());
+        state.phase = crate::upgrade::state::UpgradePhase::BinariesInstalled;
+        state.backup_id = Some(backup_id.to_owned());
+        state.persist(&state_file).unwrap();
+        let dir = backup_dir.join(backup_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = BackupManifest {
+            backup_id: backup_id.to_owned(),
+            source_version: source,
+            target_version: target.clone(),
+            source_commit: None,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            binary_sha256: [("o3kd".to_owned(), "a".repeat(64))].into_iter().collect(),
+            schema_version_before: 1,
+            db_restore_required_on_rollback: false,
+        };
+        std::fs::write(
+            dir.join("backup.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let io = SystemUpgradeIo {
+            prefix: root.clone(),
+            bin_dir: root.join("bin"),
+            config_dir: root.join("etc"),
+            data_dir: root.clone(),
+            state_file,
+            backup_dir,
+            download_dir: root.join("download"),
+            releases_url: DEFAULT_RELEASES_URL.to_owned(),
+            download_base: DEFAULT_DOWNLOAD_BASE.to_owned(),
+        };
+        assert!(io.allows_same_version_resume(&target));
+        std::fs::write(dir.join("backup.json"), b"{}").unwrap();
+        assert!(!io.allows_same_version_resume(&target));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn canonical_assets_follow_the_release_naming_contract() {
         let target = match "0.4.0-alpha.1".parse::<ReleaseVersion>() {
             Ok(version) => version,
