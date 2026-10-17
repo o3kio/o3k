@@ -56,6 +56,7 @@ PY
   O3K_PP5_1035_RUN_ID="$run_id" \
   O3K_PP5_1035_SOURCE_SHA="$source_sha" \
   O3K_PP5_1035_EVIDENCE_FILE="$artifact" \
+  O3K_PP5_1035_RUNNER_MARKER=RUN_OWNED_SQLITE_LOCALHOST_1035 \
   env -u O3K_DATABASE_URL -u O3K_DATABASE_BACKEND -u O3K_TEST_DATABASE_PURPOSE \
     cargo test -p o3kd --test pp5_1035_evidence_process --all-features pp5_1035_restart_writes_fail_closed_evidence -- --ignored --nocapture
   python3 scripts/validate_pp5_1035_evidence.py "$artifact" --source-sha "$source_sha"

@@ -20,6 +20,7 @@ expected_runner='cargo test -p o3kd --test pp5_1035_evidence_process --all-featu
 grep -Fq "$expected_runner" "$focused_runner"
 grep -Fq 'O3K_PP5_1035_EXPLICIT_AUTH=RUN_OWNED_SQLITE_LOCALHOST_1035' "$focused_runner"
 grep -Fq 'env -u O3K_DATABASE_URL -u O3K_DATABASE_BACKEND -u O3K_TEST_DATABASE_PURPOSE' "$focused_runner"
+grep -Fq 'O3K_PP5_1035_RUNNER_MARKER=RUN_OWNED_SQLITE_LOCALHOST_1035' "$focused_runner"
 grep -Fq 'cargo >/dev/null 2>&1' "$focused_runner"
 grep -Fq 'python3 >/dev/null 2>&1' "$focused_runner"
 grep -Fq 'uname -s' "$focused_runner"
@@ -27,6 +28,47 @@ grep -Fq 'command -v ss' "$focused_runner"
 grep -Fq 'source SHA must equal HEAD' "$focused_runner"
 grep -Fq 'worktree must be clean' "$focused_runner"
 grep -Fq 'run-owned SQLite/localhost' "$focused_runner"
+grep -Fq 'PP.5 #1035 runner marker is required' "$evidence_test"
+grep -Fq 'PP.5 runner marker is required' "$delete_test"
+test "$(grep -Fc 'O3K_PP5_1035_RUNNER_MARKER' "$evidence_test")" -eq 2
+test "$(grep -Fc 'O3K_PP5_1035_RUNNER_MARKER' "$delete_test")" -eq 1
+
+# Every ignored body must check the runner marker before its first setup call.
+evidence_body=$(grep -n 'async fn pp5_1035_restart_writes_fail_closed_evidence' "$evidence_test" | cut -d: -f1)
+evidence_setup=$(grep -n 'let run_id' "$evidence_test" | tail -1 | cut -d: -f1)
+test "$evidence_body" -lt "$evidence_setup"
+delete_body=$(grep -n 'async fn fault_pause_interrupted_delete_orphan_is_repaired_and_reuse_is_restored' "$delete_test" | cut -d: -f1)
+delete_setup=$(grep -n 'let root = std::env::temp_dir' "$delete_test" | cut -d: -f1)
+test "$delete_body" -lt "$delete_setup"
+
+# Direct ignored execution is fail-closed at each test body's first line when
+# the runner-issued marker is absent. Keep these exact and marker-free: they
+# must not reach any campaign fixture or external resource setup.
+run_unmarked_guard() {
+    local test_name=$1
+    local expected=$2
+    local test_target=$3
+    local output
+    if output=$(env -u O3K_PP5_1035_RUNNER_MARKER \
+        cargo test -p o3kd --test "$test_target" --all-features "$test_name" -- --ignored --exact 2>&1); then
+        echo "unmarked PP.5 test unexpectedly succeeded: $test_name" >&2
+        exit 1
+    fi
+    grep -Fq "$expected" <<<"$output"
+}
+run_unmarked_guard \
+    pp5_1035_restart_writes_fail_closed_evidence \
+    'PP.5 #1035 runner marker is required' \
+    pp5_1035_evidence_process
+run_unmarked_guard \
+    pp5_1035_postgres_restart_takes_over_lease_and_reconstructs_endpoint \
+    'PP.5 #1035 runner marker is required' \
+    pp5_1035_evidence_process
+run_unmarked_guard \
+    fault_pause_interrupted_delete_orphan_is_repaired_and_reuse_is_restored \
+    'PP.5 runner marker is required' \
+    pp5_interrupted_delete_process
+
 if grep -Fq -- '--all-features -- --ignored' "$focused_runner"; then
     echo "focused PP.5 runner must select an exact test before --ignored" >&2
     exit 1
