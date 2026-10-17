@@ -17,22 +17,34 @@ PY
 fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 container="o3k-pp6-memory-${RANDOM}-${RANDOM}"
+container_active=1
 target_dir="$(mktemp -d)"
 version_file=""
-cleanup() {
-  local s=$?
-  trap - EXIT
-  if docker inspect "$container" >/dev/null 2>&1; then
+cleanup_resources() {
+  local s=0
+  if (( container_active )); then
+    if ! docker inspect "$container" >/dev/null 2>&1; then
+      return 1
+    fi
     docker rm -f "$container" >/dev/null 2>&1 || s=1
+    container_active=0
   fi
   rm -rf "$target_dir" || s=1
   [[ -z "$version_file" ]] || rm -f "$version_file" || s=1
-  rm -f "$out.provisional" "$(dirname "$out")/.memory-phase.$$" || s=1
+  rm -f "$(dirname "$out")/.memory-phase.$$" || s=1
+  return "$s"
+}
+cleanup() {
+  local s=$?
+  trap - EXIT
+  cleanup_resources || s=1
+  rm -f "$out.provisional" || s=1
   exit "$s"
 }
 trap cleanup EXIT
 image_id="$(docker image inspect rust:1.97.1-bookworm --format '{{.Id}}' 2>/dev/null || true)"
 if [[ -z "$image_id" ]]; then
+  container_active=0
   source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
   printf '%s\n' "{\"schema\":\"o3k.pp6.sqlite-memory-pressure.v1\",\"case\":\"sqlite-memory-pressure\",\"harness\":\"sqlite_memory_pressure_kills_only_child_and_replays_operation\",\"source_commit\":\"$source_commit\",\"source_tree\":\"$source_tree\",\"execution_commit\":\"$source_commit\",\"execution_tree\":\"$source_tree\",\"profile\":\"o3k-demo-v1\",\"disposition\":\"INFRASTRUCTURE_BLOCKED\",\"reason\":\"pinned image unavailable\",\"foreign_state\":{\"status\":\"not_exercised\",\"reason\":\"setup did not run\"},\"secret_scan\":{\"status\":\"pending\",\"scope\":\"validator scans full artifact\"}}" > "$out"
   exit 0
@@ -77,6 +89,11 @@ execution_commit="$source_commit"
 execution_tree="$source_tree"
 if ! docker rm "$container" >/dev/null; then
   echo 'FAIL: container cleanup failed' >&2
+  exit 1
+fi
+container_active=0
+if ! cleanup_resources; then
+  echo 'FAIL: temporary resource cleanup failed before PASS publication' >&2
   exit 1
 fi
 provisional="$out.provisional"
