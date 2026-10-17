@@ -6,8 +6,12 @@ WORKFLOW="${ROOT_DIR}/.github/workflows/ci.yml"
 
 python3 - "${WORKFLOW}" <<'PY'
 import pathlib
+import json
+import os
 import re
+import subprocess
 import sys
+import tempfile
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 assert "git fetch origin main:refs/remotes/origin/main" in text
@@ -61,9 +65,60 @@ assert "if [[" not in memory_lane, "memory evidence validation must also run for
 memory_harness = (pathlib.Path(sys.argv[1]).parent.parent.parent / "tests/sqlite-memory-pressure.sh").read_text(
     encoding="utf-8"
 )
+memory_harness_path = pathlib.Path(sys.argv[1]).parent.parent.parent / "tests/sqlite-memory-pressure.sh"
 assert memory_harness.count("--ignored --exact sqlite_memory_pressure_kills_only_child_and_replays_operation") == 2, (
     "setup/recovery and allocator invocations must explicitly select the ignored pressure test"
 )
+assert 'docker_cgroup_version="$(docker info --format \'{{.CgroupVersion}}\'' in memory_harness
+assert '"$docker_cgroup_version" != "2"' in memory_harness
+
+# Docker Engine's CgroupVersion field is "2" on cgroup v2, not "cgroup2".
+# Exercise only the harness preflight with a Docker stub: the cgroup-v2 case
+# advances to the pinned-image check (which is deliberately unavailable), and
+# the cgroup-v1 case blocks before even checking for an image. Neither case
+# starts a container or runs the pressure operation.
+with tempfile.TemporaryDirectory(prefix="pp6-memory-preflight-") as directory:
+    root = pathlib.Path(directory)
+    docker_bin = root / "bin"
+    docker_bin.mkdir()
+    docker_stub = docker_bin / "docker"
+    image_probe = root / "image-probe"
+    docker_stub.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ $1 == info ]]; then printf '%s\\n' "$MOCK_DOCKER_CGROUP_VERSION"; exit 0; fi
+if [[ $1 == image && $2 == inspect ]]; then touch "$MOCK_IMAGE_PROBE"; exit 1; fi
+echo 'unexpected docker invocation' >&2; exit 97
+""",
+        encoding="utf-8",
+    )
+    docker_stub.chmod(0o755)
+
+    def run_preflight(version: str, label: str) -> tuple[dict, bool]:
+        runner_temp = root / label
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{docker_bin}:{env['PATH']}",
+                "RUNNER_TEMP": str(runner_temp),
+                "MOCK_DOCKER_CGROUP_VERSION": version,
+                "MOCK_IMAGE_PROBE": str(image_probe),
+            }
+        )
+        subprocess.run(["bash", str(memory_harness_path)], env=env, check=True, capture_output=True, text=True)
+        artifact = json.loads((runner_temp / "pp6-sqlite-memory-pressure.json").read_text())
+        return artifact, image_probe.exists()
+
+    artifact, image_was_probed = run_preflight("2", "cgroup-v2")
+    assert artifact["disposition"] == "INFRASTRUCTURE_BLOCKED"
+    assert artifact["reason"] == "pinned image unavailable"
+    assert image_was_probed, "Docker Engine cgroup version 2 was incorrectly rejected"
+    image_probe.unlink()
+
+    artifact, image_was_probed = run_preflight("1", "cgroup-v1")
+    assert artifact["disposition"] == "INFRASTRUCTURE_BLOCKED"
+    assert artifact["reason"] == "Docker or cgroup v2 capability unavailable"
+    assert not image_was_probed, "cgroup v1 must block before container/image setup"
 assert "validate_pp6_evidence.py --case postgres-tablespace-pressure " in tablespace_text
 # Every workflow that provides a required status check must run for merge
 # queue groups, or the queue waits forever on the missing check.

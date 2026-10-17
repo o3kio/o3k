@@ -3,7 +3,11 @@ set -euo pipefail
 
 out="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pp6-sqlite-memory-pressure.json"
 mkdir -p "$(dirname "$out")"
-if ! command -v docker >/dev/null || ! docker info --format '{{.CgroupVersion}}' 2>/dev/null | grep -qx cgroup2; then
+docker_cgroup_version=""
+if command -v docker >/dev/null; then
+  docker_cgroup_version="$(docker info --format '{{.CgroupVersion}}' 2>/dev/null || true)"
+fi
+if [[ "$docker_cgroup_version" != "2" && "$docker_cgroup_version" != "cgroup2" ]]; then
   source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
   cat >"$out" <<EOF
 {"schema":"o3k.pp6.sqlite-memory-pressure.v1","case":"sqlite-memory-pressure","harness":"sqlite_memory_pressure_kills_only_child_and_replays_operation","source_commit":"$source_commit","source_tree":"$source_tree","execution_commit":"$source_commit","execution_tree":"$source_tree","profile":"o3k-demo-v1","disposition":"NOT_RUN","reason":"Docker or cgroup v2 capability unavailable","foreign_state":{"status":"not_exercised","reason":"setup did not run"}}
