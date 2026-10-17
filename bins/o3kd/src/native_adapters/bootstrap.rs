@@ -506,10 +506,6 @@ impl BootstrapWorkflow for BootstrapAdapter {
                     )
                     .await;
             }
-            // Replayed joins still project the durable canonical phase into
-            // the live readiness gate (for example after a transient runtime
-            // failure), without changing any other readiness input.
-            self.readiness.set_bootstrap_ready(state.is_ready());
             let block_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
                 format!("o3k:building-block:{}", request.agent_id).as_bytes(),
@@ -526,6 +522,11 @@ impl BootstrapWorkflow for BootstrapAdapter {
                     );
                     BootstrapFailure::Conflict
                 })?;
+            // Publish readiness only after the live identity and its joined
+            // building block have both been re-established. A failed replay
+            // must not leave the process readiness gate claiming bootstrap
+            // success.
+            self.readiness.set_bootstrap_ready(state.is_ready());
             return Ok(JoinResponse {
                 phase: "ready".into(),
                 agent_id: request.agent_id.clone(),
@@ -820,6 +821,30 @@ mod tests {
                 .await
                 .is_none(),
             "fresh runtime must start with an empty live registry"
+        );
+        let failed_replay = restarted_adapter
+            .join(JoinRequest {
+                enrollment_token: "malformed-replay".into(),
+                agent_id: "node-test".into(),
+                agent_epoch: "epoch-3".into(),
+                certificate: String::from_utf8(
+                    include_bytes!("../../../../crates/o3k-compute-agent/tests/fixtures/agent.pem")
+                        .to_vec(),
+                )?,
+                region: None,
+                availability_domain: None,
+                failure_domain_id: None,
+                capabilities: serde_json::json!({"flags": ["malformed"]}),
+                inventories: BTreeMap::from([
+                    (String::from("VCPU"), 2),
+                    (String::from("MEMORY_MB"), 1024),
+                ]),
+            })
+            .await;
+        assert!(failed_replay.is_err(), "malformed replay must fail closed");
+        assert!(
+            !restarted_readiness.is_ready(),
+            "failed replay must not publish bootstrap readiness"
         );
         let reinstall_replay = restarted_adapter
             .join(JoinRequest {
