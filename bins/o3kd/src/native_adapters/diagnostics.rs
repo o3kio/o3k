@@ -1229,6 +1229,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capacity_unknown_when_observation_is_in_the_future() {
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        store
+            .register_provider("provider-a", &[inventory("VCPU", 8, 1, 1.0, 2)])
+            .await
+            .expect("register provider");
+        let agents = fake_agents(HashMap::from([(
+            "provider-a".to_owned(),
+            (
+                snapshot(
+                    "provider-a",
+                    AgentAvailability::Available,
+                    AgentAdministrativeState::Enabled,
+                ),
+                Some(i64::MAX),
+            ),
+        )]));
+        let adapter = DiagnosticsReaderAdapter::new(
+            Arc::new(RwLock::new(ManifestRegistry::new())),
+            agents,
+            store,
+            o3k_kernel::LocationRegistry::default(),
+        );
+        let capacity = adapter.capacity().await.expect("capacity");
+        assert_eq!(capacity.status, DiagnosticStatus::Unknown);
+        assert_eq!(capacity.reason, Some(DiagnosticReason::NeverObserved));
+    }
+
+    #[tokio::test]
     async fn capacity_arithmetic_is_saturating() {
         let store = Arc::new(
             o3k_store::unified::O3kStore::connect_sqlite_memory()
