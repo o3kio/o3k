@@ -21,6 +21,9 @@ use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
+#[path = "common/pp5_runner_capability.rs"]
+mod pp5_runner_capability;
+
 const PROJECT_ID: &str = "eba29e2d-53de-461d-ae91-ede7402713cb";
 const FOREIGN_PROJECT_ID: &str = "1d6e8a4d-9e09-4a7a-a1cb-2a0e5fb2a103";
 const BOOTSTRAP_PASSWORD: &str = "pp5-interrupted-delete-bootstrap-password";
@@ -2602,11 +2605,7 @@ async fn quota_usage(
 #[tokio::test]
 #[ignore = "explicit PP.5 #1035 invocation required"]
 async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
-    if std::env::var("O3K_PP5_1035_RUNNER_MARKER").as_deref()
-        != Ok("RUN_OWNED_SQLITE_LOCALHOST_1035")
-    {
-        return Err("PP.5 #1035 runner marker is required".into());
-    }
+    pp5_runner_capability::require_runner_capability("sqlite-restart")?;
     let run_id =
         std::env::var("O3K_PP5_1035_RUN_ID").unwrap_or_else(|_| Uuid::now_v7().to_string());
     let artifact = PathBuf::from(
@@ -2676,11 +2675,7 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
 #[ignore = "explicit PP.5 #1035 invocation required"]
 async fn pp5_1035_postgres_restart_takes_over_lease_and_reconstructs_endpoint() -> Result<(), Error>
 {
-    if std::env::var("O3K_PP5_1035_RUNNER_MARKER").as_deref()
-        != Ok("RUN_OWNED_SQLITE_LOCALHOST_1035")
-    {
-        return Err("PP.5 #1035 runner marker is required".into());
-    }
+    pp5_runner_capability::require_runner_capability("postgres-restart")?;
     let Some(fixture) = PgFixture::new().await? else {
         return Ok(());
     };
