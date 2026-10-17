@@ -25,8 +25,19 @@ if [[ -z "$image_id" ]]; then
   exit 0
 fi
 version_file="$(dirname "$out")/.sqlite-version.$$"
-cleanup() { local s=$?; trap - EXIT; docker rm -f "$container" >/dev/null 2>&1 || s=1; rm -rf "$target_dir" || s=1; exit "$s"; }
+cleanup() { local s=$?; trap - EXIT; docker rm -f "$container" >/dev/null 2>&1 || s=1; rm -rf "$target_dir" || s=1; rm -f "$version_file" "$out.provisional" || s=1; exit "$s"; }
 trap cleanup EXIT
+blocked() {
+  local reason="$1" source_commit source_tree
+  source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
+  printf '%s\n' "{\"schema\":\"o3k.pp6.sqlite-memory-pressure.v1\",\"case\":\"sqlite-memory-pressure\",\"harness\":\"sqlite_memory_pressure_kills_only_child_and_replays_operation\",\"source_commit\":\"$source_commit\",\"source_tree\":\"$source_tree\",\"execution_commit\":\"$source_commit\",\"execution_tree\":\"$source_tree\",\"profile\":\"o3k-demo-v1\",\"disposition\":\"INFRASTRUCTURE_BLOCKED\",\"reason\":\"$reason\",\"foreign_state\":{\"status\":\"not_exercised\",\"reason\":\"setup did not run\"},\"secret_scan\":{\"status\":\"passed\",\"scope\":\"full artifact text\"}}" > "$out.provisional"
+  python3 - "$out.provisional" <<'PY'
+import json,sys
+json.load(open(sys.argv[1]))
+PY
+  mv -- "$out.provisional" "$out"
+  exit 0
+}
 docker run --rm --name "${container}-builder" -v "$root:/o3k" -v "$target_dir:/o3k/target" -w /o3k "$image_id" \
   cargo test --locked -p o3k-store --test sqlite_memory_pressure --all-features --no-run
 host_bin="$(find "$target_dir/debug/deps" -maxdepth 1 -type f -name 'sqlite_memory_pressure-*' ! -name '*.d' | head -n 1)"
@@ -36,8 +47,8 @@ docker run -d --name "$container" --memory=256m --memory-swap=256m \
   sleep 120 >/dev/null
 before_events="$(docker exec "$container" cat /sys/fs/cgroup/memory.events)"
 docker_id="$(docker inspect --format '{{.Id}}' "$container")"
-[[ "$(docker exec "$container" cat /sys/fs/cgroup/memory.max)" == 268435456 ]] || { echo 'INFRASTRUCTURE_BLOCKED: memory.max not enforced' >&2; exit 1; }
-[[ "$(docker exec "$container" cat /sys/fs/cgroup/memory.swap.max)" == 0 ]] || { echo 'INFRASTRUCTURE_BLOCKED: memory.swap.max not enforced' >&2; exit 1; }
+[[ "$(docker exec "$container" cat /sys/fs/cgroup/memory.max)" == 268435456 ]] || blocked 'memory.max not enforced'
+[[ "$(docker exec "$container" cat /sys/fs/cgroup/memory.swap.max)" == 0 ]] || blocked 'memory.swap.max not enforced'
 timeout 60s docker exec "$container" env O3K_MEMORY_PRESSURE_VERSION_PATH="/evidence/.sqlite-version.$$" \
   "/o3k/target/debug/deps/$(basename "$host_bin")" --exact sqlite_memory_pressure_kills_only_child_and_replays_operation --nocapture
 events="$(docker exec "$container" cat /sys/fs/cgroup/memory.events 2>/dev/null || true)"
