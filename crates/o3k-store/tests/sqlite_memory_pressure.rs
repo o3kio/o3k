@@ -1,33 +1,37 @@
 #![cfg(target_os = "linux")]
 
-use std::os::unix::process::ExitStatusExt;
-use std::{error::Error, path::PathBuf, time::Duration};
+use std::{error::Error, path::PathBuf};
 
 use o3k_store::{DurableStore, OperationRecord, OperationState, ResourceRecord, testkit};
 use uuid::Uuid;
 
-const CHILD: &str = "O3K_MEMORY_PRESSURE_CHILD";
+const MODE: &str = "O3K_MEMORY_PRESSURE_MODE";
 const DB: &str = "O3K_MEMORY_PRESSURE_DB";
-const RESOURCE: &str = "O3K_MEMORY_PRESSURE_RESOURCE";
-const OPERATION: &str = "O3K_MEMORY_PRESSURE_OPERATION";
+const RESOURCE_ID: u128 = 0x1089_0000_0000_0000_0000_0000_0000_0001;
+const OPERATION_ID: u128 = 0x1089_0000_0000_0000_0000_0000_0000_0002;
 
 #[tokio::test]
 #[ignore = "requires a disposable 256 MiB no-swap container"]
 async fn sqlite_memory_pressure_kills_only_child_and_replays_operation()
 -> Result<(), Box<dyn Error>> {
-    let database = std::env::temp_dir().join(format!("o3k-1089-memory-{}.sqlite", Uuid::now_v7()));
-    let resource_id = std::env::var(RESOURCE)
-        .ok()
-        .and_then(|v| Uuid::parse_str(&v).ok())
-        .unwrap_or_else(Uuid::now_v7);
-    let operation_id = std::env::var(OPERATION)
-        .ok()
-        .and_then(|v| Uuid::parse_str(&v).ok())
-        .unwrap_or_else(Uuid::now_v7);
-    if std::env::var_os(CHILD).is_some() {
-        return child_case(PathBuf::from(std::env::var(DB)?), resource_id, operation_id).await;
+    let database = PathBuf::from(std::env::var(DB)?);
+    let resource_id = Uuid::from_u128(RESOURCE_ID);
+    let operation_id = Uuid::from_u128(OPERATION_ID);
+    match std::env::var(MODE)?.as_str() {
+        "setup" => setup(&database, resource_id, operation_id).await?,
+        "allocate" => allocation_child(database, resource_id, operation_id).await?,
+        "recover" => recover(&database, resource_id, operation_id).await?,
+        mode => return Err(format!("unknown memory pressure mode: {mode}").into()),
     }
-    let store = testkit::open_file(&database).await?;
+    Ok(())
+}
+
+async fn setup(
+    database: &PathBuf,
+    resource_id: Uuid,
+    operation_id: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    let store = testkit::open_file(database).await?;
     store
         .insert_resource(&ResourceRecord {
             id: resource_id,
@@ -51,26 +55,15 @@ async fn sqlite_memory_pressure_kills_only_child_and_replays_operation()
             error_message: None,
         })
         .await?;
-    drop(store);
-    let mut child = tokio::process::Command::new(std::env::current_exe()?)
-        .args([
-            "--exact",
-            "sqlite_memory_pressure_kills_only_child_and_replays_operation",
-            "--nocapture",
-        ])
-        .env(CHILD, "1")
-        .env(DB, &database)
-        .env(RESOURCE, resource_id.to_string())
-        .env(OPERATION, operation_id.to_string())
-        .kill_on_drop(true)
-        .spawn()?;
-    let status = tokio::time::timeout(Duration::from_secs(60), child.wait()).await??;
-    assert_eq!(
-        status.signal(),
-        Some(9),
-        "child must be SIGKILL OOM victim, status={status}"
-    );
-    let recovered = testkit::open_file(&database).await?;
+    Ok(())
+}
+
+async fn recover(
+    database: &PathBuf,
+    resource_id: Uuid,
+    operation_id: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    let recovered = testkit::open_file(database).await?;
     let expected_resource = ResourceRecord {
         id: resource_id,
         kind: "compute:server".into(),
@@ -103,9 +96,10 @@ async fn sqlite_memory_pressure_kills_only_child_and_replays_operation()
     let sqlite_version: String = sqlx::query_scalar("SELECT sqlite_version()")
         .fetch_one(&version_pool)
         .await?;
-    if let Some(path) = std::env::var_os("O3K_MEMORY_PRESSURE_VERSION_PATH") {
-        std::fs::write(path, sqlite_version)?;
-    }
+    std::fs::write(
+        std::env::var("O3K_MEMORY_PRESSURE_VERSION_PATH")?,
+        sqlite_version,
+    )?;
     recovered
         .update_operation(operation_id, OperationState::Succeeded, None, None, None)
         .await?;
@@ -114,13 +108,10 @@ async fn sqlite_memory_pressure_kills_only_child_and_replays_operation()
         OperationState::Succeeded
     );
     drop(recovered);
-    for suffix in ["", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{}", database.display(), suffix));
-    }
     Ok(())
 }
 
-async fn child_case(
+async fn allocation_child(
     database: PathBuf,
     resource_id: Uuid,
     operation_id: Uuid,
@@ -134,9 +125,10 @@ async fn child_case(
         store.get_operation(operation_id).await?.state,
         OperationState::Pending
     );
-    if let Some(path) = std::env::var_os("O3K_MEMORY_PRESSURE_PHASE_PATH") {
-        std::fs::write(path, "allocation-phase-ready\n")?;
-    }
+    std::fs::write(
+        std::env::var("O3K_MEMORY_PRESSURE_PHASE_PATH")?,
+        "allocation-phase-ready\n",
+    )?;
     let mut allocations = Vec::new();
     loop {
         allocations.push(vec![0_u8; 16 * 1024 * 1024]);
