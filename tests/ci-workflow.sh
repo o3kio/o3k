@@ -49,8 +49,15 @@ for case in (
     "postgres-server-pressure",
     "postgres-wal-pressure",
     "sqlite-disk-pressure",
+    "sqlite-memory-pressure",
 ):
     assert f"validate_pp6_evidence.py --case {case} " in text, case
+memory_lane = text.split("- name: PP.6 bounded SQLite memory-pressure evidence", 1)[1].split(
+    "- name: Upload PP.6 SQLite memory-pressure evidence", 1
+)[0]
+assert "bash tests/sqlite-memory-pressure.sh" in memory_lane
+assert "validate_pp6_evidence.py --case sqlite-memory-pressure" in memory_lane
+assert "if [[" not in memory_lane, "memory evidence validation must also run for NOT_RUN"
 assert "validate_pp6_evidence.py --case postgres-tablespace-pressure " in tablespace_text
 # Every workflow that provides a required status check must run for merge
 # queue groups, or the queue waits forever on the missing check.

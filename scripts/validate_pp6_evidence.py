@@ -114,6 +114,17 @@ CASES = {
         "fixture": ["filesystem_type", "filesystem_size_bytes", "evidence_tier"],
         "foreign_state": ("object", "foreign_state"),
     },
+    "sqlite-memory-pressure": {
+        "harness": "harness",
+        "lane_schema": ("schema", "o3k.pp6.sqlite-memory-pressure.v1"),
+        "disposition": ("disposition", "PASS"),
+        "source": "source_commit",
+        "execution": "execution_commit",
+        "backend": ("sqlite", "sqlite_version"),
+        "profile": "profile",
+        "fixture": ["container_id", "image_id", "cgroup_memory_max", "oom_kill_count"],
+        "foreign_state": ("object", "foreign_state"),
+    },
 }
 
 
@@ -195,7 +206,22 @@ def build_envelope(
         if lookup(document, key) != expected:
             raise EvidenceError(f"{key} must be {expected}")
     key, passing = spec["disposition"]
-    if lookup(document, key) != passing:
+    actual_disposition = lookup(document, key)
+    if case == "sqlite-memory-pressure" and actual_disposition == "NOT_RUN":
+        source_tree = required(document, "source_tree")
+        execution_tree = required(document, "execution_tree")
+        if not isinstance(source_tree, str) or not COMMIT.match(source_tree) or not isinstance(execution_tree, str) or not COMMIT.match(execution_tree):
+            raise EvidenceError("NOT_RUN source/execution trees must be full commit ids")
+        scan_secrets(text)
+        return {
+            "schema": SCHEMA, "issue": ISSUE, "case": case,
+            "disposition": "NOT_RUN", "reason": required(document, "reason"),
+            "source": {"commit": commit(document, "source_commit"), "tree": source_tree, "execution_commit": commit(document, "execution_commit"), "execution_tree": execution_tree},
+            "harness": required(document, "harness"), "profile": required(document, "profile"),
+            "foreign_state": foreign_state(document, spec["foreign_state"]),
+            "secret_scan": {"status": "passed", "scope": "full artifact text", "patterns": sorted(SECRET_PATTERNS)},
+        }
+    if actual_disposition != passing:
         raise EvidenceError(f"{key} is not the passing value {passing!r}")
     backend_kind, version_path = spec["backend"]
     version = required(document, version_path)
@@ -326,6 +352,18 @@ def self_test() -> None:
             except EvidenceError:
                 continue
             raise AssertionError(f"{case}: {label} was accepted")
+    not_run = _sample("sqlite-memory-pressure")
+    not_run.update({"disposition": "NOT_RUN", "reason": "capability unavailable", "source_tree": "a" * 40, "execution_tree": "b" * 40})
+    assert build_envelope("sqlite-memory-pressure", json.dumps(not_run), "not-run.json")["disposition"] == "NOT_RUN"
+    for value in ("postgres://user:password@host/db", "-----BEGIN PRIVATE KEY-----"):
+        bad = dict(not_run)
+        bad["reason"] = value
+        try:
+            build_envelope("sqlite-memory-pressure", json.dumps(bad), "not-run.json")
+        except EvidenceError:
+            pass
+        else:
+            raise AssertionError("credential-bearing NOT_RUN was accepted")
     # Descriptive scan text and a postgres URL without a password are fine.
     scan_secrets('{"in_harness_secret_scan": "PASS (password assignments scanned)",'
                  ' "dsn_shape": "postgres://o3k@127.0.0.1/o3k",'
@@ -387,7 +425,7 @@ def main(argv: list[str]) -> int:
         return 1
     if args.envelope:
         Path(args.envelope).write_text(json.dumps(envelope, indent=2) + "\n", encoding="utf-8")
-    print(f"PP.6 evidence for {args.case}: PASS ({artifact.name})")
+    print(f"PP.6 evidence for {args.case}: {envelope['disposition']} ({artifact.name})")
     return 0
 
 

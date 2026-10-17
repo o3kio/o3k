@@ -404,6 +404,22 @@ jobs:
           path: |
             ${{ runner.temp }}/pp6-sqlite-disk-pressure.json
             ${{ runner.temp }}/pp6-sqlite-disk-pressure.envelope.json
+      - name: PP.6 bounded SQLite memory-pressure evidence
+        run: |
+          set -euo pipefail
+          bash tests/sqlite-memory-pressure.sh
+          python3 -I scripts/validate_pp6_evidence.py --case sqlite-memory-pressure \
+            "${RUNNER_TEMP}/pp6-sqlite-memory-pressure.json" \
+            --envelope "${RUNNER_TEMP}/pp6-sqlite-memory-pressure.envelope.json"
+      - name: Upload PP.6 SQLite memory-pressure evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pp6-sqlite-memory-pressure
+          path: |
+            ${{ runner.temp }}/pp6-sqlite-memory-pressure.json
+            ${{ runner.temp }}/pp6-sqlite-memory-pressure.envelope.json
+          if-no-files-found: warn
       - name: Emit exact-source binary build manifest (preparation for artifact pipeline)
         # Safest useful preparation for the follow-up pre-built-artifact pipeline:
         # record the exact commit and sha256 of the two protected-run binaries so
