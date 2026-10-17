@@ -1877,8 +1877,27 @@ async fn run_iteration(
             .await?;
         let lease = match outcome {
             o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
-            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
-                return Err("old controller could not seed the short PostgreSQL repair lease while the terminal delete held the local repair lock".into());
+            o3k_store::LeaseAcquireOutcome::Busy {
+                owner_controller_id,
+                owner_controller_epoch,
+                fencing_token,
+                lease_created_at,
+                lease_until,
+            } => {
+                // Report the holder so an intermittent failure can be
+                // attributed: the old daemon's own scheduled pass, or another
+                // owner.
+                let held_by_old_daemon = owner_controller_id.0 == old_controller.0
+                    && owner_controller_epoch.0 == old_controller.1;
+                return Err(format!(
+                    "old controller could not seed the short PostgreSQL repair lease while the \
+                     terminal delete held the local repair lock: lease busy, held_by_old_daemon=\
+                     {held_by_old_daemon}, owner={owner_controller_id:?}, epoch=\
+                     {owner_controller_epoch:?}, fencing_token={fencing_token:?}, created_at=\
+                     {lease_created_at}, lease_until={lease_until}, paused_for_ms={}",
+                    endpoint_release_pause_started.elapsed().as_millis()
+                )
+                .into());
             }
         };
         evidence.set(
@@ -2581,7 +2600,13 @@ async fn quota_usage(
 }
 
 #[tokio::test]
+#[ignore = "explicit PP.5 #1035 invocation required"]
 async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
+    if std::env::var("O3K_PP5_1035_RUNNER_MARKER").as_deref()
+        != Ok("RUN_OWNED_SQLITE_LOCALHOST_1035")
+    {
+        return Err("PP.5 #1035 runner marker is required".into());
+    }
     let run_id =
         std::env::var("O3K_PP5_1035_RUN_ID").unwrap_or_else(|_| Uuid::now_v7().to_string());
     let artifact = PathBuf::from(
@@ -2648,8 +2673,14 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
 }
 
 #[tokio::test]
+#[ignore = "explicit PP.5 #1035 invocation required"]
 async fn pp5_1035_postgres_restart_takes_over_lease_and_reconstructs_endpoint() -> Result<(), Error>
 {
+    if std::env::var("O3K_PP5_1035_RUNNER_MARKER").as_deref()
+        != Ok("RUN_OWNED_SQLITE_LOCALHOST_1035")
+    {
+        return Err("PP.5 #1035 runner marker is required".into());
+    }
     let Some(fixture) = PgFixture::new().await? else {
         return Ok(());
     };

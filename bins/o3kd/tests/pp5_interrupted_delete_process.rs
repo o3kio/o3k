@@ -283,8 +283,14 @@ async fn wait_resource_state(
 /// the orphan the shipped sweep must repair, and the freed address must be
 /// reusable afterwards.
 #[tokio::test]
+#[ignore = "explicit PP.5 interrupted-delete invocation required"]
 async fn fault_pause_interrupted_delete_orphan_is_repaired_and_reuse_is_restored()
 -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("O3K_PP5_1035_RUNNER_MARKER").as_deref()
+        != Ok("RUN_OWNED_SQLITE_LOCALHOST_1035")
+    {
+        return Err("PP.5 runner marker is required".into());
+    }
     let root = std::env::temp_dir().join(format!("o3k-pp5-interrupted-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&root)?;
     let client = reqwest::Client::builder().build()?;

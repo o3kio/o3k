@@ -12,6 +12,11 @@ SPEC-0024 database support, SPEC-0008 operation semantics, or ADR-0167
 deployment authority. The proposal is not implementation or acceptance
 evidence.
 
+Proposed amendments A1–A9 (2026-10-16), including an offline v1 backup and
+profile-tiered key custody, are listed in
+[the decision packet](../pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md#proposed-amendments-2026-10-16).
+This specification text is unchanged until those amendments are accepted.
+
 ## 1. Goals and exclusions
 
 The backup captures authoritative O3K control-plane state so a compatible

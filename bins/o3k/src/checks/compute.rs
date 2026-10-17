@@ -2,7 +2,7 @@
 //! readiness probe, and the agent's self-reported epoch.
 
 use crate::checks::{
-    compute_actions, internal_failure, not_libvirt_profile, profile_not_applicable,
+    compute_actions, database_read_failure, not_libvirt_profile, profile_not_applicable,
 };
 use crate::context::Context;
 use crate::output::{Category, Check, CheckStatus};
@@ -43,7 +43,16 @@ pub async fn check_agent_registered(ctx: &Context) -> Check {
             .with_actions(compute_actions());
         }
     };
-    if response.status == 200 && response.body.contains("ready") {
+    let ready_status = serde_json::from_str::<serde_json::Value>(&response.body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(|status| status == "ready")
+        })
+        .unwrap_or(false);
+    if response.status == 200 && ready_status {
         let agent_id = serde_json::from_str::<serde_json::Value>(&response.body)
             .ok()
             .and_then(|value| {
@@ -151,12 +160,11 @@ pub async fn check_agent_epoch(ctx: &Context) -> Check {
     }
     let epochs = match ctx.db.latest_epochs(&ctx.database_path()).await {
         Ok(epochs) => epochs,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.agent_epoch",
                 Category::Compute,
                 "persisted agent epochs",
-                &error,
                 compute_actions(),
             );
         }
@@ -232,12 +240,11 @@ pub async fn check_agent_capabilities(ctx: &Context) -> Check {
     }
     let providers = match ctx.db.placement_providers(&ctx.database_path()).await {
         Ok(providers) => providers,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.agent_capabilities",
                 Category::Compute,
                 "placement providers",
-                &error,
                 compute_actions(),
             );
         }
@@ -252,12 +259,11 @@ pub async fn check_agent_capabilities(ctx: &Context) -> Check {
     }
     let inventories = match ctx.db.placement_inventories(&ctx.database_path()).await {
         Ok(inventories) => inventories,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.agent_capabilities",
                 Category::Compute,
                 "placement inventories",
-                &error,
                 compute_actions(),
             );
         }
@@ -314,12 +320,11 @@ pub async fn check_placement_consistent(ctx: &Context) -> Check {
     }
     let providers = match ctx.db.placement_providers(&ctx.database_path()).await {
         Ok(providers) => providers,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.placement_consistent",
                 Category::Compute,
                 "placement providers",
-                &error,
                 compute_actions(),
             );
         }
@@ -334,24 +339,22 @@ pub async fn check_placement_consistent(ctx: &Context) -> Check {
     }
     let inventories = match ctx.db.placement_inventories(&ctx.database_path()).await {
         Ok(inventories) => inventories,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.placement_consistent",
                 Category::Compute,
                 "placement inventories",
-                &error,
                 compute_actions(),
             );
         }
     };
     let allocations = match ctx.db.live_allocation_resources(&ctx.database_path()).await {
         Ok(allocations) => allocations,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "compute.placement_consistent",
                 Category::Compute,
                 "live allocation sums",
-                &error,
                 compute_actions(),
             );
         }
@@ -424,6 +427,23 @@ mod tests {
             check_agent_registered(&context(FakeExec::healthy(), http, FakeDb::healthy())).await;
         assert_eq!(check.status, CheckStatus::Pass);
         assert!(check.summary.contains("compute-agent"));
+    }
+
+    #[tokio::test]
+    async fn agent_registered_does_not_accept_not_ready_body_with_http_200() {
+        let mut http = FakeHttp::healthy();
+        http.with(
+            "GET http://127.0.0.1:9100/readyz",
+            Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: "{\"status\":\"not_ready\",\"agent_id\":\"compute-agent\"}".to_owned(),
+            }),
+        );
+        let check =
+            check_agent_registered(&context(FakeExec::healthy(), http, FakeDb::healthy())).await;
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.summary.contains("unexpected compute readiness"));
     }
 
     #[tokio::test]

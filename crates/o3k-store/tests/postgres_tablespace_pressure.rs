@@ -1,0 +1,239 @@
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+use o3k_store::{
+    DurableStore, OperationRecord, OperationState, PostgresStore, ResourceRecord, StoreError,
+};
+use serde_json::json;
+use sqlx::{Connection, postgres::PgConnection};
+use std::{env, fs};
+use uuid::Uuid;
+
+fn url() -> String {
+    env::var("O3K_DATABASE_URL").expect("O3K_DATABASE_URL")
+}
+
+fn incompressible_desired_state() -> String {
+    let mut state = 0x9e37_79b9_u32;
+    let mut payload = String::with_capacity(524_299);
+    for _ in 0..262_144 {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        payload.push_str(&format!("{:08x}", state));
+    }
+    format!(r#"{{"payload":"{payload}"}}"#)
+}
+
+#[tokio::test]
+#[ignore = "requires the run-owned constrained PostgreSQL tablespace lane"]
+async fn postgres_tablespace_pressure_preserves_canonical_state_and_retries() {
+    let url = url();
+    let path = env::var("O3K_PG_PRESSURE_TABLESPACE_PATH").expect("tablespace path");
+    let artifact = env::var("O3K_PG_PRESSURE_ARTIFACT").expect("artifact path");
+    let source_sha = env::var("O3K_SOURCE_SHA").expect("source sha");
+    let source_tree = env::var("O3K_SOURCE_TREE").expect("source tree");
+    let execution_sha = env::var("O3K_EXECUTION_SHA").expect("execution sha");
+    let execution_tree = env::var("O3K_EXECUTION_TREE").expect("execution tree");
+    let mut admin = PgConnection::connect(&url).await.expect("connect");
+    let db: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&mut admin)
+        .await
+        .expect("database");
+    let server_version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(&mut admin)
+        .await
+        .expect("server version");
+    let ts = format!("o3k_pressure_{}", Uuid::now_v7().simple());
+    let filler = format!("o3k_pressure_filler_{}", Uuid::now_v7().simple());
+    let ident = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    let store = PostgresStore::connect(&url)
+        .await
+        .expect("store and migrations");
+    let migration_version: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success = true")
+            .fetch_one(&mut admin)
+            .await
+            .expect("migration identity");
+    sqlx::query(&format!(
+        "CREATE TABLESPACE {} LOCATION '{}'",
+        ident(&ts),
+        path.replace('\\', "\\\\").replace('\'', "''")
+    ))
+    .execute(&mut admin)
+    .await
+    .expect("tablespace");
+    sqlx::query(&format!(
+        "CREATE TABLE {} (payload bytea STORAGE EXTERNAL) TABLESPACE {}",
+        ident(&filler),
+        ident(&ts)
+    ))
+    .execute(&mut admin)
+    .await
+    .expect("filler table");
+    sqlx::query(&format!(
+        "ALTER TABLE resources SET TABLESPACE {}",
+        ident(&ts)
+    ))
+    .execute(&mut admin)
+    .await
+    .expect("resource tablespace");
+    let project = format!("pp6-pressure-{}", Uuid::now_v7());
+    let baseline = Uuid::now_v7();
+    store
+        .insert_resource(&ResourceRecord {
+            id: baseline,
+            kind: "pressure-baseline".into(),
+            project_id: project.clone(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "{}".into(),
+            observed_state: "ACTIVE".into(),
+            provider_id: None,
+        })
+        .await
+        .expect("baseline");
+    let baseline_operation = Uuid::now_v7();
+    store
+        .insert_operation(&OperationRecord {
+            id: baseline_operation,
+            resource_id: baseline,
+            kind: "pressure:baseline".into(),
+            state: OperationState::Succeeded,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        })
+        .await
+        .expect("baseline operation");
+
+    let mut attempts = 0u32;
+    let sqlstate = loop {
+        attempts += 1;
+        let result = sqlx::query(&format!(
+            "INSERT INTO {} VALUES (repeat('x', 32768)::bytea)",
+            ident(&filler)
+        ))
+        .execute(&mut admin)
+        .await;
+        if let Err(error) = result {
+            break error
+                .as_database_error()
+                .and_then(|e| e.code().map(|c| c.to_string()));
+        }
+        assert!(
+            attempts < 4096,
+            "bounded pressure fill did not exhaust tablespace"
+        );
+    };
+    assert_eq!(
+        sqlstate.as_deref(),
+        Some("53100"),
+        "expected disk-full tablespace error"
+    );
+    let failed = Uuid::now_v7();
+    let pressure_desired_state = incompressible_desired_state();
+    let store_error = store
+        .insert_resource(&ResourceRecord {
+            id: failed,
+            kind: "pressure-failed".into(),
+            project_id: project.clone(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: pressure_desired_state,
+            observed_state: "ACTIVE".into(),
+            provider_id: None,
+        })
+        .await
+        .expect_err("canonical TOAST write must fail under tablespace pressure");
+    match &store_error {
+        StoreError::Database(sqlx::Error::Database(database_error)) => assert_eq!(
+            database_error.code().as_deref(),
+            Some("53100"),
+            "canonical write must fail with PostgreSQL disk-full SQLSTATE"
+        ),
+        other => panic!("unexpected canonical write error under tablespace pressure: {other}"),
+    }
+    let rendered = store_error.to_string();
+    assert_eq!(
+        rendered, "database error",
+        "store error must be bounded and redacted"
+    );
+    assert!(!rendered.contains(&url), "store error leaked database URL");
+    assert!(rendered.len() <= 512, "store error is unbounded");
+    assert!(
+        store
+            .list_resources(&project, "pressure-failed")
+            .await
+            .expect("failed lookup")
+            .iter()
+            .all(|row| row.id != failed)
+    );
+    assert!(
+        store
+            .list_resources(&project, "pressure-baseline")
+            .await
+            .expect("baseline lookup")
+            .iter()
+            .any(|row| row.id == baseline)
+    );
+    let baseline_operation_after = store
+        .get_operation(baseline_operation)
+        .await
+        .expect("baseline operation lookup");
+    assert_eq!(baseline_operation_after.resource_id, baseline);
+    assert_eq!(baseline_operation_after.state, OperationState::Succeeded);
+    assert_eq!(baseline_operation_after.kind, "pressure:baseline");
+
+    sqlx::query(&format!("DROP TABLE {}", ident(&filler)))
+        .execute(&mut admin)
+        .await
+        .expect("drop filler");
+    sqlx::query("ALTER TABLE resources SET TABLESPACE pg_default")
+        .execute(&mut admin)
+        .await
+        .expect("restore resource tablespace");
+    sqlx::query(&format!("DROP TABLESPACE {}", ident(&ts)))
+        .execute(&mut admin)
+        .await
+        .expect("drop tablespace");
+    let recovered = Uuid::now_v7();
+    store
+        .insert_resource(&ResourceRecord {
+            id: recovered,
+            kind: "pressure-recovered".into(),
+            project_id: project,
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "{}".into(),
+            observed_state: "ACTIVE".into(),
+            provider_id: None,
+        })
+        .await
+        .expect("retry after pressure recovery");
+    let mut evidence = json!({"schema":"o3k.pp6.postgres-tablespace-pressure.v1","harness":{"name":"crates/o3k-store/tests/postgres_tablespace_pressure.rs","test":"postgres_tablespace_pressure_preserves_canonical_state_and_retries","evidence_tier":"real-isolated-postgresql"},"profile":"o3k-small-edge-v1","source_sha":source_sha,"source_tree":source_tree,"execution_sha":execution_sha,"execution_tree":execution_tree,"os":env::consts::OS,"database":db,"postgres_server_version":server_version,"schema_migration":{"table":"_sqlx_migrations","max_successful_version":migration_version},"pressure":{"tablespace_size_bytes":33554432,"row_payload_bytes":32768,"max_inserts":4096,"storage":"EXTERNAL"},"tablespace":ts,"attempts":attempts,"sqlstate":sqlstate,"baseline_resource":baseline,"baseline_operation":baseline_operation,"failed_resource_absent":true,"recovered_resource":recovered,"foreign_state":{"status":"not_exercised","reason":"store-only lane does not invoke provider or external-state operations"},"final_disposition":"PASS","in_database_cleanup":"PASS","wal_pressure_claimed":false});
+    let scanned = serde_json::to_string(&evidence)
+        .expect("evidence json")
+        .to_ascii_lowercase();
+    for forbidden in [
+        "postgres://",
+        "postgresql://",
+        "password=",
+        "password:",
+        "private key",
+        "private_key",
+        "private-key",
+    ] {
+        assert!(
+            !scanned.contains(forbidden),
+            "artifact secret scan found forbidden marker: {forbidden}"
+        );
+    }
+    evidence["in_harness_secret_scan"] = json!(
+        "PASS (serialized artifact scanned for credential URLs, password assignments, and key-material markers before write)"
+    );
+    fs::write(
+        artifact,
+        serde_json::to_vec_pretty(&evidence).expect("evidence json"),
+    )
+    .expect("evidence");
+}

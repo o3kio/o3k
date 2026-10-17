@@ -2,8 +2,8 @@
 //! libvirt domains and durable compute instances.
 
 use crate::checks::{
-    compute_actions, internal_failure, is_o3k_domain_name, not_libvirt_profile,
-    profile_not_applicable, stable_domain_name,
+    compute_actions, database_read_failure, internal_failure, is_o3k_domain_name,
+    not_libvirt_profile, profile_not_applicable, stable_domain_name,
 };
 use crate::context::Context;
 use crate::output::{Category, Check, CheckStatus};
@@ -124,12 +124,11 @@ pub async fn check_domains_consistent(ctx: &Context) -> Check {
     }
     let instances = match ctx.db.compute_instances(&ctx.database_path()).await {
         Ok(instances) => instances,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "libvirt.domains_consistent",
                 Category::Libvirt,
                 "compute instances",
-                &error,
                 compute_actions(),
             );
         }

@@ -1,7 +1,7 @@
 //! Cloud/API checks: service discovery endpoints and the bootstrap
 //! test-vm status.
 
-use crate::checks::{internal_failure, o3kd_actions};
+use crate::checks::{database_read_failure, o3kd_actions};
 use crate::context::Context;
 use crate::output::{Category, Check, CheckStatus};
 
@@ -61,12 +61,11 @@ pub async fn check_testvm_status(ctx: &Context) -> Check {
     }
     let instances = match ctx.db.compute_instances(&ctx.database_path()).await {
         Ok(instances) => instances,
-        Err(error) => {
-            return internal_failure(
+        Err(_) => {
+            return database_read_failure(
                 "cloud.testvm_status",
                 Category::Cloud,
                 "compute instances",
-                &error,
                 o3kd_actions(),
             );
         }

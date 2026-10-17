@@ -488,6 +488,7 @@ mod tests {
             .placement
             .set_state("node-a", ProviderState::Unavailable)
             .await?;
+        let before = scheduler.placement.provider("node-a").await?;
         assert!(matches!(
             scheduler
                 .schedule(
@@ -501,6 +502,50 @@ mod tests {
                 .await,
             Err(SchedulerError::NoValidHost)
         ));
+        // Availability rejection happens before an allocation intent is
+        // created. The canonical Placement projection therefore remains
+        // unchanged and no owned resource leaks.
+        let after = scheduler.placement.provider("node-a").await?;
+        assert_eq!(after, before);
+        assert_eq!(after.allocations.len(), 0);
+        assert!(
+            scheduler
+                .placement
+                .allocation_intent("allocation-server-1")
+                .await?
+                .is_none()
+        );
+
+        scheduler
+            .placement
+            .set_state("node-a", ProviderState::Enabled)
+            .await?;
+        let before = scheduler.placement.provider("node-a").await?;
+        assert!(matches!(
+            scheduler
+                .schedule(
+                    "server-2",
+                    Flavor {
+                        vcpus: 2,
+                        memory_mb: 512,
+                        disk_gb: 1
+                    }
+                )
+                .await,
+            Err(SchedulerError::NoValidHost)
+        ));
+        // Insufficient capacity is also rejected before intent creation, so
+        // the enabled provider remains unchanged and leak-free.
+        let after = scheduler.placement.provider("node-a").await?;
+        assert_eq!(after, before);
+        assert_eq!(after.allocations.len(), 0);
+        assert!(
+            scheduler
+                .placement
+                .allocation_intent("allocation-server-2")
+                .await?
+                .is_none()
+        );
         std::fs::remove_dir_all(root)
             .map_err(|error| SchedulerError::Placement(PlacementError::Storage(error)))?;
         Ok(())

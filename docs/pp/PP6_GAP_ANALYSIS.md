@@ -28,6 +28,26 @@ semantics. The design PR proposes those missing details. Production code and a
 new CLI/API are out of scope until human architecture/security review accepts
 the proposal.
 
+## Implementation status (point in time)
+
+Recorded 2026-10-16 against `main` `3fdcf382a0e6e7ac88d40e582f31663a6d4d9bbd`.
+This section lists merged work and open decisions only. GitHub is
+authoritative for current PR, review and CI state; this is not acceptance
+evidence, and no PP.6 issue is closed by it.
+
+| Workstream | Merged on `main` | Open / blocked |
+| --- | --- | --- |
+| 1. Backup/restore (#1084–#1086) | ADR-0189 and SPEC-0050 drafted (#1083, #1090); decision packet `docs/pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md` (#1091). | Blocked: ADR-0189 and SPEC-0050 remain Proposed until named approvers record decisions D1–D13. No implementation. |
+| 2. PKI lifecycle (#1087) | None beyond the decision packet. | Blocked on the same gate, in particular D3 (issuer replacement and agent re-enrollment). |
+| 3. Diagnostics (#1088) | Read-only GET projection test (#1124). Correlated NOT_AVAILABLE and query-validation errors, authorization before query validation, 405 on mutating verbs, `o3k doctor` database-error redaction, JSON readiness parsing and read-only controller-authority checks (#1130). | Support bundle contract SPEC-0051 (#1102) is Proposed and unmerged; review found its Audit source cannot be built on the existing audit port, and a reworked version is in open #1134. Nine doctor row reads in six checks still forward backend error text, and on PostgreSQL `database.accessible`/`database.integrity` pass without querying; both are fixed in open #1134. `o3kd` has no `/metrics` surface (ADR-0182 E2D-11); `o3k-compute` does. |
+| 4. Upgrade/rollback (#1098) | Upgrade support boundary and `FAILED_UPGRADE` recovery steps documented in `docs/INSTALLER.md` (#1127). | Engine unit tests cover refused downgrade and resume after each phase (`fence_refuses_downgrade`, `refuses_downgrades`, `resume_after_each_phase_completes`), but there is no PP.6 exact-artifact acceptance evidence for upgrade from a prior PP candidate, interrupted upgrade, or refused downgrade. Blocked on the same ADR-0189/SPEC-0050 gate as workstream 1. |
+| 5. Resource pressure (#1089) | Evidence lanes for PostgreSQL outage/reconnect, client-pool exhaustion, server connection exhaustion (53300), tablespace and WAL disk-full (53100), and SQLite WAL filesystem pressure (#1128). Capacity, failure and recovery tests for unavailable SQLite paths, network removal across reopen, compute timeout replay, Placement capacity rejection, network pool exhaustion and volume capacity (#1129). | A cancelled SQLite write can leave a pooled connection holding the writer lock (#1126); the fix is open in #1132, and #1092's "retry is safe" claim depends on it. CloudProfile write-error status codes (#1106) change a public API; a corrected version is in open #1134. Memory and file-descriptor pressure are not covered, and malformed configuration is covered only in open #1134. The evidence lanes use different artifact formats; a shared envelope is in open #1134. |
+| 6. Documentation (#944) | Installation and health, diagnostics and capacity, and upgrade boundary runbooks (#1127). | Join/drain/remove, backup/restore and PKI runbooks depend on workstreams 1, 2 and 4. |
+
+Related CI work: the PR pipeline now cancels superseded runs and merges
+through a GitHub merge queue (#1118), and `production_mtls_*` tests hold the
+shared PostgreSQL test-database lock (#1122).
+
 ## Workstream audit
 
 | Workstream | Existing code and evidence | Gap / needed decision | Store/security boundary | Dependencies and independence |
