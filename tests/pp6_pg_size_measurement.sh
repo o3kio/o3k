@@ -30,7 +30,11 @@ pairs = parse_qsl(u.query, keep_blank_values=True)
 if u.scheme not in {"postgres", "postgresql"} or u.fragment or u.password is not None or any(k.lower() in {"password", "sslpassword"} for k, _ in pairs):
     sys.exit("use a password-free PostgreSQL URI with PGPASSFILE or PGPASSWORD")
 q = [(k,v) for k,v in pairs if k.lower() != "dbname"]
-print(urlunsplit((u.scheme, u.netloc, "/" + sys.argv[1], urlencode(q), u.fragment)))
+if u.netloc:
+    print(urlunsplit((u.scheme, u.netloc, "/" + sys.argv[1], urlencode(q), "")))
+else:
+    # urllib's generic URI serializer collapses the empty PostgreSQL authority.
+    print(u.scheme + ":///" + sys.argv[1] + ("?" + urlencode(q) if q else ""))
 PY
 )
 server_version=$(psql "$O3K_ADMIN_URL" -Atqc 'show server_version')
