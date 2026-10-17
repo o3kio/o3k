@@ -283,6 +283,7 @@ async fn wait_resource_state(
 /// the orphan the shipped sweep must repair, and the freed address must be
 /// reusable afterwards.
 #[tokio::test]
+#[ignore = "explicit PP.5 interrupted-delete invocation required"]
 async fn fault_pause_interrupted_delete_orphan_is_repaired_and_reuse_is_restored()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!("o3k-pp5-interrupted-{}", Uuid::now_v7()));

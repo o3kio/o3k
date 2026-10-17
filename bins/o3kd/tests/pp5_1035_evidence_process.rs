@@ -2614,6 +2614,7 @@ async fn quota_usage(
 }
 
 #[tokio::test]
+#[ignore = "explicit PP.5 #1035 invocation required"]
 async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
     let run_id =
         std::env::var("O3K_PP5_1035_RUN_ID").unwrap_or_else(|_| Uuid::now_v7().to_string());
@@ -2681,6 +2682,7 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
 }
 
 #[tokio::test]
+#[ignore = "explicit PP.5 #1035 invocation required"]
 async fn pp5_1035_postgres_restart_takes_over_lease_and_reconstructs_endpoint() -> Result<(), Error>
 {
     let Some(fixture) = PgFixture::new().await? else {
