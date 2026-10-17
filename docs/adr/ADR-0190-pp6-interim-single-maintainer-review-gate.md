@@ -22,14 +22,26 @@ any D1-D13/A1-A9, SPEC-0051, evidence, or protected-review gate.
 
 ## Proposed decision
 
-For PP.6 only, permit senolcolak to perform interim architecture and
-security/technical review for the exact revision named in the approval record.
+Only if an authorized human explicitly accepts this amendment, it would permit
+senolcolak to perform interim architecture and security/technical review for
+PP.6 against each exact revision named in a subsequent decision record.
 Every resulting record must state non-independent single-maintainer review.
-The named interim risk owner is senolcolak. The residual risk is that one
+The proposed interim risk owner is senolcolak; this responsibility requires
+their explicit acceptance. The residual risk is that one
 reviewer can miss a security defect, and that an agent or automated review
 cannot substitute for a qualified independent human. This proposal does not
 waive ADR-0099's signed-release human-review requirements or its
 --require-approved gate.
+
+The proposed substitution applies solely to the independent-security role
+requirement for accepting ADR-0189, SPEC-0050 and SPEC-0051. It takes effect
+only after this amendment is accepted through protected review and matching
+contract amendments explicitly reference that decision. Separate architecture
+and security/technical decisions, exact revisions and unresolved conditions
+remain required. Until then the existing independent-security requirements
+remain fully binding. A PR approval or acceptance of this amendment alone
+cannot promote those contracts or authorize dependent runtime code. Any
+independent human review required by a release gate remains a separate gate.
 
 Scope is limited to single-site o3k-small-edge-v1 PostgreSQL 16
 production-oriented operations and bounded o3k-demo-v1 SQLite small-edge,
@@ -59,7 +71,9 @@ Retain the current D1/D2 proposal: each backup uses a human detached-signature
 round trip to a disconnected workstation. Offline artifact and journal keys
 remain in two-person custody. Scheduled or unattended backup is unsupported.
 This minimizes online signing exposure but makes every backup dependent on
-operator availability and introduces a signing outage window.
+operator availability. Under the proposed D4 exclusion protocol the controller
+remains stopped throughout signing, so signing delays extend API downtime and
+may cause missed backup windows and a longer recovery point interval.
 
 ### Option B — bounded online artifact signing
 
@@ -78,9 +92,18 @@ Signer unavailability fails the backup rather than producing an unsigned
 artifact. Tests must cover altered bytes, wrong site/profile, replay,
 interruption, rotation, revocation, and publication failure.
 
+Online-key compromise could authenticate a forged artifact for the permitted
+site/profile; encryption alone does not establish trustworthy origin. The
+review must accept that residual risk and specify independently provisioned
+verification trust, signing-key validity/revocation and bounded replay rules.
+Missing custody material, wrong keys, interrupted signing and incomplete
+publication must fail closed. Recovery/journal authority remains offline.
+
 Option B is recommended for the PostgreSQL production profile because it
 removes a human round trip from routine backup cadence while preserving
-offline authority over recovery and journal transitions. It is a material
+offline authority over recovery and journal transitions. D4 still requires a
+bounded controller capture outage; this proposal does not authorize live
+cross-file capture. It is a material
 D2/A3 amendment and must not be implemented or claimed until explicitly
 accepted. Option A remains the lower-exposure choice for SQLite small-edge
 and TestLab.
