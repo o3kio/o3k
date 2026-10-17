@@ -18,6 +18,19 @@ fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 container="o3k-pp6-memory-${RANDOM}-${RANDOM}"
 target_dir="$(mktemp -d)"
+version_file=""
+cleanup() {
+  local s=$?
+  trap - EXIT
+  if docker inspect "$container" >/dev/null 2>&1; then
+    docker rm -f "$container" >/dev/null 2>&1 || s=1
+  fi
+  rm -rf "$target_dir" || s=1
+  [[ -z "$version_file" ]] || rm -f "$version_file" || s=1
+  rm -f "$out.provisional" "$(dirname "$out")/.memory-phase.$$" || s=1
+  exit "$s"
+}
+trap cleanup EXIT
 image_id="$(docker image inspect rust:1.97.1-bookworm --format '{{.Id}}' 2>/dev/null || true)"
 if [[ -z "$image_id" ]]; then
   source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
@@ -25,8 +38,6 @@ if [[ -z "$image_id" ]]; then
   exit 0
 fi
 version_file="$(dirname "$out")/.sqlite-version.$$"
-cleanup() { local s=$?; trap - EXIT; docker rm -f "$container" >/dev/null 2>&1 || s=1; rm -rf "$target_dir" || s=1; rm -f "$version_file" "$out.provisional" "$(dirname "$out")/.memory-phase.$$" || s=1; exit "$s"; }
-trap cleanup EXIT
 blocked() {
   local reason="$1" source_commit source_tree
   source_commit="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"
@@ -68,7 +79,6 @@ if ! docker rm "$container" >/dev/null; then
   echo 'FAIL: container cleanup failed' >&2
   exit 1
 fi
-trap - EXIT
 provisional="$out.provisional"
 cat >"$provisional" <<EOF
 {"schema":"o3k.pp6.sqlite-memory-pressure.v1","case":"sqlite-memory-pressure","harness":"sqlite_memory_pressure_kills_only_child_and_replays_operation","source_commit":"$source_commit","source_tree":"$source_tree","execution_commit":"$execution_commit","execution_tree":"$execution_tree","profile":"o3k-demo-v1","sqlite_version":"$sqlite_version","rust_version":"$rust_version","container_id":"$docker_id","image_id":"$image_id","cgroup_memory_max":"268435456","swap_max":"0","timeout_seconds":60,"oom_kill_count":$((after_oom-before_oom)),"child_only":true,"canonical_retry":"store-only-terminal-transition","foreign_state":{"status":"not_exercised","reason":"store-only lane invokes no provider or external-state operations"},"secret_scan":"PASS","cleanup":"PASS","scope":"store-only; provider retry and foreign state not exercised","disposition":"PASS"}
@@ -80,4 +90,3 @@ if re.search(r'postgres(?:ql)?://[^/\s:@"]+:[^@\s"]+@|BEGIN [A-Z ]*PRIVATE KEY|"
 PY
 mv -- "$provisional" "$out"
 echo "wrote $out"
-rm -f "$version_file"
