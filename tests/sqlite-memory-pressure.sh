@@ -59,6 +59,7 @@ cleanup() {
 }
 trap cleanup EXIT
 image_ref='rust@sha256:408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6'
+builder_user="$(id -u):$(id -g)"
 if ! docker pull --platform linux/amd64 "$image_ref" >/dev/null; then
   blocked 'pinned image pull failed'
 fi
@@ -66,8 +67,17 @@ image_id="$(docker image inspect "$image_ref" --format '{{.Id}}' 2>/dev/null || 
 if [[ -z "$image_id" ]]; then
   blocked 'pinned image inspect failed after pull'
 fi
-docker run --rm --name "${container}-builder" -v "$root:/o3k" -v "$target_dir:/o3k/target" -w /o3k "$image_id" \
+docker run --rm --name "${container}-builder" --memory=4g --memory-swap=4g --cpus=2 \
+  --user "$builder_user" \
+  --env HOME=/tmp/o3k-cargo-home --env CARGO_HOME=/tmp/o3k-cargo-home --env CARGO_TARGET_DIR=/target \
+  --env RUSTUP_HOME=/usr/local/rustup --env RUSTUP_TOOLCHAIN=1.97.1 \
+  -v "$root:/src:ro" -v "$target_dir:/target" -w /src "$image_id" \
   cargo test --locked -p o3k-store --test sqlite_memory_pressure --all-features --no-run
+root_owned_target_file="$(find "$target_dir" -path "$target_dir/shared" -prune -o ! -uid "$(id -u)" -print -quit)"
+[[ -z "$root_owned_target_file" ]] || {
+  echo "FAIL: container builder created a target file not owned by the runner: $root_owned_target_file" >&2
+  exit 1
+}
 host_bin="$(find "$target_dir/debug/deps" -maxdepth 1 -type f -name 'sqlite_memory_pressure-*' ! -name '*.d' | head -n 1)"
 [[ -x "$host_bin" ]] || { echo 'FAIL: unable to build memory-pressure test binary' >&2; exit 1; }
 # Setup and recovery run in bounded disposable harness containers. The allocator
@@ -116,7 +126,7 @@ sqlite_version="$(cat "$target_dir/shared/sqlite-version" 2>/dev/null || true)"
 rust_version="$(docker run --rm "$image_id" rustc --version)"
 execution_commit="$source_commit"
 execution_tree="$source_tree"
-if ! docker rm "$container" >/dev/null; then
+if ! docker rm -f "$container" >/dev/null; then
   echo 'FAIL: container cleanup failed' >&2
   exit 1
 fi

@@ -71,6 +71,12 @@ assert memory_harness.count("--ignored --exact sqlite_memory_pressure_kills_only
 )
 assert 'docker_cgroup_version="$(docker info --format \'{{.CgroupVersion}}\'' in memory_harness
 assert '"$docker_cgroup_version" != "2"' in memory_harness
+assert 'builder_user="$(id -u):$(id -g)"' in memory_harness
+assert '--memory=4g --memory-swap=4g --cpus=2' in memory_harness
+assert '--user "$builder_user"' in memory_harness
+assert '--env RUSTUP_TOOLCHAIN=1.97.1' in memory_harness
+assert 'root_owned_target_file=' in memory_harness
+assert 'docker rm -f "$container"' in memory_harness
 
 # Docker Engine's CgroupVersion field is "2" on cgroup v2, not "cgroup2".
 # Exercise only the harness preflight with a Docker stub: cgroup v2 advances to
