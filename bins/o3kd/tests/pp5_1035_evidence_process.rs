@@ -463,14 +463,10 @@ fn start_o3kd(
         );
     }
     if fault_pause {
-        if backend.is_postgres() {
-            command.env(FAULT_ENV, "0").env(
-                "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RELEASE_FILE",
-                root.join("sync/old-endpoint-release-gate"),
-            );
-        } else {
-            command.env(FAULT_ENV, "4000");
-        }
+        command.env(FAULT_ENV, "0").env(
+            "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RELEASE_FILE",
+            root.join("sync/old-endpoint-release-gate"),
+        );
     }
     let child = command.spawn()?;
     Ok(child)
@@ -1598,21 +1594,14 @@ async fn run_iteration(
         (String::from("O3K_REPAIR_TIMEOUT_MS"), String::from("30000")),
     ]);
     let mut intended = intended;
-    if backend.is_postgres() {
-        intended.insert(
-            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"),
-            String::from("0"),
-        );
-        intended.insert(
-            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RELEASE_FILE"),
-            old_endpoint_release_gate.display().to_string(),
-        );
-    } else {
-        intended.insert(
-            String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"),
-            String::from("4000"),
-        );
-    }
+    intended.insert(
+        String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS"),
+        String::from("0"),
+    );
+    intended.insert(
+        String::from("O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_RELEASE_FILE"),
+        old_endpoint_release_gate.display().to_string(),
+    );
     let admin_token = token(&client, http, "admin", BOOTSTRAP_PASSWORD, "admin").await?;
     let foreign_token = token(
         &client,
@@ -1864,11 +1853,8 @@ async fn run_iteration(
     if !terminal {
         return Err("terminal delete window not observed".into());
     }
-    let pause_log_needle = if backend.is_postgres() {
-        "test-only fault pause before-endpoint-release engaged; awaiting release gate"
-    } else {
-        "test-only fault pause before-endpoint-release engaged"
-    };
+    let pause_log_needle =
+        "test-only fault pause before-endpoint-release engaged; awaiting release gate";
     let pause_engaged = wait_log(&log, pause_log_needle, Duration::from_secs(10)).await?;
     let endpoint_release_pause_started = Instant::now();
     probe.mark_delete_paused()?;
@@ -1979,7 +1965,7 @@ async fn run_iteration(
         .into());
     }
     let operation_id = delete_operation.id.to_string();
-    if backend.is_postgres() && old_endpoint_release_gate.exists() {
+    if old_endpoint_release_gate.exists() {
         return Err("old daemon endpoint-release gate opened before SIGKILL".into());
     }
     if backend.is_postgres() {
