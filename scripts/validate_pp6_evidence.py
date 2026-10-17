@@ -223,6 +223,8 @@ def build_envelope(
         }
     if actual_disposition != passing:
         raise EvidenceError(f"{key} is not the passing value {passing!r}")
+    if case == "postgres-server-pressure" and lookup(document, "canonical_baseline_preserved") != "passed":
+        raise EvidenceError("canonical_baseline_preserved must be passed")
     backend_kind, version_path = spec["backend"]
     version = required(document, version_path)
     if not isinstance(version, str):
@@ -300,6 +302,8 @@ def _sample(case: str) -> dict:
         _set(document, path, "fixture-value")
     if case == "sqlite-memory-pressure":
         _set(document, "image_ref", "rust@sha256:" + "a" * 64)
+    if case == "postgres-server-pressure":
+        _set(document, "canonical_baseline_preserved", "passed")
     kind, path = spec["foreign_state"]
     if kind == "tested_flag":
         _set(document, path, False)
@@ -346,6 +350,10 @@ def self_test() -> None:
         }
         if case == "sqlite-memory-pressure":
             failing["mutable image tag"] = mutated(lambda d: _set(d, "image_ref", "rust:1.97.1-bookworm"))
+        if case == "postgres-server-pressure":
+            failing["missing canonical baseline assertion"] = mutated(
+                lambda d: d.pop("canonical_baseline_preserved")
+            )
         if spec["foreign_state"][0] == "object":
             failing["foreign state claim"] = mutated(
                 lambda d: _set(d, spec["foreign_state"][1], "untouched")
