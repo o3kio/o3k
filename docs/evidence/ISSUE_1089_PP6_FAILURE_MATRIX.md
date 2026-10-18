@@ -29,6 +29,7 @@ Each row names the test or CI lane that exercises a case and its state:
 | Case | Evidence | State |
 | --- | --- | --- |
 | Backup destination full or unavailable | No backup implementation exists | Gated |
+| Recovery-journal write failure leaves the restore phase unchanged and fails closed before activation | No restore-journal implementation exists | Gated |
 | Malformed configuration: positional argument, malformed TOML file, invalid listen address, PostgreSQL backend without URL, weak signing key. Each exits before serving, echoes no secret, and leaves the data directory unchanged | `bins/o3kd/tests/pp6_config_input_process.rs` | Merged |
 | Invalid CloudProfile writes: malformed body, unknown field, ID mismatch, invalid profile, stale and reused generation, missing content type, unavailable store; state and audit unchanged | `rejected_cloud_profile_writes_preserve_profile_and_audit`, `cloud_profile_write_reports_unavailable_store_as_503` in `bins/o3kd/src/native_adapters/composition_profile.rs` (#1134; supersedes #1106) | Merged |
 | Capacity rejection leaves Placement, network pool and volume state consistent | `unavailable_and_insufficient_hosts_are_skipped` (`o3k-scheduler`), `exhausted_network_pool_preserves_state_and_allows_retry_after_release` (`o3k-network`), `native_volume_capacity_failure_is_durable_and_skips_follow_up_work` (`o3k-api`) (#1129) | Merged |
@@ -42,7 +43,7 @@ Each row names the test or CI lane that exercises a case and its state:
 
 | Criterion | State | Notes |
 | --- | --- | --- |
-| 3. Bounded error identity, canonical invariants, safe retry per case | Partial | Asserted per test above. The six PostgreSQL/SQLite filesystem-pressure evidence lanes write one normalized `o3k.pp6.evidence.v1` envelope per run on `main`; the per-case assertions stay in each lane's artifact. The #1138 FD-pressure regression is a normal Rust test and does not produce a per-run envelope. The #1140 memory lane now has protected evidence requiring allocator status 137, exactly one cgroup `oom_kill`, successful canonical SQLite recovery, cleanup, and evidence validation. |
+| 3. Bounded error identity, canonical invariants, safe retry per case | Partial | Asserted per test above. The PostgreSQL outage, pool, server-connection, tablespace, WAL, and SQLite filesystem-pressure lanes each publish their own validated evidence envelope; the per-case assertions stay in each lane's artifact. The #1138 FD-pressure regression is a normal Rust test and does not produce a per-run envelope. The #1140 memory lane has protected evidence requiring allocator status 137, exactly one cgroup `oom_kill`, successful canonical SQLite recovery, cleanup, and evidence validation. |
 | 4. No unowned mutation and foreign-state preservation under interruption/retry | Partial | The store-pressure lanes record `foreign_state` as not exercised: they invoke no provider. Provider-backed interruption cases are the unknown-outcome and interrupted-delete tests above. |
 | 5. Secret checks and run binding (source, harness, backend/version, profile, fixture) | Partial | The protected pressure lanes, including #1140, bind evidence to source/execution commits, harness, backend kind/version, product profile, fixture and foreign-state disposition, scan for credential shapes, and validate cleanup. Gaps remain for criterion 2 tests and the #1138 FD-pressure regression, which produce no per-run envelope. |
 | 6. PostgreSQL cases fail, never silently pass, when the backend is unavailable | Met for the lanes | Each lane provisions or requires its PostgreSQL instance and fails without it: an `expect` on `O3K_DATABASE_URL`, a `docker` error, or `tests/postgres-wal-pressure.sh` exiting before emitting evidence. |
@@ -50,6 +51,6 @@ Each row names the test or CI lane that exercises a case and its state:
 ## Remaining work for #1089
 
 1. The SQLite lock/busy cancellation regression is merged in #1132; the final pending-operation assertions were added in #1135.
-2. Backup destination cases, once the accepted ADR-0189/SPEC-0050 contracts are implemented in #1084 and exercised on protected main.
+2. Backup destination cases and recovery-journal write failure, once the accepted ADR-0189/SPEC-0050 contracts are implemented in #1084–#1086 and exercised on protected main.
 3. Linux file-descriptor pressure is merged in #1138, and the corrected #1140 memory-pressure lane is merged with protected evidence. The memory result is bounded SQLite store evidence only; provider state and foreign-state preservation remain `not_exercised`.
 4. Per-run envelopes for the criterion 2 cases.
