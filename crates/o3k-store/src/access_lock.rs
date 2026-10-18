@@ -120,9 +120,15 @@ fn validate_parent_directory(stat: &rustix::fs::Stat) -> io::Result<()> {
             "O3K data-directory parent must be root-owned or process-owned",
         ));
     }
-    if stat.st_mode & DATA_DIR_MODE != 0 {
+    // Shared temporary directories such as /tmp are safe as the immediate
+    // parent when they are root-owned and sticky: the sticky bit prevents
+    // another uid from renaming this process-owned data-directory entry.
+    // Same-owner and root replacement remain outside this local lock's
+    // authority, as documented above.
+    let root_owned_sticky = stat.st_uid == 0 && stat.st_mode & 0o1000 != 0;
+    if stat.st_mode & DATA_DIR_MODE != 0 && !root_owned_sticky {
         return Err(invalid_data(
-            "O3K data-directory parent must not be group/other writable",
+            "O3K data-directory parent must not be group/other writable unless root-owned and sticky",
         ));
     }
     Ok(())
@@ -181,7 +187,7 @@ fn invalid_data(message: &'static str) -> io::Error {
 mod tests {
     use std::{
         fs, io,
-        os::unix::fs::{PermissionsExt, symlink},
+        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
         path::{Path, PathBuf},
         process::Command,
         sync::atomic::{AtomicU64, Ordering},
@@ -243,6 +249,27 @@ mod tests {
         let site_b = root.0.join("site-b");
         let _lock_a = StoreAccessLock::acquire(&site_a)?;
         let _lock_b = StoreAccessLock::acquire(&site_b)?;
+        Ok(())
+    }
+
+    #[test]
+    fn permits_data_directory_under_root_owned_sticky_temp_parent() -> io::Result<()> {
+        let temp_parent = std::env::temp_dir();
+        let metadata = fs::metadata(&temp_parent)?;
+        let mode = metadata.permissions().mode();
+        if metadata.uid() != 0 || mode & 0o1000 == 0 {
+            return Err(io::Error::other(
+                "test requires a root-owned sticky system temporary directory",
+            ));
+        }
+        let data_dir = temp_parent.join(format!(
+            "o3k-store-lock-sticky-{}-{}",
+            std::process::id(),
+            NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _lock = StoreAccessLock::acquire(&data_dir)?;
+        drop(_lock);
+        fs::remove_dir_all(data_dir)?;
         Ok(())
     }
 
@@ -313,6 +340,18 @@ mod tests {
         let root = TestDir::new()?;
         fs::set_permissions(&root.0, fs::Permissions::from_mode(0o777))?;
         let error = expect_error(&root.0)?;
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_group_or_other_writable_non_sticky_parent() -> io::Result<()> {
+        let root = TestDir::new()?;
+        let Some(parent) = root.0.parent() else {
+            return Err(io::Error::other("test data directory has no parent"));
+        };
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o777))?;
+        let error = expect_error(parent.join("replacement"))?;
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         Ok(())
     }
