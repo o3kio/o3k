@@ -311,6 +311,9 @@ jobs:
           O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
+          if ! git cat-file -e "$O3K_PP6_SOURCE_HEAD_SHA^{commit}"; then
+            git fetch --no-tags --depth=1 origin "$O3K_PP6_SOURCE_HEAD_SHA"
+          fi
           source_tree_sha="$(git cat-file commit "$O3K_PP6_SOURCE_HEAD_SHA" | awk '$1 == "tree" { print $2; exit }')"
           export O3K_PP6_SOURCE_TREE_SHA="$source_tree_sha"
           execution_head_sha="$(git rev-parse HEAD)"
@@ -340,9 +343,11 @@ jobs:
         env:
           O3K_PP6_CONFIG_EVIDENCE_DIR: ${{ runner.temp }}/pp6-config-evidence
           O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          O3K_PP6_SOURCE_TREE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          if ! git cat-file -e "$O3K_PP6_SOURCE_HEAD_SHA^{commit}"; then
+            git fetch --no-tags --depth=1 origin "$O3K_PP6_SOURCE_HEAD_SHA"
+          fi
           source_tree_sha="$(git cat-file commit "$O3K_PP6_SOURCE_HEAD_SHA" | awk '$1 == "tree" { print $2; exit }')"
           export O3K_PP6_SOURCE_TREE_SHA="$source_tree_sha"
           export O3K_PP6_EXECUTION_HEAD_SHA="$(git rev-parse HEAD)"

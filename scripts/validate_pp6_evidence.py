@@ -26,6 +26,7 @@ from pathlib import Path
 SCHEMA = "o3k.pp6.evidence.v1"
 ISSUE = 1089
 PROFILE_BY_BACKEND = {"postgresql": "o3k-small-edge-v1", "sqlite": "o3k-demo-v1", "process": "o3k-small-edge-v1"}
+CONFIG_CASES = {"config-file", "dash-prefixed", "listen-address", "positional", "postgres-url", "signing-key"}
 FOREIGN_STATUSES = {"not_exercised", "preserved"}
 COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
@@ -241,6 +242,18 @@ def build_envelope(
     if case == "config-process" and not re.fullmatch(r"[0-9a-f]{64}", version):
         raise EvidenceError("config-process binary.sha256 must be a full SHA-256 digest")
     if case == "config-process":
+        config_case = required(document, "case")
+        if not isinstance(config_case, str) or config_case not in CONFIG_CASES:
+            raise EvidenceError("config-process case must name a supported configuration test")
+        if lookup(document, "harness") != "pp6_config_input_process":
+            raise EvidenceError("config-process harness identity is incorrect")
+        fixture = required(document, "fixture.data_directory")
+        if not isinstance(fixture, str) or not re.fullmatch(
+            rf"o3kd-pp6-config-{re.escape(config_case)}-[1-9][0-9]*-[0-9a-f]{{32}}", fixture
+        ):
+            raise EvidenceError("config-process fixture identity is invalid")
+        if lookup(document, "foreign_state.status") != "not_exercised":
+            raise EvidenceError("config-process cannot claim provider/foreign-state evidence")
         if lookup(document, "binary.path") != "o3kd":
             raise EvidenceError("config-process binary.path must be o3kd")
         if lookup(document, "observations.redaction_scope") != "stdout_and_stderr":
@@ -279,7 +292,7 @@ def build_envelope(
             raise EvidenceError(f"{case} records its own source commit; drop --source-commit")
         change_commit = commit(document, spec["source"])
     scan_secrets(text)
-    return {
+    envelope = {
         "schema": SCHEMA,
         "issue": ISSUE,
         "case": case,
@@ -303,6 +316,12 @@ def build_envelope(
             "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         },
     }
+    if case == "config-process":
+        envelope["source"]["tree"] = document["source_tree"]
+        envelope["source"]["execution_tree"] = document["execution_tree"]
+        envelope["backend"]["observation"] = "not_exercised"
+        envelope["binary"] = document["binary"]
+    return envelope
 
 
 def _set(document: dict, path: str, value: object) -> None:
@@ -338,7 +357,9 @@ def _sample(case: str) -> dict:
         _set(document, "observations.exited_before_serving", True)
         _set(document, "observations.secret_scan", "passed")
         _set(document, "backend_observation", "not_exercised")
-        _set(document, "fixture.data_directory", "fixture-dir")
+        _set(document, "case", "positional")
+        _set(document, "harness", "pp6_config_input_process")
+        _set(document, "fixture.data_directory", "o3kd-pp6-config-positional-42-" + "a" * 32)
         _set(document, "execution_head", "b" * 40)
         _set(document, "execution_tree", "c" * 40)
     if case == "sqlite-memory-pressure":
@@ -387,6 +408,20 @@ def self_test() -> None:
                 lambda d: _set(d, spec["fixture"][0], json.dumps({"password": "hunter2"}))
             ),
         }
+        if case == "config-process":
+            for path in ("source_tree", "execution_head", "execution_tree", "binary.sha256", "fixture.data_directory"):
+                failing["missing " + path] = mutated(lambda d, p=path: _set(d, p, ""))
+                failing["invalid " + path] = mutated(lambda d, p=path: _set(d, p, "invalid"))
+            for path, bad in {
+                "case": "unknown-case", "harness": "foreign-harness", "binary.path": "foreign-binary",
+                "observations.redaction_scope": "stderr_only", "observations.secret_scan": "failed",
+                "observations.data_directory_unchanged": False, "observations.exited_before_serving": False,
+                "backend_observation": "passed", "foreign_state.status": "preserved",
+            }.items():
+                failing["invalid " + path] = mutated(lambda d, p=path, v=bad: _set(d, p, v))
+                failing["missing " + path] = mutated(lambda d, p=path: _set(d, p, None))
+            assert envelope["source"]["tree"] == good["source_tree"]
+            assert envelope["source"]["execution_tree"] == good["execution_tree"]
         if case == "sqlite-memory-pressure":
             failing["mutable image tag"] = mutated(lambda d: _set(d, "image_ref", "rust:1.97.1-bookworm"))
         if spec["foreign_state"][0] == "object":

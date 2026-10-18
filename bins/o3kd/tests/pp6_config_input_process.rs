@@ -138,7 +138,7 @@ fn assert_fails_closed(
     assert!(!status.success(), "{label}: o3kd must exit unsuccessfully");
     assert!(
         stderr.contains(expected_error),
-        "{label}: expected `{expected_error}` in stderr, got: {stderr}"
+        "{label}: expected configuration error classification was absent"
     );
     assert!(
         !stderr.contains(SENTINEL),
@@ -163,13 +163,17 @@ fn write_evidence(label: &str, data: &Path, stderr: &str, stdout: &str) -> io::R
     };
     fs::create_dir_all(&directory)?;
     let binary = env!("CARGO_BIN_EXE_o3kd");
-    let digest = Command::new("sha256sum").arg(binary).output()?.stdout;
+    let digest_output = Command::new("sha256sum").arg(binary).output()?;
+    if !digest_output.status.success() {
+        return Err(io::Error::other("o3kd binary digest command failed"));
+    }
+    let digest = digest_output.stdout;
     let binary_sha256 = String::from_utf8_lossy(&digest)
         .split_whitespace()
         .next()
         .unwrap_or_default()
         .to_owned();
-    if binary_sha256.len() != 64 {
+    if binary_sha256.len() != 64 || !binary_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(io::Error::other("o3kd binary digest unavailable"));
     }
     let source = std::env::var("O3K_PP6_SOURCE_HEAD_SHA")
