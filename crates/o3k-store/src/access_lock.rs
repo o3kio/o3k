@@ -53,7 +53,10 @@ impl StoreAccessLock {
         // Serialize path resolution only. Retaining this lock for the daemon
         // lifetime would incorrectly exclude distinct O3K installations that
         // share a parent directory.
-        flock(&parent_fd, FlockOperation::LockExclusive)?;
+        // Setup never waits behind another opener. This synchronous helper is
+        // called during daemon startup, so blocking here could hang startup
+        // indefinitely and stall the async executor thread.
+        flock(&parent_fd, FlockOperation::NonBlockingLockExclusive)?;
 
         let creating_data_dir = match fs::symlink_metadata(data_dir) {
             Ok(_) => false,
@@ -249,6 +252,28 @@ mod tests {
         let site_b = root.0.join("site-b");
         let _lock_a = StoreAccessLock::acquire(&site_a)?;
         let _lock_b = StoreAccessLock::acquire(&site_b)?;
+        Ok(())
+    }
+
+    #[test]
+    fn parent_setup_lock_fails_fast_when_another_opener_holds_it() -> io::Result<()> {
+        let root = TestDir::new()?;
+        let parent = root
+            .0
+            .parent()
+            .ok_or_else(|| io::Error::other("test directory has no parent"))?;
+        let parent_fd = rustix::fs::open(
+            parent,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        )?;
+        rustix::fs::flock(&parent_fd, rustix::fs::FlockOperation::LockExclusive)?;
+
+        let error = expect_error(parent.join("another-data-dir"))?;
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         Ok(())
     }
 
