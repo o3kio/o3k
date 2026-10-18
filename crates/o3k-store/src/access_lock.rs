@@ -7,7 +7,8 @@
 //! root-managed parent that the daemon account cannot modify.
 
 use std::{
-    fs, io,
+    error::Error,
+    fmt, fs, io,
     os::fd::OwnedFd,
     path::Path,
     thread,
@@ -62,9 +63,9 @@ impl StoreAccessLock {
         // lifetime would incorrectly exclude distinct O3K installations that
         // share a parent directory.
         acquire_parent_setup_lock(&parent_fd).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("failed to acquire O3K data-directory parent setup lock: {error}"),
+            with_lock_context(
+                "failed to acquire O3K data-directory parent setup lock",
+                error,
             )
         })?;
 
@@ -93,9 +94,9 @@ impl StoreAccessLock {
         // additional lock makes replacement of that name unable to split
         // processes that use this helper.
         flock(&dir_fd, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("failed to acquire O3K data-directory lifetime lock: {error}"),
+            with_lock_context(
+                "failed to acquire O3K data-directory lifetime lock",
+                io::Error::from(error),
             )
         })?;
         drop(parent_fd);
@@ -113,9 +114,9 @@ impl StoreAccessLock {
         // Nonblocking acquisition avoids allowing a second daemon to open
         // canonical state while it waits behind a supervisor restart race.
         flock(&lock_fd, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("failed to acquire O3K store lock-file lock: {error}"),
+            with_lock_context(
+                "failed to acquire O3K store lock-file lock",
+                io::Error::from(error),
             )
         })?;
         // Recheck after acquisition so a replacement race fails closed.
@@ -143,6 +144,29 @@ fn acquire_parent_setup_lock(parent_fd: &OwnedFd) -> io::Result<()> {
             }
             Err(error) => return Err(error.into()),
         }
+    }
+}
+
+fn with_lock_context(context: &'static str, source: io::Error) -> io::Error {
+    let kind = source.kind();
+    io::Error::new(kind, LockContextError { context, source })
+}
+
+#[derive(Debug)]
+struct LockContextError {
+    context: &'static str,
+    source: io::Error,
+}
+
+impl fmt::Display for LockContextError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.context, self.source)
+    }
+}
+
+impl Error for LockContextError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
     }
 }
 
@@ -289,6 +313,22 @@ mod tests {
             )
         })?;
         Ok(())
+    }
+
+    #[test]
+    fn lock_context_preserves_os_error_source() {
+        let source = io::Error::from(rustix::io::Errno::WOULDBLOCK);
+        let raw_os_error = source.raw_os_error();
+        let error = super::with_lock_context("test lock stage", source);
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(error.to_string().contains("test lock stage"));
+        let preserved_raw_os_error = error
+            .get_ref()
+            .and_then(|error| std::error::Error::source(error))
+            .and_then(|error| error.downcast_ref::<io::Error>())
+            .and_then(io::Error::raw_os_error);
+        assert_eq!(preserved_raw_os_error, raw_os_error);
     }
 
     #[test]
