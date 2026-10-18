@@ -24,9 +24,10 @@ use std::{
 use async_trait::async_trait;
 use axum::{
     Json, Router,
-    extract::{FromRef, State},
-    http::StatusCode,
-    response::IntoResponse,
+    extract::{FromRef, Request, State},
+    http::{HeaderValue, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use o3k_compute::ComputeService;
@@ -40,6 +41,7 @@ use o3k_network::PublicAddressAllocator;
 use serde::Serialize;
 
 mod auth;
+mod backup_admission;
 mod compute;
 mod error;
 mod identity;
@@ -61,6 +63,8 @@ pub use volume::{
     repair_volume_metering, volume_state_consumes,
 };
 
+#[doc(hidden)]
+pub use backup_admission::{BackupAdmissionError, BackupExclusion};
 pub use network::recover_l3_gateway_operations;
 
 use crate::{
@@ -151,6 +155,7 @@ pub struct AppState {
     /// recovery completes deletes that a crash interrupted, so it must close
     /// the same allocation interval instead of leaking an open one.
     metering_observer: Option<Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
+    backup_admission: backup_admission::BackupAdmission,
 }
 
 impl Default for AppState {
@@ -180,6 +185,7 @@ impl Default for AppState {
             native_attachment_workflow: None,
             native_api: None,
             metering_observer: None,
+            backup_admission: backup_admission::BackupAdmission::default(),
         }
     }
 }
@@ -233,6 +239,20 @@ impl AppState {
     /// Publishes the canonical bootstrap readiness input.
     pub fn set_bootstrap_ready(&self, ready: bool) {
         self.bootstrap_ready.store(ready, Ordering::Release);
+    }
+
+    /// Acquires exclusive admission against API router requests for a bounded
+    /// backup operation. This drains in-flight API handlers and rejects new
+    /// requests, but does not quiesce background workers or database sessions.
+    ///
+    /// This is a hidden composition hook for `o3kd`, not a supported consumer
+    /// API or public O3K protocol operation.
+    #[doc(hidden)]
+    pub async fn begin_backup_exclusion(
+        &self,
+        timeout: Duration,
+    ) -> Result<BackupExclusion, BackupAdmissionError> {
+        self.backup_admission.begin_exclusive(timeout).await
     }
 
     /// Configures the Keystone-compatible token service.
@@ -411,6 +431,7 @@ impl AppState {
 /// then the image upload body-size limit) must not change without a
 /// compatibility record update.
 pub fn router_with_state(state: AppState) -> Router {
+    let admission_state = state.clone();
     let mut router = Router::new()
         .route("/", get(keystone_root))
         .route("/v3", get(keystone_v3))
@@ -777,12 +798,44 @@ pub fn router_with_state(state: AppState) -> Router {
         );
     }
     router
+        .layer(axum::middleware::from_fn_with_state(
+            admission_state,
+            backup_admission_middleware,
+        ))
         .layer(axum::middleware::from_fn(compatibility_trace_middleware))
         .layer(axum::middleware::from_fn(microversion_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(
             o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
         ))
         .with_state(state)
+}
+
+async fn backup_admission_middleware(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Keep liveness available so supervisors do not restart a healthy process
+    // just because backup admission is temporarily closed. Readiness remains
+    // gated and therefore reports unavailable while the controller is draining.
+    if request.uri().path() == "/healthz"
+        && matches!(
+            *request.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return next.run(request).await;
+    }
+
+    let Some(_permit) = state.backup_admission.enter_request().await else {
+        let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            HeaderValue::from_static("1"),
+        );
+        return response;
+    };
+    next.run(request).await
 }
 
 async fn health() -> impl IntoResponse {
@@ -847,5 +900,123 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
                 status: "not_ready",
             }),
         )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod backup_admission_tests {
+    use super::{AppState, BackupAdmissionError, router_with_state};
+    use axum::{body::Body, http::Request};
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn exclusive_backup_admission_keeps_liveness_and_rejects_other_requests() {
+        let state = AppState::new();
+        let router = router_with_state(state.clone());
+        let exclusion = state
+            .begin_backup_exclusion(Duration::from_secs(1))
+            .await
+            .expect("acquire API request exclusion");
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("serve request");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("serve readiness request");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("retry-after")
+                .expect("retry-after header is present"),
+            "1"
+        );
+
+        drop(exclusion);
+        let response = router_with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("serve request after release");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn backup_admission_times_out_when_an_api_request_does_not_drain() {
+        let state = AppState::new();
+        let permit = state
+            .backup_admission
+            .enter_request()
+            .await
+            .expect("admit request");
+
+        let result = state
+            .begin_backup_exclusion(Duration::from_millis(10))
+            .await;
+        assert!(matches!(result, Err(BackupAdmissionError::DrainTimeout)));
+        assert!(state.backup_admission.enter_request().await.is_some());
+
+        drop(permit);
+        assert!(
+            state
+                .begin_backup_exclusion(Duration::from_secs(1))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_backup_admission_reopens_api_requests() {
+        let state = std::sync::Arc::new(AppState::new());
+        let permit = state
+            .backup_admission
+            .enter_request()
+            .await
+            .expect("admit request");
+        let task_state = std::sync::Arc::clone(&state);
+        let task = tokio::spawn(async move {
+            task_state
+                .begin_backup_exclusion(Duration::from_secs(60))
+                .await
+        });
+
+        while !state.backup_admission.is_active() {
+            tokio::task::yield_now().await;
+        }
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert!(!state.backup_admission.is_active());
+        drop(permit);
+        assert!(
+            state
+                .begin_backup_exclusion(Duration::from_secs(1))
+                .await
+                .is_ok()
+        );
     }
 }
