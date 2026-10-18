@@ -237,11 +237,21 @@ mod tests {
     #[test]
     fn excludes_second_process_handle_until_first_guard_drops() -> io::Result<()> {
         let root = TestDir::new()?;
-        let first = StoreAccessLock::acquire(&root.0)?;
+        let first = StoreAccessLock::acquire(&root.0).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("initial store lock acquisition failed: {error}"),
+            )
+        })?;
         let error = expect_error(&root.0)?;
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         drop(first);
-        StoreAccessLock::acquire(&root.0)?;
+        StoreAccessLock::acquire(&root.0).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("store lock remained unavailable after guard drop: {error}"),
+            )
+        })?;
         Ok(())
     }
 
