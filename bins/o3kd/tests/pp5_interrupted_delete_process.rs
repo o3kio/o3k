@@ -292,6 +292,8 @@ async fn fault_pause_interrupted_delete_orphan_is_repaired_and_reuse_is_restored
     pp5_runner_capability::require_runner_capability("interrupted-delete")?;
     let root = std::env::temp_dir().join(format!("o3k-pp5-interrupted-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&root)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let client = reqwest::Client::builder().build()?;
 
     // 1. A real control plane with the #1035 delete-path fault pause armed.

@@ -2614,6 +2614,8 @@ async fn pp5_1035_restart_writes_fail_closed_evidence() -> Result<(), Error> {
     );
     let root = std::env::temp_dir().join(format!("o3k-pp5-evidence-{run_id}"));
     fs::create_dir_all(&root)?;
+    #[cfg(unix)]
+    fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let source_sha = std::env::var("O3K_PP5_1035_SOURCE_SHA")
         .or_else(|_| git_sha())
         .unwrap_or_else(|_| "0000000000000000000000000000000000000000".into());
@@ -2686,6 +2688,8 @@ async fn pp5_1035_postgres_restart_takes_over_lease_and_reconstructs_endpoint() 
         let run_id = format!("postgres-{}", Uuid::now_v7().simple());
         let root = std::env::temp_dir().join(format!("o3k-pp5-evidence-{run_id}"));
         fs::create_dir_all(&root)?;
+        #[cfg(unix)]
+        fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
         let artifact = root.join("pp5-1035-postgres-restart-evidence.json");
         let source_sha = git_sha()?;
         let harness_digest = file_sha256(

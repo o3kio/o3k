@@ -703,6 +703,11 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
     let run_tag = uuid::Uuid::new_v4().simple().to_string();
     let data_dir = std::env::temp_dir().join(format!("araf-p2-{run_tag}"));
     std::fs::create_dir_all(&data_dir)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &data_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
     let backend = resolve_backend(&data_dir);
     seed_store(&backend).await?;
 
