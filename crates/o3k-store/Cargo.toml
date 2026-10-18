@@ -24,3 +24,4 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
+rustix = { workspace = true, features = ["fs", "process"] }

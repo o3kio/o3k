@@ -2065,6 +2065,7 @@ dependencies = [
  "md-5",
  "o3k-domain",
  "o3k-kernel",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "sha2",

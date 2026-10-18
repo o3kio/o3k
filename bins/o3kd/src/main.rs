@@ -16,6 +16,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = config.listen_addr;
     let data_dir = config.data_dir.clone();
     let provider = config.provider;
+    // Bind before composition starts workers or opens canonical storage, so a
+    // bind failure cannot leave detached background tasks behind the lock.
+    let listener = TcpListener::bind(listen_addr).await?;
     let composition = composition::build_composition(config).await?;
 
     info!(
@@ -25,13 +28,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "o3kd listening"
     );
 
-    let listener = TcpListener::bind(listen_addr).await?;
     let serve_state = composition.state.clone();
     let shutdown_state = composition.state.clone();
-    axum::serve(listener, o3k_api::router_with_state(serve_state))
+    let serve_result = axum::serve(listener, o3k_api::router_with_state(serve_state))
         .with_graceful_shutdown(composition::shutdown_signal(shutdown_state))
-        .await?;
+        .await;
 
     composition.shutdown().await;
+    serve_result?;
     Ok(())
 }
