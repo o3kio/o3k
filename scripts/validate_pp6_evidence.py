@@ -25,7 +25,7 @@ from pathlib import Path
 
 SCHEMA = "o3k.pp6.evidence.v1"
 ISSUE = 1089
-PROFILE_BY_BACKEND = {"postgresql": "o3k-small-edge-v1", "sqlite": "o3k-demo-v1"}
+PROFILE_BY_BACKEND = {"postgresql": "o3k-small-edge-v1", "sqlite": "o3k-demo-v1", "process": "o3k-small-edge-v1"}
 FOREIGN_STATUSES = {"not_exercised", "preserved"}
 COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
@@ -46,6 +46,17 @@ SECRET_PATTERNS = {
 
 # Per-lane field mapping. Paths are dotted keys into the lane artifact.
 CASES = {
+    "config-process": {
+        "harness": "harness",
+        "lane_schema": ("schema", "o3k.pp6.config-process.v1"),
+        "disposition": ("disposition", "PASS"),
+        "source": "source_head",
+        "execution": "execution_head",
+        "backend": ("process", "binary.sha256"),
+        "profile": "profile",
+        "fixture": ["case", "binary.sha256", "fixture.data_directory"],
+        "foreign_state": ("object", "foreign_state"),
+    },
     "postgres-outage": {
         "harness": "harness.test",
         "lane_schema": ("evidence_schema", "o3k.pp6.postgres-outage.v1"),
@@ -227,6 +238,25 @@ def build_envelope(
     version = required(document, version_path)
     if not isinstance(version, str):
         raise EvidenceError(f"{version_path} must be a string")
+    if case == "config-process" and not re.fullmatch(r"[0-9a-f]{64}", version):
+        raise EvidenceError("config-process binary.sha256 must be a full SHA-256 digest")
+    if case == "config-process":
+        if lookup(document, "binary.path") != "o3kd":
+            raise EvidenceError("config-process binary.path must be o3kd")
+        if lookup(document, "observations.redaction_scope") != "stdout_and_stderr":
+            raise EvidenceError("config-process must scan both stdout and stderr")
+        if lookup(document, "observations.data_directory_unchanged") is not True:
+            raise EvidenceError("config-process must prove unchanged fixture files")
+        if lookup(document, "observations.exited_before_serving") is not True:
+            raise EvidenceError("config-process must prove pre-serving exit")
+        if lookup(document, "observations.secret_scan") != "passed":
+            raise EvidenceError("config-process secret scan must pass")
+        if lookup(document, "backend_observation") != "not_exercised":
+            raise EvidenceError("config-process backend observation must be not_exercised")
+        for path in ("source_tree", "execution_head", "execution_tree"):
+            value = required(document, path)
+            if not isinstance(value, str) or not COMMIT.match(value):
+                raise EvidenceError(f"{path} is not a full commit id")
     profile = required(document, spec["profile"])
     if profile != PROFILE_BY_BACKEND[backend_kind]:
         raise EvidenceError(
@@ -290,14 +320,27 @@ def _sample(case: str) -> dict:
     _set(document, *spec["disposition"])
     if spec["source"]:
         _set(document, spec["source"], "a" * 40)
+    if case == "config-process":
+        _set(document, "source_tree", "d" * 40)
     _set(document, spec["harness"], "harness-identity")
-    if spec["execution"]:
+    if spec["execution"] and spec["execution"] != spec["source"]:
         _set(document, spec["execution"], "b" * 40)
     backend_kind, version_path = spec["backend"]
     _set(document, version_path, "16.4" if backend_kind == "postgresql" else "3.46.0")
     _set(document, spec["profile"], PROFILE_BY_BACKEND[backend_kind])
     for path in spec["fixture"]:
         _set(document, path, "fixture-value")
+    if case == "config-process":
+        _set(document, "binary.sha256", "a" * 64)
+        _set(document, "binary.path", "o3kd")
+        _set(document, "observations.redaction_scope", "stdout_and_stderr")
+        _set(document, "observations.data_directory_unchanged", True)
+        _set(document, "observations.exited_before_serving", True)
+        _set(document, "observations.secret_scan", "passed")
+        _set(document, "backend_observation", "not_exercised")
+        _set(document, "fixture.data_directory", "fixture-dir")
+        _set(document, "execution_head", "b" * 40)
+        _set(document, "execution_tree", "c" * 40)
     if case == "sqlite-memory-pressure":
         _set(document, "image_ref", "rust@sha256:" + "a" * 64)
     kind, path = spec["foreign_state"]
