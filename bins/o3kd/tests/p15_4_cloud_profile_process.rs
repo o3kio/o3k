@@ -75,6 +75,7 @@ async fn stop(mut child: Child) -> Result<(), Box<dyn std::error::Error>> {
 async fn cloud_profile_survives_real_daemon_restart() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!("o3k-p15-4-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&root)?;
+    std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let store = open_file(&root.join("o3k.sqlite")).await?;
     let profile = CloudProfile {
         profile_id: "default".into(),

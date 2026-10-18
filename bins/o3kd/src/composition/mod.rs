@@ -289,6 +289,8 @@ pub struct Composition {
     inspect_probe_task: Option<tokio::task::JoinHandle<()>>,
     diagnostics_probe_task: tokio::task::JoinHandle<()>,
     external_cinder_probe_task: Option<tokio::task::JoinHandle<()>>,
+    // Declared last so it is released after the daemon's owned task handles.
+    _store_access_lock: o3k_store::StoreAccessLock,
 }
 
 impl Composition {
@@ -360,6 +362,10 @@ impl Composition {
 pub async fn build_composition(
     config: o3k_config::Config,
 ) -> Result<Composition, Box<dyn std::error::Error>> {
+    // This must precede every store open and all readiness/worker/session work.
+    // The lock is local to this data directory and does not fence remote
+    // PostgreSQL writers or a controller on another host.
+    let store_access_lock = o3k_store::StoreAccessLock::acquire(&config.data_dir)?;
     let store = match config.database_backend {
         o3k_config::DatabaseBackend::Sqlite => {
             let database_path = config.data_dir.join("o3k.sqlite");
@@ -1480,6 +1486,7 @@ pub async fn build_composition(
 
     Ok(Composition {
         state,
+        _store_access_lock: store_access_lock,
         controller_id,
         controller_epoch,
         coordination_store,

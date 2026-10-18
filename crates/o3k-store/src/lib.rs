@@ -26,6 +26,8 @@ use uuid::Uuid;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+mod access_lock;
 mod artifact_transfer;
 pub mod conformance;
 pub mod coordination;
@@ -39,6 +41,8 @@ pub mod unified;
 
 pub mod domain;
 pub mod port;
+#[cfg(unix)]
+pub use access_lock::StoreAccessLock;
 pub use coordination::{
     ControllerEpoch, ControllerId, ControllerSession, ControllerState, CoordinationRepository,
     FencingToken, LeaseAcquireOutcome, WorkLease,
