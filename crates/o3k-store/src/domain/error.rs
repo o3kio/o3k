@@ -26,6 +26,13 @@ pub enum StoreError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("backup staging cleanup failed (published={published})")]
+    BackupStagingCleanup {
+        published: bool,
+        source: std::io::Error,
+    },
+    #[error("backup publication durability is uncertain; inspect the target before retrying")]
+    BackupPublicationUncertain,
     #[error("invalid UUID in durable state")]
     InvalidUuid(#[source] uuid::Error),
     #[error("corrupt durable state: {0}")]

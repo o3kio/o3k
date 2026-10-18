@@ -409,11 +409,24 @@ async fn release_abandoned_transaction(
     Ok(rolled_back_or_idle && !connection.is_in_transaction())
 }
 
-struct PrivateBackupStage(std::path::PathBuf);
+struct PrivateBackupStage {
+    path: std::path::PathBuf,
+    cleaned: bool,
+}
+
+impl PrivateBackupStage {
+    fn cleanup(mut self) -> std::io::Result<()> {
+        fs::remove_dir_all(&self.path)?;
+        self.cleaned = true;
+        Ok(())
+    }
+}
 
 impl Drop for PrivateBackupStage {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        if !self.cleaned {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }
 
@@ -676,52 +689,68 @@ impl SqliteStore {
         stage_builder
             .create(&stage_path)
             .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
-        let stage = PrivateBackupStage(stage_path.clone());
+        let stage = PrivateBackupStage {
+            path: stage_path.clone(),
+            cleaned: false,
+        };
         let snapshot_path = stage_path.join("database.sqlite");
         let snapshot_str = snapshot_path.to_str().ok_or_else(|| {
             StoreError::Database(sqlx::Error::Configuration(
                 "backup staging path must be valid UTF-8".into(),
             ))
         })?;
-        let checkpoint = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(StoreError::Database)?;
-        let busy: i64 = checkpoint.try_get(0).map_err(StoreError::Database)?;
-        let wal_frames: i64 = checkpoint.try_get(1).map_err(StoreError::Database)?;
-        let checkpointed_frames: i64 = checkpoint.try_get(2).map_err(StoreError::Database)?;
-        if busy != 0 || (wal_frames >= 0 && wal_frames != checkpointed_frames) {
-            return Err(StoreError::Corrupt(
-                "SQLite backup could not establish a complete WAL checkpoint".to_owned(),
-            ));
+        let mut published = false;
+        let result = async {
+            let checkpoint = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+            let busy: i64 = checkpoint.try_get(0).map_err(StoreError::Database)?;
+            let wal_frames: i64 = checkpoint.try_get(1).map_err(StoreError::Database)?;
+            let checkpointed_frames: i64 = checkpoint.try_get(2).map_err(StoreError::Database)?;
+            if busy != 0 || (wal_frames >= 0 && wal_frames != checkpointed_frames) {
+                return Err(StoreError::Corrupt(
+                    "SQLite backup could not establish a complete WAL checkpoint".to_owned(),
+                ));
+            }
+            sqlx::query("VACUUM INTO ?")
+                .bind(snapshot_str)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+
+            #[cfg(unix)]
+            fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+            verify_sqlite_snapshot(&snapshot_path).await?;
+            fs::File::open(&snapshot_path)
+                .and_then(|file| file.sync_all())
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+            fs::File::open(&stage_path)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+
+            // link(2) is an atomic no-replace publication: an existing file
+            // or symlink at the destination makes this fail without following
+            // or replacing that entry.
+            fs::hard_link(&snapshot_path, &final_path)
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+            published = true;
+            fs::File::open(&parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+            Ok(())
         }
-        sqlx::query("VACUUM INTO ?")
-            .bind(snapshot_str)
-            .execute(&self.pool)
-            .await
-            .map_err(StoreError::Database)?;
-
-        #[cfg(unix)]
-        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
-            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
-        verify_sqlite_snapshot(&snapshot_path).await?;
-        fs::File::open(&snapshot_path)
-            .and_then(|file| file.sync_all())
-            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
-        fs::File::open(&stage_path)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
-
-        // Linking within the destination filesystem is atomic and cannot
-        // replace a prior artifact. A crash leaves either no publication or
-        // the complete verified snapshot at the final path.
-        fs::hard_link(&snapshot_path, &final_path)
-            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
-        fs::File::open(&parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
-        drop(stage);
-        Ok(())
+        .await;
+        let result = if published && result.is_err() {
+            Err(StoreError::BackupPublicationUncertain)
+        } else {
+            result
+        };
+        match stage.cleanup() {
+            Ok(()) => result,
+            Err(source) => Err(StoreError::BackupStagingCleanup { published, source }),
+        }
     }
 
     /// Lists all resources of one kind across projects for restart

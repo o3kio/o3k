@@ -1,11 +1,37 @@
 #[cfg(test)]
 mod tests {
     use crate::*;
+    use sqlx::Row;
     use std::error::Error;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
     use uuid::Uuid;
+
+    struct BackupTestDirectory(PathBuf);
+
+    impl BackupTestDirectory {
+        fn new() -> Result<Self, Box<dyn Error>> {
+            let path = PathBuf::from(format!("/tmp/o3k-store-backup-test-{}", Uuid::now_v7()));
+            std::fs::create_dir(&path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(Self(path))
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for BackupTestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn fabric_host(
         host_id: &str,
@@ -3674,14 +3700,9 @@ mod tests {
 
     #[tokio::test]
     async fn backup_and_restore_produces_consistent_database() -> Result<(), Box<dyn Error>> {
-        let src_path = PathBuf::from(format!(
-            "/tmp/o3k-store-backup-src-{}.sqlite",
-            Uuid::now_v7()
-        ));
-        let backup_path = PathBuf::from(format!(
-            "/tmp/o3k-store-backup-dst-{}.sqlite",
-            Uuid::now_v7()
-        ));
+        let temp = BackupTestDirectory::new()?;
+        let src_path = temp.path("source.sqlite");
+        let backup_path = temp.path("backup.sqlite");
 
         let store = SqliteStore::connect_file(&src_path).await?;
         let blob = [
@@ -3715,53 +3736,35 @@ mod tests {
             .await?;
         assert_eq!(fetched, keypair);
 
-        let _ = fs::remove_file(&src_path);
-        let _ = fs::remove_file(format!("{}-wal", src_path.display()));
-        let _ = fs::remove_file(format!("{}-shm", src_path.display()));
-        let _ = fs::remove_file(&backup_path);
-        let _ = fs::remove_file(format!("{}-wal", backup_path.display()));
-        let _ = fs::remove_file(format!("{}-shm", backup_path.display()));
         Ok(())
     }
 
     #[tokio::test]
     async fn backup_publication_never_overwrites_an_existing_target() -> Result<(), Box<dyn Error>>
     {
-        let src_path = PathBuf::from(format!(
-            "/tmp/o3k-store-backup-no-overwrite-src-{}.sqlite",
-            Uuid::now_v7()
-        ));
-        let backup_path = PathBuf::from(format!(
-            "/tmp/o3k-store-backup-no-overwrite-dst-{}.sqlite",
-            Uuid::now_v7()
-        ));
+        let temp = BackupTestDirectory::new()?;
+        let src_path = temp.path("source.sqlite");
+        let backup_path = temp.path("backup.sqlite");
         let sentinel = b"preserve-existing-artifact";
         std::fs::write(&backup_path, sentinel)?;
 
         let store = SqliteStore::connect_file(&src_path).await?;
         let result = store.backup_to_file(&backup_path).await;
-        assert!(result.is_err(), "existing artifact must reject publication");
+        assert!(
+            matches!(result, Err(StoreError::ResourceAlreadyExists)),
+            "existing artifact must reject publication without replacement"
+        );
         assert_eq!(std::fs::read(&backup_path)?, sentinel);
 
         drop(store);
-        for path in [&src_path, &backup_path] {
-            let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(format!("{}-wal", path.display()));
-            let _ = std::fs::remove_file(format!("{}-shm", path.display()));
-        }
         Ok(())
     }
 
     #[tokio::test]
     async fn backup_snapshot_is_integrity_checked_and_private() -> Result<(), Box<dyn Error>> {
-        let src_path = PathBuf::from(format!(
-            "/tmp/o3k-store-backup-private-src-{}.sqlite",
-            Uuid::now_v7()
-        ));
-        let backup_path = PathBuf::from(format!(
-            "/tmp/o3k-store-backup-private-dst-{}.sqlite",
-            Uuid::now_v7()
-        ));
+        let temp = BackupTestDirectory::new()?;
+        let src_path = temp.path("source.sqlite");
+        let backup_path = temp.path("backup.sqlite");
         let store = SqliteStore::connect_file(&src_path).await?;
         store.backup_to_file(&backup_path).await?;
 
@@ -3780,25 +3783,15 @@ mod tests {
 
         drop(restored_store);
         drop(store);
-        for path in [&src_path, &backup_path] {
-            let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(format!("{}-wal", path.display()));
-            let _ = std::fs::remove_file(format!("{}-shm", path.display()));
-        }
         Ok(())
     }
 
     #[tokio::test]
     async fn backup_rejects_a_busy_wal_checkpoint_without_publishing() -> Result<(), Box<dyn Error>>
     {
-        let src_path = PathBuf::from(format!(
-            "/tmp/o3k-store-backup-busy-src-{}.sqlite",
-            Uuid::now_v7()
-        ));
-        let backup_path = PathBuf::from(format!(
-            "/tmp/o3k-store-backup-busy-dst-{}.sqlite",
-            Uuid::now_v7()
-        ));
+        let temp = BackupTestDirectory::new()?;
+        let src_path = temp.path("source.sqlite");
+        let backup_path = temp.path("backup.sqlite");
         let store = SqliteStore::connect_file(&src_path).await?;
         let mut reader = store.pool.begin().await?;
         let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
@@ -3807,18 +3800,31 @@ mod tests {
         sqlx::query("CREATE TABLE backup_wal_probe (id INTEGER PRIMARY KEY)")
             .execute(&store.pool)
             .await?;
+        let checkpoint = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
+            .fetch_one(&store.pool)
+            .await?;
+        let wal_frames: i64 = checkpoint.try_get(1)?;
+        let checkpointed_frames: i64 = checkpoint.try_get(2)?;
+        assert!(
+            wal_frames > checkpointed_frames,
+            "the pinned reader must leave committed WAL frames uncheckpointed"
+        );
 
         let result = store.backup_to_file(&backup_path).await;
         assert!(result.is_err(), "a pinned WAL reader must block capture");
         assert!(!backup_path.exists(), "failed capture must not publish");
+        assert!(
+            std::fs::read_dir(&temp.0)?.all(|entry| {
+                entry.is_ok_and(|entry| {
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".o3k-backup-")
+                })
+            }),
+            "failed capture must remove its private staging directory"
+        );
         reader.rollback().await?;
-
-        drop(store);
-        for path in [&src_path, &backup_path] {
-            let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(format!("{}-wal", path.display()));
-            let _ = std::fs::remove_file(format!("{}-shm", path.display()));
-        }
         Ok(())
     }
 
