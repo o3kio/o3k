@@ -61,7 +61,12 @@ impl StoreAccessLock {
         // Serialize path resolution only. Retaining this lock for the daemon
         // lifetime would incorrectly exclude distinct O3K installations that
         // share a parent directory.
-        acquire_parent_setup_lock(&parent_fd)?;
+        acquire_parent_setup_lock(&parent_fd).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to acquire O3K data-directory parent setup lock: {error}"),
+            )
+        })?;
 
         let creating_data_dir = match fs::symlink_metadata(data_dir) {
             Ok(_) => false,
@@ -87,7 +92,12 @@ impl StoreAccessLock {
         // The lock-file remains the shared, visible lock authority, while this
         // additional lock makes replacement of that name unable to split
         // processes that use this helper.
-        flock(&dir_fd, FlockOperation::NonBlockingLockExclusive)?;
+        flock(&dir_fd, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to acquire O3K data-directory lifetime lock: {error}"),
+            )
+        })?;
         drop(parent_fd);
 
         let lock_fd = openat(
@@ -102,7 +112,12 @@ impl StoreAccessLock {
 
         // Nonblocking acquisition avoids allowing a second daemon to open
         // canonical state while it waits behind a supervisor restart race.
-        flock(&lock_fd, FlockOperation::NonBlockingLockExclusive)?;
+        flock(&lock_fd, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to acquire O3K store lock-file lock: {error}"),
+            )
+        })?;
         // Recheck after acquisition so a replacement race fails closed.
         let locked_stat = fstat(&lock_fd)?;
         validate_lock_file(&dir_stat, &locked_stat)?;
