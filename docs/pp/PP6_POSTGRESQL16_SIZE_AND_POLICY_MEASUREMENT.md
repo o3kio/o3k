@@ -5,8 +5,11 @@ SPEC-0050 and does not certify backup or restore.
 
 ## Scope and provenance
 
-The measurements below were run on 2026-10-18 from the working tree associated
-with protected-main baseline `a6c4d6d519b974c791d2cb5ea9d83e2eada18807`.
+The measurements below were run on 2026-10-18 at source head
+`34669756ac9105c1d1f54a55860ed5740197e4fc`, tree
+`6a0979f87c8158d89784b09dbb96f80e80e46099`, based on protected main
+`a6c4d6d519b974c791d2cb5ea9d83e2eada18807`. The machine result is
+[committed separately](../evidence/pp6-pg16-native-sizing-34669756.json).
 The PostgreSQL server and tools are Ubuntu PostgreSQL 16.15:
 
 ```text
@@ -30,8 +33,13 @@ file inventory, not accepted schema identity.
 
 | Backend / operation | Source/database bytes | Native artifact bytes | Elapsed / peak | Available staging at run |
 |---|---:|---:|---:|---:|
-| SQLite all 53 migrations, checkpoint + `VACUUM INTO` | 1,175,552 | 1,171,456 | not timed | 171,004,874,752 |
-| PostgreSQL all 36 migration files | 11,172,887 | 176,867 (`pg_dump -Fc`) | 0.24 s / 14,976 KiB | 153,275,613,184 |
+| SQLite all 53 migrations, checkpoint + `VACUUM INTO` | 1,175,552 | 1,171,456 | not timed | 143,947,345,920 |
+| PostgreSQL all 36 migration files | 11,156,503 | 178,898 (`pg_dump -Fc`) | 0.15 s / 10,624 KiB | 143,947,345,920 |
+
+The peer-authenticated run used an output path containing a quote. PostgreSQL
+cleanup completed before the result was written, and an administrator query
+confirmed zero remaining fixture databases. The native dump stays in private
+local evidence; it is not a signed/encrypted O3K backup artifact.
 
 The PostgreSQL result demonstrates custom-format output sizing for the complete
 current migration schema, with no production rows. It does not establish a

@@ -113,3 +113,22 @@ test "$(grep -c 'DROP DATABASE' "$log")" -eq 1
 ! grep -q ' -f ' "$log"
 test ! -e "$fixture/out-wrong-database/result.json"
 printf 'PASS: foreign current_database fails closed before migration\n'
+
+: >"$log"
+set +e
+run_measurement 'postgres:///postgres?host=/var/run/postgresql&dbname=foreign' "$fixture/out-wrong-database-peer" wrong_database
+rc=$?
+set -e
+test "$rc" -ne 0
+test "$(grep -c 'DROP DATABASE' "$log")" -eq 1
+! grep -q ' -f ' "$log"
+test ! -e "$fixture/out-wrong-database-peer/result.json"
+target_probe=$(grep 'current_database' "$log" | tail -1)
+case "$target_probe" in
+  *'postgres:///o3k_pp6_measure_'* ) ;;
+  *) printf 'generated target did not preserve peer URI authority: %s\n' "$target_probe" >&2; exit 1 ;;
+esac
+case "$target_probe" in
+  *'dbname=foreign'*) printf 'generated target retained dbname override: %s\n' "$target_probe" >&2; exit 1 ;;
+esac
+printf 'PASS: peer URI strips dbname override and preserves triple-slash target\n'

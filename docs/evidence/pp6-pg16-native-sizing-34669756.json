@@ -1,0 +1,22 @@
+{
+  "cleanup": "passed",
+  "encrypted_outer_artifact": "PENDING",
+  "migration_ledger": "NOT_RUN: direct SQL fixture excludes SQLx ledger",
+  "pg_dump": "pg_dump (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+  "pg_dump_bytes": 178898,
+  "pg_dump_sha256": "6bcaa4aea162f3660cb925d6bd515f4f65e2b4dfd21026de2bf3a8c7a0ff7ea8",
+  "pg_restore": "pg_restore (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+  "pg_restore_list_sha256": "54a0bde98393932fc9872e6142f08aac1896bfe7892277af5635eca3867168b4",
+  "postgres_database_bytes": 11156503,
+  "postgres_migration_files": 36,
+  "postgres_server": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+  "production_backup_restore": "ACCEPTANCE_PENDING",
+  "schema": "o3k.pp6.pg-size-measurement.v1",
+  "source_head": "34669756ac9105c1d1f54a55860ed5740197e4fc",
+  "source_tree": "6a0979f87c8158d89784b09dbb96f80e80e46099",
+  "sqlite_integrity_check": "ok",
+  "sqlite_migration_files": 53,
+  "sqlite_snapshot_bytes": 1171456,
+  "sqlite_source_bytes": 1175552,
+  "staging_available_bytes": 143947345920
+}
