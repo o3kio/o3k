@@ -47,8 +47,10 @@ Every offline root, recovery, journal, and evidence key has a signed non-secret 
 ## Prototype and evidence
 
 `tests/pp6_contract_decisions.py` is a policy prototype with executable
-negative tests for D2/D4/D7/D8/D9/D10/D13. It covers signer purpose/site/profile
-scope, exact retry and fresh monotonic revocation state, signer threshold
+negative tests for D2/D4/D7/D8/D9/D10/D13. It covers the selected PostgreSQL
+online-HSM and SQLite offline-operator signing modes, PostgreSQL signer
+purpose/site/profile/backend scope, certificate/revocation/expiry rejection,
+exact retry and fresh monotonic revocation state, signer threshold
 custody, local-lock insufficiency and PostgreSQL remote/Unix-socket session
 admission, fence actor/fingerprint/key identity, freshness/TLS/power/ACL and
 challenge/sequence/journal-hash lease state, boot-bound atomic single-use activation, signed

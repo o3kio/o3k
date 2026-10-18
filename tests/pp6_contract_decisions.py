@@ -30,15 +30,24 @@ def reservation(source_bytes: int, available_bytes: int) -> int:
     return required
 
 
-def signer_authorize(*, purpose: str, profile: str, site: str,
+def signer_authorize(*, backend: str, purpose: str, profile: str, site: str,
                      configured_profile: str, configured_site: str,
                      client_identity_valid: bool = True,
                      key_cert_valid: bool = True, key_revoked: bool = False,
                      now: int = 0, expires_at: int = 900) -> bool:
-    return (purpose == "backup_manifest" and profile == "o3k-small-edge-v1"
+    return (backend == "postgresql" and purpose == "backup_manifest"
+            and profile == "o3k-small-edge-v1"
             and profile == configured_profile and site == configured_site
             and client_identity_valid and key_cert_valid and not key_revoked
             and now <= expires_at and expires_at - now <= 900)
+
+
+def selected_signing_mode(*, backend: str, profile: str) -> str | None:
+    if backend == "postgresql" and profile == "o3k-small-edge-v1":
+        return "online_hsm"
+    if backend == "sqlite" and profile in ("o3k-small-edge-v1", "o3k-demo-v1"):
+        return "offline_operator"
+    return None
 
 
 def capture_excluded(*, local_openers_stopped: bool, startup_lock_held: bool,
@@ -178,16 +187,18 @@ class ContractDecisionPrototypeTests(unittest.TestCase):
             reservation(4 * GIB, 9 * GIB - 1)
 
     def test_d2_online_signer_scope_and_forbidden_authorities(self):
-        args = dict(profile="o3k-small-edge-v1", site="site-17",
+        args = dict(backend="postgresql", profile="o3k-small-edge-v1", site="site-17",
                     configured_profile="o3k-small-edge-v1", configured_site="site-17")
         self.assertTrue(signer_authorize(purpose="backup_manifest", **args))
+        self.assertFalse(signer_authorize(
+            purpose="backup_manifest", **{**args, "backend": "sqlite"}))
         for forbidden in ("restore", "journal", "fence", "activation", "release"):
             self.assertFalse(signer_authorize(purpose=forbidden, **args))
         self.assertFalse(signer_authorize(
-            purpose="backup_manifest", profile="o3k-demo-v1", site="site-17",
+            purpose="backup_manifest", backend="postgresql", profile="o3k-demo-v1", site="site-17",
             configured_profile="o3k-small-edge-v1", configured_site="site-17"))
         self.assertFalse(signer_authorize(
-            purpose="backup_manifest", profile="o3k-small-edge-v1", site="other",
+            purpose="backup_manifest", backend="postgresql", profile="o3k-small-edge-v1", site="other",
             configured_profile="o3k-small-edge-v1", configured_site="site-17"))
         for extra in ({"client_identity_valid": False}, {"key_cert_valid": False},
                       {"key_revoked": True}, {"now": 901, "expires_at": 900},
@@ -196,13 +207,23 @@ class ContractDecisionPrototypeTests(unittest.TestCase):
         self.assertTrue(enough_custodians(2))
         self.assertTrue(enough_custodians(3))
         self.assertFalse(enough_custodians(1))
+        self.assertEqual(selected_signing_mode(
+            backend="postgresql", profile="o3k-small-edge-v1"), "online_hsm")
+        self.assertEqual(selected_signing_mode(
+            backend="sqlite", profile="o3k-small-edge-v1"), "offline_operator")
+        self.assertEqual(selected_signing_mode(
+            backend="sqlite", profile="o3k-demo-v1"), "offline_operator")
+        self.assertIsNone(selected_signing_mode(
+            backend="mysql", profile="o3k-small-edge-v1"))
 
     def test_d2_exact_retry_is_idempotent_and_replay_conflict_fails(self):
         ledger = {}
-        self.assertTrue(accept_signing_retry("req-1", "nonce-1", "site-17/pg", b"manifest-A", ledger))
-        self.assertTrue(accept_signing_retry("req-1", "nonce-1", "site-17/pg", b"manifest-A", ledger))
-        self.assertFalse(accept_signing_retry("req-1", "nonce-1", "site-17/pg", b"manifest-B", ledger))
-        self.assertFalse(accept_signing_retry("req-1", "nonce-1", "site-18/pg", b"manifest-A", ledger))
+        scope = "site-17/postgresql/o3k-small-edge-v1"
+        self.assertTrue(accept_signing_retry("req-1", "nonce-1", scope, b"manifest-A", ledger))
+        self.assertTrue(accept_signing_retry("req-1", "nonce-1", scope, b"manifest-A", ledger))
+        self.assertFalse(accept_signing_retry("req-1", "nonce-1", scope, b"manifest-B", ledger))
+        self.assertFalse(accept_signing_retry(
+            "req-1", "nonce-1", "site-18/postgresql/o3k-small-edge-v1", b"manifest-A", ledger))
 
     def test_d2_revocation_state_must_be_fresh_and_monotonic(self):
         args = dict(now=10, next_update=10, sequence=4, sequence_digest="digest-4",
