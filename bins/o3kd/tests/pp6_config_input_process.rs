@@ -6,6 +6,7 @@
 //! byte unchanged.
 #![cfg(unix)]
 
+use serde_json::json;
 use std::{
     collections::BTreeMap,
     fs, io,
@@ -45,13 +46,13 @@ impl Drop for TempDir {
 fn run_o3kd(
     args: &[String],
     envs: &[(&str, &str)],
-) -> Result<(ExitStatus, String), Box<dyn std::error::Error>> {
+) -> Result<(ExitStatus, String, String), Box<dyn std::error::Error>> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_o3kd"));
     command
         .args(args)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in envs {
         command.env(key, value);
@@ -63,9 +64,17 @@ fn run_o3kd(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("stderr was not captured"))?;
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("stdout was not captured"))?;
     let reader = thread::spawn(move || {
         let mut stderr = String::new();
         io::Read::read_to_string(&mut pipe, &mut stderr).map(|_| stderr)
+    });
+    let stdout_reader = thread::spawn(move || {
+        let mut stdout = String::new();
+        io::Read::read_to_string(&mut stdout_pipe, &mut stdout).map(|_| stdout)
     });
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
@@ -82,7 +91,10 @@ fn run_o3kd(
     let stderr = reader
         .join()
         .map_err(|_| io::Error::other("stderr reader panicked"))??;
-    Ok((status, stderr))
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| io::Error::other("stdout reader panicked"))??;
+    Ok((status, stderr, stdout))
 }
 
 /// Every file under `root` with its contents, for before/after comparison.
@@ -122,22 +134,78 @@ fn assert_fails_closed(
 ) -> TestResult {
     let data = populated_data_dir(label)?;
     let before = snapshot(&data.0)?;
-    let (status, stderr) = run_o3kd(&args(&data.0), envs)?;
+    let (status, stderr, stdout) = run_o3kd(&args(&data.0), envs)?;
     assert!(!status.success(), "{label}: o3kd must exit unsuccessfully");
     assert!(
         stderr.contains(expected_error),
-        "{label}: expected `{expected_error}` in stderr, got: {stderr}"
+        "{label}: expected configuration error classification was absent"
     );
     assert!(
         !stderr.contains(SENTINEL),
-        "{label}: stderr echoed the sentinel secret: {stderr}"
+        "{label}: stderr echoed the sentinel secret"
+    );
+    assert!(
+        !stdout.contains(SENTINEL),
+        "{label}: stdout echoed the sentinel secret"
     );
     assert_eq!(
         snapshot(&data.0)?,
         before,
         "{label}: data directory changed"
     );
+    write_evidence(label, &data.0, &stderr, &stdout)?;
     Ok(())
+}
+
+fn write_evidence(label: &str, data: &Path, stderr: &str, stdout: &str) -> io::Result<()> {
+    let Ok(directory) = std::env::var("O3K_PP6_CONFIG_EVIDENCE_DIR") else {
+        return Ok(());
+    };
+    fs::create_dir_all(&directory)?;
+    let binary = env!("CARGO_BIN_EXE_o3kd");
+    let digest_output = Command::new("sha256sum").arg(binary).output()?;
+    if !digest_output.status.success() {
+        return Err(io::Error::other("o3kd binary digest command failed"));
+    }
+    let digest = digest_output.stdout;
+    let binary_sha256 = String::from_utf8_lossy(&digest)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    if binary_sha256.len() != 64 || !binary_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::other("o3kd binary digest unavailable"));
+    }
+    let source = std::env::var("O3K_PP6_SOURCE_HEAD_SHA")
+        .map_err(|_| io::Error::other("O3K_PP6_SOURCE_HEAD_SHA is required"))?;
+    let tree = std::env::var("O3K_PP6_SOURCE_TREE_SHA")
+        .map_err(|_| io::Error::other("O3K_PP6_SOURCE_TREE_SHA is required"))?;
+    let execution_head = std::env::var("O3K_PP6_EXECUTION_HEAD_SHA")
+        .map_err(|_| io::Error::other("O3K_PP6_EXECUTION_HEAD_SHA is required"))?;
+    let execution_tree = std::env::var("O3K_PP6_EXECUTION_TREE_SHA")
+        .map_err(|_| io::Error::other("O3K_PP6_EXECUTION_TREE_SHA is required"))?;
+    let artifact = json!({
+        "schema": "o3k.pp6.config-process.v1",
+        "case": label,
+        "disposition": "PASS",
+        "source_head": source,
+        "source_tree": tree,
+        "execution_head": execution_head,
+        "execution_tree": execution_tree,
+        "harness": "pp6_config_input_process",
+        "profile": "o3k-small-edge-v1",
+        "backend_observation": "not_exercised",
+        "binary": {"path": "o3kd", "sha256": binary_sha256},
+        "fixture": {"data_directory": data.file_name().and_then(|name| name.to_str()).unwrap_or("unknown")},
+        "observations": {"exited_before_serving": true, "data_directory_unchanged": true, "secret_scan": "passed", "redaction_scope": "stdout_and_stderr", "stderr_bytes": stderr.len(), "stdout_bytes": stdout.len()},
+        "foreign_state": {"status": "not_exercised", "reason": "configuration validation exits before provider access"}
+    });
+    let path = Path::new(&directory).join(format!("{label}.json"));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    serde_json::to_writer_pretty(&mut file, &artifact).map_err(io::Error::other)
 }
 
 fn data_dir_args(data: &Path, extra: &[&str]) -> Vec<String> {

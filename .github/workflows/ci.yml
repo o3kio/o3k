@@ -313,6 +313,9 @@ jobs:
           O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
+          if ! git cat-file -e "$O3K_PP6_SOURCE_HEAD_SHA^{commit}"; then
+            git fetch --no-tags --depth=1 origin "$O3K_PP6_SOURCE_HEAD_SHA"
+          fi
           source_tree_sha="$(git cat-file commit "$O3K_PP6_SOURCE_HEAD_SHA" | awk '$1 == "tree" { print $2; exit }')"
           export O3K_PP6_SOURCE_TREE_SHA="$source_tree_sha"
           execution_head_sha="$(git rev-parse HEAD)"
@@ -337,6 +340,36 @@ jobs:
           path: |
             ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.json
             ${{ runner.temp }}/o3k-pp6-postgres-server-pressure.envelope.json
+          if-no-files-found: error
+      - name: PP.6 configuration input evidence
+        env:
+          O3K_PP6_CONFIG_EVIDENCE_DIR: ${{ runner.temp }}/pp6-config-evidence
+          O3K_PP6_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "$O3K_PP6_SOURCE_HEAD_SHA^{commit}"; then
+            git fetch --no-tags --depth=1 origin "$O3K_PP6_SOURCE_HEAD_SHA"
+          fi
+          source_tree_sha="$(git cat-file commit "$O3K_PP6_SOURCE_HEAD_SHA" | awk '$1 == "tree" { print $2; exit }')"
+          export O3K_PP6_SOURCE_TREE_SHA="$source_tree_sha"
+          execution_head_sha="$(git rev-parse HEAD)"
+          export O3K_PP6_EXECUTION_HEAD_SHA="$execution_head_sha"
+          execution_tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          export O3K_PP6_EXECUTION_TREE_SHA="$execution_tree_sha"
+          cargo test -p o3kd --test pp6_config_input_process --all-features -- --nocapture
+          expected='config-file dash-prefixed listen-address positional postgres-url signing-key'
+          actual="$(find "$O3K_PP6_CONFIG_EVIDENCE_DIR" -maxdepth 1 -name '*.json' -printf '%f\n' | sed 's/\.json$//' | sort | tr '\n' ' ' | sed 's/ *$//')"
+          test "$actual" = "$expected"
+          for artifact in "$O3K_PP6_CONFIG_EVIDENCE_DIR"/*.json; do
+            python3 -I scripts/validate_pp6_evidence.py --case config-process "$artifact" \
+              --envelope "${artifact%.json}.envelope.json"
+          done
+      - name: Upload PP.6 configuration input evidence
+        if: ${{ success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pp6-config-process-evidence
+          path: ${{ runner.temp }}/pp6-config-evidence/
           if-no-files-found: error
       - name: Architecture boundary check
         run: python3 scripts/check-architecture-boundaries.py
