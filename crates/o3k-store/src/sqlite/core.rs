@@ -430,6 +430,22 @@ impl Drop for PrivateBackupStage {
     }
 }
 
+fn cleanup_backup_stage(
+    stage: PrivateBackupStage,
+    operation: Result<(), StoreError>,
+    published: bool,
+) -> Result<(), StoreError> {
+    let operation = operation.err().map(Box::new);
+    match stage.cleanup() {
+        Ok(()) => operation.map_or(Ok(()), |error| Err(*error)),
+        Err(source) => Err(StoreError::BackupStagingCleanup {
+            published,
+            operation,
+            source,
+        }),
+    }
+}
+
 async fn verify_sqlite_snapshot(path: &Path) -> Result<(), StoreError> {
     let options = SqliteConnectOptions::new()
         .filename(path)
@@ -747,10 +763,7 @@ impl SqliteStore {
         } else {
             result
         };
-        match stage.cleanup() {
-            Ok(()) => result,
-            Err(source) => Err(StoreError::BackupStagingCleanup { published, source }),
-        }
+        cleanup_backup_stage(stage, result, published)
     }
 
     /// Lists all resources of one kind across projects for restart
@@ -2843,7 +2856,8 @@ impl ComputeRepository for SqliteStore {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod release_tests {
-    use super::release_abandoned_transaction;
+    use super::{PrivateBackupStage, cleanup_backup_stage, release_abandoned_transaction};
+    use crate::StoreError;
     use sqlx::{Connection, sqlite::SqliteConnection};
 
     #[tokio::test]
@@ -2885,5 +2899,26 @@ mod release_tests {
             .execute(&mut connection)
             .await
             .expect("a new transaction can start after release");
+    }
+
+    #[test]
+    fn backup_cleanup_error_preserves_the_primary_outcome() {
+        let stage = PrivateBackupStage {
+            path: std::env::temp_dir()
+                .join(format!("o3k-missing-backup-stage-{}", uuid::Uuid::now_v7())),
+            cleaned: false,
+        };
+        let result = cleanup_backup_stage(stage, Err(StoreError::BackupPublicationUncertain), true);
+
+        let error = result.expect_err("missing staging directory must fail cleanup");
+        assert!(matches!(
+            error,
+            StoreError::BackupStagingCleanup {
+                published: true,
+                operation: Some(operation),
+                source,
+            } if matches!(*operation, StoreError::BackupPublicationUncertain)
+                && source.kind() == std::io::ErrorKind::NotFound
+        ));
     }
 }

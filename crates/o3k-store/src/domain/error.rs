@@ -29,6 +29,7 @@ pub enum StoreError {
     #[error("backup staging cleanup failed (published={published})")]
     BackupStagingCleanup {
         published: bool,
+        operation: Option<Box<StoreError>>,
         source: std::io::Error,
     },
     #[error("backup publication durability is uncertain; inspect the target before retrying")]
