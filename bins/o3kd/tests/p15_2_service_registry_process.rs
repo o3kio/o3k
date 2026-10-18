@@ -173,6 +173,12 @@ async fn p15_2_real_process_views_converge_and_reconstruct() {
     for backend in &backends {
         let data_dir = std::env::temp_dir().join(format!("o3k-p15-2-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&data_dir).expect("data directory");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &data_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private data directory");
         let port = port();
         let base = format!("http://127.0.0.1:{port}");
         let client = Client::new();
@@ -261,6 +267,12 @@ async fn p15_2_real_process_views_converge_and_reconstruct() {
 async fn configured_but_unavailable_cinder_is_not_advertised() {
     let data_dir = std::env::temp_dir().join(format!("o3k-p15-2-cinder-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&data_dir).expect("data directory");
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &data_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("private data directory");
     let port = port();
     let base = format!("http://127.0.0.1:{port}");
     let client = Client::new();
