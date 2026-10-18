@@ -1,7 +1,7 @@
 # ADR-0189 — PP.6 control-plane backup and restore
 
-Status: Proposed — requires human architecture and security approval before
-implementation
+Status: Proposed — requires separate exact-revision human architecture and
+security/technical approval before implementation
 Date: 2026-10-15
 Affected-services: cloud-kernel, deployment, identity, governance
 Parent: PP.6 #975; general rollback/backup authority #640
@@ -128,9 +128,11 @@ surface.
 
 Proposed amendments A1–A9 (2026-10-16) to the D1–D13 recommendations are listed
 in [the decision packet](../pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md#proposed-amendments-2026-10-16).
-Architecture proposal acceptance is recorded below. Independent security
-acceptance and unresolved implementation conditions remain pending; this ADR
-remains Proposed.
+Architecture proposal acceptance is recorded below. The interim
+non-independent review arrangement is accepted under ADR-0190, but its
+durable decision URL and protected integration remain pending. Separate
+exact-revision technical/security decisions and implementation conditions
+remain pending; this ADR remains Proposed.
 
 ### Review amendments (2026-10-17)
 
@@ -138,17 +140,24 @@ remains Proposed.
 expressly records recommendations, not architecture or independent security
 acceptance. The existing packet incorporates the following proposal changes,
 subsequently accepted by architecture at the revision recorded below.
-Independent security and unresolved conditions remain **PENDING**; this ADR
+The interim non-independent security/technical review route is accepted
+under ADR-0190, subject to durable decision linkage and protected integration.
+Exact-revision decisions and unresolved conditions remain **PENDING**; this ADR
 remains **Proposed**:
 
-- **D2:** every backup requires a human detached-signature round-trip to the
-  disconnected signing workstation. Verify the exact persisted request and
-  D1 signing input before fsync and publication; abort safely or resume only
-  the exact request after interruption. Unattended/scheduled backup is outside
-  v1. Custodian identities, protected media locations, cryptsetup/workstation
-  versions, rotation/retention schedule and finite signing timeout are still
-  PENDING. Reference a protected custody record; do not publish secret material
-  or sensitive storage locations in this ADR.
+- **D2 (proposed amendment after ADR-0190 decision):** PostgreSQL 16 uses
+  bounded online signing only for authenticated backup artifacts belonging to
+  the configured site/profile. That signing authority cannot authorize
+  restore, fencing, restore-journal transitions, or controller activation.
+  Offline recovery-key custody and restore-journal signing authority remain
+  separate. SQLite small-edge/TestLab retains Option A (operator-assisted
+  offline artifact signing) where supported. This records the selected
+  operational mode, not a concrete signer implementation or accepted
+  cryptographic contract. Signer boundary, request authentication, replay
+  control, key custody, trust provisioning, rotation, revocation, recovery,
+  failure behavior, and negative tests remain PENDING. Record protected
+  custody details outside this ADR; do not publish secret material or
+  sensitive storage locations here.
 - **D4:** every O3K process opening the store, including CLI and maintenance
   paths, must honor the same startup/store-access lock. The existing storage
   execution lock is not this invariant. Stopping local daemons and taking a
@@ -199,13 +208,16 @@ remains **Proposed**:
   flags, exit codes and public CLI/API behavior require their own reviewed
   contract; none are approved here.
 
-The requested reviewers remain senolcolak for architecture and zoorpha for
-security review. Zoorpha authored #1136/#1137, so author review of that material
-cannot satisfy independent security acceptance. A qualified, authorized
-reviewer independent of the proposals and implementation must be designated,
-with qualification/role and independence basis recorded. Each role decision
-must reference the exact amended source; no acceptance is inferred from the
-review-analysis comment or a protected documentation merge.
+ADR-0190's accepted interim governance decision names `senolcolak` as human
+architecture and security/technical reviewer and risk owner for the bounded
+PP.6 profiles through 2026-11-30 or the PP.6 final decision, whichever occurs
+first. This review is explicitly non-independent and accepts the residual risk
+that one reviewer can miss a defect. The exact decision is recorded in
+[ADR-0190](ADR-0190-pp6-interim-single-maintainer-review-gate.md); each
+contract decision must cite its exact reviewed revision and identify its
+conditions. This governance decision does not accept this ADR, SPEC-0050,
+SPEC-0051, the schema, or runtime behavior. ADR-0099 release-level human review
+remains applicable.
 
 ### Architecture decision recorded (2026-10-17)
 
@@ -224,11 +236,33 @@ review-analysis comment or a protected documentation merge.
   Existing D4 exclusion and evidence requirements remain mandatory. Unresolved
   values, capabilities and evidence require explicit applicable reviewer
   resolution; none may be invented by implementation.
-- **Independent security:** unassigned / **PENDING**. No independent security
-  decision is recorded by the architecture comment or by the proposal author.
+- **Independent security:** not performed or claimed. A bounded,
+  non-independent interim review route is recorded under ADR-0190; its durable
+  decision URL and protected integration are pending. The exact technical/
+  security decision on this contract remains pending.
 - **Normative status:** this ADR, SPEC-0050 and the artifact schema remain
   **Proposed**. No normative acceptance revision or #1084 implementation is
   authorized. SPEC-0051 technical acceptance remains a separate decision.
+
+### Interim governance and signing-mode decision (2026-10-18)
+
+The authorized human accepted the bounded interim, non-independent
+single-maintainer review arrangement and selected PostgreSQL Option B and
+SQLite Option A where supported under ADR-0190, against exact revision
+`d62853bed83b7d5e1b63118a2d17bd48dac2e2aa`. The PostgreSQL online signing
+authority is limited to authenticated backup artifacts for the configured
+site/profile; it cannot authorize restore, fencing, restore-journal
+transitions, or controller activation. Offline recovery and restore-journal
+authority remain separate. See the [ADR-0190 decision
+record](ADR-0190-pp6-interim-single-maintainer-review-gate.md#human-decision-recorded-2026-10-18).
+
+This decision selects the signing mode and its authority limit only. It does
+not accept this ADR, SPEC-0050, SPEC-0051, the artifact schema, or backup
+runtime. Concrete signer implementation, key custody, rotation, revocation,
+trust, recovery, and negative tests remain pending separate exact-revision
+technical/security review. D1–D13/A1–A9 conditions, PostgreSQL real-backend
+evidence, protected integration, and all release-level review requirements
+remain in force.
 
 ### Decisions to record
 
@@ -273,7 +307,7 @@ implementation begins.
 | PostgreSQL snapshot format and restore privilege policy | PostgreSQL 16 `pg_dump` custom format (`-Fc`) as one opaque regular-file member; restore with the matching supported `pg_restore` into a newly provisioned empty O3K database. The approved invocation must use `--exit-on-error`, `--no-owner`, and `--no-acl`, or a reviewed equivalent that demonstrably enforces the ownership/ACL policy; if the tool cannot enforce it, fail before mutation. Restore only with an installation-provisioned, least-privilege database role and an approved extension/object allowlist. A known partial restore error before `STARTED` enters `FAILED_RECOVERABLE`; an unknown outcome enters `QUARANTINED`. The target stays inactive in both cases. It is discarded/recreated or recovered only by an approved idempotent path. Activate only after complete restore, integrity, privilege, and migration validation. Do not use `PGDATA` copies or cluster-wide `pg_dumpall`. | Confirm tool/version policy, extension/object allowlist, database ownership, exact role privileges, and least-privilege target-role provisioning. Artifact data must not mutate roles, passwords, tablespaces, ownership, or ACLs beyond approved object policy. |
 | SQLite snapshot primitive | Reuse `SqliteStore::backup_to_file` and its `VACUUM INTO` behavior after the accepted SQLite WAL/checkpoint and consistency boundary has been proven. | Confirm the operation can be coordinated with config, bootstrap/trust material, API writes, workers, provider dispatch, and lease activity; the existing store primitive alone is not that barrier. |
 | Public operator surface | Keep the first implementation slice internal, with no CLI or API addition. Revisit an `o3k` operator command only under a reviewed interface contract. | No public command, flags, confirmation behavior, or output format is accepted by this proposal. |
-| Signing and encryption | Review the exact D1/D2 profile and offline detached-signature workflow in the decision packet, separate from release signing keys, with externally protected operator key recovery. Unattended backup is unsupported. | Accept or amend the proposed encoding, cryptographic profile, custody, tool versions, rotation/revocation and finite signing deadline; architecture proposal acceptance does not settle missing values or independent security review. The release Ed25519 key is not a backup key. |
+| Signing and encryption | Review the selected mode: bounded online artifact signing for PostgreSQL only, restricted to authenticated backup artifacts for configured site/profile; Option A offline artifact signing for SQLite small-edge/TestLab where supported. Keep recovery and restore-journal authority offline and separate from the online signer. | Accept the concrete signer boundary, authentication and replay protections, cryptographic profile, trust provisioning, custody, tool versions, rotation/revocation, recovery, failure behavior and tests. ADR-0190 selects modes but supplies none of these implementation values. The release Ed25519 key is not a backup key. |
 | Restore activation | Review D3/D7 independent Redfish/BMC exclusion plus issuer replacement, rejection of old-source credentials, fresh target epoch and target-only PostgreSQL writer access. Never restore lease ownership as active. | Accept the profile restriction without BMC, exact evidence custody/verifier and deployment capability, PKI readiness and first reconciliation gate. |
 | Restore journal and target reservation | Review D8 service-user ownership, offline signed transitions and separate denial-only failure markers. Keep target reservation distinct from startup exclusion through commit. | Accept exact path, filesystem, signing/transfer and controlled startup handoff, stale-operation recovery authority and unknown-outcome handling. |
 | Outer artifact and limits | Review D9/A7 regular-file allowlist with no outer compression, 1 GiB member/4 GiB aggregate bounds and the full staging formula with a 9 GiB reservation cap. Authenticate before extraction or mutation. | Accept only after representative member/artifact/peak-space measurements; reject unsupported entries and never truncate the computed reservation. |
