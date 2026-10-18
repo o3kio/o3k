@@ -303,13 +303,22 @@ async fn diagnostics_http_postgres_capacity_narrow_reproduction() -> TestResult 
 async fn diagnostics_http_postgres_control_plane_read_is_read_only() -> TestResult {
     let url = std::env::var("O3K_PP6_DIAGNOSTICS_PG_URL")?;
     let parsed = url::Url::parse(&url)?;
-    if parsed.host_str() != Some("127.0.0.1") || parsed.path() != "/o3k_diagnostics_test_ci" {
+    if parsed.scheme() != "postgres"
+        || parsed.host_str() != Some("127.0.0.1")
+        || parsed.port_or_known_default() != Some(5432)
+        || parsed.username() != "o3k"
+        || parsed.password() != Some("password")
+        || parsed.path() != "/o3k_diagnostics_test_ci"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
         return Err(
-            "diagnostics PostgreSQL URL must target the dedicated localhost test database".into(),
+            "diagnostics PostgreSQL URL must target the dedicated CI PostgreSQL database".into(),
         );
     }
 
     let store = o3k_store::unified::O3kStore::connect_postgres(&url).await?;
+    let cleanup_pool = sqlx::PgPool::connect(&url).await?;
     let controller_id = format!("pp6-diagnostics-{}", uuid::Uuid::now_v7());
     let session = o3k_store::ControllerSession {
         controller_id: o3k_store::ControllerId::new(controller_id),
@@ -321,21 +330,41 @@ async fn diagnostics_http_postgres_control_plane_read_is_read_only() -> TestResu
         source_commit: "test".to_owned(),
         state: o3k_store::ControllerState::Active,
     };
-    store
-        .register_controller_session(&session, std::time::Duration::from_secs(60))
-        .await?;
-    let before = store.list_active_controller_sessions().await?;
-    if !before
-        .iter()
-        .any(|row| row.controller_id == session.controller_id)
-    {
-        return Err("registered PostgreSQL controller session was not visible".into());
-    }
+    let observed = async {
+        store
+            .register_controller_session(&session, std::time::Duration::from_secs(60))
+            .await?;
+        let before = store.list_active_controller_sessions().await?;
+        if !before
+            .iter()
+            .any(|row| row.controller_id == session.controller_id)
+        {
+            return Err("registered PostgreSQL controller session was not visible".into());
+        }
 
-    let app = build_runtime_with_store_and_provider_count(fresh_agents(), store.clone(), 0).await?;
-    let (status, body) = get(&app, "/o3k/v1/operator/diagnostics", "operator-token").await?;
+        let app =
+            build_runtime_with_store_and_provider_count(fresh_agents(), store.clone(), 0).await?;
+        let (status, body) = get(&app, "/o3k/v1/operator/diagnostics", "operator-token").await?;
+        let body: Value = serde_json::from_str(&body)?;
+        let after = store.list_active_controller_sessions().await?;
+        Ok::<_, Box<dyn std::error::Error>>((status, body, before, after))
+    }
+    .await;
+
+    // Remove only this test's uniquely identified lease, even when an
+    // intermediate read or router operation returns an error.
+    let cleanup = sqlx::query(
+        "DELETE FROM controller_sessions WHERE controller_id = $1 AND controller_epoch = $2",
+    )
+    .bind(&session.controller_id.0)
+    .bind(&session.controller_epoch.0)
+    .execute(&cleanup_pool)
+    .await;
+    cleanup_pool.close().await;
+    let (status, body, before, after) = observed?;
+    cleanup?;
+
     assert_eq!(status, StatusCode::OK, "diagnostics response: {body}");
-    let body: Value = serde_json::from_str(&body)?;
     assert_eq!(body["control_plane"]["status"], "healthy");
     assert!(
         body["control_plane"]["active_sessions"]
@@ -349,23 +378,10 @@ async fn diagnostics_http_postgres_control_plane_read_is_read_only() -> TestResu
             "diagnostics leaked {secret}"
         );
     }
-
-    let after = store.list_active_controller_sessions().await?;
     assert_eq!(
         after, before,
         "diagnostics GET must not renew or mutate durable PostgreSQL leases"
     );
-
-    // Remove only this test's uniquely identified lease from its disposable DB.
-    let cleanup_pool = sqlx::PgPool::connect(&url).await?;
-    sqlx::query(
-        "DELETE FROM controller_sessions WHERE controller_id = $1 AND controller_epoch = $2",
-    )
-    .bind(&session.controller_id.0)
-    .bind(&session.controller_epoch.0)
-    .execute(&cleanup_pool)
-    .await?;
-    cleanup_pool.close().await;
     Ok(())
 }
 
