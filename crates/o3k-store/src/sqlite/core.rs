@@ -409,6 +409,58 @@ async fn release_abandoned_transaction(
     Ok(rolled_back_or_idle && !connection.is_in_transaction())
 }
 
+struct PrivateBackupStage(std::path::PathBuf);
+
+impl Drop for PrivateBackupStage {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn verify_sqlite_snapshot(path: &Path) -> Result<(), StoreError> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(StoreError::Database)?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await
+        .map_err(StoreError::Database)?;
+    if integrity != "ok" {
+        return Err(StoreError::Corrupt(
+            "SQLite backup snapshot integrity check failed".to_owned(),
+        ));
+    }
+    let foreign_key_errors = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await
+        .map_err(StoreError::Database)?;
+    if !foreign_key_errors.is_empty() {
+        return Err(StoreError::Corrupt(
+            "SQLite backup snapshot foreign-key check failed".to_owned(),
+        ));
+    }
+    let migration_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(StoreError::Database)?;
+    if migration_table != 1 {
+        return Err(StoreError::Corrupt(
+            "SQLite backup snapshot is missing migration identity".to_owned(),
+        ));
+    }
+    pool.close().await;
+    Ok(())
+}
+
 impl SqliteStore {
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
         let is_memory = database_url == "sqlite::memory:" || database_url == "sqlite://:memory:";
@@ -586,19 +638,89 @@ impl SqliteStore {
         })
     }
 
+    /// Creates and atomically publishes an integrity-checked SQLite database
+    /// snapshot. The caller must hold the deployment's exclusive backup/store
+    /// exclusion and quiesce workers and cross-file state; this store helper
+    /// does not establish that control-plane boundary or produce a PP.6
+    /// authenticated artifact.
     pub async fn backup_to_file(&self, destination: &Path) -> Result<(), StoreError> {
-        if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent).map_err(|source| StoreError::CreateDataDirectory {
-                path: parent.to_owned(),
-                source,
-            })?;
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(|source| StoreError::CreateDataDirectory {
+            path: parent.to_owned(),
+            source,
+        })?;
+        let parent = fs::canonicalize(parent)
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        let name = destination.file_name().ok_or_else(|| {
+            StoreError::Database(sqlx::Error::Configuration(
+                "backup destination must name a file".into(),
+            ))
+        })?;
+        let final_path = parent.join(name);
+        match fs::symlink_metadata(&final_path) {
+            Ok(_) => return Err(StoreError::ResourceAlreadyExists),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(StoreError::Database(sqlx::Error::Io(error))),
         }
-        let dest_str = destination.display().to_string();
-        let query_str = format!("VACUUM INTO '{}'", dest_str.replace('\'', "''"));
-        sqlx::query(&query_str)
+
+        let stage_path = parent.join(format!(".o3k-backup-{}", Uuid::now_v7()));
+        let mut stage_builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            stage_builder.mode(0o700);
+        }
+        stage_builder
+            .create(&stage_path)
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        let stage = PrivateBackupStage(stage_path.clone());
+        let snapshot_path = stage_path.join("database.sqlite");
+        let snapshot_str = snapshot_path.to_str().ok_or_else(|| {
+            StoreError::Database(sqlx::Error::Configuration(
+                "backup staging path must be valid UTF-8".into(),
+            ))
+        })?;
+        let checkpoint = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        let busy: i64 = checkpoint.try_get(0).map_err(StoreError::Database)?;
+        let wal_frames: i64 = checkpoint.try_get(1).map_err(StoreError::Database)?;
+        let checkpointed_frames: i64 = checkpoint.try_get(2).map_err(StoreError::Database)?;
+        if busy != 0 || (wal_frames >= 0 && wal_frames != checkpointed_frames) {
+            return Err(StoreError::Corrupt(
+                "SQLite backup could not establish a complete WAL checkpoint".to_owned(),
+            ));
+        }
+        sqlx::query("VACUUM INTO ?")
+            .bind(snapshot_str)
             .execute(&self.pool)
             .await
             .map_err(StoreError::Database)?;
+
+        #[cfg(unix)]
+        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        verify_sqlite_snapshot(&snapshot_path).await?;
+        fs::File::open(&snapshot_path)
+            .and_then(|file| file.sync_all())
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        fs::File::open(&stage_path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+
+        // Linking within the destination filesystem is atomic and cannot
+        // replace a prior artifact. A crash leaves either no publication or
+        // the complete verified snapshot at the final path.
+        fs::hard_link(&snapshot_path, &final_path)
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        fs::File::open(&parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        drop(stage);
         Ok(())
     }
 

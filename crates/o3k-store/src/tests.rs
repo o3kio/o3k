@@ -3725,6 +3725,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backup_publication_never_overwrites_an_existing_target() -> Result<(), Box<dyn Error>>
+    {
+        let src_path = PathBuf::from(format!(
+            "/tmp/o3k-store-backup-no-overwrite-src-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let backup_path = PathBuf::from(format!(
+            "/tmp/o3k-store-backup-no-overwrite-dst-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let sentinel = b"preserve-existing-artifact";
+        std::fs::write(&backup_path, sentinel)?;
+
+        let store = SqliteStore::connect_file(&src_path).await?;
+        let result = store.backup_to_file(&backup_path).await;
+        assert!(result.is_err(), "existing artifact must reject publication");
+        assert_eq!(std::fs::read(&backup_path)?, sentinel);
+
+        drop(store);
+        for path in [&src_path, &backup_path] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+            let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backup_snapshot_is_integrity_checked_and_private() -> Result<(), Box<dyn Error>> {
+        let src_path = PathBuf::from(format!(
+            "/tmp/o3k-store-backup-private-src-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let backup_path = PathBuf::from(format!(
+            "/tmp/o3k-store-backup-private-dst-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let store = SqliteStore::connect_file(&src_path).await?;
+        store.backup_to_file(&backup_path).await?;
+
+        let metadata = std::fs::symlink_metadata(&backup_path)?;
+        assert!(metadata.file_type().is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+        let restored_store = SqliteStore::connect_file(&backup_path).await?;
+        assert_eq!(
+            restored_store.database_health().await?.integrity_check,
+            "ok"
+        );
+
+        drop(restored_store);
+        drop(store);
+        for path in [&src_path, &backup_path] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+            let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backup_rejects_a_busy_wal_checkpoint_without_publishing() -> Result<(), Box<dyn Error>>
+    {
+        let src_path = PathBuf::from(format!(
+            "/tmp/o3k-store-backup-busy-src-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let backup_path = PathBuf::from(format!(
+            "/tmp/o3k-store-backup-busy-dst-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let store = SqliteStore::connect_file(&src_path).await?;
+        let mut reader = store.pool.begin().await?;
+        let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&mut *reader)
+            .await?;
+        sqlx::query("CREATE TABLE backup_wal_probe (id INTEGER PRIMARY KEY)")
+            .execute(&store.pool)
+            .await?;
+
+        let result = store.backup_to_file(&backup_path).await;
+        assert!(result.is_err(), "a pinned WAL reader must block capture");
+        assert!(!backup_path.exists(), "failed capture must not publish");
+        reader.rollback().await?;
+
+        drop(store);
+        for path in [&src_path, &backup_path] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+            let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn canonical_network_relations_support_zero_realms_and_realm_removal()
     -> Result<(), Box<dyn Error>> {
         let store = SqliteStore::connect("sqlite::memory:").await?;
