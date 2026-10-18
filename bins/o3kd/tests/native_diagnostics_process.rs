@@ -366,11 +366,10 @@ async fn diagnostics_http_postgres_control_plane_read_is_read_only() -> TestResu
 
     assert_eq!(status, StatusCode::OK, "diagnostics response: {body}");
     assert_eq!(body["control_plane"]["status"], "healthy");
-    assert!(
-        body["control_plane"]["active_sessions"]
-            .as_u64()
-            .unwrap_or(0)
-            >= 1
+    assert_eq!(
+        body["control_plane"]["active_sessions"].as_u64(),
+        Some(before.len() as u64),
+        "diagnostics must report the complete PostgreSQL active-session snapshot"
     );
     for secret in SECRETS {
         assert!(
