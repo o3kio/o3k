@@ -195,6 +195,18 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
     version_connection.close().await?;
     eprintln!("checkpoint:version");
     let preflight_store = PostgresStore::connect(&url).await?;
+    let baseline_id = Uuid::now_v7();
+    let baseline = ResourceRecord {
+        id: baseline_id,
+        kind: "pp6_server_pressure_baseline".into(),
+        project_id: "pp6".into(),
+        generation: 1,
+        observed_generation: 1,
+        desired_state: "ACTIVE".into(),
+        observed_state: "ACTIVE".into(),
+        provider_id: None,
+    };
+    preflight_store.insert_resource(&baseline).await?;
     preflight_store.pool().close().await;
     eprintln!("checkpoint:store-preflight");
     let mut held = Vec::new();
@@ -233,6 +245,14 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         .await
         .map_err(|_| "PostgresStore reconnect timed out after capacity recovery")??;
     eprintln!("checkpoint:store-recovered");
+    let preserved = store
+        .list_resources("pp6", "pp6_server_pressure_baseline")
+        .await?;
+    assert_eq!(
+        preserved,
+        vec![baseline],
+        "failed admission must preserve canonical state"
+    );
     let id = resource_id;
     store
         .insert_resource(&ResourceRecord {
@@ -306,6 +326,7 @@ async fn postgres_server_connection_exhaustion_is_bounded_and_recovers()
         "failure": "server_connection_exhaustion",
         "observed_sqlstate": "53300",
         "canonical_retry": "passed",
+        "canonical_baseline_preserved": "passed",
         "cleanup": "passed",
         "foreign_state": {
             "status": "not_exercised",
