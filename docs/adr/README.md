@@ -199,7 +199,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0187](ADR-0187-fabric-owned-compute-tap-attachment.md) (accepted; clarifies ADR-0057 for Fabric-owned endpoint TAP attachment)
 - [ADR-0188](ADR-0188-stable-host-compute-and-network-agent-identity-separation.md) (accepted; separates canonical host identity from compute/network execution identities)
 - [ADR-0189](ADR-0189-pp6-control-plane-backup-and-restore.md) (proposed; requires human architecture/security approval before implementation)
-- [ADR-0190](ADR-0190-pp6-interim-single-maintainer-review-gate.md) (proposed; PP.6 review amendment only; requires explicit human acceptance)
+- [ADR-0190](ADR-0190-pp6-interim-single-maintainer-review-gate.md) (human decision accepted; durable decision URL and protected integration pending; governance only)
 
 ## Required audit
 

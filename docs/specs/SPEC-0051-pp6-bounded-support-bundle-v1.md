@@ -12,6 +12,12 @@ Related accepted sources:
 
 Related authority: [#944](https://github.com/o3kio/o3k/issues/944) owns operator documentation. This proposal does not accept or amend ADR-0189 or SPEC-0050.
 
+The interim review process for a future exact-revision decision on this
+specification is governed by [ADR-0190](../adr/ADR-0190-pp6-interim-single-maintainer-review-gate.md)
+and its 2026-10-18 decision record. That arrangement is explicitly
+non-independent and does not accept this specification or its schema. Its
+technical decisions and runtime authorization remain pending.
+
 This proposal defines the smallest supportability artifact needed by PP.6. It
 is a read-only, bounded projection assembled from the existing canonical
 diagnostics authority and static process identity. Version 1 carries no Audit
@@ -229,30 +235,27 @@ and this section does not authorize runtime implementation.
 
 | Decision | Recommendation submitted for approval | Security/operational effect | Required authority and unresolved dependency |
 | --- | --- | --- | --- |
-| Authorization and transport | Accept `operator:ReadSupportBundle` on `operator/support-bundle`, authenticated `User`, `operator` role, effective System scope, and the GET route specified in §1. Resolve authorization before reading configuration or source availability. | Limits disclosure to System operators and avoids revealing source health to denied callers. | Architecture: `senolcolak`; security nominee: `zoorpha` (author conflict; independent authority unresolved); separate decisions pending. Approve the action/resource names and System-scope policy. |
-| Read and Audit classification | Accept §1's read-only behavior and classification as a successful read that does not require a durable Audit event. Keep bundle content and source failures out of Audit and ordinary logs. Any later classification change requires a separate accepted amendment. | Avoids turning a read into canonical state mutation or copying sensitive failure material into Audit. | Architecture: `senolcolak`; security nominee: `zoorpha` (author conflict; independent authority unresolved); separate decisions pending. Approve the non-mandatory invocation-Audit classification. |
-| Sources and truncation | Accept diagnostics plus static process identity as the only v1 sources. Defer Audit and Operation evidence under §6. Keep the first 200 service/provider entries in existing projection order; enforce the 64 KiB diagnostics-source and 256 KiB complete-response limits; report omissions as `partial`/`source_truncated` with exact omitted counts and no cursor. | Prevents unbounded/system-wide queries and keeps data within explicit disclosure and response bounds. | Architecture: `senolcolak`; security nominee: `zoorpha` (author conflict; independent authority unresolved); separate decisions pending. Approve source omission, ordering, item/byte limits, and partial semantics. |
-| Backend version normalization | For PostgreSQL, accept a leading `<major>.<minor>` token only when it is followed by end-of-input, ASCII whitespace, or `(`; expose just that token (for example `16.4` from `16.4 (Debian 16.4-1.pgdg120+2)`). For SQLite, require the linked runtime's entire version to match `<major>.<minor>.<patch>`. Each component is 1–3 ASCII decimal digits; otherwise return `null`. The schema's `safe_version` pattern enforces the output grammar. | Removes vendor/build suffixes and prevents backend-provided strings from carrying arbitrary text. | Architecture: `senolcolak`; security nominee: `zoorpha` (author conflict; independent authority unresolved); separate decisions pending. Approve parsing/null behavior and the schema pattern. |
-| Provenance and profile identity | Accept `source.identity` as either a 40/64-character lowercase commit digest or `release:<name>@<digest>` as already constrained by the schema. Accept only the configured product-profile identifier under `safe_identity`; backend kind remains the fixed `sqlite`/`postgresql` enum. Do not expose hostnames, paths, arbitrary release metadata, or caller-provided labels. | Provides source/profile binding without exposing host-local or operator-controlled strings. | Architecture: `senolcolak`; security nominee: `zoorpha` (author conflict; independent authority unresolved); separate decisions pending. Approve the source and profile identity forms. |
+| Authorization and transport | Accept `operator:ReadSupportBundle` on `operator/support-bundle`, authenticated `User`, `operator` role, effective System scope, and the GET route specified in §1. Resolve authorization before reading configuration or source availability. | Limits disclosure to System operators and avoids revealing source health to denied callers. | Interim architecture and security/technical review by `senolcolak` under ADR-0190; exact-revision decision pending. Approve the action/resource names and System-scope policy. |
+| Read and Audit classification | Accept §1's read-only behavior and classification as a successful read that does not require a durable Audit event. Keep bundle content and source failures out of Audit and ordinary logs. Any later classification change requires a separate accepted amendment. | Avoids turning a read into canonical state mutation or copying sensitive failure material into Audit. | Interim architecture and security/technical review by `senolcolak` under ADR-0190; exact-revision decision pending. Approve the non-mandatory invocation-Audit classification. |
+| Sources and truncation | Accept diagnostics plus static process identity as the only v1 sources. Defer Audit and Operation evidence under §6. Keep the first 200 service/provider entries in existing projection order; enforce the 64 KiB diagnostics-source and 256 KiB complete-response limits; report omissions as `partial`/`source_truncated` with exact omitted counts and no cursor. | Prevents unbounded/system-wide queries and keeps data within explicit disclosure and response bounds. | Interim architecture and security/technical review by `senolcolak` under ADR-0190; exact-revision decision pending. Approve source omission, ordering, item/byte limits, and partial semantics. |
+| Backend version normalization | For PostgreSQL, accept a leading `<major>.<minor>` token only when it is followed by end-of-input, ASCII whitespace, or `(`; expose just that token (for example `16.4` from `16.4 (Debian 16.4-1.pgdg120+2)`). For SQLite, require the linked runtime's entire version to match `<major>.<minor>.<patch>`. Each component is 1–3 ASCII decimal digits; otherwise return `null`. The schema's `safe_version` pattern enforces the output grammar. | Removes vendor/build suffixes and prevents backend-provided strings from carrying arbitrary text. | Interim architecture and security/technical review by `senolcolak` under ADR-0190; exact-revision decision pending. Approve parsing/null behavior and the schema pattern. |
+| Provenance and profile identity | Accept `source.identity` as either a 40/64-character lowercase commit digest or `release:<name>@<digest>` as already constrained by the schema. Accept only the configured product-profile identifier under `safe_identity`; backend kind remains the fixed `sqlite`/`postgresql` enum. Do not expose hostnames, paths, arbitrary release metadata, or caller-provided labels. | Provides source/profile binding without exposing host-local or operator-controlled strings. | Interim architecture and security/technical review by `senolcolak` under ADR-0190; exact-revision decision pending. Approve the source and profile identity forms. |
 
-The user designated `senolcolak` as the architecture authority and `zoorpha` as
-the proposed independent security authority for this PP.6 approval. Before the
-security role is treated as satisfied, the record must confirm that `zoorpha`
-is qualified, authorized, and independent of both the material under review
-and its implementation. Zoorpha authored proposal PRs #1136 and #1137; reviewing
-that authored material cannot satisfy independent security acceptance. The
-requested reviewer remains zoorpha, but the independent authority is unresolved
-until a qualified, authorized reviewer independent of that material is named
-with their role and independence basis recorded. The decisions
-must be recorded separately by role against the exact reviewed revision. A
-GitHub PR approval alone is not the decision record.
+Under the accepted interim arrangement in ADR-0190, `senolcolak` may make the
+bounded PP.6 architecture and security/technical decision on an exact revised
+SPEC-0051, with explicit disclosure that the review is non-independent and
+with the accepted residual risk. This does not make the decision below
+accepted, does not satisfy an independent security review, and does not waive
+ADR-0099's release-level human-review requirements. The technical decision
+must be recorded separately against the exact reviewed revision. A GitHub PR
+approval alone is not the decision record.
 
 | Role | Named reviewer | Decision | Date | Exact revision reviewed |
 | --- | --- | --- | --- | --- |
-| Architecture authority | senolcolak | **PENDING** | — | Source commit to be recorded |
-| Independent security authority | Unresolved; requested nominee zoorpha authored #1137 and cannot independently accept that material | **PENDING** | — | Source commit to be recorded separately |
+| Interim architecture and security/technical reviewer (non-independent) | senolcolak | **PENDING** | — | Source commit to be recorded |
+| Independent security review | **Not satisfied.** ADR-0190 permits only a temporary, bounded, explicitly non-independent decision by `senolcolak`; no independent security approval is claimed. SPEC-0051 cannot be promoted or authorize runtime until its exact-revision technical decision is recorded and applicable release-level review is complete. | Pending; this interim process does not waive independent review outside its bounded scope or ADR-0099 release requirements. | — | — |
 
-After both role decisions are recorded, the contract may be marked Accepted and
-the proposed schema finalized through its protected review. Until then, neither
-this contract nor its schema authorizes the support-bundle
-runtime implementation.
+After the exact-revision technical decision under ADR-0190 is recorded, the
+contract may be marked Accepted and the proposed schema finalized through its
+protected review. Until then, neither this contract nor its schema authorizes
+the support-bundle runtime implementation.

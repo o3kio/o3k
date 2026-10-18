@@ -12,8 +12,8 @@ SPEC-0024 database support, SPEC-0008 operation semantics, or ADR-0167
 deployment authority. The proposal is not implementation or acceptance
 evidence.
 
-Proposed amendments A1–A9 (2026-10-16), including offline v1 backup and
-operator-held offline keys for both profiles, are listed in
+Proposed amendments A1–A9 (2026-10-16), as further amended below for the
+profile-specific signing mode, are listed in
 [the decision packet](../pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md#proposed-amendments-2026-10-16).
 The refinements below incorporate the recommendations in
 [review comment 6239123579](https://github.com/o3kio/o3k/issues/975#issuecomment-6239123579).
@@ -23,9 +23,17 @@ at `610f914b4c25112f67798402db8b83c9caf0cf55`, responding to the
 [exact-revision request](https://github.com/o3kio/o3k/issues/975#issuecomment-6239743723).
 See [ADR-0189's separate role record](../adr/ADR-0189-pp6-control-plane-backup-and-restore.md#architecture-decision-recorded-2026-10-17).
 Acceptance retains the proposal's unresolved conditions; it supplies no missing
-values or evidence. Independent security remains unassigned/PENDING. This
-specification and its artifact schema remain **Proposed** and do not authorize
-implementation.
+values or evidence. On 2026-10-18, the authorized human accepted the bounded
+interim review arrangement and selected PostgreSQL Option B and SQLite Option
+A under ADR-0190, against reviewed revision
+`d62853bed83b7d5e1b63118a2d17bd48dac2e2aa`; see its [decision
+record](../adr/ADR-0190-pp6-interim-single-maintainer-review-gate.md#human-decision-recorded-2026-10-18).
+This profile-mode selection does not accept this specification or schema, and
+does not decide the concrete signer implementation or security lifecycle.
+Those amendments require exact-revision technical/security review under the
+accepted, non-independent interim route, whose durable decision URL and
+protected integration remain pending. This specification and its artifact
+schema remain **Proposed** and do not authorize implementation.
 
 ## 1. Goals and exclusions
 
@@ -133,8 +141,8 @@ alone is not sufficient because it compares complete objects.
 ### Proposed common offline boundary
 
 Stop every store-opening O3K process and hold an exclusive data-directory
-startup/store-access lock through capture, offline signing and verified
-publication or safe abort. Every daemon, CLI and maintenance path opening the
+startup/store-access lock through capture, profile-specific signing and
+verified publication or safe abort. Every daemon, CLI and maintenance path opening the
 store must participate before any store initialization, readiness, worker,
 lease or provider activity. The current storage execution lock does not
 implement this invariant. Tests must race ordinary CLI/store access and
@@ -262,14 +270,19 @@ Database restoration and activation are distinct: the restored database stays
 inactive until the accepted PKI issuer/trust recovery or replacement and
 re-enrollment checks pass.
 
-The D2/D3 recommendation uses distinct offline recovery, artifact-signing and
-journal/evidence keys; issuer replacement and agent re-enrollment are proposed
-for activation. Private recovery/signing keys never move to the controller,
-target or backup destination. Exact custodian identities, protected storage
-locations, cryptsetup/workstation versions, rotation/retention schedule and
-finite signing deadline remain PENDING in ADR-0189 or its referenced protected
-custody record. Public documents must not disclose secrets or sensitive media
-locations.
+The selected signing modes keep PostgreSQL online artifact signing restricted
+to authenticated backup artifacts for the configured site/profile, while
+SQLite small-edge/TestLab retains operator-assisted offline artifact signing
+where supported. The online signing authority cannot authorize restore,
+fencing, restore-journal transitions, or controller activation. Offline
+recovery and restore-journal authority remain distinct from artifact signing;
+issuer replacement and agent re-enrollment are proposed activation gates.
+Private recovery and journal-signing keys never move to the controller, target,
+or backup destination. The concrete PostgreSQL signer boundary, request
+authentication, key custody, trust provisioning, rotation, revocation,
+recovery, and failure behavior remain PENDING in ADR-0189 or its referenced
+protected custody record. Public documents must not disclose secrets or
+sensitive media locations.
 
 ## 5. Backup publication and retry
 
@@ -284,17 +297,19 @@ atomically publishes the completed artifact. `COMMITTED` is visible only after
 all checks and durable publication finish. A failed or interrupted staging
 artifact is not selectable as a backup.
 
-Under D2, every backup requires a human offline signing round-trip. Persist a
-request bound to the D1 exact manifest/member-digest signature input, nonce/ID,
-site/artifact and key identity. Transfer it to the disconnected exact-release
-signing workstation for operator context confirmation, then return a detached
-response. Verify the trusted key, exact request/input and signature before
-fsync and publication. Signing timeout, cancellation or mismatched response
-cannot publish a backup. Retain private encrypted staging or safely abort;
-resume only the same request and immutable content after re-proving exclusion.
-The offline lock and staging reservation cover the signing wait, so unattended
-or scheduled backup is unsupported in v1. Tool/transport and deadline still
-require explicit acceptance.
+Signing follows the selected profile mode. For PostgreSQL, an online signer
+may authenticate only a completed backup artifact for its configured
+site/profile; it has no authority for restore, fencing, restore-journal
+transitions, or activation. For SQLite small-edge/TestLab where supported,
+retain the Option A operator-assisted offline signature round-trip. In both
+cases the exact authenticated manifest/member-digest input must be verified
+before fsync and publication, and signing failure, cancellation, or a
+mismatched response cannot publish a backup. Retain private encrypted staging
+or safely abort; resume only the same request and immutable content after
+re-proving exclusion. The capture exclusion and staging reservation remain in
+force through verified publication or safe abort. Exact signer request,
+transport, timeout, custody and recovery behavior remain PENDING; this
+specification does not define or authorize their implementation.
 
 Retry uses the same operation/backup identity. It observes the existing
 staging/final path and validates it before deciding whether to resume, return
