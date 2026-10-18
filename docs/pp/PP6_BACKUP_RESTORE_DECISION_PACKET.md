@@ -140,9 +140,13 @@ D8/D12 amendments above.
   trust, custody and lifecycle decisions remain pending.
 - **D4 exclusion:** test every store-opening daemon, CLI and maintenance path,
   supervisor restart races and SQLite WAL cut. PostgreSQL tests must attempt
-  remote writer login and retain an existing writer session to prove both are
-  blocked before capture; a local lock is insufficient. Missing exclusion or
-  inability to inspect sessions fails closed before capture.
+  remote writer login, Unix-socket reconnect and an existing writer session
+  to prove all are blocked before capture. The first-match HBA barrier rejects
+  every local socket connection after one already-open control session is used
+  to inspect and close out existing sessions; the barrier then proves that
+  control session is gone and only the remote dump session remains. A local
+  lock is insufficient. Missing exclusion or inability to inspect sessions
+  fails closed before capture.
 - **D7 evidence:** the signer is the D2 offline journal/evidence key holder; the
   verifier is the exact-release target recovery process using a separately
   installed public key. BMC credentials never enter the record or artifact.
@@ -209,21 +213,27 @@ D8/D12 amendments above.
 
 ## Dependencies and implementation gate
 
-The following implementation-critical decisions remain separate blockers
-and must not be inferred from other approvals:
+The consolidated technical defaults, prototype and exact-revision review
+request are now submitted in
+[`PP6_TECHNICAL_CONTRACT_APPROVAL.md`](PP6_TECHNICAL_CONTRACT_APPROVAL.md).
+The remaining gate is the explicit technical decision against that exact
+source revision and its protected integration; ADR-0190 governance and the
+PostgreSQL Option B / SQLite Option A mode decisions are already settled and
+are not repeated here. The prototype does not authorize runtime.
 
-1. **D8:** offline signing/transfer, service-user journal ownership, denial-only markers, controlled startup handoff, local ext4/kernel behavior and stale-operation recovery authority.
-2. **D7:** exact fencing control, fresh verifiable evidence, source/target identity binding, and authorized actor for each profile; source-unreachable disposition.
-3. **D9:** measured artifact sizes and accepted staging/free-space limits.
-4. **D10:** exact least-privilege PostgreSQL grants, pre-execution TOC/definition
-   policy and migration-derived object inventory.
-5. **D2:** exact storage-encryption parameters/tool versions, profile-specific artifact signer custody (online PostgreSQL and offline SQLite where supported), separate offline recovery/journal custody, rotation, revocation, media integrity, and recovery procedure.
-6. **D12:** approved operator path needed to exercise exact-release recovery.
+The following implementation-critical decisions have concrete defaults
+submitted but are not yet technically accepted:
+
+1. **D2:** validate proposed signer/HSM and trust/custody prototype assumptions against the actual protected deployment before runtime.
+2. **D4/D7/D8:** implement and exercise local startup exclusion, independent BMC fencing, signed journal and controlled startup handoff; the Python model is policy-only.
+3. **D9:** existing empty-schema size measurements do not establish production artifact/peak staging sizes; measure real source data before capture and retain the hard limits.
+4. **D10/D13:** generate the migration/repository inventory and least-privilege grants from current store registrations, then validate against real isolated PostgreSQL 16 archive and catalogs.
+5. **D12:** implement only after the command surface is accepted; verify the exact release command and runbook on disposable fresh hosts.
 
 No production backup/restore or security-sensitive PKI implementation may begin
-until the relevant decisions above are explicitly accepted in ADR-0189 and
-SPEC-0050. A reviewer must copy the accepted or amended values, both role
-decisions, date, and exact source revision into those normative documents.
+until the complete technical package is explicitly accepted in ADR-0189 and
+SPEC-0050 at the exact revision. The reviewer must record decision, conditions,
+date and full source revision in the normative documents and protected review.
 Implementation follows the existing issue order: #1084 SQLite artifact, #1085
 PostgreSQL adapter, #1086 fresh-host recovery, then dependent #1087 PKI and #1098
 upgrade/recovery work. This packet does not accept evidence, claim PP.6
