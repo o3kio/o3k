@@ -6,7 +6,13 @@
 //! Production deployments should place the data directory under a
 //! root-managed parent that the daemon account cannot modify.
 
-use std::{fs, io, os::fd::OwnedFd, path::Path};
+use std::{
+    fs, io,
+    os::fd::OwnedFd,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 
 use rustix::{
     fs::{
@@ -18,6 +24,8 @@ use rustix::{
 const LOCK_FILE: &str = ".o3k-store.lock";
 const DATA_DIR_MODE: u32 = 0o022;
 const LOCK_FILE_MODE: u32 = 0o7777;
+const PARENT_SETUP_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const PARENT_SETUP_LOCK_RETRY: Duration = Duration::from_millis(10);
 
 /// Holds the local data-directory lock until dropped.
 ///
@@ -53,10 +61,7 @@ impl StoreAccessLock {
         // Serialize path resolution only. Retaining this lock for the daemon
         // lifetime would incorrectly exclude distinct O3K installations that
         // share a parent directory.
-        // Setup never waits behind another opener. This synchronous helper is
-        // called during daemon startup, so blocking here could hang startup
-        // indefinitely and stall the async executor thread.
-        flock(&parent_fd, FlockOperation::NonBlockingLockExclusive)?;
+        acquire_parent_setup_lock(&parent_fd)?;
 
         let creating_data_dir = match fs::symlink_metadata(data_dir) {
             Ok(_) => false,
@@ -107,6 +112,22 @@ impl StoreAccessLock {
             _lock_file: lock_fd,
             _data_dir: dir_fd,
         })
+    }
+}
+
+fn acquire_parent_setup_lock(parent_fd: &OwnedFd) -> io::Result<()> {
+    let deadline = Instant::now() + PARENT_SETUP_LOCK_TIMEOUT;
+    loop {
+        match flock(parent_fd, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(()),
+            Err(error) if error == rustix::io::Errno::WOULDBLOCK => {
+                if Instant::now() >= deadline {
+                    return Err(error.into());
+                }
+                thread::sleep(PARENT_SETUP_LOCK_RETRY);
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
@@ -266,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_setup_lock_fails_fast_when_another_opener_holds_it() -> io::Result<()> {
+    fn parent_setup_lock_waits_boundedly_for_another_opener() -> io::Result<()> {
         let root = TestDir::new()?;
         let parent = root
             .0
@@ -281,9 +302,42 @@ mod tests {
             rustix::fs::Mode::empty(),
         )?;
         rustix::fs::flock(&parent_fd, rustix::fs::FlockOperation::LockExclusive)?;
+        let release_thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(parent_fd);
+        });
 
-        let error = expect_error(parent.join("another-data-dir"))?;
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        let lock = StoreAccessLock::acquire(parent.join("another-data-dir"))?;
+        release_thread
+            .join()
+            .map_err(|_| io::Error::other("parent setup lock release thread panicked"))?;
+        drop(lock);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_independent_data_directories_share_parent_setup_lock() -> io::Result<()> {
+        let root = TestDir::new()?;
+        let parent = root
+            .0
+            .parent()
+            .ok_or_else(|| io::Error::other("test directory has no parent"))?
+            .to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles = ["site-a", "site-b"].map(|name| {
+            let barrier = barrier.clone();
+            let path = parent.join(name);
+            std::thread::spawn(move || {
+                barrier.wait();
+                StoreAccessLock::acquire(path)
+            })
+        });
+        barrier.wait();
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| io::Error::other("concurrent store lock thread panicked"))??;
+        }
         Ok(())
     }
 
