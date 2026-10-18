@@ -126,6 +126,15 @@ surface.
 
 ## Human approval required
 
+Concrete implementation defaults for D2/D4/D7/D8/D9/D10/D12/D13, the
+matching proposed schema fields, negative-test prototype results and the
+single exact-revision technical decision request are consolidated in
+[`PP6_TECHNICAL_CONTRACT_APPROVAL.md`](../pp/PP6_TECHNICAL_CONTRACT_APPROVAL.md).
+They remain proposed until the named interim reviewer records explicit
+technical acceptance against the complete source commit. The ADR-0190
+governance and PostgreSQL/SQLite signing-mode decisions are settled and are
+not reopened by this request.
+
 Proposed amendments A1–A9 (2026-10-16) to the D1–D13 recommendations are listed
 in [the decision packet](../pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md#proposed-amendments-2026-10-16).
 Architecture proposal acceptance is recorded below. The interim
@@ -162,8 +171,11 @@ remains **Proposed**:
   paths, must honor the same startup/store-access lock. The existing storage
   execution lock is not this invariant. Stopping local daemons and taking a
   local lock is insufficient for PostgreSQL: preventing O3K writer-role login
-  and proving no writer sessions remain, including remote controllers, are
-  mandatory before capture.
+  and proving no writer sessions remain, including remote controllers and
+  Unix-socket reconnects, are mandatory before capture. The exact HBA admission
+  barrier rejects all local connections after one already-open control session
+  verifies/clears existing sessions; before dump begins, that control session
+  must be gone and only the designated remote read-only dump session may exist.
 - **D7:** recommend independently administered Redfish/BMC power-off, with
   per-site TLS trust, source serial binding, at most five-minute evidence age
   and a fresh authenticated observation before activation. The D2 offline
