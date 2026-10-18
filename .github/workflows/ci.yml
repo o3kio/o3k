@@ -125,6 +125,8 @@ jobs:
         run: bash tests/pp5-small-edge-campaign-ownership.sh
       - name: Validate destructive PostgreSQL test database guards
         run: bash tests/postgres_test_database_guards.sh
+      - name: Validate PP.6 measurement target cleanup guards
+        run: bash tests/pp6_pg_size_measurement_cleanup_regression.sh
       - name: Validate PP.5 PostgreSQL prerequisite failure boundaries
         run: python3 scripts/test_pp5_postgres_preflight.py
       - name: Validate PP.5 runner prerequisite boundaries
