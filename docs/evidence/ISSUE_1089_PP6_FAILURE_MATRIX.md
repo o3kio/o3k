@@ -7,7 +7,7 @@ Each row names the test or CI lane that exercises a case and its state:
 - **Merged**: on `main` and run by CI.
 - **Open PR**: in an open pull request.
 - **Partial**: some of the criterion is covered; the gap is stated.
-- **Gated**: blocked on ADR-0189/SPEC-0050 acceptance.
+- **Gated**: blocked on implementation/evidence prerequisites from the accepted ADR-0189/SPEC-0050 contract.
 
 ## Criterion 1: store pressure and availability
 

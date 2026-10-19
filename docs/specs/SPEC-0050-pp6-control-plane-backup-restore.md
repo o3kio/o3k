@@ -1,16 +1,17 @@
 # SPEC-0050 — PP.6 control-plane backup and restore
 
-Status: Proposed — requires human architecture/security approval
+Status: Accepted technical contract at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`;
+implementation and release evidence remain gated
 Authority proposal: ADR-0189
 Issue: #975, reusing #640
 Profile scope: `o3k-demo-v1` SQLite where retained; `o3k-small-edge-v1`
 PostgreSQL profile
 
-This proposed specification adds recovery behavior not covered by the existing
+This accepted technical specification defines recovery behavior not covered by the existing
 local upgrade rollback contract. It does not amend PP.5 acceptance thresholds,
 SPEC-0024 database support, SPEC-0008 operation semantics, or ADR-0167
-deployment authority. The proposal is not implementation or acceptance
-evidence.
+deployment authority. Technical contract acceptance is not implementation or
+runtime acceptance evidence.
 
 Proposed amendments A1–A9 (2026-10-16), as further amended below for the
 profile-specific signing mode, are listed in
@@ -28,12 +29,17 @@ interim review arrangement and selected PostgreSQL Option B and SQLite Option
 A under ADR-0190, against reviewed revision
 `d62853bed83b7d5e1b63118a2d17bd48dac2e2aa`; see its [decision
 record](../adr/ADR-0190-pp6-interim-single-maintainer-review-gate.md#human-decision-recorded-2026-10-18).
-This profile-mode selection does not accept this specification or schema.
-The concrete technical defaults and falsifiable prototype checks below are
-submitted for one exact-revision technical decision under the accepted,
-non-independent interim route. This specification and its artifact schema
-remain **Proposed** and do not authorize backup/restore runtime until that
-decision is explicitly recorded.
+The profile-mode selection was followed by an exact-revision technical
+decision. On 2026-10-18, the authorized reviewer recorded `accepted` on #975;
+PR #1156 was approved at source revision
+`9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` after its final signer-authorization
+test update. The tracking record limits acceptance to the technical conditions
+for ADR-0189, this specification, and the matching artifact schema
+(D2/D4/D7/D8/D9/D10/D12/D13). The review is non-independent under ADR-0190;
+no independent security review is claimed. Acceptance does not cover later
+contract revisions, SPEC-0051, runtime correctness, release readiness, or
+production evidence. The implementation and evidence gates below remain
+mandatory.
 
 The consolidated D2/D4/D7/D8/D9/D10/D12/D13 decision request and
 exact-revision record are in
@@ -57,7 +63,7 @@ provider mutation is defined here.
 
 ## 2. Artifact identity and contents
 
-The artifact has a versioned manifest conforming to the proposed
+The artifact has a versioned manifest conforming to the accepted-at-revision
 `contracts/control-plane-backup-v1.proposed.schema.json` and a set of content
 members. Each member has a normalized relative path from a closed allowlist,
 byte length, media type and cryptographic digest. Readers reject absolute
@@ -160,13 +166,13 @@ UTF-8 bytes, 1 GiB per member, 4 GiB aggregate plaintext, a 16 MiB manifest,
 64 MiB format overhead and a 5 GiB complete artifact, without outer
 compression. The 1 GiB member cap includes the entire SQLite snapshot or
 PostgreSQL custom dump. Reserve `max(2 × measured source bytes + 1 GiB, 6 GiB)`
-as an enforced staging quota; the proposed reserve cap is **9 GiB**, not
+as an enforced staging quota; the accepted reserve cap is **9 GiB**, not
 8 GiB, so a 4 GiB source can reserve its full computed need. Fail before
 capture when the full reserve is unavailable or exceeds the cap; never lower
 it to fit. Representative SQLite/PostgreSQL source, member, artifact and peak
-temporary/encryption measurements are still required before accepting these
-values. The proposed schema remains incomplete and cannot authorize runtime
-use of these bounds or the cryptographic profile by itself.
+temporary/encryption measurements remain required before claiming the bounds
+are met. The accepted schema defines the bounds and cryptographic profile; it
+does not prove a runtime implementation enforces them.
 
 JSON Schema validation is only the syntactic first pass. A semantic validator
 also rejects duplicate member names and migration versions, requires the
@@ -284,8 +290,9 @@ uses an installation-provisioned least-privilege database role and an
 approved extension/object allowlist. The artifact must not mutate roles,
 passwords, tablespaces, ownership, or ACLs beyond that approved policy. The
 artifact does not provision cluster-global roles, passwords, tablespaces, or
-grants. These exact proposed defaults remain subject to explicit exact-revision
-technical acceptance under ADR-0189; they are not authorized runtime behavior.
+grants. These defaults were accepted at the exact revision recorded in ADR-0189.
+Their runtime enforcement and evidence remain required; this contract decision
+is not runtime or release acceptance.
 
 The O3K artifact reader treats a PostgreSQL dump as opaque, integrity-checked
 member bytes; it does not recursively extract PostgreSQL-native archive
@@ -409,11 +416,11 @@ fencing, restore-journal transitions, or controller activation. Offline
 recovery and restore-journal authority remain distinct from artifact signing;
 issuer replacement and agent re-enrollment are proposed activation gates.
 Private recovery and journal-signing keys never move to the controller, target,
-or backup destination. The exact proposed PostgreSQL signer boundary, request authentication, key
-custody, trust provisioning, rotation, revocation, recovery and failure
-behavior are submitted in the exact-revision technical approval package; they
-remain unaccepted until the named human reviewer records a decision. Public
-documents must not disclose secrets or sensitive media locations.
+or backup destination. The PostgreSQL signer boundary, request authentication,
+key custody, trust provisioning, rotation, revocation, recovery and failure
+behavior are accepted as specified in the exact-revision technical approval
+package. Their implementation and operational evidence remain mandatory.
+Public documents must not disclose secrets or sensitive media locations.
 
 ## 5. Backup publication and retry
 
@@ -438,10 +445,11 @@ before fsync and publication, and signing failure, cancellation, or a
 mismatched response cannot publish a backup. Retain private encrypted staging
 or safely abort; resume only the same request and immutable content after
 re-proving exclusion. The capture exclusion and staging reservation remain in
-force through verified publication or safe abort. The exact signer request,
-transport, timeout, custody and recovery behavior proposed for acceptance are
-in the linked exact-revision technical approval package. Runtime remains gated
-on acceptance and protected integration of that package.
+force through verified publication or safe abort. The accepted signer
+request, transport, timeout, custody and recovery contract is in the linked
+exact-revision technical approval package. Runtime correctness, protected
+integration of implementation changes, and end-to-end evidence remain gated;
+contract acceptance is not runtime or release acceptance.
 
 Retry uses the same operation/backup identity. It observes the existing
 staging/final path and validates it before deciding whether to resume, return
@@ -639,9 +647,9 @@ does not define an alternate Operation or lifecycle authority.
 
 ## 8. Operator interface
 
-The proposed operator surface is host-local `o3k` CLI only; there is no HTTP
+The accepted operator surface is host-local `o3k` CLI only; there is no HTTP
 API. Commands run as the dedicated recovery operator through OS authorization
-and never accept secrets in arguments or environment variables. The proposed
+and never accept secrets in arguments or environment variables. The accepted
 commands are:
 
 ```text
@@ -660,9 +668,9 @@ requires a root-only one-use confirmation file bound to that operation. Exit
 recoverable failure, and 4 an unknown/quarantined outcome. Output is bounded
 JSON on stdout; stderr contains only stable error codes and operation ID. No
 credentials, SQL, provider payload or raw exception is emitted. These exact
-commands are proposed for review, not implemented or supported yet. The #944
-runbook and exact-release tests must use these commands before recovery is
-claimed.
+commands are part of the accepted contract but are not implemented or
+supported yet. The #944 runbook and exact-release tests must use these
+commands before recovery is claimed.
 
 ## 9. Validation and acceptance
 

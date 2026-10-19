@@ -1,6 +1,8 @@
 # PP.6 technical contract decision package
 
-**Status:** Submitted for one exact-revision technical decision; not accepted.
+**Status:** Accepted technical contract at
+`9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`; this record does not assert
+runtime, release, or independent-security acceptance.
 **Review authority:** `senolcolak`, interim architecture and security/technical
 reviewer and named risk owner under accepted ADR-0190. This review is
 non-independent. No independent security approval is claimed.
@@ -13,15 +15,19 @@ this proposal. Runtime starts only after explicit technical acceptance of the
 exact revisions of ADR-0189, SPEC-0050 and the matching schema. Acceptance is
 not inferred from a PR approval, merge, passing prototype or this document.
 
-The request applies to the complete source revision containing this document,
-ADR-0189, SPEC-0050, the proposed manifest schema and the prototype tests. The
-PR review/decision record must identify the full 40-character commit SHA and
-record ACCEPT, AMEND or REJECT with conditions. The resulting protected merge
-SHA is evidence of integration, not a substitute for the decision.
+The accepted request applied to the complete source revision containing this
+document, ADR-0189, SPEC-0050, the manifest schema and prototype tests at
+`9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`. On 2026-10-18, `senolcolak`
+recorded `accepted` on #975 and approved PR #1156 at that exact head after its
+final signer-authorization test update. The issue tracking record
+[summarizes the exact accepted scope and conditions](https://github.com/o3kio/o3k/issues/975#issuecomment-6254574622);
+the PR was integrated as `d666497c174c7297aa5feb8438a56a0ad898008f`.
+Approval and integration apply to that revision only. The PR approval by
+itself is not treated as the technical decision.
 
-## Decisions requested
+## Accepted technical parameters
 
-| Decision | Exact proposed default | Fail-closed condition |
+| Decision | Accepted exact-revision contract | Fail-closed condition |
 |---|---|---|
 | D2 — key hierarchy and signer | AES-256-GCM, one fresh 256-bit key per artifact, unique 96-bit per-member nonce, RFC 8785 canonical manifest/AAD, RFC 9180 HPKE Base X25519/HKDF-SHA256/AES-256-GCM recovery-key wrapping. Sign the D1 exact byte input with Ed25519: `ASCII("O3K-PP6-BACKUP-MANIFEST-V1\0") || u64be(manifest_length) || canonical_manifest_without_signature || concatenated_member_digests`; each path-sorted digest is `u32be(path_byte_length) || path_bytes || SHA256(ciphertext_and_tag)`. PostgreSQL uses an isolated remote signer with a non-exportable PKCS#11 v3.0 HSM key, mutually authenticated TLS 1.3, installed backup-client identity, configured site/profile allowlist, request ID, 256-bit nonce and 15-minute expiry. The separate offline Ed25519 trust root signs RFC 8785 canonical online-key certificates (`key_id`, public key, purpose=`backup_manifest`, exact site/profile, serial, validity, issuer) and a monotonic revocation list carrying `sequence`, `issued_at` and `next_update`. Online signer certificates are valid for at most 90 days; the signed revocation list must be refreshed at least every 24 hours by the offline custodian process. The root public key and initial trust/revocation sequence are pinned in the release-signed install trust manifest. Verifiers fetch the signed list from a trust-distribution endpoint administered separately from the artifact signer before artifact acceptance and again before restore activation. Two custodians issue and publish an emergency root-signed revocation immediately after compromise. A list is valid for at most 24 hours; the verifier remembers the highest accepted sequence and canonical-list digest durably; equal sequence is idempotent only for the same digest, and different content at that sequence is equivocation and fails closed. If the distribution endpoint is unavailable, a cached list may be used only until its 24-hour `next_update`; this bounds, but does not eliminate, the worst-case stale-revocation exposure to 24 hours. Offline, expired or lower-sequence state fails closed. Root operations (provision, rotate, revoke, recover) require two of three named custodians. Install new certificates before switch, retain old verification certificates for 30 days, and revoke compromise immediately. SQLite uses a separate offline artifact key with two-of-three operator-assisted signing. Recovery decryption and journal/evidence signing keys are distinct offline authorities under two-of-three custody. | No signer fallback; signer outage, wrong scope/key, malformed canonical bytes, nonce reuse, replay conflict, expired request, revoked key, unavailable custody or incomplete publication prevents success. Semantic validation rejects duplicate member names and duplicate AES-GCM nonces (JSON Schema whole-object `uniqueItems` cannot express those field-level uniqueness rules); aggregate plaintext, manifest, complete-artifact and staging limits are checked by bounded streaming accounting. Exact-byte retries return the original signature only within request expiry; after expiry, recapture with a new artifact ID and request. Online signer cannot sign restore, fence, journal, release or activation data. |
 | D4 — capture boundary | Every `o3kd` startup/store-opening path takes one lifetime exclusive `flock` before opening the store, readiness, workers, leases or dispatch; backup owns it from quiesce through verified publish/abort. PostgreSQL uses a DB-side admission barrier: install first-match `pg_hba.conf` rules permitting only the backup-host address and `o3k_backup_dump` to the O3K database, followed by explicit rejects for all other network paths and `local all all reject`; enforce the same source restriction with the independently managed database-host ingress ACL; set every O3K writer-capable LOGIN role `NOLOGIN`; stop connection pools; terminate all pre-existing sessions except one already-open control session; validate `pg_hba_file_rules`, reload completion, and prove fresh Unix-socket, application and maintenance reconnects are denied. The surviving local control session verifies zero sessions other than itself, then closes; verify it is gone and only the remote `o3k_backup_dump` session exists before dump begins. The firewall/HBA barrier remains held through `pg_dump -Fc` and cross-file capture, and release restores the saved configuration only after verified publication or abort. The dump role has CONNECT, USAGE and SELECT only on inventoried objects. | The deployment is unsupported if it cannot enforce the DB-side admission barrier against every remote or Unix-socket writer path. A local `flock` never claims remote exclusion. Any active/uninspectable session, barrier loss, supervisor restart race, lock loss, unknown operation, or DB/config/identity/release generation mismatch aborts capture. API availability is interrupted; already-running data-plane workloads continue without controller mutations. |
@@ -86,13 +92,12 @@ interruption and publication tests.
 
 ## Decision record fields
 
-The reviewer records this table against the exact full source SHA in the
-protected PR decision/review record. Unresolved amendments remain pending and
-gate only the affected work. The decision must state the review is
-non-independent and name `senolcolak` as the interim reviewer and risk owner
-under ADR-0190.
+This table records the exact-revision decision and protected integration.
+Implementation and evidence conditions remain gates; they do not reopen or
+change the accepted contract. The review was non-independent and named
+`senolcolak` as interim reviewer and risk owner under ADR-0190.
 
 | Role | Decision | Exact source SHA | Conditions / findings | Date |
 |---|---|---|---|---|
-| Architecture + technical/security (interim, non-independent) | **PENDING** | PR head required | — | — |
-| Protected integration | **PENDING** | Merge SHA required | — | — |
+| Architecture + technical/security (interim, non-independent) | **ACCEPTED** | `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` | D2/D4/D7/D8/D9/D10/D12/D13 technical contract only; residual risk and implementation/evidence conditions remain; SPEC-0051 excluded | 2026-10-18 |
+| Protected integration | **MERGED** | `d666497c174c7297aa5feb8438a56a0ad898008f` | PR #1156; integration does not enlarge exact-head acceptance | 2026-10-18 |

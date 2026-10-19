@@ -1,7 +1,7 @@
 # ADR-0189 — PP.6 control-plane backup and restore
 
-Status: Proposed — requires separate exact-revision human architecture and
-security/technical approval before implementation
+Status: Accepted technical contract at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`;
+implementation and release evidence remain gated
 Date: 2026-10-15
 Affected-services: cloud-kernel, deployment, identity, governance
 Parent: PP.6 #975; general rollback/backup authority #640
@@ -57,8 +57,8 @@ backup/restore operations recover.
 6. Secret-bearing material is never emitted in plaintext in artifacts,
    diagnostics, or evidence. Sensitive restore material uses an
    operator-managed encryption key whose recovery is outside the backup
-   artifact. The concrete key-wrapping and issuer-key recovery mechanism
-   remains an explicit security approval item; no encryption key is generated
+   artifact. The artifact key-wrapping contract is specified in accepted D2;
+   issuer-key recovery remains separately gated under D3. No encryption key is generated
    from a public installation identifier or stored beside the artifact. The
    authenticated metadata binds the canonical manifest, every payload
    ciphertext digest, encryption parameters, and format identity. Archive
@@ -124,24 +124,29 @@ surface.
 - A restore that cannot prove fencing/ownership remains inactive and requires
   operator recovery; it must not claim readiness.
 
-## Human approval required
+## Technical contract decision (2026-10-18)
 
 Concrete implementation defaults for D2/D4/D7/D8/D9/D10/D12/D13, the
 matching proposed schema fields, negative-test prototype results and the
 single exact-revision technical decision request are consolidated in
 [`PP6_TECHNICAL_CONTRACT_APPROVAL.md`](../pp/PP6_TECHNICAL_CONTRACT_APPROVAL.md).
-They remain proposed until the named interim reviewer records explicit
-technical acceptance against the complete source commit. The ADR-0190
-governance and PostgreSQL/SQLite signing-mode decisions are settled and are
-not reopened by this request.
+The named interim reviewer recorded `accepted` on #975, and approved PR #1156
+at the exact submitted source revision above after the final signer-authorization
+test update. The #975 tracking record identifies the accepted scope as the
+technical conditions for ADR-0189, SPEC-0050 and the matching manifest schema
+(D2/D4/D7/D8/D9/D10/D12/D13), with ADR-0190's PostgreSQL Option B / SQLite
+Option A unchanged. This acceptance is non-independent under the interim
+governance arrangement; no independent security review is claimed. The exact
+technical acceptance does not accept later revisions, SPEC-0051, runtime
+correctness, release readiness, or production evidence.
 
-Proposed amendments A1–A9 (2026-10-16) to the D1–D13 recommendations are listed
+Amendments A1–A9 (2026-10-16) to the D1–D13 recommendations are listed
 in [the decision packet](../pp/PP6_BACKUP_RESTORE_DECISION_PACKET.md#proposed-amendments-2026-10-16).
 Architecture proposal acceptance is recorded below. The interim
-non-independent review arrangement is accepted under ADR-0190, but its
-durable decision URL and protected integration remain pending. Separate
-exact-revision technical/security decisions and implementation conditions
-remain pending; this ADR remains Proposed.
+non-independent review arrangement is accepted under ADR-0190. The dated
+architecture and governance records below preserve their historical state;
+the exact-revision technical decision and protected integration were completed
+later as recorded above and below.
 
 ### Review amendments (2026-10-17)
 
@@ -151,8 +156,13 @@ acceptance. The existing packet incorporates the following proposal changes,
 subsequently accepted by architecture at the revision recorded below.
 The interim non-independent security/technical review route is accepted
 under ADR-0190, subject to durable decision linkage and protected integration.
-Exact-revision decisions and unresolved conditions remain **PENDING**; this ADR
-remains **Proposed**:
+The following D1–D13/A1–A9 entries record the proposal and review state before
+the 2026-10-18 technical decision. Where they say a technical detail was
+pending, that statement is historical; the accepted exact-revision contract
+and remaining runtime evidence are recorded separately below.
+The accepted exact-revision contract records the following defaults and
+conditions. Implementation must satisfy them; acceptance does not waive
+unresolved measurements, capabilities or evidence:
 
 - **D2 (proposed amendment after ADR-0190 decision):** PostgreSQL 16 uses
   bounded online signing only for authenticated backup artifacts belonging to
@@ -161,10 +171,10 @@ remains **Proposed**:
   Offline recovery-key custody and restore-journal signing authority remain
   separate. SQLite small-edge/TestLab retains Option A (operator-assisted
   offline artifact signing) where supported. This records the selected
-  operational mode, not a concrete signer implementation or accepted
-  cryptographic contract. Signer boundary, request authentication, replay
-  control, key custody, trust provisioning, rotation, revocation, recovery,
-  failure behavior, and negative tests remain PENDING. Record protected
+  operational mode at that earlier review stage. The concrete signer boundary,
+  request authentication, replay control, key custody, trust provisioning,
+  rotation, revocation, recovery, failure behavior and negative-test contract
+  were subsequently accepted at the exact revision recorded above. Record protected
   custody details outside this ADR; do not publish secret material or
   sensitive storage locations here.
 - **D4:** every O3K process opening the store, including CLI and maintenance
@@ -249,12 +259,15 @@ remains applicable.
   values, capabilities and evidence require explicit applicable reviewer
   resolution; none may be invented by implementation.
 - **Independent security:** not performed or claimed. A bounded,
-  non-independent interim review route is recorded under ADR-0190; its durable
-  decision URL and protected integration are pending. The exact technical/
-  security decision on this contract remains pending.
-- **Normative status:** this ADR, SPEC-0050 and the artifact schema remain
-  **Proposed**. No normative acceptance revision or #1084 implementation is
-  authorized. SPEC-0051 technical acceptance remains a separate decision.
+  non-independent interim review route is recorded under ADR-0190. No
+  independent security review is claimed. The later exact-revision technical
+  decision and integration are recorded above.
+- **Normative status:** this ADR, SPEC-0050 and the matching artifact schema's
+  technical contract are accepted at
+  `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`. The exact accepted technical
+  conditions are the D2/D4/D7/D8/D9/D10/D12/D13 package; implementation must
+  produce its own executable evidence. This does not accept SPEC-0051 or
+  subsequent changes to these contracts.
 
 ### Interim governance and signing-mode decision (2026-10-18)
 
@@ -268,17 +281,19 @@ transitions, or controller activation. Offline recovery and restore-journal
 authority remain separate. See the [ADR-0190 decision
 record](ADR-0190-pp6-interim-single-maintainer-review-gate.md#human-decision-recorded-2026-10-18).
 
-This decision selects the signing mode and its authority limit only. It does
-not accept this ADR, SPEC-0050, SPEC-0051, the artifact schema, or backup
-runtime. Concrete signer implementation, key custody, rotation, revocation,
-trust, recovery, and negative tests remain pending separate exact-revision
-technical/security review. D1–D13/A1–A9 conditions, PostgreSQL real-backend
-evidence, protected integration, and all release-level review requirements
-remain in force.
+This decision selected the signing mode and its authority limit. The later
+technical decision above accepts the specified signer contract and tests only
+at its exact revision. Concrete implementation correctness, key custody
+operations, PostgreSQL real-backend evidence, protected integration, and all
+release-level review requirements remain in force.
 
 ### Decisions to record
 
-Reviewers must decide or approve the proposal for:
+The following numbered list is the earlier proposal checklist, retained as
+history. The exact technical decision accepted D2/D4/D7/D8/D9/D10/D12/D13 as
+specified in the linked decision package. It does not approve additional
+restore behavior or later contract/schema changes; fresh-host activation and
+release evidence remain separately gated.
 
 1. manifest identity, canonical state inventory, consistency boundary, and
    format evolution;
@@ -306,13 +321,14 @@ Reviewers must decide or approve the proposal for:
     dispatch and resolving in-flight canonical Operations without treating an
     already activated target as a pre-activation quarantine.
 
-## Decision worksheet for implementation readiness
+## Historical architecture-proposal worksheet (2026-10-17)
 
-The following bounded recommendations have architecture proposal acceptance
-at the revision above, retaining all stated conditions. They do not authorize
-production implementation. Independent security acceptance and resolution of
-the outstanding parameters/evidence must be recorded in this ADR before #1084
-implementation begins.
+This worksheet preserves the review state before the technical decision. Its
+"Approval still required" cells are historical for the D2/D4/D7/D8/D9/D10/D12/D13
+technical fields later accepted at the exact revision above; those fields are
+defined by `PP6_TECHNICAL_CONTRACT_APPROVAL.md`. Questions outside that accepted
+scope, plus implementation and release evidence, remain gated. This worksheet
+does not authorize additional runtime behavior.
 
 | Decision | Recommended bounded choice | Approval still required |
 | --- | --- | --- |
@@ -324,18 +340,12 @@ implementation begins.
 | Restore journal and target reservation | Review D8 service-user ownership, offline signed transitions and separate denial-only failure markers. Keep target reservation distinct from startup exclusion through commit. | Accept exact path, filesystem, signing/transfer and controlled startup handoff, stale-operation recovery authority and unknown-outcome handling. |
 | Outer artifact and limits | Review D9/A7 regular-file allowlist with no outer compression, 1 GiB member/4 GiB aggregate bounds and the full staging formula with a 9 GiB reservation cap. Authenticate before extraction or mutation. | Accept only after representative member/artifact/peak-space measurements; reject unsupported entries and never truncate the computed reservation. |
 
-These recommendations narrow review but do not establish a common consistency
-cut or settle cryptographic/security semantics. The first implementation PR
-remains blocked until the applicable rows above and approval items 1–13 are
-resolved. Existing implementation can be audited and tests can be planned,
-but code must not infer approval from this worksheet.
-
-Production implementation must not begin until the applicable security and
-architecture decisions have accepted human review. The first authorized slice
-proves store-startup exclusion and a consistent SQLite cut, followed by
-manifest validation and backup publication/verification. It adds no public
-CLI/API or PostgreSQL adapter. A separately accepted operator interface is
-required before exposing that surface or claiming operational recovery.
+The technical conditions in this worksheet were accepted at
+`9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`; the acceptance does not prove their
+implementation. #1084 may implement the accepted SQLite artifact and operator
+contract. Each implementation slice must provide failure-first tests and its
+required evidence. No PostgreSQL production or fresh-host activation claim
+follows from this contract decision.
 
 ## Evidence required before claiming PP.6 support
 

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://o3k.io/contracts/proposed/control-plane-backup-v1.schema.json",
-  "title": "Proposed O3K PP.6 control-plane backup manifest v1",
-  "$comment": "PROPOSED only. Runtime remains unauthorized until ADR-0189 and SPEC-0050 receive explicit exact-revision technical acceptance.",
+  "title": "Accepted O3K PP.6 control-plane backup manifest v1 technical contract",
+  "$comment": "Manifest contract accepted at source revision 9ce23ff81218e8e35d917ef6ee4478ae69e8f28e. This status metadata does not assert implementation, release readiness, independent security review, or acceptance of later schema changes.",
   "type": "object",
   "additionalProperties": false,
   "required": [

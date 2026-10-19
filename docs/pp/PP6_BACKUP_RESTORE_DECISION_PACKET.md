@@ -1,12 +1,13 @@
 # PP.6 backup and restore decision record for approval
 
 **Revision:** 2026-10-18
-**Status:** The architecture proposal was accepted by senolcolak at the exact
-revision recorded below. The interim non-independent review arrangement and
-profile-specific signing modes were subsequently accepted under ADR-0190.
-ADR-0189 and SPEC-0050 remain Proposed; unresolved technical conditions remain
-pending. This record does not authorize production backup/restore or PKI
-implementation.
+**Status:** Historical decision packet. Architecture proposal acceptance,
+interim review governance and signing modes are recorded below. The later
+technical contract acceptance for ADR-0189, SPEC-0050 and the matching schema
+at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` is recorded in
+[`PP6_TECHNICAL_CONTRACT_APPROVAL.md`](PP6_TECHNICAL_CONTRACT_APPROVAL.md).
+That exact-revision decision does not accept SPEC-0051, runtime correctness,
+release readiness, or production evidence.
 
 **Issue authority:** #975, #640, #1084–#1087, and #1098.
 **Profiles:** single-site `o3k-demo-v1` with SQLite and
