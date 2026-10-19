@@ -22,7 +22,7 @@ including configuration/credentials/PKI and external-state boundaries
 secrets are protected, how a restored controller is fenced, or how partial
 backup/restore operations recover.
 
-## Proposed decision
+## Decision
 
 1. A PP.6 backup is a portable, versioned recovery artifact for authoritative
    O3K control-plane state and the minimum O3K-owned installation metadata
@@ -224,11 +224,11 @@ unresolved measurements, capabilities or evidence:
   function, trigger or default expression is safe; the exact-release
   pre-execution definition policy, grants and inventory revision remain
   PENDING. Unknown entries must be rejected, not silently filtered out.
-- **D12/A8:** recommend rejecting the withdrawal/deferral of the interface
-  dependency. An approved exact-release operator invocation and #944 runbook
-  are prerequisites for operational recovery acceptance. Command names,
-  flags, exit codes and public CLI/API behavior require their own reviewed
-  contract; none are approved here.
+- **D12/A8:** require the approved host-local `o3k` CLI and #944 runbook for
+  operational recovery. The exact command names, flags, exit codes and
+  no-HTTP-API boundary are accepted in SPEC-0050 and the technical contract
+  approval record. Their implementation and exact-release runbook verification
+  remain necessary before operational recovery claims.
 
 ADR-0190's accepted interim governance decision names `senolcolak` as human
 architecture and security/technical reviewer and risk owner for the bounded
