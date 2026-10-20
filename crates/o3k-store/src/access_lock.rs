@@ -162,9 +162,22 @@ impl StoreAccessLock {
     /// An error after sending may mean the peer retained the descriptors but
     /// its acknowledgement was lost. The caller must treat that outcome as
     /// unknown and must not start another store owner until it has established
-    /// which process still holds the lock.
+    /// which process still holds the lock. The error returns this guard to the
+    /// caller so a failed transfer cannot itself release the last known lock.
     #[cfg(target_os = "linux")]
-    pub fn handoff(self, stream: &mut UnixStream, timeout: Duration) -> io::Result<()> {
+    pub fn handoff(
+        self,
+        stream: &mut UnixStream,
+        timeout: Duration,
+    ) -> Result<(), (Self, io::Error)> {
+        match self.handoff_inner(stream, timeout) {
+            Ok(()) => Ok(()),
+            Err(error) => Err((self, error)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handoff_inner(&self, stream: &mut UnixStream, timeout: Duration) -> io::Result<()> {
         if timeout.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -242,6 +255,18 @@ impl StoreAccessLock {
                     error
                 }
             })?;
+            // Convert every received SCM_RIGHTS entry to owned descriptors
+            // before any validation can return. This ensures malformed frames,
+            // unexpected control messages and MSG_CTRUNC all close descriptors
+            // that the kernel installed for this recvmsg.
+            let mut descriptors = Vec::with_capacity(2);
+            let mut unexpected_ancillary = false;
+            for message in ancillary.drain() {
+                match message {
+                    RecvAncillaryMessage::ScmRights(received) => descriptors.extend(received),
+                    _ => unexpected_ancillary = true,
+                }
+            }
             // rustix 0.38 exposes returned recvmsg flags as RecvFlags but does
             // not name MSG_CTRUNC. Linux UAPI assigns this output bit 0x08.
             if received.flags.bits() & 0x08 != 0 {
@@ -258,13 +283,8 @@ impl StoreAccessLock {
             if &frame != HANDOFF_FRAME {
                 return Err(invalid_data("store-lock handoff frame is invalid"));
             }
-
-            let mut descriptors = Vec::with_capacity(2);
-            for message in ancillary.drain() {
-                match message {
-                    RecvAncillaryMessage::ScmRights(received) => descriptors.extend(received),
-                    _ => return Err(invalid_data("store-lock handoff contains unexpected data")),
-                }
+            if unexpected_ancillary {
+                return Err(invalid_data("store-lock handoff contains unexpected data"));
             }
             if descriptors.len() != 2 {
                 return Err(invalid_data("store-lock handoff descriptor set is invalid"));
@@ -505,17 +525,17 @@ fn invalid_data(message: &'static str) -> io::Error {
 mod tests {
     use std::{
         fs, io,
-        io::{Read, Write},
+        io::{IoSlice, Read, Write},
         os::fd::AsFd,
         os::unix::fs::{MetadataExt, PermissionsExt, symlink},
         os::unix::net::{UnixListener, UnixStream},
         path::{Path, PathBuf},
         process::Command,
         sync::atomic::{AtomicU64, Ordering},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
-    use super::StoreAccessLock;
+    use super::{LOCK_FILE, StoreAccessLock};
     #[cfg(target_os = "linux")]
     use rustix::net::{
         RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
@@ -556,6 +576,41 @@ mod tests {
                 let _ = fs::remove_dir_all(workspace);
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn accept_handoff_child(
+        listener: &UnixListener,
+        child: &mut std::process::Child,
+        timeout: Duration,
+    ) -> io::Result<UnixStream> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "timeout is too large"))?;
+        let result = (|| loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Ok(stream),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error),
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "handoff helper exited before connecting: {status}"
+                )));
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "handoff helper did not connect before the deadline",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        })();
+        if result.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        result
     }
 
     #[test]
@@ -705,6 +760,7 @@ mod tests {
         })?;
         let stream = UnixStream::connect(socket_path)?;
         let (lock, mut stream) = StoreAccessLock::receive_handoff(stream, Duration::from_secs(5))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.write_all(b"READY001")?;
         let mut release = [0_u8; 8];
         stream.read_exact(&mut release)?;
@@ -720,11 +776,32 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn handoff_helper_exit_does_not_leave_parent_waiting_for_connection() -> io::Result<()> {
+        let root = TestDir::new()?;
+        let listener = UnixListener::bind(root.0.join("handoff.sock"))?;
+        listener.set_nonblocking(true)?;
+        let mut child = Command::new(std::env::current_exe()?)
+            .arg("--help")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let error = match accept_handoff_child(&listener, &mut child, Duration::from_secs(5)) {
+            Ok(_) => return Err(io::Error::other("child connected without its socket")),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("exited before connecting"));
+        assert!(child.wait()?.success());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn handoff_keeps_lock_continuously_owned_across_processes() -> io::Result<()> {
         let root = TestDir::new()?;
         let data_dir = root.0.join("data");
         let socket_path = root.0.join("handoff.sock");
         let listener = UnixListener::bind(&socket_path)?;
+        listener.set_nonblocking(true)?;
         let lock = StoreAccessLock::acquire(&data_dir)?;
         let mut child = Command::new(std::env::current_exe()?)
             .args([
@@ -734,8 +811,10 @@ mod tests {
             ])
             .env("O3K_STORE_LOCK_HANDOFF_SOCKET", &socket_path)
             .spawn()?;
-        let (mut stream, _) = listener.accept()?;
-        lock.handoff(&mut stream, Duration::from_secs(5))?;
+        let mut stream = accept_handoff_child(&listener, &mut child, Duration::from_secs(5))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        lock.handoff(&mut stream, Duration::from_secs(5))
+            .map_err(|(_, error)| error)?;
 
         let mut ready = [0_u8; 8];
         stream.read_exact(&mut ready)?;
@@ -801,6 +880,53 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn handoff_malformed_frame_closes_received_descriptors() -> io::Result<()> {
+        let root = TestDir::new()?;
+        let data_dir = root.0.join("data");
+        let lock_path = data_dir.join(LOCK_FILE);
+        let lock = StoreAccessLock::acquire(&data_dir)?;
+        let (mut sender, receiver) = UnixStream::pair()?;
+        let before = open_descriptors_for(&lock_path)?;
+
+        let descriptors = [lock._lock_file.as_fd(), lock._data_dir.as_fd()];
+        let mut control = [0_u8; rustix::cmsg_space!(ScmRights(2))];
+        let mut ancillary = SendAncillaryBuffer::new(&mut control);
+        assert!(ancillary.push(SendAncillaryMessage::ScmRights(&descriptors)));
+        let payload = [IoSlice::new(b"BADFRAME")];
+        assert_eq!(
+            sendmsg(&mut sender, &payload, &mut ancillary, SendFlags::empty())?,
+            8
+        );
+
+        let error = match StoreAccessLock::receive_handoff(receiver, Duration::from_secs(1)) {
+            Ok((received, _)) => {
+                drop(received);
+                return Err(io::Error::other("malformed handoff frame was accepted"));
+            }
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(open_descriptors_for(&lock_path)?, before);
+        drop(sender);
+        drop(lock);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_descriptors_for(path: &Path) -> io::Result<usize> {
+        let mut count = 0;
+        for entry in fs::read_dir("/proc/self/fd")? {
+            if let Ok(opened) = fs::read_link(entry?.path())
+                && opened == path
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn handoff_timeout_keeps_peer_transferred_lock_until_peer_drops_it() -> io::Result<()> {
         let root = TestDir::new()?;
         let data_dir = root.0.join("data");
@@ -850,9 +976,9 @@ mod tests {
             Ok(())
         });
 
-        let error = match lock.handoff(&mut sender, Duration::from_millis(20)) {
+        let (returned_lock, error) = match lock.handoff(&mut sender, Duration::from_millis(20)) {
             Ok(()) => return Err(io::Error::other("unacknowledged handoff did not time out")),
-            Err(error) => error,
+            Err((lock, error)) => (lock, error),
         };
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         retained_receiver
@@ -864,6 +990,14 @@ mod tests {
         ));
         peer.join()
             .map_err(|_| io::Error::other("test handoff receiver panicked"))??;
+        assert!(
+            matches!(
+                StoreAccessLock::acquire(&data_dir),
+                Err(ref error) if error.kind() == io::ErrorKind::WouldBlock
+            ),
+            "sender must retain the lock after an unacknowledged handoff"
+        );
+        drop(returned_lock);
         let _reacquired = StoreAccessLock::acquire(&data_dir)?;
         Ok(())
     }
