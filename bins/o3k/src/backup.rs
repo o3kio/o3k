@@ -381,8 +381,7 @@ pub fn create_artifact_stream<R: Read>(
     if !staging_directory.is_absolute() {
         return Err("backup staging directory must be absolute".to_owned());
     }
-    let staging_directory = fs::canonicalize(staging_directory)
-        .map_err(|_| "backup staging directory is unavailable".to_owned())?;
+    let staging_directory = resolve_private_staging_parent(staging_directory)?;
     validate_private_parent(&staging_directory)?;
     validate_stream_members(&members)?;
     let member_staging = staging_directory.join(format!("members-{}", Uuid::now_v7()));
@@ -606,8 +605,7 @@ pub fn verify_artifact_stream<R: Read>(
     if !staging_parent.is_absolute() {
         return Err("backup staging directory must be absolute".to_owned());
     }
-    let parent =
-        fs::canonicalize(staging_parent).map_err(|_| "backup staging directory is unavailable")?;
+    let parent = resolve_private_staging_parent(staging_parent)?;
     validate_private_parent(&parent)?;
     let directory = parent.join(format!("verified-{}", Uuid::now_v7()));
     create_private_dir(&directory)?;
@@ -1185,6 +1183,24 @@ fn create_private_dir(path: &Path) -> Result<(), String> {
     builder
         .create(path)
         .map_err(|_| "backup private staging directory could not be created".to_owned())
+}
+
+/// Validates the caller-supplied staging root before resolving it. Calling
+/// `canonicalize` first would silently accept a symlink as the configured
+/// private staging directory and redirect secret-bearing files elsewhere.
+fn resolve_private_staging_parent(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("backup staging directory must be absolute".to_owned());
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| "backup staging directory is unavailable".to_owned())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("backup staging directory must be a regular directory".to_owned());
+    }
+    let canonical =
+        fs::canonicalize(path).map_err(|_| "backup staging directory is unavailable".to_owned())?;
+    validate_private_parent(&canonical)?;
+    Ok(canonical)
 }
 
 fn create_private_file(path: &Path) -> Result<fs::File, String> {
@@ -2188,6 +2204,45 @@ mod tests {
         let mut input = std::io::Cursor::new(corrupted);
         assert!(verify_artifact_stream(&mut input, &expected_release(), &keys, &root,).is_err());
         assert_eq!(fs::read_dir(&root).expect("staging root").count(), 0);
+        fs::remove_dir_all(root).expect("remove root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_builder_and_verifier_reject_symlink_staging_roots() {
+        use std::os::unix::fs::symlink;
+
+        let (options, members, signing, recipient) = fixture();
+        let (artifact, _) = create_artifact(&options, members.clone(), &signing).expect("artifact");
+        let root = std::env::temp_dir().join(format!("o3k-pp6-symlink-{}", Uuid::now_v7()));
+        let target = root.join("target");
+        let link = root.join("link");
+        create_private_dir(&root).expect("private root");
+        create_private_dir(&target).expect("private target");
+        symlink(&target, &link).expect("create staging symlink");
+
+        let stream_members = members
+            .into_iter()
+            .map(|member| StreamMember {
+                name: member.name.clone(),
+                media_type: member.media_type.clone(),
+                plaintext_size_bytes: member.bytes.len() as u64,
+                source: std::io::Cursor::new(member.bytes.clone()),
+            })
+            .collect();
+        assert!(create_artifact_stream(&options, stream_members, &link, &signing).is_err());
+        let trust = test_trust();
+        let verifying_key = signing.0.verifying_key();
+        let keys = ArtifactVerificationKeys {
+            signing_key_id: "signing-1",
+            signer: &verifying_key,
+            trust: &trust,
+            recipient_key_id: "recovery-1",
+            recipient: &recipient,
+        };
+        let mut input = std::io::Cursor::new(artifact);
+        assert!(verify_artifact_stream(&mut input, &expected_release(), &keys, &link).is_err());
+        assert_eq!(fs::read_dir(&target).expect("symlink target").count(), 0);
         fs::remove_dir_all(root).expect("remove root");
     }
 
