@@ -532,6 +532,7 @@ mod tests {
         path::{Path, PathBuf},
         process::Command,
         sync::atomic::{AtomicU64, Ordering},
+        sync::{Mutex, MutexGuard},
         time::{Duration, Instant},
     };
 
@@ -545,6 +546,19 @@ mod tests {
     struct TestDir(PathBuf);
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(1);
+    // Linux flock ownership follows the open-file description across fork and
+    // remains inherited until exec closes an O_CLOEXEC descriptor. Keep tests
+    // that spawn children from racing tests that assert immediate release of
+    // the last lock owner; otherwise the child is a legitimate transient lock
+    // owner during the fork/exec window. The independent-directory concurrency
+    // test remains unsynchronized.
+    static FORK_SENSITIVE_LOCK_TEST: Mutex<()> = Mutex::new(());
+
+    fn serialize_fork_sensitive_lock_test() -> MutexGuard<'static, ()> {
+        FORK_SENSITIVE_LOCK_TEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     impl TestDir {
         fn new() -> io::Result<Self> {
@@ -615,6 +629,7 @@ mod tests {
 
     #[test]
     fn excludes_second_process_handle_until_first_guard_drops() -> io::Result<()> {
+        let _fork_sensitive = serialize_fork_sensitive_lock_test();
         let root = TestDir::new()?;
         let first = StoreAccessLock::acquire(&root.0).map_err(|error| {
             io::Error::new(
@@ -777,6 +792,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn handoff_helper_exit_does_not_leave_parent_waiting_for_connection() -> io::Result<()> {
+        let _fork_sensitive = serialize_fork_sensitive_lock_test();
         let root = TestDir::new()?;
         let listener = UnixListener::bind(root.0.join("handoff.sock"))?;
         listener.set_nonblocking(true)?;
@@ -797,6 +813,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn handoff_keeps_lock_continuously_owned_across_processes() -> io::Result<()> {
+        let _fork_sensitive = serialize_fork_sensitive_lock_test();
         let root = TestDir::new()?;
         let data_dir = root.0.join("data");
         let socket_path = root.0.join("handoff.sock");
@@ -837,6 +854,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn handoff_rejects_excess_descriptors_and_releases_received_handles() -> io::Result<()> {
+        let _fork_sensitive = serialize_fork_sensitive_lock_test();
         let root = TestDir::new()?;
         let data_dir = root.0.join("data");
         let lock = StoreAccessLock::acquire(&data_dir)?;
@@ -928,6 +946,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn handoff_timeout_keeps_peer_transferred_lock_until_peer_drops_it() -> io::Result<()> {
+        let _fork_sensitive = serialize_fork_sensitive_lock_test();
         let root = TestDir::new()?;
         let data_dir = root.0.join("data");
         let lock = StoreAccessLock::acquire(&data_dir)?;
@@ -1005,6 +1024,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn handoff_receiver_timeout_is_reported_as_timed_out() -> io::Result<()> {
+        let _fork_sensitive = serialize_fork_sensitive_lock_test();
         let root = TestDir::new()?;
         let data_dir = root.0.join("data");
         let lock = StoreAccessLock::acquire(&data_dir)?;
@@ -1028,6 +1048,7 @@ mod tests {
 
     #[test]
     fn excludes_separate_process_until_first_guard_drops() -> io::Result<()> {
+        let _fork_sensitive = serialize_fork_sensitive_lock_test();
         let root = TestDir::new()?;
         let first = StoreAccessLock::acquire(&root.0)?;
         let output = Command::new(std::env::current_exe()?)
@@ -1112,6 +1133,7 @@ mod tests {
 
     #[test]
     fn replacement_lock_file_cannot_split_local_openers() -> io::Result<()> {
+        let _fork_sensitive = serialize_fork_sensitive_lock_test();
         let root = TestDir::new()?;
         let first = StoreAccessLock::acquire(&root.0)?;
         let lock_path = root.0.join(".o3k-store.lock");
