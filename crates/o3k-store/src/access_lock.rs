@@ -695,10 +695,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "subprocess helper invoked by handoff_keeps_lock_continuously_owned_across_processes"]
     fn store_lock_handoff_child() -> io::Result<()> {
-        let Some(socket_path) = std::env::var_os("O3K_STORE_LOCK_HANDOFF_SOCKET") else {
-            return Ok(());
-        };
+        let socket_path = std::env::var_os("O3K_STORE_LOCK_HANDOFF_SOCKET").ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "subprocess handoff socket environment is missing",
+            )
+        })?;
         let stream = UnixStream::connect(socket_path)?;
         let (lock, mut stream) = StoreAccessLock::receive_handoff(stream, Duration::from_secs(5))?;
         stream.write_all(b"READY001")?;
@@ -723,7 +727,11 @@ mod tests {
         let listener = UnixListener::bind(&socket_path)?;
         let lock = StoreAccessLock::acquire(&data_dir)?;
         let mut child = Command::new(std::env::current_exe()?)
-            .args(["--exact", "access_lock::tests::store_lock_handoff_child"])
+            .args([
+                "--ignored",
+                "--exact",
+                "access_lock::tests::store_lock_handoff_child",
+            ])
             .env("O3K_STORE_LOCK_HANDOFF_SOCKET", &socket_path)
             .spawn()?;
         let (mut stream, _) = listener.accept()?;
