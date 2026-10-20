@@ -198,7 +198,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0186](ADR-0186-stretched-l2-edge-fabric-vxlan-her.md) (accepted; supersedes ADR-0171)
 - [ADR-0187](ADR-0187-fabric-owned-compute-tap-attachment.md) (accepted; clarifies ADR-0057 for Fabric-owned endpoint TAP attachment)
 - [ADR-0188](ADR-0188-stable-host-compute-and-network-agent-identity-separation.md) (accepted; separates canonical host identity from compute/network execution identities)
-- [ADR-0189](ADR-0189-pp6-control-plane-backup-and-restore.md) (proposed; requires human architecture/security approval before implementation)
+- [ADR-0189](ADR-0189-pp6-control-plane-backup-and-restore.md) (technical contract accepted at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`; implementation and release evidence remain gated)
 - [ADR-0190](ADR-0190-pp6-interim-single-maintainer-review-gate.md) (human decision accepted; durable decision URL and protected integration pending; governance only)
 
 ## Required audit

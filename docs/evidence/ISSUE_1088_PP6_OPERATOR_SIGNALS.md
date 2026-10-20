@@ -22,7 +22,7 @@ Signal sources:
 | Topology / BuildingBlocks | `summary.locations` (configured regions and availability domains) | None | No BuildingBlock signal in either source. |
 | Agents | `providers` availability and observation time (`AgentNodeRegistry`) | `compute.agent_registered`, `compute.agent_epoch` (SQLite only), `services.compute_unit`, `libvirt.*`, `security.tls_identity`; `o3k-compute` serves its own `/metrics` | On PostgreSQL, doctor has no agent-epoch signal. |
 | Upgrade | None | `release.version`, `release.binary_set_consistent`, `release.binary_hashes`, `release.ownership_manifest`, `release.upgrade_state`, `release.backup_available` | `release.backup_available` covers the local upgrade rollback backup only, not PP.6 backup/restore. |
-| Backup / restore | None | None | Gated: ADR-0189/SPEC-0050 are Proposed and #1084–#1086 have no implementation. |
+| Backup / restore | None | None | Not implemented: ADR-0189/SPEC-0050 technical contract is accepted; #1084–#1086 runtime and evidence remain incomplete. |
 | PKI | None | `security.tls_identity` (mounted identity and fingerprint) | Renewal, expiry, revocation and replacement state are gated on #1087. |
 | Support bundle | Proposed SPEC-0051 (diagnostics and identity only in v1) | None | Not implemented; SPEC-0051 is Proposed. |
 

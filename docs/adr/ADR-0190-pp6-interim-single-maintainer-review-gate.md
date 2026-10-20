@@ -1,6 +1,6 @@
 # ADR-0190 — PP.6 interim single-maintainer review gate
 
-Status: Accepted — interim PP.6 governance decision; implementation contracts remain Proposed
+Status: Accepted — interim PP.6 governance decision; contract implementation and evidence remain gated
 Date: 2026-10-18
 Affected-services: governance, deployment, identity
 Parent: PP.6 #975; ADR-0189; SPEC-0050; SPEC-0051
@@ -8,10 +8,14 @@ Supersedes: none
 
 ## Context
 
-ADR-0189 and SPEC-0050 have an accepted architecture proposal from senolcolak
-and remain subject to their unresolved technical/security conditions.
-SPEC-0051's technical architecture/security decisions remain
-Proposed/PENDING. No independent security reviewer is assigned; the bounded
+ADR-0189 and SPEC-0050 have an accepted architecture proposal from senolcolak.
+Their D2/D4/D7/D8/D9/D10/D12/D13 technical contract was subsequently accepted
+at exact revision `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`, under this
+interim route; see
+[`PP6_TECHNICAL_CONTRACT_APPROVAL.md`](../pp/PP6_TECHNICAL_CONTRACT_APPROVAL.md).
+Implementation and evidence conditions remain. SPEC-0051's technical
+architecture/security decisions remain Proposed/PENDING.
+No independent security reviewer is assigned; the bounded
 interim non-independent route is defined and accepted below. The PP.6 tracking direction recorded in issue
 #975 comment 6242789269 permits a narrowly scoped governance amendment to
 consider an interim single-maintainer risk model, while preserving its
@@ -111,7 +115,8 @@ transitions, or controller activation. Offline recovery-key custody and
 offline restore-journal authority remain separate. D4 still requires the
 accepted controller exclusion and consistent cross-file capture; online
 signing does not authorize live cross-file capture. The concrete signer and
-its security lifecycle remain pending technical contract decisions.
+its security lifecycle are implementation and operational-evidence gates under
+the accepted technical contract.
 
 For SQLite small-edge and TestLab, retain Option A where supported. This
 profile choice does not make SQLite evidence production evidence for
