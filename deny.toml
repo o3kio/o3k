@@ -3,7 +3,12 @@
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+  {
+    id = "RUSTSEC-2026-0381",
+    reason = "webpki-roots 0.26.11 is the upstream semver shim that re-exports webpki-roots 1.0.10. Cargo.lock resolves its certificate data to fixed webpki-root-certs 1.0.10, which removes the affected root. The advisory range includes the shim version even though its data comes from the fixed package.",
+  },
+]
 
 [licenses]
 version = 2
