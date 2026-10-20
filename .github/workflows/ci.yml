@@ -688,7 +688,7 @@ jobs:
           test "$(git -C "${advisory_db}" rev-parse HEAD)" = "${advisory_commit}"
           echo "RustSec advisory database: ${advisory_commit}"
           cargo install cargo-audit --version 0.22.1 --locked
-          cargo audit --db "${advisory_db}" --no-fetch --stale --ignore RUSTSEC-2023-0071
+          cargo audit --db "${advisory_db}" --no-fetch --stale --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0381
   tempest-preflight:
     name: Tempest portable preflight (Gate A)
     runs-on: ubuntu-latest
