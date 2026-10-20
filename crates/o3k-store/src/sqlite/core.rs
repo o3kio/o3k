@@ -623,6 +623,49 @@ impl SqliteStore {
         Ok(store)
     }
 
+    /// Opens an existing file-backed SQLite store for a coordinated backup.
+    ///
+    /// Unlike [`Self::connect_file`], this never creates directories or files,
+    /// changes permissions, runs migrations, normalizes migration checksums,
+    /// or performs canonical-state backfills. The caller must already hold
+    /// the deployment store-access exclusion and keep it until backup
+    /// publication or abort. This is not a general-purpose read-only store:
+    /// `backup_to_file` needs a SQLite write transaction to exclude writers.
+    pub async fn open_existing_file_for_backup(path: &Path) -> Result<Self, StoreError> {
+        if path.as_os_str().is_empty() {
+            return Err(StoreError::Database(sqlx::Error::Configuration(
+                "database path cannot be empty".into(),
+            )));
+        }
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(StoreError::Database(sqlx::Error::Configuration(
+                "backup source is not a regular file".into(),
+            )));
+        }
+
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(Duration::from_secs(5))
+            .after_release(|connection, _| {
+                Box::pin(async move { release_abandoned_transaction(connection).await })
+            })
+            .connect_with(options)
+            .await
+            .map_err(StoreError::Database)?;
+
+        Ok(Self {
+            pool,
+            agent_command_projection_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
+    }
+
     pub async fn journal_mode(&self) -> Result<String, StoreError> {
         let row = sqlx::query("PRAGMA journal_mode")
             .fetch_one(&self.pool)
@@ -3055,6 +3098,73 @@ mod release_tests {
             .await
             .expect("close external writer");
         store.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn backup_opener_does_not_run_migrations_or_backfills() {
+        let directory = TestDirectory::new();
+        let database = directory.database();
+        let initial = SqliteStore::connect_file(&database)
+            .await
+            .expect("create migrated test store");
+        let migration_rows_before: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&initial.pool)
+                .await
+                .expect("read initial migration identity");
+        let schema_count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")
+                .fetch_one(&initial.pool)
+                .await
+                .expect("count initial schema objects");
+        initial.pool.close().await;
+
+        let backup = SqliteStore::open_existing_file_for_backup(&database)
+            .await
+            .expect("open existing store without migration");
+        let migration_rows_after: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&backup.pool)
+                .await
+                .expect("read migration identity after backup open");
+        let schema_count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")
+                .fetch_one(&backup.pool)
+                .await
+                .expect("count schema objects after backup open");
+        assert_eq!(migration_rows_after, migration_rows_before);
+        assert_eq!(schema_count_after, schema_count_before);
+
+        let snapshot = directory.0.join("snapshot.sqlite");
+        backup
+            .backup_to_file(&snapshot)
+            .await
+            .expect("capture an integrity-checked SQLite snapshot");
+        assert!(snapshot.is_file());
+        backup.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn backup_opener_rejects_missing_and_symlink_sources() {
+        let directory = TestDirectory::new();
+        let missing = directory.database();
+        assert!(
+            SqliteStore::open_existing_file_for_backup(&missing)
+                .await
+                .is_err()
+        );
+
+        let regular = directory.0.join("regular.sqlite");
+        fs::write(&regular, b"not opened by backup source validation").expect("write source");
+        let link = directory.0.join("linked.sqlite");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&regular, &link).expect("create symlink");
+        #[cfg(unix)]
+        assert!(
+            SqliteStore::open_existing_file_for_backup(&link)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

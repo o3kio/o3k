@@ -12,6 +12,11 @@
 //! the upgrade engine mutates only through the bounded [`upgrade::UpgradeIo`]
 //! seam and its durable state file.
 
+// This contract-checked prerequisite is intentionally not wired into a
+// supported operator journey yet. Keep it private until capture coordination,
+// trust lifecycle, and replay/crash recovery are implemented.
+#[allow(dead_code)]
+pub(crate) mod backup;
 pub mod checks;
 pub mod context;
 pub mod db;
