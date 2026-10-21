@@ -676,11 +676,11 @@ jobs:
         with:
           command: check
       - name: Validate advisory exception policy
-        run: bash tests/supply-chain-governance.sh
+        run: bash tests/supply-chain-governance-regression.sh
       - name: Audit Rust dependencies for vulnerabilities
         run: |
           advisory_db="${RUNNER_TEMP}/rustsec-advisory-db"
-          advisory_commit="84dd82689f285460d9b815c8e3271b33780f411e"
+          advisory_commit="4b587f00996ebe5c05a73eaef105ef241e876414"
           git init "${advisory_db}"
           git -C "${advisory_db}" remote add origin https://github.com/RustSec/advisory-db.git
           git -C "${advisory_db}" fetch --depth=1 origin "${advisory_commit}"
@@ -688,7 +688,7 @@ jobs:
           test "$(git -C "${advisory_db}" rev-parse HEAD)" = "${advisory_commit}"
           echo "RustSec advisory database: ${advisory_commit}"
           cargo install cargo-audit --version 0.22.1 --locked
-          cargo audit --db "${advisory_db}" --no-fetch --stale --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0381
+          cargo audit --db "${advisory_db}" --no-fetch --stale --ignore RUSTSEC-2023-0071
   tempest-preflight:
     name: Tempest portable preflight (Gate A)
     runs-on: ubuntu-latest
