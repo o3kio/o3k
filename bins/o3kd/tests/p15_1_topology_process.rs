@@ -802,9 +802,18 @@ async fn p15_1_topology_process_postgres() -> TestResult {
     // Dispose even when the journey returns Err, so a mid-test failure does
     // not leak the disposable database.
     let result = run_process_journey(&backend, &data_dir).await;
+    let drain_logs = std::fs::read_to_string(data_dir.join("o3kd.log"));
     let _ = std::fs::remove_dir_all(&data_dir);
     fixture.dispose().await;
     if result.is_ok() {
+        let logs = drain_logs?;
+        assert!(logs.contains(
+            "controller exiting without backup drain proof: unsupported storage adapter"
+        ));
+        assert!(
+            !logs.contains("controller writers drained"),
+            "PostgreSQL shutdown must not issue a SQLite backup drain verdict"
+        );
         println!("P15.1 topology process (PostgreSQL): PASS");
     }
     result

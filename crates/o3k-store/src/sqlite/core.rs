@@ -1253,6 +1253,15 @@ impl SqliteStore {
 
 #[async_trait]
 impl DurableStore for SqliteStore {
+    async fn close_for_controller_drain(&self) -> Result<(), StoreError> {
+        // SQLx 0.8.6 closes SQLite connections by sending Shutdown through
+        // each connection worker queue and awaiting its acknowledgement.
+        // Pool close also waits for checked-out/returning connections. This
+        // covers statements submitted by futures cancelled before joining.
+        self.pool.close().await;
+        Ok(())
+    }
+
     async fn insert_network_plan_work(
         &self,
         work: &NetworkPlanWorkRecord,
@@ -2215,6 +2224,16 @@ impl DurableStore for SqliteStore {
             self, operation, canonical, request,
         )
         .await
+    }
+
+    async fn list_non_terminal_operations(&self) -> Result<Vec<OperationRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message FROM operations WHERE state NOT IN ('succeeded', 'failed') ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(operation_from_row).collect()
     }
 
     async fn list_non_terminal_lifecycle_operations(

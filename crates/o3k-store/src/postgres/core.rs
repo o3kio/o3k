@@ -1397,6 +1397,16 @@ impl DurableStore for PostgresStore {
         self.get_canonical_operation(id).await
     }
 
+    async fn list_non_terminal_operations(&self) -> Result<Vec<OperationRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM operations WHERE state NOT IN ('succeeded', 'failed') ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(row_to_operation).collect()
+    }
+
     async fn list_non_terminal_lifecycle_operations(
         &self,
     ) -> Result<Vec<OperationRecord>, StoreError> {

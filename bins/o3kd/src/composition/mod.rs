@@ -269,11 +269,21 @@ fn resolve_native_lvm_config(
     }
 }
 
+#[cfg(test)]
+mod drain_test_support;
+#[cfg(test)]
+mod drain_tests;
+
 pub struct Composition {
     pub state: o3k_api::AppState,
     controller_id: o3k_store::ControllerId,
     controller_epoch: o3k_store::ControllerEpoch,
     coordination_store: Arc<dyn o3k_store::CoordinationRepository>,
+    operation_store: Arc<dyn o3k_store::DurableStore>,
+    network_lease_tasks: network::NetworkLeaseTaskRegistry,
+    compute_agent_registry: o3k_compute_agent::NodeRegistry,
+    storage_fence: Option<LocalStorageFence>,
+    native_lvm_provider: Option<Arc<o3k_storage::LvmStorageProvider>>,
     session_heartbeat_task: tokio::task::JoinHandle<()>,
     event_task: tokio::task::JoinHandle<()>,
     console_event_task: tokio::task::JoinHandle<()>,
@@ -290,71 +300,309 @@ pub struct Composition {
     diagnostics_probe_task: tokio::task::JoinHandle<()>,
     external_cinder_probe_task: Option<tokio::task::JoinHandle<()>>,
     // Declared last so it is released after the daemon's owned task handles.
-    _store_access_lock: o3k_store::StoreAccessLock,
+    _store_access_lock: Option<o3k_store::StoreAccessLock>,
 }
 
 impl Composition {
-    pub async fn shutdown(self) {
-        if let Some(task) = self.composition_task {
-            task.abort();
-            let _ = task.await;
-        }
-        if let Some(mut task) = self.control_task
-            && tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
-                .await
-                .is_err()
+    fn owned_task_handles(&mut self) -> Vec<&mut tokio::task::JoinHandle<()>> {
+        let mut tasks = vec![
+            &mut self.session_heartbeat_task,
+            &mut self.event_task,
+            &mut self.console_event_task,
+            &mut self.attachment_reconciler,
+            &mut self.create_convergence_reconciler,
+            &mut self.lifecycle_convergence_reconciler,
+            &mut self.orphan_endpoint_reconciler,
+            &mut self.diagnostics_probe_task,
+        ];
+        tasks.extend(
+            [
+                &mut self.fabric_recovery_task,
+                &mut self.inventory_task,
+                &mut self.composition_task,
+                &mut self.native_storage_recovery_task,
+                &mut self.control_task,
+                &mut self.inspect_probe_task,
+                &mut self.external_cinder_probe_task,
+            ]
+            .into_iter()
+            .filter_map(Option::as_mut),
+        );
+        tasks
+    }
+
+    pub async fn shutdown(mut self) -> Result<ControllerDrainProof, Box<dyn std::error::Error>> {
+        let mut retained_locks = DrainLockRetention {
+            store_lock: self._store_access_lock.take(),
+            storage_fence: self.storage_fence.clone(),
+        };
+        let store_lock = &mut retained_locks.store_lock;
+        let _api_exclusion = match self
+            .state
+            .begin_backup_exclusion(Duration::from_secs(5))
+            .await
         {
-            task.abort();
-            let _ = task.await;
-        }
-        if let Some(mut task) = self.inspect_probe_task
-            && tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
-                .await
-                .is_err()
+            Ok(exclusion) => exclusion,
+            Err(error) => {
+                return Err(error.into());
+            }
+        };
+        let storage_quiesce_error = if let Some(fence) = &self.storage_fence
+            && fence.quiesce(Duration::from_secs(5)).await.is_err()
         {
+            Some("storage workflow did not enter quiescence".to_owned())
+        } else {
+            None
+        };
+        let tasks = self.owned_task_handles();
+        for task in &tasks {
             task.abort();
-            let _ = task.await;
         }
-        if let Some(task) = self.external_cinder_probe_task {
-            task.abort();
-            let _ = task.await;
+        let mut task_error = storage_quiesce_error;
+        for task in tasks {
+            match tokio::time::timeout(Duration::from_secs(5), task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if error.is_cancelled() => {}
+                Ok(Err(error)) => {
+                    task_error.get_or_insert_with(|| format!("composition worker failed: {error}"));
+                }
+                Err(_) => {
+                    task_error.get_or_insert_with(|| {
+                        "composition worker did not stop before drain deadline".to_owned()
+                    });
+                }
+            }
         }
-        self.event_task.abort();
-        let _ = self.event_task.await;
-        self.console_event_task.abort();
-        let _ = self.console_event_task.await;
-        self.attachment_reconciler.abort();
-        let _ = self.attachment_reconciler.await;
-        self.create_convergence_reconciler.abort();
-        let _ = self.create_convergence_reconciler.await;
-        self.lifecycle_convergence_reconciler.abort();
-        self.orphan_endpoint_reconciler.abort();
-        if let Some(task) = self.fabric_recovery_task {
-            task.abort();
-            let _ = task.await;
+        if let Err(error) = self
+            .compute_agent_registry
+            .drain_owned_tasks(Duration::from_secs(5))
+            .await
+        {
+            return Err(std::io::Error::other(error).into());
         }
-        if let Some(task) = self.native_storage_recovery_task {
-            task.abort();
-            let _ = task.await;
+        if let Err(error) = self.network_lease_tasks.drain(Duration::from_secs(5)).await {
+            return Err(std::io::Error::other(error).into());
         }
-        let _ = self.lifecycle_convergence_reconciler.await;
-        let _ = self.orphan_endpoint_reconciler.await;
-        if let Some(task) = self.inventory_task {
-            task.abort();
-            let _ = task.await;
+        if let Some(error) = task_error {
+            return Err(std::io::Error::other(error).into());
         }
-        self.session_heartbeat_task.abort();
-        let _ = self.session_heartbeat_task.await;
-        self.diagnostics_probe_task.abort();
-        let _ = self.diagnostics_probe_task.await;
-        let _ = self
-            .coordination_store
-            .drain_controller_session(&self.controller_id, &self.controller_epoch)
-            .await;
+        if let Some(provider) = &self.native_lvm_provider {
+            provider
+                .drain_owned_commands(Duration::from_secs(5))
+                .await
+                .map_err(|_| std::io::Error::other("native storage subprocesses did not drain"))?;
+        }
+        let operations = match tokio::time::timeout(
+            Duration::from_secs(5),
+            self.operation_store.list_non_terminal_operations(),
+        )
+        .await
+        {
+            Ok(Ok(operations)) => operations,
+            Ok(Err(error)) => {
+                return Err(format!("non-terminal Operation inventory failed: {error}").into());
+            }
+            Err(_) => {
+                return Err(
+                    std::io::Error::other("non-terminal Operation inventory timed out").into(),
+                );
+            }
+        };
+        let mut unresolved = Vec::new();
+        let mut unknown_outcomes = Vec::new();
+        for operation in operations {
+            match classify_operation_for_drain(operation.state, true) {
+                OperationDrainDisposition::DurableUnresolved => unresolved.push(operation.id),
+                OperationDrainDisposition::UnknownProviderOutcome => {
+                    unknown_outcomes.push(operation.id)
+                }
+                OperationDrainDisposition::Terminal => {}
+                OperationDrainDisposition::ActiveExecution => {
+                    return Err(std::io::Error::other(
+                        "an Operation executor remains active during drain",
+                    )
+                    .into());
+                }
+            }
+        }
         info!(
-            controller_id = %self.controller_id,
-            controller_epoch = %self.controller_epoch,
-            "controller session drained"
+            unresolved_operation_ids = ?unresolved,
+            unknown_outcome_operation_ids = ?unknown_outcomes,
+            "durable Operations remain unchanged after executor drain"
+        );
+        if let Some(fence) = &self.storage_fence
+            && let Err(error) = o3k_reconciler::storage_workflow::StorageControllerFence::end(
+                fence,
+                fence.intent_epoch,
+            )
+            .await
+        {
+            return Err(format!("native storage lease did not drain: {error:?}").into());
+        }
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            self.coordination_store
+                .drain_controller_session(&self.controller_id, &self.controller_epoch),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                return Err(
+                    std::io::Error::other("controller-session drain was not confirmed").into(),
+                );
+            }
+            Ok(Err(error)) => {
+                return Err(error.into());
+            }
+            Err(_) => {
+                return Err(std::io::Error::other("controller-session drain timed out").into());
+            }
+        }
+        // Task cancellation does not cancel a statement already submitted to
+        // SQLite's connection thread. Close and join those workers before
+        // issuing the proof, while the lifetime lock is still retained.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.operation_store.close_for_controller_drain(),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("database connection workers did not drain"))??;
+        info!(controller_id = %self.controller_id, controller_epoch = %self.controller_epoch, "controller session drained");
+        info!(
+            fabric_recovery_enabled = self.fabric_recovery_task.is_some(),
+            storage_recovery_enabled = self.native_storage_recovery_task.is_some(),
+            "controller writers drained"
+        );
+        let Some(store_access_lock) = store_lock.take() else {
+            return Err(
+                std::io::Error::other("controller drain lost its lifetime store lock").into(),
+            );
+        };
+        // A successful drain verdict carries the lifetime lock. The caller
+        // holds this proof through daemon exit or a future authenticated
+        // transfer, so a new controller cannot enter the gap after drain.
+        retained_locks.storage_fence.take();
+        Ok(ControllerDrainProof {
+            _store_access_lock: store_access_lock,
+            _api_exclusion,
+        })
+    }
+}
+
+impl Drop for Composition {
+    fn drop(&mut self) {
+        for task in self.owned_task_handles() {
+            task.abort();
+        }
+        if self._store_access_lock.is_some() {
+            preserve_drain_locks(&mut self._store_access_lock, self.storage_fence.as_ref());
+        }
+    }
+}
+
+/// Evidence that all controller-owned writers drained while the daemon still
+/// owned the canonical store lock. Dropping the proof releases that lock.
+#[must_use = "keep the drain proof alive until daemon exit or authenticated lock transfer"]
+pub struct ControllerDrainProof {
+    _store_access_lock: o3k_store::StoreAccessLock,
+    _api_exclusion: o3k_api::BackupExclusion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperationDrainDisposition {
+    ActiveExecution,
+    DurableUnresolved,
+    UnknownProviderOutcome,
+    Terminal,
+}
+
+fn classify_operation_for_drain(
+    state: o3k_store::OperationState,
+    executor_stopped: bool,
+) -> OperationDrainDisposition {
+    match state {
+        o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed => {
+            OperationDrainDisposition::Terminal
+        }
+        _ if !executor_stopped => OperationDrainDisposition::ActiveExecution,
+        o3k_store::OperationState::UnknownOutcome => {
+            OperationDrainDisposition::UnknownProviderOutcome
+        }
+        o3k_store::OperationState::Pending
+        | o3k_store::OperationState::Running
+        | o3k_store::OperationState::Retryable => OperationDrainDisposition::DurableUnresolved,
+    }
+}
+
+// Cancellation is an unsuccessful drain too. Keep both exclusion locks until
+// process exit unless shutdown constructs the successful proof.
+struct DrainLockRetention {
+    store_lock: Option<o3k_store::StoreAccessLock>,
+    storage_fence: Option<LocalStorageFence>,
+}
+
+impl Drop for DrainLockRetention {
+    fn drop(&mut self) {
+        preserve_drain_locks(&mut self.store_lock, self.storage_fence.as_ref());
+    }
+}
+
+fn preserve_drain_locks(
+    store_lock: &mut Option<o3k_store::StoreAccessLock>,
+    storage_fence: Option<&LocalStorageFence>,
+) {
+    if let Some(lock) = store_lock.take() {
+        std::mem::forget(lock);
+    }
+    if let Some(fence) = storage_fence {
+        std::mem::forget(fence.clone());
+    }
+}
+
+#[cfg(test)]
+mod operation_drain_classification_tests {
+    use super::{OperationDrainDisposition, classify_operation_for_drain};
+    use o3k_store::OperationState;
+
+    #[test]
+    fn cancelled_drain_retains_the_lifetime_lock() -> Result<(), Box<dyn std::error::Error>> {
+        let directory =
+            std::env::temp_dir().join(format!("o3k-cancelled-drain-{}", uuid::Uuid::new_v4()));
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(&directory)?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        let lock = o3k_store::StoreAccessLock::acquire(&directory)?;
+        drop(super::DrainLockRetention {
+            store_lock: Some(lock),
+            storage_fence: None,
+        });
+        assert!(o3k_store::StoreAccessLock::acquire(&directory).is_err());
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn operation_states_keep_executor_and_provider_outcome_distinct() {
+        assert_eq!(
+            classify_operation_for_drain(OperationState::Running, false),
+            OperationDrainDisposition::ActiveExecution
+        );
+        assert_eq!(
+            classify_operation_for_drain(OperationState::Running, true),
+            OperationDrainDisposition::DurableUnresolved
+        );
+        assert_eq!(
+            classify_operation_for_drain(OperationState::UnknownOutcome, true),
+            OperationDrainDisposition::UnknownProviderOutcome
+        );
+        assert_eq!(
+            classify_operation_for_drain(OperationState::Succeeded, true),
+            OperationDrainDisposition::Terminal
+        );
+        assert_eq!(
+            classify_operation_for_drain(OperationState::Failed, true),
+            OperationDrainDisposition::Terminal
         );
     }
 }
@@ -365,7 +613,10 @@ pub async fn build_composition(
     // This must precede every store open and all readiness/worker/session work.
     // The lock is local to this data directory and does not fence remote
     // PostgreSQL writers or a controller on another host.
-    let store_access_lock = o3k_store::StoreAccessLock::acquire(&config.data_dir)?;
+    let mut startup_locks = DrainLockRetention {
+        store_lock: Some(o3k_store::StoreAccessLock::acquire(&config.data_dir)?),
+        storage_fence: None,
+    };
     let store = match config.database_backend {
         o3k_config::DatabaseBackend::Sqlite => {
             let database_path = config.data_dir.join("o3k.sqlite");
@@ -548,11 +799,13 @@ pub async fn build_composition(
     }
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
     let durable_store: Arc<dyn o3k_store::DurableStore> = store.clone();
+    let network_lease_tasks = network::NetworkLeaseTaskRegistry::default();
     let network_dispatcher = network_dispatcher_from_env(
         coordination_store.clone(),
         durable_store.clone(),
         controller_id.clone(),
         controller_epoch.clone(),
+        network_lease_tasks.clone(),
     )?;
     if fabric_domain_id.is_some() {
         let dispatcher = network_dispatcher
@@ -602,6 +855,7 @@ pub async fn build_composition(
                 reconciliation_locks: Arc::new(std::sync::Mutex::new(
                     std::collections::BTreeMap::new(),
                 )),
+                lease_tasks: network_lease_tasks.clone(),
             }))
         }
         (Some(_), None) => {
@@ -1121,22 +1375,26 @@ pub async fn build_composition(
         .as_ref()
         .map(|id_service| std::sync::Arc::new(id_service.clone()));
     let storage_intent_epoch = storage_intent_epoch(&controller_epoch);
+    let mut storage_fence_for_drain = None;
     let native_attachment_workflow: Option<Arc<dyn o3k_api::NativeAttachmentWorkflow>> =
         native_lvm_provider.as_ref().map(|provider| {
+            let storage_fence = LocalStorageFence {
+                coordination: coordination_store.clone(),
+                controller_id: controller_id.clone(),
+                controller_epoch: controller_epoch.clone(),
+                intent_epoch: storage_intent_epoch,
+                execution_lock_path: config.data_dir.join("storage.execution.lock"),
+                attempt: Arc::new(tokio::sync::Mutex::new(None)),
+                quiescing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            };
+            storage_fence_for_drain = Some(storage_fence.clone());
             let workflow = o3k_reconciler::storage_workflow::StorageAttachmentWorkflow::new(
                 store.clone(),
                 provider.clone(),
                 Arc::new(LocalComputeAttachmentExecutor {
                     compute: Arc::new(compute_service.clone()),
                 }),
-                Arc::new(LocalStorageFence {
-                    coordination: coordination_store.clone(),
-                    controller_id: controller_id.clone(),
-                    controller_epoch: controller_epoch.clone(),
-                    intent_epoch: storage_intent_epoch,
-                    execution_lock_path: config.data_dir.join("storage.execution.lock"),
-                    attempt: Arc::new(tokio::sync::Mutex::new(None)),
-                }),
+                Arc::new(storage_fence.clone()),
             );
             Arc::new(NativeStorageAttachmentWorkflow {
                 store: store.clone(),
@@ -1479,17 +1737,22 @@ pub async fn build_composition(
     let fabric_recovery_task = fabric_reconciler.as_ref().map(|reconciler| {
         network::spawn_fabric_recovery(
             Arc::clone(reconciler),
-            durable_store,
+            durable_store.clone(),
             registry.registration_notify(),
         )
     });
 
     Ok(Composition {
         state,
-        _store_access_lock: store_access_lock,
+        _store_access_lock: startup_locks.store_lock.take(),
         controller_id,
         controller_epoch,
         coordination_store,
+        operation_store: durable_store,
+        network_lease_tasks,
+        compute_agent_registry: registry.clone(),
+        storage_fence: storage_fence_for_drain,
+        native_lvm_provider,
         session_heartbeat_task,
         event_task,
         console_event_task,
@@ -2228,6 +2491,7 @@ mod tests {
             reconciliation_locks: Arc::new(
                 std::sync::Mutex::new(std::collections::BTreeMap::new()),
             ),
+            lease_tasks: super::network::NetworkLeaseTaskRegistry::default(),
         });
         let resolver = DaemonCreateResolver {
             store: store.clone(),

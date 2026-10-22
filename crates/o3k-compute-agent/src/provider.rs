@@ -104,7 +104,7 @@ impl AgentComputeProvider {
         let event_state = state.clone();
         let event_store = store.clone();
         let event_registry = registry.clone();
-        tokio::spawn(async move {
+        registry.spawn_owned_task(async move {
             loop {
                 match events.recv().await {
                     Ok(event) => {
@@ -192,7 +192,7 @@ impl AgentComputeProvider {
             let recovery_registry = self.registry.clone();
             let recovery_resolver = self.resolver.clone();
             let recovery_timeout = self.command_timeout;
-            tokio::spawn(async move {
+            self.registry.spawn_owned_task(async move {
                 recover_artifact_transfers(
                     recovery_registry,
                     recovery_resolver,
@@ -3525,7 +3525,7 @@ mod tests {
     ) -> mpsc::UnboundedReceiver<agent_proto::Command> {
         let (commands_tx, commands_rx) = mpsc::unbounded_channel();
         let publisher = registry.clone();
-        tokio::spawn(async move {
+        registry.spawn_owned_task(async move {
             while let Some(Ok(response)) = receiver.recv().await {
                 match response.body {
                     Some(agent_proto::control_response::Body::ArtifactOffer(offer)) => {
