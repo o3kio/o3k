@@ -386,6 +386,7 @@ struct RealmReconciliationLease {
     renewal: Arc<NetworkLeaseTask>,
     tasks: NetworkLeaseTaskRegistry,
     relinquished: bool,
+    admission: Option<NetworkLeaseAdmission>,
 }
 
 struct AgentControlLeaseGuard {
@@ -398,6 +399,7 @@ struct AgentControlLeaseGuard {
     renewal: Arc<NetworkLeaseTask>,
     tasks: NetworkLeaseTaskRegistry,
     relinquished: bool,
+    admission: Option<NetworkLeaseAdmission>,
 }
 
 #[derive(Clone, Default)]
@@ -405,6 +407,23 @@ pub(crate) struct NetworkLeaseTaskRegistry {
     tasks: Arc<Mutex<Vec<Arc<NetworkLeaseTask>>>>,
     pending_releases: Arc<Mutex<Vec<PendingNetworkLeaseRelease>>>,
     failed_cleanup: Arc<AtomicBool>,
+    admission_closed: Arc<Mutex<bool>>,
+    active_leases: Arc<std::sync::atomic::AtomicUsize>,
+    drain_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+struct NetworkLeaseAdmission {
+    registry: NetworkLeaseTaskRegistry,
+    resolved: bool,
+}
+
+impl Drop for NetworkLeaseAdmission {
+    fn drop(&mut self) {
+        if !self.resolved {
+            self.registry.mark_cleanup_failed();
+        }
+        self.registry.active_leases.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 struct PendingNetworkLeaseRelease {
@@ -431,7 +450,9 @@ impl NetworkLeaseTask {
 
     async fn stop_and_join(&self, deadline: tokio::time::Instant) -> Result<(), String> {
         self.request_stop();
-        let mut join = self.join.lock().await;
+        let mut join = tokio::time::timeout_at(deadline, self.join.lock())
+            .await
+            .map_err(|_| "network lease join ownership deadline expired")?;
         let Some(task) = join.as_mut() else {
             return Ok(());
         };
@@ -441,13 +462,44 @@ impl NetworkLeaseTask {
                 join.take();
                 Ok(())
             }
-            Ok(Err(error)) => Err(format!("network lease renewal task failed: {error}")),
+            Ok(Err(error)) => {
+                join.take();
+                Err(format!("network lease renewal task failed: {error}"))
+            }
             Err(_) => Err("network lease renewal did not stop before the drain deadline".into()),
         }
     }
 }
 
+struct NetworkDrainVerdict<'a> {
+    failed: &'a AtomicBool,
+    completed: bool,
+}
+
+impl Drop for NetworkDrainVerdict<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.failed.store(true, Ordering::Release);
+        }
+    }
+}
+
 impl NetworkLeaseTaskRegistry {
+    fn admit(&self) -> Result<NetworkLeaseAdmission, String> {
+        let closed = self
+            .admission_closed
+            .lock()
+            .map_err(|_| "network admission lock poisoned")?;
+        if *closed {
+            return Err("network writer admission is closed".into());
+        }
+        self.active_leases.fetch_add(1, Ordering::AcqRel);
+        Ok(NetworkLeaseAdmission {
+            registry: self.clone(),
+            resolved: false,
+        })
+    }
+
     fn register(
         &self,
         stop: tokio::sync::oneshot::Sender<()>,
@@ -458,6 +510,7 @@ impl NetworkLeaseTaskRegistry {
             join: tokio::sync::Mutex::new(Some(join)),
         });
         if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.retain(|task| !task.join.try_lock().is_ok_and(|join| join.is_none()));
             tasks.push(task.clone());
         } else {
             self.failed_cleanup.store(true, Ordering::Release);
@@ -467,7 +520,18 @@ impl NetworkLeaseTaskRegistry {
     }
 
     pub(crate) async fn drain(&self, timeout: std::time::Duration) -> Result<(), String> {
+        *self
+            .admission_closed
+            .lock()
+            .map_err(|_| "network admission lock poisoned")? = true;
+        let mut verdict = NetworkDrainVerdict {
+            failed: &self.failed_cleanup,
+            completed: false,
+        };
         let deadline = tokio::time::Instant::now() + timeout;
+        let _drain = tokio::time::timeout_at(deadline, self.drain_lock.lock())
+            .await
+            .map_err(|_| "network drain ownership deadline expired")?;
         let tasks = self
             .tasks
             .lock()
@@ -488,9 +552,13 @@ impl NetworkLeaseTaskRegistry {
                 return Err(error);
             }
         }
+        if self.active_leases.load(Ordering::Acquire) != 0 {
+            return Err("network lease owners remain active".into());
+        }
         if self.failed_cleanup.load(Ordering::Acquire) {
             return Err("a network lease cleanup failed or could not be registered".into());
         }
+        verdict.completed = true;
         Ok(())
     }
 
@@ -553,7 +621,9 @@ impl AgentControlLeaseGuard {
         controller_id: o3k_store::ControllerId,
         controller_epoch: o3k_store::ControllerEpoch,
         fencing_token: u64,
+        mut admission: NetworkLeaseAdmission,
     ) -> Self {
+        admission.resolved = true;
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let (stop, mut stopped) = tokio::sync::oneshot::channel();
         let renewal = {
@@ -601,6 +671,7 @@ impl AgentControlLeaseGuard {
             renewal,
             tasks,
             relinquished: false,
+            admission: Some(admission),
         }
     }
 
@@ -647,6 +718,7 @@ impl AgentControlLeaseGuard {
         {
             Ok(()) => {
                 self.relinquished = true;
+                self.admission.take();
                 Ok(())
             }
             Err(_) => {
@@ -684,6 +756,7 @@ impl RealmReconciliationLease {
         controller: &o3k_network::NetworkControllerLease,
         realm_id: Uuid,
     ) -> Result<Self, String> {
+        let mut admission = tasks.admit()?;
         let controller_id = o3k_store::ControllerId::new(controller.controller_id.clone());
         let controller_epoch = o3k_store::ControllerEpoch::new(controller.controller_epoch.clone());
         let work_key = format!("fabric-realm:{realm_id}");
@@ -700,6 +773,7 @@ impl RealmReconciliationLease {
         {
             o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
             o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                admission.resolved = true;
                 return Err(format!(
                     "realm {realm_id} reconciliation is owned by another controller"
                 ));
@@ -743,6 +817,7 @@ impl RealmReconciliationLease {
             })
         };
         let renewal = tasks.register(stop, renewal);
+        admission.resolved = true;
         Ok(Self {
             coordination,
             work_key,
@@ -753,6 +828,7 @@ impl RealmReconciliationLease {
             renewal,
             tasks,
             relinquished: false,
+            admission: Some(admission),
         })
     }
 
@@ -804,6 +880,7 @@ impl RealmReconciliationLease {
         {
             Ok(()) => {
                 self.relinquished = true;
+                self.admission.take();
                 Ok(())
             }
             Err(error) => {
@@ -841,6 +918,134 @@ mod network_lease_drain_tests {
     use std::time::Duration;
     use tokio::sync::Notify;
 
+    async fn controlled_guard() -> Result<
+        (
+            AgentControlLeaseGuard,
+            std::sync::Arc<super::super::drain_test_support::ControlledCoordination>,
+            NetworkLeaseTaskRegistry,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let store = std::sync::Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        let coordination = super::super::drain_test_support::ControlledCoordination::new(store);
+        let registry = NetworkLeaseTaskRegistry::default();
+        let id = o3k_store::ControllerId::new("controlled-network");
+        let epoch = o3k_store::ControllerEpoch::new("epoch-1");
+        let admission = registry.admit().map_err(std::io::Error::other)?;
+        let lease = coordination
+            .acquire_work_lease(
+                "controlled-network",
+                "test",
+                &id,
+                &epoch,
+                Duration::from_secs(15),
+            )
+            .await?;
+        let o3k_store::LeaseAcquireOutcome::Acquired { lease } = lease else {
+            return Err("unexpected busy lease".into());
+        };
+        let guard = AgentControlLeaseGuard::start(
+            registry.clone(),
+            coordination.clone(),
+            "controlled-network".into(),
+            id,
+            epoch,
+            lease.fencing_token,
+            admission,
+        );
+        Ok((guard, coordination, registry))
+    }
+
+    #[tokio::test]
+    async fn dropped_network_guard_waits_for_blocked_relinquishment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::Ordering;
+        let (guard, coordination, registry) = controlled_guard().await?;
+        coordination.relinquish.block();
+        drop(guard);
+        let mut drain = Box::pin(registry.drain(Duration::from_secs(2)));
+        tokio::select! {
+            result = &mut drain => return Err(format!("drain finished before blocked cleanup: {result:?}").into()),
+            () = coordination.relinquish.entered.notified() => {}
+        }
+        assert_eq!(coordination.relinquish.active.load(Ordering::Acquire), 1);
+        coordination.relinquish.release();
+        drain.await.map_err(std::io::Error::other)?;
+        assert_eq!(coordination.relinquish.active.load(Ordering::Acquire), 0);
+        assert!(registry.admit().is_err());
+        registry
+            .drain(Duration::from_secs(1))
+            .await
+            .map_err(std::io::Error::other)?;
+        assert_eq!(coordination.relinquish.active.load(Ordering::Acquire), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_quiescence_waits_for_actual_renewal_call()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::Ordering;
+        let (guard, coordination, registry) = controlled_guard().await?;
+        coordination.renew.block();
+        tokio::time::timeout(
+            Duration::from_secs(7),
+            coordination.renew.entered.notified(),
+        )
+        .await?;
+        assert_eq!(coordination.renew.active.load(Ordering::Acquire), 1);
+        drop(guard);
+        let mut drain = Box::pin(registry.drain(Duration::from_secs(2)));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(drain.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        coordination.renew.release();
+        drain.await.map_err(std::io::Error::other)?;
+        assert_eq!(coordination.renew.active.load(Ordering::Acquire), 0);
+        assert_eq!(coordination.relinquish.active.load(Ordering::Acquire), 0);
+        assert!(registry.admit().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_realm_cleanup_is_owned_by_registry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::sync::atomic::Ordering;
+        let store = std::sync::Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        let coordination = super::super::drain_test_support::ControlledCoordination::new(store);
+        let registry = NetworkLeaseTaskRegistry::default();
+        let controller = o3k_network::NetworkControllerLease {
+            controller_id: "controlled-realm".into(),
+            controller_epoch: "epoch-1".into(),
+            fencing_token: 1,
+        };
+        let mut lease = super::RealmReconciliationLease::acquire(
+            registry.clone(),
+            coordination.clone(),
+            &controller,
+            uuid::Uuid::now_v7(),
+        )
+        .await
+        .map_err(std::io::Error::other)?;
+        coordination.relinquish.block();
+        let mut cleanup = Box::pin(lease.relinquish());
+        tokio::select! {
+            result = &mut cleanup => return Err(format!("cleanup finished before gate: {result:?}").into()),
+            () = coordination.relinquish.entered.notified() => {}
+        }
+        drop(cleanup);
+        drop(lease);
+        assert_eq!(coordination.relinquish.active.load(Ordering::Acquire), 0);
+        coordination.relinquish.release();
+        registry
+            .drain(Duration::from_secs(2))
+            .await
+            .map_err(std::io::Error::other)?;
+        assert_eq!(coordination.relinquish.active.load(Ordering::Acquire), 0);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn drain_waits_for_an_in_flight_renewal_to_finish()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -873,6 +1078,40 @@ mod network_lease_drain_tests {
             .map_err(std::io::Error::other)?
             .map_err(std::io::Error::other)?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_drain_closes_admission_and_rejects_live_owners()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NetworkLeaseTaskRegistry::default();
+        let mut admission = registry.admit().map_err(std::io::Error::other)?;
+        admission.resolved = true;
+        assert!(registry.drain(Duration::from_secs(1)).await.is_err());
+        assert!(registry.admit().is_err());
+        drop(admission);
+        assert!(registry.drain(Duration::from_secs(1)).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_network_drain_cannot_later_report_success() {
+        let registry = NetworkLeaseTaskRegistry::default();
+        let (stop, _stopped) = tokio::sync::oneshot::channel();
+        let release = std::sync::Arc::new(Notify::new());
+        let task_release = release.clone();
+        registry.register(
+            stop,
+            tokio::spawn(async move { task_release.notified().await }),
+        );
+        let mut drain = Box::pin(registry.drain(Duration::from_secs(1)));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(drain.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(drain);
+        release.notify_one();
+        assert!(registry.drain(Duration::from_secs(1)).await.is_err());
     }
 
     #[tokio::test]
@@ -917,6 +1156,7 @@ mod network_lease_drain_tests {
             controller_id.clone(),
             controller_epoch.clone(),
             lease.fencing_token,
+            registry.admit().map_err(std::io::Error::other)?,
         );
         let renewal = guard.renewal.clone();
         drop(guard);
@@ -991,6 +1231,7 @@ mod network_lease_drain_tests {
             controller_id.clone(),
             controller_epoch.clone(),
             lease.fencing_token,
+            registry.admit().map_err(std::io::Error::other)?,
         );
         assert!(guard.close().await.is_err());
         drop(guard);
@@ -2487,6 +2728,10 @@ impl NetworkAgentDispatcher {
                 }
             }
             let work_key = format!("network-agent:{}", command.target.agent_id);
+            let mut admission = self
+                .lease_tasks
+                .admit()
+                .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?;
             let acquired = control
                 .coordination
                 .acquire_work_lease(
@@ -2501,6 +2746,7 @@ impl NetworkAgentDispatcher {
             let lease = match acquired {
                 o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
                 o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                    admission.resolved = true;
                     return Err(o3k_network::NetworkDispatchError::Unavailable);
                 }
             };
@@ -2511,6 +2757,7 @@ impl NetworkAgentDispatcher {
                 control.controller_id.clone(),
                 control.controller_epoch.clone(),
                 lease.fencing_token,
+                admission,
             );
             let still_owner = control
                 .coordination
@@ -2992,6 +3239,10 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
                 "historical target does not match enrolled host identity".to_owned(),
             ));
         }
+        let mut admission = self
+            .lease_tasks
+            .admit()
+            .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?;
         let key = format!("network-agent:{}", target.agent_id);
         let lease = match control
             .coordination
@@ -3007,6 +3258,7 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
         {
             o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
             o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                admission.resolved = true;
                 return Err(o3k_network::NetworkDispatchError::Unavailable);
             }
         };
@@ -3017,6 +3269,7 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
             control.controller_id.clone(),
             control.controller_epoch.clone(),
             lease.fencing_token,
+            admission,
         );
         lease_guard.assert_current().await?;
         let current = control

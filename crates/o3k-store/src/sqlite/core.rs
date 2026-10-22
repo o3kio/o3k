@@ -1253,6 +1253,15 @@ impl SqliteStore {
 
 #[async_trait]
 impl DurableStore for SqliteStore {
+    async fn close_for_controller_drain(&self) -> Result<(), StoreError> {
+        // SQLx 0.8.6 closes SQLite connections by sending Shutdown through
+        // each connection worker queue and awaiting its acknowledgement.
+        // Pool close also waits for checked-out/returning connections. This
+        // covers statements submitted by futures cancelled before joining.
+        self.pool.close().await;
+        Ok(())
+    }
+
     async fn insert_network_plan_work(
         &self,
         work: &NetworkPlanWorkRecord,

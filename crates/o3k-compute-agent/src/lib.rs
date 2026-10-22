@@ -133,6 +133,8 @@ struct AgentConnection {
     renewal_abort: Option<Arc<Notify>>,
 }
 
+type OwnedRegistryTask = Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>;
+
 #[derive(Clone)]
 pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeSnapshot>>>,
@@ -157,8 +159,9 @@ pub struct NodeRegistry {
     /// sync the freshly registered agent's capacity immediately instead of
     /// waiting for its next periodic tick (issue #606).
     registration_notify: Arc<Notify>,
-    owned_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    owned_tasks: Arc<Mutex<Vec<OwnedRegistryTask>>>,
     owned_tasks_closed: Arc<std::sync::atomic::AtomicBool>,
+    owned_tasks_drain_failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct NodeEpochLease {
@@ -182,6 +185,7 @@ impl Default for NodeRegistry {
             registration_notify: Arc::new(Notify::new()),
             owned_tasks: Arc::new(Mutex::new(Vec::new())),
             owned_tasks_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            owned_tasks_drain_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -202,7 +206,32 @@ impl NodeRegistry {
         {
             return false;
         }
-        tasks.push(tokio::spawn(task));
+        // Consume completed results while registering new work so the
+        // registry does not grow with every stream over the daemon lifetime.
+        tasks.retain(|slot| {
+            let Ok(mut slot) = slot.try_lock() else {
+                return true;
+            };
+            let Some(task) = slot.as_mut() else {
+                return false;
+            };
+            if !task.is_finished() {
+                return true;
+            }
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            match std::future::Future::poll(std::pin::Pin::new(task), &mut context) {
+                std::task::Poll::Ready(result) => {
+                    slot.take();
+                    if result.is_err_and(|error| !error.is_cancelled()) {
+                        self.owned_tasks_drain_failed
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    false
+                }
+                std::task::Poll::Pending => true,
+            }
+        });
+        tasks.push(Arc::new(tokio::sync::Mutex::new(Some(tokio::spawn(task)))));
         true
     }
 
@@ -210,34 +239,59 @@ impl NodeRegistry {
     /// handle list share one mutex, preventing a worker from registering
     /// behind the terminal empty check.
     pub async fn drain_owned_tasks(&self, timeout: Duration) -> Result<(), String> {
+        if self
+            .owned_tasks_drain_failed
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err("compute-agent drain previously failed or was cancelled".into());
+        }
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let tasks = {
-                let mut tasks = self
+                let tasks = self
                     .owned_tasks
                     .lock()
                     .map_err(|_| "compute-agent task registry lock was poisoned")?;
                 self.owned_tasks_closed
                     .store(true, std::sync::atomic::Ordering::Release);
-                std::mem::take(&mut *tasks)
+                tasks.clone()
             };
             if tasks.is_empty() {
+                self.owned_tasks_drain_failed
+                    .store(false, std::sync::atomic::Ordering::Release);
                 return Ok(());
             }
             for task in &tasks {
-                task.abort();
+                if let Ok(slot) = task.try_lock()
+                    && let Some(task) = slot.as_ref()
+                {
+                    task.abort();
+                }
             }
-            for mut task in tasks {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                match tokio::time::timeout(remaining, &mut task).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) if error.is_cancelled() => {}
-                    Ok(Err(error)) => return Err(format!("compute-agent task failed: {error}")),
+            for task in tasks {
+                let mut slot = tokio::time::timeout_at(deadline, task.lock())
+                    .await
+                    .map_err(|_| "compute-agent task ownership deadline expired")?;
+                let Some(task) = slot.as_mut() else { continue };
+                task.abort();
+                match tokio::time::timeout_at(deadline, task).await {
+                    Ok(result) => {
+                        slot.take();
+                        if let Err(error) = result
+                            && !error.is_cancelled()
+                        {
+                            return Err(format!("compute-agent task failed: {error}"));
+                        }
+                    }
                     Err(_) => {
                         return Err("compute-agent task did not stop before drain deadline".into());
                     }
                 }
             }
+            self.owned_tasks
+                .lock()
+                .map_err(|_| "compute-agent task registry lock was poisoned")?
+                .clear();
         }
     }
 
@@ -7592,3 +7646,49 @@ async fn owned_task_drain_waits_for_a_worker_holding_a_write_guard() {
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod block_device_tests;
+
+#[tokio::test]
+#[allow(clippy::panic)] // Deliberate child-task panic exercises the failure verdict.
+async fn failed_owned_task_drain_is_sticky() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = NodeRegistry::default();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let task_entered = entered.clone();
+    assert!(registry.spawn_owned_task(async move {
+        task_entered.notify_one();
+        panic!("controlled worker failure");
+    }));
+    entered.notified().await;
+    // Wait for completion without consuming the registry's join handle.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if registry
+                .owned_tasks
+                .lock()
+                .map_err(|_| std::io::Error::other("task registry poisoned"))?
+                .iter()
+                .all(|task| {
+                    task.try_lock()
+                        .is_ok_and(|slot| slot.as_ref().is_none_or(|task| task.is_finished()))
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        Ok::<(), std::io::Error>(())
+    })
+    .await??;
+    assert!(
+        registry
+            .drain_owned_tasks(Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    assert!(
+        registry
+            .drain_owned_tasks(Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    Ok(())
+}

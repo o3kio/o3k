@@ -30,8 +30,27 @@ pub(crate) struct StorageLeaseAttempt {
     pub(crate) fencing_token: o3k_store::FencingToken,
     pub(crate) stop: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) renewal: Option<tokio::task::JoinHandle<()>>,
+    renewal_failed: bool,
+    acquisition_pending: bool,
     pub(crate) valid: Arc<AtomicBool>,
-    pub(crate) _execution_lock: File,
+    execution_lock: Option<File>,
+    release_confirmed: bool,
+}
+
+impl Drop for StorageLeaseAttempt {
+    fn drop(&mut self) {
+        self.valid.store(false, Ordering::Release);
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if !self.release_confirmed
+            && let Some(lock) = self.execution_lock.take()
+        {
+            // Unexpected owner loss cannot unlock unresolved storage work.
+            // No async cleanup is launched from Drop; restart requires exit.
+            std::mem::forget(lock);
+        }
+    }
 }
 
 const STORAGE_RENEWAL_STOP_DEADLINE: Duration = Duration::from_secs(5);
@@ -72,6 +91,31 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                 o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
             );
         }
+        // Own the execution lock before submitting the first database write.
+        // A cancelled/unknown acquisition remains recorded and cannot be
+        // mistaken for an idle fence by shutdown.
+        let execution_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&self.execution_lock_path)
+            .map_err(|_| {
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
+            })?;
+        flock(&execution_lock, FlockOperation::NonBlockingLockExclusive).map_err(|_| {
+            o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
+        })?;
+        *attempt = Some(StorageLeaseAttempt {
+            fencing_token: 0,
+            stop: None,
+            renewal: None,
+            renewal_failed: false,
+            acquisition_pending: true,
+            valid: Arc::new(AtomicBool::new(false)),
+            execution_lock: Some(execution_lock),
+            release_confirmed: false,
+        });
         let lease = match self
             .coordination
             .acquire_work_lease(
@@ -87,59 +131,23 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
             })? {
             o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
             o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                if let Some(current) = attempt.as_mut() {
+                    current.release_confirmed = true;
+                }
+                attempt.take();
                 return Err(
                     o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
                 );
             }
         };
+        let current = attempt
+            .as_mut()
+            .ok_or(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)?;
+        current.fencing_token = lease.fencing_token;
+        current.acquisition_pending = false;
         if self.quiescing.load(Ordering::Acquire) {
-            let _ = tokio::time::timeout(
-                STORAGE_RENEWAL_STOP_DEADLINE,
-                self.coordination.release_work_lease(
-                    "o3k-native-storage-controller",
-                    &self.controller_id,
-                    &self.controller_epoch,
-                    lease.fencing_token,
-                ),
-            )
-            .await;
-            return Err(
-                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
-            );
-        }
-        let execution_lock = match OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&self.execution_lock_path)
-        {
-            Ok(file) => file,
-            Err(_) => {
-                let _ = self
-                    .coordination
-                    .release_work_lease(
-                        "o3k-native-storage-controller",
-                        &self.controller_id,
-                        &self.controller_epoch,
-                        lease.fencing_token,
-                    )
-                    .await;
-                return Err(
-                    o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
-                );
-            }
-        };
-        if flock(&execution_lock, FlockOperation::NonBlockingLockExclusive).is_err() {
-            let _ = self
-                .coordination
-                .release_work_lease(
-                    "o3k-native-storage-controller",
-                    &self.controller_id,
-                    &self.controller_epoch,
-                    lease.fencing_token,
-                )
-                .await;
+            // `end` owns the recorded release; no best-effort release can
+            // disappear here if quiescence races acquisition.
             return Err(
                 o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
             );
@@ -175,13 +183,9 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                 }
             }
         });
-        *attempt = Some(StorageLeaseAttempt {
-            fencing_token,
-            stop: Some(stop),
-            renewal: Some(renewal),
-            valid,
-            _execution_lock: execution_lock,
-        });
+        current.stop = Some(stop);
+        current.renewal = Some(renewal);
+        current.valid = valid;
         Ok(())
     }
 
@@ -254,6 +258,11 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
         let Some(attempt) = attempt_slot.as_mut() else {
             return Ok(());
         };
+        if attempt.renewal_failed || attempt.acquisition_pending {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
         attempt.valid.store(false, Ordering::Release);
         if let Some(stop) = attempt.stop.take() {
             let _ = stop.send(());
@@ -261,7 +270,12 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
         if let Some(renewal) = attempt.renewal.as_mut() {
             match tokio::time::timeout(STORAGE_RENEWAL_STOP_DEADLINE, renewal).await {
                 Ok(Ok(())) => attempt.renewal = None,
-                Ok(Err(_)) | Err(_) => {
+                Ok(Err(_)) => {
+                    attempt.renewal = None;
+                    attempt.renewal_failed = true;
+                    return Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence);
+                }
+                Err(_) => {
                     // Keep the join handle in the attempt if this future is
                     // cancelled or times out. Dropping it would detach the
                     // renewal task while releasing the execution lock.
@@ -284,6 +298,7 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
         .await;
         match release_result {
             Ok(Ok(true)) => {
+                attempt.release_confirmed = true;
                 attempt_slot.take();
                 Ok(())
             }
@@ -304,10 +319,12 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                             || current.owner_controller_id != self.controller_id
                             || current.owner_controller_epoch != self.controller_epoch =>
                     {
+                        attempt.release_confirmed = true;
                         attempt_slot.take();
                         Ok(())
                     }
                     Ok(Ok(None)) => {
+                        attempt.release_confirmed = true;
                         attempt_slot.take();
                         Ok(())
                     }
@@ -549,6 +566,202 @@ pub(crate) fn storage_intent_epoch(epoch: &o3k_store::ControllerEpoch) -> u64 {
 mod storage_lease_drain_tests {
     use super::*;
     use sqlx::Connection;
+
+    async fn controlled_fence() -> Result<
+        (
+            LocalStorageFence,
+            Arc<super::super::drain_test_support::ControlledCoordination>,
+            PathBuf,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let root = std::env::temp_dir().join(format!("o3kd-storage-controlled-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root)?;
+        let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        let coordination = super::super::drain_test_support::ControlledCoordination::new(store);
+        let fence = LocalStorageFence {
+            coordination: coordination.clone(),
+            controller_id: o3k_store::ControllerId::new("controlled-storage"),
+            controller_epoch: o3k_store::ControllerEpoch::new("epoch-1"),
+            intent_epoch: 1,
+            execution_lock_path: root.join("storage.execution.lock"),
+            attempt: Arc::new(tokio::sync::Mutex::new(None)),
+            quiescing: Arc::new(AtomicBool::new(false)),
+        };
+        o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1).await?;
+        Ok((fence, coordination, root))
+    }
+
+    #[tokio::test]
+    async fn storage_end_waits_for_in_flight_database_renewal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_reconciler::storage_workflow::StorageControllerFence;
+        let (fence, coordination, root) = controlled_fence().await?;
+        coordination.renew.block();
+        tokio::time::timeout(
+            Duration::from_secs(7),
+            coordination.renew.entered.notified(),
+        )
+        .await?;
+        fence
+            .quiesce(Duration::from_secs(1))
+            .await
+            .map_err(|_| "quiesce failed")?;
+        let mut end = Box::pin(fence.end(1));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(end.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(coordination.renew.active.load(Ordering::Acquire), 1);
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fence.execution_lock_path)?;
+        assert!(flock(&contender, FlockOperation::NonBlockingLockExclusive).is_err());
+        coordination.renew.release();
+        end.await?;
+        assert_eq!(coordination.renew.active.load(Ordering::Acquire), 0);
+        assert!(fence.assert_current(1).await.is_err());
+        assert!(fence.begin(1).await.is_err());
+        assert!(flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok());
+        assert_eq!(coordination.renew.active.load(Ordering::Acquire), 0);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_assert_and_end_serialize_at_the_database_boundary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_reconciler::storage_workflow::StorageControllerFence;
+        let (fence, coordination, root) = controlled_fence().await?;
+        coordination.renew.block();
+        let mut assertion = Box::pin(fence.assert_current(1));
+        tokio::select! {
+            result = &mut assertion => return Err(format!("assertion escaped gate: {result:?}").into()),
+            () = coordination.renew.entered.notified() => {}
+        }
+        let mut end = Box::pin(fence.end(1));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(end.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(fence.attempt.try_lock().is_err());
+        coordination.renew.release();
+        assertion.await?;
+        end.await?;
+        assert_eq!(coordination.renew.active.load(Ordering::Acquire), 0);
+        assert!(fence.attempt.lock().await.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_storage_renewal_is_not_repolled_or_unlocked()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_reconciler::storage_workflow::StorageControllerFence;
+        let (fence, _coordination, root) = controlled_fence().await?;
+        {
+            let attempt = fence.attempt.lock().await;
+            if let Some(renewal) = attempt
+                .as_ref()
+                .and_then(|attempt| attempt.renewal.as_ref())
+            {
+                renewal.abort();
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if fence
+                    .attempt
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|attempt| attempt.renewal.as_ref())
+                    .is_some_and(|task| task.is_finished())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(fence.end(1).await.is_err());
+        assert!(fence.end(1).await.is_err());
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fence.execution_lock_path)?;
+        assert!(flock(&contender, FlockOperation::NonBlockingLockExclusive).is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_storage_release_retains_protection() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use o3k_reconciler::storage_workflow::StorageControllerFence;
+        let (fence, coordination, root) = controlled_fence().await?;
+        coordination.unknown_release.store(true, Ordering::Release);
+        assert!(fence.end(1).await.is_err());
+        assert!(fence.attempt.lock().await.is_some());
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fence.execution_lock_path)?;
+        assert!(flock(&contender, FlockOperation::NonBlockingLockExclusive).is_err());
+        coordination.unknown_release.store(false, Ordering::Release);
+        fence.end(1).await?;
+        assert!(flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_acquisition_is_recorded_and_keeps_execution_lock()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3kd-storage-acquire-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root)?;
+        let store = Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?);
+        let lock_path = root.join("storage.execution.lock");
+        let fence = LocalStorageFence {
+            coordination: store,
+            controller_id: o3k_store::ControllerId::new("cancelled-acquire"),
+            controller_epoch: o3k_store::ControllerEpoch::new("epoch-1"),
+            intent_epoch: 1,
+            execution_lock_path: lock_path.clone(),
+            attempt: Arc::new(tokio::sync::Mutex::new(None)),
+            quiescing: Arc::new(AtomicBool::new(false)),
+        };
+        let mut begin =
+            Box::pin(o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(begin.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(begin);
+        assert!(
+            fence
+                .attempt
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|attempt| attempt.acquisition_pending)
+        );
+        assert!(
+            o3k_reconciler::storage_workflow::StorageControllerFence::end(&fence, 1)
+                .await
+                .is_err()
+        );
+        let contender = OpenOptions::new().read(true).write(true).open(&lock_path)?;
+        assert!(flock(&contender, FlockOperation::NonBlockingLockExclusive).is_err());
+        drop(fence);
+        assert!(flock(&contender, FlockOperation::NonBlockingLockExclusive).is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn end_serializes_with_assert_and_joins_the_renewal_task()

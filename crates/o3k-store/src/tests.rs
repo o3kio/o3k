@@ -53,6 +53,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_writer_drain_joins_cancelled_sqlite_transaction_and_rejects_new_writes()
+    -> Result<(), Box<dyn Error>> {
+        let directory = BackupTestDirectory::new()?;
+        let path = directory.path("drain.sqlite");
+        let store = SqliteStore::connect_file(&path).await?;
+        sqlx::query("CREATE TABLE drain_probe (id INTEGER PRIMARY KEY)")
+            .execute(&store.pool)
+            .await?;
+        let writer_store = store.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let writer_entered = entered.clone();
+        let writer = tokio::spawn(async move {
+            let mut connection = writer_store.pool.acquire().await?;
+            sqlx::query("BEGIN IMMEDIATE")
+                .execute(&mut *connection)
+                .await?;
+            sqlx::query("INSERT INTO drain_probe VALUES (1)")
+                .execute(&mut *connection)
+                .await?;
+            writer_entered.notify_one();
+            std::future::pending::<()>().await;
+            Ok::<(), sqlx::Error>(())
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+        writer.abort();
+        let _ = writer.await;
+        tokio::time::timeout(Duration::from_secs(2), store.close_for_controller_drain()).await??;
+        assert_eq!(store.pool.size(), 0);
+        assert!(matches!(
+            sqlx::query("INSERT INTO drain_probe VALUES (2)")
+                .execute(&store.pool)
+                .await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        let reopened = SqliteStore::connect_file(&path).await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drain_probe")
+            .fetch_one(&reopened.pool)
+            .await?;
+        assert_eq!(
+            count, 0,
+            "cancelled transaction must roll back before drain returns"
+        );
+        reopened.close_for_controller_drain().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn fabric_host_identity_is_persisted_and_generation_fenced() -> Result<(), Box<dyn Error>>
     {
         let store = O3kStore::connect_sqlite_memory().await?;

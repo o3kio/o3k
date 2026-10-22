@@ -53,7 +53,9 @@ fn daemon_command(address: std::net::SocketAddr, data_dir: &std::path::Path) -> 
             "--data-dir",
             data_dir.to_str().unwrap_or_default(),
             "--log-filter",
-            "off",
+            "info",
+            "--log-format",
+            "json",
         ])
         .env(
             "O3K_NATIVE_CURSOR_HMAC_KEY",
@@ -68,8 +70,12 @@ fn wait_until_ready(child: &mut Child, address: std::net::SocketAddr) -> io::Res
     let startup_deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < startup_deadline {
         if let Some(status) = child.try_wait()? {
+            let mut detail = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                stderr.read_to_string(&mut detail)?;
+            }
             return Err(io::Error::other(format!(
-                "o3kd exited before readiness: {status}"
+                "o3kd exited before readiness: {status}: {detail}"
             )));
         }
         if let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(100)) {
@@ -240,5 +246,80 @@ fn startup_failure_after_lock_acquisition_releases_store_lock()
         "startup failed before reaching store open: {stderr}"
     );
     o3k_store::StoreAccessLock::acquire(&data_dir.0)?;
+    Ok(())
+}
+
+#[test]
+fn configured_network_and_storage_workers_drain_in_real_daemon()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDataDir::new()?;
+    let address = free_address()?;
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/o3k-compute-agent/tests/fixtures");
+    let mut command = daemon_command(address, &directory.0);
+    command
+        .env("O3K_FABRIC_DOMAIN_ID", uuid::Uuid::now_v7().to_string())
+        .env(
+            "O3K_FABRIC_HOST_IDENTITIES",
+            serde_json::json!([{
+                "host_id": "drain-host", "agent_id": "drain-agent",
+                "public_key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+                "underlay_endpoint": "192.0.2.10:51820", "fabric_transport_ip": "198.18.0.10",
+                "provider_version": "fabric-v3", "fabric_generation": 1,
+                "underlay_mtu": 1500, "fabric_mtu": 1440, "administrative_state": "enabled"
+            }])
+            .to_string(),
+        )
+        .env(
+            "O3K_NETWORK_AGENT_DIRECTORY",
+            serde_json::json!([{
+                "host_id": "drain-host", "agent_id": "drain-agent", "agent_epoch": "epoch-1",
+                "endpoint": "https://127.0.0.1:1", "tls_server_name": "localhost"
+            }])
+            .to_string(),
+        )
+        .env("O3K_NETWORK_AGENT_CA", fixtures.join("ca.pem"))
+        .env(
+            "O3K_NETWORK_AGENT_CLIENT_CERT",
+            fixtures.join("server-chain.pem"),
+        )
+        .env(
+            "O3K_NETWORK_AGENT_CLIENT_KEY",
+            fixtures.join("server-key.pem"),
+        )
+        .env("O3K_LVM_VOLUME_GROUP", "o3k-drain-test")
+        .env("O3K_LVM_THIN_POOL", "pool")
+        .env("O3K_LVM_PROVIDER_NAMESPACE", "drain-test")
+        // Capability probing must not invoke host LVM tools. Empty recovery
+        // state still enables the real storage recovery worker/fence.
+        .env("PATH", directory.0.join("no-host-executables"))
+        .stdout(Stdio::piped());
+    let mut daemon = ChildGuard(command.spawn()?);
+    wait_until_ready(&mut daemon.0, address)?;
+    let competitor = daemon_command(free_address()?, &directory.0).output()?;
+    assert!(
+        !competitor.status.success(),
+        "concurrent canonical-store controller was admitted"
+    );
+    assert!(
+        String::from_utf8_lossy(&competitor.stderr).contains("O3K data-directory lifetime lock")
+    );
+    stop_daemon(&mut daemon.0)?;
+    let mut logs = String::new();
+    if let Some(mut stdout) = daemon.0.stdout.take() {
+        stdout.read_to_string(&mut logs)?;
+    }
+    assert!(
+        logs.contains("controller writers drained"),
+        "missing successful drain verdict: {logs}"
+    );
+    let verdict = logs
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|line| line["fields"]["message"] == "controller writers drained")
+        .ok_or("missing structured drain verdict")?;
+    assert_eq!(verdict["fields"]["fabric_recovery_enabled"], true);
+    assert_eq!(verdict["fields"]["storage_recovery_enabled"], true);
+    let _lock = o3k_store::StoreAccessLock::acquire(&directory.0)?;
     Ok(())
 }

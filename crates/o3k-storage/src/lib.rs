@@ -18,6 +18,8 @@ use thiserror::Error;
 use tokio::process::Command;
 
 mod ceph;
+#[cfg(all(test, unix))]
+mod command_drain_tests;
 
 pub use ceph::{
     CephCommandError, CephCommandOutput, CephCommandRunner, CephRbdConfig, CephRbdStorageProvider,
@@ -360,8 +362,60 @@ pub trait LvmCommandRunner: Send + Sync {
     ) -> Result<LvmCommandOutput, LvmCommandError>;
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemLvmCommandRunner;
+type OwnedLvmCommand = Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>;
+
+#[derive(Debug, Default)]
+struct LvmCommandTasks {
+    tasks: std::sync::Mutex<Vec<OwnedLvmCommand>>,
+    closed: std::sync::atomic::AtomicBool,
+    failed: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SystemLvmCommandRunner {
+    owned: Arc<LvmCommandTasks>,
+}
+
+impl SystemLvmCommandRunner {
+    /// Close command admission and await every submitted subprocess. Commands
+    /// are never aborted here: cancellation of their caller cannot make a
+    /// still-running storage mutation disappear from the drain predicate.
+    pub async fn drain(&self, timeout: std::time::Duration) -> Result<(), LvmCommandError> {
+        use std::sync::atomic::Ordering;
+        if self.owned.failed.swap(true, Ordering::AcqRel) {
+            return Err(LvmCommandError::Failed);
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        let tasks = {
+            let tasks = self
+                .owned
+                .tasks
+                .lock()
+                .map_err(|_| LvmCommandError::Failed)?;
+            self.owned.closed.store(true, Ordering::Release);
+            tasks.clone()
+        };
+        for task in tasks {
+            let mut slot = tokio::time::timeout_at(deadline, task.lock())
+                .await
+                .map_err(|_| LvmCommandError::Failed)?;
+            if let Some(task) = slot.as_mut() {
+                let result = tokio::time::timeout_at(deadline, task)
+                    .await
+                    .map_err(|_| LvmCommandError::Failed)?;
+                slot.take();
+                result.map_err(|_| LvmCommandError::Failed)?;
+            }
+        }
+        self.owned
+            .tasks
+            .lock()
+            .map_err(|_| LvmCommandError::Failed)?
+            .clear();
+        self.owned.failed.store(false, Ordering::Release);
+        Ok(())
+    }
+}
 
 #[async_trait]
 impl LvmCommandRunner for SystemLvmCommandRunner {
@@ -370,15 +424,61 @@ impl LvmCommandRunner for SystemLvmCommandRunner {
         program: &str,
         args: &[String],
     ) -> Result<LvmCommandOutput, LvmCommandError> {
-        let output = Command::new(program)
-            .args(args)
-            .output()
-            .await
-            .map_err(|_| LvmCommandError::Unavailable)?;
-        Ok(LvmCommandOutput {
-            status: output.status.code().unwrap_or(1),
-            stdout: String::from_utf8(output.stdout).map_err(|_| LvmCommandError::Failed)?,
-        })
+        use std::sync::atomic::Ordering;
+        let program = program.to_owned();
+        let args = args.to_vec();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        {
+            let mut tasks = self
+                .owned
+                .tasks
+                .lock()
+                .map_err(|_| LvmCommandError::Failed)?;
+            if self.owned.closed.load(Ordering::Acquire) {
+                return Err(LvmCommandError::Unavailable);
+            }
+            tasks.retain(|slot| {
+                let Ok(mut slot) = slot.try_lock() else {
+                    return true;
+                };
+                let Some(task) = slot.as_mut() else {
+                    return false;
+                };
+                if !task.is_finished() {
+                    return true;
+                }
+                let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+                match std::future::Future::poll(std::pin::Pin::new(task), &mut context) {
+                    std::task::Poll::Ready(result) => {
+                        slot.take();
+                        if result.is_err() {
+                            self.owned.failed.store(true, Ordering::Release);
+                        }
+                        false
+                    }
+                    std::task::Poll::Pending => true,
+                }
+            });
+            let task = tokio::spawn(async move {
+                let result = async {
+                    let output = Command::new(program)
+                        .kill_on_drop(true)
+                        .args(args)
+                        .output()
+                        .await
+                        .map_err(|_| LvmCommandError::Unavailable)?;
+                    Ok(LvmCommandOutput {
+                        status: output.status.code().unwrap_or(1),
+                        stdout: String::from_utf8(output.stdout)
+                            .map_err(|_| LvmCommandError::Failed)?,
+                    })
+                }
+                .await;
+                let _ = sender.send(result);
+            });
+            tasks.push(Arc::new(tokio::sync::Mutex::new(Some(task))));
+        }
+        receiver.await.map_err(|_| LvmCommandError::Failed)?
     }
 }
 
@@ -398,8 +498,15 @@ impl<R> fmt::Debug for LvmStorageProvider<R> {
 }
 
 impl LvmStorageProvider<SystemLvmCommandRunner> {
+    pub async fn drain_owned_commands(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<(), LvmCommandError> {
+        self.runner.drain(timeout).await
+    }
+
     pub fn new(config: LvmConfig) -> Result<Self, StorageProviderError> {
-        Self::with_runner(config, SystemLvmCommandRunner)
+        Self::with_runner(config, SystemLvmCommandRunner::default())
     }
 }
 

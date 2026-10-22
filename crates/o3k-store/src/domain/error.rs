@@ -13,6 +13,8 @@ pub enum StoreError {
     OperationNotFound,
     #[error("durable store cannot enumerate non-terminal operations")]
     OperationEnumerationUnavailable,
+    #[error("store cannot prove terminal writer drain")]
+    WriterDrainUnavailable,
     #[error("resource generation is stale")]
     StaleGeneration,
     #[error("resource already exists")]

@@ -348,6 +348,12 @@ pub trait DurableStore: Send + Sync {
         request: &IdempotencyReservationRequest,
     ) -> Result<CanonicalAcceptanceOutcome, StoreError>;
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError>;
+    /// Permanently closes local database admission and joins connection
+    /// workers after all controller executors and lease cleanup have stopped.
+    /// Implementations without this proof must reject the drain.
+    async fn close_for_controller_drain(&self) -> Result<(), StoreError> {
+        Err(StoreError::WriterDrainUnavailable)
+    }
     /// Lists every durable non-terminal operation in stable order. Shutdown
     /// uses this read after executor drain to preserve unresolved identities
     /// without treating them as active writers or rewriting their states.
