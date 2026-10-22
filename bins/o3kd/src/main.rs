@@ -3,6 +3,14 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+/// Hard bound on the API-serve connection drain once the shutdown signal
+/// fires. A stalled client must not delay the authenticated backup handoff
+/// past the executor's overall deadline; on expiry the serve future is
+/// dropped, which closes the listener (axum 0.8 detaches connection tasks,
+/// so stalled handlers keep running until process exit), and the bounded
+/// writer drain begins either way.
+const SERVE_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = o3k_config::Config::from_sources(std::env::args(), std::env::vars())?;
@@ -36,8 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+    // Backup handoff is Linux-only; this binding only mirrors the shape of
+    // the Linux arm (nothing consumes it off-Linux).
     #[cfg(not(target_os = "linux"))]
-    let backup_control = None;
+    let _backup_control: Option<()> = None;
 
     info!(
         address = %listen_addr,
@@ -58,9 +68,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     #[cfg(not(target_os = "linux"))]
     let graceful_shutdown = composition::shutdown_signal(shutdown_state);
-    let serve_result = axum::serve(listener, o3k_api::router_with_state(serve_state))
-        .with_graceful_shutdown(graceful_shutdown)
-        .await;
+    // Bound the post-signal connection drain: the wrapped signal future
+    // notifies `serve_shutdown_began` the moment shutdown initiates, and the
+    // serve gets at most `SERVE_DRAIN_BOUND` from then to finish. On expiry
+    // the select drops the serve future, which closes only the listener
+    // (axum 0.8 detaches connection tasks, so stalled handlers run until
+    // process exit), and the bounded writer drain below begins either way.
+    let serve_shutdown_began = std::sync::Arc::new(tokio::sync::Notify::new());
+    let serve_graceful_shutdown = {
+        let serve_shutdown_began = std::sync::Arc::clone(&serve_shutdown_began);
+        async move {
+            graceful_shutdown.await;
+            serve_shutdown_began.notify_one();
+        }
+    };
+    let serve = axum::serve(listener, o3k_api::router_with_state(serve_state))
+        .with_graceful_shutdown(serve_graceful_shutdown);
+    let serve_result = tokio::select! {
+        result = serve => result,
+        _ = async {
+            serve_shutdown_began.notified().await;
+            tokio::time::sleep(SERVE_DRAIN_BOUND).await;
+        } => {
+            tracing::warn!(
+                ?SERVE_DRAIN_BOUND,
+                "axum serve did not drain after the shutdown signal; closing the listener \
+                 (stalled connection handlers run until process exit) and proceeding to the \
+                 writer drain"
+            );
+            Ok(())
+        }
+    };
 
     let drain = composition.shutdown().await;
 
@@ -69,17 +107,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // exit. Every failure here retains the drained store lock until process
     // exit (fail closed).
     #[cfg(target_os = "linux")]
-    if let Some(request) = match backup_control.as_mut() {
-        Some(control) => control.take_accepted().await,
-        None => None,
-    } {
-        return match drain {
+    if let Some(control) = backup_control.as_mut()
+        && control.was_requested()
+    {
+        let Some(request) = control.take_accepted().await else {
+            // `take_accepted` already logged why. The daemon drained but the
+            // authenticated request never arrived; masquerading as an
+            // ordinary exit-0 would obscure the failure.
+            tracing::error!(
+                "backup handoff was requested but the accepted request never arrived; \
+                 exiting non-zero"
+            );
+            std::process::exit(1);
+        };
+        let handoff_result = match drain {
             Ok(proof) => finish_backup_handoff(proof, request),
             Err(error) => {
                 request.reject(o3k_store::HandoffRejectReason::DrainFailed);
                 Err(error)
             }
         };
+        // The API serve must also have ended cleanly; an errored serve is a
+        // failed daemon even when the handoff itself succeeded.
+        if let Err(error) = serve_result {
+            tracing::error!(
+                %error,
+                "API serve ended with an error during the backup handoff shutdown"
+            );
+            let error: Box<dyn std::error::Error> = Box::new(error);
+            return Err(error);
+        }
+        return handoff_result;
     }
 
     let _drain_proof = drain_result_for_normal_exit(drain)?;

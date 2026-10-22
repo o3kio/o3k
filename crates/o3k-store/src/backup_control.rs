@@ -38,13 +38,19 @@
 //!
 //! # Authentication (fail closed)
 //!
-//! - Peer credentials come from `SO_PEERCRED` via rustix.
-//! - The peer uid must equal the configured expected uid.
-//! - `/proc/<pid>/exe` (readlink) must canonicalize to the expected executor
-//!   path, and device+inode of both must match (no symlink substitution).
+//! - Peer credentials come from `SO_PEERCRED` via rustix, cross-checked
+//!   against the effective uid parsed from `/proc/<pid>/status`.
+//! - The peer executable is identified by device+inode, not by path:
+//!   `fs::metadata("/proc/<pid>/exe")` follows the magic link into the
+//!   peer's mount namespace and stats the real executable inode, which is
+//!   compared against `fs::metadata(expected_exe)`. The readlink exists
+//!   only to reject a ` (deleted)` suffix: an unlinked executable fails
+//!   closed. Path comparison alone is bypassable via a mount namespace
+//!   (the resolved path is compared with itself).
 //! - `/proc/<pid>/stat` field 22 (starttime, parsed after the last `)`) is
 //!   recorded at accept; [`AcceptedBackupRequest::revalidate_peer`] re-reads it
-//!   immediately before the lock handoff so PID reuse fails closed.
+//!   immediately before the lock handoff so PID reuse fails closed, and
+//!   re-checks the executable dev+ino and the peer uid recorded at accept.
 //! - One authenticated attempt at a time per listener: a second
 //!   [`BackupControlListener::accept_authenticated`] call while one request is
 //!   active is rejected with [`BackupControlError::AlreadyActive`], and a
@@ -107,6 +113,10 @@ const INSTALLATION_TOKEN_DOMAIN: &[u8] = b"o3k-backup-installation-identity-v1";
 const SITE_TOKEN_DOMAIN: &[u8] = b"o3k-backup-site-identity-v1";
 const LISTENER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const REJECT_FRAME_TIMEOUT: Duration = Duration::from_millis(500);
+/// Per-connection write bound for the in-band `AlreadyActive` rejection sent
+/// to connectors that arrive after the single authenticated attempt (a
+/// stalled peer must never pin the accept thread).
+const ALREADY_ACTIVE_REJECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Mask of permissions that must never be present on the data directory or
 /// the control directory (mirrors the store-access lock posture).
 const PUBLIC_WRITABLE_MASK: u32 = 0o022;
@@ -254,6 +264,12 @@ pub struct PeerIdentity {
     pub gid: u32,
     /// Canonical path of the peer executable observed via `/proc/<pid>/exe`.
     pub exe: PathBuf,
+    /// Device of the real peer executable inode (via
+    /// `metadata("/proc/<pid>/exe")`, which follows the magic link into the
+    /// peer's mount namespace). Identity is decided by dev+ino, not path.
+    pub exe_dev: u64,
+    /// Inode of the real peer executable inode (see [`Self::exe_dev`]).
+    pub exe_ino: u64,
     /// `/proc/<pid>/stat` field 22 (starttime in clock ticks) observed at
     /// accept; [`AcceptedBackupRequest::revalidate_peer`] requires it to be
     /// unchanged.
@@ -465,6 +481,26 @@ impl BackupControlListener {
         }
     }
 
+    /// Accepts the next pending connection WITHOUT authentication.
+    ///
+    /// After the daemon's single authenticated attempt is active, the accept
+    /// thread uses this to take every further connector and answer it with
+    /// [`reject_already_active`] instead of leaving it to wait out its own
+    /// request timeout. The wait is bounded by `timeout` exactly like
+    /// [`Self::accept_authenticated`].
+    pub fn accept_raw(&self, timeout: Duration) -> Result<UnixStream, BackupControlError> {
+        if timeout.is_zero() {
+            return Err(BackupControlError::InvalidInput);
+        }
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "backup control timeout is too large",
+            )
+        })?;
+        Ok(accept_pending(&self.listener, deadline)?.0)
+    }
+
     fn accept_inner(
         &self,
         expected: &ExpectedExecutor,
@@ -476,26 +512,9 @@ impl BackupControlListener {
                 "backup control timeout is too large",
             )
         })?;
-        let (mut stream, _) = loop {
-            match self.listener.accept() {
-                Ok(accepted) => break accepted,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(BackupControlError::Io(error)),
-            }
-            if Instant::now() >= deadline {
-                return Err(BackupControlError::Timeout);
-            }
-            thread::sleep(LISTENER_POLL_INTERVAL);
-        };
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(BackupControlError::Timeout);
-        }
-        stream
-            .set_read_timeout(Some(remaining))
-            .map_err(BackupControlError::Io)?;
+        let (mut stream, _) = accept_pending(&self.listener, deadline)?;
 
-        let frame = match read_request_frame(&mut stream) {
+        let frame = match read_request_frame(&mut stream, deadline) {
             Ok(frame) => frame,
             Err(FrameReadError::TimedOut) => return Err(BackupControlError::Timeout),
             Err(FrameReadError::Truncated) => {
@@ -539,7 +558,16 @@ impl BackupControlListener {
                 ));
             }
         };
-        match executable_matches(&identity.exe, &expected.exe) {
+        // The procfs identity must agree with the socket credentials: a
+        // process whose /proc effective uid no longer matches the peer that
+        // connected is not the authenticated executor.
+        if identity.uid != uid {
+            reject_stream(&mut stream, HandoffRejectReason::UnauthorizedPeer);
+            return Err(BackupControlError::Rejected(
+                HandoffRejectReason::UnauthorizedPeer,
+            ));
+        }
+        match executable_matches(&identity, &expected.exe) {
             Ok(true) => {}
             Ok(false) => {
                 reject_stream(&mut stream, HandoffRejectReason::UnauthorizedPeer);
@@ -582,6 +610,8 @@ impl BackupControlListener {
                 uid,
                 gid,
                 exe: identity.exe,
+                exe_dev: identity.exe_dev,
+                exe_ino: identity.exe_ino,
                 start_time_ticks: identity.start_time_ticks,
             },
             shared: self.shared.clone(),
@@ -637,17 +667,22 @@ impl AcceptedBackupRequest {
         Ok(())
     }
 
-    /// PID-reuse revalidation: re-reads `/proc/<pid>/stat` and
-    /// `/proc/<pid>/exe` and requires the peer to still be alive with an
-    /// identical starttime and executable identity. Call immediately before
-    /// [`crate::StoreAccessLock::handoff`].
+    /// PID-reuse revalidation: re-reads `/proc/<pid>/stat`, `/proc/<pid>/exe`,
+    /// and `/proc/<pid>/status` and requires the peer to still be alive with
+    /// an identical starttime, the same canonical executable path and
+    /// executable dev+ino, and the uid recorded at accept. Call immediately
+    /// before [`crate::StoreAccessLock::handoff`].
     pub fn revalidate_peer(&self) -> Result<(), BackupControlError> {
         let identity =
             read_process_identity(self.peer.pid).map_err(|_| BackupControlError::PeerChanged)?;
         if identity.start_time_ticks != self.peer.start_time_ticks {
             return Err(BackupControlError::PeerChanged);
         }
-        if identity.exe != self.peer.exe {
+        if identity.exe != self.peer.exe
+            || identity.exe_dev != self.peer.exe_dev
+            || identity.exe_ino != self.peer.exe_ino
+            || identity.uid != self.peer.uid
+        {
             return Err(BackupControlError::Unauthorized);
         }
         Ok(())
@@ -673,6 +708,12 @@ pub fn connect_and_request(
     if timeout.is_zero() {
         return Err(BackupControlError::InvalidInput);
     }
+    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "backup control timeout is too large",
+        )
+    })?;
     let socket_path = resolve_socket_path(data_dir)?;
     let mut stream = UnixStream::connect(socket_path).map_err(BackupControlError::Io)?;
     stream
@@ -694,7 +735,7 @@ pub fn connect_and_request(
         }
     })?;
 
-    let response = read_response_frame(&mut stream).map_err(|error| match error {
+    let response = read_response_frame(&mut stream, deadline).map_err(|error| match error {
         FrameReadError::TimedOut => BackupControlError::Timeout,
         FrameReadError::Truncated => BackupControlError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -815,29 +856,84 @@ fn resolve_socket_path(data_dir: &Path) -> Result<PathBuf, BackupControlError> {
         .join(BACKUP_CONTROL_SOCKET))
 }
 
+/// Waits for the next pending connection until `deadline`.
+fn accept_pending(
+    listener: &UnixListener,
+    deadline: Instant,
+) -> Result<(UnixStream, std::os::unix::net::SocketAddr), BackupControlError> {
+    loop {
+        match listener.accept() {
+            Ok(accepted) => return Ok(accepted),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(BackupControlError::Io(error)),
+        }
+        if Instant::now() >= deadline {
+            return Err(BackupControlError::Timeout);
+        }
+        thread::sleep(LISTENER_POLL_INTERVAL);
+    }
+}
+
 struct ProcIdentity {
     exe: PathBuf,
+    exe_dev: u64,
+    exe_ino: u64,
+    uid: u32,
     start_time_ticks: u64,
 }
 
 fn read_process_identity(pid: u32) -> io::Result<ProcIdentity> {
-    let exe = read_process_exe(pid)?;
-    // The executable must still resolve so acceptance binds to a live binary
-    // on disk; an unlinked exe fails closed.
-    fs::metadata(&exe)?;
+    let (exe, exe_dev, exe_ino) = read_process_exe(pid)?;
+    let uid = read_process_effective_uid(pid)?;
     let start_time_ticks = read_process_start_time(pid)?;
     Ok(ProcIdentity {
         exe,
+        exe_dev,
+        exe_ino,
+        uid,
         start_time_ticks,
     })
 }
 
-fn read_process_exe(pid: u32) -> io::Result<PathBuf> {
-    let target = fs::read_link(format!("/proc/{pid}/exe"))?;
+fn read_process_exe(pid: u32) -> io::Result<(PathBuf, u64, u64)> {
+    let proc_exe = format!("/proc/{pid}/exe");
+    let target = fs::read_link(&proc_exe)?;
     let text = target.to_string_lossy();
-    let stripped = text.strip_suffix(" (deleted)").unwrap_or(&text);
-    let canonical = fs::canonicalize(stripped)?;
-    Ok(canonical)
+    // A deleted executable fails closed: acceptance must bind to a live
+    // binary on disk, and the readlink suffix is the kernel's own signal
+    // that the executable inode was unlinked after exec.
+    if text.ends_with(" (deleted)") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "peer executable was deleted after exec",
+        ));
+    }
+    // `metadata` on the magic link follows it into the peer's mount
+    // namespace and stats the REAL executable inode; identity is decided by
+    // comparing dev+ino with the expected executor's inode (path comparison
+    // alone compares a path with itself across namespaces).
+    let metadata = fs::metadata(&proc_exe)?;
+    let canonical = fs::canonicalize(&proc_exe)?;
+    Ok((canonical, metadata.dev(), metadata.ino()))
+}
+
+/// Parses the effective uid (second field) of the `Uid:` line of
+/// `/proc/<pid>/status`.
+fn read_process_effective_uid(pid: u32) -> io::Result<u32> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
+    for line in status.lines() {
+        let Some(fields) = line.strip_prefix("Uid:") else {
+            continue;
+        };
+        let effective = fields
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| invalid_stat("effective uid field is missing"))?;
+        return effective
+            .parse::<u32>()
+            .map_err(|_| invalid_stat("effective uid field is not numeric"));
+    }
+    Err(invalid_stat("Uid line is missing"))
 }
 
 fn read_process_start_time(pid: u32) -> io::Result<u64> {
@@ -866,14 +962,13 @@ fn invalid_stat(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn executable_matches(peer_exe: &Path, expected_exe: &Path) -> io::Result<bool> {
-    let expected_canonical = fs::canonicalize(expected_exe)?;
-    if peer_exe != expected_canonical {
-        return Ok(false);
-    }
-    let peer_stat = fs::metadata(peer_exe)?;
-    let expected_stat = fs::metadata(&expected_canonical)?;
-    Ok(peer_stat.dev() == expected_stat.dev() && peer_stat.ino() == expected_stat.ino())
+/// Decides executable identity by device+inode: the peer's real executable
+/// inode (observed through the `/proc/<pid>/exe` magic link, i.e. in the
+/// peer's own mount namespace) must be the same file as the expected
+/// executor's inode.
+fn executable_matches(identity: &ProcIdentity, expected_exe: &Path) -> io::Result<bool> {
+    let expected_stat = fs::metadata(expected_exe)?;
+    Ok(identity.exe_dev == expected_stat.dev() && identity.exe_ino == expected_stat.ino())
 }
 
 enum FrameReadError {
@@ -882,10 +977,23 @@ enum FrameReadError {
     Io(io::Error),
 }
 
-fn read_request_frame(stream: &mut UnixStream) -> Result<[u8; REQUEST_FRAME_LEN], FrameReadError> {
+/// Reads the request frame with a shrinking absolute deadline: the read
+/// timeout is recomputed before EVERY read syscall, so a drip-feeding peer
+/// cannot stretch the exchange to one timeout per byte.
+fn read_request_frame(
+    stream: &mut UnixStream,
+    deadline: Instant,
+) -> Result<[u8; REQUEST_FRAME_LEN], FrameReadError> {
     let mut frame = [0_u8; REQUEST_FRAME_LEN];
     let mut offset = 0;
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(FrameReadError::TimedOut);
+        }
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(FrameReadError::Io)?;
         match stream.read(&mut frame[offset..]) {
             Ok(0) => return Err(FrameReadError::Truncated),
             Ok(read) => {
@@ -908,12 +1016,22 @@ fn read_request_frame(stream: &mut UnixStream) -> Result<[u8; REQUEST_FRAME_LEN]
     }
 }
 
+/// Reads the response frame with a shrinking absolute deadline (see
+/// [`read_request_frame`]).
 fn read_response_frame(
     stream: &mut UnixStream,
+    deadline: Instant,
 ) -> Result<[u8; RESPONSE_FRAME_LEN], FrameReadError> {
     let mut response = [0_u8; RESPONSE_FRAME_LEN];
     let mut offset = 0;
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(FrameReadError::TimedOut);
+        }
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(FrameReadError::Io)?;
         match stream.read(&mut response[offset..]) {
             Ok(0) => return Err(FrameReadError::Truncated),
             Ok(read) => {
@@ -965,22 +1083,75 @@ fn parse_request(frame: &[u8; REQUEST_FRAME_LEN]) -> Result<ParsedRequest, Hando
     })
 }
 
+/// Writes `buffer` with a shrinking absolute deadline: the write timeout is
+/// recomputed before EVERY write syscall (mirroring the frame readers), so a
+/// drip-reading peer cannot stretch the exchange to one timeout per byte.
 fn write_all_bounded(stream: &mut UnixStream, buffer: &[u8], timeout: Duration) -> io::Result<()> {
     let previous = stream.write_timeout()?;
-    stream.set_write_timeout(Some(timeout))?;
-    let result = stream.write_all(buffer);
+    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "backup control timeout is too large",
+        )
+    })?;
+    let result = (|| {
+        let mut offset = 0;
+        while offset < buffer.len() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "backup control write timed out",
+                ));
+            }
+            stream.set_write_timeout(Some(remaining))?;
+            match stream.write(&buffer[offset..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "backup control write wrote zero bytes",
+                    ));
+                }
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    })();
     let restore_result = stream.set_write_timeout(previous);
     result?;
     restore_result
 }
 
 fn reject_stream(stream: &mut UnixStream, reason: HandoffRejectReason) {
+    reject_stream_with_timeout(stream, reason, REJECT_FRAME_TIMEOUT);
+}
+
+fn reject_stream_with_timeout(
+    stream: &mut UnixStream,
+    reason: HandoffRejectReason,
+    timeout: Duration,
+) {
     let mut frame = [0_u8; RESPONSE_FRAME_LEN];
     frame[..REJECT_MAGIC.len()].copy_from_slice(REJECT_MAGIC);
     frame[REJECT_MAGIC.len()] = reason.reason_byte();
     // Best effort: the peer may already be gone; the connection closes when
     // the stream is dropped regardless.
-    let _ = write_all_bounded(stream, &frame, REJECT_FRAME_TIMEOUT);
+    let _ = write_all_bounded(stream, &frame, timeout);
+}
+
+/// Best-effort in-band `AlreadyActive` rejection (bounded to
+/// [`ALREADY_ACTIVE_REJECT_TIMEOUT`]) for a connection that arrives after the
+/// single authenticated attempt has been accepted: the concurrent executor
+/// learns the backup slot is taken (exit 2) instead of waiting out its own
+/// request timeout.
+pub fn reject_already_active(stream: &mut UnixStream) {
+    reject_stream_with_timeout(
+        stream,
+        HandoffRejectReason::AlreadyActive,
+        ALREADY_ACTIVE_REJECT_TIMEOUT,
+    );
 }
 
 #[cfg(test)]
@@ -1539,19 +1710,11 @@ mod tests {
             uid: current_uid(),
             gid: 0,
             exe: identity.exe,
+            exe_dev: identity.exe_dev,
+            exe_ino: identity.exe_ino,
             start_time_ticks: identity.start_time_ticks,
         };
-        let (pair_left, _pair_right) = UnixStream::pair()?;
-        let shared = Arc::new(ListenerShared {
-            state: AtomicU8::new(STATE_IDLE),
-            accepted_operations: Mutex::new(Vec::new()),
-        });
-        let accepted = AcceptedBackupRequest {
-            operation_id: [7_u8; 16],
-            stream: pair_left,
-            peer,
-            shared,
-        };
+        let accepted = accepted_request_for(peer)?;
         accepted.revalidate_peer().map_err(io::Error::other)?;
         child.kill()?;
         child.wait()?;
@@ -1561,6 +1724,242 @@ mod tests {
                 "dead peer revalidated successfully: {other:?}"
             ))),
         }
+    }
+
+    fn accepted_request_for(peer: PeerIdentity) -> io::Result<AcceptedBackupRequest> {
+        let (pair_left, _pair_right) = UnixStream::pair()?;
+        let shared = Arc::new(ListenerShared {
+            state: AtomicU8::new(STATE_IDLE),
+            accepted_operations: Mutex::new(Vec::new()),
+        });
+        Ok(AcceptedBackupRequest {
+            operation_id: [7_u8; 16],
+            stream: pair_left,
+            peer,
+            shared,
+        })
+    }
+
+    /// Spawns `sleep 60` and waits until its procfs identity settles on the
+    /// sleep executable, returning the child and its recorded identity.
+    fn spawn_settled_sleep() -> io::Result<(std::process::Child, ProcIdentity)> {
+        let sleep_path = ["/bin/sleep", "/usr/bin/sleep"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.exists())
+            .ok_or_else(|| io::Error::other("no sleep executable available for test"))?;
+        let canonical_sleep = fs::canonicalize(&sleep_path)?;
+        let mut child = Command::new(sleep_path).arg("60").spawn()?;
+        let pid = child.id();
+        let identity = loop {
+            match read_process_identity(pid) {
+                Ok(identity) if identity.exe == canonical_sleep => break identity,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+            if let Some(status) = child.try_wait()? {
+                let _ = child.wait();
+                return Err(io::Error::other(format!(
+                    "sleep child exited before exec settled: {status}"
+                )));
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        Ok((child, identity))
+    }
+
+    #[test]
+    fn revalidate_detects_changed_executable_inode_and_uid() -> io::Result<()> {
+        let (mut child, identity) = spawn_settled_sleep()?;
+        let base = PeerIdentity {
+            pid: child.id(),
+            uid: current_uid(),
+            gid: 0,
+            exe: identity.exe.clone(),
+            exe_dev: identity.exe_dev,
+            exe_ino: identity.exe_ino,
+            start_time_ticks: identity.start_time_ticks,
+        };
+        // The live child revalidates cleanly.
+        accepted_request_for(base.clone())?
+            .revalidate_peer()
+            .map_err(io::Error::other)?;
+        // A recorded executable inode that no longer matches the live
+        // process (the file was replaced under the same path) fails closed.
+        let mut swapped_inode = base.clone();
+        swapped_inode.exe_ino ^= 1;
+        match accepted_request_for(swapped_inode)?.revalidate_peer() {
+            Err(BackupControlError::Unauthorized) => {}
+            other => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::other(format!(
+                    "swapped executable inode revalidated successfully: {other:?}"
+                )));
+            }
+        }
+        // A recorded uid that no longer matches the live process fails closed.
+        let mut swapped_uid = base;
+        swapped_uid.uid ^= 1;
+        match accepted_request_for(swapped_uid)?.revalidate_peer() {
+            Err(BackupControlError::Unauthorized) => {}
+            other => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::other(format!(
+                    "swapped uid revalidated successfully: {other:?}"
+                )));
+            }
+        }
+        child.kill()?;
+        child.wait()?;
+        Ok(())
+    }
+
+    #[test]
+    fn deleted_executable_identity_fails_closed() -> io::Result<()> {
+        let sleep_path = ["/bin/sleep", "/usr/bin/sleep"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.exists())
+            .ok_or_else(|| io::Error::other("no sleep executable available for test"))?;
+        let root = TestDataDir::new()?;
+        let copy = root.0.join("sleep-copy");
+        fs::copy(&sleep_path, &copy)?;
+        fs::set_permissions(&copy, fs::Permissions::from_mode(0o700))?;
+        let mut child = Command::new(&copy).arg("60").spawn()?;
+        let pid = child.id();
+        let canonical = fs::canonicalize(&copy)?;
+        loop {
+            match read_process_identity(pid) {
+                Ok(identity) if identity.exe == canonical => break,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+            if let Some(status) = child.try_wait()? {
+                let _ = child.wait();
+                return Err(io::Error::other(format!(
+                    "sleep copy exited before exec settled: {status}"
+                )));
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        fs::remove_file(&copy)?;
+        // The unlinked executable must fail closed: the peer can no longer be
+        // bound to a live binary on disk, so neither identity recording nor
+        // revalidation may succeed.
+        match read_process_identity(pid) {
+            Err(_) => {}
+            Ok(identity) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::other(format!(
+                    "deleted executable was still identified: {}",
+                    identity.exe.display()
+                )));
+            }
+        }
+        child.kill()?;
+        child.wait()?;
+        Ok(())
+    }
+
+    #[test]
+    fn executable_identity_matches_by_inode_not_path() -> io::Result<()> {
+        let root = TestDataDir::new()?;
+        let original = root.0.join("executor-a");
+        fs::write(&original, b"binary-a")?;
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o700))?;
+        let alias = root.0.join("executor-a-alias");
+        fs::hard_link(&original, &alias)?;
+        let other = root.0.join("executor-b");
+        fs::write(&other, b"binary-b")?;
+        let stat_a = fs::metadata(&original)?;
+        let identity = ProcIdentity {
+            exe: fs::canonicalize(&original)?,
+            exe_dev: stat_a.dev(),
+            exe_ino: stat_a.ino(),
+            uid: current_uid(),
+            start_time_ticks: 0,
+        };
+        assert!(executable_matches(&identity, &original)?);
+        // A hardlink alias resolves to the same inode: same binary, even
+        // though the path differs.
+        assert!(executable_matches(&identity, &alias)?);
+        // A different file can never match on path alone.
+        assert!(!executable_matches(&identity, &other)?);
+        Ok(())
+    }
+
+    #[test]
+    fn drip_fed_request_frame_times_out_at_deadline() -> io::Result<()> {
+        let root = TestDataDir::new()?;
+        let listener = BackupControlListener::bind(&root.0)?;
+        let (expected, _) = expected_for_current_process(&root.0)?;
+        let socket_path = root.socket_path();
+        let client = thread::spawn(move || {
+            let Ok(mut stream) = UnixStream::connect(socket_path) else {
+                return;
+            };
+            // One byte per 200ms: a per-read timeout fixed at the start of
+            // the read loop would let this drip for ~13s; the shrinking
+            // deadline must cut it at ~1s.
+            for byte in 0..REQUEST_FRAME_LEN as u8 {
+                if stream.write_all(&[byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let started = std::time::Instant::now();
+        match listener.accept_authenticated(&expected, Duration::from_secs(1)) {
+            Err(BackupControlError::Timeout) => {}
+            other => {
+                client
+                    .join()
+                    .map_err(|_| io::Error::other("client thread panicked"))?;
+                return Err(io::Error::other(format!(
+                    "drip-fed frame was not timed out: {other:?}"
+                )));
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "drip-fed frame was not bounded by the absolute deadline"
+        );
+        client
+            .join()
+            .map_err(|_| io::Error::other("client thread panicked"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn post_accept_connection_gets_in_band_already_active_rejection() -> io::Result<()> {
+        let root = TestDataDir::new()?;
+        let listener = BackupControlListener::bind(&root.0)?;
+        let (expected, request) = expected_for_current_process(&root.0)?;
+        let data_dir = root.0.clone();
+        let client = thread::spawn(move || client_request(&data_dir, request));
+        let mut accepted = listener
+            .accept_authenticated(&expected, Duration::from_secs(5))
+            .map_err(io::Error::other)?;
+        accepted.send_accept()?;
+        let stream = join_client(client.join())?;
+        drop(stream);
+        // A connector arriving after the accepted request is taken by
+        // `accept_raw` and answered with the in-band AlreadyActive frame
+        // (the daemon's post-accept loop behavior).
+        let mut late = UnixStream::connect(root.socket_path())?;
+        let mut served = listener
+            .accept_raw(Duration::from_secs(5))
+            .map_err(io::Error::other)?;
+        reject_already_active(&mut served);
+        drop(served);
+        late.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let mut response = [0_u8; RESPONSE_FRAME_LEN];
+        late.read_exact(&mut response)?;
+        reject_frame_matches(&response, HandoffRejectReason::AlreadyActive);
+        Ok(())
     }
 
     #[test]

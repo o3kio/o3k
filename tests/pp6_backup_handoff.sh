@@ -7,10 +7,14 @@
 #
 # Failure-injection matrix: every executed case is deterministic — feature-
 # gated crash hooks (cargo features o3kd/backup-test-hooks,o3k/backup-test-hooks),
-# the two-way executor barrier, or kill signals. No sleeps as synchronization
-# except bounded readiness polls. Drain-internal classifications belonging to
-# PR #1167 are NOT faked here; they are mapped to their existing tests and
-# reported as DOCUMENTED rows.
+# the two-way executor barrier, or kill signals. No sleeps as synchronization:
+# the only sleeps are bounded readiness/deadline polls (wait_ready, wait_log,
+# reap_exit, the case-b rejection-count poll, the case-i/j/k barrier polls)
+# and the one-second workload ramp at journey start, which paces the
+# concurrent mutation loop so the backup overlaps live traffic; no assertion
+# depends on that ramp. Drain-internal classifications belonging to PR #1167
+# are NOT faked here; they are mapped to their existing tests and reported as
+# DOCUMENTED rows.
 #
 # The script is re-runnable and exits 0 only when every executed check passed.
 set -euo pipefail
@@ -71,7 +75,12 @@ cleanup() {
     done
     rm -rf -- "$WORK"
 }
-trap cleanup EXIT INT TERM
+# INT/TERM re-raise as the conventional 130/143 statuses: the EXIT trap then
+# runs cleanup exactly once and an interrupted run reports a deterministic
+# status instead of continuing with an unclear exit code.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 free_port() {
     python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
@@ -417,8 +426,16 @@ s.connect(f"{sys.argv[1]}/control/backup.sock")
 s.close()
 print("zero-length request sent")
 PY
-    sleep 0.5
-    B_REJ_COUNT="$(grep -cF 'backup handoff request rejected during authentication' "$(daemon_log case-b)" || true)"
+    # Bounded poll for the accept thread's zero-length rejection (count 2 =
+    # garbage frame + zero-length frame) instead of a fixed sleep, which can
+    # race the async log write under load.
+    B_REJ_COUNT=0
+    B_DEADLINE=$((SECONDS + 10))
+    while (( SECONDS < B_DEADLINE )); do
+        B_REJ_COUNT="$(grep -cF 'backup handoff request rejected during authentication' "$(daemon_log case-b)" || true)"
+        if (( B_REJ_COUNT >= 2 )); then break; fi
+        sleep 0.1
+    done
     [[ "$B_REJ_COUNT" -ge 2 ]] || B_OK=0
     grep -q 'Malformed' "$(daemon_log case-b)" || B_OK=0
     curl -fsS "http://127.0.0.1:$(daemon_port case-b)/readyz" >/dev/null || B_OK=0
@@ -452,14 +469,20 @@ if wait_ready case-c 30; then
     C_W1="$(cat "$WORK/case-c-w1.exit")"
     C_W2="$(backup_exit case-c)"
     [[ "$C_W1" == "0" ]] || C_OK=0
+    # Exit 2 is required either way. When the second connect lands inside the
+    # drain window, the daemon's post-accept loop answers in-band with the
+    # O3KBKRJ AlreadyActive frame (backup-already-active); when it lands after
+    # the daemon has exited (the idle-daemon drain is only tens of ms), the
+    # stale control socket refuses the connection (controller-unavailable).
+    # Both reject the second attempt while exactly one winner completes.
     [[ "$C_W2" == "2" ]] || C_OK=0
-    grep -q 'controller-unavailable' "$WORK/case-c.backup.stderr" || C_OK=0
+    grep -qE 'backup-already-active|controller-unavailable' "$WORK/case-c.backup.stderr" || C_OK=0
     verify_capture "$CASE_DEST" "$COP1" >/dev/null 2>&1 || C_OK=0
     CPID="$(daemon_pid case-c)"
     reap_exit "$CPID" 30 || C_OK=0
     [[ "${EXIT_STATUS[$CPID]}" == "0" ]] || C_OK=0
     if (( C_OK )); then
-        result PASS case-c "concurrent attempts: exactly one accepted+completed (op $COP1 exit 0), second exit 2 controller-unavailable (control socket retired after the single accept; in-band AlreadyActive unit-covered by rejects_second_attempt_while_one_is_active)"
+        result PASS case-c "concurrent attempts: exactly one accepted+completed (op $COP1 exit 0), second exit 2 ($(cat "$WORK/case-c.backup.stderr" | grep -oE 'backup-already-active|controller-unavailable')) — in-band O3KBKRJ AlreadyActive during the drain window, stale-socket refusal after process exit"
     else
         result FAIL case-c "concurrent-attempt accounting broken: winner=$C_W1 loser=$C_W2 $(cat "$WORK/case-c.backup.stderr")"
     fi
@@ -697,13 +720,17 @@ if wait_ready case-j 30; then
         sleep 0.1
     done
     if (( J_OK )); then
+        # Bounded: a competitor that blocks instead of failing at the store
+        # lock must fail this case, not hang the harness until CI timeout
+        # (124 = killed by timeout).
         set +e
         env O3K_BOOTSTRAP_PASSWORD="$BOOTSTRAP_PASSWORD" O3K_TOKEN_SIGNING_KEY="$TOKEN_SIGNING_KEY" \
             O3K_NATIVE_CURSOR_HMAC_KEY="$NATIVE_CURSOR_KEY" \
-            "$O3KD_BIN" --listen-addr "127.0.0.1:$(free_port)" --data-dir "$CASE_DATA" \
+            timeout 30 "$O3KD_BIN" --listen-addr "127.0.0.1:$(free_port)" --data-dir "$CASE_DATA" \
             --log-filter info --log-format json >"$WORK/case-j-competitor.log" 2>&1
         J_COMP_STATUS=$?
         set -e
+        [[ "$J_COMP_STATUS" != "124" ]] || J_OK=0
         [[ "$J_COMP_STATUS" != "0" ]] || J_OK=0
         grep -q 'O3K data-directory lifetime lock' "$WORK/case-j-competitor.log" || J_OK=0
         if grep -qF 'o3kd listening' "$WORK/case-j-competitor.log"; then J_OK=0; fi
@@ -711,8 +738,10 @@ if wait_ready case-j 30; then
         wait "$J_BPID" 2>/dev/null || true
         [[ "$(backup_exit case-j)" == "0" ]] || J_OK=0
         verify_capture "$CASE_DEST" "$JOP2" >/dev/null 2>&1 || J_OK=0
+        # The daemon must reach SOURCE_EXIT 0 after the lock transfer; a hang
+        # here must fail the case, not pass silently.
         JP="$(daemon_pid case-j)"
-        reap_exit "$JP" 30 || true
+        reap_exit "$JP" 30 && [[ "${EXIT_STATUS[$JP]}" == 0 ]] || J_OK=0
     fi
     if (( J_OK )); then
         result PASS case-j "supervisor restart during executor ownership: competing o3kd exit $J_COMP_STATUS at the store lock, never served (packaging/o3kd.service systemd units use this same binary/startup path), then capture completed exit 0"
@@ -764,7 +793,7 @@ PY
         wait "$K_BPID" 2>/dev/null || true
         [[ "$(backup_exit case-k)" == "0" ]] || K_OK=0
         KP="$(daemon_pid case-k)"
-        reap_exit "$KP" 30 || true
+        reap_exit "$KP" 30 && [[ "${EXIT_STATUS[$KP]}" == 0 ]] || K_OK=0
     fi
     if (( K_OK )); then
         result PASS case-k "third-party opener excluded: nonblocking exclusive flock refused on both the lock file and the data directory while the executor owns the lock ($(head -1 "$WORK/case-k.flock.txt" 2>/dev/null))"
@@ -787,14 +816,18 @@ if wait_ready case-l1 30; then
     verify_capture "$CASE_DEST" "$LOP1" >/dev/null 2>&1 || L1_OK=0
     [[ "$(marker_count "$CASE_DATA")" == "1" ]] || L1_OK=0
     L1PID="$(daemon_pid case-l1)"
-    reap_exit "$L1PID" 30 || true
+    reap_exit "$L1PID" 30 && [[ "${EXIT_STATUS[$L1PID]}" == 0 ]] || L1_OK=0
+    # Bounded: a restart attempt that blocks on the interrupted-backup marker
+    # instead of exiting must fail this case, not hang the harness until CI
+    # timeout (124 = killed by timeout).
     set +e
     env O3K_BOOTSTRAP_PASSWORD="$BOOTSTRAP_PASSWORD" O3K_TOKEN_SIGNING_KEY="$TOKEN_SIGNING_KEY" \
         O3K_NATIVE_CURSOR_HMAC_KEY="$NATIVE_CURSOR_KEY" \
-        "$O3KD_BIN" --listen-addr "127.0.0.1:$(free_port)" --data-dir "$CASE_DATA" \
+        timeout 30 "$O3KD_BIN" --listen-addr "127.0.0.1:$(free_port)" --data-dir "$CASE_DATA" \
         --log-filter info --log-format json >"$WORK/case-l1-restart.log" 2>&1
     L1R_STATUS=$?
     set -e
+    [[ "$L1R_STATUS" != "124" ]] || L1_OK=0
     [[ "$L1R_STATUS" != "0" ]] || L1_OK=0
     grep -q 'interrupted backup marker(s) present' "$WORK/case-l1-restart.log" || L1_OK=0
     rm -f "$CASE_DATA"/.o3k-backup-in-progress-*
@@ -833,7 +866,7 @@ if wait_ready case-l2 30; then
     [[ ! -e "$CASE_DEST/provisional-backup-$LOP2/o3k.sqlite" ]] || L2_OK=0
     [[ -d "$CASE_DEST/.o3k-backup-provisional-$LOP2" ]] || L2_OK=0
     L2PID="$(daemon_pid case-l2)"
-    reap_exit "$L2PID" 30 || true
+    reap_exit "$L2PID" 30 && [[ "${EXIT_STATUS[$L2PID]}" == 0 ]] || L2_OK=0
     rm -f "$CASE_DATA"/.o3k-backup-in-progress-*
     start_daemon case-l2b "$CASE_DATA"
     if wait_ready case-l2b 30; then
@@ -876,15 +909,17 @@ if wait_ready case-n1 30; then
     else
         result FAIL case-n1 "copy-dir case: status=$N1_STATUS stderr=$(cat "$WORK/case-n1.backup.stderr")"
     fi
-    # n3: second daemon instance on the same data dir fails at the store lock first
+    # n3: second daemon instance on the same data dir fails at the store lock first.
+    # Bounded: it must fail there, not block (124 = killed by timeout).
     set +e
     env O3K_BOOTSTRAP_PASSWORD="$BOOTSTRAP_PASSWORD" O3K_TOKEN_SIGNING_KEY="$TOKEN_SIGNING_KEY" \
         O3K_NATIVE_CURSOR_HMAC_KEY="$NATIVE_CURSOR_KEY" \
-        "$O3KD_BIN" --listen-addr "127.0.0.1:$(free_port)" --data-dir "$CASE_DATA" \
+        timeout 30 "$O3KD_BIN" --listen-addr "127.0.0.1:$(free_port)" --data-dir "$CASE_DATA" \
         --log-filter info --log-format json >"$WORK/case-n3.log" 2>&1
     N3_STATUS=$?
     set -e
     N3_OK=1
+    [[ "$N3_STATUS" != "124" ]] || N3_OK=0
     [[ "$N3_STATUS" != "0" ]] || N3_OK=0
     grep -q 'O3K data-directory lifetime lock' "$WORK/case-n3.log" || N3_OK=0
     if (( N3_OK )); then
@@ -906,7 +941,7 @@ if wait_ready case-n1 30; then
         N4_OK=0
     fi
     if (( N4_OK )); then
-        result PASS case-n4 "stale control socket after SIGKILL (present: $N4_SOCK): replacement daemon starts; socket file replaced after the owner/type check"
+        result PASS case-n4 "stale control socket after SIGKILL (present: $N4_SOCK): replacement daemon reached ready + SIGTERM exit 0 (what this case asserts); the owner/type check + rebind itself is unit-covered (bind_refuses_non_socket_at_socket_path, stale_socket_file_is_replaced_at_bind)"
     else
         result FAIL case-n4 "stale-socket replacement broken"
     fi

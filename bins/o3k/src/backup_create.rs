@@ -16,21 +16,44 @@
 //! signing, no trust/publication chain, and no claim of a supported PP.6
 //! backup. A partial artifact is never discoverable as a successful backup:
 //! the capture is built in a dot-prefixed staging directory and published with
-//! a no-replace rename to `provisional-backup-<operation-id>`. The success
-//! output says explicitly that this is not a supported PP.6 backup artifact.
+//! a no-replace rename to `provisional-backup-<operation-id>`. When a
+//! post-lock failure occurs, the staging directory is deliberately kept
+//! alongside the interrupted-backup marker so an operator can inspect the
+//! partial capture next to the denial evidence. The success output says
+//! explicitly that this is not a supported PP.6 backup artifact.
 //!
 //! # Exit-code contract (SPEC-0050 §8)
 //!
 //! ```text
 //! 0  provisional capture completed
-//! 2  rejected precondition (unusable destination, controller unavailable or
-//!    rejected the handoff request)
-//! 3  recoverable failure (lock received; capture or finalization failed and
-//!    the interrupted-backup marker is kept so the daemon preflight stays
-//!    blocked until an operator clears it)
+//! 2  rejected precondition (unusable or overlapping destination, controller
+//!    unavailable or rejected the handoff request)
+//! 3  recoverable failure (the handoff exchange or the capture/finalization
+//!    failed; once the interrupted-backup marker is written it is kept so the
+//!    daemon preflight stays blocked until an operator clears it, and the
+//!    staging directory is kept with it for inspection)
 //! 4  unknown/quarantined outcome (the capture could not prove source
 //!    immutability, or the capture outcome is uncertain)
 //! ```
+//!
+//! # Destination integrity
+//!
+//! The destination is validated up front (absolute, existing, real
+//! directory, effective-uid-owned, not group/other-writable, and not equal
+//! to or inside the canonical data directory). It is then opened through a
+//! retained no-follow descriptor: the staging directory is created with
+//! `mkdirat` relative to that descriptor and itself opened as a second
+//! no-follow descriptor, so the snapshot write is dir-fd-anchored — the
+//! store receives `/proc/self/fd/<staging-fd>/o3k.sqlite`, which the kernel
+//! resolves against the open descriptor — and the publication rename is a
+//! `renameat(RENAME_NOREPLACE)` between names resolved inside the retained
+//! destination descriptor. The destination is re-validated against that
+//! descriptor (same dev+ino, same owner, same mode posture) immediately
+//! before the capture and again before the final rename. The remaining
+//! string-path steps (metadata write, snapshot hashing) run inside the
+//! verified, euid-owned staging directory; a path-component symlink swap
+//! above the destination between validation and use cannot redirect the
+//! capture or the publication.
 //!
 //! Stdout carries exactly one line of bounded JSON; stderr carries only the
 //! stable reason code and the operation id. Secrets never appear in arguments,
@@ -70,7 +93,7 @@
 use std::{
     fs,
     io::{self, Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt},
+    os::unix::{fs::MetadataExt, io::AsRawFd},
     path::{Path, PathBuf},
     process::ExitCode,
     time::{Duration, Instant},
@@ -80,8 +103,9 @@ use o3k_store::{
     BackupControlError, BackupHandoffRequest, HandoffRejectReason, SqliteStore, StoreAccessLock,
     StoreError, WalCheckpointMode, connect_and_request, identity_tokens,
 };
+use rustix::fd::OwnedFd;
 use rustix::fs::renameat_with;
-use rustix::fs::{CWD, Mode, OFlags, RenameFlags, open};
+use rustix::fs::{Mode, OFlags, RenameFlags, fstat, mkdirat, open, openat};
 use rustix::process::geteuid;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -96,7 +120,11 @@ const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
 /// Bound for the authenticated handoff request/response exchange.
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound for receiving the store-access lock descriptors after acceptance.
-const HANDOFF_RECEIVE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The daemon's post-acceptance drain is a sequence of 5s-bounded steps
+/// (~55-80s worst case) plus the bounded API-serve drain, so the receive
+/// must tolerate the full [`OVERALL_DEADLINE`] window; anything shorter
+/// would turn a slow-but-correct drain into a spurious receive timeout.
+const HANDOFF_RECEIVE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Denial-only interrupted-backup marker inside the data directory.
 const MARKER_FILE_PREFIX: &str = ".o3k-backup-in-progress-";
 /// Dot-prefixed staging directory inside the destination (never discoverable
@@ -244,7 +272,72 @@ fn execute(args: &BackupCreateArgs) -> BackupCreateOutcome {
         Ok(dir) => dir,
         Err(reason) => return BackupCreateOutcome::rejected(args.operation_id, reason),
     };
-    execute_inner(args, args.destination.clone(), data_dir, started_at)
+    if destination_overlaps_data_dir(&args.destination, &data_dir) {
+        return BackupCreateOutcome::rejected(args.operation_id, "destination-inside-data-dir");
+    }
+    let destination_fd = match open_destination_dir(&args.destination) {
+        Ok(fd) => fd,
+        Err(reason) => return BackupCreateOutcome::rejected(args.operation_id, reason),
+    };
+    execute_inner(
+        args,
+        args.destination.clone(),
+        destination_fd,
+        data_dir,
+        started_at,
+    )
+}
+
+/// Reports whether the destination is the canonical data directory or a
+/// descendant of it: a capture is never written into the directory the
+/// handoff just drained (the interrupted-backup marker lives there, and
+/// publishing next to canonical state would taint the data directory).
+fn destination_overlaps_data_dir(destination: &Path, data_dir: &Path) -> bool {
+    let Ok(canonical) = fs::canonicalize(destination) else {
+        // `validate_destination` established the destination exists; a fresh
+        // resolution failure is transient and the descriptor open below fails
+        // closed anyway.
+        return false;
+    };
+    canonical == data_dir || canonical.starts_with(data_dir)
+}
+
+/// Opens the validated destination directory through a no-follow descriptor
+/// retained for the whole capture. Every later destination access (staging
+/// `mkdirat` and the staging-dir `openat` under it, the pre-capture and
+/// pre-rename revalidations, and the final `renameat`) is relative to this
+/// descriptor, so a path-component symlink swap between validation and use
+/// cannot redirect the publication.
+fn open_destination_dir(destination: &Path) -> Result<OwnedFd, &'static str> {
+    open(
+        destination,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|_| "destination-unreadable")
+}
+
+/// Re-validates the destination directory against the retained descriptor
+/// immediately before a path-based operation on it (`backup_to_file`, the
+/// final rename): the fresh `lstat` must still resolve to the held inode and
+/// keep the effective-uid-owned, not-group/other-writable posture. A symlink
+/// swap or entry replacement between validation and use fails closed here.
+fn revalidate_destination(dirfd: &OwnedFd, destination: &Path) -> Result<(), &'static str> {
+    let held = fstat(dirfd).map_err(|_| "destination-revalidation-failed")?;
+    let current =
+        fs::symlink_metadata(destination).map_err(|_| "destination-revalidation-failed")?;
+    if current.file_type().is_symlink()
+        || !current.file_type().is_dir()
+        || current.dev() != held.st_dev
+        || current.ino() != held.st_ino
+        || current.uid() != held.st_uid
+        || current.uid() != geteuid().as_raw()
+        || held.st_mode & 0o022 != 0
+        || current.mode() & 0o022 != 0
+    {
+        return Err("destination-changed-after-validation");
+    }
+    Ok(())
 }
 
 /// Validates `--destination`: absolute, existing, a real directory (no symlink
@@ -300,12 +393,14 @@ fn data_dir_from(configured: Option<&str>) -> PathBuf {
 }
 
 /// Executes the provisional capture once the destination and data directory
-/// are known. Post-lock failures keep the interrupted-backup marker unless the
-/// capture finalized cleanly.
+/// are known. Post-lock failures keep the interrupted-backup marker (and the
+/// staging directory, once created) so an operator can inspect the
+/// interrupted capture; the marker blocks daemon preflight until cleared.
 #[allow(clippy::too_many_lines)]
 fn execute_inner(
     args: &BackupCreateArgs,
     destination_dir: PathBuf,
+    destination_fd: OwnedFd,
     data_dir: PathBuf,
     started_at: String,
 ) -> BackupCreateOutcome {
@@ -359,8 +454,9 @@ fn execute_inner(
     test_barrier_after_receive();
 
     // From here on we hold the exclusive store-access lock. Every failure path
-    // keeps the denial-only marker so daemon startup stays blocked until an
-    // operator inspects the interrupted capture.
+    // keeps the denial-only marker — and the staging directory, once created —
+    // so daemon startup stays blocked until an operator inspects the
+    // interrupted capture.
     let marker_path = data_dir.join(format!("{MARKER_FILE_PREFIX}{operation_id}"));
     let marker_body = json!({
         "operation_id": operation_id,
@@ -406,22 +502,62 @@ fn execute_inner(
         Err(_) => return BackupCreateOutcome::recoverable(operation_id, "source-hash-failed"),
     };
 
-    let staging_dir = destination_dir.join(format!("{STAGING_DIR_PREFIX}{operation_id}"));
-    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&staging_dir) {
-        let reason = if error.kind() == io::ErrorKind::AlreadyExists {
-            "staging-directory-exists"
-        } else {
-            "staging-directory-create-failed"
-        };
-        return BackupCreateOutcome::recoverable(operation_id, reason);
+    let staging_name = format!("{STAGING_DIR_PREFIX}{operation_id}");
+    match mkdirat(
+        &destination_fd,
+        staging_name.as_str(),
+        Mode::from_raw_mode(0o700),
+    ) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::EXIST) => {
+            return BackupCreateOutcome::recoverable(operation_id, "staging-directory-exists");
+        }
+        Err(_) => {
+            return BackupCreateOutcome::recoverable(
+                operation_id,
+                "staging-directory-create-failed",
+            );
+        }
     }
+    let staging_dir = destination_dir.join(&staging_name);
+    // Open the staging directory itself through the held destination dir-fd;
+    // the snapshot write below is addressed through this descriptor via a
+    // `/proc/self/fd` magic link, so `backup_to_file`'s internal path
+    // re-resolution follows the verified directory instead of the (swappable)
+    // destination string path.
+    let staging_fd = match openat(
+        &destination_fd,
+        staging_name.as_str(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(_) => {
+            return BackupCreateOutcome::recoverable(operation_id, "staging-directory-open-failed");
+        }
+    };
     if Instant::now() >= deadline {
-        let _ = fs::remove_dir_all(&staging_dir);
         return BackupCreateOutcome::recoverable(operation_id, "deadline-exceeded");
     }
 
+    // The destination is revalidated immediately before the capture: the
+    // later string-path steps (metadata write, snapshot hashing) still
+    // depend on it being intact. A swap since validation fails closed here.
+    if let Err(reason) = revalidate_destination(&destination_fd, &destination_dir) {
+        return BackupCreateOutcome::recoverable(operation_id, reason);
+    }
     let snapshot_path = staging_dir.join(SNAPSHOT_FILE_NAME);
-    match runtime.block_on(store.backup_to_file(&snapshot_path)) {
+    // The snapshot destination is anchored on the staging dir-fd through a
+    // proc magic link: `backup_to_file`'s create_dir_all/canonicalize/
+    // hard_link steps resolve `/proc/self/fd/<staging-fd>` against the open
+    // descriptor, which a path-component swap cannot redirect. The staging
+    // fd stays bound (and therefore open) until the backup call returns.
+    let staged_snapshot_path = PathBuf::from(format!(
+        "/proc/self/fd/{}/{}",
+        staging_fd.as_raw_fd(),
+        SNAPSHOT_FILE_NAME
+    ));
+    match runtime.block_on(store.backup_to_file(&staged_snapshot_path)) {
         Ok(()) => {}
         Err(StoreError::BackupPublicationUncertain) => {
             // The snapshot may exist at the destination but its verification
@@ -430,32 +566,26 @@ fn execute_inner(
             return BackupCreateOutcome::unknown(operation_id, "capture-outcome-unknown");
         }
         Err(_) => {
-            let _ = fs::remove_dir_all(&staging_dir);
             return BackupCreateOutcome::recoverable(operation_id, "capture-failed");
         }
     }
 
     if Instant::now() >= deadline {
-        let _ = fs::remove_dir_all(&staging_dir);
         return BackupCreateOutcome::recoverable(operation_id, "deadline-exceeded");
     }
     let source_after = match sha256_hex_file(&db_path) {
         Ok(hash) => hash,
-        Err(_) => {
-            let _ = fs::remove_dir_all(&staging_dir);
-            return BackupCreateOutcome::unknown(operation_id, "source-rehash-failed");
-        }
+        Err(_) => return BackupCreateOutcome::unknown(operation_id, "source-rehash-failed"),
     };
     if source_before != source_after {
-        let _ = fs::remove_dir_all(&staging_dir);
         return BackupCreateOutcome::unknown(operation_id, "source-modified-during-capture");
+    }
+    if Instant::now() >= deadline {
+        return BackupCreateOutcome::recoverable(operation_id, "deadline-exceeded");
     }
     let snapshot_hash = match sha256_hex_file(&snapshot_path) {
         Ok(hash) => hash,
-        Err(_) => {
-            let _ = fs::remove_dir_all(&staging_dir);
-            return BackupCreateOutcome::unknown(operation_id, "snapshot-hash-failed");
-        }
+        Err(_) => return BackupCreateOutcome::unknown(operation_id, "snapshot-hash-failed"),
     };
     let journal_mode = match runtime.block_on(store.journal_mode()) {
         Ok(mode) => mode,
@@ -484,8 +614,24 @@ fn execute_inner(
     if sync_dir(&staging_dir).is_err() {
         return BackupCreateOutcome::recoverable(operation_id, "staging-sync-failed");
     }
-    let final_path = destination_dir.join(format!("{FINAL_DIR_PREFIX}{operation_id}"));
-    if rename_no_replace(&staging_dir, &final_path).is_err() {
+    // Re-validate the destination one last time, then publish with a
+    // no-replace rename relative to the held descriptor: both names are
+    // resolved inside the verified directory, so a last-moment path swap
+    // cannot redirect the publication.
+    if let Err(reason) = revalidate_destination(&destination_fd, &destination_dir) {
+        return BackupCreateOutcome::recoverable(operation_id, reason);
+    }
+    let final_name = format!("{FINAL_DIR_PREFIX}{operation_id}");
+    let final_path = destination_dir.join(&final_name);
+    if renameat_with(
+        &destination_fd,
+        staging_name.as_str(),
+        &destination_fd,
+        final_name.as_str(),
+        RenameFlags::NOREPLACE,
+    )
+    .is_err()
+    {
         return BackupCreateOutcome::recoverable(operation_id, "finalize-rename-failed");
     }
 
@@ -550,11 +696,6 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
         Mode::empty(),
     )?;
     fs::File::from(fd).sync_all()
-}
-
-/// Publishes the staging directory with a same-filesystem no-replace rename.
-fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
-    renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(io::Error::from)
 }
 
 /// Streaming SHA-256 of a file, hex-encoded (bounded memory, no secrets).
@@ -713,12 +854,23 @@ mod tests {
         Ok(())
     }
 
+    fn destination_fd(destination: &Path) -> io::Result<rustix::fd::OwnedFd> {
+        open_destination_dir(destination).map_err(io::Error::other)
+    }
+
     #[test]
     fn missing_controller_socket_is_rejected() -> io::Result<()> {
         let root = TempRoot::new("no-controller")?;
         let data_dir = root.private_dir("data")?;
         let dest = root.private_dir("dest")?;
-        let outcome = execute_inner(&args_for(dest.clone()), dest, data_dir, now_utc_rfc3339());
+        let fd = destination_fd(&dest)?;
+        let outcome = execute_inner(
+            &args_for(dest.clone()),
+            dest,
+            fd,
+            data_dir,
+            now_utc_rfc3339(),
+        );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&outcome), "controller-unavailable");
         Ok(())
@@ -746,7 +898,8 @@ mod tests {
         });
         let outcome = execute_inner(
             &args_for(dest.clone()),
-            dest,
+            dest.clone(),
+            destination_fd(&dest)?,
             data_dir.clone(),
             now_utc_rfc3339(),
         );
@@ -778,7 +931,14 @@ mod tests {
             thread::sleep(Duration::from_millis(100));
             Ok(())
         });
-        let outcome = execute_inner(&args_for(dest.clone()), dest, data_dir, now_utc_rfc3339());
+        let fd = destination_fd(&dest)?;
+        let outcome = execute_inner(
+            &args_for(dest.clone()),
+            dest,
+            fd,
+            data_dir,
+            now_utc_rfc3339(),
+        );
         server
             .join()
             .map_err(|_| io::Error::other("fake controller thread panicked"))??;
@@ -829,6 +989,7 @@ mod tests {
                 operation_id,
             },
             dest.clone(),
+            destination_fd(&dest)?,
             data_dir.clone(),
             now_utc_rfc3339(),
         );
@@ -880,6 +1041,76 @@ mod tests {
                 .join(format!("{MARKER_FILE_PREFIX}{operation_id}"))
                 .exists()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn destination_overlapping_data_dir_is_rejected() -> io::Result<()> {
+        let root = TempRoot::new("overlap")?;
+        let data_dir = fs::canonicalize(root.private_dir("data")?)?;
+        // Exactly the data directory.
+        assert!(destination_overlaps_data_dir(&data_dir, &data_dir));
+        // A descendant of the data directory.
+        let nested = data_dir.join("captures");
+        fs::create_dir(&nested)?;
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o700))?;
+        assert!(destination_overlaps_data_dir(&nested, &data_dir));
+        // A sibling that merely shares the path prefix is allowed.
+        let sibling = root.private_dir("data-sibling")?;
+        assert!(!destination_overlaps_data_dir(&sibling, &data_dir));
+        let outside = root.private_dir("elsewhere")?;
+        assert!(!destination_overlaps_data_dir(&outside, &data_dir));
+        Ok(())
+    }
+
+    #[test]
+    fn destination_revalidation_detects_swap_mode_change_and_symlink() -> io::Result<()> {
+        // The directory entry is replaced by another directory: the path now
+        // resolves to a different inode than the held descriptor.
+        let root = TempRoot::new("revalidate")?;
+        let original = root.private_dir("original")?;
+        let replacement = root.private_dir("replacement")?;
+        let fd = destination_fd(&original)?;
+        revalidate_destination(&fd, &original).map_err(io::Error::other)?;
+        fs::remove_dir(&original)?;
+        fs::rename(&replacement, &original)?;
+        match revalidate_destination(&fd, &original) {
+            Err("destination-changed-after-validation") => {}
+            other => {
+                return Err(io::Error::other(format!(
+                    "swapped destination was not detected: {other:?}"
+                )));
+            }
+        }
+
+        // The directory becomes group/other-writable after validation.
+        let open = root.private_dir("opened")?;
+        let open_fd = destination_fd(&open)?;
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777))?;
+        match revalidate_destination(&open_fd, &open) {
+            Err("destination-changed-after-validation") => {}
+            other => {
+                return Err(io::Error::other(format!(
+                    "group/other-writable destination was not detected: {other:?}"
+                )));
+            }
+        }
+
+        // The directory entry is replaced by a symlink: the fresh no-follow
+        // lstat catches the swap regardless of the link target.
+        let linked = root.private_dir("linked")?;
+        let linked_fd = destination_fd(&linked)?;
+        fs::remove_dir(&linked)?;
+        symlink(root.0.join("linked-target"), &linked)?;
+        assert!(fs::symlink_metadata(&linked)?.file_type().is_symlink());
+        match revalidate_destination(&linked_fd, &linked) {
+            Err("destination-changed-after-validation") => {}
+            other => {
+                return Err(io::Error::other(format!(
+                    "symlink-swapped destination was not detected: {other:?}"
+                )));
+            }
+        }
         Ok(())
     }
 }

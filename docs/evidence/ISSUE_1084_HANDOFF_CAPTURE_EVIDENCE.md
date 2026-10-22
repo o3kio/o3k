@@ -28,9 +28,9 @@ restart path.
 | Item | Value |
 | --- | --- |
 | Repository / branch | o3k, `pp6/1084-handoff` |
-| Worktree HEAD (baseline; Slice A–D uncommitted on top) | `2a481ca7c085d3515c14e12dfe92ce4217c84775` |
-| `o3kd` binary SHA-256 (debug, hooks features) | `019653c4ead0abcd79cc3332c5654827a8607b3a99ead4f8d238f95a97dbfee9` |
-| `o3k` binary SHA-256 (debug, hooks features) | `ca6e97cb8038e6fff5531f48439c3fa99a54194bcec61eeafb32c21f1eed2593` |
+| Worktree HEAD | `b92f4ce9b317e469174fd73f746c3ad3f6a3d866` (Slices A–D committed); review-rounds-1/2 production fixes uncommitted on top |
+| `o3kd` binary SHA-256 (debug, hooks features) | `ed848c3a086e3bdf4351b420291fa17de3c9d4bcb03ae30500122163890ad338` |
+| `o3k` binary SHA-256 (debug, hooks features) | `87f135aa8258c7b4cdb2c5fc31e70e21ba04548a441bda826ef4720f3ce354b5` |
 | Toolchain | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Build command | `cargo build -p o3kd -p o3k --features o3kd/backup-test-hooks,o3k/backup-test-hooks` |
 
@@ -45,7 +45,13 @@ trap-based cleanup that kills every daemon it started). It exits 0 only when
 every executed check passed and prints a per-case matrix summary. Determinism
 sources: the feature-gated crash hooks below, a two-way file barrier on each
 side of the handoff, and `kill`/`SIGKILL`. The only sleeps are bounded
-readiness polls.
+readiness/deadline polls (`wait_ready`, `wait_log`, `reap_exit`, the case-b
+rejection-count poll, the case-i/j/k barrier polls) plus a one-second
+workload ramp at journey start that paces the concurrent mutation loop; no
+assertion depends on that ramp. On `INT`/`TERM` the harness exits 130/143 so
+the `EXIT` trap runs cleanup exactly once with a deterministic status.
+Foreground competitor/restart `o3kd` invocations run under `timeout 30` so a
+blocking regression fails the case instead of hanging the harness.
 
 Test-only hooks used (all behind `backup-test-hooks`, off by default; never
 enabled in release/production builds):
@@ -93,15 +99,16 @@ execution can write the canonical controller database.
 
 ## State machine (real-process log evidence)
 
-Journey run, `o3kd` JSON log (timestamps from the 2026-10-22 campaign run):
+Journey run, `o3kd` JSON log (timestamps from the post-review-fix verification
+run of 2026-10-22):
 
 ```text
-16:58:31.611794Z o3kd listening
-16:58:36.046317Z backup handoff request accepted; draining controller for lock transfer
-16:58:36.046665Z backup handoff admitted, shutting down for lock transfer
-16:58:36.084356Z controller session drained
-16:58:36.084412Z controller writers drained
-16:58:36.085471Z store lock ownership transferred to the backup executor; source exiting
+21:37:10.343289Z o3kd listening
+21:37:14.839878Z backup handoff request accepted; draining controller for lock transfer
+21:37:14.840381Z backup handoff admitted, shutting down for lock transfer
+21:37:14.951630Z controller session drained
+21:37:14.951709Z controller writers drained
+21:37:14.952839Z store lock ownership transferred to the backup executor; source exiting
 ```
 
 Mapping to the SPEC-0050 phase names:
@@ -115,9 +122,10 @@ Mapping to the SPEC-0050 phase names:
 | EXECUTOR_OWNS | executor writes `.o3k-backup-in-progress-<op>` marker, checkpoint(TRUNCATE), `VACUUM INTO` snapshot, hash verification, metadata, no-replace rename |
 | SOURCE_EXIT | daemon exit status 0 (journey), executor exit 0 with bounded JSON |
 
-Wall-clock from acceptance to lock transfer in this run: ~39 ms of drain
-(small TestLab database, minimal profile). All drain steps retain their own
-5 s bounds independently of this observation.
+Wall-clock from acceptance to lock transfer in this run: ~113 ms of drain
+(small TestLab database, minimal profile; the earlier baseline observation was
+~39 ms — the difference is host load, and every drain step retains its own
+5 s bound independently of this observation).
 
 ## Journey results (Section 1 of the harness)
 
@@ -130,7 +138,7 @@ additional networks for the duration of the backup.
 | --- | --- |
 | `o3k backup create` exit code | 0 |
 | Bounded JSON contract | `status=provisional-capture-complete`, `source_unchanged=true`, `provisional=true`, `operation_id` matches, provisional note present |
-| Concurrent workload during backup | 5 successful mutations before shutdown began, 5 deterministic rejections after (no success at or after the first rejection) |
+| Concurrent workload during backup | 5 successful mutations before shutdown began, 6 deterministic rejections after (no success at or after the first rejection) |
 | Daemon exit | 0 (SOURCE_EXIT after ack) |
 | Artifact | `<dest>/provisional-backup-<op>/o3k.sqlite` + `metadata.json`, staging dir renamed away |
 | Metadata | all 12 fields present; `format=o3k-provisional-backup-v1`; before/after source hashes equal; `snapshot_sha256` matches the file; mode 0600 |
@@ -156,7 +164,7 @@ classification, artifact published? "n/a" = not applicable to the case.
 | a | exe-identity mismatch (copied `o3k`) | daemon (never left) | daemon-held (flock NB refused) | healthy (`/readyz` 200), SIGTERM exit 0 | none | none | rejected pre-drain, exit 2 `unauthorized-peer` | **PASS (executed)** |
 | b | garbage 64-byte frame | daemon | daemon-held | healthy, SIGTERM exit 0 | none | none | in-band `O3KBKRJ`+2 (Malformed); daemon unaffected | **PASS (executed)** |
 | b | zero-length request | daemon | daemon-held | healthy | none | none | connection closed, logged Malformed | **PASS (executed)** |
-| c | two concurrent `backup create` | first executor (after handoff) | executor-held during capture; released at exit | daemon SOURCE_EXIT 0 | none during capture | exactly one (`provisional-backup-<op1>`) | loser exit 2 `controller-unavailable` (control socket retired after the single accept; in-band `AlreadyActive` unit-covered) | **PASS (executed)** |
+| c | two concurrent `backup create` | first executor (after handoff) | executor-held during capture; released at exit | daemon SOURCE_EXIT 0 | none during capture | exactly one (`provisional-backup-<op1>`) | loser exit 2 either way: in-band `backup-already-active` (`O3KBKRJ` AlreadyActive) when the second connect lands during the drain window — the daemon now keeps accepting post-handoff and rejects in-band — or `controller-unavailable` (exit 2) when it lands after daemon exit (stale socket) | **PASS (executed)** |
 | c2 | daemon hook 98 (die after accept, pre-transfer), then restart and retry same op id | daemon, then no one | released at daemon exit | restart refused initially? no — marker absent, restart ok | none | none from first attempt; retry succeeded | duplicate detection is **per-daemon-lifetime**; a fresh daemon has no accepted ids and the aborted op never transferred the lock, so retry is safe. Residual risk recorded below | **PASS (executed)** |
 | d | drain-internal classes (API drain timeout; network lease cleanup; storage renewal; unknown provider outcome; SQLite rollback pending) | n/a | n/a | n/a | n/a | n/a | **NOT RE-EXECUTED HERE** — mapped to existing deterministic coverage (table below) | DOCUMENTED |
 | e | executor hook 95 (die before descriptor receipt) | daemon | daemon-held until its exit; free after | daemon exit 1 | none | none | daemon exits 1 without transfer (peer dead at revalidation / handoff); restart ok | **PASS (executed)** |
@@ -171,7 +179,7 @@ classification, artifact published? "n/a" = not applicable to the case.
 | m | source mutation during capture | n/a | n/a | n/a | n/a | n/a | **NOT real-process reproducible**: the transferred flock excludes all writers and `backup_to_file` holds a `BEGIN IMMEDIATE` writer exclusion; residual path enforced by the SHA-256 before/after check (exit 4 `unknown`) | DOCUMENTED |
 | n1 | executor pointed at a copy of the data dir (different installation binding) | daemon | daemon-held | healthy | none | none | exit 2 `controller-unavailable` (no live socket in the copy); in-band `identity-mismatch` unit-covered | **PASS (executed)** |
 | n3 | second daemon instance while the first lives | first daemon | first-daemon-held | competitor exit 1 at the store lock (control bind never reached) | none | n/a | covered above | **PASS (executed)** |
-| n4 | stale control socket after SIGKILL | replacement daemon | replacement-held | replacement starts ready, SIGTERM exit 0 | none | n/a | socket file survived the kill (no destructors); replacement validated owner/type and rebound | **PASS (executed)** |
+| n4 | stale control socket after SIGKILL | replacement daemon | replacement-held | replacement starts ready, SIGTERM exit 0 | none | n/a | socket file survived the kill (no destructors); this case asserts replacement readiness + clean SIGTERM only — the owner/type check + rebind itself is unit-covered (`bind_refuses_non_socket_at_socket_path`, `stale_socket_file_is_replaced_at_bind`) | **PASS (executed)** |
 
 ### Case-d existing coverage map (never reported as executed here)
 
@@ -214,19 +222,159 @@ classification, artifact published? "n/a" = not applicable to the case.
    The hook removes the race so the ownership-continuity branch is
    deterministic.
 
-## Validation (all green on baseline `2a481ca`)
+## Review round 1 (pre-merge)
 
-- `tests/pp6_backup_handoff.sh`: full run **PASS — 17 executed checks, 7
-  documented-coverage rows, 0 failures**, re-runnable end to end in ~2
-  minutes on the baseline host; trap cleanup leaves no daemon or executor
-  process and removes the temporary installation.
+A round-1 review of PR #1168 (2026-10-22, pre-merge) found 15 production-code
+findings and 5 test-harness findings. All 20 are fixed; the production fixes
+landed in `crates/`/`bins/` and the harness fixes in
+`tests/pp6_backup_handoff.sh` (this document and the matrix summary were
+refreshed in the same round).
+
+Production findings fixed (verified against the worktree diff on top of
+`b92f4ce9`):
+
+1. Peer executable identity compared by device+inode from `fs::metadata` of
+   `/proc/<pid>/exe` (no path-string comparison).
+2. Peer revalidation rechecks the peer uid on every `revalidate_peer` call
+   (PID-reuse defense), not only at accept time.
+3. Shrinking read/write deadlines on the control socket so a stalled peer
+   fails fast instead of holding the drain.
+4. Bounded serve drain (`SERVE_DRAIN_BOUND`, 15 s) on the backup-initiated
+   shutdown path.
+5. `serve_result` is checked on the backup path (a serve error can no longer
+   be silently treated as a clean drain).
+6. Non-Linux unused-binding fix.
+7. A handoff that was requested but whose accepted request never arrived
+   exits 1 (previously exit 0).
+8. `WriteZero`/`Interrupted` transfer errors classified as `UnknownOutcome`
+   (fail-closed) instead of a definite outcome.
+9. Post-accept in-band `AlreadyActive` rejection loop: after one acceptance
+   the daemon keeps accepting and answers concurrent executors with the
+   bounded `O3KBKRJ` AlreadyActive frame (exit 2) until it exits (case-c
+   drain-window behavior above).
+10. Non-UTF-8 interrupted-backup marker name still denies startup (raw-byte
+    prefix comparison, no `to_str`).
+11. Destination validated through an opened dir-fd plus revalidation, and a
+    destination overlapping the data dir is rejected (precondition exit 2).
+12. `HANDOFF_RECEIVE_TIMEOUT` (120 s) bounds the receiver-side handshake.
+13. Uniform keep-staging on post-lock failure: once the interrupted-backup
+    marker is written it is kept (with the staging dir) so an operator can
+    inspect the interrupted capture; the marker blocks daemon preflight until
+    cleared.
+14. Debug-only `compile_error!` guard on `backup-test-hooks`
+    (`not(debug_assertions)`), in both `bins/o3kd` and `o3k-store`.
+15. Exit-code documentation corrected to match the implemented contract.
+
+Harness findings fixed:
+
+- **F1** (case-b): the `sleep 0.5` wait for the zero-length rejection is a
+  bounded rejection-count poll (10 s deadline); the header wording now scopes
+  "no sleeps as synchronization" to the readiness/deadline polls and names
+  the one-second workload ramp as pacing only.
+- **F2** (cases j, k, l1, l2): the post-handoff daemon reap now asserts exit
+  status 0 (`reap_exit ... && [[ exit_status == 0 ]]`); a daemon that hangs
+  after lock transfer fails the case instead of passing.
+- **F3** (cases j, l1, n3): foreground competitor/restart `o3kd` invocations
+  run under `timeout 30`; exit 124 (timeout kill) is treated as failure, so
+  a blocking regression fails instead of hanging the harness.
+- **F6**: `INT`/`TERM` re-raise as exit 130/143 with the `EXIT` trap running
+  cleanup exactly once (previously `trap cleanup EXIT INT TERM` continued
+  with an unclear status).
+- **F7** (case-n4): the result string now states exactly what is asserted
+  (replacement readiness + clean SIGTERM exit 0) and points at the unit
+  coverage for the owner/type check and rebind
+  (`bind_refuses_non_socket_at_socket_path`,
+  `stale_socket_file_is_replaced_at_bind`).
+
+## Review round 2 (pre-merge)
+
+A round-2 review of PR #1168 (2026-10-23, pre-merge) found 7 Low/Nit
+findings — 6 production and 1 documentation; all are fixed in the same
+uncommitted worktree state on top of the round-1 fixes (the documentation
+finding is this section). The baseline binary hashes above predate this
+round; the round-2 validation rebuilt both binaries.
+
+Operator-visible behavior note: the 15 s `SERVE_DRAIN_BOUND` added in round 1
+caps not only the backup-initiated shutdown drain but also the connection
+drain of an **ordinary SIGTERM** — a stalled client can no longer hold the
+serve past that bound. This is a deliberate operator-visible behavior change.
+Also note that on expiry only the listener closes: axum 0.8 detaches
+connection tasks, so stalled handlers run until process exit.
+
+Production findings fixed (verified against the worktree diff on top of the
+round-1 fixes):
+
+1. Backup-control accept loops (the main accept loop and the post-accept
+   in-band `AlreadyActive` rejection loop) now sleep 1 s before retrying a
+   non-timeout `Io` accept error (e.g. EMFILE), so a persistent error can no
+   longer hot-spin the accept thread at 100% CPU while flooding the log.
+2. `ConnectionReset` and `BrokenPipe` lock-handoff transfer errors are
+   classified as `UnknownOutcome` (post-send ambiguity — the executor may
+   already hold duplicate descriptors) instead of `TransferRejected`; the
+   classification unit test covers both kinds.
+3. The provisional-capture snapshot write is now dir-fd-anchored end to end:
+   after the staging `mkdirat`, the staging directory is itself opened with
+   `openat(O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)` under the held destination
+   dir-fd and `/proc/self/fd/<staging-fd>/o3k.sqlite` is handed to
+   `backup_to_file` as the destination. Proc magic links are resolved by the
+   kernel against the open descriptor, so the store's internal
+   `create_dir_all`/`canonicalize`/`hard_link` re-resolution follows the
+   verified staging directory and a path-component swap between validation
+   and capture cannot redirect the snapshot; the staging fd stays alive
+   until the call returns. The module doc no longer overclaims — it now
+   states the capture path is dir-fd-anchored and scopes the remaining
+   string-path steps (metadata, hashing) to the verified euid-owned staging
+   directory.
+4. The `SERVE_DRAIN_BOUND` and shutdown-path comments (and the matching
+   operator-facing warn line) now state that dropping the axum 0.8 serve
+   future closes only the listener; stalled connection handlers run until
+   process exit.
+5. Non-Linux build fix: the off-Linux `_backup_control` binding now carries
+   an explicit type (`Option<()>`; `composition::backup::BackupControl` is
+   itself Linux-gated, so it cannot be named there), resolving the E0282
+   inference error.
+6. `AcceptedBackupRequest::revalidate_peer`'s doc now records that the
+   canonical executable path is compared alongside the executable dev+ino
+   and the uid.
+
+## Validation
+
+Round 2 (this round's fixes):
+
+- `tests/pp6_backup_handoff.sh` re-run after the round-2 fixes (worktree =
+  `b92f4ce9` + uncommitted round-1 + round-2 fixes): **PASS — 17 executed
+  checks, 7 documented-coverage rows, 0 failures** (exit 0), including the
+  full journey with the dir-fd-anchored snapshot capture.
+- `cargo fmt -p o3kd -p o3k -p o3k-store -- --check` — clean.
+- `cargo clippy -p o3kd -p o3k -p o3k-store --all-targets --all-features -- -D warnings` — exit 0, no warnings.
+- `cargo test -p o3kd -p o3k -p o3k-store --all-features` — exit 0; 744
+  passed, 0 failed across 57 test binaries (including
+  `backup_create::tests::provisional_capture_completes_end_to_end`, which
+  exercises the `/proc/self/fd/<staging-fd>` capture path end to end, and the
+  extended `handoff_transfer_error_classification_tests`).
+
+Round 1 (pre-merge):
+
+- `tests/pp6_backup_handoff.sh`: re-run **twice** after the round-1
+  production and harness fixes (worktree = `b92f4ce9` + uncommitted round-1
+  fixes). Both full runs **PASS — 17 executed checks, 7 documented-coverage
+  rows, 0 failures**, re-runnable end to end in ~2 minutes on the baseline
+  host; trap cleanup leaves no daemon or executor process and removes the
+  temporary installation. The run observations quoted above (state-machine
+  timestamps, drain wall-clock, workload counts) are from the second of
+  those runs; binary SHA-256s are from the same build. `bash -n` and
+  `shellcheck -S warning` are clean on the updated harness.
+- Original full run (baseline `2a481ca`, Slices A–D uncommitted): **PASS —
+  17 executed checks, 7 documented-coverage rows, 0 failures**.
 - `cargo fmt --all -- --check` — clean.
 - `cargo clippy -p o3kd -p o3k -p o3k-store --all-targets --all-features -- -D warnings` — exit 0, no warnings.
 - `cargo test -p o3kd -p o3k -p o3k-store --all-features` — every test
   binary `ok`, 0 failed (including the real-process `bins/o3kd/tests/shutdown.rs`
   SIGTERM/SIGINT/lock-exclusion tests, the `backup_control.rs` authenticated-
   request wiring test, the `backup_create_hooks.rs` crash-injection tests, and
-  the o3k-store handoff/pool suites).
+  the o3k-store handoff/pool suites). (The three `cargo` results are from the
+  baseline validation of Slices A–D; the round-1 production fixes on top were
+  validated by the fixing change.)
 
 ## Provenance
 

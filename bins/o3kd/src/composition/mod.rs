@@ -525,11 +525,35 @@ pub enum HandoffTransferError {
     /// The descriptors were not transferred (for example a pre-send I/O
     /// failure or an unusable timeout); the executor cannot hold them.
     TransferRejected(io::Error),
-    /// The transfer was sent but no valid acknowledgement came back (ack
-    /// timeout, truncated stream, or invalid ack frame). The executor may
-    /// already hold duplicate lock descriptors, so only process exit — which
-    /// closes every descriptor — is a safe continuation.
+    /// The transfer may have reached the peer but no valid acknowledgement
+    /// came back (ack timeout, truncated stream, invalid ack frame, or a
+    /// post-send ambiguity such as a zero-length write, a past-deadline
+    /// interrupt, or a connection reset / broken pipe on the post-send
+    /// exchange). The executor may already hold duplicate lock descriptors,
+    /// so only process exit — which closes every descriptor — is a safe
+    /// continuation.
     UnknownOutcome(io::Error),
+}
+
+/// Classifies a failed lock handoff by error kind. Post-send ambiguities —
+/// anything that can happen after the descriptors may already be with the
+/// peer (ack timeout, truncated stream, invalid ack frame, zero-length write,
+/// past-deadline interrupt, connection reset, broken pipe) — must map to
+/// [`HandoffTransferError::UnknownOutcome`], never to `TransferRejected`, so
+/// an operator never concludes the executor cannot hold duplicate descriptors
+/// when it might.
+#[cfg(target_os = "linux")]
+fn classify_handoff_transfer_error(error: io::Error) -> HandoffTransferError {
+    match error.kind() {
+        io::ErrorKind::TimedOut
+        | io::ErrorKind::UnexpectedEof
+        | io::ErrorKind::InvalidData
+        | io::ErrorKind::WriteZero
+        | io::ErrorKind::Interrupted
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::BrokenPipe => HandoffTransferError::UnknownOutcome(error),
+        _ => HandoffTransferError::TransferRejected(error),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -602,12 +626,7 @@ impl ControllerDrainProof {
                 // descriptors, so dropping our guard here could split lock
                 // ownership between a restarted daemon and the executor.
                 std::mem::forget(lock);
-                Err(match error.kind() {
-                    io::ErrorKind::TimedOut
-                    | io::ErrorKind::UnexpectedEof
-                    | io::ErrorKind::InvalidData => HandoffTransferError::UnknownOutcome(error),
-                    _ => HandoffTransferError::TransferRejected(error),
-                })
+                Err(classify_handoff_transfer_error(error))
             }
         }
     }
@@ -711,6 +730,109 @@ mod operation_drain_classification_tests {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+mod handoff_transfer_error_classification_tests {
+    use super::{HandoffTransferError, classify_handoff_transfer_error};
+    use std::io;
+
+    #[test]
+    fn post_send_ambiguities_map_to_unknown_outcome() {
+        for kind in [
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::WriteZero,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::BrokenPipe,
+        ] {
+            assert!(
+                matches!(
+                    classify_handoff_transfer_error(io::Error::new(kind, "test")),
+                    HandoffTransferError::UnknownOutcome(_)
+                ),
+                "{kind:?} must map to UnknownOutcome"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_send_failures_map_to_transfer_rejected() {
+        assert!(matches!(
+            classify_handoff_transfer_error(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "test"
+            )),
+            HandoffTransferError::TransferRejected(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod interrupted_backup_marker_tests {
+    use super::deny_interrupted_backup_markers;
+
+    fn temp_data_dir() -> std::io::Result<std::path::PathBuf> {
+        let directory =
+            std::env::temp_dir().join(format!("o3k-marker-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(directory)
+    }
+
+    #[test]
+    fn utf8_marker_denies_startup() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = temp_data_dir()?;
+        std::fs::write(directory.join(".o3k-backup-in-progress-deadbeef"), b"{}")?;
+        assert!(deny_interrupted_backup_markers(&directory).is_err());
+        std::fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_marker_name_still_denies_startup() -> Result<(), Box<dyn std::error::Error>> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = temp_data_dir()?;
+        // The marker name is deliberately not valid UTF-8: the byte-prefix
+        // comparison must still catch it (the old `to_str()` skip let it
+        // through).
+        let marker_name = OsStr::from_bytes(b".o3k-backup-in-progress-\xff\xfe");
+        std::fs::write(directory.join(marker_name), b"{}")?;
+        let error = match deny_interrupted_backup_markers(&directory) {
+            Err(error) => error,
+            Ok(()) => {
+                std::fs::remove_dir_all(&directory)?;
+                return Err("non-UTF-8 interrupted-backup marker did not deny startup".into());
+            }
+        };
+        assert!(
+            error.to_string().contains("interrupted backup marker"),
+            "unexpected error: {error}"
+        );
+        std::fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn clean_directory_allows_startup() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = temp_data_dir()?;
+        deny_interrupted_backup_markers(&directory)?;
+        // A similarly named file outside the marker prefix must not block.
+        std::fs::write(directory.join(".o3k-backup-other"), b"{}")?;
+        deny_interrupted_backup_markers(&directory)?;
+        std::fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+}
+
 /// Prefix of the denial-only interrupted-backup marker (SPEC-0050 §7). A
 /// backup executor records a marker in the data directory while it owns the
 /// transferred store lock; a replacement controller must refuse to open
@@ -721,18 +843,21 @@ const INTERRUPTED_BACKUP_MARKER_PREFIX: &str = ".o3k-backup-in-progress-";
 /// marker. The marker is untrusted, denial-only forensic metadata: presence
 /// blocks startup until an operator inspects and removes the marker(s), and
 /// absence must not be inferred from. Entries are inspected without following
-/// symlinks, and any unreadable entry fails closed.
+/// symlinks, and any unreadable entry fails closed. Names are compared as
+/// raw bytes (not `to_str`), so a non-UTF-8 marker name still denies startup
+/// instead of being skipped.
 fn deny_interrupted_backup_markers(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut markers = Vec::new();
     for entry in std::fs::read_dir(data_dir)? {
         let entry = entry?;
         let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
-            continue;
-        };
-        if !name.starts_with(INTERRUPTED_BACKUP_MARKER_PREFIX) {
+        if !file_name
+            .as_encoded_bytes()
+            .starts_with(INTERRUPTED_BACKUP_MARKER_PREFIX.as_bytes())
+        {
             continue;
         }
+        let name = file_name.to_string_lossy();
         // `DirEntry::file_type` does not traverse a trailing symlink, so a
         // marker path replaced by a symlink is still observed and denies
         // startup instead of being followed.
@@ -740,7 +865,7 @@ fn deny_interrupted_backup_markers(data_dir: &Path) -> Result<(), Box<dyn std::e
         if file_type.is_symlink() {
             markers.push(format!("{name} (symlink)"));
         } else if file_type.is_file() {
-            markers.push(name.to_owned());
+            markers.push(name.into_owned());
         } else {
             markers.push(format!("{name} (non-regular entry)"));
         }

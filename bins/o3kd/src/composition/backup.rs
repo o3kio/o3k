@@ -3,7 +3,10 @@
 //! Owns the daemon side of the private backup control channel: a dedicated
 //! std thread accepts and authenticates at most one executor request for the
 //! daemon lifetime, then forwards it to the async main flow over an unbounded
-//! channel and triggers the same graceful shutdown as an OS signal. The
+//! channel and triggers the same graceful shutdown as an OS signal. Every
+//! connector that arrives after the accepted request is answered in-band with
+//! the `AlreadyActive` rejection (bounded write), so a concurrent executor
+//! fails fast with exit 2 instead of waiting out its own request timeout. The
 //! thread deliberately is not a composition-owned tokio task: it performs no
 //! canonical writes and must not be aborted/joined by the writer drain.
 
@@ -18,7 +21,7 @@ use std::{
 
 use o3k_store::{
     AcceptedBackupRequest, BackupControlError, BackupControlListener, ExpectedExecutor,
-    HandoffRejectReason,
+    HandoffRejectReason, reject_already_active,
 };
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -62,6 +65,14 @@ impl BackupControl {
                 None
             }
         }
+    }
+
+    /// Reports whether an authenticated backup request triggered this
+    /// shutdown (the accept thread stores the flag before firing the notify).
+    /// The main flow uses this to distinguish a lost accepted request, which
+    /// must fail the process, from an ordinary signal-only shutdown.
+    pub fn was_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
     }
 }
 
@@ -118,8 +129,9 @@ fn accept_loop(
             Err(BackupControlError::Timeout) => continue,
             Err(BackupControlError::AlreadyActive) => {
                 // A successful accept leaves the listener active until process
-                // exit and this thread returns, so this cannot recur; sleep so
-                // an unexpected recurrence can never hot-spin.
+                // exit and this loop never calls `accept_authenticated`
+                // again, so this cannot recur; sleep so an unexpected
+                // recurrence can never hot-spin.
                 std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
@@ -128,6 +140,14 @@ fn accept_loop(
                     ?reason,
                     "backup handoff request rejected during authentication"
                 );
+                continue;
+            }
+            Err(BackupControlError::Io(error)) => {
+                // A persistent error (e.g. EMFILE) would otherwise retry
+                // immediately, hot-spinning this thread and flooding the log;
+                // pace retries like the AlreadyActive arm above.
+                warn!(%error, "backup control accept failed; retrying in 1s");
+                std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
             Err(error) => {
@@ -173,9 +193,28 @@ fn accept_loop(
             warn!(%operation_id, "backup handoff request arrived after shutdown began; dropping it");
         }
         shutdown.notify_one();
-        // One authenticated backup handoff per process lifetime: after a
-        // successful accept the listener stays active until process exit, so
-        // this thread has nothing more to do.
-        return;
+        // One authenticated backup handoff per process lifetime. The
+        // listener stays active until process exit, so this thread keeps
+        // accepting and immediately answers every further connector with
+        // the in-band AlreadyActive rejection (bounded write): a concurrent
+        // executor fails fast with exit 2 instead of hanging until its own
+        // request timeout. The loop runs until the process exits.
+        loop {
+            match listener.accept_raw(ACCEPT_TIMEOUT) {
+                Ok(mut stream) => reject_already_active(&mut stream),
+                Err(BackupControlError::Timeout) => continue,
+                Err(BackupControlError::Io(error)) => {
+                    // A persistent error (e.g. EMFILE) would otherwise retry
+                    // immediately, hot-spinning this thread and flooding the
+                    // log; pace retries like the AlreadyActive arm does.
+                    warn!(%error, "backup control post-accept listener failed; retrying in 1s");
+                    std::thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+                Err(error) => {
+                    warn!(%error, "backup control post-accept listener failed; continuing");
+                }
+            }
+        }
     }
 }
