@@ -804,6 +804,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_non_terminal_operations_preserves_all_durable_unresolved_states()
+    -> Result<(), StoreError> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let resource = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "{}".to_owned(),
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: Some("instance-a".to_owned()),
+        };
+        store.insert_resource(&resource).await?;
+        let make_operation = |serial: u32, state| OperationRecord {
+            id: Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("o3k-store-drain-inventory-{serial}").as_bytes(),
+            ),
+            resource_id: resource.id,
+            kind: format!("drain-test-{serial}"),
+            state,
+            provider_operation_id: Some(format!("provider-op-{serial}")),
+            error_category: None,
+            error_message: None,
+        };
+        let unresolved = [
+            make_operation(1, OperationState::Pending),
+            make_operation(2, OperationState::Running),
+            make_operation(3, OperationState::Retryable),
+            make_operation(4, OperationState::UnknownOutcome),
+        ];
+        let terminal = [
+            make_operation(5, OperationState::Succeeded),
+            make_operation(6, OperationState::Failed),
+        ];
+        for operation in unresolved.iter().chain(terminal.iter()) {
+            store.insert_operation(operation).await?;
+        }
+
+        let listed = store.list_non_terminal_operations().await?;
+        let listed_ids: Vec<_> = listed.iter().map(|operation| operation.id).collect();
+        let mut expected_ids: Vec<_> = unresolved.iter().map(|operation| operation.id).collect();
+        expected_ids.sort();
+        assert_eq!(listed_ids, expected_ids);
+        for operation in &unresolved {
+            assert!(
+                listed.contains(operation),
+                "unresolved Operation was changed"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sqlite_idempotency_reservation_is_scoped_and_atomic() -> Result<(), StoreError> {
         let store = SqliteStore::connect("sqlite::memory:").await?;
         let request = IdempotencyReservationRequest::from_semantics(

@@ -2217,6 +2217,16 @@ impl DurableStore for SqliteStore {
         .await
     }
 
+    async fn list_non_terminal_operations(&self) -> Result<Vec<OperationRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message FROM operations WHERE state NOT IN ('succeeded', 'failed') ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(operation_from_row).collect()
+    }
+
     async fn list_non_terminal_lifecycle_operations(
         &self,
     ) -> Result<Vec<OperationRecord>, StoreError> {

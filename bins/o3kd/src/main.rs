@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(composition::shutdown_signal(shutdown_state))
         .await;
 
-    composition.shutdown().await;
+    let _drain_proof = composition.shutdown().await?;
     serve_result?;
     Ok(())
 }

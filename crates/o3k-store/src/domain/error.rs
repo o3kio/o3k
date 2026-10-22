@@ -11,6 +11,8 @@ pub enum StoreError {
     ResourceNotFound,
     #[error("operation not found")]
     OperationNotFound,
+    #[error("durable store cannot enumerate non-terminal operations")]
+    OperationEnumerationUnavailable,
     #[error("resource generation is stale")]
     StaleGeneration,
     #[error("resource already exists")]

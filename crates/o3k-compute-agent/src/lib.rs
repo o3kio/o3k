@@ -157,6 +157,8 @@ pub struct NodeRegistry {
     /// sync the freshly registered agent's capacity immediately instead of
     /// waiting for its next periodic tick (issue #606).
     registration_notify: Arc<Notify>,
+    owned_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    owned_tasks_closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct NodeEpochLease {
@@ -178,11 +180,67 @@ impl Default for NodeRegistry {
             store: None,
             coordination: None,
             registration_notify: Arc::new(Notify::new()),
+            owned_tasks: Arc::new(Mutex::new(Vec::new())),
+            owned_tasks_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
 
 impl NodeRegistry {
+    /// Starts a registry-owned background task. Tasks requested after drain
+    /// closes admission are rejected and cannot perform later writes.
+    pub(crate) fn spawn_owned_task<F>(&self, task: F) -> bool
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let Ok(mut tasks) = self.owned_tasks.lock() else {
+            return false;
+        };
+        if self
+            .owned_tasks_closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        tasks.push(tokio::spawn(task));
+        true
+    }
+
+    /// Cancels and joins every registered registry worker. The lock and
+    /// handle list share one mutex, preventing a worker from registering
+    /// behind the terminal empty check.
+    pub async fn drain_owned_tasks(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let tasks = {
+                let mut tasks = self
+                    .owned_tasks
+                    .lock()
+                    .map_err(|_| "compute-agent task registry lock was poisoned")?;
+                self.owned_tasks_closed
+                    .store(true, std::sync::atomic::Ordering::Release);
+                std::mem::take(&mut *tasks)
+            };
+            if tasks.is_empty() {
+                return Ok(());
+            }
+            for task in &tasks {
+                task.abort();
+            }
+            for mut task in tasks {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match tokio::time::timeout(remaining, &mut task).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) if error.is_cancelled() => {}
+                    Ok(Err(error)) => return Err(format!("compute-agent task failed: {error}")),
+                    Err(_) => {
+                        return Err("compute-agent task did not stop before drain deadline".into());
+                    }
+                }
+            }
+        }
+    }
+
     /// Registers a prepared host from the authenticated bootstrap workflow.
     /// The certificate is authorized before the registry epoch is created;
     /// callers cannot manufacture an execution identity without proving the
@@ -344,7 +402,7 @@ impl NodeRegistry {
                     let renew_epoch = agent_epoch.to_owned();
                     let registry_conns = self.connections.clone();
 
-                    tokio::spawn(async move {
+                    self.spawn_owned_task(async move {
                         let mut interval = tokio::time::interval(Duration::from_secs(5));
                         interval.tick().await;
                         loop {
@@ -2322,7 +2380,7 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
         let registry = self.registry.clone();
         let agent_id = register.agent_id;
         let agent_epoch = register.agent_epoch;
-        tokio::spawn(async move {
+        self.registry.spawn_owned_task(async move {
             while let Ok(Some(message)) = inbound.get_mut().message().await {
                 match message.body {
                     Some(proto::control_request::Body::Heartbeat(heartbeat)) => {
@@ -2632,14 +2690,14 @@ impl ControlPlaneServer {
             }
         });
         let registry = self.registry.clone();
-        let monitor = tokio::spawn(async move {
+        self.registry.spawn_owned_task(async move {
             let mut tick = time::interval(DEFAULT_HEARTBEAT_INTERVAL);
             loop {
                 tick.tick().await;
                 registry.mark_unavailable(DEFAULT_LEASE).await;
             }
         });
-        let result = Server::builder()
+        Server::builder()
             .add_service(
                 proto::compute_agent_server::ComputeAgentServer::new(ComputeAgentService::new(
                     self.registry,
@@ -2649,9 +2707,7 @@ impl ControlPlaneServer {
             )
             .serve_with_incoming_shutdown(incoming, shutdown)
             .await
-            .map_err(AgentError::Transport);
-        monitor.abort();
-        result
+            .map_err(AgentError::Transport)
     }
 }
 
@@ -7478,6 +7534,59 @@ fn durable_server_states_project_to_the_provider_vocabulary() {
         Some(ProviderState::Creating)
     );
     assert_eq!(instance_state_from_observed("garbage-state"), None);
+}
+
+#[tokio::test]
+async fn owned_task_drain_joins_children_and_rejects_late_registration() {
+    let registry = NodeRegistry::default();
+    assert!(registry.spawn_owned_task(std::future::pending::<()>()));
+    assert!(
+        registry
+            .drain_owned_tasks(Duration::from_secs(1))
+            .await
+            .is_ok()
+    );
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_started = started.clone();
+    assert!(!registry.spawn_owned_task(async move {
+        task_started.store(true, std::sync::atomic::Ordering::Release);
+    }));
+    assert!(!started.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn owned_task_drain_waits_for_a_worker_holding_a_write_guard() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct InFlightWrite(Arc<AtomicUsize>);
+    impl Drop for InFlightWrite {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    let registry = NodeRegistry::default();
+    let writers = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let task_writers = writers.clone();
+    let task_entered = entered.clone();
+    assert!(registry.spawn_owned_task(async move {
+        task_writers.fetch_add(1, Ordering::AcqRel);
+        let _write = InFlightWrite(task_writers);
+        task_entered.notify_one();
+        std::future::pending::<()>().await;
+    }));
+    entered.notified().await;
+    assert_eq!(writers.load(Ordering::Acquire), 1);
+
+    let drain_result = registry.drain_owned_tasks(Duration::from_secs(1)).await;
+    assert!(
+        drain_result.is_ok(),
+        "worker cancellation and join must complete"
+    );
+    assert_eq!(writers.load(Ordering::Acquire), 0);
+    assert!(!registry.spawn_owned_task(std::future::pending::<()>()));
+    assert_eq!(writers.load(Ordering::Acquire), 0);
 }
 
 #[cfg(test)]

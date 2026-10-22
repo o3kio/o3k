@@ -15,6 +15,7 @@ use std::time::Duration;
 use tracing;
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub(crate) struct LocalStorageFence {
     pub(crate) coordination: Arc<dyn o3k_store::CoordinationRepository>,
     pub(crate) controller_id: o3k_store::ControllerId,
@@ -22,13 +23,31 @@ pub(crate) struct LocalStorageFence {
     pub(crate) intent_epoch: u64,
     pub(crate) execution_lock_path: PathBuf,
     pub(crate) attempt: Arc<tokio::sync::Mutex<Option<StorageLeaseAttempt>>>,
+    pub(crate) quiescing: Arc<AtomicBool>,
 }
 
 pub(crate) struct StorageLeaseAttempt {
     pub(crate) fencing_token: o3k_store::FencingToken,
-    pub(crate) stop: tokio::sync::oneshot::Sender<()>,
+    pub(crate) stop: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(crate) renewal: Option<tokio::task::JoinHandle<()>>,
     pub(crate) valid: Arc<AtomicBool>,
     pub(crate) _execution_lock: File,
+}
+
+const STORAGE_RENEWAL_STOP_DEADLINE: Duration = Duration::from_secs(5);
+const STORAGE_LEASE_TTL: Duration = Duration::from_secs(15);
+
+impl LocalStorageFence {
+    /// Permanently closes this process-local fence to new workflow lease
+    /// attempts during controller drain. Ordinary attachment begin/end cycles
+    /// remain reusable until composition explicitly quiesces the fence.
+    pub(crate) async fn quiesce(&self, timeout: Duration) -> Result<(), ()> {
+        self.quiescing.store(true, Ordering::Release);
+        let Ok(_attempt) = tokio::time::timeout(timeout, self.attempt.lock()).await else {
+            return Err(());
+        };
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -42,8 +61,13 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                 o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
             );
         }
+        if self.quiescing.load(Ordering::Acquire) {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
         let mut attempt = self.attempt.lock().await;
-        if attempt.is_some() {
+        if attempt.is_some() || self.quiescing.load(Ordering::Acquire) {
             return Err(
                 o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
             );
@@ -55,7 +79,7 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                 "storage-attachment",
                 &self.controller_id,
                 &self.controller_epoch,
-                Duration::from_secs(15),
+                STORAGE_LEASE_TTL,
             )
             .await
             .map_err(|_| {
@@ -68,6 +92,21 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                 );
             }
         };
+        if self.quiescing.load(Ordering::Acquire) {
+            let _ = tokio::time::timeout(
+                STORAGE_RENEWAL_STOP_DEADLINE,
+                self.coordination.release_work_lease(
+                    "o3k-native-storage-controller",
+                    &self.controller_id,
+                    &self.controller_epoch,
+                    lease.fencing_token,
+                ),
+            )
+            .await;
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
         let execution_lock = match OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -112,7 +151,7 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
         let controller_epoch_value = self.controller_epoch.clone();
         let fencing_token = lease.fencing_token;
         let renewal_valid = valid.clone();
-        tokio::spawn(async move {
+        let renewal = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             interval.tick().await;
             loop {
@@ -124,7 +163,7 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                             &controller_id,
                             &controller_epoch_value,
                             fencing_token,
-                            Duration::from_secs(15),
+                            STORAGE_LEASE_TTL,
                         ).await {
                             Ok(true) => {}
                             Ok(false) | Err(_) => {
@@ -138,7 +177,8 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
         });
         *attempt = Some(StorageLeaseAttempt {
             fencing_token,
-            stop,
+            stop: Some(stop),
+            renewal: Some(renewal),
             valid,
             _execution_lock: execution_lock,
         });
@@ -154,31 +194,44 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                 o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
             );
         }
-        let fencing_token = self
-            .attempt
-            .lock()
-            .await
+        if self.quiescing.load(Ordering::Acquire) {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        // Hold the attempt lock until the database renewal finishes. `end`
+        // acquires the same lock before stopping the background task, so it
+        // cannot release the lease concurrently with this assertion.
+        let attempt = self.attempt.lock().await;
+        if self.quiescing.load(Ordering::Acquire) {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        let fencing_token = attempt
             .as_ref()
-            .filter(|attempt| attempt.valid.load(Ordering::Acquire))
+            .filter(|attempt| attempt.valid.load(Ordering::Acquire) && attempt.stop.is_some())
             .map(|attempt| attempt.fencing_token)
             .ok_or(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)?;
-        let renewed = self
-            .coordination
-            .renew_work_lease(
+        let renewed = tokio::time::timeout(
+            STORAGE_RENEWAL_STOP_DEADLINE,
+            self.coordination.renew_work_lease(
                 "o3k-native-storage-controller",
                 &self.controller_id,
                 &self.controller_epoch,
                 fencing_token,
-                Duration::from_secs(15),
-            )
-            .await
-            .map_err(|_| {
-                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
-            })?;
-        if renewed {
-            Ok(())
-        } else {
-            Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
+                STORAGE_LEASE_TTL,
+            ),
+        )
+        .await;
+        match renewed {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
+                if let Some(attempt) = attempt.as_ref() {
+                    attempt.valid.store(false, Ordering::Release);
+                }
+                Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
+            }
         }
     }
 
@@ -191,26 +244,78 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                 o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
             );
         }
-        let Some(attempt) = self.attempt.lock().await.take() else {
+        let Ok(mut attempt_slot) =
+            tokio::time::timeout(STORAGE_RENEWAL_STOP_DEADLINE, self.attempt.lock()).await
+        else {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        };
+        let Some(attempt) = attempt_slot.as_mut() else {
             return Ok(());
         };
-        let _ = attempt.stop.send(());
-        let released = self
-            .coordination
-            .release_work_lease(
+        attempt.valid.store(false, Ordering::Release);
+        if let Some(stop) = attempt.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(renewal) = attempt.renewal.as_mut() {
+            match tokio::time::timeout(STORAGE_RENEWAL_STOP_DEADLINE, renewal).await {
+                Ok(Ok(())) => attempt.renewal = None,
+                Ok(Err(_)) | Err(_) => {
+                    // Keep the join handle in the attempt if this future is
+                    // cancelled or times out. Dropping it would detach the
+                    // renewal task while releasing the execution lock.
+                    return Err(
+                        o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+                    );
+                }
+            }
+        }
+        let token = attempt.fencing_token;
+        let release_result = tokio::time::timeout(
+            STORAGE_RENEWAL_STOP_DEADLINE,
+            self.coordination.release_work_lease(
                 "o3k-native-storage-controller",
                 &self.controller_id,
                 &self.controller_epoch,
-                attempt.fencing_token,
-            )
-            .await
-            .map_err(|_| {
-                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
-            })?;
-        if released {
-            Ok(())
-        } else {
-            Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
+                token,
+            ),
+        )
+        .await;
+        match release_result {
+            Ok(Ok(true)) => {
+                attempt_slot.take();
+                Ok(())
+            }
+            Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
+                // A failed response may follow a committed release. Observe
+                // the durable lease before deciding whether the local lock
+                // can be dropped. Unknown ownership keeps the attempt and
+                // execution lock live, so composition drain fails closed.
+                match tokio::time::timeout(
+                    STORAGE_RENEWAL_STOP_DEADLINE,
+                    self.coordination
+                        .inspect_work_lease("o3k-native-storage-controller"),
+                )
+                .await
+                {
+                    Ok(Ok(Some(current)))
+                        if current.fencing_token != token
+                            || current.owner_controller_id != self.controller_id
+                            || current.owner_controller_epoch != self.controller_epoch =>
+                    {
+                        attempt_slot.take();
+                        Ok(())
+                    }
+                    Ok(Ok(None)) => {
+                        attempt_slot.take();
+                        Ok(())
+                    }
+                    Ok(Ok(Some(_))) | Ok(Err(_)) | Err(_) => Err(
+                        o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+                    ),
+                }
+            }
         }
     }
 }
@@ -438,4 +543,113 @@ pub(crate) fn storage_intent_epoch(epoch: &o3k_store::ControllerEpoch) -> u64 {
         hash.wrapping_mul(0x100000001b3)
             .wrapping_add(u64::from(byte))
     })
+}
+
+#[cfg(test)]
+mod storage_lease_drain_tests {
+    use super::*;
+    use sqlx::Connection;
+
+    #[tokio::test]
+    async fn end_serializes_with_assert_and_joins_the_renewal_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?);
+        let coordination: Arc<dyn o3k_store::CoordinationRepository> = store;
+        let root = std::env::temp_dir().join(format!("o3kd-storage-drain-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root)?;
+        let fence = LocalStorageFence {
+            coordination,
+            controller_id: o3k_store::ControllerId::new("storage-drain-test"),
+            controller_epoch: o3k_store::ControllerEpoch::new("epoch-1"),
+            intent_epoch: 1,
+            execution_lock_path: root.join("storage.execution.lock"),
+            attempt: Arc::new(tokio::sync::Mutex::new(None)),
+            quiescing: Arc::new(AtomicBool::new(false)),
+        };
+
+        o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1).await?;
+        {
+            let attempt = fence.attempt.lock().await;
+            let attempt = attempt.as_ref().ok_or("lease attempt missing")?;
+            assert!(
+                attempt
+                    .renewal
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished())
+            );
+        }
+
+        let (_assert_result, end_result) = tokio::join!(
+            o3k_reconciler::storage_workflow::StorageControllerFence::assert_current(&fence, 1),
+            o3k_reconciler::storage_workflow::StorageControllerFence::end(&fence, 1),
+        );
+        end_result?;
+        assert!(fence.attempt.lock().await.is_none());
+        fence
+            .quiesce(Duration::from_secs(1))
+            .await
+            .map_err(|_| "storage fence quiesce timed out")?;
+        assert!(
+            o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1)
+                .await
+                .is_err(),
+            "quiesced storage fence must reject a new lease attempt"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_release_keeps_the_execution_lock_until_observed_safe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3kd-storage-release-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root)?;
+        let database_path = root.join("state.sqlite");
+        let store =
+            Arc::new(o3k_store::unified::O3kStore::connect_sqlite_file(&database_path).await?);
+        let coordination: Arc<dyn o3k_store::CoordinationRepository> = store;
+        let lock_path = root.join("storage.execution.lock");
+        let fence = LocalStorageFence {
+            coordination,
+            controller_id: o3k_store::ControllerId::new("storage-release-test"),
+            controller_epoch: o3k_store::ControllerEpoch::new("epoch-1"),
+            intent_epoch: 1,
+            execution_lock_path: lock_path.clone(),
+            attempt: Arc::new(tokio::sync::Mutex::new(None)),
+            quiescing: Arc::new(AtomicBool::new(false)),
+        };
+        o3k_reconciler::storage_workflow::StorageControllerFence::begin(&fence, 1).await?;
+
+        let mut connection =
+            sqlx::SqliteConnection::connect(&format!("sqlite://{}", database_path.display()))
+                .await?;
+        sqlx::query("CREATE TRIGGER block_storage_lease_release BEFORE DELETE ON work_leases WHEN OLD.work_key = 'o3k-native-storage-controller' BEGIN SELECT RAISE(ABORT, 'controlled release failure'); END")
+            .execute(&mut connection)
+            .await?;
+        assert!(
+            o3k_reconciler::storage_workflow::StorageControllerFence::end(&fence, 1)
+                .await
+                .is_err(),
+            "a failed release with the same durable lease must fail closed"
+        );
+        assert!(fence.attempt.lock().await.is_some());
+        let probe = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        assert!(flock(&probe, FlockOperation::NonBlockingLockExclusive).is_err());
+
+        sqlx::query("DROP TRIGGER block_storage_lease_release")
+            .execute(&mut connection)
+            .await?;
+        drop(connection);
+        o3k_reconciler::storage_workflow::StorageControllerFence::end(&fence, 1).await?;
+        assert!(fence.attempt.lock().await.is_none());
+        drop(fence);
+        drop(probe);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

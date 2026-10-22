@@ -122,22 +122,8 @@ fn assert_signal_shutdown(signal: &str) -> Result<(), Box<dyn std::error::Error>
     let address = probe.local_addr()?;
     drop(probe);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_o3kd"))
-        .args([
-            "--listen-addr",
-            &address.to_string(),
-            "--data-dir",
-            &format!("/tmp/o3kd-test-{}-{signal}", std::process::id()),
-            "--log-filter",
-            "off",
-        ])
-        .env(
-            "O3K_NATIVE_CURSOR_HMAC_KEY",
-            "test-native-cursor-key-0123456789abcdef",
-        )
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let data_dir = TestDataDir::new()?;
+    let mut child = daemon_command(address, &data_dir.0).spawn()?;
 
     let startup_deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < startup_deadline {
@@ -186,6 +172,14 @@ fn assert_signal_shutdown(signal: &str) -> Result<(), Box<dyn std::error::Error>
         }
         thread::sleep(Duration::from_millis(25));
     }
+
+    // A clean process drain releases the lifetime store lock only after the
+    // controller has stopped. Reopening the same disposable SQLite state is a
+    // process-level regression check for the shutdown boundary.
+    let restart_address = free_address()?;
+    let mut restarted = ChildGuard(daemon_command(restart_address, &data_dir.0).spawn()?);
+    wait_until_ready(&mut restarted.0, restart_address)?;
+    stop_daemon(&mut restarted.0)?;
     Ok(())
 }
 

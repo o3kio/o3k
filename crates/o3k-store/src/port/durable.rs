@@ -348,6 +348,12 @@ pub trait DurableStore: Send + Sync {
         request: &IdempotencyReservationRequest,
     ) -> Result<CanonicalAcceptanceOutcome, StoreError>;
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError>;
+    /// Lists every durable non-terminal operation in stable order. Shutdown
+    /// uses this read after executor drain to preserve unresolved identities
+    /// without treating them as active writers or rewriting their states.
+    async fn list_non_terminal_operations(&self) -> Result<Vec<OperationRecord>, StoreError> {
+        Err(StoreError::OperationEnumerationUnavailable)
+    }
     async fn get_canonical_operation(
         &self,
         id: Uuid,

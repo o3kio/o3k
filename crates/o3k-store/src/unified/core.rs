@@ -544,6 +544,13 @@ impl DurableStore for O3kStore {
         }
     }
 
+    async fn list_non_terminal_operations(&self) -> Result<Vec<OperationRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_non_terminal_operations().await,
+            Self::Postgres(s) => s.list_non_terminal_operations().await,
+        }
+    }
+
     async fn list_canonical_operations_page(
         &self,
         owner_scope: &str,
