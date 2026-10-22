@@ -43,17 +43,18 @@
 //! to or inside the canonical data directory). It is then opened through a
 //! retained no-follow descriptor: the staging directory is created with
 //! `mkdirat` relative to that descriptor and itself opened as a second
-//! no-follow descriptor, so the snapshot write is dir-fd-anchored — the
-//! store receives `/proc/self/fd/<staging-fd>/o3k.sqlite`, which the kernel
-//! resolves against the open descriptor — and the publication rename is a
-//! `renameat(RENAME_NOREPLACE)` between names resolved inside the retained
-//! destination descriptor. The destination is re-validated against that
-//! descriptor (same dev+ino, same owner, same mode posture) immediately
-//! before the capture and again before the final rename. The remaining
-//! string-path steps (metadata write, snapshot hashing) run inside the
-//! verified, euid-owned staging directory; a path-component symlink swap
-//! above the destination between validation and use cannot redirect the
-//! capture or the publication.
+//! no-follow descriptor, so every capture and post-capture access — the
+//! snapshot write, the snapshot hash, the metadata write, and the staging
+//! fsync — is dir-fd-anchored through `/proc/self/fd/<staging-fd>` magic
+//! links, which the kernel resolves against the open descriptor. The
+//! publication rename is a `renameat(RENAME_NOREPLACE)` between leaf names
+//! resolved inside the retained destination descriptor, and the destination
+//! directory is fsynced after the rename (best effort). The destination is
+//! re-validated against that descriptor (same dev+ino, same owner, same mode
+//! posture) immediately before the capture and again before the final
+//! rename; string paths remain only for logging. A path-component symlink
+//! swap above the destination between validation and use therefore cannot
+//! redirect the capture, its metadata, or the publication.
 //!
 //! Stdout carries exactly one line of bounded JSON; stderr carries only the
 //! stable reason code and the operation id. Secrets never appear in arguments,
@@ -105,7 +106,7 @@ use o3k_store::{
 };
 use rustix::fd::OwnedFd;
 use rustix::fs::renameat_with;
-use rustix::fs::{Mode, OFlags, RenameFlags, fstat, mkdirat, open, openat};
+use rustix::fs::{Mode, OFlags, RenameFlags, fstat, fsync, mkdirat, open, openat};
 use rustix::process::geteuid;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -248,7 +249,12 @@ pub fn run_backup_create(args: &BackupCreateArgs) -> ExitCode {
             args.operation_id
         )
     });
-    println!("{line}");
+    // Write the result manually: `println!` panics (exit 101, outside the
+    // SPEC-0050 §8 contract) when stdout is closed, e.g. `| head -0`. A failed
+    // write keeps the already-computed contract exit code.
+    if writeln!(io::stdout(), "{line}").is_err() {
+        return ExitCode::from(outcome.exit_code);
+    }
     if outcome.exit_code == 0 {
         return ExitCode::SUCCESS;
     }
@@ -257,7 +263,12 @@ pub fn run_backup_create(args: &BackupCreateArgs) -> ExitCode {
         .get("reason")
         .and_then(Value::as_str)
         .unwrap_or("unspecified");
-    eprintln!("o3k backup create [{}]: {reason}", args.operation_id);
+    // Best effort: stderr carries the stable reason line only.
+    let _ = writeln!(
+        io::stderr(),
+        "o3k backup create [{}]: {reason}",
+        args.operation_id
+    );
     ExitCode::from(outcome.exit_code)
 }
 
@@ -519,7 +530,6 @@ fn execute_inner(
             );
         }
     }
-    let staging_dir = destination_dir.join(&staging_name);
     // Open the staging directory itself through the held destination dir-fd;
     // the snapshot write below is addressed through this descriptor via a
     // `/proc/self/fd` magic link, so `backup_to_file`'s internal path
@@ -540,23 +550,21 @@ fn execute_inner(
         return BackupCreateOutcome::recoverable(operation_id, "deadline-exceeded");
     }
 
-    // The destination is revalidated immediately before the capture: the
-    // later string-path steps (metadata write, snapshot hashing) still
-    // depend on it being intact. A swap since validation fails closed here.
+    // The destination is revalidated immediately before the capture; a swap
+    // since validation fails closed here.
     if let Err(reason) = revalidate_destination(&destination_fd, &destination_dir) {
         return BackupCreateOutcome::recoverable(operation_id, reason);
     }
-    let snapshot_path = staging_dir.join(SNAPSHOT_FILE_NAME);
-    // The snapshot destination is anchored on the staging dir-fd through a
-    // proc magic link: `backup_to_file`'s create_dir_all/canonicalize/
-    // hard_link steps resolve `/proc/self/fd/<staging-fd>` against the open
-    // descriptor, which a path-component swap cannot redirect. The staging
-    // fd stays bound (and therefore open) until the backup call returns.
-    let staged_snapshot_path = PathBuf::from(format!(
-        "/proc/self/fd/{}/{}",
-        staging_fd.as_raw_fd(),
-        SNAPSHOT_FILE_NAME
-    ));
+    // Every post-capture access to the staging directory is anchored on the
+    // staging dir-fd through a proc magic link: `/proc/self/fd/<staging-fd>`
+    // is resolved by the kernel against the open descriptor, so a
+    // path-component swap after validation cannot divert the snapshot hash,
+    // the metadata write, or the staging fsync. `backup_to_file`'s internal
+    // create_dir_all/canonicalize/hard_link re-resolution follows the same
+    // link. The staging fd stays bound (and therefore open) until after the
+    // final rename.
+    let staging_fd_path = PathBuf::from(format!("/proc/self/fd/{}", staging_fd.as_raw_fd()));
+    let staged_snapshot_path = staging_fd_path.join(SNAPSHOT_FILE_NAME);
     match runtime.block_on(store.backup_to_file(&staged_snapshot_path)) {
         Ok(()) => {}
         Err(StoreError::BackupPublicationUncertain) => {
@@ -583,7 +591,7 @@ fn execute_inner(
     if Instant::now() >= deadline {
         return BackupCreateOutcome::recoverable(operation_id, "deadline-exceeded");
     }
-    let snapshot_hash = match sha256_hex_file(&snapshot_path) {
+    let snapshot_hash = match sha256_hex_file(&staged_snapshot_path) {
         Ok(hash) => hash,
         Err(_) => return BackupCreateOutcome::unknown(operation_id, "snapshot-hash-failed"),
     };
@@ -607,11 +615,11 @@ fn execute_inner(
         "cli_version": env!("CARGO_PKG_VERSION"),
         "provisional": true,
     });
-    if write_exclusive_private(&staging_dir.join("metadata.json"), &metadata).is_err() {
+    if write_exclusive_private(&staging_fd_path.join("metadata.json"), &metadata).is_err() {
         return BackupCreateOutcome::recoverable(operation_id, "metadata-write-failed");
     }
 
-    if sync_dir(&staging_dir).is_err() {
+    if fsync(&staging_fd).is_err() {
         return BackupCreateOutcome::recoverable(operation_id, "staging-sync-failed");
     }
     // Re-validate the destination one last time, then publish with a
@@ -634,6 +642,9 @@ fn execute_inner(
     {
         return BackupCreateOutcome::recoverable(operation_id, "finalize-rename-failed");
     }
+    // Best-effort durability of the published directory entry, mirroring the
+    // data-dir sync below.
+    let _ = sync_dir(&destination_dir);
 
     #[cfg(feature = "backup-test-hooks")]
     let keep_marker =

@@ -337,7 +337,59 @@ round-1 fixes):
    canonical executable path is compared alongside the executable dev+ino
    and the uid.
 
+## Review round 3 (pre-merge)
+
+Commit state first: the round-1 and round-2 fixes are no longer uncommitted —
+they landed as `e05d0701` ("fix(pp6): address pre-merge review rounds 1-2 on
+the backup handoff") on top of `b92f4ce9`, and the tree was clean at that
+head when this round started. The round-3 fixes below were applied on top of
+`e05d0701` (uncommitted at the time of writing).
+
+A round-3 review of PR #1168 (2026-10-23, pre-merge) found 2 Low and 2 Nit
+findings; all are fixed:
+
+1. **(Low) All post-capture steps are now dir-fd-anchored.** The round-2 fix
+   anchored only the `backup_to_file` destination; the snapshot hash, the
+   `metadata.json` write, and the staging fsync still used the swappable
+   destination string path, so an attacker who swapped a writable ancestor
+   after revalidation and restored it before the final rename could divert
+   the metadata and produce a success-flagged artifact missing
+   `metadata.json`. Those steps now run through the staging fd magic link
+   (`/proc/self/fd/<staging-fd>/o3k.sqlite`,
+   `/proc/self/fd/<staging-fd>/metadata.json`, and `fsync` on the staging fd
+   directly); the staging fd is kept alive until after the final rename, and
+   string paths remain only for logging and the `renameat` leaf names. The
+   module doc states this exactly.
+2. **(Low) EPIPE-safe result emission.** `run_backup_create` used
+   `println!`/`eprintln!`, which panic (exit 101, outside the SPEC-0050 §8
+   0/2/3/4 contract) when stdout is closed, e.g. `o3k backup create ... |
+   head -0`. Both emissions are now `writeln!` on `io::stdout()`/`io::stderr()`
+   with errors handled: a failed stdout write exits with the already-computed
+   contract code, and the stderr reason line is best-effort. Regression
+   coverage: `backup_create_closed_stdout_keeps_contract_exit_code` in
+   `bins/o3k/tests/cli.rs` spawns the real binary with a reader-less stdout
+   pipe and asserts exit 2 (a rejected precondition), not 101.
+3. **(Nit) Publication durability.** After the final
+   `renameat_with(RENAME_NOREPLACE)`, the destination directory is fsynced
+   best-effort (`let _ = sync_dir(&destination_dir)`), mirroring the
+   existing data-dir sync, so the published directory entry survives power
+   loss.
+4. **(Nit) This section** records the commit state and the round-3 fixes.
+
 ## Validation
+
+Round 3 (this round's fixes):
+
+- `cargo fmt -p o3k -- --check` (after `cargo fmt -p o3k`) — clean; a
+  workspace-wide `cargo fmt --all -- --check` afterwards is also clean.
+- `cargo clippy -p o3k --all-targets --all-features -- -D warnings` — exit 0,
+  no warnings.
+- `cargo test -p o3k --all-features` — exit 0, 0 failed (including the
+  end-to-end provisional-capture test on the now fully fd-anchored
+  post-capture path, the crash-hook tests, and the new closed-stdout
+  contract test).
+- `tests/pp6_backup_handoff.sh` — **PASS — 17 executed checks, 7
+  documented-coverage rows, 0 failures** (exit 0).
 
 Round 2 (this round's fixes):
 
