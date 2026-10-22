@@ -51,6 +51,11 @@ remain unresolved and require observation; tests do not prove transfer.
   composition closes command admission and joins commands before ending the
   storage fence. A cancelled caller cannot detach provider mutation from this
   proof. A missed deadline is sticky and retains composition/execution locks.
+- MEDIUM: the unsupported PostgreSQL proof also broke ordinary daemon exit.
+  The executable now recognizes only that typed unsupported-proof result as
+  normal exit, returning no proof and retaining exclusion until process exit.
+  Every actual failed writer drain still fails shutdown. A real PostgreSQL
+  restart test asserts clean exit and absence of the successful drain verdict.
 - HIGH: task cancellation did not prove SQLite connection-worker termination.
   The final store boundary closes shared pool admission and waits for SQLx
   worker shutdown/rollback after controller-session drain. Unsupported store
@@ -86,7 +91,10 @@ proof. No new durable lifecycle authority is introduced.
 
 The cancellation regression was run with the cancellation verdict guard
 removed: `cancelled_network_drain_cannot_later_report_success` failed because a
-second drain incorrectly succeeded. The guard was restored before validation.
+second drain incorrectly succeeded. The guard was restored before validation. The PostgreSQL process regression
+also failed locally before its normal-exit correction (exit status 1 on SIGTERM)
+and passed afterwards on a disposable local PostgreSQL 16 instance. This is
+normal-shutdown compatibility evidence, not PostgreSQL backup exclusion.
 
 Controlled coordination adapters wrap real disposable SQLite coordination:
 
@@ -127,6 +135,16 @@ Ignored environment-specific tests are not evidence for those profiles. The
 five o3kd real-process shutdown tests passed in that workspace run. The final
 test-only correction orders store reopening after proof release and ownership
 reacquisition; its targeted regression and workspace Clippy also passed.
+
+The subsequent CI review caught and corrected the ordinary PostgreSQL exit
+regression described above. The initial broader local PostgreSQL attempt was
+rejected by destructive-test guards because the database purpose marker was
+missing; it is not counted as passing evidence. With a disposable PostgreSQL
+16 instance, an `o3k_workspace_test_` database and
+`O3K_TEST_DATABASE_PURPOSE=workspace`, the complete final workspace suite passed:
+2,019 passed, zero failed, 57 ignored. Workspace Clippy, formatting and diff
+checks passed as well. Both real topology process backends passed; PostgreSQL
+asserts ordinary exit without a backup-drain verdict.
 
 The last review pass found no further actionable defect in this PR's scoped
 writer ownership/drain paths. This is an agent review result, not a replacement

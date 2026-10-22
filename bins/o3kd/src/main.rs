@@ -34,7 +34,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(composition::shutdown_signal(shutdown_state))
         .await;
 
-    let _drain_proof = composition.shutdown().await?;
+    let _drain_proof = drain_result_for_normal_exit(composition.shutdown().await)?;
     serve_result?;
     Ok(())
+}
+
+/// Ordinary daemon exit must remain available for adapters that cannot prove
+/// backup quiescence. The drain API itself still returns an error and never
+/// supplies a proof for them; its failed-drain guard retains exclusion until
+/// process exit. Every other failure remains a failed daemon shutdown.
+fn drain_result_for_normal_exit(
+    result: Result<composition::ControllerDrainProof, Box<dyn std::error::Error>>,
+) -> Result<Option<composition::ControllerDrainProof>, Box<dyn std::error::Error>> {
+    match result {
+        Ok(proof) => Ok(Some(proof)),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<o3k_store::StoreError>(),
+                Some(o3k_store::StoreError::WriterDrainUnavailable)
+            ) =>
+        {
+            info!("controller exiting without backup drain proof: unsupported storage adapter");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_result_for_normal_exit;
+
+    #[test]
+    fn unsupported_adapter_allows_normal_exit_without_a_drain_proof() {
+        assert!(matches!(
+            drain_result_for_normal_exit(Err(o3k_store::StoreError::WriterDrainUnavailable.into())),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn failed_writer_drain_still_fails_normal_exit() {
+        assert!(
+            drain_result_for_normal_exit(
+                Err(std::io::Error::other("writer remains active").into())
+            )
+            .is_err()
+        );
+    }
 }
