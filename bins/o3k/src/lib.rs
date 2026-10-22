@@ -17,6 +17,11 @@
 // trust lifecycle, and replay/crash recovery are implemented.
 #[allow(dead_code)]
 pub(crate) mod backup;
+// Provisional PP.6 backup capture executor (SPEC-0050 §8, ADR-0189): drives
+// the authenticated store-lock handoff and captures an unsigned, host-local
+// provisional snapshot. Linux-only like the handoff primitives in o3k-store.
+#[cfg(target_os = "linux")]
+pub mod backup_create;
 pub mod checks;
 pub mod context;
 pub mod db;

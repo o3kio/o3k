@@ -25,3 +25,10 @@ tokio = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
 rustix = { workspace = true, features = ["fs", "net", "process"] }
+
+[features]
+# Test-only crash hooks for deterministic handoff failure injection
+# (`O3K_HANDOFF_TEST_EXIT_AFTER_SEND_BEFORE_ACK_READ=1` and
+# `O3K_HANDOFF_TEST_EXIT_BEFORE_ACK=1` in `access_lock.rs`). Never enabled in
+# release or production builds.
+backup-test-hooks = []

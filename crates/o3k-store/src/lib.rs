@@ -29,6 +29,8 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 mod access_lock;
 mod artifact_transfer;
+#[cfg(target_os = "linux")]
+mod backup_control;
 pub mod conformance;
 pub mod coordination;
 pub mod governance;
@@ -43,6 +45,12 @@ pub mod domain;
 pub mod port;
 #[cfg(unix)]
 pub use access_lock::StoreAccessLock;
+#[cfg(target_os = "linux")]
+pub use backup_control::{
+    AcceptedBackupRequest, BACKUP_CONTROL_DIR, BACKUP_CONTROL_SOCKET, BackupControlError,
+    BackupControlListener, BackupHandoffRequest, ExpectedExecutor, HandoffRejectReason,
+    PeerIdentity, connect_and_request, identity_tokens, installation_token, site_token,
+};
 pub use coordination::{
     ControllerEpoch, ControllerId, ControllerSession, ControllerState, CoordinationRepository,
     FencingToken, LeaseAcquireOutcome, WorkLease,

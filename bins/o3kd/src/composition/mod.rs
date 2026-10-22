@@ -4,6 +4,9 @@ pub mod network;
 pub mod runtime;
 pub mod storage;
 
+#[cfg(target_os = "linux")]
+pub mod backup;
+
 use o3k_kernel::{Clock, Controller};
 use o3k_provider::ComputeProvider;
 use o3k_storage::StorageProvider;
@@ -11,7 +14,9 @@ use o3k_store::{
     BootstrapRepository, ComputeRepository, FederatedBindingRecord, IdentityRepository,
     OperatorAssignmentRecord,
 };
-use std::{sync::Arc, time::Duration};
+#[cfg(target_os = "linux")]
+use std::{fmt, io};
+use std::{path::Path, sync::Arc, time::Duration};
 use tracing::info;
 use uuid::Uuid;
 
@@ -509,6 +514,105 @@ pub struct ControllerDrainProof {
     _api_exclusion: o3k_api::BackupExclusion,
 }
 
+/// Why transferring the drained store lock to the authenticated backup
+/// executor failed. The daemon treats every variant identically — it retains
+/// the lock until process exit and exits non-zero — but the distinction
+/// records whether the executor can already hold duplicate lock descriptors,
+/// which an operator must know before restarting anything.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub enum HandoffTransferError {
+    /// The descriptors were not transferred (for example a pre-send I/O
+    /// failure or an unusable timeout); the executor cannot hold them.
+    TransferRejected(io::Error),
+    /// The transfer was sent but no valid acknowledgement came back (ack
+    /// timeout, truncated stream, or invalid ack frame). The executor may
+    /// already hold duplicate lock descriptors, so only process exit — which
+    /// closes every descriptor — is a safe continuation.
+    UnknownOutcome(io::Error),
+}
+
+#[cfg(target_os = "linux")]
+impl fmt::Display for HandoffTransferError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TransferRejected(error) => {
+                write!(
+                    formatter,
+                    "store-lock handoff rejected before transfer: {error}"
+                )
+            }
+            Self::UnknownOutcome(error) => write!(
+                formatter,
+                "store-lock handoff outcome unknown (acknowledgement lost): {error}"
+            ),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::error::Error for HandoffTransferError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::TransferRejected(error) | Self::UnknownOutcome(error) => Some(error),
+        }
+    }
+}
+
+impl ControllerDrainProof {
+    /// Transfers the retained lifetime store lock to the authenticated backup
+    /// executor over `stream`. On success the executor owns the lock and the
+    /// daemon must exit. On failure the lock is retained until process exit
+    /// (fail closed); the receiver may already hold duplicate descriptors, so
+    /// process exit is the only safe continuation either way.
+    #[cfg(target_os = "linux")]
+    pub fn handoff_store_lock(
+        self,
+        stream: &mut std::os::unix::net::UnixStream,
+        timeout: Duration,
+    ) -> Result<(), HandoffTransferError> {
+        // Test-only crash hook (feature `backup-test-hooks`): simulate a
+        // daemon that dies after the drain proof exists but before any
+        // descriptor is transferred.
+        #[cfg(feature = "backup-test-hooks")]
+        if std::env::var_os("O3K_BACKUP_TEST_EXIT_BEFORE_HANDOFF").is_some_and(|value| value == "1")
+        {
+            std::process::exit(98);
+        }
+        let Self {
+            _store_access_lock,
+            _api_exclusion,
+        } = self;
+        match _store_access_lock.handoff(stream, timeout) {
+            Ok(()) => {
+                // Test-only crash hook (feature `backup-test-hooks`): simulate
+                // a daemon that dies after the executor acknowledged lock
+                // ownership.
+                #[cfg(feature = "backup-test-hooks")]
+                if std::env::var_os("O3K_BACKUP_TEST_EXIT_AFTER_ACK")
+                    .is_some_and(|value| value == "1")
+                {
+                    std::process::exit(99);
+                }
+                Ok(())
+            }
+            Err((lock, error)) => {
+                // Fail closed, exactly like a cancelled drain: keep the lock
+                // until process exit. The receiver may already hold duplicate
+                // descriptors, so dropping our guard here could split lock
+                // ownership between a restarted daemon and the executor.
+                std::mem::forget(lock);
+                Err(match error.kind() {
+                    io::ErrorKind::TimedOut
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::InvalidData => HandoffTransferError::UnknownOutcome(error),
+                    _ => HandoffTransferError::TransferRejected(error),
+                })
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperationDrainDisposition {
     ActiveExecution,
@@ -607,6 +711,82 @@ mod operation_drain_classification_tests {
     }
 }
 
+/// Prefix of the denial-only interrupted-backup marker (SPEC-0050 §7). A
+/// backup executor records a marker in the data directory while it owns the
+/// transferred store lock; a replacement controller must refuse to open
+/// canonical state while one is present.
+const INTERRUPTED_BACKUP_MARKER_PREFIX: &str = ".o3k-backup-in-progress-";
+
+/// Refuses to start when the data directory contains an interrupted-backup
+/// marker. The marker is untrusted, denial-only forensic metadata: presence
+/// blocks startup until an operator inspects and removes the marker(s), and
+/// absence must not be inferred from. Entries are inspected without following
+/// symlinks, and any unreadable entry fails closed.
+fn deny_interrupted_backup_markers(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut markers = Vec::new();
+    for entry in std::fs::read_dir(data_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(INTERRUPTED_BACKUP_MARKER_PREFIX) {
+            continue;
+        }
+        // `DirEntry::file_type` does not traverse a trailing symlink, so a
+        // marker path replaced by a symlink is still observed and denies
+        // startup instead of being followed.
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            markers.push(format!("{name} (symlink)"));
+        } else if file_type.is_file() {
+            markers.push(name.to_owned());
+        } else {
+            markers.push(format!("{name} (non-regular entry)"));
+        }
+    }
+    if markers.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "interrupted backup marker(s) present in the data directory; an operator must \
+         inspect and remove them before this controller may mutate canonical state: {}",
+        markers.join(", ")
+    )
+    .into())
+}
+
+/// Builds the authenticated executor identity the backup control listener
+/// accepts: the canonicalized sibling `o3k` of the running daemon executable,
+/// the daemon's effective uid, and the installation/site identity tokens both
+/// sides derive independently from the canonical data directory.
+///
+/// Returns `None` — backup capability unavailable, ordinary startup continues
+/// — when the sibling executable is absent or the tokens cannot be derived.
+#[cfg(target_os = "linux")]
+pub fn expected_backup_executor(data_dir: &Path) -> Option<o3k_store::ExpectedExecutor> {
+    let current_exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    expected_backup_executor_from(&current_exe, data_dir)
+}
+
+/// [`expected_backup_executor`] resolved against an explicit daemon-executable
+/// path instead of the running process; the testable resolution rule.
+#[cfg(target_os = "linux")]
+pub fn expected_backup_executor_from(
+    current_exe: &Path,
+    data_dir: &Path,
+) -> Option<o3k_store::ExpectedExecutor> {
+    let parent = current_exe.parent()?;
+    let exe = parent.join("o3k").canonicalize().ok()?;
+    let (installation, site) = o3k_store::identity_tokens(data_dir).ok()?;
+    Some(o3k_store::ExpectedExecutor {
+        exe,
+        uid: rustix::process::geteuid().as_raw(),
+        installation,
+        site,
+    })
+}
+
 pub async fn build_composition(
     config: o3k_config::Config,
 ) -> Result<Composition, Box<dyn std::error::Error>> {
@@ -617,6 +797,11 @@ pub async fn build_composition(
         store_lock: Some(o3k_store::StoreAccessLock::acquire(&config.data_dir)?),
         storage_fence: None,
     };
+    // An interrupted backup is denial-only forensic metadata (SPEC-0050 §7):
+    // its presence blocks replacement-controller startup before any canonical
+    // state is opened; its absence proves nothing and is never treated as
+    // positive evidence.
+    deny_interrupted_backup_markers(&config.data_dir)?;
     let store = match config.database_backend {
         o3k_config::DatabaseBackend::Sqlite => {
             let database_path = config.data_dir.join("o3k.sqlite");
@@ -1832,10 +2017,21 @@ fn spawn_diagnostics_controller_probe(
     })
 }
 
-/// Runs an opt-in, read-only process-boundary probe for protected validation.
-/// It is deliberately absent unless its output and either a fixed resource ID
-/// or a lifecycle-produced resource-ID file are configured. It records only
+/// Waits for Ctrl+C or SIGTERM and then clears runtime readiness. Kept as
+/// the signal-only entry point; backup-capable compositions use
+/// [`shutdown_signal_with_backup`].
 pub async fn shutdown_signal(state: o3k_api::AppState) {
+    // A Notify nobody signals keeps the plain signal-only path unchanged.
+    shutdown_signal_with_backup(state, Arc::new(tokio::sync::Notify::new())).await;
+}
+
+/// Waits for Ctrl+C, SIGTERM, or an authenticated backup handoff request.
+/// Every exit path clears runtime readiness, so the axum serve ends
+/// identically for an OS signal and for a backup-triggered handoff.
+pub async fn shutdown_signal_with_backup(
+    state: o3k_api::AppState,
+    backup: Arc<tokio::sync::Notify>,
+) {
     let ctrl_c = async { tokio::signal::ctrl_c().await };
 
     #[cfg(unix)]
@@ -1860,6 +2056,9 @@ pub async fn shutdown_signal(state: o3k_api::AppState) {
         result = terminate => match result {
             Ok(()) => info!("received SIGTERM, shutting down"),
             Err(error) => tracing::error!(%error, "SIGTERM handler failed; shutting down"),
+        },
+        _ = backup.notified() => {
+            info!("backup handoff admitted, shutting down for lock transfer");
         },
     }
     state.set_runtime_ready(false);
@@ -2902,6 +3101,166 @@ mod tests {
         let _ = std::fs::remove_file(&sqlite_path);
         let _ = std::fs::remove_file(format!("{}-wal", sqlite_path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", sqlite_path.display()));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod backup_startup_tests {
+    use super::{
+        INTERRUPTED_BACKUP_MARKER_PREFIX, deny_interrupted_backup_markers,
+        expected_backup_executor_from, shutdown_signal_with_backup,
+    };
+    use std::sync::Arc;
+
+    struct TestDir(std::path::PathBuf);
+
+    impl TestDir {
+        fn new(name: &str) -> std::io::Result<Self> {
+            let path = std::env::temp_dir().join(format!(
+                "{name}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::now_v7()
+            ));
+            std::fs::create_dir(&path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn clean_data_directory_passes_marker_denial() -> Result<(), Box<dyn std::error::Error>> {
+        let root = TestDir::new("o3kd-backup-markers-clean")?;
+        std::fs::write(root.0.join("o3k.sqlite"), b"")?;
+        std::fs::write(root.0.join(".o3k-store.lock"), b"")?;
+        std::fs::write(root.0.join("unrelated-o3k-backup-in-progress-x"), b"")?;
+        deny_interrupted_backup_markers(&root.0)?;
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_backup_marker_denies_startup() -> Result<(), Box<dyn std::error::Error>> {
+        let root = TestDir::new("o3kd-backup-markers-present")?;
+        let marker =
+            format!("{INTERRUPTED_BACKUP_MARKER_PREFIX}7c9e6679-7425-40de-944b-e07fc1f90ae7");
+        std::fs::write(root.0.join(&marker), b"interrupted")?;
+        let error = match deny_interrupted_backup_markers(&root.0) {
+            Ok(()) => return Err("marker presence must deny startup".into()),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(&marker),
+            "error must name the offending marker: {message}"
+        );
+        assert!(
+            message.contains("inspect"),
+            "error must demand inspection: {message}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_backup_marker_denies_startup() -> Result<(), Box<dyn std::error::Error>> {
+        let root = TestDir::new("o3kd-backup-markers-symlink")?;
+        let target = root.0.join("elsewhere");
+        std::fs::write(&target, b"elsewhere")?;
+        let marker = root
+            .0
+            .join(format!("{INTERRUPTED_BACKUP_MARKER_PREFIX}symlinked"));
+        std::os::unix::fs::symlink(&target, &marker)?;
+        let error = match deny_interrupted_backup_markers(&root.0) {
+            Ok(()) => return Err("symlinked marker must deny startup".into()),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("(symlink)"),
+            "symlink anomaly must be reported: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn non_regular_marker_entry_denies_startup() -> Result<(), Box<dyn std::error::Error>> {
+        let root = TestDir::new("o3kd-backup-markers-dir")?;
+        std::fs::create_dir(
+            root.0
+                .join(format!("{INTERRUPTED_BACKUP_MARKER_PREFIX}directory")),
+        )?;
+        assert!(deny_interrupted_backup_markers(&root.0).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_data_directory_fails_closed() -> std::io::Result<()> {
+        let file_path = std::env::temp_dir().join(format!(
+            "o3kd-backup-markers-notadir-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::write(&file_path, b"not a directory")?;
+        assert!(deny_interrupted_backup_markers(&file_path).is_err());
+        std::fs::remove_file(&file_path)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn expected_executor_rejects_missing_sibling_executable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bin_dir = TestDir::new("o3kd-backup-executor-missing")?;
+        let data_dir = TestDir::new("o3kd-backup-executor-missing-data")?;
+        let fake_daemon = bin_dir.0.join("o3kd");
+        assert!(expected_backup_executor_from(&fake_daemon, &data_dir.0).is_none());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn expected_executor_resolves_sibling_and_identity_tokens()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bin_dir = TestDir::new("o3kd-backup-executor-present")?;
+        let data_dir = TestDir::new("o3kd-backup-executor-present-data")?;
+        // A regular file is enough: acceptance compares canonical path plus
+        // device/inode against the live peer, not file contents.
+        let sibling = bin_dir.0.join("o3k");
+        std::fs::write(&sibling, b"executor placeholder")?;
+        let fake_daemon = bin_dir.0.join("o3kd");
+        let expected = expected_backup_executor_from(&fake_daemon, &data_dir.0)
+            .ok_or("expected executor should resolve")?;
+        assert_eq!(expected.exe, std::fs::canonicalize(&sibling)?);
+        assert_eq!(
+            expected.uid,
+            rustix::process::geteuid().as_raw(),
+            "executor must run as the daemon's effective uid"
+        );
+        let (installation, site) = o3k_store::identity_tokens(&data_dir.0)?;
+        assert_eq!(expected.installation, installation);
+        assert_eq!(expected.site, site);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn backup_notify_ends_the_shutdown_signal() -> Result<(), Box<dyn std::error::Error>> {
+        let state = o3k_api::AppState::new();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let signal = shutdown_signal_with_backup(state, Arc::clone(&notify));
+        notify.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), signal)
+            .await
+            .map_err(|_| std::io::Error::other("backup notify did not end the shutdown signal"))?;
         Ok(())
     }
 }

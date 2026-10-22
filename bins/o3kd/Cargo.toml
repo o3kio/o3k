@@ -58,3 +58,12 @@ o3k-network-bin = { path = "../o3k-network" }
 o3k-database-example = { path = "../../crates/o3k-database-example" }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 sqlx = { workspace = true }
+
+[features]
+# Test-only crash hooks for deterministic backup handoff failure injection
+# (`O3K_BACKUP_TEST_EXIT_BEFORE_HANDOFF=1`, `O3K_BACKUP_TEST_EXIT_AFTER_ACK=1`
+# in the o3kd handoff path, plus the `O3K_HANDOFF_TEST_*` hooks in the shared
+# o3k-store handoff primitive, including the sender-side after-send crash hook
+# the concurrency campaign relies on). Never enabled in release or production
+# builds.
+backup-test-hooks = ["o3k-store/backup-test-hooks"]

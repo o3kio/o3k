@@ -204,6 +204,28 @@ impl StoreAccessLock {
                 "store-lock handoff frame was incomplete",
             ));
         }
+        // Test-only crash hook (feature `backup-test-hooks`): simulate a
+        // sender that dies after transmitting the descriptors but before
+        // reading the acknowledgement, so the receiver must retain the
+        // transferred lock without ever being told it owns it.
+        #[cfg(feature = "backup-test-hooks")]
+        {
+            // Optional bounded delay after the descriptor send: keeps the
+            // sender alive long enough for a real receiver to write its
+            // acknowledgement, making the after-send crash below
+            // deterministic instead of a microsecond race against process
+            // teardown.
+            if let Some(delay) = std::env::var_os("O3K_HANDOFF_TEST_SLEEP_AFTER_SEND_MS")
+                && let Ok(millis) = delay.to_string_lossy().parse::<u64>()
+            {
+                std::thread::sleep(Duration::from_millis(millis.min(10_000)));
+            }
+            if std::env::var_os("O3K_HANDOFF_TEST_EXIT_AFTER_SEND_BEFORE_ACK_READ")
+                .is_some_and(|value| value == "1")
+            {
+                std::process::exit(96);
+            }
+        }
         let mut acknowledgement = [0_u8; HANDOFF_ACK.len()];
         read_exact_with_timeout(stream, &mut acknowledgement, timeout)?;
         if &acknowledgement != HANDOFF_ACK {
@@ -308,6 +330,16 @@ impl StoreAccessLock {
             };
             lock.validate_current_entries()?;
             stream.set_read_timeout(previous_timeout)?;
+            // Test-only crash hook (feature `backup-test-hooks`): simulate a
+            // receiver that dies after all validation, immediately before it
+            // would write the ownership acknowledgement, so the sender sees a
+            // lost-ack exchange.
+            #[cfg(feature = "backup-test-hooks")]
+            if std::env::var_os("O3K_HANDOFF_TEST_EXIT_BEFORE_ACK")
+                .is_some_and(|value| value == "1")
+            {
+                std::process::exit(97);
+            }
             write_all_with_timeout(&mut stream, HANDOFF_ACK, timeout)?;
             Ok(lock)
         })();
