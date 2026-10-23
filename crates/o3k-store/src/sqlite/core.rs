@@ -1254,11 +1254,41 @@ impl SqliteStore {
 #[async_trait]
 impl DurableStore for SqliteStore {
     async fn close_for_controller_drain(&self) -> Result<(), StoreError> {
-        // SQLx 0.8.6 closes SQLite connections by sending Shutdown through
-        // each connection worker queue and awaiting its acknowledgement.
-        // Pool close also waits for checked-out/returning connections. This
-        // covers statements submitted by futures cancelled before joining.
-        self.pool.close().await;
+        // Synchronize with connection returns that are still in flight. A
+        // returned connection's slot permit is only released after it is
+        // pushed to the idle queue (sqlx 0.8.6 `PoolInner::release`), so
+        // holding every live slot proves no `return_to_pool` task can
+        // interleave with `Pool::close` and push a connection into an
+        // already-closed pool, which would leak the connection and its
+        // worker (sqlx 0.8.x checks `is_closed` only once, before the
+        // yielding `after_release`/ping steps). This mirrors the
+        // acquire-all-permits ordering of the sqlx 0.9 `close()` rewrite.
+        let live_connections = self.pool.size();
+        let mut held = Vec::with_capacity(live_connections as usize);
+        for _ in 0..live_connections {
+            held.push(self.pool.acquire().await.map_err(StoreError::Database)?);
+        }
+        // Marking the pool closed is eager (it runs when the close future is
+        // created, before any await), so create it first and drop the held
+        // connections right after: every subsequently dropped connection
+        // takes the close path instead of the idle-queue push, and close()
+        // joins those returns. Dropping before marking closed would reopen
+        // the push-into-closed-pool race described above; awaiting close
+        // while still holding would deadlock on our own permits.
+        let close = self.pool.close();
+        drop(held);
+        // SQLx 0.8.x closes each SQLite connection by sending Shutdown through
+        // the connection worker queue and awaiting its acknowledgement, which
+        // also rolls back any transaction abandoned by a cancelled writer.
+        close.await;
+        // `size()` is the authoritative live-connection count and can only
+        // decrease now; join it explicitly as defense in depth against sqlx
+        // 0.8.x pool-close accounting defects (idle connections closed by
+        // `Pool::close` release their semaphore permit twice, so close can
+        // return with connections still closing).
+        while self.pool.size() > 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         Ok(())
     }
 

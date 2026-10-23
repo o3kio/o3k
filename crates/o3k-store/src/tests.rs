@@ -76,10 +76,29 @@ mod tests {
             std::future::pending::<()>().await;
             Ok::<(), sqlx::Error>(())
         });
-        tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .map_err(|elapsed| -> Box<dyn Error> {
+                format!("cancelled writer never entered its transaction: {elapsed:?}").into()
+            })?;
         writer.abort();
         let _ = writer.await;
-        tokio::time::timeout(Duration::from_secs(2), store.close_for_controller_drain()).await??;
+        // The drain joins a connection-worker shutdown, which is a full
+        // cross-thread round trip per connection; keep a generous anti-hang
+        // bound rather than a latency assertion (the proof is the assertion
+        // sequence below, not the wall clock).
+        tokio::time::timeout(Duration::from_secs(10), store.close_for_controller_drain())
+            .await
+            .map_err(|elapsed| -> Box<dyn Error> {
+                format!(
+                    "controller drain did not complete (pool size={} num_idle={} closed={}): \
+                     {elapsed:?}",
+                    store.pool.size(),
+                    store.pool.num_idle(),
+                    store.pool.is_closed()
+                )
+                .into()
+            })??;
         assert_eq!(store.pool.size(), 0);
         assert!(matches!(
             sqlx::query("INSERT INTO drain_probe VALUES (2)")
