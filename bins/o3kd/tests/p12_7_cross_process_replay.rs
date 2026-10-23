@@ -191,25 +191,33 @@ async fn run_child(
     hold: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     init_child_logging();
+    // Startup checkpoints are unconditional (not gated on O3K_P12_7_CHILD_LOG)
+    // and land in the always-captured child log, so a child that stalls during
+    // spawn shows exactly the step it reached.
+    eprintln!("p12_7 child[{role}]: connecting store");
     // The parent has already migrated and seeded the shared durable store; this
     // child only reads it, so no two runtimes race on schema/seed bootstrap.
     let store = match store_spec.strip_prefix("sqlite:") {
         Some(path) => Arc::new(O3kStore::connect_sqlite_file(Path::new(path)).await?),
         None => Arc::new(O3kStore::connect_postgres(store_spec).await?),
     };
+    eprintln!("p12_7 child[{role}]: store connected");
     let identity = o3k_identity::TokenService::load(
         store.clone(),
         o3k_identity::Secret::new(SIGNING_KEY.to_owned()),
         Duration::from_secs(3600),
     )
     .await?;
+    eprintln!("p12_7 child[{role}]: identity loaded");
     let placement_root = std::env::temp_dir().join(format!(
         "o3k-p12-7-xproc-placement-{role}-{}",
         uuid::Uuid::new_v4()
     ));
     let ledger = o3k_placement::PlacementLedger::open(&placement_root, store.clone()).await?;
+    eprintln!("p12_7 child[{role}]: placement ledger open");
     let scheduler = o3k_scheduler::Scheduler::new(ledger);
     let (app, provider) = build_runtime(store.clone(), identity, scheduler).await?;
+    eprintln!("p12_7 child[{role}]: runtime built");
     if let Some(hold) = hold {
         let injection = match hold {
             "running" => FailureInjection::PartialCompletion,
@@ -222,13 +230,13 @@ async fn run_child(
     // identities it materialized. Independent runtimes resolve the same
     // deterministic provider identity, so the parent proves domain-identity
     // uniqueness across a genuine process boundary.
-    let role = role.to_owned();
+    let serve_role = role.to_owned();
     let count_provider = provider.clone();
     let app = app.route(
         "/__p12_7_provider_count",
         axum::routing::get(move || {
             let provider = count_provider.clone();
-            let role = role.clone();
+            let role = serve_role.clone();
             async move {
                 axum::Json(json!({
                     "provider_instances": provider.instance_count(),
@@ -240,6 +248,7 @@ async fn run_child(
     );
     let listener = tokio::net::TcpListener::bind(address).await?;
     let bound = listener.local_addr()?;
+    eprintln!("p12_7 child[{role}]: bound {bound}");
     std::fs::write(ready, format!("{bound}"))?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -322,13 +331,10 @@ impl PgFixture {
 /// One independent OS process hosting a runtime over the shared durable store.
 struct RuntimeProcess {
     child: Child,
+    role: String,
     base: String,
     ready: PathBuf,
-}
-
-fn free_address() -> std::net::SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    listener.local_addr().expect("ephemeral addr")
+    log: PathBuf,
 }
 
 fn store_spec_for_sqlite(path: &Path) -> String {
@@ -341,11 +347,23 @@ impl RuntimeProcess {
         role: &str,
         hold: Option<&str>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let address = free_address();
+        // The child binds port 0 and reports its real address through the
+        // ready file. Pre-choosing a "free" port here would reopen a
+        // time-of-check/time-of-use race with other processes on a loaded
+        // host: the child could then fail to bind and exit without ever
+        // writing the ready file.
         let ready = std::env::temp_dir().join(format!(
             "o3k-p12-7-xproc-ready-{role}-{}",
             uuid::Uuid::now_v7().simple()
         ));
+        let log = std::env::temp_dir().join(format!(
+            "o3k-p12-7-xproc-log-{role}-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)?;
         let mut command = Command::new(std::env::current_exe()?);
         command
             .args([
@@ -354,37 +372,70 @@ impl RuntimeProcess {
                 "--test-threads=1",
             ])
             .env("O3K_P12_7_CHILD_STORE", store_spec)
-            .env("O3K_P12_7_CHILD_ADDR", address.to_string())
+            .env("O3K_P12_7_CHILD_ADDR", "127.0.0.1:0")
             .env("O3K_P12_7_CHILD_READY", ready.to_string_lossy().to_string())
             .env("O3K_P12_7_CHILD_ROLE", role)
-            .stdout(Stdio::null())
-            .stderr(if std::env::var("O3K_P12_7_CHILD_LOG").is_ok() {
-                Stdio::inherit()
-            } else {
-                Stdio::null()
-            });
+            // Always capture the child's stdout/stderr (panics, startup
+            // checkpoints, and any O3K_P12_7_CHILD_LOG tracing) so a failed
+            // spawn is diagnosable instead of a silent 120s timeout.
+            .stdout(Stdio::from(log_file.try_clone()?))
+            .stderr(Stdio::from(log_file));
         if let Some(hold) = hold {
             command.env("O3K_P12_7_CHILD_HOLD", hold);
         }
         let child = command.spawn()?;
-        let process = Self {
+        let mut process = Self {
             child,
-            base: format!("http://{address}"),
+            role: role.to_owned(),
+            // Filled in from the child's ready file once it binds; the
+            // pre-bind value only appears in diagnostics.
+            base: "http://127.0.0.1:0".to_owned(),
             ready,
+            log,
         };
         process.wait_ready(Duration::from_secs(120)).await?;
         Ok(process)
     }
 
-    async fn wait_ready(&self, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    fn log_tail(&self) -> String {
+        let Ok(content) = std::fs::read_to_string(&self.log) else {
+            return format!("(no child log at {})", self.log.display());
+        };
+        const TAIL_LIMIT: usize = 8192;
+        let start = content.len().saturating_sub(TAIL_LIMIT);
+        let start = content[start..]
+            .char_indices()
+            .next()
+            .map_or(start, |(offset, _)| start + offset);
+        format!("(child log tail: {})", &content[start..])
+    }
+
+    async fn wait_ready(&mut self, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if self.ready.exists() {
+            if let Ok(content) = std::fs::read_to_string(&self.ready)
+                && let Ok(address) = content.trim().parse::<std::net::SocketAddr>()
+            {
+                self.base = format!("http://{address}");
                 return Ok(());
+            }
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Err(format!(
+                    "runtime {} child exited before becoming ready (status {status}) {}",
+                    self.role,
+                    self.log_tail()
+                )
+                .into());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        Err(format!("runtime {} did not become ready", self.base).into())
+        let status = self.child.try_wait().ok().flatten();
+        Err(format!(
+            "runtime {} did not become ready within {timeout:?} (child status {status:?}) {}",
+            self.role,
+            self.log_tail()
+        )
+        .into())
     }
 
     async fn provider_instances(&self, client: &reqwest::Client) -> usize {
@@ -507,6 +558,7 @@ impl Drop for RuntimeProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.ready);
+        let _ = std::fs::remove_file(&self.log);
     }
 }
 

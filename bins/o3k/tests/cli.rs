@@ -157,3 +157,40 @@ fn doctor_human_output_ends_with_overall() {
         "human output must end with the OVERALL verdict"
     );
 }
+
+/// `o3k backup create` must not panic (exit 101) when its stdout pipe has no
+/// reader: the result-line write fails with EPIPE and the process still exits
+/// with the computed contract code (2 for the rejected precondition used
+/// here), staying inside the SPEC-0050 §8 0/2/3/4 contract.
+#[cfg(target_os = "linux")]
+#[test]
+fn backup_create_closed_stdout_keeps_contract_exit_code() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_o3k"))
+        .args([
+            "backup",
+            "create",
+            "--destination",
+            "relative-destination",
+            "--operation-id",
+            "00000000-0000-0000-0000-000000000000",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("could not execute the o3k binary: {error}"));
+    // Drop the only read end of the stdout pipe before the child writes: the
+    // JSON line then fails with EPIPE (SIGPIPE is ignored by the Rust
+    // runtime). The child cannot beat exec-to-drop in practice; even the racy
+    // ordering would still assert the contract exit code, just without
+    // exercising EPIPE.
+    drop(child.stdout.take());
+    let status = child
+        .wait()
+        .unwrap_or_else(|error| panic!("could not reap the o3k child: {error}"));
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "closed stdout must not turn the contract exit code into a panic (101)"
+    );
+}

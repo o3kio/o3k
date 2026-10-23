@@ -95,6 +95,26 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         disk_gb: u64,
     },
+    /// Provisional backup capture (PP.6; host-local, unsigned)
+    #[cfg(target_os = "linux")]
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Subcommand)]
+enum BackupCommand {
+    /// Capture a provisional, unsigned backup snapshot
+    Create {
+        /// Absolute destination directory for the provisional capture
+        #[arg(long)]
+        destination: std::path::PathBuf,
+        /// Durable identity of this backup operation
+        #[arg(long)]
+        operation_id: uuid::Uuid,
+    },
 }
 
 #[derive(Subcommand)]
@@ -221,6 +241,16 @@ fn main() -> ExitCode {
             memory_mb,
             disk_gb,
         )),
+        #[cfg(target_os = "linux")]
+        Commands::Backup { command } => match command {
+            BackupCommand::Create {
+                destination,
+                operation_id,
+            } => o3k::backup_create::run_backup_create(&o3k::backup_create::BackupCreateArgs {
+                destination,
+                operation_id,
+            }),
+        },
     }
 }
 

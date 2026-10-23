@@ -12,11 +12,21 @@
 //! the upgrade engine mutates only through the bounded [`upgrade::UpgradeIo`]
 //! seam and its durable state file.
 
+// Test-only crash hooks may never ship in an optimized build: they force
+// hard process exits from production code paths.
+#[cfg(all(feature = "backup-test-hooks", not(debug_assertions)))]
+compile_error!("backup-test-hooks is a debug-only test feature");
+
 // This contract-checked prerequisite is intentionally not wired into a
 // supported operator journey yet. Keep it private until capture coordination,
 // trust lifecycle, and replay/crash recovery are implemented.
 #[allow(dead_code)]
 pub(crate) mod backup;
+// Provisional PP.6 backup capture executor (SPEC-0050 §8, ADR-0189): drives
+// the authenticated store-lock handoff and captures an unsigned, host-local
+// provisional snapshot. Linux-only like the handoff primitives in o3k-store.
+#[cfg(target_os = "linux")]
+pub mod backup_create;
 pub mod checks;
 pub mod context;
 pub mod db;

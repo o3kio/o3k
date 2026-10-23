@@ -27,10 +27,16 @@ chrono.workspace = true
 hex.workspace = true
 zeroize.workspace = true
 o3k-store = { path = "../../crates/o3k-store" }
-rustix.workspace = true
+rustix = { workspace = true, features = ["fs", "process"] }
 uuid.workspace = true
 sqlx = { workspace = true, default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
 tokio = { workspace = true, features = ["time"] }
+
+[features]
+# Crash-injection hooks for the PP.6 backup-handoff concurrency campaign. Off
+# by default; the hooks only force hard process exits in `o3k backup create`
+# and the matching o3k-store handoff paths.
+backup-test-hooks = ["o3k-store/backup-test-hooks"]
 
 [lib]
 name = "o3k"
