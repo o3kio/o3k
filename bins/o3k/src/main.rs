@@ -106,14 +106,21 @@ enum Commands {
 #[cfg(target_os = "linux")]
 #[derive(Subcommand)]
 enum BackupCommand {
-    /// Capture a provisional, unsigned backup snapshot
+    /// Capture an authenticated backup artifact; re-run with the same operation
+    /// id after placing signing-response.json to publish it (offline custody)
     Create {
-        /// Absolute destination directory for the provisional capture
+        /// Absolute destination directory for the backup artifact
         #[arg(long)]
         destination: std::path::PathBuf,
         /// Durable identity of this backup operation
         #[arg(long)]
         operation_id: uuid::Uuid,
+    },
+    /// Verify an authenticated backup artifact against the installed release
+    Verify {
+        /// Absolute path to the authenticated backup artifact
+        #[arg(long)]
+        artifact: std::path::PathBuf,
     },
 }
 
@@ -250,6 +257,11 @@ fn main() -> ExitCode {
                 destination,
                 operation_id,
             }),
+            BackupCommand::Verify { artifact } => {
+                o3k::backup_verify::run_backup_verify(&o3k::backup_verify::BackupVerifyArgs {
+                    artifact,
+                })
+            }
         },
     }
 }

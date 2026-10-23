@@ -36,6 +36,8 @@ mod access_lock;
 mod artifact_transfer;
 #[cfg(target_os = "linux")]
 mod backup_control;
+#[cfg(unix)]
+pub mod backup_journal;
 pub mod conformance;
 pub mod coordination;
 pub mod governance;

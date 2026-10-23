@@ -771,7 +771,7 @@ mod handoff_transfer_error_classification_tests {
 
 #[cfg(test)]
 mod interrupted_backup_marker_tests {
-    use super::deny_interrupted_backup_markers;
+    use super::{deny_interrupted_backup_markers, warn_pending_backup_operations};
 
     fn temp_data_dir() -> std::io::Result<std::path::PathBuf> {
         let directory =
@@ -831,6 +831,66 @@ mod interrupted_backup_marker_tests {
         std::fs::remove_dir_all(&directory)?;
         Ok(())
     }
+
+    /// A staged (publication-pending) operation must not deny startup: the
+    /// staged artifact is not canonical state and publication needs no store
+    /// lock. The marker remains the only denial authority.
+    #[test]
+    fn pending_backup_operation_journal_does_not_deny_startup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::backup_journal::{
+            BackupOperationPhase, BackupOperationRecord, write_backup_operation,
+        };
+
+        let directory = temp_data_dir()?;
+        let operation_id = uuid::Uuid::new_v4();
+        let record = BackupOperationRecord {
+            format: o3k_store::backup_journal::BACKUP_OPERATION_FORMAT.to_owned(),
+            operation_id,
+            phase: BackupOperationPhase::Staged,
+            backup_id: operation_id.to_string(),
+            destination: "/var/lib/o3k/backups".to_owned(),
+            staging_path: format!("/var/lib/o3k/backups/.o3k-backup-artifact-{operation_id}"),
+            request_sha256: Some("a".repeat(64)),
+            artifact_sha256: None,
+            site_id: "site-1".to_owned(),
+            installation_id: "install-1".to_owned(),
+            created_at: "2026-10-23T12:00:00Z".to_owned(),
+            updated_at: "2026-10-23T12:00:01Z".to_owned(),
+        };
+        write_backup_operation(&directory, &record)?;
+
+        deny_interrupted_backup_markers(&directory)?;
+        warn_pending_backup_operations(&directory);
+        let scan = o3k_store::backup_journal::pending_backup_operations(&directory)?;
+        assert_eq!(scan.pending.len(), 1);
+        assert_eq!(scan.pending[0].phase, BackupOperationPhase::Staged);
+
+        // A terminal record is not reported, and still does not deny.
+        let published = BackupOperationRecord {
+            phase: BackupOperationPhase::Published,
+            updated_at: "2026-10-23T12:05:00Z".to_owned(),
+            artifact_sha256: Some("b".repeat(64)),
+            ..record
+        };
+        write_backup_operation(&directory, &published)?;
+        deny_interrupted_backup_markers(&directory)?;
+        warn_pending_backup_operations(&directory);
+        assert!(
+            o3k_store::backup_journal::pending_backup_operations(&directory)?
+                .pending
+                .is_empty()
+        );
+
+        // The marker still wins: a journal entry never substitutes for it.
+        std::fs::write(
+            directory.join(format!(".o3k-backup-in-progress-{operation_id}")),
+            b"{}",
+        )?;
+        assert!(deny_interrupted_backup_markers(&directory).is_err());
+        std::fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
 }
 
 /// Prefix of the denial-only interrupted-backup marker (SPEC-0050 §7). A
@@ -846,6 +906,39 @@ const INTERRUPTED_BACKUP_MARKER_PREFIX: &str = ".o3k-backup-in-progress-";
 /// symlinks, and any unreadable entry fails closed. Names are compared as
 /// raw bytes (not `to_str`), so a non-UTF-8 marker name still denies startup
 /// instead of being skipped.
+/// Reports non-terminal backup-operation journal entries **without** denying
+/// startup.
+///
+/// Only the denial-only marker blocks a replacement controller. A `captured`,
+/// `staged` or `publishing` operation means a backup artifact is incomplete,
+/// but the staged artifact is not canonical state and publication can be
+/// completed by a later operator invocation without the store lock. The scan
+/// is diagnostic: unreadable entries and scan failures are warnings, never a
+/// startup denial.
+fn warn_pending_backup_operations(data_dir: &Path) {
+    match o3k_store::backup_journal::pending_backup_operations(data_dir) {
+        Ok(scan) => {
+            for record in &scan.pending {
+                tracing::warn!(
+                    operation_id = %record.operation_id,
+                    phase = record.phase.as_str(),
+                    "backup operation has not reached a terminal phase; staged artifacts are not canonical state and publication is still pending"
+                );
+            }
+            for entry in &scan.unreadable {
+                tracing::warn!(
+                    entry = %entry,
+                    "unreadable backup-operation journal entry; operator follow-up required"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(
+            reason = error.reason(),
+            "backup-operation journal could not be scanned"
+        ),
+    }
+}
+
 fn deny_interrupted_backup_markers(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut markers = Vec::new();
     for entry in std::fs::read_dir(data_dir)? {
@@ -927,6 +1020,10 @@ pub async fn build_composition(
     // state is opened; its absence proves nothing and is never treated as
     // positive evidence.
     deny_interrupted_backup_markers(&config.data_dir)?;
+    // Non-terminal backup operations are operator follow-up, not a denial:
+    // a staged artifact is not canonical state and publication does not need
+    // the store lock.
+    warn_pending_backup_operations(&config.data_dir);
     let store = match config.database_backend {
         o3k_config::DatabaseBackend::Sqlite => {
             let database_path = config.data_dir.join("o3k.sqlite");

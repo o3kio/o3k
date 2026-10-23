@@ -8,8 +8,9 @@
 //!   accept frame but before the store-lock descriptors are received;
 //! - `O3K_BACKUP_TEST_EXIT_AFTER_RECEIVE=1` exits 94 immediately after
 //!   `receive_handoff` completes;
-//! - `O3K_BACKUP_TEST_SKIP_MARKER_CLEANUP=1` completes with exit 0 but leaves
-//!   the denial-only interrupted-backup marker in place.
+//! - `O3K_BACKUP_TEST_SKIP_MARKER_CLEANUP=1` stages the artifact (exit 3,
+//!   `signing-required`) but leaves the denial-only interrupted-backup marker
+//!   in place.
 #![cfg(all(feature = "backup-test-hooks", target_os = "linux"))]
 
 use std::{
@@ -24,9 +25,12 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use ed25519_dalek::SigningKey;
+use hpke::{Kem, Serializable, kem::X25519HkdfSha256};
 use o3k_store::{BackupControlListener, ExpectedExecutor, StoreAccessLock, identity_tokens};
 use rustix::process::geteuid;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -197,17 +201,103 @@ fn crash_after_receive_exits_94() -> io::Result<()> {
     Ok(())
 }
 
+/// Root-owned trust document and installed release manifest for the real
+/// binary. The trust document binds the canonical identity of `data_dir`, so
+/// the executor accepts it for this installation only.
+struct TrustFixture {
+    trust_config: PathBuf,
+    install_prefix: PathBuf,
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    fs::write(path, bytes)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+fn latest_sqlite_schema_version() -> io::Result<u64> {
+    let directory = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../crates/o3k-store/migrations"
+    ));
+    let entries = fs::read_dir(directory)?;
+    let version = entries
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name();
+            name.to_str()?.split('_').next()?.parse::<u64>().ok()
+        })
+        .max();
+    version.ok_or_else(|| io::Error::other("no sqlite migration found"))
+}
+
+fn trust_fixture(root: &TempRoot, data_dir: &Path) -> io::Result<TrustFixture> {
+    let signing = SigningKey::from_bytes(&[17_u8; 32]);
+    let (recipient, _public) = X25519HkdfSha256::gen_keypair();
+    let recipient_key = root.0.join("recipient.key");
+    write_private(&recipient_key, &recipient.to_bytes())?;
+    let (installation, site) = identity_tokens(data_dir)?;
+    let public_key = signing.verifying_key().to_bytes();
+    let trust_config = root.0.join("backup-trust.json");
+    let document = serde_json::json!({
+        "format": "o3k-backup-trust-v1",
+        "site_id": hex::encode(site),
+        "installation_id": hex::encode(installation),
+        "profile_id": "o3k-demo-v1",
+        "artifact_signing": {
+            "key_id": "signing-1",
+            "ed25519_public_key": hex::encode(public_key),
+        },
+        "recipient": {
+            "key_id": "recovery-1",
+            "x25519_private_key_file": recipient_key.display().to_string(),
+        },
+        "revoked_key_ids": [],
+        "custody": {
+            "record_id": "custody-1",
+            "purpose": "artifact-signing",
+            "key_fingerprint": hex::encode(Sha256::digest(public_key)),
+            "threshold": "2-of-3",
+            "custodians": ["principal-a", "principal-b", "principal-c"],
+            "storage_class": "offline-safe",
+            "expires_at": "2035-01-01T00:00:00Z",
+        },
+    });
+    write_private(&trust_config, &serde_json::to_vec_pretty(&document)?)?;
+    let install_prefix = root.0.join("install");
+    let share = install_prefix.join("share/o3k");
+    fs::create_dir_all(&share)?;
+    fs::set_permissions(&install_prefix, fs::Permissions::from_mode(0o700))?;
+    let manifest = serde_json::json!({
+        "version": "0.4.0",
+        "profile": "demo",
+        "profile_id": "o3k-demo-v1",
+        "source_commit": "0123456789abcdef0123456789abcdef01234567",
+        "release_artifact_sha256": "a".repeat(64),
+        "schema_version": latest_sqlite_schema_version()?.to_string(),
+    });
+    write_private(
+        &share.join("release-manifest.json"),
+        &serde_json::to_vec(&manifest)?,
+    )?;
+    Ok(TrustFixture {
+        trust_config,
+        install_prefix,
+    })
+}
+
 #[test]
-fn skip_marker_cleanup_keeps_marker_on_success() -> io::Result<()> {
+fn skip_marker_cleanup_keeps_marker_after_staging() -> io::Result<()> {
     let root = TempRoot::new("skip-marker")?;
     let data_dir = root.private_dir("data")?;
     let dest = root.private_dir("dest")?;
     let operation_id = Uuid::new_v4();
     create_migrated_store(&data_dir)?;
+    let fixture = trust_fixture(&root, &data_dir)?;
 
     let listener = BackupControlListener::bind(&data_dir)?;
     let server = spawn_handoff_server(data_dir.clone(), listener);
     let output = run_backup_create(&data_dir, &dest, operation_id)
+        .env("O3K_BACKUP_TRUST_CONFIG", &fixture.trust_config)
+        .env("O3K_INSTALL_PREFIX", &fixture.install_prefix)
         .env("O3K_BACKUP_TEST_SKIP_MARKER_CLEANUP", "1")
         .output()?;
     server
@@ -215,17 +305,29 @@ fn skip_marker_cleanup_keeps_marker_on_success() -> io::Result<()> {
         .map_err(|_| io::Error::other("handoff server thread panicked"))??;
     assert_eq!(
         output.status.code(),
-        Some(0),
+        Some(3),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: Value = serde_json::from_str(stdout.trim())?;
-    assert_eq!(parsed["status"], "provisional-capture-complete");
+    assert_eq!(parsed["status"], "signing-required", "{parsed}");
+    assert_eq!(parsed["operation_id"], operation_id.to_string());
     assert!(
-        dest.join(format!("provisional-backup-{operation_id}"))
+        dest.join(format!(".o3k-backup-artifact-{operation_id}"))
             .is_dir()
     );
+    assert!(
+        dest.join(format!(
+            ".o3k-backup-artifact-{operation_id}/signing-request.json"
+        ))
+        .is_file()
+    );
+    assert!(
+        !dest.join(format!("backup-{operation_id}.o3k")).exists(),
+        "phase 1 never publishes"
+    );
+    // The skip hook keeps the marker even though capture completed.
     assert!(
         data_dir
             .join(format!(".o3k-backup-in-progress-{operation_id}"))

@@ -1,5 +1,13 @@
 # #1084 authenticated backup handoff — Slice D capture evidence
 
+> **Superseded status note (2026-10-24):** the provisional capture described
+> here has been replaced by the authenticated artifact flow on branch
+> `pp6/1084-artifact`: `o3k backup create` now stages an unsigned artifact and
+> exits 3 `signing-required`; re-running the same command with an offline
+> `signing-response.json` publishes `backup-<operation id>.o3k` and exits 0.
+> See `docs/evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md`. The measurements below
+> remain valid for the revision they name.
+
 Date: 2026-10-22. Scope: PP.6 authenticated backup handoff, real-process
 integration campaign (Slice D of the `#1084-handoff` branch work). Slices A–C
 (control protocol, store-lock handoff, daemon/CLI wiring) were implemented

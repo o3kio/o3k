@@ -36,7 +36,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
-use hpke::{Deserializable, Kem, kem::X25519HkdfSha256};
+use hpke::{Deserializable, Kem, Serializable, kem::X25519HkdfSha256};
 use rustix::{
     fs::{Mode, OFlags, open},
     process::geteuid,
@@ -64,6 +64,7 @@ const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_STORAGE_CLASS_BYTES: usize = 64;
 const ED25519_PUBLIC_KEY_BYTES: usize = 32;
 const X25519_PRIVATE_KEY_BYTES: usize = 32;
+const X25519_PUBLIC_KEY_BYTES: usize = 32;
 const CUSTODY_PURPOSE: &str = "artifact-signing";
 const CUSTODY_THRESHOLD: &str = "2-of-3";
 const CUSTODY_PRINCIPALS: usize = 3;
@@ -307,6 +308,34 @@ impl BackupTrustConfig {
     /// Decodes the configured 32-byte Ed25519 public key.
     fn signing_public_key(&self) -> Result<[u8; ED25519_PUBLIC_KEY_BYTES], BackupTrustError> {
         decode_ed25519_public_key(&self.artifact_signing.ed25519_public_key)
+    }
+
+    /// Returns the configured artifact-signing public key.
+    ///
+    /// The document is validated at load time, so this normally succeeds. It
+    /// stays fallible because a 32-byte value that is not a valid Ed25519
+    /// point must never be turned into a verification key by panicking.
+    pub fn artifact_signing_public_key(&self) -> Result<VerifyingKey, BackupTrustError> {
+        let bytes = self.signing_public_key()?;
+        VerifyingKey::from_bytes(&bytes).map_err(|_| BackupTrustError::ArtifactKeyInvalid)
+    }
+
+    /// Derives the X25519 public key of the configured recovery recipient.
+    ///
+    /// The document carries only the recipient private-key *path*, so the
+    /// public key is derived from the key file itself: the document cannot
+    /// declare a public key that does not match the custody-held private key,
+    /// and one trust document cannot be used to wrap artifacts for a
+    /// different recipient than the one it names. The private key is read into
+    /// zeroizing memory and never returned.
+    pub fn recipient_public_key(&self) -> Result<[u8; X25519_PUBLIC_KEY_BYTES], BackupTrustError> {
+        let private = self.load_recipient_private_key()?;
+        <[u8; X25519_PUBLIC_KEY_BYTES]>::try_from(
+            <X25519HkdfSha256 as Kem>::sk_to_pk(&private)
+                .to_bytes()
+                .as_slice(),
+        )
+        .map_err(|_| BackupTrustError::RecipientKeyInvalid)
     }
 
     fn validate(&self) -> Result<(), BackupTrustError> {
@@ -634,6 +663,14 @@ fn is_storage_class(value: &str) -> bool {
 
 fn parse_recipient_key(bytes: &[u8]) -> Result<[u8; X25519_PRIVATE_KEY_BYTES], BackupTrustError> {
     const HEX_KEY_BYTES: usize = X25519_PRIVATE_KEY_BYTES * 2;
+    // A raw 32-byte key is accepted verbatim: trimming it would reject valid
+    // keys whose first or last byte happens to be ASCII whitespace.
+    if bytes.len() == X25519_PRIVATE_KEY_BYTES {
+        return <[u8; X25519_PRIVATE_KEY_BYTES]>::try_from(bytes)
+            .map_err(|_| BackupTrustError::RecipientKeyInvalid);
+    }
+    // Otherwise the file is an encoded form where surrounding whitespace
+    // (for example a trailing newline) is layout, not key material.
     let trimmed = bytes.trim_ascii();
     match trimmed.len() {
         X25519_PRIVATE_KEY_BYTES => <[u8; X25519_PRIVATE_KEY_BYTES]>::try_from(trimmed)
@@ -795,6 +832,31 @@ mod tests {
     }
 
     #[test]
+    fn derives_the_recipient_public_key_from_the_custody_key_file() {
+        let fixture = new_fixture();
+        let config = fixture.load().expect("valid trust configuration");
+        let derived = config
+            .recipient_public_key()
+            .expect("derived recipient key");
+        assert_eq!(
+            derived.as_slice(),
+            <X25519HkdfSha256 as Kem>::sk_to_pk(&fixture.recipient)
+                .to_bytes()
+                .as_slice()
+        );
+
+        // A key file that does not parse never yields a public key.
+        write_private_file(&fixture.key_path, b"not-a-key");
+        assert_eq!(
+            config
+                .recipient_public_key()
+                .expect_err("malformed recipient key")
+                .reason(),
+            "trust-recipient-key-invalid"
+        );
+    }
+
+    #[test]
     fn loads_the_recipient_key_from_raw_bytes_and_hex() {
         let fixture = new_fixture();
         let config = fixture.load().expect("valid trust configuration");
@@ -816,6 +878,22 @@ mod tests {
             loaded.to_bytes().as_slice(),
             fixture.recipient.to_bytes().as_slice()
         );
+    }
+
+    #[test]
+    fn raw_recipient_key_with_whitespace_bytes_is_not_trimmed() {
+        // A raw 32-byte key is key material end to end: leading/trailing
+        // ASCII whitespace bytes are valid key bytes and must not be trimmed.
+        let mut raw = [0u8; X25519_PRIVATE_KEY_BYTES];
+        raw[0] = b' ';
+        raw[X25519_PRIVATE_KEY_BYTES - 1] = b'\n';
+        let parsed = parse_recipient_key(&raw).expect("raw key with whitespace bytes");
+        assert_eq!(&parsed, &raw);
+
+        let mut encoded = hex::encode(raw);
+        encoded.push('\n');
+        let parsed = parse_recipient_key(encoded.as_bytes()).expect("hex key with newline");
+        assert_eq!(&parsed, &raw);
     }
 
     #[test]

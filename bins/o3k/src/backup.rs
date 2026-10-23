@@ -7,7 +7,7 @@
 use std::{
     collections::BTreeSet,
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -300,6 +300,10 @@ pub struct MigrationIdentity {
 pub trait ArtifactSigner {
     fn key_id(&self) -> &str;
     fn sign_manifest(&self, signature_input: &[u8]) -> Result<[u8; 64], String>;
+    /// Public half of the signing key, used to verify a freshly produced
+    /// signature before the artifact leaves private staging. Public keys are
+    /// not secret; private key material must never be returned here.
+    fn verifying_key(&self) -> VerifyingKey;
 }
 
 /// Trust-store boundary required by streaming verification. Implementations
@@ -340,6 +344,31 @@ pub struct StagedArtifact {
     pub size_bytes: u64,
 }
 
+/// An encrypted artifact staged with an unsigned manifest.
+///
+/// This is the first half of the accepted offline signing flow (Option A):
+/// the command boundary cannot reach the custody-held signing key, so it
+/// stages the exact bytes that must be signed and hands the operator a
+/// detached signing input. The staged file is **not** a backup artifact: its
+/// manifest has no signature and the verifier rejects it.
+pub struct UnsignedStagedArtifact {
+    /// Manifest with `authentication.signature` unset.
+    pub manifest: Manifest,
+    /// Private directory containing the staged artifact and encrypted members.
+    pub staging_directory: PathBuf,
+    /// Staged unauthenticated artifact file.
+    pub path: PathBuf,
+    pub sha256: String,
+    pub size_bytes: u64,
+    /// SHA-256 of the canonical (JCS) unsigned manifest. The signing request
+    /// repeats this so the custodian can bind a signature to one manifest.
+    pub manifest_digest: String,
+    /// Exact byte string the custody boundary signs (D1 signing input).
+    pub signing_input: Vec<u8>,
+    /// Length of the canonical unsigned manifest inside the staged file.
+    manifest_bytes_len: u64,
+}
+
 /// One authenticated member written to private staging after full tag and
 /// digest validation. Paths are internal artifacts, not restore destinations.
 pub struct VerifiedMember {
@@ -366,9 +395,12 @@ pub struct ArtifactVerificationKeys<'a> {
     pub recipient: &'a <X25519HkdfSha256 as Kem>::PrivateKey,
 }
 
-/// Builds an encrypted artifact with fixed-window reads and writes. The
+/// Builds a signed encrypted artifact with fixed-window reads and writes. The
 /// staging directory must be pre-created, private, and on the destination
-/// filesystem; publication is a separate verified operation.
+/// filesystem; publication is a separate verified operation. The signer is an
+/// in-process authority: the operator command uses
+/// [`stage_unsigned_artifact`]/[`finish_signed_artifact`] instead because the
+/// custody key is offline.
 pub fn create_artifact_stream<R: Read>(
     options: &CreateOptions,
     members: Vec<StreamMember<R>>,
@@ -378,13 +410,48 @@ pub fn create_artifact_stream<R: Read>(
     if signer.key_id() != options.signing_key_id {
         return Err("configured backup signer identity does not match the request".to_owned());
     }
-    if !staging_directory.is_absolute() {
+    let unsigned = stage_unsigned_artifact(options, members, staging_directory)?;
+    let signature = match signer.sign_manifest(&unsigned.signing_input) {
+        Ok(signature) => signature,
+        Err(error) => {
+            if fs::remove_dir_all(&unsigned.staging_directory).is_err() {
+                return Err(format!("{error}; encrypted staging cleanup failed"));
+            }
+            return Err(error);
+        }
+    };
+    finish_signed_artifact(
+        unsigned,
+        signature,
+        signer.key_id(),
+        &signer.verifying_key(),
+    )
+}
+
+/// Stages an encrypted artifact whose manifest carries no signature.
+///
+/// This is the first phase of the accepted offline signing flow: the command
+/// boundary cannot reach the custody-held signing key, so it stages the exact
+/// bytes that must be signed together with the D1 signing input. The returned
+/// artifact is **not** a backup artifact — its manifest has no signature and
+/// the verifier rejects it. [`finish_signed_artifact`] must add the detached
+/// signature before publication.
+///
+/// `staging_parent` must be absolute. A regular path is resolved without
+/// following symlinks; `/proc/self/fd/<n>` is accepted because the kernel
+/// resolves that magic link against the descriptor the caller already holds,
+/// so a path-component swap cannot redirect the staging write.
+pub fn stage_unsigned_artifact<R: Read>(
+    options: &CreateOptions,
+    members: Vec<StreamMember<R>>,
+    staging_parent: &Path,
+) -> Result<UnsignedStagedArtifact, String> {
+    if !staging_parent.is_absolute() {
         return Err("backup staging directory must be absolute".to_owned());
     }
-    let staging_directory = resolve_private_staging_parent(staging_directory)?;
-    validate_private_parent(&staging_directory)?;
+    let staging_parent = resolve_staging_parent(staging_parent)?;
     validate_stream_members(&members)?;
-    let member_staging = staging_directory.join(format!("members-{}", Uuid::now_v7()));
+    let member_staging = staging_parent.join(format!("members-{}", Uuid::now_v7()));
     create_private_dir(&member_staging)?;
     let stage_result = (|| {
         let mut content_key = Zeroizing::new([0_u8; 32]);
@@ -449,7 +516,7 @@ pub fn create_artifact_stream<R: Read>(
         }
         records.sort_by(|left, right| left.name.cmp(&right.name));
         encrypted_files.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut manifest = Manifest {
+        let manifest = Manifest {
             format_version: FORMAT_VERSION.to_owned(),
             backup_id: options.backup_id.clone(),
             created_at: options.created_at.clone(),
@@ -479,9 +546,14 @@ pub fn create_artifact_stream<R: Read>(
             excluded_state: excluded_state(),
         };
         validate_manifest(&manifest, &options.consistency_generation)?;
-        let signature = signer.sign_manifest(&signature_input(&manifest)?)?;
-        manifest.authentication.signature = Some(URL_SAFE_NO_PAD.encode(signature));
-        validate_manifest_schema(&manifest)?;
+        // The v1 contract schema requires `authentication.signature`, so the
+        // unsigned manifest is validated semantically here and against the
+        // schema only after the detached signature is attached.
+        let signing_input = signature_input(&manifest)?;
+        let manifest_digest = hex_sha256(
+            &serde_jcs::to_vec(&manifest)
+                .map_err(|_| "backup manifest canonicalization failed".to_owned())?,
+        );
         let manifest_bytes = serde_jcs::to_vec(&manifest)
             .map_err(|_| "backup manifest canonicalization failed".to_owned())?;
         if manifest_bytes.len() > MAX_MANIFEST_BYTES {
@@ -500,7 +572,7 @@ pub fn create_artifact_stream<R: Read>(
         if complete_size > MAX_ARTIFACT_BYTES as u64 {
             return Err("backup artifact exceeds the configured size limit".to_owned());
         }
-        let artifact_path = member_staging.join("artifact.partial");
+        let artifact_path = member_staging.join("artifact.unsigned");
         let mut artifact = create_private_file(&artifact_path)?;
         artifact
             .write_all(MAGIC)
@@ -527,12 +599,15 @@ pub fn create_artifact_stream<R: Read>(
         if size_bytes != complete_size {
             return Err("backup artifact size changed during assembly".to_owned());
         }
-        Ok(StagedArtifact {
+        Ok(UnsignedStagedArtifact {
             manifest,
             staging_directory: member_staging.clone(),
             path: artifact_path,
             sha256,
             size_bytes,
+            manifest_digest,
+            signing_input,
+            manifest_bytes_len: manifest_bytes.len() as u64,
         })
     })();
     match stage_result {
@@ -544,6 +619,219 @@ pub fn create_artifact_stream<R: Read>(
             Err(error)
         }
     }
+}
+
+/// Completes a staged artifact with an externally produced Ed25519 signature.
+///
+/// The signature must verify against the trusted signing key before the
+/// manifest changes at all, so a wrong signature, a wrong key id or a stale
+/// signing input produces no publishable artifact. The signed manifest is
+/// re-serialized as canonical JSON, re-validated against the v1 contract
+/// schema, and the member blocks are copied from the unsigned staging file.
+pub fn finish_signed_artifact(
+    unsigned: UnsignedStagedArtifact,
+    signature: [u8; 64],
+    signer_key_id: &str,
+    verifying_key: &VerifyingKey,
+) -> Result<StagedArtifact, String> {
+    if signer_key_id != unsigned.manifest.authentication.key_id {
+        return Err("configured backup signer identity does not match the request".to_owned());
+    }
+    verifying_key
+        .verify(&unsigned.signing_input, &Signature::from_bytes(&signature))
+        .map_err(|_| "backup signature does not verify against the trusted key".to_owned())?;
+    let mut manifest = unsigned.manifest;
+    manifest.authentication.signature = Some(URL_SAFE_NO_PAD.encode(signature));
+    if signature_input(&manifest)? != unsigned.signing_input {
+        return Err("backup signature input changed after signing".to_owned());
+    }
+    validate_manifest_schema(&manifest)?;
+    let manifest_bytes = serde_jcs::to_vec(&manifest)
+        .map_err(|_| "backup manifest canonicalization failed".to_owned())?;
+    if manifest_bytes.len() > MAX_MANIFEST_BYTES {
+        return Err("backup manifest exceeds the configured size limit".to_owned());
+    }
+    let mut complete_size = (MAGIC.len() as u64)
+        .checked_add(8)
+        .and_then(|size| size.checked_add(manifest_bytes.len() as u64))
+        .ok_or("backup artifact size overflow")?;
+    for record in &manifest.members {
+        complete_size = complete_size
+            .checked_add(8)
+            .and_then(|size| size.checked_add(record.size_bytes))
+            .ok_or("backup artifact size overflow")?;
+    }
+    if complete_size > MAX_ARTIFACT_BYTES as u64 {
+        return Err("backup artifact exceeds the configured size limit".to_owned());
+    }
+
+    let final_path = unsigned.staging_directory.join("artifact.partial");
+    let mut artifact = create_private_file(&final_path)?;
+    artifact
+        .write_all(MAGIC)
+        .and_then(|()| artifact.write_all(&(manifest_bytes.len() as u64).to_be_bytes()))
+        .and_then(|()| artifact.write_all(&manifest_bytes))
+        .map_err(|_| "backup artifact staging write failed".to_owned())?;
+    let mut staged = fs::File::open(&unsigned.path)
+        .map_err(|_| "backup staged unsigned artifact is unavailable".to_owned())?;
+    let member_offset = (MAGIC.len() as u64)
+        .checked_add(8)
+        .and_then(|offset| offset.checked_add(unsigned.manifest_bytes_len))
+        .ok_or("backup artifact size overflow")?;
+    if member_offset > unsigned.size_bytes {
+        return Err("backup staged unsigned artifact is truncated".to_owned());
+    }
+    staged
+        .seek(SeekFrom::Start(member_offset))
+        .map_err(|_| "backup staged unsigned artifact could not be read".to_owned())?;
+    // The staged payload is re-digested record by record: the detached
+    // signature covers the member digests in the manifest, so a staged file
+    // modified after staging must never become a publishable artifact.
+    let mut buffer = [0_u8; STREAM_CHUNK_BYTES];
+    for record in &manifest.members {
+        let mut length = [0_u8; 8];
+        staged
+            .read_exact(&mut length)
+            .map_err(|_| "backup staged unsigned artifact is truncated".to_owned())?;
+        if u64::from_be_bytes(length) != record.size_bytes {
+            return Err("backup staged member length does not match the manifest".to_owned());
+        }
+        artifact
+            .write_all(&length)
+            .map_err(|_| "backup artifact staging write failed".to_owned())?;
+        let mut digest = Sha256::new();
+        let mut remaining = record.size_bytes;
+        while remaining > 0 {
+            let amount = usize::try_from(remaining.min(STREAM_CHUNK_BYTES as u64))
+                .map_err(|_| "backup member size is invalid")?;
+            staged
+                .read_exact(&mut buffer[..amount])
+                .map_err(|_| "backup staged unsigned artifact is truncated".to_owned())?;
+            digest.update(&buffer[..amount]);
+            artifact
+                .write_all(&buffer[..amount])
+                .map_err(|_| "backup artifact staging write failed".to_owned())?;
+            remaining -= amount as u64;
+        }
+        if hex::encode(digest.finalize()) != record.sha256 {
+            return Err("backup staged member digest does not match the manifest".to_owned());
+        }
+    }
+    artifact
+        .sync_all()
+        .map_err(|_| "backup artifact staging sync failed".to_owned())?;
+    drop(artifact);
+    let (size_bytes, sha256) = hash_file(&final_path)?;
+    if size_bytes != complete_size {
+        return Err("backup artifact size changed during assembly".to_owned());
+    }
+    let _ = fs::remove_file(&unsigned.path);
+    Ok(StagedArtifact {
+        manifest,
+        staging_directory: unsigned.staging_directory,
+        path: final_path,
+        sha256,
+        size_bytes,
+    })
+}
+
+/// Re-reads a staged unsigned artifact produced by
+/// [`stage_unsigned_artifact`].
+///
+/// The staging directory must hold exactly one `members-<uuid>` directory.
+/// Every structural property the signer relies on is re-derived from the file:
+/// the manifest must be canonical, unsigned, semantically valid for its own
+/// consistency generation, and the member blocks must exactly fill the file.
+/// The returned signing input is what a detached signature must cover.
+pub fn read_unsigned_staged_artifact(
+    staging_directory: &Path,
+) -> Result<UnsignedStagedArtifact, String> {
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(staging_directory)
+        .map_err(|_| "backup staging directory is unavailable".to_owned())?
+    {
+        let entry = entry.map_err(|_| "backup staging directory is unavailable".to_owned())?;
+        let file_name = entry.file_name();
+        if !file_name.as_encoded_bytes().starts_with(b"members-") {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|_| "backup staging entry is unavailable".to_owned())?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let artifact_path = entry.path().join("artifact.unsigned");
+        if artifact_path.is_file() {
+            candidates.push((entry.path(), artifact_path));
+        }
+    }
+    if candidates.len() != 1 {
+        return Err("staged signing request has no unique unsigned artifact".to_owned());
+    }
+    let (member_staging, artifact_path) = candidates.remove(0);
+    let metadata = fs::symlink_metadata(&artifact_path)
+        .map_err(|_| "backup staged unsigned artifact is unavailable".to_owned())?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err("backup staged unsigned artifact is not a regular file".to_owned());
+    }
+    if metadata.len() > MAX_ARTIFACT_BYTES as u64 {
+        return Err("backup artifact exceeds the configured size limit".to_owned());
+    }
+    let mut file = fs::File::open(&artifact_path)
+        .map_err(|_| "backup staged unsigned artifact is unavailable".to_owned())?;
+    let mut magic = [0_u8; 12];
+    file.read_exact(&mut magic)
+        .map_err(|_| "backup artifact header is truncated".to_owned())?;
+    if &magic != MAGIC {
+        return Err("backup artifact format header is invalid".to_owned());
+    }
+    let manifest_len = read_stream_len(&mut file)?;
+    if manifest_len > MAX_MANIFEST_BYTES {
+        return Err("backup manifest length is invalid".to_owned());
+    }
+    let mut manifest_bytes = vec![0_u8; manifest_len];
+    file.read_exact(&mut manifest_bytes)
+        .map_err(|_| "backup manifest is truncated".to_owned())?;
+    let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|_| "backup manifest is malformed".to_owned())?;
+    if manifest.authentication.signature.is_some() {
+        return Err("staged unsigned artifact already carries a signature".to_owned());
+    }
+    if serde_jcs::to_vec(&manifest).map_err(|_| "backup manifest canonicalization failed")?
+        != manifest_bytes
+    {
+        return Err("backup manifest is not canonical JSON".to_owned());
+    }
+    validate_manifest(&manifest, &manifest.consistency_generation())?;
+    let mut complete_size = (MAGIC.len() as u64)
+        .checked_add(8)
+        .and_then(|size| size.checked_add(manifest_len as u64))
+        .ok_or("backup artifact size overflow")?;
+    for record in &manifest.members {
+        complete_size = complete_size
+            .checked_add(8)
+            .and_then(|size| size.checked_add(record.size_bytes))
+            .ok_or("backup artifact size overflow")?;
+    }
+    if complete_size != metadata.len() {
+        return Err("backup staged unsigned artifact has an invalid size".to_owned());
+    }
+    let signing_input = signature_input(&manifest)?;
+    let (size_bytes, sha256) = hash_file(&artifact_path)?;
+    if size_bytes != complete_size {
+        return Err("backup artifact size changed during inspection".to_owned());
+    }
+    Ok(UnsignedStagedArtifact {
+        manifest,
+        staging_directory: member_staging,
+        path: artifact_path,
+        sha256,
+        size_bytes,
+        manifest_digest: hex_sha256(&manifest_bytes),
+        signing_input,
+        manifest_bytes_len: manifest_len as u64,
+    })
 }
 
 fn validate_stream_members<R>(members: &[StreamMember<R>]) -> Result<(), String> {
@@ -1185,6 +1473,34 @@ fn create_private_dir(path: &Path) -> Result<(), String> {
         .map_err(|_| "backup private staging directory could not be created".to_owned())
 }
 
+/// Resolves the caller-supplied staging root.
+///
+/// A `/proc/self/fd/<n>` magic link is accepted unchanged: the kernel resolves
+/// it against the descriptor the caller already holds, so there is no path
+/// component that another process could swap. Every other path is rejected if
+/// it is a symlink or not a directory before canonicalization, because
+/// canonicalizing first would silently follow a substituted link.
+fn resolve_staging_parent(path: &Path) -> Result<PathBuf, String> {
+    if is_process_descriptor_path(path) {
+        let metadata =
+            fs::metadata(path).map_err(|_| "backup staging directory is unavailable".to_owned())?;
+        validate_private_directory_metadata(&metadata)?;
+        return Ok(path.to_path_buf());
+    }
+    resolve_private_staging_parent(path)
+}
+
+/// Returns true for the exact `/proc/self/fd/<digits>` form built from a
+/// descriptor this process holds. Anything else is treated as an ordinary
+/// path and must pass the no-symlink resolution.
+fn is_process_descriptor_path(path: &Path) -> bool {
+    path.parent() == Some(Path::new("/proc/self/fd"))
+        && path.file_name().is_some_and(|name| {
+            name.to_str()
+                .is_some_and(|name| !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
+        })
+}
+
 /// Validates the caller-supplied staging root before resolving it. Calling
 /// `canonicalize` first would silently accept a symlink as the configured
 /// private staging directory and redirect secret-bearing files elsewhere.
@@ -1220,6 +1536,15 @@ fn validate_private_parent(path: &Path) -> Result<(), String> {
     let metadata =
         fs::symlink_metadata(path).map_err(|_| "backup destination directory is unavailable")?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("backup destination directory is not a regular directory".to_owned());
+    }
+    validate_private_directory_metadata(&metadata)
+}
+
+/// Owner and permission posture shared by every private directory the
+/// artifact builder writes into.
+fn validate_private_directory_metadata(metadata: &fs::Metadata) -> Result<(), String> {
+    if !metadata.is_dir() {
         return Err("backup destination directory is not a regular directory".to_owned());
     }
     #[cfg(unix)]
@@ -1702,6 +2027,9 @@ mod tests {
         fn sign_manifest(&self, signature_input: &[u8]) -> Result<[u8; 64], String> {
             Ok(self.0.sign(signature_input).to_bytes())
         }
+        fn verifying_key(&self) -> VerifyingKey {
+            self.0.verifying_key()
+        }
     }
 
     struct TestTrust {
@@ -2141,6 +2469,128 @@ mod tests {
         }];
         assert!(create_artifact_stream(&options, bad_members, &root, &signing).is_err());
         fs::remove_dir_all(root).expect("remove root");
+    }
+
+    fn stream_fixture_members(
+        plain_members: &[PlainMember],
+    ) -> Vec<StreamMember<std::io::Cursor<Vec<u8>>>> {
+        plain_members
+            .iter()
+            .map(|member| StreamMember {
+                name: member.name.clone(),
+                media_type: member.media_type.clone(),
+                plaintext_size_bytes: member.bytes.len() as u64,
+                source: std::io::Cursor::new(member.bytes.clone()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unsigned_stage_finishes_with_a_detached_signature_only_after_verification() {
+        let (options, plain_members, signing, recipient) = fixture();
+        let root = std::env::temp_dir().join(format!("o3k-pp6-unsigned-{}", Uuid::now_v7()));
+        create_private_dir(&root).expect("private root");
+        let unsigned =
+            stage_unsigned_artifact(&options, stream_fixture_members(&plain_members), &root)
+                .expect("stage unsigned artifact");
+        assert!(unsigned.manifest.authentication.signature.is_none());
+        assert!(unsigned.path.ends_with("artifact.unsigned"));
+        assert_eq!(
+            unsigned.manifest_digest,
+            hex_sha256(
+                &serde_jcs::to_vec(&unsigned.manifest).expect("canonical unsigned manifest")
+            )
+        );
+        assert_eq!(
+            unsigned.signing_input,
+            signature_input(&unsigned.manifest).expect("signing input")
+        );
+
+        // A different key must not be able to complete the artifact, and the
+        // failure must not leave a publishable file behind.
+        let foreign = SigningKey::from_bytes(&[18_u8; 32]);
+        let foreign_signature = signing.0.sign(&unsigned.signing_input).to_bytes();
+        assert!(
+            finish_signed_artifact(
+                unsigned,
+                foreign_signature,
+                "signing-1",
+                &foreign.verifying_key()
+            )
+            .is_err()
+        );
+        let member_dirs = fs::read_dir(&root).expect("staging root").count();
+        assert_eq!(member_dirs, 1, "unsigned staging is preserved on failure");
+
+        // The offline custodian re-reads the staged artifact, signs the exact
+        // signing input, and the operator completes from that detached data.
+        let unsigned = read_unsigned_staged_artifact(&root).expect("re-read staged artifact");
+        let signature = signing
+            .sign_manifest(&unsigned.signing_input)
+            .expect("offline signature");
+        let staged =
+            finish_signed_artifact(unsigned, signature, "signing-1", &signing.0.verifying_key())
+                .expect("finish signed artifact");
+        assert!(staged.manifest.authentication.signature.is_some());
+        assert!(staged.path.ends_with("artifact.partial"));
+        let bytes = fs::read(&staged.path).expect("signed artifact");
+        assert_eq!(staged.sha256, hex_sha256(&bytes));
+        assert_eq!(staged.size_bytes, bytes.len() as u64);
+        let (manifest, restored) = verify_artifact(
+            &bytes,
+            &expected_release(),
+            "signing-1",
+            &signing.0.verifying_key(),
+            "recovery-1",
+            &recipient,
+        )
+        .expect("signed artifact verifies");
+        assert_eq!(manifest.backup_id, "backup-1");
+        assert_eq!(restored.len(), plain_members.len());
+        assert!(!staged.staging_directory.join("artifact.unsigned").exists());
+        fs::remove_dir_all(&root).expect("remove root");
+    }
+
+    #[test]
+    fn unsigned_stage_rejects_a_wrong_key_id_and_a_tampered_payload() {
+        let (options, plain_members, signing, _) = fixture();
+        let root = std::env::temp_dir().join(format!("o3k-pp6-unsigned-{}", Uuid::now_v7()));
+        create_private_dir(&root).expect("private root");
+        let unsigned =
+            stage_unsigned_artifact(&options, stream_fixture_members(&plain_members), &root)
+                .expect("stage unsigned artifact");
+        let signature = signing
+            .sign_manifest(&unsigned.signing_input)
+            .expect("signature");
+        let unsigned_path = unsigned.path.clone();
+        assert!(
+            finish_signed_artifact(unsigned, signature, "other-key", &signing.0.verifying_key())
+                .is_err()
+        );
+        assert!(!unsigned_path.with_file_name("artifact.partial").exists());
+
+        // A same-size ciphertext modification keeps the file structurally
+        // valid, so the detached signature still verifies; the payload is
+        // re-digested against the signed manifest before anything is written.
+        let mut bytes = fs::read(&unsigned_path).expect("staged bytes");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        fs::write(&unsigned_path, &bytes).expect("corrupt staged artifact");
+        let unsigned = read_unsigned_staged_artifact(&root).expect("size is unchanged");
+        let signature = signing
+            .sign_manifest(&unsigned.signing_input)
+            .expect("signature");
+        assert!(
+            finish_signed_artifact(unsigned, signature, "signing-1", &signing.0.verifying_key())
+                .is_err()
+        );
+
+        // A truncated staged artifact is rejected by the reader itself.
+        let mut bytes = fs::read(&unsigned_path).expect("staged bytes");
+        bytes.truncate(bytes.len() - 1);
+        fs::write(&unsigned_path, &bytes).expect("truncate staged artifact");
+        assert!(read_unsigned_staged_artifact(&root).is_err());
+        fs::remove_dir_all(&root).expect("remove root");
     }
 
     #[test]
