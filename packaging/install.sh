@@ -10,6 +10,18 @@ O3K_BINARY=
 NETWORK_BINARY=
 PROFILE=fake
 NONINTERACTIVE=0
+# The digest of the release tarball that the outer installer verified before
+# extraction (packaging/get-o3k.sh). It is persisted into the installed
+# release manifest so backup artifacts can bind the exact release artifact.
+RELEASE_ARTIFACT_SHA256="${O3K_RELEASE_ARTIFACT_SHA256:-}"
+AUGMENTED_MANIFEST=
+cleanup_augmented_manifest() {
+  [[ -z "$AUGMENTED_MANIFEST" ]] || rm -f -- "$AUGMENTED_MANIFEST"
+}
+trap cleanup_augmented_manifest EXIT
+trap 'cleanup_augmented_manifest; exit 130' INT
+trap 'cleanup_augmented_manifest; exit 143' TERM
+trap 'cleanup_augmented_manifest; exit 129' HUP
 # Canonical-bootstrap orchestration (PP.2, contracts/installer-v1.yaml
 # invoke_canonical_init_join): the outer installer runs `o3k init` and the
 # authenticated `o3k join` BEFORE the compute agent's first control-plane
@@ -28,12 +40,17 @@ while (($#)); do
     --o3k-binary) O3K_BINARY="$2"; shift 2;;
     --network-binary) NETWORK_BINARY="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
+    --release-artifact-sha256) RELEASE_ARTIFACT_SHA256="$2"; shift 2;;
     --noninteractive) NONINTERACTIVE=1; shift;;
     --defer-compute-start) DEFER_COMPUTE_START=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
 [[ "$PROFILE" == fake || "$PROFILE" == libvirt ]] || { echo "profile must be fake or libvirt" >&2; exit 2; }
+if [[ -n "$RELEASE_ARTIFACT_SHA256" && ! "$RELEASE_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "release artifact sha256 must be 64 lowercase hex characters" >&2
+  exit 2
+fi
 if [[ -n "$NETWORK_BINARY" && "$PROFILE" != libvirt ]]; then
   echo "the network agent is only installed with the libvirt profile" >&2
   exit 2
@@ -315,13 +332,50 @@ for file in reset.sh uninstall.sh diagnose.sh preflight.sh bootstrap-certs.sh bo
 done
 install_owned_file "$ROOT_DIR/scripts/generate-passwords.sh" \
   "$PREFIX/share/o3k/generate-passwords.sh" share/o3k/generate-passwords.sh 0755
+# Persists the release-tarball digest that the outer installer verified
+# (get-o3k.sh checks it against the authenticated release digest manifest).
+# A bundle manifest that already declares a different digest fails closed.
+augment_release_manifest() {
+  local source="$1" destination="$2" digest="$3"
+  python3 - "$source" "$destination" "$digest" <<'PY'
+import json
+import sys
+
+source, destination, digest = sys.argv[1:4]
+try:
+    with open(source, encoding="utf-8") as stream:
+        value = json.load(stream)
+except (OSError, ValueError) as error:
+    raise SystemExit(f"O3K installer: release manifest is unreadable: {error}")
+if not isinstance(value, dict):
+    raise SystemExit("O3K installer: release manifest is not a JSON object")
+existing = value.get("release_artifact_sha256")
+if existing is not None:
+    if not isinstance(existing, str) or existing != digest:
+        raise SystemExit(
+            "O3K installer: release manifest release_artifact_sha256 does not match the verified release artifact"
+        )
+else:
+    value["release_artifact_sha256"] = digest
+with open(destination, "w", encoding="utf-8") as stream:
+    json.dump(value, stream, separators=(",", ":"), sort_keys=True)
+    stream.write("\n")
+PY
+}
 # Release-bundle provenance files (issue #617): manifest.json and SHA256SUMS
 # sit at the release bundle root (packaging/make-release.sh writes them next
 # to bin/) and let `o3k doctor` verify the installed release. Repo-tree/dev
 # installs have no release bundle, so the two files are installed and tracked
 # in the ownership manifest only when the bundle sources exist.
 if [[ -f "$ROOT_DIR/manifest.json" ]]; then
-  install_owned_file "$ROOT_DIR/manifest.json" "$PREFIX/share/o3k/release-manifest.json" \
+  MANIFEST_SOURCE="$ROOT_DIR/manifest.json"
+  if [[ -n "$RELEASE_ARTIFACT_SHA256" ]]; then
+    AUGMENTED_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/o3k-release-manifest.XXXXXX")"
+    augment_release_manifest "$MANIFEST_SOURCE" "$AUGMENTED_MANIFEST" "$RELEASE_ARTIFACT_SHA256" \
+      || { echo "cannot persist the verified release artifact digest" >&2; exit 1; }
+    MANIFEST_SOURCE="$AUGMENTED_MANIFEST"
+  fi
+  install_owned_file "$MANIFEST_SOURCE" "$PREFIX/share/o3k/release-manifest.json" \
     share/o3k/release-manifest.json 0644
   INSTALLED_FILES+=(share/o3k/release-manifest.json)
 fi

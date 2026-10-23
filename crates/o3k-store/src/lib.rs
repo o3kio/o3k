@@ -43,6 +43,7 @@ pub mod postgres;
 pub mod quota;
 mod reusable_policy;
 mod server_state;
+pub mod state_inventory;
 pub mod storage;
 pub mod unified;
 

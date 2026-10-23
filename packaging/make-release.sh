@@ -166,12 +166,53 @@ cmp -- "$ROOT_DIR/packaging/get-o3k.sh" "$INSTALL_SH" \
 INSTALLER_SHA256="$(sha256sum "$INSTALL_SH" | awk '{print $1}')"
 COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 WORKFLOW="${GITHUB_WORKFLOW:-local}"
+# Product profile recorded for exact-release consumers. Both frozen profiles
+# share the same release bundle; the release operator names the deployed
+# profile explicitly (default: the public single-host demo profile).
+PROFILE_ID="${O3K_PRODUCT_PROFILE_ID:-o3k-demo-v1}"
+case "$PROFILE_ID" in
+  o3k-demo-v1|o3k-small-edge-v1) ;;
+  *)
+    echo "O3K_PRODUCT_PROFILE_ID must be o3k-demo-v1 or o3k-small-edge-v1: $PROFILE_ID" >&2
+    exit 2
+    ;;
+esac
+# release_artifact_sha256 is the SHA-256 of the published release tarball.
+# The tarball is produced AFTER this manifest (it contains the manifest and the
+# manifest is covered by SHA256SUMS), so a tarball cannot carry its own digest.
+# The authoritative digest is the published .sha256 written by
+# make-release-archive.sh; get-o3k.sh passes that verified value to install.sh,
+# which persists it into the installed release manifest. A builder that
+# assembles a bundle outside the archive step may declare the digest here via
+# O3K_RELEASE_ARTIFACT_SHA256 (checked against the .sha256 when both exist) or
+# O3K_RELEASE_ARTIFACT_TARBALL (the digest is computed from that tarball).
+RELEASE_ARTIFACT_SHA256="${O3K_RELEASE_ARTIFACT_SHA256:-}"
+if [[ -z "$RELEASE_ARTIFACT_SHA256" && -n "${O3K_RELEASE_ARTIFACT_TARBALL:-}" ]]; then
+  [[ -f "$O3K_RELEASE_ARTIFACT_TARBALL" ]] \
+    || { echo "release artifact tarball is missing: $O3K_RELEASE_ARTIFACT_TARBALL" >&2; exit 2; }
+  RELEASE_ARTIFACT_SHA256="$(sha256sum "$O3K_RELEASE_ARTIFACT_TARBALL" | awk '{print $1}')"
+fi
+if [[ -n "$RELEASE_ARTIFACT_SHA256" ]]; then
+  [[ "$RELEASE_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || { echo "release_artifact_sha256 must be 64 lowercase hex characters" >&2; exit 2; }
+  if [[ -f "$DIST_ROOT/o3k-$VERSION-linux-x86_64.tar.gz.sha256" ]]; then
+    PUBLISHED_DIGEST="$(awk 'NR==1{print $1}' "$DIST_ROOT/o3k-$VERSION-linux-x86_64.tar.gz.sha256")"
+    [[ "$PUBLISHED_DIGEST" == "$RELEASE_ARTIFACT_SHA256" ]] \
+      || { echo "declared release_artifact_sha256 disagrees with the published .sha256" >&2; exit 1; }
+  fi
+fi
 # The manifest is written BEFORE SHA256SUMS so the final bundle verification
 # covers the installer record too. schema_version is the max migration prefix
 # computed above; upgrade_from.min_version is the operator-declared fence.
-printf '{"version":"%s","profile":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","schema_version":"%s","upgrade_from":{"min_version":"%s"}}\n' \
-  "$VERSION" "$PROFILE" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" \
-  "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" >"$OUT_DIR/manifest.json"
+if [[ -n "$RELEASE_ARTIFACT_SHA256" ]]; then
+  printf '{"version":"%s","profile":"%s","profile_id":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","release_artifact_sha256":"%s","schema_version":"%s","upgrade_from":{"min_version":"%s"}}\n' \
+    "$VERSION" "$PROFILE" "$PROFILE_ID" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" \
+    "$RELEASE_ARTIFACT_SHA256" "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" >"$OUT_DIR/manifest.json"
+else
+  printf '{"version":"%s","profile":"%s","profile_id":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","schema_version":"%s","upgrade_from":{"min_version":"%s"}}\n' \
+    "$VERSION" "$PROFILE" "$PROFILE_ID" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" \
+    "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" >"$OUT_DIR/manifest.json"
+fi
 (cd "$OUT_DIR" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 bash "$ROOT_DIR/packaging/verify-release-bundle.sh" "$OUT_DIR"
 echo "release prepared at $OUT_DIR"

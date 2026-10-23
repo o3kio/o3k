@@ -730,8 +730,11 @@ fi
 # installs it (with its unit, not enabled) when present — no extra flag needed.
 # --defer-compute-start keeps the compute agent stopped so the canonical join
 # below wins the NodeRegistry epoch race (see the canonical bootstrap section).
+# --release-artifact-sha256: the tarball digest verified above is persisted in
+# the installed release manifest (backup artifacts bind the exact release).
 bash "$BUNDLE_DIR/packaging/install.sh" --profile libvirt --noninteractive \
   --defer-compute-start \
+  --release-artifact-sha256 "$ARCHIVE_DIGEST" \
   --binary "$BUNDLE_DIR/bin/o3kd" --compute-binary "$BUNDLE_DIR/bin/o3k-compute" \
   --o3k-binary "$BUNDLE_DIR/bin/o3k" \
   || die 'installation failed; the host holds recoverable O3K-owned state and re-running the installer converges'

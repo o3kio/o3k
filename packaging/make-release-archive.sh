@@ -101,6 +101,27 @@ printf '%s  %s\n' "$DIGEST" "o3k-$VERSION-linux-x86_64.tar.gz" >"$SHA_FILE"
 # Prove the published file round-trips with the exact tool the wrapper uses.
 (cd "$DIST_DIR" && sha256sum -c --strict -- "o3k-$VERSION-linux-x86_64.tar.gz.sha256" >/dev/null) \
   || { echo "published SHA-256 file does not verify" >&2; exit 1; }
+# The tarball cannot contain its own digest, so the normal build path omits
+# release_artifact_sha256 from the bundle manifest; install.sh persists the
+# verified digest into the installed manifest instead. An out-of-band builder
+# may predeclare the digest, and that declaration must match the tarball
+# actually published here.
+DECLARED_DIGEST="$(python3 - "$BUNDLE_DIR/manifest.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    value = json.load(stream)
+declared = value.get("release_artifact_sha256") if isinstance(value, dict) else None
+if declared is not None and not isinstance(declared, str):
+    raise SystemExit("bundle manifest release_artifact_sha256 is not a string")
+print(declared or "")
+PY
+)" || { echo "cannot read the bundle manifest release identity" >&2; exit 1; }
+if [[ -n "$DECLARED_DIGEST" && "$DECLARED_DIGEST" != "$DIGEST" ]]; then
+  echo "bundle manifest release_artifact_sha256 does not match the archived tarball" >&2
+  exit 1
+fi
 
 SIGNATURE_SCHEME="${O3K_RELEASE_SIGNATURE_SCHEME:-ed25519}"
 case "$SIGNATURE_SCHEME" in

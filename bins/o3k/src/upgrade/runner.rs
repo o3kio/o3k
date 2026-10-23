@@ -337,6 +337,30 @@ impl SystemUpgradeIo {
         Ok(())
     }
 
+    /// Installs already-verified manifest bytes atomically with mode 0644.
+    fn install_manifest_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let destination = self.share_dir().join("release-manifest.json");
+        let parent = destination
+            .parent()
+            .ok_or_else(|| "release manifest has no parent directory".to_owned())?;
+        let temp = parent.join(format!(".release-manifest.{}.tmp", std::process::id()));
+        let write = (|| -> std::io::Result<()> {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true).mode(0o600);
+            let mut file = options.open(&temp)?;
+            std::io::Write::write_all(&mut file, bytes)?;
+            file.sync_all()
+        })();
+        if let Err(error) = write {
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!("cannot stage {}: {error}", destination.display()));
+        }
+        let result = Self::install_file(&temp, &destination, 0o644);
+        let _ = std::fs::remove_file(&temp);
+        result
+    }
+
     /// Recursively copies regular files and directories, preserving modes.
     fn copy_tree(src: &Path, dest: &Path) -> Result<(), String> {
         let metadata = std::fs::metadata(src)
@@ -1328,6 +1352,20 @@ impl UpgradeIo for SystemUpgradeIo {
                 "the bundle declares version {manifest_version}, expected {target}"
             ));
         }
+        // If the bundle manifest already carries the tarball digest, it must
+        // equal the bytes that were just verified. The digest is normally
+        // persisted into the installed manifest later (the tarball cannot
+        // contain its own digest).
+        if let Some(declared) = manifest
+            .get("release_artifact_sha256")
+            .and_then(serde_json::Value::as_str)
+            && !declared.eq_ignore_ascii_case(&actual)
+        {
+            return cleanup(
+                "the bundle manifest release_artifact_sha256 does not match the verified tarball"
+                    .to_owned(),
+            );
+        }
         let target_profile = manifest
             .get("profile")
             .and_then(serde_json::Value::as_str)
@@ -1390,6 +1428,7 @@ impl UpgradeIo for SystemUpgradeIo {
             version: target.clone(),
             dir: final_dir,
             installer_sha256: installer_sha256.to_lowercase(),
+            release_artifact_sha256: actual.to_lowercase(),
         })
     }
 
@@ -1585,11 +1624,16 @@ impl UpgradeIo for SystemUpgradeIo {
         // Release metadata (the pure-binary-swap journey keeps the
         // ownership ledger entries unchanged: the recorded paths remain
         // valid). The downloaded install.sh is never executed (plan §3).
-        Self::install_file(
-            &bundle.dir.join("manifest.json"),
-            &self.share_dir().join("release-manifest.json"),
-            0o644,
+        // The tarball digest is persisted into the installed manifest from
+        // the verified download so backup artifacts can bind the exact
+        // release artifact.
+        let bundle_manifest = std::fs::read(bundle.dir.join("manifest.json"))
+            .map_err(|error| format!("cannot read the bundle manifest: {error}"))?;
+        let installed_manifest = crate::upgrade::release_identity::manifest_with_verified_artifact(
+            &bundle_manifest,
+            &bundle.release_artifact_sha256,
         )?;
+        self.install_manifest_bytes(&installed_manifest)?;
         Self::install_file(
             &bundle.dir.join("SHA256SUMS"),
             &self.share_dir().join("SHA256SUMS"),

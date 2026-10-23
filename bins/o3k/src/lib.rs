@@ -27,6 +27,14 @@ pub(crate) mod backup;
 // provisional snapshot. Linux-only like the handoff primitives in o3k-store.
 #[cfg(target_os = "linux")]
 pub mod backup_create;
+// Root-owned installation trust/key configuration and the D9 staging
+// reservation bound for the authenticated backup artifact (SPEC-0050 §8,
+// ADR-0189). Trust loading derives the canonical identity from o3k-store and
+// uses Linux no-follow file primitives; the reservation uses POSIX statvfs.
+#[cfg(unix)]
+pub mod backup_reservation;
+#[cfg(target_os = "linux")]
+pub mod backup_trust;
 pub mod checks;
 pub mod context;
 pub mod db;
