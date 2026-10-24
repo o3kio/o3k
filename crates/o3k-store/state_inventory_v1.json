@@ -445,7 +445,7 @@
           "kind": "table",
           "schema": "public",
           "name": "canonical_networks",
-          "definition_sha256": "27511f652af22c8d6353d1dba78b1a68df3f103a53a2aff66a785c5ee8d6ce17"
+          "definition_sha256": "21a8f28a5f8d2b2af7b00a330b7b9b0edbbed74dc4bf2df95016fc9d8bcc1aa5"
         },
         {
           "kind": "table",
@@ -518,6 +518,12 @@
           "schema": "public",
           "name": "canonical_realm_bindings_realm_idx",
           "definition_sha256": "a55bf75d4f49e2d3010b420395b819fa18cc99cbe1c8df68871d3c9e07eae68d"
+        },
+        {
+          "kind": "constraint",
+          "schema": "public",
+          "name": "canonical_address_realms_id_project_unique",
+          "definition_sha256": "37139d24eec92c8d20c14cb48f9bfc9f97dd3187b101eb4cccc90ab7a7481c21"
         }
       ],
       "migration_ids": [
@@ -646,7 +652,7 @@
           "kind": "table",
           "schema": "public",
           "name": "canonical_policy_realizations",
-          "definition_sha256": "cd7f4eedf79dd6608561d2f08fc5664ac52ffd5ea15cc04d27bfd13701649ffd"
+          "definition_sha256": "3857da87c172bce4e8aa7f2cb2f9373f2907fdb43eec3a4606e5e908616ed462"
         },
         {
           "kind": "table",
@@ -870,7 +876,7 @@
         {
           "kind": "trigger",
           "schema": "main",
-          "name": "resources_delete_generic_operations",
+          "name": "resources.resources_delete_generic_operations",
           "definition_sha256": "6cf792bf3dd57a90b7262e30a917a8da402289b96c58a6ba93ab6d7d1de5ba93"
         }
       ],
@@ -908,7 +914,7 @@
         {
           "kind": "trigger",
           "schema": "public",
-          "name": "resources_delete_generic_operations",
+          "name": "resources.resources_delete_generic_operations",
           "definition_sha256": "bc493cbeb756fddf16767dddc28a0d3a08f3fb4b6df02f916549ab1ce0e8f378"
         }
       ],
@@ -1725,7 +1731,7 @@
           "kind": "table",
           "schema": "public",
           "name": "network_ports",
-          "definition_sha256": "12dc6960587b75b55f6410f6992f243b7d6fef44e86e6b993bace395c1ad4eab"
+          "definition_sha256": "26a5c6c484143e28016037ae4ac8507e403b30aeca4e59e137ba0bc014408e55"
         },
         {
           "kind": "table",
@@ -1749,7 +1755,7 @@
           "kind": "table",
           "schema": "public",
           "name": "network_subnets",
-          "definition_sha256": "e8c191a5541aecd72aaf9348ef171591d1bba5910c1804183f247e9dbbb664f8"
+          "definition_sha256": "de23442c3407777d79f5d68eabd1e2fa8c7a049b1725051a075138e438da589e"
         },
         {
           "kind": "index",
@@ -1901,7 +1907,7 @@
         {
           "kind": "trigger",
           "schema": "main",
-          "name": "operations_validate_resource_reference",
+          "name": "operations.operations_validate_resource_reference",
           "definition_sha256": "e2c2272c23bfd906b71706da09ab24956729523788bc6ad7f7f27466e2a59500"
         }
       ],
@@ -1975,19 +1981,19 @@
         {
           "kind": "trigger",
           "schema": "public",
-          "name": "operations_validate_resource_reference",
+          "name": "operations.operations_validate_resource_reference",
           "definition_sha256": "db4b3e34f0d914e003edbe0dda6644c8b1d92eec8d0d549996dc7ed5a472e097"
         },
         {
           "kind": "function",
           "schema": "public",
-          "name": "o3k_delete_generic_resource_operations",
+          "name": "o3k_delete_generic_resource_operations()",
           "definition_sha256": "172a019517928e11da083b14e8acca7d7f67e0fa14c5d246b803396e863e161c"
         },
         {
           "kind": "function",
           "schema": "public",
-          "name": "o3k_validate_operation_resource_reference",
+          "name": "o3k_validate_operation_resource_reference()",
           "definition_sha256": "0fbbf7f442006c46330a7526823bf44e6b5f7b5ae00ab8e1f4754bbcafa9b727"
         }
       ],
@@ -2133,7 +2139,7 @@
           "kind": "table",
           "schema": "public",
           "name": "placement_providers",
-          "definition_sha256": "bfc1dc3629b5df87604a22fdda268021ad14d54a6ff6b78e7998c14ce27f8e16"
+          "definition_sha256": "504e6862db27bac43252bb34f0d49518299f22d04b63d3bfb80f1965262fc274"
         },
         {
           "kind": "index",
@@ -2208,7 +2214,7 @@
           "kind": "table",
           "schema": "public",
           "name": "quota_limits",
-          "definition_sha256": "95a42d5e06e6aeca6fbd70d33a79b1f2456d62bf8afd9e224228e6774588056a"
+          "definition_sha256": "6131e79ffb00295ece5f50d346518e2a101568d46f71b57b717020a84371b8e8"
         },
         {
           "kind": "table",

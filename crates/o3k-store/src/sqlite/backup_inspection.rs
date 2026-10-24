@@ -15,11 +15,14 @@ use crate::{
 };
 
 /// Enumerates the live `sqlite_master` objects of an open snapshot.
+///
+/// Trigger objects are reported under the same `<table>.<name>` identity the
+/// committed baseline uses; every other kind keeps its catalog name.
 pub(crate) async fn live_catalog_objects(
     pool: &SqlitePool,
 ) -> Result<Vec<LiveCatalogObject>, StoreError> {
     let rows = sqlx::query(
-        "SELECT type, name, sql FROM sqlite_master \
+        "SELECT type, name, tbl_name, sql FROM sqlite_master \
          WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' \
          ORDER BY type, name",
     )
@@ -30,7 +33,8 @@ pub(crate) async fn live_catalog_objects(
     for row in rows {
         let kind: String = row.try_get(0).map_err(StoreError::Database)?;
         let name: String = row.try_get(1).map_err(StoreError::Database)?;
-        let sql: String = row.try_get(2).map_err(StoreError::Database)?;
+        let table: String = row.try_get(2).map_err(StoreError::Database)?;
+        let sql: String = row.try_get(3).map_err(StoreError::Database)?;
         if is_internal_sqlite_object(&name) {
             continue;
         }
@@ -39,6 +43,11 @@ pub(crate) async fn live_catalog_objects(
                 "snapshot catalog object {kind} {name:?} has an unsupported definition"
             ))
         })?;
+        let name = if kind == "trigger" {
+            format!("{}.{name}", table.to_ascii_lowercase())
+        } else {
+            name
+        };
         objects.push(LiveCatalogObject {
             kind,
             name,
