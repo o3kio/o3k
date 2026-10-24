@@ -13,7 +13,7 @@ chmod 0700 "$WORK"
 cleanup() { rm -rf -- "$WORK"; }
 trap cleanup EXIT
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT/target"}
-O3K_D10_TEST_EXPORT_DIR="$WORK" cargo test -p o3k --lib restore_pg_validation::tests::real_pg16_definition_validation -- --ignored --nocapture > "$WORK/d10.log" 2>&1
+O3K_D10_TEST_EXPORT_DIR="$WORK" cargo test -p o3k --lib restore_pg_validation::tests::real_pg16_ -- --ignored --nocapture > "$WORK/d10.log" 2>&1
 sed -n '/^D10 /p' "$WORK/d10.log"
 cargo build -p o3k > "$WORK/build.log" 2>&1
 BIN="$CARGO_TARGET_DIR/debug/o3k"
@@ -86,6 +86,11 @@ try:
   assert data['activation_authorized'] is False
   if reason: assert data['reason']==reason,data
   return data
+ # A root-owned manifest is insufficient when an ancestor is replaceable.
+ execute('chmod','777','/usr/local/share')
+ preflight(2,'expected-release-untrusted')
+ execute('chmod','755','/usr/local/share')
+ print('PASS writable release ancestor rejected',flush=True)
  before=call(['psql','-X','-qAt','-d','postgres','-c','SELECT oid,datname,datdba,datacl FROM pg_database ORDER BY oid'])
  result=preflight(0)
  assert result['status']=='preflighted' and result['target_mutated'] is False
@@ -94,6 +99,11 @@ try:
  assert call(['psql','-X','-qAt','-d','o3k_fresh','-c',"SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'"]).strip()==b'0'
  print('PASS real CLI signed fixture preflight; selected files/database unchanged; activation denied',flush=True)
  print(json.dumps(result,sort_keys=True),flush=True)
+ # Foreign principals must not retain schema-creation authority on the target.
+ call(['psql','-X','-q','-v','ON_ERROR_STOP=1','-c','CREATE ROLE foreign_creator; GRANT CREATE ON DATABASE o3k_fresh TO foreign_creator'])
+ preflight(2,'target-owner-policy-rejected')
+ call(['psql','-X','-q','-v','ON_ERROR_STOP=1','-c','REVOKE CREATE ON DATABASE o3k_fresh FROM foreign_creator; DROP ROLE foreign_creator'])
+ print('PASS foreign target CREATE privilege rejected',flush=True)
  # A foreign object in the selected DB must survive rejection unchanged.
  call(['psql','-X','-q','-v','ON_ERROR_STOP=1','-d','o3k_fresh','-c',"CREATE TABLE public.foreign_sentinel(value text); INSERT INTO public.foreign_sentinel VALUES ('unchanged')"])
  preflight(2,'target-database-not-empty')

@@ -488,9 +488,11 @@ SQL
 psql -X -q -v ON_ERROR_STOP=1 -h /work -U o3k_admin o3k_validate <<'SQL'
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 SQL
-# Close bootstrap admission before any archive bytes execute. Only the narrow
-# owner role is admitted, on one local socket, to one disposable database.
-printf 'local o3k_validate o3k_restore_owner trust\nlocal all all reject\nhost all all all reject\n' > /work/server/pg_hba.conf
+# Close bootstrap admission before any archive bytes execute. Untrusted SQL
+# clients can use only the narrow owner role. The observer requires the protected
+# server OS uid through peer authentication, on this disposable database only.
+printf 'o3k_observer postgres o3k_admin\n' > /work/server/pg_ident.conf
+printf 'local o3k_validate o3k_admin peer map=o3k_observer\nlocal o3k_validate o3k_restore_owner trust\nlocal all all reject\nhost all all all reject\n' > /work/server/pg_hba.conf
 pg_ctl -D /work/server reload >/dev/null
 # A fresh owner connection confirms reload before bootstrap ceases.
 for attempt in {1..50}; do
@@ -735,7 +737,7 @@ exit 1
                 4096,
             );
             if output.is_err() {
-                let _ = instance.remove();
+                instance.remove()?;
                 return Err(ValidationError::new("validation-container-unavailable"));
             }
             // A pinned image is still checked at execution, including server major.
@@ -893,6 +895,19 @@ exit 1
             Ok(())
         }
         fn catalog(&self) -> Result<Value> {
+            // pg_roles masks passwords. A separate peer-authenticated observer
+            // can only be reached by the protected server OS uid, never by the
+            // untrusted SQL/psql uid. Return presence only, never credential bytes.
+            let pristine = self.run(
+                "postgres",
+                &["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-h", "/work",
+                  "-U", "o3k_admin", "-d", "o3k_validate"],
+                Some(b"SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_authid WHERE rolpassword IS NOT NULL);"),
+                16,
+            )?;
+            if pristine != b"t\n" {
+                return Err(ValidationError::new("validation-role-password-forbidden"));
+            }
             let bytes = self.run(
                 "65534:65534",
                 &[
@@ -976,10 +991,14 @@ exit 1
         });
         let written = input.map_or(Ok(()), |bytes| stdin.write_all(bytes));
         drop(stdin);
-        let bytes = reader
-            .join()
-            .map_err(|_| ValidationError::new("validation-tool-failed"))?
-            .map_err(|_| ValidationError::new("validation-tool-failed"))?;
+        let bytes = match reader.join() {
+            Ok(Ok(bytes)) => bytes,
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ValidationError::new("validation-tool-failed"));
+            }
+        };
         if written.is_err() || bytes.len() > limit {
             let _ = child.kill();
             let _ = child.wait();
@@ -1021,6 +1040,80 @@ exit 1
                     .unwrap()
                     .contains("INSERT INTO public._sqlx_migrations")
             );
+        }
+
+        /// Exercise security attributes independently of the current migration shapes.
+        #[test]
+        #[ignore = "requires isolated Docker PostgreSQL 16 runtime"]
+        fn real_pg16_catalog_security_attributes() {
+            let policy = ValidationPolicy {
+                image: std::env::var("O3K_D10_TEST_IMAGE").expect("explicit image pin"),
+            };
+            let mut source = Container::start(&policy).unwrap();
+            source.sql(&migration_sql().unwrap()).unwrap();
+            assert!(
+                source
+                    .run(
+                        "65534:65534",
+                        &[
+                            "psql",
+                            "-X",
+                            "-h",
+                            "/work",
+                            "-U",
+                            "o3k_admin",
+                            "-d",
+                            "o3k_validate",
+                            "-c",
+                            "SELECT 1"
+                        ],
+                        None,
+                        16
+                    )
+                    .is_err(),
+                "untrusted OS uid must not impersonate the observer"
+            );
+            source.sql("CREATE TABLE catalog_probe(id int); CREATE INDEX catalog_probe_idx ON catalog_probe(id); CREATE VIEW catalog_probe_view AS SELECT id FROM catalog_probe; CREATE SEQUENCE catalog_probe_seq; CREATE POLICY catalog_probe_policy ON catalog_probe FOR SELECT TO PUBLIC USING (true);").unwrap();
+            for (section, mutation) in [
+                (
+                    "rls_policies",
+                    "DROP POLICY catalog_probe_policy ON catalog_probe; CREATE POLICY catalog_probe_policy ON catalog_probe FOR DELETE TO PUBLIC USING (true);",
+                ),
+                (
+                    "views",
+                    "ALTER VIEW catalog_probe_view SET (security_invoker=true);",
+                ),
+                (
+                    "indexes",
+                    "ALTER INDEX catalog_probe_idx SET (fillfactor=50);",
+                ),
+                (
+                    "sequences",
+                    "ALTER SEQUENCE catalog_probe_seq OWNED BY catalog_probe.id;",
+                ),
+            ] {
+                let before = source.catalog().unwrap();
+                source
+                    .sql(mutation)
+                    .unwrap_or_else(|e| panic!("{mutation}: {e:?}"));
+                let after = source.catalog().unwrap();
+                assert_ne!(
+                    before[section], after[section],
+                    "unobserved security attribute: {mutation}"
+                );
+            }
+            source
+                .sql("ALTER ROLE o3k_restore_owner PASSWORD 'disposable-test-password';")
+                .unwrap();
+            assert_eq!(
+                source
+                    .catalog()
+                    .err()
+                    .expect("password must be rejected")
+                    .reason(),
+                "validation-role-password-forbidden"
+            );
+            source.remove().unwrap();
         }
 
         /// Explicit real-host lane: absent isolation/PG16 is a failure, never a skip.

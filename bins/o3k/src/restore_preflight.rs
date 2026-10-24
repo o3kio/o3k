@@ -165,7 +165,10 @@ fn execute(args: &RestorePreflightArgs) -> Result<Value> {
     read_root_file(&trust_path, 65536)?;
     let trust = BackupTrustConfig::load_for_data_dir(&trust_path, &data_dir)
         .map_err(|error| Failure::rejected(error.reason()))?;
-    let release_file = open_regular(&prefix.join("share/o3k/release-manifest.json"))
+    let release_path = prefix.join("share/o3k/release-manifest.json");
+    verify_root_ancestors(&release_path)
+        .map_err(|_| Failure::rejected("expected-release-untrusted"))?;
+    let release_file = open_regular(&release_path)
         .map_err(|_| Failure::rejected("expected-release-unavailable"))?;
     let release_metadata = release_file
         .metadata()

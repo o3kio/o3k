@@ -151,3 +151,14 @@ receive exact-revision acceptance; software tests do not satisfy real HSM/mTLS
 custody/revocation gates. PR D requires independently controlled database-host
 ingress, qualified source fencing and PKI replacement. Until then, no restored
 controller activation or provider dispatch is authorized.
+
+Security review additions: release-manifest ancestors must all be root-owned
+and protected against replacement; foreign database CREATE grants reject the
+selected target. D10 compares RLS command types and PUBLIC roles, view/index
+options, sequence ownership/type, role expiry and PostgreSQL 16 membership
+options/grantor. Since pg_roles masks passwords, a protected server-uid peer
+observer checks only whether any password exists; no password bytes leave
+pg_authid. The untrusted SQL uid cannot authenticate as that observer. Failed
+validator startup must prove cleanup or return unknown/quarantine, and failed
+output readers reap their child process. These checks confer no activation
+authority.

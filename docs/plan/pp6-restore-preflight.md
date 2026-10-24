@@ -82,3 +82,12 @@ the existing read-only database diagnostic boundary. No guard allowlist or
 architecture contract is broadened. The guard failure is failure-before
 evidence for this correction; repeat mandatory checks and the real campaign on
 the corrected exact head.
+
+Review loop (PR #1172): inspect preflight trust paths, target admission, D10
+containment/cleanup and complete catalog security attributes; add real-process
+regressions for replaceable release ancestors and foreign database CREATE
+grants, then correct demonstrated failures. Review #1173 separately for scope,
+retry and durable acknowledgement contradictions without accepting the draft.
+Affected packages/binaries and authority remain unchanged. Widen only for a
+demonstrated security or contract defect; repeat focused PG16 evidence, guards
+and mandatory workspace checks after fixes, then review the final diff again.

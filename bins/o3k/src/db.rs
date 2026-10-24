@@ -566,7 +566,7 @@ pub(crate) async fn inspect_postgres_restore_target(url: &str) -> Result<(), Res
             LATERAL aclexplode(COALESCE(n.nspacl,acldefault('n',n.nspowner))) a
             WHERE n.nspname='public' AND a.privilege_type='CREATE'
               AND a.grantee NOT IN (r.oid, (SELECT oid FROM pg_roles WHERE rolname='pg_database_owner')))
-          AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(d.datacl,acldefault('d',d.datdba))) a WHERE a.grantee=0 AND a.privilege_type='CREATE') AS owner_ok,
+          AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(d.datacl,acldefault('d',d.datdba))) a WHERE a.grantee<>r.oid AND a.privilege_type='CREATE') AS owner_ok,
           NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datid=d.oid AND a.pid<>pg_backend_pid()) AS idle,
           NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema')

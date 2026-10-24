@@ -33,7 +33,8 @@ tables AS (
 indexes AS (
  SELECT i.indexrelid AS oid,n.nspname AS schema,i_rel.relname AS name,
    pg_get_userbyid(i_rel.relowner) AS owner,pg_get_indexdef(i.indexrelid) AS definition,
-   i.indisunique,i.indisprimary,i.indisvalid,i.indisready,pg_get_expr(i.indpred,i.indrelid) AS predicate,
+   i.indisunique,i.indisprimary,i.indisvalid,i.indisready,i.indislive,i.indisreplident,
+   i_rel.reloptions::text[] AS options,pg_get_expr(i.indpred,i.indrelid) AS predicate,
    t.relname AS table_name
  FROM pg_index i JOIN pg_class i_rel ON i_rel.oid=i.indexrelid
  JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=i_rel.relnamespace
@@ -130,19 +131,27 @@ triggers AS (
 ),
 views AS (
  SELECT c.oid,n.nspname AS schema,c.relname AS name,c.relkind::text AS relkind,
-   pg_get_userbyid(c.relowner) AS owner,pg_get_viewdef(c.oid,true) AS definition,c.relacl::text[] AS acl
+   pg_get_userbyid(c.relowner) AS owner,pg_get_viewdef(c.oid,true) AS definition,c.relacl::text[] AS acl,c.reloptions::text[] AS options
  FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE c.relkind IN ('v','m') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
 ),
 sequences AS (
  SELECT c.oid,n.nspname AS schema,c.relname AS name,pg_get_userbyid(c.relowner) AS owner,
-   s.seqstart,s.seqincrement,s.seqmin,s.seqmax,s.seqcache,s.seqcycle,c.relacl::text[] AS acl
+   format_type(s.seqtypid,NULL) AS type,
+   s.seqstart,s.seqincrement,s.seqmin,s.seqmax,s.seqcache,s.seqcycle,c.relacl::text[] AS acl,
+   COALESCE((SELECT jsonb_agg(jsonb_build_object('schema',tn.nspname,'table',t.relname,
+      'column',a.attname,'dependency',d.deptype::text) ORDER BY tn.nspname,t.relname,a.attname)
+      FROM pg_depend d JOIN pg_class t ON t.oid=d.refobjid
+      JOIN pg_namespace tn ON tn.oid=t.relnamespace
+      JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=d.refobjsubid
+      WHERE d.classid='pg_class'::regclass AND d.objid=c.oid
+        AND d.refclassid='pg_class'::regclass AND d.deptype IN ('a','i')),'[]'::jsonb) AS owned_by
  FROM pg_sequence s JOIN pg_class c ON c.oid=s.seqrelid JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
 ),
 policies AS (
  SELECT p.polrelid,c.relname AS table_name,n.nspname AS schema,p.polname AS name,
-   p.polpermissive,COALESCE((SELECT array_agg(CASE WHEN r.oid=0 THEN 'PUBLIC' ELSE r.rolname END ORDER BY r.rolname)
+   p.polcmd::text AS command,p.polpermissive,COALESCE((SELECT array_agg(CASE WHEN x.oid=0 THEN 'PUBLIC' ELSE r.rolname END ORDER BY x.oid=0,r.rolname)
       FROM unnest(p.polroles) x(oid) LEFT JOIN pg_roles r ON r.oid=x.oid),'{}') AS roles,
    pg_get_expr(p.polqual,p.polrelid) AS using_expression,
    pg_get_expr(p.polwithcheck,p.polrelid) AS check_expression
@@ -159,12 +168,13 @@ extensions AS (
 ),
 roles AS (
  SELECT r.rolname,r.rolsuper,r.rolinherit,r.rolcreaterole,r.rolcreatedb,r.rolcanlogin,
-   r.rolreplication,r.rolbypassrls,r.rolconnlimit,r.rolconfig::text[] AS config
+   r.rolreplication,r.rolbypassrls,r.rolconnlimit,r.rolvaliduntil,r.rolconfig::text[] AS config
  FROM pg_roles r
 ),
 memberships AS (
- SELECT parent.rolname AS role_name,member.rolname AS member_name,m.admin_option
+ SELECT parent.rolname AS role_name,member.rolname AS member_name,grantor.rolname AS grantor,m.admin_option,m.inherit_option,m.set_option
  FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
+ JOIN pg_roles grantor ON grantor.oid=m.grantor
 
 ),
 migrations AS (
@@ -194,6 +204,6 @@ SELECT jsonb_build_object(
  'rules',COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY schema,table_name,name) FROM rules r),'[]'::jsonb),
  'default_acls',COALESCE((SELECT jsonb_agg(to_jsonb(a) ORDER BY schema,object_type,role) FROM default_acls a),'[]'::jsonb),
  'roles',COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY rolname) FROM roles r),'[]'::jsonb),
- 'memberships',COALESCE((SELECT jsonb_agg(to_jsonb(m) ORDER BY role_name,member_name) FROM memberships m),'[]'::jsonb),
+ 'memberships',COALESCE((SELECT jsonb_agg(to_jsonb(m) ORDER BY role_name,member_name,grantor) FROM memberships m),'[]'::jsonb),
  'migrations',COALESCE((SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM migrations m),'[]'::jsonb)
 ) AS catalog;
