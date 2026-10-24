@@ -95,7 +95,8 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         disk_gb: u64,
     },
-    /// Provisional backup capture (PP.6; host-local, unsigned)
+    /// Signed backup artifacts (PP.6): capture and stage an encrypted artifact,
+    /// then publish it after detached offline Ed25519 signing and verification
     #[cfg(target_os = "linux")]
     Backup {
         #[command(subcommand)]
@@ -106,14 +107,24 @@ enum Commands {
 #[cfg(target_os = "linux")]
 #[derive(Subcommand)]
 enum BackupCommand {
-    /// Capture a provisional, unsigned backup snapshot
+    /// Capture an authenticated backup artifact. The command holds the
+    /// exclusive store lock and interrupt marker while it waits (in-process,
+    /// bounded) for the custodian to place signing-response.json, then
+    /// publishes the signed artifact. Re-run the same operation id only to
+    /// recover after a crash (offline custody)
     Create {
-        /// Absolute destination directory for the provisional capture
+        /// Absolute destination directory for the backup artifact
         #[arg(long)]
         destination: std::path::PathBuf,
         /// Durable identity of this backup operation
         #[arg(long)]
         operation_id: uuid::Uuid,
+    },
+    /// Verify an authenticated backup artifact against the installed release
+    Verify {
+        /// Absolute path to the authenticated backup artifact
+        #[arg(long)]
+        artifact: std::path::PathBuf,
     },
 }
 
@@ -250,6 +261,11 @@ fn main() -> ExitCode {
                 destination,
                 operation_id,
             }),
+            BackupCommand::Verify { artifact } => {
+                o3k::backup_verify::run_backup_verify(&o3k::backup_verify::BackupVerifyArgs {
+                    artifact,
+                })
+            }
         },
     }
 }
@@ -282,18 +298,27 @@ fn run_version() -> ExitCode {
 }
 
 fn installed_version() -> String {
-    let prefix = std::env::var("O3K_UPGRADE_PREFIX")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local"));
+    // Root ignores O3K_UPGRADE_PREFIX: release metadata must resolve from the
+    // canonical install location (SPEC-0050 §8 posture).
+    let prefix = if o3k::backup_trust::environment_overrides_allowed() {
+        std::env::var("O3K_UPGRADE_PREFIX")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/usr/local"))
+    } else {
+        std::path::PathBuf::from("/usr/local")
+    };
     let candidates = [prefix, std::path::PathBuf::from("/usr")];
     for candidate in &candidates {
-        let manifest = candidate.join("share/o3k/release-manifest.json");
-        let Ok(contents) = std::fs::read_to_string(&manifest) else {
+        // Same bounded, no-follow installation-metadata posture as the backup
+        // verifier (SPEC-0050 §8); never follow a substituted manifest path.
+        let Ok(contents) =
+            o3k::upgrade::release_identity::read_installed_release_manifest(candidate)
+        else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&contents) else {
             continue;
         };
         if let Some(version) = value

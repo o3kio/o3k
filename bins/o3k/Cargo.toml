@@ -33,9 +33,11 @@ sqlx = { workspace = true, default-features = false, features = ["runtime-tokio"
 tokio = { workspace = true, features = ["time"] }
 
 [features]
-# Crash-injection hooks for the PP.6 backup-handoff concurrency campaign. Off
+# Crash-injection hooks for the PP.6 backup-handoff and artifact campaigns. Off
 # by default; the hooks only force hard process exits in `o3k backup create`
-# and the matching o3k-store handoff paths.
+# (handoff + artifact journal transitions) and the matching o3k-store handoff
+# paths. See `backup_create.rs` and `backup_artifact.rs` for the exact
+# variables and exit codes.
 backup-test-hooks = ["o3k-store/backup-test-hooks"]
 
 [lib]

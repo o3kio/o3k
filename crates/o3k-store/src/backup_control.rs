@@ -700,11 +700,52 @@ impl Drop for AcceptedBackupRequest {
 /// `timeout` for the 8-byte response. On acceptance the returned stream is
 /// ready for [`crate::StoreAccessLock::receive_handoff`]; on rejection a typed
 /// [`BackupControlError::Rejected`] is returned.
+///
+/// This is [`connect_control`] followed by [`send_request_and_read_accept`].
+/// A caller that must authenticate the peer **before** asking it to stop
+/// serving (the executor's `daemon-identity-*` check) uses the two steps
+/// directly, so a local impostor is rejected without a needless drain.
 pub fn connect_and_request(
     data_dir: &Path,
     request: &BackupHandoffRequest,
     timeout: Duration,
 ) -> Result<UnixStream, BackupControlError> {
+    let mut stream = connect_control(data_dir, timeout)?;
+    send_request_and_read_accept(&mut stream, request, timeout)?;
+    Ok(stream)
+}
+
+/// Connects to the backup control socket without sending a request.
+///
+/// The returned stream carries the caller's timeouts, so
+/// [`send_request_and_read_accept`] inherits the same bound. Authentication
+/// ([`verify_daemon_peer`]) can therefore run between connect and request.
+pub fn connect_control(
+    data_dir: &Path,
+    timeout: Duration,
+) -> Result<UnixStream, BackupControlError> {
+    if timeout.is_zero() {
+        return Err(BackupControlError::InvalidInput);
+    }
+    let socket_path = resolve_socket_path(data_dir)?;
+    let stream = UnixStream::connect(socket_path).map_err(BackupControlError::Io)?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(BackupControlError::Io)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(BackupControlError::Io)?;
+    Ok(stream)
+}
+
+/// Sends the 64-byte request frame on an already-connected stream and reads the
+/// 8-byte response, leaving the stream ready for
+/// [`crate::StoreAccessLock::receive_handoff`] on acceptance.
+pub fn send_request_and_read_accept(
+    stream: &mut UnixStream,
+    request: &BackupHandoffRequest,
+    timeout: Duration,
+) -> Result<(), BackupControlError> {
     if timeout.is_zero() {
         return Err(BackupControlError::InvalidInput);
     }
@@ -714,17 +755,8 @@ pub fn connect_and_request(
             "backup control timeout is too large",
         )
     })?;
-    let socket_path = resolve_socket_path(data_dir)?;
-    let mut stream = UnixStream::connect(socket_path).map_err(BackupControlError::Io)?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(BackupControlError::Io)?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(BackupControlError::Io)?;
-
     let frame = request.encode();
-    write_all_bounded(&mut stream, &frame, timeout).map_err(|error| {
+    write_all_bounded(stream, &frame, timeout).map_err(|error| {
         if matches!(
             error.kind(),
             io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
@@ -735,7 +767,7 @@ pub fn connect_and_request(
         }
     })?;
 
-    let response = read_response_frame(&mut stream, deadline).map_err(|error| match error {
+    let response = read_response_frame(stream, deadline).map_err(|error| match error {
         FrameReadError::TimedOut => BackupControlError::Timeout,
         FrameReadError::Truncated => BackupControlError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -750,7 +782,7 @@ pub fn connect_and_request(
         stream
             .set_write_timeout(None)
             .map_err(BackupControlError::Io)?;
-        return Ok(stream);
+        return Ok(());
     }
     if response[..REJECT_MAGIC.len()] == *REJECT_MAGIC {
         let Some(reason) = HandoffRejectReason::from_reason_byte(response[REJECT_MAGIC.len()])
@@ -766,6 +798,46 @@ pub fn connect_and_request(
         io::ErrorKind::InvalidData,
         "backup control response frame is invalid",
     )))
+}
+
+/// Authenticates the daemon side of an accepted handoff stream.
+///
+/// The executor calls this after [`connect_control`] and before
+/// [`send_request_and_read_accept`] (so an impostor never receives the
+/// request); the same authenticated connection is then used with
+/// [`crate::StoreAccessLock::receive_handoff`]. It requires:
+///
+/// * `SO_PEERCRED` uid equal to `expected_uid` (the resolved data-directory
+///   owner);
+/// * `/proc/<pid>/status` effective uid equal to the socket credential, so a
+///   process whose credentials changed after connect is refused;
+/// * `/proc/<pid>/exe` device+inode equal to `expected_exe`, using the same
+///   mount-namespace-safe identity comparison as the listener.
+///
+/// A mismatch is [`BackupControlError::Unauthorized`]; an unreadable peer is
+/// [`BackupControlError::PeerChanged`]. Both fail closed.
+pub fn verify_daemon_peer(
+    stream: &UnixStream,
+    expected_exe: &Path,
+    expected_uid: u32,
+) -> Result<(), BackupControlError> {
+    let credentials = get_socket_peercred(stream.as_fd())
+        .map_err(|error| BackupControlError::Io(error.into()))?;
+    let uid = credentials.uid.as_raw();
+    let pid = Pid::as_raw(Some(credentials.pid));
+    if uid != expected_uid || pid <= 0 {
+        return Err(BackupControlError::Unauthorized);
+    }
+    let identity =
+        read_process_identity(pid as u32).map_err(|_| BackupControlError::PeerChanged)?;
+    if identity.uid != uid {
+        return Err(BackupControlError::Unauthorized);
+    }
+    match executable_matches(&identity, expected_exe) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(BackupControlError::Unauthorized),
+        Err(error) => Err(BackupControlError::Io(error)),
+    }
 }
 
 fn open_control_dir(data_dir_fd: &rustix::fd::OwnedFd) -> io::Result<rustix::fd::OwnedFd> {
@@ -1292,6 +1364,38 @@ mod tests {
         let site = site_token(&root.0)?;
         assert_eq!(first_installation, second_installation);
         assert_ne!(first_installation, site);
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_peer_requires_the_expected_uid_and_executable() -> io::Result<()> {
+        let (stream, _peer) = UnixStream::pair()?;
+        let uid = geteuid().as_raw();
+        let current_exe = fs::canonicalize(std::env::current_exe()?)?;
+        verify_daemon_peer(&stream, &current_exe, uid)
+            .map_err(|_| io::Error::other("matching daemon identity was rejected"))?;
+
+        let wrong_uid = uid.wrapping_add(1);
+        assert!(matches!(
+            verify_daemon_peer(&stream, &current_exe, wrong_uid),
+            Err(BackupControlError::Unauthorized)
+        ));
+
+        // A different executable inode is rejected even with the right uid:
+        // this is the fake-handoff-server case.
+        let mut candidates = ["/bin/sh", "/usr/bin/env", "/lib/systemd/systemd"]
+            .into_iter()
+            .filter(|path| fs::metadata(path).is_ok());
+        let other = candidates
+            .next()
+            .ok_or_else(|| io::Error::other("no alternative executable for the test"))?;
+        let other = fs::canonicalize(other)?;
+        if fs::metadata(&other)?.ino() != fs::metadata(&current_exe)?.ino() {
+            assert!(matches!(
+                verify_daemon_peer(&stream, &other, uid),
+                Err(BackupControlError::Unauthorized)
+            ));
+        }
         Ok(())
     }
 

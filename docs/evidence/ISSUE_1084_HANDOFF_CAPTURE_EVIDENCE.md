@@ -1,5 +1,23 @@
 # #1084 authenticated backup handoff — Slice D capture evidence
 
+> **Superseded status note (2026-10-24, updated):** the provisional capture
+> described here has been replaced by the authenticated artifact flow on branch
+> `pp6/1084-artifact`. Under ADR-0190 Option A the capture process now keeps the
+> store lock and the denial marker while it waits for the offline signature and
+> publishes in the same invocation (exit 0); an expired request is a safe abort
+> (exit 3 `signing-request-expired`); a re-run after a crash during the wait
+> resumes the wait/publication. See
+> `docs/evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md`.
+>
+> The handoff campaign described below still runs
+> `O3K_BACKUP_TEST_STOP_AFTER_STAGING=1`, a feature-gated harness control that
+> keeps phase 1 one-shot (stage, `signing-required`, exit 3, marker removed) so
+> each row can observe the post-capture state without a signing wait. That hook
+> is never enabled in a production build and does not change the product
+> semantics; the Option A wait itself is proven by
+> `tests/pp6_backup_artifact.sh` (`case-1`, `case-2`, `case-11`, `case-4e`).
+> The measurements below remain valid for the revision they name.
+
 Date: 2026-10-22. Scope: PP.6 authenticated backup handoff, real-process
 integration campaign (Slice D of the `#1084-handoff` branch work). Slices A–C
 (control protocol, store-lock handoff, daemon/CLI wiring) were implemented
@@ -180,6 +198,8 @@ classification, artifact published? "n/a" = not applicable to the case.
 | n1 | executor pointed at a copy of the data dir (different installation binding) | daemon | daemon-held | healthy | none | none | exit 2 `controller-unavailable` (no live socket in the copy); in-band `identity-mismatch` unit-covered | **PASS (executed)** |
 | n3 | second daemon instance while the first lives | first daemon | first-daemon-held | competitor exit 1 at the store lock (control bind never reached) | none | n/a | covered above | **PASS (executed)** |
 | n4 | stale control socket after SIGKILL | replacement daemon | replacement-held | replacement starts ready, SIGTERM exit 0 | none | n/a | socket file survived the kill (no destructors); this case asserts replacement readiness + clean SIGTERM only — the owner/type check + rebind itself is unit-covered (`bind_refuses_non_socket_at_socket_path`, `stale_socket_file_is_replaced_at_bind`) | **PASS (executed)** |
+| p2 | missing trust config with a live daemon | daemon (never contacted) | daemon-held | still ready (`/readyz` 200), SIGTERM exit 0 | none | none | read-only config preflight rejects before the handoff, exit 2 `trust-config-unavailable`; no marker written | **PASS (executed)** |
+| m1 | sparse database one byte over the 1 GiB member bound | none (no controller socket) | free | n/a | none | none | preflights fail before the handoff, exit 2 `member-bound-exceeded`; no marker written | **PASS (executed)** |
 
 ### Case-d existing coverage map (never reported as executed here)
 
@@ -390,6 +410,21 @@ Round 3 (this round's fixes):
   contract test).
 - `tests/pp6_backup_handoff.sh` — **PASS — 17 executed checks, 7
   documented-coverage rows, 0 failures** (exit 0).
+
+Round 3 (contract/correctness fixes):
+
+- `tests/pp6_backup_handoff.sh` — **PASS — 19 executed checks, 7
+  documented-coverage rows, 0 failures** (exit 0). The two new rows are
+  `case-p2` (read-only config preflight; the daemon stays ready) and
+  `case-m1` (sparse 1 GiB + 1 B database rejected as `member-bound-exceeded`
+  before any controller contact). `case-a` and `case-n1` now carry a valid
+  preflight configuration so they still exercise the intended
+  authentication/socket paths.
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy -p o3k -p o3k-store -p o3kd --all-targets --all-features -- -D warnings` — exit 0, no warnings.
+- `cargo test -p o3k -p o3k-store -p o3kd --all-features` — exit 0 (0 failed);
+  includes the new member-bound, journal re-read, metadata-bound, signature
+  class, catalog-internal and migration-file-binding tests.
 
 Round 2 (this round's fixes):
 

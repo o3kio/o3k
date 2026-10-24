@@ -36,6 +36,8 @@ mod access_lock;
 mod artifact_transfer;
 #[cfg(target_os = "linux")]
 mod backup_control;
+#[cfg(unix)]
+pub mod backup_journal;
 pub mod conformance;
 pub mod coordination;
 pub mod governance;
@@ -43,6 +45,7 @@ pub mod postgres;
 pub mod quota;
 mod reusable_policy;
 mod server_state;
+pub mod state_inventory;
 pub mod storage;
 pub mod unified;
 
@@ -54,8 +57,8 @@ pub use access_lock::StoreAccessLock;
 pub use backup_control::{
     AcceptedBackupRequest, BACKUP_CONTROL_DIR, BACKUP_CONTROL_SOCKET, BackupControlError,
     BackupControlListener, BackupHandoffRequest, ExpectedExecutor, HandoffRejectReason,
-    PeerIdentity, connect_and_request, identity_tokens, installation_token, reject_already_active,
-    site_token,
+    PeerIdentity, connect_and_request, connect_control, identity_tokens, installation_token,
+    reject_already_active, send_request_and_read_accept, site_token, verify_daemon_peer,
 };
 pub use coordination::{
     ControllerEpoch, ControllerId, ControllerSession, ControllerState, CoordinationRepository,

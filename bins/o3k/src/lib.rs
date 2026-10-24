@@ -17,16 +17,37 @@
 #[cfg(all(feature = "backup-test-hooks", not(debug_assertions)))]
 compile_error!("backup-test-hooks is a debug-only test feature");
 
-// This contract-checked prerequisite is intentionally not wired into a
-// supported operator journey yet. Keep it private until capture coordination,
-// trust lifecycle, and replay/crash recovery are implemented.
+// Artifact format primitives (manifest contract, member encryption, streaming
+// verify, offline signing input). Kept crate-private: the operator journey goes
+// through `backup_create` and `backup_artifact`, and a PP.6 backup claim still
+// requires protected-test and human exact-head review evidence.
 #[allow(dead_code)]
 pub(crate) mod backup;
-// Provisional PP.6 backup capture executor (SPEC-0050 §8, ADR-0189): drives
-// the authenticated store-lock handoff and captures an unsigned, host-local
-// provisional snapshot. Linux-only like the handoff primitives in o3k-store.
+// PP.6 backup artifact driver (SPEC-0050 §8, ADR-0189): assembles the
+// encrypted artifact manifest from a quiesced snapshot, drives the accepted
+// offline two-phase signing flow, and publishes by linking the verified
+// inode with no replace. Linux-only like the handoff primitives in o3k-store.
+#[cfg(target_os = "linux")]
+pub mod backup_artifact;
+// PP.6 backup capture executor (SPEC-0050 §8, ADR-0189): drives the
+// authenticated store-lock handoff, captures the snapshot, and hands it to
+// `backup_artifact`. Linux-only like the handoff primitives in o3k-store.
 #[cfg(target_os = "linux")]
 pub mod backup_create;
+// Shared `o3k backup` data-directory resolution (packaged `/var/lib/o3k`,
+// `O3K_DATA_DIR`, `/etc/o3k/o3kd.env`). Linux-only like the backup commands.
+#[cfg(target_os = "linux")]
+pub mod backup_data_dir;
+// Root-owned installation trust/key configuration and the D9 staging
+// reservation bound for the authenticated backup artifact (SPEC-0050 §8,
+// ADR-0189). Trust loading derives the canonical identity from o3k-store and
+// uses Linux no-follow file primitives; the reservation uses POSIX statvfs.
+#[cfg(unix)]
+pub mod backup_reservation;
+#[cfg(target_os = "linux")]
+pub mod backup_trust;
+#[cfg(target_os = "linux")]
+pub mod backup_verify;
 pub mod checks;
 pub mod context;
 pub mod db;

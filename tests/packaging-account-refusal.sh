@@ -74,6 +74,7 @@ build_bundle() { # tag destination
   cp "$ROOT_DIR/packaging/o3kd.service" "$dest/packaging/${tag}d.service"
   cp "$ROOT_DIR/packaging/o3k-compute.service" "$dest/packaging/${tag}-compute.service"
   cp "$ROOT_DIR/packaging/50-o3k-libvirt.rules" "$dest/packaging/50-${tag}-libvirt.rules"
+  cp "$ROOT_DIR/packaging/backup-trust.example.json" "$dest/packaging/backup-trust.example.json"
   for helper in reset.sh uninstall.sh diagnose.sh bootstrap-certs.sh bootstrap-testlab.sh; do
     cp "$ROOT_DIR/packaging/$helper" "$dest/packaging/$helper"
   done

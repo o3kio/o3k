@@ -12,6 +12,7 @@ use std::{
     io::{IoSlice, IoSliceMut, Read, Write},
     os::{
         fd::{AsFd, OwnedFd},
+        unix::fs::MetadataExt,
         unix::net::UnixStream,
     },
     path::Path,
@@ -147,6 +148,20 @@ impl StoreAccessLock {
             _lock_file: lock_fd,
             _data_dir: dir_fd,
         })
+    }
+
+    /// Compares the received data-directory descriptor with `canonical` by
+    /// device and inode.
+    ///
+    /// `receive_handoff` validates that the transferred descriptor is a
+    /// directory and that it contains the transferred lock file, but it does
+    /// not know which data directory the caller intended. An executor must
+    /// call this immediately after the handoff and fail closed when the
+    /// descriptor is not the canonical directory it resolved.
+    pub fn data_dir_matches(&self, canonical: impl AsRef<Path>) -> io::Result<bool> {
+        let directory_stat = fstat(&self._data_dir)?;
+        let expected = fs::metadata(canonical.as_ref())?;
+        Ok(directory_stat.st_dev == expected.dev() && directory_stat.st_ino == expected.ino())
     }
 
     /// Transfers this lock to a connected local executor without releasing
@@ -925,6 +940,19 @@ mod tests {
         drop(sender);
         drop(lock);
         let _reacquired = StoreAccessLock::acquire(&data_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn data_directory_identity_is_compared_by_dev_and_ino() -> io::Result<()> {
+        let root = TestDir::new()?;
+        let data_dir = root.0.clone();
+        let other = root.0.join("other");
+        fs::create_dir(&other)?;
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o700))?;
+        let lock = StoreAccessLock::acquire(&data_dir)?;
+        assert!(lock.data_dir_matches(&data_dir)?);
+        assert!(!lock.data_dir_matches(&other)?);
         Ok(())
     }
 

@@ -249,6 +249,14 @@ pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Resul
     }
 }
 
+/// Test-only entry point used by the state-inventory generator to reproduce
+/// the runtime schema that `SqliteStore::connect` applies after SQLx
+/// migrations (the `operations` rebuild and its triggers).
+#[cfg(test)]
+pub(crate) async fn apply_test_runtime_schema(pool: &SqlitePool) -> Result<(), StoreError> {
+    migrate_operation_resource_scope(pool).await
+}
+
 /// Accepts the exact released pre-redesign 0037 checksum so the controlled
 /// SQLite rebuild below can migrate that database before normal use. No other
 /// checksum is normalized; SQLx remains the authority for all unrelated

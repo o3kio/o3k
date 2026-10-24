@@ -35,6 +35,10 @@ pub struct VerifiedBundle {
     pub version: ReleaseVersion,
     pub dir: PathBuf,
     pub installer_sha256: String,
+    /// SHA-256 of the downloaded release tarball, computed by the verifier.
+    /// It is persisted into the installed release manifest so backup
+    /// artifacts can bind the exact release artifact.
+    pub release_artifact_sha256: String,
 }
 
 /// Outcome of one full doctor run.
@@ -412,6 +416,7 @@ async fn run_upgrade_locked(
             version: target.clone(),
             dir: PathBuf::new(),
             installer_sha256: String::new(),
+            release_artifact_sha256: String::new(),
         };
         return match io.preflight(&fresh, &empty_bundle).await {
             Ok(()) => UpgradeOutcome {
@@ -1137,6 +1142,7 @@ mod tests {
                     version: version(0, 3, 0, &["alpha", "1"]),
                     dir: PathBuf::from("/tmp/o3k-fake-bundle"),
                     installer_sha256: "a".repeat(64),
+                    release_artifact_sha256: "b".repeat(64),
                 }),
                 preflight: Ok(()),
                 backup: Ok("backup-1".to_owned()),
