@@ -75,6 +75,8 @@ fn o3k_bin() -> PathBuf {
 }
 
 fn run_backup_create(data_dir: &Path, dest: &Path, operation_id: Uuid) -> Command {
+    let test_executable =
+        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/nonexistent-test-executable"));
     let mut command = Command::new(o3k_bin());
     command
         .arg("backup")
@@ -83,7 +85,10 @@ fn run_backup_create(data_dir: &Path, dest: &Path, operation_id: Uuid) -> Comman
         .arg(dest)
         .arg("--operation-id")
         .arg(operation_id.to_string())
-        .env("O3K_DATA_DIR", data_dir);
+        .env("O3K_DATA_DIR", data_dir)
+        // The fake controller runs in this test process; tell the executor
+        // which executable answered the handoff (feature-gated hook).
+        .env("O3K_BACKUP_TEST_DAEMON_EXE", test_executable);
     command
 }
 
@@ -144,6 +149,8 @@ fn crash_before_receive_exits_95() -> io::Result<()> {
     let root = TempRoot::new("before-receive")?;
     let data_dir = root.private_dir("data")?;
     let dest = root.private_dir("dest")?;
+    create_migrated_store(&data_dir)?;
+    let fixture = trust_fixture(&root, &data_dir)?;
     let listener = fake_controller(&data_dir)?;
     let server = thread::spawn(move || -> io::Result<()> {
         let (mut stream, _) = listener.accept()?;
@@ -153,6 +160,8 @@ fn crash_before_receive_exits_95() -> io::Result<()> {
         Ok(())
     });
     let output = run_backup_create(&data_dir, &dest, Uuid::new_v4())
+        .env("O3K_BACKUP_TRUST_CONFIG", &fixture.trust_config)
+        .env("O3K_INSTALL_PREFIX", &fixture.install_prefix)
         .env("O3K_BACKUP_TEST_EXIT_BEFORE_RECEIVE", "1")
         .output()?;
     server
@@ -172,6 +181,8 @@ fn crash_after_receive_exits_94() -> io::Result<()> {
     let root = TempRoot::new("after-receive")?;
     let data_dir = root.private_dir("data")?;
     let dest = root.private_dir("dest")?;
+    create_migrated_store(&data_dir)?;
+    let fixture = trust_fixture(&root, &data_dir)?;
     let listener = fake_controller(&data_dir)?;
     let server_data_dir = data_dir.clone();
     let server = thread::spawn(move || -> io::Result<()> {
@@ -184,6 +195,8 @@ fn crash_after_receive_exits_94() -> io::Result<()> {
     });
     let operation_id = Uuid::new_v4();
     let output = run_backup_create(&data_dir, &dest, operation_id)
+        .env("O3K_BACKUP_TRUST_CONFIG", &fixture.trust_config)
+        .env("O3K_INSTALL_PREFIX", &fixture.install_prefix)
         .env("O3K_BACKUP_TEST_EXIT_AFTER_RECEIVE", "1")
         .output()?;
     server
@@ -320,15 +333,18 @@ fn crash_during_the_signing_wait_keeps_the_marker_and_staged_request() -> io::Re
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // The wait announced itself on stderr with one stable line.
+    // The wait announced itself on stderr with one stable line naming the
+    // operation id (SPEC-0050 §8) and no filesystem path.
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("o3k backup create: awaiting-signature"),
+        stderr.contains(&format!(
+            "o3k backup create: awaiting-signature {operation_id}"
+        )),
         "stderr: {stderr}"
     );
     assert!(
-        stderr.contains("signing-request.json"),
-        "the awaiting-signature line names the request path: {stderr}"
+        !stderr.contains("signing-request.json"),
+        "the awaiting-signature line must not emit the staging path: {stderr}"
     );
     // The crash leaves exactly the documented state: request staged, journal
     // `staged`, denial marker present, nothing published.

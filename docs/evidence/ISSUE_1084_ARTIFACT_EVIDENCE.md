@@ -1,13 +1,44 @@
 # #1084 authenticated backup artifact — Phase-8 Slice F evidence
 
-Date: 2026-10-24. Branch: `pp6/1084-artifact`. Branch head:
-`41f9c24bce8c8a5b8d97b1a9fdd4af24ba3322dd` (`fix(pp6): address security and
-contract review rounds on signed backup artifacts`), on top of
-`521cc6fc…` and `20b54afe…`. The working tree is dirty: this final-review round
-(D13 catalog kinds/live comparison, F15 harness independence and the small
-nits) is uncommitted. `source_sha` in the verdict is the branch head, not a
-clean-tree claim; exact-commit binding remains with the parent/reviewer after
-commit.
+Date: 2026-10-24. Branch: `pp6/1084-artifact`.
+
+Current state: the Slice F implementation, harness and this document are
+uncommitted. The verdict JSON records the commit the campaign ran on and
+whether the change set is dirty at run time; those are per-run facts and are
+**not** a clean-tree or exact-commit claim. This document deliberately binds no
+final source SHA. The parent/reviewer binds the final commit after committing
+via the `FINAL-COMMIT-BINDING` block below; until that block is filled, treat
+every commit id here as historical context only.
+
+## FINAL-COMMIT-BINDING
+
+Status: **PENDING — the parent fills this after committing.** Do not treat this
+document as exact-commit evidence until the block is complete.
+
+Commands to run on the final commit (from the repository root, clean tree):
+
+```bash
+git status --porcelain --untracked-files=no
+git rev-parse HEAD
+sha256sum tests/pp6_backup_artifact.sh tests/pp6_backup_handoff.sh
+cargo fmt --all -- --check
+cargo clippy -p o3k -p o3k-store -p o3kd --all-targets --all-features -- -D warnings
+cargo test -p o3k -p o3k-store -p o3kd --all-features
+bash tests/pp6_backup_artifact.sh
+bash tests/pp6_backup_handoff.sh
+```
+
+Record here afterwards:
+
+```text
+final_commit: <git rev-parse HEAD>
+clean_tree_at_run: <yes|no>
+harness_sha256: <tests/pp6_backup_artifact.sh>
+handoff_harness_sha256: <tests/pp6_backup_handoff.sh>
+artifact_campaign: <PASS rows / NOT-COVERED rows / FAIL rows>
+handoff_campaign: <PASS rows / documented rows / FAIL rows>
+verdict: <paste the O3K_PP6_VERDICT_JSON block from that run>
+```
 
 This document reports executable, real-process evidence for the signed backup
 artifact lifecycle only. The implementation is authored by the same agent that
@@ -18,12 +49,13 @@ authored this campaign; see **Interim review status**.
 | Item | Value |
 | --- | --- |
 | campaign harness | `tests/pp6_backup_artifact.sh` |
-| harness SHA-256 | `7ed481acd9a66c727abb6f2192642a9f8227f241b4b9b1b4fbb7d7d201699a9c` |
+| harness SHA-256 | `f5d4a8e05ef4fcd66e6acf5c5b5683bdb6640cea4d686989ca6333db484071e1` |
 | build | `cargo build -p o3k -p o3kd --features o3kd/backup-test-hooks,o3k/backup-test-hooks` |
-| `o3k` binary SHA-256 | `107f8e949663d0cdf0e1331d19b9c0e4d2d86aaf11ebf6b967bc42a004f21d1c` |
-| `o3kd` binary SHA-256 | `28f042563ab8578ea0cd9ed857a2ca2b3f7436f602fed5f01f6d09589939515c` |
+| `o3k` binary SHA-256 | `15b0917a7949bb5adb91a4b3299e9aae3935a71f47f48997bc2120f23ace36f3` |
+| `o3kd` binary SHA-256 | `787bfa105c987edd3dd17628c444770aa0269766a5292e62b9d7f6a673a38c66` |
 | rustc | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | SQLite (from the published manifest) | `3.46.0` |
+| SQLite generator version (baseline `state_inventory_v1.json`) | `3.46.0` |
 | schema version | `53` |
 | product/deployment profile | `o3k-demo-v1` (SQLite TestLab/portable path) |
 | host identity hash | `8110f5814f95639d2d88a1e379a827e065c9c072b52b54c92f4ce2b1051f54bb` |
@@ -39,16 +71,21 @@ Everything lives in a fresh `mktemp -d` tree, mode `0700`.
 
 The installer ships `packaging/backup-trust.example.json` to
 `<prefix>/share/o3k/backup-trust.example.json` (mode `0644`, no key material) as
-the field-by-field template operators copy to the root-owned
-`/etc/o3k/backup-trust.json`. The installer never creates the trust document
-itself and never makes `/etc/o3k` group/other-accessible.
+the field-by-field template operators copy to `/etc/o3k/backup-trust.json` as
+`root:o3k 0640` (or `0600`). The example is capture-only: it names
+`recipient.x25519_public_key` and no private-key path. The X25519 private key is
+recovery-host-only (`0600`, or `0400`) and is needed only by
+`o3k backup verify`. The installer never creates the trust document itself; the
+`/etc/o3k` directory it may create is `0755` (readable/traversable, **not**
+group- or other-writable), and the installer never creates a
+group/other-writable trust document or key path.
 
 | Fixture | Generation | Posture |
 | --- | --- | --- |
 | offline Ed25519 signing key | `openssl genpkey -algorithm ED25519` in the test tree; never passed to `o3k`/`o3kd` | `0600`; only the harness reads it |
 | foreign Ed25519 key (negative test) | second `openssl genpkey -algorithm ED25519` | `0600` |
 | X25519 recipient keypair | `openssl genpkey -algorithm X25519`; the raw 32-byte private half feeds the trust document, the public half is the fingerprint asserted in the signing request. A second keypair is the `case-17` substitution fixture. | `0600` |
-| trust document | `o3k-backup-trust-v1` JSON: site/installation identities derived as `SHA-256(domain ‖ 0x00 ‖ canonical data dir)[:16]`, profile `o3k-demo-v1`, `artifact_signing.key_id=signing-1`, custody record `2-of-3` purpose `artifact-signing` with a mandatory `expires_at`, `revoked_key_ids=[]`, recipient key id `recovery-1`, private-key path and declared `x25519_public_key` (the loader proves the two match) | `0600`, parent dirs `0700` |
+| trust document | `o3k-backup-trust-v1` JSON: site/installation identities derived as `SHA-256(domain ‖ 0x00 ‖ canonical data dir)[:16]`, profile `o3k-demo-v1`, `artifact_signing.key_id=signing-1`, custody record `2-of-3` purpose `artifact-signing` with a mandatory `expires_at`, `revoked_key_ids=[]`, recipient key id `recovery-1`, private-key path and declared `x25519_public_key`. Loading is lazy: the document is read without opening the private key, and the public/private match is proved only when verification loads the private key. | TestLab `0600`; packaged `root:o3k 0640` (or `0600`), parent dirs `0700` |
 | installed release manifest | `<prefix>/share/o3k/release-manifest.json`: `version=0.4.0`, `profile_id=o3k-demo-v1`, `source_commit=0123…4567`, `release_artifact_sha256="a"×64`, `schema_version=53` | `0600` |
 | artifact-signing public key | DER tail 32 bytes of the Ed25519 key; embedded in the trust document | public |
 | private seed / recipient bytes | extracted only for the secret scan (hex); never written to any captured output | not logged |
@@ -56,7 +93,10 @@ itself and never makes `/etc/o3k` group/other-accessible.
 `release_artifact_sha256="a"×64` is a fixture constant: the installed manifest
 is a synthetic bundle identity, not a real release tarball digest. A production
 installation gets that field from the installer/upgrade engine's verified
-tarball digest (`bins/o3k/src/upgrade/release_identity.rs`).
+tarball digest (`bins/o3k/src/upgrade/release_identity.rs`). In this campaign
+the trust document named by `O3K_BACKUP_TRUST_CONFIG` is a **fixture trust
+document**; the success JSON's "configured trust document" wording is the same
+code path production runs against the root-owned installed document.
 
 ### Offline signing procedure
 
@@ -98,7 +138,8 @@ and remain covered by `tests/pp6_backup_handoff.sh`.
   a quiesced SQLite snapshot, assembles the encrypted v1 artifact (manifest,
   HPKE-wrapped content key, AES-256-GCM members, unsigned Ed25519 slot) and
   writes the offline signing request. It emits one stable
-  `o3k backup create: awaiting-signature <request-path>` line and stays in the
+  `o3k backup create: awaiting-signature <operation-id>` line (operation id
+  only, no path) and stays in the
   wait (ADR-0190 Option A: "the controller remains stopped throughout
   signing"), so no replacement controller can start.
 - The waiting process verifies the detached response against the fixture trust
@@ -129,27 +170,34 @@ and remain covered by `tests/pp6_backup_handoff.sh`.
   only the operation journal (and transient WAL/lock/socket entries) appears in
   the data directory.
 - D9 `source_bytes`/`reserved_bytes` reported by the capture equal an
-  independent measurement taken after the WAL checkpoint (main database, a
-  non-empty `-wal` sidecar, the installation metadata members and the bounded
+  independent measurement taken after the WAL checkpoint (main database, any
+  remaining non-empty `-wal` sidecar — normally absent/zero after a truncating
+  checkpoint — the installation metadata members and the bounded
   capture/request metadata allowance) and `max(2×S + 1 GiB, 6 GiB)` with no
   truncation; the same reservation is re-checked before finalize and before
   publication and never lowered to fit.
 - A seeded non-terminal Operation makes the manifest record
   `in_flight_operations=recorded_unknown` (with the stable ids in the capture
   metadata member) instead of claiming `drained`.
+- The harness custodian compares the signing request's
+  `recipient_public_key_sha256` with the trusted trust document before it signs
+  (the two-of-three custody check is simulated at the helper boundary) and
+  writes `signing-response.json` through a private temp file plus rename. An
+  altered request is refused by the custodian and rejected independently by
+  phase 2 (`case-27`).
 - The committed D13 inventory covers 17 repositories: SQLite 78 tables /
   86 indexes / 2 triggers (166 objects), PostgreSQL 78 tables / 83 indexes /
   2 triggers / 2 functions (165 objects). Capture enumerates the snapshot's
   live
   `sqlite_master` and fails closed (exit 2 `store-catalog-mismatch`) on an
-  extra, missing or redefined object before staging anything.
+  extra, missing or redefined object before staging the artifact.
 - The campaign independently verifies the published bytes: local JCS + exact
   D1 input + OpenSSL Ed25519, recomputed member SHA-256 digests, and HPKE
   content-key unwrap plus AES-256-GCM decryption bound to the signed capture
   record and the harness-measured source database (see the F15 non-claim for
   the exact scope and limits).
 
-## Matrix (recorded from the final campaign run)
+## Matrix (recorded from the current campaign run)
 
 Columns: `exit` is the process status of the decisive invocation (the injected
 crash exit for crash rows); `journal` is the durable phase observed afterwards;
@@ -165,7 +213,7 @@ cooperative store lock is held by another process when the row is recorded;
 | 3 | `case-1b` signature while waiting → publish → verify | PASS | 0 | published | 0 | free | yes | verified, exit 0, `release_match=true` |
 | 4 | `case-1c` single-byte ciphertext-body flip | PASS | 2 | published | 0 | free | yes | `corrupt-artifact` |
 | 5 | `case-2` crash during the wait (hook 91) → restart denied → resume | PASS | 91 | published | 0 | free | yes | restart exit 1 (marker); resume published, no recapture |
-| 6 | `case-3` duplicate after publication | PASS | 2 | published | 0 | free | yes | `operation-already-published`, one artifact |
+| 6 | `case-3` replay after publication (L5) | PASS | 0 | published | 0 | free | yes | destination re-verified; idempotent exit 0, one artifact |
 | 7 | `case-4a` wrong signature | PASS | 2 | staged | 1 | free | no | `signature-invalid`; staging kept |
 | 8 | `case-4b` wrong key id | PASS | 2 | staged | 1 | free | no | `signing-response-mismatch` |
 | 9 | `case-4c` short signature | PASS | 2 | staged | 1 | free | no | `signing-response-invalid` |
@@ -174,18 +222,18 @@ cooperative store lock is held by another process when the row is recorded;
 | 12 | `case-5a` crash after `captured` (hook 86) | PASS | 86 | captured | 1 | free | no | retry exit 3 `backup-operation-incomplete` |
 | 13 | `case-5b` crash after `staged` (hook 87) | PASS | 87 | published | 0 | free | yes | replay resumed the wait and published without recapture |
 | 14 | `case-5c` crash after `publishing` (hook 88) | PASS | 88 | published | 0 | free | yes | replay finished publication, one artifact |
-| 15 | `case-5d` crash after publication (hook 89) | PASS | 89 | published | 0 | free | yes | retry exit 2 `operation-already-published` |
+| 15 | `case-5d` crash after publication (hook 89) | PASS | 89 | published | 0 | free | yes | retry exit 0 `published-replay`; one artifact |
 | 16 | `case-5e` crash between finalize and `publishing` (hook 90) | PASS | 90 | published | 0 | free | yes | retry re-verified `artifact.partial` and published |
-| 17 | `case-6` pre-existing final artifact | PASS | 2 | publishing | 1 | free | yes | `artifact-destination-exists`; untouched; retry verified |
+| 17 | `case-6` pre-existing final artifact | PASS | 2 | published | 0 | free | yes | `artifact-destination-exists` on the first attempt; untouched; after clearing it the journal replay published and verified |
 | 18 | `case-7` destination symlink swap | PASS | 2 | published | 0 | free | yes | `destination-symlink`; restored and retried |
 | 19 | `case-8` modes/cleanup | PASS | — | — | — | free | yes | staging 0700, files 0600, artifact 0600, verify staging removed |
 | 20 | `case-9` secret scan | PASS | — | — | — | free | yes | no secret/path match in outputs or artifact |
 | 21 | `case-11` replacement controller during the wait | PASS | 0 | published | 0 | free | yes | restart DENIED (exit 1); published; restart then ready + SIGTERM 0 |
 | 22 | `case-18` symlink at the final name (F37) | PASS | 2 | published | 0 | free | yes | `artifact-destination-exists`; link never followed; retry published |
 | 23 | `case-19` stale empty `artifact.partial` (M5) | PASS | 0 | published | 0 | free | yes | atomic temp+rename; retry published |
-| 24 | `case-20` post-rename crash: final present, staging gone (F2) | PASS | 0 | published | 0 | free | yes | destination digest matched; classified complete |
+| 24 | `case-20` post-publication crash: final present, staging gone (F2) | PASS | 0 | published | 0 | free | yes | destination digest matched; classified complete |
 | 25 | `case-21` concurrent phase-2 invocations (F20) | PASS | 0/0/2 | published | 0 | free | yes | one published; the other `controller-active` |
-| 26 | `case-22` create with missing trust config (F22) | PASS | 3 | — | 0 | free | no | `trust-config-unavailable` |
+| 26 | `case-22` create with missing trust config (P2) | PASS | 2 | — | 0 | free | no | `trust-config-unavailable` before the handoff; daemon stayed ready, SIGTERM exit 0 |
 | 27 | `case-23` seeded non-terminal Operation (M4) | PASS | 0 | published | 0 | free | yes | `consistency.in_flight_operations=recorded_unknown` |
 | 28 | `case-12missing-trust` | PASS | 3 | — | — | free | yes | `trust-config-unavailable` |
 | 29 | `case-12identity` | PASS | 2 | — | — | free | yes | `identity-mismatch` |
@@ -198,11 +246,18 @@ cooperative store lock is held by another process when the row is recorded;
 | 36 | `case-15` forged journal `backup_id` traversal | PASS | 2 | staged | 1 | free | no | `backup-operation-journal-invalid`; no escaped path |
 | 37 | `case-16` symlinked staged artifact | PASS | 2 | staged | 1 | free | no | `staged-artifact-invalid`; `O_NOFOLLOW` refuses the link |
 | 38 | `case-17` recipient-key substitution | PASS | 2 | published | 0 | free | yes | request fingerprint; swapped trust rejected; original published and verified |
-| 39 | `case-1d` independent artifact verification | PASS | 0 | published | 0 | free | yes | local JCS + OpenSSL Ed25519 over D1, recomputed member digests, HPKE/AES-GCM decrypt bound to capture record and source DB |
-| 40 | `case-1e` independent check rejects the tampered artifact | PASS | 2 | published | 0 | free | yes | independent member SHA-256 recomputation flags the flipped byte; nothing published |
+| 39 | `case-1d` independent artifact verification (signature/D1/member digests) | PASS | 0 | published | 0 | free | yes | local JCS + OpenSSL Ed25519 over D1; recomputed member digests |
+| 40 | `case-1d-decrypt` independent HPKE/AES-GCM decryption leg | PASS | 0 | published | 0 | free | yes | HPKE unwrap + AES-GCM decrypt bound to the capture record and source DB (NOT-COVERED, never PASS, when python `cryptography` is unavailable) |
+| 41 | `case-1e` independent check rejects the tampered artifact | PASS | 2 | published | 0 | free | yes | independent member SHA-256 recomputation flags the flipped byte; nothing published |
+| 42 | `case-24` trusted signed manifest missing `metadata/capture.json` (F10) | PASS | 2 | published | 0 | free | yes | `missing-required-member` before signature/decrypt |
+| 43 | `case-25` fake daemon answers the handoff (M1) | PASS | 2 | — | 0 | free | no | `daemon-identity-mismatch`; Python peer rejected |
+| 44 | `case-26` validly signed partial from a different manifest (M2) | PASS | 2 | staged | 1 | free | no | `signing-request-mismatch`; request and staging kept |
+| 45 | `case-27` custodian refuses an altered recipient fingerprint (L11) | PASS | 2 | staged | 1 | free | no | custodian helper exit 1, no response written; phase 2 `signing-request-mismatch` |
 
-Totals: **39 executed rows PASS, 1 NOT-COVERED, 0 FAIL**. No unexecuted row is
-reported as PASS.
+Totals: **44 executed rows PASS, 1 NOT-COVERED, 0 FAIL** when python
+`cryptography` is available. Without it, `case-1d-decrypt` is NOT-COVERED
+(44 total rows, 43 PASS, 2 NOT-COVERED) and no decryption claim is made. No
+unexecuted row is reported as PASS.
 
 ### Row notes and deliberate test mechanics
 
@@ -220,15 +275,17 @@ reported as PASS.
   it parses the frozen layout, checks the manifest bytes are canonical JCS,
   rebuilds the exact D1 input (domain prefix, u64be JCS length, canonical
   manifest without `authentication.signature`, per-member u32be name + SHA-256),
-  verifies with `openssl pkeyutl -verify -rawin -pubin`, recomputes every
-  member digest, and (when python `cryptography` is present) unwraps the HPKE
-  content key and decrypts every member. The `database/o3k.sqlite` plaintext is
-  compared with the signed `metadata/capture.json` `snapshot_sha256`; the
-  capture record's source-before/after digests are compared with a fresh hash
-  of the source database; and the decrypted snapshot's catalog and
-  `_sqlx_migrations` rows are compared with the source. `VACUUM INTO` rebuilds
-  the file, so byte equality with the source database is neither expected nor
-  claimed.
+  verifies with `openssl pkeyutl -verify -rawin -pubin`, and recomputes every
+  member digest. The decryption leg is a **separate row** (`case-1d-decrypt`):
+  when python `cryptography` is present it unwraps the HPKE content key,
+  decrypts every member, compares the `database/o3k.sqlite` plaintext with the
+  signed `metadata/capture.json` `snapshot_sha256`, binds the capture record's
+  source-before/after digests to a fresh hash of the source database, and
+  compares the decrypted snapshot's catalog and `_sqlx_migrations` rows with the
+  source. When `cryptography` is unavailable the decrypt row is NOT-COVERED and
+  `case-1d` still asserts only the signature/D1/digest legs; the detail string
+  reports the actual `decrypt=` result. `VACUUM INTO` rebuilds the file, so byte
+  equality with the source database is neither expected nor claimed.
 - `case-1e` runs the same independent check against the single-byte tampered
   copy from `case-1c`; the member SHA-256 recomputation must fail.
 - `case-4e` uses `O3K_BACKUP_TEST_AWAIT_TIMEOUT_SECONDS=1` instead of editing
@@ -243,9 +300,17 @@ reported as PASS.
   write and the signing wait. The marker stays, so controller startup remains
   denied; the replay resumes the wait and, after verified publication, removes
   it. `case-2` covers the same state reached by dying *inside* the wait.
-- `case-6` also confirms the replay path: after the colliding file is removed,
-  the journal `publishing` record plus the staged signed artifact publish
-  without a second signature (and the marker is removed).
+- `case-6` records the **decisive** invocation's exit code (2,
+  `artifact-destination-exists`) together with the **state after the retry**
+  (journal `published`, marker `0`, published `yes`). The first attempt leaves
+  the journal `publishing`, the marker `1` and the pre-existing file untouched;
+  after the operator removes the colliding entry, the same request publishes
+  without a second signature and removes the marker.
+- `case-27` alters the request's `recipient_public_key_sha256` and rebinds the
+  journal's `request_sha256` so the request-digest check passes. The harness
+  custodian refuses to sign (exit 1, no `signing-response.json`), and the
+  product's phase 2 independently rejects the request as
+  `signing-request-mismatch` (exit 2). Both legs are asserted.
 - `case-7` replaces the destination directory with a symlink while the capture
   is in its wait (reached through hook 91). The resumed invocation fails closed
   with `destination-symlink`; the staging tree is preserved in the renamed real
@@ -272,7 +337,7 @@ reported as PASS.
   independent SHA-256 recomputation and the AEAD both fail.
 - The happy-path executor wait is bounded by `wait_bounded` (exit marker plus
   deadline); no harness path performs an unbounded `wait`.
-- `case-20` simulates the post-rename crash on the already published `case-1`
+- `case-20` simulates the post-publication crash on the already published `case-1`
   artifact: journal rewritten to `publishing` with the artifact digest, staging
   tree absent, marker recreated. The replay opens the destination inode
   `O_NOFOLLOW`, requires a regular file whose digest equals the journal digest,
@@ -319,17 +384,20 @@ and the frozen v1 artifact format are unchanged.
 | F11 clock-inconsistent response | `backup_artifact.rs` `verify_signing_response` requires `created_at <= signed_at <= expires_at`; expiry is host-clock based, with no HSM time attestation. `expires_at` is inside the persisted request bytes, so it is bound by `request_sha256` (verified: the digest is computed over the whole request file). | `backup_artifact::tests::signing_response_is_bound_to_the_request_and_the_trust_key` |
 | F12 mandatory custody expiry | `backup_trust.rs` requires `custody.expires_at` (`trust-custody-incomplete`) | `backup_trust::tests::rejects_expired_or_incomplete_custody_records` |
 | F15 recipient key zeroization | `backup_trust.rs`: raw bytes in `Zeroizing`; the hpke `X25519HkdfSha256::PrivateKey` is `x25519_dalek::StaticSecret` (`ZeroizeOnDrop`), so no serialized private copy survives; documented in the module | `backup_trust::tests::loads_the_recipient_key_from_raw_bytes_and_hex` |
-| F16 trust template | `packaging/backup-trust.example.json` (placeholders, no keys) installed to `<prefix>/share/o3k/`; installer documents the fields and never creates `/etc/o3k` with permissive modes | `packaging/install.sh`; ownership list in `packaging/uninstall.sh` |
+| F16 trust template | `packaging/backup-trust.example.json` (placeholders, no keys, public-key-only capture) installed to `<prefix>/share/o3k/`; installer documents `root:o3k 0640` (or `0600`) and never creates `/etc/o3k` with permissive modes | `packaging/install.sh`; ownership list in `packaging/uninstall.sh` |
 | F17 harness negatives | `case-14`, `case-15`, `case-16`, `case-17`; `case-17` asserts the request exposes `recipient_public_key_sha256` and that a swapped recipient is rejected by phase 2 and `o3k backup verify` | `tests/pp6_backup_artifact.sh` |
 
 ### F7/F8 design note (recipient binding)
 
 The signing request now carries `recipient_public_key_sha256` (SHA-256 of the
 configured X25519 recipient public key). The trust document may declare
-`recipient.x25519_public_key`; when both halves are present the loader proves
-they match, and the capture path uses the declared public key without reading
-private key material. A capture-only document may omit
-`x25519_private_key_file`; verification still requires it to decrypt members.
+`recipient.x25519_public_key`. Loading is lazy: `BackupTrustConfig::load` never
+opens the private key. When the public key is configured the capture path uses
+it and reads no private key material, even if `x25519_private_key_file` names
+an absent path. When only the private key is configured, deriving the public
+half opens it on demand. Verification loads the private key and proves it
+matches the declared public key; a capture-only document may omit it, and
+verification then fails closed with `trust-recipient-key-unavailable`.
 
 The frozen v1 artifact manifest does **not** bind the recipient public key: the
 format is fixed by the accepted contract
@@ -345,7 +413,40 @@ The harness passes `-inkey <path>` to OpenSSL, so the key path (not the key) is
 visible in the process argument vector for the duration of the signing command.
 This is a campaign-fixture exposure only (the harness runs on a disposable
 recording host in a private temporary directory); the product never reads the
-custody key.
+artifact-signing custody key. Verification does read the separate X25519
+recovery private key on the recovery/operator host, as documented below.
+
+## Security review round 2
+
+The second security review found one blocking packaging defect (H1), a
+pre-existing root override gap (H2), two medium recovery-boundary defects (M1,
+M2), a contract member-set gap (F10), and several small hardening items. All
+are implemented; the accepted CLI surface and the frozen v1 artifact format are
+unchanged.
+
+| Finding | Fix (file) | Regression test |
+| --- | --- | --- |
+| **H1 root-owned trust anchor unusable by the service user** | `bins/o3k/src/backup_trust.rs`: trust document may be owned by root or the effective uid; modes `0600` or `0640` (the latter only when the owning group is root or one of the process's groups); group/other write and other read always rejected. Private recipient key stays `0600`/`0400`. `load` no longer opens the private key; the public/private match is checked when `load_recipient_private_key` runs. `O3K_BACKUP_TRUST_CONFIG` / `O3K_INSTALL_PREFIX` are honored only for a non-installed data directory (`/var/lib/o3k` ignores them regardless of euid). | `backup_trust::tests::{root_owned_0640_for_a_service_user_and_group_write_rejection,accepts_the_service_group_mode_and_rejects_writable_or_other_readable,capture_loads_with_a_configured_public_key_and_no_private_key_file,installed_data_dir_ignores_the_environment_overrides_regardless_of_euid}` |
+| **H2 root upgrade path/URL overrides** | `bins/o3k/src/upgrade/runner.rs`: `upgrade_overrides_allowed(euid)` gates `O3K_UPGRADE_PREFIX/BIN_DIR/CONFIG_DIR/DOWNLOAD_DIR/RELEASES_URL/DOWNLOAD_BASE`; euid 0 uses canonical paths and URLs. Release-signature verification remains a follow-up (the upgrade contract does not define it yet). | `upgrade::runner::tests::upgrade_path_and_url_overrides_are_ignored_for_root` |
+| **M1 daemon not authenticated by the executor** | `crates/o3k-store/src/backup_control.rs::verify_daemon_peer` checks `SO_PEERCRED` uid and `/proc/<pid>/exe` dev+ino against the sibling `o3kd` and the data-dir owner; `backup_create.rs` calls it before `receive_handoff` (`daemon-identity-mismatch`, exit 2) and compares the received data-dir fd dev+ino with the canonical directory (`handoff-directory-mismatch`, exit 2; `access_lock.rs::data_dir_matches`). | `backup_control::tests::daemon_peer_requires_the_expected_uid_and_executable`; `access_lock::tests::data_directory_identity_is_compared_by_dev_and_ino`; `case-25` |
+| **M2 staged partial not bound to its request** | `backup_artifact.rs::complete_staged`: the signed-recovery branch reads the persisted request (journal `request_sha256`, site/installation/key id, manifest digest, signing-input digest, recipient fingerprint) and requires the signed artifact's unsigned-manifest digest and D1 input to equal it before publishing; mismatch is exit 2 `signing-request-mismatch` and keeps staging. | `backup_artifact::tests::staged_recovery_binds_the_signed_manifest_to_the_persisted_request`; `case-26` |
+| **F10 required member set** | `bins/o3k/src/backup.rs`: one `REQUIRED_ARTIFACT_MEMBERS` constant (`database/o3k.sqlite`, `metadata/capture.json`, `release/release-manifest.json`, `trust/backup-trust.json`) used by `validate_manifest` and `verify_artifact_stream`; missing member is the typed `missing-required-member` class (exit 2). | `backup::tests::every_required_member_is_enforced_with_a_typed_failure`; `case-24` |
+| **F3 verify host boundary and live-store mutation** | `backup_verify.rs` copies the main database and a non-empty WAL sidecar into its private `0700` staging under the store lock and opens the copy read-only (`immutable=1` when no non-empty WAL); the live store is never opened. Docs state that full verification decrypts members, requires the recovery private key, and must run on the operator/recovery host; signature/D1/member-digest authenticity is independently checkable without decryption. | `backup_verify::tests::verification_reads_a_private_copy_including_a_non_empty_wal`; campaign `case-13` |
+| **L3 blocking opens** | `O_NONBLOCK` added beside `O_RDONLY\|O_NOFOLLOW` for trust/key, staged/destination artifacts, request/response, journal and release-manifest reads; post-open `fstat` type checks remain. | `backup_artifact::tests::destination_artifact_requires_owner_mode_and_never_blocks_on_a_fifo` |
+| **L4 published digest** | `backup_artifact.rs::mark_published` persists the verified `artifact_sha256` in the terminal record. | `backup_create::tests::two_phase_flow_publishes_a_verified_artifact` (journal assertion) |
+| **L5 wedged published retry** | A journal at `published` re-verifies the destination and exits 0 idempotently (clearing marker/staging debris), or rejects `published-artifact-missing` / `published-artifact-changed` (exit 2). | `backup_create::tests::{two_phase_flow_publishes_a_verified_artifact,published_operation_with_a_missing_destination_is_rejected}`; `case-3`, `case-5d` |
+| **L9 installer temp manifest** | `packaging/install.sh` creates the augmented manifest under `$PREFIX/share/o3k` (root-owned, `mktemp` `O_EXCL`), never `TMPDIR`. | `bash -n`; installer review |
+| **L10 destination posture** | `backup_artifact.rs::existing_destination` requires a regular `0600` file owned by the effective uid; other postures are exit 2 `artifact-destination-posture-invalid`. | `backup_artifact::tests::destination_artifact_requires_owner_mode_and_never_blocks_on_a_fifo` |
+| **L11 custodian fingerprint check** | `tests/pp6_backup_artifact.sh::sign_request` compares the request's `recipient_public_key_sha256` with `recipient.x25519_public_key` from the configured trust document before signing; a mismatch is refused and no response is written. The helper writes the response through a private temp file and `os.replace`. The product additionally retries an unparsable response until the deadline (safe abort) so a non-atomic writer cannot wedge it. | `case-27`; `backup_artifact::tests::signing_wait_retries_a_partially_written_response` |
+
+### Verify host boundary (non-claim)
+
+`o3k backup verify` performs full decryption and therefore requires the X25519
+recovery private key; the controller-side capture path needs only the public
+key. The campaign's independent check verifies the Ed25519 signature, exact D1
+input and every member ciphertext digest without decrypting. A public-key-only
+verify mode is a follow-up requiring a contract decision and is not claimed
+here.
 
 ## Contract review round 1
 
@@ -361,21 +462,21 @@ are unchanged.
 
 | Item | Fix (file) | Regression test |
 | --- | --- | --- |
-| **F1 / Option A exclusion through publication** | `bins/o3k/src/backup_create.rs`: the capture process retains the `StoreAccessLock` and the denial marker after staging and calls `complete_staged` in the same process; `bins/o3k/src/backup_artifact.rs` `complete_staged` emits `o3k backup create: awaiting-signature <request-path>`, polls for `signing-response.json` until the request TTL, then verifies → finalizes → publishes → removes the marker, or performs the safe abort (staging removed, journal `aborted`, marker removed, exit 3 `signing-request-expired`). Phase 2 (same `--destination/--operation-id`) detects the journal before any controller contact, acquires the lifetime lock (`WouldBlock` → exit 2 `controller-active`), re-creates the marker if an operator removed it and resumes the wait/publication. | `case-1a`, `case-1b`, `case-11`, `case-2`, `case-4e`; `backup_create::tests::{phase_one_waits_for_the_signature_and_publishes,phase_two_without_a_signature_safely_aborts,phase_two_requires_the_lifetime_store_lock}` |
-| **F2 / P0-2 post-rename recovery** | `backup_artifact.rs` `complete_staged` observes the destination **before** requiring the staging tree: `existing_destination` (`O_NOFOLLOW`, `fstat` regular) → full verification → digest equals `record.artifact_sha256` → `published`, staging removed, marker removed, exit 0. Only when the destination is absent does the staged file drive publication. | `case-20`; `backup_create::tests::two_phase_flow_publishes_a_verified_artifact` (post-rename replay step) |
+| **F1 / Option A exclusion through publication** | `bins/o3k/src/backup_create.rs`: the capture process retains the `StoreAccessLock` and the denial marker after staging and calls `complete_staged` in the same process; `bins/o3k/src/backup_artifact.rs` `complete_staged` emits `o3k backup create: awaiting-signature <operation-id>`, polls for `signing-response.json` until the request TTL, then verifies → finalizes → publishes → removes the marker, or performs the safe abort (staging removed, journal `aborted`, marker removed, exit 3 `signing-request-expired`). Phase 2 (same `--destination/--operation-id`) detects the journal before any controller contact, acquires the lifetime lock (`WouldBlock` → exit 2 `controller-active`), re-creates the marker if an operator removed it and resumes the wait/publication. | `case-1a`, `case-1b`, `case-11`, `case-2`, `case-4e`; `backup_create::tests::{phase_one_waits_for_the_signature_and_publishes,phase_two_without_a_signature_safely_aborts,phase_two_requires_the_lifetime_store_lock}` |
+| **F2 / P0-2 post-publication recovery** | `backup_artifact.rs` `complete_staged` observes the destination **before** requiring the staging tree: `existing_destination` (`O_NOFOLLOW`, `fstat` regular) → full verification → digest equals `record.artifact_sha256` → `published`, staging removed, marker removed, exit 0. Only when the destination is absent does the staged file drive publication. | `case-20`; `backup_create::tests::two_phase_flow_publishes_a_verified_artifact` (post-publication replay step) |
 | **M5 / P0-3 stale `artifact.partial`** | `bins/o3k/src/backup.rs` `finish_signed_artifact` builds into `artifact.partial.tmp-<uuid>` and renames atomically; on any failure the temporary and the partial are removed; a stale entry is removed first only after proving it is this operation's private regular file. `backup_artifact.rs` `remove_stale_finalize_outputs` clears `artifact.partial`/`artifact.partial.tmp-*` whenever `artifact.unsigned` is still present. | `case-19`; `backup::tests::finalize_replaces_a_stale_partial_instead_of_wedging` |
 | **M4 / F9 truthful `in_flight_operations`** | `backup_artifact.rs` `snapshot_in_flight_operations` / `query_in_flight_operations` read `operations` from the quiesced snapshot under the store lock (`succeeded`/`failed` are terminal); the manifest records `recorded_unknown` and the ids go into `metadata/capture.json`. | `case-23`; `backup_artifact::tests::{non_terminal_operations_are_recorded_as_unknown,capture_records_in_flight_operation_identities}` |
 | **M3 / F5b D9 measurement and footprint** | `backup_create.rs` measures after the truncating WAL checkpoint (main DB + non-empty `-wal` + release/trust members + a 2 MiB capture/request metadata allowance; the accepted formula is unchanged) and fails closed with exit 3 `space-unavailable`; `backup_reservation::ensure_reserved_space` re-checks the remaining reservation before finalize and before publication; `backup.rs` deletes each member ciphertext as soon as it is copied into the unsigned artifact and `artifact.unsigned` right after the partial is durable. | `case-10`, `case-4e`; `backup_reservation::tests::boundary_recheck_never_truncates_the_remaining_reservation` |
 | **F12 verify store-access guard** | `bins/o3k/src/backup_verify.rs` acquires `StoreAccessLock` before reading the store; `WouldBlock` → exit 2 `controller-active`; the lock is held for the migration read and released before artifact verification. Deriving migration identity from installed metadata is impossible (the release manifest carries `schema_version` but no migration checksums), so the lock option was chosen. | `case-12*` (no controller); `bins/o3k/tests/backup_verify.rs::rejects_verification_while_the_store_lock_is_held` |
 | **F11 data-directory resolution** | New `bins/o3k/src/backup_data_dir.rs` shared by `create` and `verify`: root uses `/var/lib/o3k`; non-root uses `O3K_DATA_DIR`, else the bounded `O3K_DATA_DIR=` assignment in `/etc/o3k/o3kd.env` (no shell evaluation), else `./data`. | `backup_data_dir::tests::{parses_the_single_assignment_and_ignores_everything_else,rejects_ambiguous_or_unsafe_values,precedence_matches_the_documented_rule}` |
-| **F22 classification alignment** | `backup_trust::BackupTrustError::is_recoverable` is the single predicate: `ConfigUnavailable`, `RecipientKeyUnavailable`, `IdentityUnavailable` are exit 3 in both `create` and `verify`; `ArtifactConfig::load_from` maps missing release/identity material to recoverable. | `case-22`; `case-12missing-trust`; `backup_create::tests::invalid_configuration_fails_before_capture` |
-| **F19 post-publication cleanup reported** | `backup_artifact.rs` `finish_publication`: an unprovable staging/marker removal is exit 4 `post-publication-cleanup-failed`/`marker-removal-failed`; a directory-sync failure on the success path emits the stable warning `o3k backup create: warning post-publication-sync-failed`. | covered by `case-1`/`case-5d` (success path) and the `finish_publication` failure branches |
+| **P2 pre-handoff config preflight** | `backup_create::preflight_before_handoff` loads the trust document and release identity read-only and applies the D9/member bounds before `connect_and_request`; a configuration failure is rejected (exit 2) without stopping the daemon. `verify` keeps the shared `BackupTrustError::is_recoverable` classification (missing config exit 3). | `case-22`; `backup_create::tests::missing_configuration_is_rejected_before_the_handoff`; `backup_verify::tests::reports_a_missing_trust_document_as_recoverable` |
+| **F19 post-publication cleanup reported** | `backup_artifact.rs` `finish_publication`: an unprovable staging/marker removal is exit 4 `post-publication-cleanup-failed`/`marker-removal-failed`; a directory-sync failure on the success path emits the stable warning `o3k backup create: warning post-publication-sync-failed`. | success path: `case-1`/`case-5d`; failure branches: `backup_artifact::tests::{post_publication_staging_cleanup_failure_is_an_unknown_outcome, post_publication_marker_removal_failure_is_an_unknown_outcome}` (unit-only; no real-process seam) |
 | **F20 concurrent phase 2** | `backup_artifact.rs` `OperationLock` (`flock LOCK_EX|LOCK_NB` on `<staging>/operation.lock`, mode 0600, released on every return) → exit 3 `operation-busy`; the lifetime store lock remains the primary exclusion. | `case-21`; `backup_create::tests::phase_two_requires_the_lifetime_store_lock`; `backup_artifact::tests::operation_lock_is_exclusive_and_released_on_drop` |
 | **F37 final-name entry classification** | `existing_destination` classifies a symlink or non-regular entry at the final name as `artifact-destination-exists` (exit 2), never exit 4. | `case-18`; `backup_artifact::tests::{destination_symlink_is_a_rejected_precondition,destination_directory_is_a_rejected_precondition}` |
-| **F31 exit-4 journal state** | `backup_create.rs` records the journal as `aborted` before returning `source-modified-during-capture`, `snapshot-hash-failed`, `source-rehash-failed` and `capture-outcome-unknown`, so a retry reports the real state instead of `backup-operation-incomplete`. | covered by the `mark_operation_aborted` call sites; the marker still denies startup |
+| **F31 exit-4 journal state** | `backup_create.rs` records the journal as `aborted` before returning `source-modified-during-capture`, `snapshot-hash-failed`, `source-rehash-failed`, `capture-outcome-unknown` and the other post-marker capture failures, so a retry does not mistake the attempt for an unfinished capture. | **Not separately tested end-to-end**: no deterministic seam forces those failure reasons without new production hooks. The shared helper is unit-covered by `backup_create::tests::capture_failure_helper_records_the_terminal_aborted_phase`; the reasons themselves are not claimed as real-process evidence. |
 | **L2 rustdoc attribution** | `bins/o3kd/src/composition/mod.rs`: the marker denial doc is on `deny_interrupted_backup_markers`; `warn_pending_backup_operations` has its own diagnostic-only doc. | — |
 | **L3 single migration mapping** | `backup_artifact.rs` capture calls `backup_verify::migration_checksum`; one documented mapping for both paths. | `backup_artifact::tests::snapshot_facts_reuse_the_verify_mapping` |
-| **L5 member path grammar** | `backup.rs` `validate_path` rejects segments starting with `.` or `-`; `contracts/control-plane-backup-v1.proposed.schema.json` uses the same rule. | `backup::tests::member_path_grammar_rejects_hidden_and_option_like_segments` |
+| **L5 member path grammar** | `backup.rs` `validate_path` rejects empty/`.`/`..` and any segment beginning with `.` or `-`. The frozen contract schema (`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`) also rejects a leading `.`, but permits a leading `-`; rejecting `-` is deliberately stricter (defense in depth) and no artifact member uses such a name. | `backup::tests::member_path_grammar_rejects_hidden_and_option_like_segments` |
 | **L6 forward-only journal** | `crates/o3k-store/src/backup_journal.rs` `advance_backup_operation` reads the on-disk phase, refuses regressions (`backup-operation-phase-regression`) and treats an already-durable phase as idempotent; every `update_journal`/abort/`mark_published` call uses it. | `backup_journal::tests::{transitions_only_move_forward,advance_is_idempotent_and_refuses_to_regress}` |
 | **L7 typed verification classification** | `bins/o3k/src/backup.rs` `ArtifactVerifyClass`/`ArtifactVerifyError`: the reason code and exit status come from the typed class, never from wording; `backup_verify.rs` maps class → exit/reason. | `backup_verify::tests::reason_mapping_is_stable_for_every_failure_class` (asserts the exact strings); `bins/o3k/tests/backup_verify.rs` |
 | **L8 / F30 harness dirty detection** | `tests/pp6_backup_artifact.sh` uses `git status --porcelain --untracked-files=no` scoped to the change set, so unrelated untracked build directories do not mark the campaign dirty. | verdict `working_tree_dirty` field |
@@ -386,7 +487,7 @@ are unchanged.
 | Item | Change | Evidence |
 | --- | --- | --- |
 | **F4a / D13 catalog completeness** | `crates/o3k-store/src/state_inventory.rs` now emits tables, indexes and triggers from both migration trees, plus PostgreSQL functions. Indexes/triggers are assigned to the repository owning their `ON <table>`; the two generic operation-integrity functions are assigned to `operations` through the reviewed `GENERIC_FUNCTION_OWNERS` list (an unlisted function fails generation). The SQLite catalog is generated by applying the migration tree in an in-memory store and reading `sqlite_master`, so SQLite's `ALTER TABLE ... ADD COLUMN` rewrites and the runtime `operations` rebuild are reflected in the baseline digests. | `state_inventory::tests::{baseline_inventory_includes_indexes_triggers_and_functions, baseline_comparison_detects_added_indexes_and_triggers, generation_rejects_an_index_owned_by_an_unregistered_table, generation_rejects_a_function_without_a_reviewed_owner, index_trigger_and_function_normalization_is_deterministic}`; committed baseline regenerated |
-| **F4b / live catalog comparison** | `snapshot_facts` enumerates the snapshot's live `sqlite_master` (tables/indexes/views/triggers), excludes `sqlite_*` internal names, compares names and normalized definition digests against every baseline entry in both directions, and fails closed with exit 2 `store-catalog-mismatch` before staging. `_sqlx_migrations` remains compared because the baseline claims it. | `backup_artifact::tests::{snapshot_catalog_rejects_an_extra_index, snapshot_catalog_rejects_an_extra_table, snapshot_catalog_rejects_a_changed_definition, snapshot_facts_read_store_identity_and_repository_emptiness}` |
+| **F4b / live catalog comparison** | `snapshot_facts` enumerates the snapshot's live `sqlite_master` (tables/indexes/views/triggers), excludes `sqlite_*` internal names, compares names and normalized definition digests against every baseline entry in both directions, and fails closed with exit 2 `store-catalog-mismatch` before staging the artifact. `_sqlx_migrations` remains compared because the baseline claims it. | `backup_artifact::tests::{snapshot_catalog_rejects_an_extra_index, snapshot_catalog_rejects_an_extra_table, snapshot_catalog_rejects_a_changed_definition, snapshot_facts_read_store_identity_and_repository_emptiness}` |
 | **F15 harness independent verification** | `tests/pp6_backup_artifact.sh` independently rebuilds D1 (local JCS), verifies Ed25519 with OpenSSL, recomputes member digests, and decrypts HPKE/AES-GCM members with python `cryptography`; the database plaintext is bound to the signed capture record and the harness-measured source database. `case-1d` is the positive row and `case-1e` the tampered negative row. | `case-1d`, `case-1e` |
 | **Nits** | `main.rs` Backup help text describes the two-phase signed flow; the stale raw-key trimming comment in `bins/o3k/tests/backup_verify.rs` is corrected; the happy-path executor wait is explicitly bounded by `wait_bounded`; this document uses "fixture trust document" for `O3K_BACKUP_TRUST_CONFIG`. | `cargo fmt`/clippy/tests; `bash -n` and shellcheck (pre-existing warnings only) |
 
@@ -403,23 +504,53 @@ live PostgreSQL catalog comparison, no views/sequences/constraints, no
 no-table repository entry (SPEC/schema conflict), and `VACUUM INTO` snapshot
 bytes are not the source database bytes.
 
+## Contract/correctness review round 3
+
+| Item | Change | Evidence |
+| --- | --- | --- |
+| M-1 per-member bound before capture | `backup_create::ensure_member_bound` rejects `database + wal` or any metadata source above 1 GiB (`member-bound-exceeded`, exit 2) in the read-only preflight and again after the checkpoint before `backup_to_file`; `bins/o3k/src/backup.rs` exposes the shared `MAX_MEMBER_BYTES`. | `backup_create::tests::{oversized_snapshot_member_is_rejected_before_the_handoff, member_bound_counts_the_database_and_wal_sidecar}`; `tests/pp6_backup_handoff.sh case-m1` |
+| L-1 typed signature/schema classes | Missing, malformed and non-verifying Ed25519 signatures are `signature-invalid`; semantic `validate_manifest` failures are `schema-invalid` in both `verify_artifact_stream` and `verify_signed_artifact_integrity`. | `bins/o3k/tests/backup_verify.rs::{rejects_a_forged_manifest_signature_as_signature_invalid, rejects_a_semantically_invalid_signed_manifest_as_schema_invalid}` |
+| L-2 `sqlite_sequence` false mismatch | The expected catalog map skips SQLite-internal `sqlite_*` names, matching the live-catalog exclusion. | `state_inventory::tests::catalog_comparison_ignores_expected_sqlite_internal_objects` |
+| L-3 journal re-read under the lock | Phase 2 re-reads the operation journal after `StoreAccessLock::acquire`; a record that advanced to `published` follows the L5 idempotent replay instead of failing as unavailable staging. | `backup_create::tests::phase_two_reloads_the_journal_after_acquiring_the_lock` |
+| L-6 durable finalize | `finish_signed_artifact` fsyncs the `members-*` directory after the finalize rename and after removing `artifact.unsigned`. | `backup::tests::unsigned_stage_finishes_with_a_detached_signature_only_after_verification` (exercise path); a staging-sync fault is not separately injectable |
+| L-8 metadata bound | `reservation_with_metadata_bound` propagates `source-bound-exceeded` instead of falling back to the lower reservation. | `backup_create::tests::metadata_bound_propagates_the_source_limit` |
+| P2 read-only preflight | The trust document, release identity, member bound and D9 reservation are validated before the controller is contacted; the under-lock reload remains the captured-member authority. | `backup_create::tests::missing_configuration_is_rejected_before_the_handoff`; `tests/pp6_backup_handoff.sh case-p2` |
+| D10/D13 PostgreSQL baseline binding | `state_inventory_v1.json` now binds `postgres_major` (16; SPEC-0050 / PP6 D10), the SQLite generator version (`SELECT sqlite_version()` from the linked library; `3.46.0`) and the SHA-256 of every file in both migration trees. The generator emits them, the drift gate compares them (a SQLite library change forces a reviewed regeneration), and `baseline_binding()` exposes them while `baseline_state_inventory()` keeps the manifest entry shape. | `state_inventory::tests::{baseline_binding_covers_every_migration_file, changing_a_migration_file_fails_the_drift_gate}` |
+
 ## Executed vs documented-not-executed
 
-Executed real-process rows: 39 PASS rows (one per matrix row except
-`case-12oversize`), produced by `tests/pp6_backup_artifact.sh` on the final
-tree. The campaign prints its own PASS/FAIL/NOT-COVERED accounting and exits
-non-zero on any failure.
+Executed real-process rows: 44 PASS rows (45 matrix rows; `case-12oversize` is
+NOT-COVERED end-to-end), produced by `tests/pp6_backup_artifact.sh` on the final
+tree. When python `cryptography` is unavailable, `case-1d-decrypt` becomes
+NOT-COVERED instead of PASS (43 PASS, 2 NOT-COVERED). The campaign prints its
+own PASS/FAIL/NOT-COVERED accounting and exits non-zero on any failure.
 
 Not executed end-to-end (`NOT-COVERED`, exact reason and coverage):
 
-- **Oversized artifact (`artifact-too-large`).** The verifier applies the
-  5 GiB manifest-bounded size check only after a valid Ed25519 signature over
-  the manifest. Producing that input would require the harness to reimplement
-  artifact assembly and sign a malicious manifest; that is not a real operator
-  path and would be evidence of a bespoke tool rather than of the product.
-  The stable mapping is unit-covered by
+- **Oversized artifact (`artifact-too-large`, exit 2).** The verifier applies
+  the 5 GiB manifest-bounded size check only after a valid Ed25519 signature
+  over the manifest. Producing that input would require the harness to
+  reimplement artifact assembly and sign a malicious manifest; that is not a
+  real operator path and would be evidence of a bespoke tool rather than of the
+  product. The stable mapping is unit-covered by
   `backup_verify::tests::reason_mapping_is_stable_for_every_failure_class`
   (`ArtifactVerifyClass::ArtifactTooLarge` → exit 2 `artifact-too-large`).
+  This is **not** an exit-4 row: oversize is a rejected precondition.
+- **Exit-4 post-publication cleanup (unit-only).** The
+  `post-publication-cleanup-failed` and `marker-removal-failed` branches are
+  exercised at the helper level by
+  `backup_artifact::tests::{post_publication_staging_cleanup_failure_is_an_unknown_outcome,
+  post_publication_marker_removal_failure_is_an_unknown_outcome}`. The campaign
+  has no deterministic real-process seam for "artifact published, cleanup
+  fails"; no real-process exit-4 cleanup row is claimed.
+- **F31 capture-failure reasons (not separately tested).** No deterministic
+  seam forces `source-modified-during-capture`, `snapshot-hash-failed` or
+  `capture-outcome-unknown` without new production hooks; the handoff campaign
+  likewise records source mutation during capture as a documented-coverage row
+  (`case-m`) because the transferred flock excludes all writers. The shared
+  `mark_operation_aborted` journal effect is unit-covered
+  (`backup_create::tests::capture_failure_helper_records_the_terminal_aborted_phase`);
+  the individual reasons are not claimed as real-process evidence.
 
 Unit/integration coverage that the campaign does not reproduce as a separate
 real-process row (listed so the evidence boundary is explicit):
@@ -445,6 +576,9 @@ real-process row (listed so the evidence boundary is explicit):
   destination_directory_is_a_rejected_precondition,
   publication_is_no_replace_and_replay_safe,
   naming_and_prefix_resolution_are_stable,
+  post_publication_staging_cleanup_failure_is_an_unknown_outcome,
+  post_publication_marker_removal_failure_is_an_unknown_outcome,
+  signing_wait_retries_a_partially_written_response,
   repository_table_mapping_covers_the_committed_baseline}`
 - `backup_create::tests::{invalid_configuration_fails_before_capture,
   published_operation_is_refused_before_controller_contact,
@@ -452,7 +586,8 @@ real-process row (listed so the evidence boundary is explicit):
   two_phase_flow_publishes_a_verified_artifact,
   phase_one_waits_for_the_signature_and_publishes,
   phase_two_without_a_signature_safely_aborts,
-  phase_two_requires_the_lifetime_store_lock}`
+  phase_two_requires_the_lifetime_store_lock,
+  capture_failure_helper_records_the_terminal_aborted_phase}`
 - `backup::tests::{unsigned_stage_finishes_with_a_detached_signature_only_after_verification,
   unsigned_stage_rejects_a_wrong_key_id_and_a_tampered_payload,
   finalize_replaces_a_stale_partial_instead_of_wedging,
@@ -471,7 +606,7 @@ real-process row (listed so the evidence boundary is explicit):
 - `bins/o3kd composition::tests::pending_backup_operation_journal_does_not_deny_startup`
 - `bins/o3k/tests/backup_create_hooks.rs::crash_during_the_signing_wait_keeps_the_marker_and_staged_request`
 
-The handoff journey, its 17 executed cases and its 7 documented-coverage rows
+The handoff journey, its 19 executed cases and its 7 documented-coverage rows
 remain covered by `tests/pp6_backup_handoff.sh` (still passing; see below). That
 campaign uses the harness-only `O3K_BACKUP_TEST_STOP_AFTER_STAGING=1` so its
 rows keep their one-shot phase-1 shape; it exercises the handoff, lock and
@@ -492,31 +627,30 @@ that the published artifact is 0600.
 
 ```text
 cargo fmt --all -- --check                                        # PASS
-cargo check -p o3k -p o3k-store --all-features                    # PASS
 cargo clippy -p o3k -p o3k-store -p o3kd --all-targets --all-features -- -D warnings  # PASS
 cargo test -p o3k -p o3k-store -p o3kd --all-features             # PASS (0 failures)
-bash -n packaging/install.sh packaging/uninstall.sh \
-        tests/pp6_backup_artifact.sh tests/pp6_backup_handoff.sh   # PASS
-bash tests/pp6_backup_artifact.sh        # PASS (run 1): 39 executed, 1 not-covered, 0 failures
-bash tests/pp6_backup_artifact.sh        # PASS (run 2): same matrix and row outcomes
-bash tests/pp6_backup_handoff.sh         # PASS: 17 executed, 7 documented, 0 failures
+bash -n tests/pp6_backup_artifact.sh tests/pp6_backup_handoff.sh  # PASS
+shellcheck -S warning tests/pp6_backup_artifact.sh tests/pp6_backup_handoff.sh  # PASS (no findings)
+bash tests/pp6_backup_artifact.sh        # PASS (twice): 44 executed, 1 not-covered, 0 failures
+bash tests/pp6_backup_handoff.sh         # PASS: 19 executed, 7 documented, 0 failures
 git diff --check                                                  # PASS
 ```
 
-The two artifact-campaign runs produced the same matrix
-(`NOT-COVERED=1`, `FAIL=0`, `PASS=39`) and the same per-row outcomes; only the
-per-run artifact digest, backup id, data-directory identities and size differ
-by construction. Shellcheck reports only pre-existing warnings (unused
-campaign variables and the cleanup trap's indirect reachability); `bash -n`
-passes.
+The artifact campaign produced the matrix above (`NOT-COVERED=1`, `FAIL=0`,
+`PASS=44`) in both runs; the per-run artifact digest, backup id,
+data-directory identities and size differ by construction. The round-2
+regression rows (`case-24`, `case-25`, `case-26`) and the round-2/cleanup
+additions (`case-27`, `case-1d-decrypt`) are included in that run. Shellcheck is
+clean for both campaigns; `bash -n` passes.
 
 The campaign is re-runnable and deterministic in its assertions: crashes use
 process-exit hooks, the only barriers are the executor's two-way file barrier
 and bounded readiness/exit/file polls, and the signing wait is bounded by the
 request TTL (or a feature-gated test timeout). The artifact and handoff
-campaigns above are the final invocations of the final tree (security-review
-round 1 and contract/correctness-review round 1 included) and produced the
-recorded matrix outcomes. The handoff campaign's 17 executed rows and 7
+campaigns above are the invocations of the current (uncommitted) working tree
+(security-review rounds 1 and 2 and contract/correctness-review rounds 1 and 2
+included) and produced the recorded matrix outcomes. Exact-commit binding is
+pending in `FINAL-COMMIT-BINDING`. The handoff campaign's 19 executed rows and 7
 documented-coverage rows are unchanged and passing. Per-run randomness is
 confined to the artifact content key, timestamps and the temporary
 data-directory identities (and therefore the artifact digest).
@@ -566,6 +700,52 @@ data-directory identities (and therefore the artifact digest).
   snapshot contains a non-terminal Operation, the manifest says
   `recorded_unknown` and the ids are preserved in the capture metadata; the
   artifact does not claim the operation was resolved.
+- **Round-2 residuals.** (1) Release-signature verification for upgrades is
+  not implemented; H2 only stops root from being redirected through
+  `O3K_UPGRADE_*`. (2) `verify` still performs full decryption and therefore
+  needs the recovery private key; a public-key-only verification mode is a
+  follow-up contract decision. (3) The `O3K_BACKUP_TEST_DAEMON_EXE` override
+  exists only in `backup-test-hooks` builds for the in-process fake-daemon
+  tests; a production binary never reads it. (4) For the installed
+  `/var/lib/o3k` directory the trust/install overrides are ignored even for
+  root; this is deliberately stricter than the minimum review request and
+  keeps TestLab overrides for non-installed directories. (5) The verify copy
+  includes the main database and a non-empty `-wal`; SQLite recreates the
+  `-shm` index in the private staging directory.
+
+## Contract decisions required
+
+These are places where the accepted contract text and this implementation (or
+the frozen schema) do not fully coincide, or where a boundary is deliberately
+narrower than a reader might assume. Each needs a human decision before the
+corresponding claim can be widened; none is silently resolved here.
+
+- **D9 staging quota vs. preflight + boundary re-checks.** The accepted D9 text
+  says "enforce as staging quota". The implementation measures the source after
+  the truncating checkpoint, computes `max(2×S + 1 GiB, 6 GiB)` (cap 9 GiB), and
+  re-checks `f_bavail × f_frsize` before capture, before finalize and before
+  publication. It fails closed (`space-unavailable`, exit 3) and never
+  truncates, but it is **not** a filesystem quota: a concurrent writer can
+  consume space between checks. A human contract decision is required either to
+  accept this enforcement model as satisfying D9 or to amend the D9 wording.
+- **D2 trust-root lifecycle/rotation.** Only a static configured trust document
+  with a static `revoked_key_ids` list is implemented. There is no root rotation,
+  key ceremony, revocation-distribution endpoint, sequence/`next_update`
+  tracking, or two-of-three root-signing workflow. Those D2 mechanisms remain a
+  contract/implementation gap, not a tested behavior.
+- **D13 no-table repositories.** The contract schema requires `minItems: 1` for
+  both object arrays, and the committed baseline has no repository with zero
+  tables. A genuinely empty repository cannot be represented without inventing a
+  synthetic object or amending the schema; this remains a SPEC/schema conflict.
+- **§4 private-recovery-key boundary.** Full `o3k backup verify` decrypts every
+  member and therefore must run on the recovery/operator host that holds the
+  X25519 private key. The campaign's independent check shows that
+  signature/D1/member-digest authenticity is verifiable with the public key
+  alone, but a supported public-key-only verify mode is a follow-up contract
+  decision, not an implemented mode.
+- **#1084 remains open.** This document is Slice F implementation and campaign
+  evidence only. Issue closure still needs the remaining slices, human
+  exact-commit review, and the supported-profile gates; nothing here closes it.
 
 ## Honest non-claims
 
@@ -604,7 +784,9 @@ data-directory identities (and therefore the artifact digest).
 - **Verify locking.** `o3k backup verify` needs the same exclusive store lock as
   the controller, so it is refused (exit 2 `controller-active`) while a
   controller is running. It does not hot-read a live store; operators stop the
-  controller (or use the maintenance window) before verifying.
+  controller (or use the maintenance window) before verifying. It copies the
+  main database and a non-empty WAL sidecar into its private `0700` staging and
+  opens the copy read-only; the live database file is not opened or mutated.
 - **Independent harness verification scope (F15).** The campaign now rebuilds the
   exact D1 input from the published bytes with a local JCS implementation
   (byte-checked against the artifact's stored canonical manifest), verifies the
@@ -622,8 +804,9 @@ data-directory identities (and therefore the artifact digest).
   harness does not claim `SHA-256(decrypted database) == source database hash`
   (it claims equality with the signed capture record's snapshot digest plus
   logical schema/migration equivalence to the source); and if `cryptography` is
-  unavailable the campaign records `decrypt=unavailable` and retains the
-  signature/digest checks only.
+  unavailable the campaign records `decrypt=unavailable` and the
+  `case-1d-decrypt` row is NOT-COVERED while the signature/D1/digest legs still
+  PASS in `case-1d`. A NOT-COVERED decryption leg is never reported as PASS.
 - **#1084 is not closed by this evidence.** This document records Slice F
   implementation and campaign evidence only; issue closure requires the
   remaining slices, human review at an exact commit, and the supported-profile
@@ -648,53 +831,67 @@ data-directory identities (and therefore the artifact digest).
 - **D2 trust-root rotation/lifecycle is not implemented.** Trust is a static
   configured document with a static `revoked_key_ids` list; there is no
   root-rotation, key-ceremony, or revocation-distribution workflow.
-- **Exit-4 real-process coverage remains NOT-COVERED for oversized artifacts.**
-  The verifier's `artifact-too-large` check runs only after a valid Ed25519
-  signature over a manifest declaring more than 5 GiB; producing that input
-  would require a bespoke artifact assembler and is covered only by the unit
-  mapping test.
+- **Oversized artifacts are exit 2, not exit 4.**
+  `artifact-too-large` is a rejected precondition (exit 2) and is
+  NOT-COVERED end-to-end because producing a validly signed manifest declaring
+  more than 5 GiB would require a bespoke artifact assembler; only the unit
+  mapping test covers it. The exit-4 cleanup classifications
+  (`post-publication-cleanup-failed`, `marker-removal-failed`) are unit-only;
+  no real-process exit-4 cleanup row is claimed.
 - **No independent review yet.** The implementation, the campaign and this
   document were produced by the same agent. This is interim evidence pending
   human exact-head review; it is not an independent verification.
 
 ## Machine-readable verdict
 
-Generated by the final campaign run (`tests/pp6_backup_artifact.sh`); values
-that are per-run by construction are the ones from that run. The block below is
-run 1; run 2 produced the same matrix and row outcomes with a different artifact
-digest, backup id, data-directory identities and size. The harness prints the
-same object on stdout between the markers
+Generated by run 1 of the campaign (`tests/pp6_backup_artifact.sh`) on the
+uncommitted working tree; values that are per-run by construction are the ones
+from that run. Run 2 produced the same matrix and row outcomes with a different
+artifact digest, backup id, data-directory identities and size. The harness
+prints the same object on stdout between the markers
 `O3K_PP6_VERDICT_JSON_BEGIN` and `O3K_PP6_VERDICT_JSON_END`.
+
+`source_sha` / `working_tree_dirty` are **per-run facts about the tree that was
+tested**, not an exact-commit claim; see `FINAL-COMMIT-BINDING`.
 
 ```json
 {
-  "backup_digest": "0e16cbbbfe92faea5261f4f04db02445bf869d56996bb786a716907f1379fa09",
-  "backup_id": "98e4bb27-2f04-4e6b-998c-0bfaac22663c",
-  "backup_installation_id": "60f8b6fcd49aa27140b79e307f6ea558",
-  "backup_site_id": "48488118d24d983de0604c13355304c6",
+  "backup_digest": "dff4e3cdce0e16110b785b8cbd963075a8dbd33da626d821d0fc2d151008e411",
+  "backup_id": "c8ec240e-f12e-40b9-bbdf-8dedd6417418",
+  "backup_installation_id": "b21e49612359e5534387aa9dc80e6dde",
+  "backup_site_id": "4a49afa56cce12f81425b3059ab2b38b",
   "backup_size_bytes": 1261601,
   "campaign": "tests/pp6_backup_artifact.sh",
-  "executed_rows": 39,
+  "executed_rows": 44,
   "failed_rows": 0,
-  "harness_sha256": "7ed481acd9a66c727abb6f2192642a9f8227f241b4b9b1b4fbb7d7d201699a9c",
+  "harness_sha256": "f5d4a8e05ef4fcd66e6acf5c5b5683bdb6640cea4d686989ca6333db484071e1",
   "host_identity_hash": "8110f5814f95639d2d88a1e379a827e065c9c072b52b54c92f4ce2b1051f54bb",
   "issue": 1084,
   "matrix": {
     "FAIL": 0,
     "NOT-COVERED": 1,
-    "PASS": 39
+    "PASS": 44
   },
+  "max_migration_checksum": "7a2333035bc23d000c129d6d87d236b119a69bbc2de5bda6e41618c6b1488fc0",
+  "max_migration_version": 53,
   "not_covered_rows": 1,
-  "o3k_binary_sha256": "107f8e949663d0cdf0e1331d19b9c0e4d2d86aaf11ebf6b967bc42a004f21d1c",
-  "o3kd_binary_sha256": "28f042563ab8578ea0cd9ed857a2ca2b3f7436f602fed5f01f6d09589939515c",
-  "passed_rows": 39,
+  "o3k_binary_sha256": "15b0917a7949bb5adb91a4b3299e9aae3935a71f47f48997bc2120f23ace36f3",
+  "o3kd_binary_sha256": "787bfa105c987edd3dd17628c444770aa0269766a5292e62b9d7f6a673a38c66",
+  "passed_rows": 44,
   "profile": "o3k-demo-v1",
   "release_artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
   "schema_version": 53,
   "slice": "F",
-  "source_sha": "41f9c24bce8c8a5b8d97b1a9fdd4af24ba3322dd",
+  "source_sha": "ffa0955b36cf6df98eff49c0a15f8d0dbfe8179b",
   "sqlite_version": "3.46.0",
+  "state_inventory_sqlite_version": "3.46.0",
   "working_tree_dirty": true
 }
 ```
+
+The verdict now also binds the migration identity of the captured source:
+`schema_version` (53), `max_migration_version` (53) and
+`max_migration_checksum` (SHA-256 of the highest applied SQLx checksum blob,
+the same mapping as the artifact's `store.migrations`). The baseline binding
+independently records the SQLite generator version (`3.46.0`).

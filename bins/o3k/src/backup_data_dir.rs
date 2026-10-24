@@ -114,7 +114,7 @@ fn env_file_data_dir(path: &Path) -> Result<Option<String>, &'static str> {
     }
     let descriptor = open(
         path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| REASON_ENV_FILE_UNSAFE)?;

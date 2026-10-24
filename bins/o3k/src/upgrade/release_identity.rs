@@ -174,7 +174,7 @@ fn read_trusted_manifest(path: &Path) -> io::Result<Vec<u8>> {
     }
     let descriptor = open(
         path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|error| {

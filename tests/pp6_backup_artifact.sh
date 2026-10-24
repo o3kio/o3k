@@ -16,12 +16,16 @@
 # polls, never unbounded sleeps.
 #
 # Offline signing approach: the signing request carries the exact D1 signing
-# input as base64url. The harness decodes it and signs with
-# `openssl pkeyutl -sign -rawin -inkey` (OpenSSL >= 3 supports Ed25519 raw
-# signing); python3 `cryptography` is an automatic fallback. The signing key
-# and the X25519 recipient key are generated inside the temporary campaign
-# directory (0600) and are never passed to the binary that creates/verifies the
-# artifact.
+# input as base64url. Before signing, the harness custodian compares the
+# request's `recipient_public_key_sha256` with the trusted trust document and
+# refuses a mismatch (the simulated two-of-three custody check). The harness
+# decodes the accepted request and signs with `openssl pkeyutl -sign -rawin
+# -inkey` (OpenSSL >= 3 supports Ed25519 raw signing); python3 `cryptography` is
+# an automatic fallback. The response is written to a private temp file and
+# renamed into place, so the executor never observes a partial response. The
+# signing key and the X25519 recipient key are generated inside the temporary
+# campaign directory (0600) and are never passed to the binary that
+# creates/verifies the artifact.
 #
 # The script is re-runnable and exits 0 only when every executed check passed.
 set -euo pipefail
@@ -274,11 +278,6 @@ except Exception:
 PY
 }
 
-journal_sha256() { # journal_sha256 <data-dir> <operation-id>
-    local path="$1/backup-operations/$2.json"
-    [[ -f "$path" ]] && sha256sum "$path" | cut -d' ' -f1 || echo "-"
-}
-
 marker_count() { find "$1" -maxdepth 1 -name '.o3k-backup-in-progress-*' | wc -l; }
 
 lock_owner() { # lock_owner <data-dir> -> held|free|absent
@@ -453,10 +452,10 @@ await_signing_request() { # await_signing_request <dest-dir> <operation-id> [tim
     wait_for_file "$1/.o3k-backup-artifact-$2/signing-request.json" "${3:-60}"
 }
 
-await_awaiting_signature_line() { # await_awaiting_signature_line <case-id> [timeout-seconds]
-    local case_id="$1" deadline=$((SECONDS + ${2:-60}))
+await_awaiting_signature_line() { # await_awaiting_signature_line <case-id> <operation-id> [timeout-seconds]
+    local case_id="$1" operation_id="$2" deadline=$((SECONDS + ${3:-60}))
     while (( SECONDS < deadline )); do
-        grep -qF "o3k backup create: awaiting-signature" "$WORK/$case_id.backup.stderr" 2>/dev/null && return 0
+        grep -qF "o3k backup create: awaiting-signature $operation_id" "$WORK/$case_id.backup.stderr" 2>/dev/null && return 0
         sleep 0.05
     done
     return 1
@@ -481,10 +480,10 @@ verify_reason() { json_get "$WORK/$1.verify.json" reason; }
 # Offline signing (the harness is the custodian)
 # ---------------------------------------------------------------------------
 decode_signing_input() { # decode_signing_input <staging-dir> -> $WORK/sign-input.bin $WORK/sign-meta.json
-    local staging="$1" attempt
+    local staging="$1"
     # The executor creates the request before writing it, so poll until it
     # parses instead of failing on a partially written file.
-    for attempt in $(seq 1 100); do
+    for _ in $(seq 1 100); do
         if python3 - "$staging/signing-request.json" "$WORK/sign-input.bin" "$WORK/sign-meta.json" <<'PY'
 import base64, hashlib, json, sys
 request_path, input_path, meta_path = sys.argv[1:4]
@@ -531,9 +530,14 @@ PY
 
 write_response_file() { # write_response_file <staging> <signature> <meta> [key_id] [request_sha]
     local staging="$1" signature="$2" meta="$3" key_id="${4:-}" request_sha="${5:-}"
-    python3 - "$signature" "$meta" "$staging/signing-response.json" "$key_id" "$request_sha" <<'PY'
-import json, os, sys
-signature_path, meta_path, response_path, key_id, request_sha = sys.argv[1:6]
+    # Write the response to a private temp name in the same directory and
+    # rename it into place: the executor polls for `signing-response.json`, so
+    # it must never observe a partially written response. (The product also
+    # retries an unparsable response until the deadline as a second line of
+    # defense.)
+    python3 - "$signature" "$meta" "$staging" "$key_id" "$request_sha" <<'PY'
+import json, os, sys, tempfile
+signature_path, meta_path, staging, key_id, request_sha = sys.argv[1:6]
 meta = json.load(open(meta_path))
 signature = open(signature_path, "rb").read()
 if not key_id:
@@ -549,15 +553,49 @@ response = {
     # the request's creation time (the inclusive lower bound).
     "signed_at": meta["created_at"],
 }
-with open(response_path, "w") as handle:
-    json.dump(response, handle)
-os.chmod(response_path, 0o600)
+descriptor, temporary = tempfile.mkstemp(prefix=".signing-response.tmp-", dir=staging)
+try:
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump(response, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, os.path.join(staging, "signing-response.json"))
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
 PY
 }
 
-sign_request() { # sign_request <staging> [signing-key]
+trusted_recipient_fingerprint() { # trusted_recipient_fingerprint <trust-config>
+    python3 - "$1" <<'PY'
+import hashlib, json, sys
+document = json.load(open(sys.argv[1]))
+public = document.get("recipient", {}).get("x25519_public_key")
+if not public:
+    print("")
+else:
+    print(hashlib.sha256(bytes.fromhex(public)).hexdigest())
+PY
+}
+
+sign_request() { # sign_request <staging> [signing-key] [trust-config]
     local staging="$1" key="${2:-$BACKUP_SIGNING_KEY}"
+    local trust="${3:-${O3K_BACKUP_TRUST_CONFIG:-${CASE_TRUST:-}}}"
     [[ -f "$staging/signing-request.json" ]] || { log "  missing signing request in $staging"; return 1; }
+    # Two-of-three custody check, simulated by the harness: the request's
+    # recipient fingerprint must equal the trusted trust document's before the
+    # helper signs. A request that was altered (or built for another recipient)
+    # is refused here, never signed.
+    local request_fp trusted_fp=""
+    request_fp="$(json_get "$staging/signing-request.json" recipient_public_key_sha256)"
+    if [[ -n "$trust" && -f "$trust" ]]; then
+        trusted_fp="$(trusted_recipient_fingerprint "$trust")"
+    fi
+    if [[ -z "$trusted_fp" || "$request_fp" != "$trusted_fp" ]]; then
+        log "  custodian refused the request: recipient fingerprint mismatch (request='$request_fp' trusted='$trusted_fp')"
+        return 1
+    fi
     decode_signing_input "$staging"
     sign_bytes "$key" "$WORK/sign-input.bin" "$WORK/sign-input.sig" || { log "  offline signing failed"; return 1; }
     write_response_file "$staging" "$WORK/sign-input.sig" "$WORK/sign-meta.json"
@@ -874,9 +912,13 @@ HAPPY_MANIFEST_BYTES="$(stat -c %s "$CASE_PREFIX/share/o3k/release-manifest.json
 HAPPY_DB_BYTES="$(stat -c %s "$CASE_DATA/o3k.sqlite")"
 HAPPY_WAL_BYTES=0
 [[ -f "$CASE_DATA/o3k.sqlite-wal" ]] && HAPPY_WAL_BYTES="$(stat -c %s "$CASE_DATA/o3k.sqlite-wal")"
-# D9 source = checkpointed main DB + a non-empty -wal sidecar + the two
-# metadata members + the bounded capture/request metadata allowance.
-HAPPY_EXPECTED_SOURCE=$((HAPPY_DB_BYTES + HAPPY_TRUST_BYTES + HAPPY_MANIFEST_BYTES + 2 * 1024 * 1024))
+# D9 source = checkpointed main DB + any remaining non-empty -wal sidecar + the
+# two metadata members + the bounded capture/request metadata allowance. The
+# harness truncating checkpoint above normally leaves the -wal absent or
+# zero-length, so HAPPY_WAL_BYTES is normally 0; it is included in the expected
+# sum so a non-empty sidecar is measured exactly the same way the product's
+# `source_paths` measurement counts it.
+HAPPY_EXPECTED_SOURCE=$((HAPPY_DB_BYTES + HAPPY_WAL_BYTES + HAPPY_TRUST_BYTES + HAPPY_MANIFEST_BYTES + 2 * 1024 * 1024))
 snapshot_tree "$CASE_DATA" "$WORK/happy-before-tree.txt"
 touch "$HAPPY_GO"
 
@@ -891,7 +933,7 @@ check "$(journal_phase "$CASE_DATA" "$HAPPY_OP")" "staged" "journal phase during
 check "$(marker_count "$CASE_DATA")" "1" "marker present during the wait"
 check "$(lock_owner "$CASE_DATA")" "held" "store lock held during the wait"
 check "$(is_published "$CASE_DEST" "$HAPPY_OP")" "no" "nothing published during the wait"
-await_awaiting_signature_line happy 30 || { CHECK_OK=0; log "  missing stable awaiting-signature stderr line"; }
+await_awaiting_signature_line happy "$HAPPY_OP" 30 || { CHECK_OK=0; log "  missing stable awaiting-signature stderr line"; }
 C1_REQUEST_FP="$(json_get "$STAGING/signing-request.json" recipient_public_key_sha256)"
 check "$C1_REQUEST_FP" "$BACKUP_RECIPIENT_FP" "signing request recipient public-key fingerprint"
 (( CHECK_OK )) || C1_OK=0
@@ -994,9 +1036,19 @@ else
     C1_INDEP_DETAIL="$(tail -3 "$WORK/case-1-independent.err" | tr '\n' ' ')"
 fi
 (( CHECK_OK )) || log "  independent artifact verification failed: $C1_INDEP_DETAIL"
+# The signature/D1/member-digest legs are always executed; the decryption leg
+# is a separate row so an unavailable `cryptography` module can never turn into
+# an implied decrypt PASS.
 if (( CHECK_OK )); then
-    record PASS case-1d "0" "published" "0" "free" "yes" "independent-signature+d1+members+decrypt" \
+    record PASS case-1d "0" "published" "0" "free" "yes" "independent-signature+d1+members" \
         "$C1_INDEP_DETAIL"
+    if [[ "$HAVE_PY_CRYPTO" == "1" ]]; then
+        record PASS case-1d-decrypt "0" "published" "0" "free" "yes" "independent-hpke+aes-gcm-decrypt" \
+            "$C1_INDEP_DETAIL"
+    else
+        record NOT-COVERED case-1d-decrypt "-" "published" "0" "free" "yes" "cryptography-unavailable" \
+            "python cryptography is unavailable, so the independent HPKE/AES-256-GCM decryption and the capture-record/source-database binding were not executed; the signature, D1 and member-digest legs PASS in case-1d"
+    fi
 else
     record FAIL case-1d "0" "published" "0" "free" "yes" "independent-check-failed" \
         "$C1_INDEP_DETAIL"
@@ -1064,9 +1116,7 @@ if wait_ready idem 30; then
     await_signing_request "$CASE_DEST" "$IDEM_OP" 60 || true
     wait_backup idem 60 || true
     reap_exit "$(daemon_pid idem)" 30 || true
-    IDEM_JOURNAL_BEFORE="$(journal_sha256 "$CASE_DATA" "$IDEM_OP")"
     IDEM_MEMBERS_BEFORE="$(find "$IDEM_STAGING" -maxdepth 1 -name 'members-*' | wc -l)"
-    IDEM_ARTIFACT_BEFORE="$(sha256sum "$IDEM_STAGING"/members-*/artifact.unsigned | cut -d' ' -f1)"
     IDEM_REQUEST_BEFORE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["request_sha256"])' "$CASE_DATA/backup-operations/$IDEM_OP.json")"
     CHECK_OK=1
     check "$(backup_exit idem)" "91" "hook exit"
@@ -1101,7 +1151,6 @@ if wait_ready idem 30; then
     check "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["request_sha256"])' "$CASE_DATA/backup-operations/$IDEM_OP.json")" \
         "$IDEM_REQUEST_BEFORE" "journal request digest preserved (no recapture)"
     check "$IDEM_MEMBERS_BEFORE" "1" "single capture before the crash"
-    (( CHECK_OK )) || IDEM_FAIL=1
     start_daemon idem-after "$CASE_DATA"
     if wait_ready idem-after 30; then
         sigterm_expect_zero idem-after || CHECK_OK=0
@@ -1128,18 +1177,19 @@ echo "== Case 3: duplicate after publication =="
 CASE_DATA="$HAPPY_DATA"; CASE_DEST="$HAPPY_DEST"; CASE_TRUST="$HAPPY_TRUST"; CASE_PREFIX="$HAPPY_PREFIX"
 run_backup happy-duplicate "$HAPPY_DATA" "$HAPPY_DEST" "$HAPPY_OP"
 CHECK_OK=1
-check "$(backup_exit happy-duplicate)" "2" "duplicate exit"
-check "$(backup_reason happy-duplicate)" "operation-already-published" "duplicate reason"
+check "$(backup_exit happy-duplicate)" "0" "published replay exit"
+check "$(backup_status happy-duplicate)" "backup-published" "published replay status"
+check "$(json_get "$WORK/happy-duplicate.backup.json" sha256)" "$HAPPY_ARTIFACT_SHA" "published replay digest"
 check "$(journal_phase "$HAPPY_DATA" "$HAPPY_OP")" "published" "journal remains published"
 check "$(is_published "$HAPPY_DEST" "$HAPPY_OP")" "yes" "exactly one published artifact"
 check "$(find "$HAPPY_DEST" -maxdepth 1 -name "backup-$HAPPY_OP.o3k" | wc -l)" "1" "artifact count"
 (( CHECK_OK )) && C3_OK=1 || C3_OK=0
 if (( C3_OK )); then
     record PASS case-3 "$(backup_exit happy-duplicate)" "published" "0" "$(lock_owner "$HAPPY_DATA")" "yes" "-" \
-        "re-run after publication rejected with operation-already-published; no second capture"
+        "published replay re-verified the destination and exited 0 idempotently; no second capture"
 else
     record FAIL case-3 "$(backup_exit happy-duplicate)" "published" "0" "$(lock_owner "$HAPPY_DATA")" "yes" "-" \
-        "duplicate-after-publication contract failed"
+        "idempotent published-replay contract failed"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1429,6 +1479,62 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Case 27 (security L11): the custodian helper must compare the request's
+# recipient fingerprint with the trusted trust document before signing. An
+# altered request is refused by the helper and independently rejected by the
+# product's phase 2 (the journal digest is rebound so the fingerprint check,
+# not the request-digest check, is decisive).
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 27: custodian refuses an altered recipient fingerprint =="
+fresh_case_dirs custodian-fingerprint
+C27_OP="$(new_op_id)"
+start_daemon custodian-fingerprint "$CASE_DATA"
+if wait_ready custodian-fingerprint 30; then
+    start_backup custodian-fingerprint "$CASE_DATA" "$CASE_DEST" "$C27_OP" O3K_BACKUP_TEST_EXIT_AWAITING_SIGNATURE=1
+    C27_STAGING="$CASE_DEST/.o3k-backup-artifact-$C27_OP"
+    await_signing_request "$CASE_DEST" "$C27_OP" 60 || true
+    wait_backup custodian-fingerprint 60 || true
+    reap_exit "$(daemon_pid custodian-fingerprint)" 30 || true
+    python3 - "$C27_STAGING/signing-request.json" "$CASE_DATA/backup-operations/$C27_OP.json" "$SWAPPED_RECIPIENT_FP" <<'PY'
+import hashlib, json, sys
+request_path, journal_path, altered = sys.argv[1:4]
+request = json.load(open(request_path))
+request["recipient_public_key_sha256"] = altered
+raw = json.dumps(request, indent=2).encode()
+open(request_path, "wb").write(raw)
+journal = json.load(open(journal_path))
+journal["request_sha256"] = hashlib.sha256(raw).hexdigest()
+json.dump(journal, open(journal_path, "w"))
+PY
+    CHECK_OK=1
+    C27_CUSTODIAN_RC=0
+    sign_request "$C27_STAGING" >"$WORK/case-27-custodian.log" 2>&1 || C27_CUSTODIAN_RC=$?
+    check "$C27_CUSTODIAN_RC" "1" "custodian helper refusal exit"
+    grep -qF "custodian refused the request: recipient fingerprint mismatch" "$WORK/case-27-custodian.log" || {
+        CHECK_OK=0; log "  custodian helper did not report the fingerprint refusal"
+    }
+    [[ ! -e "$C27_STAGING/signing-response.json" ]] || { CHECK_OK=0; log "  the custodian wrote a response for the altered request"; }
+    run_backup custodian-fingerprint-replay "$CASE_DATA" "$CASE_DEST" "$C27_OP"
+    check "$(backup_exit custodian-fingerprint-replay)" "2" "altered-request phase-2 exit"
+    check "$(backup_reason custodian-fingerprint-replay)" "signing-request-mismatch" "altered-request phase-2 reason"
+    check "$(is_published "$CASE_DEST" "$C27_OP")" "no" "altered request published nothing"
+    check "$(marker_count "$CASE_DATA")" "1" "marker retained for inspection"
+    [[ -d "$C27_STAGING" ]] || { CHECK_OK=0; log "  staging removed for the altered request"; }
+    if (( CHECK_OK )); then
+        record PASS case-27 "2" "staged" "1" "free" "no" \
+            "custodian-refused+signing-request-mismatch(exit=2)" \
+            "request recipient fingerprint altered to $SWAPPED_RECIPIENT_FP: the harness custodian refused to sign (exit $C27_CUSTODIAN_RC, no response written) and the product's phase 2 independently rejected the request as signing-request-mismatch (exit 2)"
+    else
+        record FAIL case-27 "$C27_CUSTODIAN_RC" "$(journal_phase "$CASE_DATA" "$C27_OP")" \
+            "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$C27_OP")" \
+            "$(backup_reason custodian-fingerprint-replay 2>/dev/null || echo '?')" "custodian fingerprint refusal was not enforced"
+    fi
+else
+    record FAIL case-27 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
+# ---------------------------------------------------------------------------
 # Case 5: crash injection around the new journal phases
 # ---------------------------------------------------------------------------
 echo
@@ -1550,12 +1656,12 @@ if wait_ready crash-postpublish 30; then
     check "$(is_published "$CASE_DEST" "$C5D_OP")" "yes" "artifact published before crash"
     check "$(marker_count "$CASE_DATA")" "0" "marker removed before the post-publication crash"
     run_backup crash-postpublish-retry "$CASE_DATA" "$CASE_DEST" "$C5D_OP"
-    check "$(backup_exit crash-postpublish-retry)" "2" "retry exit"
-    check "$(backup_reason crash-postpublish-retry)" "operation-already-published" "retry reason"
+    check "$(backup_exit crash-postpublish-retry)" "0" "retry exit"
+    check "$(backup_status crash-postpublish-retry)" "backup-published" "retry status"
     check "$(find "$CASE_DEST" -maxdepth 1 -name "backup-$C5D_OP.o3k" | wc -l)" "1" "single artifact"
     if (( CHECK_OK )); then
         record PASS case-5d "$(backup_exit crash-postpublish-hook)" "published" "0" "free" "yes" \
-            "operation-already-published(exit=2)" "crash after publication: exactly one artifact and a replay refuses duplication"
+            "published-replay(exit=0)" "crash after publication: exactly one artifact and an idempotent replay exits 0"
     else
         record FAIL case-5d "$(backup_exit crash-postpublish-hook)" "$(journal_phase "$CASE_DATA" "$C5D_OP")" \
             "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$C5D_OP")" \
@@ -1865,7 +1971,7 @@ if wait_ready stale-partial 30; then
     # `complete_staged` clears stale finalize debris before it emits the stable
     # awaiting-signature line. Inject after that cleanup, otherwise the executor
     # can remove the just-created file and race the chmod below.
-    await_awaiting_signature_line stale-partial 30 || true
+    await_awaiting_signature_line stale-partial "$C19_OP" 30 || true
     reap_exit "$(daemon_pid stale-partial)" 30 || true
     C19_MEMBERS="$(find "$CASE_DEST/.o3k-backup-artifact-$C19_OP" -mindepth 1 -maxdepth 1 -type d -name 'members-*' | head -1)"
     C19_INJECT_OK=1
@@ -1903,7 +2009,6 @@ fi
 echo
 echo "== Case 20: post-publication crash (staging gone) =="
 C20_OP="$HAPPY_OP"
-C20_ARTIFACT="$(published_path "$HAPPY_DEST" "$C20_OP")"
 C20_SHA="$(artifact_sha "$HAPPY_DEST" "$C20_OP")"
 CHECK_OK=1
 python3 - "$HAPPY_DATA/backup-operations/$C20_OP.json" "$C20_SHA" <<'PY'
@@ -1981,10 +2086,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Case 22 (F22): a missing trust document is exit 3 in `create` as well.
+# Case 22 (P2): `create` validates configuration read-only before the handoff.
 # ---------------------------------------------------------------------------
 echo
-echo "== Case 22: create classification of missing configuration =="
+echo "== Case 22: create rejects a missing configuration before the handoff =="
 fresh_case_dirs missing-create-trust
 C22_OP="$(new_op_id)"
 C22_TRUST="$CASE_TRUST"; C22_PREFIX="$CASE_PREFIX"
@@ -1992,16 +2097,19 @@ CASE_TRUST="$WORK/absent-create-trust.json"
 start_daemon missing-create-trust "$CASE_DATA"
 if wait_ready missing-create-trust 30; then
     run_backup missing-create-trust "$CASE_DATA" "$CASE_DEST" "$C22_OP"
-    reap_exit "$(daemon_pid missing-create-trust)" 30 || true
     CASE_TRUST="$C22_TRUST"; CASE_PREFIX="$C22_PREFIX"
     CHECK_OK=1
-    check "$(backup_exit missing-create-trust)" "3" "missing trust exit"
+    check "$(backup_exit missing-create-trust)" "2" "missing trust exit"
     check "$(backup_reason missing-create-trust)" "trust-config-unavailable" "missing trust reason"
     check "$(marker_count "$CASE_DATA")" "0" "no marker was written"
     check "$(find "$CASE_DEST" -maxdepth 1 -name 'backup-*.o3k' | wc -l)" "0" "nothing published"
+    # The daemon was never asked to hand off the lock, so it is still serving
+    # and exits cleanly on SIGTERM.
+    curl -fsS "http://127.0.0.1:$(daemon_port missing-create-trust)/readyz" >/dev/null 2>&1 || CHECK_OK=0
+    sigterm_expect_zero missing-create-trust || CHECK_OK=0
     if (( CHECK_OK )); then
-        record PASS case-22 "$(backup_exit missing-create-trust)" "-" "0" "free" "no" "trust-config-unavailable(exit=3)" \
-            "missing trust configuration is a recoverable failure (exit 3) in create, matching verify's classification"
+        record PASS case-22 "$(backup_exit missing-create-trust)" "-" "0" "free" "no" "trust-config-unavailable(exit=2)" \
+            "read-only config preflight rejected the missing trust document (exit 2) before the handoff; the daemon stayed ready and exited 0 on SIGTERM"
     else
         record FAIL case-22 "$(backup_exit missing-create-trust 2>/dev/null || echo '?')" \
             "$(journal_phase "$CASE_DATA" "$C22_OP")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
@@ -2113,6 +2221,183 @@ record NOT-COVERED case-12oversize "-" "-" "-" "-" "-" "artifact-too-large" \
     "not feasible end-to-end: verify checks the manifest-bounded size only after a valid Ed25519 signature; producing a signed manifest declaring >5GiB would require reimplementing artifact assembly. Unit mapping covered by backup_verify::tests::reason_mapping_is_stable_for_every_failure_class"
 
 # ---------------------------------------------------------------------------
+# Case 24: a trusted signed manifest without a required member is rejected
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 24: required-member enforcement =="
+MISSING_MEMBER="$WORK/happy-missing-member.o3k"
+python3 - "$HAPPY_ARTIFACT" "$MISSING_MEMBER" <<'PY'
+import json, struct, sys
+source, destination = sys.argv[1:3]
+raw = open(source, "rb").read()
+assert raw[:12] == b"O3KPP6BK\x00\x00\x00\x01"
+manifest_len = struct.unpack(">Q", raw[12:20])[0]
+manifest_end = 20 + manifest_len
+manifest = json.loads(raw[20:manifest_end])
+offset = manifest_end
+blocks = []
+for member in manifest["members"]:
+    size = struct.unpack(">Q", raw[offset:offset + 8])[0]
+    offset += 8
+    blocks.append(struct.pack(">Q", size) + raw[offset:offset + size])
+    offset += size
+assert offset == len(raw)
+index = next(i for i, member in enumerate(manifest["members"])
+             if member["name"] == "metadata/capture.json")
+del manifest["members"][index]
+del blocks[index]
+canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+rebuilt = raw[:12] + struct.pack(">Q", len(canonical)) + canonical + b"".join(blocks)
+open(destination, "wb").write(rebuilt)
+PY
+chmod 0600 "$MISSING_MEMBER"
+run_verify verify-missing-member "$HAPPY_DATA" "$HAPPY_TRUST" "$HAPPY_PREFIX" "$MISSING_MEMBER"
+CHECK_OK=1
+check "$(verify_exit verify-missing-member)" "2" "missing-member exit"
+check "$(verify_reason verify-missing-member)" "missing-required-member" "missing-member reason"
+if (( CHECK_OK )); then
+    record PASS case-24 "$(verify_exit verify-missing-member)" "published" "0" "free" "yes" \
+        "missing-required-member(exit=2)" "a signed manifest without metadata/capture.json is rejected by the required-member set before any decrypt"
+else
+    record FAIL case-24 "-" "-" "-" "-" "-" \
+        "exit=$(verify_exit verify-missing-member 2>/dev/null || echo '?') reason=$(verify_reason verify-missing-member 2>/dev/null || echo '?')" \
+        "required-member enforcement failed"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 25: the executor rejects a fake daemon that answers the handoff
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 25: daemon identity mismatch =="
+C25_DATA="$WORK/c25-data"
+C25_DEST="$WORK/c25-dest"
+mkdir -p "$C25_DATA" "$C25_DEST"
+chmod 0700 "$C25_DATA" "$C25_DEST"
+# The read-only preflight runs before the fake daemon is contacted, so the
+# fake data directory still needs a valid installation binding and a source
+# file; the daemon-identity check then rejects the Python peer.
+CASE_TRUST="$(write_config c25 "$C25_DATA" normal)"
+CASE_PREFIX="$WORK/cfg-c25-normal/install"
+: > "$C25_DATA/o3k.sqlite"
+C25_OP="$(new_op_id)"
+C25_READY="$WORK/c25.ready"
+rm -f "$C25_READY"
+python3 - "$C25_DATA" "$C25_READY" <<'PY' &
+import os, socket, sys, time
+data_dir, ready = sys.argv[1:3]
+control = os.path.join(data_dir, "control")
+os.makedirs(control, mode=0o700, exist_ok=True)
+os.chmod(control, 0o700)
+path = os.path.join(control, "backup.sock")
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(path)
+listener.listen(1)
+open(ready, "w").close()
+connection, _ = listener.accept()
+connection.recv(64)
+connection.sendall(b"O3KBKAC\0")
+time.sleep(3)
+connection.close()
+listener.close()
+PY
+C25_SERVER=$!
+wait_for_file "$C25_READY" 10 || true
+run_backup daemon-identity "$C25_DATA" "$C25_DEST" "$C25_OP"
+wait "$C25_SERVER" 2>/dev/null || true
+CHECK_OK=1
+check "$(backup_exit daemon-identity)" "2" "fake-daemon exit"
+check "$(backup_reason daemon-identity)" "daemon-identity-mismatch" "fake-daemon reason"
+if (( CHECK_OK )); then
+    record PASS case-25 "$(backup_exit daemon-identity)" "-" "0" "free" "no" \
+        "daemon-identity-mismatch(exit=2)" "a python process answering the authenticated handoff is rejected because its exe/uid is not the installed o3kd running as the data-dir owner"
+else
+    record FAIL case-25 "-" "-" "-" "-" "-" \
+        "exit=$(backup_exit daemon-identity 2>/dev/null || echo '?') reason=$(backup_reason daemon-identity 2>/dev/null || echo '?')" \
+        "fake-daemon rejection failed"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 26: a staged signed partial from another manifest/request is rejected
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 26: staged recovery binds the signed partial to the request =="
+fresh_case_dirs signreqbind
+C26_OP="$(new_op_id)"
+start_daemon signreqbind "$CASE_DATA"
+if wait_ready signreqbind 30; then
+    start_backup signreqbind-hook "$CASE_DATA" "$CASE_DEST" "$C26_OP" O3K_BACKUP_TEST_EXIT_AFTER_FINALIZE=1
+    await_signing_request "$CASE_DEST" "$C26_OP" 60 || true
+    reap_exit "$(daemon_pid signreqbind)" 30 || true
+    C26_STAGING="$CASE_DEST/.o3k-backup-artifact-$C26_OP"
+    sign_request "$C26_STAGING" || true
+    wait_backup signreqbind-hook 90 || true
+    C26_PARTIAL="$(find "$C26_STAGING"/members-* -name artifact.partial -type f | head -1)"
+    # Re-sign the same operation with a different manifest (changed created_at)
+    # so the artifact remains validly signed but no longer matches the request.
+    python3 - "$C26_PARTIAL" "$WORK/c26-d1.bin" "$WORK/c26-manifest.json" "$WORK/c26-blocks.bin" <<'PY'
+import json, struct, sys
+(artifact, d1_out, manifest_out, blocks_out) = sys.argv[1:5]
+raw = open(artifact, "rb").read()
+assert raw[:12] == b"O3KPP6BK\x00\x00\x00\x01"
+manifest_len = struct.unpack(">Q", raw[12:20])[0]
+manifest_end = 20 + manifest_len
+manifest = json.loads(raw[20:manifest_end])
+offset = manifest_end
+blocks = bytearray()
+for member in manifest["members"]:
+    size = struct.unpack(">Q", raw[offset:offset + 8])[0]
+    offset += 8
+    blocks += struct.pack(">Q", size) + raw[offset:offset + size]
+    offset += size
+assert offset == len(raw)
+manifest["created_at"] = "2020-01-01T00:00:00Z"
+del manifest["authentication"]["signature"]
+canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+d1 = b"O3K-PP6-BACKUP-MANIFEST-V1\x00" + struct.pack(">Q", len(canonical)) + canonical
+for member in manifest["members"]:
+    name = member["name"].encode()
+    d1 += struct.pack(">I", len(name)) + name + bytes.fromhex(member["sha256"])
+open(d1_out, "wb").write(d1)
+open(manifest_out, "w").write(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+open(blocks_out, "wb").write(blocks)
+PY
+    sign_bytes "$BACKUP_SIGNING_KEY" "$WORK/c26-d1.bin" "$WORK/c26.sig"
+    python3 - "$WORK/c26-manifest.json" "$WORK/c26.sig" "$WORK/c26-blocks.bin" "$C26_PARTIAL" <<'PY'
+import base64, json, struct, sys
+manifest_path, signature_path, blocks_path, artifact_path = sys.argv[1:5]
+manifest = json.load(open(manifest_path))
+signature = open(signature_path, "rb").read()
+manifest["authentication"]["signature"] = base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+raw = b"O3KPP6BK\x00\x00\x00\x01" + struct.pack(">Q", len(canonical)) + canonical + open(blocks_path, "rb").read()
+open(artifact_path, "wb").write(raw)
+PY
+    chmod 0600 "$C26_PARTIAL"
+    run_backup signreqbind-replay "$CASE_DATA" "$CASE_DEST" "$C26_OP"
+    CHECK_OK=1
+    check "$(backup_exit signreqbind-replay)" "2" "mismatched-request exit"
+    check "$(backup_reason signreqbind-replay)" "signing-request-mismatch" "mismatched-request reason"
+    check "$(journal_phase "$CASE_DATA" "$C26_OP")" "staged" "journal stays staged"
+    check "$(marker_count "$CASE_DATA")" "1" "marker kept for inspection"
+    [[ -f "$C26_PARTIAL" ]] || { CHECK_OK=0; log "  signed partial was removed on mismatch"; }
+    [[ -f "$C26_STAGING/signing-request.json" ]] || { CHECK_OK=0; log "  persisted request was removed on mismatch"; }
+    if (( CHECK_OK )); then
+        record PASS case-26 "$(backup_exit signreqbind-replay)" "staged" "1" "free" "no" \
+            "signing-request-mismatch(exit=2)" "a validly signed partial re-signed over a different manifest is rejected before publication; the request and staging are kept"
+    else
+        record FAIL case-26 "-" "-" "-" "-" "-" \
+            "exit=$(backup_exit signreqbind-replay 2>/dev/null || echo '?') reason=$(backup_reason signreqbind-replay 2>/dev/null || echo '?')" \
+            "staged-request binding failed"
+    fi
+else
+    record FAIL case-26 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
+# ---------------------------------------------------------------------------
 # Case 13: zero unowned mutation of canonical state
 # ---------------------------------------------------------------------------
 echo
@@ -2174,6 +2459,29 @@ fi
 HOST_IDENTITY_HASH="$(printf '%s\n%s\n' "$(hostname)" "$(uname -srm)" | sha256sum | cut -d' ' -f1)"
 HAPPY_SITE_ID="$(identity_hex o3k-backup-site-identity-v1 "$WORK/happy-data")"
 HAPPY_INSTALLATION_ID="$(identity_hex o3k-backup-installation-identity-v1 "$WORK/happy-data")"
+# Migration identity of the captured source: the release's declared
+# schema_version and the SHA-256 of the highest applied SQLx checksum (the
+# same `migration_checksum` mapping the artifact record uses).
+MIGRATION_IDENTITY="$(python3 - "$HAPPY_DATA/o3k.sqlite" <<'PY'
+import hashlib, sqlite3, sys
+connection = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+try:
+    row = connection.execute(
+        "SELECT version, checksum FROM _sqlx_migrations ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+finally:
+    connection.close()
+if row is None:
+    print("-\t-")
+else:
+    print(f"{row[0]}\t{hashlib.sha256(row[1]).hexdigest()}")
+PY
+)"
+MAX_MIGRATION_VERSION="$(printf '%s' "$MIGRATION_IDENTITY" | cut -f1)"
+MAX_MIGRATION_CHECKSUM="$(printf '%s' "$MIGRATION_IDENTITY" | cut -f2)"
+MAX_MIGRATION_VERSION_JSON=null
+[[ "$MAX_MIGRATION_VERSION" =~ ^[0-9]+$ ]] && MAX_MIGRATION_VERSION_JSON="$MAX_MIGRATION_VERSION"
+BASELINE_SQLITE_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sqlite_version", ""))' "$ROOT_DIR/crates/o3k-store/state_inventory_v1.json")"
 mkdir -p "$(dirname "$WORK/verdict.json")"
 python3 - "$WORK/verdict.json" "$MATRIX_TSV" <<PY
 import json, sys
@@ -2196,6 +2504,9 @@ verdict = {
     "profile": "o3k-demo-v1",
     "sqlite_version": "$SQLITE_VERSION",
     "schema_version": int("$SCHEMA_VERSION"),
+    "max_migration_version": $MAX_MIGRATION_VERSION_JSON,
+    "max_migration_checksum": "$MAX_MIGRATION_CHECKSUM",
+    "state_inventory_sqlite_version": "$BASELINE_SQLITE_VERSION",
     "backup_id": "$HAPPY_OP",
     "backup_digest": "$HAPPY_ARTIFACT_SHA",
     "backup_size_bytes": $(stat -c %s "$HAPPY_ARTIFACT"),

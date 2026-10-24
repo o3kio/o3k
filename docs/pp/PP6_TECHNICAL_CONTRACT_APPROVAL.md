@@ -39,6 +39,17 @@ itself is not treated as the technical decision.
 | D12 — operator surface | Host-local `o3k` CLI only; no HTTP API. Accepted commands: `o3k backup create --destination ABSOLUTE_DIRECTORY --operation-id UUID`; `o3k backup verify --artifact ABSOLUTE_FILE`; `o3k restore preflight --artifact ABSOLUTE_FILE --target EMPTY_TARGET`; `o3k restore resume --operation-id UUID --confirm-artifact SHA256`. Site/profile/key/database config is root-owned; secrets never appear in arguments/environment. Resume requires TTY confirmation repeating artifact digest and target ID, or one-use root-only operation-bound confirmation file. Exit codes: 0 complete, 2 rejected precondition, 3 recoverable failure, 4 unknown/quarantined. Bounded JSON stdout and stable redacted stderr errors. | The accepted contract defines the command surface; implementation and exact-release runbook verification are still required before operational recovery claims. These commands are not implemented or supported yet. |
 | D13 — canonical state inventory | The authenticated schema carries one entry per registered durable repository, including those with zero rows, mapping repository ID/state family to its exact SQLite and PostgreSQL data tables plus migration IDs. A separate catalog inventory records every migration-owned table/view/sequence/index/constraint/function/trigger and normalized definition digest. The schema bounds repository entries to 512; exceeding this requires a format revision. Commit one generated baseline from store registrations and both migration trees; the baseline comparison, not JSON Schema alone, enforces unique repository IDs and exact coverage. Generate from store registrations and both migration trees; separately compare real migrated catalogs (`sqlite_schema`, `pg_catalog`) with explicit system-object classification. CI regenerates and fails on baseline drift; never auto-updates it. | Any unknown/missing repository or catalog object, extra object, migration mismatch or family gap fails before capture/activation. Include audit events and empty repositories. |
 
+### D12 implementation status (interim, 2026-10-24)
+
+D12's `create` and `verify` commands are implemented against the accepted
+contract (`o3k backup create --destination --operation-id`,
+`o3k backup verify --artifact`); this is accepted-contract implementation work,
+**not** a supported operational-recovery claim. `restore preflight` and
+`restore resume` are **not implemented**. Runtime evidence is limited to the
+SQLite TestLab/portable path and is recorded in
+[`docs/evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md`](../evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md);
+#1084 remains open. This note does not change the accepted D12 text.
+
 ### D7 activation capability by deployment profile
 
 | Deployment | Activation policy | Independent authority required |

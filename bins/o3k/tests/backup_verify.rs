@@ -26,7 +26,11 @@ use std::{
     time::Duration,
 };
 
-use backup::{ArtifactSigner, CreateOptions, StreamMember, create_artifact_stream};
+use backup::{
+    ArtifactSigner, CreateOptions, Manifest, StreamMember, create_artifact_stream,
+    manifest_signing_input,
+};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey};
 use hpke::{Kem, Serializable, kem::X25519HkdfSha256};
 use serde_json::{Value, json};
@@ -67,6 +71,7 @@ struct Scenario {
     trust_document: Value,
     release_manifest: Value,
     artifact: Vec<u8>,
+    signing: SigningKey,
 }
 
 impl Drop for Scenario {
@@ -174,16 +179,28 @@ impl Scenario {
         };
         let members = vec![
             StreamMember {
-                name: "database/state.sqlite".to_owned(),
+                name: "database/o3k.sqlite".to_owned(),
                 media_type: "application/vnd.sqlite3".to_owned(),
                 plaintext_size_bytes: 8,
                 source: Cursor::new(b"snapshot".to_vec()),
             },
             StreamMember {
-                name: "config/o3kd.env".to_owned(),
-                media_type: "text/plain".to_owned(),
-                plaintext_size_bytes: 23,
-                source: Cursor::new(b"O3K_PROFILE=o3k-demo-v1".to_vec()),
+                name: "metadata/capture.json".to_owned(),
+                media_type: "application/json".to_owned(),
+                plaintext_size_bytes: 2,
+                source: Cursor::new(b"{}".to_vec()),
+            },
+            StreamMember {
+                name: "release/release-manifest.json".to_owned(),
+                media_type: "application/json".to_owned(),
+                plaintext_size_bytes: 2,
+                source: Cursor::new(b"{}".to_vec()),
+            },
+            StreamMember {
+                name: "trust/backup-trust.json".to_owned(),
+                media_type: "application/json".to_owned(),
+                plaintext_size_bytes: 2,
+                source: Cursor::new(b"{}".to_vec()),
             },
         ];
         let builder_staging = root.join(".builder-staging");
@@ -247,7 +264,31 @@ impl Scenario {
             trust_document,
             release_manifest,
             artifact,
+            signing,
         }
+    }
+
+    /// Splits the frozen artifact layout into its canonical manifest and the
+    /// member block bytes.
+    fn split_artifact(artifact: &[u8]) -> (Manifest, Vec<u8>) {
+        assert_eq!(&artifact[..12], b"O3KPP6BK\x00\x00\x00\x01");
+        let length = u64::from_be_bytes(
+            artifact[12..20]
+                .try_into()
+                .expect("manifest length is 8 bytes"),
+        ) as usize;
+        let manifest = serde_json::from_slice(&artifact[20..20 + length]).expect("manifest");
+        (manifest, artifact[20 + length..].to_vec())
+    }
+
+    fn rebuild_artifact(manifest: &Manifest, members: &[u8]) -> Vec<u8> {
+        let canonical = serde_jcs::to_vec(manifest).expect("canonical manifest");
+        let mut artifact = Vec::with_capacity(20 + canonical.len() + members.len());
+        artifact.extend_from_slice(b"O3KPP6BK\x00\x00\x00\x01");
+        artifact.extend_from_slice(&(canonical.len() as u64).to_be_bytes());
+        artifact.extend_from_slice(&canonical);
+        artifact.extend_from_slice(members);
+        artifact
     }
 
     fn command(&self) -> Command {
@@ -408,9 +449,9 @@ fn verifies_a_trusted_artifact_against_the_installed_release() {
     assert_eq!(value["recipient_key_id"], RECIPIENT_KEY_ID);
     assert_eq!(value["manifest"]["profile_id"], SITE_PROFILE);
     assert_eq!(value["manifest"]["store_backend"], "sqlite");
-    assert_eq!(value["members"].as_array().map(Vec::len), Some(2));
-    assert_eq!(value["members"][0]["name"], "config/o3kd.env");
-    assert_eq!(value["members"][0]["plaintext_size_bytes"], 23);
+    assert_eq!(value["members"].as_array().map(Vec::len), Some(4));
+    assert_eq!(value["members"][0]["name"], "database/o3k.sqlite");
+    assert_eq!(value["members"][0]["plaintext_size_bytes"], 8);
     let digest = value["artifact_sha256"].as_str().expect("artifact digest");
     assert_eq!(digest.len(), 64);
     assert_no_staging_left(&scenario.data_dir);
@@ -448,6 +489,32 @@ fn rejects_a_corrupted_artifact() {
     corrupted[last] ^= 0xff;
     scenario.write_artifact(&corrupted);
     assert_reason(&scenario.run(), 2, "corrupt-artifact");
+}
+
+#[test]
+fn rejects_a_forged_manifest_signature_as_signature_invalid() {
+    let scenario = Scenario::new("forged-signature");
+    let (mut manifest, members) = Scenario::split_artifact(&scenario.artifact);
+    // A canonical, correctly shaped 64-byte signature that does not verify.
+    manifest.authentication.signature = Some("A".repeat(86));
+    scenario.write_artifact(&Scenario::rebuild_artifact(&manifest, &members));
+    assert_reason(&scenario.run(), 2, "signature-invalid");
+}
+
+#[test]
+fn rejects_a_semantically_invalid_signed_manifest_as_schema_invalid() {
+    let scenario = Scenario::new("bad-member-name");
+    let (mut manifest, members) = Scenario::split_artifact(&scenario.artifact);
+    // `metadata/-evil` passes the frozen JSON Schema pattern (a leading `-` is
+    // accepted there) but violates the semantic member-path rules.
+    let mut bad_member = manifest.members[0].clone();
+    bad_member.name = "metadata/-evil".to_owned();
+    manifest.members.insert(0, bad_member);
+    let signing_input = manifest_signing_input(&manifest).expect("signing input");
+    let signature = scenario.signing.sign(&signing_input).to_bytes();
+    manifest.authentication.signature = Some(URL_SAFE_NO_PAD.encode(signature));
+    scenario.write_artifact(&Scenario::rebuild_artifact(&manifest, &members));
+    assert_reason(&scenario.run(), 2, "schema-invalid");
 }
 
 #[test]

@@ -18,7 +18,7 @@
 //!
 //! ```text
 //! $ o3k backup create --destination /var/lib/o3k/backups --operation-id UUID
-//! o3k backup create: awaiting-signature /var/lib/o3k/backups/.o3k-backup-artifact-UUID/signing-request.json
+//! o3k backup create: awaiting-signature UUID
 //! # offline workstation: sign the D1 signing input under the custody process
 //! # (two-of-three custodian confirmation) and place signing-response.json
 //! # next to the request.
@@ -54,9 +54,11 @@
 //!   real state instead of `backup-operation-incomplete`.
 //! * The operation journal (`<data_dir>/backup-operations/<operation>.json`)
 //!   records `capturing → captured → staged → publishing → published`
-//!   (`aborted` on a failed attempt) with forward-only transitions. A *new*
-//!   capture under an operation id whose journal already says `published` is
-//!   refused (exit 2, `operation-already-published`). The daemon's per-lifetime
+//!   (`aborted` on a failed attempt) with forward-only transitions and the
+//!   verified digest in the terminal record. A replay under an operation id
+//!   whose journal says `published` re-verifies the destination and succeeds
+//!   idempotently (exit 0) or rejects `published-artifact-missing` when the
+//!   artifact is gone; it never captures again. The daemon's per-lifetime
 //!   accepted-id list still covers genuinely concurrent attempts; the journal
 //!   only covers durable operation identity across restarts.
 //!
@@ -66,8 +68,8 @@
 //! 0  artifact published
 //! 2  rejected precondition (unusable or overlapping destination, invalid
 //!    trust/release configuration, D9 source bound, controller unavailable or
-//!    rejected the handoff, a live controller during phase 2, already-published
-//!    operation, or an invalid signing response)
+//!    rejected the handoff, a live controller during phase 2, a missing or
+//!    changed already-published destination, or an invalid signing response)
 //! 3  recoverable failure, including `signing-request-expired` (safe abort),
 //!    `operation-busy` (a concurrent phase 2), `space-unavailable` (D9 boundary
 //!    re-check), and a failed capture/finalization. Once the interrupted-backup
@@ -132,16 +134,16 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    backup::MAX_MEMBER_BYTES,
     backup_artifact::{
         ArtifactConfig, ArtifactFailure, ArtifactFailureClass, AwaitPolicy, CaptureInputs,
         CompletionInputs, MAX_METADATA_MEMBER_BYTES, OPERATION_STAGING_PREFIX, PublishedArtifact,
-        StagedSigning, complete_staged, install_prefix, snapshot_in_flight_operations,
+        StagedSigning, artifact_file_name, complete_staged, snapshot_in_flight_operations,
         stage_capture,
     },
     backup_reservation::{
         MIN_RESERVATION, Reservation, ReservationError, compute_reservation, preflight_reservation,
     },
-    backup_trust::default_trust_config_path,
     output::now_utc_rfc3339,
 };
 
@@ -168,7 +170,7 @@ const METADATA_BOUND_BYTES: u64 = 2 * MAX_METADATA_MEMBER_BYTES;
 /// harness-only stop-after-staging path.
 const SIGNING_REQUIRED_NOTE: &str = "artifact is staged and unsigned; sign the D1 signing input offline under the configured custody process, write signing-response.json next to signing-request.json, and re-run the same command";
 /// Bounded human/machine note emitted on publication.
-const PUBLISHED_NOTE: &str = "artifact signature was verified against the installed trust document; this tool does not attest the custody process and makes no restore claim";
+const PUBLISHED_NOTE: &str = "artifact signature was verified against the configured trust document; this tool does not attest the custody process and makes no restore claim";
 
 /// Exit codes defined by SPEC-0050 §8.
 const EXIT_REJECTED: u8 = 2;
@@ -232,7 +234,7 @@ fn test_barrier_after_receive() {}
 /// in the same process). The environment overrides are read **only** when the
 /// `backup-test-hooks` feature is compiled in; a production binary ignores
 /// them entirely.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone)]
 struct ExecutorControls {
     /// How long to wait for `signing-response.json`.
     await_policy: AwaitPolicy,
@@ -241,6 +243,27 @@ struct ExecutorControls {
     stop_after_staging: bool,
     /// Keep the denial marker even on the `stop_after_staging` path.
     keep_marker: bool,
+    /// Test-only override for the expected daemon executable. Production
+    /// resolves the sibling `o3kd` of the running `o3k` binary.
+    #[cfg(test)]
+    expected_daemon_exe: Option<PathBuf>,
+}
+
+// The manual implementation exists only because the test build seeds the
+// expected daemon executable; the production field set is otherwise derivable.
+#[allow(clippy::derivable_impls)]
+impl Default for ExecutorControls {
+    fn default() -> Self {
+        Self {
+            await_policy: AwaitPolicy::default(),
+            stop_after_staging: false,
+            keep_marker: false,
+            #[cfg(test)]
+            expected_daemon_exe: std::env::current_exe()
+                .ok()
+                .and_then(|path| fs::canonicalize(path).ok()),
+        }
+    }
 }
 
 impl ExecutorControls {
@@ -267,6 +290,37 @@ impl ExecutorControls {
         }
         controls
     }
+
+    /// Test-only expected daemon executable override. Production always
+    /// resolves the sibling `o3kd`.
+    fn expected_daemon_exe(&self) -> Option<&Path> {
+        #[cfg(test)]
+        {
+            self.expected_daemon_exe.as_deref()
+        }
+        #[cfg(not(test))]
+        {
+            None
+        }
+    }
+}
+
+/// The installed `o3kd` that must own the accepted backup socket: the sibling
+/// of the running `o3k` binary.
+fn expected_daemon_executable() -> io::Result<PathBuf> {
+    // Test-only: the process tests run the executor against an in-process fake
+    // daemon, so they must be able to name that process's executable. This
+    // override exists only in builds with the `backup-test-hooks` feature and
+    // is never read by a production binary.
+    #[cfg(feature = "backup-test-hooks")]
+    if let Some(path) = std::env::var_os("O3K_BACKUP_TEST_DAEMON_EXE") {
+        return Ok(PathBuf::from(path));
+    }
+    let current = fs::canonicalize(std::env::current_exe()?)?;
+    current
+        .parent()
+        .map(|directory| directory.join("o3kd"))
+        .ok_or_else(|| io::Error::other("client executable has no parent directory"))
 }
 
 /// Arguments of `o3k backup create`.
@@ -287,11 +341,30 @@ pub struct ArtifactEnvironment {
 
 impl ArtifactEnvironment {
     /// Resolves the configuration paths from the process environment.
+    ///
+    /// The trust/install overrides are honored only for a non-installed
+    /// (TestLab/temporary) data directory; if the data directory cannot be
+    /// resolved, the conservative installed paths are used.
     #[must_use]
     pub fn from_process() -> Self {
+        let data_dir = crate::backup_data_dir::resolve_data_dir()
+            .unwrap_or_else(|_| PathBuf::from(crate::backup_data_dir::ROOT_DATA_DIR));
+        Self::for_data_dir(&data_dir)
+    }
+
+    /// Resolves the configuration paths for an explicit data directory.
+    #[must_use]
+    pub fn for_data_dir(data_dir: &Path) -> Self {
         Self {
-            trust_config: default_trust_config_path(),
-            install_prefix: install_prefix(),
+            trust_config: crate::backup_trust::default_trust_config_path_for(
+                data_dir,
+                std::env::var_os(crate::backup_trust::TRUST_CONFIG_ENV),
+                std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+            ),
+            install_prefix: crate::backup_trust::install_prefix_for(
+                data_dir,
+                std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+            ),
         }
     }
 }
@@ -412,11 +485,16 @@ fn execute_with_data_dir(
     let data_dir = match data_dir_override {
         Some(path) => match fs::canonicalize(path) {
             Ok(path) => path,
-            Err(_) => return BackupCreateOutcome::rejected(operation_id, "data-dir-unavailable"),
+            // A data-directory resolution failure is recoverable (exit 3) and
+            // matches `o3k backup verify`; it is local I/O, not an artifact
+            // assertion.
+            Err(_) => {
+                return BackupCreateOutcome::recoverable(operation_id, "data-dir-unavailable");
+            }
         },
         None => match crate::backup_data_dir::resolve_data_dir() {
             Ok(dir) => dir,
-            Err(reason) => return BackupCreateOutcome::rejected(operation_id, reason),
+            Err(reason) => return BackupCreateOutcome::recoverable(operation_id, reason),
         },
     };
     if destination_overlaps_data_dir(&args.destination, &data_dir) {
@@ -429,14 +507,40 @@ fn execute_with_data_dir(
 
     // Durable operation identity is checked before any controller contact: a
     // published operation id is never captured again, and a staged operation
-    // is completed from its staged files.
-    match backup_journal::read_backup_operation(&data_dir, operation_id) {
+    // is completed from its staged files. A published replay with no
+    // destination artifact gets a clear rejected reason before configuration
+    // is even loaded.
+    //
+    // This read is only routing. The phase-2 branch re-reads the journal after
+    // acquiring the store lock (L3) so a record that advanced to `published`
+    // while this process waited for the lock is never treated as stale
+    // staging.
+    let routing_record = match backup_journal::read_backup_operation(&data_dir, operation_id) {
+        Ok(record) => record,
         Err(error) => return BackupCreateOutcome::rejected(operation_id, error.reason()),
-        Ok(Some(record)) => match record.phase {
-            BackupOperationPhase::Published => {
-                return BackupCreateOutcome::rejected(operation_id, "operation-already-published");
+    };
+    if let Some(record) = routing_record.as_ref()
+        && record.phase == BackupOperationPhase::Published
+    {
+        let destination = match fs::canonicalize(&args.destination) {
+            Ok(path) => path,
+            Err(_) => {
+                return BackupCreateOutcome::rejected(operation_id, "destination-unavailable");
             }
-            BackupOperationPhase::Staged | BackupOperationPhase::Publishing => {
+        };
+        let final_path = destination.join(artifact_file_name(&operation_id.to_string()));
+        if fs::symlink_metadata(&final_path).is_err() {
+            return BackupCreateOutcome::rejected(operation_id, "published-artifact-missing");
+        }
+    }
+    if let Some(record) = routing_record {
+        match record.phase {
+            // Contract L5: a replay of a `published` operation re-verifies the
+            // destination and idempotently clears stale marker/staging debris.
+            // It never captures again.
+            BackupOperationPhase::Published
+            | BackupOperationPhase::Staged
+            | BackupOperationPhase::Publishing => {
                 // ADR-0190 Option A: the controller stays stopped until the
                 // artifact is published. Phase 2 therefore takes the same
                 // lifetime lock the daemon uses; a live controller (or a
@@ -453,6 +557,13 @@ fn execute_with_data_dir(
                             "store-lock-unavailable",
                         );
                     }
+                };
+                // Re-read under the lock. The fresh record decides the phase;
+                // a record that is now `published` follows the L5 idempotent
+                // replay instead of failing as unavailable staging.
+                let record = match read_locked_phase_two_record(&data_dir, operation_id) {
+                    Ok(record) => record,
+                    Err(outcome) => return outcome,
                 };
                 return complete_existing(
                     args,
@@ -471,8 +582,7 @@ fn execute_with_data_dir(
                 );
             }
             BackupOperationPhase::Aborted => {}
-        },
-        Ok(None) => {}
+        }
     }
 
     execute_inner(
@@ -484,6 +594,38 @@ fn execute_with_data_dir(
         environment,
         controls,
     )
+}
+
+/// Re-reads the operation journal after the store-access lock is held.
+///
+/// The pre-lock read is routing only: another owner may have advanced the
+/// record (for example `staged` → `published`) while this process waited for
+/// the lock. The returned record is the authority for the phase-2 action.
+fn read_locked_phase_two_record(
+    data_dir: &Path,
+    operation_id: Uuid,
+) -> Result<BackupOperationRecord, BackupCreateOutcome> {
+    match backup_journal::read_backup_operation(data_dir, operation_id) {
+        Ok(Some(record)) => match record.phase {
+            BackupOperationPhase::Published
+            | BackupOperationPhase::Staged
+            | BackupOperationPhase::Publishing => Ok(record),
+            // A fresh `capturing`/`captured`/`aborted` record means the state
+            // no longer matches the routing decision; let a retry observe it
+            // rather than acting on a stale plan.
+            BackupOperationPhase::Capturing
+            | BackupOperationPhase::Captured
+            | BackupOperationPhase::Aborted => Err(BackupCreateOutcome::recoverable(
+                operation_id,
+                "backup-operation-incomplete",
+            )),
+        },
+        Ok(None) => Err(BackupCreateOutcome::recoverable(
+            operation_id,
+            "backup-operation-incomplete",
+        )),
+        Err(error) => Err(BackupCreateOutcome::rejected(operation_id, error.reason())),
+    }
 }
 
 /// Phase 2: verify the detached signature (or finish a publication replay) and
@@ -590,9 +732,9 @@ fn destination_overlaps_data_dir(destination: &Path, data_dir: &Path) -> bool {
 /// Opens the validated destination directory through a no-follow descriptor
 /// retained for the whole capture. Every later destination access (staging
 /// `mkdirat` and the staging-dir `openat` under it, the pre-capture and
-/// pre-rename revalidations, and the final `renameat`) is relative to this
-/// descriptor, so a path-component symlink swap between validation and use
-/// cannot redirect the publication.
+/// pre-publication revalidations, and the final `linkat` publication) is
+/// relative to this descriptor, so a path-component symlink swap between
+/// validation and use cannot redirect the publication.
 fn open_destination_dir(destination: &Path) -> Result<OwnedFd, &'static str> {
     open(
         destination,
@@ -604,9 +746,10 @@ fn open_destination_dir(destination: &Path) -> Result<OwnedFd, &'static str> {
 
 /// Re-validates the destination directory against the retained descriptor
 /// immediately before a path-based operation on it (`backup_to_file`, the
-/// final rename): the fresh `lstat` must still resolve to the held inode and
-/// keep the effective-uid-owned, not-group/other-writable posture. A symlink
-/// swap or entry replacement between validation and use fails closed here.
+/// final publication): the fresh `lstat` must still resolve to the held inode
+/// and keep the effective-uid-owned, not-group/other-writable posture. A
+/// symlink swap or entry replacement between validation and use fails closed
+/// here.
 fn revalidate_destination(dirfd: &OwnedFd, destination: &Path) -> Result<(), &'static str> {
     let held = fstat(dirfd).map_err(|_| "destination-revalidation-failed")?;
     let current =
@@ -653,6 +796,101 @@ fn validate_destination(destination: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Read-only configuration and D9 preflight performed **before** the handoff.
+///
+/// The controller is not contacted and no marker is written until the trust
+/// document, the installed release identity and the source/space bounds are
+/// known to be acceptable. Under-lock re-loading below remains the authority
+/// for the captured members.
+fn preflight_before_handoff(
+    data_dir: &Path,
+    destination_dir: &Path,
+    environment: &ArtifactEnvironment,
+) -> Result<(), ArtifactFailure> {
+    let config = ArtifactConfig::load_from(
+        data_dir,
+        &environment.trust_config,
+        &environment.install_prefix,
+    )
+    // P2: a configuration failure at this stage rejects the request (exit 2)
+    // without stopping the daemon. `verify` keeps its existing recoverable
+    // classification for a missing operator configuration.
+    .map_err(|failure| ArtifactFailure::rejected(failure.reason()))?;
+
+    let db_path = data_dir.join(SNAPSHOT_FILE_NAME);
+    let wal_path = data_dir.join(format!("{SNAPSHOT_FILE_NAME}-wal"));
+    let metadata_paths = [config.release_manifest_path(), config.trust_config_path()];
+    ensure_member_bound(&db_path, &wal_path, &metadata_paths).map_err(ArtifactFailure::rejected)?;
+
+    let mut source_paths: Vec<&Path> = vec![db_path.as_path()];
+    match fs::symlink_metadata(&wal_path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {
+            source_paths.push(wal_path.as_path());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(ArtifactFailure::rejected("source-unavailable")),
+    }
+    source_paths.push(metadata_paths[0]);
+    source_paths.push(metadata_paths[1]);
+    let reservation =
+        preflight_reservation(&source_paths, destination_dir).map_err(reservation_failure)?;
+    reservation_with_metadata_bound(reservation).map_err(reservation_failure)?;
+    Ok(())
+}
+
+/// Maps a D9 reservation failure to the SPEC-0050 exit classification.
+fn reservation_failure(error: ReservationError) -> ArtifactFailure {
+    if matches!(error, ReservationError::SpaceUnavailable { .. }) {
+        ArtifactFailure::recoverable(error.reason())
+    } else {
+        ArtifactFailure::rejected(error.measurement_code().unwrap_or_else(|| error.reason()))
+    }
+}
+
+/// Enforces SPEC-0050 §8's one-GiB per-member plaintext bound before capture.
+///
+/// The database member is the snapshot produced from the main database after
+/// the WAL checkpoint, so the check uses `database + wal` as the conservative
+/// member size; metadata members are checked individually. A symbolic link or
+/// non-regular source is rejected by the D9 measurement itself.
+fn ensure_member_bound(
+    database_path: &Path,
+    wal_path: &Path,
+    metadata_paths: &[&Path],
+) -> Result<(), &'static str> {
+    let database = fs::symlink_metadata(database_path).map_err(|_| "source-unavailable")?;
+    if database.file_type().is_symlink() {
+        return Err("source-symlink");
+    }
+    if !database.file_type().is_file() {
+        return Err("source-not-regular-file");
+    }
+    let wal_bytes = match fs::symlink_metadata(wal_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => return Err("source-symlink"),
+        Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
+        Ok(_) => 0,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(_) => return Err("source-unavailable"),
+    };
+    if database.len().saturating_add(wal_bytes) > MAX_MEMBER_BYTES {
+        return Err("member-bound-exceeded");
+    }
+    for path in metadata_paths {
+        let metadata = fs::symlink_metadata(path).map_err(|_| "source-unavailable")?;
+        if metadata.file_type().is_symlink() {
+            return Err("source-symlink");
+        }
+        if !metadata.file_type().is_file() {
+            return Err("source-not-regular-file");
+        }
+        if metadata.len() > MAX_MEMBER_BYTES {
+            return Err("member-bound-exceeded");
+        }
+    }
+    Ok(())
+}
+
 /// Executes one capture: handoff, configuration and D9 preflight, snapshot,
 /// manifest/staging, then the Option A signing wait and publication while the
 /// store lock and the denial marker stay held.
@@ -676,6 +914,15 @@ fn execute_inner(
     let deadline = Instant::now()
         .checked_add(OVERALL_DEADLINE)
         .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
+
+    // Contract P2: validate the trust document, release identity and the D9
+    // source bound **read-only before contacting the controller**. A bad
+    // configuration must not stop the daemon for a capture that can never
+    // succeed. The configuration is re-loaded under the lock below so the
+    // captured members describe the quiesced generation.
+    if let Err(failure) = preflight_before_handoff(&data_dir, &destination_dir, environment) {
+        return failure_outcome(operation_id, failure);
+    }
 
     let (installation, site) = match identity_tokens(&data_dir) {
         Ok(tokens) => tokens,
@@ -710,6 +957,30 @@ fn execute_inner(
         }
     };
 
+    // M1: authenticate the daemon that is about to hand off the lock. The
+    // accepted request only proves that some process answered; without this
+    // check a local impostor could pass us descriptors and then hold the
+    // capture open. The expected identity is the installed sibling `o3kd`
+    // running as the data-directory owner.
+    let expected_uid = match fs::metadata(&data_dir) {
+        Ok(metadata) => metadata.uid(),
+        Err(_) => {
+            return BackupCreateOutcome::recoverable(operation_id, "data-dir-unavailable");
+        }
+    };
+    let expected_daemon_exe = match controls.expected_daemon_exe() {
+        Some(path) => path.to_path_buf(),
+        None => match expected_daemon_executable() {
+            Ok(path) => path,
+            Err(_) => {
+                return BackupCreateOutcome::rejected(operation_id, "daemon-identity-mismatch");
+            }
+        },
+    };
+    if o3k_store::verify_daemon_peer(&stream, &expected_daemon_exe, expected_uid).is_err() {
+        return BackupCreateOutcome::rejected(operation_id, "daemon-identity-mismatch");
+    }
+
     test_hook_exit!("O3K_BACKUP_TEST_EXIT_BEFORE_RECEIVE", 95);
     // The store lock is retained for the **whole** capture → offline signing →
     // publication window (ADR-0190 Option A). It is only dropped when this
@@ -721,6 +992,14 @@ fn execute_inner(
                 return BackupCreateOutcome::recoverable(operation_id, "handoff-receive-failed");
             }
         };
+    // The received descriptor must be the canonical data directory we resolved,
+    // not merely a directory that happens to contain a lock file.
+    match store_lock.data_dir_matches(&data_dir) {
+        Ok(true) => {}
+        _ => {
+            return BackupCreateOutcome::rejected(operation_id, "handoff-directory-mismatch");
+        }
+    }
     test_hook_exit!("O3K_BACKUP_TEST_EXIT_AFTER_RECEIVE", 94);
     test_barrier_after_receive();
 
@@ -731,10 +1010,12 @@ fn execute_inner(
         Err(_) => return BackupCreateOutcome::recoverable(operation_id, "destination-unavailable"),
     };
 
-    // Root-owned configuration is read under the lock so the captured members
-    // (trust document, release manifest) and the manifest options describe the
-    // same quiesced generation. A configuration failure exits 2 (rejected) or 3
-    // (missing configuration), with the same classification as `backup verify`.
+    // Root-owned configuration is re-read under the lock so the captured
+    // members (trust document, release manifest) and the manifest options
+    // describe the same quiesced generation. A configuration that disappeared
+    // or changed since the read-only preflight keeps its existing
+    // classification here; the preflight already rejected a bad configuration
+    // before the controller was stopped.
     let config = match ArtifactConfig::load_from(
         &data_dir,
         &environment.trust_config,
@@ -844,15 +1125,22 @@ fn execute_inner(
     }
     source_paths.push(config.release_manifest_path());
     source_paths.push(config.trust_config_path());
-    let reservation = match preflight_reservation(&source_paths, &destination_dir) {
-        Ok(reservation) => reservation_with_metadata_bound(reservation),
+    // SPEC-0050 §8: every allowlisted member is bounded by one GiB. The
+    // snapshot member is the checkpointed database plus any remaining WAL, so
+    // the check is repeated against the post-checkpoint source exactly before
+    // `backup_to_file`.
+    let metadata_paths = [config.release_manifest_path(), config.trust_config_path()];
+    if let Err(reason) = ensure_member_bound(&db_path, &wal_path, &metadata_paths) {
+        abort_before_capture(&data_dir, &marker_path, &journal);
+        return BackupCreateOutcome::rejected(operation_id, reason);
+    }
+    let reservation = match preflight_reservation(&source_paths, &destination_dir)
+        .and_then(reservation_with_metadata_bound)
+    {
+        Ok(reservation) => reservation,
         Err(error) => {
             abort_before_capture(&data_dir, &marker_path, &journal);
-            if matches!(error, ReservationError::SpaceUnavailable { .. }) {
-                return BackupCreateOutcome::recoverable(operation_id, "space-unavailable");
-            }
-            let reason = error.measurement_code().unwrap_or_else(|| error.reason());
-            return BackupCreateOutcome::rejected(operation_id, reason);
+            return failure_outcome(operation_id, reservation_failure(error));
         }
     };
     journal.reserved_bytes = Some(reservation.reserved_bytes);
@@ -1103,17 +1391,21 @@ fn signing_required_outcome(operation_id: Uuid, staged: &StagedSigning) -> Backu
 /// and are bounded by [`MAX_METADATA_MEMBER_BYTES`]; they are reserved up front
 /// instead of being discovered after the space check. The accepted D9 formula
 /// (`max(2S + 1 GiB, 6 GiB)`) is unchanged.
-fn reservation_with_metadata_bound(reservation: Reservation) -> Reservation {
+///
+/// The metadata allowance is part of the measured source, so adding it must
+/// never silently fall back to the lower reservation: if the extra two MiB
+/// pushes the source over the accepted bound, that failure is propagated.
+fn reservation_with_metadata_bound(
+    reservation: Reservation,
+) -> Result<Reservation, ReservationError> {
     let source_bytes = reservation
         .source_bytes
         .saturating_add(METADATA_BOUND_BYTES);
-    Reservation {
+    let reserved_bytes = compute_reservation(source_bytes)?;
+    Ok(Reservation {
         source_bytes,
-        reserved_bytes: match compute_reservation(source_bytes) {
-            Ok(reserved) => reserved.max(reservation.reserved_bytes),
-            Err(_) => reservation.reserved_bytes,
-        },
-    }
+        reserved_bytes: reserved_bytes.max(reservation.reserved_bytes),
+    })
 }
 
 /// Clean abort for a failure **before** any capture started: nothing was
@@ -1202,6 +1494,7 @@ mod tests {
         SIGNING_REQUEST_FILE, SIGNING_REQUEST_FORMAT, SIGNING_RESPONSE_FILE,
         SIGNING_RESPONSE_FORMAT, snapshot_facts,
     };
+    use crate::backup_reservation::{RESERVATION_CAP, SOURCE_PLAINTEXT_BOUND};
     use crate::backup_trust::{BackupTrustConfig, site_and_installation_ids};
     use crate::upgrade::release_identity::BackupReleaseIdentity;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -1424,6 +1717,7 @@ mod tests {
             },
             stop_after_staging: false,
             keep_marker: false,
+            ..ExecutorControls::default()
         }
     }
 
@@ -1704,6 +1998,8 @@ mod tests {
         let root = TempRoot::new("no-controller")?;
         let data_dir = root.private_dir("data")?;
         let dest = root.private_dir("dest")?;
+        create_migrated_store(&data_dir)?;
+        let fixture = ArtifactFixture::new(&root, &data_dir, latest_sqlite_schema_version());
         let fd = destination_fd(&dest)?;
         let outcome = execute_inner(
             &args_for(dest.clone()),
@@ -1711,7 +2007,7 @@ mod tests {
             fd,
             data_dir,
             now_utc_rfc3339(),
-            &absent_environment(&root),
+            &fixture.environment(),
             &ExecutorControls::default(),
         );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
@@ -1724,6 +2020,8 @@ mod tests {
         let root = TempRoot::new("impostor")?;
         let data_dir = root.private_dir("data")?;
         let dest = root.private_dir("dest")?;
+        create_migrated_store(&data_dir)?;
+        let fixture = ArtifactFixture::new(&root, &data_dir, latest_sqlite_schema_version());
         let (installation, site) = identity_tokens(&data_dir)?;
         let impostor = [PathBuf::from("/bin/false"), PathBuf::from("/usr/bin/false")]
             .into_iter()
@@ -1745,7 +2043,7 @@ mod tests {
             destination_fd(&dest)?,
             data_dir.clone(),
             now_utc_rfc3339(),
-            &absent_environment(&root),
+            &fixture.environment(),
             &ExecutorControls::default(),
         );
         server
@@ -1761,6 +2059,8 @@ mod tests {
         let root = TempRoot::new("broken-handoff")?;
         let data_dir = root.private_dir("data")?;
         let dest = root.private_dir("dest")?;
+        create_migrated_store(&data_dir)?;
+        let fixture = ArtifactFixture::new(&root, &data_dir, latest_sqlite_schema_version());
         let control = data_dir.join(o3k_store::BACKUP_CONTROL_DIR);
         fs::create_dir(&control)?;
         fs::set_permissions(&control, fs::Permissions::from_mode(0o700))?;
@@ -1783,7 +2083,7 @@ mod tests {
             fd,
             data_dir,
             now_utc_rfc3339(),
-            &absent_environment(&root),
+            &fixture.environment(),
             &ExecutorControls::default(),
         );
         server
@@ -1795,12 +2095,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_configuration_fails_before_capture() -> io::Result<()> {
+    fn missing_configuration_is_rejected_before_the_handoff() -> io::Result<()> {
         let root = TempRoot::new("no-config")?;
         let data_dir = root.private_dir("data")?;
         let dest = root.private_dir("dest")?;
         create_migrated_store(&data_dir)?;
-        let server = spawn_handoff(data_dir.clone())?;
+        // No control socket exists. Reaching `controller-unavailable` would
+        // prove the command contacted the controller first; the required
+        // classification is the read-only configuration precondition.
         let outcome = execute_inner(
             &args_for(dest.clone()),
             dest.clone(),
@@ -1810,13 +2112,9 @@ mod tests {
             &absent_environment(&root),
             &ExecutorControls::default(),
         );
-        server
-            .join()
-            .map_err(|_| io::Error::other("handoff thread panicked"))??;
-        // F22: a missing trust document is a recoverable configuration failure
-        // in `create` as well as in `verify` (exit 3), never a rejected
-        // artifact precondition.
-        assert_eq!(outcome.exit_code, EXIT_RECOVERABLE);
+        // Contract P2: `create` rejects a bad configuration before the handoff
+        // so the daemon is never stopped for a capture that cannot start.
+        assert_eq!(outcome.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&outcome), "trust-config-unavailable");
         assert!(
             !data_dir
@@ -1831,7 +2129,86 @@ mod tests {
     }
 
     #[test]
-    fn published_operation_is_refused_before_controller_contact() -> io::Result<()> {
+    fn oversized_snapshot_member_is_rejected_before_the_handoff() -> io::Result<()> {
+        let root = TempRoot::new("member-bound")?;
+        let data_dir = root.private_dir("data")?;
+        let dest = root.private_dir("dest")?;
+        let db_path = data_dir.join(SNAPSHOT_FILE_NAME);
+        fs::File::create(&db_path)?.set_len(MAX_MEMBER_BYTES + 1)?;
+        let fixture = ArtifactFixture::new(&root, &data_dir, latest_sqlite_schema_version());
+        // No control socket exists: the one-GiB member bound must fail first.
+        let outcome = execute_inner(
+            &args_for(dest.clone()),
+            dest.clone(),
+            destination_fd(&dest)?,
+            data_dir.clone(),
+            now_utc_rfc3339(),
+            &fixture.environment(),
+            &ExecutorControls::default(),
+        );
+        assert_eq!(outcome.exit_code, EXIT_REJECTED);
+        assert_eq!(outcome_reason(&outcome), "member-bound-exceeded");
+        assert!(
+            !data_dir
+                .join(format!(
+                    "{MARKER_FILE_PREFIX}{}",
+                    outcome.json["operation_id"]
+                ))
+                .exists()
+        );
+        assert_eq!(fs::read_dir(&dest)?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn member_bound_counts_the_database_and_wal_sidecar() -> io::Result<()> {
+        let root = TempRoot::new("member-bound-helper")?;
+        let db_path = root.0.join("o3k.sqlite");
+        let wal_path = root.0.join("o3k.sqlite-wal");
+        let trust_path = root.0.join("backup-trust.json");
+        fs::File::create(&db_path)?.set_len(MAX_MEMBER_BYTES)?;
+        fs::File::create(&trust_path)?.set_len(2)?;
+        assert_eq!(
+            ensure_member_bound(&db_path, &wal_path, &[trust_path.as_path()]),
+            Ok(())
+        );
+        fs::File::create(&wal_path)?.set_len(1)?;
+        assert_eq!(
+            ensure_member_bound(&db_path, &wal_path, &[trust_path.as_path()]),
+            Err("member-bound-exceeded")
+        );
+        fs::remove_file(&wal_path)?;
+        fs::File::create(&trust_path)?.set_len(MAX_MEMBER_BYTES + 1)?;
+        assert_eq!(
+            ensure_member_bound(&db_path, &wal_path, &[trust_path.as_path()]),
+            Err("member-bound-exceeded")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_bound_propagates_the_source_limit() {
+        let at_bound = Reservation {
+            source_bytes: SOURCE_PLAINTEXT_BOUND - METADATA_BOUND_BYTES,
+            reserved_bytes: MIN_RESERVATION,
+        };
+        let accepted =
+            reservation_with_metadata_bound(at_bound).expect("source exactly at the bound");
+        assert_eq!(accepted.source_bytes, SOURCE_PLAINTEXT_BOUND);
+        assert_eq!(accepted.reserved_bytes, RESERVATION_CAP);
+
+        let over_bound = Reservation {
+            source_bytes: SOURCE_PLAINTEXT_BOUND - METADATA_BOUND_BYTES + 1,
+            reserved_bytes: MIN_RESERVATION,
+        };
+        assert!(matches!(
+            reservation_with_metadata_bound(over_bound),
+            Err(ReservationError::SourceBoundExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn published_operation_with_a_missing_destination_is_rejected() -> io::Result<()> {
         let root = TempRoot::new("published")?;
         let data_dir = root.private_dir("data")?;
         let dest = root.private_dir("dest")?;
@@ -1865,7 +2242,7 @@ mod tests {
             &ExecutorControls::default(),
         );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
-        assert_eq!(outcome_reason(&outcome), "operation-already-published");
+        assert_eq!(outcome_reason(&outcome), "published-artifact-missing");
         Ok(())
     }
 
@@ -1905,6 +2282,111 @@ mod tests {
         );
         assert_eq!(outcome.exit_code, EXIT_RECOVERABLE);
         assert_eq!(outcome_reason(&outcome), "backup-operation-incomplete");
+        Ok(())
+    }
+
+    /// F31: every post-marker capture failure (`source-modified-during-capture`,
+    /// `snapshot-hash-failed`, `capture-outcome-unknown`, ...) funnels through
+    /// this helper, which durably records the terminal `aborted` phase so a
+    /// retry never mistakes the attempt for an unfinished capture. The three
+    /// failure reasons themselves have no deterministic seam in this build, so
+    /// they are not separately exercised; the shared journal effect is.
+    #[test]
+    fn capture_failure_helper_records_the_terminal_aborted_phase() -> io::Result<()> {
+        let root = TempRoot::new("abort-helper")?;
+        let data_dir = root.private_dir("data")?;
+        let dest = root.private_dir("dest")?;
+        let operation_id = Uuid::new_v4();
+        let record = BackupOperationRecord {
+            format: o3k_store::backup_journal::BACKUP_OPERATION_FORMAT.to_owned(),
+            operation_id,
+            phase: BackupOperationPhase::Captured,
+            backup_id: operation_id.to_string(),
+            destination: fs::canonicalize(&dest)?.to_string_lossy().into_owned(),
+            staging_path: fs::canonicalize(&dest)?
+                .join(format!("{OPERATION_STAGING_PREFIX}{operation_id}"))
+                .to_string_lossy()
+                .into_owned(),
+            request_sha256: None,
+            artifact_sha256: None,
+            reserved_bytes: None,
+            site_id: "site-1".to_owned(),
+            installation_id: "install-1".to_owned(),
+            created_at: "2026-10-23T12:00:00Z".to_owned(),
+            updated_at: "2026-10-23T12:01:00Z".to_owned(),
+        };
+        journal_io(backup_journal::write_backup_operation(&data_dir, &record))?;
+
+        mark_operation_aborted(&data_dir, &record);
+        let aborted = journal_io(backup_journal::read_backup_operation(
+            &data_dir,
+            operation_id,
+        ))?
+        .expect("aborted record");
+        assert_eq!(aborted.phase, BackupOperationPhase::Aborted);
+
+        // A second failure from the already-aborted state is forward-only and
+        // idempotent, not a phase regression.
+        mark_operation_aborted(&data_dir, &aborted);
+        let still_aborted = journal_io(backup_journal::read_backup_operation(
+            &data_dir,
+            operation_id,
+        ))?
+        .expect("aborted record");
+        assert_eq!(still_aborted.phase, BackupOperationPhase::Aborted);
+        Ok(())
+    }
+
+    #[test]
+    fn phase_two_reloads_the_journal_after_acquiring_the_lock() -> io::Result<()> {
+        let root = TempRoot::new("locked-journal")?;
+        let data_dir = root.private_dir("data")?;
+        let dest = root.private_dir("dest")?;
+        let operation_id = Uuid::new_v4();
+        let staging_path =
+            fs::canonicalize(&dest)?.join(format!("{OPERATION_STAGING_PREFIX}{operation_id}"));
+        let mut record = BackupOperationRecord {
+            format: o3k_store::backup_journal::BACKUP_OPERATION_FORMAT.to_owned(),
+            operation_id,
+            phase: BackupOperationPhase::Staged,
+            backup_id: operation_id.to_string(),
+            destination: fs::canonicalize(&dest)?.to_string_lossy().into_owned(),
+            staging_path: staging_path.to_string_lossy().into_owned(),
+            request_sha256: Some("a".repeat(64)),
+            artifact_sha256: None,
+            reserved_bytes: None,
+            site_id: "site-1".to_owned(),
+            installation_id: "install-1".to_owned(),
+            created_at: "2026-10-23T12:00:00Z".to_owned(),
+            updated_at: "2026-10-23T12:01:00Z".to_owned(),
+        };
+        journal_io(backup_journal::write_backup_operation(&data_dir, &record))?;
+
+        // Routing read (before the lock).
+        let routing = journal_io(backup_journal::read_backup_operation(
+            &data_dir,
+            operation_id,
+        ))?;
+        let routing = routing.expect("routing record");
+        assert_eq!(routing.phase, BackupOperationPhase::Staged);
+
+        // Another owner publishes and releases the lock between the routing
+        // read and this process's acquisition.
+        let artifact_sha256 = "b".repeat(64);
+        record.phase = BackupOperationPhase::Published;
+        record.artifact_sha256 = Some(artifact_sha256.clone());
+        record.updated_at = "2026-10-23T12:02:00Z".to_owned();
+        journal_io(backup_journal::write_backup_operation(&data_dir, &record))?;
+
+        let fresh = read_locked_phase_two_record(&data_dir, operation_id).map_err(|outcome| {
+            io::Error::other(format!("locked journal re-read failed: {}", outcome.json))
+        })?;
+        assert_eq!(fresh.phase, BackupOperationPhase::Published);
+        assert_eq!(
+            fresh.artifact_sha256.as_deref(),
+            Some(artifact_sha256.as_str())
+        );
+        assert_ne!(routing.phase, fresh.phase);
         Ok(())
     }
 
@@ -2169,17 +2651,20 @@ mod tests {
                 .exists(),
             "the completed replay removes the denial marker"
         );
+        let journal = journal_io(backup_journal::read_backup_operation(
+            &data_dir,
+            operation_id,
+        ))?
+        .expect("journal record");
+        assert_eq!(journal.phase, BackupOperationPhase::Published);
+        // L4: the terminal record persists the exact verified digest.
         assert_eq!(
-            journal_io(backup_journal::read_backup_operation(
-                &data_dir,
-                operation_id
-            ))?
-            .map(|record| record.phase),
-            Some(BackupOperationPhase::Published)
+            journal.artifact_sha256.as_deref(),
+            Some(published_sha.as_str())
         );
 
-        // A new capture under a published operation id is refused before the
-        // controller is contacted.
+        // L5: a replay of a published operation whose destination verifies is
+        // an idempotent success, never a wedge and never a second capture.
         let duplicate = execute_with_data_dir(
             &BackupCreateArgs {
                 destination: dest.clone(),
@@ -2189,8 +2674,13 @@ mod tests {
             Some(&data_dir),
             &ExecutorControls::default(),
         );
-        assert_eq!(duplicate.exit_code, EXIT_REJECTED);
-        assert_eq!(outcome_reason(&duplicate), "operation-already-published");
+        assert_eq!(
+            duplicate.exit_code, 0,
+            "unexpected published replay outcome: {}",
+            duplicate.json
+        );
+        assert_eq!(duplicate.json["status"], "backup-published");
+        assert_eq!(duplicate.json["sha256"], published_sha);
         Ok(())
     }
 

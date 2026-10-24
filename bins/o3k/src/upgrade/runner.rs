@@ -74,31 +74,68 @@ pub struct SystemUpgradeIo {
     pub download_base: String,
 }
 
+/// Whether `O3K_UPGRADE_*` path/URL overrides may be honored for this euid.
+///
+/// Root (euid 0) always uses the canonical paths and URLs. Non-root keeps the
+/// sandbox overrides so process tests never touch real host state.
+#[must_use]
+fn upgrade_overrides_allowed(effective_uid: u32) -> bool {
+    effective_uid != 0
+}
+
 impl SystemUpgradeIo {
     /// Resolves the sandboxable paths from the process environment.
     #[must_use]
     pub fn from_env() -> Self {
-        // Root ignores O3K_UPGRADE_PREFIX and resolves the canonical install
-        // location, so a privileged upgrade cannot be redirected by its caller.
-        let prefix = if crate::backup_trust::environment_overrides_allowed() {
+        // Root ignores every O3K_UPGRADE_* path/URL override: a privileged
+        // upgrade must not be redirected by its caller. Non-root callers keep
+        // the sandbox overrides used by the process tests.
+        let overrides = upgrade_overrides_allowed(current_euid());
+        let prefix = if overrides {
             env_path("O3K_UPGRADE_PREFIX").unwrap_or_else(|| PathBuf::from("/usr/local"))
         } else {
             PathBuf::from("/usr/local")
         };
         let data_dir = crate::upgrade::state::default_data_dir();
+        let bin_dir = if overrides {
+            env_path("O3K_UPGRADE_BIN_DIR")
+        } else {
+            None
+        }
+        .unwrap_or_else(|| prefix.join("bin"));
+        let config_dir = if overrides {
+            env_path("O3K_UPGRADE_CONFIG_DIR")
+        } else {
+            None
+        }
+        .unwrap_or_else(|| PathBuf::from("/etc/o3k"));
+        let download_dir = if overrides {
+            env_path("O3K_UPGRADE_DOWNLOAD_DIR")
+        } else {
+            None
+        }
+        .unwrap_or_else(|| data_dir.join("upgrade-download"));
+        let releases_url = if overrides {
+            std::env::var("O3K_UPGRADE_RELEASES_URL").ok()
+        } else {
+            None
+        }
+        .unwrap_or_else(|| DEFAULT_RELEASES_URL.to_owned());
+        let download_base = if overrides {
+            std::env::var("O3K_UPGRADE_DOWNLOAD_BASE").ok()
+        } else {
+            None
+        }
+        .unwrap_or_else(|| DEFAULT_DOWNLOAD_BASE.to_owned());
         Self {
-            bin_dir: env_path("O3K_UPGRADE_BIN_DIR").unwrap_or_else(|| prefix.join("bin")),
-            config_dir: env_path("O3K_UPGRADE_CONFIG_DIR")
-                .unwrap_or_else(|| PathBuf::from("/etc/o3k")),
+            bin_dir,
+            config_dir,
             data_dir: data_dir.clone(),
             state_file: default_state_path(),
             backup_dir: crate::upgrade::backup::default_backup_dir(),
-            download_dir: env_path("O3K_UPGRADE_DOWNLOAD_DIR")
-                .unwrap_or_else(|| data_dir.join("upgrade-download")),
-            releases_url: std::env::var("O3K_UPGRADE_RELEASES_URL")
-                .unwrap_or_else(|_| DEFAULT_RELEASES_URL.to_owned()),
-            download_base: std::env::var("O3K_UPGRADE_DOWNLOAD_BASE")
-                .unwrap_or_else(|_| DEFAULT_DOWNLOAD_BASE.to_owned()),
+            download_dir,
+            releases_url,
+            download_base,
             prefix,
         }
     }
@@ -1866,6 +1903,13 @@ impl SystemUpgradeIo {
 mod tests {
     #![allow(clippy::assertions_on_constants)]
     use super::*;
+
+    #[test]
+    fn upgrade_path_and_url_overrides_are_ignored_for_root() {
+        assert!(!upgrade_overrides_allowed(0));
+        assert!(upgrade_overrides_allowed(1000));
+        assert!(upgrade_overrides_allowed(u32::MAX));
+    }
 
     /// Entry-name validation mirrors `safe_extract` exactly.
     #[test]

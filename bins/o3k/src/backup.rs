@@ -37,13 +37,26 @@ use zeroize::Zeroizing;
 const MAGIC: &[u8; 12] = b"O3KPP6BK\x00\x00\x00\x01";
 const FORMAT_VERSION: &str = "1";
 const MAX_MEMBERS: usize = 64;
-const MAX_MEMBER_BYTES: usize = 1_073_741_824;
+/// SPEC-0050 §8 per-member plaintext bound: one GiB.
+pub const MAX_MEMBER_BYTES: u64 = 1_073_741_824;
 const MAX_TOTAL_PLAINTEXT: usize = 4_294_967_296;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 5 * 1024 * 1024 * 1024;
 const HPKE_INFO: &[u8] = b"O3K-PP6-ARTIFACT-KEY-WRAP-V1\0";
 const SIGN_DOMAIN: &[u8] = b"O3K-PP6-BACKUP-MANIFEST-V1\0";
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Members every accepted backup artifact must carry (contract F10).
+///
+/// The capture path writes exactly these four members and the verifier
+/// requires every one of them. The list is the single authority used by both
+/// `validate_manifest` (capture/publication) and `verify_artifact_stream`.
+pub const REQUIRED_ARTIFACT_MEMBERS: [&str; 4] = [
+    "database/o3k.sqlite",
+    "metadata/capture.json",
+    "release/release-manifest.json",
+    "trust/backup-trust.json",
+];
 
 /// Stable verification failure classes (SPEC-0050 §8).
 ///
@@ -63,6 +76,8 @@ pub enum ArtifactVerifyClass {
     SignatureInvalid,
     /// The artifact was produced by a different release/site/profile/schema.
     ReleaseMismatch,
+    /// A member required by the accepted profile is absent from the manifest.
+    MissingRequiredMember,
     /// The manifest violates the v1 contract schema or semantic rules.
     SchemaInvalid,
     /// A length or aggregate size bound was exceeded.
@@ -85,6 +100,7 @@ impl ArtifactVerifyClass {
             Self::KeyIdentityMismatch => "key-identity-mismatch",
             Self::SignatureInvalid => "signature-invalid",
             Self::ReleaseMismatch => "release-mismatch",
+            Self::MissingRequiredMember => "missing-required-member",
             Self::SchemaInvalid => "schema-invalid",
             Self::ArtifactTooLarge => "artifact-too-large",
             Self::RecipientKeyMismatch => "recipient-key-mismatch",
@@ -864,6 +880,9 @@ pub fn finish_signed_artifact(
         }
         fs::rename(&temporary, &final_path)
             .map_err(|_| "backup artifact staging rename failed".to_owned())?;
+        // Make the published staging name durable before the unsigned artifact
+        // is unlinked.
+        sync_staging_directory(&unsigned.staging_directory)?;
         Ok((size_bytes, sha256))
     })();
     let (size_bytes, sha256) = match result {
@@ -879,7 +898,9 @@ pub fn finish_signed_artifact(
             return Err(error);
         }
     };
-    let _ = fs::remove_file(&unsigned.path);
+    if fs::remove_file(&unsigned.path).is_ok() {
+        sync_staging_directory(&unsigned.staging_directory)?;
+    }
     Ok(StagedArtifact {
         manifest,
         staging_directory: unsigned.staging_directory,
@@ -891,6 +912,14 @@ pub fn finish_signed_artifact(
 
 /// Temporary name prefix used while a signed artifact is assembled.
 const STAGED_SIGNED_ARTIFACT_TEMP_PREFIX: &str = "artifact.partial.tmp-";
+
+/// fsyncs the private members directory after a rename/unlink so the entry
+/// change survives a crash.
+fn sync_staging_directory(directory: &Path) -> Result<(), String> {
+    fs::File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "backup staging directory sync failed".to_owned())
+}
 
 /// Removes `path`, treating an absent entry as already removed.
 fn remove_if_present(path: &Path) -> io::Result<()> {
@@ -1031,7 +1060,10 @@ pub fn read_unsigned_staged_artifact(
 fn open_regular_nofollow(path: &Path) -> Result<fs::File, rustix::io::Errno> {
     let descriptor = rustix::fs::open(
         path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
         rustix::fs::Mode::empty(),
     )?;
     let metadata = rustix::fs::fstat(&descriptor)?;
@@ -1052,7 +1084,7 @@ fn validate_stream_members<R>(members: &[StreamMember<R>]) -> Result<(), String>
         if !names.insert(member.name.as_str()) {
             return Err("backup contains a duplicate member name".to_owned());
         }
-        if member.plaintext_size_bytes > MAX_MEMBER_BYTES as u64 {
+        if member.plaintext_size_bytes > MAX_MEMBER_BYTES {
             return Err("backup member exceeds the configured size limit".to_owned());
         }
         total = total
@@ -1140,7 +1172,9 @@ pub fn verify_artifact_stream<R: Read>(
                 "backup manifest is not canonical JSON",
             ));
         }
-        validate_manifest(&manifest, &manifest.consistency_generation())?;
+        validate_required_members(&manifest)?;
+        validate_manifest(&manifest, &manifest.consistency_generation())
+            .map_err(|detail| verify_failure(ArtifactVerifyClass::SchemaInvalid, &detail))?;
         if manifest.authentication.key_id != keys.signing_key_id
             || manifest.encryption.key_wrapping.recipient_key_id != keys.recipient_key_id
         {
@@ -1167,20 +1201,7 @@ pub fn verify_artifact_stream<R: Read>(
                 "backup signing key is not trusted for this site and profile",
             ));
         }
-        let signature_bytes = URL_SAFE_NO_PAD
-            .decode(
-                manifest
-                    .authentication
-                    .signature
-                    .as_deref()
-                    .ok_or("backup signature is missing")?,
-            )
-            .map_err(|_| "backup signature encoding is invalid".to_owned())?;
-        let signature = Signature::from_slice(&signature_bytes)
-            .map_err(|_| "backup signature encoding is invalid".to_owned())?;
-        keys.signer
-            .verify(&signature_input(&manifest)?, &signature)
-            .map_err(|_| "backup signature verification failed".to_owned())?;
+        verify_manifest_signature(&manifest, keys.signer)?;
         let mut complete_size = (MAGIC.len() as u64)
             .checked_add(8)
             .and_then(|size| size.checked_add(manifest_len as u64))
@@ -1384,7 +1405,9 @@ pub fn verify_signed_artifact_integrity<R: Read>(
             "backup manifest is not canonical JSON",
         ));
     }
-    validate_manifest(&manifest, &manifest.consistency_generation())?;
+    validate_required_members(&manifest)?;
+    validate_manifest(&manifest, &manifest.consistency_generation())
+        .map_err(|detail| verify_failure(ArtifactVerifyClass::SchemaInvalid, &detail))?;
     if manifest.authentication.key_id != expected.signing_key_id
         || manifest.encryption.key_wrapping.recipient_key_id != expected.recipient_key_id
     {
@@ -1433,21 +1456,7 @@ pub fn verify_signed_artifact_integrity<R: Read>(
             "backup signing key is not trusted for this site and profile",
         ));
     }
-    let signature_bytes = URL_SAFE_NO_PAD
-        .decode(
-            manifest
-                .authentication
-                .signature
-                .as_deref()
-                .ok_or("backup signature is missing")?,
-        )
-        .map_err(|_| "backup signature encoding is invalid".to_owned())?;
-    let signature = Signature::from_slice(&signature_bytes)
-        .map_err(|_| "backup signature encoding is invalid".to_owned())?;
-    expected
-        .signer
-        .verify(&signature_input(&manifest)?, &signature)
-        .map_err(|_| "backup signature verification failed".to_owned())?;
+    verify_manifest_signature(&manifest, expected.signer)?;
 
     let mut complete_size = (MAGIC.len() as u64)
         .checked_add(8)
@@ -2097,7 +2106,7 @@ fn validate_members(members: &[PlainMember]) -> Result<(), String> {
         if !names.insert(member.name.as_str()) {
             return Err("backup contains a duplicate member name".to_owned());
         }
-        if member.bytes.len() > MAX_MEMBER_BYTES {
+        if member.bytes.len() as u64 > MAX_MEMBER_BYTES {
             return Err("backup member exceeds the configured size limit".to_owned());
         }
         total = total
@@ -2136,6 +2145,26 @@ fn validate_path(path: &str) -> Result<(), String> {
                 .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
         {
             return Err("backup member path is invalid".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Requires every member in [`REQUIRED_ARTIFACT_MEMBERS`] to be present.
+///
+/// Missing membership is a stable, typed failure so the CLI can report
+/// `missing-required-member` (exit 2) without inspecting diagnostic text.
+fn validate_required_members(manifest: &Manifest) -> Result<(), ArtifactVerifyError> {
+    for required in REQUIRED_ARTIFACT_MEMBERS {
+        if !manifest
+            .members
+            .iter()
+            .any(|member| member.name == required)
+        {
+            return Err(verify_failure(
+                ArtifactVerifyClass::MissingRequiredMember,
+                "backup artifact is missing a required member",
+            ));
         }
     }
     Ok(())
@@ -2281,7 +2310,7 @@ fn validate_manifest(manifest: &Manifest, generation: &str) -> Result<(), String
         }
         if member.consistency_generation != generation
             || member.plaintext_size_bytes.checked_add(16) != Some(member.size_bytes)
-            || member.plaintext_size_bytes > MAX_MEMBER_BYTES as u64
+            || member.plaintext_size_bytes > MAX_MEMBER_BYTES
             || member.sha256.len() != 64
             || !member
                 .sha256
@@ -2293,6 +2322,11 @@ fn validate_manifest(manifest: &Manifest, generation: &str) -> Result<(), String
         total = total
             .checked_add(member.plaintext_size_bytes)
             .ok_or("backup size overflow")?;
+    }
+    for required in REQUIRED_ARTIFACT_MEMBERS {
+        if !names.contains(required) {
+            return Err("backup artifact is missing a required member".to_owned());
+        }
     }
     if total > MAX_TOTAL_PLAINTEXT as u64 || manifest.excluded_state != excluded_state() {
         return Err("backup manifest inventory or size is invalid".to_owned());
@@ -2419,6 +2453,50 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+/// Verifies the detached Ed25519 signature over the D1 signing input.
+///
+/// A missing, malformed or non-verifying signature is always
+/// [`ArtifactVerifyClass::SignatureInvalid`]; it is never reported as generic
+/// artifact corruption so the operator reason stays actionable.
+fn verify_manifest_signature(
+    manifest: &Manifest,
+    verifying_key: &VerifyingKey,
+) -> Result<(), ArtifactVerifyError> {
+    let signature_bytes = URL_SAFE_NO_PAD
+        .decode(
+            manifest
+                .authentication
+                .signature
+                .as_deref()
+                .ok_or_else(|| {
+                    verify_failure(
+                        ArtifactVerifyClass::SignatureInvalid,
+                        "backup signature is missing",
+                    )
+                })?,
+        )
+        .map_err(|_| {
+            verify_failure(
+                ArtifactVerifyClass::SignatureInvalid,
+                "backup signature encoding is invalid",
+            )
+        })?;
+    let signature = Signature::from_slice(&signature_bytes).map_err(|_| {
+        verify_failure(
+            ArtifactVerifyClass::SignatureInvalid,
+            "backup signature encoding is invalid",
+        )
+    })?;
+    verifying_key
+        .verify(&signature_input(manifest)?, &signature)
+        .map_err(|_| {
+            verify_failure(
+                ArtifactVerifyClass::SignatureInvalid,
+                "backup signature verification failed",
+            )
+        })
+}
+
 fn signature_input(manifest: &Manifest) -> Result<Vec<u8>, String> {
     let mut unsigned = manifest.clone();
     unsigned.authentication.signature = None;
@@ -2437,6 +2515,32 @@ fn signature_input(manifest: &Manifest) -> Result<Vec<u8>, String> {
         input.extend_from_slice(&digest);
     }
     Ok(input)
+}
+
+/// Exact D1 signing input for `manifest` (signature field excluded).
+///
+/// This is the public binding surface used by staged crash recovery to prove
+/// that a signed `artifact.partial` still belongs to the persisted signing
+/// request before it may be published.
+///
+/// # Errors
+///
+/// Returns a diagnostic when canonicalization or a member digest fails.
+pub fn manifest_signing_input(manifest: &Manifest) -> Result<Vec<u8>, String> {
+    signature_input(manifest)
+}
+
+/// Canonical unsigned-manifest digest (JCS bytes with the signature removed).
+///
+/// # Errors
+///
+/// Returns a diagnostic when canonicalization fails.
+pub fn unsigned_manifest_digest(manifest: &Manifest) -> Result<String, String> {
+    let mut unsigned = manifest.clone();
+    unsigned.authentication.signature = None;
+    let canonical = serde_jcs::to_vec(&unsigned)
+        .map_err(|_| "backup manifest canonicalization failed".to_owned())?;
+    Ok(hex::encode(Sha256::digest(&canonical)))
 }
 
 fn key_wrap_aad(options: &CreateOptions) -> Result<Vec<u8>, String> {
@@ -2617,14 +2721,24 @@ mod tests {
         };
         let members = vec![
             PlainMember {
-                name: "database/state.sqlite".to_owned(),
+                name: "database/o3k.sqlite".to_owned(),
                 media_type: "application/vnd.sqlite3".to_owned(),
                 bytes: b"snapshot".to_vec(),
             },
             PlainMember {
-                name: "config/o3kd.env".to_owned(),
-                media_type: "text/plain".to_owned(),
-                bytes: b"O3K_PROFILE=o3k-demo-v1".to_vec(),
+                name: "metadata/capture.json".to_owned(),
+                media_type: "application/json".to_owned(),
+                bytes: b"{\"capture\":true}".to_vec(),
+            },
+            PlainMember {
+                name: "release/release-manifest.json".to_owned(),
+                media_type: "application/json".to_owned(),
+                bytes: b"{\"release\":true}".to_vec(),
+            },
+            PlainMember {
+                name: "trust/backup-trust.json".to_owned(),
+                media_type: "application/json".to_owned(),
+                bytes: b"{\"trust\":true}".to_vec(),
             },
         ];
         (options, members, signing, recipient_private)
@@ -2690,15 +2804,21 @@ mod tests {
         assert_eq!(manifest.backup_id, "backup-1");
         assert_eq!(
             restored.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
-            ["config/o3kd.env", "database/state.sqlite"]
+            [
+                "database/o3k.sqlite",
+                "metadata/capture.json",
+                "release/release-manifest.json",
+                "trust/backup-trust.json"
+            ]
         );
-        assert_eq!(restored[1].bytes, members[0].bytes);
+        assert_eq!(restored[0].bytes, members[0].bytes);
     }
 
     #[test]
     fn artifact_rejects_ciphertext_corruption_and_untrusted_signer() {
         let (options, members, signing, recipient) = fixture();
-        let (mut artifact, _) = create_artifact(&options, members, &signing).expect("create");
+        let (mut artifact, _) =
+            create_artifact(&options, members.clone(), &signing).expect("create");
         let last = artifact.len() - 1;
         artifact[last] ^= 1;
         assert!(
@@ -2712,16 +2832,7 @@ mod tests {
             )
             .is_err()
         );
-        let (artifact, _) = create_artifact(
-            &options,
-            vec![PlainMember {
-                name: "database/state.sqlite".to_owned(),
-                media_type: "application/vnd.sqlite3".to_owned(),
-                bytes: b"state".to_vec(),
-            }],
-            &signing,
-        )
-        .expect("create");
+        let (artifact, _) = create_artifact(&options, members, &signing).expect("create");
         assert!(
             verify_artifact(
                 &artifact,
@@ -2933,20 +3044,9 @@ mod tests {
         let payload = (0..(STREAM_CHUNK_BYTES * 3 + 19))
             .map(|index| (index % 239) as u8)
             .collect::<Vec<_>>();
-        let members = vec![
-            StreamMember {
-                name: "database/state.sqlite".to_owned(),
-                media_type: "application/vnd.sqlite3".to_owned(),
-                plaintext_size_bytes: payload.len() as u64,
-                source: std::io::Cursor::new(payload.clone()),
-            },
-            StreamMember {
-                name: "config/o3kd.env".to_owned(),
-                media_type: "text/plain".to_owned(),
-                plaintext_size_bytes: plain_members[1].bytes.len() as u64,
-                source: std::io::Cursor::new(plain_members[1].bytes.clone()),
-            },
-        ];
+        let mut members = stream_fixture_members(&plain_members);
+        members[0].plaintext_size_bytes = payload.len() as u64;
+        members[0].source = std::io::Cursor::new(payload.clone());
         let staged =
             create_artifact_stream(&options, members, &root, &signing).expect("streamed artifact");
         assert!(staged.path.starts_with(&staged.staging_directory));
@@ -2968,7 +3068,7 @@ mod tests {
         assert_eq!(
             ring_plaintext
                 .iter()
-                .find(|member| member.name == "database/state.sqlite")
+                .find(|member| member.name == "database/o3k.sqlite")
                 .expect("database member")
                 .bytes,
             payload
@@ -3000,7 +3100,7 @@ mod tests {
         let database = verified
             .members
             .iter()
-            .find(|member| member.record.name == "database/state.sqlite")
+            .find(|member| member.record.name == "database/o3k.sqlite")
             .expect("database member");
         assert_eq!(
             fs::read(&database.path).expect("database contents"),
@@ -3159,11 +3259,11 @@ mod tests {
         let mut input = std::io::Cursor::new(artifact.clone());
         let verified = verify_artifact_stream(&mut input, &expected_release(), &keys, &root)
             .expect("verify stream");
-        assert_eq!(verified.members.len(), 2);
+        assert_eq!(verified.members.len(), 4);
         let database = verified
             .members
             .iter()
-            .find(|member| member.record.name == "database/state.sqlite")
+            .find(|member| member.record.name == "database/o3k.sqlite")
             .expect("database member");
         assert_eq!(
             fs::read(&database.path).expect("private plaintext"),
@@ -3262,6 +3362,29 @@ mod tests {
         let mut overflowed_size = manifest;
         overflowed_size.members[0].plaintext_size_bytes = u64::MAX;
         assert!(validate_manifest(&overflowed_size, "generation-1").is_err());
+    }
+
+    #[test]
+    fn every_required_member_is_enforced_with_a_typed_failure() {
+        let root = std::env::temp_dir().join(format!("o3k-pp6-required-{}", Uuid::now_v7()));
+        create_private_dir(&root).expect("staging root");
+        let (options, plain_members, _signing, _) = fixture();
+        let unsigned =
+            stage_unsigned_artifact(&options, stream_fixture_members(&plain_members), &root)
+                .expect("stage unsigned");
+        for required in REQUIRED_ARTIFACT_MEMBERS {
+            let mut manifest = unsigned.manifest.clone();
+            manifest.members.retain(|member| member.name != required);
+            let failure = validate_required_members(&manifest).expect_err("missing member");
+            assert_eq!(failure.class(), ArtifactVerifyClass::MissingRequiredMember);
+            assert_eq!(failure.class().reason(), "missing-required-member");
+            assert_eq!(
+                validate_manifest(&manifest, &manifest.consistency_generation()),
+                Err("backup artifact is missing a required member".to_owned())
+            );
+        }
+        fs::remove_dir_all(&unsigned.staging_directory).expect("remove unsigned staging");
+        fs::remove_dir_all(root).expect("remove root");
     }
 
     #[test]

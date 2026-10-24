@@ -194,7 +194,7 @@ PY
 write_backup_config() { # write_backup_config <case-key> <data-dir>
     # Writes the root-owned trust document and the installed release manifest
     # the executor requires, bound to this data directory's canonical identity.
-    local key="$1" data_dir="$2" dir="$WORK/cfg-$1" site installation public fingerprint
+    local data_dir="$2" dir="$WORK/cfg-$1" site installation public fingerprint
     mkdir -p "$dir/install/share/o3k"
     chmod 0700 "$dir" "$dir/install" "$dir/install/share" "$dir/install/share/o3k"
     site="$(identity_hex o3k-backup-site-identity-v1 "$data_dir")"
@@ -587,7 +587,10 @@ if wait_ready case-a 30; then
     chmod 0700 "$A_IMPOSTOR"
     AOP="$(new_op_id)"
     set +e
-    env O3K_DATA_DIR="$CASE_DATA" "$A_IMPOSTOR" backup create --destination "$CASE_DEST" --operation-id "$AOP" \
+    env O3K_DATA_DIR="$CASE_DATA" \
+        O3K_BACKUP_TRUST_CONFIG="$CASE_TRUST_CONFIG" \
+        O3K_INSTALL_PREFIX="$CASE_INSTALL_PREFIX" \
+        "$A_IMPOSTOR" backup create --destination "$CASE_DEST" --operation-id "$AOP" \
         >"$WORK/case-a.backup.json" 2>"$WORK/case-a.backup.stderr"
     A_STATUS=$?
     set -e
@@ -1153,12 +1156,20 @@ if wait_ready case-n1 30; then
     mkdir -p "$N_COPY/control" "$WORK/case-n1-dest"
     chmod 0700 "$N_COPY" "$N_COPY/control" "$WORK/case-n1-dest"
     cp "$CASE_DATA/o3k.sqlite" "$N_COPY/o3k.sqlite"
+    # Give the copy its own valid installation binding so the read-only
+    # preflight passes and the command reaches the (absent) control socket.
+    N1_TRUST_SAVE="$CASE_TRUST_CONFIG"; N1_PREFIX_SAVE="$CASE_INSTALL_PREFIX"
+    write_backup_config case-n1-copy "$N_COPY"
     NOP1="$(new_op_id)"
     set +e
-    env O3K_DATA_DIR="$N_COPY" "$O3K_BIN" backup create --destination "$WORK/case-n1-dest" --operation-id "$NOP1" \
+    env O3K_DATA_DIR="$N_COPY" \
+        O3K_BACKUP_TRUST_CONFIG="$CASE_TRUST_CONFIG" \
+        O3K_INSTALL_PREFIX="$CASE_INSTALL_PREFIX" \
+        "$O3K_BIN" backup create --destination "$WORK/case-n1-dest" --operation-id "$NOP1" \
         >"$WORK/case-n1.backup.json" 2>"$WORK/case-n1.backup.stderr"
     N1_STATUS=$?
     set -e
+    CASE_TRUST_CONFIG="$N1_TRUST_SAVE"; CASE_INSTALL_PREFIX="$N1_PREFIX_SAVE"
     N1_OK=1
     [[ "$N1_STATUS" == "2" ]] || N1_OK=0
     grep -q 'controller-unavailable' "$WORK/case-n1.backup.stderr" || N1_OK=0
@@ -1205,6 +1216,46 @@ if wait_ready case-n1 30; then
     fi
 else
     result FAIL case-n1 "daemon not ready"
+fi
+
+# --- (o) Read-only preflight before the handoff (contract P2) ---------------
+# A bad configuration must not stop the daemon, and an over-bound member must
+# be rejected before any controller contact or marker write.
+fresh_case_dirs case-p2
+start_daemon case-p2 "$CASE_DATA"
+if wait_ready case-p2 30; then
+    P2_OP="$(new_op_id)"
+    run_backup case-p2 "$CASE_DATA" "$CASE_DEST" "$P2_OP" \
+        O3K_BACKUP_TRUST_CONFIG="$WORK/absent-p2-trust.json"
+    P2_OK=1
+    [[ "$(backup_exit case-p2)" == "2" ]] || P2_OK=0
+    grep -q 'trust-config-unavailable' "$WORK/case-p2.backup.stderr" || P2_OK=0
+    [[ "$(marker_count "$CASE_DATA")" == "0" ]] || P2_OK=0
+    [[ ! -e "$CASE_DEST/backup-$P2_OP.o3k" ]] || P2_OK=0
+    curl -fsS "http://127.0.0.1:$(daemon_port case-p2)/readyz" >/dev/null 2>&1 || P2_OK=0
+    sigterm_expect_zero case-p2 || P2_OK=0
+    if (( P2_OK )); then
+        result PASS case-p2 "missing trust config: create exit 2 trust-config-unavailable before the handoff; no marker/artifact, daemon still ready and SIGTERM exit 0"
+    else
+        result FAIL case-p2 "config preflight: exit=$(backup_exit case-p2 2>/dev/null || echo '?') stderr=$(backup_stderr case-p2 2>/dev/null || true)"
+    fi
+else
+    result FAIL case-p2 "daemon not ready"
+fi
+
+fresh_case_dirs case-m1
+truncate -s $((1073741824 + 1)) "$CASE_DATA/o3k.sqlite"
+M1_OP="$(new_op_id)"
+run_backup case-m1 "$CASE_DATA" "$CASE_DEST" "$M1_OP"
+M1_OK=1
+[[ "$(backup_exit case-m1)" == "2" ]] || M1_OK=0
+grep -q 'member-bound-exceeded' "$WORK/case-m1.backup.stderr" || M1_OK=0
+[[ "$(marker_count "$CASE_DATA")" == "0" ]] || M1_OK=0
+[[ ! -e "$CASE_DEST/backup-$M1_OP.o3k" ]] || M1_OK=0
+if (( M1_OK )); then
+    result PASS case-m1 "sparse 1 GiB + 1 B database: create exit 2 member-bound-exceeded before the handoff; no marker or artifact (no controller socket exists)"
+else
+    result FAIL case-m1 "member bound: exit=$(backup_exit case-m1 2>/dev/null || echo '?') stderr=$(backup_stderr case-m1 2>/dev/null || true)"
 fi
 
 echo

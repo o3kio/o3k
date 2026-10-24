@@ -64,10 +64,21 @@ impl ReservationError {
     }
 
     /// Stable measurement code when this is a [`Self::Measurement`] failure.
+    ///
+    /// The returned value is one of this module's static reason constants, so
+    /// it can be emitted directly as an operator reason.
     #[must_use]
-    pub fn measurement_code(&self) -> Option<&str> {
+    pub fn measurement_code(&self) -> Option<&'static str> {
         match self {
-            Self::Measurement(code) => Some(code),
+            Self::Measurement(code) => Some(match code.as_str() {
+                REASON_SOURCE_NOT_REGULAR => REASON_SOURCE_NOT_REGULAR,
+                REASON_SOURCE_SYMLINK => REASON_SOURCE_SYMLINK,
+                REASON_SOURCE_UNAVAILABLE => REASON_SOURCE_UNAVAILABLE,
+                REASON_SOURCE_SIZE_OVERFLOW => REASON_SOURCE_SIZE_OVERFLOW,
+                REASON_DESTINATION_UNAVAILABLE => REASON_DESTINATION_UNAVAILABLE,
+                REASON_FILESYSTEM_STATISTICS_OVERFLOW => REASON_FILESYSTEM_STATISTICS_OVERFLOW,
+                _ => "measurement-failed",
+            }),
             _ => None,
         }
     }

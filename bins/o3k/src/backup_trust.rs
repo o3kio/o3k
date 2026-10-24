@@ -25,29 +25,40 @@
 //! deadline fails closed with `trust-custody-incomplete`. Expiry is evaluated
 //! against the host clock; the tool makes no HSM time-attestation claim.
 //!
-//! # Root and non-root posture
+//! # Installed and TestLab posture
 //!
-//! SPEC-0050 §8 requires root-owned installation configuration. The posture is
-//! therefore split by effective uid:
+//! SPEC-0050 §8 requires root-owned installation configuration. The packaged
+//! executor runs as the data-directory owner (`o3k`), so the trust document
+//! cannot require `root:root 0600`; the accepted posture is:
 //!
-//! * **Root (`euid == 0`)** ignores every environment override
-//!   (`O3K_BACKUP_TRUST_CONFIG`, `O3K_INSTALL_PREFIX`, `O3K_UPGRADE_PREFIX`,
-//!   `O3K_DATA_DIR`). Trust is read from `/etc/o3k/backup-trust.json` and the
-//!   release identity from the canonical install prefix
-//!   ([`DEFAULT_INSTALL_PREFIX`]). A privileged process must never let its
-//!   caller redirect the trust root.
-//! * **Non-root** (a test or service identity) may honor
-//!   `O3K_BACKUP_TRUST_CONFIG` and `O3K_INSTALL_PREFIX`. Because the caller is
-//!   then the authority anyway, the loaded document and key files must still be
-//!   owned by root or the effective uid, mode `0600`, inside a parent that is
-//!   root-or-effective-uid-owned and not group/other-writable. This is the
-//!   documented non-root posture, not a weaker trust claim.
+//! * owned by root **or** the effective uid;
+//! * mode `0600`, or `0640` when the owning group is root or one of the
+//!   process's groups (the service group);
+//! * never group/other **writable**, never other-readable;
+//! * a parent directory owned by root or the effective uid and not
+//!   group/other-writable.
+//!
+//! The recipient private key remains `0600` (or `0400`) on the
+//! recovery/operator host and is never group-readable. The controller only
+//! needs `recipient.x25519_public_key`; with that field configured,
+//! [`BackupTrustConfig::load`] and the capture path never open the private key
+//! file. A private-key-only document still derives the public half on demand,
+//! and verification always requires the private key to decrypt members.
+//!
+//! # Environment overrides
+//!
+//! `O3K_BACKUP_TRUST_CONFIG` and `O3K_INSTALL_PREFIX` are honored **only when
+//! the resolved data directory is not the installed canonical path**
+//! (`/var/lib/o3k`). For the installed data directory they are ignored
+//! regardless of effective uid, so a packaged service or a privileged caller
+//! cannot redirect the trust root. TestLab and temporary data directories keep
+//! the overrides. The same rule applies to the upgrade runner's
+//! `O3K_UPGRADE_*` overrides, which are additionally ignored whenever
+//! `euid == 0` (see `upgrade::runner`).
 //!
 //! When no override applies the document lives at
-//! `<prefix>/etc/o3k/backup-trust.json` (prefix defaults to
-//! [`DEFAULT_INSTALL_PREFIX`]), and `/etc/o3k/backup-trust.json` for root, the
-//! installed layout's [`crate::context::DEFAULT_CONFIG_DIR`] shared with doctor
-//! and upgrade.
+//! `/etc/o3k/backup-trust.json`, the installed layout's
+//! [`crate::context::DEFAULT_CONFIG_DIR`] shared with doctor and upgrade.
 
 use std::{
     collections::BTreeSet,
@@ -64,7 +75,7 @@ use ed25519_dalek::VerifyingKey;
 use hpke::{Deserializable, Kem, Serializable, kem::X25519HkdfSha256};
 use rustix::{
     fs::{Mode, OFlags, open},
-    process::geteuid,
+    process::{getegid, geteuid, getgroups},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -292,7 +303,11 @@ impl BackupTrustConfig {
         if !is_trusted_owner(opened.metadata.uid(), effective_uid) {
             return Err(BackupTrustError::ConfigOwnerUntrusted);
         }
-        if opened.metadata.permissions().mode() & 0o077 != 0 {
+        if !configuration_mode_allowed(
+            opened.metadata.permissions().mode(),
+            opened.metadata.gid(),
+            &process_groups(),
+        ) {
             return Err(BackupTrustError::ConfigPermissionsTooOpen);
         }
         validate_parent_directory(path, effective_uid).map_err(|failure| match failure {
@@ -378,10 +393,10 @@ impl BackupTrustConfig {
     /// Returns the X25519 public key of the configured recovery recipient.
     ///
     /// When the document declares `recipient.x25519_public_key`, that value is
-    /// used directly (and [`Self::validate`] has already proved it matches the
-    /// private key when one is configured), so the capture path never needs to
-    /// read private key material. Otherwise the public key is derived from the
-    /// custody-held private key, exactly as before.
+    /// used directly and no private key file is opened. [`Self::load`] is
+    /// therefore safe on a capture-only controller that has no private key at
+    /// all. Only a private-key-only document derives the public half on
+    /// demand, which reads the configured key file.
     pub fn recipient_public_key(&self) -> Result<[u8; X25519_PUBLIC_KEY_BYTES], BackupTrustError> {
         if let Some(encoded) = &self.recipient.x25519_public_key {
             return decode_x25519_public_key(encoded);
@@ -390,7 +405,7 @@ impl BackupTrustConfig {
         derived_recipient_public_key(&private)
     }
 
-    fn validate(&self, effective_uid: u32) -> Result<(), BackupTrustError> {
+    fn validate(&self, _effective_uid: u32) -> Result<(), BackupTrustError> {
         if self.format != TRUST_CONFIG_FORMAT {
             return Err(BackupTrustError::ConfigFormatUnsupported);
         }
@@ -415,19 +430,13 @@ impl BackupTrustConfig {
         };
         match &self.recipient.x25519_private_key_file {
             Some(encoded_path) => {
-                let recipient_path = Path::new(encoded_path);
-                if !recipient_path.is_absolute() {
+                // Loading is deliberately lazy: only the path grammar is
+                // checked here. The file is opened by
+                // `load_recipient_private_key` on the recovery host, so a
+                // capture-only installation can configure a public key and no
+                // readable private key file.
+                if !Path::new(encoded_path).is_absolute() {
                     return Err(BackupTrustError::RecipientKeyPathInvalid);
-                }
-                // A declared public key must be the public half of the
-                // configured private key; a mismatch means one document cannot
-                // be trusted to describe a single recovery recipient.
-                if let Some(declared) = declared_public {
-                    let private =
-                        self.load_recipient_private_key_with_effective_uid(effective_uid)?;
-                    if derived_recipient_public_key(&private)? != declared {
-                        return Err(BackupTrustError::RecipientKeyInvalid);
-                    }
                 }
             }
             None if declared_public.is_none() => {
@@ -472,10 +481,12 @@ impl BackupTrustConfig {
     /// Reads the configured X25519 recipient private key.
     ///
     /// The file must be an absolute path to a regular, no-follow file that is
-    /// root- or effective-uid-owned with no group/other permission bits, in a
-    /// trusted directory. Contents are 32 raw bytes or 64 hex characters;
-    /// surrounding ASCII whitespace (for example a trailing newline) is
-    /// ignored.
+    /// root- or effective-uid-owned with mode `0600` or `0400`, in a trusted
+    /// directory. The private key is never group-readable: only the recovery
+    /// or operator host holds it. Contents are 32 raw bytes or 64 hex
+    /// characters; surrounding ASCII whitespace (for example a trailing
+    /// newline) is ignored. When the document also declares
+    /// `recipient.x25519_public_key`, the derived public half must match it.
     pub fn load_recipient_private_key(
         &self,
     ) -> Result<<X25519HkdfSha256 as Kem>::PrivateKey, BackupTrustError> {
@@ -506,7 +517,7 @@ impl BackupTrustConfig {
         if !is_trusted_owner(opened.metadata.uid(), effective_uid) {
             return Err(BackupTrustError::RecipientKeyOwnerUntrusted);
         }
-        if opened.metadata.permissions().mode() & 0o077 != 0 {
+        if !recipient_key_mode_allowed(opened.metadata.permissions().mode()) {
             return Err(BackupTrustError::RecipientKeyPermissionsTooOpen);
         }
         validate_parent_directory(path, effective_uid).map_err(|failure| match failure {
@@ -527,8 +538,17 @@ impl BackupTrustConfig {
             return Err(BackupTrustError::RecipientKeyInvalid);
         }
         let raw = Zeroizing::new(parse_recipient_key(&bytes)?);
-        <X25519HkdfSha256 as Kem>::PrivateKey::from_bytes(&raw[..])
-            .map_err(|_| BackupTrustError::RecipientKeyInvalid)
+        let private = <X25519HkdfSha256 as Kem>::PrivateKey::from_bytes(&raw[..])
+            .map_err(|_| BackupTrustError::RecipientKeyInvalid)?;
+        // The declared public key was validated at load time without touching
+        // the private file. Prove the two halves still describe one recipient
+        // now that the private key is actually being used.
+        if let Some(encoded) = &self.recipient.x25519_public_key
+            && derived_recipient_public_key(&private)? != decode_x25519_public_key(encoded)?
+        {
+            return Err(BackupTrustError::RecipientKeyInvalid);
+        }
+        Ok(private)
     }
 
     /// Verifies that the configured site and installation identities are the
@@ -565,78 +585,106 @@ impl ArtifactTrust for BackupTrustConfig {
     }
 }
 
-/// Default trust document path.
+/// Canonical trust document path for the current process.
 ///
-/// As root the canonical `/etc/o3k/backup-trust.json` is always used and every
-/// environment override is ignored. Otherwise:
+/// Resolves the data directory first: overrides are honored only for a
+/// non-installed (TestLab/temporary) data directory. If the data directory is
+/// unavailable the conservative installed path is returned.
+#[must_use]
+pub fn default_trust_config_path() -> PathBuf {
+    match crate::backup_data_dir::resolve_data_dir() {
+        Ok(data_dir) => default_trust_config_path_for(
+            &data_dir,
+            std::env::var_os(TRUST_CONFIG_ENV),
+            std::env::var_os(INSTALL_PREFIX_ENV),
+        ),
+        Err(_) => installed_trust_config_path(),
+    }
+}
+
+/// [`default_trust_config_path`] with the data directory and environment values
+/// passed explicitly, so the installed/TestLab split is testable without
+/// mutating the process-global environment.
+///
+/// For the installed canonical data directory (`/var/lib/o3k`) both overrides
+/// are ignored regardless of effective uid. Otherwise:
 ///
 /// 1. `O3K_BACKUP_TRUST_CONFIG` when it is set and non-empty;
 /// 2. `<O3K_INSTALL_PREFIX>/etc/o3k/backup-trust.json` when the install prefix
 ///    is set and non-empty;
-/// 3. `/etc/o3k/backup-trust.json`, the installed layout's configuration
-///    directory ([`crate::context::DEFAULT_CONFIG_DIR`]).
-#[must_use]
-pub fn default_trust_config_path() -> PathBuf {
-    default_trust_config_path_for(
-        current_euid(),
-        std::env::var_os(TRUST_CONFIG_ENV),
-        std::env::var_os(INSTALL_PREFIX_ENV),
-    )
-}
-
-/// [`default_trust_config_path`] with the effective uid and environment values
-/// passed explicitly, so the root/non-root split is testable without mutating
-/// the process-global environment.
+/// 3. `/etc/o3k/backup-trust.json`.
 #[must_use]
 pub fn default_trust_config_path_for(
-    effective_uid: u32,
+    data_dir: &Path,
     config_override: Option<OsString>,
     install_prefix: Option<OsString>,
 ) -> PathBuf {
-    if effective_uid == 0 {
-        return Path::new(crate::context::DEFAULT_CONFIG_DIR).join(TRUST_CONFIG_FILE_NAME);
+    if trust_overrides_allowed(data_dir) {
+        if let Some(path) = config_override.filter(|value| !value.is_empty()) {
+            return PathBuf::from(path);
+        }
+        if let Some(prefix) = install_prefix.filter(|value| !value.is_empty()) {
+            return PathBuf::from(prefix)
+                .join(INSTALLED_CONFIG_SUBDIR)
+                .join(TRUST_CONFIG_FILE_NAME);
+        }
     }
-    if let Some(path) = config_override.filter(|value| !value.is_empty()) {
-        return PathBuf::from(path);
-    }
-    default_trust_config_path_with_prefix(install_prefix)
+    installed_trust_config_path()
 }
 
-/// [`default_trust_config_path_for`] without the explicit config override.
-fn default_trust_config_path_with_prefix(install_prefix: Option<OsString>) -> PathBuf {
-    match install_prefix.filter(|value| !value.is_empty()) {
-        Some(prefix) => PathBuf::from(prefix)
-            .join(INSTALLED_CONFIG_SUBDIR)
-            .join(TRUST_CONFIG_FILE_NAME),
-        None => Path::new(crate::context::DEFAULT_CONFIG_DIR).join(TRUST_CONFIG_FILE_NAME),
-    }
+fn installed_trust_config_path() -> PathBuf {
+    Path::new(crate::context::DEFAULT_CONFIG_DIR).join(TRUST_CONFIG_FILE_NAME)
 }
 
 /// Installation prefix used for the release identity and installed metadata.
 ///
-/// A root process always uses the canonical [`DEFAULT_INSTALL_PREFIX`];
-/// `O3K_INSTALL_PREFIX` is honored only for non-root callers.
+/// Overrides are honored only for a non-installed (TestLab/temporary) data
+/// directory; the packaged data directory always uses
+/// [`DEFAULT_INSTALL_PREFIX`].
 #[must_use]
 pub fn install_prefix() -> PathBuf {
-    install_prefix_for(current_euid(), std::env::var_os(INSTALL_PREFIX_ENV))
+    match crate::backup_data_dir::resolve_data_dir() {
+        Ok(data_dir) => install_prefix_for(&data_dir, std::env::var_os(INSTALL_PREFIX_ENV)),
+        Err(_) => PathBuf::from(DEFAULT_INSTALL_PREFIX),
+    }
 }
 
-/// [`install_prefix`] with the effective uid and override passed explicitly.
+/// [`install_prefix`] with the data directory and override passed explicitly.
 #[must_use]
-pub fn install_prefix_for(effective_uid: u32, install_prefix: Option<OsString>) -> PathBuf {
-    if effective_uid == 0 {
-        return PathBuf::from(DEFAULT_INSTALL_PREFIX);
+pub fn install_prefix_for(data_dir: &Path, install_prefix: Option<OsString>) -> PathBuf {
+    if trust_overrides_allowed(data_dir) {
+        return install_prefix
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_INSTALL_PREFIX));
     }
-    install_prefix
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_INSTALL_PREFIX))
+    PathBuf::from(DEFAULT_INSTALL_PREFIX)
+}
+
+/// Whether the trust/install environment overrides may be honored for
+/// `data_dir`.
+///
+/// This is intentionally independent of the effective uid: the packaged data
+/// directory is fixed even for root, while a TestLab/temporary data directory
+/// keeps the documented overrides.
+#[must_use]
+pub fn trust_overrides_allowed(data_dir: &Path) -> bool {
+    !is_installed_data_dir(data_dir)
+}
+
+/// True when `data_dir` is the packaged `/var/lib/o3k` installation directory.
+#[must_use]
+pub fn is_installed_data_dir(data_dir: &Path) -> bool {
+    let canonical = fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    canonical == Path::new(crate::backup_data_dir::ROOT_DATA_DIR)
 }
 
 /// Whether an environment path override may be honored by this process.
 ///
-/// A privileged process must never let its caller redirect installation
-/// configuration, so root ignores the overrides entirely.
+/// The upgrade runner uses this predicate: a privileged process must never let
+/// its caller redirect installation paths, so root ignores every
+/// `O3K_UPGRADE_*` override. The backup trust path has the stricter
+/// data-directory rule in [`trust_overrides_allowed`].
 #[must_use]
 pub fn environment_overrides_allowed() -> bool {
     current_euid() != 0
@@ -677,7 +725,7 @@ fn open_no_follow(path: &Path) -> Result<OpenedFile, OpenFailure> {
     }
     let descriptor = open(
         path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|error| {
@@ -717,6 +765,35 @@ fn validate_parent_directory(path: &Path, effective_uid: u32) -> Result<(), Pare
         return Err(ParentFailure::PermissionsTooOpen);
     }
     Ok(())
+}
+
+/// Groups this process may use for group-readable configuration: the
+/// effective gid plus every supplementary group.
+fn process_groups() -> Vec<u32> {
+    let mut groups = vec![getegid().as_raw()];
+    if let Ok(supplementary) = getgroups() {
+        groups.extend(supplementary.into_iter().map(|gid| gid.as_raw()));
+    }
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+/// The accepted trust-document mode: `0600`, or `0640` when the owning group
+/// is root or one of the process's groups (the service group). Anything else,
+/// including any group/other write or other read bit, is refused.
+fn configuration_mode_allowed(mode: u32, gid: u32, groups: &[u32]) -> bool {
+    match mode & 0o777 {
+        0o600 => true,
+        0o640 => gid == 0 || groups.contains(&gid),
+        _ => false,
+    }
+}
+
+/// The private recipient key is never group-readable: exactly `0600` or
+/// `0400`.
+fn recipient_key_mode_allowed(mode: u32) -> bool {
+    matches!(mode & 0o777, 0o600 | 0o400)
 }
 
 fn current_euid() -> u32 {
@@ -1056,40 +1133,65 @@ mod tests {
     }
 
     #[test]
-    fn rejects_group_or_world_writable_configuration_and_key() {
+    fn accepts_the_service_group_mode_and_rejects_writable_or_other_readable() {
         let fixture = new_fixture();
-        fs::set_permissions(&fixture.config_path, fs::Permissions::from_mode(0o664))
-            .expect("relax configuration permissions");
-        assert_eq!(
-            fixture.load().expect_err("writable configuration").reason(),
-            "trust-config-permissions-too-open"
-        );
-
-        // The non-root posture requires a private document: group or other
-        // readability is refused even though the bytes are not writable.
-        fs::set_permissions(&fixture.config_path, fs::Permissions::from_mode(0o644))
+        // The packaged layout is root:o3k 0640, read by the service user
+        // through its group. The fixture's group is one of our groups, so this
+        // exercises the same branch without needing root.
+        fs::set_permissions(&fixture.config_path, fs::Permissions::from_mode(0o640))
             .expect("make configuration group-readable");
-        assert_eq!(
-            fixture
-                .load()
-                .expect_err("group-readable configuration")
-                .reason(),
-            "trust-config-permissions-too-open"
-        );
+        fixture.load().expect("0640 in a service group");
+
+        for mode in [0o664, 0o660, 0o644, 0o604] {
+            fs::set_permissions(&fixture.config_path, fs::Permissions::from_mode(mode))
+                .expect("relax configuration permissions");
+            assert_eq!(
+                fixture.load().expect_err("unsafe configuration").reason(),
+                "trust-config-permissions-too-open",
+                "mode {mode:o}"
+            );
+        }
 
         fs::set_permissions(&fixture.config_path, fs::Permissions::from_mode(0o600))
             .expect("restore configuration permissions");
         let config = fixture.load().expect("valid trust configuration");
-        fs::set_permissions(&fixture.key_path, fs::Permissions::from_mode(0o640))
-            .expect("relax key permissions");
-        assert_eq!(
-            config
-                .load_recipient_private_key()
-                .err()
-                .expect("group-readable key")
-                .reason(),
-            "trust-recipient-key-permissions-too-open"
-        );
+        // The private key is recovery-host-only and never group-readable.
+        for mode in [0o640, 0o604, 0o660] {
+            fs::set_permissions(&fixture.key_path, fs::Permissions::from_mode(mode))
+                .expect("relax key permissions");
+            assert_eq!(
+                config
+                    .load_recipient_private_key()
+                    .err()
+                    .expect("group-readable key")
+                    .reason(),
+                "trust-recipient-key-permissions-too-open",
+                "key mode {mode:o}"
+            );
+        }
+        fs::set_permissions(&fixture.key_path, fs::Permissions::from_mode(0o400))
+            .expect("read-only key");
+        config
+            .load_recipient_private_key()
+            .expect("0400 private key is accepted");
+    }
+
+    #[test]
+    fn root_owned_0640_for_a_service_user_and_group_write_rejection() {
+        // Pure posture matrix: root owns the document and the service group
+        // reads it; any group write or other read is refused.
+        let service_groups = [1000_u32, 1001];
+        assert!(configuration_mode_allowed(0o640, 1001, &service_groups));
+        assert!(configuration_mode_allowed(0o640, 0, &service_groups));
+        assert!(configuration_mode_allowed(0o600, 0, &service_groups));
+        assert!(!configuration_mode_allowed(0o660, 1001, &service_groups));
+        assert!(!configuration_mode_allowed(0o640, 1002, &service_groups));
+        assert!(!configuration_mode_allowed(0o644, 1001, &service_groups));
+        assert!(!configuration_mode_allowed(0o604, 1001, &service_groups));
+        // Ownership still has to be root or the effective uid.
+        assert!(trusted_owner(0, 1000));
+        assert!(trusted_owner(1000, 1000));
+        assert!(!trusted_owner(1001, 1000));
     }
 
     #[test]
@@ -1191,10 +1293,14 @@ mod tests {
         let mut document = fixture.document();
         document["recipient"]["x25519_public_key"] = json!("00".repeat(32));
         fixture.write(&document);
+        // Loading is lazy: the mismatch is detected when the private key is
+        // actually needed, not when the document is read.
+        let mismatched = fixture.load().expect("lazy document load");
         assert_eq!(
-            fixture
-                .load()
-                .expect_err("declared public key that does not match")
+            mismatched
+                .load_recipient_private_key()
+                .err()
+                .expect("declared public key that does not match")
                 .reason(),
             "trust-recipient-key-invalid"
         );
@@ -1240,6 +1346,40 @@ mod tests {
                 .expect_err("recipient without key material")
                 .reason(),
             "trust-recipient-key-invalid"
+        );
+    }
+
+    #[test]
+    fn capture_loads_with_a_configured_public_key_and_no_private_key_file() {
+        // The recovery key lives on another host. The controller's document
+        // names an absent private-key path; loading and deriving the public
+        // key must never open it.
+        let fixture = new_fixture();
+        let derived = <X25519HkdfSha256 as Kem>::sk_to_pk(&fixture.recipient)
+            .to_bytes()
+            .to_vec();
+        let mut document = fixture.document();
+        document["recipient"]["x25519_private_key_file"] = json!(
+            fixture
+                .root
+                .join("absent-recovery.key")
+                .display()
+                .to_string()
+        );
+        document["recipient"]["x25519_public_key"] = json!(hex::encode(&derived));
+        fixture.write(&document);
+        let config = fixture.load().expect("capture-only trust document");
+        assert_eq!(
+            config.recipient_public_key().expect("declared public key"),
+            <[u8; 32]>::try_from(derived.as_slice()).expect("32-byte key")
+        );
+        assert_eq!(
+            config
+                .load_recipient_private_key()
+                .err()
+                .expect("private key is absent on the controller")
+                .reason(),
+            "trust-recipient-key-unavailable"
         );
     }
 
@@ -1472,63 +1612,83 @@ mod tests {
         fs::remove_dir_all(&data_dir).expect("remove identity fixture");
     }
 
-    #[test]
-    fn default_path_prefers_the_explicit_override() {
-        // The environment is process-global, so assert the derivation shape
-        // without mutating it: the override branch is covered by every test
-        // above that loads from an explicit path.
-        let path = default_trust_config_path();
-        assert!(path.is_absolute());
+    fn temp_data_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("o3k-pp6-trust-data-{}", Uuid::now_v7()))
     }
 
     #[test]
-    fn default_path_without_a_prefix_uses_the_installed_config_directory() {
-        let installed = Path::new(crate::context::DEFAULT_CONFIG_DIR).join(TRUST_CONFIG_FILE_NAME);
-        assert_eq!(installed, Path::new("/etc/o3k/backup-trust.json"));
-        assert_eq!(default_trust_config_path_with_prefix(None), installed);
-        assert_eq!(
-            default_trust_config_path_with_prefix(Some(OsString::new())),
-            installed
-        );
-        assert_eq!(
-            default_trust_config_path_with_prefix(Some(OsString::from("/opt/o3k"))),
-            PathBuf::from("/opt/o3k/etc/o3k/backup-trust.json")
-        );
-    }
-
-    #[test]
-    fn root_ignores_every_environment_override() {
+    fn default_path_prefers_the_explicit_override_for_testlab_data() {
+        let data_dir = temp_data_dir();
         let canonical = Path::new("/etc/o3k/backup-trust.json").to_path_buf();
         assert_eq!(
             default_trust_config_path_for(
-                0,
-                Some(OsString::from("/tmp/attacker-trust.json")),
-                Some(OsString::from("/tmp/attacker-prefix")),
-            ),
-            canonical
-        );
-        // Non-root keeps the documented override order.
-        assert_eq!(
-            default_trust_config_path_for(
-                1000,
+                &data_dir,
                 Some(OsString::from("/tmp/service-trust.json")),
                 Some(OsString::from("/opt/o3k")),
             ),
             PathBuf::from("/tmp/service-trust.json")
         );
         assert_eq!(
-            default_trust_config_path_for(1000, None, Some(OsString::from("/opt/o3k")),),
+            default_trust_config_path_for(&data_dir, None, Some(OsString::from("/opt/o3k"))),
             PathBuf::from("/opt/o3k/etc/o3k/backup-trust.json")
         );
-
         assert_eq!(
-            install_prefix_for(0, Some(OsString::from("/tmp/attacker-prefix"))),
+            default_trust_config_path_for(&data_dir, None, Some(OsString::new())),
+            canonical
+        );
+        assert!(trust_overrides_allowed(&data_dir));
+        assert_eq!(
+            install_prefix_for(&data_dir, Some(OsString::from("/opt/o3k"))),
+            PathBuf::from("/opt/o3k")
+        );
+    }
+
+    #[test]
+    fn installed_data_dir_ignores_the_environment_overrides_regardless_of_euid() {
+        let installed = Path::new("/var/lib/o3k");
+        let canonical = Path::new("/etc/o3k/backup-trust.json").to_path_buf();
+        assert!(is_installed_data_dir(installed));
+        assert!(!trust_overrides_allowed(installed));
+        // No euid parameter exists precisely so the rule cannot be weakened by
+        // a service user or by root.
+        assert_eq!(
+            default_trust_config_path_for(
+                installed,
+                Some(OsString::from("/tmp/attacker-trust.json")),
+                Some(OsString::from("/tmp/attacker-prefix")),
+            ),
+            canonical
+        );
+        assert_eq!(
+            install_prefix_for(installed, Some(OsString::from("/tmp/attacker-prefix"))),
             PathBuf::from(DEFAULT_INSTALL_PREFIX)
         );
         assert_eq!(
-            install_prefix_for(1000, Some(OsString::from("/opt/o3k"))),
-            PathBuf::from("/opt/o3k")
+            install_prefix_for(installed, None),
+            PathBuf::from(DEFAULT_INSTALL_PREFIX)
         );
-        assert_eq!(install_prefix_for(1000, None), PathBuf::from("/usr/local"));
+    }
+
+    #[test]
+    fn default_path_without_a_prefix_uses_the_installed_config_directory() {
+        let installed = Path::new(crate::context::DEFAULT_CONFIG_DIR).join(TRUST_CONFIG_FILE_NAME);
+        assert_eq!(installed, Path::new("/etc/o3k/backup-trust.json"));
+        let data_dir = temp_data_dir();
+        assert_eq!(
+            default_trust_config_path_for(&data_dir, None, None),
+            installed
+        );
+        assert_eq!(
+            default_trust_config_path_for(&data_dir, None, Some(OsString::new())),
+            installed
+        );
+    }
+
+    #[test]
+    fn trust_path_without_a_resolvable_data_dir_is_conservative() {
+        // `default_trust_config_path` cannot be redirected in-process; assert
+        // only that a resolved or conservative path is absolute and installed.
+        let path = default_trust_config_path();
+        assert!(path.is_absolute());
     }
 }

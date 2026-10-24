@@ -198,6 +198,8 @@ classification, artifact published? "n/a" = not applicable to the case.
 | n1 | executor pointed at a copy of the data dir (different installation binding) | daemon | daemon-held | healthy | none | none | exit 2 `controller-unavailable` (no live socket in the copy); in-band `identity-mismatch` unit-covered | **PASS (executed)** |
 | n3 | second daemon instance while the first lives | first daemon | first-daemon-held | competitor exit 1 at the store lock (control bind never reached) | none | n/a | covered above | **PASS (executed)** |
 | n4 | stale control socket after SIGKILL | replacement daemon | replacement-held | replacement starts ready, SIGTERM exit 0 | none | n/a | socket file survived the kill (no destructors); this case asserts replacement readiness + clean SIGTERM only — the owner/type check + rebind itself is unit-covered (`bind_refuses_non_socket_at_socket_path`, `stale_socket_file_is_replaced_at_bind`) | **PASS (executed)** |
+| p2 | missing trust config with a live daemon | daemon (never contacted) | daemon-held | still ready (`/readyz` 200), SIGTERM exit 0 | none | none | read-only config preflight rejects before the handoff, exit 2 `trust-config-unavailable`; no marker written | **PASS (executed)** |
+| m1 | sparse database one byte over the 1 GiB member bound | none (no controller socket) | free | n/a | none | none | preflights fail before the handoff, exit 2 `member-bound-exceeded`; no marker written | **PASS (executed)** |
 
 ### Case-d existing coverage map (never reported as executed here)
 
@@ -408,6 +410,21 @@ Round 3 (this round's fixes):
   contract test).
 - `tests/pp6_backup_handoff.sh` — **PASS — 17 executed checks, 7
   documented-coverage rows, 0 failures** (exit 0).
+
+Round 3 (contract/correctness fixes):
+
+- `tests/pp6_backup_handoff.sh` — **PASS — 19 executed checks, 7
+  documented-coverage rows, 0 failures** (exit 0). The two new rows are
+  `case-p2` (read-only config preflight; the daemon stays ready) and
+  `case-m1` (sparse 1 GiB + 1 B database rejected as `member-bound-exceeded`
+  before any controller contact). `case-a` and `case-n1` now carry a valid
+  preflight configuration so they still exercise the intended
+  authentication/socket paths.
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy -p o3k -p o3k-store -p o3kd --all-targets --all-features -- -D warnings` — exit 0, no warnings.
+- `cargo test -p o3k -p o3k-store -p o3kd --all-features` — exit 0 (0 failed);
+  includes the new member-bound, journal re-read, metadata-bound, signature
+  class, catalog-internal and migration-file-binding tests.
 
 Round 2 (this round's fixes):
 

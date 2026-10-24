@@ -768,6 +768,44 @@ pub fn connect_and_request(
     )))
 }
 
+/// Authenticates the daemon side of an accepted handoff stream.
+///
+/// The executor calls this after [`connect_and_request`] and before
+/// [`crate::StoreAccessLock::receive_handoff`]. It requires:
+///
+/// * `SO_PEERCRED` uid equal to `expected_uid` (the resolved data-directory
+///   owner);
+/// * `/proc/<pid>/status` effective uid equal to the socket credential, so a
+///   process whose credentials changed after connect is refused;
+/// * `/proc/<pid>/exe` device+inode equal to `expected_exe`, using the same
+///   mount-namespace-safe identity comparison as the listener.
+///
+/// A mismatch is [`BackupControlError::Unauthorized`]; an unreadable peer is
+/// [`BackupControlError::PeerChanged`]. Both fail closed.
+pub fn verify_daemon_peer(
+    stream: &UnixStream,
+    expected_exe: &Path,
+    expected_uid: u32,
+) -> Result<(), BackupControlError> {
+    let credentials = get_socket_peercred(stream.as_fd())
+        .map_err(|error| BackupControlError::Io(error.into()))?;
+    let uid = credentials.uid.as_raw();
+    let pid = Pid::as_raw(Some(credentials.pid));
+    if uid != expected_uid || pid <= 0 {
+        return Err(BackupControlError::Unauthorized);
+    }
+    let identity =
+        read_process_identity(pid as u32).map_err(|_| BackupControlError::PeerChanged)?;
+    if identity.uid != uid {
+        return Err(BackupControlError::Unauthorized);
+    }
+    match executable_matches(&identity, expected_exe) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(BackupControlError::Unauthorized),
+        Err(error) => Err(BackupControlError::Io(error)),
+    }
+}
+
 fn open_control_dir(data_dir_fd: &rustix::fd::OwnedFd) -> io::Result<rustix::fd::OwnedFd> {
     match openat(
         data_dir_fd,
@@ -1292,6 +1330,38 @@ mod tests {
         let site = site_token(&root.0)?;
         assert_eq!(first_installation, second_installation);
         assert_ne!(first_installation, site);
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_peer_requires_the_expected_uid_and_executable() -> io::Result<()> {
+        let (stream, _peer) = UnixStream::pair()?;
+        let uid = geteuid().as_raw();
+        let current_exe = fs::canonicalize(std::env::current_exe()?)?;
+        verify_daemon_peer(&stream, &current_exe, uid)
+            .map_err(|_| io::Error::other("matching daemon identity was rejected"))?;
+
+        let wrong_uid = uid.wrapping_add(1);
+        assert!(matches!(
+            verify_daemon_peer(&stream, &current_exe, wrong_uid),
+            Err(BackupControlError::Unauthorized)
+        ));
+
+        // A different executable inode is rejected even with the right uid:
+        // this is the fake-handoff-server case.
+        let mut candidates = ["/bin/sh", "/usr/bin/env", "/lib/systemd/systemd"]
+            .into_iter()
+            .filter(|path| fs::metadata(path).is_ok());
+        let other = candidates
+            .next()
+            .ok_or_else(|| io::Error::other("no alternative executable for the test"))?;
+        let other = fs::canonicalize(other)?;
+        if fs::metadata(&other)?.ino() != fs::metadata(&current_exe)?.ino() {
+            assert!(matches!(
+                verify_daemon_peer(&stream, &other, uid),
+                Err(BackupControlError::Unauthorized)
+            ));
+        }
         Ok(())
     }
 

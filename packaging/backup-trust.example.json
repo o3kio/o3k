@@ -9,7 +9,6 @@
   },
   "recipient": {
     "key_id": "recovery-1",
-    "x25519_private_key_file": "/etc/o3k/custody/recipient.key",
     "x25519_public_key": "REPLACE-WITH-64-LOWERCASE-HEX-X25519-PUBLIC-KEY"
   },
   "revoked_key_ids": [],

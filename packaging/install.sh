@@ -370,7 +370,10 @@ PY
 if [[ -f "$ROOT_DIR/manifest.json" ]]; then
   MANIFEST_SOURCE="$ROOT_DIR/manifest.json"
   if [[ -n "$RELEASE_ARTIFACT_SHA256" ]]; then
-    AUGMENTED_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/o3k-release-manifest.XXXXXX")"
+    # Keep the temporary manifest inside the root-owned installation prefix
+    # (never TMPDIR): the input is a verified release artifact and the
+    # augmented copy is installed with root ownership.
+    AUGMENTED_MANIFEST="$(mktemp "$PREFIX/share/o3k/.o3k-release-manifest.XXXXXX")"
     augment_release_manifest "$MANIFEST_SOURCE" "$AUGMENTED_MANIFEST" "$RELEASE_ARTIFACT_SHA256" \
       || { echo "cannot persist the verified release artifact digest" >&2; exit 1; }
     MANIFEST_SOURCE="$AUGMENTED_MANIFEST"
@@ -385,9 +388,13 @@ if [[ -f "$ROOT_DIR/SHA256SUMS" ]]; then
   INSTALLED_FILES+=(share/o3k/SHA256SUMS)
 fi
 # Backup trust template (no key material). Operators copy it to the root-owned
-# /etc/o3k/backup-trust.json and replace every placeholder; the loader validates
-# the file posture and rejects incomplete or malformed values. The installer
-# never creates /etc/o3k/backup-trust.json or any permissive /etc/o3k directory.
+# /etc/o3k/backup-trust.json as root:o3k 0640 (0600 is also accepted) and
+# replace every placeholder; the loader validates the file posture and rejects
+# incomplete or malformed values. The example is capture-only: it names the
+# X25519 public key and no private key file. The recovery private key stays on
+# the operator/recovery host as 0600 (0400 accepted); `o3k backup verify`
+# requires it there. The installer never creates /etc/o3k/backup-trust.json or
+# any permissive /etc/o3k directory.
 install_owned_file "$ROOT_DIR/packaging/backup-trust.example.json" \
   "$PREFIX/share/o3k/backup-trust.example.json" share/o3k/backup-trust.example.json 0644
 INSTALLED_FILES+=(share/o3k/backup-trust.example.json)
@@ -801,5 +808,5 @@ if [[ $EUID -eq 0 && "$PROFILE" == libvirt ]]; then
 fi
 echo "installed o3kd profile=$PROFILE at $PREFIX/bin/o3kd; data=$DATA_DIR; config=$ENV_FILE; user=$RUN_USER"
 if [[ -f "$PREFIX/share/o3k/backup-trust.example.json" ]]; then
-  echo "backup trust template: $PREFIX/share/o3k/backup-trust.example.json (copy to /etc/o3k/backup-trust.json as root:root 0600 and replace placeholders; fields: format, site_id, installation_id, profile_id, artifact_signing{key_id, ed25519_public_key}, recipient{key_id, x25519_private_key_file, x25519_public_key}, revoked_key_ids, custody{record_id, purpose, key_fingerprint, threshold, custodians, storage_class, expires_at})"
+  echo "backup trust template: $PREFIX/share/o3k/backup-trust.example.json (install as /etc/o3k/backup-trust.json root:o3k 0640, or 0600, and replace placeholders; capture uses recipient.x25519_public_key only; keep the X25519 private key on the recovery/operator host as 0600 and set recipient.x25519_private_key_file there for verify; fields: format, site_id, installation_id, profile_id, artifact_signing{key_id, ed25519_public_key}, recipient{key_id, x25519_public_key[, x25519_private_key_file]}, revoked_key_ids, custody{record_id, purpose, key_fingerprint, threshold, custodians, storage_class, expires_at})"
 fi

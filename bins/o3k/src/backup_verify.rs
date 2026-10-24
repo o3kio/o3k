@@ -1,40 +1,55 @@
 //! `o3k backup verify` — exact-release verification of an authenticated PP.6
 //! backup artifact (SPEC-0050 §8, ADR-0189 D12).
 //!
-//! The command is read-only with respect to canonical state. It:
+//! The command never opens or mutates the live SQLite store. It:
 //!
 //! 1. resolves the daemon data directory exactly as `o3k backup create` does
-//!    (`O3K_DATA_DIR` when set and non-empty, else `./data`, canonicalized for
-//!    a non-root caller; a root process uses the canonical `/var/lib/o3k` and
-//!    ignores the override);
-//! 2. loads the root-owned installation trust document
-//!    ([`default_trust_config_path`]; `/etc/o3k/backup-trust.json` as root,
-//!    `O3K_BACKUP_TRUST_CONFIG` only for a non-root caller) and proves its
-//!    site/installation identity matches this data directory;
+//!    (root uses `/var/lib/o3k`; a non-root caller uses a non-empty
+//!    `O3K_DATA_DIR`, else `O3K_DATA_DIR=` from `/etc/o3k/o3kd.env`, else
+//!    `./data`, canonicalized); a resolution failure is recoverable (exit 3)
+//!    in both commands;
+//! 2. loads the installation trust document (default
+//!    `/etc/o3k/backup-trust.json`; `O3K_BACKUP_TRUST_CONFIG` and
+//!    `O3K_INSTALL_PREFIX` are honored only for a non-installed data
+//!    directory) and proves its site/installation identity matches this data
+//!    directory;
 //! 3. pins the exact installed release from
-//!    `<install prefix>/share/o3k/release-manifest.json` (canonical `/usr/local`
-//!    as root, `O3K_INSTALL_PREFIX` only for a non-root caller) through
+//!    `<install prefix>/share/o3k/release-manifest.json` through
 //!    [`crate::upgrade::release_identity::backup_release_identity`], which
 //!    reads it bounded with `O_NOFOLLOW` and a trusted owner/mode check;
-//! 4. opens the artifact with `O_NOFOLLOW`, verifies its canonical manifest,
+//! 4. copies the main SQLite database and a non-empty WAL sidecar into its
+//!    private `0700` staging directory (under the store-access lock) and reads
+//!    the copy, never the live database; `immutable=1` is used when no
+//!    non-empty WAL exists;
+//! 5. opens the artifact with `O_NOFOLLOW`, verifies its canonical manifest,
 //!    Ed25519 signature, HPKE key wrapping, member digests and AES-GCM tags
 //!    through [`crate::backup::verify_artifact_stream`];
-//! 5. removes the staged plaintext before reporting success.
+//! 6. removes the staged plaintext and the database copy before reporting
+//!    success.
+//!
+//! # Host boundary and required key material
+//!
+//! Full member verification decrypts every member, so it requires the X25519
+//! recovery private key and must run on the operator/recovery host that holds
+//! it. Signature, D1 signing-input and member-digest authenticity can be
+//! checked independently without that key (the campaign does this with
+//! `openssl` and a local JCS implementation), but this command intentionally
+//! performs the full decryption and reports member plaintext sizes. A
+//! public-key-only verify mode is a follow-up that needs a contract decision;
+//! the controller-side capture path needs only the public key.
 //!
 //! # Migration identity sourcing (known limitation)
 //!
 //! The installed release manifest carries a schema version but not the applied
 //! migration identities. The verifier therefore reads the migration inventory
-//! from this installation's canonical, already-migrated SQLite store and only
-//! accepts it when its maximum migration version equals the release's
-//! `schema_version`. The store is opened with a plain read-only sqlx
-//! connection: no lifetime lock, no migration, no checkpoint, no mutation. If
-//! the store or its `_sqlx_migrations` table is unavailable, or the schema
-//! version differs, the expected release cannot be established and the
-//! command fails closed with `expected-release-unavailable`. Like any SQLite
-//! reader of a WAL database, the read-only connection needs access to the
-//! store's sidecar files while a controller is live; if the operator cannot
-//! read them the command rejects rather than guessing the release.
+//! from a private copy of this installation's already-migrated SQLite store
+//! and only accepts it when its maximum migration version equals the release's
+//! `schema_version`. The copy is taken while holding the lifetime store lock;
+//! the copy is opened with a read-only sqlx connection (no migration, no
+//! checkpoint, no mutation of the live store). If the store or its
+//! `_sqlx_migrations` table is unavailable, or the schema version differs, the
+//! expected release cannot be established and the command fails closed with
+//! `expected-release-unavailable`.
 //!
 //! The v1 contract stores a 64-character SHA-256 migration checksum while SQLx
 //! records a 48-byte SHA-384 checksum. [`migration_checksum`] is the single
@@ -89,7 +104,9 @@ use crate::backup::{
     ArtifactVerificationKeys, ArtifactVerifyClass, ArtifactVerifyError, ExpectedRelease,
     MigrationIdentity, verify_artifact_stream,
 };
-use crate::backup_trust::{BackupTrustConfig, BackupTrustError, default_trust_config_path};
+use crate::backup_trust::{
+    BackupTrustConfig, BackupTrustError, default_trust_config_path_for, install_prefix_for,
+};
 use crate::upgrade::release_identity::{BackupReleaseIdentity, backup_release_identity};
 use o3k_store::StoreAccessLock;
 
@@ -192,11 +209,11 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         Err(reason) => return BackupVerifyOutcome::recoverable(reason),
     };
 
-    // D4 store-access guard. `verify` opens the canonical SQLite store to read
-    // the applied migration identities, so it is a store-opening command and
-    // must take the same lifetime lock the daemon and `backup create` use.
+    // D4 store-access guard. `verify` copies the canonical SQLite store to
+    // read the applied migration identities, so it is a store-reading command
+    // and must take the same lifetime lock the daemon and `backup create` use.
     // A live controller (or a capture that is waiting for its signature) means
-    // the store cannot be inspected without racing the writer.
+    // the store copy would race the writer.
     //
     // The alternative — deriving the migration identities from the installed
     // release without opening the store — is not possible with the accepted
@@ -210,7 +227,11 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         Err(_) => return BackupVerifyOutcome::recoverable("store-lock-unavailable"),
     };
 
-    let trust = match BackupTrustConfig::load(&default_trust_config_path()) {
+    let trust = match BackupTrustConfig::load(&default_trust_config_path_for(
+        &data_dir,
+        std::env::var_os(crate::backup_trust::TRUST_CONFIG_ENV),
+        std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+    )) {
         Ok(config) => config,
         Err(error) => return trust_failure(error),
     };
@@ -226,16 +247,26 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         Err(error) => return trust_failure(error),
     };
 
-    let identity = match resolve_release_identity() {
+    let identity = match resolve_release_identity(&data_dir) {
         Ok(identity) => identity,
         Err(reason) => return BackupVerifyOutcome::rejected(reason),
     };
-    let migrations = match read_local_migrations(&data_dir, identity.schema_version) {
-        Ok(migrations) => migrations,
-        Err(reason) => return BackupVerifyOutcome::rejected(reason),
+    // The private staging root holds the database copy read under the lock and
+    // later the decrypted members. It is removed on every outcome.
+    let staging_root = match create_staging_root(&data_dir) {
+        Ok(path) => path,
+        Err(reason) => return BackupVerifyOutcome::recoverable(reason),
     };
-    // The store read is complete; the remaining work only touches the artifact
-    // and a private staging directory, so the lock is released here.
+    let migrations = match read_local_migrations(&data_dir, &staging_root, identity.schema_version)
+    {
+        Ok(migrations) => migrations,
+        Err(reason) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return BackupVerifyOutcome::rejected(reason);
+        }
+    };
+    // The store copy is complete; the remaining work only touches the artifact
+    // and the private staging directory, so the lock is released here.
     drop(store_lock);
     let inventory = match o3k_store::state_inventory::baseline_state_inventory() {
         Ok(inventory) => inventory,
@@ -264,11 +295,10 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
 
     let mut artifact = match open_artifact(&args.artifact) {
         Ok(artifact) => artifact,
-        Err(reason) => return BackupVerifyOutcome::recoverable(reason),
-    };
-    let staging_root = match create_staging_root(&data_dir) {
-        Ok(path) => path,
-        Err(reason) => return BackupVerifyOutcome::recoverable(reason),
+        Err(reason) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return BackupVerifyOutcome::recoverable(reason);
+        }
     };
     let verified = match verify_artifact_stream(&mut artifact, &expected, &keys, &staging_root) {
         Ok(verified) => verified,
@@ -446,10 +476,14 @@ impl<R> HashingReader<R> {
 
 /// Reads the exact installed release identity from the installation prefix
 /// shared with the artifact capture path and the trust-document default.
-fn resolve_release_identity() -> Result<BackupReleaseIdentity, &'static str> {
-    // Root uses the canonical install prefix; non-root keeps the documented
-    // O3K_INSTALL_PREFIX override (see `backup_trust::install_prefix`).
-    let prefix = crate::backup_trust::install_prefix();
+fn resolve_release_identity(data_dir: &Path) -> Result<BackupReleaseIdentity, &'static str> {
+    // The install-prefix override is honored only for a non-installed
+    // (TestLab/temporary) data directory; the packaged data directory always
+    // uses the canonical prefix (see `backup_trust::trust_overrides_allowed`).
+    let prefix = install_prefix_for(
+        data_dir,
+        std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+    );
     backup_release_identity(&prefix).map_err(|_| REASON_EXPECTED_RELEASE_UNAVAILABLE)
 }
 
@@ -463,18 +497,72 @@ fn create_staging_root(data_dir: &Path) -> Result<PathBuf, &'static str> {
     Ok(path)
 }
 
-/// Reads the applied migration identities from the local canonical store with
-/// a plain read-only connection. The store must already be at the release's
-/// schema version; nothing is created, migrated, checkpointed or locked.
-fn read_local_migrations(
+/// Copies the canonical database and a non-empty WAL sidecar into the private
+/// verify staging directory. The live store is never opened.
+fn copy_store_for_verification(
     data_dir: &Path,
-    release_schema_version: u64,
-) -> Result<Vec<MigrationIdentity>, &'static str> {
-    let path = data_dir.join(DATABASE_FILE_NAME);
-    let metadata = fs::symlink_metadata(&path).map_err(|_| REASON_EXPECTED_RELEASE_UNAVAILABLE)?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+    staging_root: &Path,
+) -> Result<(PathBuf, bool), &'static str> {
+    let source = data_dir.join(DATABASE_FILE_NAME);
+    let copy = staging_root.join(DATABASE_FILE_NAME);
+    copy_regular_nofollow(&source, &copy)?;
+    let wal_source = data_dir.join(format!("{DATABASE_FILE_NAME}-wal"));
+    let has_wal = match fs::symlink_metadata(&wal_source) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => return Err(REASON_EXPECTED_RELEASE_UNAVAILABLE),
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(REASON_EXPECTED_RELEASE_UNAVAILABLE);
+            }
+            if metadata.len() == 0 {
+                false
+            } else {
+                copy_regular_nofollow(
+                    &wal_source,
+                    &staging_root.join(format!("{DATABASE_FILE_NAME}-wal")),
+                )?;
+                true
+            }
+        }
+    };
+    Ok((copy, has_wal))
+}
+
+/// Copies one regular, no-follow source file into a fresh private file.
+fn copy_regular_nofollow(source: &Path, destination: &Path) -> Result<(), &'static str> {
+    let input = open(
+        source,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|_| REASON_EXPECTED_RELEASE_UNAVAILABLE)?;
+    let metadata = rustix::fs::fstat(&input).map_err(|_| REASON_EXPECTED_RELEASE_UNAVAILABLE)?;
+    if rustix::fs::FileType::from_raw_mode(metadata.st_mode) != rustix::fs::FileType::RegularFile {
         return Err(REASON_EXPECTED_RELEASE_UNAVAILABLE);
     }
+    let output = open(
+        destination,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::from_raw_mode(0o600),
+    )
+    .map_err(|_| "staging-unavailable")?;
+    let mut input = File::from(input);
+    let mut output = File::from(output);
+    io::copy(&mut input, &mut output).map_err(|_| "staging-unavailable")?;
+    output.sync_all().map_err(|_| "staging-unavailable")?;
+    Ok(())
+}
+
+/// Reads the applied migration identities from a private copy of the canonical
+/// store with a read-only connection. The store must already be at the
+/// release's schema version; the live database is not opened, migrated,
+/// checkpointed or locked. The copy is taken under the store-access lock.
+fn read_local_migrations(
+    data_dir: &Path,
+    staging_root: &Path,
+    release_schema_version: u64,
+) -> Result<Vec<MigrationIdentity>, &'static str> {
+    let (path, has_wal) = copy_store_for_verification(data_dir, staging_root)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -485,6 +573,14 @@ fn read_local_migrations(
             .read_only(true)
             .create_if_missing(false)
             .busy_timeout(Duration::from_secs(5));
+        // `immutable=1` skips locking/WAL recovery and is only valid when the
+        // copied database has no non-empty WAL sidecar. With a WAL, SQLite
+        // needs to open the copy normally so committed frames are replayed.
+        let options = if has_wal {
+            options
+        } else {
+            options.immutable(true)
+        };
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_secs(10))
@@ -668,6 +764,11 @@ mod tests {
                 "release-mismatch",
             ),
             (
+                ArtifactVerifyClass::MissingRequiredMember,
+                EXIT_REJECTED,
+                "missing-required-member",
+            ),
+            (
                 ArtifactVerifyClass::SchemaInvalid,
                 EXIT_REJECTED,
                 "schema-invalid",
@@ -756,9 +857,49 @@ mod tests {
     #[test]
     fn missing_local_store_fails_closed_as_expected_release_unavailable() {
         let root = TempRoot::new("missing-store");
+        let staging = root.0.join("staging");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&staging)
+            .expect("staging");
         assert_eq!(
-            read_local_migrations(&root.0, 53),
+            read_local_migrations(&root.0, &staging, 53),
             Err(REASON_EXPECTED_RELEASE_UNAVAILABLE)
         );
+    }
+
+    #[test]
+    fn verification_reads_a_private_copy_including_a_non_empty_wal() {
+        let root = TempRoot::new("copy-store");
+        fs::write(root.0.join(DATABASE_FILE_NAME), b"main-database").expect("main database");
+        fs::write(
+            root.0.join(format!("{DATABASE_FILE_NAME}-wal")),
+            b"wal-frames",
+        )
+        .expect("wal");
+        let staging = root.0.join("staging");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&staging)
+            .expect("staging");
+        let (copy, has_wal) = copy_store_for_verification(&root.0, &staging).expect("copy store");
+        assert!(has_wal);
+        assert_eq!(fs::read(&copy).expect("copied database"), b"main-database");
+        assert_eq!(
+            fs::read(staging.join(format!("{DATABASE_FILE_NAME}-wal"))).expect("copied wal"),
+            b"wal-frames"
+        );
+        // The source files are untouched by the copy.
+        assert_eq!(
+            fs::read(root.0.join(DATABASE_FILE_NAME)).expect("source database"),
+            b"main-database"
+        );
+        // The copy is private, not a link to the live file.
+        let mode = fs::metadata(&copy)
+            .expect("copy metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

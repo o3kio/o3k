@@ -20,8 +20,12 @@
 //!    `<destination>/.o3k-backup-artifact-<operation>/signing-request.json`.
 //!    **The same process keeps the `StoreAccessLock` and the denial-only
 //!    interrupted-backup marker**, prints one stable line
-//!    `o3k backup create: awaiting-signature <request-path>` on stderr, and
-//!    polls for `signing-response.json` until the request's own TTL (24h).
+//!    `o3k backup create: awaiting-signature <operation-id>` on stderr
+//!    (SPEC-0050 §8: the operation id, never a filesystem path), and polls for
+//!    `signing-response.json` until the request's own TTL (24h). A response
+//!    that is present but not yet parsable is retried until the deadline; a
+//!    response that never parses performs the same safe abort as an expired
+//!    request (`signing-response-invalid`, exit 3).
 //! 2. When the custodian writes the response: verify the detached signature,
 //!    finalize, publish, remove the marker, exit 0 with the normal JSON.
 //! 3. On timeout: **safe abort** — the staging tree is removed, the journal is
@@ -33,7 +37,9 @@
 //!    contacting any controller, acquires `StoreAccessLock` directly
 //!    (`WouldBlock` → exit 2 `controller-active`), re-creates the marker if an
 //!    operator removed it, and resumes the wait/publication. A published
-//!    operation is never recaptured (exit 2 `operation-already-published`).
+//!    operation is never recaptured: its destination is re-verified and the
+//!    replay succeeds idempotently, or rejects `published-artifact-missing`
+//!    when the artifact is gone.
 //!
 //! The CLI surface is unchanged: exactly `--destination` and `--operation-id`.
 //! There is deliberately no `--complete-signature` flag and no test signer in
@@ -175,6 +181,7 @@ use rustix::{
         AtFlags, FileType, FlockOperation, Mode, OFlags, flock, fstat, fsync, linkat, open, openat,
         unlinkat,
     },
+    process::geteuid,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -187,13 +194,14 @@ use uuid::Uuid;
 
 use crate::{
     backup::{
-        ArtifactIntegrityExpectations, ArtifactTrust, CreateOptions, MigrationIdentity,
-        StreamMember, finish_signed_artifact, read_unsigned_staged_artifact,
-        stage_unsigned_artifact,
+        ArtifactIntegrityExpectations, ArtifactTrust, CreateOptions, Manifest, MigrationIdentity,
+        StreamMember, finish_signed_artifact, manifest_signing_input,
+        read_unsigned_staged_artifact, stage_unsigned_artifact, unsigned_manifest_digest,
     },
     backup_reservation::Reservation,
     backup_trust::{
-        BackupTrustConfig, BackupTrustError, default_trust_config_path, site_and_installation_ids,
+        BackupTrustConfig, BackupTrustError, default_trust_config_path_for, install_prefix_for,
+        site_and_installation_ids,
     },
     output::now_utc_rfc3339,
     upgrade::release_identity::{BackupReleaseIdentity, backup_release_identity},
@@ -212,7 +220,8 @@ pub const SIGNING_RESPONSE_FILE: &str = "signing-response.json";
 /// `flock` file that serializes phase-2 invocations for one operation.
 pub const OPERATION_LOCK_FILE: &str = "operation.lock";
 /// Stable stderr prefix emitted once when the executor starts waiting for the
-/// detached signature. The request path follows on the same line.
+/// detached signature. The operation id follows on the same line (SPEC-0050
+/// §8); no path is emitted.
 pub const AWAITING_SIGNATURE_LINE: &str = "o3k backup create: awaiting-signature";
 /// Versioned signing-request format marker.
 pub const SIGNING_REQUEST_FORMAT: &str = "o3k-backup-signing-request-v1";
@@ -396,7 +405,18 @@ impl ArtifactConfig {
     /// Loads the trust document and the installed release identity and checks
     /// they describe this data directory.
     pub fn load(data_dir: &Path) -> Result<Self, ArtifactFailure> {
-        Self::load_from(data_dir, &default_trust_config_path(), &install_prefix())
+        Self::load_from(
+            data_dir,
+            &default_trust_config_path_for(
+                data_dir,
+                std::env::var_os(crate::backup_trust::TRUST_CONFIG_ENV),
+                std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+            ),
+            &install_prefix_for(
+                data_dir,
+                std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+            ),
+        )
     }
 
     /// [`Self::load`] with explicit paths, so the derivation is testable
@@ -1027,6 +1047,11 @@ pub fn complete_staged(
     let final_path = inputs.destination_dir.join(&final_name);
 
     match inputs.record.phase {
+        BackupOperationPhase::Published => {
+            let staging_path =
+                destination_staging_path(inputs.destination_dir, inputs.operation_id)?;
+            return replay_published(inputs, &final_name, &final_path, &staging_path);
+        }
         BackupOperationPhase::Publishing => {
             let Some(expected) = inputs.record.artifact_sha256.as_deref() else {
                 return Err(ArtifactFailure::rejected("publishing-record-incomplete"));
@@ -1037,17 +1062,17 @@ pub fn complete_staged(
             // through an `O_NOFOLLOW` descriptor and must also pass the full
             // signature/trust/member verification.
             if let Some(mut existing) = existing_destination(inputs.destination_fd, &final_name)? {
-                let (size_bytes, sha256) = verify_open_signed_artifact(inputs, &mut existing)
+                let verified = verify_open_signed_artifact(inputs, &mut existing)
                     .map_err(|_| ArtifactFailure::rejected("artifact-destination-exists"))?;
-                if sha256 != expected {
+                if verified.sha256 != expected {
                     return Err(ArtifactFailure::rejected("artifact-destination-exists"));
                 }
-                mark_published(inputs)?;
+                mark_published(inputs, &verified.sha256)?;
                 finish_publication(inputs, &staging_path)?;
                 return Ok(PublishedArtifact {
                     path: final_path,
-                    sha256,
-                    size_bytes,
+                    sha256: verified.sha256,
+                    size_bytes: verified.size_bytes,
                 });
             }
             validate_staging_directory(inputs.destination_dir, &staging_path, &staging_leaf)?;
@@ -1069,7 +1094,7 @@ pub fn complete_staged(
                 &final_name,
                 &staged.sha256,
             )?;
-            mark_published(inputs)?;
+            mark_published(inputs, &staged.sha256)?;
             finish_publication(inputs, &staging_path)?;
             return Ok(PublishedArtifact {
                 path: final_path,
@@ -1103,7 +1128,13 @@ pub fn complete_staged(
     if !unsigned_staged_artifact_present(&staging_path)
         && staged_signed_artifact_present(&staging_path)
     {
+        // The signed partial is only publishable when it is still bound to the
+        // durable signing request the journal recorded. This runs before any
+        // journal advance or publication and leaves the staging tree intact on
+        // a mismatch.
+        let (request, signing_input) = load_recovery_signing_request(inputs, &staging_path)?;
         let staged = verify_publishable_staged_artifact(inputs, &staging_path)?;
+        bind_signed_artifact_to_request(&staged.manifest, &request, &signing_input)?;
         if let Some(expected) = inputs.record.artifact_sha256.as_deref()
             && staged.sha256 != expected
         {
@@ -1123,7 +1154,7 @@ pub fn complete_staged(
             &final_name,
             &staged.sha256,
         )?;
-        mark_published(inputs)?;
+        mark_published(inputs, &staged.sha256)?;
         finish_publication(inputs, &staging_path)?;
         return Ok(PublishedArtifact {
             path: final_path,
@@ -1179,14 +1210,15 @@ pub fn complete_staged(
         return Err(ArtifactFailure::rejected("staged-artifact-mismatch"));
     }
 
-    let durable_request_path = Path::new(&inputs.record.staging_path).join(SIGNING_REQUEST_FILE);
     let deadline = inputs.await_policy.deadline(&request.expires_at)?;
     // One stable stderr line announces the wait. The operator watches for it to
     // know the controller is stopped and the artifact is awaiting signature.
+    // SPEC-0050 §8 requires the operation id only; emitting the staging path
+    // would leak filesystem layout to the operator-facing diagnostics.
     let _ = writeln!(
         std::io::stderr(),
         "{AWAITING_SIGNATURE_LINE} {}",
-        durable_request_path.display()
+        inputs.operation_id
     );
     // Test-only: die while the lock and marker are held, leaving the exact
     // crash-during-wait state a real process can only reach by being killed.
@@ -1201,6 +1233,17 @@ pub fn complete_staged(
         SignatureWait::Response(bytes) => bytes,
         SignatureWait::Unreadable => {
             return Err(ArtifactFailure::rejected("signing-response-unavailable"));
+        }
+        SignatureWait::Unparsable => {
+            // The request deadline passed while an entry existed that never
+            // became a parseable signing response. No publication is pending,
+            // so this follows the same safe abort as an expired request rather
+            // than leaving the controller denial permanently in place.
+            return Err(safe_abort(
+                inputs,
+                &staging_path,
+                "signing-response-invalid",
+            ));
         }
         SignatureWait::TimedOut => {
             return Err(safe_abort(inputs, &staging_path, "signing-request-expired"));
@@ -1251,7 +1294,7 @@ pub fn complete_staged(
         &final_name,
         &staged.sha256,
     )?;
-    mark_published(inputs)?;
+    mark_published(inputs, &staged.sha256)?;
     finish_publication(inputs, &staging_path)?;
     // Test-only: crash after the artifact is durably published, the journal
     // says `published` and the staging tree and marker are gone, before the
@@ -1264,34 +1307,85 @@ pub fn complete_staged(
     })
 }
 
+/// Idempotent replay of a journal already at `published` (contract L5).
+///
+/// The destination is observed before any cleanup. If it holds the exact
+/// artifact the journal recorded, the stale marker/staging debris is removed
+/// and the command exits successfully instead of wedging on
+/// `operation-already-published`. A missing or changed destination is a clear
+/// rejected precondition; nothing is deleted.
+fn replay_published(
+    inputs: &CompletionInputs<'_>,
+    final_name: &str,
+    final_path: &Path,
+    staging_path: &Path,
+) -> Result<PublishedArtifact, ArtifactFailure> {
+    let expected = inputs
+        .record
+        .artifact_sha256
+        .as_deref()
+        .ok_or_else(|| ArtifactFailure::rejected("published-record-incomplete"))?;
+    let Some(mut existing) = existing_destination(inputs.destination_fd, final_name)? else {
+        return Err(ArtifactFailure::rejected("published-artifact-missing"));
+    };
+    let verified = verify_open_signed_artifact(inputs, &mut existing)
+        .map_err(|_| ArtifactFailure::rejected("published-artifact-changed"))?;
+    if verified.sha256 != expected {
+        return Err(ArtifactFailure::rejected("published-artifact-changed"));
+    }
+    finish_publication(inputs, staging_path)?;
+    Ok(PublishedArtifact {
+        path: final_path.to_path_buf(),
+        sha256: verified.sha256,
+        size_bytes: verified.size_bytes,
+    })
+}
+
 /// Outcome of the bounded wait for `signing-response.json`.
 enum SignatureWait {
     Response(Vec<u8>),
     /// An entry exists but cannot be read as a bounded regular file.
     Unreadable,
+    /// An entry exists at the deadline but never parsed as a signing response.
+    /// An operator/custodian writing non-atomically can leave a partial file;
+    /// the wait retries it instead of failing on the first partial read.
+    Unparsable,
     TimedOut,
 }
 
 /// Polls for the response file until `deadline`.
 ///
 /// A symlinked or non-regular entry is a rejected precondition (never
-/// followed); a missing entry is polled. The wait is bounded by the request TTL
-/// and by the optional [`AwaitPolicy::timeout`].
+/// followed); a missing entry is polled. A present entry is returned only once
+/// it parses as a [`SigningResponse`]; a partially written (unparsable) file is
+/// retried until the deadline so a non-atomic writer cannot cause a spurious
+/// failure. The wait is bounded by the request TTL and by the optional
+/// [`AwaitPolicy::timeout`].
 fn wait_for_signing_response(
     response_path: &Path,
     deadline: &DateTime<Utc>,
     poll_interval: std::time::Duration,
 ) -> SignatureWait {
     let poll = poll_interval.max(std::time::Duration::from_millis(10));
+    let mut saw_unparsable = false;
     loop {
         match read_bounded_file(response_path, MAX_SIGNING_RESPONSE_BYTES) {
-            Ok(bytes) => return SignatureWait::Response(bytes),
+            Ok(bytes) => {
+                if serde_json::from_slice::<SigningResponse>(&bytes).is_ok() {
+                    return SignatureWait::Response(bytes);
+                }
+                saw_unparsable = true;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return SignatureWait::Unreadable,
         }
         let now = Utc::now();
         if now >= *deadline {
-            return SignatureWait::TimedOut;
+            return if saw_unparsable {
+                SignatureWait::Unparsable
+            } else {
+                SignatureWait::TimedOut
+            };
         }
         let remaining = (*deadline - now)
             .to_std()
@@ -1453,8 +1547,18 @@ fn update_journal(
         .map_err(|error| ArtifactFailure::recoverable(error.reason()))
 }
 
-fn mark_published(inputs: &CompletionInputs<'_>) -> Result<(), ArtifactFailure> {
-    update_journal(inputs, BackupOperationPhase::Published, None)
+/// Persists the terminal `published` phase together with the exact verified
+/// artifact digest, so a later replay can re-verify the destination without
+/// trusting a journal-only digest.
+fn mark_published(
+    inputs: &CompletionInputs<'_>,
+    artifact_sha256: &str,
+) -> Result<(), ArtifactFailure> {
+    update_journal(
+        inputs,
+        BackupOperationPhase::Published,
+        Some(artifact_sha256.to_owned()),
+    )
 }
 
 /// The only signed artifact file name inside a `members-*` staging directory.
@@ -1474,6 +1578,14 @@ struct VerifiedStagedArtifact {
     members_leaf: std::ffi::OsString,
     sha256: String,
     size_bytes: u64,
+    manifest: Manifest,
+}
+
+/// Header facts of an already-open, fully verified signed artifact.
+struct VerifiedOpenArtifact {
+    size_bytes: u64,
+    sha256: String,
+    manifest: Manifest,
 }
 
 /// Verifies the staged signed artifact in full from a no-follow descriptor.
@@ -1491,12 +1603,13 @@ fn verify_publishable_staged_artifact(
 ) -> Result<VerifiedStagedArtifact, ArtifactFailure> {
     let (members_leaf, mut file) = open_staged_signed_artifact(staging_path)
         .map_err(|_| ArtifactFailure::rejected("staged-artifact-invalid"))?;
-    let (size_bytes, sha256) = verify_open_signed_artifact(inputs, &mut file)?;
+    let verified = verify_open_signed_artifact(inputs, &mut file)?;
     Ok(VerifiedStagedArtifact {
         file,
         members_leaf,
-        sha256,
-        size_bytes,
+        sha256: verified.sha256,
+        size_bytes: verified.size_bytes,
+        manifest: verified.manifest,
     })
 }
 
@@ -1504,7 +1617,7 @@ fn verify_publishable_staged_artifact(
 fn verify_open_signed_artifact(
     inputs: &CompletionInputs<'_>,
     file: &mut fs::File,
-) -> Result<(u64, String), ArtifactFailure> {
+) -> Result<VerifiedOpenArtifact, ArtifactFailure> {
     let backup_id = inputs.operation_id.to_string();
     let release = inputs.config.release();
     let expectations = ArtifactIntegrityExpectations {
@@ -1523,7 +1636,11 @@ fn verify_open_signed_artifact(
     };
     let header = crate::backup::verify_signed_artifact_integrity(file, &expectations)
         .map_err(|_| ArtifactFailure::rejected("staged-artifact-invalid"))?;
-    Ok((header.size_bytes, header.sha256))
+    Ok(VerifiedOpenArtifact {
+        size_bytes: header.size_bytes,
+        sha256: header.sha256,
+        manifest: header.manifest,
+    })
 }
 
 /// True when a `members-*/artifact.partial` entry exists, including a
@@ -1628,7 +1745,7 @@ fn open_staged_signed_artifact(
         match openat(
             &directory,
             STAGED_SIGNED_ARTIFACT_NAME,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
             Mode::empty(),
         ) {
             Ok(descriptor) => {
@@ -1722,7 +1839,8 @@ fn publish(
 ///
 /// A symlink or other non-regular entry is a rejected precondition
 /// (`artifact-destination-exists`, exit 2), never a file to hash through a
-/// path and never an unknown outcome.
+/// path and never an unknown outcome. A regular entry must be `0600` and owned
+/// by the effective uid (`artifact-destination-posture-invalid`, exit 2).
 fn existing_destination(
     destination_fd: &OwnedFd,
     final_name: &str,
@@ -1730,7 +1848,7 @@ fn existing_destination(
     match openat(
         destination_fd,
         final_name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     ) {
         Ok(descriptor) => {
@@ -1738,6 +1856,12 @@ fn existing_destination(
                 .map_err(|_| ArtifactFailure::unknown("destination-artifact-unreadable"))?;
             if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
                 return Err(ArtifactFailure::rejected("artifact-destination-exists"));
+            }
+            let expected_uid = geteuid().as_raw();
+            if metadata.st_uid != expected_uid || metadata.st_mode & 0o777 != 0o600 {
+                return Err(ArtifactFailure::rejected(
+                    "artifact-destination-posture-invalid",
+                ));
             }
             Ok(Some(fs::File::from(descriptor)))
         }
@@ -1858,6 +1982,20 @@ fn validate_signing_request(
     request: &SigningRequest,
     expected: &RequestExpectations<'_>,
 ) -> Result<Vec<u8>, ArtifactFailure> {
+    validate_signing_request_with_expiry(request, expected, true)
+}
+
+/// [`validate_signing_request`] with expiry enforcement optional.
+///
+/// The staged crash-recovery path must bind an already signed partial to its
+/// request even when the request TTL has since elapsed: the signature was made
+/// inside the TTL and rejecting it after the fact would strand a valid
+/// publication. Normal phase 2 always enforces expiry.
+fn validate_signing_request_with_expiry(
+    request: &SigningRequest,
+    expected: &RequestExpectations<'_>,
+    enforce_expiry: bool,
+) -> Result<Vec<u8>, ArtifactFailure> {
     if request.format != SIGNING_REQUEST_FORMAT
         || request.operation_id != expected.operation_id
         || request.backup_id != expected.backup_id
@@ -1892,10 +2030,68 @@ fn validate_signing_request(
     if hex::encode(Sha256::digest(&signing_input)) != request.signing_input_sha256 {
         return Err(ArtifactFailure::rejected("signing-request-invalid"));
     }
-    if expires_at <= Utc::now() {
+    if enforce_expiry && expires_at <= Utc::now() {
         return Err(ArtifactFailure::recoverable("signing-request-expired"));
     }
     Ok(signing_input)
+}
+
+/// Loads and validates the persisted signing request for the staged recovery
+/// branch, returning the request and its decoded D1 input.
+///
+/// Every problem (missing file, digest mismatch, malformed or stale identity)
+/// is the same rejected `signing-request-mismatch` reason and leaves the
+/// staging tree untouched.
+fn load_recovery_signing_request(
+    inputs: &CompletionInputs<'_>,
+    staging_path: &Path,
+) -> Result<(SigningRequest, Vec<u8>), ArtifactFailure> {
+    let request_path = staging_path.join(SIGNING_REQUEST_FILE);
+    let request_bytes = read_bounded_file(&request_path, MAX_SIGNING_REQUEST_BYTES)
+        .map_err(|_| ArtifactFailure::rejected("signing-request-mismatch"))?;
+    let request_sha256 = hex::encode(Sha256::digest(&request_bytes));
+    if inputs.record.request_sha256.as_deref() != Some(request_sha256.as_str()) {
+        return Err(ArtifactFailure::rejected("signing-request-mismatch"));
+    }
+    let request: SigningRequest = serde_json::from_slice(&request_bytes)
+        .map_err(|_| ArtifactFailure::rejected("signing-request-mismatch"))?;
+    let backup_id = inputs.operation_id.to_string();
+    let expectations = RequestExpectations {
+        operation_id: inputs.operation_id,
+        backup_id: &backup_id,
+        key_id: inputs.config.signing_key_id(),
+        site_id: inputs.config.site_id(),
+        installation_id: inputs.config.installation_id(),
+        payload_sha256: None,
+        recipient_public_key_sha256: inputs.config.recipient_public_key_sha256(),
+    };
+    let signing_input = validate_signing_request_with_expiry(&request, &expectations, false)
+        .map_err(|_| ArtifactFailure::rejected("signing-request-mismatch"))?;
+    Ok((request, signing_input))
+}
+
+/// Requires a signed manifest to be the one the persisted request described.
+///
+/// This binds the unsigned-manifest digest and the exact D1 signing input, so
+/// a validly signed artifact from a different request or manifest cannot be
+/// substituted into another operation's staging tree.
+fn bind_signed_artifact_to_request(
+    manifest: &Manifest,
+    request: &SigningRequest,
+    request_signing_input: &[u8],
+) -> Result<(), ArtifactFailure> {
+    let manifest_digest = unsigned_manifest_digest(manifest)
+        .map_err(|_| ArtifactFailure::rejected("signing-request-mismatch"))?;
+    let signed_input = manifest_signing_input(manifest)
+        .map_err(|_| ArtifactFailure::rejected("signing-request-mismatch"))?;
+    if manifest_digest != request.manifest_digest
+        || signed_input != request_signing_input
+        || hex::encode(Sha256::digest(&signed_input)) != request.signing_input_sha256
+        || manifest.backup_id != request.backup_id
+    {
+        return Err(ArtifactFailure::rejected("signing-request-mismatch"));
+    }
+    Ok(())
 }
 
 /// Validates a detached signing response and verifies the signature over the
@@ -2077,7 +2273,7 @@ fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, std::io::Er
     }
     let descriptor = open(
         path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(std::io::Error::from)?;
@@ -2782,23 +2978,27 @@ mod tests {
             staging_leaf(operation_id),
             format!(".o3k-backup-artifact-{operation_id}")
         );
+        let testlab = Path::new("/tmp/o3k-artifact-prefix-test");
         assert_eq!(
-            crate::backup_trust::install_prefix_for(1000, None),
+            crate::backup_trust::install_prefix_for(testlab, None),
             PathBuf::from(DEFAULT_INSTALL_PREFIX)
         );
         assert_eq!(
-            crate::backup_trust::install_prefix_for(1000, Some(std::ffi::OsString::new())),
+            crate::backup_trust::install_prefix_for(testlab, Some(std::ffi::OsString::new())),
             PathBuf::from(DEFAULT_INSTALL_PREFIX)
         );
         assert_eq!(
             crate::backup_trust::install_prefix_for(
-                1000,
+                testlab,
                 Some(std::ffi::OsString::from("/opt/o3k"))
             ),
             PathBuf::from("/opt/o3k")
         );
         assert_eq!(
-            crate::backup_trust::install_prefix_for(0, Some(std::ffi::OsString::from("/opt/o3k"))),
+            crate::backup_trust::install_prefix_for(
+                Path::new("/var/lib/o3k"),
+                Some(std::ffi::OsString::from("/opt/o3k"))
+            ),
             PathBuf::from(DEFAULT_INSTALL_PREFIX)
         );
         assert_eq!(
@@ -3094,6 +3294,115 @@ mod tests {
         assert_eq!(failure.class(), ArtifactFailureClass::Rejected);
     }
 
+    #[test]
+    fn destination_artifact_requires_owner_mode_and_never_blocks_on_a_fifo() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = fixture();
+        let destination = fixture.root.join("destination-posture");
+        private_dir(&destination);
+        let destination_fd = open(
+            &destination,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .expect("destination descriptor");
+        let artifact = destination.join("backup-x.o3k");
+        write_private(&artifact, b"artifact");
+        existing_destination(&destination_fd, "backup-x.o3k")
+            .expect("0600 artifact")
+            .expect("present");
+        for mode in [0o644, 0o640, 0o600 | 0o010] {
+            fs::set_permissions(&artifact, fs::Permissions::from_mode(mode))
+                .expect("relax artifact mode");
+            let failure = existing_destination(&destination_fd, "backup-x.o3k")
+                .expect_err("unsafe destination posture");
+            assert_eq!(failure.reason(), "artifact-destination-posture-invalid");
+        }
+
+        // A FIFO at the final name must be rejected immediately: the open is
+        // O_NONBLOCK and the descriptor is checked with fstat.
+        let fifo = destination.join("backup-fifo.o3k");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            FileType::Fifo,
+            Mode::from_raw_mode(0o600),
+            0,
+        )
+        .expect("create fifo");
+        let failure = existing_destination(&destination_fd, "backup-fifo.o3k")
+            .expect_err("fifo is not an artifact");
+        assert_eq!(failure.reason(), "artifact-destination-exists");
+    }
+
+    #[test]
+    fn staged_recovery_binds_the_signed_manifest_to_the_persisted_request() {
+        let manifest: Manifest = serde_json::from_value(json!({
+            "format_version": "1",
+            "backup_id": "operation-1",
+            "created_at": "2026-10-19T12:00:00Z",
+            "site_id": "site-1",
+            "installation_id": "install-1",
+            "source": {},
+            "store": {},
+            "consistency": {},
+            "state_inventory": [],
+            "members": [],
+            "encryption": {
+                "algorithm": "AES-256-GCM",
+                "key_id": "artifact-1",
+                "key_is_external": true,
+                "key_wrapping": {
+                    "algorithm": "HPKE-v1-X25519-HKDF-SHA256-AES-256-GCM",
+                    "recipient_key_id": "recovery-1",
+                    "enc": "",
+                    "ciphertext": ""
+                }
+            },
+            "authentication": {"algorithm": "Ed25519", "key_id": "signing-1", "signature": "sig"},
+            "excluded_state": []
+        }))
+        .expect("manifest fixture");
+        let signing_input = manifest_signing_input(&manifest).expect("D1 input");
+        let matching = SigningRequest {
+            format: SIGNING_REQUEST_FORMAT.to_owned(),
+            operation_id: Uuid::nil(),
+            backup_id: manifest.backup_id.clone(),
+            manifest_digest: unsigned_manifest_digest(&manifest).expect("manifest digest"),
+            signing_input_sha256: hex::encode(Sha256::digest(&signing_input)),
+            signing_input_base64url: URL_SAFE_NO_PAD.encode(&signing_input),
+            key_id: SIGNING_KEY_ID.to_owned(),
+            site_id: "site-1".to_owned(),
+            installation_id: "install-1".to_owned(),
+            created_at: "2026-10-19T12:00:00Z".to_owned(),
+            expires_at: "2999-01-01T00:00:00Z".to_owned(),
+            payload_sha256: "c".repeat(64),
+            recipient_public_key_sha256: "e".repeat(64),
+        };
+        bind_signed_artifact_to_request(&manifest, &matching, &signing_input)
+            .expect("matching request");
+
+        // A different operation/request and a different manifest cannot be
+        // substituted, even though the artifact itself is validly signed.
+        let mut different_request = matching.clone();
+        different_request.operation_id = Uuid::new_v4();
+        different_request.backup_id = different_request.operation_id.to_string();
+        assert_eq!(
+            bind_signed_artifact_to_request(&manifest, &different_request, &signing_input)
+                .expect_err("different request")
+                .reason(),
+            "signing-request-mismatch"
+        );
+        let mut different_manifest = manifest.clone();
+        different_manifest.created_at = "2026-10-20T12:00:00Z".to_owned();
+        assert_eq!(
+            bind_signed_artifact_to_request(&different_manifest, &matching, &signing_input)
+                .expect_err("different manifest")
+                .reason(),
+            "signing-request-mismatch"
+        );
+    }
+
     /// F20: the per-operation staging lock admits exactly one invoker.
     #[test]
     fn operation_lock_is_exclusive_and_released_on_drop() {
@@ -3113,6 +3422,173 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join(OPERATION_LOCK_FILE)).expect("lock symlink");
         let failure = OperationLock::acquire(&root).expect_err("symlinked lock is refused");
         assert_eq!(failure.reason(), "operation-lock-unavailable");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn operation_record(
+        operation_id: Uuid,
+        staging_path: &Path,
+        destination: &Path,
+    ) -> BackupOperationRecord {
+        BackupOperationRecord {
+            format: o3k_store::backup_journal::BACKUP_OPERATION_FORMAT.to_owned(),
+            operation_id,
+            phase: BackupOperationPhase::Publishing,
+            backup_id: operation_id.to_string(),
+            destination: destination.display().to_string(),
+            staging_path: staging_path.display().to_string(),
+            request_sha256: Some("a".repeat(64)),
+            artifact_sha256: Some("b".repeat(64)),
+            reserved_bytes: None,
+            site_id: "site-1".to_owned(),
+            installation_id: "install-1".to_owned(),
+            created_at: "2026-10-23T12:00:00Z".to_owned(),
+            updated_at: "2026-10-23T12:00:01Z".to_owned(),
+        }
+    }
+
+    /// F19: a staging tree that cannot be removed after publication is an
+    /// unknown outcome (exit 4), never success, and the marker is preserved so
+    /// the operator still sees the failed cleanup.
+    #[test]
+    fn post_publication_staging_cleanup_failure_is_an_unknown_outcome() {
+        let fixture = fixture();
+        let config = ArtifactConfig::load_from(
+            &fixture.data_dir,
+            &fixture.trust_config,
+            &fixture.install_prefix,
+        )
+        .expect("valid configuration");
+        let destination = fixture.root.join("destination");
+        private_dir(&destination);
+        let destination_fd = open(
+            &destination,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .expect("destination descriptor");
+        let marker = fixture.root.join("marker");
+        write_private(&marker, b"marker");
+        // A regular file where the staging directory should be: removing it as
+        // a directory fails for root and non-root alike, so this does not
+        // depend on the test runner's uid.
+        let staging = fixture.root.join("staging-is-a-file");
+        write_private(&staging, b"not a directory");
+        let operation_id = Uuid::new_v4();
+        let record = operation_record(operation_id, &staging, &destination);
+        let inputs = CompletionInputs {
+            data_dir: &fixture.data_dir,
+            config: &config,
+            destination_dir: &destination,
+            destination_fd: &destination_fd,
+            operation_id,
+            record: &record,
+            marker_path: &marker,
+            reservation: Reservation {
+                source_bytes: 0,
+                reserved_bytes: 0,
+            },
+            await_policy: AwaitPolicy::default(),
+        };
+
+        let failure = finish_publication(&inputs, &staging)
+            .expect_err("unremovable staging tree must not report success");
+        assert_eq!(failure.reason(), "post-publication-cleanup-failed");
+        assert_eq!(failure.class(), ArtifactFailureClass::Unknown);
+        assert!(marker.is_file(), "the failure must not remove the marker");
+    }
+
+    /// F19: a marker that cannot be removed is `marker-removal-failed` (exit 4)
+    /// even though the artifact itself was published.
+    #[test]
+    fn post_publication_marker_removal_failure_is_an_unknown_outcome() {
+        let fixture = fixture();
+        let config = ArtifactConfig::load_from(
+            &fixture.data_dir,
+            &fixture.trust_config,
+            &fixture.install_prefix,
+        )
+        .expect("valid configuration");
+        let destination = fixture.root.join("destination");
+        private_dir(&destination);
+        let destination_fd = open(
+            &destination,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .expect("destination descriptor");
+        // A directory in place of the marker file: `remove_file` fails with
+        // EISDIR for every uid, which exercises the typed failure branch.
+        let marker = fixture.root.join("marker-is-a-directory");
+        private_dir(&marker);
+        let staging = fixture.root.join("already-removed-staging");
+        let operation_id = Uuid::new_v4();
+        let record = operation_record(operation_id, &staging, &destination);
+        let inputs = CompletionInputs {
+            data_dir: &fixture.data_dir,
+            config: &config,
+            destination_dir: &destination,
+            destination_fd: &destination_fd,
+            operation_id,
+            record: &record,
+            marker_path: &marker,
+            reservation: Reservation {
+                source_bytes: 0,
+                reserved_bytes: 0,
+            },
+            await_policy: AwaitPolicy::default(),
+        };
+
+        let failure = finish_publication(&inputs, &staging)
+            .expect_err("an unremovable marker must not report success");
+        assert_eq!(failure.reason(), "marker-removal-failed");
+        assert_eq!(failure.class(), ArtifactFailureClass::Unknown);
+    }
+
+    /// A non-atomically written response is retried instead of failing on the
+    /// first partial read; it becomes `Unparsable` only at the deadline.
+    #[test]
+    #[allow(clippy::panic)]
+    fn signing_wait_retries_a_partially_written_response() {
+        let root = std::env::temp_dir().join(format!("o3k-pp6-wait-{}", Uuid::now_v7()));
+        private_dir(&root);
+        let path = root.join(SIGNING_RESPONSE_FILE);
+
+        // A partial JSON document is not a response yet.
+        write_private(&path, br#"{"format":"o3k-backup-signing-response-v1""#);
+        let deadline = Utc::now() + Duration::milliseconds(120);
+        match wait_for_signing_response(&path, &deadline, std::time::Duration::from_millis(10)) {
+            SignatureWait::Unparsable => {}
+            SignatureWait::Response(_) => panic!("partial JSON must not be accepted"),
+            SignatureWait::Unreadable => panic!("partial JSON must be retried"),
+            SignatureWait::TimedOut => panic!("an entry existed, so this is unparsable"),
+        }
+
+        // The completed file is accepted on the next attempt.
+        let response = serde_json::to_vec(&json!({
+            "format": SIGNING_RESPONSE_FORMAT,
+            "request_sha256": "a".repeat(64),
+            "key_id": SIGNING_KEY_ID,
+            "signature": "0".repeat(128),
+            "signed_at": "2026-10-23T12:10:00Z",
+        }))
+        .expect("encode response");
+        write_private(&path, &response);
+        let deadline = Utc::now() + Duration::seconds(5);
+        match wait_for_signing_response(&path, &deadline, std::time::Duration::from_millis(10)) {
+            SignatureWait::Response(bytes) => assert_eq!(bytes, response),
+            SignatureWait::Unparsable => panic!("the completed response must parse"),
+            SignatureWait::Unreadable => panic!("the response is a readable regular file"),
+            SignatureWait::TimedOut => panic!("the response exists"),
+        }
+
+        // No entry at all is a timeout, not an unparsable response.
+        fs::remove_file(&path).expect("remove response");
+        let deadline = Utc::now() + Duration::milliseconds(60);
+        match wait_for_signing_response(&path, &deadline, std::time::Duration::from_millis(10)) {
+            SignatureWait::TimedOut => {}
+            _ => panic!("a missing response must time out"),
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }

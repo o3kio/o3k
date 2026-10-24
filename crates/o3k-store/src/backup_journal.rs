@@ -468,7 +468,7 @@ fn read_record_at(
     let descriptor = match openat(
         directory,
         name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     ) {
         Ok(descriptor) => descriptor,

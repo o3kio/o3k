@@ -123,10 +123,13 @@
 //! migration lineage of both trees. A live catalog comparison must still
 //! classify SQLite-internal names through [`is_internal_sqlite_table`].
 
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 #[cfg(test)]
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{fs, path::Path};
 
 use sha2::{Digest, Sha256};
 
@@ -136,6 +139,13 @@ use crate::{SqliteStore, StoreError};
 
 /// Format marker for the committed canonical state inventory.
 pub const STATE_INVENTORY_FORMAT: &str = "o3k-state-inventory-v1";
+
+/// PostgreSQL server major bound into the committed baseline (D10).
+///
+/// Source: SPEC-0050 §3 "PostgreSQL profile" requires PostgreSQL 16, and
+/// `docs/pp/PP6_TECHNICAL_CONTRACT_APPROVAL.md` D10 accepts "PostgreSQL 16
+/// only". The baseline must be regenerated if that policy moves.
+pub const POSTGRES_MAJOR: u16 = 16;
 
 /// Maximum number of entries accepted by the backup manifest contract.
 pub const MAX_INVENTORY_ENTRIES: usize = 512;
@@ -467,6 +477,13 @@ pub fn verify_sqlite_catalog_against_baseline(
             ) else {
                 continue;
             };
+            // SQLite materializes `sqlite_*` objects (notably
+            // `sqlite_sequence` for AUTOINCREMENT tables) that a live catalog
+            // comparison deliberately excludes. A reviewed baseline that
+            // claims such an object must not make every capture fail.
+            if is_internal_sqlite_object(name) {
+                continue;
+            }
             expected.insert((kind.to_owned(), name.to_owned()), digest.to_owned());
         }
     }
@@ -510,7 +527,33 @@ pub fn verify_sqlite_catalog_against_baseline(
 #[serde(deny_unknown_fields)]
 struct InventoryDocument {
     format: String,
+    /// SQLite library version of the generator that produced the SQLite
+    /// catalog (from `SELECT sqlite_version()`), so a toolchain change is
+    /// visible in the baseline binding rather than silently redefining the
+    /// generated `sqlite_master` text.
+    sqlite_version: String,
+    /// PostgreSQL server major that the baseline was generated for (D10).
+    postgres_major: u16,
+    /// SHA-256 of every SQLite and PostgreSQL migration file, keyed by its
+    /// repository-relative path (`migrations/...` / `migrations_postgres/...`).
+    migration_files: BTreeMap<String, String>,
     repositories: Vec<RepositoryInventoryEntry>,
+}
+
+/// Version/binding facts carried alongside the repository inventory.
+///
+/// This is deliberately separate from [`baseline_state_inventory`]: the
+/// artifact manifest consumes only the repository entries, while the baseline
+/// drift gate and D10 checks bind the PostgreSQL major and the exact migration
+/// file bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineBinding {
+    /// SQLite library version the SQLite catalog was generated with.
+    pub sqlite_version: String,
+    /// PostgreSQL server major the baseline was generated against.
+    pub postgres_major: u16,
+    /// Lowercase hex SHA-256 for every migration file in both trees.
+    pub migration_files: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -653,12 +696,60 @@ pub fn baseline_state_inventory() -> Result<Vec<serde_json::Value>, StateInvento
     Ok(values)
 }
 
+/// Loads the version/binding facts from the committed baseline.
+///
+/// [`baseline_state_inventory`] intentionally keeps returning only repository
+/// entries so the artifact manifest entry shape is unchanged.
+pub fn baseline_binding() -> Result<BaselineBinding, StateInventoryError> {
+    let document: InventoryDocument = serde_json::from_str(STATE_INVENTORY_V1)?;
+    validate_document(&document)?;
+    Ok(BaselineBinding {
+        sqlite_version: document.sqlite_version,
+        postgres_major: document.postgres_major,
+        migration_files: document.migration_files,
+    })
+}
+
 fn validate_document(document: &InventoryDocument) -> Result<(), StateInventoryError> {
     if document.format != STATE_INVENTORY_FORMAT {
         return Err(StateInventoryError::UnsupportedFormat {
             found: document.format.clone(),
             expected: STATE_INVENTORY_FORMAT,
         });
+    }
+    if document.postgres_major < 12 {
+        return Err(StateInventoryError::InvalidBaseline(format!(
+            "unsupported PostgreSQL major {}",
+            document.postgres_major
+        )));
+    }
+    let version = &document.sqlite_version;
+    if version.is_empty()
+        || !version.contains(|c: char| c.is_ascii_digit())
+        || !version
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c.is_ascii_alphabetic())
+    {
+        return Err(StateInventoryError::InvalidBaseline(format!(
+            "invalid SQLite generator version {version:?}"
+        )));
+    }
+    if document.migration_files.is_empty() {
+        return Err(StateInventoryError::InvalidBaseline(
+            "migration file binding is empty".to_owned(),
+        ));
+    }
+    for (path, digest) in &document.migration_files {
+        let relative = path
+            .strip_prefix("migrations/")
+            .or_else(|| path.strip_prefix("migrations_postgres/"));
+        if relative.is_none_or(|name| {
+            name.is_empty() || name.contains('/') || !name.ends_with(".sql") || !is_sha256(digest)
+        }) {
+            return Err(StateInventoryError::InvalidBaseline(format!(
+                "invalid migration file binding for {path:?}"
+            )));
+        }
     }
     if document.repositories.is_empty() || document.repositories.len() > MAX_INVENTORY_ENTRIES {
         return Err(StateInventoryError::InvalidBaseline(format!(
@@ -846,7 +937,12 @@ fn generate_inventory_from_trees(
 ) -> Result<String, StateInventoryError> {
     let sqlite = scan_sqlite_live_tree(sqlite_migrations_dir)?;
     let postgres = scan_migration_tree(postgres_migrations_dir, "PostgreSQL")?;
-    render_inventory(&sqlite, &postgres, REPOSITORY_FAMILIES)
+    render_inventory(
+        &sqlite,
+        &postgres,
+        REPOSITORY_FAMILIES,
+        migration_file_hashes(sqlite_migrations_dir, postgres_migrations_dir)?,
+    )
 }
 
 #[cfg(test)]
@@ -854,13 +950,13 @@ fn generate_inventory_from_sqlite_tree(
     migrations_dir: &Path,
 ) -> Result<String, StateInventoryError> {
     let sqlite = scan_migration_tree(migrations_dir, "SQLite")?;
+    let postgres_migrations_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations_postgres");
     render_inventory(
         &sqlite,
-        &scan_migration_tree(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations_postgres"),
-            "PostgreSQL",
-        )?,
+        &scan_migration_tree(&postgres_migrations_dir, "PostgreSQL")?,
         REPOSITORY_FAMILIES,
+        migration_file_hashes(migrations_dir, &postgres_migrations_dir)?,
     )
 }
 
@@ -872,7 +968,12 @@ fn generate_inventory_with_registry(
 ) -> Result<String, StateInventoryError> {
     let sqlite = scan_migration_tree(sqlite_migrations_dir, "SQLite")?;
     let postgres = scan_migration_tree(postgres_migrations_dir, "PostgreSQL")?;
-    render_inventory(&sqlite, &postgres, families)
+    render_inventory(
+        &sqlite,
+        &postgres,
+        families,
+        migration_file_hashes(sqlite_migrations_dir, postgres_migrations_dir)?,
+    )
 }
 
 /// One reviewed non-table definition parsed from a migration tree.
@@ -931,6 +1032,38 @@ fn migration_paths(migrations_dir: &Path) -> Result<Vec<PathBuf>, StateInventory
     }
     migration_paths.sort();
     Ok(migration_paths)
+}
+
+/// SHA-256 of every raw `.sql` file in both migration trees, keyed by the
+/// committed repository-relative path.
+#[cfg(test)]
+fn migration_file_hashes(
+    sqlite_dir: &Path,
+    postgres_dir: &Path,
+) -> Result<BTreeMap<String, String>, StateInventoryError> {
+    let mut hashes = BTreeMap::new();
+    for (directory, prefix) in [
+        (sqlite_dir, "migrations/"),
+        (postgres_dir, "migrations_postgres/"),
+    ] {
+        for path in migration_paths(directory)? {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    StateInventoryError::InvalidBaseline(format!(
+                        "migration file {} has no UTF-8 name",
+                        path.display()
+                    ))
+                })?;
+            let bytes = fs::read(&path).map_err(|source| StateInventoryError::ReadMigration {
+                path: path.clone(),
+                source,
+            })?;
+            hashes.insert(format!("{prefix}{name}"), sha256_hex_bytes(&bytes));
+        }
+    }
+    Ok(hashes)
 }
 
 #[cfg(test)]
@@ -1927,9 +2060,13 @@ fn strip_if_not_exists(statement: &str) -> String {
 }
 
 fn sha256_hex(value: &str) -> String {
+    sha256_hex_bytes(value.as_bytes())
+}
+
+fn sha256_hex_bytes(value: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    let digest = Sha256::digest(value.as_bytes());
+    let digest = Sha256::digest(value);
     let mut encoded = String::with_capacity(64);
     for byte in digest {
         let _ = write!(encoded, "{byte:02x}");
@@ -1937,11 +2074,46 @@ fn sha256_hex(value: &str) -> String {
     encoded
 }
 
+/// SQLite library version used by the generator, from the same linked library
+/// that renders the live `sqlite_master` catalog. A libsqlite change therefore
+/// appears as baseline drift and requires a reviewed regeneration.
+#[cfg(test)]
+fn generator_sqlite_version() -> Result<String, StateInventoryError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            StateInventoryError::InvalidBaseline(format!(
+                "cannot build the SQLite version runtime: {error}"
+            ))
+        })?;
+    runtime.block_on(async {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .map_err(|error| {
+                StateInventoryError::InvalidBaseline(format!(
+                    "cannot open an in-memory SQLite version probe: {error}"
+                ))
+            })?;
+        sqlx::query_scalar::<_, String>("SELECT sqlite_version()")
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| {
+                StateInventoryError::InvalidBaseline(format!(
+                    "cannot read the SQLite generator version: {error}"
+                ))
+            })
+    })
+}
+
 #[cfg(test)]
 fn render_inventory(
     sqlite: &MigrationTree,
     postgres: &MigrationTree,
     families: &[RepositoryFamily],
+    migration_files: BTreeMap<String, String>,
 ) -> Result<String, StateInventoryError> {
     let mut repository_ids = BTreeSet::new();
     let mut table_repositories: BTreeMap<String, String> = BTreeMap::new();
@@ -2084,6 +2256,9 @@ fn render_inventory(
 
     let document = InventoryDocument {
         format: STATE_INVENTORY_FORMAT.to_owned(),
+        sqlite_version: generator_sqlite_version()?,
+        postgres_major: POSTGRES_MAJOR,
+        migration_files,
         repositories: entries,
     };
     let mut json = serde_json::to_string_pretty(&document)?;
@@ -2236,6 +2411,36 @@ fn describe_drift(generated: &str, committed: &str) -> String {
     repositories.extend(committed_entries.keys().cloned());
 
     let mut changes = Vec::new();
+    if generated_document.sqlite_version != committed_document.sqlite_version {
+        changes.push(format!(
+            "SQLite generator version changed from {} to {}",
+            committed_document.sqlite_version, generated_document.sqlite_version
+        ));
+    }
+    if generated_document.postgres_major != committed_document.postgres_major {
+        changes.push(format!(
+            "PostgreSQL major changed from {} to {}",
+            committed_document.postgres_major, generated_document.postgres_major
+        ));
+    }
+    if generated_document.migration_files != committed_document.migration_files {
+        let mut changed: Vec<&str> = generated_document
+            .migration_files
+            .keys()
+            .chain(committed_document.migration_files.keys())
+            .filter(|path| {
+                generated_document.migration_files.get(*path)
+                    != committed_document.migration_files.get(*path)
+            })
+            .map(String::as_str)
+            .collect();
+        changed.sort_unstable();
+        changed.dedup();
+        changes.push(format!(
+            "migration file binding changed for: {}",
+            changed.join(", ")
+        ));
+    }
     for repository in repositories {
         match (
             generated_entries.get(&repository),
@@ -2598,6 +2803,51 @@ mod tests {
     }
 
     #[test]
+    fn catalog_comparison_ignores_expected_sqlite_internal_objects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A future AUTOINCREMENT migration may claim `sqlite_sequence` in the
+        // baseline. The live catalog excludes every `sqlite_*` name, so the
+        // expected map must exclude them too instead of reporting a missing
+        // object on every capture.
+        let inventory = vec![serde_json::json!({
+            "repository_id": "release",
+            "state_family": "release_and_install_metadata",
+            "empty_state_included": false,
+            "sqlite_objects": [
+                {
+                    "kind": "table",
+                    "schema": "main",
+                    "name": "_sqlx_migrations",
+                    "definition_sha256": "a".repeat(64)
+                },
+                {
+                    "kind": "table",
+                    "schema": "main",
+                    "name": "sqlite_sequence",
+                    "definition_sha256": "b".repeat(64)
+                }
+            ],
+            "postgres_objects": [{
+                "kind": "table",
+                "schema": "public",
+                "name": "_sqlx_migrations",
+                "definition_sha256": "c".repeat(64)
+            }],
+            "migration_ids": ["0001_initial"]
+        })];
+        let live = vec![LiveCatalogObject {
+            kind: "table".to_owned(),
+            name: "_sqlx_migrations".to_owned(),
+            definition_sha256: "a".repeat(64),
+        }];
+        assert_eq!(
+            verify_sqlite_catalog_against_baseline(&inventory, &live),
+            Ok(())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn baseline_state_inventory_satisfies_the_artifact_contract()
     -> Result<(), Box<dyn std::error::Error>> {
         let inventory = baseline_state_inventory()?;
@@ -2697,6 +2947,75 @@ mod tests {
     }
 
     #[test]
+    fn baseline_binding_covers_every_migration_file() -> Result<(), Box<dyn std::error::Error>> {
+        let binding = baseline_binding()?;
+        assert_eq!(binding.postgres_major, POSTGRES_MAJOR);
+        assert_eq!(
+            binding.sqlite_version,
+            generator_sqlite_version()?,
+            "the committed SQLite generator version must match this toolchain"
+        );
+
+        let mut expected = BTreeMap::new();
+        let mut file_count = 0;
+        for (directory, prefix) in [
+            (manifest_dir().join("migrations"), "migrations/"),
+            (
+                manifest_dir().join("migrations_postgres"),
+                "migrations_postgres/",
+            ),
+        ] {
+            for path in migration_paths(&directory)? {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        format!("migration file {} has no UTF-8 name", path.display())
+                    })?;
+                let bytes = fs::read(&path)
+                    .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+                expected.insert(format!("{prefix}{name}"), sha256_hex_bytes(&bytes));
+                file_count += 1;
+            }
+        }
+        assert!(file_count > 0, "migration trees are empty");
+        assert_eq!(
+            binding.migration_files.len(),
+            file_count,
+            "the baseline must bind every migration file"
+        );
+        assert_eq!(binding.migration_files, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn changing_a_migration_file_fails_the_drift_gate() -> Result<(), Box<dyn std::error::Error>> {
+        let (sqlite, postgres) = scratch_trees(None)?;
+        let before = generate_inventory_from_trees(sqlite.path(), postgres.path())?;
+
+        // A comment-only change does not alter any parsed catalog definition,
+        // so only the migration-file hash binding can catch it.
+        let path = postgres.path().join("0001_initial.sql");
+        let mut contents = fs::read_to_string(&path)?;
+        contents.push_str("\n-- drift probe\n");
+        fs::write(&path, contents)?;
+
+        let after = generate_inventory_from_trees(sqlite.path(), postgres.path())?;
+        assert_ne!(before, after, "file hash binding must change");
+        let error = match ensure_matches_committed(&after) {
+            Ok(()) => return Err("an edited migration file must fail the drift gate".into()),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("migration file binding changed"),
+            "{message}"
+        );
+        assert!(message.contains("0001_initial.sql"), "{message}");
+        Ok(())
+    }
+
+    #[test]
     fn unregistered_migration_table_fails_generation_with_regeneration_instructions()
     -> Result<(), Box<dyn std::error::Error>> {
         let (sqlite, postgres) = scratch_trees(Some(
@@ -2773,6 +3092,12 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let base = serde_json::json!({
             "format": STATE_INVENTORY_FORMAT,
+            "sqlite_version": generator_sqlite_version().expect("sqlite version"),
+            "postgres_major": POSTGRES_MAJOR,
+            "migration_files": {
+                "migrations/0001_alpha.sql": "0".repeat(64),
+                "migrations_postgres/0001_alpha.sql": "0".repeat(64)
+            },
             "repositories": [{
                 "repository_id": "alpha",
                 "state_family": "canonical_resources",
