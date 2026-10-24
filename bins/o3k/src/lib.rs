@@ -41,7 +41,9 @@ pub mod backup_data_dir;
 // Root-owned installation trust/key configuration and the D9 staging
 // reservation bound for the authenticated backup artifact (SPEC-0050 §8,
 // ADR-0189). Trust loading derives the canonical identity from o3k-store and
-// uses Linux no-follow file primitives; the reservation uses POSIX statvfs.
+// uses Linux no-follow file primitives; the reservation keeps a POSIX statvfs
+// preflight and enforces the remaining reservation with a non-sparse hold file
+// allocated through `fallocate(2)`.
 #[cfg(unix)]
 pub mod backup_reservation;
 #[cfg(target_os = "linux")]
