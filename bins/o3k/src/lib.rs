@@ -65,7 +65,7 @@ pub mod engine;
 pub mod native_cli;
 pub mod output;
 #[cfg(target_os = "linux")]
-pub mod restore_pg_validation;
+pub use backup_pg_dump::restore_pg_validation;
 #[cfg(target_os = "linux")]
 pub mod restore_preflight;
 pub mod sys;

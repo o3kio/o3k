@@ -10,7 +10,6 @@ use rustix::fs::{FlockOperation, Mode, OFlags, flock, fstat, fstatfs, open, open
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{Connection, Row};
 use std::{
     fs::{self, File},
     io::{self, Read, Write},
@@ -20,8 +19,6 @@ use std::{
     },
     path::{Component, Path, PathBuf},
     process::ExitCode,
-    str::FromStr,
-    time::Duration,
 };
 use uuid::Uuid;
 
@@ -300,7 +297,14 @@ fn inspect_staged(
         .enable_all()
         .build()
         .map_err(|_| Failure::recoverable("target-inspection-unavailable"))?;
-    runtime.block_on(inspect_postgres_target(&postgres.database_url))?;
+    runtime
+        .block_on(crate::db::inspect_postgres_restore_target(
+            &postgres.database_url,
+        ))
+        .map_err(|error| match error {
+            crate::db::RestoreTargetError::Rejected(reason) => Failure::rejected(reason),
+            crate::db::RestoreTargetError::Unavailable(reason) => Failure::recoverable(reason),
+        })?;
     Ok(
         json!({"status":"preflighted", "artifact_sha256":artifact_sha256,
         "backend":"postgresql", "d10_catalog_sha256": report.catalog_sha256,
@@ -327,83 +331,6 @@ fn expected_migrations(schema_version: u64) -> Result<Vec<MigrationIdentity>> {
         return Err(Failure::rejected("migration-schema-mismatch"));
     }
     Ok(migrations)
-}
-
-async fn inspect_postgres_target(url: &str) -> Result<()> {
-    let options = sqlx::postgres::PgConnectOptions::from_str(url)
-        .map_err(|_| Failure::rejected("target-database-config-invalid"))?;
-    // Require an explicit database and fixed installation-provisioned role;
-    // credentials may not be supplied in URLs, environment or logs.
-    let authority = url.split_once("://").map(|(_, rest)| rest).unwrap_or("");
-    let userinfo = authority.split('@').next().unwrap_or("");
-    if !url.starts_with("postgresql://")
-        || userinfo.contains(':')
-        || url.contains('?')
-        || options.get_username() != "o3k_restore_owner"
-        || options.get_database().is_none()
-        || url.contains(char::is_whitespace)
-        || std::env::var_os("PGPASSWORD").is_some()
-    {
-        return Err(Failure::rejected("target-database-config-invalid"));
-    }
-    let connect = sqlx::PgConnection::connect_with(&options);
-    let mut connection = tokio::time::timeout(Duration::from_secs(5), connect)
-        .await
-        .map_err(|_| Failure::recoverable("target-database-unavailable"))?
-        .map_err(|_| Failure::recoverable("target-database-unavailable"))?;
-    let inspect = async {
-        sqlx::query("BEGIN READ ONLY")
-            .execute(&mut connection)
-            .await?;
-        sqlx::query("SET LOCAL search_path = pg_catalog")
-            .execute(&mut connection)
-            .await?;
-        sqlx::query("SET LOCAL statement_timeout = '5s'")
-            .execute(&mut connection)
-            .await?;
-        let row = sqlx::query("SELECT current_setting('server_version_num')::int / 10000 = 16 AS version_ok,
-          NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolinherit
-          AND NOT r.rolreplication AND NOT r.rolbypassrls AND r.rolcanlogin
-          AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid) AS role_ok,
-          d.datdba=r.oid AND NOT EXISTS (SELECT 1 FROM pg_namespace n,
-            LATERAL aclexplode(COALESCE(n.nspacl,acldefault('n',n.nspowner))) a
-            WHERE n.nspname='public' AND a.privilege_type='CREATE'
-              AND a.grantee NOT IN (r.oid, (SELECT oid FROM pg_roles WHERE rolname='pg_database_owner')))
-          AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(d.datacl,acldefault('d',d.datdba))) a WHERE a.grantee=0 AND a.privilege_type='CREATE') AS owner_ok,
-          NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datid=d.oid AND a.pid<>pg_backend_pid()) AS idle,
-          NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-            WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema')
-          AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-            WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema')
-          AND NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname !~ '^pg_'
-            AND nspname NOT IN ('public','information_schema'))
-          AND NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
-            WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema')
-          AND NOT EXISTS (SELECT 1 FROM pg_default_acl)
-          AND NOT EXISTS (SELECT 1 FROM pg_foreign_server)
-          AND NOT EXISTS (SELECT 1 FROM pg_largeobject_metadata)
-          AND NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname <> 'plpgsql') AS empty
-          FROM pg_roles r CROSS JOIN pg_database d WHERE r.rolname=current_user AND d.datname=current_database()")
-            .fetch_one(&mut connection).await?;
-        sqlx::query("ROLLBACK").execute(&mut connection).await?;
-        Ok::<_, sqlx::Error>(row)
-    };
-    let row = tokio::time::timeout(Duration::from_secs(10), inspect)
-        .await
-        .map_err(|_| Failure::recoverable("target-inspection-unavailable"))?
-        .map_err(|_| Failure::rejected("target-policy-unverifiable"))?;
-    for (field, reason) in [
-        ("version_ok", "target-postgres-major-unsupported"),
-        ("role_ok", "target-role-policy-rejected"),
-        ("owner_ok", "target-owner-policy-rejected"),
-        ("empty", "target-database-not-empty"),
-        ("idle", "target-session-conflict"),
-    ] {
-        if !row.get::<bool, _>(field) {
-            return Err(Failure::rejected(reason));
-        }
-    }
-    Ok(())
 }
 
 fn absolute_normal(path: &Path) -> std::result::Result<(), ()> {

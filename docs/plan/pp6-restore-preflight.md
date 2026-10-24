@@ -13,8 +13,9 @@ no OpenStack adapter or public API changes. Public action is only the accepted
 host-local `o3k restore preflight --artifact ABSOLUTE_FILE --target EMPTY_TARGET`.
 
 Affected packages/binaries: `o3k` operator CLI. Expected files: new
-`restore_preflight.rs`, `restore_pg_validation.rs`, contained catalog SQL and
-supporting tests; `lib.rs` / `main.rs` module and command registration. Existing
+`restore_preflight.rs`, the existing `backup_pg_dump.rs` execution adapter and
+`db.rs` read-only diagnostic boundary, contained catalog SQL and supporting
+tests; `lib.rs` / `main.rs` module and command registration. Existing
 artifact verification, canonical inventory, release reader, store-access lock
 and capacity primitives are reused. No backup format, canonical state, provider
 contract, daemon, migration or controller-store lock is introduced.
@@ -73,3 +74,11 @@ is not senolcolak's required final-exact-head approval. The process lane uses a
 privileged recovery orchestrator container and an ext4 named volume; D10 child
 containers receive neither its Docker socket nor its target identity. This is
 not independent-machine, installed-release or HSM evidence.
+
+Protected CI identified that the initial new files placed SQL and host command
+calls outside approved architecture paths. The corrective change moves D10
+execution into the existing PostgreSQL tool adapter and target inspection into
+the existing read-only database diagnostic boundary. No guard allowlist or
+architecture contract is broadened. The guard failure is failure-before
+evidence for this correction; repeat mandatory checks and the real campaign on
+the corrected exact head.
