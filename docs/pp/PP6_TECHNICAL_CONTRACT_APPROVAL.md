@@ -58,6 +58,19 @@ SQLite TestLab/portable path and is recorded in
 | `o3k-small-edge-v1`, virtualized | Disabled by default; no qualified integration is claimed in this package | Any future enablement requires independent hypervisor power control or network isolation outside both restored-controller credentials and its host. Controller-local APIs, host-local locks and same-host agents never qualify. Until a provider-specific contract and destructive tests are accepted, only backup/verification and inactive restore/quarantine are allowed. |
 | `o3k-demo-v1` / TestLab | Backup and verification only; restored-controller activation disabled | A later profile-specific fencing contract and exact evidence are required before enabling activation. |
 
+**Proposed amendment A10 (PENDING, not accepted).** The virtualized row's
+“inactive restore/quarantine” allowance has no corresponding path in the
+accepted SPEC-0050 §7 sequence, which requires `SOURCE_FENCED` before
+`TARGET_RESERVED`. Proposed amendment A10 would add an explicit, signed,
+non-activating branch limited to virtualized PostgreSQL `o3k-small-edge-v1`
+under a release-signed installation policy; see
+[SPEC-0050 §7.1](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#71-proposed-amendment-a10--isolated-inactive-materialization-pending-not-accepted)
+and the [ADR-0189 proposed amendment](../adr/ADR-0189-pp6-control-plane-backup-and-restore.md#proposed-amendment-a10--isolated-inactive-materialization-pending-not-accepted).
+This note does not change the accepted table, SPEC-0050 or any D1–D13 decision.
+Until the exact amendment is accepted by the named human reviewer at a new
+exact revision, the accepted text governs and implementation must remain
+capture/verification-only or fail closed at `PREFLIGHTED`.
+
 ### D2 custody record
 
 Every offline root, recovery, journal, and evidence key has a signed non-secret custody record containing `custody_record_id`, site/profile, purpose, key ID and fingerprint, algorithm, `2-of-3` threshold, three stable organization principal IDs, authorization-group version, creation/rotation/revocation times, approving record IDs, storage-provider/location classes, recovery-quorum event ID and expiry/re-review date. Provisioning, rotation, emergency revocation and recovery require two distinct authorized principals. Recovery quorum is bound to key ID, site/profile, operation ID and exact artifact/journal purpose. The custody authority signs the record. Physical storage addresses, private keys, tokens and credentials are excluded. A missing/expired/mismatched record fails closed.

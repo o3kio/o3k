@@ -177,6 +177,135 @@ def trust_state_valid(*, available: bool, now: int, next_update: int,
                      and sequence_digest == highest_seen_digest)))
 
 
+# PROPOSED amendment A10. These predicates model a proposed contract only;
+# they are not accepted authority and must not be cited as such.
+INACTIVE_PHASES = (
+    "TARGET_RESERVED_INACTIVE", "STAGING_INACTIVE",
+    "DATABASE_RESTORED_INACTIVE", "FILES_RESTORED_INACTIVE",
+    "INACTIVE_VERIFIED",
+)
+INACTIVE_TRANSITIONS = {
+    "PREFLIGHTED": {"TARGET_RESERVED_INACTIVE", "ABORTED"},
+    "TARGET_RESERVED_INACTIVE": {"STAGING_INACTIVE", "ABORTED", "QUARANTINED"},
+    "STAGING_INACTIVE": {"DATABASE_RESTORED_INACTIVE", "FAILED_RECOVERABLE",
+                         "QUARANTINED"},
+    "DATABASE_RESTORED_INACTIVE": {"FILES_RESTORED_INACTIVE",
+                                   "FAILED_RECOVERABLE", "QUARANTINED"},
+    "FILES_RESTORED_INACTIVE": {"INACTIVE_VERIFIED", "FAILED_RECOVERABLE",
+                                "QUARANTINED"},
+    "FAILED_RECOVERABLE": {"DISCARDED", "QUARANTINED"},
+    "QUARANTINED": {"DISCARDED"},
+}
+ACTIVATION_ONLY_PHASES = {
+    "SOURCE_FENCED", "TARGET_RESERVED", "STAGING", "DATABASE_RESTORED",
+    "FILES_RESTORED", "TARGET_FENCED", "STARTED", "RECONCILED", "COMMITTED",
+}
+
+
+def inactive_profile_permitted(*, profile: str, backend: str, deployment: str,
+                               policy_enabled: bool) -> bool:
+    return (profile == "o3k-small-edge-v1" and backend == "postgresql"
+            and deployment == "virtualized" and policy_enabled)
+
+
+def accept_inactive_transition(*, sequence: int, previous_hash: str,
+                               expected_sequence: int,
+                               expected_previous_hash: str,
+                               recorded_branch: str | None,
+                               from_phase: str, to_phase: str,
+                               signature_verified: bool, profile: str,
+                               backend: str, deployment: str,
+                               policy_enabled: bool,
+                               verification_bound: bool = False) -> bool:
+    """PROPOSED A10 policy model; not accepted contract authority."""
+    if not signature_verified:
+        return False
+    if sequence != expected_sequence or previous_hash != expected_previous_hash:
+        return False
+    if recorded_branch not in (None, "inactive"):
+        return False
+    if not inactive_profile_permitted(profile=profile, backend=backend,
+                                      deployment=deployment,
+                                      policy_enabled=policy_enabled):
+        return False
+    if from_phase in ACTIVATION_ONLY_PHASES or to_phase in ACTIVATION_ONLY_PHASES:
+        return False
+    if to_phase not in INACTIVE_TRANSITIONS.get(from_phase, set()):
+        return False
+    if to_phase == "INACTIVE_VERIFIED" and not verification_bound:
+        return False
+    return True
+
+
+class ProposedInactiveMaterializationTests(unittest.TestCase):
+    """PROPOSED A10 tests only; they do not make the amendment accepted."""
+
+    def kwargs(self, **overrides):
+        base = dict(sequence=2, previous_hash="p" * 64,
+                    expected_sequence=2, expected_previous_hash="p" * 64,
+                    recorded_branch=None, from_phase="PREFLIGHTED",
+                    to_phase="TARGET_RESERVED_INACTIVE",
+                    signature_verified=True,
+                    profile="o3k-small-edge-v1", backend="postgresql",
+                    deployment="virtualized", policy_enabled=True)
+        base.update(overrides)
+        return base
+
+    def test_profile_and_policy_restriction(self):
+        self.assertTrue(accept_inactive_transition(**self.kwargs()))
+        for field, value in (("profile", "o3k-demo-v1"),
+                             ("backend", "sqlite"),
+                             ("deployment", "physical"),
+                             ("policy_enabled", False)):
+            with self.subTest(field=field):
+                self.assertFalse(accept_inactive_transition(
+                    **self.kwargs(**{field: value})))
+
+    def test_inactive_branch_reaches_only_inactive_verified(self):
+        chain = [
+            ("PREFLIGHTED", "TARGET_RESERVED_INACTIVE"),
+            ("TARGET_RESERVED_INACTIVE", "STAGING_INACTIVE"),
+            ("STAGING_INACTIVE", "DATABASE_RESTORED_INACTIVE"),
+            ("DATABASE_RESTORED_INACTIVE", "FILES_RESTORED_INACTIVE"),
+            ("FILES_RESTORED_INACTIVE", "INACTIVE_VERIFIED"),
+        ]
+        for index, (source, target) in enumerate(chain, start=2):
+            with self.subTest(phase=target):
+                self.assertTrue(accept_inactive_transition(
+                    **self.kwargs(
+                        sequence=index, expected_sequence=index,
+                        recorded_branch="inactive", from_phase=source,
+                        to_phase=target,
+                        verification_bound=(target == "INACTIVE_VERIFIED"))))
+        for forbidden in ACTIVATION_ONLY_PHASES:
+            with self.subTest(forbidden=forbidden):
+                self.assertFalse(accept_inactive_transition(
+                    **self.kwargs(recorded_branch="inactive",
+                                  from_phase="INACTIVE_VERIFIED",
+                                  to_phase=forbidden)))
+
+    def test_inactive_branch_rejects_cross_branch_switch_and_unsigned_records(self):
+        self.assertFalse(accept_inactive_transition(
+            **self.kwargs(recorded_branch="activation")))
+        self.assertFalse(accept_inactive_transition(
+            **self.kwargs(signature_verified=False)))
+        self.assertFalse(accept_inactive_transition(
+            **self.kwargs(from_phase="SOURCE_FENCED",
+                          to_phase="TARGET_RESERVED_INACTIVE")))
+        self.assertFalse(accept_inactive_transition(
+            **self.kwargs(sequence=3)))
+        self.assertFalse(accept_inactive_transition(
+            **self.kwargs(previous_hash="f" * 64)))
+        self.assertFalse(accept_inactive_transition(
+            **self.kwargs(from_phase="FILES_RESTORED_INACTIVE",
+                          to_phase="INACTIVE_VERIFIED",
+                          verification_bound=False)))
+        self.assertTrue(accept_inactive_transition(
+            **self.kwargs(from_phase="FILES_RESTORED_INACTIVE",
+                          to_phase="INACTIVE_VERIFIED",
+                          verification_bound=True)))
+
+
 class ContractDecisionPrototypeTests(unittest.TestCase):
     def test_d9_exact_reservation_edges_and_failures(self):
         self.assertEqual(reservation(4 * GIB, 9 * GIB), 9 * GIB)

@@ -287,6 +287,38 @@ at its exact revision. Concrete implementation correctness, key custody
 operations, PostgreSQL real-backend evidence, protected integration, and all
 release-level review requirements remain in force.
 
+### Proposed amendment A10 — isolated inactive materialization (PENDING, not accepted)
+
+Proposed 2026-10-24 for #1086. This section is **not** accepted architecture,
+is not part of the exact-revision contract at
+`9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`, and authorizes no implementation.
+It becomes normative only after the named human reviewer records explicit
+acceptance of this exact revision together with the matching SPEC-0050 and PP6
+technical-contract text, not merely by PR approval or merge.
+
+The proposal adds a signed, non-activating materialization branch for
+virtualized PostgreSQL `o3k-small-edge-v1` under an explicitly selected
+release-signed installation policy. It distinguishes isolated restoration of
+control-plane data from authorized controller activation:
+
+- the accepted annotated sequence and all D7 fencing, D3 issuer-replacement,
+  D4 exclusive-access and D8 handoff gates are unchanged for activation;
+- `INACTIVE_VERIFIED` means only that materialization and verification passed;
+  it is not `COMMITTED`, cannot transition to `STARTED` or any other activation
+  phase, and grants no controller, API, lease, provider or external-resource
+  authority;
+- physical small-edge and SQLite Demo/TestLab are outside this amendment;
+- a target left inactive may be activated only by a separately accepted
+  procedure with fresh independent fencing, fresh validation and invalidation
+  of restored credentials and leases.
+
+The exact transitions, signing bindings, mandatory safeguards, crash
+classifications, profile restrictions, backward-compatibility rules and
+residual risks are specified in
+[SPEC-0050 §7.1](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#71-proposed-amendment-a10--isolated-inactive-materialization-pending-not-accepted).
+Until acceptance, the accepted D7-first behavior and the current fail-closed
+implementation boundary govern.
+
 ### Decisions to record
 
 The following numbered list is the earlier proposal checklist, retained as
