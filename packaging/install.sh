@@ -848,12 +848,14 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   # group-kvm (the setgid bit is restored below), so pre-existing runtime
   # files (base images, overlays, console sinks) remain QEMU-readable after a
   # reset+reinstall cycle instead of being silently chowned to the compute
-  # account's group.
-  chown -R o3k-compute:kvm "$COMPUTE_DATA_DIR"
-  # The agent identity file is compute-private identity material, not QEMU
-  # runtime state; restore its compute-primary-group ownership.
-  if [[ -f "$COMPUTE_DATA_DIR/agent-id" ]]; then
-    chown o3k-compute:o3k-compute "$COMPUTE_DATA_DIR/agent-id"
+  # account's group. The fake profile does not create the compute subtree.
+  if [[ -d "$COMPUTE_DATA_DIR" ]]; then
+    chown -R o3k-compute:kvm "$COMPUTE_DATA_DIR"
+    # The agent identity file is compute-private identity material, not QEMU
+    # runtime state; restore its compute-primary-group ownership.
+    if [[ -f "$COMPUTE_DATA_DIR/agent-id" ]]; then
+      chown o3k-compute:o3k-compute "$COMPUTE_DATA_DIR/agent-id"
+    fi
   fi
   install_owned_system_file "$ROOT_DIR/packaging/o3kd.service" /etc/systemd/system/o3kd.service 0644
   if [[ "$PROFILE" == libvirt ]]; then
