@@ -388,11 +388,14 @@ if [[ -f "$ROOT_DIR/SHA256SUMS" ]]; then
   INSTALLED_FILES+=(share/o3k/SHA256SUMS)
 fi
 # Backup trust template (no key material). Operators copy it to the root-owned
-# /etc/o3k/backup-trust.json as root:o3k 0640 (0600 is also accepted) and
-# replace every placeholder; the loader validates the file posture and rejects
-# incomplete or malformed values. The example is capture-only: it names the
-# X25519 public key and no private key file. The recovery private key stays on
-# the operator/recovery host as 0600 (0400 accepted); `o3k backup verify`
+# /etc/o3k/backup-trust.json and replace every placeholder; the loader validates
+# the file posture and rejects incomplete or malformed values. The packaged mode
+# is root:o3k 0640, because the service user runs as `o3k` and needs the group
+# read bit; 0600 is only usable when the document is owned by the invoking user
+# (TestLab). A root-owned 0600 document is rejected for a non-root caller with
+# trust-config-unreadable-by-service-user. The example is capture-only: it names
+# the X25519 public key and no private key file. The recovery private key stays
+# on the operator/recovery host as 0600 (0400 accepted); `o3k backup verify`
 # requires it there. The installer never creates /etc/o3k/backup-trust.json or
 # any permissive /etc/o3k directory.
 install_owned_file "$ROOT_DIR/packaging/backup-trust.example.json" \
@@ -807,6 +810,7 @@ if [[ $EUID -eq 0 && "$PROFILE" == libvirt ]]; then
   install -d -o o3k-compute -g kvm -m 2770 "$COMPUTE_DATA_DIR/image-cache/overlays"
 fi
 echo "installed o3kd profile=$PROFILE at $PREFIX/bin/o3kd; data=$DATA_DIR; config=$ENV_FILE; user=$RUN_USER"
+echo "backup data directory: a non-root $RUN_USER service user resolves $DATA_DIR automatically when it owns that directory (the packaged posture), even though $ENV_FILE is root:root 0600 and unreadable to it; set O3K_DATA_DIR to override"
 if [[ -f "$PREFIX/share/o3k/backup-trust.example.json" ]]; then
-  echo "backup trust template: $PREFIX/share/o3k/backup-trust.example.json (install as /etc/o3k/backup-trust.json root:o3k 0640, or 0600, and replace placeholders; capture uses recipient.x25519_public_key only; keep the X25519 private key on the recovery/operator host as 0600 and set recipient.x25519_private_key_file there for verify; fields: format, site_id, installation_id, profile_id, artifact_signing{key_id, ed25519_public_key}, recipient{key_id, x25519_public_key[, x25519_private_key_file]}, revoked_key_ids, custody{record_id, purpose, key_fingerprint, threshold, custodians, storage_class, expires_at})"
+  echo "backup trust template: $PREFIX/share/o3k/backup-trust.example.json (install as /etc/o3k/backup-trust.json with the packaged mode root:$RUN_USER 0640 so the service user can read it, or 0600 only when the document is owned by the invoking user; replace placeholders; capture uses recipient.x25519_public_key only; keep the X25519 private key on the recovery/operator host as 0600 and set recipient.x25519_private_key_file there for verify; fields: format, site_id, installation_id, profile_id, artifact_signing{key_id, ed25519_public_key}, recipient{key_id, x25519_public_key[, x25519_private_key_file]}, revoked_key_ids, custody{record_id, purpose, key_fingerprint, threshold, custodians, storage_class, expires_at})"
 fi

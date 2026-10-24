@@ -626,6 +626,58 @@ json.dump(response, open(path, "w"))
 PY
 }
 
+# Rebuild an artifact around a mutated manifest and sign it with the harness
+# custody key. The mutation runs after the signature field is removed (exactly
+# the D1 input the product signs over) and the member blocks are re-attached by
+# name, so dropping a member also drops its bytes. Used to prove the
+# classification of a *validly signed* artifact, which is the only way to reach
+# the checks that run after signature verification.
+resign_artifact() { # resign_artifact <source> <destination> <python-statement mutating manifest> [signing-key]
+    local source="$1" destination="$2" mutation="$3" key="${4:-$BACKUP_SIGNING_KEY}"
+    local stem
+    stem="$WORK/resign-$(basename "${destination%.o3k}")"
+    python3 - "$source" "$stem-d1.bin" "$stem-manifest.json" "$stem-blocks.bin" "$mutation" <<'PY'
+import json, struct, sys
+(artifact, d1_out, manifest_out, blocks_out, mutation) = sys.argv[1:6]
+raw = open(artifact, "rb").read()
+assert raw[:12] == b"O3KPP6BK\x00\x00\x00\x01", "artifact magic"
+manifest_len = struct.unpack(">Q", raw[12:20])[0]
+manifest_end = 20 + manifest_len
+manifest = json.loads(raw[20:manifest_end])
+offset = manifest_end
+blocks_by_name = {}
+for member in manifest["members"]:
+    size = struct.unpack(">Q", raw[offset:offset + 8])[0]
+    offset += 8
+    blocks_by_name[member["name"]] = struct.pack(">Q", size) + raw[offset:offset + size]
+    offset += size
+assert offset == len(raw), "artifact layout"
+manifest["authentication"].pop("signature", None)
+exec(mutation)
+canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+d1 = b"O3K-PP6-BACKUP-MANIFEST-V1\x00" + struct.pack(">Q", len(canonical)) + canonical
+for member in manifest["members"]:
+    name = member["name"].encode()
+    d1 += struct.pack(">I", len(name)) + name + bytes.fromhex(member["sha256"])
+open(d1_out, "wb").write(d1)
+open(manifest_out, "w").write(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+open(blocks_out, "wb").write(b"".join(blocks_by_name[m["name"]] for m in manifest["members"]))
+PY
+    sign_bytes "$key" "$stem-d1.bin" "$stem.sig" || { log "  re-sealing signature failed"; return 1; }
+    python3 - "$stem-manifest.json" "$stem.sig" "$stem-blocks.bin" "$destination" <<'PY'
+import base64, json, struct, sys
+manifest_path, signature_path, blocks_path, artifact_path = sys.argv[1:5]
+manifest = json.load(open(manifest_path))
+signature = open(signature_path, "rb").read()
+assert len(signature) == 64, "signature length"
+manifest["authentication"]["signature"] = base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+raw = b"O3KPP6BK\x00\x00\x00\x01" + struct.pack(">Q", len(canonical)) + canonical + open(blocks_path, "rb").read()
+open(artifact_path, "wb").write(raw)
+PY
+    chmod 0600 "$destination"
+}
+
 # ---------------------------------------------------------------------------
 # Assertions on the produced artifact bytes (independent of the binary parser)
 # ---------------------------------------------------------------------------
@@ -2217,47 +2269,41 @@ verify_row identity 2 identity-mismatch "trust document bound to another install
 verify_row release 2 release-mismatch "artifact does not match the installed exact release"
 verify_row revoked 2 revoked-signing-key "revoked artifact-signing key is rejected"
 verify_row truncated 2 corrupt-artifact "truncated artifact is rejected"
+# Re-signing a mutated manifest is now feasible (`resign_artifact`), so the
+# blocker is no longer tooling: the 5 GiB complete-size branch is unreachable
+# for a *schema-valid* manifest. `validate_manifest` bounds each member's
+# plaintext at 1 GiB and the total plaintext at 4 GiB, and the verifier runs
+# that semantic validation before the complete-size check, so the largest
+# declarable artifact is ~4 GiB + 16 MiB. A re-signed manifest that tries to
+# declare more is rejected earlier as `schema-invalid` (member metadata /
+# total-size bound) and the only path to `artifact-too-large` in
+# `verify_artifact_stream` is an over-long declared manifest length, which is a
+# malformed header rather than a signed artifact. Asserted by
+# `backup::tests::the_complete_size_bound_is_unreachable_for_a_schema_valid_manifest`;
+# the exact reason mapping is unit-covered by
+# `backup_verify::tests::reason_mapping_is_stable_for_every_failure_class`
+# (`ArtifactTooLarge` -> exit 2 `artifact-too-large`).
 record NOT-COVERED case-12oversize "-" "-" "-" "-" "-" "artifact-too-large" \
-    "not feasible end-to-end: verify checks the manifest-bounded size only after a valid Ed25519 signature; producing a signed manifest declaring >5GiB would require reimplementing artifact assembly. Unit mapping covered by backup_verify::tests::reason_mapping_is_stable_for_every_failure_class"
+    "not reachable end-to-end for a schema-valid manifest: per-member 1 GiB and 4 GiB total plaintext bounds keep the declarable complete size below the 5 GiB check, which therefore runs only for a synthetic header; re-signing a mutated manifest (resign_artifact) cannot produce the input. Unit: backup::tests::the_complete_size_bound_is_unreachable_for_a_schema_valid_manifest and backup_verify::tests::reason_mapping_is_stable_for_every_failure_class"
 
 # ---------------------------------------------------------------------------
-# Case 24: a trusted signed manifest without a required member is rejected
+# Case 24: a validly signed manifest without a required member is rejected
 # ---------------------------------------------------------------------------
 echo
 echo "== Case 24: required-member enforcement =="
 MISSING_MEMBER="$WORK/happy-missing-member.o3k"
-python3 - "$HAPPY_ARTIFACT" "$MISSING_MEMBER" <<'PY'
-import json, struct, sys
-source, destination = sys.argv[1:3]
-raw = open(source, "rb").read()
-assert raw[:12] == b"O3KPP6BK\x00\x00\x00\x01"
-manifest_len = struct.unpack(">Q", raw[12:20])[0]
-manifest_end = 20 + manifest_len
-manifest = json.loads(raw[20:manifest_end])
-offset = manifest_end
-blocks = []
-for member in manifest["members"]:
-    size = struct.unpack(">Q", raw[offset:offset + 8])[0]
-    offset += 8
-    blocks.append(struct.pack(">Q", size) + raw[offset:offset + size])
-    offset += size
-assert offset == len(raw)
-index = next(i for i, member in enumerate(manifest["members"])
-             if member["name"] == "metadata/capture.json")
-del manifest["members"][index]
-del blocks[index]
-canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-rebuilt = raw[:12] + struct.pack(">Q", len(canonical)) + canonical + b"".join(blocks)
-open(destination, "wb").write(rebuilt)
-PY
-chmod 0600 "$MISSING_MEMBER"
+# The manifest is mutated *and re-signed* with the harness custody key, so the
+# rejection cannot be explained by a broken signature: a validly signed
+# artifact that lacks a required member is still exit 2 missing-required-member.
+resign_artifact "$HAPPY_ARTIFACT" "$MISSING_MEMBER" \
+    'manifest["members"] = [m for m in manifest["members"] if m["name"] != "metadata/capture.json"]'
 run_verify verify-missing-member "$HAPPY_DATA" "$HAPPY_TRUST" "$HAPPY_PREFIX" "$MISSING_MEMBER"
 CHECK_OK=1
 check "$(verify_exit verify-missing-member)" "2" "missing-member exit"
 check "$(verify_reason verify-missing-member)" "missing-required-member" "missing-member reason"
 if (( CHECK_OK )); then
     record PASS case-24 "$(verify_exit verify-missing-member)" "published" "0" "free" "yes" \
-        "missing-required-member(exit=2)" "a signed manifest without metadata/capture.json is rejected by the required-member set before any decrypt"
+        "missing-required-member(exit=2)" "a validly signed manifest (the mutated manifest was re-signed, so the D1 signature verifies) without metadata/capture.json is rejected by the required-member set: the classification is missing-required-member, not signature-invalid, and no member is decrypted"
 else
     record FAIL case-24 "-" "-" "-" "-" "-" \
         "exit=$(verify_exit verify-missing-member 2>/dev/null || echo '?') reason=$(verify_reason verify-missing-member 2>/dev/null || echo '?')" \

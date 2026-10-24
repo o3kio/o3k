@@ -57,8 +57,8 @@ pub use access_lock::StoreAccessLock;
 pub use backup_control::{
     AcceptedBackupRequest, BACKUP_CONTROL_DIR, BACKUP_CONTROL_SOCKET, BackupControlError,
     BackupControlListener, BackupHandoffRequest, ExpectedExecutor, HandoffRejectReason,
-    PeerIdentity, connect_and_request, identity_tokens, installation_token, reject_already_active,
-    site_token, verify_daemon_peer,
+    PeerIdentity, connect_and_request, connect_control, identity_tokens, installation_token,
+    reject_already_active, send_request_and_read_accept, site_token, verify_daemon_peer,
 };
 pub use coordination::{
     ControllerEpoch, ControllerId, ControllerSession, ControllerState, CoordinationRepository,

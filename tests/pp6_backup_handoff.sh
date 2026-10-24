@@ -21,6 +21,14 @@
 # DOCUMENTED rows.
 #
 # The script is re-runnable and exits 0 only when every executed check passed.
+#
+# Scope note: this is the handoff/lock/failure-injection campaign, not the
+# custody evidence script. It exercises the handoff, store lock, drain and
+# restart boundaries with the harness-only `O3K_BACKUP_TEST_STOP_AFTER_STAGING=1`
+# one-shot phase-1 shape and a fixture signing key; it makes no custody, HSM,
+# restore or artifact-format claim. The Option A signing wait, the published
+# artifact bytes and the independent verification legs are proven by
+# `tests/pp6_backup_artifact.sh`.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -578,27 +586,52 @@ if (( JOURNEY_OK )); then result PASS journey "authenticated handoff journey end
 echo
 echo "== Section 2: failure-injection matrix =="
 
-# --- (a) Authentication failure: executor exe identity mismatch ----------------
+# --- (a) Authentication failure: a relocated executor is refused ---------------
+# Round 3: the executor authenticates the daemon *before* it sends a request, so
+# a relocated binary is refused on the client side and the daemon never sees a
+# request frame (no drain for an unauthenticated peer). Two legs:
+#   a1: no sibling `o3kd` next to the copy -> the expected daemon path cannot be
+#       resolved -> exit 2 `daemon-identity-unavailable`;
+#   a2: a sibling `o3kd` copy exists but is not the running daemon -> exit 2
+#       `daemon-identity-mismatch`.
+# The daemon-side executor identity check (a non-installed executor presented
+# *with* a request) remains covered by the in-process test
+# `backup_create::tests::impostor_executor_is_rejected_by_listener` and by the
+# in-band rejection rows below; the assertion here is the reverse direction and
+# that no request reached the daemon.
 fresh_case_dirs case-a
 start_daemon case-a "$CASE_DATA"
 if wait_ready case-a 30; then
-    A_IMPOSTOR="$WORK/impostor-o3k"
+    A_RELOCATED="$WORK/case-a-relocated"
+    mkdir -p "$A_RELOCATED"
+    A_IMPOSTOR="$A_RELOCATED/o3k"
     cp "$O3K_BIN" "$A_IMPOSTOR"
     chmod 0700 "$A_IMPOSTOR"
-    AOP="$(new_op_id)"
-    set +e
-    env O3K_DATA_DIR="$CASE_DATA" \
-        O3K_BACKUP_TRUST_CONFIG="$CASE_TRUST_CONFIG" \
-        O3K_INSTALL_PREFIX="$CASE_INSTALL_PREFIX" \
-        "$A_IMPOSTOR" backup create --destination "$CASE_DEST" --operation-id "$AOP" \
-        >"$WORK/case-a.backup.json" 2>"$WORK/case-a.backup.stderr"
-    A_STATUS=$?
-    set -e
     A_OK=1
+    run_relocated() { # run_relocated <operation-id> -> writes $A_RELOCATED/*.json/.stderr
+        set +e
+        env O3K_DATA_DIR="$CASE_DATA" \
+            O3K_BACKUP_TRUST_CONFIG="$CASE_TRUST_CONFIG" \
+            O3K_INSTALL_PREFIX="$CASE_INSTALL_PREFIX" \
+            "$A_IMPOSTOR" backup create --destination "$CASE_DEST" --operation-id "$1" \
+            >"$A_RELOCATED/$1.json" 2>"$A_RELOCATED/$1.stderr"
+        A_STATUS=$?
+        set -e
+    }
+    AOP1="$(new_op_id)"
+    run_relocated "$AOP1"
     [[ "$A_STATUS" == "2" ]] || A_OK=0
-    grep -q 'unauthorized-peer' "$WORK/case-a.backup.stderr" || A_OK=0
-    grep -qF 'backup handoff request rejected during authentication' "$(daemon_log case-a)" || A_OK=0
-    grep -q 'UnauthorizedPeer' "$(daemon_log case-a)" || A_OK=0
+    grep -q 'daemon-identity-unavailable' "$A_RELOCATED/$AOP1.stderr" || A_OK=0
+    # Leg a2: a sibling o3kd that is not the running inode is a proven mismatch.
+    cp "$O3KD_BIN" "$A_RELOCATED/o3kd"
+    chmod 0700 "$A_RELOCATED/o3kd"
+    AOP2="$(new_op_id)"
+    run_relocated "$AOP2"
+    [[ "$A_STATUS" == "2" ]] || A_OK=0
+    grep -q 'daemon-identity-mismatch' "$A_RELOCATED/$AOP2.stderr" || A_OK=0
+    # Neither attempt may have reached the daemon: the daemon only logs an
+    # UnauthorizedPeer rejection after it has read a request frame.
+    if grep -q 'UnauthorizedPeer' "$(daemon_log case-a)"; then A_OK=0; fi
     curl -fsS "http://127.0.0.1:$(daemon_port case-a)/readyz" >/dev/null || A_OK=0
     if ! python3 - "$CASE_DATA" <<'PY'
 import fcntl, os, sys
@@ -612,9 +645,9 @@ PY
     then A_OK=0; fi
     sigterm_expect_zero case-a || A_OK=0
     if (( A_OK )); then
-        result PASS case-a "exe-identity mismatch rejected (exit 2 unauthorized-peer); daemon healthy, lock held, SIGTERM exit 0"
+        result PASS case-a "relocated executor refused before any request (exit 2 daemon-identity-unavailable without a sibling o3kd, exit 2 daemon-identity-mismatch with a non-matching one); daemon healthy, lock held, no request frame seen, SIGTERM exit 0"
     else
-        result FAIL case-a "auth-failure case: status=$A_STATUS stderr=$(cat "$WORK/case-a.backup.stderr")"
+        result FAIL case-a "auth-failure case: leg1=$(cat "$A_RELOCATED/$AOP1.stderr" 2>/dev/null) leg2=$(cat "$A_RELOCATED/$AOP2.stderr" 2>/dev/null)"
     fi
 else
     result FAIL case-a "daemon not ready"

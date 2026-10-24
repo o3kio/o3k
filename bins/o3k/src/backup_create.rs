@@ -2,8 +2,10 @@
 //! the PP.6 backup artifact (SPEC-0050 §8, ADR-0189 D2/D4/D8/D9/D12).
 //!
 //! This module owns the `o3k` CLI side of the host-local backup handoff. It
-//! requests the authenticated handoff from `o3kd` over the private Unix control
-//! socket ([`o3k_store::connect_and_request`]), receives the exclusive
+//! resolves the expected daemon identity, connects to the private Unix control
+//! socket ([`o3k_store::connect_control`]), authenticates the peer
+//! ([`o3k_store::verify_daemon_peer`]) **before** sending the request
+//! ([`o3k_store::send_request_and_read_accept`]), receives the exclusive
 //! store-access lock ([`o3k_store::StoreAccessLock::receive_handoff`]), writes
 //! the denial-only interrupted-backup marker, captures an integrity-checked
 //! SQLite snapshot through [`o3k_store::SqliteStore::backup_to_file`], proves
@@ -106,8 +108,10 @@
 //! with, because both sides derive the installation/site identity tokens from
 //! the canonical path and the control socket lives inside it:
 //! [`crate::backup_data_dir::resolve_data_dir`] — non-root uses non-empty
-//! `O3K_DATA_DIR`, else `O3K_DATA_DIR` from `/etc/o3k/o3kd.env`, else `./data`;
-//! root ignores the environment and uses the packaged `/var/lib/o3k`.
+//! `O3K_DATA_DIR`, else `O3K_DATA_DIR` from `/etc/o3k/o3kd.env`, else the
+//! packaged `/var/lib/o3k` when it exists and is owned by the effective uid,
+//! else `./data`; root ignores the environment and uses the packaged
+//! `/var/lib/o3k`.
 //!
 //! Linux-only, mirroring the handoff gating in `o3k-store`.
 
@@ -124,7 +128,7 @@ use o3k_store::{
     BackupControlError, BackupHandoffRequest, HandoffRejectReason, SqliteStore, StoreAccessLock,
     StoreError, WalCheckpointMode,
     backup_journal::{self, BackupOperationPhase, BackupOperationRecord},
-    connect_and_request, identity_tokens,
+    connect_control, identity_tokens, send_request_and_read_accept,
 };
 use rustix::fd::OwnedFd;
 use rustix::fs::{Mode, OFlags, fstat, mkdirat, open, openat};
@@ -935,33 +939,12 @@ fn execute_inner(
         installation,
         site,
     };
-    let stream = match connect_and_request(&data_dir, &request, CONTROL_REQUEST_TIMEOUT) {
-        Ok(stream) => stream,
-        Err(BackupControlError::Rejected(reason)) => {
-            return BackupCreateOutcome::rejected(operation_id, reject_reason_code(reason));
-        }
-        Err(BackupControlError::AlreadyActive) => {
-            return BackupCreateOutcome::rejected(operation_id, "backup-already-active");
-        }
-        Err(BackupControlError::PeerChanged) | Err(BackupControlError::Unauthorized) => {
-            return BackupCreateOutcome::rejected(operation_id, "unauthorized-peer");
-        }
-        Err(BackupControlError::Timeout) => {
-            return BackupCreateOutcome::recoverable(operation_id, "controller-timeout");
-        }
-        Err(BackupControlError::InvalidInput) => {
-            return BackupCreateOutcome::recoverable(operation_id, "internal-invalid-input");
-        }
-        Err(BackupControlError::Io(_)) => {
-            return BackupCreateOutcome::rejected(operation_id, "controller-unavailable");
-        }
-    };
 
     // M1: authenticate the daemon that is about to hand off the lock. The
-    // accepted request only proves that some process answered; without this
-    // check a local impostor could pass us descriptors and then hold the
-    // capture open. The expected identity is the installed sibling `o3kd`
-    // running as the data-directory owner.
+    // expected identity is the installed sibling `o3kd` running as the
+    // data-directory owner, and it is resolved (and proven readable) *before*
+    // the connection: an installation whose own daemon path cannot be read
+    // must not ask the controller to stop serving.
     let expected_uid = match fs::metadata(&data_dir) {
         Ok(metadata) => metadata.uid(),
         Err(_) => {
@@ -973,12 +956,27 @@ fn execute_inner(
         None => match expected_daemon_executable() {
             Ok(path) => path,
             Err(_) => {
-                return BackupCreateOutcome::rejected(operation_id, "daemon-identity-mismatch");
+                return BackupCreateOutcome::rejected(operation_id, "daemon-identity-unavailable");
             }
         },
     };
-    if o3k_store::verify_daemon_peer(&stream, &expected_daemon_exe, expected_uid).is_err() {
-        return BackupCreateOutcome::rejected(operation_id, "daemon-identity-mismatch");
+    if fs::metadata(&expected_daemon_exe).is_err() {
+        return BackupCreateOutcome::rejected(operation_id, "daemon-identity-unavailable");
+    }
+    // Connect, authenticate the peer, and only then send the request: the
+    // daemon drains writers when it accepts, so an impostor or an unreadable
+    // peer must be refused before that drain starts.
+    let mut stream = match connect_control(&data_dir, CONTROL_REQUEST_TIMEOUT) {
+        Ok(stream) => stream,
+        Err(error) => return control_failure(operation_id, error),
+    };
+    match o3k_store::verify_daemon_peer(&stream, &expected_daemon_exe, expected_uid) {
+        Ok(()) => {}
+        Err(error) => return daemon_identity_failure(operation_id, error),
+    }
+    if let Err(error) = send_request_and_read_accept(&mut stream, &request, CONTROL_REQUEST_TIMEOUT)
+    {
+        return control_failure(operation_id, error);
     }
 
     test_hook_exit!("O3K_BACKUP_TEST_EXIT_BEFORE_RECEIVE", 95);
@@ -1432,6 +1430,47 @@ fn mark_operation_aborted(data_dir: &Path, journal: &BackupOperationRecord) {
     record.updated_at = now_utc_rfc3339();
     let _ = backup_journal::advance_backup_operation(data_dir, &record);
 }
+
+/// Maps a control-socket exchange failure to the SPEC-0050 exit classification.
+fn control_failure(operation_id: Uuid, error: BackupControlError) -> BackupCreateOutcome {
+    match error {
+        BackupControlError::Rejected(reason) => {
+            BackupCreateOutcome::rejected(operation_id, reject_reason_code(reason))
+        }
+        BackupControlError::AlreadyActive => {
+            BackupCreateOutcome::rejected(operation_id, "backup-already-active")
+        }
+        BackupControlError::PeerChanged | BackupControlError::Unauthorized => {
+            BackupCreateOutcome::rejected(operation_id, "unauthorized-peer")
+        }
+        BackupControlError::Timeout => {
+            BackupCreateOutcome::recoverable(operation_id, "controller-timeout")
+        }
+        BackupControlError::InvalidInput => {
+            BackupCreateOutcome::recoverable(operation_id, "internal-invalid-input")
+        }
+        BackupControlError::Io(_) => {
+            BackupCreateOutcome::rejected(operation_id, "controller-unavailable")
+        }
+    }
+}
+
+/// Maps a daemon-authentication failure to a stable reason.
+///
+/// A peer that is demonstrably a different process (`Unauthorized`) is a
+/// mismatch. A peer whose identity cannot be read at all (its `/proc` entry
+/// disappeared, or the expected executable cannot be inspected) is
+/// `daemon-identity-unavailable`: the caller could not prove what answered, and
+/// that is not the same statement as "the wrong daemon answered".
+fn daemon_identity_failure(operation_id: Uuid, error: BackupControlError) -> BackupCreateOutcome {
+    match error {
+        BackupControlError::Unauthorized => {
+            BackupCreateOutcome::rejected(operation_id, "daemon-identity-mismatch")
+        }
+        _ => BackupCreateOutcome::rejected(operation_id, "daemon-identity-unavailable"),
+    }
+}
+
 /// Maps an in-band handoff rejection to a stable reason code.
 fn reject_reason_code(reason: HandoffRejectReason) -> &'static str {
     match reason {
@@ -2051,6 +2090,92 @@ mod tests {
             .map_err(|_| io::Error::other("listener thread panicked"))?;
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&outcome), "unauthorized-peer");
+        Ok(())
+    }
+
+    /// Contract round 3: the executor authenticates the daemon *before* it
+    /// sends the request, so an impostor socket never receives a request frame
+    /// (and the real daemon is never asked to drain for it).
+    #[test]
+    fn impostor_daemon_never_receives_the_request() -> io::Result<()> {
+        let root = TempRoot::new("no-request")?;
+        let data_dir = root.private_dir("data")?;
+        let dest = root.private_dir("dest")?;
+        create_migrated_store(&data_dir)?;
+        let fixture = ArtifactFixture::new(&root, &data_dir, latest_sqlite_schema_version());
+        let control = data_dir.join(o3k_store::BACKUP_CONTROL_DIR);
+        fs::create_dir(&control)?;
+        fs::set_permissions(&control, fs::Permissions::from_mode(0o700))?;
+        let listener =
+            std::os::unix::net::UnixListener::bind(control.join(o3k_store::BACKUP_CONTROL_SOCKET))?;
+        let (sender, received) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || -> io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut frame = [0_u8; 64];
+            // The client must close without sending: this returns 0 (EOF).
+            let read = stream.read(&mut frame)?;
+            let _ = sender.send(read);
+            Ok(())
+        });
+        // The socket peer is this test process, so point the expected daemon at
+        // a different executable: the identity check must reject it.
+        let controls = ExecutorControls {
+            expected_daemon_exe: Some(
+                [PathBuf::from("/bin/false"), PathBuf::from("/usr/bin/false")]
+                    .into_iter()
+                    .find(|path| path.exists())
+                    .ok_or_else(|| io::Error::other("no impostor executable available"))?,
+            ),
+            ..ExecutorControls::default()
+        };
+        let outcome = execute_inner(
+            &args_for(dest.clone()),
+            dest.clone(),
+            destination_fd(&dest)?,
+            data_dir.clone(),
+            now_utc_rfc3339(),
+            &fixture.environment(),
+            &controls,
+        );
+        server
+            .join()
+            .map_err(|_| io::Error::other("fake controller thread panicked"))??;
+        assert_eq!(outcome.exit_code, EXIT_REJECTED);
+        assert_eq!(outcome_reason(&outcome), "daemon-identity-mismatch");
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)),
+            Ok(0),
+            "the request frame was sent before the daemon was authenticated"
+        );
+        Ok(())
+    }
+
+    /// An expected daemon path that cannot be read is reported as
+    /// `daemon-identity-unavailable` without contacting any controller.
+    #[test]
+    fn unreadable_expected_daemon_path_is_identity_unavailable() -> io::Result<()> {
+        let root = TempRoot::new("no-daemon-path")?;
+        let data_dir = root.private_dir("data")?;
+        let dest = root.private_dir("dest")?;
+        create_migrated_store(&data_dir)?;
+        let fixture = ArtifactFixture::new(&root, &data_dir, latest_sqlite_schema_version());
+        // No control socket exists: reaching `controller-unavailable` would
+        // prove the command connected before resolving the expected identity.
+        let controls = ExecutorControls {
+            expected_daemon_exe: Some(root.0.join("absent-o3kd")),
+            ..ExecutorControls::default()
+        };
+        let outcome = execute_inner(
+            &args_for(dest.clone()),
+            dest.clone(),
+            destination_fd(&dest)?,
+            data_dir,
+            now_utc_rfc3339(),
+            &fixture.environment(),
+            &controls,
+        );
+        assert_eq!(outcome.exit_code, EXIT_REJECTED);
+        assert_eq!(outcome_reason(&outcome), "daemon-identity-unavailable");
         Ok(())
     }
 

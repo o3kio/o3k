@@ -23,10 +23,24 @@ git rev-parse HEAD
 sha256sum tests/pp6_backup_artifact.sh tests/pp6_backup_handoff.sh
 cargo fmt --all -- --check
 cargo clippy -p o3k -p o3k-store -p o3kd --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p o3k -p o3k-store -p o3kd --all-features
-bash tests/pp6_backup_artifact.sh
+cargo test --workspace --all-features
+bash -n tests/pp6_backup_artifact.sh tests/pp6_backup_handoff.sh
+shellcheck -S warning tests/pp6_backup_artifact.sh tests/pp6_backup_handoff.sh
+bash tests/pp6_backup_artifact.sh        # run 1
+bash tests/pp6_backup_artifact.sh        # run 2
 bash tests/pp6_backup_handoff.sh
+bash tests/adr-governance.sh
+bash tests/supply-chain-governance.sh
 ```
+
+Recorded runs: the artifact campaign was executed three times (the bound run
+recorded here plus two consecutive re-runs on the delivered tree) and the
+handoff campaign was re-run on the delivered tree; every run produced the row
+outcomes below. The per-run fields printed in the verdict JSON (artifact
+digest, backup id, data-directory identities) differ between runs by
+construction; the row matrix does not.
 
 Recorded result:
 
@@ -75,9 +89,18 @@ Note: `release_artifact_sha256` is the campaign fixture's placeholder value
 source build with a labelled fixture release manifest. A real installed release
 records the digest verified by the installer/upgrade path.
 
+Note: the two campaign scripts changed in the round-3 fixes (re-signed
+`case-24`, `case-12oversize` rationale, handoff scope note), so the
+`harness_sha256` / `handoff_harness_sha256` values above identify the harness of
+the bound run, not the delivered files. The row outcomes were reproduced on the
+delivered tree by the round-3 re-runs; the harness digests and
+`final_commit`/`source_sha` are re-recorded by the binding step that follows
+this document's amendment.
+
 This document reports executable, real-process evidence for the signed backup
 artifact lifecycle only. The implementation is authored by the same agent that
-authored this campaign; see **Interim review status**.
+authored this campaign; see the *No independent review yet* non-claim under
+**Honest non-claims** below.
 
 ## Environment
 
@@ -192,7 +215,10 @@ and remain covered by `tests/pp6_backup_handoff.sh`.
   refuses to inspect the store while a controller or a capture owns the data
   directory (`controller-active`, exit 2), authenticates the published bytes
   against the installed exact release and removes its private plaintext
-  staging.
+  staging. The `controller-active` refusal itself is integration-covered only
+  (`bins/o3k/tests/backup_verify.rs::rejects_verification_while_the_store_lock_is_held`);
+  every verify row in the matrix runs with no live controller, so it is not a
+  matrix row.
 - The publication boundary rejects tampering, a pre-existing destination
   (including a symlinked or non-regular entry), destination symlink swaps,
   wrong/foreign/short/mismatched signatures, an expired request, and a revoked
@@ -210,10 +236,16 @@ and remain covered by `tests/pp6_backup_handoff.sh`.
   checkpoint — the installation metadata members and the bounded
   capture/request metadata allowance) and `max(2×S + 1 GiB, 6 GiB)` with no
   truncation; the same reservation is re-checked before finalize and before
-  publication and never lowered to fit.
+  publication and never lowered to fit. Only the reported numbers are a matrix
+  row (`case-10`); the pre-finalize/pre-publication re-checks are
+  unit-only (`backup_reservation::tests::boundary_recheck_never_truncates_the_remaining_reservation`)
+  and no matrix row consumes the filesystem between checks.
 - A seeded non-terminal Operation makes the manifest record
   `in_flight_operations=recorded_unknown` (with the stable ids in the capture
-  metadata member) instead of claiming `drained`.
+  metadata member) instead of claiming `drained`. This is matrix row `case-23`
+  when `sqlite3` is installed (the harness seeds the row directly in SQLite);
+  without `sqlite3` the row is NOT-COVERED and the claim rests on the unit
+  tests `backup_artifact::tests::{non_terminal_operations_are_recorded_as_unknown,capture_records_in_flight_operation_identities}`.
 - The harness custodian compares the signing request's
   `recipient_public_key_sha256` with the trusted trust document before it signs
   (the two-of-three custody check is simulated at the helper boundary) and
@@ -225,7 +257,12 @@ and remain covered by `tests/pp6_backup_handoff.sh`.
   2 triggers / 2 functions (165 objects). Capture enumerates the snapshot's
   live
   `sqlite_master` and fails closed (exit 2 `store-catalog-mismatch`) on an
-  extra, missing or redefined object before staging the artifact.
+  extra, missing or redefined object before staging the artifact. The
+  `store-catalog-mismatch` classification is unit-only
+  (`backup_artifact::tests::snapshot_catalog_rejects_an_extra_index`,
+  `..._an_extra_table`, `..._a_changed_definition`); the campaign has no
+  matrix row for it because a catalog mutation would require seeding a
+  non-baseline schema.
 - The campaign independently verifies the published bytes: local JCS + exact
   D1 input + OpenSSL Ed25519, recomputed member SHA-256 digests, and HPKE
   content-key unwrap plus AES-256-GCM decryption bound to the signed capture
@@ -275,7 +312,7 @@ cooperative store lock is held by another process when the row is recorded;
 | 30 | `case-12release` | PASS | 2 | — | — | free | yes | `release-mismatch` |
 | 31 | `case-12revoked` | PASS | 2 | — | — | free | yes | `revoked-signing-key` |
 | 32 | `case-12truncated` | PASS | 2 | — | — | free | yes | `corrupt-artifact` |
-| 33 | `case-12oversize` | NOT-COVERED | — | — | — | — | — | see below |
+| 33 | `case-12oversize` | NOT-COVERED | — | — | — | — | — | unreachable for a schema-valid manifest; see below |
 | 34 | `case-13` canonical-state immutability | PASS | — | published | 0 | free | yes | source DB SHA-256 identical before/after |
 | 35 | `case-14` forged `publishing` journal | PASS | 2 | publishing | 1 | free | no | `staged-artifact-invalid`; forged bytes never published |
 | 36 | `case-15` forged journal `backup_id` traversal | PASS | 2 | staged | 1 | free | no | `backup-operation-journal-invalid`; no escaped path |
@@ -284,15 +321,24 @@ cooperative store lock is held by another process when the row is recorded;
 | 39 | `case-1d` independent artifact verification (signature/D1/member digests) | PASS | 0 | published | 0 | free | yes | local JCS + OpenSSL Ed25519 over D1; recomputed member digests |
 | 40 | `case-1d-decrypt` independent HPKE/AES-GCM decryption leg | PASS | 0 | published | 0 | free | yes | HPKE unwrap + AES-GCM decrypt bound to the capture record and source DB (NOT-COVERED, never PASS, when python `cryptography` is unavailable) |
 | 41 | `case-1e` independent check rejects the tampered artifact | PASS | 2 | published | 0 | free | yes | independent member SHA-256 recomputation flags the flipped byte; nothing published |
-| 42 | `case-24` trusted signed manifest missing `metadata/capture.json` (F10) | PASS | 2 | published | 0 | free | yes | `missing-required-member` before signature/decrypt |
+| 42 | `case-24` validly signed (re-signed) manifest missing `metadata/capture.json` (F10) | PASS | 2 | published | 0 | free | yes | `missing-required-member` before any decrypt; the manifest was re-signed over the mutated content, so this is not a signature failure |
 | 43 | `case-25` fake daemon answers the handoff (M1) | PASS | 2 | — | 0 | free | no | `daemon-identity-mismatch`; Python peer rejected |
 | 44 | `case-26` validly signed partial from a different manifest (M2) | PASS | 2 | staged | 1 | free | no | `signing-request-mismatch`; request and staging kept |
 | 45 | `case-27` custodian refuses an altered recipient fingerprint (L11) | PASS | 2 | staged | 1 | free | no | custodian helper exit 1, no response written; phase 2 `signing-request-mismatch` |
 
-Totals: **44 executed rows PASS, 1 NOT-COVERED, 0 FAIL** when python
-`cryptography` is available. Without it, `case-1d-decrypt` is NOT-COVERED
-(44 total rows, 43 PASS, 2 NOT-COVERED) and no decryption claim is made. No
-unexecuted row is reported as PASS.
+Totals: **45 matrix rows: 44 PASS + 1 NOT-COVERED, 0 FAIL** when both python
+`cryptography` and `sqlite3` are available. The row set is conditional on those
+two tools:
+
+- without python `cryptography`, `case-1d-decrypt` becomes NOT-COVERED
+  (45 rows: 43 PASS + 2 NOT-COVERED) and no decryption claim is made;
+- without `sqlite3`, `case-23` (seeded non-terminal Operation) becomes
+  NOT-COVERED (45 rows: 43 PASS + 2 NOT-COVERED) and the
+  `in_flight_operations=recorded_unknown` claim rests on the unit tests named
+  above.
+
+No unexecuted row is reported as PASS, and the harness prints its own
+PASS/FAIL/NOT-COVERED accounting.
 
 ### Row notes and deliberate test mechanics
 
@@ -463,7 +509,7 @@ unchanged.
 | --- | --- | --- |
 | **H1 root-owned trust anchor unusable by the service user** | `bins/o3k/src/backup_trust.rs`: trust document may be owned by root or the effective uid; modes `0600` or `0640` (the latter only when the owning group is root or one of the process's groups); group/other write and other read always rejected. Private recipient key stays `0600`/`0400`. `load` no longer opens the private key; the public/private match is checked when `load_recipient_private_key` runs. `O3K_BACKUP_TRUST_CONFIG` / `O3K_INSTALL_PREFIX` are honored only for a non-installed data directory (`/var/lib/o3k` ignores them regardless of euid). | `backup_trust::tests::{root_owned_0640_for_a_service_user_and_group_write_rejection,accepts_the_service_group_mode_and_rejects_writable_or_other_readable,capture_loads_with_a_configured_public_key_and_no_private_key_file,installed_data_dir_ignores_the_environment_overrides_regardless_of_euid}` |
 | **H2 root upgrade path/URL overrides** | `bins/o3k/src/upgrade/runner.rs`: `upgrade_overrides_allowed(euid)` gates `O3K_UPGRADE_PREFIX/BIN_DIR/CONFIG_DIR/DOWNLOAD_DIR/RELEASES_URL/DOWNLOAD_BASE`; euid 0 uses canonical paths and URLs. Release-signature verification remains a follow-up (the upgrade contract does not define it yet). | `upgrade::runner::tests::upgrade_path_and_url_overrides_are_ignored_for_root` |
-| **M1 daemon not authenticated by the executor** | `crates/o3k-store/src/backup_control.rs::verify_daemon_peer` checks `SO_PEERCRED` uid and `/proc/<pid>/exe` dev+ino against the sibling `o3kd` and the data-dir owner; `backup_create.rs` calls it before `receive_handoff` (`daemon-identity-mismatch`, exit 2) and compares the received data-dir fd dev+ino with the canonical directory (`handoff-directory-mismatch`, exit 2; `access_lock.rs::data_dir_matches`). | `backup_control::tests::daemon_peer_requires_the_expected_uid_and_executable`; `access_lock::tests::data_directory_identity_is_compared_by_dev_and_ino`; `case-25` |
+| **M1 daemon not authenticated by the executor** | `crates/o3k-store/src/backup_control.rs::verify_daemon_peer` checks `SO_PEERCRED` uid and `/proc/<pid>/exe` dev+ino against the sibling `o3kd` and the data-dir owner; `backup_create.rs` connects, authenticates the peer and only then sends the request (round 3), before `receive_handoff` (`daemon-identity-mismatch` / `daemon-identity-unavailable`, exit 2) and compares the received data-dir fd dev+ino with the canonical directory (`handoff-directory-mismatch`, exit 2; `access_lock.rs::data_dir_matches`). | `backup_control::tests::daemon_peer_requires_the_expected_uid_and_executable`; `access_lock::tests::data_directory_identity_is_compared_by_dev_and_ino`; `case-25`; `backup_create::tests::impostor_daemon_never_receives_the_request` |
 | **M2 staged partial not bound to its request** | `backup_artifact.rs::complete_staged`: the signed-recovery branch reads the persisted request (journal `request_sha256`, site/installation/key id, manifest digest, signing-input digest, recipient fingerprint) and requires the signed artifact's unsigned-manifest digest and D1 input to equal it before publishing; mismatch is exit 2 `signing-request-mismatch` and keeps staging. | `backup_artifact::tests::staged_recovery_binds_the_signed_manifest_to_the_persisted_request`; `case-26` |
 | **F10 required member set** | `bins/o3k/src/backup.rs`: one `REQUIRED_ARTIFACT_MEMBERS` constant (`database/o3k.sqlite`, `metadata/capture.json`, `release/release-manifest.json`, `trust/backup-trust.json`) used by `validate_manifest` and `verify_artifact_stream`; missing member is the typed `missing-required-member` class (exit 2). | `backup::tests::every_required_member_is_enforced_with_a_typed_failure`; `case-24` |
 | **F3 verify host boundary and live-store mutation** | `backup_verify.rs` copies the main database and a non-empty WAL sidecar into its private `0700` staging under the store lock and opens the copy read-only (`immutable=1` when no non-empty WAL); the live store is never opened. Docs state that full verification decrypts members, requires the recovery private key, and must run on the operator/recovery host; signature/D1/member-digest authenticity is independently checkable without decryption. | `backup_verify::tests::verification_reads_a_private_copy_including_a_non_empty_wal`; campaign `case-13` |
@@ -471,7 +517,7 @@ unchanged.
 | **L4 published digest** | `backup_artifact.rs::mark_published` persists the verified `artifact_sha256` in the terminal record. | `backup_create::tests::two_phase_flow_publishes_a_verified_artifact` (journal assertion) |
 | **L5 wedged published retry** | A journal at `published` re-verifies the destination and exits 0 idempotently (clearing marker/staging debris), or rejects `published-artifact-missing` / `published-artifact-changed` (exit 2). | `backup_create::tests::{two_phase_flow_publishes_a_verified_artifact,published_operation_with_a_missing_destination_is_rejected}`; `case-3`, `case-5d` |
 | **L9 installer temp manifest** | `packaging/install.sh` creates the augmented manifest under `$PREFIX/share/o3k` (root-owned, `mktemp` `O_EXCL`), never `TMPDIR`. | `bash -n`; installer review |
-| **L10 destination posture** | `backup_artifact.rs::existing_destination` requires a regular `0600` file owned by the effective uid; other postures are exit 2 `artifact-destination-posture-invalid`. | `backup_artifact::tests::destination_artifact_requires_owner_mode_and_never_blocks_on_a_fifo` |
+| **L10 destination posture** | `backup_artifact.rs::existing_destination` requires a regular file owned by the effective uid with no group/other permission bits (normally `0600`; a stricter owner-only mask such as `0400` from a hardening pass or umask is accepted so a replay cannot be wedged); other postures are exit 2 `artifact-destination-posture-invalid`. `backup.rs::create_private_file` `fchmod`s each new staging file to exactly `0600` and surfaces a failure. | `backup_artifact::tests::destination_artifact_requires_owner_mode_and_never_blocks_on_a_fifo` |
 | **L11 custodian fingerprint check** | `tests/pp6_backup_artifact.sh::sign_request` compares the request's `recipient_public_key_sha256` with `recipient.x25519_public_key` from the configured trust document before signing; a mismatch is refused and no response is written. The helper writes the response through a private temp file and `os.replace`. The product additionally retries an unparsable response until the deadline (safe abort) so a non-atomic writer cannot wedge it. | `case-27`; `backup_artifact::tests::signing_wait_retries_a_partially_written_response` |
 
 ### Verify host boundary (non-claim)
@@ -503,8 +549,8 @@ are unchanged.
 | **M4 / F9 truthful `in_flight_operations`** | `backup_artifact.rs` `snapshot_in_flight_operations` / `query_in_flight_operations` read `operations` from the quiesced snapshot under the store lock (`succeeded`/`failed` are terminal); the manifest records `recorded_unknown` and the ids go into `metadata/capture.json`. | `case-23`; `backup_artifact::tests::{non_terminal_operations_are_recorded_as_unknown,capture_records_in_flight_operation_identities}` |
 | **M3 / F5b D9 measurement and footprint** | `backup_create.rs` measures after the truncating WAL checkpoint (main DB + non-empty `-wal` + release/trust members + a 2 MiB capture/request metadata allowance; the accepted formula is unchanged) and fails closed with exit 3 `space-unavailable`; `backup_reservation::ensure_reserved_space` re-checks the remaining reservation before finalize and before publication; `backup.rs` deletes each member ciphertext as soon as it is copied into the unsigned artifact and `artifact.unsigned` right after the partial is durable. | `case-10`, `case-4e`; `backup_reservation::tests::boundary_recheck_never_truncates_the_remaining_reservation` |
 | **F12 verify store-access guard** | `bins/o3k/src/backup_verify.rs` acquires `StoreAccessLock` before reading the store; `WouldBlock` → exit 2 `controller-active`; the lock is held for the migration read and released before artifact verification. Deriving migration identity from installed metadata is impossible (the release manifest carries `schema_version` but no migration checksums), so the lock option was chosen. | `case-12*` (no controller); `bins/o3k/tests/backup_verify.rs::rejects_verification_while_the_store_lock_is_held` |
-| **F11 data-directory resolution** | New `bins/o3k/src/backup_data_dir.rs` shared by `create` and `verify`: root uses `/var/lib/o3k`; non-root uses `O3K_DATA_DIR`, else the bounded `O3K_DATA_DIR=` assignment in `/etc/o3k/o3kd.env` (no shell evaluation), else `./data`. | `backup_data_dir::tests::{parses_the_single_assignment_and_ignores_everything_else,rejects_ambiguous_or_unsafe_values,precedence_matches_the_documented_rule}` |
-| **P2 pre-handoff config preflight** | `backup_create::preflight_before_handoff` loads the trust document and release identity read-only and applies the D9/member bounds before `connect_and_request`; a configuration failure is rejected (exit 2) without stopping the daemon. `verify` keeps the shared `BackupTrustError::is_recoverable` classification (missing config exit 3). | `case-22`; `backup_create::tests::missing_configuration_is_rejected_before_the_handoff`; `backup_verify::tests::reports_a_missing_trust_document_as_recoverable` |
+| **F11 data-directory resolution** | New `bins/o3k/src/backup_data_dir.rs` shared by `create` and `verify`: root uses `/var/lib/o3k`; non-root uses `O3K_DATA_DIR`, else the bounded `O3K_DATA_DIR=` assignment in `/etc/o3k/o3kd.env` (no shell evaluation), else the packaged `/var/lib/o3k` when it exists and is owned by the effective uid (round 3), else `./data`. | `backup_data_dir::tests::{parses_the_single_assignment_and_ignores_everything_else,rejects_ambiguous_or_unsafe_values,precedence_matches_the_documented_rule,readable_environment_file_wins_over_the_packaged_directory,packaged_directory_is_used_when_the_environment_file_yields_nothing,packaged_directory_is_not_used_when_it_is_not_owned_by_the_caller,environment_file_posture_requires_a_trusted_owner_and_no_group_write}` |
+| **P2 pre-handoff config preflight** | `backup_create::preflight_before_handoff` loads the trust document and release identity read-only and applies the D9/member bounds before `connect_control`; a configuration failure is rejected (exit 2) without stopping the daemon. `verify` has no preflight and maps the shared `BackupTrustError::is_recoverable` classification to exit 3 (missing or unreadable configuration), keeping exit 2 for a present-but-untrusted document. | `case-22`; `backup_create::tests::missing_configuration_is_rejected_before_the_handoff`; `backup_verify::tests::reports_a_missing_trust_document_as_recoverable` |
 | **F19 post-publication cleanup reported** | `backup_artifact.rs` `finish_publication`: an unprovable staging/marker removal is exit 4 `post-publication-cleanup-failed`/`marker-removal-failed`; a directory-sync failure on the success path emits the stable warning `o3k backup create: warning post-publication-sync-failed`. | success path: `case-1`/`case-5d`; failure branches: `backup_artifact::tests::{post_publication_staging_cleanup_failure_is_an_unknown_outcome, post_publication_marker_removal_failure_is_an_unknown_outcome}` (unit-only; no real-process seam) |
 | **F20 concurrent phase 2** | `backup_artifact.rs` `OperationLock` (`flock LOCK_EX|LOCK_NB` on `<staging>/operation.lock`, mode 0600, released on every return) → exit 3 `operation-busy`; the lifetime store lock remains the primary exclusion. | `case-21`; `backup_create::tests::phase_two_requires_the_lifetime_store_lock`; `backup_artifact::tests::operation_lock_is_exclusive_and_released_on_drop` |
 | **F37 final-name entry classification** | `existing_destination` classifies a symlink or non-regular entry at the final name as `artifact-destination-exists` (exit 2), never exit 4. | `case-18`; `backup_artifact::tests::{destination_symlink_is_a_rejected_precondition,destination_directory_is_a_rejected_precondition}` |
@@ -524,7 +570,7 @@ are unchanged.
 | **F4a / D13 catalog completeness** | `crates/o3k-store/src/state_inventory.rs` now emits tables, indexes and triggers from both migration trees, plus PostgreSQL functions. Indexes/triggers are assigned to the repository owning their `ON <table>`; the two generic operation-integrity functions are assigned to `operations` through the reviewed `GENERIC_FUNCTION_OWNERS` list (an unlisted function fails generation). The SQLite catalog is generated by applying the migration tree in an in-memory store and reading `sqlite_master`, so SQLite's `ALTER TABLE ... ADD COLUMN` rewrites and the runtime `operations` rebuild are reflected in the baseline digests. | `state_inventory::tests::{baseline_inventory_includes_indexes_triggers_and_functions, baseline_comparison_detects_added_indexes_and_triggers, generation_rejects_an_index_owned_by_an_unregistered_table, generation_rejects_a_function_without_a_reviewed_owner, index_trigger_and_function_normalization_is_deterministic}`; committed baseline regenerated |
 | **F4b / live catalog comparison** | `snapshot_facts` enumerates the snapshot's live `sqlite_master` (tables/indexes/views/triggers), excludes `sqlite_*` internal names, compares names and normalized definition digests against every baseline entry in both directions, and fails closed with exit 2 `store-catalog-mismatch` before staging the artifact. `_sqlx_migrations` remains compared because the baseline claims it. | `backup_artifact::tests::{snapshot_catalog_rejects_an_extra_index, snapshot_catalog_rejects_an_extra_table, snapshot_catalog_rejects_a_changed_definition, snapshot_facts_read_store_identity_and_repository_emptiness}` |
 | **F15 harness independent verification** | `tests/pp6_backup_artifact.sh` independently rebuilds D1 (local JCS), verifies Ed25519 with OpenSSL, recomputes member digests, and decrypts HPKE/AES-GCM members with python `cryptography`; the database plaintext is bound to the signed capture record and the harness-measured source database. `case-1d` is the positive row and `case-1e` the tampered negative row. | `case-1d`, `case-1e` |
-| **Nits** | `main.rs` Backup help text describes the two-phase signed flow; the stale raw-key trimming comment in `bins/o3k/tests/backup_verify.rs` is corrected; the happy-path executor wait is explicitly bounded by `wait_bounded`; this document uses "fixture trust document" for `O3K_BACKUP_TRUST_CONFIG`. | `cargo fmt`/clippy/tests; `bash -n` and shellcheck (pre-existing warnings only) |
+| **Nits** | `main.rs` Backup help text describes the two-phase signed flow; the stale raw-key trimming comment in `bins/o3k/tests/backup_verify.rs` is corrected; the happy-path executor wait is explicitly bounded by `wait_bounded`; this document uses "fixture trust document" for `O3K_BACKUP_TRUST_CONFIG`. | `cargo fmt`/clippy/tests; `bash -n` and shellcheck at `-S warning` (info/style notes suppressed) |
 
 Catalog counts in the regenerated baseline (17 repositories): SQLite 78
 tables, 86 indexes, 2 triggers (166 objects); PostgreSQL 78 tables, 83
@@ -552,22 +598,54 @@ bytes are not the source database bytes.
 | P2 read-only preflight | The trust document, release identity, member bound and D9 reservation are validated before the controller is contacted; the under-lock reload remains the captured-member authority. | `backup_create::tests::missing_configuration_is_rejected_before_the_handoff`; `tests/pp6_backup_handoff.sh case-p2` |
 | D10/D13 PostgreSQL baseline binding | `state_inventory_v1.json` now binds `postgres_major` (16; SPEC-0050 / PP6 D10), the SQLite generator version (`SELECT sqlite_version()` from the linked library; `3.46.0`) and the SHA-256 of every file in both migration trees. The generator emits them, the drift gate compares them (a SQLite library change forces a reviewed regeneration), and `baseline_binding()` exposes them while `baseline_state_inventory()` keeps the manifest entry shape. | `state_inventory::tests::{baseline_binding_covers_every_migration_file, changing_a_migration_file_fails_the_drift_gate}` |
 
+## Security/correctness review round 3 (final)
+
+The third round found one high-severity packaging defect (the installed service
+user could not resolve the packaged data directory), two medium findings
+(symlinked-installation override bypass, verifier open on a FIFO) and several
+low hardening items. All are implemented; the accepted CLI surface and the
+frozen v1 artifact format are unchanged.
+
+| Item | Fix (file) | Regression test |
+| --- | --- | --- |
+| **High packaged service-user data-dir resolution** | `bins/o3k/src/backup_data_dir.rs`: the non-root rule is now `O3K_DATA_DIR` → `O3K_DATA_DIR=` from `/etc/o3k/o3kd.env` → the packaged `/var/lib/o3k` when it exists, is a directory and is owned by the effective uid → `./data`. An environment file that exists but cannot be read (the packaged `root:root 0600` case) yields no value instead of failing, and an unsafe posture still fails closed. `resolve_non_root_data_dir`/`packaged_data_dir` are the exported helpers shared by `create` and `verify`; `packaging/install.sh` prints the resolution rule. | `backup_data_dir::tests::{readable_environment_file_wins_over_the_packaged_directory, packaged_directory_is_used_when_the_environment_file_yields_nothing, packaged_directory_is_not_used_when_it_is_not_owned_by_the_caller}` |
+| **Medium symlinked installation bypass** | `bins/o3k/src/backup_trust.rs::is_installed_data_dir` compares the data directory against the canonical form of `/var/lib/o3k` as well as the literal path (fallback to the literal when resolution fails), so an installation whose packaged directory is a symlink cannot re-enable `O3K_BACKUP_TRUST_CONFIG`/`O3K_INSTALL_PREFIX`. | `backup_trust::tests::installed_data_dir_detection_survives_a_symlinked_packaged_directory` |
+| **Medium verifier open can block on a FIFO** | `bins/o3k/src/backup_verify.rs::open_artifact` adds `O_NONBLOCK` beside `O_NOFOLLOW`; the existing `fstat` regular-file check then rejects a FIFO swapped in after path validation without blocking. | `backup_verify::tests::artifact_open_never_blocks_on_a_fifo` |
+| **Low authenticate the daemon before the request** | `crates/o3k-store/src/backup_control.rs`: `connect_control` (connect only) and `send_request_and_read_accept` (frame exchange) are split; `connect_and_request` remains as their composition. `bins/o3k/src/backup_create.rs` resolves the expected uid/executable, connects, calls `verify_daemon_peer`, and only then sends the request, so an impostor never triggers the daemon's drain. An unreadable expected daemon path (or unreadable peer identity) is `daemon-identity-unavailable` (exit 2) and a proven different peer is `daemon-identity-mismatch` (exit 2). Consequence for the handoff campaign: `case-a` now exercises the client-side ordering (a relocated executor is refused with `daemon-identity-unavailable` when it has no sibling `o3kd`, and `daemon-identity-mismatch` when it has a non-matching one, with no request frame reaching the daemon); the daemon-side executor identity check stays unit-covered. | `backup_create::tests::{impostor_daemon_never_receives_the_request, unreadable_expected_daemon_path_is_identity_unavailable}`; `case-25`; handoff `case-a` |
+| **Low environment-file posture** | `backup_data_dir::env_file_data_dir` `fstat`s the opened descriptor and requires a regular file owned by root or the effective uid with no group/other write bit (`data-dir-env-unsafe` otherwise); the posture is checked on the inode actually read, not on the pre-open `lstat`. | `backup_data_dir::tests::environment_file_posture_requires_a_trusted_owner_and_no_group_write` |
+| **Low classification documentation** | `backup_trust.rs` (`is_recoverable`) and `backup_artifact.rs` (`From<BackupTrustError>`, module configuration section) state the actual split: `create`'s read-only preflight rejects configuration failures as exit 2 (exit 3 only for a configuration that disappears before the under-lock reload); `verify` reports recoverable configuration failures as exit 3. | documentation; `case-22` (create exit 2) and `case-12missing-trust` (verify exit 3) |
+| **Low installer/module wording and a distinct reason** | `backup_trust.rs` module docs and `packaging/install.sh` describe `root:o3k 0640` as the packaged trust-document mode and `0600` as the euid-owned TestLab mode; a root-owned document without the group-read bit is `trust-config-unreadable-by-service-user` (recoverable class, exit 3 in `verify`, exit 2 in the `create` preflight). | `backup_trust::tests::root_owned_document_without_group_read_names_the_service_user_reason` |
+| **Very low producer mode** | `bins/o3k/src/backup.rs::create_private_file` `fchmod`s the created file to exactly `0600` and surfaces a failure (removing the partial file); `backup_artifact.rs::existing_destination` accepts any owner-only mode (`mode & 0o077 == 0`, owner == euid) so a restrictive umask or hardening pass cannot wedge a replay. | `backup_artifact::tests::destination_artifact_requires_owner_mode_and_never_blocks_on_a_fifo` |
+| **Harness** | `tests/pp6_backup_artifact.sh` gained `resign_artifact` (rebuild + re-sign a mutated manifest) and `case-24` now re-signs the member-stripped manifest, so the row proves a *validly signed* artifact missing a required member is `missing-required-member`, not `signature-invalid`. The `case-12oversize` rationale now states why the 5 GiB branch is unreachable for a schema-valid manifest. `tests/pp6_backup_handoff.sh` states that it is not the custody evidence script. | `case-24`; `backup::tests::the_complete_size_bound_is_unreachable_for_a_schema_valid_manifest` |
+
 ## Executed vs documented-not-executed
 
-Executed real-process rows: 44 PASS rows (45 matrix rows; `case-12oversize` is
-NOT-COVERED end-to-end), produced by `tests/pp6_backup_artifact.sh` on the final
-tree. When python `cryptography` is unavailable, `case-1d-decrypt` becomes
-NOT-COVERED instead of PASS (43 PASS, 2 NOT-COVERED). The campaign prints its
-own PASS/FAIL/NOT-COVERED accounting and exits non-zero on any failure.
+Executed real-process rows: **44 PASS of 45 matrix rows** (1 NOT-COVERED,
+0 FAIL), produced by `tests/pp6_backup_artifact.sh` on the final tree. The
+matrix grew by five rows over the round-1 campaign: `case-24`, `case-25`, `case-26`, `case-27` and
+`case-1d-decrypt` (39 + 5 = 44 PASS rows; the single NOT-COVERED row,
+`case-12oversize`, is unchanged and makes 45 matrix rows). The PASS count is
+conditional on tooling: without python `cryptography`, `case-1d-decrypt` is
+NOT-COVERED (43 PASS, 2 NOT-COVERED); without `sqlite3`, `case-23` is
+NOT-COVERED (43 PASS, 2 NOT-COVERED). The campaign prints its own
+PASS/FAIL/NOT-COVERED accounting and exits non-zero on any failure.
 
 Not executed end-to-end (`NOT-COVERED`, exact reason and coverage):
 
-- **Oversized artifact (`artifact-too-large`, exit 2).** The verifier applies
-  the 5 GiB manifest-bounded size check only after a valid Ed25519 signature
-  over the manifest. Producing that input would require the harness to
-  reimplement artifact assembly and sign a malicious manifest; that is not a
-  real operator path and would be evidence of a bespoke tool rather than of the
-  product. The stable mapping is unit-covered by
+- **Oversized artifact (`artifact-too-large`, exit 2).** Rebuilding and
+  re-signing a mutated manifest is now feasible (`resign_artifact` in the
+  harness, used by `case-24`), so tooling is no longer the blocker: the 5 GiB
+  complete-size branch is unreachable for a *schema-valid* manifest.
+  `validate_manifest` bounds each member's plaintext at 1 GiB
+  (`MAX_MEMBER_BYTES`), the total plaintext at 4 GiB
+  (`MAX_TOTAL_PLAINTEXT`) and the manifest at 16 MiB, and it runs before the
+  complete-size check, so the largest declarable artifact is ~4 GiB + 16 MiB.
+  A re-signed manifest that declares more is rejected earlier as
+  `schema-invalid` (member metadata or total-size bound); the only remaining
+  path into the check is an over-long declared manifest length, i.e. a
+  malformed header rather than a signed artifact. The invariant is asserted by
+  `backup::tests::the_complete_size_bound_is_unreachable_for_a_schema_valid_manifest`,
+  and the stable mapping is unit-covered by
   `backup_verify::tests::reason_mapping_is_stable_for_every_failure_class`
   (`ArtifactVerifyClass::ArtifactTooLarge` → exit 2 `artifact-too-large`).
   This is **not** an exit-4 row: oversize is a rejected precondition.
@@ -598,7 +676,17 @@ real-process row (listed so the evidence boundary is explicit):
 - `bins/o3k/tests/backup_verify.rs::rejects_verification_while_the_store_lock_is_held`
 - `backup_data_dir::tests::{parses_the_single_assignment_and_ignores_everything_else,
   rejects_ambiguous_or_unsafe_values, precedence_matches_the_documented_rule,
-  installed_environment_file_parses_when_present}`
+  installed_environment_file_parses_when_present,
+  readable_environment_file_wins_over_the_packaged_directory,
+  packaged_directory_is_used_when_the_environment_file_yields_nothing,
+  packaged_directory_is_not_used_when_it_is_not_owned_by_the_caller,
+  environment_file_posture_requires_a_trusted_owner_and_no_group_write}`
+- `backup_trust::tests::{installed_data_dir_detection_survives_a_symlinked_packaged_directory,
+  root_owned_document_without_group_read_names_the_service_user_reason}`
+- `backup_verify::tests::artifact_open_never_blocks_on_a_fifo`
+- `backup_create::tests::{impostor_daemon_never_receives_the_request,
+  unreadable_expected_daemon_path_is_identity_unavailable}`
+- `backup::tests::the_complete_size_bound_is_unreachable_for_a_schema_valid_manifest`
 - `backup_artifact::tests::{operation_lock_is_exclusive_and_released_on_drop,
   signing_request_validation_binds_identity_digests_and_expiry,
   signing_response_is_bound_to_the_request_and_the_trust_key,
@@ -663,29 +751,40 @@ that the published artifact is 0600.
 ```text
 cargo fmt --all -- --check                                        # PASS
 cargo clippy -p o3k -p o3k-store -p o3kd --all-targets --all-features -- -D warnings  # PASS
+cargo clippy --workspace --all-targets --all-features -- -D warnings                 # PASS
 cargo test -p o3k -p o3k-store -p o3kd --all-features             # PASS (0 failures)
+cargo test --workspace --all-features                             # PASS (0 failures)
 bash -n tests/pp6_backup_artifact.sh tests/pp6_backup_handoff.sh  # PASS
 shellcheck -S warning tests/pp6_backup_artifact.sh tests/pp6_backup_handoff.sh  # PASS (no findings)
-bash tests/pp6_backup_artifact.sh        # PASS (twice): 44 executed, 1 not-covered, 0 failures
+bash tests/pp6_backup_artifact.sh        # PASS (three recorded runs): 45 matrix rows, 44 PASS, 1 not-covered, 0 failures
 bash tests/pp6_backup_handoff.sh         # PASS: 19 executed, 7 documented, 0 failures
+bash tests/adr-governance.sh             # PASS
+bash tests/supply-chain-governance.sh    # PASS
 git diff --check                                                  # PASS
 ```
 
+Shellcheck is run at `-S warning` (severity warning and above); the `info` and
+`style` notes are suppressed and are not part of the gate. Both campaigns
+produce no finding at that level; `bash -n` parses both scripts.
+
 The artifact campaign produced the matrix above (`NOT-COVERED=1`, `FAIL=0`,
-`PASS=44`) in both runs; the per-run artifact digest, backup id,
-data-directory identities and size differ by construction. The round-2
-regression rows (`case-24`, `case-25`, `case-26`) and the round-2/cleanup
-additions (`case-27`, `case-1d-decrypt`) are included in that run. Shellcheck is
-clean for both campaigns; `bash -n` passes.
+`PASS=44` of 45 matrix rows) in every recorded run; the per-run artifact digest,
+backup id, data-directory identities and size differ by construction. The
+round-2 regression rows (`case-24`, `case-25`, `case-26`) and the
+round-2/cleanup additions (`case-27`, `case-1d-decrypt`) are included in those
+runs; round 3 re-signed the `case-24` manifest so that row proves the
+required-member ordering with a valid signature, and re-ran both campaigns on
+the final tree.
 
 The campaign is re-runnable and deterministic in its assertions: crashes use
 process-exit hooks, the only barriers are the executor's two-way file barrier
 and bounded readiness/exit/file polls, and the signing wait is bounded by the
-request TTL (or a feature-gated test timeout). The artifact and handoff
-campaigns above are the invocations of the current (uncommitted) working tree
-(security-review rounds 1 and 2 and contract/correctness-review rounds 1 and 2
-included) and produced the recorded matrix outcomes. Exact-commit binding is
-pending in `FINAL-COMMIT-BINDING`. The handoff campaign's 19 executed rows and 7
+request TTL (or a feature-gated test timeout). The runs recorded above were
+executed on the tree of the commit named as `final_commit` in
+`FINAL-COMMIT-BINDING`; that commit is the binding for these results, and the
+tracked tree was clean at run time (untracked build/campaign directories
+excluded, as the harness's own `git status --porcelain --untracked-files=no`
+check records). The handoff campaign's 19 executed rows and 7
 documented-coverage rows are unchanged and passing. Per-run randomness is
 confined to the artifact content key, timestamps and the temporary
 data-directory identities (and therefore the artifact digest).
@@ -723,8 +822,12 @@ data-directory identities (and therefore the artifact digest).
   installation manifest; that is a follow-up, not a restore-time claim.
 - **Data-directory resolution is shared but not unified with `o3k-config`.**
   `create`/`verify` resolve root → `/var/lib/o3k`, non-root → `O3K_DATA_DIR` →
-  `/etc/o3k/o3kd.env` → `./data`. Other `o3k` subcommands still resolve the
-  data directory through `o3k-config`; aligning them is out of scope here.
+  `/etc/o3k/o3kd.env` → the packaged `/var/lib/o3k` when it exists and is owned
+  by the effective uid → `./data`. The packaged step exists because the
+  installed environment file is `root:root 0600` and unreadable to the `o3k`
+  service user; a present-but-unreadable file therefore falls through instead
+  of failing. Other `o3k` subcommands still resolve the data directory through
+  `o3k-config`; aligning them is out of scope here.
 - **Crash injection is exit-based.** The artifact campaign uses hard
   `std::process::exit` hooks, not SIGKILL; it exercises journal durability and
   replay ordering, not filesystem-level torn writes. The handoff campaign keeps
@@ -768,6 +871,31 @@ corresponding claim can be widened; none is silently resolved here.
   key ceremony, revocation-distribution endpoint, sequence/`next_update`
   tracking, or two-of-three root-signing workflow. Those D2 mechanisms remain a
   contract/implementation gap, not a tested behavior.
+- **Required-member set (four members, v1).** The accepted v1 schema
+  (`contracts/control-plane-backup-v1.proposed.schema.json`) constrains member
+  *shape* but not member *names*; the implementation requires exactly the four
+  capture members (`database/o3k.sqlite`, `metadata/capture.json`,
+  `release/release-manifest.json`, `trust/backup-trust.json`) through
+  `REQUIRED_ARTIFACT_MEMBERS`, and a missing one is the typed
+  `missing-required-member` (exit 2). The four-member set is deliberately
+  stricter than the schema: it makes "a validly signed artifact that omits a
+  member" a rejection rather than an accepted artifact with fewer members
+  (`case-24`). A human decision is required to make the four-member set
+  normative in the contract (schema `minContains`/member-name enumeration, or
+  the v1 text) before it is described as a contract requirement rather than an
+  implementation choice.
+- **Trust-document format and mode (`0640` root:service-group vs `0600`).**
+  SPEC-0050 §8 requires root-owned installation configuration, but the packaged
+  service user is `o3k`, so a `root:root 0600` document is unreadable to it.
+  The accepted implementation posture is "owned by root **or** the effective
+  uid; mode `0600`, or `0640` when the owning group is root or one of the
+  process's groups; never group/other writable; never other readable", with
+  `root:o3k 0640` as the packaged mode and `0600` as the euid-owned TestLab
+  mode. A root-owned `0600` document for a non-root caller is reported as
+  `trust-config-unreadable-by-service-user`. Whether the contract should name
+  `0640` plus a service group as the packaged posture (and whether the file
+  format should record a service-group name) is a human decision, not a
+  resolved part of the accepted text.
 - **D13 no-table repositories.** The contract schema requires `minItems: 1` for
   both object arrays, and the committed baseline has no repository with zero
   tables. A genuinely empty repository cannot be represented without inventing a
@@ -873,6 +1001,14 @@ corresponding claim can be widened; none is silently resolved here.
   mapping test covers it. The exit-4 cleanup classifications
   (`post-publication-cleanup-failed`, `marker-removal-failed`) are unit-only;
   no real-process exit-4 cleanup row is claimed.
+- **Packaged service-user path is unit-tested only.** The `/var/lib/o3k`
+  fallback (owned-directory check), detection of an installation whose
+  `/var/lib/o3k` is a symlink, the `root:o3k 0640` trust posture and
+  `trust-config-unreadable-by-service-user` are covered by unit tests with
+  temporary fixtures. No test creates a real `/var/lib/o3k`, runs as the
+  packaged `o3k` account, or exercises the installed systemd unit; the campaign
+  runs as an ordinary user with `O3K_DATA_DIR` and `O3K_BACKUP_TRUST_CONFIG`
+  pointing into a temporary tree. Do not read this as installed-host evidence.
 - **No independent review yet.** The implementation, the campaign and this
   document were produced by the same agent. This is interim evidence pending
   human exact-head review; it is not an independent verification.

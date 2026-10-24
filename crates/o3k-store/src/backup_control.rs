@@ -700,11 +700,52 @@ impl Drop for AcceptedBackupRequest {
 /// `timeout` for the 8-byte response. On acceptance the returned stream is
 /// ready for [`crate::StoreAccessLock::receive_handoff`]; on rejection a typed
 /// [`BackupControlError::Rejected`] is returned.
+///
+/// This is [`connect_control`] followed by [`send_request_and_read_accept`].
+/// A caller that must authenticate the peer **before** asking it to stop
+/// serving (the executor's `daemon-identity-*` check) uses the two steps
+/// directly, so a local impostor is rejected without a needless drain.
 pub fn connect_and_request(
     data_dir: &Path,
     request: &BackupHandoffRequest,
     timeout: Duration,
 ) -> Result<UnixStream, BackupControlError> {
+    let mut stream = connect_control(data_dir, timeout)?;
+    send_request_and_read_accept(&mut stream, request, timeout)?;
+    Ok(stream)
+}
+
+/// Connects to the backup control socket without sending a request.
+///
+/// The returned stream carries the caller's timeouts, so
+/// [`send_request_and_read_accept`] inherits the same bound. Authentication
+/// ([`verify_daemon_peer`]) can therefore run between connect and request.
+pub fn connect_control(
+    data_dir: &Path,
+    timeout: Duration,
+) -> Result<UnixStream, BackupControlError> {
+    if timeout.is_zero() {
+        return Err(BackupControlError::InvalidInput);
+    }
+    let socket_path = resolve_socket_path(data_dir)?;
+    let stream = UnixStream::connect(socket_path).map_err(BackupControlError::Io)?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(BackupControlError::Io)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(BackupControlError::Io)?;
+    Ok(stream)
+}
+
+/// Sends the 64-byte request frame on an already-connected stream and reads the
+/// 8-byte response, leaving the stream ready for
+/// [`crate::StoreAccessLock::receive_handoff`] on acceptance.
+pub fn send_request_and_read_accept(
+    stream: &mut UnixStream,
+    request: &BackupHandoffRequest,
+    timeout: Duration,
+) -> Result<(), BackupControlError> {
     if timeout.is_zero() {
         return Err(BackupControlError::InvalidInput);
     }
@@ -714,17 +755,8 @@ pub fn connect_and_request(
             "backup control timeout is too large",
         )
     })?;
-    let socket_path = resolve_socket_path(data_dir)?;
-    let mut stream = UnixStream::connect(socket_path).map_err(BackupControlError::Io)?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(BackupControlError::Io)?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(BackupControlError::Io)?;
-
     let frame = request.encode();
-    write_all_bounded(&mut stream, &frame, timeout).map_err(|error| {
+    write_all_bounded(stream, &frame, timeout).map_err(|error| {
         if matches!(
             error.kind(),
             io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
@@ -735,7 +767,7 @@ pub fn connect_and_request(
         }
     })?;
 
-    let response = read_response_frame(&mut stream, deadline).map_err(|error| match error {
+    let response = read_response_frame(stream, deadline).map_err(|error| match error {
         FrameReadError::TimedOut => BackupControlError::Timeout,
         FrameReadError::Truncated => BackupControlError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -750,7 +782,7 @@ pub fn connect_and_request(
         stream
             .set_write_timeout(None)
             .map_err(BackupControlError::Io)?;
-        return Ok(stream);
+        return Ok(());
     }
     if response[..REJECT_MAGIC.len()] == *REJECT_MAGIC {
         let Some(reason) = HandoffRejectReason::from_reason_byte(response[REJECT_MAGIC.len()])

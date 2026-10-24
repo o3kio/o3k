@@ -38,6 +38,13 @@
 //! * a parent directory owned by root or the effective uid and not
 //!   group/other-writable.
 //!
+//! The packaged installation therefore uses `root:o3k 0640` (group read by the
+//! service group); `0600` is the euid-owned TestLab mode. A root-owned document
+//! that the non-root service user cannot read is reported as
+//! `trust-config-unreadable-by-service-user` instead of the generic
+//! `trust-config-unavailable`, so the operator knows to add the group-read bit
+//! rather than look for a missing file.
+//!
 //! The recipient private key remains `0600` (or `0400`) on the
 //! recovery/operator host and is never group-readable. The controller only
 //! needs `recipient.x25519_public_key`; with that field configured,
@@ -116,6 +123,9 @@ const SUPPORTED_PROFILES: [&str; 2] = ["o3k-demo-v1", "o3k-small-edge-v1"];
 pub enum BackupTrustError {
     /// The configured document cannot be opened or inspected.
     ConfigUnavailable,
+    /// The document is root-owned but not readable by the non-root service
+    /// user (`0600` where the packaged posture requires group read).
+    ConfigUnreadableByServiceUser,
     /// The final path component is a symbolic link.
     ConfigSymlink,
     /// The document is not a regular file.
@@ -166,16 +176,23 @@ pub enum BackupTrustError {
 
 impl BackupTrustError {
     /// True when the document can be fixed by the operator (missing
-    /// configuration, missing key file) rather than proving the artifact or
-    /// the installation wrong.
+    /// configuration, missing key file, unreadable configuration) rather than
+    /// proving the artifact or the installation wrong.
     ///
     /// Both `o3k backup create` and `o3k backup verify` classify on this one
-    /// predicate so the same missing configuration is exit 3 in both commands.
+    /// predicate. The commands differ only in where they apply it: `create`
+    /// loads the configuration in its read-only preflight, so a configuration
+    /// failure there is a rejected precondition (exit 2) and the controller is
+    /// never stopped; `verify` has no such preflight and reports the same
+    /// failure as a recoverable configuration failure (exit 3).
     #[must_use]
     pub const fn is_recoverable(self) -> bool {
         matches!(
             self,
-            Self::ConfigUnavailable | Self::RecipientKeyUnavailable | Self::IdentityUnavailable
+            Self::ConfigUnavailable
+                | Self::ConfigUnreadableByServiceUser
+                | Self::RecipientKeyUnavailable
+                | Self::IdentityUnavailable
         )
     }
 
@@ -185,6 +202,7 @@ impl BackupTrustError {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::ConfigUnavailable => "trust-config-unavailable",
+            Self::ConfigUnreadableByServiceUser => "trust-config-unreadable-by-service-user",
             Self::ConfigSymlink => "trust-config-symlink",
             Self::ConfigNotRegularFile => "trust-config-not-regular-file",
             Self::ConfigOwnerUntrusted => "trust-config-owner-untrusted",
@@ -294,7 +312,7 @@ impl BackupTrustConfig {
     /// foreign-owner branch without needing root.
     fn load_with_effective_uid(path: &Path, effective_uid: u32) -> Result<Self, BackupTrustError> {
         let opened = open_no_follow(path).map_err(|failure| match failure {
-            OpenFailure::Unavailable => BackupTrustError::ConfigUnavailable,
+            OpenFailure::Unavailable => unavailable_config_error(path, effective_uid),
             OpenFailure::Symlink => BackupTrustError::ConfigSymlink,
         })?;
         if !opened.metadata.file_type().is_file() {
@@ -673,10 +691,24 @@ pub fn trust_overrides_allowed(data_dir: &Path) -> bool {
 }
 
 /// True when `data_dir` is the packaged `/var/lib/o3k` installation directory.
+///
+/// The comparison uses the canonical form of the packaged directory as well as
+/// its literal path, so an installation whose `/var/lib/o3k` is a symlink (for
+/// example to a dedicated volume) cannot re-enable the TestLab overrides by
+/// resolving to the link target.
 #[must_use]
 pub fn is_installed_data_dir(data_dir: &Path) -> bool {
+    installed_data_dir_matches(data_dir, Path::new(crate::backup_data_dir::ROOT_DATA_DIR))
+}
+
+/// [`is_installed_data_dir`] with the packaged directory supplied explicitly,
+/// so the symlinked-root rule is testable without a real `/var/lib/o3k`.
+fn installed_data_dir_matches(data_dir: &Path, root_data_dir: &Path) -> bool {
     let canonical = fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
-    canonical == Path::new(crate::backup_data_dir::ROOT_DATA_DIR)
+    if canonical == root_data_dir {
+        return true;
+    }
+    fs::canonicalize(root_data_dir).is_ok_and(|root| canonical == root)
 }
 
 /// Whether an environment path override may be honored by this process.
@@ -702,6 +734,36 @@ pub fn environment_overrides_allowed() -> bool {
 pub fn site_and_installation_ids(data_dir: &Path) -> io::Result<(String, String)> {
     let (installation, site) = o3k_store::identity_tokens(data_dir)?;
     Ok((hex::encode(site), hex::encode(installation)))
+}
+
+/// Distinguishes "there is no document" from "the document exists but this
+/// service user may not read it".
+///
+/// The packaged posture is `root:o3k 0640`: root owns the document and the
+/// service group reads it. A root-owned regular file without the group-read
+/// bit and a non-root caller is exactly that misconfiguration, so it gets its
+/// own reason instead of the generic unavailable code. Everything else stays
+/// `trust-config-unavailable`.
+fn unavailable_config_error(path: &Path, effective_uid: u32) -> BackupTrustError {
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && unreadable_by_service_user(
+                    metadata.uid(),
+                    metadata.permissions().mode(),
+                    effective_uid,
+                ) =>
+        {
+            BackupTrustError::ConfigUnreadableByServiceUser
+        }
+        _ => BackupTrustError::ConfigUnavailable,
+    }
+}
+
+/// Root owns the document, the caller is not root, and the group-read bit that
+/// the packaged `0640` posture provides is missing.
+fn unreadable_by_service_user(uid: u32, mode: u32, effective_uid: u32) -> bool {
+    effective_uid != 0 && uid == 0 && mode & 0o040 == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1690,5 +1752,64 @@ mod tests {
         // only that a resolved or conservative path is absolute and installed.
         let path = default_trust_config_path();
         assert!(path.is_absolute());
+    }
+
+    #[test]
+    fn installed_data_dir_detection_survives_a_symlinked_packaged_directory() {
+        // The packaged directory may be a symlink to a dedicated volume. The
+        // resolved data directory then canonicalizes to the link target, which
+        // must still be recognized as the installation (otherwise the TestLab
+        // overrides would be re-enabled for an installed service).
+        let root = std::env::temp_dir().join(format!("o3k-pp6-trust-installed-{}", Uuid::now_v7()));
+        create_private_dir(&root);
+        let volume = root.join("volume");
+        create_private_dir(&volume);
+        let packaged_link = root.join("var-lib-o3k");
+        std::os::unix::fs::symlink(&volume, &packaged_link).expect("packaged symlink");
+        let other = root.join("testlab-data");
+        create_private_dir(&other);
+
+        assert!(installed_data_dir_matches(&volume, &packaged_link));
+        assert!(installed_data_dir_matches(&packaged_link, &packaged_link));
+        assert!(installed_data_dir_matches(&volume, &volume));
+        assert!(!installed_data_dir_matches(&other, &packaged_link));
+        // The literal packaged path still matches itself even when the entry
+        // does not exist on the recording host.
+        assert!(installed_data_dir_matches(
+            Path::new("/var/lib/o3k"),
+            Path::new("/var/lib/o3k")
+        ));
+        assert!(!installed_data_dir_matches(
+            &other,
+            Path::new("/var/lib/o3k")
+        ));
+        fs::remove_dir_all(&root).expect("remove installed-dir fixture");
+    }
+
+    #[test]
+    fn root_owned_document_without_group_read_names_the_service_user_reason() {
+        // Pure posture matrix: root owns the document, the caller is not root,
+        // and the group-read bit decides between "unavailable" and the
+        // dedicated service-user reason.
+        assert!(unreadable_by_service_user(0, 0o600, 1000));
+        assert!(!unreadable_by_service_user(0, 0o640, 1000));
+        assert!(!unreadable_by_service_user(0, 0o600, 0));
+        assert!(!unreadable_by_service_user(1000, 0o600, 1000));
+        assert_eq!(
+            BackupTrustError::ConfigUnreadableByServiceUser.reason(),
+            "trust-config-unreadable-by-service-user"
+        );
+        // The recovery class is shared with the generic unavailable reason, so
+        // `verify` keeps exit 3 and `create`'s preflight keeps exit 2.
+        assert!(BackupTrustError::ConfigUnreadableByServiceUser.is_recoverable());
+
+        // A document this process owns is a plain unavailable/malformed read,
+        // never the service-user diagnosis.
+        let fixture = new_fixture();
+        let missing = fixture.root.join("absent-trust.json");
+        assert_eq!(
+            unavailable_config_error(&missing, current_euid()),
+            BackupTrustError::ConfigUnavailable
+        );
     }
 }

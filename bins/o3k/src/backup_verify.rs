@@ -5,7 +5,8 @@
 //!
 //! 1. resolves the daemon data directory exactly as `o3k backup create` does
 //!    (root uses `/var/lib/o3k`; a non-root caller uses a non-empty
-//!    `O3K_DATA_DIR`, else `O3K_DATA_DIR=` from `/etc/o3k/o3kd.env`, else
+//!    `O3K_DATA_DIR`, else `O3K_DATA_DIR=` from `/etc/o3k/o3kd.env`, else the
+//!    packaged `/var/lib/o3k` when it is owned by the effective uid, else
 //!    `./data`, canonicalized); a resolution failure is recoverable (exit 3)
 //!    in both commands;
 //! 2. loads the installation trust document (default
@@ -437,10 +438,13 @@ fn validate_artifact_path(path: &Path) -> Result<(), &'static str> {
 
 /// Opens the validated artifact with `O_NOFOLLOW` and hashes every byte the
 /// verifier reads, so the reported digest covers exactly the verified stream.
+///
+/// `O_NONBLOCK` keeps a FIFO swapped in after path validation from blocking the
+/// open forever; the `fstat` check below then rejects the non-regular inode.
 fn open_artifact(path: &Path) -> Result<HashingReader<File>, &'static str> {
     let descriptor = open(
         path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| "artifact-unreadable")?;
@@ -836,6 +840,29 @@ mod tests {
         assert_eq!(
             path_failure("artifact-unreadable").exit_code,
             EXIT_RECOVERABLE
+        );
+    }
+
+    #[test]
+    fn artifact_open_never_blocks_on_a_fifo() {
+        // A FIFO swapped in after path validation must fail the regular-file
+        // check instead of blocking the open until a writer appears.
+        let root = TempRoot::new("fifo");
+        let fifo = root.0.join("artifact.fifo");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            Mode::from_raw_mode(0o600),
+            0,
+        )
+        .expect("create fifo");
+        let started = std::time::Instant::now();
+        assert!(open_artifact(&fifo).is_err_and(|reason| reason == "artifact-not-regular-file"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "opening a fifo blocked for {:?}",
+            started.elapsed()
         );
     }
 

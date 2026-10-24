@@ -85,6 +85,15 @@
 //! from the configured X25519 private key file, so the document cannot wrap
 //! artifacts for a recipient it does not name.
 //!
+//! Configuration failures are classified by where they are observed: the
+//! `o3k backup create` preflight rejects them as a precondition (exit 2) before
+//! the controller is contacted, so a missing or unreadable document never
+//! stops the daemon; a configuration that disappears between the preflight and
+//! the under-lock reload is recoverable (exit 3). `o3k backup verify` has no
+//! preflight, so its configuration failures are exit 3 when recoverable and
+//! exit 2 for a document that is present but untrusted, malformed, mismatched
+//! or expired.
+//!
 //! # Staging content
 //!
 //! After the capture the staging tree holds only the encrypted artifact, the
@@ -376,9 +385,17 @@ impl ArtifactFailure {
 
 impl From<BackupTrustError> for ArtifactFailure {
     fn from(error: BackupTrustError) -> Self {
-        // Missing configuration/key material is recoverable (exit 3) in both
-        // `create` and `verify`; a document that is present but untrusted or
-        // mismatched is a rejected precondition (exit 2).
+        // The recovery class comes from `BackupTrustError::is_recoverable`, but
+        // the exit code depends on *where* the configuration is loaded:
+        //
+        // * `o3k backup create` preflight (`preflight_before_handoff`) rejects
+        //   every configuration failure as exit 2 and never stops the
+        //   controller for a capture that cannot start;
+        // * a configuration that disappears between that preflight and the
+        //   under-lock reload keeps this class, so it is exit 3 there;
+        // * `o3k backup verify` has no preflight, so its configuration failures
+        //   are exit 3 when recoverable and exit 2 for a document that is
+        //   present but untrusted, malformed, mismatched or expired.
         if error.is_recoverable() {
             Self::recoverable(error.reason())
         } else {
@@ -1839,8 +1856,11 @@ fn publish(
 ///
 /// A symlink or other non-regular entry is a rejected precondition
 /// (`artifact-destination-exists`, exit 2), never a file to hash through a
-/// path and never an unknown outcome. A regular entry must be `0600` and owned
-/// by the effective uid (`artifact-destination-posture-invalid`, exit 2).
+/// path and never an unknown outcome. A regular entry must be owned by the
+/// effective uid and carry no group/other permission bits (normally `0600`);
+/// any other posture is `artifact-destination-posture-invalid`, exit 2. A
+/// stricter mask from the publisher's umask is accepted so a replay is never
+/// wedged by a file the same process created.
 fn existing_destination(
     destination_fd: &OwnedFd,
     final_name: &str,
@@ -1858,7 +1878,7 @@ fn existing_destination(
                 return Err(ArtifactFailure::rejected("artifact-destination-exists"));
             }
             let expected_uid = geteuid().as_raw();
-            if metadata.st_uid != expected_uid || metadata.st_mode & 0o777 != 0o600 {
+            if metadata.st_uid != expected_uid || metadata.st_mode & 0o077 != 0 {
                 return Err(ArtifactFailure::rejected(
                     "artifact-destination-posture-invalid",
                 ));
@@ -3311,7 +3331,17 @@ mod tests {
         existing_destination(&destination_fd, "backup-x.o3k")
             .expect("0600 artifact")
             .expect("present");
-        for mode in [0o644, 0o640, 0o600 | 0o010] {
+        // A stricter owner mask (for example after an operator hardening pass,
+        // or a publisher umask) is still this process's private artifact and
+        // must not wedge the replay.
+        for mode in [0o400, 0o500] {
+            fs::set_permissions(&artifact, fs::Permissions::from_mode(mode))
+                .expect("restrict artifact mode");
+            existing_destination(&destination_fd, "backup-x.o3k")
+                .expect("owner-only artifact")
+                .expect("present");
+        }
+        for mode in [0o644, 0o640, 0o600 | 0o010, 0o606] {
             fs::set_permissions(&artifact, fs::Permissions::from_mode(mode))
                 .expect("relax artifact mode");
             let failure = existing_destination(&destination_fd, "backup-x.o3k")

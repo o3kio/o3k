@@ -2050,9 +2050,20 @@ fn create_private_file(path: &Path) -> Result<fs::File, String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options
+    let file = options
         .open(path)
-        .map_err(|_| "backup private staging file could not be created".to_owned())
+        .map_err(|_| "backup private staging file could not be created".to_owned())?;
+    // The create mode is filtered by the process umask, so a restrictive umask
+    // would otherwise leave a staging file this process cannot later reopen.
+    // Force the exact private mode on the created inode and surface a failure
+    // rather than continuing with a file of unknown posture.
+    #[cfg(unix)]
+    if rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o600)).is_err() {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err("backup private staging file permissions could not be set".to_owned());
+    }
+    Ok(file)
 }
 
 fn validate_private_parent(path: &Path) -> Result<(), String> {
@@ -3427,6 +3438,27 @@ mod tests {
             "unsigned and temporary files are removed: {entries:?}"
         );
         fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    /// The 5 GiB complete-size check is defense in depth: a manifest that
+    /// passes `validate_manifest` can never declare a complete artifact that
+    /// large, because the per-member plaintext bound (1 GiB) and the total
+    /// plaintext bound (4 GiB) intersect far below it. This is the reason the
+    /// campaign keeps `case-12oversize` NOT-COVERED instead of assembling a
+    /// "validly signed oversize artifact" that cannot exist.
+    #[test]
+    fn the_complete_size_bound_is_unreachable_for_a_schema_valid_manifest() {
+        let largest_member_count = MAX_TOTAL_PLAINTEXT as u64 / MAX_MEMBER_BYTES;
+        assert_eq!(largest_member_count, 4);
+        let largest_complete_size = (MAGIC.len() as u64)
+            + 8
+            + MAX_MANIFEST_BYTES as u64
+            + largest_member_count * (8 + MAX_MEMBER_BYTES + 16);
+        assert!(
+            largest_complete_size < MAX_ARTIFACT_BYTES as u64,
+            "a valid manifest can declare {largest_complete_size} bytes, which must stay below the {} byte artifact bound",
+            MAX_ARTIFACT_BYTES
+        );
     }
 
     #[test]
