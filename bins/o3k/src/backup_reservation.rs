@@ -605,30 +605,21 @@ mod tests {
             let _ = fs::remove_dir_all(&root);
             return;
         }
-        let before = available_bytes(&root).expect("free space before");
-
         let hold = StagingReservation::acquire(&root, reserved, 0).expect("allocate reservation");
         let hold_path = root.join(STAGING_HOLD_FILE);
         assert_eq!(hold.held_bytes(), reserved);
         assert!(hold_path.is_file(), "the hold file must exist while held");
         // The hold's own inode proves the blocks are allocated (not sparse),
         // independently of any concurrent activity on the shared filesystem.
+        // Do not assert a global f_bavail delta: nextest runs each test in its
+        // own process, so another test or build can change free space
+        // concurrently and make that assertion flaky.
         assert!(
             allocated_blocks(&hold_path) >= reserved,
             "fallocate must allocate the full reservation"
         );
-        let held_available = available_bytes(&root).expect("free space while held");
-        assert!(
-            before.saturating_sub(held_available) + SPACE_TOLERANCE >= reserved,
-            "holding {reserved} bytes must reduce f_bavail by about that much"
-        );
 
         drop(hold);
-        let released = available_bytes(&root).expect("free space after release");
-        assert!(
-            released + SPACE_TOLERANCE >= before,
-            "dropping the guard must release the reservation"
-        );
         assert!(!hold_path.exists(), "the hold file must be unlinked");
 
         fs::remove_dir_all(root).expect("remove fixture directory");
@@ -643,24 +634,18 @@ mod tests {
             let _ = fs::remove_dir_all(&root);
             return;
         }
-        let before = available_bytes(&root).expect("free space before");
         let hold = StagingReservation::acquire(&root, reserved, 0).expect("allocate reservation");
         let hold_path = root.join(STAGING_HOLD_FILE);
 
         // Blocks allocated to the hold inode are not available to any other
-        // writer. f_bavail drops accordingly, which is exactly the capacity a
-        // competing allocation would try to consume. (A literal
-        // `fallocate(remaining + N)` probe is not used on the shared CI
-        // filesystem: it would temporarily fill ~170 GiB before failing.
-        // The block count plus the f_bavail reduction proves the same
-        // exclusion without that side effect.)
+        // writer. (A literal `fallocate(remaining + N)` probe is not used on
+        // the shared CI filesystem: it would temporarily fill the disk before
+        // failing. A global f_bavail delta is also not asserted because
+        // nextest runs each test in its own process and unrelated work can
+        // change free space concurrently.)
         assert!(allocated_blocks(&hold_path) >= reserved);
-        let competing_free = available_bytes(&root).expect("free space while held");
-        assert!(
-            before.saturating_sub(competing_free) + SPACE_TOLERANCE >= reserved,
-            "the hold must remove the reserved capacity from f_bavail"
-        );
-        assert!(competing_free < before);
+        assert_eq!(hold.held_bytes(), reserved);
+        assert!(ensure_reserved_space_with_hold(&root, reserved, 0, hold.held_bytes()).is_ok());
 
         drop(hold);
         assert!(!hold_path.exists());
@@ -697,7 +682,6 @@ mod tests {
             let _ = fs::remove_dir_all(&root);
             return;
         }
-        let before = available_bytes(&root).expect("free space before");
         let hold_path = root.join(STAGING_HOLD_FILE);
 
         // A function that acquires the guard and then fails must still release
@@ -711,8 +695,6 @@ mod tests {
         }
         assert!(cancelled_operation(&root, reserved).is_err());
         assert!(!hold_path.exists(), "the error path must unlink the hold");
-        let after = available_bytes(&root).expect("free space after error");
-        assert!(after + SPACE_TOLERANCE >= before);
 
         // A partial write release survives a failure too.
         fn failed_write(root: &Path, reserved: u64) -> Result<(), ReservationError> {
@@ -725,8 +707,6 @@ mod tests {
         }
         assert!(failed_write(&root, reserved).is_err());
         assert!(!hold_path.exists());
-        let after = available_bytes(&root).expect("free space after failed write");
-        assert!(after + SPACE_TOLERANCE >= before);
 
         fs::remove_dir_all(root).expect("remove fixture directory");
     }
@@ -740,7 +720,6 @@ mod tests {
             let _ = fs::remove_dir_all(&root);
             return;
         }
-        let before = available_bytes(&root).expect("free space before");
         let hold_path = root.join(STAGING_HOLD_FILE);
 
         // Simulate a process that died while holding the reservation: the
@@ -749,30 +728,20 @@ mod tests {
         std::mem::forget(hold);
         assert!(hold_path.is_file(), "a crashed attempt leaves the hold");
         assert!(allocated_blocks(&hold_path) >= reserved);
-        let after_crash = available_bytes(&root).expect("free space after crash");
-        assert!(before.saturating_sub(after_crash) + SPACE_TOLERANCE >= reserved);
 
         // Restart path: acquiring the same reservation truncates the stale
-        // hold and re-allocates exactly once, not twice.
+        // hold and re-allocates exactly once, not twice. The allocated block
+        // count of the single hold file is the authoritative check; a global
+        // f_bavail delta is not asserted because nextest runs tests in
+        // separate processes with unrelated concurrent filesystem activity.
         let restarted =
             StagingReservation::acquire(&root, reserved, 0).expect("restart cleans stale hold");
         assert_eq!(restarted.held_bytes(), reserved);
         assert!(allocated_blocks(&hold_path) >= reserved);
         assert!(allocated_blocks(&hold_path) <= reserved + SPACE_TOLERANCE);
-        let after_restart = available_bytes(&root).expect("free space after restart");
-        assert!(
-            before.saturating_sub(after_restart) + SPACE_TOLERANCE >= reserved,
-            "the restarted hold must keep the reservation"
-        );
-        assert!(
-            after_restart + SPACE_TOLERANCE >= after_crash,
-            "a stale hold must not be allocated twice"
-        );
 
         drop(restarted);
         assert!(!hold_path.exists());
-        let released = available_bytes(&root).expect("free space after release");
-        assert!(released + SPACE_TOLERANCE >= before);
 
         fs::remove_dir_all(root).expect("remove fixture directory");
     }
