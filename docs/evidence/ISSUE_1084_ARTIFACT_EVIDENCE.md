@@ -1031,16 +1031,25 @@ verification.
   above); capacity released for an imminent phase write can still be taken by a
   concurrent writer in that window.
 - **D13 catalog coverage and the no-table SPEC/schema conflict.** The generated
-  inventory now covers SQLite tables/indexes/triggers and PostgreSQL
-  tables/indexes/triggers/functions, and capture compares the snapshot's live
-  `sqlite_master` (tables/indexes/views/triggers) against the baseline. It does
-  not emit views, sequences, explicit named constraints, PostgreSQL
-  `ALTER TABLE ADD COLUMN` effects, or a live PostgreSQL catalog comparison.
-  The contract requires `minItems: 1` for both object arrays, so a repository
-  with no table cannot be represented without either inventing a synthetic
-  object or amending the schema; the registry therefore keeps its current shape
-  (every repository owns at least one table) and this remains a SPEC/schema
-  conflict rather than an implemented no-table repository entry.
+  inventory now covers SQLite tables/views/sequences/indexes/triggers and
+  PostgreSQL tables/views/sequences/indexes/constraints/functions/triggers.
+  PostgreSQL `ALTER TABLE ADD/DROP/RENAME COLUMN` effects are merged into the
+  table definition, explicit named constraints are emitted as `constraint`
+  objects, functions are keyed by name plus normalized argument signature, and
+  triggers by table plus name. Generation proves every object is assigned to
+  exactly one repository. Capture compares the snapshot's live SQLite
+  `sqlite_master` catalog against the baseline, and a live PostgreSQL catalog
+  comparison (identity plus `pg_get_*` renderings) is available for migration
+  verification. Remaining limits: the live PostgreSQL comparison is
+  identity-only (it does not compare definition digests), it skips constraints
+  because `pg_constraint` cannot distinguish reviewed named constraints from
+  server-named implicit ones, and the committed baseline currently contains no
+  views or sequences because no reviewed migration creates one. The contract
+  still requires `minItems: 1` for both object arrays, so a repository with no
+  table cannot be represented without either inventing a synthetic object or
+  amending the schema; the registry therefore keeps its current shape (every
+  repository owns at least one table) and this remains a SPEC/schema conflict
+  rather than an implemented no-table repository entry.
 - **D2 trust-root rotation/lifecycle is not implemented.** Trust is a static
   configured document with a static `revoked_key_ids` list; there is no
   root-rotation, key-ceremony, or revocation-distribution workflow.
