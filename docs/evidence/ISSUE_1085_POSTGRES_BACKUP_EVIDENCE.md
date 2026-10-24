@@ -65,8 +65,9 @@ The barrier SHA-256 is recorded by the campaign. Application, maintenance and
 Unix-socket reconnects were denied before `pg_dump` started; the control session
 was closed before the dump probe.
 
-A SIGKILL at the accepted dump boundary left the barrier and role modes
-installed. On the next invocation:
+A feature-gated hard process exit at the accepted after-dump boundary left the
+barrier and role modes installed (the hook is compiled only for the campaign).
+On the next invocation:
 
 ```text
 role matrix after crash:
@@ -125,6 +126,6 @@ entries and does not execute archive SQL while listing.
   PKCS#11 HSM. This slice uses the existing detached-signature seam; **no HSM,
   mTLS signer service, custody, or production-signer acceptance is claimed.**
 - No PostgreSQL restore/activation, HA, multi-region, or PP.7 release claim.
-- The branch is based on protected main before the #1084 conformance PR; it
-  must be rebased/reviewed against the accepted SQLite artifact changes before
-  merge.
+- The branch is based on protected main `35e04906` (the merged #1084 artifact
+  work); those SQLite artifact changes are included, but protected review and
+  any later rebase remain required before merge.
