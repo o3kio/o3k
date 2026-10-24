@@ -205,7 +205,9 @@ use crate::{
         StreamMember, finish_signed_artifact, manifest_signing_input,
         read_unsigned_staged_artifact, stage_unsigned_artifact, unsigned_manifest_digest,
     },
-    backup_reservation::Reservation,
+    backup_reservation::{
+        Reservation, ReservationError, STAGING_HOLD_FILE, StagingReservation, staging_tree_bytes,
+    },
     backup_trust::{
         BackupTrustConfig, BackupTrustError, default_trust_config_path_for, install_prefix_for,
         site_and_installation_ids,
@@ -1025,6 +1027,7 @@ fn private_file_posture(metadata: &rustix::fs::Stat) -> bool {
 /// the recoverable `signing-request-expired` reason.
 pub fn complete_staged(
     inputs: &CompletionInputs<'_>,
+    hold: Option<&mut StagingReservation>,
 ) -> Result<PublishedArtifact, ArtifactFailure> {
     let staging_leaf = staging_leaf(inputs.operation_id);
     let staging_path = destination_staging_path(inputs.destination_dir, inputs.operation_id)?;
@@ -1076,11 +1079,28 @@ pub fn complete_staged(
             }
             let _operation_lock = OperationLock::acquire(&staging_path)?;
             ensure_marker(inputs)?;
+            // Hold the remaining reservation through the verified publication,
+            // including when this is a restarted phase 2 that no longer has
+            // the phase-1 guard in memory.
+            let mut owned_hold: Option<StagingReservation> = None;
+            let hold: &mut StagingReservation = match hold {
+                Some(existing) => existing,
+                None => {
+                    let staged = staging_tree_bytes(&staging_path);
+                    let acquired = StagingReservation::acquire(
+                        &staging_path,
+                        inputs.reservation.reserved_bytes,
+                        staged,
+                    )
+                    .map_err(hold_failure)?;
+                    owned_hold.get_or_insert(acquired)
+                }
+            };
             let staged = verify_publishable_staged_artifact(inputs, &staging_path)?;
             if staged.sha256 != expected {
                 return Err(ArtifactFailure::rejected("staged-artifact-changed"));
             }
-            ensure_staging_space(inputs, &staging_path)?;
+            ensure_staging_space(inputs, &staging_path, hold.held_bytes())?;
             publish(
                 inputs.destination_fd,
                 &staging_leaf,
@@ -1110,6 +1130,23 @@ pub fn complete_staged(
     // resumed invocation re-creates it if an operator removed it, so the
     // controller can never start while a publication is pending.
     ensure_marker(inputs)?;
+    // A restarted phase 2 has no in-memory guard: re-create the private hold
+    // for everything the staged tree does not already occupy. `acquire`
+    // truncates a stale hold left by a crashed attempt before allocating.
+    let mut owned_hold: Option<StagingReservation> = None;
+    let hold: &mut StagingReservation = match hold {
+        Some(existing) => existing,
+        None => {
+            let staged = staging_tree_bytes(&staging_path);
+            let acquired = StagingReservation::acquire(
+                &staging_path,
+                inputs.reservation.reserved_bytes,
+                staged,
+            )
+            .map_err(hold_failure)?;
+            owned_hold.get_or_insert(acquired)
+        }
+    };
 
     // Crash recovery for the window between `finish_signed_artifact` (which
     // removes `artifact.unsigned`) and the durable `publishing` transition: a
@@ -1140,7 +1177,7 @@ pub fn complete_staged(
             BackupOperationPhase::Publishing,
             Some(staged.sha256.clone()),
         )?;
-        ensure_staging_space(inputs, &staging_path)?;
+        ensure_staging_space(inputs, &staging_path, hold.held_bytes())?;
         publish(
             inputs.destination_fd,
             &staging_leaf,
@@ -1254,7 +1291,15 @@ pub fn complete_staged(
         &request.expires_at,
     )?;
 
-    ensure_staging_space(inputs, &staging_path)?;
+    ensure_staging_space(inputs, &staging_path, hold.held_bytes())?;
+    // Finalize writes a second full artifact copy before the unsigned file is
+    // removed. Release exactly that copy's upper bound from the hold; the rest
+    // of the reservation stays allocated to this operation.
+    let finalize_upper = unsigned
+        .size_bytes
+        .saturating_add(crate::backup_reservation::FORMAT_OVERHEAD_BOUND);
+    hold.prepare_for_write(finalize_upper)
+        .map_err(hold_failure)?;
     finish_signed_artifact(
         unsigned,
         signature,
@@ -1262,6 +1307,8 @@ pub fn complete_staged(
         inputs.config.signing_key(),
     )
     .map_err(|_| ArtifactFailure::rejected("artifact-finalize-failed"))?;
+    hold.reconcile(staging_tree_bytes(&staging_path))
+        .map_err(hold_failure)?;
     // Test-only: crash after finalize removed `artifact.unsigned` and before
     // the durable `publishing` transition. A retry must detect the signed
     // `artifact.partial`, re-verify it and publish.
@@ -1270,7 +1317,7 @@ pub fn complete_staged(
     // Verify the exact bytes that will be published, from a fresh no-follow
     // descriptor. `finish_signed_artifact`'s digest is only a cross-check.
     let staged = verify_publishable_staged_artifact(inputs, &staging_path)?;
-    ensure_staging_space(inputs, &staging_path)?;
+    ensure_staging_space(inputs, &staging_path, hold.held_bytes())?;
 
     update_journal(
         inputs,
@@ -1389,33 +1436,58 @@ fn wait_for_signing_response(
     }
 }
 
-/// Fails closed when the destination no longer holds the remaining D9
-/// reservation (preflight + boundary re-check, never a filesystem quota).
+/// Fails closed when the destination no longer covers the remaining D9
+/// reservation. The statvfs boundary check is retained, but the bytes already
+/// allocated by the private hold count as covered capacity.
 fn ensure_staging_space(
     inputs: &CompletionInputs<'_>,
     staging_path: &Path,
+    held_bytes: u64,
 ) -> Result<(), ArtifactFailure> {
     let staged = directory_bytes(staging_path);
-    crate::backup_reservation::ensure_reserved_space(
+    crate::backup_reservation::ensure_reserved_space_with_hold(
         inputs.destination_dir,
         inputs.reservation.reserved_bytes,
         staged,
+        held_bytes,
     )
     .map_err(|_| ArtifactFailure::recoverable("space-unavailable"))
 }
 
-/// Aggregate size of the regular files under `path` (best effort: an
-/// unreadable entry counts as zero, which only makes the check stricter).
+/// Maps a hold-file failure to the SPEC-0050 exit contract.
+fn hold_failure(error: ReservationError) -> ArtifactFailure {
+    match error {
+        ReservationError::SpaceUnavailable { .. }
+        | ReservationError::StagedExceedsReservation { .. }
+        | ReservationError::StagingHoldUnavailable => ArtifactFailure::recoverable(error.reason()),
+        _ => ArtifactFailure::rejected(error.reason()),
+    }
+}
+
+/// Allocated bytes of regular files under `path`, excluding the private
+/// reservation hold file (it is accounted for separately as `held_bytes`).
+/// `st_blocks * 512` matches the capacity removed from `f_bavail`, including
+/// block rounding. Best effort: an unreadable entry counts as zero, which only
+/// makes the check stricter.
 fn directory_bytes(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
     let Ok(entries) = fs::read_dir(path) else {
         return 0;
     };
     entries
         .filter_map(Result::ok)
-        .map(|entry| match entry.file_type() {
-            Ok(file_type) if file_type.is_dir() => directory_bytes(&entry.path()),
-            Ok(file_type) if file_type.is_file() => entry.metadata().map(|m| m.len()).unwrap_or(0),
-            _ => 0,
+        .map(|entry| {
+            if entry.file_name().as_encoded_bytes() == STAGING_HOLD_FILE.as_bytes() {
+                return 0;
+            }
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => directory_bytes(&entry.path()),
+                Ok(file_type) if file_type.is_file() => entry
+                    .metadata()
+                    .map(|metadata| metadata.blocks().saturating_mul(512))
+                    .unwrap_or(0),
+                _ => 0,
+            }
         })
         .sum()
 }
