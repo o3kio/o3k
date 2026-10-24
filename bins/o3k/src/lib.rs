@@ -25,8 +25,8 @@ compile_error!("backup-test-hooks is a debug-only test feature");
 pub(crate) mod backup;
 // PP.6 backup artifact driver (SPEC-0050 §8, ADR-0189): assembles the
 // encrypted artifact manifest from a quiesced snapshot, drives the accepted
-// offline two-phase signing flow, and publishes with an atomic no-replace
-// rename. Linux-only like the handoff primitives in o3k-store.
+// offline two-phase signing flow, and publishes by linking the verified
+// inode with no replace. Linux-only like the handoff primitives in o3k-store.
 #[cfg(target_os = "linux")]
 pub mod backup_artifact;
 // PP.6 backup capture executor (SPEC-0050 §8, ADR-0189): drives the

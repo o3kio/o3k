@@ -2135,6 +2135,9 @@ fn validate_path(path: &str) -> Result<(), String> {
         return Err("backup member path is invalid".to_owned());
     }
     let mut segments = path.split('/');
+    if path.split('/').count() > 8 {
+        return Err("backup member path is too deep".to_owned());
+    }
     let allowed_root = [
         "database", "config", "release", "identity", "trust", "metadata",
     ];
@@ -2966,9 +2969,12 @@ mod tests {
             "database/with space",
             "elsewhere/o3k.sqlite",
             "",
+            "database/a/b/c/d/e/f/g/h",
         ] {
             assert!(validate_path(path).is_err(), "{path} must be rejected");
         }
+        // Eight segments is the accepted D9 depth bound.
+        assert_eq!(validate_path("database/a/b/c/d/e/f/g"), Ok(()));
     }
 
     #[test]

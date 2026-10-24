@@ -804,7 +804,7 @@ pub fn send_request_and_read_accept(
 ///
 /// The executor calls this after [`connect_control`] and before
 /// [`send_request_and_read_accept`] (so an impostor never receives the
-/// request), and again the connection is then used with
+/// request); the same authenticated connection is then used with
 /// [`crate::StoreAccessLock::receive_handoff`]. It requires:
 ///
 /// * `SO_PEERCRED` uid equal to `expected_uid` (the resolved data-directory

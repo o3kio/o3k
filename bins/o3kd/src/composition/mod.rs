@@ -833,8 +833,10 @@ mod interrupted_backup_marker_tests {
     }
 
     /// A staged (publication-pending) operation must not deny startup: the
-    /// staged artifact is not canonical state and publication needs no store
-    /// lock. The marker remains the only denial authority.
+    /// staged artifact is not canonical state. Publication itself still runs
+    /// under the lifetime store lock in `o3k backup create`, so a live
+    /// controller blocks a replay. The marker remains the only denial
+    /// authority.
     #[test]
     fn pending_backup_operation_journal_does_not_deny_startup()
     -> Result<(), Box<dyn std::error::Error>> {

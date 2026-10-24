@@ -1,5 +1,6 @@
 //! `o3k backup create` — authenticated capture and offline-signing driver for
-//! the PP.6 backup artifact (SPEC-0050 §8, ADR-0189 D2/D4/D8/D9/D12).
+//! the PP.6 backup artifact (SPEC-0050 §8, ADR-0189 D2/D4/D9/D12).
+//! The ADR-0189 D8 signed restore journal is out of scope for this slice.
 //!
 //! This module owns the `o3k` CLI side of the host-local backup handoff. It
 //! resolves the expected daemon identity, connects to the private Unix control
@@ -693,7 +694,7 @@ fn complete_existing(
                 operation_id,
                 &record.backup_id,
                 &published,
-                reservation.source_bytes,
+                None,
                 reservation.reserved_bytes,
             ),
         },
@@ -701,26 +702,31 @@ fn complete_existing(
     }
 }
 
-/// Bounded success document for a published artifact.
+/// Bounded success document for a published artifact. Replay completion does
+/// not re-measure the source, so `source_bytes` is omitted there instead of
+/// reporting a zero that contradicts the captured run.
 fn published_json(
     operation_id: Uuid,
     backup_id: &str,
     published: &PublishedArtifact,
-    source_bytes: u64,
+    source_bytes: Option<u64>,
     reserved_bytes: u64,
 ) -> Value {
-    json!({
+    let mut document = json!({
         "status": "backup-published",
         "operation_id": operation_id,
         "backup_id": backup_id,
         "path": published.path.to_string_lossy(),
         "sha256": published.sha256,
         "size_bytes": published.size_bytes,
-        "source_bytes": source_bytes,
         "reserved_bytes": reserved_bytes,
         "signature": "verified",
         "note": PUBLISHED_NOTE,
-    })
+    });
+    if let (Some(source_bytes), Some(object)) = (source_bytes, document.as_object_mut()) {
+        object.insert("source_bytes".to_owned(), json!(source_bytes));
+    }
+    document
 }
 /// Reports whether the destination is the canonical data directory or a
 /// descendant of it: a capture is never written into the directory the
@@ -1355,7 +1361,7 @@ fn execute_inner(
                 operation_id,
                 &staged.backup_id,
                 &published,
-                staged.source_bytes,
+                Some(staged.source_bytes),
                 staged.reserved_bytes,
             ),
         },

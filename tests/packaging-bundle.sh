@@ -83,11 +83,13 @@ CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR
 cmp -s "$BUNDLE_DIR/bin/o3kd" "$PREFIX/bin/o3kd"
 cmp -s "$BUNDLE_DIR/bin/o3k" "$PREFIX/bin/o3k"
 [[ -f "$PREFIX/share/o3k/o3kd.service" ]]
+[[ -f "$PREFIX/share/o3k/backup-trust.example.json" ]]
 cmp -s "$BUNDLE_DIR/manifest.json" "$PREFIX/share/o3k/release-manifest.json"
 cmp -s "$BUNDLE_DIR/SHA256SUMS" "$PREFIX/share/o3k/SHA256SUMS"
 grep -Fqx 'bin/o3k' "$PREFIX/share/o3k/.o3k-installed"
 grep -Fqx 'share/o3k/release-manifest.json' "$PREFIX/share/o3k/.o3k-installed"
 grep -Fqx 'share/o3k/SHA256SUMS' "$PREFIX/share/o3k/.o3k-installed"
+grep -Fqx 'share/o3k/backup-trust.example.json' "$PREFIX/share/o3k/.o3k-installed"
 [[ ! -e "$WORK_DIR/cargo-invoked" ]]
 
 # Keep this deterministic and host-independent: the real preflight contract is

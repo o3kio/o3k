@@ -107,8 +107,11 @@ enum Commands {
 #[cfg(target_os = "linux")]
 #[derive(Subcommand)]
 enum BackupCommand {
-    /// Capture an authenticated backup artifact; re-run with the same operation
-    /// id after placing signing-response.json to publish it (offline custody)
+    /// Capture an authenticated backup artifact. The command holds the
+    /// exclusive store lock and interrupt marker while it waits (in-process,
+    /// bounded) for the custodian to place signing-response.json, then
+    /// publishes the signed artifact. Re-run the same operation id only to
+    /// recover after a crash (offline custody)
     Create {
         /// Absolute destination directory for the backup artifact
         #[arg(long)]

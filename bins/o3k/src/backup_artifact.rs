@@ -1,4 +1,5 @@
-//! Operator-usable PP.6 backup artifact driver (SPEC-0050 §8, ADR-0189 D2/D4/D8/D9/D12).
+//! Operator-usable PP.6 backup artifact driver (SPEC-0050 §8, ADR-0189 D2/D4/D9/D12).
+//! The ADR-0189 D8 signed restore journal is out of scope for this slice.
 //!
 //! This module turns the provisional capture from the handoff slice into a real
 //! authenticated artifact, using the accepted **offline custody** signing flow
@@ -1996,8 +1997,9 @@ struct RequestExpectations<'a> {
 }
 
 /// Validates a signing request against the local operation and returns the
-/// decoded signing input. Expiry is a recoverable failure: the staged artifact
-/// is kept, and the operator must start a new operation.
+/// decoded signing input. Expiry is returned to `complete_staged`, which
+/// performs the safe abort (staging and marker removed, journal aborted); a
+/// later capture may reuse the operation id.
 fn validate_signing_request(
     request: &SigningRequest,
     expected: &RequestExpectations<'_>,

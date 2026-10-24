@@ -68,7 +68,8 @@
 //! already removed by [`crate::backup::verify_artifact_stream`]. If the final
 //! cleanup cannot be proven, the command reports the quarantined outcome
 //! (`verification-cleanup-failed`, exit 4) instead of success; removal of the
-//! now-empty outer staging root is best effort on failure paths.
+//! outer staging root (which holds the private database copy) on failure
+//! paths; a failed removal is an unknown outcome (exit 4).
 //!
 //! # Output and exit codes
 //!
@@ -297,7 +298,9 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
     let mut artifact = match open_artifact(&args.artifact) {
         Ok(artifact) => artifact,
         Err(reason) => {
-            let _ = fs::remove_dir_all(&staging_root);
+            if fs::remove_dir_all(&staging_root).is_err() {
+                return BackupVerifyOutcome::unknown(REASON_CLEANUP_FAILED);
+            }
             return BackupVerifyOutcome::recoverable(reason);
         }
     };
@@ -305,8 +308,12 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         Ok(verified) => verified,
         Err(error) => {
             // The streaming verifier removes its own staging directory on
-            // failure; this only removes the now-empty outer root.
-            let _ = fs::remove_dir_all(&staging_root);
+            // failure; this removes the outer root, which also holds the
+            // private copy of the live database. A failed removal is an
+            // unknown outcome because plaintext may survive.
+            if fs::remove_dir_all(&staging_root).is_err() {
+                return BackupVerifyOutcome::unknown(REASON_CLEANUP_FAILED);
+            }
             return verification_failure(&error);
         }
     };
