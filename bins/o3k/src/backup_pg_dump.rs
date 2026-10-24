@@ -300,10 +300,13 @@ pub fn classify_toc(toc: &str, inventory: &[serde_json::Value]) -> Result<TocRep
         report.entries += 1;
         // The last field is the archive owner, preserved by --no-owner as
         // inert metadata.
-        if fields.len() < 2 {
+        if fields.len() < 3 {
             return Err(PgToolError::new("toc-entry-malformed"));
         }
         let body = &fields[..fields.len() - 1];
+        if body.len() < 3 && matches!(body.first().map(String::as_str), Some("TABLE" | "FK")) {
+            return Err(PgToolError::new("toc-entry-malformed"));
+        }
 
         let (kind, schema, rest) = if body.len() >= 2 && body[0] == "TABLE" && body[1] == "DATA" {
             ("TABLE DATA", body.get(2).map(String::as_str), &body[3..])
@@ -481,6 +484,23 @@ mod tests {
             "9; 2620 106 TRIGGER public operations operations_trigger owner",
         ]
         .join("\n")
+    }
+
+    #[test]
+    fn short_untrusted_toc_records_reject_without_panicking() {
+        for entry in [
+            "1; 0 0 TABLE owner",
+            "1; 0 0 TABLE DATA owner",
+            "1; 0 0 FK CONSTRAINT owner",
+            "1; 0 0 FUNCTION owner",
+        ] {
+            assert_eq!(
+                classify_toc(entry, &inventory())
+                    .expect_err("malformed TOC")
+                    .reason(),
+                "toc-entry-malformed"
+            );
+        }
     }
 
     #[test]
