@@ -92,6 +92,32 @@ grep -Fqx 'share/o3k/SHA256SUMS' "$PREFIX/share/o3k/.o3k-installed"
 grep -Fqx 'share/o3k/backup-trust.example.json' "$PREFIX/share/o3k/.o3k-installed"
 [[ ! -e "$WORK_DIR/cargo-invoked" ]]
 
+# An operator-provided backup trust document is posture-validated at install
+# time and is never created or overwritten by the installer. A 0600 document in
+# a custom TestLab config directory is accepted; 0644 is rejected before any
+# installation state exists.
+TRUST_CONFIG_DIR="$WORK_DIR/trust-config"
+mkdir -p "$TRUST_CONFIG_DIR"
+chmod 0755 "$TRUST_CONFIG_DIR"
+printf 'o3k-owned-v1 path=%s\n' "$TRUST_CONFIG_DIR" >"$TRUST_CONFIG_DIR/.o3k-owned"
+cp "$BUNDLE_DIR/packaging/backup-trust.example.json" "$TRUST_CONFIG_DIR/backup-trust.json"
+chmod 0600 "$TRUST_CONFIG_DIR/backup-trust.json"
+CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR/packaging/install.sh" \
+  --profile fake --noninteractive \
+  --prefix "$WORK_DIR/trust-prefix" --data-dir "$WORK_DIR/trust-data" \
+  --config-dir "$TRUST_CONFIG_DIR" --log-dir "$WORK_DIR/trust-log"
+[[ -f "$TRUST_CONFIG_DIR/backup-trust.json" ]]
+[[ ! -e "$WORK_DIR/trust-prefix/share/o3k/backup-trust.json" ]]
+chmod 0644 "$TRUST_CONFIG_DIR/backup-trust.json"
+if CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR/packaging/install.sh" \
+    --profile fake --noninteractive \
+    --prefix "$WORK_DIR/trust-bad-prefix" --data-dir "$WORK_DIR/trust-bad-data" \
+    --config-dir "$TRUST_CONFIG_DIR" --log-dir "$WORK_DIR/trust-bad-log"; then
+  echo "installer accepted a group/other-readable backup trust document" >&2
+  exit 1
+fi
+[[ ! -e "$WORK_DIR/trust-bad-prefix" ]]
+
 # Keep this deterministic and host-independent: the real preflight contract is
 # exercised separately, while this invocation only verifies bundle selection.
 cat >"$BUNDLE_DIR/packaging/preflight.sh" <<'EOF'
@@ -115,6 +141,7 @@ fi
 
 TLS_DIR="$WORK_DIR/libvirt-config/tls"
 mkdir -p "$TLS_DIR"
+chmod 0755 "$WORK_DIR/libvirt-config"
 printf 'o3k-owned-v1 path=%s\n' "$WORK_DIR/libvirt-config" >"$WORK_DIR/libvirt-config/.o3k-owned"
 for file in ca.pem server.pem server-key.pem agent.pem agent-key.pem; do
   printf 'test credential\n' >"$TLS_DIR/$file"

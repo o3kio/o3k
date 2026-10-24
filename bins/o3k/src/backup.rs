@@ -2861,6 +2861,73 @@ mod tests {
     }
 
     #[test]
+    fn public_only_integrity_verification_uses_no_recipient_key_and_rejects_tampering() {
+        // The publication boundary takes only a signing public key, the trust
+        // document and identity expectations: no X25519 private key is a
+        // parameter. This proves manifest/signature/ciphertext-digest
+        // verification is public-only.
+        let (options, members, signing, recipient_private_key) = fixture();
+        let (artifact, artifact_digest) =
+            create_artifact(&options, members, &signing).expect("create");
+        // The recovery private key is not available to this boundary at all.
+        drop(recipient_private_key);
+        let trust = test_trust();
+        let verifying_key = signing.0.verifying_key();
+        let release_artifact_sha256 = "a".repeat(64);
+        let expectations = ArtifactIntegrityExpectations {
+            signing_key_id: "signing-1",
+            signer: &verifying_key,
+            trust: &trust,
+            recipient_key_id: "recovery-1",
+            backup_id: "backup-1",
+            site_id: "site-1",
+            installation_id: "install-1",
+            profile_id: "o3k-demo-v1",
+            o3k_version: "0.4.0",
+            source_sha: "0123456789abcdef0123456789abcdef01234567",
+            release_artifact_sha256: &release_artifact_sha256,
+            schema_version: 53,
+        };
+        let header = verify_signed_artifact_integrity(&mut artifact.as_slice(), &expectations)
+            .expect("public-only integrity verification");
+        assert_eq!(header.manifest.backup_id, "backup-1");
+        assert_eq!(header.sha256, artifact_digest);
+        assert_eq!(header.size_bytes, artifact.len() as u64);
+
+        // A ciphertext byte change is caught by the signed member digest.
+        let mut corrupt_ciphertext = artifact.clone();
+        let last = corrupt_ciphertext.len() - 1;
+        corrupt_ciphertext[last] ^= 1;
+        assert_eq!(
+            verify_signed_artifact_integrity(&mut corrupt_ciphertext.as_slice(), &expectations)
+                .expect_err("tampered ciphertext")
+                .class(),
+            ArtifactVerifyClass::CorruptArtifact
+        );
+
+        // A signature byte change keeps the JSON canonical but fails Ed25519
+        // verification, proving the signature is checked with the public key.
+        let mut corrupt_signature = artifact;
+        let marker = b"\"signature\":\"";
+        let start = corrupt_signature
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("manifest signature field")
+            + marker.len();
+        corrupt_signature[start] = if corrupt_signature[start] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        assert_eq!(
+            verify_signed_artifact_integrity(&mut corrupt_signature.as_slice(), &expectations)
+                .expect_err("tampered signature")
+                .class(),
+            ArtifactVerifyClass::SignatureInvalid
+        );
+    }
+
+    #[test]
     fn artifact_rejects_a_different_release_identity_or_migration_baseline() {
         let (options, members, signing, recipient) = fixture();
         let (artifact, _) = create_artifact(&options, members, &signing).expect("create");
