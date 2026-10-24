@@ -3,7 +3,7 @@
 Date: 2026-10-24. Branch: `pp6/1084-artifact`.
 
 Current state: the Slice F implementation is committed at
-`50113f7a4efba261ee8af08abeee726b1d04fd6f` (tracked tree clean at run time),
+`a6b34f9aca12eec41f046157ad82dc23246dfd2e` (tracked tree clean at run time),
 and this document is bound to that run in `FINAL-COMMIT-BINDING` below. This
 document was amended after the bound run; the binding names the implementation
 commit whose tree was tested. Per-run fields (artifact digest, ids, timestamps)
@@ -45,7 +45,7 @@ construction; the row matrix does not.
 Recorded result:
 
 ```text
-final_commit: 50113f7a4efba261ee8af08abeee726b1d04fd6f
+final_commit: a6b34f9aca12eec41f046157ad82dc23246dfd2e
 clean_tree_at_run: yes (tracked tree clean; only unrelated untracked build/campaign dirs)
 harness_sha256: 92e64bb9ccb4846550aeca1675b14f681de6dcd958b0c4e98c0d59aaca890214
 handoff_harness_sha256: bc79562028ff5c3097da706b93f4063db19ea51b1b65b67a8682d5c5b2d3caff
@@ -54,10 +54,10 @@ handoff_campaign: 19 PASS rows / 7 documented rows / 0 FAIL rows
 workspace_gate: cargo fmt clean; workspace clippy -D warnings clean; cargo test --workspace --all-features exit 0 (145 suites)
 verdict:
 {
-  "backup_digest": "d17f29fe439ac2ffec1e444d653ca75cfba19d6db4069b38ef20b2efb263e355",
-  "backup_id": "00f3b95b-81bc-4fdd-9e36-e760df5ffed6",
-  "backup_installation_id": "e951cb8e47034d2939880b809a5f6d31",
-  "backup_site_id": "49fbf3953a4e06f1d2ac75108456186c",
+  "backup_digest": "098e11b81a31dbb0dbf335e2fa874b81c615f0dc055fe7a1f3fc7c2f46f8778d",
+  "backup_id": "f1fd0c81-e3e6-43b4-aa05-ebb80e8335e9",
+  "backup_installation_id": "ef298145045ad483add3ed38ff5745c1",
+  "backup_site_id": "a58ee8f79535c70b019ce3adcc191880",
   "backup_size_bytes": 1261601,
   "campaign": "tests/pp6_backup_artifact.sh",
   "executed_rows": 44,
@@ -73,20 +73,19 @@ verdict:
   "max_migration_checksum": "7a2333035bc23d000c129d6d87d236b119a69bbc2de5bda6e41618c6b1488fc0",
   "max_migration_version": 53,
   "not_covered_rows": 1,
-  "o3k_binary_sha256": "2624568d23a53888df96b1d919864a213ddaa91c990a9dea75e6698635ec9d81",
-  "o3kd_binary_sha256": "5cb9597cd7af9127b683458ab8b2d63fb1865ccfa22b2a914ead897eb4c81967",
+  "o3k_binary_sha256": "6fe3e9cd8c7149441f4ded99730fb1c99057012f19852c1665eceffdb410afb2",
+  "o3kd_binary_sha256": "86dc823a98aef4454f8f4be54a5488899dc717eeffce91fb141584c169638a34",
   "passed_rows": 44,
   "profile": "o3k-demo-v1",
   "release_artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
   "schema_version": 53,
   "slice": "F",
-  "source_sha": "50113f7a4efba261ee8af08abeee726b1d04fd6f",
+  "source_sha": "a6b34f9aca12eec41f046157ad82dc23246dfd2e",
   "sqlite_version": "3.46.0",
   "state_inventory_sqlite_version": "3.46.0",
   "working_tree_dirty": false
 }
-
 ```
 
 Note: `release_artifact_sha256` is the campaign fixture's placeholder value
@@ -97,11 +96,13 @@ records the digest verified by the installer/upgrade path.
 The recorded `harness_sha256` / `handoff_harness_sha256` values are byte-identical
 to the delivered campaign scripts at the bound commit and at the PR head.
 
-Post-binding delta: PR head `3f7b2d1f` adds `packaging/backup-trust.example.json`
-to the release-bundle file lists (`packaging/make-release.sh`,
-`tests/packaging-bundle.sh`) and touches no product code or harness;
-`tests/packaging-bundle.sh`, `packaging-safety` and `packaging-sbom` pass at
-head. The implementation binding above does not change.
+Post-binding history: the earlier packaging-only commit `3f7b2d1f` added
+`packaging/backup-trust.example.json` to the release-bundle file lists
+(`packaging/make-release.sh`, `tests/packaging-bundle.sh`) and touched no
+product code or harness. The bound implementation commit `a6b34f9a` is the
+current PR head and includes that packaging fix plus the round-5 code and
+documentation fixes; `tests/packaging-bundle.sh`, `packaging-safety` and
+`packaging-sbom` pass at head.
 
 This document reports executable, real-process evidence for the signed backup
 artifact lifecycle only. The implementation is authored by the same agent that
@@ -115,8 +116,8 @@ authored this campaign; see the *No independent review yet* non-claim under
 | campaign harness | `tests/pp6_backup_artifact.sh` |
 | harness SHA-256 | `92e64bb9ccb4846550aeca1675b14f681de6dcd958b0c4e98c0d59aaca890214` |
 | build | `cargo build -p o3k -p o3kd --features o3kd/backup-test-hooks,o3k/backup-test-hooks` |
-| `o3k` binary SHA-256 | `2624568d23a53888df96b1d919864a213ddaa91c990a9dea75e6698635ec9d81` |
-| `o3kd` binary SHA-256 | `5cb9597cd7af9127b683458ab8b2d63fb1865ccfa22b2a914ead897eb4c81967` |
+| `o3k` binary SHA-256 | `6fe3e9cd8c7149441f4ded99730fb1c99057012f19852c1665eceffdb410afb2` |
+| `o3kd` binary SHA-256 | `86dc823a98aef4454f8f4be54a5488899dc717eeffce91fb141584c169638a34` |
 | rustc | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | SQLite (from the published manifest) | `3.46.0` |
 | SQLite generator version (baseline `state_inventory_v1.json`) | `3.46.0` |
@@ -1054,7 +1055,7 @@ verification.
 ## Machine-readable verdict
 
 The authoritative run is recorded in `FINAL-COMMIT-BINDING` (clean commit
-`50113f7a`). The JSON below is an earlier pre-binding run on the uncommitted
+`a6b34f9a`). The JSON below is an earlier pre-binding run on the uncommitted
 working tree, kept to show per-run variation: the same matrix and row outcomes
 with different artifact digest, backup id, data-directory identities and size.
 The harness prints the same object on stdout between the markers
