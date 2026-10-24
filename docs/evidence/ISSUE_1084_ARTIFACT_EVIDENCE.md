@@ -3,7 +3,7 @@
 Date: 2026-10-24. Branch: `pp6/1084-artifact`.
 
 Current state: the Slice F implementation is committed at
-`0fd4ff2c9ea358508bc90b6419320f9726ed7713` (tracked tree clean at run time),
+`7a3e73521d741bc7334a27927d9f008a21d02153` (tracked tree clean at run time),
 and this document is bound to that run in `FINAL-COMMIT-BINDING` below. This
 document was amended after the bound run; the binding names the implementation
 commit whose tree was tested. Per-run fields (artifact digest, ids, timestamps)
@@ -45,19 +45,19 @@ construction; the row matrix does not.
 Recorded result:
 
 ```text
-final_commit: 0fd4ff2c9ea358508bc90b6419320f9726ed7713
+final_commit: 7a3e73521d741bc7334a27927d9f008a21d02153
 clean_tree_at_run: yes (tracked tree clean; only unrelated untracked build/campaign dirs)
-harness_sha256: f5d4a8e05ef4fcd66e6acf5c5b5683bdb6640cea4d686989ca6333db484071e1
-handoff_harness_sha256: f1a9e3989e6f61ed4fe885634227ae5fd0575f7caa243506daf785717e43d46e
+harness_sha256: 92e64bb9ccb4846550aeca1675b14f681de6dcd958b0c4e98c0d59aaca890214
+handoff_harness_sha256: bc79562028ff5c3097da706b93f4063db19ea51b1b65b67a8682d5c5b2d3caff
 artifact_campaign: 44 PASS rows / 1 NOT-COVERED row / 0 FAIL rows
 handoff_campaign: 19 PASS rows / 7 documented rows / 0 FAIL rows
 workspace_gate: cargo fmt clean; workspace clippy -D warnings clean; cargo test --workspace --all-features exit 0 (145 suites)
 verdict:
 {
-  "backup_digest": "90bc402eaaa5ef5358dc442b4ca5ab71b9beb557de6e3158ce6a14da56a889d9",
-  "backup_id": "e588f4be-c607-49f6-b5ef-681edfde1938",
-  "backup_installation_id": "be425fbc2107002425c90ffe02bde0ac",
-  "backup_site_id": "ff27f4a5ba633567e3ac4e7d7658f696",
+  "backup_digest": "0f90e373b2668ecb1b7291d15cae39e8f7c7eefa790f695caae1864020fd4e76",
+  "backup_id": "81ef4638-f066-4eff-a75d-9e1cc163bbf8",
+  "backup_installation_id": "a90532ef9a250c91ca20648068b7aa0b",
+  "backup_site_id": "7c2a1c8819d329d9880e3a96b0af042d",
   "backup_size_bytes": 1261601,
   "campaign": "tests/pp6_backup_artifact.sh",
   "executed_rows": 44,
@@ -77,7 +77,7 @@ verdict:
   "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
   "schema_version": 53,
   "slice": "F",
-  "source_sha": "0fd4ff2c9ea358508bc90b6419320f9726ed7713",
+  "source_sha": "7a3e73521d741bc7334a27927d9f008a21d02153",
   "sqlite_version": "3.46.0",
   "state_inventory_sqlite_version": "3.46.0",
   "working_tree_dirty": false
@@ -107,10 +107,10 @@ authored this campaign; see the *No independent review yet* non-claim under
 | Item | Value |
 | --- | --- |
 | campaign harness | `tests/pp6_backup_artifact.sh` |
-| harness SHA-256 | `f5d4a8e05ef4fcd66e6acf5c5b5683bdb6640cea4d686989ca6333db484071e1` |
+| harness SHA-256 | `92e64bb9ccb4846550aeca1675b14f681de6dcd958b0c4e98c0d59aaca890214` |
 | build | `cargo build -p o3k -p o3kd --features o3kd/backup-test-hooks,o3k/backup-test-hooks` |
-| `o3k` binary SHA-256 | `15b0917a7949bb5adb91a4b3299e9aae3935a71f47f48997bc2120f23ace36f3` |
-| `o3kd` binary SHA-256 | `787bfa105c987edd3dd17628c444770aa0269766a5292e62b9d7f6a673a38c66` |
+| `o3k` binary SHA-256 | `be29f90fa8380bd2487ba225236e65fe5ff9f3d10db4b2f38e4c88f514cb10bb` |
+| `o3kd` binary SHA-256 | `ee3f6687b85e659c35bd998d2264161a8e93e53ace8a733bc8905ede1495e5b8` |
 | rustc | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | SQLite (from the published manifest) | `3.46.0` |
 | SQLite generator version (baseline `state_inventory_v1.json`) | `3.46.0` |
