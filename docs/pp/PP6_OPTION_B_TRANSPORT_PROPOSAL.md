@@ -15,8 +15,8 @@ needed before production Option B code can be written.
 
 Affected package is the PostgreSQL backup/signing boundary under `bins/o3k`.
 No daemon, public O3K API, controller authority, or database schema is added.
-The first implementation would be a test-only protocol validator and a
-purpose-isolated software signer. A real HSM, custody, mTLS, revocation and
+After exact-revision acceptance, the first implementation would be a test-only
+protocol validator and a purpose-isolated software signer. A real HSM, custody, mTLS, revocation and
 installed-release campaign remain separate evidence gates.
 
 Selected profile: PostgreSQL 16 `o3k-small-edge-v1`. Canonical domain is Cloud
@@ -71,8 +71,8 @@ required fields fail closed.
 * `nonce`: exactly 32 random bytes, unpadded base64url;
 * `artifact_id`: UUID text;
 * `manifest`: the complete bounded canonical manifest object, including its
-  member records and ciphertext metadata, supplied as the request's signed
-  canonical JSON value (not merely a digest);
+  member records and ciphertext metadata, supplied as a canonical JSON value
+  without the artifact signature field (not merely a digest);
 * `member_digests`: the complete path-sorted D1 digest entries, each carrying
   the bounded UTF-8 path and ciphertext/tag SHA-256 digest;
 * `manifest_digest`: lowercase SHA-256 hex, recomputed by the signer from the
@@ -90,13 +90,23 @@ required fields fail closed.
 The request body is authenticated by TLS client identity and the signer
 recomputes both digests from the supplied bounded manifest and member entries.
 A digest field is never trusted as a substitute for those bytes. The signer
-rejects duplicate paths/nonces, oversized members, and any D1 input exceeding
-the accepted artifact bounds before invoking the HSM.
+rejects duplicate paths, nonce reuse outside an identical retry, oversized
+members, and any D1 input exceeding
+the accepted artifact bounds before invoking the HSM. Manifest artifact, site,
+profile, signing-key and release identities must equal the corresponding outer
+request fields. Every member digest must match the manifest's complete member
+set and ciphertext/tag digest. The authenticated mTLS client identity must be
+authorized for that exact release, site, profile, purpose and key; claimed body
+fields do not establish client authority. Any mismatch fails before signing.
 
-The signer accepts a request only when its immutable `issued_at` is within the
-accepted clock-skew window and `expires_at - issued_at` is exactly 15 minutes;
-it does not extend the window based on retry or receipt time. The ledger stores
-the signer receipt time and clock basis for audit/replay decisions.
+On first receipt, the signer requires immutable `issued_at` within the accepted
+clock-skew window and `expires_at - issued_at` exactly 15 minutes. An identical
+retry uses the original first-receipt decision and immutable expiry, rather
+than requiring its original issuance time to remain within the receipt skew
+window. No request is accepted after expiry and no retry extends it. Client
+identity, scope, certificate validity and current revocation/trust state are
+rechecked for every request, including retries. The ledger stores the first
+receipt time and clock basis for audit/replay decisions.
 
 `SignerResponse` required fields:
 
@@ -106,7 +116,11 @@ the signer receipt time and clock basis for audit/replay decisions.
 * `replay`: `new` or `identical_retry`;
 * `expires_at` and `server_time`.
 
-The response is signed only over the accepted D1 input. Response metadata does
+Only `signature` authenticates the accepted D1 input; response metadata is
+transport-authenticated by mTLS. Clients verify the D1 signature and all
+request/response identity, digest, key, certificate and expiry bindings before
+publication. `replay` and `server_time` describe the current transport response;
+the persisted signature and signing receipt remain immutable. Metadata does
 not authorize restore, journal transitions, fencing, release signing or
 activation.
 
@@ -114,10 +128,13 @@ The signer maintains a durable ledger with unique constraints on both
 `request_id` and `nonce` (independently and together). It stores the canonical
 request bytes/digest, artifact and scope bindings, immutable `issued_at` and
 `expires_at`, key ID, and a pending/completed response state. The completed
-response is durably persisted before acknowledgement. A crash or lost response
-leaves the request pending/unknown; the client must query the same immutable
-request identity and never assume that signing succeeded. An identical request
-returns the original signature before expiry. Any changed field, scope, digest,
+signature and immutable signing receipt are durably persisted before
+acknowledgement. A crash before durable completion leaves the request
+pending/unknown; it never establishes success. A lost acknowledgement after
+durable completion leaves a completed record and an identical retry returns
+its original signature before expiry, subject to current trust and scope
+checks. The client queries the same immutable request identity and never
+infers success from a timeout. Any changed field, scope, digest,
 artifact ID, request ID, or nonce for an existing ID/nonce returns
 `replay-conflict` and never signs. Retention duration and pending-record
 reconciliation remain acceptance questions. After immutable expiry, the
@@ -151,7 +168,12 @@ most 24 hours after issuance. The root signs the canonical object and the
 verifier persists the highest sequence and its digest. Equal sequence with a
 different digest is equivocation and fails closed; lower sequence, expired
 list, missing root signature, unknown issuer, or unavailable required trust
-state fails closed.
+state fails closed. Certificate validity intervals and revocation issuance/
+update intervals must be ordered and checked against the accepted clock-skew
+policy; future-dated lists cannot refresh trust. The sequence/digest high-water
+mark must be durably committed before accepting the new list, and an unknown
+persistence outcome fails closed. The exact signature envelopes, field encodings
+and crash-safe trust-state provisioning remain acceptance questions.
 
 The distribution endpoint is read-only trust material delivery and is
 administered separately from the signer. Transport authentication, endpoint
@@ -179,8 +201,11 @@ approve or reject:
     clock-skew policy, and real HSM, mTLS, custody, revocation and
     installed-release evidence gates.
 
-Until all applicable items are accepted, only a test signer may be used. A
-software key is protocol evidence and must never be labeled HSM qualification.
+This proposal does not authorize implementation of its draft wire or trust
+schemas before exact-revision acceptance. Existing accepted signing seams and
+components independent of the unresolved schemas may be tested with a
+purpose-isolated test signer. A software key is protocol evidence and must
+never be labeled HSM qualification.
 Signer availability or trust failure blocks backup publication; it never falls
 back to SQLite Option A or an embedded PostgreSQL key.
 
