@@ -64,6 +64,10 @@ pub mod db;
 pub mod engine;
 pub mod native_cli;
 pub mod output;
+#[cfg(target_os = "linux")]
+pub use backup_pg_dump::restore_pg_validation;
+#[cfg(target_os = "linux")]
+pub mod restore_preflight;
 pub mod sys;
 #[cfg(test)]
 pub mod testutil;
@@ -109,3 +113,6 @@ Exit codes:
   1                     diagnostics warning/unhealthy, upgrade/rollback
                         failed or blocked (including preflight)
   2                     usage error";
+
+#[cfg(all(test, target_os = "linux"))]
+mod restore_test_artifact;

@@ -102,6 +102,12 @@ enum Commands {
         #[command(subcommand)]
         command: BackupCommand,
     },
+    /// Validate an authenticated artifact and an explicitly selected fresh target
+    #[cfg(target_os = "linux")]
+    Restore {
+        #[command(subcommand)]
+        command: RestoreCommand,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -125,6 +131,18 @@ enum BackupCommand {
         /// Absolute path to the authenticated backup artifact
         #[arg(long)]
         artifact: std::path::PathBuf,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Subcommand)]
+enum RestoreCommand {
+    /// Non-destructive fresh-host recovery preflight; never authorizes activation
+    Preflight {
+        #[arg(long)]
+        artifact: std::path::PathBuf,
+        #[arg(long)]
+        target: std::path::PathBuf,
     },
 }
 
@@ -252,6 +270,14 @@ fn main() -> ExitCode {
             memory_mb,
             disk_gb,
         )),
+        #[cfg(target_os = "linux")]
+        Commands::Restore { command } => match command {
+            RestoreCommand::Preflight { artifact, target } => {
+                o3k::restore_preflight::run_restore_preflight(
+                    &o3k::restore_preflight::RestorePreflightArgs { artifact, target },
+                )
+            }
+        },
         #[cfg(target_os = "linux")]
         Commands::Backup { command } => match command {
             BackupCommand::Create {
