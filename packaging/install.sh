@@ -384,6 +384,13 @@ if [[ -f "$ROOT_DIR/SHA256SUMS" ]]; then
     share/o3k/SHA256SUMS 0644
   INSTALLED_FILES+=(share/o3k/SHA256SUMS)
 fi
+# Backup trust template (no key material). Operators copy it to the root-owned
+# /etc/o3k/backup-trust.json and replace every placeholder; the loader validates
+# the file posture and rejects incomplete or malformed values. The installer
+# never creates /etc/o3k/backup-trust.json or any permissive /etc/o3k directory.
+install_owned_file "$ROOT_DIR/packaging/backup-trust.example.json" \
+  "$PREFIX/share/o3k/backup-trust.example.json" share/o3k/backup-trust.example.json 0644
+INSTALLED_FILES+=(share/o3k/backup-trust.example.json)
 if [[ "$PROFILE" == libvirt ]]; then
   install_owned_file "$COMPUTE_BINARY" "$PREFIX/bin/o3k-compute" bin/o3k-compute 0755
   install_owned_file "$ROOT_DIR/packaging/o3k-compute.service" "$PREFIX/share/o3k/o3k-compute.service" share/o3k/o3k-compute.service 0644
@@ -793,3 +800,6 @@ if [[ $EUID -eq 0 && "$PROFILE" == libvirt ]]; then
   install -d -o o3k-compute -g kvm -m 2770 "$COMPUTE_DATA_DIR/image-cache/overlays"
 fi
 echo "installed o3kd profile=$PROFILE at $PREFIX/bin/o3kd; data=$DATA_DIR; config=$ENV_FILE; user=$RUN_USER"
+if [[ -f "$PREFIX/share/o3k/backup-trust.example.json" ]]; then
+  echo "backup trust template: $PREFIX/share/o3k/backup-trust.example.json (copy to /etc/o3k/backup-trust.json as root:root 0600 and replace placeholders; fields: format, site_id, installation_id, profile_id, artifact_signing{key_id, ed25519_public_key}, recipient{key_id, x25519_private_key_file, x25519_public_key}, revoked_key_ids, custody{record_id, purpose, key_fingerprint, threshold, custodians, storage_class, expires_at})"
+fi

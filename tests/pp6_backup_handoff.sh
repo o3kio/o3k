@@ -261,6 +261,7 @@ with open(meta_path, "w") as handle:
     json.dump({
         "request_sha256": hashlib.sha256(raw).hexdigest(),
         "key_id": request["key_id"],
+        "created_at": request["created_at"],
         "expires_at": request["expires_at"],
     }, handle)
 PY
@@ -277,7 +278,8 @@ response = {
     "request_sha256": meta["request_sha256"],
     "key_id": meta["key_id"],
     "signature": signature.hex(),
-    "signed_at": "2026-10-23T12:30:00Z",
+    # Clock-consistent with the request lifetime (host-clock based).
+    "signed_at": meta["created_at"],
 }
 with open(response_path, "w") as handle:
     json.dump(response, handle)
@@ -285,12 +287,19 @@ os.chmod(response_path, 0o600)
 PY
 }
 
+# This matrix exercises the handoff, the lock and phase separation; it is not
+# the Option A signing-wait evidence (that is `tests/pp6_backup_artifact.sh`).
+# The harness-only `O3K_BACKUP_TEST_STOP_AFTER_STAGING=1` therefore keeps
+# phase 1 one-shot: it stages, reports `signing-required` and exits, so each row
+# can observe the resulting state without a 24h wait. Phase 2 (the same command
+# on a staged journal) ignores the hook and publishes normally.
 run_backup() { # run_backup <case-id> <data-dir> <dest-dir> <operation-id> [executor env KEY=VALUE ...]
     local case_id="$1" data_dir="$2" dest_dir="$3" op="$4"; shift 4
     set +e
     env O3K_DATA_DIR="$data_dir" \
         O3K_BACKUP_TRUST_CONFIG="${CASE_TRUST_CONFIG:-$WORK/cfg-absent/backup-trust.json}" \
         O3K_INSTALL_PREFIX="${CASE_INSTALL_PREFIX:-$WORK/cfg-absent/install}" \
+        O3K_BACKUP_TEST_STOP_AFTER_STAGING=1 \
         "$@" \
         "$O3K_BIN" backup create --destination "$dest_dir" --operation-id "$op" \
         >"$WORK/$case_id.backup.json" 2>"$WORK/$case_id.backup.stderr"
@@ -666,6 +675,7 @@ if wait_ready case-c 30; then
         env O3K_DATA_DIR="$CASE_DATA" \
             O3K_BACKUP_TRUST_CONFIG="$CASE_TRUST_CONFIG" \
             O3K_INSTALL_PREFIX="$CASE_INSTALL_PREFIX" \
+            O3K_BACKUP_TEST_STOP_AFTER_STAGING=1 \
             "$O3K_BIN" backup create --destination "$CASE_DEST" --operation-id "$COP1" \
             >"$WORK/case-c-w1.json" 2>"$WORK/case-c-w1.stderr"
         echo $? >"$WORK/case-c-w1.exit"

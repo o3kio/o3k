@@ -7,7 +7,7 @@
 use std::{
     collections::BTreeSet,
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -44,6 +44,125 @@ const MAX_ARTIFACT_BYTES: usize = 5 * 1024 * 1024 * 1024;
 const HPKE_INFO: &[u8] = b"O3K-PP6-ARTIFACT-KEY-WRAP-V1\0";
 const SIGN_DOMAIN: &[u8] = b"O3K-PP6-BACKUP-MANIFEST-V1\0";
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Stable verification failure classes (SPEC-0050 §8).
+///
+/// The class — not a substring of human-readable text — decides the operator
+/// reason code and exit status. [`Self::reason`] values are part of the CLI
+/// contract and are asserted in tests; the free-text detail is diagnostic only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArtifactVerifyClass {
+    /// The artifact-signing key is revoked.
+    RevokedSigningKey,
+    /// The signing key is not trusted for this site/profile.
+    UntrustedSigningKey,
+    /// The manifest names a signing or recipient key this verifier does not use.
+    KeyIdentityMismatch,
+    /// The Ed25519 signature is missing, malformed or does not verify.
+    SignatureInvalid,
+    /// The artifact was produced by a different release/site/profile/schema.
+    ReleaseMismatch,
+    /// The manifest violates the v1 contract schema or semantic rules.
+    SchemaInvalid,
+    /// A length or aggregate size bound was exceeded.
+    ArtifactTooLarge,
+    /// The HPKE content key does not unwrap with the configured recipient key.
+    RecipientKeyMismatch,
+    /// Signature/authentication failed against the artifact bytes.
+    CorruptArtifact,
+    /// Private plaintext staging could not be removed after verification.
+    CleanupFailed,
+}
+
+impl ArtifactVerifyClass {
+    /// Stable operator reason string.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::RevokedSigningKey => "revoked-signing-key",
+            Self::UntrustedSigningKey => "untrusted-signing-key",
+            Self::KeyIdentityMismatch => "key-identity-mismatch",
+            Self::SignatureInvalid => "signature-invalid",
+            Self::ReleaseMismatch => "release-mismatch",
+            Self::SchemaInvalid => "schema-invalid",
+            Self::ArtifactTooLarge => "artifact-too-large",
+            Self::RecipientKeyMismatch => "recipient-key-mismatch",
+            Self::CorruptArtifact => "corrupt-artifact",
+            Self::CleanupFailed => "verification-cleanup-failed",
+        }
+    }
+}
+
+/// A typed verification failure: a stable class plus a bounded detail string.
+///
+/// Callers classify on [`Self::class`]; the [`Display`] form is diagnostic and
+/// may change wording without changing any operator-visible reason code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactVerifyError {
+    class: ArtifactVerifyClass,
+    detail: String,
+}
+
+impl ArtifactVerifyError {
+    /// Builds a failure with an explicit class.
+    #[must_use]
+    pub fn new(class: ArtifactVerifyClass, detail: impl Into<String>) -> Self {
+        Self {
+            class,
+            detail: detail.into(),
+        }
+    }
+
+    /// A corrupt/unauthentic artifact.
+    #[must_use]
+    pub fn corrupt(detail: impl Into<String>) -> Self {
+        Self::new(ArtifactVerifyClass::CorruptArtifact, detail)
+    }
+
+    /// The failure class.
+    #[must_use]
+    pub const fn class(&self) -> ArtifactVerifyClass {
+        self.class
+    }
+
+    /// The failure after private staging cleanup also failed. Removal of
+    /// decrypted plaintext could not be proven, so the outcome is quarantined
+    /// regardless of the original class.
+    #[must_use]
+    pub fn with_cleanup_failed(self) -> Self {
+        Self {
+            class: ArtifactVerifyClass::CleanupFailed,
+            detail: format!("{}; private verification cleanup failed", self.detail),
+        }
+    }
+}
+
+impl std::fmt::Display for ArtifactVerifyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for ArtifactVerifyError {}
+
+/// Legacy `String` detail becomes a corrupt-artifact failure.
+impl From<String> for ArtifactVerifyError {
+    fn from(detail: String) -> Self {
+        Self::corrupt(detail)
+    }
+}
+
+impl From<&str> for ArtifactVerifyError {
+    fn from(detail: &str) -> Self {
+        Self::corrupt(detail)
+    }
+}
+
+/// Convenience constructor used at the explicit classification sites.
+fn verify_failure(class: ArtifactVerifyClass, detail: &str) -> ArtifactVerifyError {
+    ArtifactVerifyError::new(class, detail)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -583,13 +702,20 @@ pub fn stage_unsigned_artifact<R: Read>(
             artifact
                 .write_all(&record.size_bytes.to_be_bytes())
                 .map_err(|_| "backup artifact staging write failed".to_owned())?;
-            let mut encrypted_file = fs::File::open(encrypted_path)
+            let mut encrypted_file = fs::File::open(&encrypted_path)
                 .map_err(|_| "backup encrypted staging member is unavailable".to_owned())?;
             let copied = std::io::copy(&mut encrypted_file, &mut artifact)
                 .map_err(|_| "backup artifact staging write failed".to_owned())?;
             if copied != record.size_bytes {
                 return Err("backup staged member size changed during assembly".to_owned());
             }
+            drop(encrypted_file);
+            // The ciphertext is now part of the unsigned artifact. Removing the
+            // per-member copy keeps peak staging at one payload copy (D9);
+            // failing to free it would silently exceed the measured bound, so
+            // it fails instead of continuing.
+            fs::remove_file(&encrypted_path)
+                .map_err(|_| "backup member staging cleanup failed".to_owned())?;
         }
         artifact
             .sync_all()
@@ -645,7 +771,7 @@ pub fn finish_signed_artifact(
     if signature_input(&manifest)? != unsigned.signing_input {
         return Err("backup signature input changed after signing".to_owned());
     }
-    validate_manifest_schema(&manifest)?;
+    validate_manifest_schema(&manifest).map_err(|error| error.to_string())?;
     let manifest_bytes = serde_jcs::to_vec(&manifest)
         .map_err(|_| "backup manifest canonicalization failed".to_owned())?;
     if manifest_bytes.len() > MAX_MANIFEST_BYTES {
@@ -666,65 +792,93 @@ pub fn finish_signed_artifact(
     }
 
     let final_path = unsigned.staging_directory.join("artifact.partial");
-    let mut artifact = create_private_file(&final_path)?;
-    artifact
-        .write_all(MAGIC)
-        .and_then(|()| artifact.write_all(&(manifest_bytes.len() as u64).to_be_bytes()))
-        .and_then(|()| artifact.write_all(&manifest_bytes))
-        .map_err(|_| "backup artifact staging write failed".to_owned())?;
-    let mut staged = fs::File::open(&unsigned.path)
-        .map_err(|_| "backup staged unsigned artifact is unavailable".to_owned())?;
-    let member_offset = (MAGIC.len() as u64)
-        .checked_add(8)
-        .and_then(|offset| offset.checked_add(unsigned.manifest_bytes_len))
-        .ok_or("backup artifact size overflow")?;
-    if member_offset > unsigned.size_bytes {
-        return Err("backup staged unsigned artifact is truncated".to_owned());
-    }
-    staged
-        .seek(SeekFrom::Start(member_offset))
-        .map_err(|_| "backup staged unsigned artifact could not be read".to_owned())?;
-    // The staged payload is re-digested record by record: the detached
-    // signature covers the member digests in the manifest, so a staged file
-    // modified after staging must never become a publishable artifact.
-    let mut buffer = [0_u8; STREAM_CHUNK_BYTES];
-    for record in &manifest.members {
-        let mut length = [0_u8; 8];
+    // Build under a temporary name and rename into place. A failed or crashed
+    // finalize then leaves a distinguishable temporary instead of a truncated
+    // `artifact.partial`, and a retry is never wedged by a partial file left
+    // behind by an earlier attempt. The stale entry (if any) is only removed
+    // after proving it is this operation's private regular file.
+    remove_stale_finalize_output(&final_path)?;
+    let temporary = unsigned.staging_directory.join(format!(
+        "{STAGED_SIGNED_ARTIFACT_TEMP_PREFIX}{}",
+        Uuid::now_v7()
+    ));
+    let result = (|| {
+        let mut artifact = create_private_file(&temporary)?;
+        artifact
+            .write_all(MAGIC)
+            .and_then(|()| artifact.write_all(&(manifest_bytes.len() as u64).to_be_bytes()))
+            .and_then(|()| artifact.write_all(&manifest_bytes))
+            .map_err(|_| "backup artifact staging write failed".to_owned())?;
+        let mut staged = fs::File::open(&unsigned.path)
+            .map_err(|_| "backup staged unsigned artifact is unavailable".to_owned())?;
+        let member_offset = (MAGIC.len() as u64)
+            .checked_add(8)
+            .and_then(|offset| offset.checked_add(unsigned.manifest_bytes_len))
+            .ok_or("backup artifact size overflow")?;
+        if member_offset > unsigned.size_bytes {
+            return Err("backup staged unsigned artifact is truncated".to_owned());
+        }
         staged
-            .read_exact(&mut length)
-            .map_err(|_| "backup staged unsigned artifact is truncated".to_owned())?;
-        if u64::from_be_bytes(length) != record.size_bytes {
-            return Err("backup staged member length does not match the manifest".to_owned());
+            .seek(SeekFrom::Start(member_offset))
+            .map_err(|_| "backup staged unsigned artifact could not be read".to_owned())?;
+        // The staged payload is re-digested record by record: the detached
+        // signature covers the member digests in the manifest, so a staged file
+        // modified after staging must never become a publishable artifact.
+        let mut buffer = [0_u8; STREAM_CHUNK_BYTES];
+        for record in &manifest.members {
+            let mut length = [0_u8; 8];
+            staged
+                .read_exact(&mut length)
+                .map_err(|_| "backup staged unsigned artifact is truncated".to_owned())?;
+            if u64::from_be_bytes(length) != record.size_bytes {
+                return Err("backup staged member length does not match the manifest".to_owned());
+            }
+            artifact
+                .write_all(&length)
+                .map_err(|_| "backup artifact staging write failed".to_owned())?;
+            let mut digest = Sha256::new();
+            let mut remaining = record.size_bytes;
+            while remaining > 0 {
+                let amount = usize::try_from(remaining.min(STREAM_CHUNK_BYTES as u64))
+                    .map_err(|_| "backup member size is invalid")?;
+                staged
+                    .read_exact(&mut buffer[..amount])
+                    .map_err(|_| "backup staged unsigned artifact is truncated".to_owned())?;
+                digest.update(&buffer[..amount]);
+                artifact
+                    .write_all(&buffer[..amount])
+                    .map_err(|_| "backup artifact staging write failed".to_owned())?;
+                remaining -= amount as u64;
+            }
+            if hex::encode(digest.finalize()) != record.sha256 {
+                return Err("backup staged member digest does not match the manifest".to_owned());
+            }
         }
         artifact
-            .write_all(&length)
-            .map_err(|_| "backup artifact staging write failed".to_owned())?;
-        let mut digest = Sha256::new();
-        let mut remaining = record.size_bytes;
-        while remaining > 0 {
-            let amount = usize::try_from(remaining.min(STREAM_CHUNK_BYTES as u64))
-                .map_err(|_| "backup member size is invalid")?;
-            staged
-                .read_exact(&mut buffer[..amount])
-                .map_err(|_| "backup staged unsigned artifact is truncated".to_owned())?;
-            digest.update(&buffer[..amount]);
-            artifact
-                .write_all(&buffer[..amount])
-                .map_err(|_| "backup artifact staging write failed".to_owned())?;
-            remaining -= amount as u64;
+            .sync_all()
+            .map_err(|_| "backup artifact staging sync failed".to_owned())?;
+        drop(artifact);
+        let (size_bytes, sha256) = hash_file(&temporary)?;
+        if size_bytes != complete_size {
+            return Err("backup artifact size changed during assembly".to_owned());
         }
-        if hex::encode(digest.finalize()) != record.sha256 {
-            return Err("backup staged member digest does not match the manifest".to_owned());
+        fs::rename(&temporary, &final_path)
+            .map_err(|_| "backup artifact staging rename failed".to_owned())?;
+        Ok((size_bytes, sha256))
+    })();
+    let (size_bytes, sha256) = match result {
+        Ok(hashed) => hashed,
+        Err(error) => {
+            // Neither the temporary nor a partial built by this attempt may
+            // survive: the next retry must start from the unsigned artifact.
+            let temporary_cleanup = remove_if_present(&temporary);
+            let final_cleanup = remove_if_present(&final_path);
+            if temporary_cleanup.is_err() || final_cleanup.is_err() {
+                return Err(format!("{error}; staging cleanup failed"));
+            }
+            return Err(error);
         }
-    }
-    artifact
-        .sync_all()
-        .map_err(|_| "backup artifact staging sync failed".to_owned())?;
-    drop(artifact);
-    let (size_bytes, sha256) = hash_file(&final_path)?;
-    if size_bytes != complete_size {
-        return Err("backup artifact size changed during assembly".to_owned());
-    }
+    };
     let _ = fs::remove_file(&unsigned.path);
     Ok(StagedArtifact {
         manifest,
@@ -733,6 +887,42 @@ pub fn finish_signed_artifact(
         sha256,
         size_bytes,
     })
+}
+
+/// Temporary name prefix used while a signed artifact is assembled.
+const STAGED_SIGNED_ARTIFACT_TEMP_PREFIX: &str = "artifact.partial.tmp-";
+
+/// Removes `path`, treating an absent entry as already removed.
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Removes a stale `artifact.partial` left by an earlier failed finalize.
+///
+/// Only this operation's private regular file may be removed: a symlink,
+/// directory or other entry type is refused rather than followed, and the
+/// removal itself must succeed before a new artifact is built.
+fn remove_stale_finalize_output(path: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("backup private staging entry is unavailable".to_owned()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err("backup private staging entry is not a regular file".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err("backup private staging entry permissions are too open".to_owned());
+        }
+    }
+    fs::remove_file(path).map_err(|_| "backup stale staging entry could not be removed".to_owned())
 }
 
 /// Re-reads a staged unsigned artifact produced by
@@ -762,24 +952,26 @@ pub fn read_unsigned_staged_artifact(
             continue;
         }
         let artifact_path = entry.path().join("artifact.unsigned");
-        if artifact_path.is_file() {
-            candidates.push((entry.path(), artifact_path));
+        // The final component must be a regular file opened without following
+        // a symlink; the descriptor, not the path, is what gets read.
+        match open_regular_nofollow(&artifact_path) {
+            Ok(file) => candidates.push((entry.path(), artifact_path, file)),
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(_) => {
+                return Err("backup staged unsigned artifact is not a regular file".to_owned());
+            }
         }
     }
     if candidates.len() != 1 {
         return Err("staged signing request has no unique unsigned artifact".to_owned());
     }
-    let (member_staging, artifact_path) = candidates.remove(0);
-    let metadata = fs::symlink_metadata(&artifact_path)
+    let (member_staging, artifact_path, mut file) = candidates.remove(0);
+    let metadata = file
+        .metadata()
         .map_err(|_| "backup staged unsigned artifact is unavailable".to_owned())?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err("backup staged unsigned artifact is not a regular file".to_owned());
-    }
     if metadata.len() > MAX_ARTIFACT_BYTES as u64 {
         return Err("backup artifact exceeds the configured size limit".to_owned());
     }
-    let mut file = fs::File::open(&artifact_path)
-        .map_err(|_| "backup staged unsigned artifact is unavailable".to_owned())?;
     let mut magic = [0_u8; 12];
     file.read_exact(&mut magic)
         .map_err(|_| "backup artifact header is truncated".to_owned())?;
@@ -832,6 +1024,21 @@ pub fn read_unsigned_staged_artifact(
         signing_input,
         manifest_bytes_len: manifest_len as u64,
     })
+}
+
+/// Opens a regular file read-only with `O_NOFOLLOW` and verifies the entry type
+/// through the descriptor's own metadata.
+fn open_regular_nofollow(path: &Path) -> Result<fs::File, rustix::io::Errno> {
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )?;
+    let metadata = rustix::fs::fstat(&descriptor)?;
+    if rustix::fs::FileType::from_raw_mode(metadata.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err(rustix::io::Errno::INVAL);
+    }
+    Ok(fs::File::from(descriptor))
 }
 
 fn validate_stream_members<R>(members: &[StreamMember<R>]) -> Result<(), String> {
@@ -889,9 +1096,12 @@ pub fn verify_artifact_stream<R: Read>(
     expected_release: &ExpectedRelease,
     keys: &ArtifactVerificationKeys<'_>,
     staging_parent: &Path,
-) -> Result<VerifiedArtifact, String> {
+) -> Result<VerifiedArtifact, ArtifactVerifyError> {
     if !staging_parent.is_absolute() {
-        return Err("backup staging directory must be absolute".to_owned());
+        return Err(verify_failure(
+            ArtifactVerifyClass::CorruptArtifact,
+            "backup staging directory must be absolute",
+        ));
     }
     let parent = resolve_private_staging_parent(staging_parent)?;
     validate_private_parent(&parent)?;
@@ -903,11 +1113,17 @@ pub fn verify_artifact_stream<R: Read>(
             .read_exact(&mut magic)
             .map_err(|_| "backup artifact header is truncated".to_owned())?;
         if &magic != MAGIC {
-            return Err("backup artifact format header is invalid".to_owned());
+            return Err(verify_failure(
+                ArtifactVerifyClass::CorruptArtifact,
+                "backup artifact format header is invalid",
+            ));
         }
         let manifest_len = read_stream_len(source)?;
         if manifest_len > MAX_MANIFEST_BYTES {
-            return Err("backup manifest length is invalid".to_owned());
+            return Err(verify_failure(
+                ArtifactVerifyClass::ArtifactTooLarge,
+                "backup manifest length is invalid",
+            ));
         }
         let mut manifest_bytes = vec![0_u8; manifest_len];
         source
@@ -919,17 +1135,26 @@ pub fn verify_artifact_stream<R: Read>(
         let canonical = serde_jcs::to_vec(&manifest)
             .map_err(|_| "backup manifest canonicalization failed".to_owned())?;
         if canonical != manifest_bytes {
-            return Err("backup manifest is not canonical JSON".to_owned());
+            return Err(verify_failure(
+                ArtifactVerifyClass::SchemaInvalid,
+                "backup manifest is not canonical JSON",
+            ));
         }
         validate_manifest(&manifest, &manifest.consistency_generation())?;
         if manifest.authentication.key_id != keys.signing_key_id
             || manifest.encryption.key_wrapping.recipient_key_id != keys.recipient_key_id
         {
-            return Err("backup key identity is not trusted by this verifier".to_owned());
+            return Err(verify_failure(
+                ArtifactVerifyClass::KeyIdentityMismatch,
+                "backup key identity is not trusted by this verifier",
+            ));
         }
         validate_expected_release(&manifest, expected_release)?;
         if keys.trust.signing_key_is_revoked(keys.signing_key_id)? {
-            return Err("backup signing key is revoked".to_owned());
+            return Err(verify_failure(
+                ArtifactVerifyClass::RevokedSigningKey,
+                "backup signing key is revoked",
+            ));
         }
         if !keys.trust.signing_key_is_trusted(
             keys.signing_key_id,
@@ -937,7 +1162,10 @@ pub fn verify_artifact_stream<R: Read>(
             &expected_release.profile_id,
             keys.signer,
         )? {
-            return Err("backup signing key is not trusted for this site and profile".to_owned());
+            return Err(verify_failure(
+                ArtifactVerifyClass::UntrustedSigningKey,
+                "backup signing key is not trusted for this site and profile",
+            ));
         }
         let signature_bytes = URL_SAFE_NO_PAD
             .decode(
@@ -964,7 +1192,10 @@ pub fn verify_artifact_stream<R: Read>(
                 .ok_or("backup artifact size overflow")?;
         }
         if complete_size > MAX_ARTIFACT_BYTES as u64 {
-            return Err("backup artifact exceeds the configured size limit".to_owned());
+            return Err(verify_failure(
+                ArtifactVerifyClass::ArtifactTooLarge,
+                "backup artifact exceeds the configured size limit",
+            ));
         }
 
         let enc_bytes = URL_SAFE_NO_PAD
@@ -981,11 +1212,21 @@ pub fn verify_artifact_stream<R: Read>(
             &encapped,
             HPKE_INFO,
         )
-        .map_err(|_| "backup content key cannot be unwrapped".to_owned())?;
+        .map_err(|_| {
+            verify_failure(
+                ArtifactVerifyClass::RecipientKeyMismatch,
+                "backup content key cannot be unwrapped",
+            )
+        })?;
         let content_key = Zeroizing::new(
             hpke_context
                 .open(&wrapped_key, &key_wrap_aad_from_manifest(&manifest)?)
-                .map_err(|_| "backup content key cannot be unwrapped".to_owned())?,
+                .map_err(|_| {
+                    verify_failure(
+                        ArtifactVerifyClass::RecipientKeyMismatch,
+                        "backup content key cannot be unwrapped",
+                    )
+                })?,
         );
         let content_key = Zeroizing::new(
             <[u8; 32]>::try_from(content_key.as_slice())
@@ -996,14 +1237,20 @@ pub fn verify_artifact_stream<R: Read>(
         let mut prior_name: Option<&str> = None;
         for (index, record) in manifest.members.iter().enumerate() {
             if prior_name.is_some_and(|prior| prior >= record.name.as_str()) {
-                return Err("backup manifest members are not in canonical path order".to_owned());
+                return Err(verify_failure(
+                    ArtifactVerifyClass::CorruptArtifact,
+                    "backup manifest members are not in canonical path order",
+                ));
             }
             prior_name = Some(&record.name);
             let size = read_stream_len(source)?;
             if u64::try_from(size).map_err(|_| "backup member length is invalid")?
                 != record.size_bytes
             {
-                return Err("backup member length does not match the manifest".to_owned());
+                return Err(verify_failure(
+                    ArtifactVerifyClass::CorruptArtifact,
+                    "backup member length does not match the manifest",
+                ));
             }
             let nonce_bytes = URL_SAFE_NO_PAD
                 .decode(&record.nonce)
@@ -1022,7 +1269,10 @@ pub fn verify_artifact_stream<R: Read>(
                 record.size_bytes,
             )?;
             if plaintext_size != record.plaintext_size_bytes || digest != record.sha256 {
-                return Err("backup member digest or plaintext size is invalid".to_owned());
+                return Err(verify_failure(
+                    ArtifactVerifyClass::CorruptArtifact,
+                    "backup member digest or plaintext size is invalid",
+                ));
             }
             output
                 .sync_all()
@@ -1038,7 +1288,10 @@ pub fn verify_artifact_stream<R: Read>(
             .map_err(|_| "backup artifact could not be read".to_owned())?
             != 0
         {
-            return Err("backup artifact has trailing bytes".to_owned());
+            return Err(verify_failure(
+                ArtifactVerifyClass::CorruptArtifact,
+                "backup artifact has trailing bytes",
+            ));
         }
         Ok(VerifiedArtifact {
             manifest,
@@ -1050,10 +1303,252 @@ pub fn verify_artifact_stream<R: Read>(
         Ok(verified) => Ok(verified),
         Err(error) => {
             if fs::remove_dir_all(&directory).is_err() {
-                return Err(format!("{error}; private verification cleanup failed"));
+                return Err(error.with_cleanup_failed());
             }
             Err(error)
         }
+    }
+}
+
+/// Expectations for the publication-time integrity check of a signed staged
+/// artifact. Unlike [`ArtifactVerificationKeys`] this needs no recipient
+/// private key: members are re-digested but never decrypted.
+pub struct ArtifactIntegrityExpectations<'a> {
+    pub signing_key_id: &'a str,
+    pub signer: &'a VerifyingKey,
+    pub trust: &'a dyn ArtifactTrust,
+    pub recipient_key_id: &'a str,
+    pub backup_id: &'a str,
+    pub site_id: &'a str,
+    pub installation_id: &'a str,
+    pub profile_id: &'a str,
+    pub o3k_version: &'a str,
+    pub source_sha: &'a str,
+    pub release_artifact_sha256: &'a str,
+    pub schema_version: u64,
+}
+
+/// Header facts of a signed artifact that passed integrity verification.
+#[derive(Debug, Clone)]
+pub struct VerifiedArtifactHeader {
+    pub manifest: Manifest,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+/// Verifies a signed artifact's structure without decrypting any member.
+///
+/// This is the publication/replay boundary: canonical encoding, the v1
+/// contract schema, semantic manifest validation, exact release/site/profile
+/// identity, signing/recipient key ids, fail-closed trust and revocation, the
+/// Ed25519 signature over the D1 input, the member inventory and every member
+/// ciphertext digest are all checked before the artifact may be published.
+pub fn verify_signed_artifact_integrity<R: Read>(
+    source: &mut R,
+    expected: &ArtifactIntegrityExpectations<'_>,
+) -> Result<VerifiedArtifactHeader, ArtifactVerifyError> {
+    let mut reader = HashingReader {
+        inner: source,
+        hasher: Sha256::new(),
+        size: 0,
+    };
+    let mut magic = [0_u8; 12];
+    reader
+        .read_exact(&mut magic)
+        .map_err(|_| "backup artifact header is truncated".to_owned())?;
+    if &magic != MAGIC {
+        return Err(verify_failure(
+            ArtifactVerifyClass::CorruptArtifact,
+            "backup artifact format header is invalid",
+        ));
+    }
+    let manifest_len = read_stream_len(&mut reader)?;
+    if manifest_len > MAX_MANIFEST_BYTES {
+        return Err(verify_failure(
+            ArtifactVerifyClass::ArtifactTooLarge,
+            "backup manifest length is invalid",
+        ));
+    }
+    let mut manifest_bytes = vec![0_u8; manifest_len];
+    reader
+        .read_exact(&mut manifest_bytes)
+        .map_err(|_| "backup manifest is truncated".to_owned())?;
+    let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|_| "backup manifest is malformed".to_owned())?;
+    validate_manifest_schema(&manifest)?;
+    let canonical = serde_jcs::to_vec(&manifest)
+        .map_err(|_| "backup manifest canonicalization failed".to_owned())?;
+    if canonical != manifest_bytes {
+        return Err(verify_failure(
+            ArtifactVerifyClass::SchemaInvalid,
+            "backup manifest is not canonical JSON",
+        ));
+    }
+    validate_manifest(&manifest, &manifest.consistency_generation())?;
+    if manifest.authentication.key_id != expected.signing_key_id
+        || manifest.encryption.key_wrapping.recipient_key_id != expected.recipient_key_id
+    {
+        return Err(verify_failure(
+            ArtifactVerifyClass::KeyIdentityMismatch,
+            "backup key identity is not trusted by this verifier",
+        ));
+    }
+    if manifest.backup_id != expected.backup_id
+        || manifest.site_id != expected.site_id
+        || manifest.installation_id != expected.installation_id
+        || manifest.source.get("o3k_version").and_then(Value::as_str) != Some(expected.o3k_version)
+        || manifest.source.get("source_sha").and_then(Value::as_str) != Some(expected.source_sha)
+        || manifest
+            .source
+            .get("release_artifact_sha256")
+            .and_then(Value::as_str)
+            != Some(expected.release_artifact_sha256)
+        || manifest.source.get("profile_id").and_then(Value::as_str) != Some(expected.profile_id)
+        || manifest.store.get("backend").and_then(Value::as_str) != Some("sqlite")
+        || manifest.store.get("schema_version").and_then(Value::as_u64)
+            != Some(expected.schema_version)
+    {
+        return Err(verify_failure(
+            ArtifactVerifyClass::ReleaseMismatch,
+            "backup artifact does not match the verifier's exact release",
+        ));
+    }
+    if expected
+        .trust
+        .signing_key_is_revoked(expected.signing_key_id)?
+    {
+        return Err(verify_failure(
+            ArtifactVerifyClass::RevokedSigningKey,
+            "backup signing key is revoked",
+        ));
+    }
+    if !expected.trust.signing_key_is_trusted(
+        expected.signing_key_id,
+        expected.site_id,
+        expected.profile_id,
+        expected.signer,
+    )? {
+        return Err(verify_failure(
+            ArtifactVerifyClass::UntrustedSigningKey,
+            "backup signing key is not trusted for this site and profile",
+        ));
+    }
+    let signature_bytes = URL_SAFE_NO_PAD
+        .decode(
+            manifest
+                .authentication
+                .signature
+                .as_deref()
+                .ok_or("backup signature is missing")?,
+        )
+        .map_err(|_| "backup signature encoding is invalid".to_owned())?;
+    let signature = Signature::from_slice(&signature_bytes)
+        .map_err(|_| "backup signature encoding is invalid".to_owned())?;
+    expected
+        .signer
+        .verify(&signature_input(&manifest)?, &signature)
+        .map_err(|_| "backup signature verification failed".to_owned())?;
+
+    let mut complete_size = (MAGIC.len() as u64)
+        .checked_add(8)
+        .and_then(|size| size.checked_add(manifest_len as u64))
+        .ok_or("backup artifact size overflow")?;
+    for record in &manifest.members {
+        complete_size = complete_size
+            .checked_add(8)
+            .and_then(|size| size.checked_add(record.size_bytes))
+            .ok_or("backup artifact size overflow")?;
+    }
+    if complete_size > MAX_ARTIFACT_BYTES as u64 {
+        return Err(verify_failure(
+            ArtifactVerifyClass::ArtifactTooLarge,
+            "backup artifact exceeds the configured size limit",
+        ));
+    }
+
+    let mut prior_name: Option<&str> = None;
+    let mut buffer = [0_u8; STREAM_CHUNK_BYTES];
+    for record in &manifest.members {
+        if prior_name.is_some_and(|prior| prior >= record.name.as_str()) {
+            return Err(verify_failure(
+                ArtifactVerifyClass::CorruptArtifact,
+                "backup manifest members are not in canonical path order",
+            ));
+        }
+        prior_name = Some(&record.name);
+        let size = read_stream_len(&mut reader)?;
+        if u64::try_from(size).map_err(|_| "backup member length is invalid")? != record.size_bytes
+        {
+            return Err(verify_failure(
+                ArtifactVerifyClass::CorruptArtifact,
+                "backup member length does not match the manifest",
+            ));
+        }
+        let mut digest = Sha256::new();
+        let mut remaining = record.size_bytes;
+        while remaining > 0 {
+            let amount = usize::try_from(remaining.min(STREAM_CHUNK_BYTES as u64))
+                .map_err(|_| "backup member size is invalid")?;
+            reader
+                .read_exact(&mut buffer[..amount])
+                .map_err(|_| "backup artifact is truncated".to_owned())?;
+            digest.update(&buffer[..amount]);
+            remaining -= amount as u64;
+        }
+        if hex::encode(digest.finalize()) != record.sha256 {
+            return Err(verify_failure(
+                ArtifactVerifyClass::CorruptArtifact,
+                "backup member digest verification failed",
+            ));
+        }
+    }
+    let mut trailing = [0_u8; 1];
+    if reader
+        .read(&mut trailing)
+        .map_err(|_| "backup artifact could not be read".to_owned())?
+        != 0
+    {
+        return Err(verify_failure(
+            ArtifactVerifyClass::CorruptArtifact,
+            "backup artifact has trailing bytes",
+        ));
+    }
+    let (size_bytes, sha256) = reader.finish();
+    if size_bytes != complete_size {
+        return Err(verify_failure(
+            ArtifactVerifyClass::CorruptArtifact,
+            "backup artifact size does not match the manifest",
+        ));
+    }
+    Ok(VerifiedArtifactHeader {
+        manifest,
+        size_bytes,
+        sha256,
+    })
+}
+
+/// Reads a stream while hashing and counting the bytes consumed.
+struct HashingReader<'a, R> {
+    inner: &'a mut R,
+    hasher: Sha256,
+    size: u64,
+}
+
+impl<R: Read> Read for HashingReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.hasher.update(&buffer[..read]);
+        self.size = self
+            .size
+            .checked_add(read as u64)
+            .ok_or_else(|| std::io::Error::other("size overflow"))?;
+        Ok(read)
+    }
+}
+
+impl<R> HashingReader<'_, R> {
+    fn finish(self) -> (u64, String) {
+        (self.size, hex::encode(self.hasher.finalize()))
     }
 }
 
@@ -1165,7 +1660,7 @@ pub fn create_artifact(
     validate_manifest(&manifest, &options.consistency_generation)?;
     let signature = signer.sign_manifest(&signature_input(&manifest)?)?;
     manifest.authentication.signature = Some(URL_SAFE_NO_PAD.encode(signature));
-    validate_manifest_schema(&manifest)?;
+    validate_manifest_schema(&manifest).map_err(|error| error.to_string())?;
     let manifest_bytes = serde_jcs::to_vec(&manifest)
         .map_err(|_| "backup manifest canonicalization failed".to_owned())?;
     if manifest_bytes.len() > MAX_MANIFEST_BYTES {
@@ -1214,7 +1709,7 @@ pub fn verify_artifact(
     let manifest_bytes = &artifact[manifest_start..manifest_end];
     let manifest: Manifest = serde_json::from_slice(manifest_bytes)
         .map_err(|_| "backup manifest is malformed".to_owned())?;
-    validate_manifest_schema(&manifest)?;
+    validate_manifest_schema(&manifest).map_err(|error| error.to_string())?;
     let canonical = serde_jcs::to_vec(&manifest)
         .map_err(|_| "backup manifest canonicalization failed".to_owned())?;
     if canonical != manifest_bytes {
@@ -1240,7 +1735,7 @@ pub fn verify_artifact(
     signer
         .verify(&signature_input(&manifest)?, &signature)
         .map_err(|_| "backup signature verification failed".to_owned())?;
-    validate_expected_release(&manifest, expected_release)?;
+    validate_expected_release(&manifest, expected_release).map_err(|error| error.to_string())?;
 
     let mut offset = manifest_end;
     let mut ciphertexts = Vec::with_capacity(manifest.members.len());
@@ -1327,26 +1822,42 @@ pub fn verify_artifact(
     Ok((manifest, plaintext))
 }
 
-fn validate_manifest_schema(manifest: &Manifest) -> Result<(), String> {
-    let value = serde_json::to_value(manifest)
-        .map_err(|_| "backup manifest could not be validated".to_owned())?;
+fn validate_manifest_schema(manifest: &Manifest) -> Result<(), ArtifactVerifyError> {
+    let value = serde_json::to_value(manifest).map_err(|_| {
+        verify_failure(
+            ArtifactVerifyClass::SchemaInvalid,
+            "backup manifest could not be validated",
+        )
+    })?;
     let schema: Value = serde_json::from_str(include_str!(
         "../../../contracts/control-plane-backup-v1.proposed.schema.json"
     ))
-    .map_err(|_| "backup manifest schema is unavailable".to_owned())?;
-    let validator = jsonschema::validator_for(&schema)
-        .map_err(|_| "backup manifest schema is invalid".to_owned())?;
+    .map_err(|_| {
+        verify_failure(
+            ArtifactVerifyClass::SchemaInvalid,
+            "backup manifest schema is unavailable",
+        )
+    })?;
+    let validator = jsonschema::validator_for(&schema).map_err(|_| {
+        verify_failure(
+            ArtifactVerifyClass::SchemaInvalid,
+            "backup manifest schema is invalid",
+        )
+    })?;
     if validator.is_valid(&value) {
         Ok(())
     } else {
-        Err("backup manifest does not match the v1 contract".to_owned())
+        Err(verify_failure(
+            ArtifactVerifyClass::SchemaInvalid,
+            "backup manifest does not match the v1 contract",
+        ))
     }
 }
 
 fn validate_expected_release(
     manifest: &Manifest,
     expected: &ExpectedRelease,
-) -> Result<(), String> {
+) -> Result<(), ArtifactVerifyError> {
     let migrations = manifest
         .store
         .get("migrations")
@@ -1400,7 +1911,10 @@ fn validate_expected_release(
         || actual_migrations != expected.migrations
         || actual_inventory != expected_inventory
     {
-        return Err("backup artifact does not match the verifier's exact release".to_owned());
+        return Err(verify_failure(
+            ArtifactVerifyClass::ReleaseMismatch,
+            "backup artifact does not match the verifier's exact release",
+        ));
     }
     Ok(())
 }
@@ -1608,9 +2122,15 @@ fn validate_path(path: &str) -> Result<(), String> {
         return Err("backup member path is not allowlisted".to_owned());
     }
     for segment in path.split('/') {
+        // Segments are exact names: empty, `.`/`..` traversal, and any name
+        // whose first character is `.` (hidden or traversal-like) or `-`
+        // (option-like, unsafe to hand to a downstream tool) are rejected.
+        // The first-character rule matches the frozen contract schema for `.`;
+        // rejecting a leading `-` is deliberately stricter than the contract
+        // (defense in depth) and no artifact member uses such a name.
         if segment.is_empty()
-            || segment == "."
-            || segment == ".."
+            || segment.starts_with('.')
+            || segment.starts_with('-')
             || !segment
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
@@ -2302,6 +2822,34 @@ mod tests {
     }
 
     #[test]
+    fn member_path_grammar_rejects_hidden_and_option_like_segments() {
+        for path in [
+            "database/o3k.sqlite",
+            "metadata/capture.json",
+            "trust/backup-trust.json",
+            "config/_internal",
+            "database/a.b-c_d",
+        ] {
+            assert_eq!(validate_path(path), Ok(()), "{path}");
+        }
+        for path in [
+            "database/.hidden",
+            "database/sub/.hidden",
+            "database/-option",
+            "database/sub/-option",
+            "database/..",
+            "database/.",
+            "database//double",
+            "/database/absolute",
+            "database/with space",
+            "elsewhere/o3k.sqlite",
+            "",
+        ] {
+            assert!(validate_path(path).is_err(), "{path} must be rejected");
+        }
+    }
+
+    #[test]
     fn artifact_rejects_manifest_fields_outside_the_contract_schema() {
         let (mut options, members, signing, _) = fixture();
         options.backup_id = "../outside".to_owned();
@@ -2714,6 +3262,48 @@ mod tests {
         let mut overflowed_size = manifest;
         overflowed_size.members[0].plaintext_size_bytes = u64::MAX;
         assert!(validate_manifest(&overflowed_size, "generation-1").is_err());
+    }
+
+    #[test]
+    fn finalize_replaces_a_stale_partial_instead_of_wedging() {
+        // P0-3/M5: an empty `artifact.partial` left by a failed finalize must
+        // not block the retry. The builder replaces it atomically.
+        let root = std::env::temp_dir().join(format!("o3k-pp6-stale-{}", Uuid::now_v7()));
+        create_private_dir(&root).expect("staging root");
+        let (options, plain_members, signing, _) = fixture();
+        let unsigned =
+            stage_unsigned_artifact(&options, stream_fixture_members(&plain_members), &root)
+                .expect("stage unsigned");
+        let stale = unsigned.staging_directory.join("artifact.partial");
+        fs::write(&stale, b"").expect("stale partial");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stale, fs::Permissions::from_mode(0o600))
+                .expect("restrict stale partial");
+        }
+        let signature = signing.0.sign(&unsigned.signing_input).to_bytes();
+        let finished =
+            finish_signed_artifact(unsigned, signature, "signing-1", &signing.0.verifying_key())
+                .expect("finish over a stale partial");
+        assert!(finished.size_bytes > 0);
+        assert_eq!(
+            fs::metadata(&finished.path).expect("finalized").len(),
+            finished.size_bytes
+        );
+        let entries = fs::read_dir(&finished.staging_directory)
+            .expect("members")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            entries
+                .iter()
+                .all(|name| name != "artifact.unsigned"
+                    && !name.starts_with("artifact.partial.tmp-")),
+            "unsigned and temporary files are removed: {entries:?}"
+        );
+        fs::remove_dir_all(&root).expect("cleanup");
     }
 
     #[test]

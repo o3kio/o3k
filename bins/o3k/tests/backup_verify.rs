@@ -100,7 +100,14 @@ impl Scenario {
         let data_dir = root.join("data");
         create_private_dir(&data_dir);
         let prefix = root.join("prefix");
-        fs::create_dir_all(prefix.join("share/o3k")).expect("create release prefix");
+        let share = prefix.join("share/o3k");
+        fs::create_dir_all(&share).expect("create release prefix");
+        for directory in [prefix.clone(), prefix.join("share"), share] {
+            // 0755 like a production install; the ambient umask must not make
+            // the release-manifest parent group-writable.
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
+                .expect("restrict release prefix");
+        }
         let release_manifest_path = prefix.join("share/o3k/release-manifest.json");
         let config_path = root.join("backup-trust.json");
         let recipient_key_path = root.join("recipient.key");
@@ -481,6 +488,20 @@ fn reports_a_missing_trust_document_as_recoverable() {
     let scenario = Scenario::new("missing-trust");
     fs::remove_file(&scenario.config_path).expect("remove trust document");
     assert_reason(&scenario.run(), 3, "trust-config-unavailable");
+}
+
+/// D4: `verify` is a store-opening command, so a live controller (or a capture
+/// that is waiting for its signature) must reject it before any store read.
+#[test]
+fn rejects_verification_while_the_store_lock_is_held() {
+    let scenario = Scenario::new("controller-active");
+    let live_owner = o3k_store::StoreAccessLock::acquire(&scenario.data_dir)
+        .expect("hold the lifetime store lock");
+    let output = scenario.run();
+    drop(live_owner);
+    assert_reason(&output, 2, "controller-active");
+    // A rejected run must not leave plaintext staging behind.
+    assert_no_staging_left(&scenario.data_dir);
 }
 
 #[test]

@@ -4,14 +4,18 @@
 //! The command is read-only with respect to canonical state. It:
 //!
 //! 1. resolves the daemon data directory exactly as `o3k backup create` does
-//!    (`O3K_DATA_DIR` when set and non-empty, else `./data`, canonicalized);
+//!    (`O3K_DATA_DIR` when set and non-empty, else `./data`, canonicalized for
+//!    a non-root caller; a root process uses the canonical `/var/lib/o3k` and
+//!    ignores the override);
 //! 2. loads the root-owned installation trust document
-//!    ([`default_trust_config_path`], `O3K_BACKUP_TRUST_CONFIG` override) and
-//!    proves its site/installation identity matches this data directory;
+//!    ([`default_trust_config_path`]; `/etc/o3k/backup-trust.json` as root,
+//!    `O3K_BACKUP_TRUST_CONFIG` only for a non-root caller) and proves its
+//!    site/installation identity matches this data directory;
 //! 3. pins the exact installed release from
-//!    `<O3K_INSTALL_PREFIX>/share/o3k/release-manifest.json`
-//!    (`/usr/local` by default) through
-//!    [`crate::upgrade::release_identity::backup_release_identity`];
+//!    `<install prefix>/share/o3k/release-manifest.json` (canonical `/usr/local`
+//!    as root, `O3K_INSTALL_PREFIX` only for a non-root caller) through
+//!    [`crate::upgrade::release_identity::backup_release_identity`], which
+//!    reads it bounded with `O_NOFOLLOW` and a trusted owner/mode check;
 //! 4. opens the artifact with `O_NOFOLLOW`, verifies its canonical manifest,
 //!    Ed25519 signature, HPKE key wrapping, member digests and AES-GCM tags
 //!    through [`crate::backup::verify_artifact_stream`];
@@ -82,19 +86,15 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use uuid::Uuid;
 
 use crate::backup::{
-    ArtifactVerificationKeys, ExpectedRelease, MigrationIdentity, verify_artifact_stream,
+    ArtifactVerificationKeys, ArtifactVerifyClass, ArtifactVerifyError, ExpectedRelease,
+    MigrationIdentity, verify_artifact_stream,
 };
-use crate::backup_trust::{
-    BackupTrustConfig, BackupTrustError, INSTALL_PREFIX_ENV, default_trust_config_path,
-};
+use crate::backup_trust::{BackupTrustConfig, BackupTrustError, default_trust_config_path};
 use crate::upgrade::release_identity::{BackupReleaseIdentity, backup_release_identity};
+use o3k_store::StoreAccessLock;
 
-/// Default daemon data directory; mirrors `o3k-config`'s `DEFAULT_DATA_DIR`.
-const DEFAULT_DATA_DIR: &str = "./data";
 /// Database file name inside the data directory.
 const DATABASE_FILE_NAME: &str = "o3k.sqlite";
-/// Default installation prefix used by the installer.
-const DEFAULT_INSTALL_PREFIX: &str = "/usr/local";
 /// Private verification staging root inside the data directory.
 const STAGING_DIR_PREFIX: &str = ".o3k-verify-staging-";
 
@@ -108,7 +108,9 @@ const EXIT_UNKNOWN: u8 = 4;
 /// stores and schema drift: all of them mean "this host is not the exact
 /// release".
 const REASON_EXPECTED_RELEASE_UNAVAILABLE: &str = "expected-release-unavailable";
-const REASON_CLEANUP_FAILED: &str = "verification-cleanup-failed";
+/// Quarantined post-verification cleanup, taken from the single reason table in
+/// [`crate::backup::ArtifactVerifyClass`].
+const REASON_CLEANUP_FAILED: &str = ArtifactVerifyClass::CleanupFailed.reason();
 
 /// Arguments of `o3k backup verify`.
 pub struct BackupVerifyArgs {
@@ -185,9 +187,27 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
     }
     // The data directory is local I/O, not an artifact assertion: a resolution
     // failure is recoverable.
-    let data_dir = match resolve_data_dir() {
+    let data_dir = match crate::backup_data_dir::resolve_data_dir() {
         Ok(dir) => dir,
         Err(reason) => return BackupVerifyOutcome::recoverable(reason),
+    };
+
+    // D4 store-access guard. `verify` opens the canonical SQLite store to read
+    // the applied migration identities, so it is a store-opening command and
+    // must take the same lifetime lock the daemon and `backup create` use.
+    // A live controller (or a capture that is waiting for its signature) means
+    // the store cannot be inspected without racing the writer.
+    //
+    // The alternative — deriving the migration identities from the installed
+    // release without opening the store — is not possible with the accepted
+    // installed metadata: the release manifest carries `schema_version` but no
+    // migration checksums, and the committed migration tree is not installed.
+    let store_lock = match StoreAccessLock::acquire(&data_dir) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            return BackupVerifyOutcome::rejected("controller-active");
+        }
+        Err(_) => return BackupVerifyOutcome::recoverable("store-lock-unavailable"),
     };
 
     let trust = match BackupTrustConfig::load(&default_trust_config_path()) {
@@ -214,6 +234,9 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         Ok(migrations) => migrations,
         Err(reason) => return BackupVerifyOutcome::rejected(reason),
     };
+    // The store read is complete; the remaining work only touches the artifact
+    // and a private staging directory, so the lock is released here.
+    drop(store_lock);
     let inventory = match o3k_store::state_inventory::baseline_state_inventory() {
         Ok(inventory) => inventory,
         Err(_) => return BackupVerifyOutcome::rejected(REASON_EXPECTED_RELEASE_UNAVAILABLE),
@@ -275,55 +298,32 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
 /// present but untrusted, malformed, mismatched or expired is a rejected
 /// precondition.
 fn trust_failure(error: BackupTrustError) -> BackupVerifyOutcome {
-    match error {
-        BackupTrustError::ConfigUnavailable
-        | BackupTrustError::RecipientKeyUnavailable
-        | BackupTrustError::IdentityUnavailable => BackupVerifyOutcome::recoverable(error.reason()),
-        _ => BackupVerifyOutcome::rejected(error.reason()),
-    }
-}
-
-/// Maps a streaming-verification error to a stable reason. Verification errors
-/// are bounded, secret-free strings; the mapping is part of the CLI contract.
-fn verification_failure(error: &str) -> BackupVerifyOutcome {
-    let (exit_code, reason) = classify_verification_failure(error);
-    BackupVerifyOutcome::with_status(exit_code, status_for(exit_code), reason)
-}
-
-fn classify_verification_failure(error: &str) -> (u8, &'static str) {
-    // A failed cleanup is quarantined even when the primary verification also
-    // failed: safe removal of decrypted plaintext could not be proven.
-    if error.contains("private verification cleanup failed") {
-        return (EXIT_UNKNOWN, REASON_CLEANUP_FAILED);
-    }
-    let reason = if error.contains("signing key is revoked") {
-        "revoked-signing-key"
-    } else if error.contains("signing key is not trusted") {
-        "untrusted-signing-key"
-    } else if error.contains("key identity is not trusted") {
-        "key-identity-mismatch"
-    } else if error.contains("signature verification failed")
-        || error.contains("signature is missing")
-        || error.contains("signature encoding is invalid")
-    {
-        "signature-invalid"
-    } else if error.contains("exact release") {
-        "release-mismatch"
-    } else if error.contains("does not match the v1 contract")
-        || error.contains("manifest is malformed")
-        || error.contains("backup manifest schema is")
-    {
-        "schema-invalid"
-    } else if error.contains("exceeds the configured size limit")
-        || error.contains("length is not supported")
-    {
-        "artifact-too-large"
-    } else if error.contains("content key cannot be unwrapped") {
-        "recipient-key-mismatch"
+    // One shared predicate with `o3k backup create`: missing configuration or
+    // key material is recoverable, everything else rejects the precondition.
+    if error.is_recoverable() {
+        BackupVerifyOutcome::recoverable(error.reason())
     } else {
-        "corrupt-artifact"
-    };
-    (EXIT_REJECTED, reason)
+        BackupVerifyOutcome::rejected(error.reason())
+    }
+}
+
+/// Maps a streaming-verification failure to a stable reason. The mapping uses
+/// the typed failure class from [`crate::backup`], never a substring of the
+/// free-text detail, so reworded diagnostics cannot change the operator reason
+/// or exit status.
+fn verification_failure(error: &ArtifactVerifyError) -> BackupVerifyOutcome {
+    let class = error.class();
+    let exit_code = exit_code_for(class);
+    BackupVerifyOutcome::with_status(exit_code, status_for(exit_code), class.reason())
+}
+
+/// Only a failed plaintext-staging cleanup is quarantined (exit 4); every other
+/// verification failure is a rejected artifact (exit 2).
+const fn exit_code_for(class: ArtifactVerifyClass) -> u8 {
+    match class {
+        ArtifactVerifyClass::CleanupFailed => EXIT_UNKNOWN,
+        _ => EXIT_REJECTED,
+    }
 }
 
 const fn status_for(exit_code: u8) -> &'static str {
@@ -444,35 +444,12 @@ impl<R> HashingReader<R> {
     }
 }
 
-/// Resolves the daemon data directory the way `o3k-config` does for the
-/// SQLite default: non-empty `O3K_DATA_DIR`, else `./data`, canonicalized.
-fn resolve_data_dir() -> Result<PathBuf, &'static str> {
-    let configured = std::env::var("O3K_DATA_DIR")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    resolve_data_dir_from(configured.as_deref())
-}
-
-fn resolve_data_dir_from(configured: Option<&str>) -> Result<PathBuf, &'static str> {
-    fs::canonicalize(data_dir_from(configured)).map_err(|_| "data-dir-unavailable")
-}
-
-fn data_dir_from(configured: Option<&str>) -> PathBuf {
-    configured
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR))
-}
-
 /// Reads the exact installed release identity from the installation prefix
 /// shared with the artifact capture path and the trust-document default.
 fn resolve_release_identity() -> Result<BackupReleaseIdentity, &'static str> {
-    let prefix = std::env::var_os(INSTALL_PREFIX_ENV)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_INSTALL_PREFIX));
+    // Root uses the canonical install prefix; non-root keeps the documented
+    // O3K_INSTALL_PREFIX override (see `backup_trust::install_prefix`).
+    let prefix = crate::backup_trust::install_prefix();
     backup_release_identity(&prefix).map_err(|_| REASON_EXPECTED_RELEASE_UNAVAILABLE)
 }
 
@@ -661,68 +638,72 @@ mod tests {
 
     #[test]
     fn reason_mapping_is_stable_for_every_failure_class() {
+        // The exact operator strings are part of the CLI contract. They come
+        // from one table and are asserted here literally, so a wording change
+        // in a diagnostic can never silently rename a reason code.
         let cases = [
             (
-                "backup signing key is revoked",
+                ArtifactVerifyClass::RevokedSigningKey,
                 EXIT_REJECTED,
                 "revoked-signing-key",
             ),
             (
-                "backup signing key is not trusted for this site and profile",
+                ArtifactVerifyClass::UntrustedSigningKey,
                 EXIT_REJECTED,
                 "untrusted-signing-key",
             ),
             (
-                "backup key identity is not trusted by this verifier",
+                ArtifactVerifyClass::KeyIdentityMismatch,
                 EXIT_REJECTED,
                 "key-identity-mismatch",
             ),
             (
-                "backup signature verification failed",
+                ArtifactVerifyClass::SignatureInvalid,
                 EXIT_REJECTED,
                 "signature-invalid",
             ),
             (
-                "backup artifact does not match the verifier's exact release",
+                ArtifactVerifyClass::ReleaseMismatch,
                 EXIT_REJECTED,
                 "release-mismatch",
             ),
             (
-                "backup manifest does not match the v1 contract",
+                ArtifactVerifyClass::SchemaInvalid,
                 EXIT_REJECTED,
                 "schema-invalid",
             ),
             (
-                "backup manifest is malformed",
-                EXIT_REJECTED,
-                "schema-invalid",
-            ),
-            (
-                "backup artifact exceeds the configured size limit",
+                ArtifactVerifyClass::ArtifactTooLarge,
                 EXIT_REJECTED,
                 "artifact-too-large",
             ),
             (
-                "backup content key cannot be unwrapped",
+                ArtifactVerifyClass::RecipientKeyMismatch,
                 EXIT_REJECTED,
                 "recipient-key-mismatch",
             ),
             (
-                "backup member authentication failed",
+                ArtifactVerifyClass::CorruptArtifact,
                 EXIT_REJECTED,
                 "corrupt-artifact",
             ),
             (
-                "backup signature verification failed; private verification cleanup failed",
+                ArtifactVerifyClass::CleanupFailed,
                 EXIT_UNKNOWN,
                 "verification-cleanup-failed",
             ),
         ];
-        for (error, exit_code, reason) in cases {
-            let (mapped_exit, mapped_reason) = classify_verification_failure(error);
-            assert_eq!(mapped_exit, exit_code, "{error}");
-            assert_eq!(mapped_reason, reason, "{error}");
+        for (class, exit_code, reason) in cases {
+            assert_eq!(class.reason(), reason, "{class:?}");
+            let outcome = verification_failure(&ArtifactVerifyError::new(class, "detail"));
+            assert_eq!(outcome.exit_code, exit_code, "{class:?}");
+            assert_eq!(outcome.json["reason"], reason, "{class:?}");
+            assert_eq!(outcome.json["status"], status_for(exit_code), "{class:?}");
         }
+        assert_eq!(REASON_CLEANUP_FAILED, "verification-cleanup-failed");
+        // Only cleanup is quarantined; everything else is a rejected artifact.
+        assert_eq!(exit_code_for(ArtifactVerifyClass::CleanupFailed), 4);
+        assert_eq!(exit_code_for(ArtifactVerifyClass::CorruptArtifact), 2);
     }
 
     #[test]
@@ -770,16 +751,6 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         );
-    }
-
-    #[test]
-    fn data_dir_precedence_mirrors_the_capture_executor() {
-        assert_eq!(data_dir_from(None), PathBuf::from(DEFAULT_DATA_DIR));
-        assert_eq!(
-            data_dir_from(Some("  /var/lib/o3k  ")),
-            PathBuf::from("/var/lib/o3k")
-        );
-        assert_eq!(data_dir_from(Some("   ")), PathBuf::from(DEFAULT_DATA_DIR));
     }
 
     #[test]

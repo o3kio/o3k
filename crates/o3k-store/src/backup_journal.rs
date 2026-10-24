@@ -20,25 +20,54 @@
 //!   authority for whether startup is denied.
 //!
 //! Only `published` and `aborted` are terminal. A non-terminal
-//! `captured`/`staged`/`publishing` record must never deny controller startup:
-//! the staged artifact is not canonical state, and publication can be
-//! completed by a later operator invocation without the store lock.
+//! `captured`/`staged`/`publishing` record must never deny controller startup
+//! on its own: the staged artifact is not canonical state. Under ADR-0190
+//! Option A the *marker* is what denies startup for the whole capture →
+//! offline signing → verified publication window; the journal only records
+//! which phase the operation reached.
+//!
+//! # Forward-only transitions
+//!
+//! [`advance_backup_operation`] compares the on-disk phase with the target and
+//! refuses to move backwards or sideways (`captured` → `capturing`,
+//! `publishing` → `staged`, anything after a terminal phase). A replayed
+//! transition that is already durable is idempotent. The executor holds the
+//! store-access lock (and the phase-2 operation lock) for the whole
+//! read-compare-write window, so a concurrent writer cannot interleave.
 //!
 //! Records are private files (`0600`) inside a private directory (`0700`) in
 //! the data directory. They carry operation identity, lifecycle, paths and
 //! digests only — never credentials, key material or provider payloads. The
 //! lifecycle is written atomically (private temporary file, `fsync`, rename,
 //! directory `fsync`) so a crash leaves either the previous or the next phase.
+//!
+//! # Read posture
+//!
+//! `operation_id`, `backup_id`, `site_id` and `installation_id` use the
+//! contract identifier grammar `^[A-Za-z0-9][A-Za-z0-9._:-]*$`; `/`, `..`,
+//! empty and other punctuation are rejected so a journal value can never become
+//! a path component. Destination and staging paths are validated separately
+//! (absolute, bounded) and the executor re-derives the publication name from
+//! the operation UUID.
+//!
+//! Every read validates the journal directory (real directory, root-or-
+//! effective-uid owner, no group/other access), opens the record with
+//! `O_NOFOLLOW`, validates the descriptor's own `fstat` (regular file, `0600`,
+//! trusted owner) and parses at most 256 KiB. A symlink swap between inspection
+//! and open therefore cannot redirect the read.
 
 use std::{
+    ffi::OsStr,
     fmt, fs,
     io::{self, Read, Write},
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
 };
 
 use chrono::DateTime;
 use rustix::{
-    fs::{Mode, OFlags, open},
+    fd::OwnedFd,
+    fs::{FileType, Mode, OFlags, fstat, open, openat},
     process::geteuid,
 };
 use serde::{Deserialize, Serialize};
@@ -50,7 +79,7 @@ pub const BACKUP_OPERATION_DIR: &str = "backup-operations";
 /// Versioned record format marker.
 pub const BACKUP_OPERATION_FORMAT: &str = "o3k-backup-operation-v1";
 
-const MAX_OPERATION_RECORD_BYTES: u64 = 64 * 1024;
+const MAX_OPERATION_RECORD_BYTES: u64 = 256 * 1024;
 const MAX_PENDING_ENTRIES: usize = 1024;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_PATH_BYTES: usize = 4096;
@@ -98,6 +127,25 @@ impl BackupOperationPhase {
     pub const fn is_pending_publication(self) -> bool {
         matches!(self, Self::Staged | Self::Publishing)
     }
+
+    /// True when `next` is a legal forward transition from this phase.
+    ///
+    /// Legal moves are `capturing → captured → staged → publishing →
+    /// published`, plus `aborted` from any non-terminal phase. A terminal
+    /// phase never advances, and a phase never repeats another earlier phase
+    /// (`publishing` can never fall back to `staged`).
+    #[must_use]
+    pub const fn may_advance_to(self, next: Self) -> bool {
+        match (self, next) {
+            (Self::Capturing, Self::Captured)
+            | (Self::Captured, Self::Staged)
+            | (Self::Staged, Self::Publishing)
+            | (Self::Publishing, Self::Published) => true,
+            (Self::Published | Self::Aborted, _) => false,
+            (_, Self::Aborted) => true,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for BackupOperationPhase {
@@ -125,6 +173,11 @@ pub struct BackupOperationRecord {
     /// SHA-256 of the signed artifact once publication starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_sha256: Option<String>,
+    /// D9 staging reservation accepted by the capture preflight. It is
+    /// re-checked against the destination before finalize and publication, so
+    /// a resumed phase 2 never has to guess the reservation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_bytes: Option<u64>,
     pub site_id: String,
     pub installation_id: String,
     /// First time the operation was journalled.
@@ -177,6 +230,8 @@ pub enum BackupJournalError {
     UnsafeEntry,
     /// The record is not valid JSON for this schema or fails validation.
     InvalidRecord,
+    /// The requested transition would move the operation backwards.
+    InvalidTransition,
     /// The record could not be written durably.
     WriteFailed,
 }
@@ -189,6 +244,7 @@ impl BackupJournalError {
             Self::Unavailable => "backup-operation-journal-unavailable",
             Self::UnsafeEntry => "backup-operation-journal-unsafe-entry",
             Self::InvalidRecord => "backup-operation-journal-invalid",
+            Self::InvalidTransition => "backup-operation-phase-regression",
             Self::WriteFailed => "backup-operation-journal-write-failed",
         }
     }
@@ -220,21 +276,21 @@ pub fn read_backup_operation(
     data_dir: &Path,
     operation_id: Uuid,
 ) -> Result<Option<BackupOperationRecord>, BackupJournalError> {
-    let path = operation_path(data_dir, operation_id);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-                return Err(BackupJournalError::UnsafeEntry);
-            }
-            let record = read_record(&path)?;
-            if record.operation_id != operation_id {
-                return Err(BackupJournalError::InvalidRecord);
-            }
-            Ok(Some(record))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(BackupJournalError::Unavailable),
+    // The directory posture is part of the trust boundary: a reader must never
+    // follow a symlinked or group/other-accessible journal directory. The
+    // descriptor is validated and the record is opened relative to it, so a
+    // directory swap after validation cannot redirect the read.
+    let Some(directory) = open_operation_directory(data_dir)? else {
+        return Ok(None);
+    };
+    let name = format!("{operation_id}.json");
+    let Some(record) = read_record_at(&directory, OsStr::new(&name))? else {
+        return Ok(None);
+    };
+    if record.operation_id != operation_id {
+        return Err(BackupJournalError::InvalidRecord);
     }
+    Ok(Some(record))
 }
 
 /// Writes one operation record atomically.
@@ -279,6 +335,41 @@ pub fn write_backup_operation(
     result
 }
 
+/// Advances one operation record, refusing to regress its phase.
+///
+/// The on-disk record is read first and the transition is validated with
+/// [`BackupOperationPhase::may_advance_to`]. Writing the phase that is already
+/// durable is idempotent (a replayed step succeeds without a write). A missing
+/// record or an illegal transition fails with
+/// [`BackupJournalError::InvalidTransition`] instead of overwriting the
+/// recorded history; a crash can therefore never make the journal describe a
+/// phase the operation never reached.
+///
+/// Field-only updates are persisted by the next forward transition: phase 1
+/// records the accepted D9 reservation while still in `capturing` and it
+/// becomes durable with the `captured` write, which always precedes any
+/// `staged` record a later invocation can observe.
+///
+/// The read-compare-write window is serialized by the caller's store-access
+/// lock (and, for phase 2, the operation lock in the staging directory). This
+/// function is the compare-and-set on the on-disk phase; it does not create a
+/// record.
+pub fn advance_backup_operation(
+    data_dir: &Path,
+    record: &BackupOperationRecord,
+) -> Result<(), BackupJournalError> {
+    let Some(current) = read_backup_operation(data_dir, record.operation_id)? else {
+        return Err(BackupJournalError::InvalidTransition);
+    };
+    if current.phase == record.phase {
+        return Ok(());
+    }
+    if !current.phase.may_advance_to(record.phase) {
+        return Err(BackupJournalError::InvalidTransition);
+    }
+    write_backup_operation(data_dir, record)
+}
+
 /// Non-terminal journal records found in a data directory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PendingBackupOperations {
@@ -297,20 +388,15 @@ pub struct PendingBackupOperations {
 pub fn pending_backup_operations(
     data_dir: &Path,
 ) -> Result<PendingBackupOperations, BackupJournalError> {
-    let directory = data_dir.join(BACKUP_OPERATION_DIR);
-    let metadata = match fs::symlink_metadata(&directory) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(PendingBackupOperations::default());
-        }
-        Err(_) => return Err(BackupJournalError::Unavailable),
+    let Some(directory) = open_operation_directory(data_dir)? else {
+        return Ok(PendingBackupOperations::default());
     };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(BackupJournalError::UnsafeEntry);
-    }
     let mut pending = Vec::new();
     let mut unreadable = Vec::new();
-    let entries = fs::read_dir(&directory).map_err(|_| BackupJournalError::Unavailable)?;
+    // `/proc/self/fd/<n>` resolves against the descriptor this process holds,
+    // so the scan cannot be redirected to a replaced directory.
+    let directory_path = format!("/proc/self/fd/{}", directory.as_raw_fd());
+    let entries = fs::read_dir(&directory_path).map_err(|_| BackupJournalError::Unavailable)?;
     for entry in entries.take(MAX_PENDING_ENTRIES) {
         let Ok(entry) = entry else {
             unreadable.push("<unreadable-entry>".to_owned());
@@ -331,16 +417,10 @@ pub fn pending_backup_operations(
             unreadable.push(name.to_owned());
             continue;
         };
-        let Ok(file_type) = entry.file_type() else {
-            unreadable.push(name.to_owned());
-            continue;
-        };
-        if !file_type.is_file() {
-            unreadable.push(name.to_owned());
-            continue;
-        }
-        match read_record(&entry.path()) {
-            Ok(record) if record.operation_id == operation_id && !record.phase.is_terminal() => {
+        match read_record_at(&directory, file_name.as_os_str()) {
+            Ok(Some(record))
+                if record.operation_id == operation_id && !record.phase.is_terminal() =>
+            {
                 pending.push(record);
             }
             Ok(_) => {}
@@ -354,17 +434,63 @@ pub fn pending_backup_operations(
     })
 }
 
-fn read_record(path: &Path) -> Result<BackupOperationRecord, BackupJournalError> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| BackupJournalError::Unavailable)?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+/// Opens and validates the journal directory as a descriptor.
+///
+/// `Ok(None)` means the directory does not exist. A symlink, non-directory or
+/// untrusted owner/mode fails closed.
+fn open_operation_directory(data_dir: &Path) -> Result<Option<OwnedFd>, BackupJournalError> {
+    let directory = data_dir.join(BACKUP_OPERATION_DIR);
+    let descriptor = match open(
+        &directory,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) => {
+            return Err(BackupJournalError::UnsafeEntry);
+        }
+        Err(_) => return Err(BackupJournalError::Unavailable),
+    };
+    let metadata = fstat(&descriptor).map_err(|_| BackupJournalError::Unavailable)?;
+    validate_directory_stat(&metadata)?;
+    Ok(Some(descriptor))
+}
+
+/// Reads one record relative to a validated journal directory descriptor,
+/// never following a symlink and validating the record descriptor's own
+/// metadata (`0600`, root-or-effective-uid owner, regular file) and size
+/// bound. `Ok(None)` means the entry does not exist.
+fn read_record_at(
+    directory: &OwnedFd,
+    name: &OsStr,
+) -> Result<Option<BackupOperationRecord>, BackupJournalError> {
+    let descriptor = match openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(rustix::io::Errno::LOOP) => return Err(BackupJournalError::UnsafeEntry),
+        Err(_) => return Err(BackupJournalError::Unavailable),
+    };
+    let metadata = fstat(&descriptor).map_err(|_| BackupJournalError::Unavailable)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
         return Err(BackupJournalError::UnsafeEntry);
     }
-    if metadata.len() > MAX_OPERATION_RECORD_BYTES {
+    if !trusted_owner(metadata.st_uid) {
+        return Err(BackupJournalError::UnsafeEntry);
+    }
+    if metadata.st_mode & 0o077 != 0 {
+        return Err(BackupJournalError::UnsafeEntry);
+    }
+    if u64::try_from(metadata.st_size).unwrap_or(u64::MAX) > MAX_OPERATION_RECORD_BYTES {
         return Err(BackupJournalError::InvalidRecord);
     }
     let mut bytes = Vec::new();
-    fs::File::open(path)
-        .map_err(|_| BackupJournalError::Unavailable)?
+    fs::File::from(descriptor)
         .take(MAX_OPERATION_RECORD_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| BackupJournalError::Unavailable)?;
@@ -374,7 +500,7 @@ fn read_record(path: &Path) -> Result<BackupOperationRecord, BackupJournalError>
     let record: BackupOperationRecord =
         serde_json::from_slice(&bytes).map_err(|_| BackupJournalError::InvalidRecord)?;
     record.validate()?;
-    Ok(record)
+    Ok(Some(record))
 }
 
 fn ensure_operation_directory(data_dir: &Path) -> Result<PathBuf, BackupJournalError> {
@@ -410,15 +536,36 @@ fn validate_directory(metadata: &fs::Metadata) -> Result<(), BackupJournalError>
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let uid = geteuid().as_raw();
-        if metadata.uid() != 0 && metadata.uid() != uid {
+        if !trusted_owner(metadata.uid()) {
             return Err(BackupJournalError::UnsafeEntry);
         }
-        if metadata.permissions().mode() & 0o022 != 0 {
+        // The journal directory is private (0700): group or other access of
+        // any kind is outside the contract.
+        if metadata.permissions().mode() & 0o077 != 0 {
             return Err(BackupJournalError::UnsafeEntry);
         }
     }
     Ok(())
+}
+
+/// Descriptor-based counterpart of [`validate_directory`], used after `open`
+/// so the checks apply to the inode actually traversed.
+fn validate_directory_stat(metadata: &rustix::fs::Stat) -> Result<(), BackupJournalError> {
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory {
+        return Err(BackupJournalError::UnsafeEntry);
+    }
+    if !trusted_owner(metadata.st_uid) {
+        return Err(BackupJournalError::UnsafeEntry);
+    }
+    if metadata.st_mode & 0o077 != 0 {
+        return Err(BackupJournalError::UnsafeEntry);
+    }
+    Ok(())
+}
+
+/// Root, or the effective uid, owns the journal.
+fn trusted_owner(uid: u32) -> bool {
+    uid == 0 || uid == geteuid().as_raw()
 }
 
 fn sync_directory(directory: &Path) -> io::Result<()> {
@@ -430,12 +577,23 @@ fn sync_directory(directory: &Path) -> io::Result<()> {
     fs::File::from(descriptor).sync_all()
 }
 
+/// Contract identifier grammar `^[A-Za-z0-9][A-Za-z0-9._:-]*$`.
+///
+/// Journal strings are used to derive paths and identities, so `/`, `..`,
+/// whitespace, empty values and any other punctuation are rejected. This is
+/// deliberately stricter than the pre-review "ascii graphic" check that
+/// allowed `x/../../escaped`.
 fn is_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_IDENTIFIER_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\'))
+    if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+        return false;
+    }
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    first.is_ascii_alphanumeric()
+        && bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -483,6 +641,7 @@ mod tests {
             staging_path: format!("/var/lib/o3k/backups/.o3k-backup-artifact-{operation_id}"),
             request_sha256: Some("a".repeat(64)),
             artifact_sha256: None,
+            reserved_bytes: None,
             site_id: "site-1".to_owned(),
             installation_id: "install-1".to_owned(),
             created_at: "2026-10-23T12:00:00Z".to_owned(),
@@ -657,8 +816,95 @@ mod tests {
         );
         assert_eq!(
             read_backup_operation(&fixture.0, Uuid::new_v4()),
-            Ok(None),
-            "a missing record inside a replaced directory is not followed"
+            Err(BackupJournalError::UnsafeEntry),
+            "a replaced journal directory is rejected before any record lookup"
+        );
+    }
+
+    #[test]
+    fn identifiers_reject_path_traversal_and_empty_values() {
+        let operation_id = Uuid::new_v4();
+        for field in ["backup_id", "site_id", "installation_id"] {
+            let mut value = record(operation_id, BackupOperationPhase::Staged);
+            match field {
+                "backup_id" => value.backup_id = "x/../../escaped".to_owned(),
+                "site_id" => value.site_id = "..".to_owned(),
+                _ => value.installation_id = "".to_owned(),
+            }
+            assert_eq!(
+                write_backup_operation(&Fixture::new("identifier").0, &value),
+                Err(BackupJournalError::InvalidRecord),
+                "field {field}"
+            );
+        }
+        assert!(is_identifier("8a1c9e5e-3b2f-4a9a-9df0-4f0e2f1d9c11"));
+        assert!(is_identifier("site-1"));
+        assert!(is_identifier("a.b_c:d"));
+        assert!(!is_identifier(""));
+        assert!(!is_identifier(".leading-dot"));
+        assert!(!is_identifier("x/../../escaped"));
+        assert!(!is_identifier("space id"));
+        assert!(!is_identifier("../up"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_and_over_permissive_records_are_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new("record-posture");
+        let operation_id = Uuid::new_v4();
+        write_backup_operation(
+            &fixture.0,
+            &record(operation_id, BackupOperationPhase::Staged),
+        )
+        .expect("write valid record");
+        let path = operation_path(&fixture.0, operation_id);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("relax record");
+        assert_eq!(
+            read_backup_operation(&fixture.0, operation_id),
+            Err(BackupJournalError::UnsafeEntry)
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("restore record");
+
+        let target = fixture.0.join("elsewhere.json");
+        fs::rename(&path, &target).expect("move record");
+        std::os::unix::fs::symlink(&target, &path).expect("record symlink");
+        assert_eq!(
+            read_backup_operation(&fixture.0, operation_id),
+            Err(BackupJournalError::UnsafeEntry)
+        );
+
+        // A group-accessible journal directory is rejected on every read.
+        fs::remove_file(&path).expect("remove symlink");
+        fs::rename(&target, &path).expect("restore record");
+        fs::set_permissions(
+            fixture.0.join(BACKUP_OPERATION_DIR),
+            fs::Permissions::from_mode(0o750),
+        )
+        .expect("relax journal directory");
+        assert_eq!(
+            read_backup_operation(&fixture.0, operation_id),
+            Err(BackupJournalError::UnsafeEntry)
+        );
+    }
+
+    #[test]
+    fn oversized_records_are_rejected_before_parsing() {
+        let fixture = Fixture::new("oversized");
+        let operation_id = Uuid::new_v4();
+        let directory = ensure_operation_directory(&fixture.0).expect("journal directory");
+        let path = directory.join(format!("{operation_id}.json"));
+        fs::write(&path, vec![b' '; (MAX_OPERATION_RECORD_BYTES + 1) as usize])
+            .expect("write oversized record");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .expect("restrict oversized record");
+        }
+        assert_eq!(
+            read_backup_operation(&fixture.0, operation_id),
+            Err(BackupJournalError::InvalidRecord)
         );
     }
 
@@ -674,6 +920,110 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&BackupOperationPhase::Staged).expect("encode"),
             "\"staged\""
+        );
+    }
+
+    #[test]
+    fn transitions_only_move_forward() {
+        use BackupOperationPhase::{Aborted, Captured, Capturing, Published, Publishing, Staged};
+        let forward = [
+            (Capturing, Captured),
+            (Captured, Staged),
+            (Staged, Publishing),
+            (Publishing, Published),
+            (Capturing, Aborted),
+            (Captured, Aborted),
+            (Staged, Aborted),
+            (Publishing, Aborted),
+        ];
+        for (from, to) in forward {
+            assert!(from.may_advance_to(to), "{from} -> {to} must be allowed");
+        }
+        let backwards = [
+            (Captured, Capturing),
+            (Staged, Captured),
+            (Publishing, Staged),
+            (Published, Publishing),
+            (Published, Staged),
+            (Aborted, Capturing),
+            (Aborted, Published),
+            (Published, Aborted),
+            (Capturing, Staged),
+        ];
+        for (from, to) in backwards {
+            assert!(!from.may_advance_to(to), "{from} -> {to} must be refused");
+        }
+    }
+
+    #[test]
+    fn advance_is_idempotent_and_refuses_to_regress() {
+        let fixture = Fixture::new("advance");
+        let operation_id = Uuid::new_v4();
+        write_backup_operation(
+            &fixture.0,
+            &record(operation_id, BackupOperationPhase::Capturing),
+        )
+        .expect("write capturing");
+        advance_backup_operation(
+            &fixture.0,
+            &record(operation_id, BackupOperationPhase::Captured),
+        )
+        .expect("capturing -> captured");
+        // Replaying the durable transition is a no-op.
+        advance_backup_operation(
+            &fixture.0,
+            &record(operation_id, BackupOperationPhase::Captured),
+        )
+        .expect("replayed captured transition");
+        assert_eq!(
+            advance_backup_operation(
+                &fixture.0,
+                &record(operation_id, BackupOperationPhase::Capturing)
+            ),
+            Err(BackupJournalError::InvalidTransition)
+        );
+        assert_eq!(
+            read_backup_operation(&fixture.0, operation_id)
+                .expect("read")
+                .map(|stored| stored.phase),
+            Some(BackupOperationPhase::Captured),
+            "a refused transition must leave the recorded phase untouched"
+        );
+        advance_backup_operation(
+            &fixture.0,
+            &record(operation_id, BackupOperationPhase::Staged),
+        )
+        .expect("captured -> staged");
+        advance_backup_operation(
+            &fixture.0,
+            &record(operation_id, BackupOperationPhase::Publishing),
+        )
+        .expect("staged -> publishing");
+        assert_eq!(
+            advance_backup_operation(
+                &fixture.0,
+                &record(operation_id, BackupOperationPhase::Staged)
+            ),
+            Err(BackupJournalError::InvalidTransition)
+        );
+        advance_backup_operation(
+            &fixture.0,
+            &record(operation_id, BackupOperationPhase::Published),
+        )
+        .expect("publishing -> published");
+        assert_eq!(
+            advance_backup_operation(
+                &fixture.0,
+                &record(operation_id, BackupOperationPhase::Aborted)
+            ),
+            Err(BackupJournalError::InvalidTransition),
+            "a published operation is terminal"
+        );
+        // A record that does not exist yet can never be advanced.
+        let missing = Uuid::new_v4();
+        assert_eq!(
+            advance_backup_operation(&fixture.0, &record(missing, BackupOperationPhase::Captured)),
+            Err(BackupJournalError::InvalidTransition)
         );
     }
 }

@@ -34,6 +34,10 @@ pub mod backup_artifact;
 // `backup_artifact`. Linux-only like the handoff primitives in o3k-store.
 #[cfg(target_os = "linux")]
 pub mod backup_create;
+// Shared `o3k backup` data-directory resolution (packaged `/var/lib/o3k`,
+// `O3K_DATA_DIR`, `/etc/o3k/o3kd.env`). Linux-only like the backup commands.
+#[cfg(target_os = "linux")]
+pub mod backup_data_dir;
 // Root-owned installation trust/key configuration and the D9 staging
 // reservation bound for the authenticated backup artifact (SPEC-0050 §8,
 // ADR-0189). Trust loading derives the canonical identity from o3k-store and

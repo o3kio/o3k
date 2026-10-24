@@ -8,9 +8,12 @@
 //!   accept frame but before the store-lock descriptors are received;
 //! - `O3K_BACKUP_TEST_EXIT_AFTER_RECEIVE=1` exits 94 immediately after
 //!   `receive_handoff` completes;
-//! - `O3K_BACKUP_TEST_SKIP_MARKER_CLEANUP=1` stages the artifact (exit 3,
-//!   `signing-required`) but leaves the denial-only interrupted-backup marker
-//!   in place.
+//! - `O3K_BACKUP_TEST_EXIT_AWAITING_SIGNATURE=1` exits 91 inside the signing
+//!   wait (store lock and denial marker held), leaving the exact
+//!   crash-during-wait state a killed process would leave;
+//! - `O3K_BACKUP_TEST_STOP_AFTER_STAGING=1` stages the artifact and reports
+//!   `signing-required` (exit 3) without waiting; combined with
+//!   `O3K_BACKUP_TEST_SKIP_MARKER_CLEANUP=1` the marker is kept.
 #![cfg(all(feature = "backup-test-hooks", target_os = "linux"))]
 
 use std::{
@@ -265,7 +268,15 @@ fn trust_fixture(root: &TempRoot, data_dir: &Path) -> io::Result<TrustFixture> {
     let install_prefix = root.0.join("install");
     let share = install_prefix.join("share/o3k");
     fs::create_dir_all(&share)?;
-    fs::set_permissions(&install_prefix, fs::Permissions::from_mode(0o700))?;
+    for directory in [
+        install_prefix.clone(),
+        install_prefix.join("share"),
+        share.clone(),
+    ] {
+        // 0755 like a production install; the ambient umask must not make the
+        // release-manifest parent group-writable.
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))?;
+    }
     let manifest = serde_json::json!({
         "version": "0.4.0",
         "profile": "demo",
@@ -285,8 +296,8 @@ fn trust_fixture(root: &TempRoot, data_dir: &Path) -> io::Result<TrustFixture> {
 }
 
 #[test]
-fn skip_marker_cleanup_keeps_marker_after_staging() -> io::Result<()> {
-    let root = TempRoot::new("skip-marker")?;
+fn crash_during_the_signing_wait_keeps_the_marker_and_staged_request() -> io::Result<()> {
+    let root = TempRoot::new("awaiting-signature")?;
     let data_dir = root.private_dir("data")?;
     let dest = root.private_dir("dest")?;
     let operation_id = Uuid::new_v4();
@@ -298,40 +309,43 @@ fn skip_marker_cleanup_keeps_marker_after_staging() -> io::Result<()> {
     let output = run_backup_create(&data_dir, &dest, operation_id)
         .env("O3K_BACKUP_TRUST_CONFIG", &fixture.trust_config)
         .env("O3K_INSTALL_PREFIX", &fixture.install_prefix)
-        .env("O3K_BACKUP_TEST_SKIP_MARKER_CLEANUP", "1")
+        .env("O3K_BACKUP_TEST_EXIT_AWAITING_SIGNATURE", "1")
         .output()?;
     server
         .join()
         .map_err(|_| io::Error::other("handoff server thread panicked"))??;
     assert_eq!(
         output.status.code(),
-        Some(3),
+        Some(91),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Value = serde_json::from_str(stdout.trim())?;
-    assert_eq!(parsed["status"], "signing-required", "{parsed}");
-    assert_eq!(parsed["operation_id"], operation_id.to_string());
+    // The wait announced itself on stderr with one stable line.
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        dest.join(format!(".o3k-backup-artifact-{operation_id}"))
-            .is_dir()
+        stderr.contains("o3k backup create: awaiting-signature"),
+        "stderr: {stderr}"
     );
     assert!(
-        dest.join(format!(
-            ".o3k-backup-artifact-{operation_id}/signing-request.json"
-        ))
-        .is_file()
+        stderr.contains("signing-request.json"),
+        "the awaiting-signature line names the request path: {stderr}"
     );
-    assert!(
-        !dest.join(format!("backup-{operation_id}.o3k")).exists(),
-        "phase 1 never publishes"
-    );
-    // The skip hook keeps the marker even though capture completed.
+    // The crash leaves exactly the documented state: request staged, journal
+    // `staged`, denial marker present, nothing published.
+    let staging = dest.join(format!(".o3k-backup-artifact-{operation_id}"));
+    assert!(staging.join("signing-request.json").is_file());
+    assert!(!dest.join(format!("backup-{operation_id}.o3k")).exists());
     assert!(
         data_dir
             .join(format!(".o3k-backup-in-progress-{operation_id}"))
-            .is_file()
+            .is_file(),
+        "the denial marker must outlive a crash during the signing wait"
     );
+    let journal: Value = serde_json::from_slice(&fs::read(
+        data_dir
+            .join("backup-operations")
+            .join(format!("{operation_id}.json")),
+    )?)?;
+    assert_eq!(journal["phase"], "staged", "{journal}");
     Ok(())
 }

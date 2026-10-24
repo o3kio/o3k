@@ -185,6 +185,49 @@ fn reserve_with_available(
     })
 }
 
+/// Free bytes for an unprivileged writer on the filesystem holding `path`
+/// (`f_bavail * f_frsize`).
+fn available_bytes(path: &Path) -> Result<u64, ReservationError> {
+    let statistics = statvfs(path)
+        .map_err(|_| ReservationError::Measurement(REASON_DESTINATION_UNAVAILABLE.to_owned()))?;
+    statistics
+        .f_bavail
+        .checked_mul(statistics.f_frsize)
+        .ok_or_else(|| {
+            ReservationError::Measurement(REASON_FILESYSTEM_STATISTICS_OVERFLOW.to_owned())
+        })
+}
+
+/// Re-checks the reservation at a phase boundary.
+///
+/// `already_staged_bytes` is the space the staging tree of this operation
+/// already occupies on the same filesystem; the remaining requirement is the
+/// full reservation minus that amount. The check never lowers the reserve: a
+/// shortfall fails closed with [`ReservationError::SpaceUnavailable`]
+/// (`space-unavailable`) and nothing is truncated.
+///
+/// This is a preflight plus boundary re-check, not a hard filesystem quota.
+///
+/// # Errors
+///
+/// Propagates the measurement failure, or [`ReservationError::SpaceUnavailable`]
+/// when the destination cannot hold the remaining reservation.
+pub fn ensure_reserved_space(
+    destination: &Path,
+    reserved_bytes: u64,
+    already_staged_bytes: u64,
+) -> Result<(), ReservationError> {
+    let required = reserved_bytes.saturating_sub(already_staged_bytes);
+    let available = available_bytes(destination)?;
+    if available < required {
+        return Err(ReservationError::SpaceUnavailable {
+            reserved_bytes: required,
+            available_bytes: available,
+        });
+    }
+    Ok(())
+}
+
 /// Measures the sources and verifies that `destination` has at least the D9
 /// reservation free for unprivileged writers (`f_bavail * f_frsize`).
 ///
@@ -198,14 +241,7 @@ pub fn preflight_reservation(
     destination: &Path,
 ) -> Result<Reservation, ReservationError> {
     let source_bytes = measure_source_bytes(source_paths.iter().copied())?;
-    let statistics = statvfs(destination)
-        .map_err(|_| ReservationError::Measurement(REASON_DESTINATION_UNAVAILABLE.to_owned()))?;
-    let available_bytes = statistics
-        .f_bavail
-        .checked_mul(statistics.f_frsize)
-        .ok_or_else(|| {
-            ReservationError::Measurement(REASON_FILESYSTEM_STATISTICS_OVERFLOW.to_owned())
-        })?;
+    let available_bytes = available_bytes(destination)?;
     reserve_with_available(source_bytes, available_bytes)
 }
 
@@ -365,5 +401,32 @@ mod tests {
             ReservationError::Measurement(REASON_SOURCE_SYMLINK.to_owned()).reason(),
             "measurement-failed"
         );
+    }
+
+    #[test]
+    fn boundary_recheck_never_truncates_the_remaining_reservation() {
+        let root = fixture_dir();
+        // A real filesystem always has more free space than this; the fixture
+        // only proves the arithmetic and the fail-closed direction.
+        assert_eq!(ensure_reserved_space(&root, MIN_RESERVATION, 0), Ok(()));
+        assert_eq!(
+            ensure_reserved_space(&root, MIN_RESERVATION, MIN_RESERVATION - 1),
+            Ok(()),
+            "space already staged is deducted from the remaining requirement"
+        );
+        assert_eq!(
+            ensure_reserved_space(&root, u64::MAX, 0),
+            Err(ReservationError::SpaceUnavailable {
+                reserved_bytes: u64::MAX,
+                available_bytes: available_bytes(&root).expect("filesystem statistics"),
+            })
+        );
+        assert_eq!(
+            ensure_reserved_space(&root, u64::MAX, 0)
+                .expect_err("impossible reservation")
+                .reason(),
+            "space-unavailable"
+        );
+        fs::remove_dir_all(root).expect("remove fixture directory");
     }
 }

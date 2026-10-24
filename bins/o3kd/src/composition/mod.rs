@@ -853,6 +853,7 @@ mod interrupted_backup_marker_tests {
             staging_path: format!("/var/lib/o3k/backups/.o3k-backup-artifact-{operation_id}"),
             request_sha256: Some("a".repeat(64)),
             artifact_sha256: None,
+            reserved_bytes: None,
             site_id: "site-1".to_owned(),
             installation_id: "install-1".to_owned(),
             created_at: "2026-10-23T12:00:00Z".to_owned(),
@@ -899,21 +900,15 @@ mod interrupted_backup_marker_tests {
 /// canonical state while one is present.
 const INTERRUPTED_BACKUP_MARKER_PREFIX: &str = ".o3k-backup-in-progress-";
 
-/// Refuses to start when the data directory contains an interrupted-backup
-/// marker. The marker is untrusted, denial-only forensic metadata: presence
-/// blocks startup until an operator inspects and removes the marker(s), and
-/// absence must not be inferred from. Entries are inspected without following
-/// symlinks, and any unreadable entry fails closed. Names are compared as
-/// raw bytes (not `to_str`), so a non-UTF-8 marker name still denies startup
-/// instead of being skipped.
 /// Reports non-terminal backup-operation journal entries **without** denying
 /// startup.
 ///
 /// Only the denial-only marker blocks a replacement controller. A `captured`,
 /// `staged` or `publishing` operation means a backup artifact is incomplete,
-/// but the staged artifact is not canonical state and publication can be
-/// completed by a later operator invocation without the store lock. The scan
-/// is diagnostic: unreadable entries and scan failures are warnings, never a
+/// but the staged artifact is not canonical state; under ADR-0190 Option A the
+/// marker (not the journal) denies startup while publication is pending, and
+/// publication itself is completed by the operator invocation. The scan is
+/// diagnostic: unreadable entries and scan failures are warnings, never a
 /// startup denial.
 fn warn_pending_backup_operations(data_dir: &Path) {
     match o3k_store::backup_journal::pending_backup_operations(data_dir) {
@@ -939,6 +934,17 @@ fn warn_pending_backup_operations(data_dir: &Path) {
     }
 }
 
+/// Refuses to start when the data directory contains an interrupted-backup
+/// marker. The marker is untrusted, denial-only forensic metadata: presence
+/// blocks startup until an operator inspects and removes the marker(s), and
+/// absence must not be inferred from. Entries are inspected without following
+/// symlinks, and any unreadable entry fails closed. Names are compared as
+/// raw bytes (not `to_str`), so a non-UTF-8 marker name still denies startup
+/// instead of being skipped.
+///
+/// Under ADR-0190 Option A the marker is created before capture and stays in
+/// place through offline signing and verified publication (or the safe abort),
+/// so it is the authority that keeps the controller stopped for that window.
 fn deny_interrupted_backup_markers(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut markers = Vec::new();
     for entry in std::fs::read_dir(data_dir)? {

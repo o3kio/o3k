@@ -1,12 +1,22 @@
 # #1084 authenticated backup handoff — Slice D capture evidence
 
-> **Superseded status note (2026-10-24):** the provisional capture described
-> here has been replaced by the authenticated artifact flow on branch
-> `pp6/1084-artifact`: `o3k backup create` now stages an unsigned artifact and
-> exits 3 `signing-required`; re-running the same command with an offline
-> `signing-response.json` publishes `backup-<operation id>.o3k` and exits 0.
-> See `docs/evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md`. The measurements below
-> remain valid for the revision they name.
+> **Superseded status note (2026-10-24, updated):** the provisional capture
+> described here has been replaced by the authenticated artifact flow on branch
+> `pp6/1084-artifact`. Under ADR-0190 Option A the capture process now keeps the
+> store lock and the denial marker while it waits for the offline signature and
+> publishes in the same invocation (exit 0); an expired request is a safe abort
+> (exit 3 `signing-request-expired`); a re-run after a crash during the wait
+> resumes the wait/publication. See
+> `docs/evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md`.
+>
+> The handoff campaign described below still runs
+> `O3K_BACKUP_TEST_STOP_AFTER_STAGING=1`, a feature-gated harness control that
+> keeps phase 1 one-shot (stage, `signing-required`, exit 3, marker removed) so
+> each row can observe the post-capture state without a signing wait. That hook
+> is never enabled in a production build and does not change the product
+> semantics; the Option A wait itself is proven by
+> `tests/pp6_backup_artifact.sh` (`case-1`, `case-2`, `case-11`, `case-4e`).
+> The measurements below remain valid for the revision they name.
 
 Date: 2026-10-22. Scope: PP.6 authenticated backup handoff, real-process
 integration campaign (Slice D of the `#1084-handoff` branch work). Slices A–C

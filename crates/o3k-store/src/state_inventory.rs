@@ -23,7 +23,8 @@
 //! The baseline is generated from both migration trees by the regeneration
 //! test, which compares the result byte-for-byte with the committed file and
 //! fails on drift. Set `O3K_REGENERATE_INVENTORY=1` to rewrite the file for
-//! review; CI must never set it.
+//! local review; the test refuses regeneration whenever `CI` is set, so CI can
+//! only detect drift, never rewrite the baseline.
 //!
 //! Every baseline entry sets `empty_state_included` to `false`: the baseline
 //! records schema coverage, while emptiness is a property of one captured
@@ -1563,7 +1564,11 @@ mod tests {
             &root.join("migrations_postgres"),
         )?;
 
-        if std::env::var("O3K_REGENERATE_INVENTORY").as_deref() == Ok("1") {
+        let regenerate = regeneration_requested(
+            std::env::var("O3K_REGENERATE_INVENTORY").ok().as_deref(),
+            std::env::var("CI").ok().as_deref(),
+        )?;
+        if regenerate {
             fs::write(root.join("state_inventory_v1.json"), &generated)?;
             println!(
                 "regenerate and review crates/o3k-store/state_inventory_v1.json before committing"
@@ -1573,6 +1578,42 @@ mod tests {
 
         ensure_matches_committed(&generated)?;
         Ok(())
+    }
+
+    /// Regeneration is a local, reviewed maintenance action; CI must never
+    /// rewrite the committed baseline (F34).
+    fn regeneration_requested(
+        regenerate: Option<&str>,
+        ci: Option<&str>,
+    ) -> Result<bool, std::io::Error> {
+        let requested = regenerate == Some("1");
+        if requested && ci.is_some_and(|value| !value.trim().is_empty()) {
+            return Err(std::io::Error::other(
+                "O3K_REGENERATE_INVENTORY=1 is refused while CI is set; \
+                 regenerate locally, review the diff and commit the baseline",
+            ));
+        }
+        Ok(requested)
+    }
+
+    #[test]
+    fn regeneration_is_refused_in_ci() {
+        assert!(!matches!(regeneration_requested(None, None), Ok(true)));
+        assert!(matches!(regeneration_requested(Some("1"), None), Ok(true)));
+        assert!(!matches!(
+            regeneration_requested(Some("0"), Some("true")),
+            Ok(true)
+        ));
+        for ci in ["true", "1", "gitlab"] {
+            assert!(
+                regeneration_requested(Some("1"), Some(ci)).is_err(),
+                "CI={ci} must refuse regeneration"
+            );
+        }
+        assert!(matches!(
+            regeneration_requested(Some("1"), Some("  ")),
+            Ok(true)
+        ));
     }
 
     /// Mirrors `validate_inventory`, `valid_objects`, `valid_ids` and

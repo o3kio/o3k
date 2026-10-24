@@ -12,9 +12,33 @@
 //! *installed* manifest by the installer and the upgrade engine from the
 //! digest they actually verified. Manifests that predate that persistence
 //! fail closed here instead of falling back to a fabricated digest.
+//!
+//! # Trust-boundary posture (SPEC-0050 §8)
+//!
+//! Every reader goes through [`read_installed_release_manifest`]: a bounded
+//! (≤ 1 MiB) read through an `O_NOFOLLOW` descriptor whose own metadata must be
+//! a regular file owned by root or the effective uid and not group/other-
+//! writable, inside a directory with the same owner and write posture. A root
+//! process resolves the canonical `/usr/local` prefix and ignores
+//! `O3K_INSTALL_PREFIX`; the override is honored only for a non-root caller
+//! (see `backup_trust::install_prefix`).
 
 use serde_json::Value;
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{self, Read},
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::Path,
+};
+
+use rustix::{
+    fs::{Mode, OFlags, open},
+    process::geteuid,
+};
+
+/// Bound for the installed release manifest. It is a small JSON identity, so
+/// the trust-boundary reader never buffers more than this.
+const MAX_RELEASE_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 /// Product profiles accepted by the backup artifact contract.
 pub const SUPPORTED_PROFILE_IDS: [&str; 2] = ["o3k-demo-v1", "o3k-small-edge-v1"];
@@ -100,11 +124,102 @@ impl BackupReleaseIdentity {
 ///
 /// `prefix` is the installation prefix (`/usr/local` by default); the manifest
 /// lives at `<prefix>/share/o3k/release-manifest.json`.
+///
+/// The manifest is installation trust data, so it is read with the same
+/// posture as the trust document (SPEC-0050 §8):
+///
+/// * bounded read (≤ 1 MiB) through a descriptor opened `O_NOFOLLOW`;
+/// * the descriptor's own metadata must be a regular file owned by root or the
+///   effective uid and not group/other-writable;
+/// * the containing directory must be a real directory owned by root or the
+///   effective uid and not group/other-writable.
+///
+/// The release manifest is installed `0644`, so group/other *read* is allowed;
+/// only write permission is refused. A root process resolves the canonical
+/// prefix (see `backup_trust::install_prefix`), so the caller cannot redirect
+/// it.
 pub fn backup_release_identity(prefix: &Path) -> Result<BackupReleaseIdentity, String> {
-    let manifest = prefix.join("share/o3k/release-manifest.json");
-    let bytes = std::fs::read(&manifest)
-        .map_err(|error| format!("cannot read {}: {error}", manifest.display()))?;
+    let bytes = read_installed_release_manifest(prefix)?;
     BackupReleaseIdentity::from_manifest_bytes(&bytes)
+}
+
+/// Reads the installed release manifest with the trust-boundary posture.
+///
+/// Every reader of `<prefix>/share/o3k/release-manifest.json` goes through this
+/// function so no caller can reintroduce a path-following or unbounded read.
+pub fn read_installed_release_manifest(prefix: &Path) -> Result<Vec<u8>, String> {
+    let manifest = prefix.join("share/o3k/release-manifest.json");
+    read_trusted_manifest(&manifest)
+        .map_err(|error| format!("cannot read {}: {error}", manifest.display()))
+}
+
+/// Bounded, no-follow read of the installed release manifest.
+fn read_trusted_manifest(path: &Path) -> io::Result<Vec<u8>> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let parent_metadata = std::fs::metadata(parent)?;
+    if !parent_metadata.is_dir() || !trusted_owner(parent_metadata.uid()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "release manifest directory is not trusted",
+        ));
+    }
+    if parent_metadata.permissions().mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "release manifest directory is writable by untrusted users",
+        ));
+    }
+    let descriptor = open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::LOOP {
+            io::Error::new(io::ErrorKind::InvalidInput, "release manifest is a symlink")
+        } else {
+            io::Error::from(error)
+        }
+    })?;
+    let mut file = File::from(descriptor);
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || !trusted_owner(metadata.uid()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "release manifest is not a trusted regular file",
+        ));
+    }
+    if metadata.permissions().mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "release manifest is writable by untrusted users",
+        ));
+    }
+    if metadata.len() > MAX_RELEASE_MANIFEST_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "release manifest exceeds the size bound",
+        ));
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(MAX_RELEASE_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_RELEASE_MANIFEST_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "release manifest exceeds the size bound",
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Root, or the effective uid, owns installation metadata.
+fn trusted_owner(uid: u32) -> bool {
+    uid == 0 || uid == geteuid().as_raw()
 }
 
 /// Adds the verified release-tarball digest to a bundle manifest before it is
@@ -186,6 +301,20 @@ mod tests {
         std::env::temp_dir().join(format!("o3k-release-identity-{}", Uuid::now_v7()))
     }
 
+    /// A private install prefix whose directory chain passes the trust-boundary
+    /// posture (0700, effective-uid owned). `/tmp` itself is sticky but not
+    /// group/other-writable after the mode check on the direct parent.
+    fn private_prefix() -> PathBuf {
+        let prefix = temp_prefix();
+        let share = prefix.join("share/o3k");
+        std::fs::create_dir_all(&share).unwrap();
+        std::fs::set_permissions(&prefix, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(prefix.join("share"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(&share, std::fs::Permissions::from_mode(0o700)).unwrap();
+        prefix
+    }
+
     #[test]
     fn parses_a_complete_manifest() {
         let digest = "a".repeat(64);
@@ -258,18 +387,50 @@ mod tests {
 
     #[test]
     fn reads_the_installed_manifest_from_the_prefix() {
-        let prefix = temp_prefix();
+        let prefix = private_prefix();
         let share = prefix.join("share/o3k");
-        std::fs::create_dir_all(&share).unwrap();
         let digest = "c".repeat(64);
-        std::fs::write(
-            share.join("release-manifest.json"),
-            manifest(Some(&digest), "o3k-small-edge-v1"),
-        )
-        .unwrap();
+        let path = share.join("release-manifest.json");
+        std::fs::write(&path, manifest(Some(&digest), "o3k-small-edge-v1")).unwrap();
+        // The installer writes the manifest 0644; the ambient test umask is
+        // not part of the contract.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let identity = backup_release_identity(&prefix).expect("installed manifest parses");
         assert_eq!(identity.release_artifact_sha256, digest);
         assert_eq!(identity.profile_id, "o3k-small-edge-v1");
+        std::fs::remove_dir_all(&prefix).unwrap();
+    }
+
+    #[test]
+    fn release_manifest_read_fails_closed_on_unsafe_entries() {
+        let prefix = private_prefix();
+        let share = prefix.join("share/o3k");
+        let path = share.join("release-manifest.json");
+        let digest = "c".repeat(64);
+        std::fs::write(&path, manifest(Some(&digest), "o3k-demo-v1")).unwrap();
+
+        // Symlink substitution of the final component.
+        let link = share.join("linked-manifest.json");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        std::fs::rename(&path, share.join("real-manifest.json")).unwrap();
+        std::os::unix::fs::symlink(share.join("real-manifest.json"), &path).unwrap();
+        assert!(backup_release_identity(&prefix).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::fs::rename(share.join("real-manifest.json"), &path).unwrap();
+
+        // A group-writable manifest is installation metadata an untrusted
+        // user could redirect.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        assert!(backup_release_identity(&prefix).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        backup_release_identity(&prefix).expect("0644 is the installed posture");
+
+        // Oversized input is bounded before parsing.
+        let oversized = vec![b' '; (MAX_RELEASE_MANIFEST_BYTES + 1) as usize];
+        std::fs::write(&path, &oversized).unwrap();
+        assert!(backup_release_identity(&prefix).is_err());
+
         std::fs::remove_dir_all(&prefix).unwrap();
     }
 

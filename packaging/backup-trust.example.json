@@ -1,0 +1,29 @@
+{
+  "format": "o3k-backup-trust-v1",
+  "site_id": "REPLACE-WITH-CANONICAL-SITE-ID",
+  "installation_id": "REPLACE-WITH-CANONICAL-INSTALLATION-ID",
+  "profile_id": "o3k-demo-v1",
+  "artifact_signing": {
+    "key_id": "signing-1",
+    "ed25519_public_key": "REPLACE-WITH-64-LOWERCASE-HEX-ED25519-PUBLIC-KEY"
+  },
+  "recipient": {
+    "key_id": "recovery-1",
+    "x25519_private_key_file": "/etc/o3k/custody/recipient.key",
+    "x25519_public_key": "REPLACE-WITH-64-LOWERCASE-HEX-X25519-PUBLIC-KEY"
+  },
+  "revoked_key_ids": [],
+  "custody": {
+    "record_id": "custody-1",
+    "purpose": "artifact-signing",
+    "key_fingerprint": "REPLACE-WITH-SHA256-OF-THE-ED25519-PUBLIC-KEY",
+    "threshold": "2-of-3",
+    "custodians": [
+      "custodian-a",
+      "custodian-b",
+      "custodian-c"
+    ],
+    "storage_class": "offline-safe",
+    "expires_at": "2035-01-01T00:00:00Z"
+  }
+}

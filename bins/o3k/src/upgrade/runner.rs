@@ -78,7 +78,13 @@ impl SystemUpgradeIo {
     /// Resolves the sandboxable paths from the process environment.
     #[must_use]
     pub fn from_env() -> Self {
-        let prefix = env_path("O3K_UPGRADE_PREFIX").unwrap_or_else(|| PathBuf::from("/usr/local"));
+        // Root ignores O3K_UPGRADE_PREFIX and resolves the canonical install
+        // location, so a privileged upgrade cannot be redirected by its caller.
+        let prefix = if crate::backup_trust::environment_overrides_allowed() {
+            env_path("O3K_UPGRADE_PREFIX").unwrap_or_else(|| PathBuf::from("/usr/local"))
+        } else {
+            PathBuf::from("/usr/local")
+        };
         let data_dir = crate::upgrade::state::default_data_dir();
         Self {
             bin_dir: env_path("O3K_UPGRADE_BIN_DIR").unwrap_or_else(|| prefix.join("bin")),
@@ -1226,10 +1232,12 @@ impl UpgradeIo for SystemUpgradeIo {
     }
 
     async fn read_installed_manifest(&self) -> Result<InstalledRelease, String> {
-        let manifest = self.share_dir().join("release-manifest.json");
-        let contents = std::fs::read_to_string(&manifest)
-            .map_err(|error| format!("cannot read {}: {error}", manifest.display()))?;
-        let value: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
+        // Installation metadata uses the same bounded, no-follow posture as the
+        // backup release identity (SPEC-0050 §8): never follow a substituted
+        // manifest path or read an unbounded file.
+        let contents =
+            crate::upgrade::release_identity::read_installed_release_manifest(&self.prefix)?;
+        let value: serde_json::Value = serde_json::from_slice(&contents).map_err(|error| {
             format!("the installed release manifest is not valid JSON: {error}")
         })?;
         let version = value

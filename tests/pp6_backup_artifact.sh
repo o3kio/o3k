@@ -61,13 +61,26 @@ O3KD_BIN_SHA256="$(sha256sum "$O3KD_BIN" | cut -d' ' -f1)"
 # ---------------------------------------------------------------------------
 BACKUP_SIGNING_KEY="$WORK/backup-signing-key.pem"
 BACKUP_FOREIGN_KEY="$WORK/backup-foreign-signing-key.pem"
+BACKUP_RECIPIENT_PEM="$WORK/backup-recipient.pem"
+BACKUP_SWAPPED_RECIPIENT_PEM="$WORK/backup-swapped-recipient.pem"
 BACKUP_RECIPIENT_KEY="$WORK/backup-recipient.key"
+SWAPPED_RECIPIENT_KEY="$WORK/backup-swapped-recipient.key"
 openssl genpkey -algorithm ED25519 -out "$BACKUP_SIGNING_KEY" 2>/dev/null
 openssl genpkey -algorithm ED25519 -out "$BACKUP_FOREIGN_KEY" 2>/dev/null
 chmod 0600 "$BACKUP_SIGNING_KEY" "$BACKUP_FOREIGN_KEY"
-# 32 raw bytes: the trust loader derives the X25519 public key from this file.
-openssl rand -out "$BACKUP_RECIPIENT_KEY" 32
-chmod 0600 "$BACKUP_RECIPIENT_KEY"
+# X25519 keypairs: the raw 32-byte private half feeds the trust document, and
+# the public half is the fingerprint the custodian compares in the request.
+openssl genpkey -algorithm X25519 -out "$BACKUP_RECIPIENT_PEM" 2>/dev/null
+openssl genpkey -algorithm X25519 -out "$BACKUP_SWAPPED_RECIPIENT_PEM" 2>/dev/null
+chmod 0600 "$BACKUP_RECIPIENT_PEM" "$BACKUP_SWAPPED_RECIPIENT_PEM"
+openssl pkey -in "$BACKUP_RECIPIENT_PEM" -outform DER 2>/dev/null | tail -c 32 >"$BACKUP_RECIPIENT_KEY"
+openssl pkey -in "$BACKUP_SWAPPED_RECIPIENT_PEM" -outform DER 2>/dev/null | tail -c 32 >"$SWAPPED_RECIPIENT_KEY"
+chmod 0600 "$BACKUP_RECIPIENT_KEY" "$SWAPPED_RECIPIENT_KEY"
+BACKUP_RECIPIENT_PUBLIC_HEX="$(openssl pkey -in "$BACKUP_RECIPIENT_PEM" -pubout -outform DER 2>/dev/null | tail -c 32 | xxd -p -c 64)"
+SWAPPED_RECIPIENT_PUBLIC_HEX="$(openssl pkey -in "$BACKUP_SWAPPED_RECIPIENT_PEM" -pubout -outform DER 2>/dev/null | tail -c 32 | xxd -p -c 64)"
+recipient_fingerprint() { printf '%s' "$1" | xxd -r -p | sha256sum | cut -d' ' -f1; }
+BACKUP_RECIPIENT_FP="$(recipient_fingerprint "$BACKUP_RECIPIENT_PUBLIC_HEX")"
+SWAPPED_RECIPIENT_FP="$(recipient_fingerprint "$SWAPPED_RECIPIENT_PUBLIC_HEX")"
 BACKUP_SIGNING_PUBLIC_HEX="$(openssl pkey -in "$BACKUP_SIGNING_KEY" -pubout -outform DER 2>/dev/null | tail -c 32 | xxd -p -c 64)"
 # PKCS#8 DER for Ed25519 is 302e...0420 || seed; the last 32 bytes are the seed.
 BACKUP_SIGNING_SEED_HEX="$(openssl pkey -in "$BACKUP_SIGNING_KEY" -outform DER 2>/dev/null | tail -c 32 | xxd -p -c 64)"
@@ -279,8 +292,10 @@ new_op_id() { python3 -c 'import uuid; print(uuid.uuid4())'; }
 # ---------------------------------------------------------------------------
 # Trust document / installed release manifest fixtures
 # ---------------------------------------------------------------------------
-write_config() { # write_config <key> <data-dir> [normal|revoked|foreign-identity|alt-release]
+write_config() { # write_config <key> <data-dir> [normal|revoked|foreign-identity|alt-release|swapped-recipient] [recipient-key] [recipient-public-hex]
     local key="$1" data_dir="$2" mode="${3:-normal}"
+    local recipient="${4:-$BACKUP_RECIPIENT_KEY}"
+    local recipient_public="${5:-$BACKUP_RECIPIENT_PUBLIC_HEX}"
     local dir="$WORK/cfg-$key-$mode" site installation
     mkdir -p "$dir/install/share/o3k"
     chmod 0700 "$dir" "$dir/install" "$dir/install/share" "$dir/install/share/o3k"
@@ -296,11 +311,11 @@ write_config() { # write_config <key> <data-dir> [normal|revoked|foreign-identit
     local source_commit="0123456789abcdef0123456789abcdef01234567"
     [[ "$mode" == "alt-release" ]] && source_commit="fedcba9876543210fedcba9876543210fedcba98"
     python3 - "$dir/backup-trust.json" "$dir/install/share/o3k/release-manifest.json" \
-        "$site" "$installation" "$BACKUP_SIGNING_PUBLIC_HEX" "$BACKUP_RECIPIENT_KEY" \
-        "$revoked" "$source_commit" "$SCHEMA_VERSION" <<'PY'
+        "$site" "$installation" "$BACKUP_SIGNING_PUBLIC_HEX" "$recipient" \
+        "$recipient_public" "$revoked" "$source_commit" "$SCHEMA_VERSION" <<'PY'
 import hashlib, json, sys
 (trust_path, manifest_path, site, installation, public, recipient,
- revoked, source_commit, schema) = sys.argv[1:10]
+ recipient_public, revoked, source_commit, schema) = sys.argv[1:11]
 public_bytes = bytes.fromhex(public)
 trust = {
     "format": "o3k-backup-trust-v1",
@@ -308,7 +323,11 @@ trust = {
     "installation_id": installation,
     "profile_id": "o3k-demo-v1",
     "artifact_signing": {"key_id": "signing-1", "ed25519_public_key": public},
-    "recipient": {"key_id": "recovery-1", "x25519_private_key_file": recipient},
+    "recipient": {
+        "key_id": "recovery-1",
+        "x25519_private_key_file": recipient,
+        "x25519_public_key": recipient_public,
+    },
     "revoked_key_ids": ["signing-1"] if revoked == "true" else [],
     "custody": {
         "record_id": "custody-1",
@@ -368,6 +387,62 @@ backup_exit() { cat "$WORK/$1.backup.exit"; }
 backup_status() { json_get "$WORK/$1.backup.json" status; }
 backup_reason() { json_get "$WORK/$1.backup.json" reason; }
 backup_stderr() { cat "$WORK/$1.backup.stderr"; }
+backup_pid() { cat "$WORK/$1.backup.pid"; }
+
+# Option A: the capture process holds the store lock and the denial marker
+# while it waits for the detached signature, so every flow that needs a
+# signature runs `backup create` in the background and the harness acts as the
+# offline custodian while it waits.
+start_backup() { # start_backup <case-id> <data-dir> <dest-dir> <operation-id> [env KEY=VALUE ...]
+    local case_id="$1" data_dir="$2" dest_dir="$3" op="$4"; shift 4
+    (
+        set +e
+        env O3K_DATA_DIR="$data_dir" \
+            O3K_BACKUP_TRUST_CONFIG="$CASE_TRUST" \
+            O3K_INSTALL_PREFIX="$CASE_PREFIX" \
+            "$@" \
+            "$O3K_BIN" backup create --destination "$dest_dir" --operation-id "$op" \
+            >"$WORK/$case_id.backup.json" 2>"$WORK/$case_id.backup.stderr"
+        echo $? >"$WORK/$case_id.backup.exit"
+    ) &
+    echo $! >"$WORK/$case_id.backup.pid"
+}
+
+wait_backup() { # wait_backup <case-id> [timeout-seconds]
+    local case_id="$1" deadline=$((SECONDS + ${2:-90})) pid
+    pid="$(backup_pid "$case_id")"
+    while (( SECONDS < deadline )); do
+        if [[ -f "$WORK/$case_id.backup.exit" ]]; then
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+            sleep 0.05
+            if [[ -f "$WORK/$case_id.backup.exit" ]]; then
+                wait "$pid" 2>/dev/null || true
+                return 0
+            fi
+            return 1
+        fi
+        sleep 0.05
+    done
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    return 1
+}
+
+await_signing_request() { # await_signing_request <dest-dir> <operation-id> [timeout-seconds]
+    wait_for_file "$1/.o3k-backup-artifact-$2/signing-request.json" "${3:-60}"
+}
+
+await_awaiting_signature_line() { # await_awaiting_signature_line <case-id> [timeout-seconds]
+    local case_id="$1" deadline=$((SECONDS + ${2:-60}))
+    while (( SECONDS < deadline )); do
+        grep -qF "o3k backup create: awaiting-signature" "$WORK/$case_id.backup.stderr" 2>/dev/null && return 0
+        sleep 0.05
+    done
+    return 1
+}
 
 run_verify() { # run_verify <case-id> <data-dir> <trust-config> <install-prefix> <artifact>
     local case_id="$1" data_dir="$2" trust="$3" prefix="$4" artifact="$5"
@@ -388,8 +463,11 @@ verify_reason() { json_get "$WORK/$1.verify.json" reason; }
 # Offline signing (the harness is the custodian)
 # ---------------------------------------------------------------------------
 decode_signing_input() { # decode_signing_input <staging-dir> -> $WORK/sign-input.bin $WORK/sign-meta.json
-    local staging="$1"
-    python3 - "$staging/signing-request.json" "$WORK/sign-input.bin" "$WORK/sign-meta.json" <<'PY'
+    local staging="$1" attempt
+    # The executor creates the request before writing it, so poll until it
+    # parses instead of failing on a partially written file.
+    for attempt in $(seq 1 100); do
+        if python3 - "$staging/signing-request.json" "$WORK/sign-input.bin" "$WORK/sign-meta.json" <<'PY'
 import base64, hashlib, json, sys
 request_path, input_path, meta_path = sys.argv[1:4]
 raw = open(request_path, "rb").read()
@@ -402,9 +480,18 @@ with open(meta_path, "w") as handle:
     json.dump({
         "request_sha256": hashlib.sha256(raw).hexdigest(),
         "key_id": request["key_id"],
+        "created_at": request["created_at"],
         "expires_at": request["expires_at"],
+        "recipient_public_key_sha256": request["recipient_public_key_sha256"],
     }, handle)
 PY
+        then
+            return 0
+        fi
+        sleep 0.05
+    done
+    log "  signing request never parsed"
+    return 1
 }
 
 sign_bytes() { # sign_bytes <key> <input> <signature-out>
@@ -440,7 +527,9 @@ response = {
     "request_sha256": request_sha,
     "key_id": key_id,
     "signature": signature.hex(),
-    "signed_at": "2026-10-24T12:30:00Z",
+    # The response must be clock-consistent with the request: sign exactly at
+    # the request's creation time (the inclusive lower bound).
+    "signed_at": meta["created_at"],
 }
 with open(response_path, "w") as handle:
     json.dump(response, handle)
@@ -498,27 +587,6 @@ print(manifest["store"]["schema_version"])
 PY
 }
 
-assert_phase_one_contract() { # assert_phase_one_contract <case> <dest> <op> <data>
-    local case_id="$1" dest="$2" op="$3" data_dir="$4"
-    python3 - "$WORK/$case_id.backup.json" "$op" "$dest" "$data_dir" <<'PY'
-import json, os, sys
-payload = json.load(open(sys.argv[1]))
-operation_id, dest, data_dir = sys.argv[2:5]
-assert payload["status"] == "signing-required", payload
-assert payload["operation_id"] == operation_id, payload
-assert payload["expires_at"], payload
-assert int(payload["artifact_size_bytes"]) > 0, payload
-assert int(payload["source_bytes"]) > 0, payload
-request = os.path.join(dest, f".o3k-backup-artifact-{operation_id}", "signing-request.json")
-assert os.path.isfile(request), request
-assert not os.path.exists(os.path.join(dest, f"backup-{operation_id}.o3k")), "phase 1 must not publish"
-assert not os.path.exists(os.path.join(data_dir, f".o3k-backup-in-progress-{operation_id}")), "marker must be removed"
-journal = json.load(open(os.path.join(data_dir, "backup-operations", f"{operation_id}.json")))
-assert journal["phase"] == "staged", journal
-assert journal["request_sha256"], journal
-PY
-}
-
 settle_checkpoint() { # settle_checkpoint <data-dir>
     # The executor holds the exclusive store lock at the barrier; no process is
     # writing. Applying the remaining WAL frames here makes the measured main
@@ -535,7 +603,7 @@ snapshot_tree() { # snapshot_tree <data-dir> <out>
 }
 
 echo
-echo "== Case 1: happy path (capture -> offline sign -> publish -> verify -> tamper) =="
+echo "== Case 1: happy path (capture -> wait for signature -> publish -> verify -> tamper) =="
 fresh_case_dirs happy
 HAPPY_DATA="$CASE_DATA"; HAPPY_DEST="$CASE_DEST"
 HAPPY_TRUST="$CASE_TRUST"; HAPPY_PREFIX="$CASE_PREFIX"
@@ -549,10 +617,10 @@ if ! wait_ready happy 30; then
 fi
 
 # Barrier: the executor holds the store lock but has not opened the store yet.
-run_backup happy "$CASE_DATA" "$CASE_DEST" "$HAPPY_OP" \
+start_backup happy "$CASE_DATA" "$CASE_DEST" "$HAPPY_OP" \
     O3K_BACKUP_TEST_BARRIER_READY_FILE="$HAPPY_READY" \
-    O3K_BACKUP_TEST_BARRIER_WAIT_FILE="$HAPPY_GO" &
-HAPPY_BPID=$!
+    O3K_BACKUP_TEST_BARRIER_WAIT_FILE="$HAPPY_GO"
+HAPPY_BPID="$(backup_pid happy)"
 if ! wait_for_file "$HAPPY_READY" 30; then
     record FAIL case-1 "executor barrier did not become ready"
     exit 1
@@ -562,52 +630,38 @@ HAPPY_BEFORE_DB_SHA="$(sha256_file_or_missing "$CASE_DATA/o3k.sqlite")"
 HAPPY_TRUST_BYTES="$(stat -c %s "$CASE_TRUST")"
 HAPPY_MANIFEST_BYTES="$(stat -c %s "$CASE_PREFIX/share/o3k/release-manifest.json")"
 HAPPY_DB_BYTES="$(stat -c %s "$CASE_DATA/o3k.sqlite")"
-HAPPY_EXPECTED_SOURCE=$((HAPPY_DB_BYTES + HAPPY_TRUST_BYTES + HAPPY_MANIFEST_BYTES))
+HAPPY_WAL_BYTES=0
+[[ -f "$CASE_DATA/o3k.sqlite-wal" ]] && HAPPY_WAL_BYTES="$(stat -c %s "$CASE_DATA/o3k.sqlite-wal")"
+# D9 source = checkpointed main DB + a non-empty -wal sidecar + the two
+# metadata members + the bounded capture/request metadata allowance.
+HAPPY_EXPECTED_SOURCE=$((HAPPY_DB_BYTES + HAPPY_TRUST_BYTES + HAPPY_MANIFEST_BYTES + 2 * 1024 * 1024))
 snapshot_tree "$CASE_DATA" "$WORK/happy-before-tree.txt"
 touch "$HAPPY_GO"
-set +e
-wait "$HAPPY_BPID"
-set -e
-HAPPY_DAEMON_PID="$(daemon_pid happy)"
-reap_exit "$HAPPY_DAEMON_PID" 30 || true
 
+STAGING="$CASE_DEST/.o3k-backup-artifact-$HAPPY_OP"
 C1_OK=1; CHECK_OK=1
-check "$(backup_exit happy)" "3" "phase 1 exit"
-check "$(backup_status happy)" "signing-required" "phase 1 status"
-check "$(journal_phase "$CASE_DATA" "$HAPPY_OP")" "staged" "journal phase after phase 1"
-check "$(marker_count "$CASE_DATA")" "0" "marker count after phase 1"
-check "$(is_published "$CASE_DEST" "$HAPPY_OP")" "no" "phase 1 publication"
-check "$(lock_owner "$CASE_DATA")" "free" "lock owner after phase 1"
-if ! assert_phase_one_contract happy "$CASE_DEST" "$HAPPY_OP" "$CASE_DATA" 2>"$WORK/case-1.assert"; then
-    CHECK_OK=0; log "  phase-1 contract: $(cat "$WORK/case-1.assert")"
+if ! await_signing_request "$CASE_DEST" "$HAPPY_OP" 90; then
+    CHECK_OK=0; log "  signing request never appeared"
 fi
+# Option A exclusion: while this process waits for the signature it still owns
+# the store lock and the denial marker, and nothing is published.
+check "$(journal_phase "$CASE_DATA" "$HAPPY_OP")" "staged" "journal phase during the wait"
+check "$(marker_count "$CASE_DATA")" "1" "marker present during the wait"
+check "$(lock_owner "$CASE_DATA")" "held" "store lock held during the wait"
+check "$(is_published "$CASE_DEST" "$HAPPY_OP")" "no" "nothing published during the wait"
+await_awaiting_signature_line happy 30 || { CHECK_OK=0; log "  missing stable awaiting-signature stderr line"; }
+C1_REQUEST_FP="$(json_get "$STAGING/signing-request.json" recipient_public_key_sha256)"
+check "$C1_REQUEST_FP" "$BACKUP_RECIPIENT_FP" "signing request recipient public-key fingerprint"
 (( CHECK_OK )) || C1_OK=0
 if (( C1_OK )); then
-    record PASS case-1a "3" "staged" "0" "free" "no" "-" "phase 1 staged the artifact and exited 3 signing-required; nothing published"
+    record PASS case-1a "wait" "staged" "1" "held" "no" "-" \
+        "capture staged; the same process held the store lock and the denial marker while waiting for the detached signature (awaiting-signature line emitted)"
 else
-    record FAIL case-1a "3?" "staged?" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "?" "-" "phase-1 contract failed"
+    record FAIL case-1a "wait?" "staged?" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "?" "-" "Option A wait contract failed"
 fi
 
-# D9 reservation (case 10) is computed from this same fixture.
-C10_OK=1; CHECK_OK=1
-PHASE1_SOURCE_BYTES="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_bytes"])' "$WORK/happy.backup.json")"
-PHASE1_RESERVED_BYTES="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["reserved_bytes"])' "$WORK/happy.backup.json")"
-EXPECTED_R="$(python3 -c "s=$HAPPY_EXPECTED_SOURCE; print(max(2*s + 1024**3, 6*1024**3))")"
-check "$PHASE1_SOURCE_BYTES" "$HAPPY_EXPECTED_SOURCE" "D9 source_bytes measurement"
-check "$PHASE1_RESERVED_BYTES" "$EXPECTED_R" "D9 reservation formula"
-if (( PHASE1_RESERVED_BYTES > 9 * 1024 * 1024 * 1024 )); then CHECK_OK=0; log "  D9 reservation exceeds the 9 GiB cap"; fi
-(( CHECK_OK )) || C10_OK=0
-if (( C10_OK )); then
-    record PASS case-10 "3" "staged" "0" "free" "no" "-" \
-        "D9: source_bytes=$PHASE1_SOURCE_BYTES reserved_bytes=$PHASE1_RESERVED_BYTES = max(2S+1GiB,6GiB), no truncation"
-else
-    record FAIL case-10 "3" "staged" "0" "free" "no" "-" \
-        "D9 mismatch: source=$PHASE1_SOURCE_BYTES reserved=$PHASE1_RESERVED_BYTES expected_S=$HAPPY_EXPECTED_SOURCE expected_R=$EXPECTED_R"
-fi
-
-# Permissions (case 8) while staging exists.
+# Permissions (case 8 part 1) while staging exists.
 C8_OK=1; CHECK_OK=1
-STAGING="$CASE_DEST/.o3k-backup-artifact-$HAPPY_OP"
 check "$(stat -c %a "$STAGING")" "700" "staging directory mode"
 while read -r mode path; do
     [[ "$mode" == "600" ]] || { CHECK_OK=0; log "  staged file mode $mode: $path"; }
@@ -617,23 +671,44 @@ check "$(stat -c %a "$BACKUP_SIGNING_KEY")" "600" "signing key mode"
 check "$(stat -c %a "$BACKUP_RECIPIENT_KEY")" "600" "recipient key mode"
 (( CHECK_OK )) || C8_OK=0
 
-# Phase 2: the offline custodian signs, then the exact same command runs.
+# The offline custodian signs; the waiting process verifies and publishes.
 sign_request "$STAGING" || C1_OK=0
-run_backup happy-complete "$CASE_DATA" "$CASE_DEST" "$HAPPY_OP"
-C1_PHASE2_EXIT="$(backup_exit happy-complete)"
-check "$C1_PHASE2_EXIT" "0" "phase 2 exit"
-check "$(backup_status happy-complete)" "backup-published" "phase 2 status"
-check "$(journal_phase "$CASE_DATA" "$HAPPY_OP")" "published" "journal phase after phase 2"
+wait_backup happy 90 || { C1_OK=0; log "  executor did not finish the signing wait"; }
+HAPPY_DAEMON_PID="$(daemon_pid happy)"
+reap_exit "$HAPPY_DAEMON_PID" 30 || true
+
+CHECK_OK=1
+check "$(backup_exit happy)" "0" "phase-1 publication exit"
+check "$(backup_status happy)" "backup-published" "phase-1 publication status"
+check "$(journal_phase "$CASE_DATA" "$HAPPY_OP")" "published" "journal phase after publication"
+check "$(marker_count "$CASE_DATA")" "0" "marker removed after publication"
 check "$(is_published "$CASE_DEST" "$HAPPY_OP")" "yes" "artifact published"
-check "$(lock_owner "$CASE_DATA")" "free" "lock owner after phase 2"
+check "$(lock_owner "$CASE_DATA")" "free" "lock released after publication"
 [[ ! -e "$STAGING" ]] || { CHECK_OK=0; log "  staging still present after publication"; }
 (( CHECK_OK )) || C1_OK=0
 
+# D9 reservation (case 10) from the same run.
+C10_OK=1; CHECK_OK=1
+PHASE1_SOURCE_BYTES="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_bytes"])' "$WORK/happy.backup.json")"
+PHASE1_RESERVED_BYTES="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["reserved_bytes"])' "$WORK/happy.backup.json")"
+EXPECTED_R="$(python3 -c "s=$HAPPY_EXPECTED_SOURCE; print(max(2*s + 1024**3, 6*1024**3))")"
+check "$PHASE1_SOURCE_BYTES" "$HAPPY_EXPECTED_SOURCE" "D9 source_bytes measurement"
+check "$PHASE1_RESERVED_BYTES" "$EXPECTED_R" "D9 reservation formula"
+if (( PHASE1_RESERVED_BYTES > 9 * 1024 * 1024 * 1024 )); then CHECK_OK=0; log "  D9 reservation exceeds the 9 GiB cap"; fi
+(( CHECK_OK )) || C10_OK=0
+if (( C10_OK )); then
+    record PASS case-10 "0" "published" "0" "free" "yes" "-" \
+        "D9: source_bytes=$PHASE1_SOURCE_BYTES (db + wal($HAPPY_WAL_BYTES) + trust + manifest + 2 MiB metadata bound) reserved_bytes=$PHASE1_RESERVED_BYTES = max(2S+1GiB,6GiB), no truncation"
+else
+    record FAIL case-10 "0" "published" "0" "free" "yes" "-" \
+        "D9 mismatch: source=$PHASE1_SOURCE_BYTES reserved=$PHASE1_RESERVED_BYTES expected_S=$HAPPY_EXPECTED_SOURCE expected_R=$EXPECTED_R"
+fi
+
 HAPPY_ARTIFACT="$(published_path "$CASE_DEST" "$HAPPY_OP")"
 HAPPY_ARTIFACT_SHA="$(artifact_sha "$CASE_DEST" "$HAPPY_OP")"
-PHASE2_SHA="$(json_get "$WORK/happy-complete.backup.json" sha256)"
-check "$PHASE2_SHA" "$HAPPY_ARTIFACT_SHA" "phase-2 JSON digest equals artifact digest"
-[[ "$(json_get "$WORK/happy-complete.backup.json" signature)" == "verified" ]] || { CHECK_OK=0; log "  phase-2 signature not verified"; }
+PHASE1_SHA_JSON="$(json_get "$WORK/happy.backup.json" sha256)"
+check "$PHASE1_SHA_JSON" "$HAPPY_ARTIFACT_SHA" "published JSON digest equals artifact digest"
+[[ "$(json_get "$WORK/happy.backup.json" signature)" == "verified" ]] || { CHECK_OK=0; log "  signature not reported verified"; }
 
 run_verify case-1 "$CASE_DATA" "$CASE_TRUST" "$CASE_PREFIX" "$HAPPY_ARTIFACT"
 check "$(verify_exit case-1)" "0" "verify exit"
@@ -647,16 +722,13 @@ check "$MANIFEST_SCHEMA_VERSION" "$SCHEMA_VERSION" "manifest schema version"
 check_nonempty "$SQLITE_VERSION" "manifest sqlite_version"
 (( CHECK_OK )) || C1_OK=0
 if (( C1_OK )); then
-    record PASS case-1b "$C1_PHASE2_EXIT" "published" "0" "free" "yes" "verified(exit=0)" \
-        "offline detached signature verified; published $HAPPY_ARTIFACT_SHA; verify exit 0 release_match"
+    record PASS case-1b "$(backup_exit happy)" "published" "0" "free" "yes" "verified(exit=0)" \
+        "offline detached signature verified in the waiting process; published $HAPPY_ARTIFACT_SHA; verify exit 0 release_match"
 else
-    record FAIL case-1b "$C1_PHASE2_EXIT" "$(journal_phase "$CASE_DATA" "$HAPPY_OP")" \
+    record FAIL case-1b "$(backup_exit happy 2>/dev/null || echo '?')" "$(journal_phase "$CASE_DATA" "$HAPPY_OP")" \
         "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$HAPPY_OP")" \
-        "verify_exit=$(verify_exit case-1 2>/dev/null || echo '?')" "phase-2/verify contract failed"
+        "verify_exit=$(verify_exit case-1 2>/dev/null || echo '?')" "publication/verify contract failed"
 fi
-
-# Tamper: flip the last ciphertext byte of a copy; the signature covers the
-# manifest (unchanged), so the member GCM tag is the failing boundary.
 TAMPERED="$WORK/happy-tampered.o3k"
 cp "$HAPPY_ARTIFACT" "$TAMPERED"
 chmod 0600 "$TAMPERED"
@@ -682,37 +754,72 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Case 2: idempotent phase-1 re-run without a response
+# Case 2: crash during the signing wait -> replay resumes without recapture
 # ---------------------------------------------------------------------------
 echo
-echo "== Case 2: idempotent phase-1 re-run =="
+echo "== Case 2: crash during the signing wait =="
 fresh_case_dirs idem
 IDEM_OP="$(new_op_id)"
 start_daemon idem "$CASE_DATA"
 if wait_ready idem 30; then
-    run_backup idem "$CASE_DATA" "$CASE_DEST" "$IDEM_OP"
-    IDEM_JOURNAL_BEFORE="$(journal_sha256 "$CASE_DATA" "$IDEM_OP")"
-    IDEM_MEMBERS_BEFORE="$(find "$CASE_DEST/.o3k-backup-artifact-$IDEM_OP" -maxdepth 1 -name 'members-*' | wc -l)"
-    IDEM_ARTIFACT_BEFORE="$(sha256sum "$CASE_DEST/.o3k-backup-artifact-$IDEM_OP"/members-*/artifact.unsigned | cut -d' ' -f1)"
-    run_backup idem-rerun "$CASE_DATA" "$CASE_DEST" "$IDEM_OP"
-    CHECK_OK=1
-    check "$(backup_exit idem)" "3" "first phase-1 exit"
-    check "$(backup_exit idem-rerun)" "3" "re-run exit"
-    check "$(backup_status idem-rerun)" "signing-required" "re-run status"
-    check "$(journal_sha256 "$CASE_DATA" "$IDEM_OP")" "$IDEM_JOURNAL_BEFORE" "journal unchanged by re-run"
-    check "$(find "$CASE_DEST/.o3k-backup-artifact-$IDEM_OP" -maxdepth 1 -name 'members-*' | wc -l)" "$IDEM_MEMBERS_BEFORE" "no duplicate capture"
-    check "$(sha256sum "$CASE_DEST/.o3k-backup-artifact-$IDEM_OP"/members-*/artifact.unsigned | cut -d' ' -f1)" \
-        "$IDEM_ARTIFACT_BEFORE" "same staged artifact digest"
-    check "$(is_published "$CASE_DEST" "$IDEM_OP")" "no" "nothing published"
-    check "$(lock_owner "$CASE_DATA")" "free" "lock owner"
+    # Hook 91 dies inside the wait, with the lock and marker held: exactly the
+    # state a SIGKILL during the signing window leaves.
+    start_backup idem "$CASE_DATA" "$CASE_DEST" "$IDEM_OP" O3K_BACKUP_TEST_EXIT_AWAITING_SIGNATURE=1
+    IDEM_STAGING="$CASE_DEST/.o3k-backup-artifact-$IDEM_OP"
+    await_signing_request "$CASE_DEST" "$IDEM_OP" 60 || true
+    wait_backup idem 60 || true
     reap_exit "$(daemon_pid idem)" 30 || true
-    if (( CHECK_OK )); then
-        record PASS case-2 "$(backup_exit idem-rerun)" "staged" "0" "free" "no" "-" \
-            "second phase-1 run returned signing-required with an unchanged journal and no re-capture"
+    IDEM_JOURNAL_BEFORE="$(journal_sha256 "$CASE_DATA" "$IDEM_OP")"
+    IDEM_MEMBERS_BEFORE="$(find "$IDEM_STAGING" -maxdepth 1 -name 'members-*' | wc -l)"
+    IDEM_ARTIFACT_BEFORE="$(sha256sum "$IDEM_STAGING"/members-*/artifact.unsigned | cut -d' ' -f1)"
+    IDEM_REQUEST_BEFORE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["request_sha256"])' "$CASE_DATA/backup-operations/$IDEM_OP.json")"
+    CHECK_OK=1
+    check "$(backup_exit idem)" "91" "hook exit"
+    check "$(journal_phase "$CASE_DATA" "$IDEM_OP")" "staged" "journal survives the crash"
+    check "$(marker_count "$CASE_DATA")" "1" "marker retained by the crash"
+    check "$(lock_owner "$CASE_DATA")" "free" "kernel released the lock when the process died"
+    check "$(is_published "$CASE_DEST" "$IDEM_OP")" "no" "nothing published"
+    # A replacement controller must be DENIED while the marker exists.
+    set +e
+    env O3K_BOOTSTRAP_PASSWORD="$BOOTSTRAP_PASSWORD" O3K_TOKEN_SIGNING_KEY="$TOKEN_SIGNING_KEY" \
+        O3K_NATIVE_CURSOR_HMAC_KEY="$NATIVE_CURSOR_KEY" \
+        timeout 30 "$O3KD_BIN" --listen-addr "127.0.0.1:$(free_port)" --data-dir "$CASE_DATA" \
+        --log-filter info --log-format json >"$WORK/case-2-restart.log" 2>&1
+    IDEM_RESTART_STATUS=$?
+    set -e
+    check "$IDEM_RESTART_STATUS" "1" "restart after crash-during-wait refused"
+    grep -q 'interrupted backup marker(s) present' "$WORK/case-2-restart.log" || { CHECK_OK=0; log "  restart did not report the interrupted marker"; }
+    check "$(marker_count "$CASE_DATA")" "1" "marker still denies after the refused restart"
+    # The re-run resumes the wait; the custodian signs while it waits.
+    start_backup idem-resume "$CASE_DATA" "$CASE_DEST" "$IDEM_OP"
+    await_signing_request "$CASE_DEST" "$IDEM_OP" 60 || CHECK_OK=0
+    check "$(lock_owner "$CASE_DATA")" "held" "re-run holds the store lock while waiting"
+    sign_request "$IDEM_STAGING" || CHECK_OK=0
+    wait_backup idem-resume 90 || CHECK_OK=0
+    check "$(backup_exit idem-resume)" "0" "resume exit"
+    check "$(journal_phase "$CASE_DATA" "$IDEM_OP")" "published" "journal after resume"
+    check "$(marker_count "$CASE_DATA")" "0" "marker removed after publication"
+    check "$(is_published "$CASE_DEST" "$IDEM_OP")" "yes" "artifact published by the resume"
+    check "$(find "$IDEM_STAGING" -maxdepth 1 -name 'members-*' 2>/dev/null | wc -l)" "0" "staging removed"
+    # No recapture: the same request digest and the same staged artifact were
+    # used (the artifact.unsigned digest is compared before publication).
+    check "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["request_sha256"])' "$CASE_DATA/backup-operations/$IDEM_OP.json")" \
+        "$IDEM_REQUEST_BEFORE" "journal request digest preserved (no recapture)"
+    check "$IDEM_MEMBERS_BEFORE" "1" "single capture before the crash"
+    (( CHECK_OK )) || IDEM_FAIL=1
+    start_daemon idem-after "$CASE_DATA"
+    if wait_ready idem-after 30; then
+        sigterm_expect_zero idem-after || CHECK_OK=0
     else
-        record FAIL case-2 "$(backup_exit idem-rerun)" "$(journal_phase "$CASE_DATA" "$IDEM_OP")" \
-            "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$IDEM_OP")" "-" \
-            "idempotent re-run contract failed"
+        CHECK_OK=0; log "  controller could not start after publication"
+    fi
+    if (( CHECK_OK )); then
+        record PASS case-2 "$(backup_exit idem)" "published" "0" "free" "yes" "published(exit=0)" \
+            "crash during the wait (hook 91) left the marker and the staged journal; the replacement controller was DENIED, the same command resumed the wait and published without recapture, then the controller started and exited 0 on SIGTERM"
+    else
+        record FAIL case-2 "$(backup_exit idem 2>/dev/null || echo '?')" "$(journal_phase "$CASE_DATA" "$IDEM_OP")" \
+            "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$IDEM_OP")" \
+            "-" "crash-during-wait resume contract failed"
     fi
 else
     record FAIL case-2 "-" "-" "-" "-" "-" "-" "daemon not ready"
@@ -745,8 +852,9 @@ fi
 # ---------------------------------------------------------------------------
 echo
 echo "== Case 4: signature rejection matrix =="
-reject_case() { # reject_case <suffix> <mutation> <expected-exit> <expected-reason>
+reject_case() { # reject_case <suffix> <mutation> <expected-exit> <expected-reason> [kept|aborted]
     local suffix="$1" mutation="$2" expected_exit="$3" expected_reason="$4"
+    local staging_expectation="${5:-kept}"
     local key="sig-$suffix"
     fresh_case_dirs "$key"
     local op; op="$(new_op_id)"
@@ -755,55 +863,89 @@ reject_case() { # reject_case <suffix> <mutation> <expected-exit> <expected-reas
         record FAIL "case-4$suffix" "-" "-" "-" "-" "-" "-" "daemon not ready"
         return
     fi
-    run_backup "$key" "$CASE_DATA" "$CASE_DEST" "$op"
+    # The rejection is observed by the waiting process itself (Option A).
+    if [[ "$mutation" == "expired-request" ]]; then
+        start_backup "$key" "$CASE_DATA" "$CASE_DEST" "$op" O3K_BACKUP_TEST_AWAIT_TIMEOUT_SECONDS=1
+    else
+        start_backup "$key" "$CASE_DATA" "$CASE_DEST" "$op"
+    fi
     local staging="$CASE_DEST/.o3k-backup-artifact-$op"
     local mutation_ok=1
-    case "$mutation" in
-        wrong-signature)
-            decode_signing_input "$staging"
-            sign_bytes "$BACKUP_FOREIGN_KEY" "$WORK/sign-input.bin" "$WORK/sign-input.sig"
-            write_response_file "$staging" "$WORK/sign-input.sig" "$WORK/sign-meta.json"
-            ;;
-        wrong-key-id)
-            sign_request "$staging"
-            mutate_response "$staging" 'response["key_id"] = "signing-2"'
-            ;;
-        short-signature)
-            sign_request "$staging"
-            mutate_response "$staging" 'response["signature"] = response["signature"][:32]'
-            ;;
-        request-digest)
-            sign_request "$staging"
-            mutate_response "$staging" 'response["request_sha256"] = "e" * 64'
-            ;;
-        expired-request)
-            expire_signing_request "$staging" "$CASE_DATA" "$op"
-            sign_request "$staging"
-            ;;
-        *) mutation_ok=0 ;;
-    esac
+    await_signing_request "$CASE_DEST" "$op" 90 || { mutation_ok=0; log "  signing request never appeared"; }
     if (( mutation_ok )); then
-        run_backup "$key-complete" "$CASE_DATA" "$CASE_DEST" "$op"
+        case "$mutation" in
+            wrong-signature)
+                decode_signing_input "$staging"
+                sign_bytes "$BACKUP_FOREIGN_KEY" "$WORK/sign-input.bin" "$WORK/sign-input.sig"
+                write_response_file "$staging" "$WORK/sign-input.sig" "$WORK/sign-meta.json"
+                ;;
+            wrong-key-id)
+                # Build the mutated response out of tree and move it in
+                # atomically: the executor polls for the file, so it must never
+                # observe the valid response between the two writes.
+                mkdir -p "$WORK/response-staging"
+                decode_signing_input "$staging"
+                sign_bytes "$BACKUP_SIGNING_KEY" "$WORK/sign-input.bin" "$WORK/sign-input.sig"
+                write_response_file "$WORK/response-staging" "$WORK/sign-input.sig" "$WORK/sign-meta.json"
+                mutate_response "$WORK/response-staging" 'response["key_id"] = "signing-2"'
+                mv "$WORK/response-staging/signing-response.json" "$staging/signing-response.json"
+                ;;
+            short-signature)
+                mkdir -p "$WORK/response-staging"
+                decode_signing_input "$staging"
+                sign_bytes "$BACKUP_SIGNING_KEY" "$WORK/sign-input.bin" "$WORK/sign-input.sig"
+                write_response_file "$WORK/response-staging" "$WORK/sign-input.sig" "$WORK/sign-meta.json"
+                mutate_response "$WORK/response-staging" 'response["signature"] = response["signature"][:32]'
+                mv "$WORK/response-staging/signing-response.json" "$staging/signing-response.json"
+                ;;
+            request-digest)
+                mkdir -p "$WORK/response-staging"
+                decode_signing_input "$staging"
+                sign_bytes "$BACKUP_SIGNING_KEY" "$WORK/sign-input.bin" "$WORK/sign-input.sig"
+                write_response_file "$WORK/response-staging" "$WORK/sign-input.sig" "$WORK/sign-meta.json"
+                mutate_response "$WORK/response-staging" 'response["request_sha256"] = "e" * 64'
+                mv "$WORK/response-staging/signing-response.json" "$staging/signing-response.json"
+                ;;
+            expired-request)
+                # No response: the bounded wait expires and the executor must
+                # perform the safe abort.
+                ;;
+            *) mutation_ok=0 ;;
+        esac
+    fi
+    wait_backup "$key" 90 || { mutation_ok=0; log "  executor did not return"; }
+    reap_exit "$(daemon_pid "$key")" 30 || true
+    if (( mutation_ok )); then
         CHECK_OK=1
-        check "$(backup_exit "$key")" "3" "phase 1 exit"
-        check "$(backup_exit "$key-complete")" "$expected_exit" "rejection exit"
-        check "$(backup_reason "$key-complete")" "$expected_reason" "rejection reason"
+        check "$(backup_exit "$key")" "$expected_exit" "rejection exit"
+        check "$(backup_reason "$key")" "$expected_reason" "rejection reason"
         check "$(is_published "$CASE_DEST" "$op")" "no" "nothing published"
-        check "$(journal_phase "$CASE_DATA" "$op")" "staged" "journal remains staged"
-        [[ -d "$staging" ]] || { CHECK_OK=0; log "  staging removed on rejection"; }
-        check "$(marker_count "$CASE_DATA")" "0" "marker absent"
+        if [[ "$staging_expectation" == "aborted" ]]; then
+            check "$(journal_phase "$CASE_DATA" "$op")" "aborted" "journal aborted by the safe abort"
+            [[ ! -e "$staging" ]] || { CHECK_OK=0; log "  staging retained after the safe abort"; }
+            check "$(marker_count "$CASE_DATA")" "0" "marker removed by the safe abort"
+        else
+            check "$(journal_phase "$CASE_DATA" "$op")" "staged" "journal remains staged"
+            [[ -d "$staging" ]] || { CHECK_OK=0; log "  staging removed on rejection"; }
+            check "$(marker_count "$CASE_DATA")" "1" "marker retained while publication is pending"
+        fi
         check "$(lock_owner "$CASE_DATA")" "free" "lock owner"
     else
         CHECK_OK=0
     fi
-    reap_exit "$(daemon_pid "$key")" 30 || true
     if (( CHECK_OK )); then
-        record PASS "case-4$suffix" "$(backup_exit "$key-complete" 2>/dev/null || echo '?')" "staged" "0" "free" "no" \
-            "$expected_reason(exit=$expected_exit)" "$mutation rejected; staging preserved, nothing published"
+        local staging_detail="staging preserved, marker retained"
+        [[ "$staging_expectation" == "aborted" ]] && staging_detail="safe abort removed staging and marker"
+        local journal_phase_now
+        journal_phase_now="$(journal_phase "$CASE_DATA" "$op")"
+        local marker_now
+        marker_now="$(marker_count "$CASE_DATA")"
+        record PASS "case-4$suffix" "$(backup_exit "$key" 2>/dev/null || echo '?')" "$journal_phase_now" "$marker_now" "free" "no" \
+            "$expected_reason(exit=$expected_exit)" "$mutation rejected; $staging_detail, nothing published"
     else
-        record FAIL "case-4$suffix" "$(backup_exit "$key-complete" 2>/dev/null || echo '?')" \
+        record FAIL "case-4$suffix" "$(backup_exit "$key" 2>/dev/null || echo '?')" \
             "$(journal_phase "$CASE_DATA" "$op")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
-            "$(is_published "$CASE_DEST" "$op")" "$(backup_reason "$key-complete" 2>/dev/null || echo '?')" \
+            "$(is_published "$CASE_DEST" "$op")" "$(backup_reason "$key" 2>/dev/null || echo '?')" \
             "$mutation rejection failed"
     fi
 }
@@ -811,7 +953,185 @@ reject_case a wrong-signature 2 signature-invalid
 reject_case b wrong-key-id 2 signing-response-mismatch
 reject_case c short-signature 2 signing-response-invalid
 reject_case d request-digest 2 signing-response-mismatch
-reject_case e expired-request 3 signing-request-expired
+reject_case e expired-request 3 signing-request-expired aborted
+
+# ---------------------------------------------------------------------------
+# Case 14 (security review F1): a forged `publishing` journal must never
+# authorise publication. The journal points at arbitrary unsigned bytes whose
+# digest matches the record; the replay must still verify the signed artifact
+# from scratch and refuse.
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 14: forged publishing journal cannot publish unsigned bytes =="
+fresh_case_dirs forged-publishing
+C14_OP="$(new_op_id)"
+start_daemon forged-publishing "$CASE_DATA"
+if wait_ready forged-publishing 30; then
+    start_backup forged-publishing "$CASE_DATA" "$CASE_DEST" "$C14_OP" O3K_BACKUP_TEST_EXIT_AWAITING_SIGNATURE=1
+    await_signing_request "$CASE_DEST" "$C14_OP" 60 || true
+    wait_backup forged-publishing 60 || true
+    reap_exit "$(daemon_pid forged-publishing)" 30 || true
+    C14_STAGING="$CASE_DEST/.o3k-backup-artifact-$C14_OP"
+    C14_MEMBERS="$(find "$C14_STAGING" -mindepth 1 -maxdepth 1 -type d -name 'members-*' | head -1)"
+    if [[ -n "$C14_MEMBERS" && -f "$C14_MEMBERS/artifact.unsigned" ]]; then
+        mv "$C14_MEMBERS/artifact.unsigned" "$C14_MEMBERS/artifact.partial"
+    fi
+    C14_SHA="$(sha256sum "$C14_MEMBERS/artifact.partial" 2>/dev/null | cut -d' ' -f1)"
+    python3 - "$CASE_DATA/backup-operations/$C14_OP.json" "$C14_SHA" <<'PY'
+import json, sys
+path, digest = sys.argv[1:3]
+journal = json.load(open(path))
+journal["phase"] = "publishing"
+journal["artifact_sha256"] = digest
+json.dump(journal, open(path, "w"))
+PY
+    run_backup forged-publishing-replay "$CASE_DATA" "$CASE_DEST" "$C14_OP"
+    CHECK_OK=1
+    check "$(backup_exit forged-publishing-replay)" "2" "forged replay exit"
+    check "$(backup_reason forged-publishing-replay)" "staged-artifact-invalid" "forged replay reason"
+    check "$(is_published "$CASE_DEST" "$C14_OP")" "no" "forged replay published nothing"
+    check "$(journal_phase "$CASE_DATA" "$C14_OP")" "publishing" "journal remains publishing"
+    if (( CHECK_OK )); then
+        record PASS case-14 "$(backup_exit forged-publishing-replay)" "publishing" "$(marker_count "$CASE_DATA")" "free" "no" \
+            "staged-artifact-invalid(exit=2)" \
+            "forged publishing journal with matching digest of unsigned bytes was re-verified and rejected; nothing published"
+    else
+        record FAIL case-14 "$(backup_exit forged-publishing-replay 2>/dev/null || echo '?')" \
+            "$(journal_phase "$CASE_DATA" "$C14_OP")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
+            "$(is_published "$CASE_DEST" "$C14_OP")" "$(backup_reason forged-publishing-replay 2>/dev/null || echo '?')" \
+            "forged publishing replay was not rejected"
+    fi
+else
+    record FAIL case-14 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 15 (security review F3): journal backup_id path traversal
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 15: forged journal backup_id cannot escape the destination =="
+fresh_case_dirs forged-journal
+C15_OP="$(new_op_id)"
+start_daemon forged-journal "$CASE_DATA"
+if wait_ready forged-journal 30; then
+    start_backup forged-journal "$CASE_DATA" "$CASE_DEST" "$C15_OP" O3K_BACKUP_TEST_EXIT_AWAITING_SIGNATURE=1
+    await_signing_request "$CASE_DEST" "$C15_OP" 60 || true
+    wait_backup forged-journal 60 || true
+    reap_exit "$(daemon_pid forged-journal)" 30 || true
+    python3 - "$CASE_DATA/backup-operations/$C15_OP.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+journal = json.load(open(path))
+journal["backup_id"] = "x/../../escaped"
+json.dump(journal, open(path, "w"))
+PY
+    run_backup forged-journal-retry "$CASE_DATA" "$CASE_DEST" "$C15_OP"
+    CHECK_OK=1
+    check "$(backup_exit forged-journal-retry)" "2" "forged journal exit"
+    check "$(backup_reason forged-journal-retry)" "backup-operation-journal-invalid" "forged journal reason"
+    check "$(is_published "$CASE_DEST" "$C15_OP")" "no" "forged journal published nothing"
+    check "$(find "$WORK" -maxdepth 3 -name '*escaped*' | wc -l)" "0" "no escaped path was created"
+    if (( CHECK_OK )); then
+        record PASS case-15 "$(backup_exit forged-journal-retry)" "staged" "$(marker_count "$CASE_DATA")" "free" "no" \
+            "backup-operation-journal-invalid(exit=2)" \
+            "backup_id=x/../../escaped is rejected by the journal identifier grammar; nothing written outside the destination"
+    else
+        record FAIL case-15 "$(backup_exit forged-journal-retry 2>/dev/null || echo '?')" \
+            "$(journal_phase "$CASE_DATA" "$C15_OP")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
+            "$(is_published "$CASE_DEST" "$C15_OP")" "$(backup_reason forged-journal-retry 2>/dev/null || echo '?')" \
+            "forged backup_id traversal was not rejected"
+    fi
+else
+    record FAIL case-15 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 16 (security review F4): a symlinked staged artifact is never published
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 16: symlinked staged artifact is rejected =="
+fresh_case_dirs symlink-staged
+C16_OP="$(new_op_id)"
+start_daemon symlink-staged "$CASE_DATA"
+if wait_ready symlink-staged 30; then
+    start_backup symlink-staged "$CASE_DATA" "$CASE_DEST" "$C16_OP" O3K_BACKUP_TEST_EXIT_AWAITING_SIGNATURE=1
+    await_signing_request "$CASE_DEST" "$C16_OP" 60 || true
+    wait_backup symlink-staged 60 || true
+    reap_exit "$(daemon_pid symlink-staged)" 30 || true
+    C16_STAGING="$CASE_DEST/.o3k-backup-artifact-$C16_OP"
+    C16_MEMBERS="$(find "$C16_STAGING" -mindepth 1 -maxdepth 1 -type d -name 'members-*' | head -1)"
+    ln -s "$C16_MEMBERS/artifact.unsigned" "$C16_MEMBERS/artifact.partial"
+    run_backup symlink-staged-replay "$CASE_DATA" "$CASE_DEST" "$C16_OP"
+    CHECK_OK=1
+    check "$(backup_exit symlink-staged-replay)" "2" "symlinked staging exit"
+    check "$(backup_reason symlink-staged-replay)" "staged-artifact-invalid" "symlinked staging reason"
+    check "$(is_published "$CASE_DEST" "$C16_OP")" "no" "symlinked staging published nothing"
+    [[ -L "$C16_MEMBERS/artifact.partial" ]] || { CHECK_OK=0; log "  symlink fixture was altered"; }
+    if (( CHECK_OK )); then
+        record PASS case-16 "$(backup_exit symlink-staged-replay)" "staged" "$(marker_count "$CASE_DATA")" "free" "no" \
+            "staged-artifact-invalid(exit=2)" \
+            "O_NOFOLLOW/fstat rejects a symlinked artifact.partial even when its target content matches; nothing published"
+    else
+        record FAIL case-16 "$(backup_exit symlink-staged-replay 2>/dev/null || echo '?')" \
+            "$(journal_phase "$CASE_DATA" "$C16_OP")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
+            "$(is_published "$CASE_DEST" "$C16_OP")" "$(backup_reason symlink-staged-replay 2>/dev/null || echo '?')" \
+            "symlinked staged artifact was not rejected"
+    fi
+else
+    record FAIL case-16 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 17 (security review F7/F8/F17b): recipient substitution is visible in
+# the signing request and rejected by phase 2 and the verifier.
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 17: recipient key substitution =="
+fresh_case_dirs recipient-substitution
+C17_OP="$(new_op_id)"
+start_daemon recipient-substitution "$CASE_DATA"
+if wait_ready recipient-substitution 30; then
+    start_backup recipient-substitution "$CASE_DATA" "$CASE_DEST" "$C17_OP" O3K_BACKUP_TEST_EXIT_AWAITING_SIGNATURE=1
+    await_signing_request "$CASE_DEST" "$C17_OP" 60 || true
+    wait_backup recipient-substitution 60 || true
+    reap_exit "$(daemon_pid recipient-substitution)" 30 || true
+    C17_STAGING="$CASE_DEST/.o3k-backup-artifact-$C17_OP"
+    C17_REQUEST_FP="$(json_get "$C17_STAGING/signing-request.json" recipient_public_key_sha256)"
+    C17_TRUST="$CASE_TRUST"; C17_PREFIX="$CASE_PREFIX"
+    SWAPPED_TRUST="$(write_config recipient-substitution "$CASE_DATA" swapped-recipient "$SWAPPED_RECIPIENT_KEY" "$SWAPPED_RECIPIENT_PUBLIC_HEX")"
+    SWAPPED_PREFIX="$WORK/cfg-recipient-substitution-swapped-recipient/install"
+    CASE_TRUST="$SWAPPED_TRUST"; CASE_PREFIX="$SWAPPED_PREFIX"
+    run_backup recipient-substitution-swapped "$CASE_DATA" "$CASE_DEST" "$C17_OP"
+    CASE_TRUST="$C17_TRUST"; CASE_PREFIX="$C17_PREFIX"
+    CHECK_OK=1
+    check_nonempty "$C17_REQUEST_FP" "request recipient fingerprint"
+    check "$C17_REQUEST_FP" "$BACKUP_RECIPIENT_FP" "request exposes the configured recipient fingerprint"
+    check "$(backup_exit recipient-substitution-swapped)" "2" "swapped recipient phase-2 exit"
+    check "$(backup_reason recipient-substitution-swapped)" "signing-request-mismatch" "swapped recipient phase-2 reason"
+    check "$(is_published "$CASE_DEST" "$C17_OP")" "no" "swapped recipient published nothing"
+    check "$(marker_count "$CASE_DATA")" "1" "marker retained while publication is pending"
+    sign_request "$C17_STAGING" || CHECK_OK=0
+    start_backup recipient-substitution-complete "$CASE_DATA" "$CASE_DEST" "$C17_OP"
+    wait_backup recipient-substitution-complete 90 || CHECK_OK=0
+    check "$(backup_exit recipient-substitution-complete)" "0" "original recipient publishes"
+    check "$(marker_count "$CASE_DATA")" "0" "marker removed after publication"
+    run_verify recipient-substitution-swapped-verify "$CASE_DATA" "$SWAPPED_TRUST" "$SWAPPED_PREFIX" \
+        "$(published_path "$CASE_DEST" "$C17_OP")"
+    check "$(verify_exit recipient-substitution-swapped-verify)" "2" "swapped recipient verify exit"
+    check "$(verify_reason recipient-substitution-swapped-verify)" "recipient-key-mismatch" "swapped recipient verify reason"
+    if (( CHECK_OK )); then
+        record PASS case-17 "$(backup_exit recipient-substitution-swapped)" "published" "0" "free" \
+            "yes" "recipient-key-mismatch(exit=2)" \
+            "request exposes recipient fingerprint $C17_REQUEST_FP; swapped recipient trust document is rejected by phase 2 and by verify, original recipient publishes and verifies"
+    else
+        record FAIL case-17 "$(backup_exit recipient-substitution-swapped 2>/dev/null || echo '?')" \
+            "$(journal_phase "$CASE_DATA" "$C17_OP")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
+            "$(is_published "$CASE_DEST" "$C17_OP")" "$(verify_reason recipient-substitution-swapped-verify 2>/dev/null || echo '?')" \
+            "recipient substitution was not detected (request fingerprint $C17_REQUEST_FP)"
+    fi
+else
+    record FAIL case-17 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
 
 # ---------------------------------------------------------------------------
 # Case 5: crash injection around the new journal phases
@@ -862,8 +1182,10 @@ if wait_ready crash-staged 30; then
     check "$(journal_phase "$CASE_DATA" "$C5B_OP")" "staged" "journal phase after crash"
     check "$(marker_count "$CASE_DATA")" "1" "marker retained by the injected crash"
     check "$(is_published "$CASE_DEST" "$C5B_OP")" "no" "nothing published before replay"
+    start_backup crash-staged-replay "$CASE_DATA" "$CASE_DEST" "$C5B_OP"
+    await_signing_request "$CASE_DEST" "$C5B_OP" 60 || CHECK_OK=0
     sign_request "$C5B_STAGING" || CHECK_OK=0
-    run_backup crash-staged-replay "$CASE_DATA" "$CASE_DEST" "$C5B_OP"
+    wait_backup crash-staged-replay 90 || CHECK_OK=0
     check "$(backup_exit crash-staged-replay)" "0" "replay exit"
     check "$(journal_phase "$CASE_DATA" "$C5B_OP")" "published" "journal after replay"
     check "$(is_published "$CASE_DEST" "$C5B_OP")" "yes" "artifact published by replay"
@@ -872,10 +1194,10 @@ if wait_ready crash-staged 30; then
     # the replay must not have captured again.
     check "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["request_sha256"])' "$CASE_DATA/backup-operations/$C5B_OP.json")" \
         "$C5B_REQUEST_BEFORE" "journal request digest preserved (no recapture)"
-    check "$(marker_count "$CASE_DATA")" "1" "marker still present (phase 2 never owns it)"
+    check "$(marker_count "$CASE_DATA")" "0" "marker removed by the replay after publication"
     if (( CHECK_OK )); then
-        record PASS case-5b "$(backup_exit crash-staged)" "published" "1" "free" "yes" "published(exit=0)" \
-            "crash after staged: replay published from the staged request without recapture; marker remains for operator follow-up"
+        record PASS case-5b "$(backup_exit crash-staged)" "published" "0" "free" "yes" "published(exit=0)" \
+            "crash after the staged journal: the replay resumed the signing wait, published from the staged request without recapture, and removed the marker"
     else
         record FAIL case-5b "$(backup_exit crash-staged)" "$(journal_phase "$CASE_DATA" "$C5B_OP")" \
             "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$C5B_OP")" \
@@ -890,13 +1212,15 @@ fresh_case_dirs crash-publishing
 C5C_OP="$(new_op_id)"
 start_daemon crash-publishing "$CASE_DATA"
 if wait_ready crash-publishing 30; then
-    run_backup crash-publishing "$CASE_DATA" "$CASE_DEST" "$C5C_OP"
+    start_backup crash-publishing-hook "$CASE_DATA" "$CASE_DEST" "$C5C_OP" O3K_BACKUP_TEST_EXIT_AFTER_JOURNAL_PUBLISHING=1
+    await_signing_request "$CASE_DEST" "$C5C_OP" 60 || true
     reap_exit "$(daemon_pid crash-publishing)" 30 || true
     sign_request "$CASE_DEST/.o3k-backup-artifact-$C5C_OP" || true
-    run_backup crash-publishing-hook "$CASE_DATA" "$CASE_DEST" "$C5C_OP" O3K_BACKUP_TEST_EXIT_AFTER_JOURNAL_PUBLISHING=1
+    wait_backup crash-publishing-hook 90 || true
     CHECK_OK=1
     check "$(backup_exit crash-publishing-hook)" "88" "hook exit"
     check "$(journal_phase "$CASE_DATA" "$C5C_OP")" "publishing" "journal phase after crash"
+    check "$(marker_count "$CASE_DATA")" "1" "marker retained across the publishing crash"
     check "$(is_published "$CASE_DEST" "$C5C_OP")" "no" "nothing published before replay"
     run_backup crash-publishing-replay "$CASE_DATA" "$CASE_DEST" "$C5C_OP"
     check "$(backup_exit crash-publishing-replay)" "0" "replay exit"
@@ -905,7 +1229,7 @@ if wait_ready crash-publishing 30; then
     check "$(find "$CASE_DEST" -maxdepth 1 -name "backup-$C5C_OP.o3k" | wc -l)" "1" "single artifact"
     if (( CHECK_OK )); then
         record PASS case-5c "$(backup_exit crash-publishing-hook)" "published" "0" "free" "yes" "published(exit=0)" \
-            "crash after publishing: replay observed the staged signed artifact and finished without a duplicate rename"
+            "crash after publishing: replay observed the staged signed artifact, finished publication without a duplicate rename, and removed the marker"
     else
         record FAIL case-5c "$(backup_exit crash-publishing-hook)" "$(journal_phase "$CASE_DATA" "$C5C_OP")" \
             "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$C5C_OP")" \
@@ -920,14 +1244,16 @@ fresh_case_dirs crash-postpublish
 C5D_OP="$(new_op_id)"
 start_daemon crash-postpublish "$CASE_DATA"
 if wait_ready crash-postpublish 30; then
-    run_backup crash-postpublish "$CASE_DATA" "$CASE_DEST" "$C5D_OP"
+    start_backup crash-postpublish-hook "$CASE_DATA" "$CASE_DEST" "$C5D_OP" O3K_BACKUP_TEST_EXIT_AFTER_PUBLICATION=1
+    await_signing_request "$CASE_DEST" "$C5D_OP" 60 || true
     reap_exit "$(daemon_pid crash-postpublish)" 30 || true
     sign_request "$CASE_DEST/.o3k-backup-artifact-$C5D_OP" || true
-    run_backup crash-postpublish-hook "$CASE_DATA" "$CASE_DEST" "$C5D_OP" O3K_BACKUP_TEST_EXIT_AFTER_PUBLICATION=1
+    wait_backup crash-postpublish-hook 90 || true
     CHECK_OK=1
     check "$(backup_exit crash-postpublish-hook)" "89" "hook exit"
     check "$(journal_phase "$CASE_DATA" "$C5D_OP")" "published" "journal phase after crash"
     check "$(is_published "$CASE_DEST" "$C5D_OP")" "yes" "artifact published before crash"
+    check "$(marker_count "$CASE_DATA")" "0" "marker removed before the post-publication crash"
     run_backup crash-postpublish-retry "$CASE_DATA" "$CASE_DEST" "$C5D_OP"
     check "$(backup_exit crash-postpublish-retry)" "2" "retry exit"
     check "$(backup_reason crash-postpublish-retry)" "operation-already-published" "retry reason"
@@ -944,6 +1270,45 @@ else
     record FAIL case-5d "-" "-" "-" "-" "-" "-" "daemon not ready"
 fi
 
+# 5e: crash after finalize (artifact.unsigned removed, artifact.partial written)
+# but before the journal `publishing` write. The retry lives in the `staged`
+# phase and must detect + fully re-verify the signed artifact.
+fresh_case_dirs crash-finalize
+C5E_OP="$(new_op_id)"
+start_daemon crash-finalize "$CASE_DATA"
+if wait_ready crash-finalize 30; then
+    start_backup crash-finalize-hook "$CASE_DATA" "$CASE_DEST" "$C5E_OP" O3K_BACKUP_TEST_EXIT_AFTER_FINALIZE=1
+    await_signing_request "$CASE_DEST" "$C5E_OP" 60 || true
+    reap_exit "$(daemon_pid crash-finalize)" 30 || true
+    C5E_STAGING="$CASE_DEST/.o3k-backup-artifact-$C5E_OP"
+    sign_request "$C5E_STAGING" || true
+    wait_backup crash-finalize-hook 90 || true
+    C5E_MEMBERS="$(find "$C5E_STAGING" -mindepth 1 -maxdepth 1 -type d -name 'members-*' | head -1)"
+    CHECK_OK=1
+    check "$(backup_exit crash-finalize-hook)" "90" "hook exit"
+    check "$(journal_phase "$CASE_DATA" "$C5E_OP")" "staged" "journal stays staged across the finalize window"
+    check "$(marker_count "$CASE_DATA")" "1" "marker retained across the finalize window"
+    check "$(is_published "$CASE_DEST" "$C5E_OP")" "no" "nothing published before the retry"
+    [[ ! -e "$C5E_MEMBERS/artifact.unsigned" ]] || { CHECK_OK=0; log "  unsigned artifact still present after finalize"; }
+    [[ -f "$C5E_MEMBERS/artifact.partial" ]] || { CHECK_OK=0; log "  signed artifact missing after finalize"; }
+    run_backup crash-finalize-replay "$CASE_DATA" "$CASE_DEST" "$C5E_OP"
+    check "$(backup_exit crash-finalize-replay)" "0" "replay exit"
+    check "$(journal_phase "$CASE_DATA" "$C5E_OP")" "published" "journal after replay"
+    check "$(is_published "$CASE_DEST" "$C5E_OP")" "yes" "artifact published by the staged recovery"
+    check "$(find "$CASE_DEST" -maxdepth 1 -name "backup-$C5E_OP.o3k" | wc -l)" "1" "single artifact"
+    if (( CHECK_OK )); then
+        record PASS case-5e "$(backup_exit crash-finalize-hook)" "published" "0" "free" "yes" "published(exit=0)" \
+            "crash between finalize and the publishing journal: the staged retry detected artifact.partial, re-verified it in full and published"
+    else
+        record FAIL case-5e "$(backup_exit crash-finalize-hook 2>/dev/null || echo '?')" \
+            "$(journal_phase "$CASE_DATA" "$C5E_OP")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
+            "$(is_published "$CASE_DEST" "$C5E_OP")" "$(backup_exit crash-finalize-replay 2>/dev/null || echo '?')" \
+            "finalize/journal crash-window recovery failed"
+    fi
+else
+    record FAIL case-5e "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
 # ---------------------------------------------------------------------------
 # Case 6: publication race with a pre-existing final artifact
 # ---------------------------------------------------------------------------
@@ -953,21 +1318,25 @@ fresh_case_dirs collision
 C6_OP="$(new_op_id)"
 start_daemon collision "$CASE_DATA"
 if wait_ready collision 30; then
-    run_backup collision "$CASE_DATA" "$CASE_DEST" "$C6_OP"
+    start_backup collision-complete "$CASE_DATA" "$CASE_DEST" "$C6_OP"
+    await_signing_request "$CASE_DEST" "$C6_OP" 60 || true
     reap_exit "$(daemon_pid collision)" 30 || true
-    sign_request "$CASE_DEST/.o3k-backup-artifact-$C6_OP" || true
+    # The collision appears while the executor is already waiting.
     printf 'pre-existing artifact\n' >"$CASE_DEST/backup-$C6_OP.o3k"
     chmod 0600 "$CASE_DEST/backup-$C6_OP.o3k"
-    run_backup collision-complete "$CASE_DATA" "$CASE_DEST" "$C6_OP"
+    sign_request "$CASE_DEST/.o3k-backup-artifact-$C6_OP" || true
+    wait_backup collision-complete 90 || true
     CHECK_OK=1
     check "$(backup_exit collision-complete)" "2" "collision exit"
     check "$(backup_reason collision-complete)" "artifact-destination-exists" "collision reason"
     check "$(cat "$CASE_DEST/backup-$C6_OP.o3k")" "pre-existing artifact" "pre-existing artifact untouched"
     [[ -d "$CASE_DEST/.o3k-backup-artifact-$C6_OP" ]] || { CHECK_OK=0; log "  staging removed on collision"; }
     check "$(journal_phase "$CASE_DATA" "$C6_OP")" "publishing" "journal preserves attempted publication"
+    check "$(marker_count "$CASE_DATA")" "1" "marker retained after the failed publication"
     rm -f "$CASE_DEST/backup-$C6_OP.o3k"
     run_backup collision-retry "$CASE_DATA" "$CASE_DEST" "$C6_OP"
     check "$(backup_exit collision-retry)" "0" "retry after clearing collision"
+    check "$(marker_count "$CASE_DATA")" "0" "marker removed by the successful retry"
     check "$(is_published "$CASE_DEST" "$C6_OP")" "yes" "artifact published after retry"
     run_verify collision-verify "$CASE_DATA" "$CASE_TRUST" "$CASE_PREFIX" "$(published_path "$CASE_DEST" "$C6_OP")"
     check "$(verify_exit collision-verify)" "0" "retry artifact verifies"
@@ -992,9 +1361,10 @@ fresh_case_dirs swap
 C7_OP="$(new_op_id)"
 start_daemon swap "$CASE_DATA"
 if wait_ready swap 30; then
-    run_backup swap "$CASE_DATA" "$CASE_DEST" "$C7_OP"
+    start_backup swap "$CASE_DATA" "$CASE_DEST" "$C7_OP" O3K_BACKUP_TEST_EXIT_AWAITING_SIGNATURE=1
+    await_signing_request "$CASE_DEST" "$C7_OP" 60 || true
+    wait_backup swap 60 || true
     reap_exit "$(daemon_pid swap)" 30 || true
-    sign_request "$CASE_DEST/.o3k-backup-artifact-$C7_OP" || true
     mv "$CASE_DEST" "$CASE_DEST.real"
     ln -s "$CASE_DEST.real" "$CASE_DEST"
     run_backup swap-complete "$CASE_DATA" "$CASE_DEST" "$C7_OP"
@@ -1005,12 +1375,14 @@ if wait_ready swap 30; then
     [[ -d "$CASE_DEST.real/.o3k-backup-artifact-$C7_OP" ]] || { CHECK_OK=0; log "  staging lost on swap rejection"; }
     rm -f "$CASE_DEST"
     mv "$CASE_DEST.real" "$CASE_DEST"
-    run_backup swap-retry "$CASE_DATA" "$CASE_DEST" "$C7_OP"
+    sign_request "$CASE_DEST/.o3k-backup-artifact-$C7_OP" || { CHECK_OK=0; log "  staging lost with the swap"; }
+    start_backup swap-retry "$CASE_DATA" "$CASE_DEST" "$C7_OP"
+    wait_backup swap-retry 90 || CHECK_OK=0
     check "$(backup_exit swap-retry)" "0" "retry after restoring the destination"
     check "$(is_published "$CASE_DEST" "$C7_OP")" "yes" "artifact published after restore"
     if (( CHECK_OK )); then
-        record PASS case-7 "$(backup_exit swap-complete)" "staged" "0" "free" "no" "destination-symlink(exit=2)" \
-            "destination replaced by a symlink before phase 2 fails closed (destination-symlink); nothing published outside; retry after restore succeeds"
+        record PASS case-7 "$(backup_exit swap-complete)" "published" "0" "free" "yes" "destination-symlink(exit=2)" \
+            "destination replaced by a symlink before the resumed publication fails closed (destination-symlink); nothing published outside; retry after restore published"
     else
         record FAIL case-7 "$(backup_exit swap-complete)" "$(journal_phase "$CASE_DATA" "$C7_OP")" \
             "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$C7_OP")" \
@@ -1084,42 +1456,316 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Case 11: replacement controller starts on a staged (non-terminal) journal
+# ---------------------------------------------------------------------------
+# Case 11: a replacement controller is DENIED during the Option A signing wait
 # ---------------------------------------------------------------------------
 echo
-echo "== Case 11: restart safety with a staged journal =="
+echo "== Case 11: restart safety during the signing wait =="
 fresh_case_dirs restart
 C11_OP="$(new_op_id)"
 start_daemon restart1 "$CASE_DATA"
 if wait_ready restart1 30; then
-    run_backup restart "$CASE_DATA" "$CASE_DEST" "$C11_OP"
+    # The executor keeps the store lock and the marker for the whole wait.
+    start_backup restart "$CASE_DATA" "$CASE_DEST" "$C11_OP"
+    await_signing_request "$CASE_DEST" "$C11_OP" 60 || true
     reap_exit "$(daemon_pid restart1)" 30 || true
     CHECK_OK=1
-    check "$(backup_exit restart)" "3" "phase 1 exit"
-    check "$(journal_phase "$CASE_DATA" "$C11_OP")" "staged" "journal staged before restart"
+    check "$(journal_phase "$CASE_DATA" "$C11_OP")" "staged" "journal staged during the wait"
+    check "$(marker_count "$CASE_DATA")" "1" "denial marker present during the wait"
+    check "$(lock_owner "$CASE_DATA")" "held" "store lock held during the wait"
+    # A replacement controller must be refused: the marker denies startup and
+    # the lock is still owned by the waiting executor.
+    set +e
+    env O3K_BOOTSTRAP_PASSWORD="$BOOTSTRAP_PASSWORD" O3K_TOKEN_SIGNING_KEY="$TOKEN_SIGNING_KEY" \
+        O3K_NATIVE_CURSOR_HMAC_KEY="$NATIVE_CURSOR_KEY" \
+        timeout 30 "$O3KD_BIN" --listen-addr "127.0.0.1:$(free_port)" --data-dir "$CASE_DATA" \
+        --log-filter info --log-format json >"$WORK/case-11-restart.log" 2>&1
+    C11_RESTART_STATUS=$?
+    set -e
+    check "$C11_RESTART_STATUS" "1" "restart during the wait refused"
+    if grep -qF 'o3kd listening' "$WORK/case-11-restart.log"; then CHECK_OK=0; log "  replacement controller served while a signature was pending"; fi
+    if ! grep -qE 'interrupted backup marker\(s\) present|O3K data-directory lifetime lock' "$WORK/case-11-restart.log"; then
+        CHECK_OK=0; log "  restart refusal reason missing: $(tail -3 "$WORK/case-11-restart.log")"
+    fi
+    # The custodian signs; the same process publishes and releases the marker.
+    sign_request "$CASE_DEST/.o3k-backup-artifact-$C11_OP" || CHECK_OK=0
+    wait_backup restart 90 || CHECK_OK=0
+    check "$(backup_exit restart)" "0" "publication exit"
+    check "$(is_published "$CASE_DEST" "$C11_OP")" "yes" "artifact published"
+    check "$(marker_count "$CASE_DATA")" "0" "marker removed after publication"
+    run_verify restart-verify "$CASE_DATA" "$CASE_TRUST" "$CASE_PREFIX" "$(published_path "$CASE_DEST" "$C11_OP")"
+    check "$(verify_exit restart-verify)" "0" "artifact verifies after publication"
+    # Only after verified publication may a replacement controller start.
     start_daemon restart2 "$CASE_DATA"
     if wait_ready restart2 30; then
-        wait_log restart2 "backup operation has not reached a terminal phase" 10 || { CHECK_OK=0; log "  daemon did not warn about the pending operation"; }
         sigterm_expect_zero restart2 || { CHECK_OK=0; log "  replacement daemon did not exit 0 on SIGTERM"; }
     else
-        CHECK_OK=0; log "  replacement daemon not ready"
+        CHECK_OK=0; log "  replacement daemon not ready after publication: $(tail -3 "$(daemon_log restart2)")"
     fi
-    sign_request "$CASE_DEST/.o3k-backup-artifact-$C11_OP" || CHECK_OK=0
-    run_backup restart-complete "$CASE_DATA" "$CASE_DEST" "$C11_OP"
-    check "$(backup_exit restart-complete)" "0" "phase 2 after restart"
-    check "$(is_published "$CASE_DEST" "$C11_OP")" "yes" "artifact published after restart"
-    run_verify restart-verify "$CASE_DATA" "$CASE_TRUST" "$CASE_PREFIX" "$(published_path "$CASE_DEST" "$C11_OP")"
-    check "$(verify_exit restart-verify)" "0" "artifact verifies after restart"
     if (( CHECK_OK )); then
         record PASS case-11 "$(backup_exit restart)" "published" "0" "free" "yes" "verified(exit=0)" \
-            "replacement o3kd started and reached ready with a staged journal (warn only), exited 0 on SIGTERM, and phase 2 still published"
+            "a replacement o3kd was DENIED during the signing wait (exit $C11_RESTART_STATUS; marker/lock), the waiting process published after the signature, and only then did a controller reach ready and exit 0 on SIGTERM"
     else
-        record FAIL case-11 "$(backup_exit restart)" "$(journal_phase "$CASE_DATA" "$C11_OP")" \
+        record FAIL case-11 "$(backup_exit restart 2>/dev/null || echo '?')" "$(journal_phase "$CASE_DATA" "$C11_OP")" \
             "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$C11_OP")" \
-            "$(verify_exit restart-verify 2>/dev/null || echo '?')" "restart-safety contract failed"
+            "$(verify_exit restart-verify 2>/dev/null || echo '?')" "restart-safety contract failed (restart status $C11_RESTART_STATUS)"
     fi
 else
     record FAIL case-11 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 18 (F37): a pre-existing symlink at the final name is a rejected
+# precondition (exit 2 artifact-destination-exists), never exit 4.
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 18: symlink at the final publication name =="
+fresh_case_dirs final-symlink
+C18_OP="$(new_op_id)"
+start_daemon final-symlink "$CASE_DATA"
+if wait_ready final-symlink 30; then
+    start_backup final-symlink "$CASE_DATA" "$CASE_DEST" "$C18_OP"
+    await_signing_request "$CASE_DEST" "$C18_OP" 60 || true
+    reap_exit "$(daemon_pid final-symlink)" 30 || true
+    ln -s "$WORK/outside-target" "$CASE_DEST/backup-$C18_OP.o3k"
+    sign_request "$CASE_DEST/.o3k-backup-artifact-$C18_OP" || true
+    wait_backup final-symlink 90 || true
+    CHECK_OK=1
+    check "$(backup_exit final-symlink)" "2" "symlinked final name exit"
+    check "$(backup_reason final-symlink)" "artifact-destination-exists" "symlinked final name reason"
+    [[ -L "$CASE_DEST/backup-$C18_OP.o3k" ]] || { CHECK_OK=0; log "  the pre-existing symlink was replaced or removed"; }
+    [[ ! -e "$WORK/outside-target" ]] || { CHECK_OK=0; log "  publication followed the symlink"; }
+    check "$(marker_count "$CASE_DATA")" "1" "marker retained while publication is pending"
+    # Clearing the entry lets the same request finish publication.
+    rm -f "$CASE_DEST/backup-$C18_OP.o3k"
+    run_backup final-symlink-retry "$CASE_DATA" "$CASE_DEST" "$C18_OP"
+    check "$(backup_exit final-symlink-retry)" "0" "retry after clearing the symlink"
+    check "$(marker_count "$CASE_DATA")" "0" "marker removed by the retry"
+    if (( CHECK_OK )); then
+        record PASS case-18 "$(backup_exit final-symlink)" "published" "0" "free" "yes" \
+            "artifact-destination-exists(exit=2)" \
+            "a symlink at the final name is a rejected precondition (exit 2, not an unknown outcome); the link is never followed or replaced; clearing it publishes on retry"
+    else
+        record FAIL case-18 "$(backup_exit final-symlink 2>/dev/null || echo '?')" \
+            "$(journal_phase "$CASE_DATA" "$C18_OP")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
+            "$(is_published "$CASE_DEST" "$C18_OP")" "$(backup_reason final-symlink 2>/dev/null || echo '?')" \
+            "final-name symlink classification failed"
+    fi
+else
+    record FAIL case-18 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 19 (M5): a stale empty artifact.partial from a failed finalize must not
+# wedge the retry.
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 19: stale artifact.partial =="
+fresh_case_dirs stale-partial
+C19_OP="$(new_op_id)"
+start_daemon stale-partial "$CASE_DATA"
+if wait_ready stale-partial 30; then
+    start_backup stale-partial "$CASE_DATA" "$CASE_DEST" "$C19_OP"
+    await_signing_request "$CASE_DEST" "$C19_OP" 60 || true
+    reap_exit "$(daemon_pid stale-partial)" 30 || true
+    C19_MEMBERS="$(find "$CASE_DEST/.o3k-backup-artifact-$C19_OP" -mindepth 1 -maxdepth 1 -type d -name 'members-*' | head -1)"
+    : >"$C19_MEMBERS/artifact.partial"
+    chmod 0600 "$C19_MEMBERS/artifact.partial"
+    sign_request "$CASE_DEST/.o3k-backup-artifact-$C19_OP" || true
+    wait_backup stale-partial 90 || true
+    CHECK_OK=1
+    check "$(backup_exit stale-partial)" "0" "publication over a stale partial"
+    check "$(is_published "$CASE_DEST" "$C19_OP")" "yes" "artifact published"
+    check "$(journal_phase "$CASE_DATA" "$C19_OP")" "published" "journal published"
+    check "$(find "$CASE_DEST" -maxdepth 1 -name "backup-$C19_OP.o3k" | wc -l)" "1" "exactly one artifact"
+    if (( CHECK_OK )); then
+        record PASS case-19 "$(backup_exit stale-partial)" "published" "0" "free" "yes" "published(exit=0)" \
+            "an empty stale artifact.partial left by an earlier failed finalize is replaced atomically (temp + rename) and the retry publishes"
+    else
+        record FAIL case-19 "$(backup_exit stale-partial 2>/dev/null || echo '?')" \
+            "$(journal_phase "$CASE_DATA" "$C19_OP")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
+            "$(is_published "$CASE_DEST" "$C19_OP")" "-" "stale-partial retry failed"
+    fi
+else
+    record FAIL case-19 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 20 (F2/P0-2): a crash after publication but before the `published`
+# journal write, with the staging tree already gone, is recovered from the
+# destination inode.
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 20: post-publication crash (staging gone) =="
+C20_OP="$HAPPY_OP"
+C20_ARTIFACT="$(published_path "$HAPPY_DEST" "$C20_OP")"
+C20_SHA="$(artifact_sha "$HAPPY_DEST" "$C20_OP")"
+CHECK_OK=1
+python3 - "$HAPPY_DATA/backup-operations/$C20_OP.json" "$C20_SHA" <<'PY'
+import json, sys
+path, digest = sys.argv[1:3]
+journal = json.load(open(path))
+journal["phase"] = "publishing"
+journal["artifact_sha256"] = digest
+json.dump(journal, open(path, "w"))
+PY
+printf '{"operation_id":"%s"}\n' "$C20_OP" >"$HAPPY_DATA/.o3k-backup-in-progress-$C20_OP"
+chmod 0600 "$HAPPY_DATA/.o3k-backup-in-progress-$C20_OP"
+[[ ! -e "$HAPPY_DEST/.o3k-backup-artifact-$C20_OP" ]] || { CHECK_OK=0; log "  staging unexpectedly present"; }
+CASE_DATA="$HAPPY_DATA"; CASE_DEST="$HAPPY_DEST"; CASE_TRUST="$HAPPY_TRUST"; CASE_PREFIX="$HAPPY_PREFIX"
+run_backup post-rename-replay "$HAPPY_DATA" "$HAPPY_DEST" "$C20_OP"
+check "$(backup_exit post-rename-replay)" "0" "post-rename replay exit"
+check "$(backup_status post-rename-replay)" "backup-published" "post-rename replay status"
+check "$(json_get "$WORK/post-rename-replay.backup.json" sha256)" "$C20_SHA" "post-rename replay digest"
+check "$(journal_phase "$HAPPY_DATA" "$C20_OP")" "published" "journal marked published"
+check "$(marker_count "$HAPPY_DATA")" "0" "marker removed by the replay"
+check "$(find "$HAPPY_DEST" -maxdepth 1 -name "backup-$C20_OP.o3k" | wc -l)" "1" "single artifact"
+if (( CHECK_OK )); then
+    record PASS case-20 "$(backup_exit post-rename-replay)" "published" "0" "free" "yes" "published(exit=0)" \
+        "publishing journal + missing staging: the destination inode is opened O_NOFOLLOW, must be a regular file and must hash to the journal digest; the replay classified publication complete and removed the marker"
+else
+    record FAIL case-20 "$(backup_exit post-rename-replay 2>/dev/null || echo '?')" \
+        "$(journal_phase "$HAPPY_DATA" "$C20_OP")" "$(marker_count "$HAPPY_DATA")" "$(lock_owner "$HAPPY_DATA")" \
+        "$(is_published "$HAPPY_DEST" "$C20_OP")" "-" "post-rename crash recovery failed"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 21 (F20): concurrent phase-2 invocations cannot interleave.
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 21: concurrent phase-2 invocations =="
+fresh_case_dirs concurrent
+C21_OP="$(new_op_id)"
+start_daemon concurrent "$CASE_DATA"
+if wait_ready concurrent 30; then
+    start_backup concurrent-seed "$CASE_DATA" "$CASE_DEST" "$C21_OP" O3K_BACKUP_TEST_EXIT_AWAITING_SIGNATURE=1
+    await_signing_request "$CASE_DEST" "$C21_OP" 60 || true
+    wait_backup concurrent-seed 60 || true
+    reap_exit "$(daemon_pid concurrent)" 30 || true
+    sign_request "$CASE_DEST/.o3k-backup-artifact-$C21_OP" || true
+    start_backup concurrent-a "$CASE_DATA" "$CASE_DEST" "$C21_OP"
+    start_backup concurrent-b "$CASE_DATA" "$CASE_DEST" "$C21_OP"
+    wait_backup concurrent-a 90 || true
+    wait_backup concurrent-b 90 || true
+    C21_A="$(backup_exit concurrent-a)"; C21_AR="$(backup_reason concurrent-a)"
+    C21_B="$(backup_exit concurrent-b)"; C21_BR="$(backup_reason concurrent-b)"
+    CHECK_OK=1
+    C21_OK_COUNT=0; C21_REJECT_COUNT=0
+    for pair in "$C21_A:$C21_AR" "$C21_B:$C21_BR"; do
+        case "$pair" in
+            0:*) C21_OK_COUNT=$((C21_OK_COUNT + 1)) ;;
+            2:controller-active|3:operation-busy) C21_REJECT_COUNT=$((C21_REJECT_COUNT + 1)) ;;
+            *) CHECK_OK=0; log "  unexpected concurrent outcome: $pair" ;;
+        esac
+    done
+    check "$C21_OK_COUNT" "1" "exactly one phase 2 published"
+    check "$C21_REJECT_COUNT" "1" "exactly one phase 2 rejected"
+    check "$(is_published "$CASE_DEST" "$C21_OP")" "yes" "artifact published"
+    check "$(find "$CASE_DEST" -maxdepth 1 -name "backup-$C21_OP.o3k" | wc -l)" "1" "single artifact"
+    check "$(journal_phase "$CASE_DATA" "$C21_OP")" "published" "journal published"
+    if (( CHECK_OK )); then
+        record PASS case-21 "0/$C21_A/$C21_B" "published" "0" "free" "yes" "$C21_A:$C21_AR $C21_B:$C21_BR" \
+            "two simultaneous replays: one published (exit 0) and the other was rejected before touching the tree (controller-active from the lifetime store lock, or operation-busy from the staging-dir operation lock)"
+    else
+        record FAIL case-21 "$C21_A/$C21_B" "$(journal_phase "$CASE_DATA" "$C21_OP")" \
+            "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$C21_OP")" \
+            "$C21_AR/$C21_BR" "concurrent phase-2 exclusion failed"
+    fi
+else
+    record FAIL case-21 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22 (F22): a missing trust document is exit 3 in `create` as well.
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 22: create classification of missing configuration =="
+fresh_case_dirs missing-create-trust
+C22_OP="$(new_op_id)"
+C22_TRUST="$CASE_TRUST"; C22_PREFIX="$CASE_PREFIX"
+CASE_TRUST="$WORK/absent-create-trust.json"
+start_daemon missing-create-trust "$CASE_DATA"
+if wait_ready missing-create-trust 30; then
+    run_backup missing-create-trust "$CASE_DATA" "$CASE_DEST" "$C22_OP"
+    reap_exit "$(daemon_pid missing-create-trust)" 30 || true
+    CASE_TRUST="$C22_TRUST"; CASE_PREFIX="$C22_PREFIX"
+    CHECK_OK=1
+    check "$(backup_exit missing-create-trust)" "3" "missing trust exit"
+    check "$(backup_reason missing-create-trust)" "trust-config-unavailable" "missing trust reason"
+    check "$(marker_count "$CASE_DATA")" "0" "no marker was written"
+    check "$(find "$CASE_DEST" -maxdepth 1 -name 'backup-*.o3k' | wc -l)" "0" "nothing published"
+    if (( CHECK_OK )); then
+        record PASS case-22 "$(backup_exit missing-create-trust)" "-" "0" "free" "no" "trust-config-unavailable(exit=3)" \
+            "missing trust configuration is a recoverable failure (exit 3) in create, matching verify's classification"
+    else
+        record FAIL case-22 "$(backup_exit missing-create-trust 2>/dev/null || echo '?')" \
+            "$(journal_phase "$CASE_DATA" "$C22_OP")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
+            "$(is_published "$CASE_DEST" "$C22_OP")" "$(backup_reason missing-create-trust 2>/dev/null || echo '?')" \
+            "create classification of missing configuration failed"
+    fi
+else
+    record FAIL case-22 "-" "-" "-" "-" "-" "-" "daemon not ready"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 23 (M4/F9): a seeded non-terminal Operation makes the manifest say
+# recorded_unknown instead of drained.
+# ---------------------------------------------------------------------------
+echo
+echo "== Case 23: truthful in_flight_operations =="
+if (( HAVE_SQLITE3 )); then
+    fresh_case_dirs in-flight
+    C23_OP="$(new_op_id)"
+    start_daemon in-flight-seed "$CASE_DATA"
+    if wait_ready in-flight-seed 30; then
+        sigterm_expect_zero in-flight-seed || true
+        C23_RESOURCE="$(new_op_id)"
+        C23_OPERATION="$(new_op_id)"
+        sqlite3 "$CASE_DATA/o3k.sqlite" <<SQL
+INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state)
+VALUES ('$C23_RESOURCE', 'network', 'project-1', 1, 1, '{}', '{}');
+INSERT INTO operations (id, resource_id, kind, state)
+VALUES ('$C23_OPERATION', '$C23_RESOURCE', 'create', 'running');
+SQL
+        start_daemon in-flight "$CASE_DATA"
+        if wait_ready in-flight 30; then
+            start_backup in-flight "$CASE_DATA" "$CASE_DEST" "$C23_OP"
+            await_signing_request "$CASE_DEST" "$C23_OP" 60 || true
+            reap_exit "$(daemon_pid in-flight)" 30 || true
+            sign_request "$CASE_DEST/.o3k-backup-artifact-$C23_OP" || true
+            wait_backup in-flight 90 || true
+            if [[ "$(backup_exit in-flight)" == "0" ]]; then
+                C23_CLASS="$(python3 - "$(published_path "$CASE_DEST" "$C23_OP")" <<'PY'
+import json, struct, sys
+raw = open(sys.argv[1], "rb").read()
+length = struct.unpack(">Q", raw[12:20])[0]
+manifest = json.loads(raw[20:20 + length])
+print(manifest["consistency"]["in_flight_operations"])
+PY
+)"
+            else
+                C23_CLASS="-"
+            fi
+            CHECK_OK=1
+            check "$(backup_exit in-flight)" "0" "seeded-operation publication exit"
+            check "$C23_CLASS" "recorded_unknown" "manifest in_flight_operations"
+            if (( CHECK_OK )); then
+                record PASS case-23 "$(backup_exit in-flight)" "published" "0" "free" "yes" "recorded_unknown" \
+                    "a seeded non-terminal Operation ($C23_OPERATION) makes the manifest record in_flight_operations=recorded_unknown instead of drained; the same identity is stored in the capture metadata member (unit: capture_records_in_flight_operation_identities)"
+            else
+                record FAIL case-23 "$(backup_exit in-flight 2>/dev/null || echo '?')" \
+                    "$(journal_phase "$CASE_DATA" "$C23_OP")" "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" \
+                    "$(is_published "$CASE_DEST" "$C23_OP")" "$C23_CLASS" "in_flight_operations classification failed"
+            fi
+        else
+            record FAIL case-23 "-" "-" "-" "-" "-" "-" "daemon not ready after seeding"
+        fi
+    else
+        record FAIL case-23 "-" "-" "-" "-" "-" "-" "seed daemon not ready"
+    fi
+else
+    record NOT-COVERED case-23 "-" "-" "-" "-" "-" "recorded_unknown" \
+        "sqlite3 is unavailable, so the harness cannot seed a non-terminal Operation; unit coverage: backup_artifact::tests::non_terminal_operations_are_recorded_as_unknown and backup_artifact::tests::capture_records_in_flight_operation_identities"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1212,7 +1858,10 @@ for row in "${RESULTS[@]}"; do
 done
 
 SOURCE_SHA="$(git rev-parse HEAD)"
-if [[ -n "$(git status --porcelain -- bins/o3k bins/o3kd crates/o3k-store tests/pp6_backup_artifact.sh docs/evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md 2>/dev/null)" ]]; then
+# Only tracked modifications count: unrelated untracked build/artifact
+# directories in the working tree must not be reported as a dirty campaign
+# (L8/F30).
+if [[ -n "$(git status --porcelain --untracked-files=no -- bins/o3k bins/o3kd crates/o3k-store tests/pp6_backup_artifact.sh docs/evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md 2>/dev/null)" ]]; then
     WORKING_TREE_DIRTY_PY=True
 else
     WORKING_TREE_DIRTY_PY=False

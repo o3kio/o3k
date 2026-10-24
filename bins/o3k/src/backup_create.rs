@@ -10,29 +10,30 @@
 //! the source database did not change during capture, and hands the snapshot to
 //! [`crate::backup_artifact`] for manifest assembly and encrypted staging.
 //!
-//! # Two-phase operator flow (Option A, offline custody)
+//! # Option A operator flow (offline custody, controller stopped)
 //!
-//! The custody-held Ed25519 key is offline, so one invocation cannot finish the
-//! artifact. Instead:
+//! The custody-held Ed25519 key is offline and ADR-0190 Option A requires the
+//! controller to stay stopped for the whole signing window, so the capture
+//! process holds the store lock and the denial-only marker across the wait:
 //!
 //! ```text
 //! $ o3k backup create --destination /var/lib/o3k/backups --operation-id UUID
-//! {"status":"signing-required", ... "signing_request":".../signing-request.json", ...}
-//! # exit 3 — snapshot captured, artifact staged unsigned, marker removed
-//!
+//! o3k backup create: awaiting-signature /var/lib/o3k/backups/.o3k-backup-artifact-UUID/signing-request.json
 //! # offline workstation: sign the D1 signing input under the custody process
 //! # (two-of-three custodian confirmation) and place signing-response.json
 //! # next to the request.
-//!
-//! $ o3k backup create --destination /var/lib/o3k/backups --operation-id UUID
 //! {"status":"backup-published", ... "path":".../backup-UUID.o3k", ...}
-//! # exit 0
+//! # exit 0 — signature verified, artifact published, marker removed
 //! ```
 //!
-//! The CLI surface is exactly `--destination` and `--operation-id`: the second
-//! phase is the same exact request, detected from the durable operation journal
-//! before any controller contact. Phase 2 never needs the store lock because it
-//! only reads staged files, verifies a detached signature and publishes.
+//! If the request expires first, the command performs a **safe abort** (staging
+//! tree removed, journal `aborted`, marker removed) and exits 3 with
+//! `signing-request-expired`.
+//!
+//! The CLI surface is exactly `--destination` and `--operation-id`. A re-run
+//! with the same arguments after a crash during the wait detects the durable
+//! journal before any controller contact, acquires the store lock directly and
+//! resumes the wait/publication.
 //!
 //! The tool accepts a signature produced under the configured custody process;
 //! it does not attest custody, custodian identity, the threshold, or the
@@ -40,36 +41,42 @@
 //!
 //! # Interruption semantics
 //!
-//! * The denial-only marker is written before capture and removed as soon as
-//!   the artifact is durably staged (capture complete). Publication pending is
-//!   a separate, non-canonical state: a replacement controller may start, and
-//!   the staged artifact is not canonical state.
+//! * The denial-only marker is written before capture and removed only after
+//!   verified publication or a safe abort. `staged`/`publishing` journal phases
+//!   never authorize a controller start on their own; the marker denies it.
+//! * A crash during the signing wait releases the kernel lock but leaves the
+//!   marker and the `staged` journal, so a replacement controller still refuses
+//!   to start and the operator can resume publication.
 //! * Failures after the marker keep the marker so daemon startup stays blocked
 //!   until an operator inspects the partial capture. Failures before the marker
-//!   leave canonical state untouched.
+//!   leave canonical state untouched. Unknown outcomes (exit 4) also record a
+//!   terminal `aborted` journal phase before returning, so a retry reports the
+//!   real state instead of `backup-operation-incomplete`.
 //! * The operation journal (`<data_dir>/backup-operations/<operation>.json`)
 //!   records `capturing → captured → staged → publishing → published`
-//!   (`aborted` on a failed attempt). A *new* capture under an operation id
-//!   whose journal already says `published` is refused (exit 2,
-//!   `operation-already-published`). The daemon's per-lifetime accepted-id
-//!   list still covers genuinely concurrent attempts; the journal only covers
-//!   durable operation identity across restarts.
+//!   (`aborted` on a failed attempt) with forward-only transitions. A *new*
+//!   capture under an operation id whose journal already says `published` is
+//!   refused (exit 2, `operation-already-published`). The daemon's per-lifetime
+//!   accepted-id list still covers genuinely concurrent attempts; the journal
+//!   only covers durable operation identity across restarts.
 //!
 //! # Exit-code contract (SPEC-0050 §8)
 //!
 //! ```text
-//! 0  artifact published (phase 2 only)
+//! 0  artifact published
 //! 2  rejected precondition (unusable or overlapping destination, invalid
-//!    trust/release configuration, D9 source/space bound, controller
-//!    unavailable or rejected the handoff, already-published operation, or an
-//!    invalid signing response)
-//! 3  recoverable failure, including `signing-required` (capture staged;
-//!    publication pending) and a failed capture/finalization. Once the
-//!    interrupted-backup marker is written it is kept on failure so daemon
-//!    preflight stays blocked until an operator clears it, and the staging
-//!    directory is kept for inspection.
-//! 4  unknown/quarantined outcome (source immutability could not be proven, or
-//!    the capture/publication outcome is uncertain)
+//!    trust/release configuration, D9 source bound, controller unavailable or
+//!    rejected the handoff, a live controller during phase 2, already-published
+//!    operation, or an invalid signing response)
+//! 3  recoverable failure, including `signing-request-expired` (safe abort),
+//!    `operation-busy` (a concurrent phase 2), `space-unavailable` (D9 boundary
+//!    re-check), and a failed capture/finalization. Once the interrupted-backup
+//!    marker is written it is kept on failure so daemon preflight stays blocked
+//!    until an operator clears it, and the staging directory is kept for
+//!    inspection (except on the safe abort).
+//! 4  unknown/quarantined outcome (source immutability could not be proven, the
+//!    capture/publication outcome is uncertain, or post-publication cleanup /
+//!    safe abort could not be proven)
 //! ```
 //!
 //! # Destination integrity
@@ -81,22 +88,24 @@
 //! relative to that descriptor and itself opened as a second no-follow
 //! descriptor, so every capture and staging access is dir-fd-anchored through
 //! `/proc/self/fd/<staging-fd>` magic links (the artifact builder accepts that
-//! form explicitly). Publication is a `renameat(RENAME_NOREPLACE)` inside the
-//! retained destination descriptor, and the destination directory is fsynced
-//! after the rename.
+//! form explicitly). Publication is a `linkat` of the exact verified inode into
+//! the retained destination descriptor (`artifact_verify` never replaces an
+//! existing entry), and the destination directory is fsynced afterwards.
 //!
 //! Stdout carries exactly one line of bounded JSON; stderr carries only the
-//! stable reason code and the operation id. Secrets never appear in arguments,
-//! environment, or logs; identity tokens travel only inside the socket request
-//! frame, and signing material is never read by this process.
+//! stable reason code, the operation id and the one `awaiting-signature` line.
+//! Secrets never appear in arguments, environment, or logs; identity tokens
+//! travel only inside the socket request frame, and signing material is never
+//! read by this process.
 //!
 //! # Data-directory resolution
 //!
 //! The executor resolves the same directory the running `o3kd` was launched
 //! with, because both sides derive the installation/site identity tokens from
-//! the canonical path and the control socket lives inside it. It reuses
-//! `o3k-config`'s precedence: non-empty `O3K_DATA_DIR`, else `./data`
-//! ([`DEFAULT_DATA_DIR`]), canonicalized.
+//! the canonical path and the control socket lives inside it:
+//! [`crate::backup_data_dir::resolve_data_dir`] — non-root uses non-empty
+//! `O3K_DATA_DIR`, else `O3K_DATA_DIR` from `/etc/o3k/o3kd.env`, else `./data`;
+//! root ignores the environment and uses the packaged `/var/lib/o3k`.
 //!
 //! Linux-only, mirroring the handoff gating in `o3k-store`.
 
@@ -124,17 +133,18 @@ use uuid::Uuid;
 
 use crate::{
     backup_artifact::{
-        ArtifactConfig, ArtifactFailure, ArtifactFailureClass, CaptureInputs, CompletionInputs,
-        CompletionOutcome, OPERATION_STAGING_PREFIX, complete_staged, install_prefix,
+        ArtifactConfig, ArtifactFailure, ArtifactFailureClass, AwaitPolicy, CaptureInputs,
+        CompletionInputs, MAX_METADATA_MEMBER_BYTES, OPERATION_STAGING_PREFIX, PublishedArtifact,
+        StagedSigning, complete_staged, install_prefix, snapshot_in_flight_operations,
         stage_capture,
     },
-    backup_reservation::preflight_reservation,
+    backup_reservation::{
+        MIN_RESERVATION, Reservation, ReservationError, compute_reservation, preflight_reservation,
+    },
     backup_trust::default_trust_config_path,
     output::now_utc_rfc3339,
 };
 
-/// Default daemon data directory; mirrors `o3k-config`'s `DEFAULT_DATA_DIR`.
-const DEFAULT_DATA_DIR: &str = "./data";
 /// Default overall deadline for the whole capture.
 const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
 /// Bound for the authenticated handoff request/response exchange.
@@ -150,8 +160,12 @@ const MARKER_FILE_PREFIX: &str = ".o3k-backup-in-progress-";
 /// Snapshot file name inside the operation staging directory (also the
 /// `database/o3k.sqlite` member source).
 const SNAPSHOT_FILE_NAME: &str = "o3k.sqlite";
+/// Bounded allowance for the capture-record and signing-request metadata in the
+/// D9 source measurement (each is capped at [`MAX_METADATA_MEMBER_BYTES`]).
+const METADATA_BOUND_BYTES: u64 = 2 * MAX_METADATA_MEMBER_BYTES;
 
-/// Bounded human/machine note emitted with `signing-required`.
+/// Bounded human/machine note emitted with `signing-required` on the
+/// harness-only stop-after-staging path.
 const SIGNING_REQUIRED_NOTE: &str = "artifact is staged and unsigned; sign the D1 signing input offline under the configured custody process, write signing-response.json next to signing-request.json, and re-run the same command";
 /// Bounded human/machine note emitted on publication.
 const PUBLISHED_NOTE: &str = "artifact signature was verified against the installed trust document; this tool does not attest the custody process and makes no restore claim";
@@ -209,6 +223,51 @@ fn test_barrier_after_receive() {
 
 #[cfg(not(feature = "backup-test-hooks"))]
 fn test_barrier_after_receive() {}
+
+/// Executor behavior that production fixes but the campaign tests need to
+/// control: how long the signing wait lasts and whether phase 1 stops right
+/// after staging.
+///
+/// Production always uses [`Self::default`] (wait for the request TTL, publish
+/// in the same process). The environment overrides are read **only** when the
+/// `backup-test-hooks` feature is compiled in; a production binary ignores
+/// them entirely.
+#[derive(Debug, Clone, Copy, Default)]
+struct ExecutorControls {
+    /// How long to wait for `signing-response.json`.
+    await_policy: AwaitPolicy,
+    /// Stop after the durable `staged` write and report `signing-required`
+    /// (pre-Option-A harness shape; never enabled in production builds).
+    stop_after_staging: bool,
+    /// Keep the denial marker even on the `stop_after_staging` path.
+    keep_marker: bool,
+}
+
+impl ExecutorControls {
+    /// Production controls: the accepted Option A wait semantics.
+    fn from_process() -> Self {
+        let mut controls = Self::default();
+        #[cfg(feature = "backup-test-hooks")]
+        {
+            if let Some(millis) = std::env::var_os("O3K_BACKUP_TEST_AWAIT_POLL_MS")
+                .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+            {
+                controls.await_policy.poll_interval =
+                    Duration::from_millis(millis.clamp(10, 60_000));
+            }
+            if let Some(seconds) = std::env::var_os("O3K_BACKUP_TEST_AWAIT_TIMEOUT_SECONDS")
+                .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+            {
+                controls.await_policy.timeout = Some(Duration::from_secs(seconds.clamp(1, 86_400)));
+            }
+            controls.stop_after_staging = std::env::var_os("O3K_BACKUP_TEST_STOP_AFTER_STAGING")
+                .is_some_and(|value| value == "1");
+            controls.keep_marker = std::env::var_os("O3K_BACKUP_TEST_SKIP_MARKER_CLEANUP")
+                .is_some_and(|value| value == "1");
+        }
+        controls
+    }
+}
 
 /// Arguments of `o3k backup create`.
 pub struct BackupCreateArgs {
@@ -291,7 +350,11 @@ fn failure_outcome(operation_id: Uuid, failure: ArtifactFailure) -> BackupCreate
 /// Runs `o3k backup create`, printing the bounded JSON result on stdout and a
 /// stable reason line on stderr, and returns the process exit code.
 pub fn run_backup_create(args: &BackupCreateArgs) -> ExitCode {
-    let outcome = execute(args, &ArtifactEnvironment::from_process());
+    let outcome = execute(
+        args,
+        &ArtifactEnvironment::from_process(),
+        &ExecutorControls::from_process(),
+    );
     let line = serde_json::to_string(&outcome.json).unwrap_or_else(|_| {
         format!(
             "{{\"status\":\"recoverable-failure\",\"reason\":\"output-serialization-failed\",\"operation_id\":\"{}\"}}",
@@ -326,8 +389,12 @@ pub fn run_backup_create(args: &BackupCreateArgs) -> ExitCode {
 
 /// Validates the destination, resolves the data directory, and either completes
 /// a staged operation or starts a fresh capture.
-fn execute(args: &BackupCreateArgs, environment: &ArtifactEnvironment) -> BackupCreateOutcome {
-    execute_with_data_dir(args, environment, None)
+fn execute(
+    args: &BackupCreateArgs,
+    environment: &ArtifactEnvironment,
+    controls: &ExecutorControls,
+) -> BackupCreateOutcome {
+    execute_with_data_dir(args, environment, None, controls)
 }
 
 /// [`execute`] with an explicit data directory, so tests exercise the exact
@@ -336,6 +403,7 @@ fn execute_with_data_dir(
     args: &BackupCreateArgs,
     environment: &ArtifactEnvironment,
     data_dir_override: Option<&Path>,
+    controls: &ExecutorControls,
 ) -> BackupCreateOutcome {
     let operation_id = args.operation_id;
     if let Err(reason) = validate_destination(&args.destination) {
@@ -346,7 +414,7 @@ fn execute_with_data_dir(
             Ok(path) => path,
             Err(_) => return BackupCreateOutcome::rejected(operation_id, "data-dir-unavailable"),
         },
-        None => match resolve_data_dir() {
+        None => match crate::backup_data_dir::resolve_data_dir() {
             Ok(dir) => dir,
             Err(reason) => return BackupCreateOutcome::rejected(operation_id, reason),
         },
@@ -361,7 +429,7 @@ fn execute_with_data_dir(
 
     // Durable operation identity is checked before any controller contact: a
     // published operation id is never captured again, and a staged operation
-    // is completed from its staged files without taking the store lock.
+    // is completed from its staged files.
     match backup_journal::read_backup_operation(&data_dir, operation_id) {
         Err(error) => return BackupCreateOutcome::rejected(operation_id, error.reason()),
         Ok(Some(record)) => match record.phase {
@@ -369,7 +437,32 @@ fn execute_with_data_dir(
                 return BackupCreateOutcome::rejected(operation_id, "operation-already-published");
             }
             BackupOperationPhase::Staged | BackupOperationPhase::Publishing => {
-                return complete_existing(args, environment, &data_dir, destination_fd, record);
+                // ADR-0190 Option A: the controller stays stopped until the
+                // artifact is published. Phase 2 therefore takes the same
+                // lifetime lock the daemon uses; a live controller (or a
+                // concurrent phase 1 that still holds the lock during its own
+                // signing wait) means no publication may proceed.
+                let store_lock = match StoreAccessLock::acquire(&data_dir) {
+                    Ok(lock) => lock,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        return BackupCreateOutcome::rejected(operation_id, "controller-active");
+                    }
+                    Err(_) => {
+                        return BackupCreateOutcome::recoverable(
+                            operation_id,
+                            "store-lock-unavailable",
+                        );
+                    }
+                };
+                return complete_existing(
+                    args,
+                    environment,
+                    &data_dir,
+                    destination_fd,
+                    record,
+                    controls,
+                    store_lock,
+                );
             }
             BackupOperationPhase::Capturing | BackupOperationPhase::Captured => {
                 return BackupCreateOutcome::recoverable(
@@ -389,18 +482,26 @@ fn execute_with_data_dir(
         data_dir,
         now_utc_rfc3339(),
         environment,
+        controls,
     )
 }
 
 /// Phase 2: verify the detached signature (or finish a publication replay) and
-/// publish. This path never contacts the controller and never opens the store.
+/// publish, holding the lifetime store lock for the whole step.
+///
+/// `_store_lock` is the exclusion proof: it is retained (not copied) until this
+/// function returns, so no controller and no concurrent capture can touch the
+/// data directory while the staged artifact is verified and published.
 fn complete_existing(
     args: &BackupCreateArgs,
     environment: &ArtifactEnvironment,
     data_dir: &Path,
     destination_fd: OwnedFd,
     record: BackupOperationRecord,
+    controls: &ExecutorControls,
+    store_lock: StoreAccessLock,
 ) -> BackupCreateOutcome {
+    let _store_lock = store_lock;
     let operation_id = args.operation_id;
     let destination_dir = match fs::canonicalize(&args.destination) {
         Ok(path) => path,
@@ -417,6 +518,14 @@ fn complete_existing(
         Ok(config) => config,
         Err(failure) => return failure_outcome(operation_id, failure),
     };
+    let marker_path = data_dir.join(format!("{MARKER_FILE_PREFIX}{operation_id}"));
+    // The capture recorded the accepted D9 reservation; a record from before
+    // that field existed can only prove the minimum reservation, which is a
+    // lower bound of every accepted formula result (never a reduced reserve).
+    let reservation = Reservation {
+        source_bytes: 0,
+        reserved_bytes: record.reserved_bytes.unwrap_or(MIN_RESERVATION),
+    };
     let inputs = CompletionInputs {
         data_dir,
         config: &config,
@@ -424,43 +533,46 @@ fn complete_existing(
         destination_fd: &destination_fd,
         operation_id,
         record: &record,
+        marker_path: &marker_path,
+        reservation,
+        await_policy: controls.await_policy,
     };
     match complete_staged(&inputs) {
-        Ok(CompletionOutcome::SigningRequired {
-            request_path,
-            expires_at,
-        }) => BackupCreateOutcome {
-            exit_code: EXIT_RECOVERABLE,
-            json: json!({
-                "status": "signing-required",
-                "operation_id": operation_id,
-                "backup_id": record.backup_id,
-                "signing_request": request_path.to_string_lossy(),
-                "expires_at": expires_at,
-                "note": SIGNING_REQUIRED_NOTE,
-            }),
-        },
-        Ok(CompletionOutcome::Published {
-            path,
-            sha256,
-            size_bytes,
-        }) => BackupCreateOutcome {
+        Ok(published) => BackupCreateOutcome {
             exit_code: 0,
-            json: json!({
-                "status": "backup-published",
-                "operation_id": operation_id,
-                "backup_id": record.backup_id,
-                "path": path.to_string_lossy(),
-                "sha256": sha256,
-                "size_bytes": size_bytes,
-                "signature": "verified",
-                "note": PUBLISHED_NOTE,
-            }),
+            json: published_json(
+                operation_id,
+                &record.backup_id,
+                &published,
+                reservation.source_bytes,
+                reservation.reserved_bytes,
+            ),
         },
         Err(failure) => failure_outcome(operation_id, failure),
     }
 }
 
+/// Bounded success document for a published artifact.
+fn published_json(
+    operation_id: Uuid,
+    backup_id: &str,
+    published: &PublishedArtifact,
+    source_bytes: u64,
+    reserved_bytes: u64,
+) -> Value {
+    json!({
+        "status": "backup-published",
+        "operation_id": operation_id,
+        "backup_id": backup_id,
+        "path": published.path.to_string_lossy(),
+        "sha256": published.sha256,
+        "size_bytes": published.size_bytes,
+        "source_bytes": source_bytes,
+        "reserved_bytes": reserved_bytes,
+        "signature": "verified",
+        "note": PUBLISHED_NOTE,
+    })
+}
 /// Reports whether the destination is the canonical data directory or a
 /// descendant of it: a capture is never written into the directory the
 /// handoff just drained (the interrupted-backup marker lives there, and
@@ -541,35 +653,15 @@ fn validate_destination(destination: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Resolves the daemon data directory the way `o3k-config` does for the
-/// SQLite default: non-empty `O3K_DATA_DIR`, else `./data`, canonicalized.
-fn resolve_data_dir() -> Result<PathBuf, &'static str> {
-    let configured = std::env::var("O3K_DATA_DIR")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    resolve_data_dir_from(configured.as_deref())
-}
-
-fn resolve_data_dir_from(configured: Option<&str>) -> Result<PathBuf, &'static str> {
-    fs::canonicalize(data_dir_from(configured)).map_err(|_| "data-dir-unavailable")
-}
-
-/// Chooses the configured data directory: non-empty trimmed `O3K_DATA_DIR`,
-/// else the `./data` default (mirroring `o3k-config`).
-fn data_dir_from(configured: Option<&str>) -> PathBuf {
-    configured
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR))
-}
-
 /// Executes one capture: handoff, configuration and D9 preflight, snapshot,
-/// manifest/staging, offline signing request. Post-lock failures keep the
-/// interrupted-backup marker (and the staging directory, once created) so an
-/// operator can inspect the interrupted capture; the marker blocks daemon
-/// preflight until cleared.
+/// manifest/staging, then the Option A signing wait and publication while the
+/// store lock and the denial marker stay held.
+///
+/// Post-marker failures keep the marker (daemon startup stays blocked) and the
+/// staging directory so an operator can inspect the interrupted capture. A
+/// failure **before** any capture starts performs a clean abort: the journal is
+/// marked `aborted` and the marker is removed because canonical state was never
+/// touched.
 #[allow(clippy::too_many_lines)]
 fn execute_inner(
     args: &BackupCreateArgs,
@@ -578,6 +670,7 @@ fn execute_inner(
     data_dir: PathBuf,
     started_at: String,
     environment: &ArtifactEnvironment,
+    controls: &ExecutorControls,
 ) -> BackupCreateOutcome {
     let operation_id = args.operation_id;
     let deadline = Instant::now()
@@ -587,7 +680,7 @@ fn execute_inner(
     let (installation, site) = match identity_tokens(&data_dir) {
         Ok(tokens) => tokens,
         Err(_) => {
-            return BackupCreateOutcome::recoverable(operation_id, "identity-derivation-failed");
+            return BackupCreateOutcome::recoverable(operation_id, "identity-unavailable");
         }
     };
     let request = BackupHandoffRequest {
@@ -618,7 +711,10 @@ fn execute_inner(
     };
 
     test_hook_exit!("O3K_BACKUP_TEST_EXIT_BEFORE_RECEIVE", 95);
-    let (_store_lock, _handoff_stream) =
+    // The store lock is retained for the **whole** capture → offline signing →
+    // publication window (ADR-0190 Option A). It is only dropped when this
+    // function returns.
+    let (store_lock, _handoff_stream) =
         match StoreAccessLock::receive_handoff(stream, HANDOFF_RECEIVE_TIMEOUT) {
             Ok(pair) => pair,
             Err(_) => {
@@ -637,8 +733,8 @@ fn execute_inner(
 
     // Root-owned configuration is read under the lock so the captured members
     // (trust document, release manifest) and the manifest options describe the
-    // same quiesced generation. A configuration failure exits 2 before any
-    // capture; the controller has already exited by design (SOURCE_EXIT).
+    // same quiesced generation. A configuration failure exits 2 (rejected) or 3
+    // (missing configuration), with the same classification as `backup verify`.
     let config = match ArtifactConfig::load_from(
         &data_dir,
         &environment.trust_config,
@@ -648,26 +744,10 @@ fn execute_inner(
         Err(failure) => return failure_outcome(operation_id, failure),
     };
 
-    // D9 preflight: the measured source is the snapshot plus the installation
-    // metadata members captured below. The destination must hold the full
-    // reservation; a shortfall fails closed instead of truncating it.
-    let db_path = data_dir.join(SNAPSHOT_FILE_NAME);
-    let source_paths: [&Path; 3] = [
-        db_path.as_path(),
-        config.release_manifest_path(),
-        config.trust_config_path(),
-    ];
-    let reservation = match preflight_reservation(&source_paths, &destination_dir) {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            let reason = error.measurement_code().unwrap_or_else(|| error.reason());
-            return BackupCreateOutcome::rejected(operation_id, reason);
-        }
-    };
-
     // Denial-only marker first: its presence is what blocks replacement-
-    // controller startup. The journal is written immediately after so a later
-    // phase can be recognised, but the marker stays the denial authority.
+    // controller startup for the whole signing window. The journal is written
+    // immediately after so a later phase can be recognised, but the marker
+    // stays the denial authority.
     let marker_path = data_dir.join(format!("{MARKER_FILE_PREFIX}{operation_id}"));
     let marker_body = json!({
         "operation_id": operation_id,
@@ -697,6 +777,7 @@ fn execute_inner(
         staging_path: staging_path.to_string_lossy().into_owned(),
         request_sha256: None,
         artifact_sha256: None,
+        reserved_bytes: None,
         site_id: config.site_id().to_owned(),
         installation_id: config.installation_id().to_owned(),
         created_at: started_at.clone(),
@@ -711,26 +792,74 @@ fn execute_inner(
         .build()
     {
         Ok(runtime) => runtime,
-        Err(_) => return BackupCreateOutcome::recoverable(operation_id, "runtime-build-failed"),
+        Err(_) => {
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            return BackupCreateOutcome::recoverable(operation_id, "runtime-build-failed");
+        }
     };
+    let db_path = data_dir.join(SNAPSHOT_FILE_NAME);
     let store = match runtime.block_on(SqliteStore::open_existing_file_for_backup(&db_path)) {
         Ok(store) => store,
-        Err(_) => return BackupCreateOutcome::recoverable(operation_id, "store-open-failed"),
+        Err(_) => {
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            return BackupCreateOutcome::recoverable(operation_id, "store-open-failed");
+        }
     };
 
     if Instant::now() >= deadline {
+        abort_before_capture(&data_dir, &marker_path, &journal);
         return BackupCreateOutcome::recoverable(operation_id, "deadline-exceeded");
     }
     if runtime
         .block_on(store.checkpoint(WalCheckpointMode::Truncate))
         .is_err()
     {
+        abort_before_capture(&data_dir, &marker_path, &journal);
         return BackupCreateOutcome::recoverable(operation_id, "checkpoint-failed");
     }
     let source_before = match sha256_hex_file(&db_path) {
         Ok(hash) => hash,
-        Err(_) => return BackupCreateOutcome::recoverable(operation_id, "source-hash-failed"),
+        Err(_) => {
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            return BackupCreateOutcome::recoverable(operation_id, "source-hash-failed");
+        }
     };
+
+    // D9 preflight **after** the WAL checkpoint: the measured source is the
+    // checkpointed main database, a non-empty `-wal` sidecar (a truncating
+    // checkpoint normally empties it), the installation metadata members and
+    // the bounded capture/request metadata this run will add.
+    let mut source_paths: Vec<&Path> = vec![db_path.as_path()];
+    let wal_path = data_dir.join(format!("{SNAPSHOT_FILE_NAME}-wal"));
+    match fs::symlink_metadata(&wal_path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {
+            source_paths.push(wal_path.as_path());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => {
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            return BackupCreateOutcome::rejected(operation_id, "source-unavailable");
+        }
+    }
+    source_paths.push(config.release_manifest_path());
+    source_paths.push(config.trust_config_path());
+    let reservation = match preflight_reservation(&source_paths, &destination_dir) {
+        Ok(reservation) => reservation_with_metadata_bound(reservation),
+        Err(error) => {
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            if matches!(error, ReservationError::SpaceUnavailable { .. }) {
+                return BackupCreateOutcome::recoverable(operation_id, "space-unavailable");
+            }
+            let reason = error.measurement_code().unwrap_or_else(|| error.reason());
+            return BackupCreateOutcome::rejected(operation_id, reason);
+        }
+    };
+    journal.reserved_bytes = Some(reservation.reserved_bytes);
+    journal.updated_at = now_utc_rfc3339();
+    if let Err(error) = backup_journal::advance_backup_operation(&data_dir, &journal) {
+        return BackupCreateOutcome::recoverable(operation_id, error.reason());
+    }
 
     match mkdirat(
         &destination_fd,
@@ -780,32 +909,44 @@ fn execute_inner(
         Err(StoreError::BackupPublicationUncertain) => {
             // The snapshot may exist at the destination but its verification
             // or publication step failed; the outcome is unknown, so the
-            // staging content is preserved for inspection.
+            // remaining staging content is preserved for inspection. The
+            // plaintext database snapshot is never preserved.
+            let _ = fs::remove_file(&staged_snapshot_path);
             mark_operation_aborted(&data_dir, &journal);
             return BackupCreateOutcome::unknown(operation_id, "capture-outcome-unknown");
         }
         Err(_) => {
+            let _ = fs::remove_file(&staged_snapshot_path);
             mark_operation_aborted(&data_dir, &journal);
             return BackupCreateOutcome::recoverable(operation_id, "capture-failed");
         }
     }
 
     if Instant::now() >= deadline {
+        mark_operation_aborted(&data_dir, &journal);
         return BackupCreateOutcome::recoverable(operation_id, "deadline-exceeded");
     }
     let source_after = match sha256_hex_file(&db_path) {
         Ok(hash) => hash,
-        Err(_) => return BackupCreateOutcome::unknown(operation_id, "source-rehash-failed"),
+        Err(_) => {
+            mark_operation_aborted(&data_dir, &journal);
+            return BackupCreateOutcome::unknown(operation_id, "source-rehash-failed");
+        }
     };
     if source_before != source_after {
+        mark_operation_aborted(&data_dir, &journal);
         return BackupCreateOutcome::unknown(operation_id, "source-modified-during-capture");
     }
     if Instant::now() >= deadline {
+        mark_operation_aborted(&data_dir, &journal);
         return BackupCreateOutcome::recoverable(operation_id, "deadline-exceeded");
     }
     let snapshot_hash = match sha256_hex_file(&staged_snapshot_path) {
         Ok(hash) => hash,
-        Err(_) => return BackupCreateOutcome::unknown(operation_id, "snapshot-hash-failed"),
+        Err(_) => {
+            mark_operation_aborted(&data_dir, &journal);
+            return BackupCreateOutcome::unknown(operation_id, "snapshot-hash-failed");
+        }
     };
     let journal_mode = match runtime.block_on(store.journal_mode()) {
         Ok(mode) => mode,
@@ -814,10 +955,18 @@ fn execute_inner(
             return BackupCreateOutcome::recoverable(operation_id, "journal-mode-read-failed");
         }
     };
+    let (in_flight_operations, in_flight_operation_ids) =
+        match snapshot_in_flight_operations(&runtime, &staged_snapshot_path) {
+            Ok(facts) => facts,
+            Err(failure) => {
+                mark_operation_aborted(&data_dir, &journal);
+                return failure_outcome(operation_id, failure);
+            }
+        };
     let completed_at = now_utc_rfc3339();
     journal.phase = BackupOperationPhase::Captured;
     journal.updated_at = completed_at.clone();
-    if let Err(error) = backup_journal::write_backup_operation(&data_dir, &journal) {
+    if let Err(error) = backup_journal::advance_backup_operation(&data_dir, &journal) {
         return BackupCreateOutcome::recoverable(operation_id, error.reason());
     }
     // Test-only: crash immediately after the durable `captured` transition,
@@ -826,6 +975,7 @@ fn execute_inner(
     test_hook_exit!("O3K_BACKUP_TEST_EXIT_AFTER_JOURNAL_CAPTURED", 86);
 
     if Instant::now() >= deadline {
+        mark_operation_aborted(&data_dir, &journal);
         return BackupCreateOutcome::recoverable(operation_id, "deadline-exceeded");
     }
     let capture = CaptureInputs {
@@ -841,42 +991,93 @@ fn execute_inner(
         journal_mode: &journal_mode,
         snapshot_started_at: &started_at,
         snapshot_completed_at: &completed_at,
+        in_flight_operations,
+        in_flight_operation_ids: &in_flight_operation_ids,
         runtime: &runtime,
     };
-    let staged = match stage_capture(&capture) {
+    let staged_result = stage_capture(&capture);
+    // F5: the plaintext snapshot must never survive into the signable staging
+    // tree. Unlink it (and make the unlink durable) as soon as the encrypted
+    // artifact has been staged, whether or not staging succeeded.
+    let snapshot_cleanup = fs::remove_file(&staged_snapshot_path)
+        .and_then(|()| fs::File::open(&staging_fd_path).and_then(|directory| directory.sync_all()));
+    let staged = match staged_result {
         Ok(staged) => staged,
         Err(failure) => {
             mark_operation_aborted(&data_dir, &journal);
             return failure_outcome(operation_id, failure);
         }
     };
+    if snapshot_cleanup.is_err() {
+        // Do not report success while plaintext capture data may still be on
+        // disk.
+        mark_operation_aborted(&data_dir, &journal);
+        return BackupCreateOutcome::recoverable(operation_id, "snapshot-cleanup-failed");
+    }
 
     journal.phase = BackupOperationPhase::Staged;
     journal.backup_id = staged.backup_id.clone();
     journal.request_sha256 = Some(staged.request_sha256.clone());
     journal.updated_at = now_utc_rfc3339();
-    if let Err(error) = backup_journal::write_backup_operation(&data_dir, &journal) {
+    if let Err(error) = backup_journal::advance_backup_operation(&data_dir, &journal) {
         // The artifact is staged but the durable transition is missing. Keep
         // the marker: the operator must inspect the operation before the
         // controller may start and before publication can be trusted.
         return BackupCreateOutcome::recoverable(operation_id, error.reason());
     }
     // Test-only: crash after the durable `staged` transition but before the
-    // denial-only marker is removed. A later phase-2 invocation must complete
-    // from the staged files without recapturing.
+    // signing wait. A later invocation must complete from the staged files
+    // without recapturing.
     test_hook_exit!("O3K_BACKUP_TEST_EXIT_AFTER_JOURNAL_STAGED", 87);
 
-    #[cfg(feature = "backup-test-hooks")]
-    let keep_marker =
-        std::env::var_os("O3K_BACKUP_TEST_SKIP_MARKER_CLEANUP").is_some_and(|value| value == "1");
-    #[cfg(not(feature = "backup-test-hooks"))]
-    let keep_marker = false;
-    if !keep_marker && fs::remove_file(&marker_path).is_err() {
-        return BackupCreateOutcome::recoverable(operation_id, "marker-removal-failed");
+    if controls.stop_after_staging {
+        // Harness-only: reproduce the pre-Option-A one-shot phase-1 result so
+        // the handoff/lock matrix can be exercised without a 24h wait. The
+        // marker is removed (unless the skip hook keeps it), matching a capture
+        // that ends before the signing exclusion window.
+        if !controls.keep_marker && fs::remove_file(&marker_path).is_err() {
+            return BackupCreateOutcome::recoverable(operation_id, "marker-removal-failed");
+        }
+        let _ = sync_dir(&data_dir);
+        let _ = sync_dir(&destination_dir);
+        drop(store_lock);
+        return signing_required_outcome(operation_id, &staged);
     }
-    let _ = sync_dir(&data_dir);
-    let _ = sync_dir(&destination_dir);
 
+    // Option A: the store lock and the marker stay held while this process
+    // waits for the detached signature. `complete_staged` emits the single
+    // `awaiting-signature` stderr line, verifies the response, finalizes,
+    // publishes and removes the marker (or performs the safe abort).
+    let completion = CompletionInputs {
+        data_dir: &data_dir,
+        config: &config,
+        destination_dir: &destination_dir,
+        destination_fd: &destination_fd,
+        operation_id,
+        record: &journal,
+        marker_path: &marker_path,
+        reservation,
+        await_policy: controls.await_policy,
+    };
+    let outcome = match complete_staged(&completion) {
+        Ok(published) => BackupCreateOutcome {
+            exit_code: 0,
+            json: published_json(
+                operation_id,
+                &staged.backup_id,
+                &published,
+                staged.source_bytes,
+                staged.reserved_bytes,
+            ),
+        },
+        Err(failure) => failure_outcome(operation_id, failure),
+    };
+    drop(store_lock);
+    outcome
+}
+
+/// The pre-Option-A one-shot `signing-required` document (test harness only).
+fn signing_required_outcome(operation_id: Uuid, staged: &StagedSigning) -> BackupCreateOutcome {
     BackupCreateOutcome {
         exit_code: EXIT_RECOVERABLE,
         json: json!({
@@ -896,6 +1097,36 @@ fn execute_inner(
     }
 }
 
+/// Adds the bounded capture/request metadata allowance to the measured source.
+///
+/// The capture record and the signing request are part of the staged artifact
+/// and are bounded by [`MAX_METADATA_MEMBER_BYTES`]; they are reserved up front
+/// instead of being discovered after the space check. The accepted D9 formula
+/// (`max(2S + 1 GiB, 6 GiB)`) is unchanged.
+fn reservation_with_metadata_bound(reservation: Reservation) -> Reservation {
+    let source_bytes = reservation
+        .source_bytes
+        .saturating_add(METADATA_BOUND_BYTES);
+    Reservation {
+        source_bytes,
+        reserved_bytes: match compute_reservation(source_bytes) {
+            Ok(reserved) => reserved.max(reservation.reserved_bytes),
+            Err(_) => reservation.reserved_bytes,
+        },
+    }
+}
+
+/// Clean abort for a failure **before** any capture started: nothing was
+/// mutated, so the journal is marked `aborted` and the marker is removed.
+fn abort_before_capture(data_dir: &Path, marker_path: &Path, journal: &BackupOperationRecord) {
+    let mut record = journal.clone();
+    record.phase = BackupOperationPhase::Aborted;
+    record.updated_at = now_utc_rfc3339();
+    let _ = backup_journal::advance_backup_operation(data_dir, &record);
+    let _ = fs::remove_file(marker_path);
+    let _ = sync_dir(data_dir);
+}
+
 /// Records a failed attempt as `aborted` without touching the marker.
 ///
 /// The marker stays the denial authority: a failure after the marker is
@@ -907,9 +1138,8 @@ fn mark_operation_aborted(data_dir: &Path, journal: &BackupOperationRecord) {
     let mut record = journal.clone();
     record.phase = BackupOperationPhase::Aborted;
     record.updated_at = now_utc_rfc3339();
-    let _ = backup_journal::write_backup_operation(data_dir, &record);
+    let _ = backup_journal::advance_backup_operation(data_dir, &record);
 }
-
 /// Maps an in-band handoff rejection to a stable reason code.
 fn reject_reason_code(reason: HandoffRejectReason) -> &'static str {
     match reason {
@@ -969,7 +1199,8 @@ mod tests {
     use super::*;
     use crate::backup::{ArtifactVerificationKeys, ExpectedRelease};
     use crate::backup_artifact::{
-        SIGNING_REQUEST_FORMAT, SIGNING_RESPONSE_FILE, SIGNING_RESPONSE_FORMAT, snapshot_facts,
+        SIGNING_REQUEST_FILE, SIGNING_REQUEST_FORMAT, SIGNING_RESPONSE_FILE,
+        SIGNING_RESPONSE_FORMAT, snapshot_facts,
     };
     use crate::backup_trust::{BackupTrustConfig, site_and_installation_ids};
     use crate::upgrade::release_identity::BackupReleaseIdentity;
@@ -1096,8 +1327,14 @@ mod tests {
             let install_prefix = root.0.join("install");
             let share = install_prefix.join("share/o3k");
             fs::create_dir_all(&share).expect("create install prefix");
-            fs::set_permissions(&install_prefix, fs::Permissions::from_mode(0o700))
-                .expect("restrict install prefix");
+            for directory in [
+                install_prefix.clone(),
+                install_prefix.join("share"),
+                share.clone(),
+            ] {
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
+                    .expect("restrict install prefix");
+            }
             let release = BackupReleaseIdentity {
                 o3k_version: "0.4.0".to_owned(),
                 source_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
@@ -1138,28 +1375,7 @@ mod tests {
         /// Signs the staged request exactly as the offline custodian would and
         /// places the detached response next to it.
         fn respond_to_signing_request(&self, request_path: &Path) -> io::Result<()> {
-            let request_bytes = fs::read(request_path)?;
-            let request: Value = serde_json::from_slice(&request_bytes)?;
-            assert_eq!(request["format"], SIGNING_REQUEST_FORMAT);
-            let signing_input = URL_SAFE_NO_PAD
-                .decode(
-                    request["signing_input_base64url"]
-                        .as_str()
-                        .expect("signing input"),
-                )
-                .map_err(io::Error::other)?;
-            let signature = self.signing.sign(&signing_input);
-            let response = json!({
-                "format": SIGNING_RESPONSE_FORMAT,
-                "request_sha256": hex::encode(Sha256::digest(&request_bytes)),
-                "key_id": SIGNING_KEY_ID,
-                "signature": hex::encode(signature.to_bytes()),
-                "signed_at": now_utc_rfc3339(),
-            });
-            write_private(
-                &request_path.with_file_name(SIGNING_RESPONSE_FILE),
-                &serde_json::to_vec(&response)?,
-            )
+            respond_to_request(request_path, &self.signing)
         }
 
         fn expected_release(&self, data_dir: &Path) -> ExpectedRelease {
@@ -1188,6 +1404,132 @@ mod tests {
         result: Result<T, o3k_store::backup_journal::BackupJournalError>,
     ) -> io::Result<T> {
         result.map_err(|error| io::Error::other(error.reason()))
+    }
+
+    /// Harness controls that stop phase 1 right after staging (the pre-Option-A
+    /// one-shot shape). Production always waits for the signature itself.
+    fn stop_after_staging_controls() -> ExecutorControls {
+        ExecutorControls {
+            stop_after_staging: true,
+            ..ExecutorControls::default()
+        }
+    }
+
+    /// A bounded await policy for tests that must not wait for the 24h TTL.
+    fn short_await_controls(timeout: Duration) -> ExecutorControls {
+        ExecutorControls {
+            await_policy: AwaitPolicy {
+                timeout: Some(timeout),
+                poll_interval: Duration::from_millis(10),
+            },
+            stop_after_staging: false,
+            keep_marker: false,
+        }
+    }
+
+    /// Signs the request at `request_path` exactly as the offline custodian
+    /// would and writes the detached response next to it.
+    fn respond_to_request(request_path: &Path, signing: &SigningKey) -> io::Result<()> {
+        // The executor creates the request with `O_CREAT|O_EXCL` and then writes
+        // it; a custodian that only checks for existence can observe the empty
+        // file. Poll until it parses instead.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (request_bytes, request) = loop {
+            let bytes = fs::read(request_path)?;
+            match serde_json::from_slice::<Value>(&bytes) {
+                Ok(value) => break (bytes, value),
+                Err(_) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(io::Error::other(error.to_string())),
+            }
+        };
+        if request["format"] != SIGNING_REQUEST_FORMAT {
+            return Err(io::Error::other("unexpected signing request format"));
+        }
+        let signing_input = URL_SAFE_NO_PAD
+            .decode(
+                request["signing_input_base64url"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("signing input"))?,
+            )
+            .map_err(io::Error::other)?;
+        let signature = signing.sign(&signing_input);
+        // Signing time must be inside the request lifetime; use the request's
+        // own creation timestamp (deterministic and in-range).
+        let signed_at = request["created_at"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(now_utc_rfc3339);
+        let response = json!({
+            "format": SIGNING_RESPONSE_FORMAT,
+            "request_sha256": hex::encode(Sha256::digest(&request_bytes)),
+            "key_id": SIGNING_KEY_ID,
+            "signature": hex::encode(signature.to_bytes()),
+            "signed_at": signed_at,
+        });
+        write_private(
+            &request_path.with_file_name(SIGNING_RESPONSE_FILE),
+            &serde_json::to_vec(&response)?,
+        )
+    }
+
+    /// Plays the offline custodian in a background thread: waits for the
+    /// request, proves the executor still holds the store lock and the denial
+    /// marker, then signs.
+    fn spawn_custodian(
+        request_path: PathBuf,
+        marker_path: PathBuf,
+        data_dir: PathBuf,
+        signing: SigningKey,
+    ) -> thread::JoinHandle<io::Result<()>> {
+        thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !request_path.is_file() {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "signing request did not appear",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            if !marker_path.is_file() {
+                return Err(io::Error::other(
+                    "denial marker missing while the executor waits for a signature",
+                ));
+            }
+            match StoreAccessLock::acquire(&data_dir) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Ok(lock) => {
+                    drop(lock);
+                    return Err(io::Error::other(
+                        "store lock was released during the signing wait",
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+            respond_to_request(&request_path, &signing)
+        })
+    }
+
+    /// Rewrites the durable journal phase (test-only simulation of a crash
+    /// state that the hooks cannot reach deterministically).
+    fn rewrite_journal_phase(
+        data_dir: &Path,
+        operation_id: Uuid,
+        phase: BackupOperationPhase,
+        artifact_sha256: Option<String>,
+    ) -> io::Result<()> {
+        let mut record = journal_io(backup_journal::read_backup_operation(
+            data_dir,
+            operation_id,
+        ))?
+        .ok_or_else(|| io::Error::other("journal record"))?;
+        record.phase = phase;
+        record.artifact_sha256 = artifact_sha256;
+        record.updated_at = now_utc_rfc3339();
+        journal_io(backup_journal::write_backup_operation(data_dir, &record))
     }
 
     fn outcome_reason(outcome: &BackupCreateOutcome) -> &str {
@@ -1251,6 +1593,7 @@ mod tests {
         let outcome = execute(
             &args_for(PathBuf::from("relative-dest")),
             &absent_environment(&root),
+            &ExecutorControls::default(),
         );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&outcome), "destination-not-absolute");
@@ -1259,7 +1602,11 @@ mod tests {
     #[test]
     fn missing_destination_is_rejected() -> io::Result<()> {
         let root = TempRoot::new("missing")?;
-        let outcome = execute(&args_for(root.0.join("absent")), &absent_environment(&root));
+        let outcome = execute(
+            &args_for(root.0.join("absent")),
+            &absent_environment(&root),
+            &ExecutorControls::default(),
+        );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&outcome), "destination-missing");
         Ok(())
@@ -1270,7 +1617,11 @@ mod tests {
         let root = TempRoot::new("file-dest")?;
         let file = root.0.join("a-file");
         fs::write(&file, b"data")?;
-        let outcome = execute(&args_for(file), &absent_environment(&root));
+        let outcome = execute(
+            &args_for(file),
+            &absent_environment(&root),
+            &ExecutorControls::default(),
+        );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&outcome), "destination-not-directory");
         Ok(())
@@ -1282,7 +1633,11 @@ mod tests {
         let real = root.private_dir("real")?;
         let link = root.0.join("link");
         symlink(&real, &link)?;
-        let outcome = execute(&args_for(link), &absent_environment(&root));
+        let outcome = execute(
+            &args_for(link),
+            &absent_environment(&root),
+            &ExecutorControls::default(),
+        );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&outcome), "destination-symlink");
         Ok(())
@@ -1293,7 +1648,11 @@ mod tests {
         let root = TempRoot::new("writable-dest")?;
         let open = root.private_dir("open")?;
         fs::set_permissions(&open, fs::Permissions::from_mode(0o777))?;
-        let outcome = execute(&args_for(open), &absent_environment(&root));
+        let outcome = execute(
+            &args_for(open),
+            &absent_environment(&root),
+            &ExecutorControls::default(),
+        );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
         assert_eq!(
             outcome_reason(&outcome),
@@ -1305,15 +1664,18 @@ mod tests {
     #[test]
     fn data_dir_selection_matches_config_precedence() {
         assert_eq!(
-            data_dir_from(Some("/tmp/o3k-a")),
+            crate::backup_data_dir::data_dir_from(Some("/tmp/o3k-a")),
             PathBuf::from("/tmp/o3k-a")
         );
         assert_eq!(
-            data_dir_from(Some("  /tmp/o3k-b ")),
+            crate::backup_data_dir::data_dir_from(Some("  /tmp/o3k-b ")),
             PathBuf::from("/tmp/o3k-b")
         );
         for empty in [None, Some(""), Some("   ")] {
-            assert_eq!(data_dir_from(empty), PathBuf::from(DEFAULT_DATA_DIR));
+            assert_eq!(
+                crate::backup_data_dir::data_dir_from(empty),
+                PathBuf::from(crate::backup_data_dir::LOCAL_DATA_DIR)
+            );
         }
     }
 
@@ -1324,9 +1686,11 @@ mod tests {
             .0
             .to_str()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "temp path is not UTF-8"))?;
-        let explicit = resolve_data_dir_from(Some(utf8_path)).map_err(io::Error::other)?;
+        let explicit = crate::backup_data_dir::resolve_data_dir_from(Some(utf8_path))
+            .map_err(io::Error::other)?;
         assert_eq!(explicit, fs::canonicalize(&root.0)?);
-        let unresolved = resolve_data_dir_from(Some("/definitely/missing/o3k-path"));
+        let unresolved =
+            crate::backup_data_dir::resolve_data_dir_from(Some("/definitely/missing/o3k-path"));
         assert_eq!(unresolved.err(), Some("data-dir-unavailable"));
         Ok(())
     }
@@ -1348,6 +1712,7 @@ mod tests {
             data_dir,
             now_utc_rfc3339(),
             &absent_environment(&root),
+            &ExecutorControls::default(),
         );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&outcome), "controller-unavailable");
@@ -1381,6 +1746,7 @@ mod tests {
             data_dir.clone(),
             now_utc_rfc3339(),
             &absent_environment(&root),
+            &ExecutorControls::default(),
         );
         server
             .join()
@@ -1418,6 +1784,7 @@ mod tests {
             data_dir,
             now_utc_rfc3339(),
             &absent_environment(&root),
+            &ExecutorControls::default(),
         );
         server
             .join()
@@ -1441,11 +1808,15 @@ mod tests {
             data_dir.clone(),
             now_utc_rfc3339(),
             &absent_environment(&root),
+            &ExecutorControls::default(),
         );
         server
             .join()
             .map_err(|_| io::Error::other("handoff thread panicked"))??;
-        assert_eq!(outcome.exit_code, EXIT_REJECTED);
+        // F22: a missing trust document is a recoverable configuration failure
+        // in `create` as well as in `verify` (exit 3), never a rejected
+        // artifact precondition.
+        assert_eq!(outcome.exit_code, EXIT_RECOVERABLE);
         assert_eq!(outcome_reason(&outcome), "trust-config-unavailable");
         assert!(
             !data_dir
@@ -1477,6 +1848,7 @@ mod tests {
                 .into_owned(),
             request_sha256: Some("a".repeat(64)),
             artifact_sha256: Some("b".repeat(64)),
+            reserved_bytes: None,
             site_id: "site-1".to_owned(),
             installation_id: "install-1".to_owned(),
             created_at: "2026-10-23T12:00:00Z".to_owned(),
@@ -1490,6 +1862,7 @@ mod tests {
             },
             &absent_environment(&root),
             Some(&data_dir),
+            &ExecutorControls::default(),
         );
         assert_eq!(outcome.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&outcome), "operation-already-published");
@@ -1514,6 +1887,7 @@ mod tests {
                 .into_owned(),
             request_sha256: None,
             artifact_sha256: None,
+            reserved_bytes: None,
             site_id: "site-1".to_owned(),
             installation_id: "install-1".to_owned(),
             created_at: "2026-10-23T12:00:00Z".to_owned(),
@@ -1527,15 +1901,20 @@ mod tests {
             },
             &absent_environment(&root),
             Some(&data_dir),
+            &ExecutorControls::default(),
         );
         assert_eq!(outcome.exit_code, EXIT_RECOVERABLE);
         assert_eq!(outcome_reason(&outcome), "backup-operation-incomplete");
         Ok(())
     }
 
-    /// The full accepted flow: capture and stage (exit 3), sign offline, re-run
-    /// the same request (exit 0), verify the published artifact against the
-    /// installed release, and refuse a second capture for the same id.
+    /// The staged-artifact flow with the harness stop-after-staging control:
+    /// capture and stage (exit 3), sign offline, re-run the same request
+    /// (exit 0), verify the published artifact against the installed release,
+    /// and refuse a second capture for the same id.
+    ///
+    /// Production never stops after staging (Option A waits in the same
+    /// process); `phase_one_waits_and_publishes_the_artifact` covers that.
     #[test]
     fn two_phase_flow_publishes_a_verified_artifact() -> io::Result<()> {
         let root = TempRoot::new("two-phase")?;
@@ -1558,6 +1937,7 @@ mod tests {
             data_dir.clone(),
             now_utc_rfc3339(),
             &environment,
+            &stop_after_staging_controls(),
         );
         server
             .join()
@@ -1601,24 +1981,24 @@ mod tests {
         assert!(journal.request_sha256.is_some());
         let staging_path = PathBuf::from(&journal.staging_path);
         assert!(staging_path.is_dir());
-        assert!(staging_path.join(SNAPSHOT_FILE_NAME).is_file());
+        // F5: the plaintext snapshot is unlinked as soon as the encrypted
+        // artifact is staged; only the artifact and the request remain.
+        assert!(
+            !staging_path.join(SNAPSHOT_FILE_NAME).exists(),
+            "plaintext snapshot must not remain in the signable staging tree"
+        );
+        let staged_entries = fs::read_dir(&staging_path)
+            .expect("staging directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            staged_entries
+                .iter()
+                .all(|name| name == SIGNING_REQUEST_FILE || name.starts_with("members-")),
+            "unexpected staging entries: {staged_entries:?}"
+        );
         assert!(!dest.join(format!("backup-{operation_id}.o3k")).exists());
-
-        // Phase 2 without a response stays idempotent.
-        let pending = execute_with_data_dir(
-            &BackupCreateArgs {
-                destination: dest.clone(),
-                operation_id,
-            },
-            &environment,
-            Some(&data_dir),
-        );
-        assert_eq!(pending.exit_code, EXIT_RECOVERABLE, "{}", pending.json);
-        assert_eq!(
-            pending.json["status"], "signing-required",
-            "{}",
-            pending.json
-        );
 
         // A wrong signature is rejected and nothing is published.
         let request_bytes = fs::read(&request_path)?;
@@ -1648,11 +2028,22 @@ mod tests {
             },
             &environment,
             Some(&data_dir),
+            &ExecutorControls::default(),
         );
         assert_eq!(rejected.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&rejected), "signature-invalid");
         assert!(!dest.join(format!("backup-{operation_id}.o3k")).exists());
         assert!(staging_path.is_dir());
+
+        // P0-3/M5 regression: debris from an earlier failed finalize (an empty
+        // `artifact.partial`) must not wedge the retry. It is removed before a
+        // fresh finalize and the same request still publishes.
+        let members = fs::read_dir(&staging_path)?
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().starts_with("members-"))
+            .ok_or_else(|| io::Error::other("members staging directory"))?
+            .path();
+        write_private(&members.join("artifact.partial"), b"")?;
 
         // Offline custodian signs the exact D1 input; the same request
         // completes and publishes.
@@ -1664,6 +2055,7 @@ mod tests {
             },
             &environment,
             Some(&data_dir),
+            &ExecutorControls::default(),
         );
         assert_eq!(
             published.exit_code, 0,
@@ -1732,6 +2124,60 @@ mod tests {
         assert!(capture["reservation"]["reserved_bytes"].as_u64().is_some());
         fs::remove_dir_all(&verified.staging_directory)?;
 
+        // F2/P0-2 regression: a crash after publication but before the
+        // `published` journal write, with the staging tree already removed.
+        // The replay must observe the destination inode first (no-follow,
+        // regular, matching digest) and classify the operation as published.
+        let published_sha = published.json["sha256"]
+            .as_str()
+            .expect("published digest")
+            .to_owned();
+        assert!(!staging_path.exists(), "staging was removed on publication");
+        rewrite_journal_phase(
+            &data_dir,
+            operation_id,
+            BackupOperationPhase::Publishing,
+            Some(published_sha.clone()),
+        )?;
+        write_private(
+            &data_dir.join(format!("{MARKER_FILE_PREFIX}{operation_id}")),
+            b"{}",
+        )?;
+        let post_rename_replay = execute_with_data_dir(
+            &BackupCreateArgs {
+                destination: dest.clone(),
+                operation_id,
+            },
+            &environment,
+            Some(&data_dir),
+            &short_await_controls(Duration::from_millis(200)),
+        );
+        assert_eq!(
+            post_rename_replay.exit_code, 0,
+            "unexpected post-rename replay outcome: {}",
+            post_rename_replay.json
+        );
+        assert_eq!(
+            post_rename_replay.json["status"], "backup-published",
+            "{}",
+            post_rename_replay.json
+        );
+        assert_eq!(post_rename_replay.json["sha256"], published_sha);
+        assert!(
+            !data_dir
+                .join(format!("{MARKER_FILE_PREFIX}{operation_id}"))
+                .exists(),
+            "the completed replay removes the denial marker"
+        );
+        assert_eq!(
+            journal_io(backup_journal::read_backup_operation(
+                &data_dir,
+                operation_id
+            ))?
+            .map(|record| record.phase),
+            Some(BackupOperationPhase::Published)
+        );
+
         // A new capture under a published operation id is refused before the
         // controller is contacted.
         let duplicate = execute_with_data_dir(
@@ -1741,9 +2187,224 @@ mod tests {
             },
             &environment,
             Some(&data_dir),
+            &ExecutorControls::default(),
         );
         assert_eq!(duplicate.exit_code, EXIT_REJECTED);
         assert_eq!(outcome_reason(&duplicate), "operation-already-published");
+        Ok(())
+    }
+
+    /// Option A: the capture process keeps the store lock and the denial
+    /// marker while it waits for the detached signature, then verifies and
+    /// publishes in the same invocation.
+    #[test]
+    fn phase_one_waits_for_the_signature_and_publishes() -> io::Result<()> {
+        let root = TempRoot::new("option-a-wait")?;
+        let data_dir = root.private_dir("data")?;
+        let dest = root.private_dir("dest")?;
+        let operation_id = Uuid::new_v4();
+        create_migrated_store(&data_dir)?;
+        let fixture = ArtifactFixture::new(&root, &data_dir, latest_sqlite_schema_version());
+        let environment = fixture.environment();
+        let marker_path = data_dir.join(format!("{MARKER_FILE_PREFIX}{operation_id}"));
+        let request_path = dest
+            .join(format!("{OPERATION_STAGING_PREFIX}{operation_id}"))
+            .join(SIGNING_REQUEST_FILE);
+
+        // The custodian thread also proves the exclusion: while the request
+        // exists, the marker must exist and the store lock must be held.
+        let custodian = spawn_custodian(
+            request_path,
+            marker_path.clone(),
+            data_dir.clone(),
+            fixture.signing.clone(),
+        );
+        let server = spawn_handoff(data_dir.clone())?;
+        let outcome = execute_inner(
+            &BackupCreateArgs {
+                destination: dest.clone(),
+                operation_id,
+            },
+            dest.clone(),
+            destination_fd(&dest)?,
+            data_dir.clone(),
+            now_utc_rfc3339(),
+            &environment,
+            &short_await_controls(Duration::from_secs(60)),
+        );
+        server
+            .join()
+            .map_err(|_| io::Error::other("handoff thread panicked"))??;
+        custodian
+            .join()
+            .map_err(|_| io::Error::other("custodian thread panicked"))??;
+
+        assert_eq!(
+            outcome.exit_code, 0,
+            "unexpected phase-1 outcome: {}",
+            outcome.json
+        );
+        assert_eq!(outcome.json["status"], "backup-published");
+        let artifact = dest.join(format!("backup-{operation_id}.o3k"));
+        assert!(artifact.is_file());
+        assert_eq!(
+            outcome.json["sha256"].as_str(),
+            Some(sha256_hex_file(&artifact)?.as_str())
+        );
+        // The wait ended in verified publication: staging, marker and lock are
+        // all released.
+        assert!(
+            !dest
+                .join(format!("{OPERATION_STAGING_PREFIX}{operation_id}"))
+                .exists()
+        );
+        assert!(!marker_path.exists());
+        assert_eq!(
+            journal_io(backup_journal::read_backup_operation(
+                &data_dir,
+                operation_id
+            ))?
+            .map(|record| record.phase),
+            Some(BackupOperationPhase::Published)
+        );
+        let reacquired = StoreAccessLock::acquire(&data_dir)?;
+        drop(reacquired);
+        Ok(())
+    }
+
+    /// The request TTL expiring while the executor waits is a safe abort: no
+    /// publication, no staging tree, no marker, journal `aborted`.
+    #[test]
+    fn phase_two_without_a_signature_safely_aborts() -> io::Result<()> {
+        let root = TempRoot::new("safe-abort")?;
+        let data_dir = root.private_dir("data")?;
+        let dest = root.private_dir("dest")?;
+        let operation_id = Uuid::new_v4();
+        create_migrated_store(&data_dir)?;
+        let fixture = ArtifactFixture::new(&root, &data_dir, latest_sqlite_schema_version());
+        let environment = fixture.environment();
+
+        let server = spawn_handoff(data_dir.clone())?;
+        let phase_one = execute_inner(
+            &BackupCreateArgs {
+                destination: dest.clone(),
+                operation_id,
+            },
+            dest.clone(),
+            destination_fd(&dest)?,
+            data_dir.clone(),
+            now_utc_rfc3339(),
+            &environment,
+            &stop_after_staging_controls(),
+        );
+        server
+            .join()
+            .map_err(|_| io::Error::other("handoff thread panicked"))??;
+        assert_eq!(phase_one.exit_code, EXIT_RECOVERABLE, "{}", phase_one.json);
+        let staging = dest.join(format!("{OPERATION_STAGING_PREFIX}{operation_id}"));
+        assert!(staging.is_dir());
+
+        let aborted = execute_with_data_dir(
+            &BackupCreateArgs {
+                destination: dest.clone(),
+                operation_id,
+            },
+            &environment,
+            Some(&data_dir),
+            &short_await_controls(Duration::from_millis(200)),
+        );
+        assert_eq!(
+            aborted.exit_code, EXIT_RECOVERABLE,
+            "unexpected safe-abort outcome: {}",
+            aborted.json
+        );
+        assert_eq!(outcome_reason(&aborted), "signing-request-expired");
+        assert!(!staging.exists(), "safe abort removes the staging tree");
+        assert!(!dest.join(format!("backup-{operation_id}.o3k")).exists());
+        assert_eq!(
+            journal_io(backup_journal::read_backup_operation(
+                &data_dir,
+                operation_id
+            ))?
+            .map(|record| record.phase),
+            Some(BackupOperationPhase::Aborted)
+        );
+        assert!(
+            !data_dir
+                .join(format!("{MARKER_FILE_PREFIX}{operation_id}"))
+                .exists(),
+            "safe abort removes the denial marker"
+        );
+        // A later capture under the same id is not blocked by an aborted
+        // journal; it fails only on the missing controller.
+        let retry = execute_with_data_dir(
+            &BackupCreateArgs {
+                destination: dest.clone(),
+                operation_id,
+            },
+            &environment,
+            Some(&data_dir),
+            &short_await_controls(Duration::from_millis(50)),
+        );
+        assert_eq!(retry.exit_code, EXIT_REJECTED, "{}", retry.json);
+        assert_eq!(outcome_reason(&retry), "controller-unavailable");
+        Ok(())
+    }
+
+    /// Phase 2 may not run while a controller (or a concurrent phase 1 that
+    /// still holds the lock during its own signing wait) owns the data
+    /// directory.
+    #[test]
+    fn phase_two_requires_the_lifetime_store_lock() -> io::Result<()> {
+        let root = TempRoot::new("phase-two-lock")?;
+        let data_dir = root.private_dir("data")?;
+        let dest = root.private_dir("dest")?;
+        let operation_id = Uuid::new_v4();
+        create_migrated_store(&data_dir)?;
+        let fixture = ArtifactFixture::new(&root, &data_dir, latest_sqlite_schema_version());
+        let environment = fixture.environment();
+
+        let server = spawn_handoff(data_dir.clone())?;
+        let phase_one = execute_inner(
+            &BackupCreateArgs {
+                destination: dest.clone(),
+                operation_id,
+            },
+            dest.clone(),
+            destination_fd(&dest)?,
+            data_dir.clone(),
+            now_utc_rfc3339(),
+            &environment,
+            &stop_after_staging_controls(),
+        );
+        server
+            .join()
+            .map_err(|_| io::Error::other("handoff thread panicked"))??;
+        assert_eq!(phase_one.exit_code, EXIT_RECOVERABLE, "{}", phase_one.json);
+
+        let live_owner = StoreAccessLock::acquire(&data_dir)?;
+        let blocked = execute_with_data_dir(
+            &BackupCreateArgs {
+                destination: dest.clone(),
+                operation_id,
+            },
+            &environment,
+            Some(&data_dir),
+            &short_await_controls(Duration::from_millis(50)),
+        );
+        assert_eq!(blocked.exit_code, EXIT_REJECTED, "{}", blocked.json);
+        assert_eq!(outcome_reason(&blocked), "controller-active");
+        let staging = dest.join(format!("{OPERATION_STAGING_PREFIX}{operation_id}"));
+        assert!(staging.is_dir(), "a rejected phase 2 touches no staging");
+        assert_eq!(
+            journal_io(backup_journal::read_backup_operation(
+                &data_dir,
+                operation_id
+            ))?
+            .map(|record| record.phase),
+            Some(BackupOperationPhase::Staged)
+        );
+        drop(live_owner);
         Ok(())
     }
 

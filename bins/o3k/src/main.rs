@@ -294,18 +294,27 @@ fn run_version() -> ExitCode {
 }
 
 fn installed_version() -> String {
-    let prefix = std::env::var("O3K_UPGRADE_PREFIX")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local"));
+    // Root ignores O3K_UPGRADE_PREFIX: release metadata must resolve from the
+    // canonical install location (SPEC-0050 §8 posture).
+    let prefix = if o3k::backup_trust::environment_overrides_allowed() {
+        std::env::var("O3K_UPGRADE_PREFIX")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/usr/local"))
+    } else {
+        std::path::PathBuf::from("/usr/local")
+    };
     let candidates = [prefix, std::path::PathBuf::from("/usr")];
     for candidate in &candidates {
-        let manifest = candidate.join("share/o3k/release-manifest.json");
-        let Ok(contents) = std::fs::read_to_string(&manifest) else {
+        // Same bounded, no-follow installation-metadata posture as the backup
+        // verifier (SPEC-0050 §8); never follow a substituted manifest path.
+        let Ok(contents) =
+            o3k::upgrade::release_identity::read_installed_release_manifest(candidate)
+        else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&contents) else {
             continue;
         };
         if let Some(version) = value
