@@ -289,7 +289,8 @@ release-level review requirements remain in force.
 
 ### Proposed amendment A10 isolated inactive materialization (PENDING, not accepted)
 
-Proposed 2026-10-24 for #1086. This section is **not** accepted architecture,
+Proposed 2026-10-24, revised 2026-10-25 for #1086. This section is **not**
+accepted architecture,
 is not part of the exact-revision contract at
 `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`, and authorizes no implementation.
 It becomes normative only after the named human reviewer records explicit

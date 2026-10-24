@@ -923,11 +923,12 @@ format are both version-bound to the accepted amendment.
 Implementation of this branch is forbidden until the named human reviewer
 records explicit acceptance of this exact specification revision together with
 the consistent ADR-0189 and PP6 technical-contract text. Opening, approving or
-merging the proposal PR is not that acceptance. Until acceptance, the current
-implementation must continue to permit only the authenticated `PREFLIGHTED`
-record and must reject every later phase, including all `_INACTIVE` phases.
-If this amendment is rejected, the physical D7-first path remains the only
-restore path.
+merging the proposal PR is not that acceptance. Until acceptance,
+implementations must not persist or accept any later phase, including all
+`_INACTIVE` phases, and must remain limited to the authenticated
+`PREFLIGHTED` record. If this amendment is rejected, no inactive restore
+branch exists; only the accepted D7-first activation path and
+capture/verification remain.
 
 ## 8. Operator interface
 
