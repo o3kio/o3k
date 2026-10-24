@@ -64,12 +64,13 @@ accepted SPEC-0050 §7 sequence, which requires `SOURCE_FENCED` before
 `TARGET_RESERVED`. Proposed amendment A10 would add an explicit, signed,
 non-activating branch limited to virtualized PostgreSQL `o3k-small-edge-v1`
 under a release-signed installation policy; see
-[SPEC-0050 §7.1](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#71-proposed-amendment-a10--isolated-inactive-materialization-pending-not-accepted)
-and the [ADR-0189 proposed amendment](../adr/ADR-0189-pp6-control-plane-backup-and-restore.md#proposed-amendment-a10--isolated-inactive-materialization-pending-not-accepted).
+[SPEC-0050 §7.1](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#71-proposed-amendment-a10-isolated-inactive-materialization-pending-not-accepted)
+and the [ADR-0189 proposed amendment](../adr/ADR-0189-pp6-control-plane-backup-and-restore.md#proposed-amendment-a10-isolated-inactive-materialization-pending-not-accepted).
 This note does not change the accepted table, SPEC-0050 or any D1–D13 decision.
 Until the exact amendment is accepted by the named human reviewer at a new
-exact revision, the accepted text governs and implementation must remain
-capture/verification-only or fail closed at `PREFLIGHTED`.
+exact revision, the accepted text governs: implementation must remain limited
+to capture/verification or the accepted fenced activation path, and the
+current local journal remains fail-closed at `PREFLIGHTED`.
 
 ### D2 custody record
 

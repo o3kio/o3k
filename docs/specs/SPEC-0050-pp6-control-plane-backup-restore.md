@@ -655,11 +655,12 @@ through the accepted observe-before-retry behavior. The exact stop/fence and
 restart transition is a human approval item in ADR-0189; the restore design
 does not define an alternate Operation or lifecycle authority.
 
-### 7.1 Proposed amendment A10 — isolated inactive materialization (PENDING, not accepted)
+### 7.1 Proposed amendment A10 isolated inactive materialization (PENDING, not accepted)
 
-Status: proposed 2026-10-24 for #1086. This subsection is **not** part of the
-accepted contract at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` and is not
-implementation authority. It becomes normative only if the named human
+Status: proposed 2026-10-24, revised 2026-10-25 for #1086. This subsection is
+**not** part of the accepted contract at
+`9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` and is not implementation
+authority. It becomes normative only if the named human
 reviewer records explicit acceptance of this exact revised specification,
 ADR-0189 and the PP6 technical contract at a new exact revision. PR approval or
 merge alone is not that acceptance. Until then, §6's capture/verification-only
@@ -692,11 +693,16 @@ separate future profile extension. No new public API or endpoint is proposed;
 the accepted host-local `o3k` CLI surface and confirmation/exit-code semantics
 in §8 and the technical contract continue to apply.
 
+The target may contain restored control-plane data, but it must have no
+operational controller authority. It is a verified data image, not a running
+cloud control plane.
+
 #### 7.1.2 Legal state branch and transitions
 
-After `PREFLIGHTED`, an operation selects exactly one branch. The branch is
-fixed for the life of the journal chain and is part of every signed record.
-The proposed inactive branch is:
+An operation selects its branch when its journal is created, no later than the
+`PREFLIGHTED` record, and the selection is fixed for the life of the journal
+chain and is part of every signed record. An existing `v1` activation chain
+cannot later select the inactive branch. The proposed inactive branch is:
 
 ```text
 PREFLIGHTED
@@ -759,9 +765,11 @@ Replay, sequence and retry rules are unchanged: a lost response retries the
 exact persisted request bytes and nonce; a new nonce for an already requested
 sequence is a fork; a replayed, forked, skipped or mixed-branch chain is
 rejected; an unsigned failure marker may only deny progress. New phase names
-require a new journal format version (`o3k-restore-journal-v2` or later);
-older readers must reject the unknown format or phase rather than treat it as
-success.
+require a new journal and signing-request format version
+(`o3k-restore-journal-v2` / `o3k-restore-signing-request-v2`, or later). An
+inactive operation uses that format from its first record; a `v1` chain is
+never converted into it. Older readers must reject the unknown format or phase
+rather than treat it as success.
 
 #### 7.1.4 Mandatory inactive-target safeguards
 
@@ -795,6 +803,15 @@ An inactive materialization is permitted only when all of the following hold:
     and
 12. failure ends in explicit verified cleanup or quarantine, never a blind
     destructive retry.
+
+The mutations this branch may perform are limited to: creating and owning the
+reserved fresh target database; restoring schema, data, files and metadata into
+that target; writing the protected journal, staging and verification records;
+and verified cleanup or quarantine. It must not start a controller, open an
+operational API or listener, acquire or serve a lease, dispatch providers or
+reconcile Operations, read the source database, mutate external VM/storage/
+network/provider state, or write any activation phase or signed `STARTED`
+record.
 
 A journal phase label alone is never an adequate startup guard. Every
 store-opening path — `o3kd`, ordinary systemd start, host-local CLI startup or
@@ -849,7 +866,7 @@ evidence.
 
 | Profile | Backend | Deployment | Inactive materialization | Fenced activation | Notes |
 |---|---|---|---|---|---|
-| `o3k-small-edge-v1` | PostgreSQL 16 | physical | not permitted by A10 | accepted D7 path when configured | physical profiles continue to use the fenced sequence |
+| `o3k-small-edge-v1` | PostgreSQL 16 | physical | not permitted by A10 | accepted D7 path when configured | physical profiles continue to use the fenced sequence; a separate amendment would be required for physical inactive materialization |
 | `o3k-small-edge-v1` | PostgreSQL 16 | virtualized | permitted to `INACTIVE_VERIFIED` only when signed policy selects it | disabled by default; requires a separately accepted independent fence | this amendment |
 | `o3k-small-edge-v1` | PostgreSQL 16 | virtualized, policy not selected | not permitted | disabled | backup/verification only |
 | `o3k-demo-v1` / TestLab | SQLite | any | not permitted | backup/verification only | separate future profile amendment required |
@@ -871,16 +888,18 @@ activation boundary, and this amendment does not weaken it.
 
 #### 7.1.9 Backward compatibility and installed releases
 
-Existing `o3k-restore-journal-v1` chains containing only `PREFLIGHTED` remain
-readable and forward-compatible; the branch is selected at sequence 2. New
-inactive phase names require a new journal format version. Older binaries and
-installed releases that predate the exact acceptance must reject the new
-format or phase and must not perform inactive materialization. Chains are
-never downgraded, migrated or edited in place. A target carrying an inactive
-chain is not reusable by an activation operation without the accepted
-discard/recreate or promotion procedure. A release may implement the inactive
-branch only when its signed install policy and journal format are both
-version-bound to the accepted amendment.
+Existing `o3k-restore-journal-v1` chains remain readable under the accepted
+activation contract. An inactive-branch operation uses the new journal and
+signing-request format from its first record; a `v1` chain may not later select
+the inactive branch and is never converted, rewritten or downgraded. The
+branch is chosen once, at journal creation and no later than the
+`PREFLIGHTED` record, within that operation's format version. Older binaries
+and installed releases that predate the exact acceptance must reject the new
+format, phase or branch field and must not perform inactive materialization. A
+target carrying an inactive chain is not reusable by an activation operation
+without the accepted discard/recreate or promotion procedure. A release may
+implement the inactive branch only when its signed install policy and journal
+format are both version-bound to the accepted amendment.
 
 #### 7.1.10 Residual risks
 

@@ -287,7 +287,7 @@ at its exact revision. Concrete implementation correctness, key custody
 operations, PostgreSQL real-backend evidence, protected integration, and all
 release-level review requirements remain in force.
 
-### Proposed amendment A10 — isolated inactive materialization (PENDING, not accepted)
+### Proposed amendment A10 isolated inactive materialization (PENDING, not accepted)
 
 Proposed 2026-10-24 for #1086. This section is **not** accepted architecture,
 is not part of the exact-revision contract at
@@ -315,7 +315,7 @@ control-plane data from authorized controller activation:
 The exact transitions, signing bindings, mandatory safeguards, crash
 classifications, profile restrictions, backward-compatibility rules and
 residual risks are specified in
-[SPEC-0050 §7.1](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#71-proposed-amendment-a10--isolated-inactive-materialization-pending-not-accepted).
+[SPEC-0050 §7.1](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#71-proposed-amendment-a10-isolated-inactive-materialization-pending-not-accepted).
 Until acceptance, the accepted D7-first behavior and the current fail-closed
 implementation boundary govern.
 

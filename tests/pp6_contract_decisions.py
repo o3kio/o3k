@@ -222,7 +222,10 @@ def accept_inactive_transition(*, sequence: int, previous_hash: str,
         return False
     if sequence != expected_sequence or previous_hash != expected_previous_hash:
         return False
-    if recorded_branch not in (None, "inactive"):
+    if recorded_branch is None:
+        if from_phase != "PREFLIGHTED":
+            return False
+    elif recorded_branch != "inactive":
         return False
     if not inactive_profile_permitted(profile=profile, backend=backend,
                                       deployment=deployment,
@@ -277,6 +280,7 @@ class ProposedInactiveMaterializationTests(unittest.TestCase):
                         recorded_branch="inactive", from_phase=source,
                         to_phase=target,
                         verification_bound=(target == "INACTIVE_VERIFIED"))))
+        self.assertEqual({target for _, target in chain}, set(INACTIVE_PHASES))
         for forbidden in ACTIVATION_ONLY_PHASES:
             with self.subTest(forbidden=forbidden):
                 self.assertFalse(accept_inactive_transition(
@@ -288,6 +292,10 @@ class ProposedInactiveMaterializationTests(unittest.TestCase):
         self.assertFalse(accept_inactive_transition(
             **self.kwargs(recorded_branch="activation")))
         self.assertFalse(accept_inactive_transition(
+            **self.kwargs(recorded_branch=None,
+                          from_phase="TARGET_RESERVED_INACTIVE",
+                          to_phase="STAGING_INACTIVE")))
+        self.assertFalse(accept_inactive_transition(
             **self.kwargs(signature_verified=False)))
         self.assertFalse(accept_inactive_transition(
             **self.kwargs(from_phase="SOURCE_FENCED",
@@ -297,11 +305,13 @@ class ProposedInactiveMaterializationTests(unittest.TestCase):
         self.assertFalse(accept_inactive_transition(
             **self.kwargs(previous_hash="f" * 64)))
         self.assertFalse(accept_inactive_transition(
-            **self.kwargs(from_phase="FILES_RESTORED_INACTIVE",
+            **self.kwargs(recorded_branch="inactive",
+                          from_phase="FILES_RESTORED_INACTIVE",
                           to_phase="INACTIVE_VERIFIED",
                           verification_bound=False)))
         self.assertTrue(accept_inactive_transition(
-            **self.kwargs(from_phase="FILES_RESTORED_INACTIVE",
+            **self.kwargs(recorded_branch="inactive",
+                          from_phase="FILES_RESTORED_INACTIVE",
                           to_phase="INACTIVE_VERIFIED",
                           verification_bound=True)))
 
