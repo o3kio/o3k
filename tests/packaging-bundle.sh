@@ -12,7 +12,7 @@ BUNDLE_DIR="$WORK_DIR/bundle"
 mkdir -p "$BUNDLE_DIR/bin" "$BUNDLE_DIR/packaging" "$BUNDLE_DIR/scripts"
 for file in \
   install.sh o3kd.service reset.sh uninstall.sh diagnose.sh preflight.sh \
-  bootstrap-certs.sh bootstrap-testlab.sh release-gate.sh validate-human-review.sh scan-release-evidence.sh generate-candidate-evidence-manifest.py o3k-compute.service o3k-network.service 50-o3k-libvirt.rules; do
+  bootstrap-certs.sh bootstrap-testlab.sh release-gate.sh validate-human-review.sh scan-release-evidence.sh generate-candidate-evidence-manifest.py o3k-compute.service o3k-network.service 50-o3k-libvirt.rules backup-trust.example.json; do
   cp "$ROOT_DIR/packaging/$file" "$BUNDLE_DIR/packaging/$file"
 done
 cp "$ROOT_DIR/scripts/generate-passwords.sh" "$BUNDLE_DIR/scripts/generate-passwords.sh"
