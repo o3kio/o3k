@@ -273,6 +273,9 @@ impl Default for ExecutorControls {
 impl ExecutorControls {
     /// Production controls: the accepted Option A wait semantics.
     fn from_process() -> Self {
+        #[cfg(not(feature = "backup-test-hooks"))]
+        let controls = Self::default();
+        #[cfg(feature = "backup-test-hooks")]
         let mut controls = Self::default();
         #[cfg(feature = "backup-test-hooks")]
         {

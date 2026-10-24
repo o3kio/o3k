@@ -62,15 +62,19 @@ verdict:
   "campaign": "tests/pp6_backup_artifact.sh",
   "executed_rows": 44,
   "failed_rows": 0,
-  "harness_sha256": "f5d4a8e05ef4fcd66e6acf5c5b5683bdb6640cea4d686989ca6333db484071e1",
+  "harness_sha256": "92e64bb9ccb4846550aeca1675b14f681de6dcd958b0c4e98c0d59aaca890214",
   "host_identity_hash": "8110f5814f95639d2d88a1e379a827e065c9c072b52b54c92f4ce2b1051f54bb",
   "issue": 1084,
-  "matrix": { "FAIL": 0, "NOT-COVERED": 1, "PASS": 44 },
+  "matrix": {
+    "FAIL": 0,
+    "NOT-COVERED": 1,
+    "PASS": 44
+  },
   "max_migration_checksum": "7a2333035bc23d000c129d6d87d236b119a69bbc2de5bda6e41618c6b1488fc0",
   "max_migration_version": 53,
   "not_covered_rows": 1,
-  "o3k_binary_sha256": "15b0917a7949bb5adb91a4b3299e9aae3935a71f47f48997bc2120f23ace36f3",
-  "o3kd_binary_sha256": "787bfa105c987edd3dd17628c444770aa0269766a5292e62b9d7f6a673a38c66",
+  "o3k_binary_sha256": "be29f90fa8380bd2487ba225236e65fe5ff9f3d10db4b2f38e4c88f514cb10bb",
+  "o3kd_binary_sha256": "ee3f6687b85e659c35bd998d2264161a8e93e53ace8a733bc8905ede1495e5b8",
   "passed_rows": 44,
   "profile": "o3k-demo-v1",
   "release_artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -81,6 +85,7 @@ verdict:
   "sqlite_version": "3.46.0",
   "state_inventory_sqlite_version": "3.46.0",
   "working_tree_dirty": false
+}
 }
 ```
 
@@ -1016,7 +1021,7 @@ corresponding claim can be widened; none is silently resolved here.
 ## Machine-readable verdict
 
 The authoritative run is recorded in `FINAL-COMMIT-BINDING` (clean commit
-`0fd4ff2c`). The JSON below is an earlier pre-binding run on the uncommitted
+`7a3e7352`). The JSON below is an earlier pre-binding run on the uncommitted
 working tree, kept to show per-run variation: the same matrix and row outcomes
 with different artifact digest, backup id, data-directory identities and size.
 The harness prints the same object on stdout between the markers

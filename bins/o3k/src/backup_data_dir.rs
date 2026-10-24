@@ -187,7 +187,11 @@ fn env_file_data_dir(path: &Path, effective_uid: u32) -> Result<Option<String>, 
         Mode::empty(),
     ) {
         Ok(descriptor) => descriptor,
-        Err(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM) => return Ok(None),
+        // A file that disappeared between `lstat` and `open` is the same
+        // "no value available" case as a missing file.
+        Err(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM | rustix::io::Errno::NOENT) => {
+            return Ok(None);
+        }
         Err(_) => return Err(REASON_ENV_FILE_UNSAFE),
     };
     // The posture is checked on the descriptor that is actually read, so a
