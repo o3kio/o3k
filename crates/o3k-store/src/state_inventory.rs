@@ -34,30 +34,78 @@
 //!
 //! `definition_sha256` is the lowercase hex SHA-256 of a normalized catalog
 //! definition parsed from the committed migration SQL. SQLite objects are
-//! computed from `migrations/` and PostgreSQL objects independently from
-//! `migrations_postgres/`. Normalization rules:
+//! derived by applying `migrations/` (and the runtime `operations` rebuild that
+//! `SqliteStore` performs after SQLx migrations) in an empty in-memory store and
+//! reading the resulting `sqlite_master`; PostgreSQL objects are parsed
+//! independently from `migrations_postgres/`.
 //!
-//! 1. `--` line comments and `/* */` block comments are removed;
-//! 2. the definition is the exact `CREATE TABLE` statement from `CREATE`
-//!    through the parenthesis that closes the column/constraint list, without
-//!    the trailing `;`;
+//! The registry emits these kinds:
+//!
+//! - **table** — every `CREATE TABLE` in the migration tree;
+//! - **index** — every `CREATE [UNIQUE] INDEX` (SQLite and PostgreSQL);
+//! - **trigger** — every `CREATE [OR REPLACE] TRIGGER` (SQLite and PostgreSQL);
+//! - **function** — every `CREATE [OR REPLACE] FUNCTION` (PostgreSQL only).
+//!
+//! Views and sequences are accepted by the contract but no reviewed migration
+//! creates one; a future `CREATE VIEW`/`CREATE SEQUENCE` fails generation
+//! instead of being silently omitted. Explicit named constraints (for example
+//! `ALTER TABLE ... ADD CONSTRAINT` in the PostgreSQL tree) are not emitted as
+//! `constraint` objects; the reviewed catalog coverage is tables, indexes,
+//! triggers and functions.
+//!
+//! Indexes and triggers are assigned to the repository entry that owns the
+//! table named by their `ON <table>` clause. A PostgreSQL function has no table
+//! owner; each reviewed function must be listed in
+//! `GENERIC_FUNCTION_OWNERS` and is assigned to the named repository (both
+//! current functions are generic operation-integrity functions and belong to
+//! `operations`). An unlisted function fails generation instead of being
+//! silently dropped.
+//!
+//! Normalization rules:
+//!
+//! 1. `--` line comments and `/* */` block comments are removed. SQLite
+//!    `[...]` quoting, SQL `'...'`/`"..."`/`` `...` `` quoting and PostgreSQL
+//!    dollar-quoted strings (`$$...$$`, `$tag$...$tag$`) are preserved;
+//! 2. for a table, the definition is the exact `CREATE TABLE` statement from
+//!    `CREATE` through the parenthesis that closes the column/constraint list;
+//!    for indexes, triggers and functions it is the whole statement through the
+//!    terminator (the PostgreSQL function body is the complete dollar-quoted
+//!    string). The trailing `;` is excluded;
 //! 3. runs of whitespace outside quoted identifiers and string literals
-//!    collapse to one space, and the result is trimmed;
+//!    collapse to one space, and the result is trimmed. Whitespace inside a
+//!    dollar-quoted function body is collapsed by the same rule; the body text
+//!    is otherwise preserved verbatim;
 //! 4. whitespace that depends only on layout is removed outside quoted
 //!    identifiers and string literals: after `(`, after `,`, before `)` and
 //!    before `,`;
 //! 5. an `IF NOT EXISTS` qualifier is removed;
 //! 6. identifiers, keywords and literals keep their original spelling, case
 //!    and quoting;
-//! 7. when one tree creates the same table more than once (a table rebuild,
-//!    for example `0036_native_attachment_reuse.sql`), the last `CREATE TABLE`
-//!    in migration-stem order is the effective definition.
+//! 7. when one tree creates the same object more than once (a table rebuild,
+//!    for example `0036_native_attachment_reuse.sql`, or a
+//!    `DROP TRIGGER`/`CREATE TRIGGER` pair), the last `CREATE` in
+//!    migration-stem order is the effective definition. A `DROP` of an object
+//!    that the tree itself never creates is ignored.
 //!
 //! `migration_ids` lists, sorted and unique, every migration file stem that
 //! names the repository's tables in a DDL statement: `CREATE TABLE`,
 //! `ALTER TABLE`, `DROP TABLE`, `CREATE [UNIQUE] INDEX ... ON` and
 //! `CREATE TRIGGER ... ON`. Stems from both migration trees are included
 //! because the two trees do not share a numbering scheme.
+//!
+//! # Capture-time live catalog comparison
+//!
+//! Snapshot facts enumerate the captured snapshot's `sqlite_master` objects
+//! (`table`, `index`, `view`, `trigger`) and compare them against every
+//! baseline entry's `sqlite_objects`: a missing object, an extra object or a
+//! normalized-definition mismatch fails the capture with exit 2
+//! `store-catalog-mismatch` **before** anything is staged. SQLite-internal
+//! names (`sqlite_*`, including `sqlite_autoindex_*`) are excluded;
+//! `_sqlx_migrations` is compared because the baseline explicitly claims it as
+//! framework state (see **Framework and internal objects**). The same
+//! normalization function is used for the generated digest and the live
+//! `sqlite_master.sql` digest, so layout or `IF NOT EXISTS` differences do not
+//! produce false mismatches.
 //!
 //! # Framework and internal objects
 //!
@@ -80,7 +128,6 @@ use std::{collections::BTreeSet, path::PathBuf};
 #[cfg(test)]
 use std::{collections::BTreeMap, fs, path::Path};
 
-#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 use serde::{Deserialize, Serialize};
@@ -321,6 +368,144 @@ pub fn is_internal_sqlite_table(name: &str) -> bool {
     INTERNAL_SQLITE_TABLES.contains(&name)
 }
 
+/// Returns true for SQLite-internal catalog names that a live comparison must
+/// exclude (`sqlite_*`, including `sqlite_autoindex_*` and
+/// `sqlite_sequence`).
+///
+/// `_sqlx_migrations` is **not** excluded: the baseline explicitly claims that
+/// framework-owned table and the capture-time comparison verifies its
+/// reviewed definition.
+pub fn is_internal_sqlite_object(name: &str) -> bool {
+    name.starts_with("sqlite_")
+}
+
+/// One object read from the captured snapshot's live `sqlite_master`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveCatalogObject {
+    pub kind: String,
+    pub name: String,
+    pub definition_sha256: String,
+}
+
+/// A live catalog difference between the snapshot and the committed baseline.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CatalogMismatch {
+    #[error("snapshot catalog object {kind} {name:?} is missing")]
+    Missing { kind: String, name: String },
+    #[error("snapshot catalog object {kind} {name:?} is not in the baseline inventory")]
+    Unexpected { kind: String, name: String },
+    #[error("snapshot catalog object {kind} {name:?} has a different normalized definition")]
+    Definition { kind: String, name: String },
+}
+
+/// Enumerates the live `sqlite_master` objects of an open snapshot.
+///
+/// Rows without SQL text (SQLite's implicit `sqlite_autoindex_*` entries) and
+/// `sqlite_*` internal names are excluded. Every remaining object is normalized
+/// with [`normalize_catalog_definition`], the same function used to generate the
+/// committed baseline digest.
+pub async fn sqlite_live_catalog_objects(
+    pool: &sqlx::SqlitePool,
+) -> Result<Vec<LiveCatalogObject>, StoreError> {
+    use sqlx::Row as _;
+
+    let rows = sqlx::query(
+        "SELECT type, name, sql FROM sqlite_master \
+         WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' \
+         ORDER BY type, name",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(StoreError::Database)?;
+    let mut objects = Vec::with_capacity(rows.len());
+    for row in rows {
+        let kind: String = row.try_get(0).map_err(StoreError::Database)?;
+        let name: String = row.try_get(1).map_err(StoreError::Database)?;
+        let sql: String = row.try_get(2).map_err(StoreError::Database)?;
+        if is_internal_sqlite_object(&name) {
+            continue;
+        }
+        let definition = normalize_catalog_definition(&kind, &sql).ok_or_else(|| {
+            StoreError::Corrupt(format!(
+                "snapshot catalog object {kind} {name:?} has an unsupported definition"
+            ))
+        })?;
+        objects.push(LiveCatalogObject {
+            kind,
+            name,
+            definition_sha256: sha256_hex(&definition),
+        });
+    }
+    Ok(objects)
+}
+
+/// Compares the live snapshot catalog with every baseline entry's
+/// `sqlite_objects`.
+///
+/// The comparison is exact in both directions and compares normalized
+/// definition digests, not only names. The first difference in sorted order is
+/// returned so the failure is deterministic.
+pub fn verify_sqlite_catalog_against_baseline(
+    inventory: &[serde_json::Value],
+    live: &[LiveCatalogObject],
+) -> Result<(), CatalogMismatch> {
+    let mut expected = std::collections::BTreeMap::new();
+    for entry in inventory {
+        let Some(objects) = entry
+            .get("sqlite_objects")
+            .and_then(|value| value.as_array())
+        else {
+            continue;
+        };
+        for object in objects {
+            let (Some(kind), Some(name), Some(digest)) = (
+                object.get("kind").and_then(|value| value.as_str()),
+                object.get("name").and_then(|value| value.as_str()),
+                object
+                    .get("definition_sha256")
+                    .and_then(|value| value.as_str()),
+            ) else {
+                continue;
+            };
+            expected.insert((kind.to_owned(), name.to_owned()), digest.to_owned());
+        }
+    }
+    let mut actual = std::collections::BTreeMap::new();
+    for object in live {
+        actual.insert(
+            (object.kind.clone(), object.name.clone()),
+            object.definition_sha256.clone(),
+        );
+    }
+
+    for (key, digest) in &expected {
+        match actual.get(key) {
+            None => {
+                return Err(CatalogMismatch::Missing {
+                    kind: key.0.clone(),
+                    name: key.1.clone(),
+                });
+            }
+            Some(actual_digest) if actual_digest != digest => {
+                return Err(CatalogMismatch::Definition {
+                    kind: key.0.clone(),
+                    name: key.1.clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for key in actual.keys() {
+        if !expected.contains_key(key) {
+            return Err(CatalogMismatch::Unexpected {
+                kind: key.0.clone(),
+                name: key.1.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InventoryDocument {
@@ -417,6 +602,30 @@ pub enum StateInventoryError {
     RepositoryWithoutMigrations { repository: String },
     #[error("state inventory omits contract state families: {families:?}")]
     MissingStateFamily { families: Vec<String> },
+    #[error(
+        "state inventory registry assigns index/trigger {kind} {name:?} to unregistered table \
+         {table:?} in the {tree} migration tree"
+    )]
+    UnregisteredCatalogObject {
+        tree: &'static str,
+        kind: &'static str,
+        name: String,
+        table: String,
+    },
+    #[error(
+        "the {tree} migration tree defines function {name:?} with no reviewed repository owner; \
+         add it to GENERIC_FUNCTION_OWNERS in crates/o3k-store/src/state_inventory.rs"
+    )]
+    UnassignedFunction { tree: &'static str, name: String },
+    #[error(
+        "the {tree} migration tree creates catalog object {kind} {name:?}, which this generator \
+         does not emit; extend the generator or remove the object"
+    )]
+    UnsupportedCatalogObject {
+        tree: &'static str,
+        kind: &'static str,
+        name: String,
+    },
     #[error(
         "state inventory baseline drift: {detail}. \
          Run `O3K_REGENERATE_INVENTORY=1 cargo test -p o3k-store --all-features state_inventory` \
@@ -635,7 +844,7 @@ fn generate_inventory_from_trees(
     sqlite_migrations_dir: &Path,
     postgres_migrations_dir: &Path,
 ) -> Result<String, StateInventoryError> {
-    let sqlite = scan_migration_tree(sqlite_migrations_dir, "SQLite")?;
+    let sqlite = scan_sqlite_live_tree(sqlite_migrations_dir)?;
     let postgres = scan_migration_tree(postgres_migrations_dir, "PostgreSQL")?;
     render_inventory(&sqlite, &postgres, REPOSITORY_FAMILIES)
 }
@@ -666,22 +875,44 @@ fn generate_inventory_with_registry(
     render_inventory(&sqlite, &postgres, families)
 }
 
-/// One migration tree: effective table definitions, per-table migration
-/// lineage, and the migration stems it contains.
+/// One reviewed non-table definition parsed from a migration tree.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObjectDefinition {
+    kind: &'static str,
+    /// Owner table from `ON <table>`; `None` only for functions.
+    table: Option<String>,
+    definition: String,
+}
+
+/// One migration tree: effective table definitions, one owner per non-table
+/// object, per-table migration lineage, and the migration stems it contains.
 #[cfg(test)]
 struct MigrationTree {
     tree: &'static str,
     definitions: BTreeMap<String, String>,
+    indexes: BTreeMap<String, ObjectDefinition>,
+    triggers: BTreeMap<String, ObjectDefinition>,
+    functions: BTreeMap<String, ObjectDefinition>,
     references: BTreeMap<String, BTreeSet<String>>,
     stems: BTreeSet<String>,
     autoincrement: bool,
 }
 
+/// Reviewed assignment of the generic operation-integrity functions.
+///
+/// A PostgreSQL function has no `ON <table>` clause, so it cannot be assigned
+/// to a repository by table ownership. Every reviewed function must appear
+/// here; [`render_inventory`] fails on an unlisted function instead of silently
+/// omitting it.
 #[cfg(test)]
-fn scan_migration_tree(
-    migrations_dir: &Path,
-    tree: &'static str,
-) -> Result<MigrationTree, StateInventoryError> {
+const GENERIC_FUNCTION_OWNERS: &[(&str, &str)] = &[
+    ("o3k_delete_generic_resource_operations", "operations"),
+    ("o3k_validate_operation_resource_reference", "operations"),
+];
+
+#[cfg(test)]
+fn migration_paths(migrations_dir: &Path) -> Result<Vec<PathBuf>, StateInventoryError> {
     let entries =
         fs::read_dir(migrations_dir).map_err(|source| StateInventoryError::ReadDirectory {
             path: migrations_dir.to_path_buf(),
@@ -699,10 +930,22 @@ fn scan_migration_tree(
         }
     }
     migration_paths.sort();
+    Ok(migration_paths)
+}
+
+#[cfg(test)]
+fn scan_migration_tree(
+    migrations_dir: &Path,
+    tree: &'static str,
+) -> Result<MigrationTree, StateInventoryError> {
+    let migration_paths = migration_paths(migrations_dir)?;
 
     let mut scanned = MigrationTree {
         tree,
         definitions: BTreeMap::new(),
+        indexes: BTreeMap::new(),
+        triggers: BTreeMap::new(),
+        functions: BTreeMap::new(),
         references: BTreeMap::new(),
         stems: BTreeSet::new(),
         autoincrement: false,
@@ -730,6 +973,42 @@ fn scan_migration_tree(
         for (table, definition) in parse_create_tables(&code) {
             scanned.definitions.insert(table, definition);
         }
+        let context = |detail: String| {
+            StateInventoryError::InvalidBaseline(format!("{tree} migration {stem}: {detail}"))
+        };
+        for (name, table, definition) in parse_create_indexes(&code).map_err(context)? {
+            scanned.indexes.insert(
+                name,
+                ObjectDefinition {
+                    kind: "index",
+                    table: Some(table),
+                    definition,
+                },
+            );
+        }
+        for (name, table, definition) in parse_create_triggers(&code).map_err(context)? {
+            scanned.triggers.insert(
+                name,
+                ObjectDefinition {
+                    kind: "trigger",
+                    table: Some(table),
+                    definition,
+                },
+            );
+        }
+        for (name, definition) in parse_create_functions(&code).map_err(context)? {
+            scanned.functions.insert(
+                name,
+                ObjectDefinition {
+                    kind: "function",
+                    table: None,
+                    definition,
+                },
+            );
+        }
+        if let Some((kind, name)) = unsupported_create_object(&code) {
+            return Err(StateInventoryError::UnsupportedCatalogObject { tree, kind, name });
+        }
         for table in migration_table_references(&code) {
             scanned
                 .references
@@ -747,66 +1026,266 @@ fn scan_migration_tree(
     Ok(scanned)
 }
 
-/// Removes `--` line comments and `/* */` block comments while preserving
-/// quoted identifiers and string literals, so offsets remain valid for slicing
-/// statement definitions out of the returned text.
+/// Builds the SQLite side of the baseline by executing the reviewed migration
+/// files in an empty in-memory database and reading the resulting
+/// `sqlite_master` definitions.
 ///
-/// PostgreSQL dollar-quoted strings are not used by the reviewed migrations and
-/// are not handled.
+/// This is required because SQLite rewrites a table's stored `CREATE TABLE`
+/// text when a later migration runs `ALTER TABLE ... ADD COLUMN`. Parsing only
+/// `CREATE TABLE` statements would produce a digest that the capture-time live
+/// catalog comparison can never match. The effective definition is therefore
+/// the definition SQLite itself records. The committed baseline is tied to the
+/// bundled SQLite version used by the build and by the artifact binary.
 #[cfg(test)]
+fn scan_sqlite_live_tree(migrations_dir: &Path) -> Result<MigrationTree, StateInventoryError> {
+    use sqlx::Row as _;
+
+    let migration_paths = migration_paths(migrations_dir)?;
+    let mut scanned = MigrationTree {
+        tree: "SQLite",
+        definitions: BTreeMap::new(),
+        indexes: BTreeMap::new(),
+        triggers: BTreeMap::new(),
+        functions: BTreeMap::new(),
+        references: BTreeMap::new(),
+        stems: BTreeSet::new(),
+        autoincrement: false,
+    };
+    let mut migration_sql = Vec::with_capacity(migration_paths.len());
+    for path in &migration_paths {
+        let stem = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .ok_or_else(|| {
+                StateInventoryError::InvalidBaseline(format!(
+                    "migration file {} has no file stem",
+                    path.display()
+                ))
+            })?;
+        let sql =
+            fs::read_to_string(path).map_err(|source| StateInventoryError::ReadMigration {
+                path: path.clone(),
+                source,
+            })?;
+        let code = strip_sql_comments(&sql);
+        if code.to_ascii_uppercase().contains("AUTOINCREMENT") {
+            scanned.autoincrement = true;
+        }
+        scanned.stems.insert(stem.clone());
+        for table in migration_table_references(&code) {
+            scanned
+                .references
+                .entry(table)
+                .or_default()
+                .insert(stem.clone());
+        }
+        migration_sql.push((stem, sql));
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            StateInventoryError::InvalidBaseline(format!(
+                "cannot build the SQLite catalog runtime: {error}"
+            ))
+        })?;
+    let rows = runtime.block_on(async {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .map_err(|error| {
+                StateInventoryError::InvalidBaseline(format!(
+                    "cannot open the in-memory SQLite catalog: {error}"
+                ))
+            })?;
+        for (stem, sql) in &migration_sql {
+            sqlx::raw_sql(sql).execute(&pool).await.map_err(|error| {
+                StateInventoryError::InvalidBaseline(format!(
+                    "SQLite migration {stem} does not apply to an empty catalog: {error}"
+                ))
+            })?;
+        }
+        crate::sqlite::apply_test_runtime_schema(&pool)
+            .await
+            .map_err(|error| {
+                StateInventoryError::InvalidBaseline(format!(
+                    "SQLite runtime schema migration failed: {error}"
+                ))
+            })?;
+        let rows = sqlx::query(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master \
+             WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' \
+             ORDER BY type, name",
+        )
+        .fetch_all(&pool)
+        .await
+        .map_err(|error| {
+            StateInventoryError::InvalidBaseline(format!(
+                "cannot read the in-memory SQLite catalog: {error}"
+            ))
+        })?;
+        pool.close().await;
+        Ok::<_, StateInventoryError>(rows)
+    })?;
+
+    for row in rows {
+        let kind: String = row.try_get(0).map_err(|error| {
+            StateInventoryError::InvalidBaseline(format!("SQLite catalog type: {error}"))
+        })?;
+        let name: String = row.try_get(1).map_err(|error| {
+            StateInventoryError::InvalidBaseline(format!("SQLite catalog name: {error}"))
+        })?;
+        let table: String = row.try_get(2).map_err(|error| {
+            StateInventoryError::InvalidBaseline(format!("SQLite catalog owner: {error}"))
+        })?;
+        let sql: String = row.try_get(3).map_err(|error| {
+            StateInventoryError::InvalidBaseline(format!("SQLite catalog SQL: {error}"))
+        })?;
+        let definition = normalize_catalog_definition(&kind, &sql).ok_or_else(|| {
+            StateInventoryError::UnsupportedCatalogObject {
+                tree: "SQLite",
+                kind: "catalog",
+                name: name.clone(),
+            }
+        })?;
+        match kind.as_str() {
+            "table" => {
+                scanned.definitions.insert(name, definition);
+            }
+            "index" => {
+                scanned.indexes.insert(
+                    name,
+                    ObjectDefinition {
+                        kind: "index",
+                        table: Some(table.to_ascii_lowercase()),
+                        definition,
+                    },
+                );
+            }
+            "trigger" => {
+                scanned.triggers.insert(
+                    name,
+                    ObjectDefinition {
+                        kind: "trigger",
+                        table: Some(table.to_ascii_lowercase()),
+                        definition,
+                    },
+                );
+            }
+            "view" => {
+                return Err(StateInventoryError::UnsupportedCatalogObject {
+                    tree: "SQLite",
+                    kind: "view",
+                    name,
+                });
+            }
+            _ => {}
+        }
+    }
+    if scanned.definitions.is_empty() {
+        return Err(StateInventoryError::InvalidBaseline(format!(
+            "migration directory {} defines no tables",
+            migrations_dir.display()
+        )));
+    }
+    Ok(scanned)
+}
 fn strip_sql_comments(sql: &str) -> String {
+    let characters: Vec<char> = sql.chars().collect();
     let mut stripped = String::with_capacity(sql.len());
-    let mut characters = sql.chars().peekable();
+    let mut index = 0;
     let mut quote: Option<char> = None;
-    while let Some(character) = characters.next() {
+    while index < characters.len() {
+        let character = characters[index];
         if let Some(terminator) = quote {
             stripped.push(character);
             if character == terminator {
-                if characters.peek() == Some(&terminator) {
-                    if let Some(escaped) = characters.next() {
-                        stripped.push(escaped);
+                if characters.get(index + 1) == Some(&terminator) {
+                    if let Some(escaped) = characters.get(index + 1) {
+                        stripped.push(*escaped);
                     }
-                } else {
-                    quote = None;
+                    index += 2;
+                    continue;
                 }
+                quote = None;
             }
+            index += 1;
             continue;
         }
         match character {
             '\'' | '"' | '`' => {
                 quote = Some(character);
                 stripped.push(character);
+                index += 1;
             }
             '[' => {
                 quote = Some(']');
                 stripped.push(character);
+                index += 1;
             }
-            '-' if characters.peek() == Some(&'-') => {
-                for next in characters.by_ref() {
-                    if next == '\n' {
-                        stripped.push('\n');
-                        break;
+            '$' => {
+                let mut cursor = index + 1;
+                while cursor < characters.len()
+                    && (characters[cursor].is_ascii_alphanumeric() || characters[cursor] == '_')
+                {
+                    cursor += 1;
+                }
+                if characters.get(cursor) == Some(&'$') {
+                    let delimiter: Vec<char> = characters[index..=cursor].to_vec();
+                    for character in &delimiter {
+                        stripped.push(*character);
                     }
+                    let body_start = cursor + 1;
+                    let mut end = body_start;
+                    while end + delimiter.len() <= characters.len() {
+                        if characters[end..end + delimiter.len()] == delimiter[..] {
+                            end += delimiter.len();
+                            break;
+                        }
+                        end += 1;
+                    }
+                    let end = end.min(characters.len());
+                    for character in &characters[body_start..end] {
+                        stripped.push(*character);
+                    }
+                    index = end;
+                } else {
+                    stripped.push(character);
+                    index += 1;
                 }
             }
-            '/' if characters.peek() == Some(&'*') => {
-                characters.next();
+            '-' if characters.get(index + 1) == Some(&'-') => {
+                index += 2;
+                while index < characters.len() && characters[index] != '\n' {
+                    index += 1;
+                }
+                if index < characters.len() {
+                    stripped.push('\n');
+                    index += 1;
+                }
+            }
+            '/' if characters.get(index + 1) == Some(&'*') => {
+                index += 2;
                 stripped.push(' ');
-                let mut previous = '\0';
-                for next in characters.by_ref() {
-                    if previous == '*' && next == '/' {
+                while index < characters.len() {
+                    if characters[index] == '*' && characters.get(index + 1) == Some(&'/') {
+                        index += 2;
                         break;
                     }
-                    previous = next;
+                    index += 1;
                 }
             }
-            _ => stripped.push(character),
+            _ => {
+                stripped.push(character);
+                index += 1;
+            }
         }
     }
     stripped
 }
 
-#[cfg(test)]
 #[derive(Debug)]
 struct Token {
     text: String,
@@ -815,10 +1294,43 @@ struct Token {
     end: usize,
 }
 
+/// Returns the delimiter and the index just past the opening delimiter when a
+/// PostgreSQL dollar quote starts at `index` (`$$` or `$tag$`).
+fn dollar_quote_open(bytes: &[u8], index: usize) -> Option<(String, usize)> {
+    if bytes.get(index) != Some(&b'$') {
+        return None;
+    }
+    let mut cursor = index + 1;
+    while cursor < bytes.len() && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'$') {
+        return None;
+    }
+    Some((
+        String::from_utf8_lossy(&bytes[index..=cursor]).into_owned(),
+        cursor + 1,
+    ))
+}
+
+/// Index just past the closing delimiter of a dollar-quoted string, or the end
+/// of input when it is unterminated.
+fn dollar_quote_close(bytes: &[u8], body_start: usize, delimiter: &str) -> usize {
+    let delimiter = delimiter.as_bytes();
+    let mut cursor = body_start;
+    while cursor + delimiter.len() <= bytes.len() {
+        if &bytes[cursor..cursor + delimiter.len()] == delimiter {
+            return cursor + delimiter.len();
+        }
+        cursor += 1;
+    }
+    bytes.len()
+}
+
 /// Splits SQL into tokens, recording byte offsets in `code`. Quoted
-/// identifiers and string literals become single tokens; parentheses and
-/// commas become their own tokens; statement separators are dropped.
-#[cfg(test)]
+/// identifiers, string literals and PostgreSQL dollar-quoted bodies become
+/// single tokens; parentheses, commas and statement terminators become their
+/// own tokens.
 fn tokenize(code: &str) -> Vec<Token> {
     let bytes = code.as_bytes();
     let mut tokens = Vec::new();
@@ -872,7 +1384,36 @@ fn tokenize(code: &str) -> Vec<Token> {
                     end: index,
                 });
             }
-            b'(' | b')' | b',' => {
+            b'$' => {
+                if let Some((delimiter, body_start)) = dollar_quote_open(bytes, index) {
+                    let start = index;
+                    index = dollar_quote_close(bytes, body_start, &delimiter);
+                    tokens.push(Token {
+                        text: code[start..index].to_owned(),
+                        quoted: true,
+                        start,
+                        end: index,
+                    });
+                } else {
+                    let start = index;
+                    while index < bytes.len()
+                        && !bytes[index].is_ascii_whitespace()
+                        && !matches!(
+                            bytes[index],
+                            b'(' | b')' | b',' | b';' | b'\'' | b'"' | b'`'
+                        )
+                    {
+                        index += 1;
+                    }
+                    tokens.push(Token {
+                        text: code[start..index].to_owned(),
+                        quoted: false,
+                        start,
+                        end: index,
+                    });
+                }
+            }
+            b'(' | b')' | b',' | b';' => {
                 tokens.push(Token {
                     text: (byte as char).to_string(),
                     quoted: false,
@@ -881,7 +1422,6 @@ fn tokenize(code: &str) -> Vec<Token> {
                 });
                 index += 1;
             }
-            b';' => index += 1,
             _ => {
                 let start = index;
                 while index < bytes.len()
@@ -905,14 +1445,12 @@ fn tokenize(code: &str) -> Vec<Token> {
     tokens
 }
 
-#[cfg(test)]
 fn is_keyword(tokens: &[Token], index: usize, keyword: &str) -> bool {
     tokens
         .get(index)
         .is_some_and(|token| !token.quoted && token.text.eq_ignore_ascii_case(keyword))
 }
 
-#[cfg(test)]
 fn skip_exists_clause(tokens: &[Token], index: usize) -> usize {
     if is_keyword(tokens, index, "if") {
         if is_keyword(tokens, index + 1, "not") && is_keyword(tokens, index + 2, "exists") {
@@ -927,7 +1465,6 @@ fn skip_exists_clause(tokens: &[Token], index: usize) -> usize {
 
 /// Returns `(table, normalized definition)` for every `CREATE TABLE` statement
 /// in `code`, in file order.
-#[cfg(test)]
 fn parse_create_tables(code: &str) -> Vec<(String, String)> {
     let tokens = tokenize(code);
     let mut statements = Vec::new();
@@ -971,6 +1508,221 @@ fn parse_create_tables(code: &str) -> Vec<(String, String)> {
         index += 1;
     }
     statements
+}
+
+/// Normalizes a catalog definition of any supported kind.
+///
+/// Tables are reduced to the `CREATE TABLE ... ( ... )` form; every other kind
+/// keeps its whole statement (minus the terminator). Returns `None` for a kind
+/// whose definition grammar this module does not understand.
+pub fn normalize_catalog_definition(kind: &str, statement: &str) -> Option<String> {
+    let code = strip_sql_comments(statement);
+    match kind {
+        "table" => parse_create_tables(&code)
+            .into_iter()
+            .next()
+            .map(|(_, definition)| definition),
+        "index" | "trigger" | "function" | "view" | "sequence" | "constraint" => {
+            Some(normalized_definition(code.trim()))
+        }
+        _ => None,
+    }
+}
+
+/// Index of the token that terminates the statement starting at `start`.
+///
+/// With `block_aware`, `BEGIN`/`CASE` ... `END` blocks keep their inner
+/// semicolons from terminating the statement (SQLite trigger bodies).
+#[cfg(test)]
+fn statement_terminator(tokens: &[Token], start: usize, block_aware: bool) -> usize {
+    let mut depth = 0_i32;
+    for (offset, token) in tokens.iter().enumerate().skip(start) {
+        if token.quoted {
+            continue;
+        }
+        if block_aware {
+            if token.text.eq_ignore_ascii_case("begin") || token.text.eq_ignore_ascii_case("case") {
+                depth += 1;
+            } else if token.text.eq_ignore_ascii_case("end") {
+                depth = (depth - 1).max(0);
+            }
+        }
+        if token.text == ";" && (!block_aware || depth == 0) {
+            return offset;
+        }
+    }
+    tokens.len()
+}
+
+/// Returns `(name, owner table, normalized definition)` for every
+/// `CREATE [UNIQUE] INDEX` statement in `code`, in file order.
+#[cfg(test)]
+fn parse_create_indexes(code: &str) -> Result<Vec<(String, String, String)>, String> {
+    let tokens = tokenize(code);
+    let mut indexes = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if is_keyword(&tokens, index, "create") {
+            let mut at = index + 1;
+            if is_keyword(&tokens, at, "unique") {
+                at += 1;
+            }
+            if is_keyword(&tokens, at, "index") {
+                let name_index = skip_exists_clause(&tokens, at + 1);
+                let name = tokens
+                    .get(name_index)
+                    .ok_or_else(|| "CREATE INDEX has no name".to_owned())?;
+                let mut cursor = name_index + 1;
+                while cursor < tokens.len()
+                    && !is_keyword(&tokens, cursor, "on")
+                    && tokens[cursor].text != ";"
+                {
+                    cursor += 1;
+                }
+                if !is_keyword(&tokens, cursor, "on") {
+                    return Err(format!("CREATE INDEX {:?} has no ON clause", name.text));
+                }
+                let mut table_index = cursor + 1;
+                if is_keyword(&tokens, table_index, "only") {
+                    table_index += 1;
+                }
+                let table = tokens
+                    .get(table_index)
+                    .ok_or_else(|| format!("CREATE INDEX {:?} has no owner table", name.text))?;
+                let terminator = statement_terminator(&tokens, index, false);
+                let end = tokens
+                    .get(terminator)
+                    .map_or(code.len(), |token| token.start);
+                let definition = normalized_definition(&code[tokens[index].start..end]);
+                indexes.push((
+                    name.text.to_ascii_lowercase(),
+                    table.text.to_ascii_lowercase(),
+                    definition,
+                ));
+                index = terminator;
+            }
+        }
+        index += 1;
+    }
+    Ok(indexes)
+}
+
+/// Returns `(name, owner table, normalized definition)` for every
+/// `CREATE [OR REPLACE] TRIGGER` statement in `code`, in file order.
+#[cfg(test)]
+fn parse_create_triggers(code: &str) -> Result<Vec<(String, String, String)>, String> {
+    let tokens = tokenize(code);
+    let mut triggers = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if is_keyword(&tokens, index, "create") {
+            let mut at = index + 1;
+            if is_keyword(&tokens, at, "or") && is_keyword(&tokens, at + 1, "replace") {
+                at += 2;
+            }
+            if is_keyword(&tokens, at, "trigger") {
+                let name_index = skip_exists_clause(&tokens, at + 1);
+                let name = tokens
+                    .get(name_index)
+                    .ok_or_else(|| "CREATE TRIGGER has no name".to_owned())?;
+                let mut cursor = name_index + 1;
+                while cursor < tokens.len()
+                    && !is_keyword(&tokens, cursor, "on")
+                    && tokens[cursor].text != ";"
+                    && !is_keyword(&tokens, cursor, "begin")
+                    && !is_keyword(&tokens, cursor, "execute")
+                {
+                    cursor += 1;
+                }
+                if !is_keyword(&tokens, cursor, "on") {
+                    return Err(format!("CREATE TRIGGER {:?} has no ON clause", name.text));
+                }
+                let mut table_index = cursor + 1;
+                if is_keyword(&tokens, table_index, "only") {
+                    table_index += 1;
+                }
+                let table = tokens
+                    .get(table_index)
+                    .ok_or_else(|| format!("CREATE TRIGGER {:?} has no owner table", name.text))?;
+                let terminator = statement_terminator(&tokens, index, true);
+                let end = tokens
+                    .get(terminator)
+                    .map_or(code.len(), |token| token.start);
+                let definition = normalized_definition(&code[tokens[index].start..end]);
+                triggers.push((
+                    name.text.to_ascii_lowercase(),
+                    table.text.to_ascii_lowercase(),
+                    definition,
+                ));
+                index = terminator;
+            }
+        }
+        index += 1;
+    }
+    Ok(triggers)
+}
+
+/// Returns `(name, normalized definition)` for every
+/// `CREATE [OR REPLACE] FUNCTION` statement in `code`, in file order.
+#[cfg(test)]
+fn parse_create_functions(code: &str) -> Result<Vec<(String, String)>, String> {
+    let tokens = tokenize(code);
+    let mut functions = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if is_keyword(&tokens, index, "create") {
+            let mut at = index + 1;
+            if is_keyword(&tokens, at, "or") && is_keyword(&tokens, at + 1, "replace") {
+                at += 2;
+            }
+            if is_keyword(&tokens, at, "function") {
+                let name = tokens
+                    .get(at + 1)
+                    .ok_or_else(|| "CREATE FUNCTION has no name".to_owned())?;
+                let terminator = statement_terminator(&tokens, index, false);
+                let end = tokens
+                    .get(terminator)
+                    .map_or(code.len(), |token| token.start);
+                let definition = normalized_definition(&code[tokens[index].start..end]);
+                functions.push((name.text.to_ascii_lowercase(), definition));
+                index = terminator;
+            }
+        }
+        index += 1;
+    }
+    Ok(functions)
+}
+
+/// Returns the first `CREATE VIEW`/`CREATE MATERIALIZED VIEW`/`CREATE
+/// SEQUENCE` in `code`, which the generator does not emit.
+#[cfg(test)]
+fn unsupported_create_object(code: &str) -> Option<(&'static str, String)> {
+    let tokens = tokenize(code);
+    let mut index = 0;
+    while index < tokens.len() {
+        if is_keyword(&tokens, index, "create") {
+            let mut at = index + 1;
+            if is_keyword(&tokens, at, "materialized") {
+                at += 1;
+            }
+            let kind = if is_keyword(&tokens, at, "view") {
+                Some("view")
+            } else if is_keyword(&tokens, at, "sequence") {
+                Some("sequence")
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                let name_index = skip_exists_clause(&tokens, at + 1);
+                let name = tokens
+                    .get(name_index)
+                    .map_or_else(|| "<unnamed>".to_owned(), |token| token.text.clone());
+                return Some((kind, name));
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Returns every table named by a DDL statement in `code`.
@@ -1045,7 +1797,6 @@ fn migration_table_references(code: &str) -> BTreeSet<String> {
 /// Collapses whitespace runs outside quoted identifiers and string literals,
 /// removes the spaces that only depend on layout (after `(`, after `,`, before
 /// `)` and before `,`), and removes an `IF NOT EXISTS` qualifier.
-#[cfg(test)]
 fn normalized_definition(statement: &str) -> String {
     let collapsed = collapse_whitespace(statement);
     strip_if_not_exists(&tidy_punctuation(&collapsed))
@@ -1053,7 +1804,6 @@ fn normalized_definition(statement: &str) -> String {
 
 /// Removes whitespace introduced only by statement layout around parentheses
 /// and commas, outside quoted identifiers and string literals.
-#[cfg(test)]
 fn tidy_punctuation(input: &str) -> String {
     let mut tidied = String::with_capacity(input.len());
     let mut characters = input.chars().peekable();
@@ -1108,7 +1858,6 @@ fn tidy_punctuation(input: &str) -> String {
     tidied
 }
 
-#[cfg(test)]
 fn collapse_whitespace(input: &str) -> String {
     let mut collapsed = String::with_capacity(input.len());
     let mut characters = input.chars().peekable();
@@ -1160,30 +1909,23 @@ fn collapse_whitespace(input: &str) -> String {
     collapsed
 }
 
-#[cfg(test)]
+/// Removes every `IF NOT EXISTS` qualifier regardless of the object keyword
+/// (`CREATE TABLE`, `CREATE UNIQUE INDEX`, `CREATE TRIGGER`, ...).
 fn strip_if_not_exists(statement: &str) -> String {
-    let mut parts = statement.splitn(5, ' ');
-    let (Some(create), Some(table), Some(if_), Some(not), Some(rest)) = (
-        parts.next(),
-        parts.next(),
-        parts.next(),
-        parts.next(),
-        parts.next(),
-    ) else {
-        return statement.to_owned();
-    };
-    if if_.eq_ignore_ascii_case("IF")
-        && not.eq_ignore_ascii_case("NOT")
-        && rest
-            .get(.."EXISTS ".len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("EXISTS "))
-    {
-        return format!("{create} {table} {}", &rest["EXISTS ".len()..]);
+    let lowercase = statement.to_ascii_lowercase();
+    let needle = " if not exists ";
+    let mut stripped = String::with_capacity(statement.len());
+    let mut offset = 0;
+    while let Some(position) = lowercase[offset..].find(needle) {
+        let start = offset + position;
+        stripped.push_str(&statement[offset..start]);
+        stripped.push(' ');
+        offset = start + needle.len();
     }
-    statement.to_owned()
+    stripped.push_str(&statement[offset..]);
+    stripped
 }
 
-#[cfg(test)]
 fn sha256_hex(value: &str) -> String {
     use std::fmt::Write as _;
 
@@ -1266,18 +2008,42 @@ fn render_inventory(
         }
     }
 
+    for tree in [sqlite, postgres] {
+        for (kind, objects) in [("index", &tree.indexes), ("trigger", &tree.triggers)] {
+            for (name, object) in objects {
+                let table = object.table.as_deref().unwrap_or_default();
+                if !table_repositories.contains_key(table) {
+                    return Err(StateInventoryError::UnregisteredCatalogObject {
+                        tree: tree.tree,
+                        kind,
+                        name: name.clone(),
+                        table: table.to_owned(),
+                    });
+                }
+            }
+        }
+        for name in tree.functions.keys() {
+            let Some((_, repository)) = GENERIC_FUNCTION_OWNERS
+                .iter()
+                .find(|(function, _)| *function == name.as_str())
+            else {
+                return Err(StateInventoryError::UnassignedFunction {
+                    tree: tree.tree,
+                    name: name.clone(),
+                });
+            };
+            if !repository_ids.contains(*repository) {
+                return Err(StateInventoryError::InvalidBaseline(format!(
+                    "function {name:?} is assigned to unknown repository {repository:?}"
+                )));
+            }
+        }
+    }
+
     let mut entries = Vec::with_capacity(families.len() + 1);
     for family in families {
-        let sqlite_objects = family
-            .tables
-            .iter()
-            .map(|table| catalog_table(sqlite, "main", table))
-            .collect::<Result<Vec<_>, _>>()?;
-        let postgres_objects = family
-            .tables
-            .iter()
-            .map(|table| catalog_table(postgres, "public", table))
-            .collect::<Result<Vec<_>, _>>()?;
+        let sqlite_objects = family_objects(sqlite, "main", family)?;
+        let postgres_objects = family_objects(postgres, "public", family)?;
         let mut migration_ids = BTreeSet::new();
         for table in family.tables.iter() {
             for tree in [sqlite, postgres] {
@@ -1344,6 +2110,59 @@ fn catalog_table(
         name: table.to_owned(),
         definition_sha256: sha256_hex(definition),
     })
+}
+
+#[cfg(test)]
+fn catalog_non_table(schema: &str, name: &str, object: &ObjectDefinition) -> CatalogObject {
+    CatalogObject {
+        kind: object.kind.to_owned(),
+        schema: schema.to_owned(),
+        name: name.to_owned(),
+        definition_sha256: sha256_hex(&object.definition),
+    }
+}
+
+/// Every catalog object owned by one repository entry: its tables in registry
+/// order, then indexes, triggers and (PostgreSQL only) functions in name order.
+#[cfg(test)]
+fn family_objects(
+    tree: &MigrationTree,
+    schema: &str,
+    family: &RepositoryFamily,
+) -> Result<Vec<CatalogObject>, StateInventoryError> {
+    let mut objects = Vec::new();
+    for table in family.tables.iter() {
+        objects.push(catalog_table(tree, schema, table)?);
+    }
+    for (name, object) in &tree.indexes {
+        if object
+            .table
+            .as_deref()
+            .is_some_and(|table| family.tables.contains(&table))
+        {
+            objects.push(catalog_non_table(schema, name, object));
+        }
+    }
+    for (name, object) in &tree.triggers {
+        if object
+            .table
+            .as_deref()
+            .is_some_and(|table| family.tables.contains(&table))
+        {
+            objects.push(catalog_non_table(schema, name, object));
+        }
+    }
+    for (name, object) in &tree.functions {
+        if GENERIC_FUNCTION_OWNERS
+            .iter()
+            .any(|(function, repository)| {
+                *function == name.as_str() && *repository == family.repository_id
+            })
+        {
+            objects.push(catalog_non_table(schema, name, object));
+        }
+    }
+    Ok(objects)
 }
 
 /// The framework-owned release/install bookkeeping entry.
@@ -1423,25 +2242,25 @@ fn describe_drift(generated: &str, committed: &str) -> String {
             committed_entries.get(&repository),
         ) {
             (Some(generated_entry), Some(committed_entry)) => {
-                let generated_tables = entry_tables(generated_entry);
-                let committed_tables = entry_tables(committed_entry);
-                let added: Vec<_> = generated_tables
-                    .difference(&committed_tables)
-                    .cloned()
+                let generated_objects = entry_object_keys(generated_entry);
+                let committed_objects = entry_object_keys(committed_entry);
+                let added: Vec<_> = generated_objects
+                    .difference(&committed_objects)
+                    .map(|(kind, name)| format!("{kind}:{name}"))
                     .collect();
-                let removed: Vec<_> = committed_tables
-                    .difference(&generated_tables)
-                    .cloned()
+                let removed: Vec<_> = committed_objects
+                    .difference(&generated_objects)
+                    .map(|(kind, name)| format!("{kind}:{name}"))
                     .collect();
                 if !added.is_empty() {
                     changes.push(format!(
-                        "table(s) added to repository {repository:?}: {}",
+                        "catalog object(s) added to repository {repository:?}: {}",
                         added.join(", ")
                     ));
                 }
                 if !removed.is_empty() {
                     changes.push(format!(
-                        "table(s) removed from repository {repository:?}: {}",
+                        "catalog object(s) removed from repository {repository:?}: {}",
                         removed.join(", ")
                     ));
                 }
@@ -1486,12 +2305,23 @@ fn entry_tables(entry: &RepositoryInventoryEntry) -> BTreeSet<String> {
     entry
         .sqlite_objects
         .iter()
+        .filter(|object| object.kind == "table")
         .map(|object| object.name.clone())
         .collect()
 }
 
 #[cfg(test)]
+fn entry_object_keys(entry: &RepositoryInventoryEntry) -> BTreeSet<(String, String)> {
+    entry
+        .sqlite_objects
+        .iter()
+        .map(|object| (object.kind.clone(), object.name.clone()))
+        .collect()
+}
+
+#[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
     use super::*;
     use serde_json::Value;
 
@@ -1825,6 +2655,7 @@ mod tests {
                 .as_array()
                 .ok_or("sqlite_objects is not an array")?
                 .iter()
+                .filter(|object| object["kind"].as_str() == Some("table"))
                 .map(|object| object["name"].as_str().unwrap_or_default())
                 .collect();
             assert_eq!(tables, family.tables.to_vec());
@@ -1832,6 +2663,7 @@ mod tests {
                 .as_array()
                 .ok_or("postgres_objects is not an array")?
                 .iter()
+                .filter(|object| object["kind"].as_str() == Some("table"))
                 .map(|object| object["name"].as_str().unwrap_or_default())
                 .collect();
             assert_eq!(postgres_tables, family.tables.to_vec());
@@ -1957,16 +2789,43 @@ mod tests {
             }]
         });
         let mut added = base.clone();
-        added["repositories"][0]["sqlite_objects"]
+        let objects = added["repositories"][0]["sqlite_objects"]
             .as_array_mut()
-            .ok_or("sqlite_objects is not an array")?
-            .push(serde_json::json!({
-                "kind": "table", "schema": "main", "name": "alpha_added",
-                "definition_sha256": "1".repeat(64)
-            }));
+            .ok_or("sqlite_objects is not an array")?;
+        objects.push(serde_json::json!({
+            "kind": "table", "schema": "main", "name": "alpha_added",
+            "definition_sha256": "1".repeat(64)
+        }));
+        objects.push(serde_json::json!({
+            "kind": "index", "schema": "main", "name": "alpha_idx_added",
+            "definition_sha256": "2".repeat(64)
+        }));
+        objects.push(serde_json::json!({
+            "kind": "function", "schema": "main", "name": "alpha_fn_added",
+            "definition_sha256": "4".repeat(64)
+        }));
         let message = describe_drift(&added.to_string(), &base.to_string());
-        assert!(message.contains("table(s) added"), "{message}");
+        assert!(message.contains("catalog object(s) added"), "{message}");
         assert!(message.contains("alpha_added"), "{message}");
+        assert!(message.contains("index:alpha_idx_added"), "{message}");
+        assert!(message.contains("function:alpha_fn_added"), "{message}");
+
+        let mut removed_object = base.clone();
+        let objects = removed_object["repositories"][0]["sqlite_objects"]
+            .as_array_mut()
+            .ok_or("sqlite_objects is not an array")?;
+        objects.push(serde_json::json!({
+            "kind": "trigger", "schema": "main", "name": "alpha_trigger",
+            "definition_sha256": "3".repeat(64)
+        }));
+        objects.push(serde_json::json!({
+            "kind": "function", "schema": "main", "name": "alpha_fn",
+            "definition_sha256": "5".repeat(64)
+        }));
+        let message = describe_drift(&base.to_string(), &removed_object.to_string());
+        assert!(message.contains("catalog object(s) removed"), "{message}");
+        assert!(message.contains("trigger:alpha_trigger"), "{message}");
+        assert!(message.contains("function:alpha_fn"), "{message}");
 
         let mut removed = base.clone();
         removed["repositories"]
@@ -2082,5 +2941,200 @@ DROP TABLE delta;
         };
         assert!(error.to_string().contains("drift_gate_probe"));
         Ok(())
+    }
+
+    fn entry<'a>(inventory: &'a [Value], repository_id: &str) -> &'a Value {
+        inventory
+            .iter()
+            .find(|entry| entry["repository_id"].as_str() == Some(repository_id))
+            .expect("repository entry")
+    }
+
+    fn has_object(entry: &Value, field: &str, kind: &str, name: &str) -> bool {
+        entry[field].as_array().is_some_and(|objects| {
+            objects.iter().any(|object| {
+                object["kind"].as_str() == Some(kind) && object["name"].as_str() == Some(name)
+            })
+        })
+    }
+
+    #[test]
+    fn baseline_inventory_includes_indexes_triggers_and_functions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let inventory = baseline_state_inventory()?;
+        let operations = entry(&inventory, "operations");
+        let core_resources = entry(&inventory, "core_resources");
+        let audit = entry(&inventory, "audit");
+
+        assert!(has_object(
+            operations,
+            "sqlite_objects",
+            "index",
+            "operations_resource_idx"
+        ));
+        assert!(has_object(
+            operations,
+            "sqlite_objects",
+            "trigger",
+            "operations_validate_resource_reference"
+        ));
+        assert!(has_object(
+            operations,
+            "postgres_objects",
+            "index",
+            "operations_resource_idx"
+        ));
+        assert!(has_object(
+            operations,
+            "postgres_objects",
+            "trigger",
+            "operations_validate_resource_reference"
+        ));
+        assert!(has_object(
+            core_resources,
+            "postgres_objects",
+            "trigger",
+            "resources_delete_generic_operations"
+        ));
+        assert!(has_object(
+            operations,
+            "postgres_objects",
+            "function",
+            "o3k_validate_operation_resource_reference"
+        ));
+        assert!(has_object(
+            operations,
+            "postgres_objects",
+            "function",
+            "o3k_delete_generic_resource_operations"
+        ));
+        assert!(has_object(
+            audit,
+            "sqlite_objects",
+            "index",
+            "idx_audit_scope_service_event"
+        ));
+
+        for entry in &inventory {
+            for field in ["sqlite_objects", "postgres_objects"] {
+                for object in entry[field].as_array().ok_or("object array")? {
+                    let digest = object["definition_sha256"]
+                        .as_str()
+                        .ok_or("object digest")?;
+                    assert!(is_sha256(digest), "{field} digest {digest:?}");
+                    assert!(
+                        CATALOG_KINDS.contains(&object["kind"].as_str().unwrap_or_default()),
+                        "unexpected kind in {field}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn baseline_comparison_detects_added_indexes_and_triggers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sqlite, postgres) = scratch_trees(Some(
+            "CREATE INDEX drift_gate_probe_idx ON resources (project_id);\n\
+             CREATE TRIGGER drift_gate_probe_trigger\n\
+             BEFORE INSERT ON operations BEGIN SELECT 1; END;\n",
+        ))?;
+        let generated =
+            generate_inventory_with_registry(sqlite.path(), postgres.path(), REPOSITORY_FAMILIES)?;
+        let error = match ensure_matches_committed(&generated) {
+            Ok(()) => return Err("an added index/trigger must fail the drift gate".into()),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        println!("index/trigger drift gate: {message}");
+        assert!(message.contains("index:drift_gate_probe_idx"), "{message}");
+        assert!(
+            message.contains("trigger:drift_gate_probe_trigger"),
+            "{message}"
+        );
+        assert!(message.contains("core_resources"), "{message}");
+        assert!(message.contains("operations"), "{message}");
+        Ok(())
+    }
+
+    #[test]
+    fn generation_rejects_an_index_owned_by_an_unregistered_table()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sqlite, postgres) = scratch_trees(Some(
+            "CREATE INDEX drift_gate_probe_idx ON drift_gate_probe (id);\n",
+        ))?;
+        let error = match generate_inventory_with_registry(
+            sqlite.path(),
+            postgres.path(),
+            REPOSITORY_FAMILIES,
+        ) {
+            Ok(_) => return Err("an index on an unregistered table must fail".into()),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("drift_gate_probe_idx"), "{message}");
+        assert!(message.contains("unregistered table"), "{message}");
+        Ok(())
+    }
+
+    #[test]
+    fn generation_rejects_a_function_without_a_reviewed_owner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sqlite, postgres) = scratch_trees(Some(
+            "CREATE OR REPLACE FUNCTION drift_gate_probe_fn()\n\
+             RETURNS trigger LANGUAGE plpgsql AS $$\n\
+             BEGIN RETURN NEW; END;\n\
+             $$;\n",
+        ))?;
+        let error = match generate_inventory_with_registry(
+            sqlite.path(),
+            postgres.path(),
+            REPOSITORY_FAMILIES,
+        ) {
+            Ok(_) => return Err("an unowned function must fail generation".into()),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("drift_gate_probe_fn"), "{message}");
+        assert!(message.contains("GENERIC_FUNCTION_OWNERS"), "{message}");
+        Ok(())
+    }
+
+    #[test]
+    fn index_trigger_and_function_normalization_is_deterministic() {
+        let index_one = "CREATE UNIQUE INDEX IF NOT EXISTS idx ON demo (a, b);";
+        let index_many = "CREATE UNIQUE INDEX idx\n    ON demo (a,   b)";
+        let one = parse_create_indexes(&strip_sql_comments(index_one)).expect("index one");
+        let many = parse_create_indexes(&strip_sql_comments(index_many)).expect("index many");
+        assert_eq!(one.len(), 1);
+        assert_eq!(many.len(), 1);
+        assert_eq!(one[0].0, "idx");
+        assert_eq!(one[0].1, "demo");
+        assert_eq!(one[0].2, many[0].2);
+        assert_eq!(one[0].2, "CREATE UNIQUE INDEX idx ON demo (a,b)");
+
+        let trigger_one = "CREATE TRIGGER guard BEFORE INSERT ON demo BEGIN SELECT 1; END;";
+        let trigger_many = "CREATE TRIGGER guard\n  BEFORE INSERT ON demo\n  BEGIN SELECT 1; END";
+        let one = parse_create_triggers(&strip_sql_comments(trigger_one)).expect("trigger one");
+        let many = parse_create_triggers(&strip_sql_comments(trigger_many)).expect("trigger many");
+        assert_eq!(one.len(), 1);
+        assert_eq!(many.len(), 1);
+        assert_eq!(one[0].0, "guard");
+        assert_eq!(one[0].1, "demo");
+        assert_eq!(one[0].2, many[0].2);
+        assert!(!one[0].2.ends_with(';'));
+
+        let function_one = "CREATE OR REPLACE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$;";
+        let function_many = "CREATE OR REPLACE FUNCTION f()\nRETURNS trigger\nLANGUAGE plpgsql\nAS $$\nBEGIN RETURN NEW; END;\n$$";
+        let one = parse_create_functions(&strip_sql_comments(function_one)).expect("function one");
+        let many =
+            parse_create_functions(&strip_sql_comments(function_many)).expect("function many");
+        assert_eq!(one.len(), 1);
+        assert_eq!(many.len(), 1);
+        assert_eq!(one[0].0, "f");
+        assert_eq!(one[0].1, many[0].1);
+        assert!(one[0].1.contains("$$"));
+        assert!(!one[0].1.ends_with(';'));
     }
 }

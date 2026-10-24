@@ -60,6 +60,7 @@ O3KD_BIN_SHA256="$(sha256sum "$O3KD_BIN" | cut -d' ' -f1)"
 # Offline custody fixture (never read by the artifact command)
 # ---------------------------------------------------------------------------
 BACKUP_SIGNING_KEY="$WORK/backup-signing-key.pem"
+BACKUP_SIGNING_PUBLIC_PEM="$WORK/backup-signing-public.pem"
 BACKUP_FOREIGN_KEY="$WORK/backup-foreign-signing-key.pem"
 BACKUP_RECIPIENT_PEM="$WORK/backup-recipient.pem"
 BACKUP_SWAPPED_RECIPIENT_PEM="$WORK/backup-swapped-recipient.pem"
@@ -67,7 +68,9 @@ BACKUP_RECIPIENT_KEY="$WORK/backup-recipient.key"
 SWAPPED_RECIPIENT_KEY="$WORK/backup-swapped-recipient.key"
 openssl genpkey -algorithm ED25519 -out "$BACKUP_SIGNING_KEY" 2>/dev/null
 openssl genpkey -algorithm ED25519 -out "$BACKUP_FOREIGN_KEY" 2>/dev/null
+openssl pkey -in "$BACKUP_SIGNING_KEY" -pubout -out "$BACKUP_SIGNING_PUBLIC_PEM" 2>/dev/null
 chmod 0600 "$BACKUP_SIGNING_KEY" "$BACKUP_FOREIGN_KEY"
+chmod 0644 "$BACKUP_SIGNING_PUBLIC_PEM"
 # X25519 keypairs: the raw 32-byte private half feeds the trust document, and
 # the public half is the fingerprint the custodian compares in the request.
 openssl genpkey -algorithm X25519 -out "$BACKUP_RECIPIENT_PEM" 2>/dev/null
@@ -160,6 +163,21 @@ reap_exit() { # reap_exit <pid> [timeout-seconds]; sets EXIT_STATUS[pid]
         sleep 0.1
     done
     return 1
+}
+
+# Bounded reap: never block the harness on a child. The exit marker is written
+# by the command wrapper before the child exits, and the loop is capped by a
+# deadline, so there is no unbounded `wait`.
+wait_bounded() { # wait_bounded <pid> <exit-marker> [timeout-seconds]
+    local pid="$1" marker="$2" deadline=$((SECONDS + ${3:-30}))
+    while (( SECONDS < deadline )); do
+        if [[ -f "$marker" ]] || ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.05
+    done
+    return 124
 }
 
 start_daemon() { # start_daemon <name> <data-dir> [extra env KEY=VALUE ...]
@@ -596,6 +614,230 @@ settle_checkpoint() { # settle_checkpoint <data-dir>
     fi
 }
 
+# Independent verification of the published artifact, not using any product
+# verifier code:
+#   * parse the frozen artifact layout and re-canonicalize the manifest with a
+#     local JCS implementation (checked byte-for-byte against the stored
+#     canonical bytes);
+#   * rebuild the exact D1 signing input and verify Ed25519 with OpenSSL;
+#   * recompute SHA-256 over every member ciphertext+tag;
+#   * when python `cryptography` is available, unwrap the HPKE X25519/HKDF-SHA256
+#     content key, decrypt every AES-256-GCM member with its manifest AAD, and
+#     bind `database/o3k.sqlite` to the signed capture record's snapshot digest,
+#     the independently measured source hash, and the source catalog/migration
+#     lineage.
+independent_artifact_check() { # <artifact> <signing-public-pem> <recipient-key> <source-db>
+    local artifact="$1" public_pem="$2" recipient_key="$3" source_db="$4"
+    python3 - "$artifact" "$public_pem" "$recipient_key" "$source_db" <<'PY'
+import base64
+import hashlib
+import hmac
+import json
+import os
+import sqlite3
+import struct
+import subprocess
+import sys
+import tempfile
+
+artifact, public_pem, recipient_key, source_db = sys.argv[1:5]
+
+def b64d(value):
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+def jcs(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+def sha256_file(path):
+    return hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+raw = open(artifact, "rb").read()
+assert raw[:12] == b"O3KPP6BK\x00\x00\x00\x01", "artifact magic"
+manifest_len = struct.unpack(">Q", raw[12:20])[0]
+manifest_end = 20 + manifest_len
+manifest_raw = raw[20:manifest_end]
+manifest = json.loads(manifest_raw)
+# This both validates our local JCS implementation against serde_jcs for this
+# object and proves the bytes inside the artifact are canonical.
+assert jcs(manifest) == manifest_raw, "stored manifest is not canonical JCS"
+
+members = manifest["members"]
+offset = manifest_end
+blocks = []
+for member in members:
+    size = struct.unpack(">Q", raw[offset:offset + 8])[0]
+    offset += 8
+    block = raw[offset:offset + size]
+    assert len(block) == size, f"truncated member {member['name']}"
+    blocks.append(block)
+    offset += size
+assert offset == len(raw), "artifact has trailing or missing member bytes"
+
+for member, block in zip(members, blocks):
+    assert member["encrypted"] is True
+    assert member["size_bytes"] == len(block)
+    assert member["plaintext_size_bytes"] + 16 == len(block)
+    assert hashlib.sha256(block).hexdigest() == member["sha256"], (
+        f"independent member digest mismatch: {member['name']}"
+    )
+
+signature = b64d(manifest["authentication"]["signature"])
+assert len(signature) == 64, "signature is not 64 bytes"
+unsigned = json.loads(manifest_raw)
+del unsigned["authentication"]["signature"]
+canonical = jcs(unsigned)
+d1 = b"O3K-PP6-BACKUP-MANIFEST-V1\x00" + struct.pack(">Q", len(canonical)) + canonical
+for member in members:
+    name = member["name"].encode()
+    d1 += struct.pack(">I", len(name)) + name + bytes.fromhex(member["sha256"])
+
+with tempfile.TemporaryDirectory() as tmp:
+    d1_path = os.path.join(tmp, "d1.bin")
+    sig_path = os.path.join(tmp, "signature.bin")
+    with open(d1_path, "wb") as handle:
+        handle.write(d1)
+    with open(sig_path, "wb") as handle:
+        handle.write(signature)
+    verified = subprocess.run(
+        ["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", public_pem,
+         "-rawin", "-in", d1_path, "-sigfile", sig_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    assert verified.returncode == 0, (
+        "independent Ed25519 verification failed: "
+        + verified.stderr.decode(errors="replace")
+    )
+
+try:
+    from cryptography.hazmat.primitives.asymmetric.x25519 import (
+        X25519PrivateKey,
+        X25519PublicKey,
+    )
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:
+    print(f"independent: signature=ok members={len(members)} decrypt=unavailable")
+    raise SystemExit(0)
+
+def i2osp(value, length):
+    return value.to_bytes(length, "big")
+
+def hkdf_extract(salt, ikm):
+    return hmac.new(salt or b"\x00" * 32, ikm, hashlib.sha256).digest()
+
+def hkdf_expand(prk, info, length):
+    output = b""
+    block = b""
+    counter = 1
+    while len(output) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        output += block
+        counter += 1
+    return output[:length]
+
+def labeled_extract(suite, salt, label, ikm):
+    return hkdf_extract(salt, b"HPKE-v1" + suite + label + ikm)
+
+def labeled_expand(suite, prk, label, info, length):
+    return hkdf_expand(
+        prk, i2osp(length, 2) + b"HPKE-v1" + suite + label + info, length
+    )
+
+recipient_bytes = open(recipient_key, "rb").read()
+assert len(recipient_bytes) == 32, "recipient key is not 32 raw bytes"
+private = X25519PrivateKey.from_private_bytes(recipient_bytes)
+recipient_public = private.public_key().public_bytes_raw()
+
+key_wrapping = manifest["encryption"]["key_wrapping"]
+enc = b64d(key_wrapping["enc"])
+wrapped_key = b64d(key_wrapping["ciphertext"])
+assert len(enc) == 32, "HPKE encapsulated key is not 32 bytes"
+
+kem_suite = b"KEM" + i2osp(0x0020, 2)
+hpke_suite = b"HPKE" + i2osp(0x0020, 2) + i2osp(0x0001, 2) + i2osp(0x0002, 2)
+shared = private.exchange(X25519PublicKey.from_public_bytes(enc))
+kem_context = enc + recipient_public
+eae_prk = labeled_extract(kem_suite, b"", b"eae_prk", shared)
+shared_secret = labeled_expand(kem_suite, eae_prk, b"shared_secret", kem_context, 32)
+psk_id_hash = labeled_extract(hpke_suite, b"", b"psk_id_hash", b"")
+info_hash = labeled_extract(hpke_suite, b"", b"info_hash", b"O3K-PP6-ARTIFACT-KEY-WRAP-V1\x00")
+schedule_context = b"\x00" + psk_id_hash + info_hash
+secret = labeled_extract(hpke_suite, shared_secret, b"secret", b"")
+key = labeled_expand(hpke_suite, secret, b"key", schedule_context, 32)
+base_nonce = labeled_expand(hpke_suite, secret, b"base_nonce", schedule_context, 12)
+
+wrap_aad = jcs({
+    "format_version": manifest["format_version"],
+    "profile_id": manifest["source"]["profile_id"],
+    "site_id": manifest["site_id"],
+    "backup_id": manifest["backup_id"],
+    "recipient_key_id": key_wrapping["recipient_key_id"],
+})
+content_key = AESGCM(key).decrypt(base_nonce, wrapped_key, wrap_aad)
+assert len(content_key) == 32, "unwrapped content key is not 32 bytes"
+
+plaintexts = {}
+for member, block in zip(members, blocks):
+    member_aad = jcs({
+        "format_version": manifest["format_version"],
+        "profile_id": manifest["source"]["profile_id"],
+        "site_id": manifest["site_id"],
+        "backup_id": manifest["backup_id"],
+        "member_name": member["name"],
+        "plaintext_size_bytes": member["plaintext_size_bytes"],
+    })
+    plaintext = AESGCM(content_key).decrypt(b64d(member["nonce"]), block, member_aad)
+    assert len(plaintext) == member["plaintext_size_bytes"]
+    plaintexts[member["name"]] = plaintext
+
+capture = json.loads(plaintexts["metadata/capture.json"])
+database = plaintexts["database/o3k.sqlite"]
+database_sha = hashlib.sha256(database).hexdigest()
+assert capture["snapshot_sha256"] == database_sha, "capture snapshot digest mismatch"
+
+source_sha = sha256_file(source_db)
+assert capture["source_db_sha256_before"] == source_sha, "source-before digest mismatch"
+assert capture["source_db_sha256_after"] == source_sha, "source-after digest mismatch"
+
+def catalog_rows(connection):
+    return list(connection.execute(
+        "SELECT type, name, tbl_name FROM sqlite_master "
+        "WHERE type IN ('table', 'index', 'trigger') "
+        "AND name NOT GLOB 'sqlite_*' ORDER BY type, name"
+    ))
+
+def migration_rows(connection):
+    return list(connection.execute(
+        "SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version"
+    ))
+
+with tempfile.TemporaryDirectory() as tmp:
+    snapshot_path = os.path.join(tmp, "snapshot.sqlite")
+    with open(snapshot_path, "wb") as handle:
+        handle.write(database)
+    os.chmod(snapshot_path, 0o600)
+    snapshot = sqlite3.connect(snapshot_path)
+    source = sqlite3.connect(f"file:{source_db}?mode=ro", uri=True)
+    try:
+        assert catalog_rows(snapshot) == catalog_rows(source), (
+            "decrypted snapshot catalog differs from the source database"
+        )
+        assert migration_rows(snapshot) == migration_rows(source), (
+            "decrypted snapshot migrations differ from the source database"
+        )
+        integrity = snapshot.execute("PRAGMA integrity_check").fetchone()[0]
+        assert integrity == "ok", f"decrypted snapshot integrity_check: {integrity}"
+    finally:
+        snapshot.close()
+        source.close()
+
+print(
+    f"independent: signature=ok members={len(members)} decrypt=verified "
+    f"db_sha256={database_sha}"
+)
+PY
+}
+
 sha256_file_or_missing() { [[ -f "$1" ]] && sha256sum "$1" | cut -d' ' -f1 || echo "-"; }
 
 snapshot_tree() { # snapshot_tree <data-dir> <out>
@@ -673,7 +915,12 @@ check "$(stat -c %a "$BACKUP_RECIPIENT_KEY")" "600" "recipient key mode"
 
 # The offline custodian signs; the waiting process verifies and publishes.
 sign_request "$STAGING" || C1_OK=0
-wait_backup happy 90 || { C1_OK=0; log "  executor did not finish the signing wait"; }
+if ! wait_bounded "$HAPPY_BPID" "$WORK/happy.backup.exit" 90; then
+    C1_OK=0
+    log "  executor did not finish the signing wait within 90s"
+    kill -9 "$HAPPY_BPID" 2>/dev/null || true
+fi
+wait_backup happy 5 || { C1_OK=0; log "  executor exit status was not recorded"; }
 HAPPY_DAEMON_PID="$(daemon_pid happy)"
 reap_exit "$HAPPY_DAEMON_PID" 30 || true
 
@@ -729,14 +976,46 @@ else
         "$(marker_count "$CASE_DATA")" "$(lock_owner "$CASE_DATA")" "$(is_published "$CASE_DEST" "$HAPPY_OP")" \
         "verify_exit=$(verify_exit case-1 2>/dev/null || echo '?')" "publication/verify contract failed"
 fi
+
+# Independent verification, using no product verifier code: local JCS (checked
+# against the stored canonical bytes), the exact D1 input, OpenSSL Ed25519,
+# recomputed member digests, and HPKE/AES-GCM decryption bound to the signed
+# capture record and the harness-measured source database.
+if [[ "$HAVE_PY_CRYPTO" == "1" ]]; then C1_INDEP_DECRYPT="verified"; else C1_INDEP_DECRYPT="unavailable"; fi
+CHECK_OK=1
+if independent_artifact_check "$HAPPY_ARTIFACT" "$BACKUP_SIGNING_PUBLIC_PEM" \
+    "$BACKUP_RECIPIENT_KEY" "$HAPPY_DATA/o3k.sqlite" \
+    >"$WORK/case-1-independent.txt" 2>"$WORK/case-1-independent.err"; then
+    C1_INDEP_DETAIL="$(cat "$WORK/case-1-independent.txt")"
+    grep -q 'signature=ok' "$WORK/case-1-independent.txt" || CHECK_OK=0
+    grep -q "decrypt=$C1_INDEP_DECRYPT" "$WORK/case-1-independent.txt" || CHECK_OK=0
+else
+    CHECK_OK=0
+    C1_INDEP_DETAIL="$(tail -3 "$WORK/case-1-independent.err" | tr '\n' ' ')"
+fi
+(( CHECK_OK )) || log "  independent artifact verification failed: $C1_INDEP_DETAIL"
+if (( CHECK_OK )); then
+    record PASS case-1d "0" "published" "0" "free" "yes" "independent-signature+d1+members+decrypt" \
+        "$C1_INDEP_DETAIL"
+else
+    record FAIL case-1d "0" "published" "0" "free" "yes" "independent-check-failed" \
+        "$C1_INDEP_DETAIL"
+fi
+
 TAMPERED="$WORK/happy-tampered.o3k"
 cp "$HAPPY_ARTIFACT" "$TAMPERED"
 chmod 0600 "$TAMPERED"
 python3 - "$TAMPERED" <<'PY'
-import sys
+import struct, sys
 path = sys.argv[1]
 raw = bytearray(open(path, "rb").read())
-raw[-1] ^= 0x01
+manifest_length = struct.unpack(">Q", raw[12:20])[0]
+# First member block: 8-byte ciphertext length, then ciphertext+tag. Flip a
+# byte inside the ciphertext body (not the trailing tag) so both AEAD and the
+# independent digest must notice it.
+ciphertext_body = 20 + manifest_length + 8
+assert ciphertext_body + 8 < len(raw), "artifact is too small to tamper"
+raw[ciphertext_body + 8] ^= 0x01
 open(path, "wb").write(raw)
 PY
 run_verify case-1-tamper "$CASE_DATA" "$CASE_TRUST" "$CASE_PREFIX" "$TAMPERED"
@@ -748,9 +1027,25 @@ check "$C1_TAMPER_REASON" "corrupt-artifact" "tampered verify reason"
 (( CHECK_OK )) || C1_OK=0
 if (( CHECK_OK )); then
     record PASS case-1c "$C1_TAMPER_EXIT" "published" "0" "free" "yes" "corrupt-artifact(exit=2)" \
-        "single-byte ciphertext flip rejected as corrupt-artifact; published artifact untouched"
+        "single-byte ciphertext-body flip rejected as corrupt-artifact; published artifact untouched"
 else
     record FAIL case-1c "$C1_TAMPER_EXIT" "published" "0" "free" "yes" "$C1_TAMPER_REASON" "tamper rejection failed"
+fi
+
+# The independent member-digest check must also flag the same flipped byte.
+CHECK_OK=1
+if independent_artifact_check "$TAMPERED" "$BACKUP_SIGNING_PUBLIC_PEM" \
+    "$BACKUP_RECIPIENT_KEY" "$HAPPY_DATA/o3k.sqlite" \
+    >"$WORK/case-1-tamper-independent.txt" 2>"$WORK/case-1-tamper-independent.err"; then
+    CHECK_OK=0
+    log "  independent check accepted the tampered artifact"
+fi
+if (( CHECK_OK )); then
+    record PASS case-1e "$C1_TAMPER_EXIT" "published" "0" "free" "yes" "independent-digest-mismatch" \
+        "the independent member SHA-256 recomputation also rejects the flipped ciphertext byte"
+else
+    record FAIL case-1e "$C1_TAMPER_EXIT" "published" "0" "free" "yes" "-" \
+        "independent digest check did not flag the tampered artifact"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1567,13 +1862,23 @@ start_daemon stale-partial "$CASE_DATA"
 if wait_ready stale-partial 30; then
     start_backup stale-partial "$CASE_DATA" "$CASE_DEST" "$C19_OP"
     await_signing_request "$CASE_DEST" "$C19_OP" 60 || true
+    # `complete_staged` clears stale finalize debris before it emits the stable
+    # awaiting-signature line. Inject after that cleanup, otherwise the executor
+    # can remove the just-created file and race the chmod below.
+    await_awaiting_signature_line stale-partial 30 || true
     reap_exit "$(daemon_pid stale-partial)" 30 || true
     C19_MEMBERS="$(find "$CASE_DEST/.o3k-backup-artifact-$C19_OP" -mindepth 1 -maxdepth 1 -type d -name 'members-*' | head -1)"
-    : >"$C19_MEMBERS/artifact.partial"
-    chmod 0600 "$C19_MEMBERS/artifact.partial"
+    C19_INJECT_OK=1
+    if [[ -z "$C19_MEMBERS" ]]; then
+        C19_INJECT_OK=0
+        log "  stale-partial staging members directory is missing"
+    else
+        : >"$C19_MEMBERS/artifact.partial"
+        chmod 0600 "$C19_MEMBERS/artifact.partial"
+    fi
     sign_request "$CASE_DEST/.o3k-backup-artifact-$C19_OP" || true
     wait_backup stale-partial 90 || true
-    CHECK_OK=1
+    CHECK_OK=$C19_INJECT_OK
     check "$(backup_exit stale-partial)" "0" "publication over a stale partial"
     check "$(is_published "$CASE_DEST" "$C19_OP")" "yes" "artifact published"
     check "$(journal_phase "$CASE_DATA" "$C19_OP")" "published" "journal published"

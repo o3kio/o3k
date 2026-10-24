@@ -21,6 +21,8 @@ mod relationship;
 mod topology;
 mod volume_attachment;
 
+#[cfg(test)]
+pub(crate) use core::apply_test_runtime_schema;
 pub use helpers::validate_public_key;
 pub(crate) use helpers::{
     checked_generation, map_canonical_insert_error, parse_uuid, sqlite_sequence,

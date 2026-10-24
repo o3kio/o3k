@@ -11,6 +11,60 @@
           "schema": "main",
           "name": "audit_events",
           "definition_sha256": "ada27f73286bbe01f688ff2cd12d553d06f8561b401911c8744d2e76a080970b"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_audit_operation",
+          "definition_sha256": "39d8fe03cbf8a8bbf440161fbc6357766da3095261e8d8b23f4a2930ae1deb8a"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_audit_scope_action_event",
+          "definition_sha256": "88b12db0b03f7cfa756efadcfb1e8a589c078bf0d7685172f97184d8436c6f8f"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_audit_scope_audit_event",
+          "definition_sha256": "5d36d4168171096fa92211f8caad184b92b2ede3523afaf30dfd2d285383409f"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_audit_scope_outcome_event",
+          "definition_sha256": "8076d5b0a2dca87b2ddc24fb116e040648100421a2d1fe3bbf59022672a84efc"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_audit_scope_principal_event",
+          "definition_sha256": "830b84d2a8e66e4ddcc70808b21efeaa161a391ba01ad57b612a6dcc120ab343"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_audit_scope_request_event",
+          "definition_sha256": "55c8311d3b6edba59683b6ab83b18361c7eb36d65aaad6c495c73112b9ab1a08"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_audit_scope_resource_event",
+          "definition_sha256": "776ca094a18f479c8442b57709f6d000d594d076a3af9baba54ecdac6d3a4983"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_audit_scope_service_event",
+          "definition_sha256": "2a8cfd677dcd9e9237b9c45f45bef2280c6bd3338b301745ffa9be8f4076f1e0"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_audit_scope_time",
+          "definition_sha256": "a0d57205ed22c900de68eee7b8e3e634db67d6f0be926fbd144d304a126cfc42"
         }
       ],
       "postgres_objects": [
@@ -19,6 +73,60 @@
           "schema": "public",
           "name": "audit_events",
           "definition_sha256": "ada27f73286bbe01f688ff2cd12d553d06f8561b401911c8744d2e76a080970b"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_audit_operation",
+          "definition_sha256": "39d8fe03cbf8a8bbf440161fbc6357766da3095261e8d8b23f4a2930ae1deb8a"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_audit_scope_action_event",
+          "definition_sha256": "88b12db0b03f7cfa756efadcfb1e8a589c078bf0d7685172f97184d8436c6f8f"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_audit_scope_audit_event",
+          "definition_sha256": "5d36d4168171096fa92211f8caad184b92b2ede3523afaf30dfd2d285383409f"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_audit_scope_outcome_event",
+          "definition_sha256": "8076d5b0a2dca87b2ddc24fb116e040648100421a2d1fe3bbf59022672a84efc"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_audit_scope_principal_event",
+          "definition_sha256": "830b84d2a8e66e4ddcc70808b21efeaa161a391ba01ad57b612a6dcc120ab343"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_audit_scope_request_event",
+          "definition_sha256": "55c8311d3b6edba59683b6ab83b18361c7eb36d65aaad6c495c73112b9ab1a08"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_audit_scope_resource_event",
+          "definition_sha256": "776ca094a18f479c8442b57709f6d000d594d076a3af9baba54ecdac6d3a4983"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_audit_scope_service_event",
+          "definition_sha256": "2a8cfd677dcd9e9237b9c45f45bef2280c6bd3338b301745ffa9be8f4076f1e0"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_audit_scope_time",
+          "definition_sha256": "a0d57205ed22c900de68eee7b8e3e634db67d6f0be926fbd144d304a126cfc42"
         }
       ],
       "migration_ids": [
@@ -44,6 +152,12 @@
           "schema": "main",
           "name": "enrollment_grants",
           "definition_sha256": "82bf4f65a8578b33ad9b87260f7e83b39373bb30d798121b9297dc24c1ef5000"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "enrollment_grants_agent_idx",
+          "definition_sha256": "07982822b514e3d50fe8e463fd0277eced8a35caa39c2184d5659c8ca84041b4"
         }
       ],
       "postgres_objects": [
@@ -58,6 +172,12 @@
           "schema": "public",
           "name": "enrollment_grants",
           "definition_sha256": "44286c3f731cba7dc1c5d6821ff4563128ad028aacd3c8819b5c8e6337f87ce4"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "enrollment_grants_agent_idx",
+          "definition_sha256": "07982822b514e3d50fe8e463fd0277eced8a35caa39c2184d5659c8ca84041b4"
         }
       ],
       "migration_ids": [
@@ -110,13 +230,85 @@
           "kind": "table",
           "schema": "main",
           "name": "canonical_networks",
-          "definition_sha256": "4a0b810948918c03d873434dea8f9a660e444e843f78ecf383578d8db2f64f5f"
+          "definition_sha256": "4cbb0a3869c9a0c5123f328fbed024e3656091ef203d08de817eefbde3911d02"
         },
         {
           "kind": "table",
           "schema": "main",
           "name": "canonical_realm_encapsulation_bindings",
           "definition_sha256": "6b2b51c332bec4cbbb7b835c36191ad5e971b4aac47481cff756509478653b04"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_address_pools_project_idx",
+          "definition_sha256": "5147e4c05c8c9549f16a2ecd60c66d4a889e37b364bb1073c85bc7bc8d9f34b2"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_address_pools_realm_idx",
+          "definition_sha256": "f683b2b6ae9bfb0c333fc1c632b4dbd6b1279289fba1fc593e8c1158a05896a7"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_address_realms_id_project_idx",
+          "definition_sha256": "f6c49bc1afd7a26e1daa60faae1818a343305500980a0f2db3ff199cdfd70f54"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_address_realms_network_idx",
+          "definition_sha256": "a08208eba9cc05c38fa1d112e56c1c5ffaaea1bf73740f6eda8376fa16c6dedd"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_address_realms_project_idx",
+          "definition_sha256": "029f0fa2dc8c094e7d2e57156565367d7192d6c82b7cb897c898a8eac38b0172"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_endpoints_id_project_idx",
+          "definition_sha256": "1bf2116e92e68acd9e82dce54e39d7668943af33c8bda0f71c83cc1f19a9ab83"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_endpoints_project_idx",
+          "definition_sha256": "cf89b47cda81fa6ab12e0525f0d632306315b3fa1a26fe0fb71824edf55684d4"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_endpoints_realm_idx",
+          "definition_sha256": "0775eb851a43c7ba003d54d5d91047991950f291e3c8efed5ed0b4a94c7018d2"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_l3_gateway_attachments_active_pair",
+          "definition_sha256": "9f9cf0dd31b40a91009f1b0a5f62994b0cc17057659cc096df665844975de0d6"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_l3_gateway_attachments_by_realm",
+          "definition_sha256": "3978e34e32c01705d1329cd2b359a2deb16fcc4cc3f3925e8b3c6befc5d8636a"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_networks_project_idx",
+          "definition_sha256": "269edd59f9fca79d19147afed3e2313f2ff680e7845a57ba6805d9b65ef36ee9"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_realm_bindings_realm_idx",
+          "definition_sha256": "a55bf75d4f49e2d3010b420395b819fa18cc99cbe1c8df68871d3c9e07eae68d"
         }
       ],
       "postgres_objects": [
@@ -167,6 +359,72 @@
           "schema": "public",
           "name": "canonical_realm_encapsulation_bindings",
           "definition_sha256": "0f9e699dc1ee91f2756fa9d6d4683644fba0709582afd991fdff197459c4cde4"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_address_pools_project_idx",
+          "definition_sha256": "5147e4c05c8c9549f16a2ecd60c66d4a889e37b364bb1073c85bc7bc8d9f34b2"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_address_pools_realm_idx",
+          "definition_sha256": "f683b2b6ae9bfb0c333fc1c632b4dbd6b1279289fba1fc593e8c1158a05896a7"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_address_realms_network_idx",
+          "definition_sha256": "a08208eba9cc05c38fa1d112e56c1c5ffaaea1bf73740f6eda8376fa16c6dedd"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_address_realms_project_idx",
+          "definition_sha256": "029f0fa2dc8c094e7d2e57156565367d7192d6c82b7cb897c898a8eac38b0172"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_endpoints_id_project_idx",
+          "definition_sha256": "1bf2116e92e68acd9e82dce54e39d7668943af33c8bda0f71c83cc1f19a9ab83"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_endpoints_project_idx",
+          "definition_sha256": "cf89b47cda81fa6ab12e0525f0d632306315b3fa1a26fe0fb71824edf55684d4"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_endpoints_realm_idx",
+          "definition_sha256": "0775eb851a43c7ba003d54d5d91047991950f291e3c8efed5ed0b4a94c7018d2"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_l3_gateway_attachments_active_pair",
+          "definition_sha256": "9f9cf0dd31b40a91009f1b0a5f62994b0cc17057659cc096df665844975de0d6"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_l3_gateway_attachments_by_realm",
+          "definition_sha256": "3978e34e32c01705d1329cd2b359a2deb16fcc4cc3f3925e8b3c6befc5d8636a"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_networks_project_idx",
+          "definition_sha256": "269edd59f9fca79d19147afed3e2313f2ff680e7845a57ba6805d9b65ef36ee9"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_realm_bindings_realm_idx",
+          "definition_sha256": "a55bf75d4f49e2d3010b420395b819fa18cc99cbe1c8df68871d3c9e07eae68d"
         }
       ],
       "migration_ids": [
@@ -209,13 +467,67 @@
           "kind": "table",
           "schema": "main",
           "name": "canonical_policy_realizations",
-          "definition_sha256": "6fbde51896b1eda7289aeadff955457e14bda525e82e7a8060c29db08071d185"
+          "definition_sha256": "49337c63f0b94207a43c68ac28a463a1e5fde8ec78026c386a36d05ee1fa1992"
         },
         {
           "kind": "table",
           "schema": "main",
           "name": "canonical_reusable_network_policies",
           "definition_sha256": "30b974be64a886cc8ae7a547b1a5d7dea9e913d1f7465ae3480f4c52e377b2f2"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_network_policies_endpoint_idx",
+          "definition_sha256": "12b5abb51f523cec4b49b426b23b9e62005a84b8617cbdc679680e25bb6bb851"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_network_policies_project_idx",
+          "definition_sha256": "fa199014b8531c217cc592da5de071ed143512e312349701360d1acdd3441456"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_network_policy_rules_active_key",
+          "definition_sha256": "3029c70ef5a6c8c11e179306c244f9f9b46ea5710651b87b00b3e74bab5e2a47"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_network_policy_rules_policy_idx",
+          "definition_sha256": "a93b2ddff26731c939bfea239ca319e8909bf623d971a2572197c88493a1476f"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_policy_attachments_active_pair",
+          "definition_sha256": "022c6d96cbdf4e1c95c6fcefba0bf27c2f9aed1b5462de474f8a0f627c598660"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_policy_attachments_endpoint_idx",
+          "definition_sha256": "c29a244eaf48a4a7aa7b91b77af26cf18abc5c5df7875a276caac7255fd32f60"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_policy_attachments_policy_idx",
+          "definition_sha256": "525a9a8a2b2e4dab62b9a265a367d0f745c26b70348a7b3d5c43e57f7db046fb"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_policy_realizations_project_idx",
+          "definition_sha256": "617ef8953bd1dbcf4e8dfa8fe3e556e07597e872e16f79fa55fbbe7b06a63c21"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "canonical_reusable_network_policies_project_idx",
+          "definition_sha256": "a8d06b0bcf4b435f8d6b3d4bd789f08d9599e846f4fe0ee348b0eea1de018930"
         }
       ],
       "postgres_objects": [
@@ -248,6 +560,60 @@
           "schema": "public",
           "name": "canonical_reusable_network_policies",
           "definition_sha256": "5e67fa3c330ac0a9022317e2c0ad7aac2a43c5505363d1d93fe634022cc217ac"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_network_policies_endpoint_idx",
+          "definition_sha256": "12b5abb51f523cec4b49b426b23b9e62005a84b8617cbdc679680e25bb6bb851"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_network_policies_project_idx",
+          "definition_sha256": "fa199014b8531c217cc592da5de071ed143512e312349701360d1acdd3441456"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_network_policy_rules_active_key",
+          "definition_sha256": "3029c70ef5a6c8c11e179306c244f9f9b46ea5710651b87b00b3e74bab5e2a47"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_network_policy_rules_policy_idx",
+          "definition_sha256": "a93b2ddff26731c939bfea239ca319e8909bf623d971a2572197c88493a1476f"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_policy_attachments_active_pair",
+          "definition_sha256": "022c6d96cbdf4e1c95c6fcefba0bf27c2f9aed1b5462de474f8a0f627c598660"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_policy_attachments_endpoint_idx",
+          "definition_sha256": "c29a244eaf48a4a7aa7b91b77af26cf18abc5c5df7875a276caac7255fd32f60"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_policy_attachments_policy_idx",
+          "definition_sha256": "525a9a8a2b2e4dab62b9a265a367d0f745c26b70348a7b3d5c43e57f7db046fb"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_policy_realizations_project_idx",
+          "definition_sha256": "617ef8953bd1dbcf4e8dfa8fe3e556e07597e872e16f79fa55fbbe7b06a63c21"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "canonical_reusable_network_policies_project_idx",
+          "definition_sha256": "a8d06b0bcf4b435f8d6b3d4bd789f08d9599e846f4fe0ee348b0eea1de018930"
         }
       ],
       "migration_ids": [
@@ -322,6 +688,18 @@
           "schema": "main",
           "name": "work_leases",
           "definition_sha256": "4ce440e25837b6cd921992e00866dd0cddf66e2f32b76e9dce55f49413ddb36f"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_work_leases_expiry",
+          "definition_sha256": "55ce3dad2a031a07c409d5f2e1ca6de1625c49666248858184ac7303cec3cfac"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_work_leases_owner",
+          "definition_sha256": "7b9ac403483db41af493db0407b5f4eea47f8cdea2aec774b6063127558fbf45"
         }
       ],
       "postgres_objects": [
@@ -342,6 +720,18 @@
           "schema": "public",
           "name": "work_leases",
           "definition_sha256": "556be6e8ecced56bc137238ce620d73c8afc1a883fac1d00bd09e6f3c17b51f8"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_work_leases_expiry",
+          "definition_sha256": "55ce3dad2a031a07c409d5f2e1ca6de1625c49666248858184ac7303cec3cfac"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_work_leases_owner",
+          "definition_sha256": "7b9ac403483db41af493db0407b5f4eea47f8cdea2aec774b6063127558fbf45"
         }
       ],
       "migration_ids": [
@@ -371,6 +761,24 @@
           "schema": "main",
           "name": "resources",
           "definition_sha256": "4000c28416839462fdd2fe7b51ad0320a0b8ecade17f80a8820c32fee95bf99c"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "resource_relationships_child_idx",
+          "definition_sha256": "8da4b848a60c1336fe22a8a0f52d43396a86931c3fecb7b5c2e44e632f0ca5a5"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "resources_project_kind_idx",
+          "definition_sha256": "288d6dee3df46a10212466a13c6c8ceec5b0486ac5f949fde390071a6ea78af2"
+        },
+        {
+          "kind": "trigger",
+          "schema": "main",
+          "name": "resources_delete_generic_operations",
+          "definition_sha256": "6cf792bf3dd57a90b7262e30a917a8da402289b96c58a6ba93ab6d7d1de5ba93"
         }
       ],
       "postgres_objects": [
@@ -391,6 +799,24 @@
           "schema": "public",
           "name": "resources",
           "definition_sha256": "00ccb93d7d7203c6420ffa6d9d5055118538a4f2e0cb6ac755c5222cc04aa549"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "resource_relationships_child_idx",
+          "definition_sha256": "8da4b848a60c1336fe22a8a0f52d43396a86931c3fecb7b5c2e44e632f0ca5a5"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "resources_project_kind_idx",
+          "definition_sha256": "288d6dee3df46a10212466a13c6c8ceec5b0486ac5f949fde390071a6ea78af2"
+        },
+        {
+          "kind": "trigger",
+          "schema": "public",
+          "name": "resources_delete_generic_operations",
+          "definition_sha256": "bc493cbeb756fddf16767dddc28a0d3a08f3fb4b6df02f916549ab1ce0e8f378"
         }
       ],
       "migration_ids": [
@@ -477,6 +903,48 @@
           "schema": "main",
           "name": "server_keypairs",
           "definition_sha256": "694ca3f8cc44ea1e10a1e7e46d9859236f09fb6b5e5c5f172511cfd7c4c08bd9"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_federated_bindings_principal",
+          "definition_sha256": "74fc62b846aff0eaf9e157fc7379d8a1a2a5b11982fbb8ec0e8876e3d4513165"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_keystone_projects_domain_id",
+          "definition_sha256": "d06e02982ac80a10ad1bf241725d23cae741480cdd2e76b7cfca1c1477768e98"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_keystone_role_assignments_principal_id",
+          "definition_sha256": "302f63500f1c59c81556b8e52e09f1091df24e622a6ad8f7248aa4a0993afe45"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_keystone_role_assignments_project_id",
+          "definition_sha256": "fd56eafb881720fe663b4a77c25c1150558c98f1dca0fb77137fe05459693883"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_keystone_role_assignments_role_id",
+          "definition_sha256": "b716887fc7aacc70cbd01220a4e884748c55e94cb8f83394bf90d1756276a77d"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_operator_assignments_user_enabled",
+          "definition_sha256": "a59fa45d1cf762279d0ce614ac1d4051f91259373be36f906e2f5b93fea333cf"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "keypairs_scope_idx",
+          "definition_sha256": "ad14fa5d3af428f3b5ee6b447754615cabbbf8620f509e598bca1dc7569ec0ce"
         }
       ],
       "postgres_objects": [
@@ -551,6 +1019,42 @@
           "schema": "public",
           "name": "server_keypairs",
           "definition_sha256": "49e0d08a57e80711ec6d436c1bf04ac0e000c66938ca785c0a5cf90441e9a92c"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_federated_bindings_principal",
+          "definition_sha256": "74fc62b846aff0eaf9e157fc7379d8a1a2a5b11982fbb8ec0e8876e3d4513165"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_keystone_projects_domain_id",
+          "definition_sha256": "d06e02982ac80a10ad1bf241725d23cae741480cdd2e76b7cfca1c1477768e98"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_keystone_role_assignments_principal_id",
+          "definition_sha256": "302f63500f1c59c81556b8e52e09f1091df24e622a6ad8f7248aa4a0993afe45"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_keystone_role_assignments_project_id",
+          "definition_sha256": "fd56eafb881720fe663b4a77c25c1150558c98f1dca0fb77137fe05459693883"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_keystone_role_assignments_role_id",
+          "definition_sha256": "b716887fc7aacc70cbd01220a4e884748c55e94cb8f83394bf90d1756276a77d"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_operator_assignments_user_enabled",
+          "definition_sha256": "a59fa45d1cf762279d0ce614ac1d4051f91259373be36f906e2f5b93fea333cf"
         }
       ],
       "migration_ids": [
@@ -575,7 +1079,7 @@
           "kind": "table",
           "schema": "main",
           "name": "artifact_transfers",
-          "definition_sha256": "88451e14691d4b733bfb039b9f9df4c2e8806b154c23d3d81038a85a89d514cc"
+          "definition_sha256": "bd57f1cb1517020cbd90267d7f4f4ed2a90e36e991fe54097713e05371c9f1f6"
         },
         {
           "kind": "table",
@@ -588,6 +1092,48 @@
           "schema": "main",
           "name": "image_overlay_ownership",
           "definition_sha256": "7877b5f3364b20c14590c23ea522ec9feedc5fb9c8682832cf37d9838ad052bb"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "artifact_transfers_agent_epoch_idx",
+          "definition_sha256": "0c740419bf7b7dd7990406390563fe0ae382c07fcc2bf561ff70c93a10a55855"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "artifact_transfers_operation_idx",
+          "definition_sha256": "75770fab03591dfa4455c6bb9139da787bc23ae91f572b7123ab279c60d909a0"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "artifact_transfers_recovery_idx",
+          "definition_sha256": "251c7bb5d07bf479c21dae6149a4cb86089abb7639bb0c9c1529e1c7bd03ab2c"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_image_metadata_project",
+          "definition_sha256": "909316b562e042350dcdafd1a5eee1a58383d659f553bdb7e7a32ce5d435811a"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "image_overlay_ownership_base_ref_idx",
+          "definition_sha256": "6895604e1b9a8164cc10b8c0157b5b3afdcffe50d9b71de63bf1797d9cd2b7d5"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "image_overlay_ownership_recovery_idx",
+          "definition_sha256": "a886618c8af7269b6482a4d7ac2b2b2f84886788445b67ad943b4672ba23a781"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "image_overlay_ownership_resource_idx",
+          "definition_sha256": "30a9831ac05ae947804f1b75c365cae596796af717878e6ed59e8d2eee0d767c"
         }
       ],
       "postgres_objects": [
@@ -608,6 +1154,48 @@
           "schema": "public",
           "name": "image_overlay_ownership",
           "definition_sha256": "7877b5f3364b20c14590c23ea522ec9feedc5fb9c8682832cf37d9838ad052bb"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "artifact_transfers_agent_epoch_idx",
+          "definition_sha256": "0c740419bf7b7dd7990406390563fe0ae382c07fcc2bf561ff70c93a10a55855"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "artifact_transfers_operation_idx",
+          "definition_sha256": "75770fab03591dfa4455c6bb9139da787bc23ae91f572b7123ab279c60d909a0"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "artifact_transfers_recovery_idx",
+          "definition_sha256": "251c7bb5d07bf479c21dae6149a4cb86089abb7639bb0c9c1529e1c7bd03ab2c"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_image_metadata_project",
+          "definition_sha256": "909316b562e042350dcdafd1a5eee1a58383d659f553bdb7e7a32ce5d435811a"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "image_overlay_ownership_base_ref_idx",
+          "definition_sha256": "6895604e1b9a8164cc10b8c0157b5b3afdcffe50d9b71de63bf1797d9cd2b7d5"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "image_overlay_ownership_recovery_idx",
+          "definition_sha256": "a886618c8af7269b6482a4d7ac2b2b2f84886788445b67ad943b4672ba23a781"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "image_overlay_ownership_resource_idx",
+          "definition_sha256": "30a9831ac05ae947804f1b75c365cae596796af717878e6ed59e8d2eee0d767c"
         }
       ],
       "migration_ids": [
@@ -640,6 +1228,30 @@
           "schema": "main",
           "name": "metering_intervals",
           "definition_sha256": "2f59e0d2ad7087ce27c531f91f77791362bad0f2414381546233593e3b342ed1"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_metering_aggregates_scope_bucket",
+          "definition_sha256": "8ccfc518b437013ff6e0cc7238b7216a79e6cee5964c435e48cf8db466516ef1"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_metering_intervals_open",
+          "definition_sha256": "c3385932f8c5133ecbc89f46f92d39630d4ac81edea6639bd7fa495d1bdf4704"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_metering_intervals_open_series",
+          "definition_sha256": "1ef7a6135de1cabed60475019aa81815eb6bd67e9a9f3be7ee2906e5111b9f5d"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_metering_intervals_series",
+          "definition_sha256": "1635019d343fe01b39b64cef2d5f7dd56af89d31e54308cbe9e1caeea226708a"
         }
       ],
       "postgres_objects": [
@@ -660,6 +1272,30 @@
           "schema": "public",
           "name": "metering_intervals",
           "definition_sha256": "2f59e0d2ad7087ce27c531f91f77791362bad0f2414381546233593e3b342ed1"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_metering_aggregates_scope_bucket",
+          "definition_sha256": "8ccfc518b437013ff6e0cc7238b7216a79e6cee5964c435e48cf8db466516ef1"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_metering_intervals_open",
+          "definition_sha256": "c3385932f8c5133ecbc89f46f92d39630d4ac81edea6639bd7fa495d1bdf4704"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_metering_intervals_open_series",
+          "definition_sha256": "1ef7a6135de1cabed60475019aa81815eb6bd67e9a9f3be7ee2906e5111b9f5d"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_metering_intervals_series",
+          "definition_sha256": "1635019d343fe01b39b64cef2d5f7dd56af89d31e54308cbe9e1caeea226708a"
         }
       ],
       "migration_ids": [
@@ -700,7 +1336,67 @@
           "kind": "table",
           "schema": "main",
           "name": "volume_attachments",
-          "definition_sha256": "48302c42728cede36576365d1b92b4f6e1dcdd259c61684c887b02c0eb521a96"
+          "definition_sha256": "15fce766df4228bb9c4a100866e1b8b91dd42cdef87a9e328e9509ecf25962d7"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_volume_attachments_idempotency",
+          "definition_sha256": "9785e366373164a62dd36c6295f885d484bdcd9f26383ab7d6660382bdf8468f"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_volume_attachments_server",
+          "definition_sha256": "19431bf6976b67d87b659013ed90be328609cfa1a7c9454a2e5fc9d8e14c9881"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_volume_attachments_status",
+          "definition_sha256": "9f4e1abc35915eeddc726c0685ecb84ed76406a21284e780c9aba0bd1cf05ebc"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_volume_attachments_volume",
+          "definition_sha256": "1f33fcf25d6d1a76e30a7817da093e1109eb28c49cd73b0d3ed2c91c7d640632"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "native_snapshots_project_idx",
+          "definition_sha256": "e4de005b45e0f4b6d3404a83a661b2d96e5eb9ad702b5c0aec24b69d4a00515d"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "native_snapshots_volume_idx",
+          "definition_sha256": "20f5bb5cdc052fe61d6160879fe4da294575651cb15b2e7dbcedacecf17f350c"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "native_volume_attachments_live_volume",
+          "definition_sha256": "a08633c6dc6191fc2ee88bf2790b72d78e0cd46e062f30fbc7b13c13f7ffcdd5"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "native_volume_attachments_project_idx",
+          "definition_sha256": "4ae7c584ba76c46ffe5ca5fae37d62ed88be66bad638d270ba6c450fc8d06709"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "native_volume_attachments_server_idx",
+          "definition_sha256": "220cea045088a5f0c1464ae21bf769dab85f936497458794aa060cb5cd69b20e"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "native_volumes_project_idx",
+          "definition_sha256": "455471d42b8a2fd8ff6214506411a3f7759c3ad706cdc7a0db3876061dba098a"
         }
       ],
       "postgres_objects": [
@@ -733,6 +1429,66 @@
           "schema": "public",
           "name": "volume_attachments",
           "definition_sha256": "b8968d24b73145466714a934b10f5f2edf80f983a641f59ec00e94b736146561"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_volume_attachments_idempotency",
+          "definition_sha256": "9785e366373164a62dd36c6295f885d484bdcd9f26383ab7d6660382bdf8468f"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_volume_attachments_server",
+          "definition_sha256": "19431bf6976b67d87b659013ed90be328609cfa1a7c9454a2e5fc9d8e14c9881"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_volume_attachments_status",
+          "definition_sha256": "9f4e1abc35915eeddc726c0685ecb84ed76406a21284e780c9aba0bd1cf05ebc"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_volume_attachments_volume",
+          "definition_sha256": "1f33fcf25d6d1a76e30a7817da093e1109eb28c49cd73b0d3ed2c91c7d640632"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "native_snapshots_project_idx",
+          "definition_sha256": "e4de005b45e0f4b6d3404a83a661b2d96e5eb9ad702b5c0aec24b69d4a00515d"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "native_snapshots_volume_idx",
+          "definition_sha256": "20f5bb5cdc052fe61d6160879fe4da294575651cb15b2e7dbcedacecf17f350c"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "native_volume_attachments_live_volume",
+          "definition_sha256": "a08633c6dc6191fc2ee88bf2790b72d78e0cd46e062f30fbc7b13c13f7ffcdd5"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "native_volume_attachments_project_idx",
+          "definition_sha256": "4ae7c584ba76c46ffe5ca5fae37d62ed88be66bad638d270ba6c450fc8d06709"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "native_volume_attachments_server_idx",
+          "definition_sha256": "220cea045088a5f0c1464ae21bf769dab85f936497458794aa060cb5cd69b20e"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "native_volumes_project_idx",
+          "definition_sha256": "455471d42b8a2fd8ff6214506411a3f7759c3ad706cdc7a0db3876061dba098a"
         }
       ],
       "migration_ids": [
@@ -772,7 +1528,7 @@
           "kind": "table",
           "schema": "main",
           "name": "network_ports",
-          "definition_sha256": "12dc6960587b75b55f6410f6992f243b7d6fef44e86e6b993bace395c1ad4eab"
+          "definition_sha256": "9336e52bb68eec6711f79c40d6475db074cd9c66e72540154e04efabf8579f5c"
         },
         {
           "kind": "table",
@@ -796,7 +1552,61 @@
           "kind": "table",
           "schema": "main",
           "name": "network_subnets",
-          "definition_sha256": "e8c191a5541aecd72aaf9348ef171591d1bba5910c1804183f247e9dbbb664f8"
+          "definition_sha256": "4f8cbe2067ba184f8c27486e71a3f2d5d09dded9e9967efe80160bd8bfacc402"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_network_address_allocations_realm",
+          "definition_sha256": "9b9c527eb80e87518b88a71c580126903250e0e79d5762bab8b1e445a388436e"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_network_intents_project",
+          "definition_sha256": "26f7d99d5cfac1afe49481889b7657efec1aa82d29adb58f2953f72ffac44579"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_network_networks_project",
+          "definition_sha256": "b917525eecf0f04b88c78256ecaa08d68eef206b5ae6a09458f5377b0b9d9692"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_network_ports_network",
+          "definition_sha256": "b20ae6c65f08f005e5da1127d5d3c6882f86a011aaba149b9f4316d07361954e"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_network_ports_project",
+          "definition_sha256": "d5f4ebaced8346ed6bfca8a566c70e6a96c01e65bce44844a6c96d982c284be8"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_network_security_group_bindings_endpoint",
+          "definition_sha256": "4a8e32516bd2d1e5bd8f719fabd0044fa2daec0fb9324707debdde8b8d75e434"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_network_security_group_rules_group",
+          "definition_sha256": "28fce736a040c7ea4e5edef9128cf29ce8d880dcc20cb1eab8fd12740b1f2641"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_network_subnets_network",
+          "definition_sha256": "b0a6e2f255a4079cb453610f1aaaff7e677c5914fac89925ce9c3c3faf175f79"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_network_subnets_project",
+          "definition_sha256": "4fe03810cf1cb7aae7b0c1d77b5fb90a33104aca04ba745e970ff77c8c87c3b9"
         }
       ],
       "postgres_objects": [
@@ -847,6 +1657,60 @@
           "schema": "public",
           "name": "network_subnets",
           "definition_sha256": "e8c191a5541aecd72aaf9348ef171591d1bba5910c1804183f247e9dbbb664f8"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_network_address_allocations_realm",
+          "definition_sha256": "9b9c527eb80e87518b88a71c580126903250e0e79d5762bab8b1e445a388436e"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_network_intents_project",
+          "definition_sha256": "26f7d99d5cfac1afe49481889b7657efec1aa82d29adb58f2953f72ffac44579"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_network_networks_project",
+          "definition_sha256": "b917525eecf0f04b88c78256ecaa08d68eef206b5ae6a09458f5377b0b9d9692"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_network_ports_network",
+          "definition_sha256": "b20ae6c65f08f005e5da1127d5d3c6882f86a011aaba149b9f4316d07361954e"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_network_ports_project",
+          "definition_sha256": "d5f4ebaced8346ed6bfca8a566c70e6a96c01e65bce44844a6c96d982c284be8"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_network_security_group_bindings_endpoint",
+          "definition_sha256": "4a8e32516bd2d1e5bd8f719fabd0044fa2daec0fb9324707debdde8b8d75e434"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_network_security_group_rules_group",
+          "definition_sha256": "28fce736a040c7ea4e5edef9128cf29ce8d880dcc20cb1eab8fd12740b1f2641"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_network_subnets_network",
+          "definition_sha256": "b0a6e2f255a4079cb453610f1aaaff7e677c5914fac89925ce9c3c3faf175f79"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_network_subnets_project",
+          "definition_sha256": "4fe03810cf1cb7aae7b0c1d77b5fb90a33104aca04ba745e970ff77c8c87c3b9"
         }
       ],
       "migration_ids": [
@@ -909,7 +1773,43 @@
           "kind": "table",
           "schema": "main",
           "name": "operations",
-          "definition_sha256": "0cc5d383b25e3d1d1f51f46b1e0b8985ea19c4d1be92b906e60d69e093be4fd8"
+          "definition_sha256": "5e2556b8ae50a4288c974652ac71f53641bf062b8693e448d82b8e96cf586dc4"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "agent_commands_operation_idx",
+          "definition_sha256": "e6dcead97c5d2b588433fa22b1fec0377c65ba3825ac1d59e79f786623f9ba38"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "agent_commands_resource_idx",
+          "definition_sha256": "e57f62d80cc34c622633e27f3406175b6d201cf6bdaa15074cae61c10d3b9fd6"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idempotency_reservations_operation_idx",
+          "definition_sha256": "8017c4de9b36b600539edd784743af28031aff2d65c595f4f487de7aae6d4154"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "network_plan_work_unresolved_idx",
+          "definition_sha256": "5af14f63b0e5b373d6a5be217844811854d2d3e7b9a91f05f4a2f97d80bf5763"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "operations_resource_idx",
+          "definition_sha256": "9a53ac3ee7589fa7f6b4548d045e692d7764a6929e6c20307d70389a05de045b"
+        },
+        {
+          "kind": "trigger",
+          "schema": "main",
+          "name": "operations_validate_resource_reference",
+          "definition_sha256": "e2c2272c23bfd906b71706da09ab24956729523788bc6ad7f7f27466e2a59500"
         }
       ],
       "postgres_objects": [
@@ -954,6 +1854,48 @@
           "schema": "public",
           "name": "operations",
           "definition_sha256": "2099f8f225b3e48df160cb80b460aa244e0516a5c218b056d6acbcf05a39250b"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "agent_commands_operation_idx",
+          "definition_sha256": "e6dcead97c5d2b588433fa22b1fec0377c65ba3825ac1d59e79f786623f9ba38"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "agent_commands_resource_idx",
+          "definition_sha256": "e57f62d80cc34c622633e27f3406175b6d201cf6bdaa15074cae61c10d3b9fd6"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "network_plan_work_unresolved_idx",
+          "definition_sha256": "5af14f63b0e5b373d6a5be217844811854d2d3e7b9a91f05f4a2f97d80bf5763"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "operations_resource_idx",
+          "definition_sha256": "9a53ac3ee7589fa7f6b4548d045e692d7764a6929e6c20307d70389a05de045b"
+        },
+        {
+          "kind": "trigger",
+          "schema": "public",
+          "name": "operations_validate_resource_reference",
+          "definition_sha256": "db4b3e34f0d914e003edbe0dda6644c8b1d92eec8d0d549996dc7ed5a472e097"
+        },
+        {
+          "kind": "function",
+          "schema": "public",
+          "name": "o3k_delete_generic_resource_operations",
+          "definition_sha256": "172a019517928e11da083b14e8acca7d7f67e0fa14c5d246b803396e863e161c"
+        },
+        {
+          "kind": "function",
+          "schema": "public",
+          "name": "o3k_validate_operation_resource_reference",
+          "definition_sha256": "0fbbf7f442006c46330a7526823bf44e6b5f7b5ae00ab8e1f4754bbcafa9b727"
         }
       ],
       "migration_ids": [
@@ -1024,7 +1966,31 @@
           "kind": "table",
           "schema": "main",
           "name": "placement_providers",
-          "definition_sha256": "c65cf0940b6ae4df08df955479954441dfdad6d6fb51e4fa986c6d9b66365b66"
+          "definition_sha256": "06c69fa6e588a4ecf1544393220eba41fca5040978092ed013df0f648032b9e5"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_placement_allocations_consumer",
+          "definition_sha256": "a5ece2a5769cd0929aeac0abd6f1f6577265c10ec1a9c111630ca6dad4e52a10"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_placement_allocations_provider",
+          "definition_sha256": "f66e169d011fd9afb6cce3706ef0f60608bb7e5a8c4fa54ed53f96e20f6e1e2c"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_placement_intents_provider",
+          "definition_sha256": "c317cba140420c26d886d0fa573ce27b39a01bcc17441ea4a45a43fbe85d74ed"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_placement_providers_parent",
+          "definition_sha256": "abf53a8e99cd2e847d356ac7eed77444b8052de35d44dea79afc84ff51e96747"
         }
       ],
       "postgres_objects": [
@@ -1075,6 +2041,30 @@
           "schema": "public",
           "name": "placement_providers",
           "definition_sha256": "bfc1dc3629b5df87604a22fdda268021ad14d54a6ff6b78e7998c14ce27f8e16"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_placement_allocations_consumer",
+          "definition_sha256": "a5ece2a5769cd0929aeac0abd6f1f6577265c10ec1a9c111630ca6dad4e52a10"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_placement_allocations_provider",
+          "definition_sha256": "f66e169d011fd9afb6cce3706ef0f60608bb7e5a8c4fa54ed53f96e20f6e1e2c"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_placement_intents_provider",
+          "definition_sha256": "c317cba140420c26d886d0fa573ce27b39a01bcc17441ea4a45a43fbe85d74ed"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_placement_providers_parent",
+          "definition_sha256": "abf53a8e99cd2e847d356ac7eed77444b8052de35d44dea79afc84ff51e96747"
         }
       ],
       "migration_ids": [
@@ -1093,7 +2083,7 @@
           "kind": "table",
           "schema": "main",
           "name": "quota_limits",
-          "definition_sha256": "26f06e83bfdd66440b3d799a9023477dd4f73c1f3ed92fd9e23defce017b66f6"
+          "definition_sha256": "62c032d785e967e1bdfa14d3f8d1406ef870f04f15c33e42ac21690971176ec5"
         },
         {
           "kind": "table",
@@ -1106,6 +2096,18 @@
           "schema": "main",
           "name": "quota_reservations",
           "definition_sha256": "99a4c5192716d0704b880bb13f0be0976b07f9263818446d5c362b2972a11f00"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_quota_res_op",
+          "definition_sha256": "25b2e30c92596f9a2e54504c568932cf1ab6f48831a58bfb9cdc4e9a791638e9"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_quota_res_scope",
+          "definition_sha256": "fa5a559328f39f48ce469a2c330389b408b81e9664b232e529ec1d6806d2e671"
         }
       ],
       "postgres_objects": [
@@ -1126,6 +2128,18 @@
           "schema": "public",
           "name": "quota_reservations",
           "definition_sha256": "99a4c5192716d0704b880bb13f0be0976b07f9263818446d5c362b2972a11f00"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_quota_res_op",
+          "definition_sha256": "25b2e30c92596f9a2e54504c568932cf1ab6f48831a58bfb9cdc4e9a791638e9"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_quota_res_scope",
+          "definition_sha256": "fa5a559328f39f48ce469a2c330389b408b81e9664b232e529ec1d6806d2e671"
         }
       ],
       "migration_ids": [
@@ -1274,6 +2288,24 @@
           "schema": "main",
           "name": "topology_regions",
           "definition_sha256": "0ec6cd6fa1611c787f224cd33bb86c433c4edac9cb9ef3f3c55e57469a8d751e"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_failure_domains_az",
+          "definition_sha256": "afd1864860917991933d68f7119939fa6c95ecb0a55289f82c3aae36438b81b0"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_failure_domains_parent",
+          "definition_sha256": "12ae9c0cb3930e4f9f59f5ca603373de51ae0f92df892da912bd22d6b710b341"
+        },
+        {
+          "kind": "index",
+          "schema": "main",
+          "name": "idx_topology_bindings_target",
+          "definition_sha256": "1a756ee259d15853d094edd6f703411ea815d51aec1de4c1e06e3c8e5a605cc3"
         }
       ],
       "postgres_objects": [
@@ -1300,6 +2332,24 @@
           "schema": "public",
           "name": "topology_regions",
           "definition_sha256": "0ec6cd6fa1611c787f224cd33bb86c433c4edac9cb9ef3f3c55e57469a8d751e"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_failure_domains_az",
+          "definition_sha256": "afd1864860917991933d68f7119939fa6c95ecb0a55289f82c3aae36438b81b0"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_failure_domains_parent",
+          "definition_sha256": "12ae9c0cb3930e4f9f59f5ca603373de51ae0f92df892da912bd22d6b710b341"
+        },
+        {
+          "kind": "index",
+          "schema": "public",
+          "name": "idx_topology_bindings_target",
+          "definition_sha256": "1a756ee259d15853d094edd6f703411ea815d51aec1de4c1e06e3c8e5a605cc3"
         }
       ],
       "migration_ids": [

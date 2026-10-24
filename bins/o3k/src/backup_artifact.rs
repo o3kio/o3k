@@ -164,7 +164,10 @@ use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use o3k_store::{
     backup_journal::{self, BackupOperationPhase, BackupOperationRecord},
-    state_inventory::baseline_state_inventory,
+    state_inventory::{
+        baseline_state_inventory, sqlite_live_catalog_objects,
+        verify_sqlite_catalog_against_baseline,
+    },
 };
 use rustix::{
     fd::{AsFd, OwnedFd},
@@ -665,6 +668,15 @@ async fn read_snapshot_facts(
     }
     let mut inventory = baseline_state_inventory()
         .map_err(|_| ArtifactFailure::rejected("state-inventory-unavailable"))?;
+    // D13 capture-time catalog check: the snapshot's live sqlite_master must
+    // match the committed baseline exactly (names and normalized definitions)
+    // before anything is staged. This catches missing, extra or redefined
+    // tables/indexes/triggers in the bytes that will be encrypted.
+    let live_catalog = sqlite_live_catalog_objects(pool)
+        .await
+        .map_err(|_| ArtifactFailure::rejected("snapshot-catalog-unavailable"))?;
+    verify_sqlite_catalog_against_baseline(&inventory, &live_catalog)
+        .map_err(|_| ArtifactFailure::rejected("store-catalog-mismatch"))?;
     for entry in &mut inventory {
         let tables =
             repository_tables(entry).ok_or(ArtifactFailure::rejected("state-inventory-invalid"))?;
@@ -2582,6 +2594,71 @@ mod tests {
                 .reason(),
             "migration-schema-mismatch"
         );
+    }
+
+    #[test]
+    fn snapshot_catalog_rejects_an_extra_index() {
+        assert_snapshot_catalog_fails(
+            "CREATE INDEX extra_probe_idx ON resources(project_id)",
+            "extra index",
+        );
+    }
+
+    #[test]
+    fn snapshot_catalog_rejects_an_extra_table() {
+        assert_snapshot_catalog_fails(
+            "CREATE TABLE extra_probe (id TEXT PRIMARY KEY)",
+            "extra table",
+        );
+    }
+
+    #[test]
+    fn snapshot_catalog_rejects_a_changed_definition() {
+        assert_snapshot_catalog_fails(
+            "DROP INDEX resources_project_kind_idx;\n\
+             CREATE INDEX resources_project_kind_idx ON resources(kind)",
+            "redefined index",
+        );
+    }
+
+    /// Opens a normally migrated snapshot, applies `ddl`, and requires
+    /// `snapshot_facts` to fail closed with `store-catalog-mismatch` (exit 2)
+    /// before any capture staging could start.
+    fn assert_snapshot_catalog_fails(ddl: &str, label: &str) {
+        let fixture = fixture();
+        let snapshot = fixture.data_dir.join("o3k.sqlite");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        drop(
+            runtime
+                .block_on(o3k_store::testkit::open_file(&snapshot))
+                .expect("migrated store"),
+        );
+        runtime.block_on(async {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(SqliteConnectOptions::new().filename(&snapshot))
+                .await
+                .expect("snapshot writer");
+            sqlx::raw_sql(ddl)
+                .execute(&pool)
+                .await
+                .expect("catalog mutation");
+            pool.close().await;
+        });
+        let release = BackupReleaseIdentity {
+            o3k_version: "0.4.0".to_owned(),
+            source_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            release_artifact_sha256: "a".repeat(64),
+            profile_id: "o3k-demo-v1".to_owned(),
+            schema_version: latest_sqlite_schema_version(),
+        };
+        let failure = snapshot_facts(&runtime, &snapshot, &release)
+            .expect_err("catalog drift must fail closed");
+        assert_eq!(failure.reason(), "store-catalog-mismatch", "{label}");
+        assert_eq!(failure.class(), ArtifactFailureClass::Rejected, "{label}");
     }
 
     #[test]

@@ -1,13 +1,13 @@
 # #1084 authenticated backup artifact — Phase-8 Slice F evidence
 
 Date: 2026-10-24. Branch: `pp6/1084-artifact`. Branch head:
-`521cc6fca9ea8401112917d5c0c6be162fc52a5d` (`feat(pp6): operator-usable signed
-backup artifacts and verification (#1084)`), on top of
-`20b54afea966dbfc286e04545a5a8af6987ce2c8` (`feat(pp6): backup trust config,
-D9 reservations, D13 inventory, release identity`). The working tree is dirty:
-the security-review round-1 fixes (F1–F17 below) and the contract/correctness
-review round-1 fixes (see **Contract review round 1**) are uncommitted.
-`source_sha` in the verdict below is the branch head, not a clean-tree claim.
+`41f9c24bce8c8a5b8d97b1a9fdd4af24ba3322dd` (`fix(pp6): address security and
+contract review rounds on signed backup artifacts`), on top of
+`521cc6fc…` and `20b54afe…`. The working tree is dirty: this final-review round
+(D13 catalog kinds/live comparison, F15 harness independence and the small
+nits) is uncommitted. `source_sha` in the verdict is the branch head, not a
+clean-tree claim; exact-commit binding remains with the parent/reviewer after
+commit.
 
 This document reports executable, real-process evidence for the signed backup
 artifact lifecycle only. The implementation is authored by the same agent that
@@ -18,10 +18,10 @@ authored this campaign; see **Interim review status**.
 | Item | Value |
 | --- | --- |
 | campaign harness | `tests/pp6_backup_artifact.sh` |
-| harness SHA-256 | `dbe88f44d1baa98c7728059015354c0e77a221909b5888d1b0609ad3d10570e0` |
+| harness SHA-256 | `7ed481acd9a66c727abb6f2192642a9f8227f241b4b9b1b4fbb7d7d201699a9c` |
 | build | `cargo build -p o3k -p o3kd --features o3kd/backup-test-hooks,o3k/backup-test-hooks` |
-| `o3k` binary SHA-256 | `672d9a30f38118e9770984c9996b1568417e8bf38627617b80ae9e8107f6a8a3` |
-| `o3kd` binary SHA-256 | `7cb83ac8464c9b751574da82fa44779aca5dab51f9cfd8c269deb2e8a8c68625` |
+| `o3k` binary SHA-256 | `107f8e949663d0cdf0e1331d19b9c0e4d2d86aaf11ebf6b967bc42a004f21d1c` |
+| `o3kd` binary SHA-256 | `28f042563ab8578ea0cd9ed857a2ca2b3f7436f602fed5f01f6d09589939515c` |
 | rustc | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | SQLite (from the published manifest) | `3.46.0` |
 | schema version | `53` |
@@ -101,11 +101,13 @@ and remain covered by `tests/pp6_backup_handoff.sh`.
   `o3k backup create: awaiting-signature <request-path>` line and stays in the
   wait (ADR-0190 Option A: "the controller remains stopped throughout
   signing"), so no replacement controller can start.
-- The waiting process verifies the detached response against the installed
-  trust document, publishes `<destination>/backup-<operation id>.o3k` with an
-  atomic no-replace publication, removes the marker and exits 0. A request that
-  expires first performs the **safe abort** (staging tree removed, journal
-  `aborted`, marker removed, exit 3 `signing-request-expired`).
+- The waiting process verifies the detached response against the fixture trust
+  document (`O3K_BACKUP_TRUST_CONFIG` in this campaign; production uses the
+  root-owned installed `/etc/o3k/backup-trust.json`), publishes
+  `<destination>/backup-<operation id>.o3k` with an atomic no-replace
+  publication, removes the marker and exits 0. A request that expires first
+  performs the **safe abort** (staging tree removed, journal `aborted`, marker
+  removed, exit 3 `signing-request-expired`).
 - A crash during the wait leaves the marker and the `staged` journal; the same
   command resumes the wait/publication without recapturing, and a controller
   restart is refused until verified publication (or the safe abort) removes the
@@ -135,6 +137,17 @@ and remain covered by `tests/pp6_backup_handoff.sh`.
 - A seeded non-terminal Operation makes the manifest record
   `in_flight_operations=recorded_unknown` (with the stable ids in the capture
   metadata member) instead of claiming `drained`.
+- The committed D13 inventory covers 17 repositories: SQLite 78 tables /
+  86 indexes / 2 triggers (166 objects), PostgreSQL 78 tables / 83 indexes /
+  2 triggers / 2 functions (165 objects). Capture enumerates the snapshot's
+  live
+  `sqlite_master` and fails closed (exit 2 `store-catalog-mismatch`) on an
+  extra, missing or redefined object before staging anything.
+- The campaign independently verifies the published bytes: local JCS + exact
+  D1 input + OpenSSL Ed25519, recomputed member SHA-256 digests, and HPKE
+  content-key unwrap plus AES-256-GCM decryption bound to the signed capture
+  record and the harness-measured source database (see the F15 non-claim for
+  the exact scope and limits).
 
 ## Matrix (recorded from the final campaign run)
 
@@ -150,7 +163,7 @@ cooperative store lock is held by another process when the row is recorded;
 | 1 | `case-1a` Option A wait (barrier-frozen; independent D9 measurement) | PASS | wait | staged | 1 | held | no | — |
 | 2 | `case-10` D9 reservation | PASS | 0 | published | 0 | free | yes | source 3,298,472 B (db + wal + 2 MiB metadata bound); reserved 6,442,450,944 B |
 | 3 | `case-1b` signature while waiting → publish → verify | PASS | 0 | published | 0 | free | yes | verified, exit 0, `release_match=true` |
-| 4 | `case-1c` single-byte ciphertext flip | PASS | 2 | published | 0 | free | yes | `corrupt-artifact` |
+| 4 | `case-1c` single-byte ciphertext-body flip | PASS | 2 | published | 0 | free | yes | `corrupt-artifact` |
 | 5 | `case-2` crash during the wait (hook 91) → restart denied → resume | PASS | 91 | published | 0 | free | yes | restart exit 1 (marker); resume published, no recapture |
 | 6 | `case-3` duplicate after publication | PASS | 2 | published | 0 | free | yes | `operation-already-published`, one artifact |
 | 7 | `case-4a` wrong signature | PASS | 2 | staged | 1 | free | no | `signature-invalid`; staging kept |
@@ -185,8 +198,10 @@ cooperative store lock is held by another process when the row is recorded;
 | 36 | `case-15` forged journal `backup_id` traversal | PASS | 2 | staged | 1 | free | no | `backup-operation-journal-invalid`; no escaped path |
 | 37 | `case-16` symlinked staged artifact | PASS | 2 | staged | 1 | free | no | `staged-artifact-invalid`; `O_NOFOLLOW` refuses the link |
 | 38 | `case-17` recipient-key substitution | PASS | 2 | published | 0 | free | yes | request fingerprint; swapped trust rejected; original published and verified |
+| 39 | `case-1d` independent artifact verification | PASS | 0 | published | 0 | free | yes | local JCS + OpenSSL Ed25519 over D1, recomputed member digests, HPKE/AES-GCM decrypt bound to capture record and source DB |
+| 40 | `case-1e` independent check rejects the tampered artifact | PASS | 2 | published | 0 | free | yes | independent member SHA-256 recomputation flags the flipped byte; nothing published |
 
-Totals: **37 executed rows PASS, 1 NOT-COVERED, 0 FAIL**. No unexecuted row is
+Totals: **39 executed rows PASS, 1 NOT-COVERED, 0 FAIL**. No unexecuted row is
 reported as PASS.
 
 ### Row notes and deliberate test mechanics
@@ -201,6 +216,21 @@ reported as PASS.
   store lock is held by the waiting process, one `awaiting-signature` line is on
   stderr, and nothing is published. The harness then signs; the *same* process
   verifies, publishes and removes the marker (`case-1b`).
+- `case-1d` re-verifies the published artifact without product verifier code:
+  it parses the frozen layout, checks the manifest bytes are canonical JCS,
+  rebuilds the exact D1 input (domain prefix, u64be JCS length, canonical
+  manifest without `authentication.signature`, per-member u32be name + SHA-256),
+  verifies with `openssl pkeyutl -verify -rawin -pubin`, recomputes every
+  member digest, and (when python `cryptography` is present) unwraps the HPKE
+  content key and decrypts every member. The `database/o3k.sqlite` plaintext is
+  compared with the signed `metadata/capture.json` `snapshot_sha256`; the
+  capture record's source-before/after digests are compared with a fresh hash
+  of the source database; and the decrypted snapshot's catalog and
+  `_sqlx_migrations` rows are compared with the source. `VACUUM INTO` rebuilds
+  the file, so byte equality with the source database is neither expected nor
+  claimed.
+- `case-1e` runs the same independent check against the single-byte tampered
+  copy from `case-1c`; the member SHA-256 recomputation must fail.
 - `case-4e` uses `O3K_BACKUP_TEST_AWAIT_TIMEOUT_SECONDS=1` instead of editing
   the request: the real request TTL is 24h, so the bounded-wait hook makes the
   safe abort observable. The observed contract is recoverable exit 3
@@ -234,7 +264,14 @@ reported as PASS.
   the entry is removed.
 - `case-19` creates an empty, 0600 `artifact.partial` in the members directory
   while the capture waits; the retry replaces it atomically (temp name +
-  rename) and publishes.
+  rename) and publishes. The injection happens only after the stable
+  `awaiting-signature` line, because `complete_staged` clears stale finalize
+  debris before emitting that line; injecting earlier races the cleanup.
+- `case-1d`/`case-1e` use the same tampered file: `case-1e` flips one byte
+  inside the first member's ciphertext body (not the trailing tag), so the
+  independent SHA-256 recomputation and the AEAD both fail.
+- The happy-path executor wait is bounded by `wait_bounded` (exit marker plus
+  deadline); no harness path performs an unbounded `wait`.
 - `case-20` simulates the post-rename crash on the already published `case-1`
   artifact: journal rewritten to `publishing` with the artifact digest, staging
   tree absent, marker recreated. The replay opens the destination inode
@@ -344,9 +381,31 @@ are unchanged.
 | **L8 / F30 harness dirty detection** | `tests/pp6_backup_artifact.sh` uses `git status --porcelain --untracked-files=no` scoped to the change set, so unrelated untracked build directories do not mark the campaign dirty. | verdict `working_tree_dirty` field |
 | **F34 CI cannot regenerate the baseline** | `crates/o3k-store/src/state_inventory.rs` `regeneration_requested` refuses `O3K_REGENERATE_INVENTORY=1` whenever `CI` is set. | `state_inventory::tests::regeneration_is_refused_in_ci` |
 
+## Final review round: D13 catalog completeness and F15 harness independence
+
+| Item | Change | Evidence |
+| --- | --- | --- |
+| **F4a / D13 catalog completeness** | `crates/o3k-store/src/state_inventory.rs` now emits tables, indexes and triggers from both migration trees, plus PostgreSQL functions. Indexes/triggers are assigned to the repository owning their `ON <table>`; the two generic operation-integrity functions are assigned to `operations` through the reviewed `GENERIC_FUNCTION_OWNERS` list (an unlisted function fails generation). The SQLite catalog is generated by applying the migration tree in an in-memory store and reading `sqlite_master`, so SQLite's `ALTER TABLE ... ADD COLUMN` rewrites and the runtime `operations` rebuild are reflected in the baseline digests. | `state_inventory::tests::{baseline_inventory_includes_indexes_triggers_and_functions, baseline_comparison_detects_added_indexes_and_triggers, generation_rejects_an_index_owned_by_an_unregistered_table, generation_rejects_a_function_without_a_reviewed_owner, index_trigger_and_function_normalization_is_deterministic}`; committed baseline regenerated |
+| **F4b / live catalog comparison** | `snapshot_facts` enumerates the snapshot's live `sqlite_master` (tables/indexes/views/triggers), excludes `sqlite_*` internal names, compares names and normalized definition digests against every baseline entry in both directions, and fails closed with exit 2 `store-catalog-mismatch` before staging. `_sqlx_migrations` remains compared because the baseline claims it. | `backup_artifact::tests::{snapshot_catalog_rejects_an_extra_index, snapshot_catalog_rejects_an_extra_table, snapshot_catalog_rejects_a_changed_definition, snapshot_facts_read_store_identity_and_repository_emptiness}` |
+| **F15 harness independent verification** | `tests/pp6_backup_artifact.sh` independently rebuilds D1 (local JCS), verifies Ed25519 with OpenSSL, recomputes member digests, and decrypts HPKE/AES-GCM members with python `cryptography`; the database plaintext is bound to the signed capture record and the harness-measured source database. `case-1d` is the positive row and `case-1e` the tampered negative row. | `case-1d`, `case-1e` |
+| **Nits** | `main.rs` Backup help text describes the two-phase signed flow; the stale raw-key trimming comment in `bins/o3k/tests/backup_verify.rs` is corrected; the happy-path executor wait is explicitly bounded by `wait_bounded`; this document uses "fixture trust document" for `O3K_BACKUP_TRUST_CONFIG`. | `cargo fmt`/clippy/tests; `bash -n` and shellcheck (pre-existing warnings only) |
+
+Catalog counts in the regenerated baseline (17 repositories): SQLite 78
+tables, 86 indexes, 2 triggers (166 objects); PostgreSQL 78 tables, 83
+indexes, 2 triggers, 2 functions (165 objects). The extra table in each
+backend is the framework-owned `_sqlx_migrations`; the second SQLite trigger
+(`resources_delete_generic_operations`) and the `operations` table definition
+come from the runtime schema rebuild that `SqliteStore::connect` applies after
+SQLx migrations.
+
+Known verification limits are listed in the F15 and D13 non-claims above: no
+live PostgreSQL catalog comparison, no views/sequences/constraints, no
+no-table repository entry (SPEC/schema conflict), and `VACUUM INTO` snapshot
+bytes are not the source database bytes.
+
 ## Executed vs documented-not-executed
 
-Executed real-process rows: 37 PASS rows (one per matrix row except
+Executed real-process rows: 39 PASS rows (one per matrix row except
 `case-12oversize`), produced by `tests/pp6_backup_artifact.sh` on the final
 tree. The campaign prints its own PASS/FAIL/NOT-COVERED accounting and exits
 non-zero on any failure.
@@ -433,14 +492,23 @@ that the published artifact is 0600.
 
 ```text
 cargo fmt --all -- --check                                        # PASS
+cargo check -p o3k -p o3k-store --all-features                    # PASS
 cargo clippy -p o3k -p o3k-store -p o3kd --all-targets --all-features -- -D warnings  # PASS
 cargo test -p o3k -p o3k-store -p o3kd --all-features             # PASS (0 failures)
 bash -n packaging/install.sh packaging/uninstall.sh \
         tests/pp6_backup_artifact.sh tests/pp6_backup_handoff.sh   # PASS
-bash tests/pp6_backup_artifact.sh        # PASS: 37 executed, 1 not-covered, 0 failures
+bash tests/pp6_backup_artifact.sh        # PASS (run 1): 39 executed, 1 not-covered, 0 failures
+bash tests/pp6_backup_artifact.sh        # PASS (run 2): same matrix and row outcomes
 bash tests/pp6_backup_handoff.sh         # PASS: 17 executed, 7 documented, 0 failures
 git diff --check                                                  # PASS
 ```
+
+The two artifact-campaign runs produced the same matrix
+(`NOT-COVERED=1`, `FAIL=0`, `PASS=39`) and the same per-row outcomes; only the
+per-run artifact digest, backup id, data-directory identities and size differ
+by construction. Shellcheck reports only pre-existing warnings (unused
+campaign variables and the cleanup trap's indirect reachability); `bash -n`
+passes.
 
 The campaign is re-runnable and deterministic in its assertions: crashes use
 process-exit hooks, the only barriers are the executor's two-way file barrier
@@ -537,9 +605,54 @@ data-directory identities (and therefore the artifact digest).
   the controller, so it is refused (exit 2 `controller-active`) while a
   controller is running. It does not hot-read a live store; operators stop the
   controller (or use the maintenance window) before verifying.
-- **No independent signature verification in the harness.** The campaign signs
-  with OpenSSL and relies on the product's verifier; it does not independently
-  re-implement Ed25519/HPKE verification.
+- **Independent harness verification scope (F15).** The campaign now rebuilds the
+  exact D1 input from the published bytes with a local JCS implementation
+  (byte-checked against the artifact's stored canonical manifest), verifies the
+  Ed25519 signature with `openssl pkeyutl -verify -rawin -pubin`, recomputes
+  every member's SHA-256 over ciphertext+tag, and, when python `cryptography` is
+  available, performs the HPKE X25519/HKDF-SHA256 key unwrap and AES-256-GCM
+  member decryption independently of the product verifier. The decrypted
+  `database/o3k.sqlite` is bound to the signed capture record's
+  `snapshot_sha256`, the record's `source_db_sha256_before`/`_after` are bound
+  to the harness-measured source database, and the decrypted snapshot's catalog
+  and `_sqlx_migrations` lineage must equal the source database's. Limits: the
+  HPKE/AES-GCM primitives come from the python `cryptography` library rather
+  than a second from-scratch implementation; the snapshot is produced by
+  `VACUUM INTO` and is **not** byte-identical to the source database, so the
+  harness does not claim `SHA-256(decrypted database) == source database hash`
+  (it claims equality with the signed capture record's snapshot digest plus
+  logical schema/migration equivalence to the source); and if `cryptography` is
+  unavailable the campaign records `decrypt=unavailable` and retains the
+  signature/digest checks only.
+- **#1084 is not closed by this evidence.** This document records Slice F
+  implementation and campaign evidence only; issue closure requires the
+  remaining slices, human review at an exact commit, and the supported-profile
+  gates.
+- **D4 exclusion is continuous but operator-visible.** The lock and denial
+  marker are held across the signing wait and publication (Option A), so a
+  systemd-managed controller restart during that window is downtime, not a
+  transparent handoff. The wait is bounded by the request TTL.
+- **D9 is preflight plus re-checks, not a filesystem quota** (see above); a
+  concurrent writer can still consume space between checks.
+- **D13 catalog coverage and the no-table SPEC/schema conflict.** The generated
+  inventory now covers SQLite tables/indexes/triggers and PostgreSQL
+  tables/indexes/triggers/functions, and capture compares the snapshot's live
+  `sqlite_master` (tables/indexes/views/triggers) against the baseline. It does
+  not emit views, sequences, explicit named constraints, PostgreSQL
+  `ALTER TABLE ADD COLUMN` effects, or a live PostgreSQL catalog comparison.
+  The contract requires `minItems: 1` for both object arrays, so a repository
+  with no table cannot be represented without either inventing a synthetic
+  object or amending the schema; the registry therefore keeps its current shape
+  (every repository owns at least one table) and this remains a SPEC/schema
+  conflict rather than an implemented no-table repository entry.
+- **D2 trust-root rotation/lifecycle is not implemented.** Trust is a static
+  configured document with a static `revoked_key_ids` list; there is no
+  root-rotation, key-ceremony, or revocation-distribution workflow.
+- **Exit-4 real-process coverage remains NOT-COVERED for oversized artifacts.**
+  The verifier's `artifact-too-large` check runs only after a valid Ed25519
+  signature over a manifest declaring more than 5 GiB; producing that input
+  would require a bespoke artifact assembler and is covered only by the unit
+  mapping test.
 - **No independent review yet.** The implementation, the campaign and this
   document were produced by the same agent. This is interim evidence pending
   human exact-head review; it is not an independent verification.
@@ -547,38 +660,40 @@ data-directory identities (and therefore the artifact digest).
 ## Machine-readable verdict
 
 Generated by the final campaign run (`tests/pp6_backup_artifact.sh`); values
-that are per-run by construction are the ones from that run. The harness prints
-the same object on stdout between the markers
+that are per-run by construction are the ones from that run. The block below is
+run 1; run 2 produced the same matrix and row outcomes with a different artifact
+digest, backup id, data-directory identities and size. The harness prints the
+same object on stdout between the markers
 `O3K_PP6_VERDICT_JSON_BEGIN` and `O3K_PP6_VERDICT_JSON_END`.
 
 ```json
 {
-  "backup_digest": "cce56e9c36ea83064cda876b8d372e0027882cf82852161c58aa27daf772ca03",
-  "backup_id": "d6939bce-edee-4ba4-82c7-5dab72b22adc",
-  "backup_installation_id": "e3b429edf93ee6004cf8749917dcf786",
-  "backup_site_id": "0e981c0633873e9f35e17f32b756c445",
-  "backup_size_bytes": 1233073,
+  "backup_digest": "0e16cbbbfe92faea5261f4f04db02445bf869d56996bb786a716907f1379fa09",
+  "backup_id": "98e4bb27-2f04-4e6b-998c-0bfaac22663c",
+  "backup_installation_id": "60f8b6fcd49aa27140b79e307f6ea558",
+  "backup_site_id": "48488118d24d983de0604c13355304c6",
+  "backup_size_bytes": 1261601,
   "campaign": "tests/pp6_backup_artifact.sh",
-  "executed_rows": 37,
+  "executed_rows": 39,
   "failed_rows": 0,
-  "harness_sha256": "dbe88f44d1baa98c7728059015354c0e77a221909b5888d1b0609ad3d10570e0",
+  "harness_sha256": "7ed481acd9a66c727abb6f2192642a9f8227f241b4b9b1b4fbb7d7d201699a9c",
   "host_identity_hash": "8110f5814f95639d2d88a1e379a827e065c9c072b52b54c92f4ce2b1051f54bb",
   "issue": 1084,
   "matrix": {
     "FAIL": 0,
     "NOT-COVERED": 1,
-    "PASS": 37
+    "PASS": 39
   },
   "not_covered_rows": 1,
-  "o3k_binary_sha256": "672d9a30f38118e9770984c9996b1568417e8bf38627617b80ae9e8107f6a8a3",
-  "o3kd_binary_sha256": "7cb83ac8464c9b751574da82fa44779aca5dab51f9cfd8c269deb2e8a8c68625",
-  "passed_rows": 37,
+  "o3k_binary_sha256": "107f8e949663d0cdf0e1331d19b9c0e4d2d86aaf11ebf6b967bc42a004f21d1c",
+  "o3kd_binary_sha256": "28f042563ab8578ea0cd9ed857a2ca2b3f7436f602fed5f01f6d09589939515c",
+  "passed_rows": 39,
   "profile": "o3k-demo-v1",
   "release_artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
   "schema_version": 53,
   "slice": "F",
-  "source_sha": "521cc6fca9ea8401112917d5c0c6be162fc52a5d",
+  "source_sha": "41f9c24bce8c8a5b8d97b1a9fdd4af24ba3322dd",
   "sqlite_version": "3.46.0",
   "working_tree_dirty": true
 }

@@ -95,7 +95,8 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         disk_gb: u64,
     },
-    /// Provisional backup capture (PP.6; host-local, unsigned)
+    /// Signed backup artifacts (PP.6): capture and stage an encrypted artifact,
+    /// then publish it after detached offline Ed25519 signing and verification
     #[cfg(target_os = "linux")]
     Backup {
         #[command(subcommand)]

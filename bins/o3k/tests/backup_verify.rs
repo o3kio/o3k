@@ -121,10 +121,10 @@ impl Scenario {
             migrations,
             schema_version,
         } = build_keys_and_store(&db_path);
-        // Hex encoding keeps the fixture deterministic: the trust parser trims
-        // ASCII whitespace before inspecting the key bytes, so a raw 32-byte
-        // key that happens to begin or end with a whitespace byte would be
-        // rejected.
+        // Hex encoding keeps the fixture deterministic. A raw 32-byte key is
+        // accepted verbatim and is never trimmed (a whitespace byte can be a
+        // valid key byte); only the encoded form tolerates surrounding
+        // whitespace such as a trailing newline.
         write_private_file(
             &recipient_key_path,
             hex::encode(recipient_private.to_bytes()).as_bytes(),
