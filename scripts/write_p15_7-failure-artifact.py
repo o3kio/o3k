@@ -117,6 +117,7 @@ def main() -> int:
         "fault_injection",
         "crash_recovery",
         "orphan_repair",
+        "evidence_gap",
         "evidence_validation",
         "cleanup",
         "product_correctness",

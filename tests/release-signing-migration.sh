@@ -41,6 +41,8 @@ assert "id-token: write" in workflow
 assert "O3K_RELEASE_SIGNING_KEY" not in workflow
 assert "pull_request" not in workflow
 assert "workflow_call" not in workflow
+assert "RELEASE_SOURCE_COMMIT=\"$(git rev-parse HEAD)\"" in workflow
+assert "RELEASE_SOURCE_TREE=\"$(git rev-parse 'HEAD^{tree}')\"" in workflow
 
 contract = yaml.safe_load((root / "contracts/release-bundle-v2.yaml").read_text())
 assert contract["schema_version"] == 2
@@ -62,6 +64,7 @@ with tempfile.TemporaryDirectory() as tmp:
         "signature_scheme": "sigstore-keyless",
         "release": "v0.4.0-rc.9",
         "source_commit": "a" * 40,
+        "source_tree": "d" * 40,
         "oidc_issuer": "https://token.actions.githubusercontent.com",
         "repository": "o3kio/o3k",
         "workflow": ".github/workflows/release.yml",
@@ -72,15 +75,46 @@ with tempfile.TemporaryDirectory() as tmp:
     path = tmp_path / "provenance.json"
     path.write_text(__import__("json").dumps(valid))
     checker = root / "packaging/validate-sigstore-provenance.py"
-    subprocess.run([checker, path, root / "packaging/trust-policy.yaml", "v0.4.0-rc.9", "a" * 40], check=True)
+    subprocess.run([checker, path, root / "packaging/trust-policy.yaml", "v0.4.0-rc.9", "a" * 40, "d" * 40], check=True)
     for field, bad in (("oidc_issuer", "https://example.invalid"),
                        ("repository", "o3kio/other"),
                        ("workflow", ".github/workflows/other.yml"),
-                       ("source_commit", "c" * 40)):
-        changed = dict(valid)
+                       ("source_commit", "c" * 40),
+                       ("source_tree", "e" * 40)):
+        changed = __import__("copy").deepcopy(valid)
         changed[field] = bad
         path.write_text(__import__("json").dumps(changed))
-        assert subprocess.run([checker, path, root / "packaging/trust-policy.yaml", "v0.4.0-rc.9", "a" * 40]).returncode != 0
+        assert subprocess.run([checker, path, root / "packaging/trust-policy.yaml", "v0.4.0-rc.9", "a" * 40, "d" * 40]).returncode != 0
+
+    missing_tree = __import__("copy").deepcopy(valid)
+    del missing_tree["source_tree"]
+    path.write_text(__import__("json").dumps(missing_tree))
+    assert subprocess.run([checker, path, root / "packaging/trust-policy.yaml", "v0.4.0-rc.9", "a" * 40, "d" * 40]).returncode != 0
+
+    normalized_duplicate = __import__("copy").deepcopy(valid)
+    normalized_duplicate["assets"] = [
+        {"name": "install.sh", "sha256": "b" * 64},
+        {"name": "./install.sh", "sha256": "c" * 64},
+    ]
+    path.write_text(__import__("json").dumps(normalized_duplicate))
+    assert subprocess.run([checker, path, root / "packaging/trust-policy.yaml", "v0.4.0-rc.9", "a" * 40, "d" * 40]).returncode != 0
+
+verifier = (root / "packaging/verify-release-sigstore.sh").read_text()
+assert "RELEASE_SOURCE_TREE" in verifier
+assert "provenance source tree does not match the independent expected identity" in verifier
+assert "TAG_TREE" in verifier
+assert "write_release_verification_report.py" in verifier
+assert "REPORT_FILE" in verifier
+report_writer = (root / "packaging/write_release_verification_report.py").read_text()
+assert '"schema": "o3k.release-verification.v1"' in report_writer
+pp5_verifier = (root / "scripts/pp5-verify-release-artifact.sh").read_text()
+assert "sed -nE" not in pp5_verifier, "PP.5 must not parse human-readable verifier output"
+assert "json.loads(path.read_text" in pp5_verifier
+assert "sigstore_verification_report_sha256" in pp5_verifier
+
+manifest_tests = root / "scripts/test_validate_pp5_release_manifest.py"
+subprocess.run(["python3", manifest_tests], check=True)
+subprocess.run(["python3", root / "packaging/test-release-verification-report.py"], check=True)
 
 print("release signing migration checks: PASS")
 PY

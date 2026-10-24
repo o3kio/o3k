@@ -31,6 +31,17 @@ assert doc["failure_class"] == "harness_gap"
 assert doc["phase"] == "journey"
 assert "phase-scoped harness identity prerequisite" in doc["message"]
 PY
+python3 "$ROOT_DIR/scripts/write_p15_7-failure-artifact.py" \
+  "$WORK_DIR/evidence-gap.json" "$SHA" run-c s3-scale evidence_gap \
+  source_verified "native scale producer required" "scale lane is deferred" "" "" \
+  pending unchanged "scale execution is DEFERRED_BY_POLICY"
+python3 - "$WORK_DIR/evidence-gap.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    doc = json.load(stream)
+assert doc["failure_class"] == "evidence_gap"
+assert doc["phase"] == "s3-scale"
+PY
 if python3 "$ROOT_DIR/scripts/write_p15_7-failure-artifact.py" \
     "$WORK_DIR/bad.json" not-a-sha run-a crash unknown "" x y s e pending unknown msg >/dev/null 2>&1; then
   echo "invalid failure artifact SHA was accepted" >&2

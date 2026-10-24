@@ -788,26 +788,24 @@ bootstrap = Path(sys.argv[5]).read_text(encoding="utf-8")
 vm_address = Path(sys.argv[6]).read_text(encoding="utf-8")
 upload = workflow.split("- name: Upload redacted real-host artifacts", 1)[1].split("if-no-files-found:", 1)[0]
 assert "target/real-host-workflow-artifacts/p15-7-provisioning-diagnostics.json" in upload
-for required in ("virt-install", "qemu-img create", "block-a", "block-b", "block-c", "block-d", "block-e", "o3k init",
+for required in ("virt-install", "qemu-img create", "o3k init",
                  "bootstrap/join", "actions/drain", "actions/remove", "actions/ready", "docker restart",
-                 "capacity_total", "CAPACITY_AFTER_ADD", "CAPACITY_AFTER_D",
-                 "CAPACITY_AFTER_REMOVE", "CAPACITY_AFTER_E", "drain_blockers", "cargo test --locked -p o3kd",
+                 "capacity_total", "CAPACITY_AFTER_JOIN", "CAPACITY_AFTER_REMOVE",
+                 "CAPACITY_AFTER_REPLACEMENT", "drain_blockers", "cargo test --locked -p o3kd",
                  "o3k-p15-7-journey-owned=", "o3k-p15-7-journey-owned-v1",
                  "rm -rf -- \"$WORK_ROOT\"", "second_real_host_required", "assert_owned_domains_absent",
                  "agent-id", "agent identity transfer failed", "/var/lib/o3k-compute/agent-id",
                  "actual_uuid", "DOMAINS+=(\"$d\")", "OVERLAYS+=(\"$overlay\")",
-                 "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-c-uuid\")\"", "provision_vms_bounded",
-                 "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-d-uuid\")\"",
-                 "UUIDS[$((${#IPS[@]} - 1))]=\"$(<\"$WORK_ROOT/block-e-uuid\")\"",
+                 "SCALE_CHILD_IDS=()", "required_child_agent_ids()", "provision_vms_bounded",
                  "capture-p15-7-provision-diagnostics.py", "p15-7-provisioning-diagnostics.json", "REPLAY_JOIN_FILE",
                  "REPLAY_JOIN_BY_AGENT[$DRAIN_AGENT]", "compute-agent-replay-join.json",
-                 "for agent in block-a block-b block-c block-d block-e; do",
+                 'for agent in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do',
                  "required_child_agent_ids() {", "REQUIRED_CHILD_AGENT_IDS=()",
                  'for required_agent in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do',
                  'for agent_id in "${REQUIRED_CHILD_AGENT_IDS[@]}"; do',
-                 "initial eligible Ready count is not exactly five",
-                 "post-replacement eligible Ready count is not exactly five",
-                 "peak concurrent Ready count is below five",
+                 "initial eligible Ready count is not exactly $SCALE_HOSTS",
+                 "post-replacement eligible Ready count is not exactly $SCALE_HOSTS",
+                 "peak concurrent Ready count is below requested scale",
                  "removed block {absent_id} is still present in the canonical topology",
                  "record_scale_checkpoint", "p15-7-scale-checkpoint-",
                  "O3K_TEST_FAULT_PAUSE_BEFORE_ENDPOINT_RELEASE_MS",
@@ -977,7 +975,7 @@ assert journey.index('die "workload B did not become ACTIVE before cleanup"') < 
 assert 'p15-7-libvirt-storage-pool.sh" assert-absent "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert 'p15-7-libvirt-storage-pool.sh" define "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
 assert 'p15-7-libvirt-storage-pool.sh" cleanup "$RUN_ID" "$LIBVIRT_STORAGE_ROOT"' in journey
-assert journey.index('p15-7-libvirt-storage-pool.sh" define') < journey.index('provision_vms_bounded block-a block-b')
+assert journey.index('p15-7-libvirt-storage-pool.sh" define') < journey.index('case "$PP5_PHASE" in\n  s1-boundary')
 # S5 lifecycle ordering: the eligibility-based initial checkpoint must run
 # after block-a..block-d join and before any drain; the #1042 blocker requery
 # sits between the workload deletion and the remove; drain and removal
@@ -986,11 +984,14 @@ assert journey.index('p15-7-libvirt-storage-pool.sh" define') < journey.index('p
 # #1035 crash leg and the #1033 maintenance leg run after the post-replacement
 # checkpoint and before the historical late restart gate.
 assert journey.index('record_scale_checkpoint initial-scale-checkpoint') < journey.index('DRAIN_AGENT="$HOST_A"')
-assert journey.index('install_agent block-d "${IPS[3]}"') < journey.index('DRAIN_AGENT="$HOST_A"')
+assert 'for ((scale_index = 2; scale_index < ${#SCALE_CHILD_IDS[@]}; scale_index++))' in journey
+assert 'scale_agent="${SCALE_CHILD_IDS[$scale_index]}"' in journey
+assert 'install_agent "$scale_agent" "${AGENT_IPS[$scale_agent]}"' in journey
+assert journey.index('record_scale_checkpoint initial-scale-checkpoint') < journey.index('DRAIN_AGENT="$HOST_A"')
 assert journey.index('actions/drain') < journey.index('drain-blocker-requery.json')
 assert journey.index('drain-blocker-requery.json') < journey.index('actions/remove')
-assert journey.index('actions/remove') < journey.index('join_block block-e "${IPS[4]}"')
-assert journey.index('capacity-after-remove.json') < journey.index('capacity-after-e.json')
+assert journey.index('actions/remove') < journey.index('join_block "$REPLACEMENT_AGENT_ID"')
+assert journey.index('capacity-after-remove.json') < journey.index('capacity-after-replacement.json')
 assert journey.index('record_scale_checkpoint post-replacement') < journey.index('# ── #1035 crash-injection leg')
 assert journey.index('# ── #1035 crash-injection leg') < journey.index('# ── #1033 host-maintenance leg')
 assert journey.index('restart_o3kd_verified\nwait_o3kd_readyz "readyz did not reconstruct after restart"') < journey.index('# ── #1035 crash-injection leg')
@@ -1010,10 +1011,10 @@ assert maintenance_reboot.index('virsh -c qemu:///system reboot "$MAINT_UUID"') 
 # Review finding H1 (HIGH): both maintenance boot-id reads are read-only probes
 # and must go through the bounded readiness watchdog. A guest that accepts SSH
 # but never completes the command would otherwise hang the journey forever.
-assert 'MAINT_BOOT_ID_BEFORE="$(readiness_probe block-e "maintenance-boot-id-before" "${IPS[4]}" cat /proc/sys/kernel/random/boot_id' in maintenance_reboot, \
-    "maintenance boot-id-before read must use the bounded readiness watchdog"
-assert 'MAINT_BOOT_ID_AFTER="$(readiness_probe block-e "maintenance-boot-id-after" "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id' in maintenance_reboot, \
-    "maintenance boot-id-after read must use the bounded readiness watchdog"
+assert 'MAINT_BOOT_ID_BEFORE="$(readiness_probe "$REPLACEMENT_AGENT_ID" "maintenance-boot-id-before" "${AGENT_IPS[$REPLACEMENT_AGENT_ID]}" cat /proc/sys/kernel/random/boot_id' in maintenance_reboot, \
+    "maintenance boot-id-before read must use the bounded readiness watchdog and selected host"
+assert 'MAINT_BOOT_ID_AFTER="$(readiness_probe "$REPLACEMENT_AGENT_ID" "maintenance-boot-id-after" "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id' in maintenance_reboot, \
+    "maintenance boot-id-after read must use the bounded readiness watchdog and selected host"
 assert 'ssh_vm "${IPS[4]}" cat /proc/sys/kernel/random/boot_id' not in journey, \
     "unbounded boot-id read remains in the maintenance leg"
 assert 'ssh_vm "$MAINT_IP_AFTER" cat /proc/sys/kernel/random/boot_id' not in journey, \
