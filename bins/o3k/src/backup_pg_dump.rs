@@ -1093,9 +1093,7 @@ exit 1
                 ),
             ] {
                 let before = source.catalog().unwrap();
-                source
-                    .sql(mutation)
-                    .unwrap_or_else(|e| panic!("{mutation}: {e:?}"));
+                assert!(source.sql(mutation).is_ok(), "mutation failed: {mutation}");
                 let after = source.catalog().unwrap();
                 assert_ne!(
                     before[section], after[section],
@@ -1105,14 +1103,8 @@ exit 1
             source
                 .sql("ALTER ROLE o3k_restore_owner PASSWORD 'disposable-test-password';")
                 .unwrap();
-            assert_eq!(
-                source
-                    .catalog()
-                    .err()
-                    .expect("password must be rejected")
-                    .reason(),
-                "validation-role-password-forbidden"
-            );
+            assert!(matches!(source.catalog(), Err(error)
+                if error.reason() == "validation-role-password-forbidden"));
             source.remove().unwrap();
         }
 
