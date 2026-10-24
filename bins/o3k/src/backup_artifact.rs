@@ -106,7 +106,10 @@
 //! # Manifest population
 //!
 //! * `database/o3k.sqlite` — the quiesced snapshot from
-//!   `SqliteStore::backup_to_file` (member bytes are the snapshot file).
+//!   `SqliteStore::backup_to_file` (member bytes are the snapshot file). The
+//!   PostgreSQL profile instead carries one opaque `database/o3k.dump`
+//!   custom-format dump; [`CaptureInputs`] selects the member and consistency
+//!   method from the backend and the rest of the pipeline is identical.
 //! * `metadata/capture.json` — bounded capture provenance (source hashes,
 //!   snapshot hash, journal mode, D9 measurements, in-flight operation
 //!   classification, CLI version). This is provenance, not canonical state.
@@ -310,8 +313,12 @@ macro_rules! test_hook_exit {
 }
 
 const MEMBERS_DIR_PREFIX: &str = "members-";
-const DATABASE_MEMBER: &str = "database/o3k.sqlite";
-const DATABASE_MEDIA_TYPE: &str = "application/vnd.sqlite3";
+/// SQLite database member name (also the accepted SQLite artifact member).
+pub const DATABASE_MEMBER: &str = "database/o3k.sqlite";
+/// SQLite database member media type.
+pub const DATABASE_MEDIA_TYPE: &str = "application/vnd.sqlite3";
+/// SQLite manifest consistency method.
+pub const SQLITE_SNAPSHOT_METHOD: &str = "sqlite_vacuum_into";
 const CAPTURE_RECORD_MEMBER: &str = "metadata/capture.json";
 const RELEASE_MANIFEST_MEMBER: &str = "release/release-manifest.json";
 const TRUST_CONFIG_MEMBER: &str = "trust/backup-trust.json";
@@ -564,9 +571,12 @@ fn release_manifest_path(install_prefix: &Path) -> PathBuf {
 
 /// Facts read from the captured snapshot that populate `store` and
 /// `state_inventory`.
-#[derive(Debug)]
+///
+/// The field names are backend-neutral: SQLite fills `server_version` from
+/// `SELECT sqlite_version()`, PostgreSQL from `SHOW server_version`.
+#[derive(Debug, Clone)]
 pub struct SnapshotFacts {
-    pub sqlite_version: String,
+    pub server_version: String,
     pub migrations: Vec<MigrationIdentity>,
     pub state_inventory: Vec<Value>,
     /// `drained` (no non-terminal Operation), `recorded_unknown` (at least one
@@ -661,7 +671,7 @@ async fn read_snapshot_facts(
     pool: &sqlx::SqlitePool,
     release: &BackupReleaseIdentity,
 ) -> Result<SnapshotFacts, ArtifactFailure> {
-    let sqlite_version = crate::db::sqlite_version(pool)
+    let server_version = crate::db::sqlite_version(pool)
         .await
         .map_err(|_| ArtifactFailure::rejected("snapshot-unreadable"))?;
     let rows = crate::db::sqlite_migration_inventory(pool)
@@ -721,7 +731,7 @@ async fn read_snapshot_facts(
     // live store that may have moved on.
     let (in_flight_operations, in_flight_operation_ids) = query_in_flight_operations(pool).await?;
     Ok(SnapshotFacts {
-        sqlite_version,
+        server_version,
         migrations,
         state_inventory: inventory,
         in_flight_operations,
@@ -758,11 +768,25 @@ pub struct CaptureInputs<'a> {
     pub config: &'a ArtifactConfig,
     pub operation_id: Uuid,
     pub reservation: Reservation,
+    /// `sqlite` or `postgresql`; selects the required member and consistency
+    /// method in the manifest.
+    pub database_backend: &'a str,
+    /// Backend-specific database member name (`database/o3k.sqlite` or
+    /// `database/o3k.dump`).
+    pub database_member: &'a str,
+    /// Media type recorded for the database member.
+    pub database_media_type: &'a str,
+    /// Manifest `consistency.method` for this backend.
+    pub consistency_method: &'a str,
+    /// Facts already read from the captured database. When set (PostgreSQL),
+    /// the SQLite snapshot reader is not used.
+    pub prepared_facts: Option<&'a SnapshotFacts>,
     /// Operation staging directory addressed as `/proc/self/fd/<n>`.
     pub staging_dir: &'a Path,
     /// Durable path of the same staging directory, reported to the operator.
     pub durable_staging_dir: &'a Path,
-    /// Snapshot file addressed as `/proc/self/fd/<n>/o3k.sqlite`.
+    /// Snapshot file addressed as `/proc/self/fd/<n>/o3k.sqlite` (or the
+    /// PostgreSQL custom dump).
     pub snapshot_path: &'a Path,
     pub snapshot_sha256: &'a str,
     pub source_before: &'a str,
@@ -797,7 +821,10 @@ pub struct StagedSigning {
 pub fn stage_capture(inputs: &CaptureInputs<'_>) -> Result<StagedSigning, ArtifactFailure> {
     let config = inputs.config;
     let backup_id = inputs.operation_id.to_string();
-    let facts = snapshot_facts(inputs.runtime, inputs.snapshot_path, config.release())?;
+    let facts = match inputs.prepared_facts {
+        Some(facts) => facts.clone(),
+        None => snapshot_facts(inputs.runtime, inputs.snapshot_path, config.release())?,
+    };
     let record = capture_record_bytes(inputs)?;
 
     let snapshot_metadata = fs::symlink_metadata(inputs.snapshot_path)
@@ -817,8 +844,8 @@ pub fn stage_capture(inputs: &CaptureInputs<'_>) -> Result<StagedSigning, Artifa
             "profile_id": config.release().profile_id,
         }),
         store: json!({
-            "backend": "sqlite",
-            "server_version": facts.sqlite_version,
+            "backend": inputs.database_backend,
+            "server_version": facts.server_version,
             "schema_version": config.release().schema_version,
             "migrations": facts
                 .migrations
@@ -830,7 +857,7 @@ pub fn stage_capture(inputs: &CaptureInputs<'_>) -> Result<StagedSigning, Artifa
                 .collect::<Vec<_>>(),
         }),
         consistency: json!({
-            "method": "sqlite_vacuum_into",
+            "method": inputs.consistency_method,
             "write_quiescence": true,
             "worker_quiescence": true,
             "in_flight_operations": inputs.in_flight_operations,
@@ -850,8 +877,8 @@ pub fn stage_capture(inputs: &CaptureInputs<'_>) -> Result<StagedSigning, Artifa
     let trust_config = read_bounded_private(inputs.config.trust_config_path())?;
     let members: Vec<StreamMember<Box<dyn Read>>> = vec![
         StreamMember {
-            name: DATABASE_MEMBER.to_owned(),
-            media_type: DATABASE_MEDIA_TYPE.to_owned(),
+            name: inputs.database_member.to_owned(),
+            media_type: inputs.database_media_type.to_owned(),
             plaintext_size_bytes: snapshot_metadata.len(),
             source: Box::new(
                 fs::File::open(inputs.snapshot_path)
@@ -953,6 +980,9 @@ pub struct CompletionInputs<'a> {
     pub reservation: Reservation,
     /// How long to wait for `signing-response.json`.
     pub await_policy: AwaitPolicy,
+    /// Backend of the staged capture; the publication integrity check must not
+    /// accept a manifest for a different backend.
+    pub store_backend: &'a str,
 }
 
 /// A durably published artifact.
@@ -1628,6 +1658,7 @@ fn verify_open_signed_artifact(
         source_sha: &release.source_sha,
         release_artifact_sha256: &release.release_artifact_sha256,
         schema_version: release.schema_version,
+        store_backend: inputs.store_backend,
     };
     let header = crate::backup::verify_signed_artifact_integrity(file, &expectations)
         .map_err(|_| ArtifactFailure::rejected("staged-artifact-invalid"))?;
@@ -2221,6 +2252,9 @@ fn capture_record_bytes(inputs: &CaptureInputs<'_>) -> Result<Vec<u8>, ArtifactF
         "source_db_sha256_before": inputs.source_before,
         "source_db_sha256_after": inputs.source_after,
         "snapshot_sha256": inputs.snapshot_sha256,
+        "database_backend": inputs.database_backend,
+        "database_member": inputs.database_member,
+        "consistency_method": inputs.consistency_method,
         "journal_mode": inputs.journal_mode,
         "in_flight_operations": {
             "classification": inputs.in_flight_operations,
@@ -2751,7 +2785,7 @@ mod tests {
             schema_version,
         };
         let facts = snapshot_facts(&runtime, &snapshot, &release).expect("snapshot facts");
-        assert!(!facts.sqlite_version.is_empty());
+        assert!(!facts.server_version.is_empty());
         assert!(!facts.migrations.is_empty());
         assert_eq!(
             facts.migrations.last().map(|migration| migration.version),
@@ -3199,6 +3233,11 @@ mod tests {
             config: &config,
             operation_id,
             reservation,
+            database_backend: crate::backup::BACKEND_SQLITE,
+            database_member: DATABASE_MEMBER,
+            database_media_type: DATABASE_MEDIA_TYPE,
+            consistency_method: SQLITE_SNAPSHOT_METHOD,
+            prepared_facts: None,
             staging_dir: &staging,
             durable_staging_dir: &staging,
             snapshot_path: &snapshot,
@@ -3498,6 +3537,7 @@ mod tests {
                 reserved_bytes: 0,
             },
             await_policy: AwaitPolicy::default(),
+            store_backend: "sqlite",
         };
 
         let failure = finish_publication(&inputs, &staging)
@@ -3546,6 +3586,7 @@ mod tests {
                 reserved_bytes: 0,
             },
             await_policy: AwaitPolicy::default(),
+            store_backend: "sqlite",
         };
 
         let failure = finish_publication(&inputs, &staging)

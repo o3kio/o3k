@@ -34,6 +34,14 @@ pub mod backup_artifact;
 // `backup_artifact`. Linux-only like the handoff primitives in o3k-store.
 #[cfg(target_os = "linux")]
 pub mod backup_create;
+// PP.6 PostgreSQL capture orchestration (D4 barrier + D10 dump classification).
+// Linux-only like the handoff primitives in o3k-store.
+#[cfg(target_os = "linux")]
+pub mod backup_pg;
+// PP.6 PostgreSQL `pg_dump`/`pg_restore --list` argv-only host boundary. This
+// is a narrowly approved execution adapter; it never uses a shell.
+#[cfg(target_os = "linux")]
+pub mod backup_pg_dump;
 // Shared `o3k backup` data-directory resolution (packaged `/var/lib/o3k`,
 // `O3K_DATA_DIR`, `/etc/o3k/o3kd.env`). Linux-only like the backup commands.
 #[cfg(target_os = "linux")]

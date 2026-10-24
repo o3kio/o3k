@@ -239,6 +239,24 @@ pub fn ensure_reserved_space(
     Ok(())
 }
 
+/// Applies the D9 reservation to an already measured source size.
+///
+/// The PostgreSQL capture measures the source with `pg_database_size()` before
+/// the dump exists; the same formula and the same fail-closed checks apply.
+///
+/// # Errors
+///
+/// Propagates the source bound/cap failures and
+/// [`ReservationError::SpaceUnavailable`] when the destination filesystem
+/// cannot hold the full reservation.
+pub fn preflight_reservation_bytes(
+    source_bytes: u64,
+    destination: &Path,
+) -> Result<Reservation, ReservationError> {
+    let available_bytes = available_bytes(destination)?;
+    reserve_with_available(source_bytes, available_bytes)
+}
+
 /// Measures the sources and verifies that `destination` has at least the D9
 /// reservation free for unprivileged writers (`f_bavail * f_frsize`).
 ///
