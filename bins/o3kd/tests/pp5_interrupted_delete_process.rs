@@ -32,6 +32,9 @@ use o3k_store::DurableStore;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[path = "common/pp5_runner_capability.rs"]
+mod pp5_runner_capability;
+
 const PROJECT_ID: &str = "eba29e2d-53de-461d-ae91-ede7402713cb";
 const BOOTSTRAP_PASSWORD: &str = "pp5-interrupted-delete-bootstrap-password";
 const TOKEN_SIGNING_KEY: &str = "pp5-interrupted-delete-signing-key-0123456789abcdef";
@@ -283,10 +286,14 @@ async fn wait_resource_state(
 /// the orphan the shipped sweep must repair, and the freed address must be
 /// reusable afterwards.
 #[tokio::test]
+#[ignore = "explicit PP.5 interrupted-delete invocation required"]
 async fn fault_pause_interrupted_delete_orphan_is_repaired_and_reuse_is_restored()
 -> Result<(), Box<dyn std::error::Error>> {
+    pp5_runner_capability::require_runner_capability("interrupted-delete")?;
     let root = std::env::temp_dir().join(format!("o3k-pp5-interrupted-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&root)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let client = reqwest::Client::builder().build()?;
 
     // 1. A real control plane with the #1035 delete-path fault pause armed.

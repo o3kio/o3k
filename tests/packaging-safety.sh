@@ -169,6 +169,77 @@ if grep -q '^O3K_PROVIDER=' "$WORK_DIR/config/o3kd.env"; then
   exit 1
 fi
 
+# An operator-provided backup trust document is validated fail-closed before
+# any installation state is created. The installer never writes the document.
+prepare_trust_config() { # prepare_trust_config <dir> <dir-mode> <file-mode>
+  local dir="$1" dir_mode="$2" file_mode="$3"
+  mkdir -p "$dir"
+  printf 'o3k-owned-v1 path=%s\n' "$dir" >"$dir/.o3k-owned"
+  cp "$ROOT_DIR/packaging/backup-trust.example.json" "$dir/backup-trust.json"
+  chmod "$file_mode" "$dir/backup-trust.json"
+  chmod "$dir_mode" "$dir"
+}
+
+TRUST_CONFIG_DIR="$WORK_DIR/trust-config"
+prepare_trust_config "$TRUST_CONFIG_DIR" 0755 0600
+bash "$ROOT_DIR/packaging/install.sh" \
+  --profile fake --noninteractive --binary "$BINARY" --o3k-binary "$O3K_BINARY" \
+  --prefix "$WORK_DIR/trust-prefix" --data-dir "$WORK_DIR/trust-data" \
+  --config-dir "$TRUST_CONFIG_DIR" --log-dir "$WORK_DIR/trust-log"
+[[ -f "$TRUST_CONFIG_DIR/backup-trust.json" ]]
+
+for invalid_mode in 0644 0660; do
+  BAD_TRUST_DIR="$WORK_DIR/trust-bad-mode-$invalid_mode"
+  prepare_trust_config "$BAD_TRUST_DIR" 0755 "$invalid_mode"
+  if bash "$ROOT_DIR/packaging/install.sh" \
+      --profile fake --noninteractive --binary "$BINARY" --o3k-binary "$O3K_BINARY" \
+      --prefix "$WORK_DIR/trust-bad-prefix-$invalid_mode" \
+      --data-dir "$WORK_DIR/trust-bad-data-$invalid_mode" \
+      --config-dir "$BAD_TRUST_DIR" --log-dir "$WORK_DIR/trust-bad-log-$invalid_mode"; then
+    echo "installer accepted a backup trust document with mode $invalid_mode" >&2
+    exit 1
+  fi
+  [[ ! -e "$WORK_DIR/trust-bad-prefix-$invalid_mode" ]]
+done
+
+SYMLINK_TRUST_DIR="$WORK_DIR/trust-symlink"
+prepare_trust_config "$SYMLINK_TRUST_DIR" 0755 0600
+rm -f "$SYMLINK_TRUST_DIR/backup-trust.json"
+ln -s "$ROOT_DIR/packaging/backup-trust.example.json" "$SYMLINK_TRUST_DIR/backup-trust.json"
+if bash "$ROOT_DIR/packaging/install.sh" \
+    --profile fake --noninteractive --binary "$BINARY" --o3k-binary "$O3K_BINARY" \
+    --prefix "$WORK_DIR/trust-symlink-prefix" --data-dir "$WORK_DIR/trust-symlink-data" \
+    --config-dir "$SYMLINK_TRUST_DIR" --log-dir "$WORK_DIR/trust-symlink-log"; then
+  echo "installer accepted a symlinked backup trust document" >&2
+  exit 1
+fi
+[[ ! -e "$WORK_DIR/trust-symlink-prefix" ]]
+
+if [[ "$EUID" -eq 0 ]]; then
+  FOREIGN_TRUST_DIR="$WORK_DIR/trust-foreign"
+  prepare_trust_config "$FOREIGN_TRUST_DIR" 0755 0600
+  chown 65534:65534 "$FOREIGN_TRUST_DIR/backup-trust.json"
+  if bash "$ROOT_DIR/packaging/install.sh" \
+      --profile fake --noninteractive --binary "$BINARY" --o3k-binary "$O3K_BINARY" \
+      --prefix "$WORK_DIR/trust-foreign-prefix" --data-dir "$WORK_DIR/trust-foreign-data" \
+      --config-dir "$FOREIGN_TRUST_DIR" --log-dir "$WORK_DIR/trust-foreign-log"; then
+    echo "installer accepted a foreign-owned backup trust document" >&2
+    exit 1
+  fi
+  [[ ! -e "$WORK_DIR/trust-foreign-prefix" ]]
+fi
+
+WRITABLE_CONFIG_DIR="$WORK_DIR/trust-writable-config"
+prepare_trust_config "$WRITABLE_CONFIG_DIR" 0770 0600
+if bash "$ROOT_DIR/packaging/install.sh" \
+    --profile fake --noninteractive --binary "$BINARY" --o3k-binary "$O3K_BINARY" \
+    --prefix "$WORK_DIR/trust-writable-prefix" --data-dir "$WORK_DIR/trust-writable-data" \
+    --config-dir "$WRITABLE_CONFIG_DIR" --log-dir "$WORK_DIR/trust-writable-log"; then
+  echo "installer accepted a group-writable configuration directory" >&2
+  exit 1
+fi
+[[ ! -e "$WORK_DIR/trust-writable-prefix" ]]
+
 # Uninstall must apply the same path boundary as install. A dot component
 # resolving to the installed prefix must be rejected before any helper or
 # binary is removed.
@@ -393,6 +464,15 @@ if ! grep -Fq 'chmod 0755 "$CONFIG_DIR"' "$ROOT_DIR/packaging/install.sh" \
   || ! grep -Fq 'chgrp o3k-compute "$TLS_DIR/$file"' "$ROOT_DIR/packaging/install.sh" \
   || ! grep -Fq 'chgrp o3k "$TLS_DIR/$file"' "$ROOT_DIR/packaging/install.sh"; then
   echo "install.sh does not enforce split TLS private-key ownership" >&2
+  exit 1
+fi
+# The installed backup trust document posture must stay fail-closed: regular
+# file, root:o3k (installed layout), 0640/0600, and a non-writable config dir.
+if ! grep -Fq 'validate_backup_trust_posture' "$ROOT_DIR/packaging/install.sh" \
+  || ! grep -Fq 'refusing backup trust document ownership' "$ROOT_DIR/packaging/install.sh" \
+  || ! grep -Fq 'refusing backup trust document mode' "$ROOT_DIR/packaging/install.sh" \
+  || ! grep -Fq 'validate_config_directory_posture' "$ROOT_DIR/packaging/install.sh"; then
+  echo "install.sh does not enforce the backup trust document posture" >&2
   exit 1
 fi
 # ADR-0146 (docs/adr/ADR-0146-agent-inventory-publication.md): the compute

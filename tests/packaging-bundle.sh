@@ -12,7 +12,7 @@ BUNDLE_DIR="$WORK_DIR/bundle"
 mkdir -p "$BUNDLE_DIR/bin" "$BUNDLE_DIR/packaging" "$BUNDLE_DIR/scripts"
 for file in \
   install.sh o3kd.service reset.sh uninstall.sh diagnose.sh preflight.sh \
-  bootstrap-certs.sh bootstrap-testlab.sh release-gate.sh validate-human-review.sh scan-release-evidence.sh generate-candidate-evidence-manifest.py o3k-compute.service o3k-network.service 50-o3k-libvirt.rules; do
+  bootstrap-certs.sh bootstrap-testlab.sh release-gate.sh validate-human-review.sh scan-release-evidence.sh generate-candidate-evidence-manifest.py o3k-compute.service o3k-network.service 50-o3k-libvirt.rules backup-trust.example.json; do
   cp "$ROOT_DIR/packaging/$file" "$BUNDLE_DIR/packaging/$file"
 done
 cp "$ROOT_DIR/scripts/generate-passwords.sh" "$BUNDLE_DIR/scripts/generate-passwords.sh"
@@ -83,12 +83,40 @@ CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR
 cmp -s "$BUNDLE_DIR/bin/o3kd" "$PREFIX/bin/o3kd"
 cmp -s "$BUNDLE_DIR/bin/o3k" "$PREFIX/bin/o3k"
 [[ -f "$PREFIX/share/o3k/o3kd.service" ]]
+[[ -f "$PREFIX/share/o3k/backup-trust.example.json" ]]
 cmp -s "$BUNDLE_DIR/manifest.json" "$PREFIX/share/o3k/release-manifest.json"
 cmp -s "$BUNDLE_DIR/SHA256SUMS" "$PREFIX/share/o3k/SHA256SUMS"
 grep -Fqx 'bin/o3k' "$PREFIX/share/o3k/.o3k-installed"
 grep -Fqx 'share/o3k/release-manifest.json' "$PREFIX/share/o3k/.o3k-installed"
 grep -Fqx 'share/o3k/SHA256SUMS' "$PREFIX/share/o3k/.o3k-installed"
+grep -Fqx 'share/o3k/backup-trust.example.json' "$PREFIX/share/o3k/.o3k-installed"
 [[ ! -e "$WORK_DIR/cargo-invoked" ]]
+
+# An operator-provided backup trust document is posture-validated at install
+# time and is never created or overwritten by the installer. A 0600 document in
+# a custom TestLab config directory is accepted; 0644 is rejected before any
+# installation state exists.
+TRUST_CONFIG_DIR="$WORK_DIR/trust-config"
+mkdir -p "$TRUST_CONFIG_DIR"
+chmod 0755 "$TRUST_CONFIG_DIR"
+printf 'o3k-owned-v1 path=%s\n' "$TRUST_CONFIG_DIR" >"$TRUST_CONFIG_DIR/.o3k-owned"
+cp "$BUNDLE_DIR/packaging/backup-trust.example.json" "$TRUST_CONFIG_DIR/backup-trust.json"
+chmod 0600 "$TRUST_CONFIG_DIR/backup-trust.json"
+CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR/packaging/install.sh" \
+  --profile fake --noninteractive \
+  --prefix "$WORK_DIR/trust-prefix" --data-dir "$WORK_DIR/trust-data" \
+  --config-dir "$TRUST_CONFIG_DIR" --log-dir "$WORK_DIR/trust-log"
+[[ -f "$TRUST_CONFIG_DIR/backup-trust.json" ]]
+[[ ! -e "$WORK_DIR/trust-prefix/share/o3k/backup-trust.json" ]]
+chmod 0644 "$TRUST_CONFIG_DIR/backup-trust.json"
+if CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR/packaging/install.sh" \
+    --profile fake --noninteractive \
+    --prefix "$WORK_DIR/trust-bad-prefix" --data-dir "$WORK_DIR/trust-bad-data" \
+    --config-dir "$TRUST_CONFIG_DIR" --log-dir "$WORK_DIR/trust-bad-log"; then
+  echo "installer accepted a group/other-readable backup trust document" >&2
+  exit 1
+fi
+[[ ! -e "$WORK_DIR/trust-bad-prefix" ]]
 
 # Keep this deterministic and host-independent: the real preflight contract is
 # exercised separately, while this invocation only verifies bundle selection.
@@ -113,6 +141,7 @@ fi
 
 TLS_DIR="$WORK_DIR/libvirt-config/tls"
 mkdir -p "$TLS_DIR"
+chmod 0755 "$WORK_DIR/libvirt-config"
 printf 'o3k-owned-v1 path=%s\n' "$WORK_DIR/libvirt-config" >"$WORK_DIR/libvirt-config/.o3k-owned"
 for file in ca.pem server.pem server-key.pem agent.pem agent-key.pem; do
   printf 'test credential\n' >"$TLS_DIR/$file"

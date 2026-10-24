@@ -1,0 +1,527 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/proposed/control-plane-backup-v1.schema.json",
+  "title": "Accepted O3K PP.6 control-plane backup manifest v1 technical contract",
+  "$comment": "Manifest contract accepted at source revision 9ce23ff81218e8e35d917ef6ee4478ae69e8f28e. This status metadata does not assert implementation, release readiness, independent security review, or acceptance of later schema changes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format_version",
+    "backup_id",
+    "created_at",
+    "site_id",
+    "installation_id",
+    "source",
+    "store",
+    "consistency",
+    "state_inventory",
+    "members",
+    "encryption",
+    "authentication",
+    "excluded_state"
+  ],
+  "properties": {
+    "format_version": {
+      "const": "1"
+    },
+    "backup_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "installation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "o3k_version",
+        "source_sha",
+        "release_artifact_sha256",
+        "profile_id"
+      ],
+      "properties": {
+        "o3k_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "source_sha": {
+          "$ref": "#/$defs/gitCommitSha"
+        },
+        "release_artifact_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "profile_id": {
+          "type": "string",
+          "enum": [
+            "o3k-demo-v1",
+            "o3k-small-edge-v1"
+          ]
+        }
+      }
+    },
+    "store": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "server_version",
+        "schema_version",
+        "migrations"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "sqlite",
+            "postgresql"
+          ]
+        },
+        "server_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "schema_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "migrations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "version",
+              "checksum"
+            ],
+            "properties": {
+              "version": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "checksum": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        },
+        "extensions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "consistency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "write_quiescence",
+        "worker_quiescence",
+        "in_flight_operations",
+        "quiescence_generation",
+        "snapshot_started_at",
+        "snapshot_completed_at"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "sqlite_vacuum_into",
+            "postgresql_native_dump"
+          ]
+        },
+        "write_quiescence": {
+          "const": true
+        },
+        "worker_quiescence": {
+          "const": true
+        },
+        "in_flight_operations": {
+          "type": "string",
+          "enum": [
+            "none",
+            "drained",
+            "recorded_unknown"
+          ]
+        },
+        "quiescence_generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "snapshot_started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "snapshot_completed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "state_inventory": {
+      "type": "array",
+      "description": "Authenticated repository-to-catalog mapping. Every registered durable repository, including repositories with zero state rows, has an entry. Each entry maps its state family and exact SQLite/PostgreSQL objects to migration identities. Semantic validation enforces unique repository IDs and exact baseline coverage.",
+      "minItems": 1,
+      "maxItems": 512,
+      "items": {
+        "$ref": "#/$defs/repository_inventory_entry"
+      }
+    },
+    "members": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "plaintext_size_bytes",
+          "size_bytes",
+          "sha256",
+          "media_type",
+          "encrypted",
+          "consistency_generation",
+          "nonce"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^(database|config|release|identity|trust|metadata)/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*$",
+            "description": "ASCII path; maxLength therefore also enforces the 1024-byte path bound"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 16,
+            "description": "Encrypted bytes including the 16-byte AES-GCM tag; bounded by 1 GiB plaintext plus tag",
+            "maximum": 1073741840
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256",
+            "description": "SHA-256 digest of the encrypted member bytes"
+          },
+          "media_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "encrypted": {
+            "const": true
+          },
+          "consistency_generation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "nonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{16}$",
+            "description": "96-bit AES-256-GCM nonce, unpadded base64url. Semantic validation rejects duplicate nonce values and duplicate member names; JSON Schema uniqueItems compares whole objects only."
+          },
+          "plaintext_size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Plaintext member length; bound into AES-GCM AAD; max 1 GiB. Semantic validation enforces total artifact plaintext <= 4 GiB.",
+            "maximum": 1073741824
+          }
+        }
+      }
+    },
+    "encryption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "key_id",
+        "key_is_external",
+        "key_wrapping"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "AES-256-GCM"
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "key_is_external": {
+          "const": true
+        },
+        "key_wrapping": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "algorithm",
+            "recipient_key_id",
+            "enc",
+            "ciphertext"
+          ],
+          "properties": {
+            "algorithm": {
+              "const": "HPKE-v1-X25519-HKDF-SHA256-AES-256-GCM"
+            },
+            "recipient_key_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            },
+            "enc": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$",
+              "description": "32-byte HPKE encapsulated key, unpadded base64url"
+            },
+            "ciphertext": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{64}$",
+              "description": "48-byte HPKE ciphertext for the 32-byte content key, unpadded base64url"
+            }
+          }
+        }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "key_id",
+        "signature"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "Ed25519"
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$",
+          "contentEncoding": "base64url",
+          "description": "64-byte Ed25519 signature, unpadded base64url"
+        }
+      }
+    },
+    "excluded_state": {
+      "type": "array",
+      "description": "All five excluded state families are declared in v1 for both currently enumerated profiles.",
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "tenant_vm_disks_and_guest_filesystems",
+          "hypervisor_local_guest_runtime_state",
+          "external_storage_payloads",
+          "external_hosted_service_databases",
+          "provider_local_caches"
+        ]
+      }
+    },
+    "site_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "description": "Configured O3K site identity; bound into member AAD and signer scope"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "store": {
+            "properties": {
+              "backend": {
+                "const": "sqlite"
+              }
+            }
+          }
+        },
+        "required": [
+          "store"
+        ]
+      },
+      "then": {
+        "properties": {
+          "consistency": {
+            "properties": {
+              "method": {
+                "const": "sqlite_vacuum_into"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "store": {
+            "properties": {
+              "backend": {
+                "const": "postgresql"
+              }
+            }
+          }
+        },
+        "required": [
+          "store"
+        ]
+      },
+      "then": {
+        "properties": {
+          "consistency": {
+            "properties": {
+              "method": {
+                "const": "postgresql_native_dump"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "repository_inventory_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_id",
+        "state_family",
+        "empty_state_included",
+        "sqlite_objects",
+        "postgres_objects",
+        "migration_ids"
+      ],
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "state_family": {
+          "type": "string",
+          "enum": [
+            "canonical_resources",
+            "operations_and_reconciliation",
+            "placement_allocations_and_provider_mappings",
+            "topology_and_building_blocks",
+            "iam_and_security_scope",
+            "bootstrap_enrollment_and_revocation",
+            "audit_and_governance",
+            "o3k_owned_configuration",
+            "release_and_install_metadata"
+          ]
+        },
+        "empty_state_included": {
+          "type": "boolean",
+          "description": "True when this repository has zero rows at the captured consistency point; its repository and catalog mapping remains present."
+        },
+        "sqlite_objects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/catalog_object"
+          }
+        },
+        "postgres_objects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/catalog_object"
+          }
+        },
+        "migration_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          }
+        }
+      }
+    },
+    "catalog_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "definition_sha256"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "table",
+            "view",
+            "sequence",
+            "index",
+            "constraint",
+            "function",
+            "trigger"
+          ]
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "definition_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Digest of normalized catalog definition; validation is against the exact-release migration baseline."
+        }
+      }
+    },
+    "gitCommitSha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

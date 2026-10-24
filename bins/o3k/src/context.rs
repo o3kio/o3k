@@ -2,7 +2,10 @@
 //! seams (process execution, HTTP, database) that make every check
 //! deterministically testable without root or shell shims.
 
-use crate::db::{AllocationRow, EpochRow, InstanceRow, InventoryRow, PortRow, ProviderRow};
+use crate::db::{
+    AllocationRow, EpochRow, InstanceRow, InventoryRow, MigrationCounts, PortRow, ProviderRow,
+    WorkLeaseRow,
+};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -148,6 +151,24 @@ pub trait DoctorDb: Send + Sync {
     async fn compute_instances(&self, path: &Path) -> Result<Vec<InstanceRow>, String>;
     /// All rows of `network_ports`.
     async fn network_ports(&self, path: &Path) -> Result<Vec<PortRow>, String>;
+    /// A read-only `SELECT 1` against the configured PostgreSQL store.
+    async fn postgres_reachable(&self, url: &str) -> Result<(), String>;
+    /// Successful and failed rows in PostgreSQL `_sqlx_migrations`.
+    async fn postgres_migration_counts(&self, url: &str) -> Result<MigrationCounts, String>;
+    /// Count of currently active controller sessions in the durable authority.
+    async fn active_controller_sessions(
+        &self,
+        path: &Path,
+        use_postgres: bool,
+        postgres_url: Option<&str>,
+    ) -> Result<u64, String>;
+    /// Currently unexpired work leases and their fencing tokens.
+    async fn active_work_leases(
+        &self,
+        path: &Path,
+        use_postgres: bool,
+        postgres_url: Option<&str>,
+    ) -> Result<Vec<WorkLeaseRow>, String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -305,6 +326,12 @@ impl Context {
     pub fn is_postgres(&self) -> bool {
         let backend = self.database_backend();
         backend.eq_ignore_ascii_case("postgres") || backend.eq_ignore_ascii_case("postgresql")
+    }
+
+    /// Configured PostgreSQL URL, kept out of diagnostics output.
+    #[must_use]
+    pub fn database_url(&self) -> Option<&str> {
+        self.o3kd_env.get("O3K_DATABASE_URL").map(String::as_str)
     }
 
     /// Path of the network ownership manifest.

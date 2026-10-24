@@ -11,6 +11,10 @@ pub enum StoreError {
     ResourceNotFound,
     #[error("operation not found")]
     OperationNotFound,
+    #[error("durable store cannot enumerate non-terminal operations")]
+    OperationEnumerationUnavailable,
+    #[error("store cannot prove terminal writer drain")]
+    WriterDrainUnavailable,
     #[error("resource generation is stale")]
     StaleGeneration,
     #[error("resource already exists")]
@@ -26,6 +30,14 @@ pub enum StoreError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("backup staging cleanup failed (published={published})")]
+    BackupStagingCleanup {
+        published: bool,
+        operation: Option<Box<StoreError>>,
+        source: std::io::Error,
+    },
+    #[error("backup publication durability is uncertain; inspect the target before retrying")]
+    BackupPublicationUncertain,
     #[error("invalid UUID in durable state")]
     InvalidUuid(#[source] uuid::Error),
     #[error("corrupt durable state: {0}")]

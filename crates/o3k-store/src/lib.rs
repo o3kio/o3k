@@ -13,6 +13,11 @@
 //! across repository, SQL, and business logic boundaries.
 //!
 
+// Test-only crash hooks may never ship in an optimized build: they force
+// hard process exits from production code paths.
+#[cfg(all(feature = "backup-test-hooks", not(debug_assertions)))]
+compile_error!("backup-test-hooks is a debug-only test feature");
+
 use std::{
     fs,
     net::Ipv4Addr,
@@ -26,7 +31,13 @@ use uuid::Uuid;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+mod access_lock;
 mod artifact_transfer;
+#[cfg(target_os = "linux")]
+mod backup_control;
+#[cfg(unix)]
+pub mod backup_journal;
 pub mod conformance;
 pub mod coordination;
 pub mod governance;
@@ -34,11 +45,21 @@ pub mod postgres;
 pub mod quota;
 mod reusable_policy;
 mod server_state;
+pub mod state_inventory;
 pub mod storage;
 pub mod unified;
 
 pub mod domain;
 pub mod port;
+#[cfg(unix)]
+pub use access_lock::StoreAccessLock;
+#[cfg(target_os = "linux")]
+pub use backup_control::{
+    AcceptedBackupRequest, BACKUP_CONTROL_DIR, BACKUP_CONTROL_SOCKET, BackupControlError,
+    BackupControlListener, BackupHandoffRequest, ExpectedExecutor, HandoffRejectReason,
+    PeerIdentity, connect_and_request, connect_control, identity_tokens, installation_token,
+    reject_already_active, send_request_and_read_accept, site_token, verify_daemon_peer,
+};
 pub use coordination::{
     ControllerEpoch, ControllerId, ControllerSession, ControllerState, CoordinationRepository,
     FencingToken, LeaseAcquireOutcome, WorkLease,

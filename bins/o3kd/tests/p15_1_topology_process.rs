@@ -594,6 +594,8 @@ async fn run_process_journey(backend: &Backend, data_dir: &Path) -> TestResult {
     //    another run's converged regions into the "no topology" case.
     let fb_dir = data_dir.join("no-locations");
     std::fs::create_dir_all(&fb_dir)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&fb_dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let fb_backend = sqlite_backend(fb_dir.join("o3k.sqlite"));
     let fb_port = ephemeral_port();
     let fb_base = format!("http://{LISTEN}:{fb_port}");
@@ -765,6 +767,11 @@ async fn run_process_journey(backend: &Backend, data_dir: &Path) -> TestResult {
 async fn p15_1_topology_process_sqlite() -> TestResult {
     let data_dir = std::env::temp_dir().join(format!("p15-1-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&data_dir)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &data_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
     let backend = sqlite_backend(data_dir.join("o3k.sqlite"));
     run_process_journey(&backend, &data_dir).await?;
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -787,12 +794,26 @@ async fn p15_1_topology_process_postgres() -> TestResult {
     let backend = Backend::Postgres(fixture.url.clone());
     let data_dir = std::env::temp_dir().join(format!("p15-1-pg-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&data_dir)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &data_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
     // Dispose even when the journey returns Err, so a mid-test failure does
     // not leak the disposable database.
     let result = run_process_journey(&backend, &data_dir).await;
+    let drain_logs = std::fs::read_to_string(data_dir.join("o3kd.log"));
     let _ = std::fs::remove_dir_all(&data_dir);
     fixture.dispose().await;
     if result.is_ok() {
+        let logs = drain_logs?;
+        assert!(logs.contains(
+            "controller exiting without backup drain proof: unsupported storage adapter"
+        ));
+        assert!(
+            !logs.contains("controller writers drained"),
+            "PostgreSQL shutdown must not issue a SQLite backup drain verdict"
+        );
         println!("P15.1 topology process (PostgreSQL): PASS");
     }
     result

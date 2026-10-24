@@ -10,9 +10,10 @@ use super::{
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{
-    Row, SqlitePool,
+    Connection, Row, SqlitePool,
     sqlite::{
-        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
+        SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions, SqliteRow,
+        SqliteSynchronous,
     },
 };
 #[cfg(unix)]
@@ -248,6 +249,14 @@ pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Resul
     }
 }
 
+/// Test-only entry point used by the state-inventory generator to reproduce
+/// the runtime schema that `SqliteStore::connect` applies after SQLx
+/// migrations (the `operations` rebuild and its triggers).
+#[cfg(test)]
+pub(crate) async fn apply_test_runtime_schema(pool: &SqlitePool) -> Result<(), StoreError> {
+    migrate_operation_resource_scope(pool).await
+}
+
 /// Accepts the exact released pre-redesign 0037 checksum so the controlled
 /// SQLite rebuild below can migrate that database before normal use. No other
 /// checksum is normalized; SQLx remains the authority for all unrelated
@@ -390,6 +399,130 @@ pub(super) async fn update_agent_command_once_sqlite(
     store.get_agent_command(command_id).await
 }
 
+/// Store writes start with a raw `BEGIN IMMEDIATE`, which sqlx does not track.
+/// If the caller cancels a write, its connection can return to the pool inside
+/// an open transaction: a `BEGIN IMMEDIATE` still waiting on the busy timeout
+/// keeps running on the connection's worker and takes the writer lock after the
+/// caller has gone (#1126). The release hook runs after any statement still in
+/// flight on the connection, so it rolls back whatever was abandoned. A
+/// connection whose transaction state cannot be confirmed is closed, not reused.
+async fn release_abandoned_transaction(
+    connection: &mut SqliteConnection,
+) -> Result<bool, sqlx::Error> {
+    let rolled_back_or_idle = match sqlx::query("ROLLBACK").execute(&mut *connection).await {
+        Ok(_) => true,
+        Err(sqlx::Error::Database(error)) => error.message().contains("no transaction is active"),
+        Err(_) => false,
+    };
+    Ok(rolled_back_or_idle && !connection.is_in_transaction())
+}
+
+struct PrivateBackupStage {
+    path: std::path::PathBuf,
+    cleaned: bool,
+}
+
+/// Holds a database-level SQLite writer exclusion while a file-backed
+/// snapshot is read.
+struct BackupWriterExclusion {
+    connection: sqlx::pool::PoolConnection<sqlx::Sqlite>,
+}
+
+impl BackupWriterExclusion {
+    async fn acquire(pool: &SqlitePool) -> Result<Self, StoreError> {
+        let mut connection = pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(Self { connection })
+    }
+
+    async fn release(mut self) -> Result<(), StoreError> {
+        sqlx::query("ROLLBACK")
+            .execute(&mut *self.connection)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+}
+
+impl PrivateBackupStage {
+    fn cleanup(mut self) -> std::io::Result<()> {
+        fs::remove_dir_all(&self.path)?;
+        self.cleaned = true;
+        Ok(())
+    }
+}
+
+impl Drop for PrivateBackupStage {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn cleanup_backup_stage(
+    stage: PrivateBackupStage,
+    operation: Result<(), StoreError>,
+    published: bool,
+) -> Result<(), StoreError> {
+    let operation = operation.err().map(Box::new);
+    match stage.cleanup() {
+        Ok(()) => operation.map_or(Ok(()), |error| Err(*error)),
+        Err(source) => Err(StoreError::BackupStagingCleanup {
+            published,
+            operation,
+            source,
+        }),
+    }
+}
+
+async fn verify_sqlite_snapshot(path: &Path) -> Result<(), StoreError> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(StoreError::Database)?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await
+        .map_err(StoreError::Database)?;
+    if integrity != "ok" {
+        return Err(StoreError::Corrupt(
+            "SQLite backup snapshot integrity check failed".to_owned(),
+        ));
+    }
+    let foreign_key_errors = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await
+        .map_err(StoreError::Database)?;
+    if !foreign_key_errors.is_empty() {
+        return Err(StoreError::Corrupt(
+            "SQLite backup snapshot foreign-key check failed".to_owned(),
+        ));
+    }
+    let migration_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(StoreError::Database)?;
+    if migration_table != 1 {
+        return Err(StoreError::Corrupt(
+            "SQLite backup snapshot is missing migration identity".to_owned(),
+        ));
+    }
+    pool.close().await;
+    Ok(())
+}
+
 impl SqliteStore {
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
         let is_memory = database_url == "sqlite::memory:" || database_url == "sqlite://:memory:";
@@ -411,6 +544,16 @@ impl SqliteStore {
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
             .acquire_timeout(Duration::from_secs(5))
+            .after_release(move |connection, _| {
+                Box::pin(async move {
+                    let clean = release_abandoned_transaction(connection).await?;
+                    // The in-memory store lives on its only connection;
+                    // closing it would discard the whole database, so keep
+                    // it after the rollback attempt even if its state could
+                    // not be confirmed.
+                    Ok(clean || is_memory)
+                })
+            })
             .connect_with(options)
             .await
             .map_err(StoreError::Database)?;
@@ -488,6 +631,49 @@ impl SqliteStore {
         Ok(store)
     }
 
+    /// Opens an existing file-backed SQLite store for a coordinated backup.
+    ///
+    /// Unlike [`Self::connect_file`], this never creates directories or files,
+    /// changes permissions, runs migrations, normalizes migration checksums,
+    /// or performs canonical-state backfills. The caller must already hold
+    /// the deployment store-access exclusion and keep it until backup
+    /// publication or abort. This is not a general-purpose read-only store:
+    /// `backup_to_file` needs a SQLite write transaction to exclude writers.
+    pub async fn open_existing_file_for_backup(path: &Path) -> Result<Self, StoreError> {
+        if path.as_os_str().is_empty() {
+            return Err(StoreError::Database(sqlx::Error::Configuration(
+                "database path cannot be empty".into(),
+            )));
+        }
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(StoreError::Database(sqlx::Error::Configuration(
+                "backup source is not a regular file".into(),
+            )));
+        }
+
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(Duration::from_secs(5))
+            .after_release(|connection, _| {
+                Box::pin(async move { release_abandoned_transaction(connection).await })
+            })
+            .connect_with(options)
+            .await
+            .map_err(StoreError::Database)?;
+
+        Ok(Self {
+            pool,
+            agent_command_projection_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
+    }
+
     pub async fn journal_mode(&self) -> Result<String, StoreError> {
         let row = sqlx::query("PRAGMA journal_mode")
             .fetch_one(&self.pool)
@@ -557,20 +743,140 @@ impl SqliteStore {
         })
     }
 
+    /// Creates and atomically publishes an integrity-checked SQLite database
+    /// snapshot. A database-level writer exclusion protects the snapshot from
+    /// concurrent SQLite writers, including writers in other processes for
+    /// file-backed stores. The caller must still hold the deployment's
+    /// exclusive backup/store exclusion and quiesce workers and cross-file
+    /// state; this helper does not establish that control-plane boundary or
+    /// produce a PP.6 authenticated artifact.
     pub async fn backup_to_file(&self, destination: &Path) -> Result<(), StoreError> {
-        if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent).map_err(|source| StoreError::CreateDataDirectory {
-                path: parent.to_owned(),
-                source,
-            })?;
-        }
-        let dest_str = destination.display().to_string();
-        let query_str = format!("VACUUM INTO '{}'", dest_str.replace('\'', "''"));
-        sqlx::query(&query_str)
-            .execute(&self.pool)
+        self.backup_to_file_inner(destination, std::future::ready(()))
             .await
-            .map_err(StoreError::Database)?;
-        Ok(())
+    }
+
+    async fn backup_to_file_inner<F>(
+        &self,
+        destination: &Path,
+        after_writer_exclusion: F,
+    ) -> Result<(), StoreError>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        if self.pool.options().get_max_connections() < 2 {
+            return Err(StoreError::Database(sqlx::Error::Configuration(
+                "SQLite backup requires a file-backed store pool with at least two connections"
+                    .into(),
+            )));
+        }
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(|source| StoreError::CreateDataDirectory {
+            path: parent.to_owned(),
+            source,
+        })?;
+        let parent = fs::canonicalize(parent)
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        let name = destination.file_name().ok_or_else(|| {
+            StoreError::Database(sqlx::Error::Configuration(
+                "backup destination must name a file".into(),
+            ))
+        })?;
+        let final_path = parent.join(name);
+        match fs::symlink_metadata(&final_path) {
+            Ok(_) => return Err(StoreError::ResourceAlreadyExists),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(StoreError::Database(sqlx::Error::Io(error))),
+        }
+
+        let stage_path = parent.join(format!(".o3k-backup-{}", Uuid::now_v7()));
+        let mut stage_builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            stage_builder.mode(0o700);
+        }
+        stage_builder
+            .create(&stage_path)
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        let stage = PrivateBackupStage {
+            path: stage_path.clone(),
+            cleaned: false,
+        };
+        let snapshot_path = stage_path.join("database.sqlite");
+        let snapshot_str = snapshot_path.to_str().ok_or_else(|| {
+            StoreError::Database(sqlx::Error::Configuration(
+                "backup staging path must be valid UTF-8".into(),
+            ))
+        })?;
+        let mut published = false;
+        let result = async {
+            let checkpoint = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+            let busy: i64 = checkpoint.try_get(0).map_err(StoreError::Database)?;
+            let wal_frames: i64 = checkpoint.try_get(1).map_err(StoreError::Database)?;
+            let checkpointed_frames: i64 = checkpoint.try_get(2).map_err(StoreError::Database)?;
+            if busy != 0 || (wal_frames >= 0 && wal_frames != checkpointed_frames) {
+                return Err(StoreError::Corrupt(
+                    "SQLite backup could not establish a complete WAL checkpoint".to_owned(),
+                ));
+            }
+            let writer_exclusion = BackupWriterExclusion::acquire(&self.pool).await?;
+            after_writer_exclusion.await;
+            let snapshot_result = sqlx::query("VACUUM INTO ?")
+                .bind(snapshot_str)
+                .execute(&self.pool)
+                .await;
+            match snapshot_result {
+                Ok(_) => {
+                    writer_exclusion.release().await?;
+                }
+                Err(error) => {
+                    // Returning the connection invokes the pool's rollback
+                    // release hook. Preserve the snapshot failure as primary.
+                    drop(writer_exclusion);
+                    return Err(StoreError::Database(error));
+                }
+            }
+            if !snapshot_path.is_file() {
+                return Err(StoreError::Corrupt(
+                    "SQLite VACUUM INTO did not create a regular snapshot file".to_owned(),
+                ));
+            }
+
+            #[cfg(unix)]
+            fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+            verify_sqlite_snapshot(&snapshot_path).await?;
+            fs::File::open(&snapshot_path)
+                .and_then(|file| file.sync_all())
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+            fs::File::open(&stage_path)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+
+            // link(2) is an atomic no-replace publication: an existing file
+            // or symlink at the destination makes this fail without following
+            // or replacing that entry.
+            fs::hard_link(&snapshot_path, &final_path)
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+            published = true;
+            fs::File::open(&parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+            Ok(())
+        }
+        .await;
+        let result = if published && result.is_err() {
+            Err(StoreError::BackupPublicationUncertain)
+        } else {
+            result
+        };
+        cleanup_backup_stage(stage, result, published)
     }
 
     /// Lists all resources of one kind across projects for restart
@@ -955,6 +1261,45 @@ impl SqliteStore {
 
 #[async_trait]
 impl DurableStore for SqliteStore {
+    async fn close_for_controller_drain(&self) -> Result<(), StoreError> {
+        // Synchronize with connection returns that are still in flight. A
+        // returned connection's slot permit is only released after it is
+        // pushed to the idle queue (sqlx 0.8.6 `PoolInner::release`), so
+        // holding every live slot proves no `return_to_pool` task can
+        // interleave with `Pool::close` and push a connection into an
+        // already-closed pool, which would leak the connection and its
+        // worker (sqlx 0.8.x checks `is_closed` only once, before the
+        // yielding `after_release`/ping steps). This mirrors the
+        // acquire-all-permits ordering of the sqlx 0.9 `close()` rewrite.
+        let live_connections = self.pool.size();
+        let mut held = Vec::with_capacity(live_connections as usize);
+        for _ in 0..live_connections {
+            held.push(self.pool.acquire().await.map_err(StoreError::Database)?);
+        }
+        // Marking the pool closed is eager (it runs when the close future is
+        // created, before any await), so create it first and drop the held
+        // connections right after: every subsequently dropped connection
+        // takes the close path instead of the idle-queue push, and close()
+        // joins those returns. Dropping before marking closed would reopen
+        // the push-into-closed-pool race described above; awaiting close
+        // while still holding would deadlock on our own permits.
+        let close = self.pool.close();
+        drop(held);
+        // SQLx 0.8.x closes each SQLite connection by sending Shutdown through
+        // the connection worker queue and awaiting its acknowledgement, which
+        // also rolls back any transaction abandoned by a cancelled writer.
+        close.await;
+        // `size()` is the authoritative live-connection count and can only
+        // decrease now; join it explicitly as defense in depth against sqlx
+        // 0.8.x pool-close accounting defects (idle connections closed by
+        // `Pool::close` release their semaphore permit twice, so close can
+        // return with connections still closing).
+        while self.pool.size() > 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        Ok(())
+    }
+
     async fn insert_network_plan_work(
         &self,
         work: &NetworkPlanWorkRecord,
@@ -1919,6 +2264,16 @@ impl DurableStore for SqliteStore {
         .await
     }
 
+    async fn list_non_terminal_operations(&self) -> Result<Vec<OperationRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message FROM operations WHERE state NOT IN ('succeeded', 'failed') ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(operation_from_row).collect()
+    }
+
     async fn list_non_terminal_lifecycle_operations(
         &self,
     ) -> Result<Vec<OperationRecord>, StoreError> {
@@ -2657,5 +3012,361 @@ impl DurableStore for SqliteStore {
 impl ComputeRepository for SqliteStore {
     async fn list_resources_by_kind(&self, kind: &str) -> Result<Vec<ResourceRecord>, StoreError> {
         self.list_resources_by_kind(kind).await
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod release_tests {
+    use super::{
+        BackupWriterExclusion, PrivateBackupStage, cleanup_backup_stage, is_sqlite_busy,
+        release_abandoned_transaction,
+    };
+    use crate::{SqliteStore, StoreError};
+    use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+    use std::{fs, str::FromStr, time::Duration};
+
+    struct TestDirectory(std::path::PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("o3k-sqlite-lock-{}", uuid::Uuid::now_v7()));
+            fs::create_dir(&path).expect("create private test directory");
+            Self(path)
+        }
+
+        fn database(&self) -> std::path::PathBuf {
+            self.0.join("store.sqlite")
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn release_keeps_idle_connection_and_rolls_back_open_transaction() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open in-memory SQLite connection");
+        assert!(
+            release_abandoned_transaction(&mut connection)
+                .await
+                .expect("release idle connection"),
+            "an idle connection must be returned to the pool, not discarded"
+        );
+
+        sqlx::query("CREATE TABLE release_probe (id INTEGER)")
+            .execute(&mut connection)
+            .await
+            .expect("create probe table");
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut connection)
+            .await
+            .expect("start untracked transaction");
+        sqlx::query("INSERT INTO release_probe (id) VALUES (1)")
+            .execute(&mut connection)
+            .await
+            .expect("write inside untracked transaction");
+        assert!(
+            release_abandoned_transaction(&mut connection)
+                .await
+                .expect("release connection with open transaction"),
+            "a rolled-back connection is clean and may be reused"
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM release_probe")
+            .fetch_one(&mut connection)
+            .await
+            .expect("count probe rows");
+        assert_eq!(rows, 0, "the abandoned write must be rolled back");
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut connection)
+            .await
+            .expect("a new transaction can start after release");
+    }
+
+    #[test]
+    fn backup_cleanup_error_preserves_the_primary_outcome() {
+        let stage = PrivateBackupStage {
+            path: std::env::temp_dir()
+                .join(format!("o3k-missing-backup-stage-{}", uuid::Uuid::now_v7())),
+            cleaned: false,
+        };
+        let result = cleanup_backup_stage(stage, Err(StoreError::BackupPublicationUncertain), true);
+
+        let error = result.expect_err("missing staging directory must fail cleanup");
+        assert!(matches!(
+            error,
+            StoreError::BackupStagingCleanup {
+                published: true,
+                operation: Some(operation),
+                source,
+            } if matches!(*operation, StoreError::BackupPublicationUncertain)
+                && source.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[tokio::test]
+    async fn backup_writer_exclusion_blocks_external_sqlite_writers() {
+        let directory = TestDirectory::new();
+        let database = directory.database();
+        let store = SqliteStore::connect_file(&database)
+            .await
+            .expect("open file-backed store");
+        sqlx::query("CREATE TABLE backup_writer_probe (id INTEGER PRIMARY KEY)")
+            .execute(&store.pool)
+            .await
+            .expect("create writer probe");
+
+        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", database.display()))
+            .expect("parse database URL")
+            .create_if_missing(false)
+            .journal_mode(super::SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_millis(100));
+        let mut external_writer = SqliteConnection::connect_with(&options)
+            .await
+            .expect("open second SQLite connection");
+        let exclusion = BackupWriterExclusion::acquire(&store.pool)
+            .await
+            .expect("acquire SQLite writer exclusion");
+
+        let blocked = sqlx::query("INSERT INTO backup_writer_probe (id) VALUES (1)")
+            .execute(&mut external_writer)
+            .await
+            .expect_err("a second connection must not write during backup exclusion");
+        assert!(
+            is_sqlite_busy(&blocked),
+            "expected SQLite writer contention, got {blocked:?}"
+        );
+        exclusion
+            .release()
+            .await
+            .expect("release SQLite writer exclusion");
+
+        sqlx::query("INSERT INTO backup_writer_probe (id) VALUES (1)")
+            .execute(&mut external_writer)
+            .await
+            .expect("external writer proceeds after exclusion is released");
+        external_writer
+            .close()
+            .await
+            .expect("close external writer");
+        store.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn backup_opener_does_not_run_migrations_or_backfills() {
+        let directory = TestDirectory::new();
+        let database = directory.database();
+        let initial = SqliteStore::connect_file(&database)
+            .await
+            .expect("create migrated test store");
+        let migration_rows_before: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&initial.pool)
+                .await
+                .expect("read initial migration identity");
+        let schema_count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")
+                .fetch_one(&initial.pool)
+                .await
+                .expect("count initial schema objects");
+        initial.pool.close().await;
+
+        let backup = SqliteStore::open_existing_file_for_backup(&database)
+            .await
+            .expect("open existing store without migration");
+        let migration_rows_after: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&backup.pool)
+                .await
+                .expect("read migration identity after backup open");
+        let schema_count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")
+                .fetch_one(&backup.pool)
+                .await
+                .expect("count schema objects after backup open");
+        assert_eq!(migration_rows_after, migration_rows_before);
+        assert_eq!(schema_count_after, schema_count_before);
+
+        let snapshot = directory.0.join("snapshot.sqlite");
+        backup
+            .backup_to_file(&snapshot)
+            .await
+            .expect("capture an integrity-checked SQLite snapshot");
+        assert!(snapshot.is_file());
+        backup.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn backup_opener_rejects_missing_and_symlink_sources() {
+        let directory = TestDirectory::new();
+        let missing = directory.database();
+        assert!(
+            SqliteStore::open_existing_file_for_backup(&missing)
+                .await
+                .is_err()
+        );
+
+        let regular = directory.0.join("regular.sqlite");
+        fs::write(&regular, b"not opened by backup source validation").expect("write source");
+        let link = directory.0.join("linked.sqlite");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&regular, &link).expect("create symlink");
+        #[cfg(unix)]
+        assert!(
+            SqliteStore::open_existing_file_for_backup(&link)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_snapshot_holds_writer_exclusion_until_snapshot_finishes() {
+        let directory = TestDirectory::new();
+        let database = directory.database();
+        let store = std::sync::Arc::new(
+            SqliteStore::connect_file(&database)
+                .await
+                .expect("open file-backed store"),
+        );
+        sqlx::query("CREATE TABLE backup_writer_probe (id INTEGER PRIMARY KEY)")
+            .execute(&store.pool)
+            .await
+            .expect("create writer probe");
+
+        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", database.display()))
+            .expect("parse database URL")
+            .create_if_missing(false)
+            .journal_mode(super::SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_millis(100));
+        let mut external_writer = SqliteConnection::connect_with(&options)
+            .await
+            .expect("open second SQLite connection");
+        let destination = directory.0.join("snapshot.sqlite");
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let backup_store = std::sync::Arc::clone(&store);
+        let backup = tokio::spawn(async move {
+            backup_store
+                .backup_to_file_inner(&destination, async move {
+                    locked_tx.send(()).expect("notify writer fence acquired");
+                    let _ = resume_rx.await;
+                })
+                .await
+        });
+
+        locked_rx
+            .await
+            .expect("backup acquired its SQLite writer exclusion");
+        let blocked = sqlx::query("INSERT INTO backup_writer_probe (id) VALUES (1)")
+            .execute(&mut external_writer)
+            .await
+            .expect_err("backup snapshot must exclude a concurrent SQLite writer");
+        assert!(
+            is_sqlite_busy(&blocked),
+            "expected SQLite writer contention, got {blocked:?}"
+        );
+        assert!(
+            !directory.0.join("snapshot.sqlite").exists(),
+            "backup must not publish before snapshot completion"
+        );
+
+        resume_tx.send(()).expect("resume backup snapshot");
+        backup
+            .await
+            .expect("backup task completes")
+            .expect("snapshot succeeds");
+        sqlx::query("INSERT INTO backup_writer_probe (id) VALUES (1)")
+            .execute(&mut external_writer)
+            .await
+            .expect("external writer proceeds after snapshot completes");
+        external_writer
+            .close()
+            .await
+            .expect("close external writer");
+        store.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_backup_releases_writer_exclusion() {
+        let directory = TestDirectory::new();
+        let database = directory.database();
+        let store = std::sync::Arc::new(
+            SqliteStore::connect_file(&database)
+                .await
+                .expect("open file-backed store"),
+        );
+        sqlx::query("CREATE TABLE backup_writer_probe (id INTEGER PRIMARY KEY)")
+            .execute(&store.pool)
+            .await
+            .expect("create writer probe");
+
+        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", database.display()))
+            .expect("parse database URL")
+            .create_if_missing(false)
+            .journal_mode(super::SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_millis(500));
+        let mut external_writer = SqliteConnection::connect_with(&options)
+            .await
+            .expect("open second SQLite connection");
+        let destination = directory.0.join("cancelled-snapshot.sqlite");
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (_resume_tx, resume_rx) = tokio::sync::oneshot::channel::<()>();
+        let backup_store = std::sync::Arc::clone(&store);
+        let backup_destination = destination.clone();
+        let backup = tokio::spawn(async move {
+            backup_store
+                .backup_to_file_inner(&backup_destination, async move {
+                    locked_tx.send(()).expect("notify writer fence acquired");
+                    let _ = resume_rx.await;
+                })
+                .await
+        });
+
+        locked_rx
+            .await
+            .expect("backup acquired its SQLite writer exclusion");
+        backup.abort();
+        assert!(
+            backup
+                .await
+                .expect_err("backup task is cancelled")
+                .is_cancelled()
+        );
+
+        sqlx::query("INSERT INTO backup_writer_probe (id) VALUES (1)")
+            .execute(&mut external_writer)
+            .await
+            .expect("cancelled backup returns the SQLite writer lock");
+        assert!(!destination.exists());
+        external_writer
+            .close()
+            .await
+            .expect("close external writer");
+        store.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn backup_rejects_single_connection_memory_store() {
+        let directory = TestDirectory::new();
+        let destination = directory.0.join("memory-backup.sqlite");
+        let store = SqliteStore::connect("sqlite::memory:")
+            .await
+            .expect("open in-memory store");
+
+        let error = store
+            .backup_to_file(&destination)
+            .await
+            .expect_err("in-memory store backup has no cross-connection writer fence");
+        assert!(matches!(
+            error,
+            StoreError::Database(sqlx::Error::Configuration(_))
+        ));
+        assert!(!destination.exists());
+        store.pool.close().await;
     }
 }

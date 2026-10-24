@@ -14,6 +14,13 @@ use crate::{
 use super::O3kStore;
 #[async_trait]
 impl DurableStore for O3kStore {
+    async fn close_for_controller_drain(&self) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(store) => store.close_for_controller_drain().await,
+            Self::Postgres(store) => store.close_for_controller_drain().await,
+        }
+    }
+
     async fn insert_network_plan_work(
         &self,
         work: &NetworkPlanWorkRecord,
@@ -541,6 +548,13 @@ impl DurableStore for O3kStore {
         match self {
             Self::Sqlite(s) => s.list_non_terminal_lifecycle_operations().await,
             Self::Postgres(s) => s.list_non_terminal_lifecycle_operations().await,
+        }
+    }
+
+    async fn list_non_terminal_operations(&self) -> Result<Vec<OperationRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_non_terminal_operations().await,
+            Self::Postgres(s) => s.list_non_terminal_operations().await,
         }
     }
 

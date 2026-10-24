@@ -10,6 +10,18 @@ O3K_BINARY=
 NETWORK_BINARY=
 PROFILE=fake
 NONINTERACTIVE=0
+# The digest of the release tarball that the outer installer verified before
+# extraction (packaging/get-o3k.sh). It is persisted into the installed
+# release manifest so backup artifacts can bind the exact release artifact.
+RELEASE_ARTIFACT_SHA256="${O3K_RELEASE_ARTIFACT_SHA256:-}"
+AUGMENTED_MANIFEST=
+cleanup_augmented_manifest() {
+  [[ -z "$AUGMENTED_MANIFEST" ]] || rm -f -- "$AUGMENTED_MANIFEST"
+}
+trap cleanup_augmented_manifest EXIT
+trap 'cleanup_augmented_manifest; exit 130' INT
+trap 'cleanup_augmented_manifest; exit 143' TERM
+trap 'cleanup_augmented_manifest; exit 129' HUP
 # Canonical-bootstrap orchestration (PP.2, contracts/installer-v1.yaml
 # invoke_canonical_init_join): the outer installer runs `o3k init` and the
 # authenticated `o3k join` BEFORE the compute agent's first control-plane
@@ -28,12 +40,17 @@ while (($#)); do
     --o3k-binary) O3K_BINARY="$2"; shift 2;;
     --network-binary) NETWORK_BINARY="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
+    --release-artifact-sha256) RELEASE_ARTIFACT_SHA256="$2"; shift 2;;
     --noninteractive) NONINTERACTIVE=1; shift;;
     --defer-compute-start) DEFER_COMPUTE_START=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
 [[ "$PROFILE" == fake || "$PROFILE" == libvirt ]] || { echo "profile must be fake or libvirt" >&2; exit 2; }
+if [[ -n "$RELEASE_ARTIFACT_SHA256" && ! "$RELEASE_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "release artifact sha256 must be 64 lowercase hex characters" >&2
+  exit 2
+fi
 if [[ -n "$NETWORK_BINARY" && "$PROFILE" != libvirt ]]; then
   echo "the network agent is only installed with the libvirt profile" >&2
   exit 2
@@ -223,6 +240,99 @@ if [[ $EUID -eq 0 ]]; then
   RUN_USER=o3k
 else RUN_USER="$(id -un)"; fi
 
+# The packaged service group that owns the installed backup trust document.
+# The installer creates the local system group above, so the local account
+# database is authoritative; if it cannot be resolved, only gid 0 is an
+# accepted fallback (matching the Rust loader's installed posture).
+resolve_o3k_gid() {
+  local gid=""
+  if command -v getent >/dev/null 2>&1; then
+    gid="$(getent group o3k 2>/dev/null | cut -d: -f3 || true)"
+  fi
+  if [[ ! "$gid" =~ ^[0-9]+$ ]]; then
+    gid="$(id -g o3k 2>/dev/null || true)"
+  fi
+  if [[ "$gid" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$gid"
+  else
+    printf '0'
+  fi
+}
+
+# Fail-closed validation of an operator-provided trust document. The installer
+# never creates or populates this file and carries no key material: it only
+# rejects a posture that the loader would refuse or that a service user could
+# have written.
+#
+# Installed system layout: root:o3k 0640 (service-user group read) or
+# root:o3k 0600 (root caller). TestLab/custom layout: the invoking user's
+# 0600/0640 document, matching the documented non-installed override.
+validate_backup_trust_posture() {
+  local trust_path="$CONFIG_DIR/backup-trust.json"
+  if [[ ! -e "$trust_path" && ! -L "$trust_path" ]]; then
+    return 0
+  fi
+  if [[ -L "$trust_path" || ! -f "$trust_path" ]]; then
+    echo "refusing backup trust document that is not a regular file: $trust_path" >&2
+    exit 2
+  fi
+  local uid gid mode
+  read -r uid gid mode < <(stat -c '%u %g %a' -- "$trust_path" 2>/dev/null || true)
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]+$ ]] || {
+    echo "backup trust document ownership is unreadable: $trust_path" >&2
+    exit 2
+  }
+  local expected_uid expected_gid
+  if [[ $EUID -eq 0 && "$SYSTEM_INSTALL" -eq 1 ]]; then
+    expected_uid=0
+    expected_gid="$(resolve_o3k_gid)"
+  else
+    expected_uid="$EUID"
+    expected_gid="$(id -g)"
+  fi
+  if [[ "$uid" -ne "$expected_uid" || "$gid" -ne "$expected_gid" ]]; then
+    echo "refusing backup trust document ownership ${uid}:${gid}; expected ${expected_uid}:${expected_gid} (root:o3k for the installed layout): $trust_path" >&2
+    exit 2
+  fi
+  case "$mode" in
+    600|640) ;;
+    *)
+      echo "refusing backup trust document mode 0${mode}; installed posture is 0640 or 0600 with no group/other write or execute: $trust_path" >&2
+      exit 2
+      ;;
+  esac
+}
+
+# The installed configuration directory is traversed by the control-plane and
+# compute service identities. The documented non-writable mode is root:root
+# 0755 (root-owned, no group/other write); a group/world-writable directory
+# would let a service user replace the trust document.
+validate_config_directory_posture() {
+  [[ -e "$CONFIG_DIR" || -L "$CONFIG_DIR" ]] || return 0
+  if [[ -L "$CONFIG_DIR" || ! -d "$CONFIG_DIR" ]]; then
+    echo "refusing non-directory configuration path: $CONFIG_DIR" >&2
+    exit 2
+  fi
+  local uid gid mode
+  read -r uid gid mode < <(stat -c '%u %g %a' -- "$CONFIG_DIR" 2>/dev/null || true)
+  [[ "$uid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]+$ ]] || {
+    echo "configuration directory ownership is unreadable: $CONFIG_DIR" >&2
+    exit 2
+  }
+  if [[ "$uid" -ne "$EUID" ]]; then
+    echo "refusing configuration directory owned by uid ${uid}; expected uid ${EUID}: $CONFIG_DIR" >&2
+    exit 2
+  fi
+  local permissions=$((8#$mode))
+  if (( (permissions & 8#022) != 0 )); then
+    echo "refusing group/world-writable configuration directory: $CONFIG_DIR" >&2
+    exit 2
+  fi
+}
+
+validate_backup_trust_posture
+validate_config_directory_posture
+
 mark_owned_dir() {
   local path="$1" marker="$1/.o3k-owned"
   if [[ -e "$path" ]]; then
@@ -315,13 +425,53 @@ for file in reset.sh uninstall.sh diagnose.sh preflight.sh bootstrap-certs.sh bo
 done
 install_owned_file "$ROOT_DIR/scripts/generate-passwords.sh" \
   "$PREFIX/share/o3k/generate-passwords.sh" share/o3k/generate-passwords.sh 0755
+# Persists the release-tarball digest that the outer installer verified
+# (get-o3k.sh checks it against the authenticated release digest manifest).
+# A bundle manifest that already declares a different digest fails closed.
+augment_release_manifest() {
+  local source="$1" destination="$2" digest="$3"
+  python3 - "$source" "$destination" "$digest" <<'PY'
+import json
+import sys
+
+source, destination, digest = sys.argv[1:4]
+try:
+    with open(source, encoding="utf-8") as stream:
+        value = json.load(stream)
+except (OSError, ValueError) as error:
+    raise SystemExit(f"O3K installer: release manifest is unreadable: {error}")
+if not isinstance(value, dict):
+    raise SystemExit("O3K installer: release manifest is not a JSON object")
+existing = value.get("release_artifact_sha256")
+if existing is not None:
+    if not isinstance(existing, str) or existing != digest:
+        raise SystemExit(
+            "O3K installer: release manifest release_artifact_sha256 does not match the verified release artifact"
+        )
+else:
+    value["release_artifact_sha256"] = digest
+with open(destination, "w", encoding="utf-8") as stream:
+    json.dump(value, stream, separators=(",", ":"), sort_keys=True)
+    stream.write("\n")
+PY
+}
 # Release-bundle provenance files (issue #617): manifest.json and SHA256SUMS
 # sit at the release bundle root (packaging/make-release.sh writes them next
 # to bin/) and let `o3k doctor` verify the installed release. Repo-tree/dev
 # installs have no release bundle, so the two files are installed and tracked
 # in the ownership manifest only when the bundle sources exist.
 if [[ -f "$ROOT_DIR/manifest.json" ]]; then
-  install_owned_file "$ROOT_DIR/manifest.json" "$PREFIX/share/o3k/release-manifest.json" \
+  MANIFEST_SOURCE="$ROOT_DIR/manifest.json"
+  if [[ -n "$RELEASE_ARTIFACT_SHA256" ]]; then
+    # Keep the temporary manifest inside the root-owned installation prefix
+    # (never TMPDIR): the input is a verified release artifact and the
+    # augmented copy is installed with root ownership.
+    AUGMENTED_MANIFEST="$(mktemp "$PREFIX/share/o3k/.o3k-release-manifest.XXXXXX")"
+    augment_release_manifest "$MANIFEST_SOURCE" "$AUGMENTED_MANIFEST" "$RELEASE_ARTIFACT_SHA256" \
+      || { echo "cannot persist the verified release artifact digest" >&2; exit 1; }
+    MANIFEST_SOURCE="$AUGMENTED_MANIFEST"
+  fi
+  install_owned_file "$MANIFEST_SOURCE" "$PREFIX/share/o3k/release-manifest.json" \
     share/o3k/release-manifest.json 0644
   INSTALLED_FILES+=(share/o3k/release-manifest.json)
 fi
@@ -330,6 +480,24 @@ if [[ -f "$ROOT_DIR/SHA256SUMS" ]]; then
     share/o3k/SHA256SUMS 0644
   INSTALLED_FILES+=(share/o3k/SHA256SUMS)
 fi
+# Backup trust template (no key material). Operators copy it to the root-owned
+# /etc/o3k/backup-trust.json and replace every placeholder; the loader validates
+# the file posture and rejects incomplete or malformed values. The installer
+# never creates or populates /etc/o3k/backup-trust.json. If an operator-provided
+# document already exists, the installer fails closed unless it is a regular
+# file owned by root:o3k (or the invoking user for a custom TestLab config
+# directory) with mode 0640 or 0600. The packaged mode is root:o3k 0640,
+# because the service user runs as `o3k` and needs the group read bit; a
+# root-owned 0600 document is rejected for a non-root caller with
+# trust-config-unreadable-by-service-user. The example is capture-only: it names
+# the X25519 public key and no private key file. The recovery private key stays
+# on the operator/recovery host as 0600 (0400 accepted); `o3k backup verify`
+# requires it there. The installer never creates any permissive /etc/o3k
+# directory; an existing one must be owned by the installing user (root for a
+# system install) and not group/other writable.
+install_owned_file "$ROOT_DIR/packaging/backup-trust.example.json" \
+  "$PREFIX/share/o3k/backup-trust.example.json" share/o3k/backup-trust.example.json 0644
+INSTALLED_FILES+=(share/o3k/backup-trust.example.json)
 if [[ "$PROFILE" == libvirt ]]; then
   install_owned_file "$COMPUTE_BINARY" "$PREFIX/bin/o3k-compute" bin/o3k-compute 0755
   install_owned_file "$ROOT_DIR/packaging/o3k-compute.service" "$PREFIX/share/o3k/o3k-compute.service" share/o3k/o3k-compute.service 0644
@@ -680,12 +848,14 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   # group-kvm (the setgid bit is restored below), so pre-existing runtime
   # files (base images, overlays, console sinks) remain QEMU-readable after a
   # reset+reinstall cycle instead of being silently chowned to the compute
-  # account's group.
-  chown -R o3k-compute:kvm "$COMPUTE_DATA_DIR"
-  # The agent identity file is compute-private identity material, not QEMU
-  # runtime state; restore its compute-primary-group ownership.
-  if [[ -f "$COMPUTE_DATA_DIR/agent-id" ]]; then
-    chown o3k-compute:o3k-compute "$COMPUTE_DATA_DIR/agent-id"
+  # account's group. The fake profile does not create the compute subtree.
+  if [[ -d "$COMPUTE_DATA_DIR" ]]; then
+    chown -R o3k-compute:kvm "$COMPUTE_DATA_DIR"
+    # The agent identity file is compute-private identity material, not QEMU
+    # runtime state; restore its compute-primary-group ownership.
+    if [[ -f "$COMPUTE_DATA_DIR/agent-id" ]]; then
+      chown o3k-compute:o3k-compute "$COMPUTE_DATA_DIR/agent-id"
+    fi
   fi
   install_owned_system_file "$ROOT_DIR/packaging/o3kd.service" /etc/systemd/system/o3kd.service 0644
   if [[ "$PROFILE" == libvirt ]]; then
@@ -739,3 +909,12 @@ if [[ $EUID -eq 0 && "$PROFILE" == libvirt ]]; then
   install -d -o o3k-compute -g kvm -m 2770 "$COMPUTE_DATA_DIR/image-cache/overlays"
 fi
 echo "installed o3kd profile=$PROFILE at $PREFIX/bin/o3kd; data=$DATA_DIR; config=$ENV_FILE; user=$RUN_USER"
+echo "backup data directory: a non-root $RUN_USER service user resolves $DATA_DIR automatically when it owns that directory (the packaged posture), even though $ENV_FILE is root:root 0600 and unreadable to it; set O3K_DATA_DIR to override"
+if [[ -f "$PREFIX/share/o3k/backup-trust.example.json" ]]; then
+  if [[ $EUID -eq 0 && "$SYSTEM_INSTALL" -eq 1 ]]; then
+    TRUST_POSTURE="root:$RUN_USER 0640 (or root:$RUN_USER 0600 for a root caller)"
+  else
+    TRUST_POSTURE="0600 (or 0640) owned by $RUN_USER"
+  fi
+  echo "backup trust template: $PREFIX/share/o3k/backup-trust.example.json (install as $CONFIG_DIR/backup-trust.json with the packaged mode $TRUST_POSTURE; an existing document is validated and the install aborts unless its owner, group and mode match the installed/TestLab posture; replace placeholders; capture uses recipient.x25519_public_key only; keep the X25519 private key on the recovery/operator host as 0600 and set recipient.x25519_private_key_file there for verify; fields: format, site_id, installation_id, profile_id, artifact_signing{key_id, ed25519_public_key}, recipient{key_id, x25519_public_key[, x25519_private_key_file]}, revoked_key_ids, custody{record_id, purpose, key_fingerprint, threshold, custodians, storage_class, expires_at})"
+fi

@@ -1,11 +1,37 @@
 #[cfg(test)]
 mod tests {
     use crate::*;
+    use sqlx::Row;
     use std::error::Error;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
     use uuid::Uuid;
+
+    struct BackupTestDirectory(PathBuf);
+
+    impl BackupTestDirectory {
+        fn new() -> Result<Self, Box<dyn Error>> {
+            let path = PathBuf::from(format!("/tmp/o3k-store-backup-test-{}", Uuid::now_v7()));
+            std::fs::create_dir(&path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(Self(path))
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for BackupTestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn fabric_host(
         host_id: &str,
@@ -24,6 +50,72 @@ mod tests {
             fabric_mtu: 1440,
             administrative_state: "enabled".to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_writer_drain_joins_cancelled_sqlite_transaction_and_rejects_new_writes()
+    -> Result<(), Box<dyn Error>> {
+        let directory = BackupTestDirectory::new()?;
+        let path = directory.path("drain.sqlite");
+        let store = SqliteStore::connect_file(&path).await?;
+        sqlx::query("CREATE TABLE drain_probe (id INTEGER PRIMARY KEY)")
+            .execute(&store.pool)
+            .await?;
+        let writer_store = store.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let writer_entered = entered.clone();
+        let writer = tokio::spawn(async move {
+            let mut connection = writer_store.pool.acquire().await?;
+            sqlx::query("BEGIN IMMEDIATE")
+                .execute(&mut *connection)
+                .await?;
+            sqlx::query("INSERT INTO drain_probe VALUES (1)")
+                .execute(&mut *connection)
+                .await?;
+            writer_entered.notify_one();
+            std::future::pending::<()>().await;
+            Ok::<(), sqlx::Error>(())
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .map_err(|elapsed| -> Box<dyn Error> {
+                format!("cancelled writer never entered its transaction: {elapsed:?}").into()
+            })?;
+        writer.abort();
+        let _ = writer.await;
+        // The drain joins a connection-worker shutdown, which is a full
+        // cross-thread round trip per connection; keep a generous anti-hang
+        // bound rather than a latency assertion (the proof is the assertion
+        // sequence below, not the wall clock).
+        tokio::time::timeout(Duration::from_secs(10), store.close_for_controller_drain())
+            .await
+            .map_err(|elapsed| -> Box<dyn Error> {
+                format!(
+                    "controller drain did not complete (pool size={} num_idle={} closed={}): \
+                     {elapsed:?}",
+                    store.pool.size(),
+                    store.pool.num_idle(),
+                    store.pool.is_closed()
+                )
+                .into()
+            })??;
+        assert_eq!(store.pool.size(), 0);
+        assert!(matches!(
+            sqlx::query("INSERT INTO drain_probe VALUES (2)")
+                .execute(&store.pool)
+                .await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        let reopened = SqliteStore::connect_file(&path).await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drain_probe")
+            .fetch_one(&reopened.pool)
+            .await?;
+        assert_eq!(
+            count, 0,
+            "cancelled transaction must roll back before drain returns"
+        );
+        reopened.close_for_controller_drain().await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -772,6 +864,61 @@ mod tests {
                 ),
                 "a terminal operation must never be listed: {:?}",
                 row.state
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_non_terminal_operations_preserves_all_durable_unresolved_states()
+    -> Result<(), StoreError> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let resource = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "{}".to_owned(),
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: Some("instance-a".to_owned()),
+        };
+        store.insert_resource(&resource).await?;
+        let make_operation = |serial: u32, state| OperationRecord {
+            id: Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("o3k-store-drain-inventory-{serial}").as_bytes(),
+            ),
+            resource_id: resource.id,
+            kind: format!("drain-test-{serial}"),
+            state,
+            provider_operation_id: Some(format!("provider-op-{serial}")),
+            error_category: None,
+            error_message: None,
+        };
+        let unresolved = [
+            make_operation(1, OperationState::Pending),
+            make_operation(2, OperationState::Running),
+            make_operation(3, OperationState::Retryable),
+            make_operation(4, OperationState::UnknownOutcome),
+        ];
+        let terminal = [
+            make_operation(5, OperationState::Succeeded),
+            make_operation(6, OperationState::Failed),
+        ];
+        for operation in unresolved.iter().chain(terminal.iter()) {
+            store.insert_operation(operation).await?;
+        }
+
+        let listed = store.list_non_terminal_operations().await?;
+        let listed_ids: Vec<_> = listed.iter().map(|operation| operation.id).collect();
+        let mut expected_ids: Vec<_> = unresolved.iter().map(|operation| operation.id).collect();
+        expected_ids.sort();
+        assert_eq!(listed_ids, expected_ids);
+        for operation in &unresolved {
+            assert!(
+                listed.contains(operation),
+                "unresolved Operation was changed"
             );
         }
         Ok(())
@@ -3674,14 +3821,9 @@ mod tests {
 
     #[tokio::test]
     async fn backup_and_restore_produces_consistent_database() -> Result<(), Box<dyn Error>> {
-        let src_path = PathBuf::from(format!(
-            "/tmp/o3k-store-backup-src-{}.sqlite",
-            Uuid::now_v7()
-        ));
-        let backup_path = PathBuf::from(format!(
-            "/tmp/o3k-store-backup-dst-{}.sqlite",
-            Uuid::now_v7()
-        ));
+        let temp = BackupTestDirectory::new()?;
+        let src_path = temp.path("source.sqlite");
+        let backup_path = temp.path("backup.sqlite");
 
         let store = SqliteStore::connect_file(&src_path).await?;
         let blob = [
@@ -3715,12 +3857,95 @@ mod tests {
             .await?;
         assert_eq!(fetched, keypair);
 
-        let _ = fs::remove_file(&src_path);
-        let _ = fs::remove_file(format!("{}-wal", src_path.display()));
-        let _ = fs::remove_file(format!("{}-shm", src_path.display()));
-        let _ = fs::remove_file(&backup_path);
-        let _ = fs::remove_file(format!("{}-wal", backup_path.display()));
-        let _ = fs::remove_file(format!("{}-shm", backup_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backup_publication_never_overwrites_an_existing_target() -> Result<(), Box<dyn Error>>
+    {
+        let temp = BackupTestDirectory::new()?;
+        let src_path = temp.path("source.sqlite");
+        let backup_path = temp.path("backup.sqlite");
+        let sentinel = b"preserve-existing-artifact";
+        std::fs::write(&backup_path, sentinel)?;
+
+        let store = SqliteStore::connect_file(&src_path).await?;
+        let result = store.backup_to_file(&backup_path).await;
+        assert!(
+            matches!(result, Err(StoreError::ResourceAlreadyExists)),
+            "existing artifact must reject publication without replacement"
+        );
+        assert_eq!(std::fs::read(&backup_path)?, sentinel);
+
+        drop(store);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backup_snapshot_is_integrity_checked_and_private() -> Result<(), Box<dyn Error>> {
+        let temp = BackupTestDirectory::new()?;
+        let src_path = temp.path("source.sqlite");
+        let backup_path = temp.path("backup.sqlite");
+        let store = SqliteStore::connect_file(&src_path).await?;
+        store.backup_to_file(&backup_path).await?;
+
+        let metadata = std::fs::symlink_metadata(&backup_path)?;
+        assert!(metadata.file_type().is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+        let restored_store = SqliteStore::connect_file(&backup_path).await?;
+        assert_eq!(
+            restored_store.database_health().await?.integrity_check,
+            "ok"
+        );
+
+        drop(restored_store);
+        drop(store);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backup_rejects_a_busy_wal_checkpoint_without_publishing() -> Result<(), Box<dyn Error>>
+    {
+        let temp = BackupTestDirectory::new()?;
+        let src_path = temp.path("source.sqlite");
+        let backup_path = temp.path("backup.sqlite");
+        let store = SqliteStore::connect_file(&src_path).await?;
+        let mut reader = store.pool.begin().await?;
+        let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&mut *reader)
+            .await?;
+        sqlx::query("CREATE TABLE backup_wal_probe (id INTEGER PRIMARY KEY)")
+            .execute(&store.pool)
+            .await?;
+        let checkpoint = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
+            .fetch_one(&store.pool)
+            .await?;
+        let wal_frames: i64 = checkpoint.try_get(1)?;
+        let checkpointed_frames: i64 = checkpoint.try_get(2)?;
+        assert!(
+            wal_frames > checkpointed_frames,
+            "the pinned reader must leave committed WAL frames uncheckpointed"
+        );
+
+        let result = store.backup_to_file(&backup_path).await;
+        assert!(result.is_err(), "a pinned WAL reader must block capture");
+        assert!(!backup_path.exists(), "failed capture must not publish");
+        assert!(
+            std::fs::read_dir(&temp.0)?.all(|entry| {
+                entry.is_ok_and(|entry| {
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".o3k-backup-")
+                })
+            }),
+            "failed capture must remove its private staging directory"
+        );
+        reader.rollback().await?;
         Ok(())
     }
 

@@ -64,6 +64,12 @@ schemars = "1.2"
 jsonschema = "0.50"
 sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+hpke = { version = "0.14.1", default-features = false, features = ["x25519", "aes", "alloc", "getrandom"] }
+serde_jcs = "0.2.0"
+ring = "0.17.14"
+openssl = "0.10"
+zeroize = "1.8"
+hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "macros", "migrate", "chrono", "uuid"] }
 thiserror = "2"

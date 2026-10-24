@@ -1,7 +1,7 @@
 schema_version: 1
 advisory_database:
   repository: https://github.com/RustSec/advisory-db.git
-  commit: 84dd82689f285460d9b815c8e3271b33780f411e
+  commit: 4b587f00996ebe5c05a73eaef105ef241e876414
   fetch_mode: pinned
 exceptions:
   - id: RUSTSEC-2023-0071
@@ -12,3 +12,14 @@ exceptions:
       Retained only in the lockfile through SQLx's optional MySQL support;
       this workspace enables SQLite only and cargo tree has no active RSA path.
     review_trigger: Reconsider if another SQLx database feature is enabled.
+  - id: RUSTSEC-2026-0381
+    package: webpki-roots
+    affected_version: 0.26.11
+    owner: O3K maintainers
+    rationale: >-
+      SQLx's webpki-roots 0.26.11 dependency is the upstream semver shim and
+      re-exports webpki-roots 1.0.10. RUSTSEC-2026-0381 marks 0.26.11 unaffected
+      and requires the shim's resolved 1.x dependency to be at least 1.0.10.
+      Cargo.lock pins that exact safe edge; the governance test rejects a stale
+      or changed resolution.
+    review_trigger: Remove when SQLx no longer resolves the 0.26 semver shim or when its certificate-data resolution changes.

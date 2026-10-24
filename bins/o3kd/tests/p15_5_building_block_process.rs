@@ -57,6 +57,7 @@ fn start(root: &Path, addr: std::net::SocketAddr) -> Result<Child, Box<dyn std::
 async fn building_block_survives_real_daemon_restart() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!("o3k-p15-5-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&root)?;
+    std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let store = open_file(&root.join("o3k.sqlite")).await?;
     let block = BuildingBlock::enrolling("bb-process", "agent-process", vec![], None, None)?;
     let record = o3k_store::BuildingBlockRecord::from_block(&block, "2026-01-01T00:00:00Z")?;

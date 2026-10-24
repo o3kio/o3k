@@ -3,7 +3,8 @@
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+]
 
 [licenses]
 version = 2

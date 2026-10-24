@@ -17,7 +17,7 @@ use crate::upgrade::backup::{BackupManifest, RecordKind, RollbackChain, Rollback
 use crate::upgrade::engine::{
     DoctorOutcome, InstalledRelease, LockGuard, UpgradeIo, VerifiedBundle,
 };
-use crate::upgrade::fence::UpgradeFence;
+use crate::upgrade::fence::{FenceError, UpgradeFence};
 use crate::upgrade::state::{UpgradeState, default_state_path, env_path, write_atomic};
 use crate::version::ReleaseVersion;
 use async_trait::async_trait;
@@ -74,25 +74,68 @@ pub struct SystemUpgradeIo {
     pub download_base: String,
 }
 
+/// Whether `O3K_UPGRADE_*` path/URL overrides may be honored for this euid.
+///
+/// Root (euid 0) always uses the canonical paths and URLs. Non-root keeps the
+/// sandbox overrides so process tests never touch real host state.
+#[must_use]
+fn upgrade_overrides_allowed(effective_uid: u32) -> bool {
+    effective_uid != 0
+}
+
 impl SystemUpgradeIo {
     /// Resolves the sandboxable paths from the process environment.
     #[must_use]
     pub fn from_env() -> Self {
-        let prefix = env_path("O3K_UPGRADE_PREFIX").unwrap_or_else(|| PathBuf::from("/usr/local"));
+        // Root ignores every O3K_UPGRADE_* path/URL override: a privileged
+        // upgrade must not be redirected by its caller. Non-root callers keep
+        // the sandbox overrides used by the process tests.
+        let overrides = upgrade_overrides_allowed(current_euid());
+        let prefix = if overrides {
+            env_path("O3K_UPGRADE_PREFIX").unwrap_or_else(|| PathBuf::from("/usr/local"))
+        } else {
+            PathBuf::from("/usr/local")
+        };
         let data_dir = crate::upgrade::state::default_data_dir();
+        let bin_dir = if overrides {
+            env_path("O3K_UPGRADE_BIN_DIR")
+        } else {
+            None
+        }
+        .unwrap_or_else(|| prefix.join("bin"));
+        let config_dir = if overrides {
+            env_path("O3K_UPGRADE_CONFIG_DIR")
+        } else {
+            None
+        }
+        .unwrap_or_else(|| PathBuf::from("/etc/o3k"));
+        let download_dir = if overrides {
+            env_path("O3K_UPGRADE_DOWNLOAD_DIR")
+        } else {
+            None
+        }
+        .unwrap_or_else(|| data_dir.join("upgrade-download"));
+        let releases_url = if overrides {
+            std::env::var("O3K_UPGRADE_RELEASES_URL").ok()
+        } else {
+            None
+        }
+        .unwrap_or_else(|| DEFAULT_RELEASES_URL.to_owned());
+        let download_base = if overrides {
+            std::env::var("O3K_UPGRADE_DOWNLOAD_BASE").ok()
+        } else {
+            None
+        }
+        .unwrap_or_else(|| DEFAULT_DOWNLOAD_BASE.to_owned());
         Self {
-            bin_dir: env_path("O3K_UPGRADE_BIN_DIR").unwrap_or_else(|| prefix.join("bin")),
-            config_dir: env_path("O3K_UPGRADE_CONFIG_DIR")
-                .unwrap_or_else(|| PathBuf::from("/etc/o3k")),
+            bin_dir,
+            config_dir,
             data_dir: data_dir.clone(),
             state_file: default_state_path(),
             backup_dir: crate::upgrade::backup::default_backup_dir(),
-            download_dir: env_path("O3K_UPGRADE_DOWNLOAD_DIR")
-                .unwrap_or_else(|| data_dir.join("upgrade-download")),
-            releases_url: std::env::var("O3K_UPGRADE_RELEASES_URL")
-                .unwrap_or_else(|_| DEFAULT_RELEASES_URL.to_owned()),
-            download_base: std::env::var("O3K_UPGRADE_DOWNLOAD_BASE")
-                .unwrap_or_else(|_| DEFAULT_DOWNLOAD_BASE.to_owned()),
+            download_dir,
+            releases_url,
+            download_base,
             prefix,
         }
     }
@@ -106,6 +149,69 @@ impl SystemUpgradeIo {
         let mut name = self.state_file.as_os_str().to_os_string();
         name.push(".lock");
         PathBuf::from(name)
+    }
+
+    /// Re-evaluate the original upgrade path when the binary switch has
+    /// already installed the target manifest. The persisted attempt and its
+    /// matching backup are required; ordinary same-version upgrades stay denied.
+    fn validate_bundle_upgrade_fence(
+        &self,
+        installed: &InstalledRelease,
+        target: &ReleaseVersion,
+        target_profile: &str,
+        min_version: Option<&str>,
+    ) -> Result<(), FenceError> {
+        let decide = |source| {
+            UpgradeFence::from_manifest_values(
+                source,
+                target.clone(),
+                &installed.profile,
+                target_profile,
+                min_version,
+            )?
+            .decide()
+        };
+        match decide(installed.version.clone()) {
+            Err(FenceError::SameVersion) => {
+                let source = self.resume_source(target).ok_or(FenceError::SameVersion)?;
+                decide(source)
+            }
+            result => result,
+        }
+    }
+
+    fn resume_source(&self, target: &ReleaseVersion) -> Option<ReleaseVersion> {
+        use crate::upgrade::state::UpgradePhase;
+        let state = UpgradeState::load(&self.state_file).ok()??;
+        // BinariesInstalled is persisted before the switch. Earlier phases
+        // cannot legitimately have installed the target; terminal states
+        // cannot authorize a new attempt.
+        if state.target_version != *target
+            || !matches!(
+                state.phase,
+                UpgradePhase::BinariesInstalled
+                    | UpgradePhase::MigrationsApplied
+                    | UpgradePhase::ServicesStarted
+                    | UpgradePhase::HealthVerified
+                    | UpgradePhase::DoctorPassed
+            )
+            || state.rollback_performed
+        {
+            return None;
+        }
+        let backup_id = state.backup_id.as_deref()?;
+        let mut components = Path::new(backup_id).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            return None;
+        }
+        let bytes = std::fs::read(self.backup_dir.join(backup_id).join("backup.json")).ok()?;
+        let backup = BackupManifest::validate(&bytes).ok()?;
+        (backup.backup_id == backup_id
+            && backup.source_version == state.source_version
+            && backup.target_version == state.target_version)
+            .then_some(state.source_version)
     }
 
     /// Installed share directory (`<prefix>/share/o3k`).
@@ -272,6 +378,30 @@ impl SystemUpgradeIo {
             ));
         }
         Ok(())
+    }
+
+    /// Installs already-verified manifest bytes atomically with mode 0644.
+    fn install_manifest_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let destination = self.share_dir().join("release-manifest.json");
+        let parent = destination
+            .parent()
+            .ok_or_else(|| "release manifest has no parent directory".to_owned())?;
+        let temp = parent.join(format!(".release-manifest.{}.tmp", std::process::id()));
+        let write = (|| -> std::io::Result<()> {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true).mode(0o600);
+            let mut file = options.open(&temp)?;
+            std::io::Write::write_all(&mut file, bytes)?;
+            file.sync_all()
+        })();
+        if let Err(error) = write {
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!("cannot stage {}: {error}", destination.display()));
+        }
+        let result = Self::install_file(&temp, &destination, 0o644);
+        let _ = std::fs::remove_file(&temp);
+        result
     }
 
     /// Recursively copies regular files and directories, preserving modes.
@@ -1139,10 +1269,12 @@ impl UpgradeIo for SystemUpgradeIo {
     }
 
     async fn read_installed_manifest(&self) -> Result<InstalledRelease, String> {
-        let manifest = self.share_dir().join("release-manifest.json");
-        let contents = std::fs::read_to_string(&manifest)
-            .map_err(|error| format!("cannot read {}: {error}", manifest.display()))?;
-        let value: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
+        // Installation metadata uses the same bounded, no-follow posture as the
+        // backup release identity (SPEC-0050 §8): never follow a substituted
+        // manifest path or read an unbounded file.
+        let contents =
+            crate::upgrade::release_identity::read_installed_release_manifest(&self.prefix)?;
+        let value: serde_json::Value = serde_json::from_slice(&contents).map_err(|error| {
             format!("the installed release manifest is not valid JSON: {error}")
         })?;
         let version = value
@@ -1265,6 +1397,20 @@ impl UpgradeIo for SystemUpgradeIo {
                 "the bundle declares version {manifest_version}, expected {target}"
             ));
         }
+        // If the bundle manifest already carries the tarball digest, it must
+        // equal the bytes that were just verified. The digest is normally
+        // persisted into the installed manifest later (the tarball cannot
+        // contain its own digest).
+        if let Some(declared) = manifest
+            .get("release_artifact_sha256")
+            .and_then(serde_json::Value::as_str)
+            && !declared.eq_ignore_ascii_case(&actual)
+        {
+            return cleanup(
+                "the bundle manifest release_artifact_sha256 does not match the verified tarball"
+                    .to_owned(),
+            );
+        }
         let target_profile = manifest
             .get("profile")
             .and_then(serde_json::Value::as_str)
@@ -1307,14 +1453,9 @@ impl UpgradeIo for SystemUpgradeIo {
             .and_then(|fence| fence.get("min_version"))
             .and_then(serde_json::Value::as_str);
         let installed = self.read_installed_manifest().await?;
-        let fence = UpgradeFence::from_manifest_values(
-            installed.version,
-            target.clone(),
-            &installed.profile,
-            target_profile,
-            min_version,
-        );
-        if let Err(kind) = fence.and_then(|fence| fence.decide()) {
+        if let Err(kind) =
+            self.validate_bundle_upgrade_fence(&installed, target, target_profile, min_version)
+        {
             return cleanup(kind.to_string());
         }
         // SHA256SUMS coverage: exactly the extracted regular files.
@@ -1332,6 +1473,7 @@ impl UpgradeIo for SystemUpgradeIo {
             version: target.clone(),
             dir: final_dir,
             installer_sha256: installer_sha256.to_lowercase(),
+            release_artifact_sha256: actual.to_lowercase(),
         })
     }
 
@@ -1527,11 +1669,16 @@ impl UpgradeIo for SystemUpgradeIo {
         // Release metadata (the pure-binary-swap journey keeps the
         // ownership ledger entries unchanged: the recorded paths remain
         // valid). The downloaded install.sh is never executed (plan §3).
-        Self::install_file(
-            &bundle.dir.join("manifest.json"),
-            &self.share_dir().join("release-manifest.json"),
-            0o644,
+        // The tarball digest is persisted into the installed manifest from
+        // the verified download so backup artifacts can bind the exact
+        // release artifact.
+        let bundle_manifest = std::fs::read(bundle.dir.join("manifest.json"))
+            .map_err(|error| format!("cannot read the bundle manifest: {error}"))?;
+        let installed_manifest = crate::upgrade::release_identity::manifest_with_verified_artifact(
+            &bundle_manifest,
+            &bundle.release_artifact_sha256,
         )?;
+        self.install_manifest_bytes(&installed_manifest)?;
         Self::install_file(
             &bundle.dir.join("SHA256SUMS"),
             &self.share_dir().join("SHA256SUMS"),
@@ -1757,6 +1904,13 @@ mod tests {
     #![allow(clippy::assertions_on_constants)]
     use super::*;
 
+    #[test]
+    fn upgrade_path_and_url_overrides_are_ignored_for_root() {
+        assert!(!upgrade_overrides_allowed(0));
+        assert!(upgrade_overrides_allowed(1000));
+        assert!(upgrade_overrides_allowed(u32::MAX));
+    }
+
     /// Entry-name validation mirrors `safe_extract` exactly.
     #[test]
     fn entry_names_must_be_relative_and_safe() {
@@ -1892,6 +2046,181 @@ dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd  ./docs/readme.
             download_base: DEFAULT_DOWNLOAD_BASE.to_owned(),
         };
         assert_eq!(io.lock_path(), PathBuf::from("/sandbox/state.json.lock"));
+    }
+
+    #[test]
+    fn same_version_resume_requires_matching_durable_backup() -> Result<(), String> {
+        use crate::upgrade::state::UpgradePhase;
+        let root = std::env::temp_dir().join(format!(
+            "o3k-resume-fence-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).map_err(|error| error.to_string())?;
+        let state_file = root.join("state.json");
+        let backup_dir = root.join("backups");
+        let source: ReleaseVersion = "0.2.0-alpha.2"
+            .parse::<ReleaseVersion>()
+            .map_err(|error| error.to_string())?;
+        let target: ReleaseVersion = "0.3.0-alpha.1"
+            .parse::<ReleaseVersion>()
+            .map_err(|error| error.to_string())?;
+        let backup_id = "backup-1";
+        let mut state = UpgradeState::discovered(source.clone(), target.clone());
+        state.phase = UpgradePhase::BinariesInstalled;
+        state.backup_id = Some(backup_id.to_owned());
+        let dir = backup_dir.join(backup_id);
+        std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let mut manifest = BackupManifest {
+            backup_id: backup_id.to_owned(),
+            source_version: source.clone(),
+            target_version: target.clone(),
+            source_commit: None,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            binary_sha256: [("o3kd".to_owned(), "a".repeat(64))].into_iter().collect(),
+            schema_version_before: 1,
+            db_restore_required_on_rollback: false,
+        };
+        let io = SystemUpgradeIo {
+            prefix: root.clone(),
+            bin_dir: root.join("bin"),
+            config_dir: root.join("etc"),
+            data_dir: root.clone(),
+            state_file,
+            backup_dir,
+            download_dir: root.join("download"),
+            releases_url: DEFAULT_RELEASES_URL.to_owned(),
+            download_base: DEFAULT_DOWNLOAD_BASE.to_owned(),
+        };
+        let installed = InstalledRelease {
+            version: target.clone(),
+            profile: "libvirt".to_owned(),
+            commit: None,
+        };
+        let check = |profile, minimum| {
+            io.validate_bundle_upgrade_fence(&installed, &target, profile, minimum)
+        };
+        let write_manifest = |manifest: &BackupManifest| -> Result<(), String> {
+            std::fs::write(
+                dir.join("backup.json"),
+                serde_json::to_vec(manifest).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(())
+        };
+        write_manifest(&manifest)?;
+        assert_eq!(check("libvirt", None), Err(FenceError::SameVersion));
+        for phase in [
+            UpgradePhase::BinariesInstalled,
+            UpgradePhase::MigrationsApplied,
+            UpgradePhase::ServicesStarted,
+            UpgradePhase::HealthVerified,
+            UpgradePhase::DoctorPassed,
+        ] {
+            state.phase = phase;
+            state
+                .persist(&io.state_file)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(check("libvirt", Some("0.2.0-alpha.2")), Ok(()), "{phase:?}");
+        }
+        assert_eq!(check("other", None), Err(FenceError::ProfileMismatch));
+        assert_eq!(
+            check("libvirt", Some("0.2.0-alpha.3")),
+            Err(FenceError::UnsupportedPathBelowMin)
+        );
+        assert_eq!(
+            check("libvirt", Some("invalid")),
+            Err(FenceError::BadVersion)
+        );
+        for phase in [
+            UpgradePhase::Discovered,
+            UpgradePhase::BackupCreated,
+            UpgradePhase::ServicesStopped,
+            UpgradePhase::Committed,
+            UpgradePhase::FailedUpgrade,
+            UpgradePhase::RolledBack,
+        ] {
+            state.phase = phase;
+            state
+                .persist(&io.state_file)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                check("libvirt", None),
+                Err(FenceError::SameVersion),
+                "{phase:?}"
+            );
+        }
+        state.phase = UpgradePhase::BinariesInstalled;
+        state.rollback_performed = true;
+        state
+            .persist(&io.state_file)
+            .map_err(|error| error.to_string())?;
+        assert!(check("libvirt", None).is_err());
+        state.rollback_performed = false;
+        state
+            .persist(&io.state_file)
+            .map_err(|error| error.to_string())?;
+        for field in ["id", "source", "target"] {
+            let mut foreign = manifest.clone();
+            match field {
+                "id" => foreign.backup_id = "foreign".to_owned(),
+                "source" => foreign.source_version = target.clone(),
+                _ => foreign.target_version = source.clone(),
+            }
+            write_manifest(&foreign)?;
+            assert!(check("libvirt", None).is_err(), "foreign {field}");
+        }
+        write_manifest(&manifest)?;
+        state.backup_id = Some("../backup-1".to_owned());
+        state
+            .persist(&io.state_file)
+            .map_err(|error| error.to_string())?;
+        assert!(check("libvirt", None).is_err());
+        state.backup_id = None;
+        state
+            .persist(&io.state_file)
+            .map_err(|error| error.to_string())?;
+        assert!(check("libvirt", None).is_err());
+        state.backup_id = Some(backup_id.to_owned());
+        state.target_version = source.clone();
+        state
+            .persist(&io.state_file)
+            .map_err(|error| error.to_string())?;
+        assert!(check("libvirt", None).is_err());
+        state.target_version = target.clone();
+        state
+            .persist(&io.state_file)
+            .map_err(|error| error.to_string())?;
+        for invalid_source in ["0.3.0-alpha.1", "0.4.0-alpha.1", "0.2.0-beta.1"] {
+            let invalid_source = invalid_source
+                .parse::<ReleaseVersion>()
+                .map_err(|error| error.to_string())?;
+            manifest.source_version = invalid_source.clone();
+            state.source_version = invalid_source;
+            state
+                .persist(&io.state_file)
+                .map_err(|error| error.to_string())?;
+            write_manifest(&manifest)?;
+            assert!(check("libvirt", None).is_err());
+        }
+        manifest.source_version = source.clone();
+        state.source_version = source;
+        state
+            .persist(&io.state_file)
+            .map_err(|error| error.to_string())?;
+        write_manifest(&manifest)?;
+        assert_eq!(check("libvirt", None), Ok(()));
+        std::fs::write(dir.join("backup.json"), b"{}").map_err(|error| error.to_string())?;
+        assert!(check("libvirt", None).is_err());
+        std::fs::remove_file(dir.join("backup.json")).map_err(|error| error.to_string())?;
+        assert!(check("libvirt", None).is_err());
+        std::fs::write(&io.state_file, b"{}").map_err(|error| error.to_string())?;
+        assert!(check("libvirt", None).is_err());
+        std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     #[test]

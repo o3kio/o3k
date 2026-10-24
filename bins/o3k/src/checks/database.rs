@@ -9,15 +9,61 @@ use crate::output::{Category, Check, CheckStatus};
 /// or concurrency compared to WAL.
 const DEGRADED_JOURNAL_MODES: [&str; 5] = ["delete", "truncate", "persist", "memory", "off"];
 
+/// Database driver errors can include connection URLs, usernames, or other
+/// credentials. Keep the check actionable without projecting backend detail
+/// into either doctor output format.
+fn database_error_details(operation: &str) -> String {
+    format!(
+        "{operation} failed; inspect the o3kd service and journal for the backend-specific cause"
+    )
+}
+
+/// SQLite's `quick_check` result is backend-controlled text and may contain
+/// page details or injected secrets. Classify it without copying that text
+/// into operator output; the summary already identifies the failed check.
+fn sqlite_integrity_details(result: &str) -> &'static str {
+    if result.trim().is_empty() {
+        "SQLite quick_check returned an empty non-ok result; inspect the o3kd journal for the backend-specific cause"
+    } else if result.lines().count() > 1 {
+        "SQLite quick_check returned a multi-line integrity failure; inspect the o3kd journal for the backend-specific cause"
+    } else {
+        "SQLite quick_check returned a non-ok integrity result; inspect the o3kd journal for the backend-specific cause"
+    }
+}
+
+/// The PostgreSQL profile is selected but o3kd.env gives no database URL.
+fn postgres_url_missing(id: &str) -> Check {
+    Check::new(
+        id,
+        Category::Database,
+        CheckStatus::Fail,
+        "PostgreSQL backend is configured without a database URL",
+    )
+    .with_actions(o3kd_actions())
+}
+
 /// `database.accessible`: the database file must exist and open read-only.
 pub async fn check_accessible(ctx: &Context) -> Check {
     if ctx.is_postgres() {
-        return Check::new(
-            "database.accessible",
-            Category::Database,
-            CheckStatus::Pass,
-            "database backend is PostgreSQL (configured)",
-        );
+        let Some(url) = ctx.database_url() else {
+            return postgres_url_missing("database.accessible");
+        };
+        return match ctx.db.postgres_reachable(url).await {
+            Ok(()) => Check::new(
+                "database.accessible",
+                Category::Database,
+                CheckStatus::Pass,
+                "PostgreSQL store answered a read-only query",
+            ),
+            Err(_) => Check::new(
+                "database.accessible",
+                Category::Database,
+                CheckStatus::Fail,
+                "PostgreSQL store is unreachable",
+            )
+            .with_details(database_error_details("PostgreSQL read-only connection"))
+            .with_actions(o3kd_actions()),
+        };
     }
     let path = ctx.database_path();
     if !ctx.exec.is_regular_file(&path) {
@@ -39,13 +85,13 @@ pub async fn check_accessible(ctx: &Context) -> Check {
             CheckStatus::Pass,
             "database file is present and readable",
         ),
-        Err(error) => Check::new(
+        Err(_error) => Check::new(
             "database.accessible",
             Category::Database,
             CheckStatus::Fail,
             "database not readable",
         )
-        .with_details(error)
+        .with_details(database_error_details("database access"))
         .with_actions(o3kd_actions()),
     }
 }
@@ -53,12 +99,45 @@ pub async fn check_accessible(ctx: &Context) -> Check {
 /// `database.integrity`: `PRAGMA quick_check` must report `ok`.
 pub async fn check_integrity(ctx: &Context) -> Check {
     if ctx.is_postgres() {
-        return Check::new(
-            "database.integrity",
-            Category::Database,
-            CheckStatus::Pass,
-            "PostgreSQL schema migrations verified",
-        );
+        let Some(url) = ctx.database_url() else {
+            return postgres_url_missing("database.integrity");
+        };
+        return match ctx.db.postgres_migration_counts(url).await {
+            Ok(counts) if counts.failed > 0 => Check::new(
+                "database.integrity",
+                Category::Database,
+                CheckStatus::Fail,
+                format!(
+                    "PostgreSQL records {} failed schema migration(s)",
+                    counts.failed
+                ),
+            )
+            .with_actions(o3kd_actions()),
+            Ok(counts) if counts.applied == 0 => Check::new(
+                "database.integrity",
+                Category::Database,
+                CheckStatus::Fail,
+                "no PostgreSQL schema migrations are recorded",
+            )
+            .with_actions(o3kd_actions()),
+            Ok(counts) => Check::new(
+                "database.integrity",
+                Category::Database,
+                CheckStatus::Pass,
+                format!(
+                    "PostgreSQL records {} schema migration(s) and none failed",
+                    counts.applied
+                ),
+            ),
+            Err(_) => Check::new(
+                "database.integrity",
+                Category::Database,
+                CheckStatus::Fail,
+                "PostgreSQL schema migration state is unreadable",
+            )
+            .with_details(database_error_details("PostgreSQL migration state query"))
+            .with_actions(o3kd_actions()),
+        };
     }
     let path = ctx.database_path();
     if !ctx.exec.is_regular_file(&path) {
@@ -82,18 +161,19 @@ pub async fn check_integrity(ctx: &Context) -> Check {
             CheckStatus::Fail,
             "corrupt SQLite database",
         )
-        .with_details(format!("PRAGMA quick_check reported: {result}"))
+        .with_details(sqlite_integrity_details(&result))
         .with_actions(vec![
             "journalctl -u o3kd -n 100".to_owned(),
             "back up the database file before any operator action".to_owned(),
         ]),
-        Err(error) => internal_failure(
+        Err(_error) => Check::new(
             "database.integrity",
             Category::Database,
-            "SQLite integrity",
-            &error,
-            o3kd_actions(),
-        ),
+            CheckStatus::Fail,
+            "SQLite integrity check unavailable",
+        )
+        .with_details(database_error_details("SQLite integrity check"))
+        .with_actions(o3kd_actions()),
     }
 }
 
@@ -144,13 +224,13 @@ pub async fn check_wal_mode(ctx: &Context) -> Check {
             format!("unexpected journal mode {mode}"),
         )
         .with_actions(o3kd_actions()),
-        Err(error) => Check::new(
+        Err(_error) => Check::new(
             "database.wal_mode",
             Category::Database,
             CheckStatus::Fail,
             "journal mode is unreadable",
         )
-        .with_details(error)
+        .with_details(database_error_details("SQLite journal mode query"))
         .with_actions(o3kd_actions()),
     }
 }
@@ -278,6 +358,96 @@ mod tests {
         context_with(exec, FakeHttp::healthy(), db, true, true)
     }
 
+    const POSTGRES_URL: &str = "postgres://o3k:pg-sentinel-secret@db.example/o3k";
+
+    fn postgres_context(db: FakeDb, url: Option<&str>) -> Context {
+        let mut ctx = context(FakeExec::healthy(), db);
+        ctx.o3kd_env
+            .insert("O3K_DATABASE_BACKEND".to_owned(), "postgres".to_owned());
+        if let Some(url) = url {
+            ctx.o3kd_env
+                .insert("O3K_DATABASE_URL".to_owned(), url.to_owned());
+        }
+        ctx
+    }
+
+    fn assert_secret_safe(check: &Check) {
+        let rendered = format!(
+            "{} {} {:?}",
+            check.summary,
+            check.details.as_deref().unwrap_or_default(),
+            check.recommended_actions
+        );
+        assert!(!rendered.contains("pg-sentinel-secret"), "{rendered}");
+        assert!(!rendered.contains("db.example"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn postgres_checks_pass_only_after_real_queries() {
+        let ctx = postgres_context(FakeDb::healthy(), Some(POSTGRES_URL));
+        let accessible = check_accessible(&ctx).await;
+        assert_eq!(accessible.status, CheckStatus::Pass);
+        let integrity = check_integrity(&ctx).await;
+        assert_eq!(integrity.status, CheckStatus::Pass);
+        assert!(integrity.summary.contains("none failed"));
+    }
+
+    #[tokio::test]
+    async fn unreachable_postgres_fails_both_checks_without_leaking_the_url() {
+        let db = FakeDb {
+            postgres_reachable: Err("connection refused to db.example".to_owned()),
+            postgres_migrations: Err("connection refused to db.example".to_owned()),
+            ..FakeDb::healthy()
+        };
+        let ctx = postgres_context(db, Some(POSTGRES_URL));
+        for check in [check_accessible(&ctx).await, check_integrity(&ctx).await] {
+            assert_eq!(check.status, CheckStatus::Fail, "{}", check.id);
+            assert!(!check.recommended_actions.is_empty(), "{}", check.id);
+            assert_secret_safe(&check);
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_without_url_fails_both_checks() {
+        let ctx = postgres_context(FakeDb::healthy(), None);
+        for check in [check_accessible(&ctx).await, check_integrity(&ctx).await] {
+            assert_eq!(check.status, CheckStatus::Fail, "{}", check.id);
+            assert!(
+                check.summary.contains("without a database URL"),
+                "{}",
+                check.id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_or_missing_postgres_migrations_fail_integrity() {
+        for (counts, expected) in [
+            (
+                crate::db::MigrationCounts {
+                    applied: 40,
+                    failed: 1,
+                },
+                "1 failed schema migration",
+            ),
+            (
+                crate::db::MigrationCounts {
+                    applied: 0,
+                    failed: 0,
+                },
+                "no PostgreSQL schema migrations",
+            ),
+        ] {
+            let db = FakeDb {
+                postgres_migrations: Ok(counts),
+                ..FakeDb::healthy()
+            };
+            let check = check_integrity(&postgres_context(db, Some(POSTGRES_URL))).await;
+            assert_eq!(check.status, CheckStatus::Fail);
+            assert!(check.summary.contains(expected), "{}", check.summary);
+        }
+    }
+
     #[tokio::test]
     async fn accessible_fails_when_database_missing() {
         let mut exec = FakeExec::healthy();
@@ -289,6 +459,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inaccessible_database_error_is_secret_safe_in_json_and_human_output() {
+        let sentinel = "postgres://user:sentinel-secret@db.example/o3k";
+        let mut db = FakeDb::healthy();
+        db.journal_mode = Err(sentinel.to_owned());
+        db.quick_check = Err(sentinel.to_owned());
+
+        let ctx = context(FakeExec::healthy(), db);
+        let checks = vec![
+            check_accessible(&ctx).await,
+            check_integrity(&ctx).await,
+            check_wal_mode(&ctx).await,
+        ];
+        assert!(checks.iter().all(|check| check.status == CheckStatus::Fail));
+        assert!(
+            checks
+                .iter()
+                .all(|check| !check.recommended_actions.is_empty())
+        );
+
+        let report = crate::output::Report {
+            version: "test".to_owned(),
+            overall_status: crate::output::OverallStatus::Unhealthy,
+            timestamp: "2026-01-01T00:00:00Z".to_owned(),
+            checks,
+        };
+        let serialized = serde_json::to_string(&report);
+        assert!(serialized.is_ok());
+        let json = serialized.unwrap_or_default();
+        let human = report.render_human();
+        assert!(!json.contains(sentinel));
+        assert!(!human.contains(sentinel));
+    }
+
+    #[tokio::test]
     async fn integrity_fails_when_corrupt() {
         let mut db = FakeDb::healthy();
         db.quick_check = Ok(
@@ -297,7 +501,34 @@ mod tests {
         let check = check_integrity(&context(FakeExec::healthy(), db)).await;
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.summary.contains("corrupt"));
+        assert!(
+            check
+                .details
+                .as_deref()
+                .is_some_and(|details| details.contains("multi-line"))
+        );
         assert!(!check.recommended_actions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn integrity_non_ok_result_is_secret_safe_and_classified() {
+        let sentinel = "sqlite://user:sentinel-secret@db.example/control";
+        let mut db = FakeDb::healthy();
+        db.quick_check = Ok(format!("*** {sentinel} ***"));
+
+        let check = check_integrity(&context(FakeExec::healthy(), db)).await;
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(
+            check.details.as_deref(),
+            Some(
+                "SQLite quick_check returned a non-ok integrity result; inspect the o3kd journal for the backend-specific cause"
+            )
+        );
+        let serialized = serde_json::to_string(&check);
+        assert!(serialized.is_ok(), "check serialization failed");
+        let json = serialized.unwrap_or_default();
+        assert!(!json.contains(sentinel));
     }
 
     #[tokio::test]
