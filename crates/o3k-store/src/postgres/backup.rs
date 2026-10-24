@@ -1145,9 +1145,11 @@ async fn live_catalog_objects(connection: &mut PgConnection) -> Result<LiveCatal
         reason: "catalog-inspection-failed",
     })?;
     let functions = sqlx::query_scalar::<_, String>(
-        "SELECT p.proname FROM pg_proc p \
+        "SELECT p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' \
+         FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = 'public' AND p.prokind IN ('f', 'p') ORDER BY p.proname",
+         WHERE n.nspname = 'public' AND p.prokind IN ('f', 'p') \
+         ORDER BY p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)",
     )
     .fetch_all(&mut *connection)
     .await
@@ -1155,10 +1157,11 @@ async fn live_catalog_objects(connection: &mut PgConnection) -> Result<LiveCatal
         reason: "catalog-inspection-failed",
     })?;
     let triggers = sqlx::query_scalar::<_, String>(
-        "SELECT t.tgname FROM pg_trigger t \
+        "SELECT c.relname || '.' || t.tgname FROM pg_trigger t \
          JOIN pg_class c ON c.oid = t.tgrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'public' AND NOT t.tgisinternal ORDER BY t.tgname",
+         WHERE n.nspname = 'public' AND NOT t.tgisinternal \
+         ORDER BY c.relname, t.tgname",
     )
     .fetch_all(&mut *connection)
     .await
@@ -1188,14 +1191,30 @@ fn baseline_sets(inventory: &[Value]) -> Result<LiveCatalog, BarrierError> {
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if !valid_identifier(name) {
-                return fail("state-inventory-invalid");
-            }
             match kind {
-                "table" => catalog.tables.push(name.to_owned()),
-                "index" => catalog.indexes.push(name.to_owned()),
+                // Tables and indexes are interpolated by later checks, so they
+                // must remain plain identifiers.
+                "table" => {
+                    if !valid_identifier(name) {
+                        return fail("state-inventory-invalid");
+                    }
+                    catalog.tables.push(name.to_owned());
+                }
+                "index" => {
+                    if !valid_identifier(name) {
+                        return fail("state-inventory-invalid");
+                    }
+                    catalog.indexes.push(name.to_owned());
+                }
+                // D13 keys functions by `name(identity-arguments)` and
+                // triggers by `<table>.<name>`. These values are compared,
+                // never interpolated.
                 "function" => catalog.functions.push(name.to_owned()),
                 "trigger" => catalog.triggers.push(name.to_owned()),
+                // Explicit constraints/views/sequences are covered by the D13
+                // migration-tree drift gate; this live barrier check compares
+                // the object identities it can safely classify.
+                "constraint" | "view" | "sequence" => continue,
                 _ => return fail("state-inventory-invalid"),
             }
         }
@@ -1313,9 +1332,21 @@ mod tests {
         assert_eq!(sets.indexes, vec!["idx_resources"]);
         assert_eq!(sets.functions, vec!["f"]);
         assert_eq!(sets.triggers, vec!["t"]);
-        let bad =
-            vec![json!({"postgres_objects": [{"kind": "view", "schema": "public", "name": "v"}]})];
+        // D13 makes views/constraints/sequences valid inventory kinds; the
+        // barrier set comparison safely skips them. A kind it cannot classify
+        // must still fail closed.
+        let bad = vec![json!({
+            "postgres_objects": [{"kind": "extension", "schema": "public", "name": "x"}]
+        })];
         assert!(baseline_sets(&bad).is_err());
+        let skipped = vec![json!({
+            "postgres_objects": [
+                {"kind": "view", "schema": "public", "name": "v"},
+                {"kind": "constraint", "schema": "public", "name": "c"},
+                {"kind": "sequence", "schema": "public", "name": "s"}
+            ]
+        })];
+        assert!(baseline_sets(&skipped).is_ok());
     }
 
     #[test]

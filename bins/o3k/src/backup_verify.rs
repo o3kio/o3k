@@ -233,11 +233,14 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         Err(_) => return BackupVerifyOutcome::recoverable("store-lock-unavailable"),
     };
 
-    let trust = match BackupTrustConfig::load(&default_trust_config_path_for(
+    let trust = match BackupTrustConfig::load_for_data_dir(
+        &default_trust_config_path_for(
+            &data_dir,
+            std::env::var_os(crate::backup_trust::TRUST_CONFIG_ENV),
+            std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+        ),
         &data_dir,
-        std::env::var_os(crate::backup_trust::TRUST_CONFIG_ENV),
-        std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
-    )) {
+    ) {
         Ok(config) => config,
         Err(error) => return trust_failure(error),
     };
@@ -347,11 +350,14 @@ fn execute_postgres(args: &BackupVerifyArgs, data_dir: &Path) -> BackupVerifyOut
         data_dir,
         std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
     );
-    let trust = match BackupTrustConfig::load(&default_trust_config_path_for(
+    let trust = match BackupTrustConfig::load_for_data_dir(
+        &default_trust_config_path_for(
+            data_dir,
+            std::env::var_os(crate::backup_trust::TRUST_CONFIG_ENV),
+            std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+        ),
         data_dir,
-        std::env::var_os(crate::backup_trust::TRUST_CONFIG_ENV),
-        std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
-    )) {
+    ) {
         Ok(config) => config,
         Err(error) => return trust_failure(error),
     };

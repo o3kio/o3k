@@ -74,11 +74,11 @@
 //!    rejected the handoff, a live controller during phase 2, a missing or
 //!    changed already-published destination, or an invalid signing response)
 //! 3  recoverable failure, including `signing-request-expired` (safe abort),
-//!    `operation-busy` (a concurrent phase 2), `space-unavailable` (D9 boundary
-//!    re-check), and a failed capture/finalization. Once the interrupted-backup
-//!    marker is written it is kept on failure so daemon preflight stays blocked
-//!    until an operator clears it, and the staging directory is kept for
-//!    inspection (except on the safe abort).
+//!    `operation-busy` (a concurrent phase 2), `space-unavailable` (D9 hold
+//!    allocation or boundary re-check), and a failed capture/finalization. Once
+//!    the interrupted-backup marker is written it is kept on failure so daemon
+//!    preflight stays blocked until an operator clears it, and the staging
+//!    directory is kept for inspection (except on the safe abort).
 //! 4  unknown/quarantined outcome (source immutability could not be proven, the
 //!    capture/publication outcome is uncertain, or post-publication cleanup /
 //!    safe abort could not be proven)
@@ -149,8 +149,9 @@ use crate::{
     },
     backup_pg::{self, PgBackupConfig},
     backup_reservation::{
-        MIN_RESERVATION, Reservation, ReservationError, compute_reservation, preflight_reservation,
-        preflight_reservation_bytes,
+        FORMAT_OVERHEAD_BOUND, MIN_RESERVATION, Reservation, ReservationError, StagingReservation,
+        compute_reservation, preflight_reservation, preflight_reservation_bytes,
+        staging_tree_bytes,
     },
     output::now_utc_rfc3339,
 };
@@ -255,6 +256,11 @@ struct ExecutorControls {
     /// resolves the sibling `o3kd` of the running `o3k` binary.
     #[cfg(test)]
     expected_daemon_exe: Option<PathBuf>,
+    /// Test-only path where the executor records the reservation it acquired.
+    /// It proves the hold existed before capture without exposing it in
+    /// production output.
+    #[cfg(test)]
+    hold_observation: Option<PathBuf>,
 }
 
 // The manual implementation exists only because the test build seeds the
@@ -270,6 +276,8 @@ impl Default for ExecutorControls {
             expected_daemon_exe: std::env::current_exe()
                 .ok()
                 .and_then(|path| fs::canonicalize(path).ok()),
+            #[cfg(test)]
+            hold_observation: None,
         }
     }
 }
@@ -623,6 +631,11 @@ fn execute_with_data_dir(
                     Ok(record) => record,
                     Err(outcome) => return outcome,
                 };
+                // Phase 2 acquires a fresh D9 hold for its staging tree.
+                // Serialise it with the other real-filesystem reservation
+                // tests so their free-space measurements stay meaningful.
+                #[cfg(test)]
+                let _staging_test_lock = crate::backup_reservation::staging_test_lock();
                 let outcome = complete_existing(
                     args,
                     environment,
@@ -776,7 +789,7 @@ fn complete_existing(
         await_policy: controls.await_policy,
         store_backend,
     };
-    match complete_staged(&inputs) {
+    match complete_staged(&inputs, None) {
         Ok(published) => BackupCreateOutcome {
             exit_code: 0,
             json: published_json(
@@ -943,10 +956,11 @@ fn preflight_before_handoff(
 
 /// Maps a D9 reservation failure to the SPEC-0050 exit classification.
 fn reservation_failure(error: ReservationError) -> ArtifactFailure {
-    if matches!(error, ReservationError::SpaceUnavailable { .. }) {
-        ArtifactFailure::recoverable(error.reason())
-    } else {
-        ArtifactFailure::rejected(error.measurement_code().unwrap_or_else(|| error.reason()))
+    match error {
+        ReservationError::SpaceUnavailable { .. }
+        | ReservationError::StagedExceedsReservation { .. }
+        | ReservationError::StagingHoldUnavailable => ArtifactFailure::recoverable(error.reason()),
+        _ => ArtifactFailure::rejected(error.measurement_code().unwrap_or_else(|| error.reason())),
     }
 }
 
@@ -1013,6 +1027,11 @@ fn execute_inner(
     controls: &ExecutorControls,
 ) -> BackupCreateOutcome {
     let operation_id = args.operation_id;
+    // Real-filesystem tests measure f_bavail before/after holding the
+    // reservation; serialise capture tests so a parallel test's hold cannot
+    // distort those measurements. Production is unaffected.
+    #[cfg(test)]
+    let _staging_test_lock = crate::backup_reservation::staging_test_lock();
     let deadline = Instant::now()
         .checked_add(OVERALL_DEADLINE)
         .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
@@ -1288,6 +1307,34 @@ fn execute_inner(
     }
     let staging_fd_path = PathBuf::from(format!("/proc/self/fd/{}", staging_fd.as_raw_fd()));
     let staged_snapshot_path = staging_fd_path.join(SNAPSHOT_FILE_NAME);
+    // D9 enforcement starts before the first capture byte: allocate the full
+    // remaining reservation as a non-sparse hold file. The snapshot write
+    // then releases only its own upper bound, so the rest stays unavailable
+    // to any concurrent writer.
+    let mut reservation_hold =
+        match StagingReservation::acquire(&staging_fd_path, reservation.reserved_bytes, 0) {
+            Ok(hold) => hold,
+            Err(error) => {
+                return failure_outcome(operation_id, reservation_failure(error));
+            }
+        };
+    let snapshot_upper = match fs::symlink_metadata(&db_path) {
+        Ok(metadata) => metadata.len(),
+        Err(_) => {
+            mark_operation_aborted(&data_dir, &journal);
+            return BackupCreateOutcome::recoverable(operation_id, "source-unavailable");
+        }
+    };
+    if let Err(error) =
+        reservation_hold.prepare_for_write(snapshot_upper.saturating_add(FORMAT_OVERHEAD_BOUND))
+    {
+        mark_operation_aborted(&data_dir, &journal);
+        return failure_outcome(operation_id, reservation_failure(error));
+    }
+    #[cfg(test)]
+    if let Some(path) = controls.hold_observation.as_deref() {
+        let _ = fs::write(path, format!("{}\n", reservation.reserved_bytes));
+    }
     match runtime.block_on(store.backup_to_file(&staged_snapshot_path)) {
         Ok(()) => {}
         Err(StoreError::BackupPublicationUncertain) => {
@@ -1304,6 +1351,11 @@ fn execute_inner(
             mark_operation_aborted(&data_dir, &journal);
             return BackupCreateOutcome::recoverable(operation_id, "capture-failed");
         }
+    }
+    if let Err(error) = reservation_hold.reconcile(staging_tree_bytes(&staging_path)) {
+        let _ = fs::remove_file(&staged_snapshot_path);
+        mark_operation_aborted(&data_dir, &journal);
+        return failure_outcome(operation_id, reservation_failure(error));
     }
 
     if Instant::now() >= deadline {
@@ -1362,6 +1414,15 @@ fn execute_inner(
         mark_operation_aborted(&data_dir, &journal);
         return BackupCreateOutcome::recoverable(operation_id, "deadline-exceeded");
     }
+    if let Err(error) = reservation_hold.prepare_for_write(
+        reservation
+            .source_bytes
+            .saturating_add(FORMAT_OVERHEAD_BOUND),
+    ) {
+        let _ = fs::remove_file(&staged_snapshot_path);
+        mark_operation_aborted(&data_dir, &journal);
+        return failure_outcome(operation_id, reservation_failure(error));
+    }
     let capture = CaptureInputs {
         config: &config,
         operation_id,
@@ -1402,6 +1463,10 @@ fn execute_inner(
         // disk.
         mark_operation_aborted(&data_dir, &journal);
         return BackupCreateOutcome::recoverable(operation_id, "snapshot-cleanup-failed");
+    }
+    if let Err(error) = reservation_hold.reconcile(staging_tree_bytes(&staging_path)) {
+        mark_operation_aborted(&data_dir, &journal);
+        return failure_outcome(operation_id, reservation_failure(error));
     }
 
     journal.phase = BackupOperationPhase::Staged;
@@ -1449,7 +1514,7 @@ fn execute_inner(
         await_policy: controls.await_policy,
         store_backend: crate::backup::BACKEND_SQLITE,
     };
-    let outcome = match complete_staged(&completion) {
+    let outcome = match complete_staged(&completion, Some(&mut reservation_hold)) {
         Ok(published) => BackupCreateOutcome {
             exit_code: 0,
             json: published_json(
@@ -1708,6 +1773,27 @@ fn execute_inner_postgres(
         in_flight_operation_ids: &facts.in_flight_operation_ids,
         runtime: &runtime,
     };
+    // D9 enforcement: hold the remaining reservation while the artifact is
+    // staged. The dump file already occupies part of the staging tree, so it
+    // is the `staged` term; release the write bound just before staging and
+    // reconcile back afterwards. The guard stays alive through publication.
+    let mut reservation_hold = match StagingReservation::acquire(
+        &staging_fd_path,
+        reservation.reserved_bytes,
+        staging_tree_bytes(&staging_path),
+    ) {
+        Ok(hold) => hold,
+        Err(error) => {
+            let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            return failure_outcome(operation_id, reservation_failure(error));
+        }
+    };
+    if let Err(error) = reservation_hold.prepare_for_write(reservation_hold.held_bytes()) {
+        let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+        abort_before_capture(&data_dir, &marker_path, &journal);
+        return failure_outcome(operation_id, reservation_failure(error));
+    }
     let staged_result = stage_capture(&capture_inputs);
     let snapshot_cleanup = fs::remove_file(&dump_path)
         .and_then(|()| fs::File::open(&staging_fd_path).and_then(|directory| directory.sync_all()));
@@ -1725,6 +1811,11 @@ fn execute_inner_postgres(
         return BackupCreateOutcome::recoverable(operation_id, "snapshot-cleanup-failed");
     }
 
+    if let Err(error) = reservation_hold.reconcile(staging_tree_bytes(&staging_path)) {
+        let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+        abort_before_capture(&data_dir, &marker_path, &journal);
+        return failure_outcome(operation_id, reservation_failure(error));
+    }
     journal.phase = BackupOperationPhase::Staged;
     journal.backup_id = staged.backup_id.clone();
     journal.request_sha256 = Some(staged.request_sha256.clone());
@@ -1765,7 +1856,7 @@ fn execute_inner_postgres(
         await_policy: controls.await_policy,
         store_backend: crate::backup::BACKEND_POSTGRESQL,
     };
-    let outcome = match complete_staged(&completion) {
+    let outcome = match complete_staged(&completion, Some(&mut reservation_hold)) {
         Ok(published) => BackupCreateOutcome {
             exit_code: 0,
             json: published_json(
@@ -1962,7 +2053,9 @@ mod tests {
         SIGNING_REQUEST_FILE, SIGNING_REQUEST_FORMAT, SIGNING_RESPONSE_FILE,
         SIGNING_RESPONSE_FORMAT, snapshot_facts,
     };
-    use crate::backup_reservation::{RESERVATION_CAP, SOURCE_PLAINTEXT_BOUND};
+    use crate::backup_reservation::{
+        MIN_RESERVATION, RESERVATION_CAP, SOURCE_PLAINTEXT_BOUND, STAGING_HOLD_FILE,
+    };
     use crate::backup_trust::{BackupTrustConfig, site_and_installation_ids};
     use crate::upgrade::release_identity::BackupReleaseIdentity;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -2962,6 +3055,9 @@ mod tests {
         let environment = fixture.environment();
 
         // Phase 1: authenticated handoff, capture, staging, signing request.
+        let observation = root.0.join("reservation-observation");
+        let mut controls = stop_after_staging_controls();
+        controls.hold_observation = Some(observation.clone());
         let server = spawn_handoff(data_dir.clone())?;
         let phase_one = execute_inner(
             &BackupCreateArgs {
@@ -2973,7 +3069,7 @@ mod tests {
             data_dir.clone(),
             now_utc_rfc3339(),
             &environment,
-            &stop_after_staging_controls(),
+            &controls,
         );
         server
             .join()
@@ -2990,6 +3086,11 @@ mod tests {
         );
         assert_eq!(phase_one.json["operation_id"], operation_id.to_string());
         assert_eq!(phase_one.json["backup_id"], operation_id.to_string());
+        assert_eq!(
+            fs::read_to_string(&observation)?.trim().parse::<u64>().ok(),
+            Some(MIN_RESERVATION),
+            "the enforced hold must exist at the computed reservation before capture"
+        );
         let request_path = PathBuf::from(
             phase_one.json["signing_request"]
                 .as_str()
@@ -3017,6 +3118,10 @@ mod tests {
         assert!(journal.request_sha256.is_some());
         let staging_path = PathBuf::from(&journal.staging_path);
         assert!(staging_path.is_dir());
+        assert!(
+            !staging_path.join(STAGING_HOLD_FILE).exists(),
+            "phase 1 must release the staging reservation when it returns"
+        );
         // F5: the plaintext snapshot is unlinked as soon as the encrypted
         // artifact is staged; only the artifact and the request remain.
         assert!(
@@ -3123,7 +3228,8 @@ mod tests {
         );
 
         // Real verification against the installed release identity.
-        let trust = BackupTrustConfig::load(&fixture.trust_config).expect("trust document");
+        let trust = BackupTrustConfig::load_for_data_dir(&fixture.trust_config, &data_dir)
+            .expect("trust document");
         let recipient = trust.load_recipient_private_key().expect("recipient key");
         let verifying_key = fixture.signing.verifying_key();
         let keys = ArtifactVerificationKeys {
@@ -3347,6 +3453,10 @@ mod tests {
         assert_eq!(phase_one.exit_code, EXIT_RECOVERABLE, "{}", phase_one.json);
         let staging = dest.join(format!("{OPERATION_STAGING_PREFIX}{operation_id}"));
         assert!(staging.is_dir());
+        assert!(
+            !staging.join(STAGING_HOLD_FILE).exists(),
+            "phase 1 releases the hold before the separate phase-2 invocation"
+        );
 
         let aborted = execute_with_data_dir(
             &BackupCreateArgs {

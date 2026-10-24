@@ -177,22 +177,48 @@ fn expected_objects(inventory: &[serde_json::Value]) -> Result<ExpectedObjects, 
                 .get("name")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            if schema != "public" || !valid_identifier(name) {
+            if schema != "public" {
                 return Err(PgToolError::new("toc-inventory-invalid"));
             }
             match kind {
                 "table" => {
+                    if !valid_identifier(name) {
+                        return Err(PgToolError::new("toc-inventory-invalid"));
+                    }
                     expected.tables.insert(name.to_owned());
                 }
                 "index" => {
+                    if !valid_identifier(name) {
+                        return Err(PgToolError::new("toc-inventory-invalid"));
+                    }
                     expected.indexes.insert(name.to_owned());
                 }
+                // D13 keys functions by `name(identity-arguments)` and
+                // triggers by `<table>.<name>`. The TOC carries the bare
+                // function name / trigger name, so reduce to that form.
                 "function" => {
-                    expected.functions.insert(name.to_owned());
+                    let (base, arguments) = name
+                        .split_once('(')
+                        .ok_or_else(|| PgToolError::new("toc-inventory-invalid"))?;
+                    if !arguments.ends_with(')') || !valid_identifier(base) {
+                        return Err(PgToolError::new("toc-inventory-invalid"));
+                    }
+                    expected.functions.insert(base.to_owned());
                 }
                 "trigger" => {
-                    expected.triggers.insert(name.to_owned());
+                    let base = name
+                        .rsplit_once('.')
+                        .map(|(_, base)| base)
+                        .ok_or_else(|| PgToolError::new("toc-inventory-invalid"))?;
+                    if !valid_identifier(base) {
+                        return Err(PgToolError::new("toc-inventory-invalid"));
+                    }
+                    expected.triggers.insert(base.to_owned());
                 }
+                // Explicit constraints/views/sequences are covered by the D13
+                // migration-tree drift gate; the TOC classifier still scopes
+                // constraint entries to expected tables.
+                "constraint" | "view" | "sequence" => continue,
                 _ => return Err(PgToolError::new("toc-inventory-invalid")),
             }
         }
@@ -435,8 +461,8 @@ mod tests {
                 {"kind": "table", "schema": "public", "name": "resources"},
                 {"kind": "table", "schema": "public", "name": "operations"},
                 {"kind": "index", "schema": "public", "name": "idx_resources"},
-                {"kind": "function", "schema": "public", "name": "o3k_fn"},
-                {"kind": "trigger", "schema": "public", "name": "operations_trigger"}
+                {"kind": "function", "schema": "public", "name": "o3k_fn()"},
+                {"kind": "trigger", "schema": "public", "name": "operations.operations_trigger"}
             ]
         })]
     }

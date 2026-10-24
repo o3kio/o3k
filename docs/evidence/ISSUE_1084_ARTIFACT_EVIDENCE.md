@@ -839,8 +839,8 @@ data-directory identities (and therefore the artifact digest).
   `std::process::exit` hooks, not SIGKILL; it exercises journal durability and
   replay ordering, not filesystem-level torn writes. The handoff campaign keeps
   its SIGKILL coverage for the lock-transfer window.
-- **D9 enforcement is preflight plus boundary re-checks, not a quota.** See the
-  non-claim below.
+- **D9 enforcement is a non-sparse hold file plus preflight/boundary checks,
+  not a filesystem quota.** See the non-claim below.
 - **`recorded_unknown` is truthful, not a drain proof.** If the quiesced
   snapshot contains a non-terminal Operation, the manifest says
   `recorded_unknown` and the ids are preserved in the capture metadata; the
@@ -867,12 +867,18 @@ corresponding claim can be widened; none is silently resolved here.
 
 - **D9 staging quota vs. preflight + boundary re-checks.** The accepted D9 text
   says "enforce as staging quota". The implementation measures the source after
-  the truncating checkpoint, computes `max(2×S + 1 GiB, 6 GiB)` (cap 9 GiB), and
-  re-checks `f_bavail × f_frsize` before capture, before finalize and before
-  publication. It fails closed (`space-unavailable`, exit 3) and never
-  truncates, but it is **not** a filesystem quota: a concurrent writer can
-  consume space between checks. A human contract decision is required either to
-  accept this enforcement model as satisfying D9 or to amend the D9 wording.
+  the truncating checkpoint, computes `max(2×S + 1 GiB, 6 GiB)` (cap 9 GiB),
+  keeps the `f_bavail × f_frsize` preflight/boundary checks, and additionally
+  creates a private hold file in the staging directory and allocates the
+  remaining reservation with non-sparse `fallocate(2)`. The guard releases only
+  the upper bound of the next phase write and reconciles back to
+  `reserved - staged`; a failed allocation fails closed (`space-unavailable`,
+  exit 3) and never truncates the reserve. It is not a filesystem quota: bytes
+  released immediately before a phase write are briefly available to a
+  concurrent writer, although every other part of the reservation remains
+  allocated to this operation. The hold is truncated and unlinked on every drop
+  path (success, error, safe abort), and a restarted phase 2 truncates a stale
+  hold left by a crash before re-allocating.
 - **D2 trust-root lifecycle/rotation.** Only a static configured trust document
   with a static `revoked_key_ids` list is implemented. There is no root rotation,
   key ceremony, revocation-distribution endpoint, sequence/`next_update`
@@ -967,12 +973,16 @@ corresponding claim can be widened; none is silently resolved here.
 - **No Kubernetes/HA, edge-profile, cross-cloud or footprint claim.** The
   evidence is one host running the SQLite demo/TestLab profile.
 - **D9 enforcement scope.** The accepted reservation (`max(2×S + 1 GiB,
-  6 GiB)`, cap 9 GiB) is a preflight plus boundary re-check against
-  `f_bavail × f_frsize`: once before capture (after the WAL checkpoint), once
-  before finalize and once before publication, each never lowering the reserve.
-  It is **not** a filesystem quota and does not prevent another process from
-  consuming the space between checks; a shortfall fails closed with exit 3
-  `space-unavailable` and nothing is truncated.
+  6 GiB)`, cap 9 GiB) is enforced by a private non-sparse hold file allocated
+  with `fallocate(2)` from before capture through verified publication or safe
+  abort, in addition to the `f_bavail × f_frsize` preflight and boundary
+  re-checks. The hold is reconciled so `held + staged <= reserved`; capacity
+  released for an imminent phase write is the residual concurrency window. It
+  is **not** a filesystem quota: no kernel filesystem-quota facility is used,
+  and a holder that crashes leaves the hold file behind until the restart path
+  truncates it or the staging tree is removed. A shortfall fails closed with
+  exit 3 `space-unavailable`, nothing is truncated, and the numeric limits are
+  unchanged.
 - **Option A wait semantics.** While waiting for the detached signature the
   controller cannot start (the denial marker and the store lock are held), so
   signing delays extend API downtime and may extend the recovery point
@@ -1017,19 +1027,29 @@ verification.
   marker are held across the signing wait and publication (Option A), so a
   systemd-managed controller restart during that window is downtime, not a
   transparent handoff. The wait is bounded by the request TTL.
-- **D9 is preflight plus re-checks, not a filesystem quota** (see above); a
-  concurrent writer can still consume space between checks.
+- **D9 is a hold file plus preflight/re-checks, not a filesystem quota** (see
+  above); capacity released for an imminent phase write can still be taken by a
+  concurrent writer in that window.
 - **D13 catalog coverage and the no-table SPEC/schema conflict.** The generated
-  inventory now covers SQLite tables/indexes/triggers and PostgreSQL
-  tables/indexes/triggers/functions, and capture compares the snapshot's live
-  `sqlite_master` (tables/indexes/views/triggers) against the baseline. It does
-  not emit views, sequences, explicit named constraints, PostgreSQL
-  `ALTER TABLE ADD COLUMN` effects, or a live PostgreSQL catalog comparison.
-  The contract requires `minItems: 1` for both object arrays, so a repository
-  with no table cannot be represented without either inventing a synthetic
-  object or amending the schema; the registry therefore keeps its current shape
-  (every repository owns at least one table) and this remains a SPEC/schema
-  conflict rather than an implemented no-table repository entry.
+  inventory now covers SQLite tables/views/sequences/indexes/triggers and
+  PostgreSQL tables/views/sequences/indexes/constraints/functions/triggers.
+  PostgreSQL `ALTER TABLE ADD/DROP/RENAME COLUMN` effects are merged into the
+  table definition, explicit named constraints are emitted as `constraint`
+  objects, functions are keyed by name plus normalized argument signature, and
+  triggers by table plus name. Generation proves every object is assigned to
+  exactly one repository. Capture compares the snapshot's live SQLite
+  `sqlite_master` catalog against the baseline, and a live PostgreSQL catalog
+  comparison (identity plus `pg_get_*` renderings) is available for migration
+  verification. Remaining limits: the live PostgreSQL comparison is
+  identity-only (it does not compare definition digests), it skips constraints
+  because `pg_constraint` cannot distinguish reviewed named constraints from
+  server-named implicit ones, and the committed baseline currently contains no
+  views or sequences because no reviewed migration creates one. The contract
+  still requires `minItems: 1` for both object arrays, so a repository with no
+  table cannot be represented without either inventing a synthetic object or
+  amending the schema; the registry therefore keeps its current shape (every
+  repository owns at least one table) and this remains a SPEC/schema conflict
+  rather than an implemented no-table repository entry.
 - **D2 trust-root rotation/lifecycle is not implemented.** Trust is a static
   configured document with a static `revoked_key_ids` list; there is no
   root-rotation, key-ceremony, or revocation-distribution workflow.

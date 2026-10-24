@@ -19,7 +19,7 @@
 use std::{
     fs,
     io::{self, Read, Write},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::Command,
@@ -30,6 +30,9 @@ use std::{
 
 use ed25519_dalek::SigningKey;
 use hpke::{Kem, Serializable, kem::X25519HkdfSha256};
+use o3k::backup_reservation::{
+    MIN_RESERVATION, STAGING_HOLD_FILE, StagingReservation, staging_tree_bytes,
+};
 use o3k_store::{BackupControlListener, ExpectedExecutor, StoreAccessLock, identity_tokens};
 use rustix::process::geteuid;
 use serde_json::Value;
@@ -350,6 +353,31 @@ fn crash_during_the_signing_wait_keeps_the_marker_and_staged_request() -> io::Re
     // `staged`, denial marker present, nothing published.
     let staging = dest.join(format!(".o3k-backup-artifact-{operation_id}"));
     assert!(staging.join("signing-request.json").is_file());
+    // D9: the crashed process left its non-sparse hold allocated. The hold
+    // plus the staged bytes covers the accepted reservation; the blocks are
+    // owned by the hold inode and no other writer can claim them.
+    let hold_path = staging.join(STAGING_HOLD_FILE);
+    assert!(hold_path.is_file(), "a crash leaves the reservation hold");
+    let hold_blocks = fs::metadata(&hold_path)?.blocks().saturating_mul(512);
+    let staged = staging_tree_bytes(&staging);
+    assert!(staged > 0, "the crash happened after staging");
+    assert!(
+        hold_blocks.saturating_add(staged) >= MIN_RESERVATION.saturating_sub(64 * 1024 * 1024),
+        "the crashed hold plus staged tree must cover the reservation"
+    );
+    // Restart path: acquiring the same reservation truncates the stale hold
+    // and re-allocates only the staged tree's remainder, never doubling it.
+    let restarted =
+        StagingReservation::acquire(&staging, MIN_RESERVATION, staged).map_err(io::Error::other)?;
+    assert_eq!(
+        restarted.held_bytes(),
+        MIN_RESERVATION.saturating_sub(staged)
+    );
+    drop(restarted);
+    assert!(
+        !hold_path.exists(),
+        "restart cleanup unlinks the stale reservation hold"
+    );
     assert!(!dest.join(format!("backup-{operation_id}.o3k")).exists());
     assert!(
         data_dir

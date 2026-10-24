@@ -23,6 +23,7 @@ mod governance;
 mod helpers;
 mod identity;
 mod image;
+mod live_catalog;
 mod metering;
 mod network;
 mod placement;
@@ -30,6 +31,8 @@ mod quota;
 mod relationship;
 mod topology;
 mod volume_attachment;
+
+pub(crate) use live_catalog::live_catalog_objects;
 
 impl PostgresStore {
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
