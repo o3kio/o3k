@@ -523,6 +523,33 @@ pub async fn apply_writer_barrier(
     Ok(())
 }
 
+/// Restores the reviewed role login modes after publication, safe abort or
+/// crash recovery: the dump role is disabled and every writer is enabled
+/// again. Role attributes are never changed.
+pub async fn restore_role_modes(
+    connection: &mut PgConnection,
+    policy: &RolePolicy,
+) -> Result<(), BarrierError> {
+    let dump = quote_ident(&policy.dump_role)?;
+    let restore = quote_ident(&policy.restore_role)?;
+    let mut statements = vec![
+        format!("ALTER ROLE {dump} NOLOGIN"),
+        format!("ALTER ROLE {restore} NOLOGIN"),
+    ];
+    for writer in &policy.writer_roles {
+        statements.push(format!("ALTER ROLE {} LOGIN", quote_ident(writer)?));
+    }
+    for statement in statements {
+        sqlx::query(&statement)
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| BarrierError {
+                reason: "role-mode-restore-failed",
+            })?;
+    }
+    Ok(())
+}
+
 /// Terminates every other session on the O3K database and verifies that only
 /// the control session remains.
 pub async fn terminate_other_sessions(

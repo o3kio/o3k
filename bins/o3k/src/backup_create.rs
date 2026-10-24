@@ -544,8 +544,22 @@ fn execute_with_data_dir(
                 );
             }
         };
-        if let Err(error) = runtime.block_on(backup_pg::ensure_admission_restored(&pg_config)) {
-            return BackupCreateOutcome::recoverable(operation_id, error.reason());
+        // Serialize crash recovery with any controller/other capture. If the
+        // lifetime lock is held, leave admission/role state untouched; the
+        // capture path below rejects `controller-active` instead of racing it.
+        match StoreAccessLock::acquire(&data_dir) {
+            Ok(recovery_lock) => {
+                if let Err(error) =
+                    runtime.block_on(backup_pg::ensure_admission_restored(&pg_config))
+                {
+                    return BackupCreateOutcome::recoverable(operation_id, error.reason());
+                }
+                drop(recovery_lock);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(_) => {
+                return BackupCreateOutcome::recoverable(operation_id, "store-lock-unavailable");
+            }
         }
     }
 
@@ -1643,8 +1657,13 @@ fn execute_inner_postgres(
             let restored = runtime
                 .block_on(backup_pg::ensure_admission_restored(&pg_config))
                 .is_ok();
+            // The guard already restored the admission file (so the saved-file
+            // signal is gone); reset the role modes unconditionally here.
+            let roles_restored = runtime
+                .block_on(backup_pg::reset_after_failed_capture(&pg_config))
+                .is_ok();
             abort_before_capture(&data_dir, &marker_path, &journal);
-            if !restored {
+            if !restored || !roles_restored {
                 return BackupCreateOutcome::unknown(operation_id, "admission-restore-unverified");
             }
             return failure_outcome(operation_id, postgres_failure(error.reason()));

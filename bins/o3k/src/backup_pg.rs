@@ -67,6 +67,9 @@ pub const CONFIG_ENV: &str = "O3K_PG_BACKUP_CONFIG";
 pub const CONFIG_RELATIVE_PATH: &str = "etc/o3k/backup-postgres.json";
 /// Bound for the policy document.
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+/// Sidecar proving the barrier changed role login modes. It survives a crash
+/// and is removed only after the reviewed modes are restored.
+const ROLE_MODES_SUFFIX: &str = ".o3k-pp6-role-modes";
 
 /// Stable PostgreSQL capture failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,6 +390,7 @@ pub async fn capture(
             .await?;
 
     pg_backup::apply_writer_barrier(&mut connection, &roles).await?;
+    mark_role_modes_armed(config)?;
     pg_backup::terminate_other_sessions(&mut connection, &config.database).await?;
     let guard = pg_backup::install_admission(&config.hba_path, &config.data_directory, &admission)?;
     pg_backup::reload_and_verify(&mut connection, &admission, guard.installed_sha256()).await?;
@@ -477,7 +481,41 @@ pub async fn restore_admission(
         .guard
         .restore_and_verify(&config.control_database_url)
         .await
-        .map_err(PgBackupError::from)
+        .map_err(PgBackupError::from)?;
+    restore_role_modes(config).await
+}
+
+/// Restores the reviewed role login modes after a failed capture whose guard
+/// already restored the admission file.
+pub async fn reset_after_failed_capture(config: &PgBackupConfig) -> Result<(), PgBackupError> {
+    restore_role_modes(config).await
+}
+
+fn role_modes_path(config: &PgBackupConfig) -> PathBuf {
+    let mut name = config.hba_path.as_os_str().to_owned();
+    name.push(ROLE_MODES_SUFFIX);
+    PathBuf::from(name)
+}
+
+fn mark_role_modes_armed(config: &PgBackupConfig) -> Result<(), PgBackupError> {
+    fs::write(
+        role_modes_path(config),
+        b"armed
+",
+    )
+    .map_err(|_| PgBackupError::new("role-modes-marker-write-failed"))
+}
+
+async fn restore_role_modes(config: &PgBackupConfig) -> Result<(), PgBackupError> {
+    let mut connection = connect_control_retry(&config.control_database_url).await?;
+    pg_backup::restore_role_modes(&mut connection, &config.role_policy())
+        .await
+        .map_err(PgBackupError::from)?;
+    match fs::remove_file(role_modes_path(config)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(PgBackupError::new("role-modes-marker-removal-failed")),
+    }
 }
 
 /// Crash-recovery entry point: restores any saved admission left by an
@@ -487,7 +525,16 @@ pub async fn restore_admission(
 pub async fn ensure_admission_restored(config: &PgBackupConfig) -> Result<bool, PgBackupError> {
     let restored = pg_backup::recover_saved_admission(&config.hba_path, &config.data_directory)
         .map_err(PgBackupError::from)?;
-    connect_control_retry(&config.control_database_url).await?;
+    let mut connection = connect_control_retry(&config.control_database_url).await?;
+    // A crash can leave the admission file and/or the role-mode marker. On a
+    // fresh run with neither, do not touch role modes: another capture may
+    // legitimately own them.
+    if restored || role_modes_path(config).exists() {
+        pg_backup::restore_role_modes(&mut connection, &config.role_policy())
+            .await
+            .map_err(PgBackupError::from)?;
+        let _ = fs::remove_file(role_modes_path(config));
+    }
     Ok(restored)
 }
 

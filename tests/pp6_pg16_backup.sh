@@ -49,6 +49,7 @@ PRISTINE_HBA="$WORK/pg_hba.pristine"
 cp "$HBA" "$PRISTINE_HBA"
 SAVED="$HBA.o3k-pp6-saved"
 SAVED_DIGEST="$HBA.o3k-pp6-saved.sha256"
+ROLE_MARKER="$HBA.o3k-pp6-role-modes"
 
 # ---------------------------------------------------------------------------
 # Matrix bookkeeping
@@ -65,7 +66,7 @@ record() { # record <PASS|FAIL|NOT-COVERED> <case> <detail>
 cleanup() {
     set +e
     if [[ -f "$PRISTINE_HBA" ]]; then cp "$PRISTINE_HBA" "$HBA"; fi
-    rm -f "$SAVED" "$SAVED_DIGEST"
+    rm -f "$SAVED" "$SAVED_DIGEST" "$ROLE_MARKER"
     signal_reload || true
     for db in ${DBS[@]+"${DBS[@]}"}; do dropdb --if-exists "$db" >/dev/null 2>&1; done
     psql -X -q -v ON_ERROR_STOP=0 -c 'DROP ROLE IF EXISTS o3k_rogue' >/dev/null 2>&1
@@ -259,7 +260,7 @@ PY
 
 reset_barrier_state() {
     cp "$PRISTINE_HBA" "$HBA"
-    rm -f "$SAVED" "$SAVED_DIGEST"
+    rm -f "$SAVED" "$SAVED_DIGEST" "$ROLE_MARKER"
     signal_reload
     sleep 0.2
 }
@@ -385,10 +386,12 @@ case_happy() {
         record FAIL case-a-happy "rc=$rc reason=$(json_get "$WORK/happy.create.json" reason)"
         return
     fi
-    if [[ ! -e "$SAVED" && ! -e "$SAVED_DIGEST" ]] && controls_connect "$db"; then
-        record PASS case-e-admission-restored "saved admission removed and control role reconnects after publication"
+    local role_modes
+    role_modes="$(psql -X -qAt -F '|' -c "SELECT (SELECT rolcanlogin FROM pg_roles WHERE rolname='o3k_runtime'), (SELECT rolcanlogin FROM pg_roles WHERE rolname='o3k_backup_dump'), (SELECT rolcanlogin FROM pg_roles WHERE rolname='o3k_restore_owner')")"
+    if [[ ! -e "$SAVED" && ! -e "$SAVED_DIGEST" ]] && controls_connect "$db" && [[ "$role_modes" == 't|f|f' ]]; then
+        record PASS case-e-admission-restored "saved admission removed, control reconnects and role login modes are restored"
     else
-        record FAIL case-e-admission-restored "admission was not restored after publication"
+        record FAIL case-e-admission-restored "admission or role modes were not restored after publication ($role_modes)"
     fi
     local pgcfg_path="$pgcfg"
     common_env "$db" "$pgcfg_path" "$O3K_BIN" backup verify --artifact "$dest/backup-$op.o3k" \
@@ -482,7 +485,8 @@ case_safe_abort() {
     rc=$?
     set -e
     if [[ "$rc" == 3 && "$(json_get "$WORK/abort.json" status)" == signing-required ]] \
-        && [[ ! -e "$SAVED" ]] && controls_connect "$db"; then
+        && [[ ! -e "$SAVED" ]] && controls_connect "$db" \
+        && [[ "$(psql -X -qAt -F '|' -c "SELECT (SELECT rolcanlogin FROM pg_roles WHERE rolname='o3k_runtime'), (SELECT rolcanlogin FROM pg_roles WHERE rolname='o3k_backup_dump')")" == 't|f' ]]; then
         record PASS case-d-safe-abort "staged capture aborted safely and admission was restored"
     else
         record FAIL case-d-safe-abort "rc=$rc status=$(json_get "$WORK/abort.json" status)"
@@ -559,10 +563,13 @@ case_interrupted_dump() {
         >"$WORK/crash-retry.json" 2>"$WORK/crash-retry.err"
     retry=$?
     set -e
-    if [[ "$retry" == 3 && ! -e "$SAVED" ]] && controls_connect "$db"; then
-        record PASS case-g-admission-crash-recovery "next invocation restored admission after the crash"
+    local crash_modes
+    crash_modes="$(psql -X -qAt -F '|' -c "SELECT (SELECT rolcanlogin FROM pg_roles WHERE rolname='o3k_runtime'), (SELECT rolcanlogin FROM pg_roles WHERE rolname='o3k_backup_dump')")"
+    if [[ "$retry" == 3 && ! -e "$SAVED" && ! -e "$ROLE_MARKER" ]] \
+        && [[ "$crash_modes" == 't|f' ]] && controls_connect "$db"; then
+        record PASS case-g-admission-crash-recovery "next invocation restored admission and role login modes after the crash"
     else
-        record FAIL case-g-admission-crash-recovery "retry rc=$retry saved=$([[ -e "$SAVED" ]] && echo yes || echo no)"
+        record FAIL case-g-admission-crash-recovery "retry rc=$retry saved=$([[ -e "$SAVED" ]] && echo yes || echo no) modes=$crash_modes"
     fi
 }
 
