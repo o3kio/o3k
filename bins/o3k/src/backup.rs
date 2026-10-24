@@ -46,17 +46,48 @@ const HPKE_INFO: &[u8] = b"O3K-PP6-ARTIFACT-KEY-WRAP-V1\0";
 const SIGN_DOMAIN: &[u8] = b"O3K-PP6-BACKUP-MANIFEST-V1\0";
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Members every accepted backup artifact must carry (contract F10).
+/// Members every accepted SQLite backup artifact must carry (contract F10).
 ///
-/// The capture path writes exactly these four members and the verifier
+/// The SQLite capture path writes exactly these four members and the verifier
 /// requires every one of them. The list is the single authority used by both
 /// `validate_manifest` (capture/publication) and `verify_artifact_stream`.
-pub const REQUIRED_ARTIFACT_MEMBERS: [&str; 4] = [
+pub const SQLITE_ARTIFACT_MEMBERS: [&str; 4] = [
     "database/o3k.sqlite",
     "metadata/capture.json",
     "release/release-manifest.json",
     "trust/backup-trust.json",
 ];
+
+/// Members every accepted PostgreSQL backup artifact must carry.
+///
+/// The database member is one opaque PostgreSQL 16 custom-format dump
+/// (`pg_dump -Fc`); the artifact reader never extracts it recursively.
+pub const POSTGRES_ARTIFACT_MEMBERS: [&str; 4] = [
+    "database/o3k.dump",
+    "metadata/capture.json",
+    "release/release-manifest.json",
+    "trust/backup-trust.json",
+];
+
+/// Stable store-backend identifiers used by the artifact contract.
+///
+/// SQLite and PostgreSQL differ only in the database member
+/// (`database/o3k.sqlite` vs one opaque `database/o3k.dump` custom dump) and
+/// the recorded consistency method. The manifest, encryption, signing and
+/// publication pipeline is shared; there is no second artifact format.
+pub const BACKEND_SQLITE: &str = "sqlite";
+pub const BACKEND_POSTGRESQL: &str = "postgresql";
+
+/// Returns the required member set for a manifest store backend.
+///
+/// Unknown backends fail closed instead of falling back to the SQLite set.
+pub fn required_artifact_members(backend: &str) -> Result<&'static [&'static str], String> {
+    match backend {
+        BACKEND_SQLITE => Ok(&SQLITE_ARTIFACT_MEMBERS),
+        BACKEND_POSTGRESQL => Ok(&POSTGRES_ARTIFACT_MEMBERS),
+        _ => Err("backup manifest declares an unsupported store backend".to_owned()),
+    }
+}
 
 /// Stable verification failure classes (SPEC-0050 §8).
 ///
@@ -1347,6 +1378,8 @@ pub struct ArtifactIntegrityExpectations<'a> {
     pub source_sha: &'a str,
     pub release_artifact_sha256: &'a str,
     pub schema_version: u64,
+    /// Backend this capture/replay belongs to (`sqlite` or `postgresql`).
+    pub store_backend: &'a str,
 }
 
 /// Header facts of a signed artifact that passed integrity verification.
@@ -1427,7 +1460,7 @@ pub fn verify_signed_artifact_integrity<R: Read>(
             .and_then(Value::as_str)
             != Some(expected.release_artifact_sha256)
         || manifest.source.get("profile_id").and_then(Value::as_str) != Some(expected.profile_id)
-        || manifest.store.get("backend").and_then(Value::as_str) != Some("sqlite")
+        || manifest.store.get("backend").and_then(Value::as_str) != Some(expected.store_backend)
         || manifest.store.get("schema_version").and_then(Value::as_u64)
             != Some(expected.schema_version)
     {
@@ -2164,16 +2197,28 @@ fn validate_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Requires every member in [`REQUIRED_ARTIFACT_MEMBERS`] to be present.
+/// Requires every member in the backend's required set to be present.
 ///
 /// Missing membership is a stable, typed failure so the CLI can report
 /// `missing-required-member` (exit 2) without inspecting diagnostic text.
+/// An unknown backend is a schema failure, not a missing-member failure.
 fn validate_required_members(manifest: &Manifest) -> Result<(), ArtifactVerifyError> {
-    for required in REQUIRED_ARTIFACT_MEMBERS {
+    let backend = manifest
+        .store
+        .get("backend")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let required = required_artifact_members(backend).map_err(|_| {
+        verify_failure(
+            ArtifactVerifyClass::SchemaInvalid,
+            "backup manifest declares an unsupported store backend",
+        )
+    })?;
+    for required in required {
         if !manifest
             .members
             .iter()
-            .any(|member| member.name == required)
+            .any(|member| member.name == *required)
         {
             return Err(verify_failure(
                 ArtifactVerifyClass::MissingRequiredMember,
@@ -2236,21 +2281,39 @@ fn validate_manifest(manifest: &Manifest, generation: &str) -> Result<(), String
         || !is_sha256(source_digest)
         || !["o3k-demo-v1", "o3k-small-edge-v1"].contains(&profile)
     {
-        return Err("backup source release identity is invalid for SQLite".to_owned());
+        return Err("backup source release identity is invalid".to_owned());
     }
-    if manifest.store.get("backend").and_then(Value::as_str) != Some("sqlite")
-        || manifest
-            .store
-            .get("server_version")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
+    let backend = manifest
+        .store
+        .get("backend")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (consistency_method, backend_label) = match backend {
+        BACKEND_SQLITE => ("sqlite_vacuum_into", "SQLite"),
+        // SPEC-0050 §3: the PostgreSQL profile is restricted to the
+        // production-oriented small-edge profile.
+        BACKEND_POSTGRESQL if profile == "o3k-small-edge-v1" => {
+            ("postgresql_native_dump", "PostgreSQL")
+        }
+        BACKEND_POSTGRESQL => {
+            return Err(
+                "backup PostgreSQL profile is not supported for this product profile".to_owned(),
+            );
+        }
+        _ => return Err("backup manifest declares an unsupported store backend".to_owned()),
+    };
+    if manifest
+        .store
+        .get("server_version")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
         || manifest
             .store
             .get("schema_version")
             .and_then(Value::as_u64)
             .is_none()
     {
-        return Err("backup SQLite store identity is invalid".to_owned());
+        return Err(format!("backup {backend_label} store identity is invalid"));
     }
     let migrations = manifest
         .store
@@ -2280,7 +2343,7 @@ fn validate_manifest(manifest: &Manifest, generation: &str) -> Result<(), String
         last_migration = Some(version);
     }
     let consistency = &manifest.consistency;
-    if consistency.get("method").and_then(Value::as_str) != Some("sqlite_vacuum_into")
+    if consistency.get("method").and_then(Value::as_str) != Some(consistency_method)
         || consistency.get("write_quiescence").and_then(Value::as_bool) != Some(true)
         || consistency
             .get("worker_quiescence")
@@ -2337,7 +2400,8 @@ fn validate_manifest(manifest: &Manifest, generation: &str) -> Result<(), String
             .checked_add(member.plaintext_size_bytes)
             .ok_or("backup size overflow")?;
     }
-    for required in REQUIRED_ARTIFACT_MEMBERS {
+    let required_members = required_artifact_members(backend)?;
+    for required in required_members {
         if !names.contains(required) {
             return Err("backup artifact is missing a required member".to_owned());
         }
@@ -2887,6 +2951,7 @@ mod tests {
             source_sha: "0123456789abcdef0123456789abcdef01234567",
             release_artifact_sha256: &release_artifact_sha256,
             schema_version: 53,
+            store_backend: crate::backup::BACKEND_SQLITE,
         };
         let header = verify_signed_artifact_integrity(&mut artifact.as_slice(), &expectations)
             .expect("public-only integrity verification");
@@ -3456,7 +3521,7 @@ mod tests {
         let unsigned =
             stage_unsigned_artifact(&options, stream_fixture_members(&plain_members), &root)
                 .expect("stage unsigned");
-        for required in REQUIRED_ARTIFACT_MEMBERS {
+        for required in SQLITE_ARTIFACT_MEMBERS {
             let mut manifest = unsigned.manifest.clone();
             manifest.members.retain(|member| member.name != required);
             let failure = validate_required_members(&manifest).expect_err("missing member");

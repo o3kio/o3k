@@ -211,6 +211,10 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         Err(reason) => return BackupVerifyOutcome::recoverable(reason),
     };
 
+    if crate::backup_pg::configured_backend() == crate::backup::BACKEND_POSTGRESQL {
+        return execute_postgres(args, &data_dir);
+    }
+
     // D4 store-access guard. `verify` copies the canonical SQLite store to
     // read the applied migration identities, so it is a store-reading command
     // and must take the same lifetime lock the daemon and `backup create` use.
@@ -328,6 +332,131 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         return BackupVerifyOutcome::unknown(REASON_CLEANUP_FAILED);
     }
 
+    BackupVerifyOutcome {
+        exit_code: 0,
+        json: verified_json(&verified, &artifact_sha256),
+    }
+}
+
+/// PostgreSQL artifact verification.
+///
+/// The installed release is still the authority, but the applied migration
+/// identities are read from the configured PostgreSQL control database rather
+/// than from a local SQLite copy. The `pg_hba` admission barrier is not
+/// installed by verification: this is a read-only operator command against a
+/// reachable database.
+fn execute_postgres(args: &BackupVerifyArgs, data_dir: &Path) -> BackupVerifyOutcome {
+    let install_prefix = install_prefix_for(
+        data_dir,
+        std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+    );
+    let trust = match BackupTrustConfig::load_for_data_dir(
+        &default_trust_config_path_for(
+            data_dir,
+            std::env::var_os(crate::backup_trust::TRUST_CONFIG_ENV),
+            std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+        ),
+        data_dir,
+    ) {
+        Ok(config) => config,
+        Err(error) => return trust_failure(error),
+    };
+    if let Err(error) = trust.verify_identity(data_dir) {
+        return trust_failure(error);
+    }
+    let signing_key = match trust.artifact_signing_public_key() {
+        Ok(key) => key,
+        Err(error) => return trust_failure(error),
+    };
+    let recipient = match trust.load_recipient_private_key() {
+        Ok(key) => key,
+        Err(error) => return trust_failure(error),
+    };
+    let identity = match backup_release_identity(&install_prefix) {
+        Ok(identity) => identity,
+        Err(_) => return BackupVerifyOutcome::rejected(REASON_EXPECTED_RELEASE_UNAVAILABLE),
+    };
+    if identity.profile_id != "o3k-small-edge-v1" {
+        return BackupVerifyOutcome::rejected("postgres-profile-unsupported");
+    }
+    let pg_config = match crate::backup_pg::PgBackupConfig::load(&install_prefix) {
+        Ok(config) => config,
+        Err(error) => return BackupVerifyOutcome::rejected(error.reason()),
+    };
+
+    let store_lock = match StoreAccessLock::acquire(data_dir) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            return BackupVerifyOutcome::rejected("controller-active");
+        }
+        Err(_) => return BackupVerifyOutcome::recoverable("store-lock-unavailable"),
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => return BackupVerifyOutcome::recoverable(REASON_EXPECTED_RELEASE_UNAVAILABLE),
+    };
+    let migrations = match runtime.block_on(crate::backup_pg::read_migrations(
+        &pg_config,
+        identity.schema_version,
+    )) {
+        Ok(migrations) => migrations,
+        Err(error) => {
+            return BackupVerifyOutcome::rejected(error.reason());
+        }
+    };
+    drop(store_lock);
+    let inventory = match o3k_store::state_inventory::baseline_state_inventory() {
+        Ok(inventory) => inventory,
+        Err(_) => return BackupVerifyOutcome::rejected(REASON_EXPECTED_RELEASE_UNAVAILABLE),
+    };
+    let expected = ExpectedRelease {
+        site_id: trust.site_id().to_owned(),
+        installation_id: trust.installation_id().to_owned(),
+        o3k_version: identity.o3k_version,
+        source_sha: identity.source_sha,
+        release_artifact_sha256: identity.release_artifact_sha256,
+        profile_id: identity.profile_id,
+        store_backend: crate::backup::BACKEND_POSTGRESQL.to_owned(),
+        schema_version: identity.schema_version,
+        migrations,
+        state_inventory: inventory,
+    };
+    let keys = ArtifactVerificationKeys {
+        signing_key_id: trust.artifact_signing_key_id(),
+        signer: &signing_key,
+        trust: &trust,
+        recipient_key_id: trust.recipient_key_id(),
+        recipient: &recipient,
+    };
+    let staging_root = match create_staging_root(data_dir) {
+        Ok(path) => path,
+        Err(reason) => return BackupVerifyOutcome::recoverable(reason),
+    };
+    let mut artifact = match open_artifact(&args.artifact) {
+        Ok(artifact) => artifact,
+        Err(reason) => {
+            if fs::remove_dir_all(&staging_root).is_err() {
+                return BackupVerifyOutcome::unknown(REASON_CLEANUP_FAILED);
+            }
+            return BackupVerifyOutcome::recoverable(reason);
+        }
+    };
+    let verified = match verify_artifact_stream(&mut artifact, &expected, &keys, &staging_root) {
+        Ok(verified) => verified,
+        Err(error) => {
+            if fs::remove_dir_all(&staging_root).is_err() {
+                return BackupVerifyOutcome::unknown(REASON_CLEANUP_FAILED);
+            }
+            return verification_failure(&error);
+        }
+    };
+    let artifact_sha256 = artifact.finish();
+    if fs::remove_dir_all(&staging_root).is_err() {
+        return BackupVerifyOutcome::unknown(REASON_CLEANUP_FAILED);
+    }
     BackupVerifyOutcome {
         exit_code: 0,
         json: verified_json(&verified, &artifact_sha256),

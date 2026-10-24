@@ -334,6 +334,9 @@ def _host_command_aliases(source: str) -> set[str]:
 APPROVED_HOST_EXECUTION_PATHS = {
     "bins/o3k/src/sys.rs",
     "bins/o3k/src/upgrade/runner.rs",
+    # PP.6 D10 PostgreSQL dump boundary: argv-only pg_dump/pg_restore --list.
+    # Shell execution remains forbidden even inside this path.
+    "bins/o3k/src/backup_pg_dump.rs",
     "bins/o3k-compute/src/iscsi.rs",
     "crates/o3k-config-drive/src/lib.rs",
     "crates/o3k-dhcp/src/lib.rs",

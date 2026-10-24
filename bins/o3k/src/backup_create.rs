@@ -133,6 +133,7 @@ use o3k_store::{
 };
 use rustix::fd::OwnedFd;
 use rustix::fs::{Mode, OFlags, fstat, mkdirat, open, openat};
+use rustix::io::{FdFlags, fcntl_setfd};
 use rustix::process::geteuid;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -146,9 +147,11 @@ use crate::{
         StagedSigning, artifact_file_name, complete_staged, snapshot_in_flight_operations,
         stage_capture,
     },
+    backup_pg::{self, PgBackupConfig},
     backup_reservation::{
         FORMAT_OVERHEAD_BOUND, MIN_RESERVATION, Reservation, ReservationError, StagingReservation,
-        compute_reservation, preflight_reservation, staging_tree_bytes,
+        compute_reservation, preflight_reservation, preflight_reservation_bytes,
+        staging_tree_bytes,
     },
     output::now_utc_rfc3339,
 };
@@ -516,10 +519,57 @@ fn execute_with_data_dir(
     if destination_overlaps_data_dir(&args.destination, &data_dir) {
         return BackupCreateOutcome::rejected(operation_id, "destination-inside-data-dir");
     }
+    let backend = crate::backup_pg::configured_backend();
+    let is_postgres = match backend.as_str() {
+        "postgres" | "postgresql" => true,
+        "sqlite" => false,
+        _ => return BackupCreateOutcome::rejected(operation_id, "store-backend-unsupported"),
+    };
     let destination_fd = match open_destination_dir(&args.destination) {
         Ok(fd) => fd,
         Err(reason) => return BackupCreateOutcome::rejected(operation_id, reason),
     };
+
+    // A crashed PostgreSQL run may have left the admission barrier installed.
+    // Restore it before journal routing or any controller contact; otherwise
+    // the database stays unreachable and no retry can observe its own state.
+    if is_postgres {
+        let pg_config = match PgBackupConfig::load(&environment.install_prefix) {
+            Ok(config) => config,
+            Err(error) => {
+                return BackupCreateOutcome::rejected(operation_id, error.reason());
+            }
+        };
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                return BackupCreateOutcome::recoverable(
+                    operation_id,
+                    "admission-recovery-runtime-failed",
+                );
+            }
+        };
+        // Serialize crash recovery with any controller/other capture. If the
+        // lifetime lock is held, leave admission/role state untouched; the
+        // capture path below rejects `controller-active` instead of racing it.
+        match StoreAccessLock::acquire(&data_dir) {
+            Ok(recovery_lock) => {
+                if let Err(error) =
+                    runtime.block_on(backup_pg::ensure_admission_restored(&pg_config))
+                {
+                    return BackupCreateOutcome::recoverable(operation_id, error.reason());
+                }
+                drop(recovery_lock);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(_) => {
+                return BackupCreateOutcome::recoverable(operation_id, "store-lock-unavailable");
+            }
+        }
+    }
 
     // Durable operation identity is checked before any controller contact: a
     // published operation id is never captured again, and a staged operation
@@ -586,7 +636,7 @@ fn execute_with_data_dir(
                 // tests so their free-space measurements stay meaningful.
                 #[cfg(test)]
                 let _staging_test_lock = crate::backup_reservation::staging_test_lock();
-                return complete_existing(
+                let outcome = complete_existing(
                     args,
                     environment,
                     &data_dir,
@@ -594,7 +644,17 @@ fn execute_with_data_dir(
                     record,
                     controls,
                     store_lock,
+                    &backend,
                 );
+                if is_postgres && outcome.exit_code == 0 {
+                    // The barrier stays armed through publication by design.
+                    // Once the artifact is verified and published, restore the
+                    // saved admission and prove the control role is admitted.
+                    if let Err(failure) = restore_postgres_admission(environment) {
+                        return failure_outcome(operation_id, failure);
+                    }
+                }
+                return outcome;
             }
             BackupOperationPhase::Capturing | BackupOperationPhase::Captured => {
                 return BackupCreateOutcome::recoverable(
@@ -606,6 +666,17 @@ fn execute_with_data_dir(
         }
     }
 
+    if is_postgres {
+        return execute_inner_postgres(
+            args,
+            args.destination.clone(),
+            destination_fd,
+            data_dir,
+            now_utc_rfc3339(),
+            environment,
+            controls,
+        );
+    }
     execute_inner(
         args,
         args.destination.clone(),
@@ -615,6 +686,21 @@ fn execute_with_data_dir(
         environment,
         controls,
     )
+}
+
+/// Restores admission left behind by a PostgreSQL capture/publication and
+/// proves the control role can connect again.
+fn restore_postgres_admission(environment: &ArtifactEnvironment) -> Result<(), ArtifactFailure> {
+    let config = PgBackupConfig::load(&environment.install_prefix)
+        .map_err(|error| ArtifactFailure::unknown(error.reason()))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ArtifactFailure::unknown("admission-restore-runtime-failed"))?;
+    runtime
+        .block_on(backup_pg::ensure_admission_restored(&config))
+        .map(|_| ())
+        .map_err(|_| ArtifactFailure::unknown("admission-restore-unverified"))
 }
 
 /// Re-reads the operation journal after the store-access lock is held.
@@ -655,6 +741,7 @@ fn read_locked_phase_two_record(
 /// `_store_lock` is the exclusion proof: it is retained (not copied) until this
 /// function returns, so no controller and no concurrent capture can touch the
 /// data directory while the staged artifact is verified and published.
+#[allow(clippy::too_many_arguments)]
 fn complete_existing(
     args: &BackupCreateArgs,
     environment: &ArtifactEnvironment,
@@ -663,6 +750,7 @@ fn complete_existing(
     record: BackupOperationRecord,
     controls: &ExecutorControls,
     store_lock: StoreAccessLock,
+    store_backend: &str,
 ) -> BackupCreateOutcome {
     let _store_lock = store_lock;
     let operation_id = args.operation_id;
@@ -699,6 +787,7 @@ fn complete_existing(
         marker_path: &marker_path,
         reservation,
         await_policy: controls.await_policy,
+        store_backend,
     };
     match complete_staged(&inputs, None) {
         Ok(published) => BackupCreateOutcome {
@@ -1338,6 +1427,11 @@ fn execute_inner(
         config: &config,
         operation_id,
         reservation,
+        database_backend: crate::backup::BACKEND_SQLITE,
+        database_member: crate::backup_artifact::DATABASE_MEMBER,
+        database_media_type: crate::backup_artifact::DATABASE_MEDIA_TYPE,
+        consistency_method: crate::backup_artifact::SQLITE_SNAPSHOT_METHOD,
+        prepared_facts: None,
         staging_dir: &staging_fd_path,
         durable_staging_dir: &staging_path,
         snapshot_path: &staged_snapshot_path,
@@ -1418,6 +1512,7 @@ fn execute_inner(
         marker_path: &marker_path,
         reservation,
         await_policy: controls.await_policy,
+        store_backend: crate::backup::BACKEND_SQLITE,
     };
     let outcome = match complete_staged(&completion, Some(&mut reservation_hold)) {
         Ok(published) => BackupCreateOutcome {
@@ -1432,6 +1527,357 @@ fn execute_inner(
         },
         Err(failure) => failure_outcome(operation_id, failure),
     };
+    drop(store_lock);
+    outcome
+}
+
+/// Maps a PostgreSQL capture failure to the SPEC-0050 exit contract.
+fn postgres_failure(reason: &'static str) -> ArtifactFailure {
+    if reason == "admission-restore-unverified" {
+        return ArtifactFailure::unknown(reason);
+    }
+    if reason.starts_with("pg-dump-") || reason.starts_with("pg-restore-list-") {
+        return ArtifactFailure::recoverable(reason);
+    }
+    ArtifactFailure::rejected(reason)
+}
+
+/// PostgreSQL capture: D4 barrier → `pg_dump` → complete TOC classification →
+/// the existing staging/signing/publication path.
+#[allow(clippy::too_many_lines)]
+fn execute_inner_postgres(
+    args: &BackupCreateArgs,
+    destination_dir: PathBuf,
+    destination_fd: OwnedFd,
+    data_dir: PathBuf,
+    started_at: String,
+    environment: &ArtifactEnvironment,
+    controls: &ExecutorControls,
+) -> BackupCreateOutcome {
+    let operation_id = args.operation_id;
+    let pg_config = match PgBackupConfig::load(&environment.install_prefix) {
+        Ok(config) => config,
+        Err(error) => {
+            return failure_outcome(operation_id, ArtifactFailure::rejected(error.reason()));
+        }
+    };
+    let config = match ArtifactConfig::load_from(
+        &data_dir,
+        &environment.trust_config,
+        &environment.install_prefix,
+    ) {
+        Ok(config) => config,
+        Err(failure) => return failure_outcome(operation_id, failure),
+    };
+    if config.release().profile_id != "o3k-small-edge-v1" {
+        return BackupCreateOutcome::rejected(operation_id, "postgres-profile-unsupported");
+    }
+    let inventory = match o3k_store::state_inventory::baseline_state_inventory() {
+        Ok(inventory) => inventory,
+        Err(_) => {
+            return BackupCreateOutcome::rejected(operation_id, "state-inventory-unavailable");
+        }
+    };
+
+    let store_lock = match StoreAccessLock::acquire(&data_dir) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            return BackupCreateOutcome::rejected(operation_id, "controller-active");
+        }
+        Err(_) => {
+            return BackupCreateOutcome::recoverable(operation_id, "store-lock-unavailable");
+        }
+    };
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => return BackupCreateOutcome::recoverable(operation_id, "runtime-build-failed"),
+    };
+
+    // A previous interrupted PostgreSQL run may still have the admission
+    // barrier installed. Restore it before any measurement or capture.
+    if let Err(error) = runtime.block_on(backup_pg::ensure_admission_restored(&pg_config)) {
+        return failure_outcome(operation_id, postgres_failure(error.reason()));
+    }
+
+    let mut source_bytes = match runtime.block_on(backup_pg::database_size(&pg_config)) {
+        Ok(bytes) => bytes,
+        Err(error) => return failure_outcome(operation_id, postgres_failure(error.reason())),
+    };
+    source_bytes = source_bytes
+        .saturating_add(
+            fs::metadata(config.release_manifest_path())
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        )
+        .saturating_add(
+            fs::metadata(config.trust_config_path())
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        )
+        .saturating_add(2 * MAX_METADATA_MEMBER_BYTES);
+    let reservation = match preflight_reservation_bytes(source_bytes, &destination_dir) {
+        Ok(reservation) => reservation,
+        Err(error) => return failure_outcome(operation_id, reservation_failure(error)),
+    };
+
+    let marker_path = data_dir.join(format!("{MARKER_FILE_PREFIX}{operation_id}"));
+    let marker_body = json!({
+        "operation_id": operation_id,
+        "pid": std::process::id(),
+        "started_at": started_at,
+    });
+    if let Err(error) = write_exclusive_private(&marker_path, &marker_body) {
+        let reason = if error.kind() == io::ErrorKind::AlreadyExists {
+            "backup-in-progress-marker-present"
+        } else {
+            "marker-write-failed"
+        };
+        return BackupCreateOutcome::recoverable(operation_id, reason);
+    }
+    if sync_dir(&data_dir).is_err() {
+        return BackupCreateOutcome::recoverable(operation_id, "marker-sync-failed");
+    }
+
+    let staging_leaf = format!("{OPERATION_STAGING_PREFIX}{operation_id}");
+    let staging_path = destination_dir.join(&staging_leaf);
+    let mut journal = BackupOperationRecord {
+        format: o3k_store::backup_journal::BACKUP_OPERATION_FORMAT.to_owned(),
+        operation_id,
+        phase: BackupOperationPhase::Capturing,
+        backup_id: operation_id.to_string(),
+        destination: destination_dir.to_string_lossy().into_owned(),
+        staging_path: staging_path.to_string_lossy().into_owned(),
+        request_sha256: None,
+        artifact_sha256: None,
+        reserved_bytes: Some(reservation.reserved_bytes),
+        site_id: config.site_id().to_owned(),
+        installation_id: config.installation_id().to_owned(),
+        created_at: started_at.clone(),
+        updated_at: started_at.clone(),
+    };
+    if let Err(error) = backup_journal::write_backup_operation(&data_dir, &journal) {
+        return BackupCreateOutcome::recoverable(operation_id, error.reason());
+    }
+
+    match mkdirat(
+        &destination_fd,
+        staging_leaf.as_str(),
+        Mode::from_raw_mode(0o700),
+    ) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::EXIST) => {
+            return BackupCreateOutcome::recoverable(operation_id, "staging-directory-exists");
+        }
+        Err(_) => {
+            let _ = runtime.block_on(backup_pg::ensure_admission_restored(&pg_config));
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            return BackupCreateOutcome::recoverable(
+                operation_id,
+                "staging-directory-create-failed",
+            );
+        }
+    }
+    let staging_fd = match openat(
+        &destination_fd,
+        staging_leaf.as_str(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(_) => {
+            let _ = runtime.block_on(backup_pg::ensure_admission_restored(&pg_config));
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            return BackupCreateOutcome::recoverable(operation_id, "staging-directory-open-failed");
+        }
+    };
+    if let Err(reason) = revalidate_destination(&destination_fd, &destination_dir) {
+        let _ = runtime.block_on(backup_pg::ensure_admission_restored(&pg_config));
+        abort_before_capture(&data_dir, &marker_path, &journal);
+        return BackupCreateOutcome::recoverable(operation_id, reason);
+    }
+    let staging_fd_path = PathBuf::from(format!("/proc/self/fd/{}", staging_fd.as_raw_fd()));
+    // `pg_dump` is a separate process: the descriptor behind the
+    // `/proc/self/fd` path must survive `execve`.
+    if fcntl_setfd(&staging_fd, FdFlags::empty()).is_err() {
+        let _ = runtime.block_on(backup_pg::ensure_admission_restored(&pg_config));
+        abort_before_capture(&data_dir, &marker_path, &journal);
+        return BackupCreateOutcome::recoverable(operation_id, "staging-descriptor-unavailable");
+    }
+    let dump_path = staging_fd_path.join("o3k.dump");
+
+    let mut capture = match runtime.block_on(backup_pg::capture(
+        &pg_config,
+        &dump_path,
+        config.release(),
+        &inventory,
+    )) {
+        Ok(capture) => capture,
+        Err(error) => {
+            // The guard restores admission synchronously on failure; prove it
+            // before reporting a bounded outcome.
+            let restored = runtime
+                .block_on(backup_pg::ensure_admission_restored(&pg_config))
+                .is_ok();
+            // The guard already restored the admission file (so the saved-file
+            // signal is gone); reset the role modes unconditionally here.
+            let roles_restored = runtime
+                .block_on(backup_pg::reset_after_failed_capture(&pg_config))
+                .is_ok();
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            if !restored || !roles_restored {
+                return BackupCreateOutcome::unknown(operation_id, "admission-restore-unverified");
+            }
+            return failure_outcome(operation_id, postgres_failure(error.reason()));
+        }
+    };
+    if capture.dump_size_bytes > MAX_MEMBER_BYTES {
+        let _ = fs::remove_file(&dump_path);
+        let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+        abort_before_capture(&data_dir, &marker_path, &journal);
+        return BackupCreateOutcome::rejected(operation_id, "member-bound-exceeded");
+    }
+
+    let completed_at = now_utc_rfc3339();
+    let dump_sha256 = capture.dump_sha256.clone();
+    let facts = capture.artifact_facts();
+    journal.phase = BackupOperationPhase::Captured;
+    journal.updated_at = completed_at.clone();
+    if let Err(error) = backup_journal::advance_backup_operation(&data_dir, &journal) {
+        let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+        return BackupCreateOutcome::recoverable(operation_id, error.reason());
+    }
+
+    let capture_inputs = CaptureInputs {
+        config: &config,
+        operation_id,
+        reservation,
+        database_backend: crate::backup::BACKEND_POSTGRESQL,
+        database_member: o3k_store::postgres::backup::DATABASE_MEMBER,
+        database_media_type: o3k_store::postgres::backup::DATABASE_MEDIA_TYPE,
+        consistency_method: o3k_store::postgres::backup::POSTGRES_SNAPSHOT_METHOD,
+        prepared_facts: Some(&facts),
+        staging_dir: &staging_fd_path,
+        durable_staging_dir: &staging_path,
+        snapshot_path: &dump_path,
+        snapshot_sha256: &dump_sha256,
+        source_before: &dump_sha256,
+        source_after: &dump_sha256,
+        journal_mode: "postgres",
+        snapshot_started_at: &started_at,
+        snapshot_completed_at: &completed_at,
+        in_flight_operations: facts.in_flight_operations,
+        in_flight_operation_ids: &facts.in_flight_operation_ids,
+        runtime: &runtime,
+    };
+    // D9 enforcement: hold the remaining reservation while the artifact is
+    // staged. The dump file already occupies part of the staging tree, so it
+    // is the `staged` term; release the write bound just before staging and
+    // reconcile back afterwards. The guard stays alive through publication.
+    let mut reservation_hold = match StagingReservation::acquire(
+        &staging_fd_path,
+        reservation.reserved_bytes,
+        staging_tree_bytes(&staging_path),
+    ) {
+        Ok(hold) => hold,
+        Err(error) => {
+            let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            return failure_outcome(operation_id, reservation_failure(error));
+        }
+    };
+    if let Err(error) = reservation_hold.prepare_for_write(reservation_hold.held_bytes()) {
+        let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+        abort_before_capture(&data_dir, &marker_path, &journal);
+        return failure_outcome(operation_id, reservation_failure(error));
+    }
+    let staged_result = stage_capture(&capture_inputs);
+    let snapshot_cleanup = fs::remove_file(&dump_path)
+        .and_then(|()| fs::File::open(&staging_fd_path).and_then(|directory| directory.sync_all()));
+    let staged = match staged_result {
+        Ok(staged) => staged,
+        Err(failure) => {
+            let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+            abort_before_capture(&data_dir, &marker_path, &journal);
+            return failure_outcome(operation_id, failure);
+        }
+    };
+    if snapshot_cleanup.is_err() {
+        let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+        abort_before_capture(&data_dir, &marker_path, &journal);
+        return BackupCreateOutcome::recoverable(operation_id, "snapshot-cleanup-failed");
+    }
+
+    if let Err(error) = reservation_hold.reconcile(staging_tree_bytes(&staging_path)) {
+        let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+        abort_before_capture(&data_dir, &marker_path, &journal);
+        return failure_outcome(operation_id, reservation_failure(error));
+    }
+    journal.phase = BackupOperationPhase::Staged;
+    journal.backup_id = staged.backup_id.clone();
+    journal.request_sha256 = Some(staged.request_sha256.clone());
+    journal.updated_at = now_utc_rfc3339();
+    if let Err(error) = backup_journal::advance_backup_operation(&data_dir, &journal) {
+        let _ = runtime.block_on(backup_pg::restore_admission(&mut capture, &pg_config));
+        return BackupCreateOutcome::recoverable(operation_id, error.reason());
+    }
+    test_hook_exit!("O3K_BACKUP_TEST_EXIT_AFTER_JOURNAL_STAGED", 87);
+
+    if controls.stop_after_staging {
+        // Harness-only early exit: the capture is complete and the artifact is
+        // staged, so restoring admission is a safe abort of the signing wait.
+        if runtime
+            .block_on(backup_pg::restore_admission(&mut capture, &pg_config))
+            .is_err()
+        {
+            return BackupCreateOutcome::unknown(operation_id, "admission-restore-unverified");
+        }
+        if !controls.keep_marker && fs::remove_file(&marker_path).is_err() {
+            return BackupCreateOutcome::recoverable(operation_id, "marker-removal-failed");
+        }
+        let _ = sync_dir(&data_dir);
+        let _ = sync_dir(&destination_dir);
+        drop(store_lock);
+        return signing_required_outcome(operation_id, &staged);
+    }
+
+    let completion = CompletionInputs {
+        data_dir: &data_dir,
+        config: &config,
+        destination_dir: &destination_dir,
+        destination_fd: &destination_fd,
+        operation_id,
+        record: &journal,
+        marker_path: &marker_path,
+        reservation,
+        await_policy: controls.await_policy,
+        store_backend: crate::backup::BACKEND_POSTGRESQL,
+    };
+    let outcome = match complete_staged(&completion, Some(&mut reservation_hold)) {
+        Ok(published) => BackupCreateOutcome {
+            exit_code: 0,
+            json: published_json(
+                operation_id,
+                &staged.backup_id,
+                &published,
+                Some(staged.source_bytes),
+                staged.reserved_bytes,
+            ),
+        },
+        Err(failure) => failure_outcome(operation_id, failure),
+    };
+    // SPEC-0050 §3: admission is restored only after verified publication or a
+    // safe abort. Every path through `complete_staged` is one of those.
+    if runtime
+        .block_on(backup_pg::restore_admission(&mut capture, &pg_config))
+        .is_err()
+    {
+        drop(store_lock);
+        return BackupCreateOutcome::unknown(operation_id, "admission-restore-unverified");
+    }
     drop(store_lock);
     outcome
 }
