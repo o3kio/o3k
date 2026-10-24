@@ -3,7 +3,15 @@
 Date: 2026-10-24. Branch: `pp6/1085-postgres`. Source base:
 `35e049062b6af709141f54522692e8e0c8865661` (protected main). Implementation
 commits: `2036b872` (backend, D4 barrier, D10 classification), `bf64a471`
-(real PG16 campaign), `9fc51372` (restore role login modes after the barrier).
+(real PG16 campaign), `9fc51372` (restore role login modes after the barrier),
+`b180cf5a` (merge/rebase onto protected main `70ad01bd`, which merged the
+SQLite conformance PR #1170).
+
+The rebase integrated the D9 `StagingReservation` hold into the PostgreSQL
+staging path, adapted the D4 live-catalog comparison and D10 TOC classifier to
+D13's `name(args)`/`table.name` identities and constraint/view/sequence kinds,
+and switched the PostgreSQL verify path to the installed trust loader. The
+PG16 campaign was re-run on the rebased tree: **PASS=22 FAIL=0 NOT-COVERED=5**.
 
 This document reports executable evidence from a disposable **PostgreSQL 16.15**
 cluster (`pg_virtualenv`, Ubuntu `16.15-0ubuntu0.24.04.1`). No managed cluster,
