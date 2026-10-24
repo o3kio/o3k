@@ -441,7 +441,7 @@ impl ArtifactConfig {
         trust_config_path: &Path,
         install_prefix: &Path,
     ) -> Result<Self, ArtifactFailure> {
-        let trust = BackupTrustConfig::load(trust_config_path)?;
+        let trust = BackupTrustConfig::load_for_data_dir(trust_config_path, data_dir)?;
         trust.verify_identity(data_dir)?;
         if trust
             .signing_key_is_revoked(trust.artifact_signing_key_id())

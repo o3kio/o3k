@@ -2703,7 +2703,8 @@ mod tests {
         );
 
         // Real verification against the installed release identity.
-        let trust = BackupTrustConfig::load(&fixture.trust_config).expect("trust document");
+        let trust = BackupTrustConfig::load_for_data_dir(&fixture.trust_config, &data_dir)
+            .expect("trust document");
         let recipient = trust.load_recipient_private_key().expect("recipient key");
         let verifying_key = fixture.signing.verifying_key();
         let keys = ArtifactVerificationKeys {

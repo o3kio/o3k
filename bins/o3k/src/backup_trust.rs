@@ -27,29 +27,35 @@
 //!
 //! # Installed and TestLab posture
 //!
-//! SPEC-0050 §8 requires root-owned installation configuration. The packaged
-//! executor runs as the data-directory owner (`o3k`), so the trust document
-//! cannot require `root:root 0600`; the accepted posture is:
+//! SPEC-0050 §8 requires root-owned installation configuration. The posture
+//! depends on whether the resolved data directory is the packaged
+//! `/var/lib/o3k` installation ([`is_installed_data_dir`]):
 //!
-//! * owned by root **or** the effective uid;
-//! * mode `0600`, or `0640` when the owning group is root or one of the
-//!   process's groups (the service group);
-//! * never group/other **writable**, never other-readable;
-//! * a parent directory owned by root or the effective uid and not
-//!   group/other-writable.
+//! * **Installed** (`/var/lib/o3k`): the document must be owned by uid `0`,
+//!   owned by the packaged service group `o3k` (or gid `0` when the group
+//!   cannot be resolved), and be exactly `0600` or `0640`. Any other owner,
+//!   group or mode fails closed as `trust-config-posture-invalid`. The parent
+//!   `/etc/o3k` must be root-owned and not group/other-writable.
+//! * **Non-installed/TestLab**: the documented override path is preserved:
+//!   owned by root **or** the effective uid, mode `0600`, or `0640` when the
+//!   owning group is root or one of the process's groups (the service group),
+//!   never group/other-writable and never other-readable; the parent must be
+//!   owned by root or the effective uid and not group/other-writable.
 //!
 //! The packaged installation therefore uses `root:o3k 0640` (group read by the
-//! service group); `0600` is the euid-owned TestLab mode. A root-owned document
-//! that the non-root service user cannot read is reported as
+//! service group); `0600` is the euid-owned TestLab mode and is also accepted
+//! for a root-owned installed document used by a root caller. A root-owned
+//! document that the non-root service user cannot read is reported as
 //! `trust-config-unreadable-by-service-user` instead of the generic
 //! `trust-config-unavailable`, so the operator knows to add the group-read bit
-//! rather than look for a missing file.
+//! rather than look for a missing file. A service-user-owned document in the
+//! installed data directory is never accepted.
 //!
 //! The recipient private key remains `0600` (or `0400`) on the
 //! recovery/operator host and is never group-readable. The controller only
 //! needs `recipient.x25519_public_key`; with that field configured,
-//! [`BackupTrustConfig::load`] and the capture path never open the private key
-//! file. A private-key-only document still derives the public half on demand,
+//! [`BackupTrustConfig::load_for_data_dir`] and the capture path never open
+//! the private key file. A private-key-only document still derives the public half on demand,
 //! and verification always requires the private key to decrypt members.
 //!
 //! # Environment overrides
@@ -130,6 +136,8 @@ pub enum BackupTrustError {
     ConfigSymlink,
     /// The document is not a regular file.
     ConfigNotRegularFile,
+    /// The document does not match the installed ownership/group/mode posture.
+    ConfigPostureInvalid,
     /// The document owner is neither root nor the effective uid.
     ConfigOwnerUntrusted,
     /// The document is group- or other-writable.
@@ -205,6 +213,7 @@ impl BackupTrustError {
             Self::ConfigUnreadableByServiceUser => "trust-config-unreadable-by-service-user",
             Self::ConfigSymlink => "trust-config-symlink",
             Self::ConfigNotRegularFile => "trust-config-not-regular-file",
+            Self::ConfigPostureInvalid => "trust-config-posture-invalid",
             Self::ConfigOwnerUntrusted => "trust-config-owner-untrusted",
             Self::ConfigPermissionsTooOpen => "trust-config-permissions-too-open",
             Self::ConfigParentUntrusted => "trust-config-parent-untrusted",
@@ -241,8 +250,8 @@ impl std::error::Error for BackupTrustError {}
 /// The parsed installation trust document.
 ///
 /// Fields are private so the document can only be obtained through
-/// [`BackupTrustConfig::load`], which enforces the file posture and custody
-/// schema.
+/// [`BackupTrustConfig::load_for_data_dir`], which enforces the file posture
+/// and custody schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupTrustConfig {
@@ -297,43 +306,71 @@ struct Custody {
 }
 
 impl BackupTrustConfig {
-    /// Loads and validates the installation trust document at `path`.
+    /// Loads and validates the installation trust document at `path` for the
+    /// installation identified by `data_dir`.
+    ///
+    /// The file posture is selected from the data directory: the packaged
+    /// `/var/lib/o3k` installation requires the installed posture (root-owned,
+    /// service-group, `0600`/`0640`), while TestLab/temporary directories keep
+    /// the documented euid-owned override posture.
     ///
     /// Fails closed on any file-posture, schema, identity, key or custody
     /// discrepancy. The document is opened with `O_NOFOLLOW` and validated
     /// against the descriptor's own metadata, so a symlink swap cannot
     /// redirect the read.
-    pub fn load(path: &Path) -> Result<Self, BackupTrustError> {
-        Self::load_with_effective_uid(path, current_euid())
+    pub fn load_for_data_dir(path: &Path, data_dir: &Path) -> Result<Self, BackupTrustError> {
+        let posture = if is_installed_data_dir(data_dir) {
+            TrustPosture::Installed {
+                service_gid: installed_service_gid(),
+            }
+        } else {
+            TrustPosture::TestLab
+        };
+        Self::load_with_posture(path, current_euid(), posture)
     }
 
-    /// [`Self::load`] with an explicit effective uid. Production always passes
-    /// the process's real effective uid; tests use it to exercise the
-    /// foreign-owner branch without needing root.
-    fn load_with_effective_uid(path: &Path, effective_uid: u32) -> Result<Self, BackupTrustError> {
+    /// [`Self::load_for_data_dir`] with an explicit effective uid and posture.
+    /// Production passes the process's real effective uid; tests use the
+    /// explicit posture to exercise the installed branch without a real
+    /// `/var/lib/o3k` or root-owned fixture.
+    fn load_with_posture(
+        path: &Path,
+        effective_uid: u32,
+        posture: TrustPosture,
+    ) -> Result<Self, BackupTrustError> {
         let opened = open_no_follow(path).map_err(|failure| match failure {
-            OpenFailure::Unavailable => unavailable_config_error(path, effective_uid),
+            OpenFailure::Unavailable => unavailable_config_error(path, effective_uid, posture),
             OpenFailure::Symlink => BackupTrustError::ConfigSymlink,
         })?;
         if !opened.metadata.file_type().is_file() {
             return Err(BackupTrustError::ConfigNotRegularFile);
         }
-        if !is_trusted_owner(opened.metadata.uid(), effective_uid) {
-            return Err(BackupTrustError::ConfigOwnerUntrusted);
-        }
-        if !configuration_mode_allowed(
-            opened.metadata.permissions().mode(),
-            opened.metadata.gid(),
-            &process_groups(),
-        ) {
-            return Err(BackupTrustError::ConfigPermissionsTooOpen);
-        }
-        validate_parent_directory(path, effective_uid).map_err(|failure| match failure {
-            ParentFailure::Unavailable | ParentFailure::OwnerUntrusted => {
-                BackupTrustError::ConfigParentUntrusted
+        let uid = opened.metadata.uid();
+        let gid = opened.metadata.gid();
+        let mode = opened.metadata.permissions().mode();
+        match posture {
+            TrustPosture::Installed { service_gid } => {
+                if !installed_posture_allowed(uid, gid, mode, service_gid) {
+                    return Err(BackupTrustError::ConfigPostureInvalid);
+                }
             }
-            ParentFailure::PermissionsTooOpen => BackupTrustError::ConfigPermissionsTooOpen,
-        })?;
+            TrustPosture::TestLab => {
+                if !is_trusted_owner(uid, effective_uid) {
+                    return Err(BackupTrustError::ConfigOwnerUntrusted);
+                }
+                if !configuration_mode_allowed(mode, gid, &process_groups()) {
+                    return Err(BackupTrustError::ConfigPermissionsTooOpen);
+                }
+            }
+        }
+        validate_parent_directory(path, effective_uid, posture).map_err(
+            |failure| match failure {
+                ParentFailure::Unavailable | ParentFailure::OwnerUntrusted => {
+                    BackupTrustError::ConfigParentUntrusted
+                }
+                ParentFailure::PermissionsTooOpen => BackupTrustError::ConfigPermissionsTooOpen,
+            },
+        )?;
         if opened.metadata.len() > MAX_TRUST_CONFIG_BYTES {
             return Err(BackupTrustError::ConfigTooLarge);
         }
@@ -411,10 +448,11 @@ impl BackupTrustConfig {
     /// Returns the X25519 public key of the configured recovery recipient.
     ///
     /// When the document declares `recipient.x25519_public_key`, that value is
-    /// used directly and no private key file is opened. [`Self::load`] is
-    /// therefore safe on a capture-only controller that has no private key at
-    /// all. Only a private-key-only document derives the public half on
-    /// demand, which reads the configured key file.
+    /// used directly and no private key file is opened.
+    /// [`Self::load_for_data_dir`] is therefore safe on a capture-only
+    /// controller that has no private key at all. Only a private-key-only
+    /// document derives the public half on demand, which reads the configured
+    /// key file.
     pub fn recipient_public_key(&self) -> Result<[u8; X25519_PUBLIC_KEY_BYTES], BackupTrustError> {
         if let Some(encoded) = &self.recipient.x25519_public_key {
             return decode_x25519_public_key(encoded);
@@ -538,12 +576,14 @@ impl BackupTrustConfig {
         if !recipient_key_mode_allowed(opened.metadata.permissions().mode()) {
             return Err(BackupTrustError::RecipientKeyPermissionsTooOpen);
         }
-        validate_parent_directory(path, effective_uid).map_err(|failure| match failure {
-            ParentFailure::Unavailable | ParentFailure::OwnerUntrusted => {
-                BackupTrustError::RecipientKeyParentUntrusted
-            }
-            ParentFailure::PermissionsTooOpen => BackupTrustError::RecipientKeyParentUntrusted,
-        })?;
+        validate_parent_directory(path, effective_uid, TrustPosture::TestLab).map_err(
+            |failure| match failure {
+                ParentFailure::Unavailable | ParentFailure::OwnerUntrusted => {
+                    BackupTrustError::RecipientKeyParentUntrusted
+                }
+                ParentFailure::PermissionsTooOpen => BackupTrustError::RecipientKeyParentUntrusted,
+            },
+        )?;
         if opened.metadata.len() > MAX_RECIPIENT_KEY_BYTES {
             return Err(BackupTrustError::RecipientKeyInvalid);
         }
@@ -742,19 +782,32 @@ pub fn site_and_installation_ids(data_dir: &Path) -> io::Result<(String, String)
 /// The packaged posture is `root:o3k 0640`: root owns the document and the
 /// service group reads it. A root-owned regular file without the group-read
 /// bit and a non-root caller is exactly that misconfiguration, so it gets its
-/// own reason instead of the generic unavailable code. Everything else stays
+/// own reason instead of the generic unavailable code. For an installed data
+/// directory an unreadable document whose own metadata already violates the
+/// installed posture (wrong owner, group or mode) is reported as
+/// `trust-config-posture-invalid`, so a wrong group cannot hide behind
+/// `trust-config-unavailable`. Everything else stays
 /// `trust-config-unavailable`.
-fn unavailable_config_error(path: &Path, effective_uid: u32) -> BackupTrustError {
+fn unavailable_config_error(
+    path: &Path,
+    effective_uid: u32,
+    posture: TrustPosture,
+) -> BackupTrustError {
     match fs::symlink_metadata(path) {
-        Ok(metadata)
-            if metadata.file_type().is_file()
-                && unreadable_by_service_user(
-                    metadata.uid(),
-                    metadata.permissions().mode(),
-                    effective_uid,
-                ) =>
-        {
-            BackupTrustError::ConfigUnreadableByServiceUser
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let uid = metadata.uid();
+            let gid = metadata.gid();
+            let mode = metadata.permissions().mode();
+            if let TrustPosture::Installed { service_gid } = posture
+                && !installed_posture_allowed(uid, gid, mode, service_gid)
+            {
+                return BackupTrustError::ConfigPostureInvalid;
+            }
+            if unreadable_by_service_user(uid, mode, effective_uid) {
+                BackupTrustError::ConfigUnreadableByServiceUser
+            } else {
+                BackupTrustError::ConfigUnavailable
+            }
         }
         _ => BackupTrustError::ConfigUnavailable,
     }
@@ -764,6 +817,73 @@ fn unavailable_config_error(path: &Path, effective_uid: u32) -> BackupTrustError
 /// the packaged `0640` posture provides is missing.
 fn unreadable_by_service_user(uid: u32, mode: u32, effective_uid: u32) -> bool {
     effective_uid != 0 && uid == 0 && mode & 0o040 == 0
+}
+
+/// Trust-document posture selected from the resolved data directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustPosture {
+    /// Packaged `/var/lib/o3k` installation. `service_gid` is the resolved
+    /// packaged `o3k` group; `None` means resolution was unavailable and gid
+    /// `0` is the only accepted fallback.
+    Installed { service_gid: Option<u32> },
+    /// Non-installed/TestLab or temporary data directory.
+    TestLab,
+}
+
+/// The installed posture: root-owned, owned by the packaged service group (or
+/// root when that group could not be resolved), and exactly `0600` or `0640`.
+fn installed_posture_allowed(uid: u32, gid: u32, mode: u32, service_gid: Option<u32>) -> bool {
+    uid == 0
+        && service_gid.map_or(gid == 0, |wanted| gid == wanted)
+        && matches!(mode & 0o777, 0o600 | 0o640)
+}
+
+/// Resolves the packaged `o3k` service group from the local account database.
+///
+/// The packaged installer creates a local system group, so `/etc/group` (and
+/// `/etc/passwd` for the account's primary group) is sufficient. Resolution
+/// failure is not an error: the installed posture then accepts only gid `0`.
+fn installed_service_gid() -> Option<u32> {
+    group_gid_by_name("/etc/group", "o3k").or_else(|| user_primary_gid("/etc/passwd", "o3k"))
+}
+
+/// Finds a group name in a bounded local `group(5)` file and returns its gid.
+fn group_gid_by_name(path: &str, name: &str) -> Option<u32> {
+    let contents = read_account_file(path)?;
+    contents.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let group = fields.next()?;
+        let _password = fields.next()?;
+        let gid = fields.next()?;
+        (group == name).then(|| gid.parse::<u32>().ok()).flatten()
+    })
+}
+
+/// Finds a user name in a bounded local `passwd(5)` file and returns its
+/// primary gid.
+fn user_primary_gid(path: &str, name: &str) -> Option<u32> {
+    let contents = read_account_file(path)?;
+    contents.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let user = fields.next()?;
+        let _password = fields.next()?;
+        let _uid = fields.next()?;
+        let gid = fields.next()?;
+        (user == name).then(|| gid.parse::<u32>().ok()).flatten()
+    })
+}
+
+/// Reads a local account database with a fixed size bound. Only the packaged
+/// service account name is looked up, never caller-controlled data.
+fn read_account_file(path: &str) -> Option<String> {
+    const MAX_ACCOUNT_FILE_BYTES: u64 = 1024 * 1024;
+    let mut bytes = Vec::new();
+    File::open(path)
+        .ok()?
+        .take(MAX_ACCOUNT_FILE_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -811,7 +931,14 @@ enum ParentFailure {
 
 /// Requires the containing directory to be a real directory with a trusted
 /// owner and no group/other write permission.
-fn validate_parent_directory(path: &Path, effective_uid: u32) -> Result<(), ParentFailure> {
+///
+/// The installed posture additionally requires the parent (the installed
+/// `/etc/o3k`) to be root-owned; a service-user-owned parent never qualifies.
+fn validate_parent_directory(
+    path: &Path,
+    effective_uid: u32,
+    posture: TrustPosture,
+) -> Result<(), ParentFailure> {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -820,7 +947,11 @@ fn validate_parent_directory(path: &Path, effective_uid: u32) -> Result<(), Pare
     if !metadata.is_dir() {
         return Err(ParentFailure::Unavailable);
     }
-    if !is_trusted_owner(metadata.uid(), effective_uid) {
+    let owner_trusted = match posture {
+        TrustPosture::Installed { .. } => metadata.uid() == 0,
+        TrustPosture::TestLab => is_trusted_owner(metadata.uid(), effective_uid),
+    };
+    if !owner_trusted {
         return Err(ParentFailure::OwnerUntrusted);
     }
     if metadata.permissions().mode() & 0o022 != 0 {
@@ -1079,7 +1210,37 @@ mod tests {
         }
 
         fn load(&self) -> Result<BackupTrustConfig, BackupTrustError> {
-            BackupTrustConfig::load(&self.config_path)
+            BackupTrustConfig::load_for_data_dir(&self.config_path, &self.root)
+        }
+
+        fn load_testlab_with_effective_uid(
+            &self,
+            effective_uid: u32,
+        ) -> Result<BackupTrustConfig, BackupTrustError> {
+            BackupTrustConfig::load_with_posture(
+                &self.config_path,
+                effective_uid,
+                TrustPosture::TestLab,
+            )
+        }
+
+        fn load_installed(
+            &self,
+            service_gid: Option<u32>,
+        ) -> Result<BackupTrustConfig, BackupTrustError> {
+            self.load_installed_at(&self.config_path, service_gid)
+        }
+
+        fn load_installed_at(
+            &self,
+            path: &Path,
+            service_gid: Option<u32>,
+        ) -> Result<BackupTrustConfig, BackupTrustError> {
+            BackupTrustConfig::load_with_posture(
+                path,
+                current_euid(),
+                TrustPosture::Installed { service_gid },
+            )
         }
     }
 
@@ -1239,6 +1400,164 @@ mod tests {
     }
 
     #[test]
+    fn installed_posture_accepts_only_root_service_group_0600_or_0640() {
+        let service_gid = 4321;
+        // Valid packaged postures: root:o3k 0640 and root:o3k 0600. Mode from
+        // `MetadataExt::mode()` carries the file-type bits; only 0o777 counts.
+        assert!(installed_posture_allowed(
+            0,
+            service_gid,
+            0o100_640,
+            Some(service_gid)
+        ));
+        assert!(installed_posture_allowed(
+            0,
+            service_gid,
+            0o100_600,
+            Some(service_gid)
+        ));
+
+        // A service-user-owned document is never an installed document, even
+        // with the packaged mode and group.
+        assert!(!installed_posture_allowed(
+            service_gid,
+            service_gid,
+            0o100_600,
+            Some(service_gid)
+        ));
+        // Wrong group: root:root, and an unrelated group.
+        assert!(!installed_posture_allowed(
+            0,
+            0,
+            0o100_640,
+            Some(service_gid)
+        ));
+        assert!(!installed_posture_allowed(
+            0,
+            service_gid + 1,
+            0o100_640,
+            Some(service_gid)
+        ));
+        // 0644, 0660, 0604, 0400 and group/other execute are all refused.
+        for mode in [0o644, 0o660, 0o664, 0o604, 0o400, 0o650] {
+            assert!(
+                !installed_posture_allowed(0, service_gid, mode, Some(service_gid)),
+                "mode {mode:o}"
+            );
+        }
+
+        // If the local account database cannot resolve `o3k`, only the root
+        // group is an accepted fallback.
+        assert!(installed_posture_allowed(0, 0, 0o640, None));
+        assert!(!installed_posture_allowed(0, service_gid, 0o640, None));
+    }
+
+    #[test]
+    fn installed_posture_rejects_a_service_user_owned_document() {
+        let fixture = new_fixture();
+        let metadata = fs::metadata(&fixture.config_path).expect("fixture metadata");
+        let gid = metadata.gid();
+        assert_eq!(
+            fixture
+                .load_installed(Some(gid))
+                .expect_err("service-user-owned installed document")
+                .reason(),
+            "trust-config-posture-invalid"
+        );
+
+        fs::set_permissions(&fixture.config_path, fs::Permissions::from_mode(0o640))
+            .expect("packaged group-read mode");
+        assert_eq!(
+            fixture
+                .load_installed(Some(gid))
+                .expect_err("service-user-owned installed document")
+                .reason(),
+            "trust-config-posture-invalid"
+        );
+    }
+
+    #[test]
+    fn installed_loader_accepts_root_service_group_posture_when_privileged() {
+        if current_euid() != 0 {
+            // Creating a root-owned fixture requires root; the predicate
+            // matrix covers the valid root:o3k cases on unprivileged hosts.
+            return;
+        }
+        let fixture = new_fixture();
+        let gid = fs::metadata(&fixture.config_path)
+            .expect("fixture metadata")
+            .gid();
+        for mode in [0o640, 0o600] {
+            fs::set_permissions(&fixture.config_path, fs::Permissions::from_mode(mode))
+                .expect("packaged installed mode");
+            let config = fixture
+                .load_installed(Some(gid))
+                .expect("root-owned installed document");
+            assert_eq!(config.site_id(), SITE_ID);
+        }
+    }
+
+    #[test]
+    fn installed_posture_rejects_symlink_and_non_0600_or_0640_modes() {
+        let fixture = new_fixture();
+        let gid = fs::metadata(&fixture.config_path)
+            .expect("fixture metadata")
+            .gid();
+        let config_link = fixture.root.join("backup-trust-installed-link.json");
+        std::os::unix::fs::symlink(&fixture.config_path, &config_link).expect("config symlink");
+        assert_eq!(
+            fixture
+                .load_installed_at(&config_link, Some(gid))
+                .expect_err("symlinked installed document")
+                .reason(),
+            "trust-config-symlink"
+        );
+
+        // The fixture owner is the effective uid, which is itself an installed
+        // posture violation; these cases still prove 0644/0660 never pass.
+        for mode in [0o644, 0o660] {
+            fs::set_permissions(&fixture.config_path, fs::Permissions::from_mode(mode))
+                .expect("relax installed fixture permissions");
+            assert_eq!(
+                fixture
+                    .load_installed(Some(gid))
+                    .expect_err("unsafe installed mode")
+                    .reason(),
+                "trust-config-posture-invalid",
+                "mode {mode:o}"
+            );
+        }
+    }
+
+    #[test]
+    fn service_group_resolution_reads_local_group_and_passwd_files() {
+        let root = std::env::temp_dir().join(format!("o3k-group-fixture-{}", Uuid::now_v7()));
+        create_private_dir(&root);
+        let group_file = root.join("group");
+        let passwd_file = root.join("passwd");
+        fs::write(&group_file, "root:x:0:\nother:x:100:\no3k:x:4321:\n")
+            .expect("write group fixture");
+        fs::write(
+            &passwd_file,
+            "root:x:0:0:root:/root:/bin/sh\no3k:x:999:4321::/var/lib/o3k:/usr/sbin/nologin\n",
+        )
+        .expect("write passwd fixture");
+        assert_eq!(
+            group_gid_by_name(group_file.to_str().expect("utf-8 path"), "o3k"),
+            Some(4321)
+        );
+        assert_eq!(
+            user_primary_gid(passwd_file.to_str().expect("utf-8 path"), "o3k"),
+            Some(4321)
+        );
+        assert_eq!(
+            group_gid_by_name(group_file.to_str().expect("utf-8 path"), "absent"),
+            None
+        );
+        fs::remove_dir_all(root).expect("remove group fixture");
+    }
+
+    #[test]
     fn root_owned_0640_for_a_service_user_and_group_write_rejection() {
         // Pure posture matrix: root owns the document and the service group
         // reads it; any group write or other read is refused.
@@ -1273,7 +1592,7 @@ mod tests {
         let config_link = fixture.root.join("backup-trust-link.json");
         std::os::unix::fs::symlink(&fixture.config_path, &config_link).expect("config symlink");
         assert_eq!(
-            BackupTrustConfig::load(&config_link)
+            BackupTrustConfig::load_for_data_dir(&config_link, &fixture.root)
                 .expect_err("symlinked configuration")
                 .reason(),
             "trust-config-symlink"
@@ -1460,7 +1779,8 @@ mod tests {
     fn rejects_configuration_and_key_owned_by_another_user() {
         let fixture = new_fixture();
         let effective_uid = current_euid();
-        BackupTrustConfig::load_with_effective_uid(&fixture.config_path, effective_uid)
+        fixture
+            .load_testlab_with_effective_uid(effective_uid)
             .expect("config owned by the effective uid");
         let foreign_uid = if effective_uid == 0 {
             1
@@ -1468,7 +1788,8 @@ mod tests {
             effective_uid + 1
         };
         assert_eq!(
-            BackupTrustConfig::load_with_effective_uid(&fixture.config_path, foreign_uid)
+            fixture
+                .load_testlab_with_effective_uid(foreign_uid)
                 .expect_err("foreign owner")
                 .reason(),
             "trust-config-owner-untrusted"
@@ -1489,7 +1810,7 @@ mod tests {
     fn rejects_a_directory_as_configuration() {
         let fixture = new_fixture();
         assert_eq!(
-            BackupTrustConfig::load(&fixture.root)
+            BackupTrustConfig::load_for_data_dir(&fixture.root, &fixture.root)
                 .expect_err("directory configuration")
                 .reason(),
             "trust-config-not-regular-file"
@@ -1808,7 +2129,7 @@ mod tests {
         let fixture = new_fixture();
         let missing = fixture.root.join("absent-trust.json");
         assert_eq!(
-            unavailable_config_error(&missing, current_euid()),
+            unavailable_config_error(&missing, current_euid(), TrustPosture::TestLab),
             BackupTrustError::ConfigUnavailable
         );
     }

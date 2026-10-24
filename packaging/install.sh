@@ -240,6 +240,99 @@ if [[ $EUID -eq 0 ]]; then
   RUN_USER=o3k
 else RUN_USER="$(id -un)"; fi
 
+# The packaged service group that owns the installed backup trust document.
+# The installer creates the local system group above, so the local account
+# database is authoritative; if it cannot be resolved, only gid 0 is an
+# accepted fallback (matching the Rust loader's installed posture).
+resolve_o3k_gid() {
+  local gid=""
+  if command -v getent >/dev/null 2>&1; then
+    gid="$(getent group o3k 2>/dev/null | cut -d: -f3 || true)"
+  fi
+  if [[ ! "$gid" =~ ^[0-9]+$ ]]; then
+    gid="$(id -g o3k 2>/dev/null || true)"
+  fi
+  if [[ "$gid" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$gid"
+  else
+    printf '0'
+  fi
+}
+
+# Fail-closed validation of an operator-provided trust document. The installer
+# never creates or populates this file and carries no key material: it only
+# rejects a posture that the loader would refuse or that a service user could
+# have written.
+#
+# Installed system layout: root:o3k 0640 (service-user group read) or
+# root:o3k 0600 (root caller). TestLab/custom layout: the invoking user's
+# 0600/0640 document, matching the documented non-installed override.
+validate_backup_trust_posture() {
+  local trust_path="$CONFIG_DIR/backup-trust.json"
+  if [[ ! -e "$trust_path" && ! -L "$trust_path" ]]; then
+    return 0
+  fi
+  if [[ -L "$trust_path" || ! -f "$trust_path" ]]; then
+    echo "refusing backup trust document that is not a regular file: $trust_path" >&2
+    exit 2
+  fi
+  local uid gid mode
+  read -r uid gid mode < <(stat -c '%u %g %a' -- "$trust_path" 2>/dev/null || true)
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]+$ ]] || {
+    echo "backup trust document ownership is unreadable: $trust_path" >&2
+    exit 2
+  }
+  local expected_uid expected_gid
+  if [[ $EUID -eq 0 && "$SYSTEM_INSTALL" -eq 1 ]]; then
+    expected_uid=0
+    expected_gid="$(resolve_o3k_gid)"
+  else
+    expected_uid="$EUID"
+    expected_gid="$(id -g)"
+  fi
+  if [[ "$uid" -ne "$expected_uid" || "$gid" -ne "$expected_gid" ]]; then
+    echo "refusing backup trust document ownership ${uid}:${gid}; expected ${expected_uid}:${expected_gid} (root:o3k for the installed layout): $trust_path" >&2
+    exit 2
+  fi
+  case "$mode" in
+    600|640) ;;
+    *)
+      echo "refusing backup trust document mode 0${mode}; installed posture is 0640 or 0600 with no group/other write or execute: $trust_path" >&2
+      exit 2
+      ;;
+  esac
+}
+
+# The installed configuration directory is traversed by the control-plane and
+# compute service identities. The documented non-writable mode is root:root
+# 0755 (root-owned, no group/other write); a group/world-writable directory
+# would let a service user replace the trust document.
+validate_config_directory_posture() {
+  [[ -e "$CONFIG_DIR" || -L "$CONFIG_DIR" ]] || return 0
+  if [[ -L "$CONFIG_DIR" || ! -d "$CONFIG_DIR" ]]; then
+    echo "refusing non-directory configuration path: $CONFIG_DIR" >&2
+    exit 2
+  fi
+  local uid gid mode
+  read -r uid gid mode < <(stat -c '%u %g %a' -- "$CONFIG_DIR" 2>/dev/null || true)
+  [[ "$uid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]+$ ]] || {
+    echo "configuration directory ownership is unreadable: $CONFIG_DIR" >&2
+    exit 2
+  }
+  if [[ "$uid" -ne "$EUID" ]]; then
+    echo "refusing configuration directory owned by uid ${uid}; expected uid ${EUID}: $CONFIG_DIR" >&2
+    exit 2
+  fi
+  local permissions=$((8#$mode))
+  if (( (permissions & 8#022) != 0 )); then
+    echo "refusing group/world-writable configuration directory: $CONFIG_DIR" >&2
+    exit 2
+  fi
+}
+
+validate_backup_trust_posture
+validate_config_directory_posture
+
 mark_owned_dir() {
   local path="$1" marker="$1/.o3k-owned"
   if [[ -e "$path" ]]; then
@@ -389,15 +482,19 @@ if [[ -f "$ROOT_DIR/SHA256SUMS" ]]; then
 fi
 # Backup trust template (no key material). Operators copy it to the root-owned
 # /etc/o3k/backup-trust.json and replace every placeholder; the loader validates
-# the file posture and rejects incomplete or malformed values. The packaged mode
-# is root:o3k 0640, because the service user runs as `o3k` and needs the group
-# read bit; 0600 is only usable when the document is owned by the invoking user
-# (TestLab). A root-owned 0600 document is rejected for a non-root caller with
+# the file posture and rejects incomplete or malformed values. The installer
+# never creates or populates /etc/o3k/backup-trust.json. If an operator-provided
+# document already exists, the installer fails closed unless it is a regular
+# file owned by root:o3k (or the invoking user for a custom TestLab config
+# directory) with mode 0640 or 0600. The packaged mode is root:o3k 0640,
+# because the service user runs as `o3k` and needs the group read bit; a
+# root-owned 0600 document is rejected for a non-root caller with
 # trust-config-unreadable-by-service-user. The example is capture-only: it names
 # the X25519 public key and no private key file. The recovery private key stays
 # on the operator/recovery host as 0600 (0400 accepted); `o3k backup verify`
-# requires it there. The installer never creates /etc/o3k/backup-trust.json or
-# any permissive /etc/o3k directory.
+# requires it there. The installer never creates any permissive /etc/o3k
+# directory; an existing one must be owned by the installing user (root for a
+# system install) and not group/other writable.
 install_owned_file "$ROOT_DIR/packaging/backup-trust.example.json" \
   "$PREFIX/share/o3k/backup-trust.example.json" share/o3k/backup-trust.example.json 0644
 INSTALLED_FILES+=(share/o3k/backup-trust.example.json)
@@ -812,5 +909,10 @@ fi
 echo "installed o3kd profile=$PROFILE at $PREFIX/bin/o3kd; data=$DATA_DIR; config=$ENV_FILE; user=$RUN_USER"
 echo "backup data directory: a non-root $RUN_USER service user resolves $DATA_DIR automatically when it owns that directory (the packaged posture), even though $ENV_FILE is root:root 0600 and unreadable to it; set O3K_DATA_DIR to override"
 if [[ -f "$PREFIX/share/o3k/backup-trust.example.json" ]]; then
-  echo "backup trust template: $PREFIX/share/o3k/backup-trust.example.json (install as /etc/o3k/backup-trust.json with the packaged mode root:$RUN_USER 0640 so the service user can read it, or 0600 only when the document is owned by the invoking user; replace placeholders; capture uses recipient.x25519_public_key only; keep the X25519 private key on the recovery/operator host as 0600 and set recipient.x25519_private_key_file there for verify; fields: format, site_id, installation_id, profile_id, artifact_signing{key_id, ed25519_public_key}, recipient{key_id, x25519_public_key[, x25519_private_key_file]}, revoked_key_ids, custody{record_id, purpose, key_fingerprint, threshold, custodians, storage_class, expires_at})"
+  if [[ $EUID -eq 0 && "$SYSTEM_INSTALL" -eq 1 ]]; then
+    TRUST_POSTURE="root:$RUN_USER 0640 (or root:$RUN_USER 0600 for a root caller)"
+  else
+    TRUST_POSTURE="0600 (or 0640) owned by $RUN_USER"
+  fi
+  echo "backup trust template: $PREFIX/share/o3k/backup-trust.example.json (install as $CONFIG_DIR/backup-trust.json with the packaged mode $TRUST_POSTURE; an existing document is validated and the install aborts unless its owner, group and mode match the installed/TestLab posture; replace placeholders; capture uses recipient.x25519_public_key only; keep the X25519 private key on the recovery/operator host as 0600 and set recipient.x25519_private_key_file there for verify; fields: format, site_id, installation_id, profile_id, artifact_signing{key_id, ed25519_public_key}, recipient{key_id, x25519_public_key[, x25519_private_key_file]}, revoked_key_ids, custody{record_id, purpose, key_fingerprint, threshold, custodians, storage_class, expires_at})"
 fi
