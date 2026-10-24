@@ -598,11 +598,9 @@ fn read_local_migrations(
             .connect_with(options)
             .await
             .map_err(|_| REASON_EXPECTED_RELEASE_UNAVAILABLE)?;
-        let rows: Vec<(i64, Vec<u8>)> =
-            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
-                .fetch_all(&pool)
-                .await
-                .map_err(|_| REASON_EXPECTED_RELEASE_UNAVAILABLE)?;
+        let rows = crate::db::sqlite_migration_inventory(&pool)
+            .await
+            .map_err(|_| REASON_EXPECTED_RELEASE_UNAVAILABLE)?;
         pool.close().await;
         Ok::<_, &'static str>(rows)
     })?;

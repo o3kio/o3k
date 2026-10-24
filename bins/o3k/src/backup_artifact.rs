@@ -196,10 +196,7 @@ use rustix::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{
-    Row,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use uuid::Uuid;
 
 use crate::{
@@ -640,23 +637,15 @@ pub fn snapshot_in_flight_operations(
 async fn query_in_flight_operations(
     pool: &sqlx::SqlitePool,
 ) -> Result<(&'static str, Vec<String>), ArtifactFailure> {
-    let rows = sqlx::query(
-        "SELECT id FROM operations WHERE state NOT IN ('succeeded', 'failed') ORDER BY id",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ArtifactFailure::rejected("snapshot-operation-inventory-unavailable"))?;
-    let mut ids = Vec::with_capacity(rows.len());
-    for row in rows {
-        let id: String = row
-            .try_get(0)
-            .map_err(|_| ArtifactFailure::rejected("snapshot-operation-inventory-unavailable"))?;
-        if Uuid::parse_str(&id).is_err() {
+    let ids = crate::db::sqlite_in_flight_operation_ids(pool)
+        .await
+        .map_err(|_| ArtifactFailure::rejected("snapshot-operation-inventory-unavailable"))?;
+    for id in &ids {
+        if Uuid::parse_str(id).is_err() {
             return Err(ArtifactFailure::rejected(
                 "snapshot-operation-inventory-unavailable",
             ));
         }
-        ids.push(id);
     }
     let classification = if ids.is_empty() {
         "drained"
@@ -672,22 +661,14 @@ async fn read_snapshot_facts(
     pool: &sqlx::SqlitePool,
     release: &BackupReleaseIdentity,
 ) -> Result<SnapshotFacts, ArtifactFailure> {
-    let sqlite_version: String = sqlx::query_scalar("SELECT sqlite_version()")
-        .fetch_one(pool)
+    let sqlite_version = crate::db::sqlite_version(pool)
         .await
         .map_err(|_| ArtifactFailure::rejected("snapshot-unreadable"))?;
-    let rows = sqlx::query("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
-        .fetch_all(pool)
+    let rows = crate::db::sqlite_migration_inventory(pool)
         .await
         .map_err(|_| ArtifactFailure::rejected("snapshot-migration-inventory-unavailable"))?;
     let mut migrations = Vec::with_capacity(rows.len());
-    for row in rows {
-        let version: i64 = row
-            .try_get(0)
-            .map_err(|_| ArtifactFailure::rejected("migration-version-invalid"))?;
-        let checksum: Vec<u8> = row
-            .try_get(1)
-            .map_err(|_| ArtifactFailure::rejected("migration-checksum-invalid"))?;
+    for (version, checksum) in rows {
         migrations.push(MigrationIdentity {
             version: u64::try_from(version)
                 .map_err(|_| ArtifactFailure::rejected("migration-version-invalid"))?,
@@ -723,14 +704,10 @@ async fn read_snapshot_facts(
             if !is_table_identifier(&table) {
                 return Err(ArtifactFailure::rejected("state-inventory-invalid"));
             }
-            let exists: i64 =
-                sqlx::query_scalar(&format!("SELECT EXISTS(SELECT 1 FROM \"{table}\")"))
-                    .fetch_one(pool)
-                    .await
-                    .map_err(|_| {
-                        ArtifactFailure::rejected("snapshot-repository-table-unavailable")
-                    })?;
-            if exists != 0 {
+            let exists = crate::db::sqlite_table_exists(pool, &table)
+                .await
+                .map_err(|_| ArtifactFailure::rejected("snapshot-repository-table-unavailable"))?;
+            if exists {
                 included = false;
                 break;
             }

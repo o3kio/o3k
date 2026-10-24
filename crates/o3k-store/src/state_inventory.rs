@@ -417,36 +417,7 @@ pub enum CatalogMismatch {
 pub async fn sqlite_live_catalog_objects(
     pool: &sqlx::SqlitePool,
 ) -> Result<Vec<LiveCatalogObject>, StoreError> {
-    use sqlx::Row as _;
-
-    let rows = sqlx::query(
-        "SELECT type, name, sql FROM sqlite_master \
-         WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' \
-         ORDER BY type, name",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(StoreError::Database)?;
-    let mut objects = Vec::with_capacity(rows.len());
-    for row in rows {
-        let kind: String = row.try_get(0).map_err(StoreError::Database)?;
-        let name: String = row.try_get(1).map_err(StoreError::Database)?;
-        let sql: String = row.try_get(2).map_err(StoreError::Database)?;
-        if is_internal_sqlite_object(&name) {
-            continue;
-        }
-        let definition = normalize_catalog_definition(&kind, &sql).ok_or_else(|| {
-            StoreError::Corrupt(format!(
-                "snapshot catalog object {kind} {name:?} has an unsupported definition"
-            ))
-        })?;
-        objects.push(LiveCatalogObject {
-            kind,
-            name,
-            definition_sha256: sha256_hex(&definition),
-        });
-    }
-    Ok(objects)
+    crate::sqlite::live_catalog_objects(pool).await
 }
 
 /// Compares the live snapshot catalog with every baseline entry's
@@ -891,14 +862,7 @@ fn is_sha256(value: &str) -> bool {
 /// includes `_sqlx_migrations`; callers comparing this against the canonical
 /// inventory must drop names accepted by [`is_internal_sqlite_table`].
 pub async fn sqlite_live_tables(store: &SqliteStore) -> Result<Vec<String>, StoreError> {
-    sqlx::query_scalar(
-        "SELECT name FROM sqlite_master \
-         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' \
-         ORDER BY name",
-    )
-    .fetch_all(&store.pool)
-    .await
-    .map_err(StoreError::Database)
+    crate::sqlite::live_tables(store).await
 }
 
 /// Reviewed framework DDL for SQLite `_sqlx_migrations`, verbatim from
@@ -2059,7 +2023,7 @@ fn strip_if_not_exists(statement: &str) -> String {
     stripped
 }
 
-fn sha256_hex(value: &str) -> String {
+pub(crate) fn sha256_hex(value: &str) -> String {
     sha256_hex_bytes(value.as_bytes())
 }
 

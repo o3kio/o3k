@@ -7,6 +7,7 @@ use sqlx::SqlitePool;
 use std::sync::Arc;
 
 mod audit_store;
+mod backup_inspection;
 mod bootstrap;
 mod building_block;
 mod composition;
@@ -21,6 +22,7 @@ mod relationship;
 mod topology;
 mod volume_attachment;
 
+pub(crate) use backup_inspection::{live_catalog_objects, live_tables};
 #[cfg(test)]
 pub(crate) use core::apply_test_runtime_schema;
 pub use helpers::validate_public_key;

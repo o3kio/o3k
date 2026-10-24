@@ -468,6 +468,51 @@ impl DoctorDb for SqlxDoctorDb {
     }
 }
 
+/// Reads the applied SQLx migration rows from an open read-only snapshot pool.
+///
+/// The returned checksum is the raw bytes SQLx recorded (SHA-384); callers own
+/// the documented binding to the manifest's SHA-256.
+pub async fn sqlite_migration_inventory(
+    pool: &sqlx::SqlitePool,
+) -> Result<Vec<(i64, Vec<u8>)>, sqlx::Error> {
+    sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+        .fetch_all(pool)
+        .await
+}
+
+/// Reads the SQLite library version from an open read-only snapshot pool.
+pub async fn sqlite_version(pool: &sqlx::SqlitePool) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar("SELECT sqlite_version()")
+        .fetch_one(pool)
+        .await
+}
+
+/// Reads the durable non-terminal Operation identities from an open snapshot.
+pub async fn sqlite_in_flight_operation_ids(
+    pool: &sqlx::SqlitePool,
+) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id FROM operations WHERE state NOT IN ('succeeded', 'failed') ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(|row| row.try_get(0)).collect()
+}
+
+/// Returns whether `table` exists in an open snapshot.
+///
+/// `table` must already be validated as a plain identifier by the caller; it
+/// is interpolated because SQLite does not parameterize identifiers.
+pub async fn sqlite_table_exists(
+    pool: &sqlx::SqlitePool,
+    table: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(&format!("SELECT EXISTS(SELECT 1 FROM \"{table}\")"))
+        .fetch_one(pool)
+        .await
+        .map(|exists| exists != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
