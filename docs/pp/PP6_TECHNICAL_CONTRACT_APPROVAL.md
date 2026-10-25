@@ -55,7 +55,7 @@ SQLite TestLab/portable path and is recorded in
 | Deployment | Activation policy | Independent authority required |
 |---|---|---|
 | `o3k-small-edge-v1`, physical | Supported only when configured | Redfish/BMC administered outside O3K, independent recovery host, pinned CA/certificate and source serial, plus continuous fence lease. |
-| `o3k-small-edge-v1`, virtualized | Disabled by default; no qualified integration is claimed in this package | Any future enablement requires independent hypervisor power control or network isolation outside both restored-controller credentials and its host. Controller-local APIs, host-local locks and same-host agents never qualify. Until a provider-specific contract and destructive tests are accepted, only backup/verification and inactive restore/quarantine are allowed. |
+| `o3k-small-edge-v1`, virtualized | Disabled by default; no qualified integration is claimed in this package | Any future activation requires independent hypervisor power control or network isolation outside both restored-controller credentials and its host. Controller-local APIs, host-local locks and same-host agents never qualify. Until A10 is explicitly accepted, only backup/verification is allowed; if accepted, inactive materialization is limited to its signed-policy branch. |
 | `o3k-demo-v1` / TestLab | Backup and verification only; restored-controller activation disabled | A later profile-specific fencing contract and exact evidence are required before enabling activation. |
 
 **Proposed amendment A10 (PENDING, not accepted).** The virtualized row's
@@ -66,11 +66,7 @@ non-activating branch limited to virtualized PostgreSQL `o3k-small-edge-v1`
 under a release-signed installation policy; see
 [SPEC-0050 §7.1](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#71-proposed-amendment-a10-isolated-inactive-materialization-pending-not-accepted)
 and the [ADR-0189 proposed amendment](../adr/ADR-0189-pp6-control-plane-backup-and-restore.md#proposed-amendment-a10-isolated-inactive-materialization-pending-not-accepted).
-This note does not change the accepted table, SPEC-0050 or any D1–D13 decision.
-Until the exact amendment is accepted by the named human reviewer at a new
-exact revision, the accepted text governs: implementation must remain limited
-to capture/verification or the accepted fenced activation path, and the
-current local journal remains fail-closed at `PREFLIGHTED`.
+Proposed A10 also clarifies [SPEC-0050 §8](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#8-operator-interface): the unchanged `restore resume` command revalidates and observes the same target; emptiness is required before first mutation, not after the operation's own partial mutation. Fresh D7 evidence remains required for activation resumes, while the A10 inactive branch requires its signed installation policy and never accepts activation transitions. This proposal does not change any accepted D1–D13 decision. Until the exact amendment is accepted by the named human reviewer at a new exact revision, implementation remains fail-closed at `PREFLIGHTED` and inactive target mutation is not authorized.
 
 ### D2 custody record
 
