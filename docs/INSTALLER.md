@@ -355,6 +355,34 @@ confirm the result with `sudo o3k doctor`, then re-run `sudo o3k upgrade`. A suc
 describes the current local installation; it does not prove external provider
 state or guest/storage recovery.
 
+## Backup and recovery boundary
+
+The current protected source implements authenticated backup artifact creation
+and verification for the bounded SQLite/TestLab path. The operator commands
+are:
+
+```sh
+sudo o3k backup create --destination ABSOLUTE_DIRECTORY --operation-id UUID
+sudo o3k backup verify --artifact ABSOLUTE_FILE
+```
+
+Run them only against O3K-owned paths and retain the bounded JSON result with
+the exact installed release identity. Verification is a maintenance operation;
+it does not restore a database, start a controller, or prove fresh-host
+recovery. The artifact campaign in
+[`docs/evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md`](evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md)
+is source-bound SQLite/TestLab evidence and is not PostgreSQL or production
+recovery evidence.
+
+`o3k restore preflight` is a non-mutating validation surface. `o3k restore
+resume`, target restoration, and controller activation are not implemented or
+supported by this release. Do not improvise a restore by copying live database
+files, editing recovery markers, deleting `restore.json`, starting restored
+binaries directly, or reusing an artifact on a non-empty target. PostgreSQL
+backup/restore, fresh-host recovery, HA, and workload disaster recovery remain
+outside the supported installer profile until their exact contract and
+real-process evidence gates pass.
+
 Installer fence: `curl -sfL https://get.o3k.io | sudo sh -` never
 auto-upgrades an existing install. On a host with an installed release, the
 installer compares the resolved target version against
