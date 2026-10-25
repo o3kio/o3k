@@ -1016,13 +1016,39 @@ pub fn expected_backup_executor_from(
 pub async fn build_composition(
     config: o3k_config::Config,
 ) -> Result<Composition, Box<dyn std::error::Error>> {
+    let startup_guard = acquire_startup_guard(&config.data_dir)?;
+    build_composition_with_guard(config, startup_guard).await
+}
+
+/// Acquires the process-lifetime store guard and rejects configured restore
+/// recovery state before callers bind an API listener or open canonical state.
+pub fn acquire_startup_guard(
+    data_dir: &Path,
+) -> Result<o3k_store::StoreAccessLock, Box<dyn std::error::Error>> {
+    let guard = o3k_store::StoreAccessLock::acquire(data_dir)?;
+    o3k::restore_preflight::deny_startup_if_restore_state(data_dir)
+        .map_err(std::io::Error::other)?;
+    Ok(guard)
+}
+
+/// Builds the operational composition while retaining the already acquired
+/// startup guard for the lifetime of the daemon.
+pub async fn build_composition_with_guard(
+    config: o3k_config::Config,
+    store_lock: o3k_store::StoreAccessLock,
+) -> Result<Composition, Box<dyn std::error::Error>> {
     // This must precede every store open and all readiness/worker/session work.
     // The lock is local to this data directory and does not fence remote
     // PostgreSQL writers or a controller on another host.
     let mut startup_locks = DrainLockRetention {
-        store_lock: Some(o3k_store::StoreAccessLock::acquire(&config.data_dir)?),
+        store_lock: Some(store_lock),
         storage_fence: None,
     };
+    // Repeat the denial check under the retained lock at the store-opening
+    // boundary. This also protects direct composition callers that do not use
+    // the process entry point's pre-bind gate.
+    o3k::restore_preflight::deny_startup_if_restore_state(&config.data_dir)
+        .map_err(std::io::Error::other)?;
     // An interrupted backup is denial-only forensic metadata (SPEC-0050 §7):
     // its presence blocks replacement-controller startup before any canonical
     // state is opened; its absence proves nothing and is never treated as

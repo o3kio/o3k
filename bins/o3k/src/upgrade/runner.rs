@@ -1212,6 +1212,9 @@ fn validate_tar_entries(tarball: &Path) -> Result<(), String> {
 #[async_trait]
 impl UpgradeIo for SystemUpgradeIo {
     async fn acquire_lock(&self) -> Result<LockGuard, String> {
+        crate::restore_preflight::deny_startup_if_restore_state(&self.data_dir).map_err(
+            |reason| format!("upgrade or rollback denied by restore quarantine: {reason}"),
+        )?;
         let lock_path = self.lock_path();
         if let Some(parent) = lock_path.parent()
             && !parent.exists()

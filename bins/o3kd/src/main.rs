@@ -24,10 +24,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = config.listen_addr;
     let data_dir = config.data_dir.clone();
     let provider = config.provider;
+    // Acquire the lifetime store guard and reject restore quarantine before
+    // opening even an API listener. Keep the exact guard through composition
+    // and daemon shutdown.
+    let startup_guard = composition::acquire_startup_guard(&data_dir)?;
     // Bind before composition starts workers or opens canonical storage, so a
     // bind failure cannot leave detached background tasks behind the lock.
     let listener = TcpListener::bind(listen_addr).await?;
-    let composition = composition::build_composition(config).await?;
+    let composition = composition::build_composition_with_guard(config, startup_guard).await?;
 
     // Optional authenticated backup handoff control channel (PP.6). A missing
     // sibling `o3k` executable or a bind failure disables backups with a

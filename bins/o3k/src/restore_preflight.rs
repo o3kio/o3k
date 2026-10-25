@@ -28,6 +28,74 @@ pub struct RestorePreflightArgs {
     pub target: PathBuf,
 }
 
+/// Denies daemon startup when a configured restore recovery directory contains
+/// any state. The journal is not an authority for daemon startup in this
+/// implementation: even a valid `PREFLIGHTED` record cannot authorize opening
+/// canonical state because the D7 activation and D8 nonce-handoff verifiers
+/// are not implemented. Malformed configuration, unsafe paths, and unreadable
+/// state also fail closed.
+///
+/// This check is called while the daemon holds the lifetime store-access lock
+/// and before it binds the public API listener.
+pub fn deny_startup_if_restore_state(data_dir: &Path) -> std::result::Result<(), &'static str> {
+    let prefix = crate::backup_trust::install_prefix_for(
+        data_dir,
+        std::env::var_os(crate::backup_trust::INSTALL_PREFIX_ENV),
+    );
+    let config_path = prefix.join("etc/o3k/restore.json");
+    match fs::symlink_metadata(&config_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("restore configuration cannot be inspected"),
+        Ok(_) => {}
+    }
+
+    let bytes = read_root_file(&config_path, 65_536)
+        .map_err(|_| "restore configuration is unsafe or unavailable")?;
+    let config: RecoveryConfig =
+        serde_json::from_slice(&bytes).map_err(|_| "restore configuration is malformed")?;
+    let (uid, gid) = o3k_identity().map_err(|_| "o3k account is unavailable")?;
+    deny_recovery_state(&config, data_dir, uid, gid, true)
+}
+
+fn deny_recovery_state(
+    config: &RecoveryConfig,
+    data_dir: &Path,
+    uid: u32,
+    gid: u32,
+    require_ext4: bool,
+) -> std::result::Result<(), &'static str> {
+    if config.format != "o3k-restore-preflight-v1" || config.target_directory != data_dir {
+        return Err("restore configuration does not identify this data directory");
+    }
+    if config.recovery_directory == data_dir
+        || config.recovery_directory.starts_with(data_dir)
+        || data_dir.starts_with(&config.recovery_directory)
+    {
+        return Err("restore recovery directory overlaps the data directory");
+    }
+
+    if require_ext4 {
+        verify_root_ancestors(&config.recovery_directory)
+            .map_err(|_| "restore recovery directory has an untrusted ancestor")?;
+    }
+    let recovery = open_directory(&config.recovery_directory)
+        .map_err(|_| "restore recovery directory is unsafe or unavailable")?;
+    ensure_same_directory(&config.recovery_directory, &recovery)
+        .map_err(|_| "restore recovery directory identity changed")?;
+    verify_directory_posture(&recovery, uid, gid, require_ext4)
+        .map_err(|_| "restore recovery directory failed its owner or filesystem checks")?;
+    let has_state = fs::read_dir(fd_path(&recovery))
+        .map_err(|_| "restore recovery directory cannot be inspected")?
+        .next()
+        .is_some();
+    ensure_same_directory(&config.recovery_directory, &recovery)
+        .map_err(|_| "restore recovery directory identity changed")?;
+    if has_state {
+        return Err("restore recovery state is present; daemon startup is quarantined");
+    }
+    Ok(())
+}
+
 /// Root-owned host installation policy, not an artifact or cloud authority.
 /// PostgreSQL target is independently provisioned and empty; preflight never
 /// creates databases, roles, grants, files, controller epochs or provider work.
@@ -390,9 +458,15 @@ fn ensure_empty(fd: &OwnedFd) -> Result<()> {
     Ok(())
 }
 fn verify_directory(fd: &OwnedFd, uid: u32, gid: u32) -> Result<()> {
+    verify_directory_posture(fd, uid, gid, true)
+}
+fn verify_directory_posture(fd: &OwnedFd, uid: u32, gid: u32, require_ext4: bool) -> Result<()> {
     let stat = fstat(fd).map_err(|_| Failure::rejected("directory-unverifiable"))?;
     if stat.st_uid != uid || stat.st_gid != gid || stat.st_mode & 0o7777 != 0o700 {
         return Err(Failure::rejected("directory-owner-or-mode-rejected"));
+    }
+    if !require_ext4 {
+        return Ok(());
     }
     let filesystem =
         fstatfs(fd).map_err(|_| Failure::rejected("directory-filesystem-unverifiable"))?;
@@ -503,6 +577,7 @@ fn read_root_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+
 fn o3k_identity() -> Result<(u32, u32)> {
     let passwd = fs::read_to_string("/etc/passwd")
         .map_err(|_| Failure::rejected("recovery-account-unavailable"))?;
@@ -529,5 +604,116 @@ impl<R: Read> Read for HashReader<R> {
         let count = self.inner.read(buffer)?;
         self.hasher.update(&buffer[..count]);
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod startup_quarantine_tests {
+    use super::{RecoveryConfig, deny_recovery_state};
+    use std::{
+        fs,
+        os::unix::{fs::MetadataExt, fs::PermissionsExt},
+        path::PathBuf,
+    };
+    use uuid::Uuid;
+
+    struct TestDirs(PathBuf);
+    impl TestDirs {
+        fn new() -> std::io::Result<Self> {
+            let root = std::env::temp_dir().join(format!(
+                "o3k-restore-startup-{}-{}",
+                std::process::id(),
+                Uuid::now_v7()
+            ));
+            fs::create_dir(&root)?;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+            Ok(Self(root))
+        }
+    }
+    impl Drop for TestDirs {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn config(data_dir: PathBuf, recovery_directory: PathBuf) -> RecoveryConfig {
+        RecoveryConfig {
+            format: "o3k-restore-preflight-v1".to_owned(),
+            backend: "postgresql".to_owned(),
+            target_directory: data_dir,
+            recovery_directory,
+            postgres: None,
+        }
+    }
+
+    #[test]
+    fn configured_empty_recovery_directory_allows_startup_gate() -> std::io::Result<()> {
+        let dirs = TestDirs::new()?;
+        let target = dirs.0.join("target");
+        let recovery = dirs.0.join("recovery");
+        fs::create_dir(&target)?;
+        fs::create_dir(&recovery)?;
+        for path in [&target, &recovery] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        let metadata = fs::metadata(&recovery)?;
+        deny_recovery_state(
+            &config(target.clone(), recovery),
+            &target,
+            metadata.uid(),
+            metadata.gid(),
+            false,
+        )
+        .map_err(std::io::Error::other)
+    }
+
+    #[test]
+    fn any_restore_journal_state_denies_startup() -> std::io::Result<()> {
+        let dirs = TestDirs::new()?;
+        let target = dirs.0.join("target");
+        let recovery = dirs.0.join("recovery");
+        fs::create_dir(&target)?;
+        fs::create_dir(&recovery)?;
+        for path in [&target, &recovery] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        fs::write(recovery.join("restore-journal.json"), b"not-authoritative")?;
+        let metadata = fs::metadata(&recovery)?;
+        let error = match deny_recovery_state(
+            &config(target.clone(), recovery),
+            &target,
+            metadata.uid(),
+            metadata.gid(),
+            false,
+        ) {
+            Ok(()) => return Err(std::io::Error::other("journal presence allowed startup")),
+            Err(error) => error,
+        };
+        assert!(error.contains("quarantined"));
+        Ok(())
+    }
+
+    #[test]
+    fn changed_target_identity_denies_startup() -> std::io::Result<()> {
+        let dirs = TestDirs::new()?;
+        let target = dirs.0.join("target");
+        let other_target = dirs.0.join("other-target");
+        let recovery = dirs.0.join("recovery");
+        fs::create_dir(&target)?;
+        fs::create_dir(&other_target)?;
+        fs::create_dir(&recovery)?;
+        let metadata = fs::metadata(&recovery)?;
+        let error = match deny_recovery_state(
+            &config(target, recovery),
+            &other_target,
+            metadata.uid(),
+            metadata.gid(),
+            false,
+        ) {
+            Ok(()) => return Err(std::io::Error::other("target mismatch allowed startup")),
+            Err(error) => error,
+        };
+        assert!(error.contains("does not identify"));
+        Ok(())
     }
 }
