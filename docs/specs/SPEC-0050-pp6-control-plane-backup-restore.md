@@ -953,24 +953,45 @@ SHA-256 digest, and stable recovery-state root. Its signing key is not used
 for artifact, recovery-decryption, journal, evidence, or release signing.
 At startup the policy is verified against the installed release manifest and
 cross-checked against canonical O3K identity tokens and the target
-data-directory device/inode. The identity is not derived from
+data-directory device/inode. Policy revisions are monotonic, name the prior
+revision digest, and are rejected on rollback, equivocation, or an unexpected
+installation identity; the installed high-water revision is durable. The
+release manifest identifies the fixed installed policy path so startup can
+discover the policy without consulting recovery configuration or a mutable
+installation prefix. The identity is not derived from
 `restore.json`, a display name, or the installation prefix. A prefix change
 does not move the recovery state or change the identity. Rebinding a data
 directory or replacing an installation identity requires an explicit,
-authenticated installer operation and a new signed installation-policy
-revision; path replacement alone never rebinds it.
+authenticated installer operation, a new signed installation-policy revision
+linked to the previous policy digest, and explicit preservation or migration
+of recovery state; path replacement alone never rebinds it.
 
 Every supported installation has a protected recovery-state record, including
-one that has never entered recovery. The initial `NEVER_RECOVERED` state is
-authenticated by the verified installation policy. Before the first restore
+one that has never entered recovery. The record is a canonical, signed
+`o3k-installation-state-v1` document with `installation_id`, `site_id`,
+profile, backend, policy revision and digest, target device/inode, monotonic
+sequence, prior-record digest, state, and signature. Sequence zero is the
+installation-policy-authority-signed `NEVER_RECOVERED` record, bound by the
+signed policy. Every later state record is signed by the offline journal
+authority under the exact installed journal purpose and scope; it binds the
+prior record digest and is accepted only after signature, revocation, identity,
+and anti-rollback checks. Equal sequence is idempotent only for the same
+record digest. Missing or conflicting record state never reconstructs sequence
+zero from the policy alone.
+
+Before the first restore
 mutation, the authorized recovery operator must durably transition it to
 `RECOVERY_DESIGNATED`, binding the installation identity, target device/inode,
 operation ID, artifact digest,
 recovery-directory identity, and journal trust-bundle digest. The transition
-is written as a new same-directory file, file-fsynced, atomically renamed, and
-followed by directory fsync before any target mutation. A failed or uncertain
-write leaves startup denied and requires authenticated observation; it never
-falls back to `NEVER_RECOVERED`.
+is written as a new same-directory file, file-fsynced, atomically renamed,
+followed by directory fsync, read back, and authenticated before any target
+mutation. A failed or uncertain designation write prohibits restore execution
+until an authenticated read determines the durable state. If the verified
+prior `NEVER_RECOVERED` record remains and no target mutation occurred, ordinary
+startup may proceed; any missing, ambiguous, or conflicting record denies
+startup. A restore process must never infer designation success from a lost
+write acknowledgement.
 
 In the packaged Linux layout, the designation and anti-rollback high-water
 state live at `/var/lib/o3k-recovery/<installation_id>/`; the recovery state
@@ -1010,10 +1031,11 @@ disposition; the migration never infers `NEVER_RECOVERED` from missing
 `restore.json` alone. New installations receive the initial state during
 installation.
 
-Only the root-authorized installer may initialize or rebind the stable
-installation policy. The policy signature authenticates the initial
-`NEVER_RECOVERED` state, while the release-signed release manifest authenticates
-the policy verification key. An OS-authorized recovery operator may request a
+Only the root-authorized installer, acting with the installation-policy
+authority, may initialize or rebind the stable installation policy. The
+policy signature authenticates the initial `NEVER_RECOVERED` state, while the
+release-signed release manifest authenticates the policy verification key. An
+OS-authorized recovery operator may request a
 designation transition, but every transition into or out of quarantine must
 be signed by the offline journal authority and bind the exact prior record
 digest and next sequence. `o3kd` and ordinary maintenance commands are
@@ -1033,6 +1055,12 @@ access to the installation policy, recovery state, systemd unit, binaries, and
 target. They do not protect against an attacker with privileged target-root
 authority who can replace all trusted local state, roll back local files, or
 run a modified controller binary. No claim may say otherwise.
+
+For the current packaged `o3k-small-edge-v1` profile, a privileged target-root
+attacker is outside the recovery security claim unless the deployment has the
+qualified independent anchor below. Documentation and evidence must state
+which posture applies; root-owned local state alone is not root-attacker
+protection.
 
 If defense against a privileged target-root attacker is required, the
 installation must use an independently trusted, rollback-resistant anchor
@@ -1062,7 +1090,12 @@ Journal signer certificates
 documents containing `key_id`, public key, exact purpose (`restore_journal`
 or `recovery_evidence`), exact site, installation, profile and backend,
 serial, `not_before`, `not_after`, and issuer. A key or certificate with
-unknown purpose, scope, issuer, or identity is rejected.
+unknown purpose, scope, issuer, or identity is rejected. Each certificate is
+signed by its corresponding offline trust root over the RFC 8785 canonical
+certificate payload. The signature envelope identifies the signature
+algorithm and signer key ID; the verifier rejects duplicate or unknown fields
+and non-canonical payloads. Certificate signature and scope are verified
+before installing the certificate.
 
 The offline trust root signs each RFC 8785 canonical Ed25519 revocation
 document (`o3k-recovery-revocations-v1`) containing exact site and profile
@@ -1095,9 +1128,14 @@ or online artifact-signing keys cannot repair trust. The previous trust state
 is preserved as evidence.
 
 This proposal defines protocol fields and provisioning behavior absent from
-the accepted contract. No implementation may infer those fields from the
-existing artifact `backup_trust` document or treat caller-supplied revoked-key
-lists as installed trust.
+the accepted contract. Exact acceptance must explicitly include or amend the
+canonical formats, signature envelopes, key purposes and scopes, and the
+proposed 90-day certificate lifetime, 24-hour revocation refresh, and 30-day
+rotation overlap. No implementation may infer those fields from the existing
+artifact `backup_trust` document or treat caller-supplied revoked-key lists as
+installed trust. This amendment does not authorize any post-`PREFLIGHTED`
+journal phase; those transitions require the separately accepted A10/journal-v2
+contract. Journal v1 remains limited to its accepted `PREFLIGHTED` behavior.
 
 ## 8. Operator interface
 

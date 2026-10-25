@@ -343,7 +343,10 @@ The proposed minimum binds recovery state to a stable per-installation policy
 whose verification key is authenticated by the release-signed release
 manifest, plus target device/inode. It authenticates an initial
 `NEVER_RECOVERED` state and requires an atomic `RECOVERY_DESIGNATED` transition
-before the first restore mutation. Startup discovers that state from the
+before the first restore mutation. The signed installation-state record has a
+monotonic sequence and prior-record digest; installation-policy revisions are
+also monotonic and linked, so prefix changes or release updates cannot silently
+rebind or roll back recovery identity. Startup discovers that state from the
 installation-authenticated stable O3K state root rather than `restore.json` or
 an installation-prefix-derived path. Missing, unreadable, replaced, stale,
 conflicting, expired, or revoked state denies startup. Only an offline-signed
@@ -357,6 +360,15 @@ backend, signed revocation distribution with durable anti-rollback sequence
 and digest, freshness/expiry, and offline rotation/compromise recovery. It
 keeps artifact, decryption, journal, evidence, and release keys separate and
 keeps all private offline keys out of `o3kd`.
+
+The proposed certificate and revocation formats, signature envelopes, and
+90-day certificate lifetime, 24-hour revocation refresh, and 30-day signer
+overlap are new protocol/provisioning decisions that require explicit
+acceptance or amendment. For the current packaged `o3k-small-edge-v1` profile,
+privileged target-root attackers are outside the recovery security claim
+without a qualified independent rollback-resistant anchor. C1 does not
+authorize journal phases after `PREFLIGHTED`; those require the separately
+accepted A10/journal-v2 contract.
 
 Local files and signatures do not defend against a privileged target-root
 attacker able to replace all local state or the binary. If that attacker is in
