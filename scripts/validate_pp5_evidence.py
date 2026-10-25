@@ -752,13 +752,20 @@ def validate_negatives(root: Mapping[str, Any], errors: list[str]) -> None:
     elif not all(isinstance(claim, str) and claim.strip() for claim in non_claims):
         fail(errors, "non_claims must contain non-empty strings")
     else:
-        # Every declared non-claim must actually appear.  Match case-insensitive
-        # substring on each key's distinctive fragment(s); the evidence may word
-        # the disclaimer differently, but each required capability must be named.
+        # Every declared non-claim must actually appear. Match case-insensitively
+        # and require word boundaries around single-token fragments so incidental
+        # text such as "thanks" cannot satisfy the HA disclaimer.
         joined = " ".join(non_claims).lower()
+
+        def names_fragment(fragment: str) -> bool:
+            escaped = re.escape(fragment)
+            left = r"(?<!\w)" if fragment and fragment[0].isalnum() else ""
+            right = r"(?!\w)" if fragment and fragment[-1].isalnum() else ""
+            return re.search(left + escaped + right, joined) is not None
+
         missing = [
             key for key, fragments in REQUIRED_NON_CLAIMS.items()
-            if not any(fragment in joined for fragment in fragments)
+            if not any(names_fragment(fragment) for fragment in fragments)
         ]
         if missing:
             fail(errors, "non_claims missing required disclaimer(s): " + "; ".join(sorted(missing)))

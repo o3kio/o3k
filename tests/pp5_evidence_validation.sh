@@ -337,6 +337,8 @@ elif mutation == "drop_non_claims":
     doc["non_claims"] = []
 elif mutation == "drop_required_non_claim":
     doc["non_claims"] = [c for c in doc["non_claims"] if "Araf" not in c]
+elif mutation == "incidental_ha_substring":
+    doc["non_claims"] = [c for c in doc["non_claims"] if c not in ("HA", "SLA")] + ["thanks"]
 elif mutation == "flip_result":
     doc["results"][0]["verdict"] = "fail"
 elif mutation == "own_leak":
@@ -438,6 +440,7 @@ cases=(
     "missing_acceptance_row|1|missing acceptance row(s): M"
     "drop_non_claims|1|non_claims must be a non-empty explicit list"
     "drop_required_non_claim|1|non_claims missing required disclaimer"
+    "incidental_ha_substring|1|no HA or SLA claim"
     "flip_result|1|must be 'pass'"
     "own_leak|1|leaked_owned_resources must be empty"
     "remaining_endpoints|1|server_owned_endpoints_remaining must be 0"
