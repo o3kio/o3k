@@ -943,13 +943,18 @@ mutation, or relax the D7 activation gate.
 
 #### 7.2.1 Installation-bound designation
 
-The packaged installation identity is a canonical per-installation policy
-containing stable `installation_id`, `site_id`, profile, backend, exact
-release identity, canonical data-root path, and target device/inode. The
-policy is signed by the installation-policy authority whose public key is
-authenticated by the release-signed release manifest. The policy also binds
-the journal/evidence trust-root public keys and IDs, trust-bundle path and
-SHA-256 digest, and stable recovery-state root. Its signing key is not used
+The packaged installation identity is an RFC 8785 canonical Ed25519-signed
+`o3k-installation-policy-v1` document. Its signed payload contains stable
+`installation_id`, `site_id`, profile, backend, exact release identity,
+canonical data-root path, target device/inode, monotonic policy revision and
+prior-policy digest, fixed policy path, trust-bundle path and digest,
+recovery-state root, and installation-policy signer key ID. The signature
+envelope names the algorithm and signer key ID and covers the canonical payload
+excluding the envelope; duplicate, unknown, or non-canonical fields are
+rejected. The policy is signed by the installation-policy authority whose
+public key and allowed policy format are authenticated by the release-signed
+release manifest. The policy also binds the journal/evidence trust-root public
+keys and IDs. Its signing key is not used
 for artifact, recovery-decryption, journal, evidence, or release signing.
 At startup the policy is verified against the installed release manifest and
 cross-checked against canonical O3K identity tokens and the target
@@ -964,7 +969,11 @@ does not move the recovery state or change the identity. Rebinding a data
 directory or replacing an installation identity requires an explicit,
 authenticated installer operation, a new signed installation-policy revision
 linked to the previous policy digest, and explicit preservation or migration
-of recovery state; path replacement alone never rebinds it.
+of recovery state; path replacement alone never rebinds it. Rotation of the
+policy-signing key requires a release-signed manifest that authenticates the
+new key and format plus a monotonic next policy revision linked to the prior
+policy digest. It cannot change `installation_id`, site, or target identity
+without the separately authenticated rebind operation.
 
 Every supported installation has a protected recovery-state record, including
 one that has never entered recovery. The record is an RFC 8785 canonical
@@ -1138,7 +1147,8 @@ is preserved as evidence.
 
 This proposal defines protocol fields and provisioning behavior absent from
 the accepted contract. Exact acceptance must explicitly include or amend the
-canonical formats, signature envelopes, key purposes and scopes, and the
+installation-policy and state-record canonical formats and signature
+envelopes, trust certificate/revocation formats, key purposes and scopes, and the
 proposed 90-day certificate lifetime, 24-hour revocation refresh, and 30-day
 rotation overlap. No implementation may infer those fields from the existing
 artifact `backup_trust` document or treat caller-supplied revoked-key lists as

@@ -339,9 +339,12 @@ the installed journal/evidence signer and revocation distribution needed to
 authenticate the chain. The corresponding proposal is
 [SPEC-0050 §7.2](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#72-proposed-amendment-c1-durable-recovery-designation-and-installed-journal-trust-pending-not-accepted).
 
-The proposed minimum binds recovery state to a stable per-installation policy
-whose verification key is authenticated by the release-signed release
-manifest, plus target device/inode. It authenticates an initial
+The proposed minimum defines an RFC 8785 canonical Ed25519-signed
+`o3k-installation-policy-v1` document, with its fixed discovery path, allowed
+format, and verification key authenticated by the release-signed release
+manifest. Monotonic policy revisions link to the prior digest, including
+signing-key rotation. The policy binds recovery state to the installation and
+target device/inode. It authenticates an initial
 `NEVER_RECOVERED` state and requires an atomic `RECOVERY_DESIGNATED` transition
 before the first restore mutation. The signed installation-state record has a
 monotonic sequence and prior-record digest; installation-policy revisions are
