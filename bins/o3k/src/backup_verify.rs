@@ -211,6 +211,14 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         Err(reason) => return BackupVerifyOutcome::recoverable(reason),
     };
 
+    // Verification reads canonical migration state on both persistence
+    // backends. Honor restore quarantine before even acquiring the store lock,
+    // matching daemon startup and backup creation. A maintenance command must
+    // not reopen a target that is designated for recovery.
+    if crate::restore_preflight::deny_startup_if_restore_state(&data_dir).is_err() {
+        return BackupVerifyOutcome::rejected("restore-recovery-state-present");
+    }
+
     if crate::backup_pg::configured_backend() == crate::backup::BACKEND_POSTGRESQL {
         return execute_postgres(args, &data_dir);
     }
