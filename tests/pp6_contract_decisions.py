@@ -203,8 +203,11 @@ def renewal_permitted(*, now: int, not_after: int, renewal_window: int,
             and old_serial_revoked)
 
 
-def lifecycle_evidence_safe(payload: str) -> bool:
-    """Reject private keys, bearer material, and raw certificate payloads."""
+def lifecycle_evidence_has_no_sensitive_markers(payload: str) -> bool:
+    """Reject known sensitive markers in serialized lifecycle evidence.
+
+    This is a contract predicate, not a comprehensive content sanitizer.
+    """
     forbidden = ("PRIVATE KEY", "BEGIN CERTIFICATE", "bearer", "enrollment_secret",
                  "client_secret", "token")
     lowered = payload.lower()
@@ -524,14 +527,14 @@ class ContractDecisionPrototypeTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertFalse(renewal_permitted(**{**args, **change}))
 
-    def test_d3_evidence_never_contains_private_keys_or_credentials(self):
-        self.assertTrue(lifecycle_evidence_safe(
+    def test_d3_evidence_rejects_known_sensitive_markers(self):
+        self.assertTrue(lifecycle_evidence_has_no_sensitive_markers(
             '{"issuer_id":"site-issuer-v2","serial":"s2","result":"rejected"}'))
         for secret in ("-----BEGIN PRIVATE KEY-----", "BEGIN CERTIFICATE",
                        "bearer abc", "enrollment_secret=abc", "client_secret=abc",
                        "token=abc"):
             with self.subTest(secret=secret):
-                self.assertFalse(lifecycle_evidence_safe(secret))
+                self.assertFalse(lifecycle_evidence_has_no_sensitive_markers(secret))
 
     def test_manifest_schema_binds_site_plaintext_size_and_unique_nonce(self):
         schema = json.loads((Path(__file__).parents[1] / "contracts" /
