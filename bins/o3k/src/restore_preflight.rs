@@ -694,6 +694,23 @@ mod startup_quarantine_tests {
     }
 
     #[test]
+    fn unrecognized_recovery_config_format_denies_startup_even_when_empty() -> std::io::Result<()> {
+        let dirs = TestDirs::new()?;
+        let target = dirs.0.join("target");
+        let recovery = dirs.0.join("recovery");
+        fs::create_dir(&target)?;
+        fs::create_dir(&recovery)?;
+        let metadata = fs::metadata(&recovery)?;
+        let mut config = config(target.clone(), recovery);
+        config.format = "unrecognized-recovery-format".to_owned();
+        assert_eq!(
+            deny_recovery_state(&config, &target, metadata.uid(), metadata.gid(), false),
+            Err("restore configuration does not identify this data directory")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn changed_target_identity_denies_startup() -> std::io::Result<()> {
         let dirs = TestDirs::new()?;
         let target = dirs.0.join("target");
