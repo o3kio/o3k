@@ -312,11 +312,22 @@ control-plane data from authorized controller activation:
 - a target left inactive may be activated only by a separately accepted
   procedure with fresh independent fencing, fresh validation and invalidation
   of restored credentials and leases.
+- D12 keeps its existing `o3k restore resume --operation-id UUID
+  --confirm-artifact SHA256` command, confirmation mechanism and exit codes.
+  Resume revalidates and observes the exact bound target. The target must be
+  empty before its first mutation; after mutation, resume may continue only
+  from state attributable to the same operation, artifact and reservation.
+  Foreign or conflicting state is quarantined, and an unknown non-idempotent
+  operation is never blindly repeated. Fresh D7 evidence remains mandatory for the existing activation
+  branch. It is not required for the signed A10 inactive branch, whose
+  release-signed installation policy and journal branch prohibit activation.
 
 The exact transitions, signing bindings, mandatory safeguards, crash
 classifications, profile restrictions, backward-compatibility rules and
 residual risks are specified in
 [SPEC-0050 §7.1](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#71-proposed-amendment-a10-isolated-inactive-materialization-pending-not-accepted).
+The corresponding D12 resume distinction is specified in
+[SPEC-0050 §8](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#8-operator-interface).
 Until acceptance, the accepted D7-first behavior and the current fail-closed
 implementation boundary govern.
 

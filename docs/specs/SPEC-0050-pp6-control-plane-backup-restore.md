@@ -945,17 +945,28 @@ o3k restore resume --operation-id UUID --confirm-artifact SHA256
 ```
 
 Site/profile, database roles, trust and key handles come only from root-owned
-installation configuration. `preflight` is read-only. `resume` requires a
-pre-provisioned empty target, fresh fence, signed journal, and TTY confirmation
-repeating artifact digest and target installation ID. Non-interactive use
-requires a root-only one-use confirmation file bound to that operation. Exit
-0 means the requested local step completed, 2 a rejected precondition, 3 a
-recoverable failure, and 4 an unknown/quarantined outcome. Output is bounded
-JSON on stdout; stderr contains only stable error codes and operation ID. No
-credentials, SQL, provider payload or raw exception is emitted. These exact
-commands are part of the accepted contract but are not implemented or
-supported yet. The #944 runbook and exact-release tests must use these
-commands before recovery is claimed.
+installation configuration. `preflight` is read-only. `resume` requires an
+authenticated signed journal, the existing TTY confirmation repeating artifact
+digest and target installation ID, and revalidation and observation of the
+same target bound to that operation, artifact and reservation. Before the first target mutation, that
+target must still be fresh, empty and exclusively reserved. On a retry after a
+mutation, the target may contain prior work only when observation attributes
+each mutation to that same operation, artifact and target reservation; foreign
+or conflicting state is quarantined. The runner resumes only when the previous
+step is demonstrably complete or the next operation is demonstrably
+idempotent. It never blindly repeats an operation with an unknown outcome. For the existing fenced
+activation branch, `resume` continues to require fresh D7 source-fencing
+evidence; this requirement is unchanged. For the proposed A10 inactive branch,
+fresh D7 evidence is not required because that branch cannot activate, but the
+release-signed installation policy selecting A10 and the branch-bound signed
+journal are required. Non-interactive use requires a root-only one-use
+confirmation file bound to that operation. Exit 0 means the requested local
+step completed, 2 a rejected precondition, 3 a recoverable failure, and 4 an
+unknown/quarantined outcome. Output is bounded JSON on stdout; stderr contains
+only stable error codes and operation ID. No credentials, SQL, provider
+payload or raw exception is emitted. The command names, confirmation mechanism
+and exit-code semantics are unchanged. The #944 runbook and exact-release
+tests must use these commands before recovery is claimed.
 
 ## 9. Validation and acceptance
 

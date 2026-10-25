@@ -208,6 +208,40 @@ def inactive_profile_permitted(*, profile: str, backend: str, deployment: str,
             and deployment == "virtualized" and policy_enabled)
 
 
+def resume_preconditions_permitted(*, branch: str,
+                                  target_identity_matches: bool,
+                                  target_observed: bool,
+                                  target_state_attributable: bool,
+                                  target_empty: bool,
+                                  first_target_mutation_pending: bool,
+                                  fresh_fence: bool,
+                                  signed_installation_policy: bool) -> bool:
+    """Model D12 resume gates for existing activation and proposed A10."""
+    if (not target_identity_matches or not target_observed
+            or not target_state_attributable):
+        return False
+    if first_target_mutation_pending and not target_empty:
+        return False
+    if branch == "activation":
+        return fresh_fence
+    if branch == "inactive":
+        return signed_installation_policy
+    return False
+
+
+def resume_step_disposition(*, outcome_known_complete: bool,
+                            outcome_unknown: bool,
+                            operation_idempotent: bool) -> str:
+    """Unknown non-idempotent work must quarantine rather than be replayed."""
+    if outcome_known_complete:
+        return "ADVANCE"
+    if operation_idempotent:
+        return "RETRY"
+    if outcome_unknown:
+        return "QUARANTINE"
+    return "QUARANTINE"
+
+
 def accept_inactive_transition(*, sequence: int, previous_hash: str,
                                expected_sequence: int,
                                expected_previous_hash: str,
@@ -263,6 +297,54 @@ class ProposedInactiveMaterializationTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertFalse(accept_inactive_transition(
                     **self.kwargs(**{field: value})))
+
+    def test_resume_keeps_fence_for_activation_and_uses_policy_for_inactive(self):
+        common = dict(target_identity_matches=True, target_observed=True,
+                      target_state_attributable=True,
+                      target_empty=True, first_target_mutation_pending=True,
+                      signed_installation_policy=True)
+        self.assertTrue(resume_preconditions_permitted(
+            branch="activation", fresh_fence=True, **common))
+        self.assertFalse(resume_preconditions_permitted(
+            branch="activation", fresh_fence=False, **common))
+        self.assertTrue(resume_preconditions_permitted(
+            branch="inactive", fresh_fence=False, **common))
+        self.assertFalse(resume_preconditions_permitted(
+            branch="inactive", fresh_fence=True,
+            **{**common, "signed_installation_policy": False}))
+
+    def test_resume_requires_empty_target_only_before_first_mutation(self):
+        common = dict(branch="inactive", target_identity_matches=True,
+                      target_observed=True, target_state_attributable=True,
+                      fresh_fence=False,
+                      signed_installation_policy=True)
+        # First mutation must still see the exact fresh empty target.
+        self.assertFalse(resume_preconditions_permitted(
+            **common, target_empty=False, first_target_mutation_pending=True))
+        # After this operation mutated the target, resume observes that same
+        # target; non-emptiness alone is not a reason to discard or overwrite it.
+        self.assertTrue(resume_preconditions_permitted(
+            **common, target_empty=False, first_target_mutation_pending=False))
+        self.assertFalse(resume_preconditions_permitted(
+            **{**common, "target_identity_matches": False},
+            target_empty=False, first_target_mutation_pending=False))
+        self.assertFalse(resume_preconditions_permitted(
+            **{**common, "target_observed": False},
+            target_empty=False, first_target_mutation_pending=False))
+        self.assertFalse(resume_preconditions_permitted(
+            **{**common, "target_state_attributable": False},
+            target_empty=False, first_target_mutation_pending=False))
+
+    def test_resume_never_replays_unknown_pg_restore(self):
+        self.assertEqual(resume_step_disposition(
+            outcome_known_complete=False, outcome_unknown=True,
+            operation_idempotent=False), "QUARANTINE")
+        self.assertEqual(resume_step_disposition(
+            outcome_known_complete=True, outcome_unknown=False,
+            operation_idempotent=False), "ADVANCE")
+        self.assertEqual(resume_step_disposition(
+            outcome_known_complete=False, outcome_unknown=True,
+            operation_idempotent=True), "RETRY")
 
     def test_inactive_branch_reaches_only_inactive_verified(self):
         chain = [
