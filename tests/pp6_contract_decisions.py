@@ -188,7 +188,7 @@ def agent_certificate_accepted(*, issuer_id: str, trusted_issuer_id: str,
     certificate-bound agent identity are inputs, while private keys never
     enter the predicate or its evidence.
     """
-    return (issuer_id == trusted_issuer_id and bool(serial)
+    return (bool(issuer_id) and issuer_id == trusted_issuer_id and bool(serial)
             and serial not in revoked_serials and now < not_after
             and bool(certificate_fingerprint)
             and certificate_fingerprint == enrolled_fingerprint)
@@ -504,6 +504,7 @@ class ContractDecisionPrototypeTests(unittest.TestCase):
             {"certificate_fingerprint": "fp-old"},
             {"issuer_id": "other-site-issuer"},
             {"trusted_issuer_id": "other-site-issuer"},
+            {"issuer_id": "", "trusted_issuer_id": ""},
         ):
             with self.subTest(change=change):
                 self.assertFalse(agent_certificate_accepted(**{**args, **change}))
