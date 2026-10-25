@@ -177,6 +177,40 @@ def trust_state_valid(*, available: bool, now: int, next_update: int,
                      and sequence_digest == highest_seen_digest)))
 
 
+def agent_certificate_accepted(*, issuer_id: str, trusted_issuer_id: str,
+                               serial: str, revoked_serials: set[str],
+                               not_after: int, now: int,
+                               certificate_fingerprint: str,
+                               enrolled_fingerprint: str) -> bool:
+    """Bounded verifier predicate for the existing certificate identity.
+
+    This models the PP.6 lifecycle authority only: the issuer/trust source and
+    certificate-bound agent identity are inputs, while private keys never
+    enter the predicate or its evidence.
+    """
+    return (issuer_id == trusted_issuer_id and bool(serial)
+            and serial not in revoked_serials and now < not_after
+            and bool(certificate_fingerprint)
+            and certificate_fingerprint == enrolled_fingerprint)
+
+
+def renewal_permitted(*, now: int, not_after: int, renewal_window: int,
+                      issuer_available: bool, replacement_trust_ready: bool,
+                      old_serial_revoked: bool) -> bool:
+    """Renew before expiry, with issuer/trust readiness and old-key retirement."""
+    return (issuer_available and replacement_trust_ready
+            and now < not_after and not_after - now <= renewal_window
+            and old_serial_revoked)
+
+
+def lifecycle_evidence_safe(payload: str) -> bool:
+    """Reject private keys, bearer material, and raw certificate payloads."""
+    forbidden = ("PRIVATE KEY", "BEGIN CERTIFICATE", "bearer", "enrollment_secret",
+                 "client_secret", "token")
+    lowered = payload.lower()
+    return not any(marker.lower() in lowered for marker in forbidden)
+
+
 # PROPOSED amendment A10. These predicates model a proposed contract only;
 # they are not accepted authority and must not be cited as such.
 INACTIVE_PHASES = (
@@ -457,6 +491,46 @@ class ContractDecisionPrototypeTests(unittest.TestCase):
             available=True, **{**args, "sequence_digest": "equivocated-digest"}))
         self.assertTrue(trust_state_valid(
             available=True, **{**args, "sequence": 5, "sequence_digest": "digest-5"}))
+
+    def test_d3_agent_identity_rejects_expired_revoked_replaced_or_wrong_issuer(self):
+        args = dict(issuer_id="site-issuer-v1", trusted_issuer_id="site-issuer-v1",
+                    serial="agent-serial-1", revoked_serials=set(), not_after=100,
+                    now=10, certificate_fingerprint="fp-new",
+                    enrolled_fingerprint="fp-new")
+        self.assertTrue(agent_certificate_accepted(**args))
+        for change in (
+            {"now": 100},
+            {"revoked_serials": {"agent-serial-1"}},
+            {"certificate_fingerprint": "fp-old"},
+            {"issuer_id": "other-site-issuer"},
+            {"trusted_issuer_id": "other-site-issuer"},
+        ):
+            with self.subTest(change=change):
+                self.assertFalse(agent_certificate_accepted(**{**args, **change}))
+
+    def test_d3_renewal_requires_overlap_window_trust_and_old_serial_retirement(self):
+        args = dict(now=80, not_after=100, renewal_window=25,
+                    issuer_available=True, replacement_trust_ready=True,
+                    old_serial_revoked=True)
+        self.assertTrue(renewal_permitted(**args))
+        for change in (
+            {"now": 10},
+            {"issuer_available": False},
+            {"replacement_trust_ready": False},
+            {"old_serial_revoked": False},
+            {"not_after": 110},
+        ):
+            with self.subTest(change=change):
+                self.assertFalse(renewal_permitted(**{**args, **change}))
+
+    def test_d3_evidence_never_contains_private_keys_or_credentials(self):
+        self.assertTrue(lifecycle_evidence_safe(
+            '{"issuer_id":"site-issuer-v2","serial":"s2","result":"rejected"}'))
+        for secret in ("-----BEGIN PRIVATE KEY-----", "BEGIN CERTIFICATE",
+                       "bearer abc", "enrollment_secret=abc", "client_secret=abc",
+                       "token=abc"):
+            with self.subTest(secret=secret):
+                self.assertFalse(lifecycle_evidence_safe(secret))
 
     def test_manifest_schema_binds_site_plaintext_size_and_unique_nonce(self):
         schema = json.loads((Path(__file__).parents[1] / "contracts" /
