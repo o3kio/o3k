@@ -381,9 +381,9 @@ resume`, target restoration, and controller activation are not implemented or
 supported by this release. Do not improvise a restore by copying live database
 files, editing recovery markers, deleting `restore.json`, starting restored
 binaries directly, or reusing an artifact on a non-empty target. PostgreSQL
-backup/restore, fresh-host recovery, HA, and workload disaster recovery remain
-outside the supported installer profile until their exact contract and
-real-process evidence gates pass.
+restore, fresh-host recovery, HA, and workload disaster recovery remain outside
+the supported installer profile until their exact contract and real-process
+evidence gates pass.
 
 Installer fence: `curl -sfL https://get.o3k.io | sudo sh -` never
 auto-upgrades an existing install. On a host with an installed release, the
