@@ -358,8 +358,10 @@ state or guest/storage recovery.
 ## Backup and recovery boundary
 
 The current protected source implements authenticated backup artifact creation
-and verification for the bounded SQLite/TestLab path. The operator commands
-are:
+and verification for SQLite and PostgreSQL backends. This installer guide and
+the published artifact evidence cover the bounded SQLite/TestLab profile;
+PostgreSQL backup support does not provide a supported PostgreSQL restore or
+production recovery profile. The operator commands are:
 
 ```sh
 sudo o3k backup create --destination ABSOLUTE_DIRECTORY --operation-id UUID
@@ -367,9 +369,9 @@ sudo o3k backup verify --artifact ABSOLUTE_FILE
 ```
 
 Run them only against O3K-owned paths and retain the bounded JSON result with
-the exact installed release identity. Verification is a maintenance operation;
-it does not restore a database, start a controller, or prove fresh-host
-recovery. The artifact campaign in
+the exact installed release identity and backend. Verification is a maintenance
+operation; it does not restore a database, start a controller, or prove
+fresh-host recovery. The artifact campaign in
 [`docs/evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md`](evidence/ISSUE_1084_ARTIFACT_EVIDENCE.md)
 is source-bound SQLite/TestLab evidence and is not PostgreSQL or production
 recovery evidence.
