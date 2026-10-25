@@ -6,15 +6,12 @@
 use std::{
     fs,
     net::{SocketAddr, TcpListener, TcpStream},
-    os::unix::fs::PermissionsExt,
+    os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
-
-const O3K_UID: u32 = 994;
-const O3K_GID: u32 = 985;
 
 struct RootFixture(PathBuf);
 
@@ -23,7 +20,7 @@ impl RootFixture {
         if rustix::process::geteuid().as_raw() != 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                "requires root for installed recovery path posture",
+                "requires root for protected recovery-path fixture",
             ));
         }
         let path = PathBuf::from(format!(
@@ -32,7 +29,7 @@ impl RootFixture {
             uuid::Uuid::now_v7()
         ));
         fs::create_dir(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
         Ok(Self(path))
     }
 
@@ -46,6 +43,8 @@ impl RootFixture {
 
     fn prepare_layout(&self) -> std::io::Result<()> {
         fs::create_dir(self.data_dir())?;
+        let (uid, gid) = o3k_identity()?;
+        chown(&self.data_dir(), uid, gid)?;
         fs::set_permissions(self.data_dir(), fs::Permissions::from_mode(0o700))?;
         for path in [self.prefix().join("etc"), self.prefix().join("etc/o3k")] {
             fs::create_dir_all(&path)?;
@@ -55,9 +54,10 @@ impl RootFixture {
     }
 
     fn install_restore_config(&self, recovery_dir: &Path) -> std::io::Result<()> {
+        let (_, gid) = o3k_identity()?;
         let value = serde_json::json!({
             "format": "o3k-restore-preflight-v1",
-            "backend": "postgresql",
+            "backend": "sqlite",
             "target_directory": self.data_dir(),
             "recovery_directory": recovery_dir,
         });
@@ -65,13 +65,15 @@ impl RootFixture {
             self.prefix().join("etc/o3k/restore.json"),
             serde_json::to_vec(&value)?,
         )?;
+        chown(&self.prefix().join("etc/o3k/restore.json"), 0, gid)?;
         fs::set_permissions(
             self.prefix().join("etc/o3k/restore.json"),
-            fs::Permissions::from_mode(0o600),
+            fs::Permissions::from_mode(0o640),
         )
     }
 
     fn daemon(&self, address: SocketAddr) -> std::io::Result<Child> {
+        let (uid, gid) = o3k_identity()?;
         Command::new(env!("CARGO_BIN_EXE_o3kd"))
             .arg("--data-dir")
             .arg(self.data_dir())
@@ -85,6 +87,8 @@ impl RootFixture {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
+            .uid(uid)
+            .gid(gid)
             .spawn()
     }
 }
@@ -100,9 +104,29 @@ fn unused_address() -> std::io::Result<SocketAddr> {
     listener.local_addr()
 }
 
-fn chown_to_o3k(path: &Path) -> std::io::Result<()> {
+fn o3k_identity() -> std::io::Result<(u32, u32)> {
+    let passwd = fs::read_to_string("/etc/passwd")?;
+    for line in passwd.lines() {
+        let fields = line.split(':').collect::<Vec<_>>();
+        if fields.first() == Some(&"o3k") && fields.len() >= 4 {
+            let uid = fields[2]
+                .parse()
+                .map_err(|_| std::io::Error::other("invalid o3k uid"))?;
+            let gid = fields[3]
+                .parse()
+                .map_err(|_| std::io::Error::other("invalid o3k gid"))?;
+            return Ok((uid, gid));
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "o3k service account is unavailable",
+    ))
+}
+
+fn chown(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
     let status = Command::new("chown")
-        .arg(format!("{O3K_UID}:{O3K_GID}"))
+        .arg(format!("{uid}:{gid}"))
         .arg(path)
         .status()?;
     if status.success() {
@@ -112,6 +136,77 @@ fn chown_to_o3k(path: &Path) -> std::io::Result<()> {
             "could not set recovery fixture owner",
         ))
     }
+}
+
+struct ProcessLockHolder(Child);
+
+impl ProcessLockHolder {
+    fn start(data_dir: &Path, ready_path: &Path, uid: u32, gid: u32) -> std::io::Result<Self> {
+        let mut child = Command::new(std::env::current_exe()?)
+            .args(["--exact", "lock_holder_helper", "--nocapture"])
+            .env("O3K_PP6_LOCK_HOLDER_DATA_DIR", data_dir)
+            .env("O3K_PP6_LOCK_HOLDER_READY_PATH", ready_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .uid(uid)
+            .gid(gid)
+            .spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready_path.exists() && Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !ready_path.exists() {
+            let mut stderr = String::new();
+            if let Some(mut stream) = child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut stream, &mut stderr);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other(format!(
+                "service-user store-lock helper did not acquire the lock; stderr={stderr:?}"
+            )));
+        }
+        Ok(Self(child))
+    }
+
+    fn release(mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.0.stdin.take();
+        self.0.wait()
+    }
+}
+
+impl Drop for ProcessLockHolder {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+#[test]
+fn lock_holder_helper() {
+    let Ok(data_dir) = std::env::var("O3K_PP6_LOCK_HOLDER_DATA_DIR") else {
+        return;
+    };
+    let lock = o3k_store::StoreAccessLock::acquire(data_dir)
+        .expect("service-user lock helper must acquire the store lock");
+    let ready_path =
+        std::env::var("O3K_PP6_LOCK_HOLDER_READY_PATH").expect("lock-ready path must be provided");
+    fs::write(ready_path, b"ready").expect("write lock-ready marker");
+    let mut input = String::new();
+    let _ = std::io::stdin().read_line(&mut input);
+    drop(lock);
 }
 
 fn assert_no_listener(address: SocketAddr) {
@@ -140,19 +235,20 @@ fn wait_for_exit(child: &mut Child) -> std::io::Result<std::process::ExitStatus>
 }
 
 #[test]
-#[ignore = "requires root and a local ext4 recovery fixture; run in the installed-host gate"]
+#[ignore = "requires root and a local ext4 recovery fixture; run explicitly with --ignored"]
 fn real_o3kd_quarantines_before_listener_or_store_open() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = RootFixture::new()?;
     fixture.prepare_layout()?;
     let recovery = fixture.0.join("recovery");
     fs::create_dir(&recovery)?;
-    chown_to_o3k(&recovery)?;
+    let (uid, gid) = o3k_identity()?;
+    chown(&recovery, uid, gid)?;
     fs::set_permissions(&recovery, fs::Permissions::from_mode(0o700))?;
     fs::write(
         recovery.join("restore-journal.json"),
         b"quarantine-evidence",
     )?;
-    chown_to_o3k(&recovery.join("restore-journal.json"))?;
+    chown(&recovery.join("restore-journal.json"), uid, gid)?;
     fs::set_permissions(
         recovery.join("restore-journal.json"),
         fs::Permissions::from_mode(0o600),
@@ -172,12 +268,14 @@ fn real_o3kd_quarantines_before_listener_or_store_open() -> Result<(), Box<dyn s
 }
 
 #[test]
-#[ignore = "requires root; run in the installed-host gate"]
+#[ignore = "requires root; run explicitly with --ignored"]
 fn real_o3kd_lock_contention_denies_before_listener_or_store_open()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = RootFixture::new()?;
     fixture.prepare_layout()?;
-    let _lock = o3k_store::StoreAccessLock::acquire(fixture.data_dir())?;
+    let (uid, gid) = o3k_identity()?;
+    let ready_path = fixture.data_dir().join(".lock-holder-ready");
+    let lock_holder = ProcessLockHolder::start(&fixture.data_dir(), &ready_path, uid, gid)?;
     let address = unused_address()?;
     let mut child = fixture.daemon(address)?;
     let status = wait_for_exit(&mut child)?;
@@ -189,6 +287,10 @@ fn real_o3kd_lock_contention_denies_before_listener_or_store_open()
     assert!(
         !fixture.data_dir().join("o3k.sqlite").exists(),
         "lock-contention daemon opened or created the canonical SQLite store"
+    );
+    assert!(
+        lock_holder.release()?.success(),
+        "service-user lock holder exited unsuccessfully"
     );
     Ok(())
 }
