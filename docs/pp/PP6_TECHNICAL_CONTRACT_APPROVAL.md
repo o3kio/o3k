@@ -68,6 +68,20 @@ under a release-signed installation policy; see
 and the [ADR-0189 proposed amendment](../adr/ADR-0189-pp6-control-plane-backup-and-restore.md#proposed-amendment-a10-isolated-inactive-materialization-pending-not-accepted).
 Proposed A10 also clarifies [SPEC-0050 §8](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#8-operator-interface): the unchanged `restore resume` command revalidates and observes the same target; emptiness is required before first mutation, not after the operation's own partial mutation. Fresh D7 evidence remains required for activation resumes, while the A10 inactive branch requires its signed installation policy and never accepts activation transitions. This proposal does not change any accepted D1–D13 decision. Until the exact amendment is accepted by the named human reviewer at a new exact revision, implementation remains fail-closed at `PREFLIGHTED` and inactive target mutation is not authorized.
 
+**Proposed amendment C1 (PENDING, not accepted).** SPEC-0050 §7.2 and the
+matching ADR-0189 amendment propose an installation-bound recovery designation
+that is discovered independently of `restore.json`, plus installed
+journal/evidence signer trust and signed revocation state with durable
+anti-rollback, freshness, rotation, and recovery rules. They also state that
+local files cannot defend against a privileged target-root attacker; that
+threat requires an independently trusted rollback-resistant anchor and startup
+verifier or remains out of scope. This is a new normative amendment to the
+accepted D8/trust contract, not a clarification already authorized by the
+technical decision at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`. It has no
+implementation authority until explicitly accepted by the named human reviewer
+against one exact revision containing SPEC-0050, ADR-0189, and this record.
+Acceptance of C1 would not accept A10 or authorize restore target mutation.
+
 ### D2 custody record
 
 Every offline root, recovery, journal, and evidence key has a signed non-secret custody record containing `custody_record_id`, site/profile, purpose, key ID and fingerprint, algorithm, `2-of-3` threshold, three stable organization principal IDs, authorization-group version, creation/rotation/revocation times, approving record IDs, storage-provider/location classes, recovery-quorum event ID and expiry/re-review date. Provisioning, rotation, emergency revocation and recovery require two distinct authorized principals. Recovery quorum is bound to key ID, site/profile, operation ID and exact artifact/journal purpose. The custody authority signs the record. Physical storage addresses, private keys, tokens and credentials are excluded. A missing/expired/mismatched record fails closed.

@@ -331,6 +331,45 @@ The corresponding D12 resume distinction is specified in
 Until acceptance, the accepted D7-first behavior and the current fail-closed
 implementation boundary govern.
 
+### Proposed amendment C1 — durable recovery designation and installed journal trust (PENDING, not accepted)
+
+The accepted D8 contract and journal v1 do not define an installation-bound
+recovery designation discoverable independently of optional `restore.json`, or
+the installed journal/evidence signer and revocation distribution needed to
+authenticate the chain. The corresponding proposal is
+[SPEC-0050 §7.2](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#72-proposed-amendment-c1-durable-recovery-designation-and-installed-journal-trust-pending-not-accepted).
+
+The proposed minimum binds recovery state to a stable per-installation policy
+whose verification key is authenticated by the release-signed release
+manifest, plus target device/inode. It authenticates an initial
+`NEVER_RECOVERED` state and requires an atomic `RECOVERY_DESIGNATED` transition
+before the first restore mutation. Startup discovers that state from the
+installation-authenticated stable O3K state root rather than `restore.json` or
+an installation-prefix-derived path. Missing, unreadable, replaced, stale,
+conflicting, expired, or revoked state denies startup. Only an offline-signed
+`RELEASED` disposition bound to the terminal journal and authenticated evidence
+can explicitly release quarantine. `o3kd` remains a read-only consumer, and
+the existing lifetime store-access lock remains in force.
+
+The proposal also defines separate offline journal and evidence trust
+purposes, signer certificates scoped to exact site/installation/profile/
+backend, signed revocation distribution with durable anti-rollback sequence
+and digest, freshness/expiry, and offline rotation/compromise recovery. It
+keeps artifact, decryption, journal, evidence, and release keys separate and
+keeps all private offline keys out of `o3kd`.
+
+Local files and signatures do not defend against a privileged target-root
+attacker able to replace all local state or the binary. If that attacker is in
+scope, an independently trusted rollback-resistant external anchor and
+startup verifier are required; without one, the threat is explicitly out of
+scope. This is a procedural recovery safeguard, not canonical Cloud Kernel
+state or a second controller authority.
+
+This amendment is pending exact-revision human acceptance and authorizes no
+implementation. It does not accept A10, authorize target mutation, or change
+the existing `PREFLIGHTED`-only implementation boundary. Journal v1 remains
+non-activating and no v1 chain is upgraded in place.
+
 ### Decisions to record
 
 The following numbered list is the earlier proposal checklist, retained as
