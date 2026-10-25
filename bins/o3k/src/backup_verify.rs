@@ -211,6 +211,14 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         Err(reason) => return BackupVerifyOutcome::recoverable(reason),
     };
 
+    // Verification reads canonical migration state on both persistence
+    // backends. Honor restore quarantine before even acquiring the store lock,
+    // matching daemon startup and backup creation. A maintenance command must
+    // not reopen a target that is designated for recovery.
+    if crate::restore_preflight::deny_startup_if_restore_state(&data_dir).is_err() {
+        return BackupVerifyOutcome::rejected("restore-recovery-state-present");
+    }
+
     if crate::backup_pg::configured_backend() == crate::backup::BACKEND_POSTGRESQL {
         return execute_postgres(args, &data_dir);
     }
@@ -232,6 +240,11 @@ fn execute(args: &BackupVerifyArgs) -> BackupVerifyOutcome {
         }
         Err(_) => return BackupVerifyOutcome::recoverable("store-lock-unavailable"),
     };
+    // Preflight reserves the same directory inode. Recheck under the lock so
+    // a journal published after the early guard cannot race store access.
+    if crate::restore_preflight::deny_startup_if_restore_state(&data_dir).is_err() {
+        return BackupVerifyOutcome::rejected("restore-recovery-state-present");
+    }
 
     let trust = match BackupTrustConfig::load_for_data_dir(
         &default_trust_config_path_for(
@@ -391,6 +404,10 @@ fn execute_postgres(args: &BackupVerifyArgs, data_dir: &Path) -> BackupVerifyOut
         }
         Err(_) => return BackupVerifyOutcome::recoverable("store-lock-unavailable"),
     };
+    // Keep recovery-state discovery and store access within one reservation.
+    if crate::restore_preflight::deny_startup_if_restore_state(data_dir).is_err() {
+        return BackupVerifyOutcome::rejected("restore-recovery-state-present");
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
