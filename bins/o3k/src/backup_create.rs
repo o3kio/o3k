@@ -516,6 +516,9 @@ fn execute_with_data_dir(
             Err(reason) => return BackupCreateOutcome::recoverable(operation_id, reason),
         },
     };
+    if crate::restore_preflight::deny_startup_if_restore_state(&data_dir).is_err() {
+        return BackupCreateOutcome::rejected(operation_id, "restore-recovery-state-present");
+    }
     if destination_overlaps_data_dir(&args.destination, &data_dir) {
         return BackupCreateOutcome::rejected(operation_id, "destination-inside-data-dir");
     }

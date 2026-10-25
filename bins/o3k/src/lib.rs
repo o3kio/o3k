@@ -67,6 +67,10 @@ pub mod output;
 #[cfg(target_os = "linux")]
 pub use backup_pg_dump::restore_pg_validation;
 #[cfg(target_os = "linux")]
+pub mod restore_fence;
+#[cfg(target_os = "linux")]
+pub mod restore_journal;
+#[cfg(target_os = "linux")]
 pub mod restore_preflight;
 pub mod sys;
 #[cfg(test)]

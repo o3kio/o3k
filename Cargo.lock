@@ -2303,6 +2303,7 @@ dependencies = [
  "ed25519-dalek",
  "jsonschema",
  "jsonwebtoken",
+ "o3k",
  "o3k-api",
  "o3k-cellhv",
  "o3k-cinder",
