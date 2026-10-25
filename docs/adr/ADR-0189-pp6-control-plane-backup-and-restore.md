@@ -351,7 +351,10 @@ installation-authenticated stable O3K state root rather than `restore.json` or
 an installation-prefix-derived path. Missing, unreadable, replaced, stale,
 conflicting, expired, or revoked state denies startup. Only an offline-signed
 `RELEASED` disposition bound to the terminal journal and authenticated evidence
-can explicitly release quarantine. `o3kd` remains a read-only consumer, and
+can explicitly release quarantine. An authenticated `NEVER_RECOVERED`
+installation has no journal or journal-trust dependency; designated or
+previously recovered installations require current installed trust. `o3kd`
+remains a read-only consumer, and
 the existing lifetime store-access lock remains in force.
 
 The proposal also defines separate offline journal and evidence trust
@@ -368,7 +371,10 @@ acceptance or amendment. For the current packaged `o3k-small-edge-v1` profile,
 privileged target-root attackers are outside the recovery security claim
 without a qualified independent rollback-resistant anchor. C1 does not
 authorize journal phases after `PREFLIGHTED`; those require the separately
-accepted A10/journal-v2 contract.
+accepted A10/journal-v2 contract. Trust-root rotation requires a monotonic,
+prior-digest-linked policy revision from the separate installation-policy
+authority; compromise of that authority requires independent release-path
+re-provisioning.
 
 Local files and signatures do not defend against a privileged target-root
 attacker able to replace all local state or the binary. If that attacker is in

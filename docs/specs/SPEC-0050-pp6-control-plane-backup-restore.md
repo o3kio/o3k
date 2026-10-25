@@ -967,10 +967,11 @@ linked to the previous policy digest, and explicit preservation or migration
 of recovery state; path replacement alone never rebinds it.
 
 Every supported installation has a protected recovery-state record, including
-one that has never entered recovery. The record is a canonical, signed
-`o3k-installation-state-v1` document with `installation_id`, `site_id`,
-profile, backend, policy revision and digest, target device/inode, monotonic
-sequence, prior-record digest, state, and signature. Sequence zero is the
+one that has never entered recovery. The record is an RFC 8785 canonical
+Ed25519-signed `o3k-installation-state-v1` document with `installation_id`,
+`site_id`, profile, backend, policy revision and digest, target device/inode,
+monotonic sequence, prior-record digest, state, and a signature envelope
+naming the algorithm and signer key ID. Sequence zero is the
 installation-policy-authority-signed `NEVER_RECOVERED` record, bound by the
 signed policy. Every later state record is signed by the offline journal
 authority under the exact installed journal purpose and scope; it binds the
@@ -1010,12 +1011,13 @@ configuration, opening canonical state, creating a controller session, or
 binding an API listener.
 
 Missing, unreadable, malformed, replaced, stale, expired, or conflicting
-designation, trust, journal, target, or installation identity state denies
+installation policy, state record, target, or installation identity denies
 startup. An installation that has never entered recovery starts only when its
-authenticated `NEVER_RECOVERED` record verifies; it has no recovery-journal
-dependency. A designated or previously recovered installation also requires
-its current installed journal trust and revocation state to verify. During
-recovery, only the authenticated journal chain and designation can
+authenticated `NEVER_RECOVERED` record verifies; it has no recovery-journal or
+installed journal-trust dependency. A designated or previously recovered
+installation also requires its current installed journal trust, revocation
+state, and journal to verify. During recovery, only the authenticated journal
+chain and designation can
 describe progress; a journal phase label or unsigned marker cannot grant
 startup. All store-opening maintenance commands apply the same check. The
 lifetime store-access lock remains held from before the check through process
@@ -1113,8 +1115,15 @@ The journal and evidence signer certificates are valid for at most 90 days;
 revocation state is refreshed at least every 24 hours. The verifier obtains
 updates from a trust-distribution endpoint administered separately from the
 artifact signer. A new signer is installed and verified before rotation; old
-and new signers overlap for at most 30 days. Emergency compromise recovery
-uses an offline-root-signed revocation and increments the protected sequence.
+and new signers overlap for at most 30 days. Journal/evidence signer compromise
+recovery uses an offline-root-signed revocation and increments the protected
+sequence. Trust-root rotation or recovery uses a new monotonic installation-
+policy revision, signed by the separate installation-policy authority, bound
+to the authenticated release manifest, and linked to the prior policy digest;
+it installs the replacement trust-bundle digest before the old root is retired.
+If the installation-policy authority is compromised, local trust recovery is
+not permitted; the installation must be re-provisioned through an independently
+authorized release path.
 
 Before a journal transition can authorize a state change or startup decision,
 the verifier authenticates every journal signature against the installed

@@ -80,6 +80,8 @@ accepted D8/trust contract, not a clarification already authorized by the
 technical decision at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e`. It has no
 implementation authority until explicitly accepted by the named human reviewer
 against one exact revision containing SPEC-0050, ADR-0189, and this record.
+Authenticated `NEVER_RECOVERED` installations have no journal-trust dependency;
+recovery-designated or previously recovered installations do.
 Acceptance must explicitly include or amend the proposed canonical formats,
 signature envelopes, purpose/scope bindings, and 90-day certificate, 24-hour
 revocation-refresh, and 30-day signer-overlap values. For the current packaged
