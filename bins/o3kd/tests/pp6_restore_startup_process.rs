@@ -142,7 +142,7 @@ struct ProcessLockHolder(Child);
 
 impl ProcessLockHolder {
     fn start(data_dir: &Path, ready_path: &Path, uid: u32, gid: u32) -> std::io::Result<Self> {
-        let mut child = Command::new(std::env::current_exe()?)
+        let child = Command::new(std::env::current_exe()?)
             .args(["--exact", "lock_holder_helper", "--nocapture"])
             .env("O3K_PP6_LOCK_HOLDER_DATA_DIR", data_dir)
             .env("O3K_PP6_LOCK_HOLDER_READY_PATH", ready_path)
@@ -152,7 +152,15 @@ impl ProcessLockHolder {
             .uid(uid)
             .gid(gid)
             .spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        Self::wait_until_ready(child, ready_path, Duration::from_secs(5))
+    }
+
+    fn wait_until_ready(
+        mut child: Child,
+        ready_path: &Path,
+        timeout: Duration,
+    ) -> std::io::Result<Self> {
+        let deadline = Instant::now() + timeout;
         while !ready_path.exists() && Instant::now() < deadline {
             match child.try_wait() {
                 Ok(Some(_)) => break,
@@ -166,12 +174,14 @@ impl ProcessLockHolder {
             thread::sleep(Duration::from_millis(10));
         }
         if !ready_path.exists() {
+            // Stop the helper before reading its pipe to EOF: a live helper can
+            // keep stderr open indefinitely after the readiness deadline.
+            let _ = child.kill();
+            let _ = child.wait();
             let mut stderr = String::new();
             if let Some(mut stream) = child.stderr.take() {
                 let _ = std::io::Read::read_to_string(&mut stream, &mut stderr);
             }
-            let _ = child.kill();
-            let _ = child.wait();
             return Err(std::io::Error::other(format!(
                 "service-user store-lock helper did not acquire the lock; stderr={stderr:?}"
             )));
@@ -195,6 +205,33 @@ impl Drop for ProcessLockHolder {
 }
 
 #[test]
+fn stalled_lock_helper() {
+    if std::env::var_os("O3K_PP6_STALLED_HELPER").is_some() {
+        let mut input = String::new();
+        let _ = std::io::stdin().read_line(&mut input);
+    }
+}
+
+#[test]
+fn lock_holder_readiness_timeout_stops_child_before_reading_stderr()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ready_path = std::env::temp_dir().join(format!("o3k-never-ready-{}", uuid::Uuid::new_v4()));
+    let child = Command::new(std::env::current_exe()?)
+        .args(["--exact", "stalled_lock_helper", "--nocapture"])
+        .env("O3K_PP6_STALLED_HELPER", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started = Instant::now();
+    let result =
+        ProcessLockHolder::wait_until_ready(child, &ready_path, Duration::from_millis(100));
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    Ok(())
+}
+
+#[test]
 fn lock_holder_helper() {
     let Ok(data_dir) = std::env::var("O3K_PP6_LOCK_HOLDER_DATA_DIR") else {
         return;
@@ -214,6 +251,18 @@ fn assert_no_listener(address: SocketAddr) {
         TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err(),
         "quarantined daemon unexpectedly accepted a connection"
     );
+}
+
+fn assert_stderr_contains(child: &mut Child, expected: &str) -> std::io::Result<()> {
+    let mut stderr = String::new();
+    if let Some(mut stream) = child.stderr.take() {
+        std::io::Read::read_to_string(&mut stream, &mut stderr)?;
+    }
+    assert!(
+        stderr.contains(expected),
+        "expected startup rejection {expected:?}; stderr={stderr:?}"
+    );
+    Ok(())
 }
 
 fn wait_for_exit(child: &mut Child) -> std::io::Result<std::process::ExitStatus> {
@@ -259,6 +308,11 @@ fn real_o3kd_quarantines_before_listener_or_store_open() -> Result<(), Box<dyn s
     let mut child = fixture.daemon(address)?;
     let status = wait_for_exit(&mut child)?;
     assert!(!status.success(), "quarantined daemon exited successfully");
+    assert_stderr_contains(
+        &mut child,
+        "restore recovery state is present; daemon startup is quarantined",
+    )?;
+    assert!(fixture.data_dir().join(".o3k-store.lock").exists());
     assert_no_listener(address);
     assert!(
         !fixture.data_dir().join("o3k.sqlite").exists(),
@@ -283,6 +337,10 @@ fn real_o3kd_lock_contention_denies_before_listener_or_store_open()
         !status.success(),
         "second daemon succeeded while lock was held"
     );
+    assert_stderr_contains(
+        &mut child,
+        "failed to acquire O3K data-directory lifetime lock",
+    )?;
     assert_no_listener(address);
     assert!(
         !fixture.data_dir().join("o3k.sqlite").exists(),
