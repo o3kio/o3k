@@ -4,14 +4,16 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOOTSTRAP="$ROOT_DIR/scripts/bootstrap-disposable-testlab.sh"
 CLEANUP="$ROOT_DIR/scripts/cleanup-disposable-testlab.sh"
+RELEASE_VERIFY="$ROOT_DIR/scripts/pp5-verify-release-artifact.sh"
 
-python3 - "$BOOTSTRAP" "$CLEANUP" "$ROOT_DIR/.github/workflows/real-host-validation.yml" <<'PY'
+python3 - "$BOOTSTRAP" "$CLEANUP" "$ROOT_DIR/.github/workflows/real-host-validation.yml" "$RELEASE_VERIFY" <<'PY'
 from pathlib import Path
 import sys
 
 bootstrap = Path(sys.argv[1]).read_text(encoding="utf-8")
 cleanup = Path(sys.argv[2]).read_text(encoding="utf-8")
 workflow = Path(sys.argv[3]).read_text(encoding="utf-8")
+release_verify = Path(sys.argv[4]).read_text(encoding="utf-8")
 assert 'PASSWORD="$(openssl rand -hex 32)"' in bootstrap
 assert 'echo "::add-mask::${PASSWORD}"' in bootstrap
 assert bootstrap.index('echo "::add-mask::${PASSWORD}"') < bootstrap.index('O3K_BOOTSTRAP_PASSWORD=')
@@ -24,6 +26,23 @@ assert '--no-create-home' in bootstrap
 assert 'o3k-disposable-account-v1' in bootstrap
 assert 'protobuf-compiler' in bootstrap
 assert 'cargo build --locked --release --bin o3kd --bin o3k' in bootstrap
+assert 'O3K_TESTLAB_RELEASE_BUNDLE_DIR' in bootstrap
+assert 'release bundle source does not match candidate' in bootstrap
+assert 'verified release bundle lacks executable' in bootstrap
+assert 'if [[ -n "$RELEASE_BUNDLE_DIR" ]]; then' in bootstrap
+assert 'cargo build --locked --release --bin o3kd --bin o3k' in bootstrap
+assert 'packaging/verify-release-sigstore.sh' in release_verify
+assert 'packaging/verify-release-bundle.sh' in release_verify
+assert 'RELEASE_SOURCE_COMMIT="$SOURCE_SHA" RELEASE_SOURCE_TREE="$SOURCE_TREE"' in release_verify
+assert 'archive digest mismatch' in release_verify
+assert 'SOURCE_TREE' in release_verify
+assert 'O3K_RELEASE_TAG_REPO' in release_verify
+assert 'release tag is not fetched' in release_verify
+assert 'PEELED_TREE' in release_verify
+assert 'signed release digest does not bind' in release_verify
+assert 'pp5-release-verification.json' in release_verify
+assert 'source_commit' in release_verify
+assert 'scripts/pp5_release_archive.py' in release_verify
 assert 'bootstrap_testlab() {' in bootstrap
 assert '"$STATE_ROOT/bin/o3k" init' in bootstrap
 assert '"$STATE_ROOT/bin/o3k" join' in bootstrap
@@ -103,6 +122,27 @@ assert 'OS_PASSWORD:' not in workflow
 assert workflow.count('scripts/bootstrap-disposable-testlab.sh') >= 2
 assert workflow.count('scripts/cleanup-disposable-testlab.sh') >= 2
 PY
+
+# Tag identity is checked before any release asset is trusted. Exercise the
+# fail-closed source/tree mismatch path with a fetched annotated tag whose
+# commit is deliberately different from the requested candidate.
+tag_repo="$(mktemp -d "${TMPDIR:-/tmp}/o3k-release-tag-test.XXXXXX")"
+git -C "$tag_repo" init -q
+git -C "$tag_repo" config user.email test@example.invalid
+git -C "$tag_repo" config user.name test
+printf 'test\n' >"$tag_repo/file"
+git -C "$tag_repo" add file
+git -C "$tag_repo" commit -q -m tag-test
+git -C "$tag_repo" tag -a -m release v0.4.0-rc.25
+mkdir -p "$tag_repo/dist"
+if O3K_RELEASE_TAG_REPO="$tag_repo" bash "$RELEASE_VERIFY" \
+  v0.4.0-rc.25 0000000000000000000000000000000000000000 \
+  0000000000000000000000000000000000000000 \
+  "$(printf '%064d' 0)" "$tag_repo/dist" "$tag_repo/out" >/dev/null 2>&1; then
+  echo "release verifier accepted a tag/source mismatch" >&2
+  exit 1
+fi
+rm -rf -- "$tag_repo"
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/o3k-disposable-bootstrap-test.XXXXXX")"
 trap 'rm -rf -- "$tmp_root"' EXIT

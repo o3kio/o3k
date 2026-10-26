@@ -4,17 +4,21 @@
 import json
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def fail(message: str) -> None:
     raise SystemExit(message)
 
 
-if len(sys.argv) != 5:
-    fail("usage: validate-sigstore-provenance.py PROVENANCE POLICY VERSION SOURCE_COMMIT")
+if len(sys.argv) != 6:
+    fail("usage: validate-sigstore-provenance.py PROVENANCE POLICY VERSION SOURCE_COMMIT SOURCE_TREE")
 
-provenance_path, policy_path, expected_version, expected_commit = map(Path, sys.argv[1:])
+provenance_path = Path(sys.argv[1])
+policy_path = Path(sys.argv[2])
+expected_version = sys.argv[3]
+expected_commit = sys.argv[4]
+expected_tree = sys.argv[5]
 try:
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     policy = __import__("yaml").safe_load(policy_path.read_text(encoding="utf-8"))
@@ -30,6 +34,7 @@ required = {
     "signature_scheme": "sigstore-keyless",
     "release": str(expected_version),
     "source_commit": str(expected_commit),
+    "source_tree": str(expected_tree),
     "oidc_issuer": current.get("oidc_issuer"),
     "repository": current.get("repository"),
     "workflow": current.get("workflow"),
@@ -48,7 +53,13 @@ for asset in provenance["assets"]:
     if not isinstance(asset, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(asset.get("sha256", ""))):
         fail("provenance asset digest is invalid")
     name = asset.get("name")
-    if not isinstance(name, str) or name in asset_names:
-        fail("provenance asset names must be unique")
-    asset_names.add(name)
+    if not isinstance(name, str) or not name or "\\" in name:
+        fail("provenance asset name is invalid")
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        fail("provenance asset name is unsafe")
+    normalized_name = path.as_posix()
+    if normalized_name in asset_names:
+        fail("provenance asset names must be unique after path normalization")
+    asset_names.add(normalized_name)
 print("sigstore provenance policy: PASS")

@@ -145,7 +145,10 @@ try:
         check=True, capture_output=True, text=True,
     ).stdout.strip()
     assert classified == 'orphan_repair', f'orphan checkpoint failure was classified as {classified!r}'
-    assert source.index('run_checkpoint_path_diagnostic') < source.index('provision_vms_bounded block-a block-b'), \
+    first_provision_match = re.search(r'^\s*provision_vms_bounded(?:\s|$)', source, re.M)
+    assert first_provision_match, 'journey must contain a bounded VM provisioning call'
+    first_provision = first_provision_match.start()
+    assert source.index('run_checkpoint_path_diagnostic') < first_provision, \
         'checkpoint path diagnostic must run before VM provisioning'
     assert 'O3K_CHECKPOINT_BOUNDARY_ROOT=' in source, 'runner must pass the checkpoint boundary diagnostic root'
 finally:
