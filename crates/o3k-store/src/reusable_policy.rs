@@ -413,7 +413,15 @@ impl crate::SqliteStore {
         if current.state != p.state {
             return Err(StoreError::StaleGeneration);
         }
-        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        // Acquire SQLite's writer lock before the read/validate sequence. A
+        // deferred transaction can let two writers both read the old state,
+        // then one fails upgrading with SQLITE_BUSY instead of returning the
+        // validated durable domain result.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(StoreError::Database)?;
         let current_state: Option<String> = sqlx::query_scalar(
             "SELECT state FROM canonical_reusable_network_policies WHERE id=? AND project_id=?",
         )
@@ -554,7 +562,11 @@ impl crate::SqliteStore {
     ) -> Result<(), StoreError> {
         let generation = validate_rule(r)?;
         validate_child_insert_state(&r.state)?;
-        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(StoreError::Database)?;
         let parent = sqlx::query(
             "SELECT project_id, state FROM canonical_reusable_network_policies WHERE id=?",
         )
@@ -662,7 +674,11 @@ impl crate::SqliteStore {
     ) -> Result<(), StoreError> {
         let generation = validate_attachment(a)?;
         validate_child_insert_state(&a.state)?;
-        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(StoreError::Database)?;
         let p = sqlx::query(
             "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=?",
         )
@@ -2297,7 +2313,18 @@ mod tests {
             store.insert_policy_rule(&first),
             store.insert_policy_rule(&second)
         );
-        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        assert!(matches!(
+            &a,
+            Ok(()) | Err(StoreError::ResourceAlreadyExists)
+        ));
+        assert!(matches!(
+            &b,
+            Ok(()) | Err(StoreError::ResourceAlreadyExists)
+        ));
+        assert!(
+            a.is_ok() ^ b.is_ok(),
+            "exactly one rule create must win: {a:?}, {b:?}"
+        );
         let attachment_a = CanonicalPolicyAttachmentRecord {
             id: Uuid::from_u128(34),
             policy_id,
@@ -2312,7 +2339,18 @@ mod tests {
             store.insert_policy_attachment(&attachment_a),
             store.insert_policy_attachment(&attachment_b)
         );
-        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        assert!(matches!(
+            &a,
+            Ok(()) | Err(StoreError::ResourceAlreadyExists)
+        ));
+        assert!(matches!(
+            &b,
+            Ok(()) | Err(StoreError::ResourceAlreadyExists)
+        ));
+        assert!(
+            a.is_ok() ^ b.is_ok(),
+            "exactly one attachment create must win: {a:?}, {b:?}"
+        );
         assert_eq!(
             store
                 .list_endpoint_policy_attachments("project-a", &Uuid::from_u128(31))
@@ -2322,6 +2360,42 @@ mod tests {
         );
         drop(store);
         let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_writer_contention_waits_before_rule_validation() -> Result<(), StoreError> {
+        let path =
+            std::env::temp_dir().join(format!("o3k-policy-contention-{}.sqlite", Uuid::now_v7()));
+        let store = SqliteStore::connect_file(&path).await?;
+        let policy_id = Uuid::from_u128(36);
+        store
+            .insert_reusable_policy(&policy(policy_id, "Allow"))
+            .await?;
+
+        let holder = store
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(StoreError::Database)?;
+
+        let contender_rule = rule(Uuid::from_u128(37), policy_id);
+        let contender = store.insert_policy_rule(&contender_rule);
+        let release = async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            holder.rollback().await.map_err(StoreError::Database)
+        };
+        let (result, released) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(contender, release)
+        })
+        .await
+        .map_err(|_| StoreError::Database(sqlx::Error::PoolTimedOut))?;
+        released?;
+        result?;
+        store.pool.close().await;
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
         Ok(())
     }
 
