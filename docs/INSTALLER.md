@@ -268,6 +268,10 @@ Try:
   sudo o3k doctor
 ```
 
+The transcript's `sudo o3k doctor` suggestion predates the accepted D8 exclusive
+store guard. Use the offline service-account diagnostics procedure in the
+upgrade troubleshooting section below for current source.
+
 On Debian 12 the flavor line reads `✓ flavor testlab-flavor already present
 (in use; spec verified when it was created)` instead, because its
 python-openstackclient 6.0.0 cannot enumerate flavors; everything else is
@@ -338,20 +342,27 @@ rollback attempt runs per invocation; if the rollback itself fails, an
 explicit `FAILED_UPGRADE` state records the backup id and prints the exact
 next command. In `FAILED_UPGRADE`, `sudo o3k upgrade` refuses to start and
 instructs you to run `sudo o3k rollback` first and then re-run
-`sudo o3k upgrade`. `sudo o3k doctor` remains the read-only post-upgrade validation
-gate; the release checks (`release.binary_set_consistent`,
+`sudo o3k upgrade`. Offline `sudo -u o3k o3k doctor` provides read-only
+post-upgrade diagnostics; the release checks (`release.binary_set_consistent`,
 `release.backup_available`, `release.upgrade_state`) report mixed-version
 installs, a missing backup on an otherwise healthy install, and interrupted
 upgrade state.
 
-Troubleshooting boundary: after a process or service restart, run
-`sudo o3k doctor --json` and retain its output with the release and upgrade
-state files for diagnosis. A warning or unhealthy result is not proof that an
+Troubleshooting boundary: store diagnostics require an approved offline
+maintenance window with `o3kd` stopped and no other store opener. Run
+`sudo -u o3k o3k doctor --json` as the canonical service account and retain its
+output with the release and upgrade state files for diagnosis. The CLI requires
+the existing exclusive lifetime lock; root, missing lock state, contention or
+recovery quarantine produces a bounded denial report before probes. Offline
+service/API checks may fail because the daemon is stopped. Do not require an
+overall healthy report as a condition for recovery, or restart a quarantined
+controller to satisfy these checks. A warning or unhealthy result is not proof that an
 upgrade or rollback completed; inspect the reported phase and follow the exact
 recovery command printed by the CLI. If the state is `FAILED_UPGRADE`, do not
 delete the upgrade state file (`/var/lib/o3k/.o3k-upgrade-state.json`) or the
 backups under `/var/lib/o3k/backups/`; run the printed `sudo o3k rollback`,
-confirm the result with `sudo o3k doctor`, then re-run `sudo o3k upgrade`. A successful `doctor` run only
+inspect offline diagnostics as above, then re-run `sudo o3k upgrade` when its
+preconditions permit. A `doctor` report only
 describes the current local installation; it does not prove external provider
 state or guest/storage recovery.
 
