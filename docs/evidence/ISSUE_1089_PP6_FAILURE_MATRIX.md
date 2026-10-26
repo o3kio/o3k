@@ -1,7 +1,7 @@
 # #1089 PP.6 resource-pressure and operator-error matrix
 
 Status: coverage map for [#1089](https://github.com/o3kio/o3k/issues/1089),
-updated 2026-10-18 against protected `main` `959c7cfa38e1a18db77529af78434bab4dddd208`. This is not acceptance evidence and does not close #1089.
+updated 2026-10-25 against protected `main` `f9ae93406b99cbdefcc3337f6fc1756763fdf363`. This is not acceptance evidence and does not close #1089.
 Each row names the test or CI lane that exercises a case and its state:
 
 - **Merged**: on `main` and run by CI.
@@ -28,7 +28,7 @@ Each row names the test or CI lane that exercises a case and its state:
 
 | Case | Evidence | State |
 | --- | --- | --- |
-| Backup destination full or unavailable | No backup implementation exists | Gated |
+| Backup destination missing, unreadable, unsafe, overlapping the store, or replaced after validation | `bins/o3k/src/backup_create.rs` destination-validation/revalidation tests; `tests/pp6_backup_artifact.sh` destination and swap cases | Merged (source/unit and process coverage); real filesystem-full destination evidence NOT_RUN |
 | Recovery-journal write failure leaves the restore phase unchanged and fails closed before activation | No restore-journal implementation exists | Gated |
 | Malformed configuration: positional argument, malformed TOML file, invalid listen address, PostgreSQL backend without URL, weak signing key. Each exits before serving, echoes no secret, and leaves the data directory unchanged | `bins/o3kd/tests/pp6_config_input_process.rs` | Merged |
 | Invalid CloudProfile writes: malformed body, unknown field, ID mismatch, invalid profile, stale and reused generation, missing content type, unavailable store; state and audit unchanged | `rejected_cloud_profile_writes_preserve_profile_and_audit`, `cloud_profile_write_reports_unavailable_store_as_503` in `bins/o3kd/src/native_adapters/composition_profile.rs` (#1134; supersedes #1106) | Merged |
@@ -51,6 +51,6 @@ Each row names the test or CI lane that exercises a case and its state:
 ## Remaining work for #1089
 
 1. The SQLite lock/busy cancellation regression is merged in #1132; the final pending-operation assertions were added in #1135.
-2. Backup destination cases and recovery-journal write failure, once the accepted ADR-0189/SPEC-0050 contracts are implemented in #1084–#1086 and exercised on protected main.
+2. A real destination-filesystem-full backup run remains NOT_RUN in this environment. Recovery-journal write failure remains gated on the accepted ADR-0189/SPEC-0050 contracts and restore implementation in #1084–#1086.
 3. Linux file-descriptor pressure is merged in #1138, and the corrected #1140 memory-pressure lane is merged with protected evidence. The memory result is bounded SQLite store evidence only; provider state and foreign-state preservation remain `not_exercised`.
 4. Per-run envelopes for the criterion 2 cases.
