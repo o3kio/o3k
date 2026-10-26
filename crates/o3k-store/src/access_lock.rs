@@ -106,6 +106,37 @@ impl StoreAccessLock {
             // would otherwise leave it group-writable.
             fchmod(&dir_fd, Mode::from_raw_mode(0o700))?;
         }
+        Self::lock_open_directory(parent_fd, dir_fd, false)
+    }
+
+    /// Acquires the same exclusive lifetime guard without creating directories
+    /// or files. Diagnostics fail closed when installation lock state is absent.
+    pub fn acquire_read_only(data_dir: impl AsRef<Path>) -> io::Result<Self> {
+        let data_dir = data_dir.as_ref();
+        let parent_path = data_dir
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent_fd = open(
+            parent_path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+        validate_parent_directory(&fstat(&parent_fd)?)?;
+        acquire_parent_setup_lock(&parent_fd)?;
+        let dir_fd = open(
+            data_dir,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+        Self::lock_open_directory(parent_fd, dir_fd, true)
+    }
+
+    fn lock_open_directory(
+        parent_fd: OwnedFd,
+        dir_fd: OwnedFd,
+        read_only: bool,
+    ) -> io::Result<Self> {
         let dir_stat = fstat(&dir_fd)?;
         validate_directory(&dir_stat)?;
 
@@ -124,7 +155,13 @@ impl StoreAccessLock {
         let lock_fd = openat(
             &dir_fd,
             LOCK_FILE,
-            OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            (if read_only {
+                OFlags::RDONLY
+            } else {
+                OFlags::RDWR | OFlags::CREATE
+            }) | OFlags::CLOEXEC
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK,
             Mode::from_raw_mode(0o600),
         )?;
         let lock_stat = fstat(&lock_fd)?;
@@ -1121,6 +1158,56 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         drop(first);
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_guard_never_provisions_missing_state() -> io::Result<()> {
+        let root = TestDir::new()?;
+        let missing = root.0.join("absent");
+        assert!(StoreAccessLock::acquire_read_only(&missing).is_err());
+        assert!(!missing.exists());
+        assert!(StoreAccessLock::acquire_read_only(&root.0).is_err());
+        assert!(!root.0.join(LOCK_FILE).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_guard_excludes_other_store_openers() -> io::Result<()> {
+        let _serial = serialize_fork_sensitive_lock_test();
+        let root = TestDir::new()?;
+        let writer = StoreAccessLock::acquire(&root.0)?;
+        assert!(matches!(
+            StoreAccessLock::acquire_read_only(&root.0),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock
+        ));
+        drop(writer);
+        let reader = StoreAccessLock::acquire_read_only(&root.0)?;
+        assert!(matches!(
+            StoreAccessLock::acquire(&root.0),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock
+        ));
+        assert!(matches!(
+            StoreAccessLock::acquire_read_only(&root.0),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock
+        ));
+        drop(reader);
+        let _writer = StoreAccessLock::acquire(&root.0)?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_guard_rejects_unsafe_lock_state() -> io::Result<()> {
+        let root = TestDir::new()?;
+        let target = root.0.join("target");
+        fs::write(&target, b"unrelated")?;
+        symlink(&target, root.0.join(LOCK_FILE))?;
+        assert!(StoreAccessLock::acquire_read_only(&root.0).is_err());
+        assert_eq!(fs::read(&target)?, b"unrelated");
+        fs::remove_file(root.0.join(LOCK_FILE))?;
+        fs::write(root.0.join(LOCK_FILE), b"")?;
+        fs::set_permissions(root.0.join(LOCK_FILE), fs::Permissions::from_mode(0o644))?;
+        assert!(StoreAccessLock::acquire_read_only(&root.0).is_err());
         Ok(())
     }
 

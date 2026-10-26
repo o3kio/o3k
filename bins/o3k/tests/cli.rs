@@ -17,7 +17,15 @@ use std::process::Command;
 /// CLI.)
 fn run(args: &[&str]) -> (i32, String, String) {
     let binary = env!("CARGO_BIN_EXE_o3k");
-    match Command::new(binary).args(args).output() {
+    let absent = std::env::temp_dir().join(format!("o3k-cli-absent-{}", uuid::Uuid::now_v7()));
+    let mut command = Command::new(binary);
+    command.args(args);
+    if args.first() == Some(&"doctor") {
+        command
+            .env("O3K_DOCTOR_DATA_DIR", absent.join("data"))
+            .env("O3K_INSTALL_PREFIX", &absent);
+    }
+    match command.output() {
         Ok(output) => (
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -135,7 +143,15 @@ fn doctor_json_emits_contract_json_without_an_install() {
             return;
         }
     };
-    assert_eq!(checks.len(), 36, "doctor must run exactly 36 checks");
+    // A missing installation must not cause unguarded canonical store access.
+    assert_eq!(checks.len(), 1);
+    assert_eq!(value["overall_status"], "unhealthy");
+    assert_eq!(checks[0]["id"], "database.accessible");
+    assert_eq!(checks[0]["status"], "FAIL");
+    assert_eq!(
+        checks[0]["summary"],
+        "canonical store access denied: store-access lock unavailable"
+    );
 }
 
 /// `o3k doctor` (human output) exits 0 or 1 and ends with the OVERALL line.

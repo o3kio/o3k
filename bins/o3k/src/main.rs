@@ -359,10 +359,6 @@ fn installed_version() -> String {
 }
 
 fn run_doctor(json: bool) -> ExitCode {
-    let runtime = match build_runtime() {
-        Ok(runtime) => runtime,
-        Err(exit) => return exit,
-    };
     let is_root = o3k::context::current_euid() == 0;
     let context = Context::load(
         Arc::new(SystemExec::new(is_root)),
@@ -370,13 +366,44 @@ fn run_doctor(json: bool) -> ExitCode {
         Arc::new(SqlxDoctorDb),
     );
     if let Err(reason) = o3k::restore_preflight::deny_startup_if_restore_state(&context.data_dir) {
-        eprintln!("o3k doctor: recovery quarantine: {reason}");
-        return ExitCode::from(1);
+        return doctor_access_denied(json, &format!("recovery quarantine: {reason}"));
     }
-
-    // Doctor's database checks open the canonical SQLite/PostgreSQL store in
-    // read-only mode. They still must not inspect a recovery-designated store.
+    // Keep the guard alive through runtime shutdown, including connection
+    // cleanup. Diagnostics never create missing installation or lock state.
+    let _store_guard = match o3k_store::StoreAccessLock::acquire_read_only(&context.data_dir) {
+        Ok(guard) => guard,
+        Err(_) => return doctor_access_denied(json, "store-access lock unavailable"),
+    };
+    if let Err(reason) = o3k::restore_preflight::deny_startup_if_restore_state(&context.data_dir) {
+        return doctor_access_denied(json, &format!("recovery quarantine: {reason}"));
+    }
+    let runtime = match build_runtime() {
+        Ok(runtime) => runtime,
+        Err(exit) => return exit,
+    };
     let report = runtime.block_on(o3k::run_all(&context));
+    render_doctor_report(json, report)
+}
+
+fn doctor_access_denied(json: bool, reason: &str) -> ExitCode {
+    let report = o3k::Report {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        timestamp: o3k::now_utc_rfc3339(),
+        overall_status: o3k::OverallStatus::Unhealthy,
+        checks: vec![
+            o3k::Check::new(
+                "database.accessible",
+                o3k::Category::Database,
+                o3k::CheckStatus::Fail,
+                format!("canonical store access denied: {reason}"),
+            )
+            .with_actions(vec!["systemctl status o3kd".to_owned()]),
+        ],
+    };
+    render_doctor_report(json, report)
+}
+
+fn render_doctor_report(json: bool, report: o3k::Report) -> ExitCode {
     if json {
         match serde_json::to_string_pretty(&report) {
             Ok(serialized) => println!("{serialized}"),

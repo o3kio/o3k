@@ -15,6 +15,15 @@ Doctor is strictly read-only: it opens SQLite in read-only mode, uses
 for `link` listings, and never mutates anything. `o3k repair` is explicitly
 out of scope (separate reviewed feature later).
 
+Under the accepted D8 recovery boundary, the CLI first acquires the existing
+exclusive store-access guard without creating directories or lock files. It
+checks recovery quarantine while holding that guard and retains it through
+diagnostic runtime shutdown. A missing, unsafe or busy guard, or recovery
+quarantine, produces an unhealthy report containing one `database.accessible`
+failure and exits 1 before any diagnostic probe. This includes `--json` output.
+Doctor therefore requires offline exclusive access to inspect the canonical
+store; it cannot run store diagnostics alongside `o3kd`.
+
 ### Check engine
 
 - `Context` carries resolved paths/addresses (data dir, config dir, API
