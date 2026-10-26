@@ -331,6 +331,79 @@ The corresponding D12 resume distinction is specified in
 Until acceptance, the accepted D7-first behavior and the current fail-closed
 implementation boundary govern.
 
+### Proposed amendment C1 — durable recovery designation and installed journal trust (PENDING, not accepted)
+
+The accepted D8 contract and journal v1 do not define an installation-bound
+recovery designation discoverable independently of optional `restore.json`, or
+the installed journal/evidence signer and revocation distribution needed to
+authenticate the chain. The corresponding proposal is
+[SPEC-0050 §7.2](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#72-proposed-amendment-c1-durable-recovery-designation-and-installed-journal-trust-pending-not-accepted).
+
+The proposed minimum defines an RFC 8785 canonical Ed25519-signed
+`o3k-installation-policy-v1` document, with its fixed discovery path, allowed
+format, and verification key authenticated by the release-signed release
+manifest. Monotonic policy revisions link to the prior digest, including
+signing-key rotation. The policy binds recovery state to the installation and
+target device/inode. It authenticates an initial
+`NEVER_RECOVERED` state and requires an atomic `RECOVERY_DESIGNATED` transition
+before the first restore mutation. The signed installation-state record has a
+monotonic sequence and prior-record digest; installation-policy revisions are
+also monotonic and linked, so prefix changes or release updates cannot silently
+rebind or roll back recovery identity. Startup discovers that state from the
+installation-authenticated stable O3K state root rather than `restore.json` or
+an installation-prefix-derived path. Missing, unreadable, replaced, stale,
+conflicting, expired, or revoked state denies startup. Only an offline-signed
+`RELEASED` disposition bound to the terminal journal and authenticated evidence
+can explicitly release quarantine. An authenticated `NEVER_RECOVERED`
+installation has no journal or journal-trust dependency; designated or
+previously recovered installations require current installed trust. `o3kd`
+remains a read-only consumer, and the existing lifetime store-access lock
+remains in force. To preserve D8's journal controls while preventing the
+service identity from rolling back a valid `RECOVERY_DESIGNATED` state, C1
+separates the two paths. The root-owned recovery-state directory is readable
+by the `o3k` group but not writable by the service (`0750`, `root:o3k`; state
+files `0640`, `root:o3k`) on verified local ext4. The D8 journal remains in a
+separate `o3k:o3k` directory (`0700`) with `0600` journal, pending-request,
+marker, and lock files on verified local ext4. Both paths use no-follow and
+exclusive-create semantics with owner, mode, device, and inode revalidation;
+atomic replacements retain the applicable D8 fsync/rename sequence. The
+installation policy binds both paths and their device/inode identities. Any
+signed alternate path must meet the exact controls for its respective role and
+remain separated from the target and installation prefix. Filesystem write
+access alone does not confer designation or quarantine-transition authority;
+the proposed signature and actor restrictions still apply.
+
+The proposal also defines separate offline journal and evidence trust
+purposes, signer certificates scoped to exact site/installation/profile/
+backend, signed revocation distribution with durable anti-rollback sequence
+and digest, freshness/expiry, and offline rotation/compromise recovery. It
+keeps artifact, decryption, journal, evidence, and release keys separate and
+keeps all private offline keys out of `o3kd`.
+
+The proposed certificate and revocation formats, signature envelopes, and
+90-day certificate lifetime, 24-hour revocation refresh, and 30-day signer
+overlap are new protocol/provisioning decisions that require explicit
+acceptance or amendment. For the current packaged `o3k-small-edge-v1` profile,
+privileged target-root attackers are outside the recovery security claim
+without a qualified independent rollback-resistant anchor. C1 does not
+authorize journal phases after `PREFLIGHTED`; those require the separately
+accepted A10/journal-v2 contract. Trust-root rotation requires a monotonic,
+prior-digest-linked policy revision from the separate installation-policy
+authority; compromise of that authority requires independent release-path
+re-provisioning.
+
+Local files and signatures do not defend against a privileged target-root
+attacker able to replace all local state or the binary. If that attacker is in
+scope, an independently trusted rollback-resistant external anchor and
+startup verifier are required; without one, the threat is explicitly out of
+scope. This is a procedural recovery safeguard, not canonical Cloud Kernel
+state or a second controller authority.
+
+This amendment is pending exact-revision human acceptance and authorizes no
+implementation. It does not accept A10, authorize target mutation, or change
+the existing `PREFLIGHTED`-only implementation boundary. Journal v1 remains
+non-activating and no v1 chain is upgraded in place.
+
 ### Decisions to record
 
 The following numbered list is the earlier proposal checklist, retained as

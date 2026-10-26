@@ -930,6 +930,256 @@ implementations must not persist or accept any later phase, including all
 branch exists; only the accepted D7-first activation path and
 capture/verification remain.
 
+### 7.2 Proposed amendment C1: durable recovery designation and installed journal trust (PENDING, not accepted)
+
+Status: proposed 2026-10-25 to close the startup-discovery and journal-trust
+gaps identified after D8 journal v1. This subsection is not part of the
+accepted contract at
+`9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` and grants no implementation
+authority. It must be explicitly accepted by the named human reviewer together
+with the matching ADR-0189 and PP6 technical-contract text at one exact source
+revision. Acceptance of this amendment does not accept A10, enable any restore
+mutation, or relax the D7 activation gate.
+
+#### 7.2.1 Installation-bound designation
+
+The packaged installation identity is an RFC 8785 canonical Ed25519-signed
+`o3k-installation-policy-v1` document. Its signed payload contains stable
+`installation_id`, `site_id`, profile, backend, exact release identity,
+canonical data-root path, target device/inode, monotonic policy revision and
+prior-policy digest, fixed policy path, trust-bundle path and digest,
+recovery-state root path and device/inode, D8 journal-directory path and
+device/inode, and installation-policy signer key ID. The signature
+envelope names the algorithm and signer key ID and covers the canonical payload
+excluding the envelope; duplicate, unknown, or non-canonical fields are
+rejected. The policy is signed by the installation-policy authority whose
+public key and allowed policy format are authenticated by the release-signed
+release manifest. The policy also binds the journal/evidence trust-root public
+keys and IDs. Its signing key is not used
+for artifact, recovery-decryption, journal, evidence, or release signing.
+At startup the policy is verified against the installed release manifest and
+cross-checked against canonical O3K identity tokens and the target
+data-directory device/inode. Policy revisions are monotonic, name the prior
+revision digest, and are rejected on rollback, equivocation, or an unexpected
+installation identity; the installed high-water revision is durable. The
+release manifest identifies the fixed installed policy path so startup can
+discover the policy without consulting recovery configuration or a mutable
+installation prefix. The identity is not derived from
+`restore.json`, a display name, or the installation prefix. A prefix change
+does not move the recovery state or change the identity. Rebinding a data
+directory or replacing an installation identity requires an explicit,
+authenticated installer operation, a new signed installation-policy revision
+linked to the previous policy digest, and explicit preservation or migration
+of recovery state; path replacement alone never rebinds it. Rotation of the
+policy-signing key requires a release-signed manifest that authenticates the
+new key and format plus a monotonic next policy revision linked to the prior
+policy digest. It cannot change `installation_id`, site, or target identity
+without the separately authenticated rebind operation.
+
+Every supported installation has a protected recovery-state record, including
+one that has never entered recovery. The record is an RFC 8785 canonical
+Ed25519-signed `o3k-installation-state-v1` document with `installation_id`,
+`site_id`, profile, backend, policy revision and digest, target device/inode,
+monotonic sequence, prior-record digest, state, and a signature envelope
+naming the algorithm and signer key ID. Sequence zero is the
+installation-policy-authority-signed `NEVER_RECOVERED` record, bound by the
+signed policy. Every later state record is signed by the offline journal
+authority under the exact installed journal purpose and scope; it binds the
+prior record digest and is accepted only after signature, revocation, identity,
+and anti-rollback checks. Equal sequence is idempotent only for the same
+record digest. Missing or conflicting record state never reconstructs sequence
+zero from the policy alone.
+
+Before the first restore
+mutation, the authorized recovery operator must durably transition it to
+`RECOVERY_DESIGNATED`, binding the installation identity, target device/inode,
+operation ID, artifact digest,
+recovery-directory identity, and journal trust-bundle digest. The transition
+is written as a new same-directory file, file-fsynced, atomically renamed,
+followed by directory fsync, read back, and authenticated before any target
+mutation. A failed or uncertain designation write prohibits restore execution
+until an authenticated read determines the durable state. If the verified
+prior `NEVER_RECOVERED` record remains and no target mutation occurred, ordinary
+startup may proceed; any missing, ambiguous, or conflicting record denies
+startup. A restore process must never infer designation success from a lost
+write acknowledgement.
+
+In the packaged Linux layout, the designation and anti-rollback high-water
+state live at `/var/lib/o3k-recovery-state/<installation_id>/`, a separate
+root-owned, `o3k`-group-readable directory (mode `0750`) with state files owned
+by `root:o3k` (mode `0640`) on verified local ext4. It is outside both the
+target data directory and installation prefix, and is not writable by the
+`o3k` service identity. File creation uses no-follow and exclusive-create
+semantics; before use, the directory and files have their owner, mode, device,
+and inode rechecked. Atomic replacements use a new same-directory file, file
+fsync, rename, and directory fsync. The D8 journal remains at
+`/var/lib/o3k-recovery/<installation_id>/`: a pre-provisioned `o3k:o3k`
+directory (mode `0700`) on verified local ext4, with journal, pending-request,
+marker, and lock files mode `0600`. File creation is no-follow and exclusive;
+owner, mode, device, and inode are rechecked before use, and journal
+replacements follow the accepted D8 fsync/rename sequence. The signed
+installation policy binds both paths; the signed designation and journal bind
+the D8 directory identity. An alternate recovery-state root must meet the same
+root ownership, group readability, exact modes, filesystem, no-follow,
+exclusive-create, and owner/device/inode revalidation controls above. An
+alternate journal directory must meet the exact D8 ownership, mode, filesystem,
+no-follow/exclusive-create, owner/device/inode revalidation, and separation
+controls. Filesystem write access alone does not authorize a designation or
+quarantine transition; the signatures and actor restrictions below remain
+mandatory. The root-authorized installer provisions both directories before
+systemd can start `o3kd`.
+
+The installed journal trust bundle lives at `/etc/o3k/recovery-trust.json` and
+is root-owned, service-readable, and not service-writable. Its path and digest
+are bound by the signed installation policy; an alternate path must satisfy
+the same trust-bundle ownership, readability, no-follow, owner/mode/device/inode
+revalidation, and separation checks. The release-signed release manifest
+authenticates the installation-policy verification key; the signed
+installation policy binds the trust roots, trust-bundle path and digest, and
+recovery-state root. `restore.json` may supply validated operator parameters
+but cannot designate, release, or clear
+recovery state. Startup discovers the protected record from the authenticated
+installation policy and stable state root before reading optional recovery
+configuration, opening canonical state, creating a controller session, or
+binding an API listener.
+
+Missing, unreadable, malformed, replaced, stale, expired, or conflicting
+installation policy, state record, target, or installation identity denies
+startup. An installation that has never entered recovery starts only when its
+authenticated `NEVER_RECOVERED` record verifies; it has no recovery-journal or
+installed journal-trust dependency. A designated or previously recovered
+installation also requires its current installed journal trust, revocation
+state, and journal to verify. During recovery, only the authenticated journal
+chain and designation can
+describe progress; a journal phase label or unsigned marker cannot grant
+startup. All store-opening maintenance commands apply the same check. The
+lifetime store-access lock remains held from before the check through process
+shutdown.
+
+For an installation upgraded from a release that lacks this record, an
+installer migration runs before systemd can start `o3kd`. It may initialize
+`NEVER_RECOVERED` only after the installation identity and release verify and
+legacy recovery configuration, directories, journals, and markers establish
+that recovery was never entered. Any existing or ambiguous recovery state is
+migrated to denial/quarantine and requires an authenticated recovery
+disposition; the migration never infers `NEVER_RECOVERED` from missing
+`restore.json` alone. New installations receive the initial state during
+installation.
+
+Only the root-authorized installer, acting with the installation-policy
+authority, may initialize or rebind the stable installation policy. The
+policy signature authenticates the initial `NEVER_RECOVERED` state, while the
+release-signed release manifest authenticates the policy verification key. An
+OS-authorized recovery operator may request a
+designation transition, but every transition into or out of quarantine must
+be signed by the offline journal authority and bind the exact prior record
+digest and next sequence. `o3kd` and ordinary maintenance commands are
+read-only consumers of designation state. A recovery may be released only by
+a distinct signed `RELEASED` disposition after the exact operation reaches an
+accepted terminal state, the target identity is rechecked, and the required
+verification evidence is authenticated. The disposition binds the terminal
+journal hash and evidence digest; it is atomically persisted and anti-rollback
+checked before startup may proceed. A missing journal, missing designation,
+unsigned marker removal, or operator-edited file cannot release quarantine.
+
+#### 7.2.2 Privileged-target threat model and external anchor
+
+Root-owned local files, filesystem permissions, signatures, and fsync ordering
+protect against unprivileged users and service processes that lack write
+access to the installation policy, recovery state, systemd unit, binaries, and
+target. They do not protect against an attacker with privileged target-root
+authority who can replace all trusted local state, roll back local files, or
+run a modified controller binary. No claim may say otherwise.
+
+For the current packaged `o3k-small-edge-v1` profile, a privileged target-root
+attacker is outside the recovery security claim unless the deployment has the
+qualified independent anchor below. Documentation and evidence must state
+which posture applies; root-owned local state alone is not root-attacker
+protection.
+
+If defense against a privileged target-root attacker is required, the
+installation must use an independently trusted, rollback-resistant anchor
+outside that root's replacement authority (for example, a qualified TPM
+monotonic state plus measured boot, or an independently administered remote
+startup verifier). That anchor must bind the installation identity and the
+highest designation/trust sequence and digest, deny startup on rollback or
+anchor unavailability, and be independently qualified for the deployment.
+Without such an anchor, this threat is explicitly out of scope and recovery
+state is not protected from target root.
+
+#### 7.2.3 Installed journal and evidence trust
+
+The offline recovery trust root is separate from artifact-signing,
+recovery-decryption, journal-signing, evidence-signing, and release-signing
+keys. Each key has one purpose and distinct key ID. Private offline keys are
+never provisioned to or loaded into `o3kd`, the restore target, or the online
+artifact signer.
+
+An installed trust bundle (`o3k-recovery-trust-v1`) contains distinct offline
+journal and evidence trust roots, exact site and profile scope, their initial
+signed revocation documents, and the highest accepted sequence and canonical
+digest for each root. Its digest is authenticated by the installation policy.
+Journal signer certificates
+(`o3k-journal-authority-v1`) and evidence signer certificates
+(`o3k-evidence-authority-v1`) are distinct RFC 8785 canonical Ed25519
+documents containing `key_id`, public key, exact purpose (`restore_journal`
+or `recovery_evidence`), exact site, installation, profile and backend,
+serial, `not_before`, `not_after`, and issuer. A key or certificate with
+unknown purpose, scope, issuer, or identity is rejected. Each certificate is
+signed by its corresponding offline trust root over the RFC 8785 canonical
+certificate payload. The signature envelope identifies the signature
+algorithm and signer key ID; the verifier rejects duplicate or unknown fields
+and non-canonical payloads. Certificate signature and scope are verified
+before installing the certificate.
+
+The offline trust root signs each RFC 8785 canonical Ed25519 revocation
+document (`o3k-recovery-revocations-v1`) containing exact site and profile
+scope, monotonic `sequence`, `issued_at`, `next_update`, and revoked certificate
+serials and key IDs. Its SHA-256 digest covers the complete canonical signed
+document. The installed verifier authenticates the signature, scope, validity,
+and freshness, then durably records the highest sequence and digest before
+using the document. Equal
+sequence is idempotent only for an identical digest; lower sequence,
+same-sequence equivocation, expired freshness, unavailable required trust
+state, or clock rollback/unavailability fails closed. A cached document is
+usable only through `next_update`. The installation's rollback-resistant
+anchor, when required by §7.2.2, also protects the trust sequence and digest.
+The journal and evidence signer certificates are valid for at most 90 days;
+revocation state is refreshed at least every 24 hours. The verifier obtains
+updates from a trust-distribution endpoint administered separately from the
+artifact signer. A new signer is installed and verified before rotation; old
+and new signers overlap for at most 30 days. Journal/evidence signer compromise
+recovery uses an offline-root-signed revocation and increments the protected
+sequence. Trust-root rotation or recovery uses a new monotonic installation-
+policy revision, signed by the separate installation-policy authority, bound
+to the authenticated release manifest, and linked to the prior policy digest;
+it installs the replacement trust-bundle digest before the old root is retired.
+If the installation-policy authority is compromised, local trust recovery is
+not permitted; the installation must be re-provisioned through an independently
+authorized release path.
+
+Before a journal transition can authorize a state change or startup decision,
+the verifier authenticates every journal signature against the installed
+purpose- and scope-bound signer certificate and current signed revocation
+state. Unknown, expired, or revoked authority never authorizes a transition;
+ambiguity quarantines the installation. Trust rotation installs a new
+root-authenticated bundle and validates its sequence before switching signers.
+Compromise recovery requires an offline-root-signed revocation and an
+authenticated, anti-rollback trust recovery disposition; local operator edits
+or online artifact-signing keys cannot repair trust. The previous trust state
+is preserved as evidence.
+
+This proposal defines protocol fields and provisioning behavior absent from
+the accepted contract. Exact acceptance must explicitly include or amend the
+installation-policy and state-record canonical formats and signature
+envelopes, trust certificate/revocation formats, key purposes and scopes, and the
+proposed 90-day certificate lifetime, 24-hour revocation refresh, and 30-day
+rotation overlap. No implementation may infer those fields from the existing
+artifact `backup_trust` document or treat caller-supplied revoked-key lists as
+installed trust. This amendment does not authorize any post-`PREFLIGHTED`
+journal phase; those transitions require the separately accepted A10/journal-v2
+contract. Journal v1 remains limited to its accepted `PREFLIGHTED` behavior.
+
 ## 8. Operator interface
 
 The accepted operator surface is host-local `o3k` CLI only; there is no HTTP
