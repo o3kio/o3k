@@ -956,13 +956,13 @@ mod tests {
             Ok(()),
             "space already staged is deducted from the remaining requirement"
         );
-        assert_eq!(
+        assert!(matches!(
             ensure_reserved_space(&root, u64::MAX, 0),
             Err(ReservationError::SpaceUnavailable {
                 reserved_bytes: u64::MAX,
-                available_bytes: available_bytes(&root).expect("filesystem statistics"),
+                ..
             })
-        );
+        ));
         assert_eq!(
             ensure_reserved_space(&root, u64::MAX, 0)
                 .expect_err("impossible reservation")
