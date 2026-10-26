@@ -8,12 +8,26 @@ New workspace binary crate `bins/o3k` producing the `o3k` binary whose only
 subcommand today is `doctor`. No general CLI framework: argument handling is a
 plain match on the first argument (`doctor`, `--version`, `--help`); future
 subcommands slot into the same crate without redesign. This satisfies the
-preferred UX `sudo o3k doctor` directly.
+original UX `sudo o3k doctor` directly; the accepted D8 boundary below now
+requires installed store probes to use the canonical service identity.
 
 Doctor is strictly read-only: it opens SQLite in read-only mode, uses
 `systemctl` only for state queries, `virsh` only for `uri`/`list`, `ip` only
 for `link` listings, and never mutates anything. `o3k repair` is explicitly
 out of scope (separate reviewed feature later).
+
+Under the accepted D8 recovery boundary, the CLI first acquires the existing
+exclusive store-access guard without creating directories or lock files. It
+checks recovery quarantine while holding that guard and retains it through
+diagnostic runtime shutdown. A missing, unsafe or busy guard, or recovery
+quarantine, produces an unhealthy report containing one `database.accessible`
+failure and exits 1 before any diagnostic probe. This includes `--json` output.
+Doctor therefore requires offline exclusive access to inspect the canonical
+store; it cannot run store diagnostics alongside `o3kd`. For a packaged
+service-owned installation, run `sudo -u o3k o3k doctor --json` during an approved
+offline maintenance window. Root cannot substitute for the lock owner. Offline
+service/API checks can report failures; an unhealthy report is not permission
+to start a recovery-designated controller.
 
 ### Check engine
 

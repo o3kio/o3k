@@ -185,6 +185,13 @@ chmod 0600 "$SANDBOX_DATA/o3k.sqlite"
 mkdir -p "$WORK_DIR/corrupt-data"
 printf 'this is not a sqlite database\n' >"$WORK_DIR/corrupt-data/o3k.sqlite"
 chmod 0600 "$WORK_DIR/corrupt-data/o3k.sqlite"
+# Installation fixtures must already have their D8 lifetime lock. Doctor must
+# never provision missing lock state just to run read-only diagnostics.
+for data in "$SANDBOX_DATA" "$WORK_DIR/corrupt-data"; do
+  chmod 0700 "$data"
+  (umask 077; : >"$data/.o3k-store.lock")
+done
+mkdir -m 0700 "$WORK_DIR/no-lock-data"
 # An empty prefix fixture: no ownership manifest, no release manifest.
 mkdir -p "$WORK_DIR/empty-prefix"
 
@@ -352,7 +359,7 @@ SERVER_PIDS+=($!)
 # could rely on them (python socket probe, no external network). Bounded
 # retry: the servers need a moment to bind.
 shims_ready=0
-for attempt in $(seq 1 100); do
+for _attempt in $(seq 1 100); do
   if python3 - "$CONTROL_PORT" "$COMPUTE_PORT" 2>/dev/null <<'PY'
 import http.client
 import sys
@@ -463,6 +470,7 @@ if [[ -x "$BIN" ]] && command -v strings >/dev/null 2>&1 \
     O3K_DOCTOR_CONFIG_DIR="$SANDBOX_CONFIG" \
       O3K_DOCTOR_DATA_DIR="$data" \
       O3K_DOCTOR_PREFIX="$prefix" \
+      O3K_INSTALL_PREFIX="$prefix" \
       PATH="$SANDBOX_SHIM_BIN:$PATH" \
       "$BIN" doctor --json >"$out" 2>"$OUT_DIR/$name.err"
     status=$?
@@ -517,6 +525,7 @@ if sys.argv[3] != "0":
     expected["libvirt.compute_access"] = "NOT_APPLICABLE"
     expected["libvirt.control_isolation"] = "NOT_APPLICABLE"
 by_id = {check["id"]: check["status"] for check in document["checks"]}
+assert len(document["checks"]) == 36, "sandbox must reach the full diagnostics engine"
 mismatches = [
     f"{check_id}: expected {status}, got {by_id.get(check_id)!r}"
     for check_id, status in expected.items()
@@ -540,6 +549,7 @@ import json
 import sys
 
 document = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(document["checks"]) == 36, "corrupt database must be probed under the guard"
 by_id = {check["id"]: check["status"] for check in document["checks"]}
 assert by_id.get("database.accessible") == "FAIL", by_id
 PY
@@ -565,6 +575,29 @@ PY
     record_pass "missing installer manifest fixture classifies release failures"
   else
     record_fail "missing installer manifest fixture was not classified (see $OUT_DIR/doctor-empty.json, $OUT_DIR/doctor-empty.err)"
+  fi
+
+  # No lock is an admission failure, distinct from a corrupt database. Keep
+  # this assertion separate so quarantine cannot falsely pass the cases above.
+  run_sandbox no-lock "$WORK_DIR/no-lock-data" "$SANDBOX_PREFIX" "$OUT_DIR/doctor-no-lock.json"
+  if python3 - "$OUT_DIR/doctor-no-lock.json" "$OUT_DIR/no-lock.exit" "$WORK_DIR/no-lock-data" <<'PY'
+import json
+import pathlib
+import sys
+
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+assert document["overall_status"] == "unhealthy"
+assert len(document["checks"]) == 1, "unguarded diagnostic probes ran"
+check = document["checks"][0]
+assert check["id"] == "database.accessible" and check["status"] == "FAIL"
+assert check["summary"] == "canonical store access denied: store-access lock unavailable"
+assert pathlib.Path(sys.argv[2]).read_text().strip() == "1"
+assert not any(pathlib.Path(sys.argv[3]).iterdir()), "doctor provisioned missing state"
+PY
+  then
+    record_pass "missing lock denies probes without provisioning state"
+  else
+    record_fail "missing lock did not fail closed without provisioning state"
   fi
 else
   record_skip "sandbox-driven classification (no O3K_DOCTOR_* overrides in the binary; negative matrix covered by bins/o3k unit tests)"
