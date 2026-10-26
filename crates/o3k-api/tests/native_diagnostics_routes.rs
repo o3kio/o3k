@@ -151,6 +151,38 @@ impl DiagnosticsReader for FakeDiagnosticsReader {
     }
 }
 
+/// Simulates a backend failure whose internal details must never cross the
+/// diagnostics API boundary. The public port carries only bounded error
+/// categories, so the router must emit a generic problem response.
+struct FailingDiagnosticsReader;
+
+#[async_trait::async_trait]
+impl DiagnosticsReader for FailingDiagnosticsReader {
+    async fn summary(&self) -> Result<DiagnosticsSummary, DiagnosticsError> {
+        Err(DiagnosticsError::Corrupt)
+    }
+
+    async fn services(
+        &self,
+        _limit: usize,
+        _after: Option<&str>,
+    ) -> Result<DiagnosticsPage<ServiceDiagnostics>, DiagnosticsError> {
+        Err(DiagnosticsError::Unavailable)
+    }
+
+    async fn providers(
+        &self,
+        _limit: usize,
+        _after: Option<&str>,
+    ) -> Result<DiagnosticsPage<ProviderDiagnostics>, DiagnosticsError> {
+        Err(DiagnosticsError::Corrupt)
+    }
+
+    async fn capacity(&self) -> Result<CapacityDiagnostics, DiagnosticsError> {
+        Err(DiagnosticsError::Unavailable)
+    }
+}
+
 /// Request ID baked into the TestIssuer's AuthContext.
 const ISSUER_REQUEST_ID: &str = "request-test";
 
@@ -332,6 +364,50 @@ async fn native_diagnostics_get_routes_call_only_their_read_projection() -> Test
             let expected = usize::from(read_index == index);
             assert_eq!(count.load(Ordering::SeqCst), expected, "{uri}");
             count.store(0, Ordering::SeqCst);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_diagnostics_backend_failures_are_bounded_and_secret_safe() -> TestResult {
+    let router = router_with_diagnostics_reader(Some(Arc::new(FailingDiagnosticsReader)))?;
+
+    for (uri, expected_status, expected_code) in [
+        (
+            "/o3k/v1/operator/diagnostics",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/services",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NOT_AVAILABLE",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/providers",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+        ),
+        (
+            "/o3k/v1/operator/diagnostics/capacity",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NOT_AVAILABLE",
+        ),
+    ] {
+        let (status, body) = get_from_router(router.clone(), uri, "operator-token").await?;
+        assert_eq!(status, expected_status, "{uri}");
+        let value: Value = serde_json::from_str(&body)?;
+        assert_eq!(value["code"], expected_code, "{uri}");
+        assert_eq!(value["request_id"], REQUEST_ID, "{uri}");
+        assert!(value.get("detail").is_none(), "{uri} exposed error detail");
+        for secret in [
+            "postgres://user:password@db/o3k",
+            "Authorization: Bearer backend-secret",
+            "private_key",
+            "provider-payload",
+        ] {
+            assert!(!body.contains(secret), "{secret:?} leaked into {uri}");
         }
     }
     Ok(())
