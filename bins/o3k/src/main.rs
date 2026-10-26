@@ -369,6 +369,13 @@ fn run_doctor(json: bool) -> ExitCode {
         Arc::new(SystemHttpClient),
         Arc::new(SqlxDoctorDb),
     );
+    if let Err(reason) = o3k::restore_preflight::deny_startup_if_restore_state(&context.data_dir) {
+        eprintln!("o3k doctor: recovery quarantine: {reason}");
+        return ExitCode::from(1);
+    }
+
+    // Doctor's database checks open the canonical SQLite/PostgreSQL store in
+    // read-only mode. They still must not inspect a recovery-designated store.
     let report = runtime.block_on(o3k::run_all(&context));
     if json {
         match serde_json::to_string_pretty(&report) {
