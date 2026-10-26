@@ -357,8 +357,21 @@ conflicting, expired, or revoked state denies startup. Only an offline-signed
 can explicitly release quarantine. An authenticated `NEVER_RECOVERED`
 installation has no journal or journal-trust dependency; designated or
 previously recovered installations require current installed trust. `o3kd`
-remains a read-only consumer, and
-the existing lifetime store-access lock remains in force.
+remains a read-only consumer, and the existing lifetime store-access lock
+remains in force. To preserve D8's journal controls while preventing the
+service identity from rolling back a valid `RECOVERY_DESIGNATED` state, C1
+separates the two paths. The root-owned recovery-state directory is readable
+by the `o3k` group but not writable by the service (`0750`, `root:o3k`; state
+files `0640`, `root:o3k`) on verified local ext4. The D8 journal remains in a
+separate `o3k:o3k` directory (`0700`) with `0600` journal, pending-request,
+marker, and lock files on verified local ext4. Both paths use no-follow and
+exclusive-create semantics with owner, mode, device, and inode revalidation;
+atomic replacements retain the applicable D8 fsync/rename sequence. The
+installation policy binds both paths and their device/inode identities. Any
+signed alternate path must meet the exact controls for its respective role and
+remain separated from the target and installation prefix. Filesystem write
+access alone does not confer designation or quarantine-transition authority;
+the proposed signature and actor restrictions still apply.
 
 The proposal also defines separate offline journal and evidence trust
 purposes, signer certificates scoped to exact site/installation/profile/

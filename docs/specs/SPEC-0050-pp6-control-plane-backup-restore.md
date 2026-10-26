@@ -948,7 +948,8 @@ The packaged installation identity is an RFC 8785 canonical Ed25519-signed
 `installation_id`, `site_id`, profile, backend, exact release identity,
 canonical data-root path, target device/inode, monotonic policy revision and
 prior-policy digest, fixed policy path, trust-bundle path and digest,
-recovery-state root, and installation-policy signer key ID. The signature
+recovery-state root path and device/inode, D8 journal-directory path and
+device/inode, and installation-policy signer key ID. The signature
 envelope names the algorithm and signer key ID and covers the canonical payload
 excluding the envelope; duplicate, unknown, or non-canonical fields are
 rejected. The policy is signed by the installation-policy authority whose
@@ -1004,16 +1005,39 @@ startup. A restore process must never infer designation success from a lost
 write acknowledgement.
 
 In the packaged Linux layout, the designation and anti-rollback high-water
-state live at `/var/lib/o3k-recovery/<installation_id>/`; the recovery state
-root is root-owned, service-readable, not service-writable, and outside both
-the target data directory and installation prefix. The installed journal
-trust bundle lives at `/etc/o3k/recovery-trust.json`. A different path is
-allowed only when the signed installation policy names it and the same
-ownership, filesystem, and separation checks pass. The release-signed release
-manifest authenticates the installation-policy verification key; the signed
+state live at `/var/lib/o3k-recovery-state/<installation_id>/`, a separate
+root-owned, `o3k`-group-readable directory (mode `0750`) with state files owned
+by `root:o3k` (mode `0640`) on verified local ext4. It is outside both the
+target data directory and installation prefix, and is not writable by the
+`o3k` service identity. File creation uses no-follow and exclusive-create
+semantics; before use, the directory and files have their owner, mode, device,
+and inode rechecked. Atomic replacements use a new same-directory file, file
+fsync, rename, and directory fsync. The D8 journal remains at
+`/var/lib/o3k-recovery/<installation_id>/`: a pre-provisioned `o3k:o3k`
+directory (mode `0700`) on verified local ext4, with journal, pending-request,
+marker, and lock files mode `0600`. File creation is no-follow and exclusive;
+owner, mode, device, and inode are rechecked before use, and journal
+replacements follow the accepted D8 fsync/rename sequence. The signed
+installation policy binds both paths; the signed designation and journal bind
+the D8 directory identity. An alternate recovery-state root must meet the same
+root ownership, group readability, exact modes, filesystem, no-follow,
+exclusive-create, and owner/device/inode revalidation controls above. An
+alternate journal directory must meet the exact D8 ownership, mode, filesystem,
+no-follow/exclusive-create, owner/device/inode revalidation, and separation
+controls. Filesystem write access alone does not authorize a designation or
+quarantine transition; the signatures and actor restrictions below remain
+mandatory. The root-authorized installer provisions both directories before
+systemd can start `o3kd`.
+
+The installed journal trust bundle lives at `/etc/o3k/recovery-trust.json` and
+is root-owned, service-readable, and not service-writable. Its path and digest
+are bound by the signed installation policy; an alternate path must satisfy
+the same trust-bundle ownership, readability, no-follow, owner/mode/device/inode
+revalidation, and separation checks. The release-signed release manifest
+authenticates the installation-policy verification key; the signed
 installation policy binds the trust roots, trust-bundle path and digest, and
-recovery-state root. `restore.json` may supply validated operator parameters but
-cannot designate, release, or clear
+recovery-state root. `restore.json` may supply validated operator parameters
+but cannot designate, release, or clear
 recovery state. Startup discovers the protected record from the authenticated
 installation policy and stable state root before reading optional recovery
 configuration, opening canonical state, creating a controller session, or
