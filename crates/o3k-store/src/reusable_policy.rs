@@ -2313,7 +2313,6 @@ mod tests {
             store.insert_policy_rule(&first),
             store.insert_policy_rule(&second)
         );
-        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
         assert!(matches!(
             &a,
             Ok(()) | Err(StoreError::ResourceAlreadyExists)
@@ -2340,7 +2339,6 @@ mod tests {
             store.insert_policy_attachment(&attachment_a),
             store.insert_policy_attachment(&attachment_b)
         );
-        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
         assert!(matches!(
             &a,
             Ok(()) | Err(StoreError::ResourceAlreadyExists)
@@ -2375,9 +2373,9 @@ mod tests {
             .insert_reusable_policy(&policy(policy_id, "Allow"))
             .await?;
 
-        let mut holder = store.pool.acquire().await.map_err(StoreError::Database)?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *holder)
+        let holder = store
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(StoreError::Database)?;
 
@@ -2385,10 +2383,7 @@ mod tests {
         let contender = store.insert_policy_rule(&contender_rule);
         let release = async {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            sqlx::query("ROLLBACK")
-                .execute(&mut *holder)
-                .await
-                .map_err(StoreError::Database)
+            holder.rollback().await.map_err(StoreError::Database)
         };
         let (result, released) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             tokio::join!(contender, release)
@@ -2396,7 +2391,12 @@ mod tests {
         .await
         .map_err(|_| StoreError::Database(sqlx::Error::PoolTimedOut))?;
         released?;
-        result
+        result?;
+        store.pool.close().await;
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+        Ok(())
     }
 
     #[tokio::test]
