@@ -416,7 +416,7 @@ impl crate::SqliteStore {
         // Acquire SQLite's writer lock before the read/validate sequence. A
         // deferred transaction can let two writers both read the old state,
         // then one fails upgrading with SQLITE_BUSY instead of returning the
-        // durable conflict from the uniqueness constraint.
+        // validated durable domain result.
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -2322,7 +2322,10 @@ mod tests {
             &b,
             Ok(()) | Err(StoreError::ResourceAlreadyExists)
         ));
-        assert!(a.is_err() || b.is_err());
+        assert!(
+            a.is_ok() ^ b.is_ok(),
+            "exactly one rule create must win: {a:?}, {b:?}"
+        );
         let attachment_a = CanonicalPolicyAttachmentRecord {
             id: Uuid::from_u128(34),
             policy_id,
@@ -2346,7 +2349,10 @@ mod tests {
             &b,
             Ok(()) | Err(StoreError::ResourceAlreadyExists)
         ));
-        assert!(a.is_err() || b.is_err());
+        assert!(
+            a.is_ok() ^ b.is_ok(),
+            "exactly one attachment create must win: {a:?}, {b:?}"
+        );
         assert_eq!(
             store
                 .list_endpoint_policy_attachments("project-a", &Uuid::from_u128(31))
@@ -2357,6 +2363,40 @@ mod tests {
         drop(store);
         let _ = std::fs::remove_file(path);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_writer_contention_waits_before_rule_validation() -> Result<(), StoreError> {
+        let path =
+            std::env::temp_dir().join(format!("o3k-policy-contention-{}.sqlite", Uuid::now_v7()));
+        let store = SqliteStore::connect_file(&path).await?;
+        let policy_id = Uuid::from_u128(36);
+        store
+            .insert_reusable_policy(&policy(policy_id, "Allow"))
+            .await?;
+
+        let mut holder = store.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *holder)
+            .await
+            .map_err(StoreError::Database)?;
+
+        let contender_rule = rule(Uuid::from_u128(37), policy_id);
+        let contender = store.insert_policy_rule(&contender_rule);
+        let release = async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            sqlx::query("ROLLBACK")
+                .execute(&mut *holder)
+                .await
+                .map_err(StoreError::Database)
+        };
+        let (result, released) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(contender, release)
+        })
+        .await
+        .map_err(|_| StoreError::Database(sqlx::Error::PoolTimedOut))?;
+        released?;
+        result
     }
 
     #[tokio::test]
