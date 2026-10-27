@@ -257,11 +257,69 @@ impl ProtectedDirectory {
         bytes: &[u8],
         gid: u32,
     ) -> Result<(), RecoveryFileError> {
+        self.atomic_write_checked(
+            name,
+            expected,
+            bytes,
+            0,
+            gid,
+            0o640,
+            DirectoryPolicy::StateRoot,
+        )
+    }
+
+    /// Root-only atomic publish into a protected installer directory of any
+    /// accepted posture (`/etc/o3k` root-owned non-writable, or the D8
+    /// journal directory owned by the service identity). The file lands with
+    /// the exact uid/gid/mode given. The same no-follow, exclusive-create,
+    /// fsync/rename/fsync/readback discipline applies.
+    pub fn atomic_write_installer(
+        &self,
+        name: &str,
+        expected: Option<&[u8]>,
+        bytes: &[u8],
+        uid: u32,
+        gid: u32,
+        mode: u32,
+    ) -> Result<(), RecoveryFileError> {
+        self.atomic_write_checked(
+            name,
+            expected,
+            bytes,
+            uid,
+            gid,
+            mode,
+            DirectoryPolicy::Installer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn atomic_write_checked(
+        &self,
+        name: &str,
+        expected: Option<&[u8]>,
+        bytes: &[u8],
+        uid: u32,
+        gid: u32,
+        mode: u32,
+        policy: DirectoryPolicy,
+    ) -> Result<(), RecoveryFileError> {
         validate_name(name)?;
-        if self.uid != 0 || self.mode != 0o750 {
-            return Err(RecoveryFileError::Unsafe(
-                "root-owned state directory required",
-            ));
+        match policy {
+            DirectoryPolicy::StateRoot => {
+                if self.uid != 0 || self.mode != 0o750 {
+                    return Err(RecoveryFileError::Unsafe(
+                        "root-owned state directory required",
+                    ));
+                }
+            }
+            DirectoryPolicy::Installer => {
+                if self.mode & 0o022 != 0 {
+                    return Err(RecoveryFileError::Unsafe(
+                        "installer directory must not be group or world writable",
+                    ));
+                }
+            }
         }
         if geteuid().as_raw() != 0 {
             return Err(RecoveryFileError::Unsafe("root required"));
@@ -294,8 +352,8 @@ impl ProtectedDirectory {
             Mode::from_raw_mode(0o640),
         )?;
         let mut file = File::from(fd);
-        fchmod(file.as_fd(), Mode::from_raw_mode(0o640)).map_err(errno)?;
-        std::os::unix::fs::fchown(&file, Some(0), Some(gid))?;
+        fchmod(file.as_fd(), Mode::from_raw_mode(mode)).map_err(errno)?;
+        std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
         file.write_all(bytes)?;
         crash_hook("before-file-fsync")?;
         file.sync_all()?;
@@ -304,12 +362,87 @@ impl ProtectedDirectory {
         crash_hook("after-rename")?;
         self.dir.sync_all()?;
         crash_hook("after-directory-fsync")?;
-        let readback = self.read_bounded(name, 0, gid, 0o640, bytes.len())?;
+        let readback = self.read_bounded(name, uid, gid, mode, bytes.len())?;
         if readback != bytes {
             return Err(RecoveryFileError::Unsafe("write readback"));
         }
         Ok(())
     }
+
+    /// Root-only atomic upsert (create or replace) with the same no-follow,
+    /// exclusive-temp, fsync/rename/fsync/readback discipline. Callers are
+    /// responsible for the compare/classify policy; this primitive never
+    /// leaves a partially written file and never follows a symlink.
+    pub fn atomic_publish_installer(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        uid: u32,
+        gid: u32,
+        mode: u32,
+    ) -> Result<(), RecoveryFileError> {
+        validate_name(name)?;
+        if self.mode & 0o022 != 0 {
+            return Err(RecoveryFileError::Unsafe(
+                "installer directory must not be group or world writable",
+            ));
+        }
+        if geteuid().as_raw() != 0 {
+            return Err(RecoveryFileError::Unsafe("root required"));
+        }
+        self.lock()?;
+        let temp = format! {".{name}.tmp-{}", std::process::id()};
+        let fd = openat(
+            self.dir.as_fd(),
+            temp.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::from_raw_mode(0o640),
+        )?;
+        let mut file = File::from(fd);
+        fchmod(file.as_fd(), Mode::from_raw_mode(mode)).map_err(errno)?;
+        std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
+        file.write_all(bytes)?;
+        crash_hook("before-file-fsync")?;
+        file.sync_all()?;
+        crash_hook("after-file-fsync")?;
+        rustix::fs::renameat(self.dir.as_fd(), temp.as_str(), self.dir.as_fd(), name)?;
+        crash_hook("after-rename")?;
+        self.dir.sync_all()?;
+        crash_hook("after-directory-fsync")?;
+        let readback = self.read_bounded(name, uid, gid, mode, bytes.len())?;
+        if readback != bytes {
+            return Err(RecoveryFileError::Unsafe("write readback"));
+        }
+        Ok(())
+    }
+
+    /// The anchored absolute path, for bounded listings by policy consumers.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Bounded entry listing of the anchored directory. Names only; entries
+    /// are validated by the caller before any use.
+    pub fn list_names(&self) -> Result<Vec<String>, RecoveryFileError> {
+        self.check()?;
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&self.path)? {
+            let entry = entry?;
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+        Ok(names)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectoryPolicy {
+    /// The root-owned, `o3k`-group-readable recovery state root (0750).
+    StateRoot,
+    /// Any root-owned or service-owned, non-group/world-writable installer
+    /// directory (`/etc/o3k`, the D8 journal directory).
+    Installer,
 }
 
 fn errno(error: rustix::io::Errno) -> io::Error {

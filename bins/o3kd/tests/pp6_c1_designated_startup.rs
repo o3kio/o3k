@@ -15,7 +15,8 @@ use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -903,32 +904,403 @@ fn designated_installation_denies_integrated_maintenance_paths() {
     );
 }
 
-#[test]
-#[ignore = "requires a systemd manager; run explicitly with --ignored"]
-fn designated_installation_denies_under_systemd_restart() {
-    let available = std::fs::read_to_string("/proc/1/comm")
-        .map(|comm| comm.trim() == "systemd")
-        .unwrap_or(false)
-        && Command::new("systemctl")
-            .arg("is-system-running")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false);
-    if !available {
-        eprintln!(
-            "NOT_RUN systemd restart denial: no systemd manager available in this environment; \
-             repeated direct exec is not systemd evidence"
-        );
-        return;
+// ---- real systemd supervision evidence ----
+//
+// The transient units below run the same unshare(1) namespace preamble as the
+// direct-exec scenarios, but under a real systemd manager so the daemon denial
+// is proven for supervisor-driven startup: Restart=always re-attempts, manual
+// `systemctl restart`, and root/service-user authority separation.  Nothing
+// here is an installed-release unit or a production deployment claim.
+
+const UNIT_DESCRIPTION: &str = "o3k C1 designated startup denial evidence (test-only fixture; issue #1086; not a production unit)";
+const OWNERSHIP_DENIAL: &str = "not owned by the effective uid";
+
+/// Resolves a host tool to an absolute path (systemd ExecStart requires one).
+fn host_tool(name: &str) -> Result<String, String> {
+    let output = Command::new("which")
+        .arg(name)
+        .output()
+        .map_err(|error| format!("which {name}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("{name} is not on the host PATH"));
     }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn probe(args: &[&str]) -> Result<(), String> {
+    let status = Command::new(args[0])
+        .args(&args[1..])
+        .status()
+        .map_err(|error| format!("{}: {error}", args[0]))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} probe exited {status}", args[0]))
+    }
+}
+
+/// Returns why the systemd scenario cannot run in this environment, if it
+/// cannot.  `is-system-running` exits non-zero on `degraded`, so the state is
+/// parsed from stdout instead of requiring a zero exit status.
+fn systemd_scenario_unavailable() -> Option<String> {
+    if rustix::process::geteuid().as_raw() != 0 {
+        return Some("requires root".to_string());
+    }
+    if fs::read_to_string("/proc/1/comm")
+        .map(|comm| comm.trim() != "systemd")
+        .unwrap_or(true)
+    {
+        return Some("PID 1 is not systemd".to_string());
+    }
+    let output = match Command::new("systemctl").arg("is-system-running").output() {
+        Ok(output) => output,
+        Err(error) => return Some(format!("systemctl is-system-running: {error}")),
+    };
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "running" | "degraded" | "starting" | "initializing" => {}
+        other => return Some(format!("system manager state is {other:?}")),
+    }
+    if let Err(error) = probe(&["unshare", "--mount", "--", "/bin/true"]) {
+        return Some(format!("unshare(1) unusable: {error}"));
+    }
+    if let Err(error) = probe(&[
+        "setpriv",
+        "--reuid=65534",
+        "--regid=65534",
+        "--clear-groups",
+        "/bin/true",
+    ]) {
+        return Some(format!("setpriv(1) unusable: {error}"));
+    }
+    None
+}
+
+/// A transient unit under test.  Drop always attempts cleanup so a failed
+/// assertion cannot leave a Restart=always unit churning behind.
+struct TransientUnit {
+    unit: String,
+}
+
+impl TransientUnit {
+    fn new(role: &str) -> Self {
+        Self {
+            unit: format!("o3k-c1-designated-{role}-{}.service", uuid::Uuid::now_v7()),
+        }
+    }
+
+    fn systemctl(&self, args: &[&str]) -> Result<std::process::Output, String> {
+        Command::new("systemctl")
+            .args(args)
+            .arg(&self.unit)
+            .output()
+            .map_err(|error| format!("systemctl {}: {error}", args.join(" ")))
+    }
+
+    fn show(&self, property: &str) -> Result<Option<String>, String> {
+        let output = self.systemctl(&["show", "-p", property])?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .and_then(|line| line.split_once('='))
+            .map(|(_, value)| value.trim().to_string()))
+    }
+
+    fn show_required(&self, property: &str) -> Result<String, String> {
+        self.show(property)?
+            .ok_or_else(|| format!("systemctl show -p {property} failed for {}", self.unit))
+    }
+
+    fn stop_and_reset(&self) {
+        let _ = self.systemctl(&["stop"]);
+        let _ = self.systemctl(&["reset-failed"]);
+    }
+
+    fn wait_load_state(&self, wanted: &str, deadline: Instant) -> Result<(), String> {
+        loop {
+            if let Ok(Some(state)) = self.show("LoadState")
+                && state == wanted
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "unit {} did not reach LoadState={wanted}",
+                    self.unit
+                ));
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+impl Drop for TransientUnit {
+    fn drop(&mut self) {
+        self.stop_and_reset();
+    }
+}
+
+/// Registers a transient service unit whose main process is the real o3kd
+/// binary inside the fixture mount namespace.  With `service_user` the daemon
+/// execs as uid/gid 900 (the packaged service-user posture); otherwise it runs
+/// as root.  Restart=always with the start-rate limit disabled keeps the
+/// denial observable across supervisor retries; the test stops the unit
+/// explicitly.  StandardError appends to a host-visible fixture file so each
+/// denied attempt is asserted individually.
+fn start_denial_unit(
+    unit: &TransientUnit,
+    fixture: &DesignatedFixture,
+    stderr_log: &Path,
+    address: SocketAddr,
+    service_user: bool,
+) -> Result<(), String> {
+    let unshare = host_tool("unshare")?;
+    let shell = host_tool("sh")?;
+    let drop_privileges = if service_user {
+        format!("setpriv --reuid={O3K_UID} --regid={O3K_GID} --clear-groups")
+    } else {
+        String::new()
+    };
+    let script = format!(
+        "set -u; mount --make-rprivate /; \
+         mount --bind {0} /var/lib; \
+         mount --bind /var/lib/etc-fixture /etc; \
+         mount --bind /var/lib/share-fixture /usr/local/share/o3k; \
+         test -d /var/lib/o3k; \
+         {drop_privileges} env -i PATH=/usr/bin:/bin O3K_LISTEN_ADDR={1} O3K_PROVIDER=fake \
+         {2} --data-dir /var/lib/o3k --log-filter warn",
+        fixture.root.join("var").display(),
+        address,
+        env!("CARGO_BIN_EXE_o3kd"),
+    );
+    let status = Command::new("systemd-run")
+        .arg("--unit")
+        .arg(&unit.unit)
+        .arg("--description")
+        .arg(UNIT_DESCRIPTION)
+        .arg("--property")
+        .arg("Restart=always")
+        .arg("--property")
+        .arg("RestartSec=1")
+        .arg("--property")
+        .arg("StartLimitIntervalSec=0")
+        .arg("--property")
+        .arg(format!("StandardError=append:{}", stderr_log.display()))
+        .arg(&unshare)
+        .arg("--mount")
+        .arg("--")
+        .arg(&shell)
+        .arg("-c")
+        .arg(&script)
+        .status()
+        .map_err(|error| format!("systemd-run: {error}"))?;
+    if !status.success() {
+        return Err(format!("systemd-run exited with {status}"));
+    }
+    Ok(())
+}
+
+/// Polls a captured unit stderr log until `fragment` appears at least
+/// `at_least` times, returning the observed count.
+fn wait_for_denials(
+    stderr_log: &Path,
+    fragment: &str,
+    at_least: usize,
+    deadline: Instant,
+) -> Result<usize, String> {
+    loop {
+        let text = fs::read_to_string(stderr_log).unwrap_or_default();
+        let count = text.matches(fragment).count();
+        if count >= at_least {
+            return Ok(count);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "only {count} occurrence(s) of {fragment:?} before the deadline; \
+                 captured unit stderr: {text}"
+            ));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn denial_occurrences(stderr_log: &Path, fragment: &str) -> usize {
+    fs::read_to_string(stderr_log)
+        .map(|text| text.matches(fragment).count())
+        .unwrap_or(0)
+}
+
+/// The shared before-listener/before-store posture for every supervised
+/// attempt: the daemon acquired the store-access guard lock (owned by
+/// `lock_owner`, proving which uid ran it), the canonical SQLite store was
+/// never created or opened, and the API listener is not accepting.
+fn assert_unit_denied(
+    case: &str,
+    fixture: &DesignatedFixture,
+    address: SocketAddr,
+    lock_owner: u32,
+) -> Result<(), String> {
+    let lock = fixture.data_dir_host.join(".o3k-store.lock");
+    let metadata = fs::metadata(&lock)
+        .map_err(|error| format!("{case}: store-access guard lock missing: {error}"))?;
+    if metadata.uid() != lock_owner {
+        return Err(format!(
+            "{case}: guard lock owned by uid {} instead of the expected {lock_owner}",
+            metadata.uid()
+        ));
+    }
+    if fixture.data_dir_host.join("o3k.sqlite").exists() {
+        return Err(format!(
+            "{case}: canonical SQLite store was created or opened"
+        ));
+    }
+    if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+        return Err(format!(
+            "{case}: API listener unexpectedly accepting connections"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires root, a systemd manager, unshare(1), and setpriv(1); run explicitly with --ignored"]
+fn designated_installation_denies_under_systemd_restart() -> Result<(), String> {
     let Some(root) = fixture_root() else {
         eprintln!("NOT_RUN systemd restart denial: requires root");
-        return;
+        return Ok(());
     };
-    let fixture = build(&root, Variant::Control).expect("fixture builds");
-    let _ = fixture;
-    panic!(
-        "systemd manager present but the namespace-scoped systemd unit path is not implemented; \
-         add the unit-based denial here rather than relabeling direct exec as systemd evidence"
+    if let Some(reason) = systemd_scenario_unavailable() {
+        eprintln!("NOT_RUN systemd restart denial: {reason}");
+        let _ = fs::remove_dir_all(&root);
+        return Ok(());
+    }
+    let fixture = build(&root, Variant::Control)?;
+    let address = unused_address();
+    let deadline = |seconds: u64| Instant::now() + Duration::from_secs(seconds);
+
+    // 1. A transient service unit runs the daemon as the packaged o3k service
+    //    user under Restart=always.  Every supervised attempt denies before
+    //    the listener bind and canonical store open.
+    let service_unit = TransientUnit::new("svc");
+    let service_stderr = fixture
+        .root
+        .join(format!("{}.stderr.log", service_unit.unit));
+    start_denial_unit(&service_unit, &fixture, &service_stderr, address, true)?;
+    let denials = wait_for_denials(&service_stderr, DESIGNATION, 3, deadline(30))?;
+    let restarts: u32 = service_unit
+        .show_required("NRestarts")?
+        .parse()
+        .map_err(|_| "NRestarts is not a number".to_string())?;
+    assert!(
+        restarts >= 2,
+        "Restart=always did not re-attempt the daemon (NRestarts={restarts}, denials={denials})"
     );
+    assert_eq!(
+        service_unit.show_required("Result")?,
+        "exit-code",
+        "daemon unit did not fail with a real exit-code denial"
+    );
+    assert_ne!(
+        service_unit.show_required("ExecMainStatus")?,
+        "0",
+        "daemon unit main process exited successfully"
+    );
+    assert_unit_denied("systemd service-user unit", &fixture, address, O3K_UID)?;
+    eprintln!(
+        "systemd service-user Restart=always denial: {denials} denied attempts, {restarts} restarts"
+    );
+
+    // 2. A manual `systemctl restart` re-runs the denied daemon; the
+    //    designation denies again before listener or store.
+    let before_restart = denial_occurrences(&service_stderr, DESIGNATION);
+    let restarted = service_unit.systemctl(&["restart"])?;
+    if !restarted.status.success() {
+        return Err(format!(
+            "systemctl restart failed: {}",
+            String::from_utf8_lossy(&restarted.stderr)
+        ));
+    }
+    wait_for_denials(
+        &service_stderr,
+        DESIGNATION,
+        before_restart + 2,
+        deadline(30),
+    )?;
+    assert_unit_denied("systemd systemctl restart", &fixture, address, O3K_UID)?;
+    eprintln!("systemd systemctl restart denial: repeated before listener/store");
+
+    // 3. Unit control is root authority: an unprivileged uid cannot start,
+    //    restart, or stop the daemon unit.
+    for verb in ["start", "restart", "stop"] {
+        let status = Command::new("setpriv")
+            .args([
+                "--reuid=65534",
+                "--regid=65534",
+                "--clear-groups",
+                "systemctl",
+                verb,
+                &service_unit.unit,
+            ])
+            .status()
+            .map_err(|error| format!("unprivileged systemctl {verb}: {error}"))?;
+        assert!(
+            !status.success(),
+            "unprivileged systemctl {verb} unexpectedly succeeded"
+        );
+    }
+    assert_ne!(
+        service_unit.show_required("ActiveState")?,
+        "inactive",
+        "unprivileged stop deactivated the daemon unit"
+    );
+    eprintln!("systemd unit control remains root-only authority");
+
+    // 4. A root stop halts the Restart=always churn and unloads the transient
+    //    unit: no further denied attempts appear and the unit file is gone.
+    service_unit.stop_and_reset();
+    let frozen = denial_occurrences(&service_stderr, DESIGNATION);
+    thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        denial_occurrences(&service_stderr, DESIGNATION),
+        frozen,
+        "denials continued after systemctl stop"
+    );
+    service_unit.wait_load_state("not-found", deadline(10))?;
+    eprintln!("systemd transient unit stopped and unloaded");
+
+    // 5. Root execution against the service-user installation is fenced by
+    //    uid ownership before any store open: the guard denies, the lock stays
+    //    with the service user, and no listener appears.
+    let root_unit = TransientUnit::new("root");
+    let root_stderr = fixture.root.join(format!("{}.stderr.log", root_unit.unit));
+    start_denial_unit(&root_unit, &fixture, &root_stderr, address, false)?;
+    wait_for_denials(&root_stderr, OWNERSHIP_DENIAL, 1, deadline(30))?;
+    let root_denial = fs::read_to_string(&root_stderr).unwrap_or_default();
+    assert!(
+        root_denial.contains(OWNERSHIP_DENIAL),
+        "root-run daemon denial unexpected: {root_denial}"
+    );
+    assert_eq!(
+        root_unit.show_required("Result")?,
+        "exit-code",
+        "root-run daemon unit did not fail with a real exit-code denial"
+    );
+    assert_unit_denied("systemd root unit", &fixture, address, O3K_UID)?;
+    root_unit.stop_and_reset();
+    root_unit.wait_load_state("not-found", deadline(10))?;
+    eprintln!("systemd root execution fenced before store open");
+
+    // 6. Cleanup: transient units are unloaded above; the fixture directory
+    //    and its captured stderr files must not linger under /var/lib.
+    drop(root_unit);
+    drop(service_unit);
+    drop(fixture);
+    assert!(
+        !root.exists(),
+        "fixture directory left behind under /var/lib"
+    );
+    eprintln!("systemd restart denial: PASS (transient units and fixture state cleaned)");
+    Ok(())
 }

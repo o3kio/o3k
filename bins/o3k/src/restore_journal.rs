@@ -560,6 +560,22 @@ impl AuthenticatedJournal {
     pub fn phase(&self) -> RestorePhase {
         self.phase
     }
+
+    /// The authenticated sequence of the terminal record.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// The authenticated signed hash of the terminal record: the journal tip
+    /// identity later checkpoint records bind as their prior record digest.
+    pub fn signed_hash(&self) -> &str {
+        &self.signed_hash
+    }
+
+    /// The exact SHA-256 of the canonical journal bytes.
+    pub fn chain_sha256(&self) -> &str {
+        &self.chain_sha256
+    }
 }
 
 /// Canonical RFC 8785 bytes of a signing request.

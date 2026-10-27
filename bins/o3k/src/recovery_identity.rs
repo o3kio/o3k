@@ -253,10 +253,54 @@ pub fn verify_initial_state_transition(
     if prev.is_some() {
         return Err(IdentityError::InvalidSequence);
     };
-    verify_state_transition_inner(prev, next, p, None)
+    verify_state_transition_inner(None, next, p, None)
+}
+
+/// The preserved-state view of any state-chain tip (disposition or re-anchor
+/// record). Re-anchor records change no state value, so a later disposition
+/// always transitions from the *preserved* state of its predecessor tip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateTipView<'a> {
+    pub sequence: u64,
+    pub state: RecoveryState,
+    /// The policy digest the tip binds: the record digest for a disposition,
+    /// the new-policy digest for a re-anchor record.
+    pub policy_digest: &'a str,
+    /// Preserved operation continuity (None for a `NEVER_RECOVERED` tip).
+    pub operation_id: Option<&'a str>,
+    pub artifact_sha256: Option<&'a str>,
+    /// Preserved trust-bundle and recovery-directory bindings.
+    pub trust_bundle_digest: Option<&'a str>,
+    pub recovery_directory_digest: Option<&'a str>,
+}
+
+pub fn state_tip_view(state: &InstallationState) -> StateTipView<'_> {
+    StateTipView {
+        sequence: state.sequence,
+        state: state.state,
+        policy_digest: &state.policy_digest,
+        operation_id: state.operation_id.as_deref(),
+        artifact_sha256: state.artifact_sha256.as_deref(),
+        trust_bundle_digest: state.trust_bundle_digest.as_deref(),
+        recovery_directory_digest: state.recovery_directory_digest.as_deref(),
+    }
+}
+
+/// Tip-generalized transition check: the predecessor may be any state-chain
+/// tip; only its sequence, preserved state value, and policy digest participate.
+pub fn verify_tip_transition(
+    prev: Option<StateTipView<'_>>,
+    d: Option<&str>,
+    n: &InstallationState,
+    p: &InstallationPolicy,
+) -> Result<(), IdentityError> {
+    if prev.is_some() && !d.is_some_and(hex_digest) {
+        return Err(IdentityError::InvalidSequence);
+    }
+    verify_state_transition_inner(prev, n, p, d)
 }
 fn verify_state_transition_inner(
-    prev: Option<&InstallationState>,
+    prev: Option<StateTipView<'_>>,
     n: &InstallationState,
     p: &InstallationPolicy,
     expected: Option<&str>,
@@ -308,8 +352,8 @@ fn verify_state_transition_inner(
                 && n.terminal_journal_digest.as_deref().is_some_and(hex_digest)
                 && n.evidence_digest.as_deref().is_some_and(hex_digest)
                 && n.policy_digest == o.policy_digest
-                && n.operation_id == o.operation_id
-                && n.artifact_sha256 == o.artifact_sha256 =>
+                && n.operation_id.as_deref() == o.operation_id
+                && n.artifact_sha256.as_deref() == o.artifact_sha256 =>
         {
             Ok(())
         }
@@ -325,7 +369,7 @@ pub fn verify_state_transition_with_previous_digest(
     if prev.is_some() && !d.is_some_and(hex_digest) {
         return Err(IdentityError::InvalidSequence);
     }
-    verify_state_transition_inner(prev, n, p, d)
+    verify_state_transition_inner(prev.map(state_tip_view), n, p, d)
 }
 pub struct CertificateScope<'a> {
     pub purpose: &'a str,

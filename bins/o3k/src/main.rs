@@ -70,6 +70,24 @@ enum Commands {
         #[arg(long)]
         state: std::path::PathBuf,
     },
+    /// Persist a C1.1 authenticated installation-policy/trust re-anchor and
+    /// journal checkpoint (root-only installer operation; grants no
+    /// activation, never clears quarantine, and accepts no new CLI authority)
+    #[command(hide = true)]
+    RecoveryReanchor {
+        #[arg(long)]
+        reanchor: std::path::PathBuf,
+        #[arg(long)]
+        checkpoint: Option<std::path::PathBuf>,
+        #[arg(long)]
+        policy: std::path::PathBuf,
+        #[arg(long)]
+        trust: std::path::PathBuf,
+        #[arg(long)]
+        revalidation: Option<std::path::PathBuf>,
+        #[arg(long)]
+        custody_record: Option<std::path::PathBuf>,
+    },
     /// Upgrade the installation
     Upgrade {
         /// Target release version (e.g. v0.4.0)
@@ -327,6 +345,83 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(reason) => {
                     eprintln!("recovery release failed: {reason}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Commands::RecoveryReanchor {
+            reanchor,
+            checkpoint,
+            policy,
+            trust,
+            revalidation,
+            custody_record,
+        } => {
+            // The plan builder authenticates a complete generation and
+            // verifies the signed R/C against the durable prior bytes for an
+            // exact-forward resume; a full startup load here would deny the
+            // legitimate partial generation after a crash.
+            let installed = match o3k::recovery_installation::InstalledRecovery::load_partial(
+                Path::new("/var/lib/o3k"),
+            ) {
+                Ok(installed) => installed,
+                Err(reason) => {
+                    eprintln!("recovery rotation rejected: {reason}");
+                    return ExitCode::from(2);
+                }
+            };
+            let read_input =
+                |path: &std::path::PathBuf, label: &str| -> Result<Vec<u8>, ExitCode> {
+                    std::fs::read(path).map_err(|error| {
+                        eprintln!("recovery rotation {label} is unreadable: {error}");
+                        ExitCode::from(2)
+                    })
+                };
+            let signed_reanchor = match read_input(&reanchor, "re-anchor record") {
+                Ok(bytes) => bytes,
+                Err(code) => return code,
+            };
+            let signed_checkpoint = match &checkpoint {
+                Some(path) => match read_input(path, "checkpoint") {
+                    Ok(bytes) => Some(bytes),
+                    Err(code) => return code,
+                },
+                None => None,
+            };
+            let new_policy = match read_input(&policy, "installation policy") {
+                Ok(bytes) => bytes,
+                Err(code) => return code,
+            };
+            let new_trust_bundle = match read_input(&trust, "recovery trust bundle") {
+                Ok(bytes) => bytes,
+                Err(code) => return code,
+            };
+            let signed_revalidation = match &revalidation {
+                Some(path) => match read_input(path, "revalidation evidence") {
+                    Ok(bytes) => Some(bytes),
+                    Err(code) => return code,
+                },
+                None => None,
+            };
+            let custody_record = match &custody_record {
+                Some(path) => match read_input(path, "custody record") {
+                    Ok(bytes) => Some(bytes),
+                    Err(code) => return code,
+                },
+                None => None,
+            };
+            let inputs = o3k::recovery_reanchor::RotationInputs {
+                signed_reanchor,
+                signed_checkpoint,
+                new_policy,
+                new_trust_bundle,
+                signed_revalidation,
+                custody_record,
+            };
+            match o3k::recovery_reanchor::rotate(&installed, &inputs) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(reason) => {
+                    eprintln!("recovery rotation failed: {reason}");
                     ExitCode::from(1)
                 }
             }

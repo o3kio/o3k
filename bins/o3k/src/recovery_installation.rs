@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     recovery_files::{DirectoryPosture, ProtectedDirectory},
     recovery_identity::{self as identity, InstallationPolicy, InstallationState, RecoveryState},
+    recovery_reanchor as reanchor,
+    recovery_reanchor::{GenerationView, ReanchorError, RotationArea, RotationStore},
     upgrade::release_identity::{self, BackupReleaseIdentity},
 };
 
@@ -20,8 +22,34 @@ type Result<T> = std::result::Result<T, &'static str>;
 pub struct InstalledRecovery {
     pub policy: InstallationPolicy,
     pub policy_digest: String,
+    /// The current state-chain tip when it is a C1 disposition record. For a
+    /// rotated installation (tip is the re-anchor record R) this holds the
+    /// era-1 base disposition record instead.
     pub state: InstallationState,
     pub state_digest: String,
+    /// The preserved recovery-state value: the tip's own state for a
+    /// disposition tip, or the preserved state carried by the re-anchor tip.
+    preserved_state: RecoveryState,
+    /// The sequence of the state-chain tip itself (for a re-anchor tip this
+    /// differs from the base disposition record's sequence).
+    tip_sequence: u64,
+    /// The full authenticated generation bytes retained for the C1.1
+    /// rotation driver and final observation.
+    manifest_bytes: Vec<u8>,
+    policy_bytes: Vec<u8>,
+    fixed_bundle_bytes: Vec<u8>,
+    trust_high_water_bytes: Vec<u8>,
+    state_tip_bytes: Vec<u8>,
+    journal_bytes: Option<Vec<u8>>,
+    checkpoint_bytes: Option<Vec<u8>>,
+    consumption_record_bytes: Option<Vec<u8>>,
+    /// The durable policy high-water and the inert staged prior-generation
+    /// bytes, observed by the partial load for the C1.1 rotation driver's
+    /// exact-forward resume (SPEC-0050 §7.3.9).
+    policy_high_water_bytes: Option<Vec<u8>>,
+    staged_prior_policy_bytes: Option<Vec<u8>>,
+    staged_prior_trust_bytes: Option<Vec<u8>>,
+    tip_is_reanchor: bool,
     state_directory: ProtectedDirectory,
     _data_directory: ProtectedDirectory,
     journal_directory: Option<ProtectedDirectory>,
@@ -74,14 +102,27 @@ pub fn deny_operational_access_for_backend(
     if expected_backend.is_some_and(|expected| installed.policy.backend != expected) {
         return Err("installation policy backend does not match configured backend");
     }
-    if installed.state.state != RecoveryState::NeverRecovered {
+    if installed.preserved_state() != RecoveryState::NeverRecovered {
         return Err("authenticated recovery designation denies operational access");
     }
     Ok(())
 }
 
 impl InstalledRecovery {
+    /// Loads without authenticating the generation chain: the rotation
+    /// driver's plan builder performs the clean-or-resume observation, and a
+    /// partial generation after a crash must remain openable for the
+    /// exact-forward resume (§7.3.9). All filesystem, posture, and signature
+    /// checks on the individual records still run.
+    pub fn load_partial(data_dir: &Path) -> Result<Self> {
+        Self::load_impl(data_dir, false)
+    }
+
     pub fn load(data_dir: &Path) -> Result<Self> {
+        Self::load_impl(data_dir, true)
+    }
+
+    fn load_impl(data_dir: &Path, authenticate: bool) -> Result<Self> {
         let release_bytes = release_identity::read_fixed_installed_release_manifest()
             .map_err(|_| "installed recovery release is unsafe or unavailable")?;
         let authority = BackupReleaseIdentity::c1_authority_from_manifest(&release_bytes)
@@ -151,96 +192,408 @@ impl InstalledRecovery {
             .map_err(|_| "recovery target identity or protection changed")?;
         let policy_digest = hex::encode(Sha256::digest(&policy_bytes));
         // Checkpoint is the exact signed policy, not an unsigned permission
-        // marker. Only the root-authorized installer may advance it.
+        // marker. Only the root-authorized installer may advance it. A
+        // partial load (crash resume) tolerates a not-yet-advanced high-water.
         let checkpoint = state_directory
             .read_bounded("policy.json", 0, gid, 0o640, MAX_DOCUMENT)
             .map_err(|_| "installation policy high-water state is unavailable")?;
-        if checkpoint != policy_bytes {
+        if authenticate && checkpoint != policy_bytes {
             return Err("installation policy rollback or equivocation detected");
         }
-        let state_bytes = state_directory
+        let state_tip_bytes = state_directory
             .read_bounded("state.json", 0, gid, 0o640, MAX_DOCUMENT)
             .map_err(|_| "protected installation state is unavailable")?;
-        let state_digest = hex::encode(Sha256::digest(&state_bytes));
-        let unverified: identity::Signed<InstallationState> =
-            identity::decode_canonical(&state_bytes)
+        let state_digest = hex::encode(Sha256::digest(&state_tip_bytes));
+        let tip_envelope: identity::Signed<serde_json::Value> =
+            identity::decode_canonical(&state_tip_bytes)
                 .map_err(|_| "installation state is malformed")?;
-        let (state, journal_directory) =
-            if unverified.payload.state == RecoveryState::NeverRecovered {
-                let initial = identity::verify_signed(
-                    &state_bytes,
-                    "o3k-installation-state-v1",
-                    &authority.key_id,
-                    &policy_key,
-                )
-                .map_err(|_| "installation state signature is invalid")?;
-                identity::verify_initial_state_transition(None, &initial, &policy)
-                    .map_err(|_| "installation state predecessor is invalid")?;
-                (initial, None)
+        let tip_format = tip_envelope
+            .payload
+            .get("format")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("installation state is malformed")?;
+        if !authenticate {
+            // Rotation-driver context: the plan builder authenticates the
+            // generation (clean or exact-forward resume). The byte fields the
+            // pipeline needs are gathered here without the chain checks.
+            let state: InstallationState = if tip_format == reanchor::REANCHOR_FORMAT {
+                // A re-anchor tip: expose the preserved bindings in the base
+                // disposition shape (rotation never reads this field).
+                let signed: identity::Signed<serde_json::Value> =
+                    identity::decode_canonical(&state_tip_bytes)
+                        .map_err(|_| "installation state is malformed")?;
+                let payload = &signed.payload;
+                let get = |key: &str| {
+                    payload
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                };
+                InstallationState {
+                    format: "o3k-installation-state-v1".to_string(),
+                    installation_id: get("installation_id").unwrap_or_default(),
+                    site_id: get("site_id").unwrap_or_default(),
+                    profile: get("profile").unwrap_or_default(),
+                    backend: get("backend").unwrap_or_default(),
+                    policy_revision: get("new_policy_revision")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(policy.policy_revision),
+                    policy_digest: get("new_policy_digest").unwrap_or_default(),
+                    target_device: get("target_device")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(policy.target_device),
+                    target_inode: get("target_inode")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(policy.target_inode),
+                    sequence: get("sequence")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_default(),
+                    prior_record_digest: get("prior_record_digest").unwrap_or_default(),
+                    state: get("preserved_state")
+                        .and_then(|v| match v.as_str() {
+                            "NEVER_RECOVERED" => Some(RecoveryState::NeverRecovered),
+                            "RECOVERY_DESIGNATED" => Some(RecoveryState::RecoveryDesignated),
+                            "RELEASED" => Some(RecoveryState::Released),
+                            _ => None,
+                        })
+                        .ok_or("installation state is malformed")?,
+                    operation_id: get("operation_id"),
+                    artifact_sha256: get("artifact_sha256"),
+                    recovery_directory_digest: get("recovery_directory_digest"),
+                    trust_bundle_digest: Some(policy.trust_bundle_digest.clone()),
+                    terminal_journal_digest: get("terminal_journal_digest"),
+                    evidence_digest: get("terminal_evidence_digest"),
+                }
             } else {
-                let journal_directory =
-                    journal_directory.ok_or("recovery journal identity or protection changed")?;
-                let trust = load_trust(&policy, &state_directory, gid)?;
-                let signer = &unverified.envelope.signer_key_id;
-                let signer_key = trust
-                    .journal_key(signer)
-                    .ok_or("installation state signer is unknown or revoked")?;
-                let current: InstallationState = identity::verify_signed(
-                    &state_bytes,
-                    "o3k-installation-state-v1",
-                    signer,
-                    signer_key,
-                )
-                .map_err(|_| "installation state signature is invalid")?;
-                // C1 supports designation now. RELEASED requires independently
-                // verified activation evidence; A10 completion never qualifies.
-                startup_state_check(&current)?;
-                let previous_bytes = state_directory
+                identity::decode_canonical::<identity::Signed<InstallationState>>(&state_tip_bytes)
+                    .map_err(|_| "installation state is malformed")
+                    .map(|signed| signed.payload)?
+            };
+            let (
+                fixed_bundle_bytes,
+                trust_high_water_bytes,
+                journal_bytes,
+                checkpoint_bytes,
+                consumption_record_bytes,
+            ) = (
+                read_protected_config(Path::new(&policy.trust_bundle_path), gid)
+                    .map_err(|_| "installed recovery trust is unsafe or unavailable")?,
+                state_directory
+                    .read_bounded("trust.json", 0, gid, 0o640, MAX_DOCUMENT)
+                    .map_err(|_| "durable recovery trust high-water state is unavailable")?,
+                journal_directory.as_ref().and_then(|directory| {
+                    directory
+                        .read_bounded("restore-journal.json", uid, gid, 0o600, 64 * 1024 * 1024)
+                        .ok()
+                }),
+                journal_directory.as_ref().and_then(|directory| {
+                    directory
+                        .read_bounded(reanchor::CHECKPOINT_NAME, uid, gid, 0o600, MAX_DOCUMENT)
+                        .ok()
+                }),
+                state_directory
+                    .read_bounded(reanchor::CONSUMPTION_NAME, 0, gid, 0o640, MAX_DOCUMENT)
+                    .ok(),
+            );
+            return Ok(Self {
+                state: state.clone(),
+                policy,
+                policy_digest,
+                state_digest,
+                preserved_state: state.state,
+                tip_sequence: state.sequence,
+                manifest_bytes: release_bytes,
+                policy_bytes,
+                fixed_bundle_bytes,
+                trust_high_water_bytes,
+                state_tip_bytes,
+                journal_bytes,
+                checkpoint_bytes,
+                consumption_record_bytes,
+                policy_high_water_bytes: Some(checkpoint),
+                staged_prior_policy_bytes: state_directory
                     .read_bounded(
-                        &format!("state-{}.json", current.prior_record_digest),
+                        reanchor::STAGED_PRIOR_POLICY_NAME,
                         0,
                         gid,
                         0o640,
                         MAX_DOCUMENT,
                     )
-                    .map_err(|_| "installation state predecessor is missing")?;
-                if hex::encode(Sha256::digest(&previous_bytes)) != current.prior_record_digest {
-                    return Err("installation state predecessor digest changed");
-                }
-                let previous: InstallationState = identity::verify_signed(
-                    &previous_bytes,
-                    "o3k-installation-state-v1",
-                    &authority.key_id,
-                    &policy_key,
-                )
-                .map_err(|_| "installation initial state signature is invalid")?;
-                identity::verify_initial_state_transition(None, &previous, &policy)
-                    .map_err(|_| "installation initial predecessor is invalid")?;
-                identity::verify_state_transition_with_previous_digest(
-                    Some(&previous),
-                    Some(&current.prior_record_digest),
-                    &current,
-                    &policy,
-                )
-                .map_err(|_| "installation designation predecessor is invalid")?;
-                if !designation_binding_valid(&current, &policy, &policy_digest) {
-                    return Err("installation designation trust or directory binding changed");
-                }
-                (current, Some(journal_directory))
-            };
-        if state.policy_digest != policy_digest {
-            return Err("installation state policy digest changed");
+                    .ok(),
+                staged_prior_trust_bytes: state_directory
+                    .read_bounded(
+                        reanchor::STAGED_PRIOR_TRUST_NAME,
+                        0,
+                        gid,
+                        0o640,
+                        MAX_DOCUMENT,
+                    )
+                    .ok(),
+                tip_is_reanchor: tip_format == reanchor::REANCHOR_FORMAT,
+                state_directory,
+                _data_directory: data_directory,
+                journal_directory,
+            });
         }
+
+        let manifest_bytes = release_bytes.clone();
+        let mut fixed_bundle_bytes = Vec::new();
+        let mut trust_high_water_bytes = Vec::new();
+        let mut journal_bytes = None;
+        let mut checkpoint_bytes = None;
+        let mut consumption_record_bytes = None;
+        let mut tip_is_reanchor = false;
+        let (state, preserved_state, tip_sequence, journal_directory) = match tip_format {
+            "o3k-installation-state-v1" => {
+                let unverified: identity::Signed<InstallationState> =
+                    identity::decode_canonical(&state_tip_bytes)
+                        .map_err(|_| "installation state is malformed")?;
+                let (state, journal_directory) = if unverified.payload.state
+                    == RecoveryState::NeverRecovered
+                {
+                    let initial = identity::verify_signed(
+                        &state_tip_bytes,
+                        "o3k-installation-state-v1",
+                        &authority.key_id,
+                        &policy_key,
+                    )
+                    .map_err(|_| "installation state signature is invalid")?;
+                    identity::verify_initial_state_transition(None, &initial, &policy)
+                        .map_err(|_| "installation state predecessor is invalid")?;
+                    // The provisioned journal directory stays observed on a
+                    // NEVER_RECOVERED tip: designation (and the C1.1 rotation
+                    // driver) require it, and its identity is policy-bound.
+                    (initial, journal_directory)
+                } else {
+                    let journal_directory = journal_directory
+                        .ok_or("recovery journal identity or protection changed")?;
+                    let trust = load_trust(&policy, &state_directory, gid)?;
+                    let signer = &unverified.envelope.signer_key_id;
+                    let signer_key = trust
+                        .journal_key(signer)
+                        .ok_or("installation state signer is unknown or revoked")?;
+                    let current: InstallationState = identity::verify_signed(
+                        &state_tip_bytes,
+                        "o3k-installation-state-v1",
+                        signer,
+                        signer_key,
+                    )
+                    .map_err(|_| "installation state signature is invalid")?;
+                    // C1 supports designation now. RELEASED requires independently
+                    // verified activation evidence; A10 completion never qualifies.
+                    startup_state_check(&current)?;
+                    let previous_bytes = state_directory
+                        .read_bounded(
+                            &format!("state-{}.json", current.prior_record_digest),
+                            0,
+                            gid,
+                            0o640,
+                            MAX_DOCUMENT,
+                        )
+                        .map_err(|_| "installation state predecessor is missing")?;
+                    if hex::encode(Sha256::digest(&previous_bytes)) != current.prior_record_digest {
+                        return Err("installation state predecessor digest changed");
+                    }
+                    let previous_envelope: identity::Signed<serde_json::Value> =
+                        identity::decode_canonical(&previous_bytes)
+                            .map_err(|_| "installation state predecessor is malformed")?;
+                    let previous_format = previous_envelope
+                        .payload
+                        .get("format")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or("installation state predecessor is malformed")?;
+                    match previous_format {
+                        // A designation after rotation transitions from the
+                        // preserved value of the re-anchor tip; the re-anchor
+                        // link is authenticated by its policy-authority
+                        // signature and its binding of the installed policy.
+                        reanchor::REANCHOR_FORMAT => {
+                            let record =
+                                reanchor::verify_reanchor_record(&previous_bytes, &release_bytes)
+                                    .map_err(|_| "re-anchor predecessor is invalid")?;
+                            if record.new_policy_digest != policy_digest {
+                                return Err(
+                                    "re-anchor predecessor does not bind the installed policy",
+                                );
+                            }
+                            let record_view = identity::StateTipView {
+                                sequence: record.sequence,
+                                state: record.preserved_state,
+                                policy_digest: record.new_policy_digest.as_str(),
+                                operation_id: record.operation_id.as_deref(),
+                                artifact_sha256: record.artifact_sha256.as_deref(),
+                                trust_bundle_digest: None,
+                                recovery_directory_digest: record
+                                    .recovery_directory_digest
+                                    .as_deref(),
+                            };
+                            identity::verify_tip_transition(
+                                Some(record_view),
+                                Some(current.prior_record_digest.as_str()),
+                                &current,
+                                &policy,
+                            )
+                            .map_err(|_| "installation designation predecessor is invalid")?;
+                        }
+                        "o3k-installation-state-v1" => {
+                            let previous: InstallationState = identity::verify_signed(
+                                &previous_bytes,
+                                "o3k-installation-state-v1",
+                                &authority.key_id,
+                                &policy_key,
+                            )
+                            .map_err(|_| "installation initial state signature is invalid")?;
+                            identity::verify_initial_state_transition(None, &previous, &policy)
+                                .map_err(|_| "installation initial predecessor is invalid")?;
+                            identity::verify_state_transition_with_previous_digest(
+                                Some(&previous),
+                                Some(&current.prior_record_digest),
+                                &current,
+                                &policy,
+                            )
+                            .map_err(|_| "installation designation predecessor is invalid")?;
+                        }
+                        _ => return Err("installation state predecessor kind is unknown"),
+                    }
+                    if !designation_binding_valid(&current, &policy, &policy_digest) {
+                        return Err("installation designation trust or directory binding changed");
+                    }
+                    (current, Some(journal_directory))
+                };
+                if state.policy_digest != policy_digest {
+                    return Err("installation state policy digest changed");
+                }
+                let preserved = state.state;
+                let tip_sequence = state.sequence;
+                (state, preserved, tip_sequence, journal_directory)
+            }
+            reanchor::REANCHOR_FORMAT => {
+                tip_is_reanchor = true;
+                let journal_directory =
+                    journal_directory.ok_or("recovery journal identity or protection changed")?;
+                fixed_bundle_bytes =
+                    read_protected_config(Path::new(&policy.trust_bundle_path), gid)
+                        .map_err(|_| "installed recovery trust is unsafe or unavailable")?;
+                trust_high_water_bytes = state_directory
+                    .read_bounded("trust.json", 0, gid, 0o640, MAX_DOCUMENT)
+                    .map_err(|_| "durable recovery trust high-water state is unavailable")?;
+                journal_bytes = journal_directory
+                    .read_bounded("restore-journal.json", uid, gid, 0o600, 64 * 1024 * 1024)
+                    .ok();
+                checkpoint_bytes = journal_directory
+                    .read_bounded(reanchor::CHECKPOINT_NAME, uid, gid, 0o600, MAX_DOCUMENT)
+                    .ok();
+                consumption_record_bytes = state_directory
+                    .read_bounded(reanchor::CONSUMPTION_NAME, 0, gid, 0o640, MAX_DOCUMENT)
+                    .ok();
+                let archives = ProtectedArchives {
+                    state_directory: &state_directory,
+                    journal_directory: Some(&journal_directory),
+                    uid,
+                    gid,
+                };
+                let staged_prior_policy_bytes = state_directory
+                    .read_bounded(
+                        reanchor::STAGED_PRIOR_POLICY_NAME,
+                        0,
+                        gid,
+                        0o640,
+                        MAX_DOCUMENT,
+                    )
+                    .ok();
+                let staged_prior_trust_bytes = state_directory
+                    .read_bounded(
+                        reanchor::STAGED_PRIOR_TRUST_NAME,
+                        0,
+                        gid,
+                        0o640,
+                        MAX_DOCUMENT,
+                    )
+                    .ok();
+                let policy_high_water_bytes = state_directory
+                    .read_bounded(
+                        reanchor::POLICY_HIGH_WATER_NAME,
+                        0,
+                        gid,
+                        0o640,
+                        MAX_DOCUMENT,
+                    )
+                    .ok();
+                let view = GenerationView {
+                    manifest_bytes: &manifest_bytes,
+                    policy_bytes: &policy_bytes,
+                    policy_high_water_bytes: policy_high_water_bytes.as_deref(),
+                    fixed_bundle_bytes: &fixed_bundle_bytes,
+                    trust_high_water_bytes: &trust_high_water_bytes,
+                    staged_prior_policy_bytes: staged_prior_policy_bytes.as_deref(),
+                    staged_prior_trust_bytes: staged_prior_trust_bytes.as_deref(),
+                    state_tip_bytes: &state_tip_bytes,
+                    journal_bytes: journal_bytes.as_deref(),
+                    checkpoint_bytes: checkpoint_bytes.as_deref(),
+                    consumption_record_bytes: consumption_record_bytes.as_deref(),
+                    pending_signing_request_present: false,
+                    now: chrono::Utc::now().timestamp(),
+                };
+                let observed = reanchor::authenticate_rotated_generation(&view, &archives)
+                    .map_err(rotated_denial_reason)?;
+                match observed.preserved_state {
+                    RecoveryState::NeverRecovered => {}
+                    RecoveryState::RecoveryDesignated => {
+                        let base = observed.base_disposition.as_ref().ok_or(
+                            "authenticated recovery designation denies operational access",
+                        )?;
+                        // The base designation may sit at any sequence >= 1:
+                        // designation after a re-anchor rotation chains
+                        // through the re-anchor tip.
+                        if base.sequence < 1 {
+                            return Err("recovery release requires accepted activation evidence");
+                        }
+                    }
+                    RecoveryState::Released => {
+                        return Err(
+                            "installation state RELEASED is a recovery disposition, not a startup authority",
+                        );
+                    }
+                }
+                let base = observed
+                    .base_disposition
+                    .clone()
+                    .ok_or("protected installation state is unavailable")?;
+                (
+                    base,
+                    observed.preserved_state,
+                    observed.tip_sequence,
+                    Some(journal_directory),
+                )
+            }
+            _ => return Err("installation state is malformed"),
+        };
         let installed = Self {
             policy,
             policy_digest,
             state,
             state_digest,
+            preserved_state,
+            tip_sequence,
+            manifest_bytes,
+            policy_bytes,
+            fixed_bundle_bytes,
+            trust_high_water_bytes,
+            state_tip_bytes,
+            journal_bytes,
+            checkpoint_bytes,
+            consumption_record_bytes,
+            policy_high_water_bytes: None,
+            staged_prior_policy_bytes: None,
+            staged_prior_trust_bytes: None,
+            tip_is_reanchor,
             state_directory,
             _data_directory: data_directory,
             journal_directory,
         };
-        if installed.state.state != RecoveryState::NeverRecovered {
+        if installed.preserved_state != RecoveryState::NeverRecovered && !installed.tip_is_reanchor
+        {
+            let (_, gid) = service_identity()?;
             let trust = load_trust(&installed.policy, &installed.state_directory, gid)?;
             installed.authenticate_journal_for(&installed.state, &trust)?;
         }
@@ -253,7 +606,7 @@ impl InstalledRecovery {
         if rustix::process::geteuid().as_raw() != 0 {
             return Err("recovery designation requires root-authorized persistence");
         }
-        if self.state.state != RecoveryState::NeverRecovered {
+        if self.preserved_state() != RecoveryState::NeverRecovered {
             return Err("recovery designation has an invalid predecessor");
         }
         if self.journal_directory.is_none() {
@@ -266,7 +619,7 @@ impl InstalledRecovery {
         let (_, gid) = service_identity()?;
         let trust = load_trust(&self.policy, &self.state_directory, gid)?;
         let next = verify_designation_record(
-            &self.state,
+            &self.state_tip_view(),
             &self.state_digest,
             &self.policy,
             &self.policy_digest,
@@ -315,7 +668,7 @@ impl InstalledRecovery {
         if rustix::process::geteuid().as_raw() != 0 {
             return Err("recovery release requires root-authorized persistence");
         }
-        if self.state.state != RecoveryState::RecoveryDesignated || self.state.sequence != 1 {
+        if self.preserved_state() != RecoveryState::RecoveryDesignated || self.state.sequence != 1 {
             return Err("recovery release requires a durable recovery designation");
         }
         if self.journal_directory.is_none() {
@@ -329,7 +682,7 @@ impl InstalledRecovery {
         let (_, gid) = service_identity()?;
         let trust = load_trust(&self.policy, &self.state_directory, gid)?;
         let next = verify_release_record(
-            &self.state,
+            &self.state_tip_view(),
             &self.state_digest,
             &self.policy,
             &self.policy_digest,
@@ -405,6 +758,161 @@ impl InstalledRecovery {
             return Err("installation state changed during operation");
         }
         Ok(())
+    }
+
+    /// The preserved recovery-state value of the authenticated tip.
+    pub fn preserved_state(&self) -> RecoveryState {
+        self.preserved_state
+    }
+
+    /// Whether the state-chain tip is a C1.1 re-anchor record.
+    pub fn tip_is_reanchor(&self) -> bool {
+        self.tip_is_reanchor
+    }
+
+    fn state_tip_view(&self) -> identity::StateTipView<'_> {
+        if self.tip_is_reanchor {
+            identity::StateTipView {
+                sequence: self.tip_sequence,
+                state: self.preserved_state,
+                policy_digest: &self.policy_digest,
+                operation_id: self.state.operation_id.as_deref(),
+                artifact_sha256: self.state.artifact_sha256.as_deref(),
+                trust_bundle_digest: self.state.trust_bundle_digest.as_deref(),
+                recovery_directory_digest: self.state.recovery_directory_digest.as_deref(),
+            }
+        } else {
+            identity::state_tip_view(&self.state)
+        }
+    }
+
+    /// Exclusive data-directory quiescence for rotation: the same flock the
+    /// designation path holds, plus the policy-bound identity recheck.
+    pub(crate) fn quiesce_data_directory(&self) -> std::result::Result<(), ReanchorError> {
+        self._data_directory
+            .lock()
+            .map_err(|_| ReanchorError::Quiescence("recovery target is busy"))?;
+        let (device, inode) = self._data_directory.identity();
+        if device != self.policy.target_device || inode != self.policy.target_inode {
+            return Err(ReanchorError::Quiescence(
+                "recovery target identity changed",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Strict pending-signing-request exclusion: no unsigned or in-flight
+    /// journal signing request may exist before the tips are observed.
+    pub(crate) fn strict_pending_signing_request_exclusion(
+        &self,
+        uid: u32,
+        gid: u32,
+    ) -> std::result::Result<(), ReanchorError> {
+        let journal = self
+            .journal_directory
+            .as_ref()
+            .ok_or(ReanchorError::Quiescence(
+                "recovery journal directory is unavailable",
+            ))?;
+        if journal
+            .read_bounded(
+                reanchor::PENDING_REQUEST_NAME,
+                uid,
+                gid,
+                0o600,
+                MAX_DOCUMENT,
+            )
+            .is_ok()
+        {
+            return Err(ReanchorError::Quiescence(
+                "an unsigned journal signing request is pending; rotation is denied",
+            ));
+        }
+        for name in journal.list_names().map_err(|_| {
+            ReanchorError::Quiescence("recovery journal directory cannot be inspected")
+        })? {
+            if name.starts_with("restore-reservation-") && name.ends_with(".lock") {
+                return Err(ReanchorError::Quiescence(
+                    "an in-flight journal reservation exists; rotation is denied",
+                ));
+            }
+        }
+        let lock_path = journal.path().join("restore-signing-request.lock");
+        if let Ok(file) = fs::File::open(&lock_path)
+            && rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+                .is_err()
+        {
+            return Err(ReanchorError::Quiescence(
+                "a journal signing request is in flight; rotation is denied",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Byte-level view of the authenticated generation for the C1.1
+    /// rotation pipeline.
+    pub(crate) fn generation_view(
+        &self,
+        uid: u32,
+        _gid: u32,
+    ) -> std::result::Result<GenerationView<'_>, ReanchorError> {
+        let pending_signing_request_present = match self.journal_directory.as_ref() {
+            Some(journal) => journal
+                .list_names()
+                .map_err(|_| {
+                    ReanchorError::Quiescence("recovery journal directory cannot be inspected")
+                })?
+                .iter()
+                .any(|name| {
+                    name == reanchor::PENDING_REQUEST_NAME
+                        || (name.starts_with("restore-reservation-") && name.ends_with(".lock"))
+                }),
+            None => false,
+        };
+        let _ = uid;
+        Ok(GenerationView {
+            manifest_bytes: &self.manifest_bytes,
+            policy_bytes: &self.policy_bytes,
+            policy_high_water_bytes: self.policy_high_water_bytes.as_deref(),
+            fixed_bundle_bytes: &self.fixed_bundle_bytes,
+            trust_high_water_bytes: &self.trust_high_water_bytes,
+            staged_prior_policy_bytes: self.staged_prior_policy_bytes.as_deref(),
+            staged_prior_trust_bytes: self.staged_prior_trust_bytes.as_deref(),
+            state_tip_bytes: &self.state_tip_bytes,
+            journal_bytes: self.journal_bytes.as_deref(),
+            checkpoint_bytes: self.checkpoint_bytes.as_deref(),
+            consumption_record_bytes: self.consumption_record_bytes.as_deref(),
+            pending_signing_request_present,
+            now: chrono::Utc::now().timestamp(),
+        })
+    }
+
+    pub(crate) fn archive_lookup(&self, uid: u32, gid: u32) -> ProtectedArchives<'_> {
+        ProtectedArchives {
+            state_directory: &self.state_directory,
+            journal_directory: self.journal_directory.as_ref(),
+            uid,
+            gid,
+        }
+    }
+
+    pub(crate) fn rotation_store(
+        &self,
+        uid: u32,
+        gid: u32,
+    ) -> std::result::Result<ProtectedRotationStore<'_>, ReanchorError> {
+        Ok(ProtectedRotationStore {
+            state_directory: &self.state_directory,
+            journal_directory: self
+                .journal_directory
+                .as_ref()
+                .ok_or(ReanchorError::Quiescence(
+                    "rotation requires the provisioned journal directory",
+                ))?,
+            fixed_config: open_fixed_config_directory()?,
+            uid,
+            gid,
+        })
     }
 }
 
@@ -535,7 +1043,10 @@ pub(crate) fn compute_group_gid() -> Result<u32> {
 /// terminal activation evidence, which C1 does not implement.
 fn startup_state_check(state: &InstallationState) -> Result<()> {
     match state.state {
-        RecoveryState::RecoveryDesignated if state.sequence == 1 => Ok(()),
+        // A designation at any sequence >= 1 authenticates: after a C1.1
+        // re-anchor rotation the designation transitions from the re-anchor
+        // tip and therefore sits at sequence two or later.
+        RecoveryState::RecoveryDesignated if state.sequence >= 1 => Ok(()),
         RecoveryState::Released => {
             Err("installation state RELEASED is a recovery disposition, not a startup authority")
         }
@@ -558,11 +1069,11 @@ fn designation_binding_valid(
 }
 
 /// Verifies an offline-signed `RECOVERY_DESIGNATED` candidate against the
-/// observed initial record: canonical encoding, installed journal-authority
-/// signature (unknown or revoked signers fail), exact predecessor digest
-/// chain, and installation binding.
+/// observed state tip (a disposition or a re-anchor record): canonical
+/// encoding, installed journal-authority signature (unknown or revoked
+/// signers fail), exact predecessor digest chain, and installation binding.
 fn verify_designation_record(
-    previous: &InstallationState,
+    previous: &identity::StateTipView<'_>,
     previous_digest: &str,
     policy: &InstallationPolicy,
     policy_digest: &str,
@@ -578,13 +1089,8 @@ fn verify_designation_record(
     let next: InstallationState =
         identity::verify_signed(signed_state, "o3k-installation-state-v1", signer, verifier)
             .map_err(|_| "recovery designation signature is invalid")?;
-    identity::verify_state_transition_with_previous_digest(
-        Some(previous),
-        Some(previous_digest),
-        &next,
-        policy,
-    )
-    .map_err(|_| "recovery designation predecessor is invalid")?;
+    identity::verify_tip_transition(Some(*previous), Some(previous_digest), &next, policy)
+        .map_err(|_| "recovery designation predecessor is invalid")?;
     if next.state != RecoveryState::RecoveryDesignated
         || !designation_binding_valid(&next, policy, policy_digest)
     {
@@ -597,7 +1103,7 @@ fn verify_designation_record(
 /// designation: canonical encoding, installed journal-authority signature,
 /// exact predecessor chain, and continuity of the designation binding.
 fn verify_release_record(
-    previous: &InstallationState,
+    previous: &identity::StateTipView<'_>,
     previous_digest: &str,
     policy: &InstallationPolicy,
     policy_digest: &str,
@@ -613,17 +1119,12 @@ fn verify_release_record(
     let next: InstallationState =
         identity::verify_signed(signed_state, "o3k-installation-state-v1", signer, verifier)
             .map_err(|_| "recovery release signature is invalid")?;
-    identity::verify_state_transition_with_previous_digest(
-        Some(previous),
-        Some(previous_digest),
-        &next,
-        policy,
-    )
-    .map_err(|_| "recovery release predecessor is invalid")?;
+    identity::verify_tip_transition(Some(*previous), Some(previous_digest), &next, policy)
+        .map_err(|_| "recovery release predecessor is invalid")?;
     if next.state != RecoveryState::Released
         || next.policy_digest != policy_digest
-        || next.trust_bundle_digest != previous.trust_bundle_digest
-        || next.recovery_directory_digest != previous.recovery_directory_digest
+        || next.trust_bundle_digest.as_deref() != previous.trust_bundle_digest
+        || next.recovery_directory_digest.as_deref() != previous.recovery_directory_digest
     {
         return Err("recovery release is not bound to the designated operation");
     }
@@ -701,6 +1202,177 @@ fn load_trust(
         )),
     )
     .map_err(|_| "installed recovery authority is stale, expired, revoked or conflicting")
+}
+
+/// Archive lookup over the protected recovery directories. Only the
+/// content-named archive shapes are readable; anything else is ignored.
+pub(crate) struct ProtectedArchives<'a> {
+    state_directory: &'a ProtectedDirectory,
+    journal_directory: Option<&'a ProtectedDirectory>,
+    uid: u32,
+    gid: u32,
+}
+
+impl reanchor::ArchiveLookup for ProtectedArchives<'_> {
+    fn read_archive(&self, name: &str) -> Option<Vec<u8>> {
+        let (area, digest) = parse_archive_name(name)?;
+        let max = MAX_DOCUMENT;
+        match area {
+            ArchiveArea::StateRoot => self
+                .state_directory
+                .read_bounded(name, 0, self.gid, 0o640, max)
+                .ok()
+                .filter(|bytes| hex::encode(Sha256::digest(bytes)) == digest),
+            ArchiveArea::JournalDir => self.journal_directory.as_ref().and_then(|directory| {
+                directory
+                    .read_bounded(name, self.uid, self.gid, 0o600, max)
+                    .ok()
+                    .filter(|bytes| hex::encode(Sha256::digest(bytes)) == digest)
+            }),
+        }
+    }
+}
+
+enum ArchiveArea {
+    StateRoot,
+    JournalDir,
+}
+
+fn parse_archive_name(name: &str) -> Option<(ArchiveArea, String)> {
+    let (prefix, rest) = name.split_once('-')?;
+    let digest = rest.strip_suffix(".json")?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    let area = match prefix {
+        "state" | "policy" | "trust" => ArchiveArea::StateRoot,
+        "checkpoint" => ArchiveArea::JournalDir,
+        _ => return None,
+    };
+    Some((area, digest.to_string()))
+}
+
+/// Descriptor-anchored rotation store over the protected installer
+/// directories. Fixed-config files land root-owned service-readable (0640),
+/// state-root files likewise, and journal files service-owned 0600.
+pub(crate) struct ProtectedRotationStore<'a> {
+    state_directory: &'a ProtectedDirectory,
+    journal_directory: &'a ProtectedDirectory,
+    fixed_config: ProtectedDirectory,
+    uid: u32,
+    gid: u32,
+}
+
+fn open_fixed_config_directory() -> std::result::Result<ProtectedDirectory, ReanchorError> {
+    use std::os::unix::fs::MetadataExt;
+    let path = Path::new("/etc/o3k");
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ReanchorError::Persistence("fixed configuration directory is unavailable"))?;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 || !metadata.is_dir() {
+        return Err(ReanchorError::Persistence(
+            "fixed configuration directory posture is invalid",
+        ));
+    }
+    ProtectedDirectory::open(
+        path,
+        0,
+        metadata.gid(),
+        metadata.mode() & 0o7777,
+        metadata.dev(),
+        metadata.ino(),
+    )
+    .map_err(|_| ReanchorError::Persistence("fixed configuration directory is unsafe"))
+}
+
+impl RotationStore for ProtectedRotationStore<'_> {
+    fn read(
+        &self,
+        area: RotationArea,
+        name: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, ReanchorError> {
+        let bytes = match area {
+            RotationArea::StateRoot => self
+                .state_directory
+                .read_bounded(name, 0, self.gid, 0o640, MAX_DOCUMENT)
+                .ok(),
+            RotationArea::JournalDir => self
+                .journal_directory
+                .read_bounded(name, self.uid, self.gid, 0o600, MAX_DOCUMENT)
+                .ok(),
+            RotationArea::FixedConfig => self
+                .fixed_config
+                .read_bounded(name, 0, self.gid, 0o640, MAX_DOCUMENT)
+                .ok(),
+        };
+        Ok(bytes)
+    }
+
+    fn publish(
+        &mut self,
+        area: RotationArea,
+        name: &str,
+        bytes: &[u8],
+    ) -> std::result::Result<(), ReanchorError> {
+        let result = match area {
+            RotationArea::StateRoot => self
+                .state_directory
+                .atomic_publish_installer(name, bytes, 0, self.gid, 0o640),
+            RotationArea::JournalDir => self
+                .journal_directory
+                .atomic_publish_installer(name, bytes, self.uid, self.gid, 0o600),
+            RotationArea::FixedConfig => self
+                .fixed_config
+                .atomic_publish_installer(name, bytes, 0, self.gid, 0o640),
+        };
+        result.map_err(|_| ReanchorError::Persistence("protected publication failed"))
+    }
+
+    fn list(&self, area: RotationArea) -> std::result::Result<Vec<String>, ReanchorError> {
+        let directory = match area {
+            RotationArea::StateRoot => self.state_directory,
+            RotationArea::JournalDir => self.journal_directory,
+            RotationArea::FixedConfig => &self.fixed_config,
+        };
+        directory
+            .list_names()
+            .map_err(|_| ReanchorError::Persistence("protected directory cannot be listed"))
+    }
+}
+
+/// Maps a rotated-generation authentication failure to the startup denial
+/// reason. The messages stay within the established recovery-denial wording.
+fn rotated_denial_reason(error: ReanchorError) -> &'static str {
+    match error {
+        ReanchorError::Trust(reason) => {
+            let _ = reason;
+            "installed recovery authority is stale, expired, revoked or conflicting"
+        }
+        ReanchorError::Signature(reason) => {
+            let _ = reason;
+            "installation state signature is invalid"
+        }
+        ReanchorError::Quiescence(reason) => {
+            let _ = reason;
+            "recovery journal identity cannot be observed"
+        }
+        ReanchorError::Persistence(reason) => {
+            let _ = reason;
+            "protected installation state is unavailable"
+        }
+        ReanchorError::Sequence(reason)
+        | ReanchorError::Malformed(reason)
+        | ReanchorError::Binding(reason)
+        | ReanchorError::Evidence(reason)
+        | ReanchorError::Equivocation(reason)
+        | ReanchorError::Conflicting(reason) => reason,
+        ReanchorError::NotRoot | ReanchorError::InjectedCrash(_) => {
+            "authenticated recovery designation denies operational access"
+        }
+    }
 }
 
 #[cfg(test)]
@@ -947,19 +1619,19 @@ mod tests {
     }
 
     #[test]
-    fn startup_accepts_only_the_exact_sequence_one_designation() {
+    fn startup_accepts_designated_sequence_at_least_one() {
         let fixture = fixture();
         assert_eq!(startup_state_check(&fixture.designated), Ok(()));
         assert_eq!(
             startup_state_check(&fixture.released),
             Err("installation state RELEASED is a recovery disposition, not a startup authority")
         );
+        // A designation after a C1.1 re-anchor rotation sits at sequence >= 2:
+        // the disposition transitions from the re-anchor tip, so any real
+        // designation (sequence >= 1) authenticates at startup.
         let mut later = fixture.designated.clone();
         later.sequence = 2;
-        assert_eq!(
-            startup_state_check(&later),
-            Err("recovery release requires accepted activation evidence")
-        );
+        assert_eq!(startup_state_check(&later), Ok(()));
         assert_eq!(
             startup_state_check(&fixture.initial),
             Err("recovery release requires accepted activation evidence")
@@ -1054,7 +1726,7 @@ mod tests {
             JOURNAL_SIGNER_ID,
         );
         let verified = verify_designation_record(
-            &fixture.initial,
+            &identity::state_tip_view(&fixture.initial),
             &fixture.initial_digest,
             &fixture.policy,
             POLICY_DIGEST,
@@ -1073,7 +1745,7 @@ mod tests {
         let signed = sign_bytes(&fixture.designated, &unknown, "unknown-signer");
         assert_eq!(
             verify_designation_record(
-                &fixture.initial,
+                &identity::state_tip_view(&fixture.initial),
                 &fixture.initial_digest,
                 &fixture.policy,
                 POLICY_DIGEST,
@@ -1086,7 +1758,7 @@ mod tests {
         let signed = sign_bytes(&fixture.designated, &keypair(4), EVIDENCE_SIGNER_ID);
         assert_eq!(
             verify_designation_record(
-                &fixture.initial,
+                &identity::state_tip_view(&fixture.initial),
                 &fixture.initial_digest,
                 &fixture.policy,
                 POLICY_DIGEST,
@@ -1127,7 +1799,7 @@ mod tests {
         );
         assert_eq!(
             verify_designation_record(
-                &rotated_fixture.initial,
+                &identity::state_tip_view(&rotated_fixture.initial),
                 &rotated_fixture.initial_digest,
                 &rotated_fixture.policy,
                 POLICY_DIGEST,
@@ -1149,7 +1821,7 @@ mod tests {
         );
         assert_eq!(
             verify_designation_record(
-                &fixture.initial,
+                &identity::state_tip_view(&fixture.initial),
                 &hex::encode([0xde; 32]),
                 &fixture.policy,
                 POLICY_DIGEST,
@@ -1164,7 +1836,7 @@ mod tests {
         let signed = sign_bytes(&tampered, &fixture.journal_signer, JOURNAL_SIGNER_ID);
         assert_eq!(
             verify_designation_record(
-                &fixture.initial,
+                &identity::state_tip_view(&fixture.initial),
                 &fixture.initial_digest,
                 &fixture.policy,
                 POLICY_DIGEST,
@@ -1179,7 +1851,7 @@ mod tests {
         let signed = sign_bytes(&tampered, &fixture.journal_signer, JOURNAL_SIGNER_ID);
         assert_eq!(
             verify_designation_record(
-                &fixture.initial,
+                &identity::state_tip_view(&fixture.initial),
                 &fixture.initial_digest,
                 &fixture.policy,
                 POLICY_DIGEST,
@@ -1197,7 +1869,7 @@ mod tests {
         );
         assert_eq!(
             verify_designation_record(
-                &fixture.designated,
+                &identity::state_tip_view(&fixture.designated),
                 &fixture.designated_digest,
                 &fixture.policy,
                 POLICY_DIGEST,
@@ -1209,7 +1881,7 @@ mod tests {
         // Non-canonical bytes are rejected before any signature math.
         assert_eq!(
             verify_designation_record(
-                &fixture.initial,
+                &identity::state_tip_view(&fixture.initial),
                 &fixture.initial_digest,
                 &fixture.policy,
                 POLICY_DIGEST,
@@ -1231,7 +1903,7 @@ mod tests {
         // Every structural check passes: the only remaining barrier is the
         // fail-closed terminal-evidence gate.
         let verified = verify_release_record(
-            &fixture.designated,
+            &identity::state_tip_view(&fixture.designated),
             &fixture.designated_digest,
             &fixture.policy,
             POLICY_DIGEST,
@@ -1259,7 +1931,7 @@ mod tests {
         // RELEASED from NEVER_RECOVERED skips designation.
         assert_eq!(
             verify_release_record(
-                &fixture.initial,
+                &identity::state_tip_view(&fixture.initial),
                 &fixture.initial_digest,
                 &fixture.policy,
                 POLICY_DIGEST,
@@ -1274,7 +1946,7 @@ mod tests {
         let signed = sign_bytes(&drifted, &fixture.journal_signer, JOURNAL_SIGNER_ID);
         assert_eq!(
             verify_release_record(
-                &fixture.designated,
+                &identity::state_tip_view(&fixture.designated),
                 &fixture.designated_digest,
                 &fixture.policy,
                 POLICY_DIGEST,
@@ -1289,7 +1961,7 @@ mod tests {
         let signed = sign_bytes(&drifted, &fixture.journal_signer, JOURNAL_SIGNER_ID);
         assert_eq!(
             verify_release_record(
-                &fixture.designated,
+                &identity::state_tip_view(&fixture.designated),
                 &fixture.designated_digest,
                 &fixture.policy,
                 POLICY_DIGEST,
@@ -1306,7 +1978,7 @@ mod tests {
         );
         assert_eq!(
             verify_release_record(
-                &fixture.initial,
+                &identity::state_tip_view(&fixture.initial),
                 &fixture.initial_digest,
                 &fixture.policy,
                 POLICY_DIGEST,

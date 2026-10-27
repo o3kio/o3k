@@ -77,6 +77,8 @@ pub mod recovery_prepare;
 #[cfg(target_os = "linux")]
 pub mod recovery_provision;
 #[cfg(target_os = "linux")]
+pub mod recovery_reanchor;
+#[cfg(target_os = "linux")]
 pub mod recovery_trust;
 #[cfg(target_os = "linux")]
 pub mod recovery_trust_update;
