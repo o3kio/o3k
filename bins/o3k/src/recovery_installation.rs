@@ -73,29 +73,26 @@ pub fn deny_operational_access_for_backend(
     data_dir: &Path,
     expected_backend: Option<&str>,
 ) -> Result<()> {
-    // The existing portable fixture suite has no authenticated installed
-    // release. This compatibility seam exists ONLY in unit tests or the
-    // debug-only crash-test build (forbidden in optimized releases by lib.rs).
-    // It is never compiled into an installable release binary.
-    #[cfg(any(test, feature = "backup-test-hooks"))]
+    // A source-built TestLab process uses a non-default data directory and
+    // has no installed release manifest. It is not an installed O3K
+    // installation: leave its existing startup lifecycle unchanged. The
+    // packaged data directory always requires installed C1 identity, and any
+    // release manifest that authenticates a C1 policy also requires it, so an
+    // installed host cannot use another data path to bypass designation.
+    if data_dir != Path::new("/var/lib/o3k")
+        && !fs::canonicalize(data_dir).is_ok_and(|path| path == Path::new("/var/lib/o3k"))
     {
-        if data_dir != Path::new("/var/lib/o3k")
-            && !fs::canonicalize(data_dir).is_ok_and(|path| path == Path::new("/var/lib/o3k"))
-        {
-            let legacy_fixture = match release_identity::read_fixed_installed_release_manifest() {
-                Ok(bytes) => {
-                    serde_json::from_slice::<serde_json::Value>(&bytes).is_ok_and(|value| {
-                        value.get("installation_policy_format").is_none()
-                            && value.get("installation_policy_path").is_none()
-                            && value.get("installation_policy_authority").is_none()
-                    })
-                }
-                Err(_) => fs::symlink_metadata(release_identity::FIXED_RELEASE_MANIFEST_PATH)
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
-            };
-            if legacy_fixture {
-                return Ok(());
-            }
+        let legacy_fixture = match release_identity::read_fixed_installed_release_manifest() {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).is_ok_and(|value| {
+                value.get("installation_policy_format").is_none()
+                    && value.get("installation_policy_path").is_none()
+                    && value.get("installation_policy_authority").is_none()
+            }),
+            Err(_) => fs::symlink_metadata(release_identity::FIXED_RELEASE_MANIFEST_PATH)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        };
+        if legacy_fixture {
+            return Ok(());
         }
     }
     let installed = InstalledRecovery::load(data_dir)?;
