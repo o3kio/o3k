@@ -400,15 +400,15 @@ A10 or authorize target mutation by itself, and it does not certify runtime,
 installed, production, or independent-security evidence. Journal v1 remains
 non-activating, and no v1 chain may be upgraded in place.
 
-### Proposed amendment C1.1 — authenticated installation-policy/trust re-anchor and journal checkpoint (PENDING, not accepted)
+### Accepted amendment C1.1 — authenticated installation-policy/trust re-anchor and journal checkpoint
 
-Proposed 2026-10-27. This section is **not** accepted architecture, is not part
-of the exact-revision contract at `9ce23ff81218e8e35d917ef6ee4478ae69e8f28e` or
-of the owner-accepted C1/A10 amendments, and authorizes no implementation. It
-becomes normative only after the named human reviewer records explicit
-acceptance of this exact revision together with the matching SPEC-0050 §7.3
-and PP6 technical-contract text; PR approval or merge is not that acceptance.
-It changes no accepted C1 or A10 technical parameter.
+Accepted for implementation/testing on 2026-10-27 by owner decision
+[6440284521](https://github.com/o3kio/o3k/issues/1086#issuecomment-6440284521),
+reviewing PR #1187 head `df52e28471fee99b09807135a3823c6f8bd5326e`, merged as
+`4d9d5108f4995b270144c3b29ad54704a62e61c8`. This is owner-directed,
+non-independent architecture/technical acceptance under ADR-0190, not runtime,
+installed, production, or independent-security qualification. It changes no
+accepted C1 or A10 technical parameter.
 
 Conflict and selected option. Accepted C1 authenticates every historical
 journal/state signature against the installed, current signer certificate and
@@ -418,7 +418,7 @@ live TCB. Historical policy-chain verification (Option B) would keep retired
 roots in the live TCB, needs unbounded retention/expiry exceptions, and still
 needs a sealing re-anchor; the smaller, safer explicit re-anchor (Option A)
 is selected. The full design is specified in
-[SPEC-0050 §7.3](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#73-proposed-amendment-c11-authenticated-installation-policytrust-re-anchor-and-journal-checkpoint-pending-not-accepted).
+[SPEC-0050 §7.3](../specs/SPEC-0050-pp6-control-plane-backup-restore.md#73-accepted-amendment-c11-authenticated-installation-policytrust-re-anchor-and-journal-checkpoint).
 
 Design summary. The frozen v1 policy/state/trust/journal formats and the
 accepted A10 journal-v2 are unchanged; three RFC 8785 canonical Ed25519
@@ -479,8 +479,8 @@ authorization without retroactively rewriting durable history, which is
 carried only by a routine C or by a compromise C plus its revalidation
 evidence. A compromise C requires the signed `o3k-recovery-revalidation-v1`
 evidence under the new recovery-evidence authority with a unique 256-bit
-nonce, a proposed 300-second validity (a pending human decision), denial on
-clock rollback or unavailability, and `custody_record_digest` plus a 2-of-3
+nonce, an accepted 300-second validity, denial on clock rollback or
+unavailability, and `custody_record_digest` plus a 2-of-3
 `recovery_quorum_event_id`; it authorizes exactly one R/C pair through a
 durable consumption record binding the evidence digest and the exact R and C
 digests, written before acceptance and marked consumed only after full
@@ -515,12 +515,15 @@ crash at every publication step with exact-forward resume only,
 byte-for-byte marker preservation, old-verifier denial, stale trust, and no
 activation.
 
-Pending human decisions (not accepted by this proposal): the
-policy-authority-only R signer; the new-journal-authority C; current-era plus
-authenticated-tip verification replacing every-historical-signature
-verification under current trust; the compromise revalidation authority,
-custody/quorum binding, and 300-second evidence validity; and
-quiescence/rotation during quarantine.
+Owner decision
+[6440284521](https://github.com/o3kio/o3k/issues/1086#issuecomment-6440284521)
+explicitly accepted the policy-authority-only R signer; the
+new-journal-authority C; current-era plus authenticated-tip verification
+replacing every-historical-signature verification under current trust; the
+compromise revalidation authority, custody/quorum binding, and 300-second
+evidence validity; and quiescence/rotation during quarantine. This acceptance
+covers implementation/testing only and leaves all runtime and production
+evidence gates in force.
 
 ### Decisions to record
 
