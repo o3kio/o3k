@@ -292,7 +292,9 @@ pub struct GenerationView<'a> {
     pub fixed_bundle_bytes: &'a [u8],
     /// The durable trust high-water (state-root `trust.json`).
     pub trust_high_water_bytes: &'a [u8],
-    /// Inert staged prior-generation bytes (never read by verifiers).
+    /// Exact signed pending R, durably staged only after outgoing verification.
+    pub pending_reanchor_bytes: Option<&'a [u8]>,
+    /// Inert staged prior-generation bytes (never read by startup verifiers).
     pub staged_prior_policy_bytes: Option<&'a [u8]>,
     pub staged_prior_trust_bytes: Option<&'a [u8]>,
     pub state_tip_bytes: &'a [u8],
@@ -396,6 +398,7 @@ fn verify_current_policy(
 fn verify_current_trust(
     view: &GenerationView<'_>,
     policy: &InstallationPolicy,
+    historical: bool,
 ) -> Result<(VerifiedTrust, TrustBundle), ReanchorError> {
     if sha256_hex(view.fixed_bundle_bytes) != policy.trust_bundle_digest {
         return Err(ReanchorError::Trust(
@@ -423,20 +426,32 @@ fn verify_current_trust(
     }
     let journal_root = decode_key32(&policy.journal_trust_root_public_key)?;
     let evidence_root = decode_key32(&policy.evidence_trust_root_public_key)?;
-    let trust = crate::recovery_trust::verify_trust_bundle(
-        current.clone(),
-        &journal_root,
-        &evidence_root,
-        view.now,
-        Some((
-            fixed.journal_revocations.payload.sequence,
-            &fixed.journal_revocation_digest,
-        )),
-        Some((
-            fixed.evidence_revocations.payload.sequence,
-            &fixed.evidence_revocation_digest,
-        )),
-    )
+    let jh = Some((
+        fixed.journal_revocations.payload.sequence,
+        fixed.journal_revocation_digest.as_str(),
+    ));
+    let eh = Some((
+        fixed.evidence_revocations.payload.sequence,
+        fixed.evidence_revocation_digest.as_str(),
+    ));
+    let trust = if historical {
+        crate::recovery_trust::verify_historical_trust(
+            current.clone(),
+            &journal_root,
+            &evidence_root,
+            jh,
+            eh,
+        )
+    } else {
+        crate::recovery_trust::verify_trust_bundle(
+            current.clone(),
+            &journal_root,
+            &evidence_root,
+            view.now,
+            jh,
+            eh,
+        )
+    }
     .map_err(|_| {
         ReanchorError::Trust(
             "installed recovery authority is stale, expired, revoked or conflicting",
@@ -473,18 +488,6 @@ fn era_journal_key(bundle: &TrustBundle) -> Result<(String, VerifyingKey), Reanc
         || cert.purpose != "restore_journal"
         || !certificate_scope_valid(cert, bundle)
         || cert.issuer != bundle.journal_root_key_id
-        || bundle
-            .journal_revocations
-            .payload
-            .revoked_serials
-            .iter()
-            .any(|s| s == &cert.serial)
-        || bundle
-            .journal_revocations
-            .payload
-            .revoked_key_ids
-            .iter()
-            .any(|k| k == &cert.key_id)
     {
         return Err(ReanchorError::Trust(
             "era journal signer certificate is revoked or invalid",
@@ -551,8 +554,16 @@ pub fn observe_disposition_generation(
     view: &GenerationView<'_>,
     archives: &dyn ArchiveLookup,
 ) -> Result<ObservedGeneration, ReanchorError> {
+    observe_disposition_generation_with_history(view, archives, false)
+}
+
+fn observe_disposition_generation_with_history(
+    view: &GenerationView<'_>,
+    archives: &dyn ArchiveLookup,
+    historical: bool,
+) -> Result<ObservedGeneration, ReanchorError> {
     let (policy, policy_digest, authority) = verify_current_policy(view)?;
-    let (trust, trust_bundle) = verify_current_trust(view, &policy)?;
+    let (trust, trust_bundle) = verify_current_trust(view, &policy, historical)?;
     let signed: Signed<InstallationState> = decode_signed(view.state_tip_bytes)
         .map_err(|_| ReanchorError::Malformed("installation state is malformed"))?;
     if signed.payload.format != "o3k-installation-state-v1" {
@@ -846,15 +857,20 @@ fn verify_disposition_chain(
                 }
             }
         }
-        let reached_initial = previous.sequence() == 0;
+        // A policy-authority-signed R is the authenticated boundary of this
+        // era. Its predecessor belongs to an older policy and signer era;
+        // interpreting that history under the current policy is invalid.
+        let reached_boundary = previous.sequence() == 0
+            || matches!(&previous, ChainCursor::Reanchor(record) if record.new_policy_digest == policy_digest);
         current = previous;
-        if reached_initial {
+        if reached_boundary {
             break;
         }
     }
     match &current {
         ChainCursor::State(base)
             if base.sequence == 0 && base.state == RecoveryState::NeverRecovered => {}
+        ChainCursor::Reanchor(record) if record.new_policy_digest == policy_digest => {}
         _ => {
             return Err(ReanchorError::Sequence(
                 "disposition chain does not reach the initial record",
@@ -1077,8 +1093,16 @@ pub fn authenticate_rotated_generation(
     view: &GenerationView<'_>,
     archives: &dyn ArchiveLookup,
 ) -> Result<ObservedGeneration, ReanchorError> {
+    authenticate_rotated_generation_with_history(view, archives, false)
+}
+
+fn authenticate_rotated_generation_with_history(
+    view: &GenerationView<'_>,
+    archives: &dyn ArchiveLookup,
+    historical: bool,
+) -> Result<ObservedGeneration, ReanchorError> {
     let (policy, policy_digest, authority) = verify_current_policy(view)?;
-    let (trust, trust_bundle) = verify_current_trust(view, &policy)?;
+    let (trust, trust_bundle) = verify_current_trust(view, &policy, historical)?;
     let tip = verify_reanchor_document(view.state_tip_bytes, &authority)?;
     let r = &tip.record;
     if r.installation_id != policy.installation_id
@@ -1113,13 +1137,14 @@ pub fn authenticate_rotated_generation(
             "durable policy high-water does not match the authenticated re-anchor policy",
         ));
     }
-    if r.new_trust_bundle_digest != sha256_hex(view.trust_high_water_bytes) {
+    let fixed_bundle: TrustBundle = decode_signed(view.fixed_bundle_bytes)?;
+    if r.new_trust_bundle_digest != sha256_hex(view.fixed_bundle_bytes) {
         return Err(ReanchorError::Binding(
-            "re-anchor new trust binding does not match the durable trust high-water",
+            "re-anchor new trust binding does not match the policy-authenticated bundle",
         ));
     }
-    if r.new_journal_revocation != (revocation_high_water(&trust_bundle.journal_revocations)?)
-        || r.new_evidence_revocation != (revocation_high_water(&trust_bundle.evidence_revocations)?)
+    if r.new_journal_revocation != (revocation_high_water(&fixed_bundle.journal_revocations)?)
+        || r.new_evidence_revocation != (revocation_high_water(&fixed_bundle.evidence_revocations)?)
     {
         return Err(ReanchorError::Binding(
             "re-anchor new revocation high-waters do not match the durable trust high-water",
@@ -1145,8 +1170,8 @@ pub fn authenticate_rotated_generation(
     let mut era = EraBundle {
         policy: policy.clone(),
         policy_digest: policy_digest.clone(),
-        bundle: trust_bundle.clone(),
-        bundle_digest: sha256_hex(view.trust_high_water_bytes),
+        bundle: fixed_bundle,
+        bundle_digest: sha256_hex(view.fixed_bundle_bytes),
     };
     // Newest first: chain[0] is the current tip checkpoint C_n.
     let mut checkpoint_chain: Vec<(JournalCheckpoint, String)> = Vec::new();
@@ -1184,6 +1209,7 @@ pub fn authenticate_rotated_generation(
             &record.prior_policy_digest,
             &record.prior_trust_bundle_digest,
         )?;
+        verify_rotation_high_waters(&prior_era.bundle, &era.bundle)?;
         if record.prior_journal_revocation
             != (revocation_high_water(&prior_era.bundle.journal_revocations)?)
             || record.prior_evidence_revocation
@@ -1277,11 +1303,17 @@ pub fn authenticate_rotated_generation(
                     prior_record.terminal_journal_digest.as_deref(),
                     prior_record.terminal_evidence_digest.as_deref(),
                 )?;
+                let prior_anchor_era = load_era(
+                    archives,
+                    &prior_record.new_policy_digest,
+                    &prior_record.new_trust_bundle_digest,
+                )?;
+                verify_rotation_high_waters(&prior_anchor_era.bundle, &prior_era.bundle)?;
                 current = ReanchorTip {
                     record: prior_record,
                     digest: sha256_hex(&prior_tip_bytes),
                 };
-                era = prior_era;
+                era = prior_anchor_era;
             }
             "o3k-installation-state-v1" => {
                 let base_signed: Signed<InstallationState> = decode_signed(&prior_tip_bytes)
@@ -1467,11 +1499,10 @@ fn authenticated_base_tip(
     let artifact = artifact.ok_or(ReanchorError::Binding("recovery artifact is missing"))?;
     let journal_root = decode_key32(&base_era.bundle.journal_root_public_key)?;
     let evidence_root = decode_key32(&base_era.bundle.evidence_root_public_key)?;
-    let Ok(era_trust) = crate::recovery_trust::verify_trust_bundle(
+    let Ok(era_trust) = crate::recovery_trust::verify_historical_trust(
         base_era.bundle.clone(),
         &journal_root,
         &evidence_root,
-        view.now,
         None,
         None,
     ) else {
@@ -1847,6 +1878,11 @@ fn observe_resume(
     archives: &dyn ArchiveLookup,
     inputs: &RotationInputs,
 ) -> Result<(ObservedGeneration, PriorBytes), ReanchorError> {
+    if view.pending_reanchor_bytes != Some(inputs.signed_reanchor.as_slice()) {
+        return Err(ReanchorError::Conflicting(
+            "resume requires the exact durably staged signed re-anchor intent",
+        ));
+    }
     let authority = manifest_authority(view.manifest_bytes)?;
     let r = verify_reanchor_document(&inputs.signed_reanchor, &authority)?.record;
 
@@ -1857,38 +1893,49 @@ fn observe_resume(
         ));
     }
     let s0_signed = tip_envelope(view.state_tip_bytes)?;
-    let (s0_state, s0_sequence, s0_operation_id, s0_artifact, s0_recovery_directory) =
-        match s0_signed
-            .payload
-            .get("format")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("o3k-installation-state-v1") => {
-                let signed: Signed<InstallationState> = decode_signed(view.state_tip_bytes)
-                    .map_err(|_| ReanchorError::Malformed("resume state tip is malformed"))?;
-                let p = &signed.payload;
-                (
-                    p.state,
-                    p.sequence,
-                    p.operation_id.clone(),
-                    p.artifact_sha256.clone(),
-                    p.recovery_directory_digest.clone(),
-                )
-            }
-            Some(REANCHOR_FORMAT) => {
-                let signed: Signed<InstallationReanchor> = decode_signed(view.state_tip_bytes)
-                    .map_err(|_| ReanchorError::Malformed("resume state tip is malformed"))?;
-                let p = &signed.payload;
-                (
-                    p.preserved_state,
-                    p.sequence,
-                    p.operation_id.clone(),
-                    p.artifact_sha256.clone(),
-                    p.recovery_directory_digest.clone(),
-                )
-            }
-            _ => return Err(ReanchorError::Malformed("resume state tip kind is unknown")),
-        };
+    let (
+        s0_state,
+        s0_sequence,
+        s0_operation_id,
+        s0_artifact,
+        s0_recovery_directory,
+        s0_terminal_journal,
+        s0_terminal_evidence,
+    ) = match s0_signed
+        .payload
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("o3k-installation-state-v1") => {
+            let signed: Signed<InstallationState> = decode_signed(view.state_tip_bytes)
+                .map_err(|_| ReanchorError::Malformed("resume state tip is malformed"))?;
+            let p = &signed.payload;
+            (
+                p.state,
+                p.sequence,
+                p.operation_id.clone(),
+                p.artifact_sha256.clone(),
+                p.recovery_directory_digest.clone(),
+                p.terminal_journal_digest.clone(),
+                p.evidence_digest.clone(),
+            )
+        }
+        Some(REANCHOR_FORMAT) => {
+            let signed: Signed<InstallationReanchor> = decode_signed(view.state_tip_bytes)
+                .map_err(|_| ReanchorError::Malformed("resume state tip is malformed"))?;
+            let p = &signed.payload;
+            (
+                p.preserved_state,
+                p.sequence,
+                p.operation_id.clone(),
+                p.artifact_sha256.clone(),
+                p.recovery_directory_digest.clone(),
+                p.terminal_journal_digest.clone(),
+                p.terminal_evidence_digest.clone(),
+            )
+        }
+        _ => return Err(ReanchorError::Malformed("resume state tip kind is unknown")),
+    };
     if r.sequence != s0_sequence + 1 {
         return Err(ReanchorError::Sequence(
             "resume re-anchor sequence must be exactly the prior tip sequence plus one",
@@ -2078,8 +2125,8 @@ fn observe_resume(
             s0_operation_id,
             s0_artifact,
             s0_recovery_directory,
-            None,
-            None,
+            s0_terminal_journal,
+            s0_terminal_evidence,
             Some(journal),
             None,
         ),
@@ -2204,6 +2251,10 @@ fn verify_new_policy(
         || policy.policy_path != old.policy_path
         || policy.trust_bundle_path != old.trust_bundle_path
         || policy.recovery_state_root != old.recovery_state_root
+        || policy.recovery_state_device != old.recovery_state_device
+        || policy.recovery_state_inode != old.recovery_state_inode
+        || policy.journal_device != old.journal_device
+        || policy.journal_inode != old.journal_inode
         || policy.journal_directory != old.journal_directory
         || policy.release_identity != old.release_identity
     {
@@ -2222,6 +2273,47 @@ fn verify_new_policy(
         ));
     }
     Ok(policy)
+}
+
+/// A policy revision does not reset revocation history for an unchanged root.
+fn verify_rotation_high_waters(old: &TrustBundle, new: &TrustBundle) -> Result<(), ReanchorError> {
+    for (old_id, old_key, old_doc, new_id, new_key, new_doc) in [
+        (
+            &old.journal_root_key_id,
+            &old.journal_root_public_key,
+            &old.journal_revocations,
+            &new.journal_root_key_id,
+            &new.journal_root_public_key,
+            &new.journal_revocations,
+        ),
+        (
+            &old.evidence_root_key_id,
+            &old.evidence_root_public_key,
+            &old.evidence_revocations,
+            &new.evidence_root_key_id,
+            &new.evidence_root_public_key,
+            &new.evidence_revocations,
+        ),
+    ] {
+        if old_id == new_id && old_key != new_key {
+            return Err(ReanchorError::Trust(
+                "rotation cannot rebind a trust root key ID",
+            ));
+        }
+        if old_key == new_key
+            && (new_doc.payload.sequence < old_doc.payload.sequence
+                || (new_doc.payload.sequence == old_doc.payload.sequence
+                    && identity::digest(new_doc)
+                        .map_err(|_| ReanchorError::Trust("invalid revocation digest"))?
+                        != identity::digest(old_doc)
+                            .map_err(|_| ReanchorError::Trust("invalid revocation digest"))?))
+        {
+            return Err(ReanchorError::Trust(
+                "same-root revocation rollback or equivocation",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn verify_new_bundle(
@@ -2291,7 +2383,7 @@ fn verify_inputs(
             .map_err(|_| ReanchorError::Malformed("installation re-anchor is malformed"))?;
         let record = record.payload;
         if inputs.new_policy.as_slice() != view.policy_bytes
-            || inputs.new_trust_bundle.as_slice() != view.trust_high_water_bytes
+            || inputs.new_trust_bundle.as_slice() != view.fixed_bundle_bytes
         {
             return Err(ReanchorError::Conflicting(
                 "idempotent replay conflicts with the published generation",
@@ -2323,6 +2415,7 @@ fn verify_inputs(
     let new_policy = verify_new_policy(inputs, observed, &authority)?;
     let new_policy_digest = sha256_hex(&inputs.new_policy);
     let new_bundle = verify_new_bundle(inputs, &new_policy, now)?;
+    verify_rotation_high_waters(&observed.trust_bundle, &new_bundle)?;
     let new_bundle_digest = sha256_hex(&inputs.new_trust_bundle);
     if new_policy.trust_bundle_digest != new_bundle_digest {
         return Err(ReanchorError::Binding(
@@ -2761,6 +2854,17 @@ pub fn build_rotation_plan(
             "an unsigned or in-flight journal signing request denies rotation",
         ));
     }
+    if let Some(pending_bytes) = view.pending_reanchor_bytes {
+        let authority = manifest_authority(view.manifest_bytes)?;
+        let pending = verify_reanchor_document(pending_bytes, &authority)?.record;
+        if pending.prior_record_digest == sha256_hex(view.state_tip_bytes)
+            && pending_bytes != inputs.signed_reanchor.as_slice()
+        {
+            return Err(ReanchorError::Conflicting(
+                "a pending rotation permits only the exact signed re-anchor pair",
+            ));
+        }
+    }
     // A complete current generation observes directly; a partial one (crash
     // resume, §7.3.9) re-verifies the signed R/C against the durable prior
     // bytes and continues forward only.
@@ -2778,7 +2882,48 @@ pub fn build_rotation_plan(
                 state_tip: view.state_tip_bytes.to_vec(),
             },
         ),
-        Err(_) => observe_resume(view, archives, inputs)?,
+        Err(error) => {
+            if view.pending_reanchor_bytes == Some(inputs.signed_reanchor.as_slice()) {
+                observe_resume(view, archives, inputs)?
+            } else {
+                let authority = manifest_authority(view.manifest_bytes)?;
+                let r = verify_reanchor_document(&inputs.signed_reanchor, &authority)?.record;
+                if r.recovery_revalidation_digest.is_none() || inputs.signed_revalidation.is_none()
+                {
+                    return Err(error);
+                }
+                // Historical verification supplies no new authority. The
+                // policy-signed R and fresh new-authority evidence are fully
+                // verified by verify_inputs before any publication plan exists.
+                let signed = tip_envelope(view.state_tip_bytes)?;
+                let historical = match signed
+                    .payload
+                    .get("format")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some(REANCHOR_FORMAT) => {
+                        authenticate_rotated_generation_with_history(view, archives, true)?
+                    }
+                    Some("o3k-installation-state-v1") => {
+                        observe_disposition_generation_with_history(view, archives, true)?
+                    }
+                    _ => return Err(error),
+                };
+                (
+                    historical,
+                    PriorBytes {
+                        fixed_policy: view.policy_bytes.to_vec(),
+                        policy_high_water: view
+                            .policy_high_water_bytes
+                            .unwrap_or(view.policy_bytes)
+                            .to_vec(),
+                        fixed_trust: view.fixed_bundle_bytes.to_vec(),
+                        trust_high_water: view.trust_high_water_bytes.to_vec(),
+                        state_tip: view.state_tip_bytes.to_vec(),
+                    },
+                )
+            }
+        }
     };
     let (_record, checkpoint, evidence_digest, identity_replay, evidence_nonce) =
         verify_inputs(view, &observed, inputs, now)?;
@@ -3047,8 +3192,11 @@ pub fn run_rotation_plan(
         crash_at("after-final-observation")?;
         // A crash between the observation and the mark leaves the durable
         // binding unconsumed; the exact replay completes the mark.
-        mark_consumption(store, &plan.reanchor_digest)?;
-        crash_at("after-consumption-mark")?;
+        let replay: Signed<InstallationReanchor> = decode_signed(&plan.reanchor)?;
+        if replay.payload.recovery_revalidation_digest.is_some() {
+            mark_consumption(store, &plan.reanchor_digest)?;
+            crash_at("after-consumption-mark")?;
+        }
         return Ok(());
     }
 

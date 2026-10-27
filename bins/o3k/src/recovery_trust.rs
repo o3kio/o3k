@@ -43,6 +43,51 @@ pub fn verify_installed_trust(
     jh: Option<(u64, &str)>,
     eh: Option<(u64, &str)>,
 ) -> Result<VerifiedTrust, TrustError> {
+    verify_bundle(b, jr, er, now, jh, eh, TrustUse::Current)
+}
+
+/// Cryptographic history verification only. Never authorizes a transition:
+/// callers must separately verify a new policy and fresh revalidation evidence.
+pub(crate) fn verify_historical_trust(
+    b: TrustBundle,
+    jr: &VerifyingKey,
+    er: &VerifyingKey,
+    jh: Option<(u64, &str)>,
+    eh: Option<(u64, &str)>,
+) -> Result<VerifiedTrust, TrustError> {
+    verify_bundle(b, jr, er, 0, jh, eh, TrustUse::History)
+}
+
+/// Accept a fresh root-signed revocation update even when it revokes the
+/// active signer. The returned verification result grants no operational use.
+pub(crate) fn verify_revocation_update(
+    b: TrustBundle,
+    jr: &VerifyingKey,
+    er: &VerifyingKey,
+    now: i64,
+    jh: Option<(u64, &str)>,
+    eh: Option<(u64, &str)>,
+) -> Result<(), TrustError> {
+    verify_bundle(b, jr, er, now, jh, eh, TrustUse::RevocationUpdate).map(|_| ())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrustUse {
+    Current,
+    History,
+    RevocationUpdate,
+}
+
+fn verify_bundle(
+    b: TrustBundle,
+    jr: &VerifyingKey,
+    er: &VerifyingKey,
+    now: i64,
+    jh: Option<(u64, &str)>,
+    eh: Option<(u64, &str)>,
+    usage: TrustUse,
+) -> Result<VerifiedTrust, TrustError> {
+    let historical = usage == TrustUse::History;
     if b.format != "o3k-recovery-trust-v1"
         || b.site_id.is_empty()
         || b.profile.is_empty()
@@ -92,7 +137,7 @@ pub fn verify_installed_trust(
             profile: &b.profile,
             backend: &b.backend,
             issuer: &b.journal_root_key_id,
-            now,
+            now: if historical { jc.not_before } else { now },
         },
     )?;
     verify_certificate_binding(
@@ -104,15 +149,28 @@ pub fn verify_installed_trust(
             profile: &b.profile,
             backend: &b.backend,
             issuer: &b.evidence_root_key_id,
-            now,
+            now: if historical { ec.not_before } else { now },
         },
     )?;
-    verify_revocation(&jv, &b.site_id, &b.profile, now, None)?;
-    verify_revocation(&ev, &b.site_id, &b.profile, now, None)?;
-    if jv.revoked_serials.iter().any(|x| x == &jc.serial)
-        || jv.revoked_key_ids.iter().any(|x| x == &jc.key_id)
-        || ev.revoked_serials.iter().any(|x| x == &ec.serial)
-        || ev.revoked_key_ids.iter().any(|x| x == &ec.key_id)
+    verify_revocation(
+        &jv,
+        &b.site_id,
+        &b.profile,
+        if historical { jv.issued_at } else { now },
+        None,
+    )?;
+    verify_revocation(
+        &ev,
+        &b.site_id,
+        &b.profile,
+        if historical { ev.issued_at } else { now },
+        None,
+    )?;
+    if (usage == TrustUse::Current
+        && (jv.revoked_serials.iter().any(|x| x == &jc.serial)
+            || jv.revoked_key_ids.iter().any(|x| x == &jc.key_id)
+            || ev.revoked_serials.iter().any(|x| x == &ec.serial)
+            || ev.revoked_key_ids.iter().any(|x| x == &ec.key_id)))
         || jv.sequence != b.journal_revocation_sequence
         || ev.sequence != b.evidence_revocation_sequence
         || digest(&b.journal_revocations)? != b.journal_revocation_digest
@@ -143,8 +201,14 @@ pub fn verify_installed_trust(
     )
     .map_err(|_| TrustError::Invalid)?;
     if jc.key_id == ec.key_id
-        || jc.public_key == ec.public_key
+        || jk == ek
+        || jk == *jr
+        || jk == *er
+        || ek == *jr
+        || ek == *er
         || jc.key_id == b.journal_root_key_id
+        || jc.key_id == b.evidence_root_key_id
+        || ec.key_id == b.journal_root_key_id
         || ec.key_id == b.evidence_root_key_id
     {
         return Err(TrustError::Invalid);
@@ -556,6 +620,105 @@ mod tests {
             EVIDENCE_ROOT_ID,
         );
         assert_eq!(verify(&fixture).unwrap_err(), TrustError::Invalid);
+    }
+
+    #[test]
+    fn rejects_signer_reusing_either_root_key_or_cross_purpose_root_id() {
+        for journal in [false, true] {
+            for root_is_journal in [false, true] {
+                for reuse_public_key in [false, true] {
+                    let mut fixture = valid_fixture();
+                    let root_id = if root_is_journal {
+                        JOURNAL_ROOT_ID
+                    } else {
+                        EVIDENCE_ROOT_ID
+                    };
+                    let root_key = if root_is_journal {
+                        fixture.journal_root.verifying_key()
+                    } else {
+                        fixture.evidence_root.verifying_key()
+                    };
+                    let cert = if journal {
+                        &mut fixture.bundle.journal_certificate
+                    } else {
+                        &mut fixture.bundle.evidence_certificate
+                    };
+                    if reuse_public_key {
+                        cert.payload.public_key = hex::encode(root_key.as_bytes());
+                    } else {
+                        cert.payload.key_id = root_id.to_string();
+                    }
+                    *cert = if journal {
+                        sign(&cert.payload, &fixture.journal_root, JOURNAL_ROOT_ID)
+                    } else {
+                        sign(&cert.payload, &fixture.evidence_root, EVIDENCE_ROOT_ID)
+                    };
+                    assert_eq!(verify(&fixture).unwrap_err(), TrustError::Invalid);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn historical_verification_checks_signatures_without_authorizing_revoked_keys() {
+        let mut fixture = valid_fixture();
+        let mut doc = fixture.bundle.journal_revocations.payload.clone();
+        doc.sequence += 1;
+        doc.revoked_key_ids.push(JOURNAL_SIGNER_ID.to_string());
+        fixture.bundle.journal_revocations = sign(&doc, &fixture.journal_root, JOURNAL_ROOT_ID);
+        fixture.bundle.journal_revocation_sequence = doc.sequence;
+        fixture.bundle.journal_revocation_digest =
+            digest(&fixture.bundle.journal_revocations).expect("digest");
+        assert!(
+            verify(&fixture).is_err(),
+            "current authorization stays denied"
+        );
+        let historical = |bundle| {
+            verify_historical_trust(
+                bundle,
+                &fixture.journal_root.verifying_key(),
+                &fixture.evidence_root.verifying_key(),
+                None,
+                None,
+            )
+        };
+        assert!(historical(fixture.bundle.clone()).is_ok());
+        assert!(
+            verify_revocation_update(
+                fixture.bundle.clone(),
+                &fixture.journal_root.verifying_key(),
+                &fixture.evidence_root.verifying_key(),
+                NOW,
+                None,
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_revocation_update(
+                fixture.bundle.clone(),
+                &fixture.journal_root.verifying_key(),
+                &fixture.evidence_root.verifying_key(),
+                NOW + 10000,
+                None,
+                None
+            )
+            .is_err(),
+            "revocation publication still requires fresh authority"
+        );
+        let mut forged = fixture.bundle.clone();
+        forged.journal_certificate.envelope.signature = "00".repeat(64);
+        assert!(
+            historical(forged).is_err(),
+            "history still requires valid signatures"
+        );
+        let mut forged = fixture.bundle.clone();
+        forged.journal_revocations.envelope.signature = "00".repeat(64);
+        forged.journal_revocation_digest = digest(&forged.journal_revocations).expect("digest");
+        assert!(
+            historical(forged).is_err(),
+            "revocations remain root authenticated"
+        );
     }
 
     #[test]

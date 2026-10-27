@@ -456,6 +456,7 @@ fn journal_chain(policy: &InstallationPolicy, request_nonce_seed: u8) -> (Vec<u8
 // ---- the pre-rotation installation fixture ----
 
 struct Fixture {
+    fixed_bundle_override: Option<Vec<u8>>,
     keys: Keys,
     manifest_bytes: Vec<u8>,
     old_bundle: BundleFixture,
@@ -503,6 +504,7 @@ fn never_recovered_fixture() -> Fixture {
     );
     let initial = initial_state(&policy.policy, &policy.digest);
     Fixture {
+        fixed_bundle_override: None,
         keys,
         manifest_bytes: manifest_bytes(),
         old_bundle,
@@ -794,7 +796,11 @@ impl MemStore {
             .insert("policy.json".to_string(), fixture.policy.bytes.clone());
         self.fixed_config.insert(
             "recovery-trust.json".to_string(),
-            fixture.old_bundle.bytes.clone(),
+            fixture
+                .fixed_bundle_override
+                .as_ref()
+                .unwrap_or(&fixture.old_bundle.bytes)
+                .clone(),
         );
         self.state_root
             .insert("trust.json".to_string(), fixture.old_bundle.bytes.clone());
@@ -896,8 +902,12 @@ fn fixture_view<'a>(
         manifest_bytes: &fixture.manifest_bytes,
         policy_bytes: &fixture.policy.bytes,
         policy_high_water_bytes: None,
-        fixed_bundle_bytes: &fixture.old_bundle.bytes,
+        fixed_bundle_bytes: fixture
+            .fixed_bundle_override
+            .as_deref()
+            .unwrap_or(&fixture.old_bundle.bytes),
         trust_high_water_bytes: &fixture.old_bundle.bytes,
+        pending_reanchor_bytes: None,
         staged_prior_policy_bytes: None,
         staged_prior_trust_bytes: None,
         state_tip_bytes: tip_bytes,
@@ -942,6 +952,7 @@ fn observe_authenticates(
             policy_high_water_bytes: policy_high_water.as_deref(),
             fixed_bundle_bytes: fixed_trust.as_deref().unwrap_or(&[]),
             trust_high_water_bytes: trust_high_water.as_deref().unwrap_or(&[]),
+            pending_reanchor_bytes: None,
             staged_prior_policy_bytes: None,
             staged_prior_trust_bytes: None,
             state_tip_bytes: state_tip.as_deref().unwrap_or(&[]),
@@ -1578,6 +1589,10 @@ fn equal_sequence_reanchor_with_different_digest_is_equivocation() {
         policy_high_water_bytes: store.state_root.get("policy.json").map(Vec::as_slice),
         fixed_bundle_bytes: store.fixed_config.get("recovery-trust.json").unwrap(),
         trust_high_water_bytes: store.state_root.get("trust.json").unwrap(),
+        pending_reanchor_bytes: store
+            .state_root
+            .get("staged-reanchor.json")
+            .map(Vec::as_slice),
         staged_prior_policy_bytes: staged_prior_policy.as_deref(),
         staged_prior_trust_bytes: staged_prior_trust.as_deref(),
         state_tip_bytes: &published_tip,
@@ -1723,6 +1738,10 @@ fn byte_identical_rotation_is_idempotent() {
         policy_high_water_bytes: store.state_root.get("policy.json").map(Vec::as_slice),
         fixed_bundle_bytes: store.fixed_config.get("recovery-trust.json").unwrap(),
         trust_high_water_bytes: store.state_root.get("trust.json").unwrap(),
+        pending_reanchor_bytes: store
+            .state_root
+            .get("staged-reanchor.json")
+            .map(Vec::as_slice),
         staged_prior_policy_bytes: staged_prior_policy.as_deref(),
         staged_prior_trust_bytes: staged_prior_trust.as_deref(),
         state_tip_bytes: store.state_root.get("state.json").unwrap(),
@@ -1878,6 +1897,10 @@ fn reusing_single_use_evidence_for_a_different_pair_fails_closed() {
         policy_high_water_bytes: store.state_root.get("policy.json").map(Vec::as_slice),
         fixed_bundle_bytes: store.fixed_config.get("recovery-trust.json").unwrap(),
         trust_high_water_bytes: store.state_root.get("trust.json").unwrap(),
+        pending_reanchor_bytes: store
+            .state_root
+            .get("staged-reanchor.json")
+            .map(Vec::as_slice),
         staged_prior_policy_bytes: staged_prior_policy.as_deref(),
         staged_prior_trust_bytes: staged_prior_trust.as_deref(),
         state_tip_bytes: &published_tip,
@@ -1910,6 +1933,7 @@ fn reusing_single_use_evidence_for_a_different_pair_fails_closed() {
         matches!(
             result,
             Err(ReanchorError::Evidence(_))
+                | Err(ReanchorError::Trust(_))
                 | Err(ReanchorError::Conflicting(_))
                 | Err(ReanchorError::Equivocation(_))
         ),
@@ -1958,12 +1982,16 @@ fn crash_before_and_after_every_publication_boundary_resumes_exact_forward() {
         return;
     }
     let exe = std::env::current_exe().expect("current test binary");
-    for point in CRASH_POINTS {
+    for (point, released) in CRASH_POINTS.iter().flat_map(|p| [(p, false), (p, true)]) {
         let status = std::process::Command::new(&exe)
             .arg("crash_at_point")
             .arg("--exact")
             .arg("--nocapture")
             .env("O3K_REANCHOR_CRASH_AT", point)
+            .env(
+                "O3K_REANCHOR_RELEASED_FIXTURE",
+                if released { "1" } else { "0" },
+            )
             .status()
             .expect("spawn crash child");
         assert_eq!(status.code(), Some(0), "crash child failed at {point}");
@@ -1977,23 +2005,32 @@ fn crash_at_point() {
     };
     // Each crash point interrupts the designated rotation; resuming with the
     // injection cleared must reach the identical published generation.
-    let fixture = designated_fixture();
+    let fixture = if std::env::var("O3K_REANCHOR_RELEASED_FIXTURE").as_deref() == Ok("1") {
+        released_fixture()
+    } else {
+        designated_fixture()
+    };
     let new_generation = build_new_generation(&fixture, RotationReason::Compromise);
-    let tip_bytes = fixture.designated.as_ref().unwrap().1.clone();
+    let tip = fixture
+        .released
+        .as_ref()
+        .or(fixture.designated.as_ref())
+        .unwrap();
+    let tip_bytes = tip.1.clone();
     let journal_tip = authenticated_tip_hash(fixture.journal.as_ref().unwrap());
     let mut reanchor = reanchor_record(
         &fixture,
         &new_generation,
         RotationReason::Compromise,
-        1,
+        tip.0.sequence,
         &sha256_hex(&tip_bytes),
         None,
         None,
         Some(OPERATION_ID),
         Some(ARTIFACT),
         Some(&journal_identity_digest(&fixture.policy.policy)),
-        None,
-        None,
+        tip.0.terminal_journal_digest.as_deref(),
+        tip.0.evidence_digest.as_deref(),
     );
     let mut checkpoint = checkpoint_record(
         &fixture,
@@ -2058,6 +2095,10 @@ fn crash_at_point() {
         policy_high_water_bytes: store.state_root.get("policy.json").map(Vec::as_slice),
         fixed_bundle_bytes: store.fixed_config.get("recovery-trust.json").unwrap(),
         trust_high_water_bytes: store.state_root.get("trust.json").unwrap(),
+        pending_reanchor_bytes: store
+            .state_root
+            .get("staged-reanchor.json")
+            .map(Vec::as_slice),
         staged_prior_policy_bytes: staged_prior_policy.as_deref(),
         staged_prior_trust_bytes: staged_prior_trust.as_deref(),
         state_tip_bytes: store.state_root.get("state.json").unwrap(),
@@ -2608,6 +2649,10 @@ fn rotated_view<'a>(fixture: &'a Fixture, store: &'a MemStore) -> GenerationView
             .get("trust.json")
             .map(Vec::as_slice)
             .unwrap_or(&[]),
+        pending_reanchor_bytes: store
+            .state_root
+            .get("staged-reanchor.json")
+            .map(Vec::as_slice),
         staged_prior_policy_bytes: store
             .state_root
             .get("staged-prior-policy.json")
@@ -3109,4 +3154,287 @@ fn compromise_rotation_followed_by_routine_rotation_succeeds() {
     .unwrap();
     assert!(record.consumed);
     assert_eq!(record.nonce, first_nonce);
+}
+
+#[test]
+fn routine_rotation_cannot_treat_unverified_outgoing_trust_as_a_resume() {
+    let fixture = never_recovered_fixture();
+    let generation = build_new_generation(&fixture, RotationReason::Routine);
+    let r = reanchor_record(
+        &fixture,
+        &generation,
+        RotationReason::Routine,
+        0,
+        &fixture.initial.2,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let inputs = RotationInputs {
+        signed_reanchor: sign(&r, &fixture.keys.policy, POLICY_SIGNER_ID),
+        signed_checkpoint: None,
+        new_policy: generation.policy.bytes,
+        new_trust_bundle: generation.bundle.bytes,
+        signed_revalidation: None,
+        custody_record: None,
+    };
+    // Outgoing trust is unavailable/corrupt before any staging or publication.
+    let mut view = fixture_view(&fixture, &fixture.initial.1, None);
+    view.fixed_bundle_bytes = b"{}";
+    let result = build_rotation_plan(&view, &fixture_archives(&fixture), &inputs, NOW);
+    assert!(
+        result.is_err(),
+        "an unstarted rotation must authenticate outgoing trust"
+    );
+}
+
+#[test]
+fn routine_replay_after_compromise_preserves_the_prior_consumption_record() {
+    let fixture = designated_fixture();
+    let (mut store, first) =
+        rotate_fixture(&fixture, RotationReason::Compromise, NOW, |_, _, _| {});
+    first.expect("compromise succeeds");
+    let inputs = rotated_rotation_inputs(
+        &fixture,
+        &store,
+        &era2(),
+        &era3(),
+        3,
+        &hex(&[0x7A; 32]),
+        RotationReason::Routine,
+        |_| {},
+    );
+    run_second_rotation(&fixture, &mut store, &inputs).expect("routine succeeds");
+    let consumption = store
+        .state_root
+        .get("revalidation-consumption.json")
+        .unwrap()
+        .clone();
+    run_second_rotation(&fixture, &mut store, &inputs).expect("exact routine replay succeeds");
+    assert_eq!(
+        store.state_root.get("revalidation-consumption.json"),
+        Some(&consumption)
+    );
+}
+
+#[test]
+fn signer_rotation_under_the_same_root_preserves_revocation_high_waters() {
+    for purpose in ["journal", "evidence"] {
+        for equivocation in [false, true] {
+            let fixture = never_recovered_fixture();
+            let mut j = fixture
+                .old_bundle
+                .bundle
+                .journal_revocations
+                .payload
+                .clone();
+            let mut e = fixture
+                .old_bundle
+                .bundle
+                .evidence_revocations
+                .payload
+                .clone();
+            let document = if purpose == "journal" { &mut j } else { &mut e };
+            if equivocation {
+                document.revoked_key_ids.push("retired-key".to_string());
+            } else {
+                document.sequence -= 1;
+            }
+            let bundle = build_bundle(
+                &fixture.keys.old_journal_root,
+                OLD_JOURNAL_ROOT_ID,
+                &fixture.keys.new_journal_signer,
+                NEW_JOURNAL_SIGNER_ID,
+                "serial-journal-2",
+                &fixture.keys.old_evidence_root,
+                OLD_EVIDENCE_ROOT_ID,
+                &fixture.keys.new_evidence_signer,
+                NEW_EVIDENCE_SIGNER_ID,
+                "serial-evidence-2",
+                signed_revocations(&j, &fixture.keys.old_journal_root, OLD_JOURNAL_ROOT_ID),
+                signed_revocations(&e, &fixture.keys.old_evidence_root, OLD_EVIDENCE_ROOT_ID),
+            );
+            let policy = build_policy(
+                2,
+                &fixture.policy.digest,
+                &bundle.digest,
+                OLD_JOURNAL_ROOT_ID,
+                &fixture.keys.old_journal_root.verifying_key(),
+                OLD_EVIDENCE_ROOT_ID,
+                &fixture.keys.old_evidence_root.verifying_key(),
+            );
+            let generation = NewGeneration { bundle, policy };
+            let r = reanchor_record(
+                &fixture,
+                &generation,
+                RotationReason::Routine,
+                0,
+                &fixture.initial.2,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let inputs = RotationInputs {
+                signed_reanchor: sign(&r, &fixture.keys.policy, POLICY_SIGNER_ID),
+                signed_checkpoint: None,
+                new_policy: generation.policy.bytes,
+                new_trust_bundle: generation.bundle.bytes,
+                signed_revalidation: None,
+                custody_record: None,
+            };
+            let view = fixture_view(&fixture, &fixture.initial.1, None);
+            assert!(
+                build_rotation_plan(&view, &fixture_archives(&fixture), &inputs, NOW).is_err(),
+                "same-root {purpose} rollback/equivocation must be denied"
+            );
+        }
+    }
+}
+
+fn refresh_rotated_trust(fixture: &Fixture, store: &mut MemStore) {
+    let old = store.state_root.get("trust.json").unwrap().clone();
+    let mut bundle: TrustBundle = o3k::recovery_identity::decode_canonical(&old).unwrap();
+    bundle.journal_revocations.payload.sequence += 1;
+    bundle.journal_revocations = signed_revocations(
+        &bundle.journal_revocations.payload,
+        &fixture.keys.new_journal_root,
+        NEW_JOURNAL_ROOT_ID,
+    );
+    bundle.journal_revocation_sequence = bundle.journal_revocations.payload.sequence;
+    bundle.journal_revocation_digest =
+        o3k::recovery_identity::digest(&bundle.journal_revocations).unwrap();
+    store
+        .state_root
+        .insert(format!("trust-{}.json", sha256_hex(&old)), old);
+    store.state_root.insert(
+        "trust.json".to_string(),
+        o3k::recovery_identity::canonical(&bundle).unwrap(),
+    );
+}
+
+#[test]
+fn rotated_generation_accepts_authenticated_revocation_refresh_and_rotates_again() {
+    let fixture = designated_fixture();
+    let (mut store, result) = rotate_fixture(&fixture, RotationReason::Routine, NOW, |_, _, _| {});
+    result.expect("first rotation");
+    refresh_rotated_trust(&fixture, &mut store);
+    authenticate_rotated_generation(&rotated_view(&fixture, &store), &StoreArchives(&store))
+        .expect("routine revocation refresh preserves rotated generation");
+    let replay = RotationInputs {
+        signed_reanchor: store.state_root["state.json"].clone(),
+        signed_checkpoint: store.journal_dir.get(CHECKPOINT_NAME).cloned(),
+        new_policy: store.fixed_config["installation-policy.json"].clone(),
+        new_trust_bundle: store.fixed_config["recovery-trust.json"].clone(),
+        signed_revalidation: None,
+        custody_record: None,
+    };
+    let refreshed = store.state_root["trust.json"].clone();
+    run_second_rotation(&fixture, &mut store, &replay)
+        .expect("exact replay after revocation refresh");
+    assert_eq!(
+        store.state_root["trust.json"], refreshed,
+        "replay preserves refreshed high-water"
+    );
+
+    let inputs = rotated_rotation_inputs(
+        &fixture,
+        &store,
+        &era2(),
+        &era3(),
+        3,
+        &hex(&[0x7A; 32]),
+        RotationReason::Routine,
+        |_| {},
+    );
+    run_second_rotation(&fixture, &mut store, &inputs).expect("rotate again after refresh");
+    authenticate_rotated_generation(&rotated_view(&fixture, &store), &StoreArchives(&store))
+        .expect("refreshed prior era remains authentic");
+}
+
+#[test]
+fn rotation_cannot_rebind_protected_directory_identity() {
+    for field in 0..4 {
+        let fixture = never_recovered_fixture();
+        let generation = build_new_generation(&fixture, RotationReason::Routine);
+        let mut policy = generation.policy.policy.clone();
+        match field {
+            0 => policy.recovery_state_device += 1,
+            1 => policy.recovery_state_inode += 1,
+            2 => policy.journal_device += 1,
+            _ => policy.journal_inode += 1,
+        }
+        let r = reanchor_record(
+            &fixture,
+            &generation,
+            RotationReason::Routine,
+            0,
+            &fixture.initial.2,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let mut inputs = RotationInputs {
+            signed_reanchor: sign(&r, &fixture.keys.policy, POLICY_SIGNER_ID),
+            signed_checkpoint: None,
+            new_policy: generation.policy.bytes.clone(),
+            new_trust_bundle: generation.bundle.bytes.clone(),
+            signed_revalidation: None,
+            custody_record: None,
+        };
+        inputs.new_policy = sign(&policy, &fixture.keys.policy, POLICY_SIGNER_ID);
+        let mut r: Signed<InstallationReanchor> =
+            o3k::recovery_identity::decode_canonical(&inputs.signed_reanchor).unwrap();
+        r.payload.new_policy_digest = sha256_hex(&inputs.new_policy);
+        inputs.signed_reanchor = sign(&r.payload, &fixture.keys.policy, POLICY_SIGNER_ID);
+        let view = fixture_view(&fixture, &fixture.initial.1, None);
+        assert!(
+            build_rotation_plan(&view, &fixture_archives(&fixture), &inputs, NOW).is_err(),
+            "directory identity field {field} must not be rebound"
+        );
+    }
+}
+
+#[test]
+fn compromise_rotation_revalidates_history_after_outgoing_signer_revocation() {
+    for released in [false, true] {
+        let mut fixture = if released {
+            released_fixture()
+        } else {
+            designated_fixture()
+        };
+        fixture.fixed_bundle_override = Some(fixture.old_bundle.bytes.clone());
+        let bundle = &mut fixture.old_bundle.bundle;
+        let mut j = bundle.journal_revocations.payload.clone();
+        j.sequence += 1;
+        j.revoked_key_ids.push(OLD_JOURNAL_SIGNER_ID.to_string());
+        bundle.journal_revocations =
+            signed_revocations(&j, &fixture.keys.old_journal_root, OLD_JOURNAL_ROOT_ID);
+        bundle.journal_revocation_sequence = j.sequence;
+        bundle.journal_revocation_digest =
+            o3k::recovery_identity::digest(&bundle.journal_revocations).unwrap();
+        fixture.old_bundle.bytes = o3k::recovery_identity::canonical(bundle).unwrap();
+        fixture.old_bundle.digest = sha256_hex(&fixture.old_bundle.bytes);
+        let (_, routine) = rotate_fixture(&fixture, RotationReason::Routine, NOW, |_, _, _| {});
+        assert!(
+            routine.is_err(),
+            "revoked outgoing signer denies routine rotation"
+        );
+        let (_, compromise) =
+            rotate_fixture(&fixture, RotationReason::Compromise, NOW, |_, _, _| {});
+        compromise.expect(
+            "fresh new-authority evidence permits revalidation of revoked historical signatures",
+        );
+    }
 }

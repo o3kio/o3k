@@ -47,6 +47,7 @@ pub struct InstalledRecovery {
     /// bytes, observed by the partial load for the C1.1 rotation driver's
     /// exact-forward resume (SPEC-0050 §7.3.9).
     policy_high_water_bytes: Option<Vec<u8>>,
+    pending_reanchor_bytes: Option<Vec<u8>>,
     staged_prior_policy_bytes: Option<Vec<u8>>,
     staged_prior_trust_bytes: Option<Vec<u8>>,
     tip_is_reanchor: bool,
@@ -308,6 +309,9 @@ impl InstalledRecovery {
                 checkpoint_bytes,
                 consumption_record_bytes,
                 policy_high_water_bytes: Some(checkpoint),
+                pending_reanchor_bytes: state_directory
+                    .read_bounded(reanchor::STAGED_REANCHOR_NAME, 0, gid, 0o640, MAX_DOCUMENT)
+                    .ok(),
                 staged_prior_policy_bytes: state_directory
                     .read_bounded(
                         reanchor::STAGED_PRIOR_POLICY_NAME,
@@ -522,6 +526,7 @@ impl InstalledRecovery {
                     policy_high_water_bytes: policy_high_water_bytes.as_deref(),
                     fixed_bundle_bytes: &fixed_bundle_bytes,
                     trust_high_water_bytes: &trust_high_water_bytes,
+                    pending_reanchor_bytes: None,
                     staged_prior_policy_bytes: staged_prior_policy_bytes.as_deref(),
                     staged_prior_trust_bytes: staged_prior_trust_bytes.as_deref(),
                     state_tip_bytes: &state_tip_bytes,
@@ -581,6 +586,7 @@ impl InstalledRecovery {
             checkpoint_bytes,
             consumption_record_bytes,
             policy_high_water_bytes: None,
+            pending_reanchor_bytes: None,
             staged_prior_policy_bytes: None,
             staged_prior_trust_bytes: None,
             tip_is_reanchor,
@@ -873,6 +879,7 @@ impl InstalledRecovery {
             policy_high_water_bytes: self.policy_high_water_bytes.as_deref(),
             fixed_bundle_bytes: &self.fixed_bundle_bytes,
             trust_high_water_bytes: &self.trust_high_water_bytes,
+            pending_reanchor_bytes: self.pending_reanchor_bytes.as_deref(),
             staged_prior_policy_bytes: self.staged_prior_policy_bytes.as_deref(),
             staged_prior_trust_bytes: self.staged_prior_trust_bytes.as_deref(),
             state_tip_bytes: &self.state_tip_bytes,

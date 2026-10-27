@@ -1784,3 +1784,66 @@ fn startup_observation_rejects_mixed_generations() {
 
     let _ = fs::remove_dir_all(&fixture);
 }
+
+#[test]
+#[ignore = "requires root, unshare(1), and a source-built o3k binary"]
+fn revocation_refresh_resumes_after_archive_and_is_repeatable() {
+    let fixture = root_fixture().expect("root fixture required");
+    let mut ctx = fresh_ctx();
+    let installation = setup_fixture(&mut ctx, &fixture, true);
+    let input = installation.var.join("refresh-inputs");
+    fs::create_dir(&input).unwrap();
+    fs::set_permissions(&input, fs::Permissions::from_mode(0o700)).unwrap();
+    write_root_owned(
+        &input.join("policy.json"),
+        &installation.era1_policy.bytes,
+        0,
+        0,
+        0o640,
+    );
+    let mut revoked = installation.era1_bundle.bundle.clone();
+    let mut revocations = revoked.journal_revocations.payload.clone();
+    revocations.sequence += 1;
+    revocations
+        .revoked_key_ids
+        .push(installation.era1.journal_signer_id.clone());
+    revoked.journal_revocations = decode_signed(&sign(
+        &revocations,
+        &installation.era1.journal_root,
+        &installation.era1.journal_root_id,
+    ));
+    revoked.journal_revocation_sequence = revocations.sequence;
+    revoked.journal_revocation_digest =
+        o3k::recovery_identity::digest(&revoked.journal_revocations).unwrap();
+    let revoked_bytes = o3k::recovery_identity::canonical(&revoked).unwrap();
+    write_root_owned(&input.join("trust.json"), &revoked_bytes, 0, 0, 0o640);
+    // Model a crash after the immutable archive publication but before CAS.
+    write_root_owned(
+        &installation
+            .state_root
+            .join(format!("trust-{}.json", installation.era1_bundle.digest)),
+        &installation.era1_bundle.bytes,
+        0,
+        900,
+        0o640,
+    );
+    for attempt in 0..3 {
+        let (_, stderr, status) = run_in_namespace(
+            &fixture,
+            "{binary} recovery-trust-update --policy /var/lib/refresh-inputs/policy.json --trust /var/lib/refresh-inputs/trust.json",
+            &[],
+        );
+        assert!(status.success(), "refresh retry {attempt} failed: {stderr}");
+        assert_eq!(
+            fs::read(installation.state_root.join("trust.json")).unwrap(),
+            revoked_bytes
+        );
+    }
+    let (stdout, status) = doctor(&fixture, false);
+    assert!(!status.success(), "revoked active signer must deny startup");
+    assert!(
+        stdout.contains(DENIED_PREFIX),
+        "revocation must quarantine: {stdout}"
+    );
+    fs::remove_dir_all(&fixture).unwrap();
+}

@@ -735,6 +735,9 @@ async fn run_upgrade_locked(
                             ),
                         );
                     };
+                    // Rollback acquires its own retained store lock. Release
+                    // the binary-publication guard before entering that path.
+                    drop(store_phase_guard.take());
                     match io.rollback_to_backup(&id).await {
                         Ok(()) => {
                             // Restored: clear the in-progress state and report.
@@ -1153,6 +1156,7 @@ mod tests {
         /// database), exactly like `SystemUpgradeIo`.
         rollback_entry_deny: Option<String>,
         commit_chain: Option<PathBuf>,
+        real_store_lock_dir: Option<PathBuf>,
     }
 
     impl FakeUpgradeIo {
@@ -1187,6 +1191,7 @@ mod tests {
                 rollback: Ok(()),
                 rollback_entry_deny: None,
                 commit_chain: None,
+                real_store_lock_dir: None,
             }
         }
 
@@ -1220,6 +1225,15 @@ mod tests {
                 ))
             } else {
                 Err("another o3k upgrade is running".to_owned())
+            }
+        }
+
+        async fn acquire_store_phase_lock(&self) -> Result<StorePhaseGuard, String> {
+            match &self.real_store_lock_dir {
+                Some(dir) => o3k_store::StoreAccessLock::acquire(dir)
+                    .map(StorePhaseGuard::from_lock)
+                    .map_err(|e| e.to_string()),
+                None => Ok(StorePhaseGuard::empty()),
             }
         }
 
@@ -1320,6 +1334,12 @@ mod tests {
 
         async fn rollback_to_backup(&self, backup_id: &str) -> Result<(), String> {
             self.record_owned(format!("rollback:{backup_id}"));
+            let _store_lock = self
+                .real_store_lock_dir
+                .as_ref()
+                .map(o3k_store::StoreAccessLock::acquire)
+                .transpose()
+                .map_err(|e| e.to_string())?;
             if let Some(reason) = &self.rollback_entry_deny {
                 return Err(reason.clone());
             }
@@ -1603,6 +1623,9 @@ mod tests {
         let paths = sandbox();
         let mut io = FakeUpgradeIo::happy();
         io.switch = Err("rename failed".to_owned());
+        // Exercise the real flock boundary: automatic rollback must be able
+        // to reacquire it after the binary-publication guard is released.
+        io.real_store_lock_dir = paths.state_file.parent().map(|p| p.join("data"));
         let outcome = run_upgrade_with_paths(&io, &upgrade_args(), &paths).await;
         assert_eq!(outcome.status, UpgradeStatus::Failed);
         assert!(outcome.rollback_performed);

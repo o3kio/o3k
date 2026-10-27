@@ -6,7 +6,7 @@ use crate::{
 };
 use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
-use std::{fs, os::unix::fs::MetadataExt, path::Path};
+use std::{fs, path::Path};
 
 #[derive(Debug)]
 pub enum TrustUpdateError {
@@ -29,7 +29,7 @@ pub fn update(policy_input: &Path, trust_input: &Path) -> Result<(), TrustUpdate
         .map_err(|e| TrustUpdateError::Reject(e.to_string()))?;
     let authority = release_identity::BackupReleaseIdentity::c1_authority_from_manifest(&manifest)
         .map_err(|error| TrustUpdateError::Reject(error.to_owned()))?;
-    let (_, gid) = service_identity()?;
+    let (uid, gid) = service_identity()?;
     let installed_policy = read_protected_config(Path::new(&authority.policy_path), gid)
         .map_err(|error| TrustUpdateError::Reject(error.to_owned()))?;
     let supplied_policy = read_input(policy_input)?;
@@ -48,6 +48,30 @@ pub fn update(policy_input: &Path, trust_input: &Path) -> Result<(), TrustUpdate
     .map_err(|e| TrustUpdateError::Reject(e.to_string()))?;
     identity::verify_policy(&policy, &authority.key_id)
         .map_err(|e| TrustUpdateError::Reject(e.to_string()))?;
+    // Serialize with rotation and every canonical store opener, then recheck
+    // the policy read before acquiring the retained data-directory lock.
+    let data_dir = ProtectedDirectory::open_accepted(
+        Path::new(&policy.data_root),
+        &crate::recovery_installation::data_root_postures(
+            uid,
+            gid,
+            crate::recovery_installation::compute_group_gid().ok(),
+        ),
+        policy.target_device,
+        policy.target_inode,
+    )
+    .map_err(|e| TrustUpdateError::Reject(format!("{e:?}")))?;
+    data_dir
+        .lock()
+        .map_err(|e| TrustUpdateError::Reject(format!("{e:?}")))?;
+    if read_protected_config(Path::new(&authority.policy_path), gid)
+        .map_err(|e| TrustUpdateError::Reject(e.to_string()))?
+        != installed_policy
+    {
+        return Err(TrustUpdateError::Reject(
+            "installed policy changed before quiescence".into(),
+        ));
+    }
     let state_dir = ProtectedDirectory::open(
         Path::new(&policy.recovery_state_root),
         0,
@@ -107,7 +131,7 @@ pub fn update(policy_input: &Path, trust_input: &Path) -> Result<(), TrustUpdate
             "revocation high-water rollback or equivocation".into(),
         ));
     }
-    recovery_trust::verify_trust_bundle(
+    recovery_trust::verify_revocation_update(
         new_bundle.clone(),
         &key(&new_bundle.journal_root_public_key)?,
         &key(&new_bundle.evidence_root_public_key)?,
@@ -117,9 +141,22 @@ pub fn update(policy_input: &Path, trust_input: &Path) -> Result<(), TrustUpdate
     )
     .map_err(|_| TrustUpdateError::Reject("new trust bundle is invalid or stale".into()))?;
     let old_digest = hex::encode(Sha256::digest(&old));
-    state_dir
-        .atomic_write(&format!("trust-{old_digest}.json"), None, &old, gid)
-        .map_err(|e| TrustUpdateError::Persist(format!("{e:?}")))?;
+    let archive = format!("trust-{old_digest}.json");
+    match state_dir.read_bounded(&archive, 0, gid, 0o640, 1024 * 1024) {
+        Ok(bytes) if bytes == old => {}
+        Err(crate::recovery_files::RecoveryFileError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            state_dir
+                .atomic_write(&archive, None, &old, gid)
+                .map_err(|e| TrustUpdateError::Persist(format!("{e:?}")))?;
+        }
+        _ => {
+            return Err(TrustUpdateError::Reject(
+                "prior trust archive conflicts or is unsafe".into(),
+            ));
+        }
+    }
     state_dir
         .atomic_write("trust.json", Some(&old), &new_bytes, gid)
         .map_err(|e| TrustUpdateError::Persist(format!("{e:?}")))?;
@@ -151,9 +188,5 @@ fn service_identity() -> Result<(u32, u32), TrustUpdateError> {
     Err(TrustUpdateError::Reject("o3k identity unavailable".into()))
 }
 fn read_input(p: &Path) -> Result<Vec<u8>, TrustUpdateError> {
-    let m = fs::symlink_metadata(p).map_err(|e| TrustUpdateError::Reject(e.to_string()))?;
-    if !m.is_file() || m.uid() != 0 || m.gid() != 0 || m.mode() & 0o7777 != 0o640 {
-        return Err(TrustUpdateError::Reject("unsafe input".into()));
-    }
-    std::fs::read(p).map_err(|e| TrustUpdateError::Reject(e.to_string()))
+    read_protected_config(p, 0).map_err(|error| TrustUpdateError::Reject(error.to_owned()))
 }

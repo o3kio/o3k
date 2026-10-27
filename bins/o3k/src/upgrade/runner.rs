@@ -1269,11 +1269,13 @@ impl UpgradeIo for SystemUpgradeIo {
     async fn acquire_store_phase_lock(
         &self,
     ) -> Result<crate::upgrade::engine::StorePhaseGuard, String> {
+        let lock = o3k_store::StoreAccessLock::acquire(&self.data_dir)
+            .map_err(|error| format!("upgrade cannot acquire store lock: {error}"))?;
+        // Observe quarantine under the retained D4 lock so designation cannot
+        // race between authorization and binary publication.
         crate::restore_preflight::deny_startup_if_restore_state(&self.data_dir)
             .map_err(|reason| format!("upgrade denied by recovery quarantine: {reason}"))?;
-        o3k_store::StoreAccessLock::acquire(&self.data_dir)
-            .map(crate::upgrade::engine::StorePhaseGuard::from_lock)
-            .map_err(|error| format!("upgrade cannot acquire store lock: {error}"))
+        Ok(crate::upgrade::engine::StorePhaseGuard::from_lock(lock))
     }
 
     async fn release_lock(&self, _guard: LockGuard) -> Result<(), String> {
@@ -1836,8 +1838,8 @@ impl UpgradeIo for SystemUpgradeIo {
         // post-failure rollback inside `run_upgrade` reaches this entry
         // without a fresh `acquire_lock`, so the deny must live here and not
         // only in the lock path.  The check is read-only and runs before the
-        // store-access lock taken for the snapshot restore: no lock-order
-        // change and no second authority.
+        // retained store-access lock below. Quarantine is checked again
+        // under that lock before the first binary or database mutation.
         crate::restore_preflight::deny_startup_if_restore_state(&self.data_dir).map_err(
             |reason| format!("upgrade or rollback denied by restore quarantine: {reason}"),
         )?;
@@ -1874,6 +1876,11 @@ impl UpgradeIo for SystemUpgradeIo {
         }
         // Stop, restore, restart (plan §10).
         self.stop_services().await?;
+        let store_lock = o3k_store::StoreAccessLock::acquire(&self.data_dir)
+            .map_err(|error| format!("rollback cannot acquire store lock: {error}"))?;
+        crate::restore_preflight::deny_startup_if_restore_state(&self.data_dir).map_err(
+            |reason| format!("upgrade or rollback denied by restore quarantine: {reason}"),
+        )?;
         for name in BINARIES {
             let saved = dir.join("bin").join(name);
             Self::install_file(&saved, &self.bin_dir.join(name), 0o755)?;
@@ -1889,13 +1896,12 @@ impl UpgradeIo for SystemUpgradeIo {
         }
         if manifest.db_restore_required_on_rollback {
             let snapshot = dir.join("o3k.sqlite.backup");
-            let _store_lock = o3k_store::StoreAccessLock::acquire(&self.data_dir)
-                .map_err(|error| format!("rollback cannot acquire store lock: {error}"))?;
             let database = self.database_path();
             let _ = std::fs::remove_file(database.with_extension("sqlite-wal"));
             let _ = std::fs::remove_file(database.with_extension("sqlite-shm"));
             Self::install_file(&snapshot, &database, 0o600)?;
         }
+        drop(store_lock);
         // Config files are only restored when a recorded migration changed
         // them; the first real journey has none (plan §10).
         self.start_unit("o3kd.service").await?;
